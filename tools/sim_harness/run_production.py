@@ -134,6 +134,7 @@ from tools.sim_harness.ha_stubs import install_ha_stubs  # noqa: E402
 from tools.sim_harness.scenario_model import (  # noqa: E402
     ProductionRunResult,
     build_classification_from_event,
+    capture_next_action,
     merged_scenario_config,
     parse_event_time,
     pin_scenario_thermal_model,
@@ -582,21 +583,10 @@ class FakeHassSession:
     def _capture_next_action(self) -> dict[str, Any]:
         """Issue #1276: the real ``_compute_next_action`` text for the run's final state.
 
-        Same arguments production passes in ``_async_update_data`` (classification, indoor reading,
-        outdoor, physical window state, engine); outdoor is the scenario's last ``temp_update``
-        ``outdoor_f``. ``advises_opening_windows`` lets a scenario assert the card's direction with
-        the existing ``field_equals`` assertion, so ``outcomes.py`` is unchanged.
+        Delegates to ``scenario_model.capture_next_action``, shared with the real-HA adapter so the
+        opt-in field means the same thing on both tiers.
         """
-        co = self.coordinator
-        updates = [e for e in sorted_events(self.scenario) if e.get("type") == "temp_update" and "outdoor_f" in e]
-        text = co._compute_next_action(
-            co._current_classification,
-            indoor_temp=co._get_indoor_temp(),
-            outdoor_temp=float(updates[-1]["outdoor_f"]) if updates else None,
-            windows_physically_open=co._any_sensor_open(),
-            ae=self.engine,
-        )
-        return {"text": text, "advises_opening_windows": str(text).startswith("Open windows")}
+        return capture_next_action(self.coordinator, self.engine, self.scenario)
 
     def close(self) -> None:
         """Leave the patched clock/timer context (idempotent)."""

@@ -21,7 +21,8 @@ Recording rules (anchors for the Tier 3 spec):
 * At most one snapshot per local clock hour: a later fetch in the same hour REPLACES that hour's
   snapshot (the latest issue in the hour wins - it is the freshest statement of what the provider
   expected, and the 30-minute cycle plus the briefing/midnight refreshes can fetch several times
-  an hour).
+  an hour). A refetch whose content (source, grid start, temps) is unchanged is not a change: the
+  earlier issue time is kept and nothing is written.
 * Temperatures are internal degrees F, exactly as given. ``_get_hourly_forecast_data()`` already
   normalised the list to F at its source (Issue #1015); this module NEVER converts.
 * Only real provider hourly entries are recorded. The chart's synthetic extended days
@@ -255,7 +256,12 @@ class ForecastArchive:
         if self._snapshots:
             last_issued = _parse_iso(self._snapshots[-1]["i"])
             if last_issued is not None and _floor_hour(last_issued.astimezone(tz)) == issue_hour:
-                if self._snapshots[-1] == encoded:
+                # Identical CONTENT (source, grid start, temps) -> no change and no file rewrite, whatever the
+                # minute of the refetch: the 30-min cycle usually refetches an unchanged provider forecast, and
+                # comparing "i" too would rewrite the whole year-long file on every such fetch. The earlier issue
+                # time is kept: the provider already said exactly this then.
+                prev = self._snapshots[-1]
+                if all(prev.get(k) == encoded[k] for k in ("s", "h0", "t")):
                     return False
                 self._snapshots[-1] = encoded
                 replaced = True

@@ -159,6 +159,15 @@ class TestRecordRules:
         a.record(T0, "w", _hours(T0, 4))
         assert a.record(T0, "w", _hours(T0, 4)) is False
 
+    def test_identical_content_later_in_hour_reports_no_change(self, tmp_path):
+        """A 30-min refetch of an unchanged forecast must not rewrite the year-long file (keeps the first issue)."""
+        a = _archive(tmp_path)
+        a.record(T0, "w", _hours(T0, 4))
+        later = T0 + timedelta(minutes=30)
+        assert a.record(later, "w", _hours(T0, 4)) is False
+        assert len(a._snapshots) == 1
+        assert a._snapshots[0]["i"] == "2026-11-06T14:05-07:00"
+
     def test_next_hour_appends(self, tmp_path):
         a = _archive(tmp_path)
         a.record(T0, "w", _hours(T0, 4))

@@ -240,3 +240,24 @@ def snapshot_engine_state(engine: Any) -> dict[str, Any]:
         snap["_current_classification"] = None
 
     return snap
+
+
+def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[str, Any]:
+    """Issue #1276: the real ``_compute_next_action`` card text for the run's final state.
+
+    Shared by both adapters (FakeHass Tier A and real-HA Tier B) so a scenario that sets
+    ``"capture_next_action": true`` is judged the same way on both. Same arguments production passes in
+    ``_async_update_data`` (classification, indoor reading, outdoor, physical window state, engine);
+    outdoor is the scenario's last ``temp_update`` ``outdoor_f`` (Tier A runs no weather entity, so this
+    keeps the two tiers on one input). ``advises_opening_windows`` lets a scenario assert the card's
+    direction with the existing ``field_equals`` assertion, so ``outcomes.py`` is unchanged.
+    """
+    updates = [e for e in sorted_events(scenario) if e.get("type") == "temp_update" and "outdoor_f" in e]
+    text = coordinator._compute_next_action(
+        coordinator._current_classification,
+        indoor_temp=coordinator._get_indoor_temp(),
+        outdoor_temp=float(updates[-1]["outdoor_f"]) if updates else None,
+        windows_physically_open=coordinator._any_sensor_open(),
+        ae=engine,
+    )
+    return {"text": text, "advises_opening_windows": str(text).startswith("Open windows")}

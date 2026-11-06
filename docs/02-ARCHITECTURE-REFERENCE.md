@@ -401,7 +401,7 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 - Row fields added in 0.9.1 (Issue #1230 R0): `indoor_sensors` (per-sensor °F map; see [Chart Log Spec](chart-log-spec.md#indoor-sensors-field-issue-1230-r0))
 
 ### Forecast Archive Parameters
-- Snapshot cadence: at most one per local clock hour (latest fetch in the hour wins), only from a successful fetch that returned entries
+- Snapshot cadence: at most one per local clock hour (latest changed fetch in the hour wins; an unchanged refetch writes nothing), only from a successful fetch that returned entries
 - Horizon: 72 hours from the issue hour; retention 365 days (~3.9 MB)
 - Storage: `climate_advisor_forecast_archive_<entry_id>.json` in HA config dir (see [Forecast Archive Spec](forecast-archive-spec.md))
 

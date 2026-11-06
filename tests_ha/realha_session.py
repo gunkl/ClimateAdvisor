@@ -69,6 +69,7 @@ from tests_ha.house.settle import quiesce, track_executor
 from tools.sim_harness.scenario_model import (
     ProductionRunResult,
     build_classification_from_event,
+    capture_next_action,
     merged_scenario_config,
     parse_event_time,
     pin_scenario_thermal_model,
@@ -762,6 +763,10 @@ class RealHASession:
         try:
             engine_state = snapshot_engine_state(self.engine)
             engine_state["_thermostat_hvac_mode"] = self.house.thermostat.mode if self.house else None
+            # Issue #1276: the same opt-in Next Action capture as FakeHassSession (shared helper), so a golden
+            # that asserts the card text is judged on real HA too. Absent unless the scenario opts in.
+            if self.scenario.get("capture_next_action") and self.house is not None:
+                engine_state["_next_action"] = capture_next_action(self.coordinator, self.engine, self.scenario)
             result = ProductionRunResult(
                 event_log=list(self.event_log),
                 action_log=self._action_log(),

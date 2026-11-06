@@ -1874,7 +1874,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #543: chart_log.load() does blocking file I/O — offload to executor.
         await self._executor_job(self._chart_log.load)
         # Issue #1230 R0: ForecastArchive.load() never raises (corrupt/missing file -> empty archive).
-        await self._executor_job(self._forecast_archive.load)
+        # getattr: partially built coordinators (tests via __new__) have no archive, the same guard
+        # _record_forecast_archive() uses on the record side. Kept in the self.<attr>.<method> shape so the
+        # tests/test_executor_offload.py AST guard still sees it.
+        if getattr(self, "_forecast_archive", None) is not None:
+            await self._executor_job(self._forecast_archive.load)
         await self._executor_job(self.learning.load_state)
         # Restore rejection_log from LearningState (load_state() already validated and capped it)
         loaded_rl = self.learning._state.rejection_log
@@ -5074,7 +5078,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         real = [e for e in fetched if isinstance(e, dict) and not e.get("synthetic")]
         hourly = _parse_forecast_entries(real)
         if hourly and archive.record(dt_util.now(), str(self.config.get("weather_entity", "")), hourly):
-            await self._executor_job(archive.save)
+            await self._executor_job(self._forecast_archive.save)  # self.<attr> shape: AST offload guard
 
     def _note_hourly_forecast_cache(self, kept: list[dict]) -> None:
         """Log, once per change, whether an outage is covered by the kept forecast or has run past it (#1337)."""

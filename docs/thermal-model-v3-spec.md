@@ -24,6 +24,8 @@
 | What happens to thermal learning while the indoor sensor is unavailable? | `_get_current_sample()` returns `None` (no fake `0.0`); pre-heat and event-driven samples are skipped (DEBUG), and an HVAC session that starts during the outage is not started and records an `indoor_unavailable` rejection (INFO `Thermal HVAC observation not started`). Operational interruption, not a quality failure (Issue #1035). | [Indoor-sensor outage handling](#indoor-sensor-outage-handling-issue-1035) |
 | What rejection codes indicate normal operation vs. pipeline failure for HVAC obs types? | `new_session_started` (short-cycling), `plateau_guard` (insufficient post-heat decay), and `n=0 delta_t=0.00°F` (sensor quantization) are expected on some homes. `n=0` with elapsed > 0 in pre-v0.3.50 coordinators indicates the key-shadow bug. | [§Known Rejection Patterns](#known-rejection-patterns) |
 
+**Data sources for fitting (Issue #1230 R0, 0.9.1):** the chart_log fits below read `indoor`/`outdoor` per row. Rows written from 0.9.1 also carry `indoor_sensors` (`{entity_id: °F | null}` for every configured indoor sensor, independent of the sleep window; also the way to recover `indoor_primary` between `hvac_action_change` rows) - see [Chart Log Spec](chart-log-spec.md#indoor-sensors-field-issue-1230-r0). What the hourly weather forecast said at each point in time (for scoring forecast error by lead time) is archived by [Forecast Archive Spec](forecast-archive-spec.md), read through `ForecastArchive.get_snapshots()`. No fit in this spec reads either yet; they are R0 data foundations.
+
 ---
 
 ## Scope

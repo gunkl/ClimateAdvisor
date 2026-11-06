@@ -11,7 +11,9 @@
 | What does `get_entries()` return when the log is empty or the range produces no matches? | An empty list `[]`. No error is raised. Downsampling buckets that receive zero entries simply produce no output rows. | [Query Contract](#query-contract) |
 | How does `get_entries()` support historical navigation? | Pass `before: datetime` to anchor the query window to that point in time instead of the current clock. The window is then `[before − range_days, before)`. Used by `get_chart_data(before_ts=...)` to serve past data windows. | [Query Contract](#query-contract) |
 | What downsampling tier applies for each `range_str` value? | `6h`/`12h`/`24h`/`3d` → raw entries. `7d`/`30d` → hourly averages. `1y` → daily summaries. An unrecognised range string defaults to `24h` (1-day raw). | [Downsampling Rules](#downsampling-rules) |
-| What fields does a raw entry always carry, and which are optional? | Nine core fields always present: `ts`, `hvac`, `fan`, `indoor`, `outdoor`, `windows_open`, `windows_recommended`, `pred_outdoor`, `pred_indoor`. The `event` field is only present when the marker argument is non-None; `indoor_primary` only on `hvac_action_change` rows written since v0.8.34 (Issue #1234); `comfort_target` only on rows written while the remote-sensor outer loop holds an offset (Issue #1194 d). | [Entry Schema](#entry-schema) |
+| What fields does a raw entry always carry, and which are optional? | Nine core fields always present: `ts`, `hvac`, `fan`, `indoor`, `outdoor`, `windows_open`, `windows_recommended`, `pred_outdoor`, `pred_indoor`. The `event` field is only present when the marker argument is non-None; `indoor_primary` only on `hvac_action_change` rows written since v0.8.34 (Issue #1234); `comfort_target` only on rows written while the remote-sensor outer loop holds an offset (Issue #1194 d); `indoor_sensors` on every coordinator-written row since 0.9.1 (Issue #1230 R0). |
+| What is `indoor_sensors` and which sensors does it cover? | A dict `{entity_id: °F (2 dp) \| null}` of every configured indoor source - the climate entity's `current_temperature`, `indoor_temp_entity`, `sleep_indoor_temp_entity` (de-duplicated, in that order) - read on every row under the resolver's validation rules and identical whether or not the sleep window is active. `null` = that sensor failed the read (missing, non-numeric, outside 40-110 F, or stale >12 h). | [Indoor Sensors Field](#indoor-sensors-field-issue-1230-r0) |
+| How does `indoor_sensors` appear in the 7d/30d/1y views, and does the chart ever see it? | Hourly and daily buckets carry the per-entity mean (2 dp) under the same `indoor_sensors` key. `get_chart_data()` STRIPS it from `state_log` (not converted), so a Celsius frontend never receives a Fahrenheit value; the thermal tools read the raw file. | [Downsampled Entry Schemas](#downsampled-entry-schemas), [Temperature Units](#temperature-units-and-display-conversion-issue-1015) | [Entry Schema](#entry-schema) |
 | What two fields were added for the Vent bar (Issue #331), and what do they mean? | `fan_running: bool` — fan is physically on (compressor-class running). `nat_vent_active: bool` — nat-vent session is armed (includes paused-between-cycles). Legacy `fan` field is still emitted for back-compat. | [Vent Bar Fields (Issue #331)](#vent-bar-fields-issue-331) |
 | How does the frontend decide the Vent bar color for each entry? | Blue if `fan_running`; green if `nat_vent_active || windows_recommended`; else off. Back-compat: if `fan_running` absent, fall back to legacy `fan` field → blue. | [Vent Bar Fields (Issue #331)](#vent-bar-fields-issue-331) |
 | What does the HVAC bar show after Issue #331? | Compressor-only: `heating` (red) / `cooling` (blue). `fan_only` and `off` produce no bar. | [Vent Bar Fields (Issue #331)](#vent-bar-fields-issue-331) |
@@ -32,7 +34,7 @@
 This spec covers the `ChartStateLog` class in its entirety: construction, `load()`, `save()`, `append()`, `_maybe_prune()`, `get_entries()`, and the three internal bucketing helpers.
 
 - **File:** `custom_components/climate_advisor/chart_log.py`
-- **Approximate line range:** L41 – L318 (full class)
+- **Approximate line range:** L81 – L465 (full class)
 - **Entry point:** `ChartStateLog.__init__()` for construction; `append()` and `get_entries()` for runtime use
 
 **Out of scope:**
@@ -77,7 +79,7 @@ This spec covers the `ChartStateLog` class in its entirety: construction, `load(
 ### After `append()`
 1. Exactly one new dict has been appended to `self._entries`.
 2. The new entry always contains the nine core fields (`ts`, `hvac`, `fan`, `indoor`, `outdoor`, `windows_open`, `windows_recommended`, `pred_outdoor`, `pred_indoor`).
-3. The `event` key is present in the new entry if and only if the `event` argument was non-None.
+3. The `event` key is present in the new entry if and only if the `event` argument was non-None. The same rule holds for `indoor_primary` and `comfort_target` (non-None) and `indoor_sensors` (`indoor_sensors is not None`, so an empty `{}` is kept; the mapping is copied, never aliased).
 4. If the hourly prune gate passes, all entries older than `max_days` are evicted from `self._entries`.
 5. `save()` is NOT called by `append()` — the caller is responsible for persistence.
 
@@ -134,8 +136,9 @@ Entries with unparseable `ts` fields are treated differently in the two prune co
 | `windows_recommended` | `bool` | Always | Whether natural ventilation was recommended at this tick |
 | `pred_outdoor` | `float \| null` | Always | Hourly forecast temperature for the current local hour, extracted by `_extract_current_hour_forecast_temp()` from `self._hourly_forecast_temps`. Since Issue #1015 (0.7.82) that list is normalised to internal °F at its source, so this value is °F on every install; entries written before 0.7.82 on Celsius installs hold the provider's native unit (see [Known limitation](#known-limitation-pre-fix-history-not-migrated)). `null` when the hourly forecast has no entry matching the current hour, or when hourly forecast is unavailable. (Fixed in Issue #132: previously stored a normalised value from `_build_outdoor_curve()`, which caused spikes at classification boundaries.) |
 | `pred_indoor` | `float \| null` | Always | Predicted indoor temperature: read from `_pred_archive` (first-write-wins archive). The archived value for time T was written when T was ~4 hours in the future — i.e., the prediction was made ~4 hours before T arrived. Falls back to `_last_predicted_indoor[0]["temp"]` only during the warmup period (first 4 hours after HA restart). Written on every entry regardless of `indoor` or `pred_outdoor` being null (Issue #1039: during an indoor-sensor outage the entry holds `indoor=null` with a real `pred_indoor`); `null` only when both archive and cache are empty. Selection is `_select_pred_indoor()`. See [First-Write-Wins Prediction Archive](#first-write-wins-prediction-archive). |
-| `indoor_primary` | `float \| null` | Optional (Issue #1234, v0.8.34+) | The always-primary indoor reading in internal °F (`IndoorTempReading.primary_value` - never the sleep-window swap that `indoor` may carry). Written only on `hvac_action_change` rows, and only when a value exists; absent on every other row and on older logs. Read by `tools/thermal_replay.py`'s swing backfill (which uses ONLY this field) and by `tools/swing_audit.py --chart-log`. Because it exists only on `hvac_action_change` rows, the coast overshoot (Issue #1233, peak/trough after a stop) cannot be backfilled from chart_log. Not averaged into hourly/daily buckets. |
+| `indoor_primary` | `float \| null` | Optional (Issue #1234, v0.8.34+) | The always-primary indoor reading in internal °F (`IndoorTempReading.primary_value` - never the sleep-window swap that `indoor` may carry). Written only on `hvac_action_change` rows, and only when a value exists; absent on every other row and on older logs. Read by `tools/thermal_replay.py`'s swing backfill (which uses ONLY this field) and by `tools/swing_audit.py --chart-log`. Because it exists only on `hvac_action_change` rows, the coast overshoot (Issue #1233, peak/trough after a stop) cannot be backfilled from chart_log for rows written before 0.9.1; from 0.9.1 on, every row carries `indoor_sensors`, so the 30-minute series of the primary sensor is recoverable as `indoor_sensors[<primary entity>]` and that gap is closable (Issue #1230 R0). Not averaged into hourly/daily buckets. |
 | `comfort_target` | `float \| null` | Optional (Issue #1194 d, v0.8.46+) | The room's comfort target in internal °F, written only on rows where the remote-sensor outer loop holds an offset, so `setpoint` (the COMMANDED value, target + offset) and the target the room should reach are charted apart (`AutomationEngine.remote_offset_state()` via `_read_chart_comfort_target()`). Absent on every other row and on older logs. Hourly/daily buckets carry it only when at least one row in the bucket has it: the average of each row's `comfort_target`, or its `setpoint` when it has none (`_bucket_comfort_target()`), so the 7d/30d/1y Target line stays at the room's target. |
+| `indoor_sensors` | `dict[str, float \| null]` | Optional (Issue #1230 R0, v0.9.1+) | `{entity_id: internal °F rounded to 2 dp, or null}` for every configured indoor source: the climate entity (`current_temperature`), `indoor_temp_entity`, `sleep_indoor_temp_entity`, de-duplicated, in that order. Written on every coordinator row (all four `append` sites) regardless of the sleep window or which source is in use, so `indoor` (comfort-facing, may swap to the bedroom sensor) and this map can differ. `null` = the sensor failed the resolver's parse / plausibility (40-110 F) / 12 h stale rules (an `input_number.*` helper is exempt from the stale rule; the climate entity is not stale-checked). Absent on rows written before 0.9.1. Informational: nothing reads it for a decision or display; `get_chart_data()` strips it from `state_log`. See [Indoor Sensors Field](#indoor-sensors-field-issue-1230-r0). |
 | `event` | `str` | Optional | Event marker label (e.g., `"hvac_mode_changed"`, `"windows_opened"`). Present only when `event` argument was non-None. |
 
 **Invariant:** `ts` is always present and always a string. Monotonic non-decrease of `ts` values is the caller's responsibility — the class does not enforce it.
@@ -159,13 +162,33 @@ Entries with unparseable `ts` fields are treated differently in the two prune co
 | `indoor`, `outdoor` | Read from the raw entries into the `actual_*` series, which are converted separately |
 | `setpoint`, `nat_vent_target`, `comfort_target` | `_extract_historical_effective_target()` (and `_extract_historical_commanded_setpoint()`, which feeds `commanded_setpoint_history`) reads them after `_conv_log_entry()` and its result is converted again; converting here would double-convert `effective_target_history` |
 
+| Removed (not converted) from `state_log` | Why |
+|---|---|
+| `indoor_sensors` | A nested `{entity_id: °F}` map cannot be converted key-by-key, and nothing in the frontend or the post-conversion readers uses it (the thermal tools read the raw file). `_conv_log_entry()` pops every key in the module constant `_CHART_LOG_STATE_LOG_STRIPPED_KEYS` (`coordinator.py`, currently `("indoor_sensors",)`) before the conversion loop, so a Celsius `state_log` can never carry a stray °F value in any tier (raw, hourly, daily) and the 24h/3d raw payload stays small. The stored log keeps the field. |
+
 The historical-band series built before `_conv_log_entry()` reads raw `lower`/`upper` and converts them once itself, so adding them to the constant does not double-convert it.
 
-**Guard against drift:** `tests/test_chart_celsius.py` structurally requires every temperature field `ChartStateLog.append()` emits to be either in `_CHART_LOG_CONVERTED_TEMP_KEYS` or on the test's explicit allowlist, so a newly added chart-log temperature field fails CI until it is classified.
+**Guard against drift:** `tests/test_chart_celsius.py` structurally requires every temperature field `ChartStateLog.append()` emits to be either in `_CHART_LOG_CONVERTED_TEMP_KEYS` or on the test's explicit allowlist, so a newly added chart-log temperature field fails CI until it is classified. The same test requires every dict-valued `append()` keyword (found by signature introspection) to be listed in `_CHART_LOG_STATE_LOG_STRIPPED_KEYS`, and `test_state_log_never_carries_indoor_sensors` asserts the field is absent from `state_log` for Celsius and Fahrenheit across the 24h, 7d and 1y tiers while still present in the stored log.
 
 ### Known limitation: pre-fix history not migrated
 
 Chart-log entries written before 0.7.82 on Celsius installs hold `pred_outdoor` in the provider's native unit (°C). They were left as they are — no migration, no change to the persisted file format (so no downgrade hazard). `get_chart_data()` converts them as if they were °F, so on Celsius installs the Predicted Outdoor line for past windows that still contain pre-fix entries stays wrong until they age out: the 24h/3d raw views while the window covers them, and the 7d/30d/1y averages for up to 7/30/365 days. Entries written after the fix display correctly. Historical `pred_indoor` (computed from the raw outdoor input) is likewise not repaired. Fahrenheit installs are unaffected (the normalisation is a passthrough for `"fahrenheit"`).
+
+## Indoor Sensors Field (Issue #1230 R0)
+
+**Why:** the v4 thermal model fits one line per indoor sensor, but `indoor` carries only the comfort-facing value (it swaps to the bedroom sensor in the sleep window) and `indoor_primary` exists only on `hvac_action_change` rows. `indoor_sensors` records what every configured sensor read on every row, so a fit never has to guess which sensor `indoor` came from.
+
+**Reader:** `indoor_temp.read_indoor_sensors_f(hass=, unit=, climate_entity=, indoor_temp_entity=None, sleep_indoor_temp_entity=None, now=None) -> dict[str, float | None]`. The coordinator calls it through `_read_chart_indoor_sensors()` at all four `_chart_log.append(...)` sites.
+
+- Sources, in order and de-duplicated: climate entity (`current_temperature` attribute via `read_attribute_temp_f`), `indoor_temp_entity` and `sleep_indoor_temp_entity` (state via `read_sensor_state_f`). An unconfigured source is omitted from the map; a configured one that fails is present with `null` (never a placeholder).
+- Validation matches the resolver: the unit is converted to °F, then `_check_plausible` (40-110 F), then the `INDOOR_SENSOR_STALE_HOURS` (12 h) stale rule for sensors. `input_number.*` helpers are exempt from the stale rule and the climate entity is not stale-checked. Value is rounded to 2 decimals so a 0.18 F-step sensor keeps its resolution.
+- Identical regardless of the sleep window and of which source the resolver is currently using.
+- Pure read: no events, nothing above DEBUG, never raises (a failing source reads `null`; if the whole read fails the coordinator wrapper returns `{}`).
+- Hourly and daily buckets: `_bucket_indoor_sensors()` returns the per-entity mean (2 dp) of the rows that carried the field, under the same `indoor_sensors` key in both shapes. An entity with no numeric reading in the bucket stays in the map as `null`; legacy rows contribute nothing; the key is omitted when no row in the bucket had the field (the `comfort_target` precedent).
+
+Example raw row fragment: `"indoor_sensors": {"climate.living_room": 71.5, "sensor.bedroom_temp": 69.82, "sensor.office_temp": null}`.
+
+**Tests:** `tests/test_chart_indoor_sensors.py` (reader rules, append-site coverage, round trip, bucketing), `tests/test_chart_celsius.py` (strip guard).
 
 ## Vent Bar Fields (Issue #331)
 
@@ -242,13 +265,22 @@ def append(
     windows_recommended: bool = False,
     pred_outdoor: float | None = None,
     pred_indoor: float | None = None,
+    setpoint: float | None = None,
     event: str | None = None,
     ts: str | None = None,
+    fan_running: bool = False,
+    nat_vent_active: bool = False,
+    lower: float | None = None,
+    upper: float | None = None,
+    nat_vent_target: float | None = None,
+    indoor_primary: float | None = None,
+    comfort_target: float | None = None,
+    indoor_sensors: dict[str, float | None] | None = None,
 ) -> None:
 ```
 
 - If `ts` is `None`, the entry timestamp is set to `dt_util.now().isoformat()` (HA-aware wall clock).
-- `event` is the only field that is conditionally included. All other nine fields are always written to the dict, even when their value is `None` or `False`.
+- `event`, `indoor_primary`, `comfort_target` and `indoor_sensors` are the conditionally included fields (each only when its argument is not `None`). `indoor_sensors` is stored as a shallow copy (`dict(indoor_sensors)`) so later mutation by the caller cannot alter the log. Every other field is always written, even when its value is `None` or `False`.
 - After appending, `_maybe_prune()` is called. If the prune gate is open (≥1 hour since last prune), old entries are evicted in-place.
 - `save()` is not called. The caller (coordinator) is responsible for persisting after `append()`.
 
@@ -300,6 +332,7 @@ The downsampling tier is selected by `_range_str_to_days()` against two threshol
 | `pred_outdoor` | `float \| null` | Mean of non-null `pred_outdoor` values, rounded to 1 decimal |
 | `pred_indoor` | `float \| null` | Mean of non-null `pred_indoor` values, rounded to 1 decimal |
 | `comfort_target` | `float \| null` | Issue #1194 (d). Present only when at least one entry in the bucket had `comfort_target`: mean over the entries of `comfort_target`, or `setpoint` when that entry has none, rounded to 1 decimal (`_bucket_comfort_target()`) |
+| `indoor_sensors` | `dict[str, float \| null]` | Issue #1230 R0. Present only when at least one entry in the bucket had the field: per-entity mean of the numeric readings, rounded to 2 decimals; an entity with no numeric reading in the hour is `null` (`_bucket_indoor_sensors()`) |
 | `event` | `list[str]` | Collected event marker strings from the hour. Present only when at least one entry had an `event` field. |
 
 ### Daily summary entry (produced by `_bucket_daily()`)
@@ -320,6 +353,7 @@ The downsampling tier is selected by `_range_str_to_days()` against two threshol
 | `pred_outdoor_avg` | `float \| null` | Mean of non-null `pred_outdoor` values, rounded to 1 decimal |
 | `pred_indoor_avg` | `float \| null` | Mean of non-null `pred_indoor` values, rounded to 1 decimal |
 | `comfort_target` | `float \| null` | Issue #1194 (d). Present only when at least one entry in the bucket had `comfort_target`: mean over the entries of `comfort_target`, or `setpoint` when that entry has none, rounded to 1 decimal (`_bucket_comfort_target()`) |
+| `indoor_sensors` | `dict[str, float \| null]` | Issue #1230 R0. Same key and rule as the hourly shape: per-entity mean over the day's rows that carried the field, 2 decimals, `null` when silent all day; omitted when no row had it |
 | `events` | `list[str]` | Collected event marker strings for the day (plural key). Present only when at least one entry had an `event` field. |
 
 **Key schema difference summary:**
@@ -330,6 +364,7 @@ The downsampling tier is selected by `_range_str_to_days()` against two threshol
 | Fan field | `fan: bool` | `fan: bool` (OR) | `fan_minutes: int` |
 | Event field key | `event: str` (optional) | `event: list[str]` (optional) | `events: list[str]` (optional) |
 | Prediction fields | `pred_outdoor`, `pred_indoor` | `pred_outdoor`, `pred_indoor` (averaged) | `pred_outdoor_avg`, `pred_indoor_avg` |
+| Per-sensor readings | `indoor_sensors` (per-row) | `indoor_sensors` (per-entity mean) | `indoor_sensors` (per-entity mean, same key) |
 
 ## Load Contract
 
@@ -388,15 +423,19 @@ In all error paths `load()` returns `None` and does not raise. The coordinator r
 
 ## Code Reference
 
-- [`ChartStateLog.__init__`](../custom_components/climate_advisor/chart_log.py#L44) — construction; sets `_path`, `_max_days`, `_entries`, `_last_prune`
-- [`ChartStateLog.load`](../custom_components/climate_advisor/chart_log.py#L55) — disk read, parse, prune on startup
-- [`ChartStateLog.save`](../custom_components/climate_advisor/chart_log.py#L95) — atomic write to disk
-- [`ChartStateLog.append`](../custom_components/climate_advisor/chart_log.py#L119) — entry construction and in-memory append
-- [`ChartStateLog._maybe_prune`](../custom_components/climate_advisor/chart_log.py#L167) — time-gated retention enforcement
-- [`ChartStateLog.get_entries`](../custom_components/climate_advisor/chart_log.py#L189) — filtered, downsampled retrieval
-- [`ChartStateLog._bucket_hourly`](../custom_components/climate_advisor/chart_log.py#L260) — 1-hour average bucketing
-- [`ChartStateLog._bucket_daily`](../custom_components/climate_advisor/chart_log.py#L304) — daily summary bucketing
-- [`_parse_ts`](../custom_components/climate_advisor/chart_log.py#L31) — ISO-8601 parse helper; returns `None` on failure
+- [`ChartStateLog.__init__`](../custom_components/climate_advisor/chart_log.py#L84) — construction; sets `_path`, `_max_days`, `_entries`, `_last_prune`
+- [`ChartStateLog.load`](../custom_components/climate_advisor/chart_log.py#L97) — disk read, parse, prune on startup
+- [`ChartStateLog.save`](../custom_components/climate_advisor/chart_log.py#L138) — atomic write to disk
+- [`ChartStateLog.append`](../custom_components/climate_advisor/chart_log.py#L162) — entry construction and in-memory append
+- [`ChartStateLog._maybe_prune`](../custom_components/climate_advisor/chart_log.py#L252) — time-gated retention enforcement
+- [`ChartStateLog.get_entries`](../custom_components/climate_advisor/chart_log.py#L274) — filtered, downsampled retrieval
+- [`ChartStateLog._bucket_hourly`](../custom_components/climate_advisor/chart_log.py#L345) — 1-hour average bucketing
+- [`ChartStateLog._bucket_daily`](../custom_components/climate_advisor/chart_log.py#L403) — daily summary bucketing
+- [`_bucket_indoor_sensors`](../custom_components/climate_advisor/chart_log.py#L62) - per-entity mean for hourly/daily buckets (Issue #1230 R0)
+- [`read_indoor_sensors_f`](../custom_components/climate_advisor/indoor_temp.py#L214) - the per-row sensor snapshot
+- [`_read_chart_indoor_sensors`](../custom_components/climate_advisor/coordinator.py#L4890) - coordinator wrapper used at all four `append` sites
+- [`_CHART_LOG_STATE_LOG_STRIPPED_KEYS`](../custom_components/climate_advisor/coordinator.py#L478) and `_conv_log_entry()` (`coordinator.py#L13701`) - strip from `state_log`
+- [`_parse_ts`](../custom_components/climate_advisor/chart_log.py#L33) — ISO-8601 parse helper; returns `None` on failure
 
 ## Coordinator Chart Log Wiring
 

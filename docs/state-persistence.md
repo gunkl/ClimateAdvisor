@@ -23,6 +23,7 @@
 
 **Explicitly does NOT own:**
 - `LearningState` — lives in `learning.py`; persists to `climate_advisor_learning.json` via `LearningEngine`
+- The chart log (`climate_advisor_chart_log_<entry_id>.json`, [chart-log-spec.md](chart-log-spec.md)) and the forecast archive (`climate_advisor_forecast_archive_<entry_id>.json`, Issue #1230 R0, [forecast-archive-spec.md](forecast-archive-spec.md)) - separate entry-scoped files with their own persistence contracts. Like the other per-zone files, neither is removed when a config entry is deleted (no entry-removal cleanup exists)
 - The schema of the state dict — the coordinator (`coordinator.py`) is responsible for what keys are written and read
 - Nothing else — file permissions (`0o600` via `os.chmod` after `os.replace()`, guarded by `hasattr(os, "chmod")` for cross-platform safety) ARE set by this module; see Invariants
 - Migration logic — version mismatches are handled by discarding and starting fresh; no field-level upgrade path exists in `state.py`

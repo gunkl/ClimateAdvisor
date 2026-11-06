@@ -44,6 +44,7 @@ from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
     AutomationEngineCallbacks,
+    PreCoolDecision,
     _in_sleep_window,
     _refuse_if_shut_down,
     awake_comfort_edges,
@@ -111,6 +112,7 @@ from .const import (
     COMFORT_STALL_MARGIN_F,
     COMFORT_STALL_REMINDER_SECONDS,
     COMFORT_STALL_SUSTAIN_SECONDS,
+    COMPANION_CONSISTENCY_F,
     COMPANION_SENSOR_OFF,
     COMPANION_SENSOR_REFRESH_SECONDS,
     CONF_AI_API_KEY,
@@ -934,10 +936,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pre_cool_status: str | None = None  # surfaced in status API
         self._pre_cool_trigger_dt: datetime | None = None  # full tz-aware trigger datetime
         self._pre_cool_target: float | None = None  # pre-cool ceiling target temp
-        # Issue #1378: (waking date, modifier) of the night the pending/last trigger was decided for. Survives the
-        # 23:59 day reset while that night is still ahead, so a pre-cool decided on day D for D+1 is not re-judged
-        # on D+1's forecast (which looks at D+2) after midnight.
-        self._pre_cool_decided: tuple[date, float] | None = None
+        # Issue #1378: PreCoolDecision (waking date, modifier, deciding day's high/low) of the night the pending/last
+        # trigger was decided for. Survives the 23:59 day reset while that night is still ahead; after midnight the
+        # night is re-checked on the fresh forecast for its waking day, not on D+1's "tomorrow" (D+2).
+        self._pre_cool_decided: PreCoolDecision | None = None
         # #437 follow-up: tracks natural_vent_active across _emit_event() calls so a
         # True->False transition (nat-vent genuinely exiting, any of its 6 real exit
         # paths) can pull a pending pre-cool trigger earlier instead of leaving it on
@@ -1081,9 +1083,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Funnel state (``_refresh_indoor_sensor_health``): the companion in use now / last announced, and the
         # one-time ambiguity note. Event loop only.
         self._indoor_companion_in_use: str | None = None
-        self._indoor_companion_announced: str | None = None
         self._indoor_companion_reason: str | None = None
         self._indoor_companion_ambiguous_logged: bool = False
+        # Issue #1230 R1c: the sensor CA last announced as the room's reading (entity, role) - None until known.
+        self._indoor_source_announced: str | None = None
+        self._indoor_source_announced_role: str | None = None
+        self._indoor_source_companions_seen: set[str] = set()
+        self._indoor_source_left_sleep_failed: bool = False
         self._last_violation_check: datetime | None = None
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
@@ -4891,6 +4897,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         primary_entity = self._primary_indoor_entity()
         self._note_indoor_sensor_state("primary", reading.reason, primary_entity, reading.primary_value)
         self._note_indoor_companion(reading)
+        self._note_indoor_source(reading)
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
         if sleep_entity and _in_sleep_window(dt_util.now(), self.config):
             self._note_indoor_sensor_state("sleep", reading.sleep_reason, sleep_entity, reading.value)
@@ -4905,10 +4912,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Track and announce the thermostat's finer companion sensor entering/leaving use (Issue #1230 R1b).
 
         Called only by ``_refresh_indoor_sensor_health`` (event loop). The current state always drives the Settings
-        label; INFO lines fire only on a change of the sensor in use (companion -> thermostat reading and back), once
-        per change, never per call, and not during the startup coalesce (the first announcement then waits). A
-        reason change while the companion stays out of use is DEBUG only, so a flapping 'unavailable' companion
-        cannot spam; ambiguity (two candidates both usable) is noted once at INFO.
+        label. It announces nothing about a switch: the one INFO line and Activity entry per real change of the room's
+        sensor come from ``_note_indoor_source`` (Issue #1230 R1c). Ambiguity (two candidates both usable) is noted
+        once at INFO.
         """
         using, reason = reading.companion_entity, reading.companion_reason
         self._companion_ensure_tracking_attrs()
@@ -4921,26 +4927,176 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 " match its reading (candidates=%s); keeping the thermostat's own reading",
                 ", ".join(getattr(self._companion, "entities", ())),
             )
-        if getattr(self, "_startup_coalesce_active", True):
+
+    def _indoor_source_ensure_attrs(self) -> None:
+        """Default the source-switch attrs on coordinators built via ``object.__new__`` (tests)."""
+        for name, default in (
+            ("_indoor_source_announced", None),
+            ("_indoor_source_announced_role", None),
+            ("_indoor_source_left_sleep_failed", False),
+        ):
+            if not hasattr(self, name):
+                setattr(self, name, default)
+        if not hasattr(self, "_indoor_source_companions_seen"):
+            self._indoor_source_companions_seen = set()
+
+    def _indoor_friendly_name(self, entity_id: str | None) -> str:
+        """HA ``friendly_name`` of an entity for log/Activity text, falling back to its id."""
+        if not entity_id:
+            return "unknown"
+        try:
+            name = self.hass.states.get(entity_id).attributes.get("friendly_name")
+        except AttributeError:
+            name = None
+        return name if isinstance(name, str) and name else entity_id
+
+    def _indoor_zone_title(self) -> str:
+        """The zone's config-entry title for log text, falling back to the zone log id."""
+        try:
+            from .zone_registry import resolve_zone_display_name
+
+            title = resolve_zone_display_name(self.hass, getattr(self, "_entry_id", None))
+        except Exception:  # noqa: BLE001 - log text must never fail the funnel
+            title = None
+        return title if isinstance(title, str) and title else self._zone_log_id()
+
+    def _indoor_source_role(self, entity_id: str, reading: IndoorTempReading) -> str:
+        """Plain-words role of the sensor CA reads the room from."""
+        if reading.remote_context is not None or entity_id == self.config.get("sleep_indoor_temp_entity"):
+            return "sleep sensor"
+        if entity_id in getattr(getattr(self, "_companion", None), "entities", ()):
+            return "thermostat's finer sensor"
+        if entity_id == self.config.get("climate_entity"):
+            return "thermostat"
+        return "dedicated indoor sensor"
+
+    def _indoor_source_reason(self, reading: IndoorTempReading, using: str, was_role: str) -> str:
+        """Why the room's sensor changed, in plain words (Issue #1230 R1c)."""
+        if reading.remote_context is not None:
+            return "sleep sensor reporting again" if self._indoor_source_left_sleep_failed else "sleep window started"
+        if was_role == "sleep sensor":
+            if reading.sleep_reason:
+                return f"sleep sensor not usable ({str(reading.sleep_reason).replace('_', ' ')})"
+            return "sleep window ended"
+        if using == reading.companion_entity:
+            if using in self._indoor_source_companions_seen:
+                return "finer sensor available again"
+            return "finer sensor proven"
+        if was_role == "thermostat's finer sensor":
+            if self._companion_for_resolver() is None:
+                return "setting off"
+            return {
+                "unavailable": "finer sensor unavailable — using the thermostat",
+                "stale": "finer sensor stopped updating — using the thermostat",
+                "implausible": "finer sensor reading out of range — using the thermostat",
+                "inconsistent": f"more than {COMPANION_CONSISTENCY_F:.1f} °F apart",
+                "ambiguous": "two candidate sensors",
+                "entity_missing": "finer sensor not found — using the thermostat",
+                "non_numeric": "finer sensor reading not a number — using the thermostat",
+                "non_finite": "finer sensor reading invalid — using the thermostat",
+                "not_proven": "finer sensor not proven — using the thermostat",
+            }.get(reading.companion_reason or "", "finer sensor no longer used — using the thermostat")
+        return "indoor sensor setting changed"
+
+    def _note_indoor_source(self, reading: IndoorTempReading) -> None:
+        """Announce each real change of the sensor CA reads the room from, once (Issue #1230 R1c).
+
+        The single owner of that INFO line and of the ``indoor_source_changed`` Activity entry (the resolver's own
+        lines are DEBUG). Called only by ``_refresh_indoor_sensor_health`` (event loop). Per zone, one line per change
+        of sensor - thermostat attribute, thermostat's finer sensor, dedicated sensor, sleep sensor - never per call.
+        Silent while the startup coalesce is active; the first announcement after it is a "using" line, not a switch.
+        A moment with no usable reading (``source_entity`` None) changes nothing here: the outage is announced by
+        ``_note_indoor_sensor_state`` and the same sensor coming back is not a switch.
+        """
+        self._indoor_source_ensure_attrs()
+        using = reading.source_entity
+        if getattr(self, "_startup_coalesce_active", True) or using is None:
             return
-        if using == self._indoor_companion_announced:
+        previous = self._indoor_source_announced
+        if using == previous:
             return
-        previous = self._indoor_companion_announced
-        self._indoor_companion_announced = using
-        if using is not None:
-            _LOGGER.info("Indoor reading source changed to the thermostat's finer sensor entity=%s", using)
-        elif previous is not None:
+        role = self._indoor_source_role(using, reading)
+        zone = self._indoor_zone_title()
+
+        def _fmt(value: float | None) -> str:
+            return "no reading" if value is None else f"{value:.2f}".rstrip("0").rstrip(".") + "°F"
+
+        to_value = reading.value
+        if previous is None:
+            self._record_indoor_source(using, role)
             _LOGGER.info(
-                "Indoor reading source changed back to the thermostat's own reading (finer sensor %s: reason=%s)",
-                previous,
-                reason or "not_in_use",
+                'Zone "%s": room temperature using "%s" (%s, %s, %s)',
+                zone,
+                self._indoor_friendly_name(using),
+                using,
+                role,
+                _fmt(to_value),
             )
+            return
+        was_role = self._indoor_source_announced_role or "thermostat"
+        reason = self._indoor_source_reason(reading, using, was_role)
+        from_value = self._indoor_snapshot_f().get(previous)
+        from_name, to_name = self._indoor_friendly_name(previous), self._indoor_friendly_name(using)
+        self._indoor_source_left_sleep_failed = was_role == "sleep sensor" and bool(reading.sleep_reason)
+        self._record_indoor_source(using, role)
+        _LOGGER.info(
+            'Zone "%s": room temperature now from "%s" (%s, %s, %s) instead of "%s" (%s, %s, %s): %s',
+            zone,
+            to_name,
+            using,
+            role,
+            _fmt(to_value),
+            from_name,
+            previous,
+            was_role,
+            _fmt(from_value),
+            reason,
+        )
+        self._emit_event(
+            "indoor_source_changed",
+            {
+                "zone": zone,
+                "from_entity": previous,
+                "from_name": from_name,
+                "from_role": was_role,
+                "from_value_f": from_value,
+                "to_entity": using,
+                "to_name": to_name,
+                "to_role": role,
+                "to_value_f": to_value,
+                "reason": reason,
+            },
+        )
+
+    def _indoor_snapshot_f(self) -> dict[str, float | None]:
+        """Every known indoor sensor's reading now, for the "instead of" value of a switch line (never raises).
+
+        Same reads as ``_read_chart_indoor_sensors`` but over the candidates already held by the resolver's
+        ``CompanionSensors``, so it neither refreshes the registry cache nor mutates any state.
+        """
+        try:
+            return read_indoor_sensors_f(
+                hass=self.hass,
+                unit=self.config.get("temp_unit", "fahrenheit"),
+                climate_entity=self.config.get("climate_entity"),
+                indoor_temp_entity=self.config.get("indoor_temp_entity"),
+                sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
+                companion_entities=tuple(getattr(getattr(self, "_companion", None), "entities", ())),
+            )
+        except Exception:  # noqa: BLE001 - log text must never fail the funnel
+            return {}
+
+    def _record_indoor_source(self, using: str, role: str) -> None:
+        """Remember the announced sensor (and that a finer sensor has been in use)."""
+        self._indoor_source_announced = using
+        self._indoor_source_announced_role = role
+        if role == "thermostat's finer sensor":
+            self._indoor_source_companions_seen.add(using)
 
     def _companion_ensure_tracking_attrs(self) -> None:
         """Default the funnel's companion attrs on coordinators built via ``object.__new__`` (tests)."""
         for name, default in (
             ("_indoor_companion_in_use", None),
-            ("_indoor_companion_announced", None),
             ("_indoor_companion_reason", None),
             ("_indoor_companion_ambiguous_logged", False),
         ):
@@ -6261,7 +6417,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             decided=self._pre_cool_decision(),
         )
 
-    def _pre_cool_decision(self) -> tuple[date, float] | None:
+    def _pre_cool_decision(self) -> PreCoolDecision | None:
         """``_pre_cool_decided`` when it is a real record (Issue #1378; tests build partial coordinators)."""
         decided = getattr(self, "_pre_cool_decided", None)
         return decided if isinstance(decided, tuple) else None
@@ -6710,7 +6866,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         pre_cool_target = compute_pre_cool_target(self.config, _modifier if _modifier is not None else 0.0)
         if _modifier is not None:
             # Issue #1378: remember which night this was decided for, and how, so it survives the 23:59 reset.
-            self._pre_cool_decided = (pre_cool_waking_date(trigger_time, self.config), _modifier)
+            # The deciding day's own forecast high/low is the base for the fire-time trend re-check -- only when
+            # that day is the one before the night's waking day (decided before midnight / after wake).
+            _waking = pre_cool_waking_date(trigger_time, self.config)
+            _c = self._current_classification
+            _prev_is_today = _waking != dt_util.as_local(now).date()
+            self._pre_cool_decided = PreCoolDecision(
+                _waking,
+                _modifier,
+                getattr(_c, "today_high", None) if _prev_is_today else None,
+                getattr(_c, "today_low", None) if _prev_is_today else None,
+            )
 
         self._pre_cool_trigger_cancel = async_track_point_in_time(
             self.hass, self._zone_scoped(self._async_pre_cool_trigger), trigger_time
@@ -6727,7 +6893,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Handle the overnight pre-cool trigger point."""
         self._pre_cool_trigger_dt = None  # trigger has fired; no longer a future candidate
         # Issue #1378: judge the night on the day it wakes into. After midnight the classification is already that
-        # day's, so its "tomorrow" is a day too far; the decision recorded when this trigger was scheduled stands.
+        # day's, so its "tomorrow" is a day too far; it is re-checked on the fresh forecast for today
+        # (warming trend from the recorded decision, or hot).
         _modifier = self._pre_cool_modifier_for_night(now)
         if _modifier is None:
             _LOGGER.info("Pre-cool trigger fired: skipped — the day this night wakes into is not pre-cool eligible")
@@ -14929,7 +15096,7 @@ def _compute_pre_cool_trigger_time_pure(
     config: dict[str, Any],
     now: datetime,
     *,
-    decided: tuple[date, float] | None = None,
+    decided: PreCoolDecision | None = None,
 ) -> datetime | None:
     """Pure computation behind ``ClimateAdvisorCoordinator._compute_pre_cool_trigger_time()``
     (Issue #514) — takes ``classification``/``config``/``now`` explicitly instead of reading

@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
@@ -133,6 +133,8 @@ from .const import (
     TEMP_SOURCE_CLIMATE_FALLBACK,
     THERMAL_SWING_DEFAULT_F,
     TIMER_BOUNDARY_SETTLE_SECONDS,
+    TREND_THRESHOLD_MODERATE,
+    TREND_THRESHOLD_SIGNIFICANT,
 )
 from .desired_state import (
     MODE_SWITCH_DEDUPE_SECONDS,
@@ -1002,13 +1004,36 @@ def pre_cool_waking_date(at: datetime, config: dict) -> date:
     return local.date() if local.time() < wake else local.date() + timedelta(days=1)
 
 
+class PreCoolDecision(NamedTuple):
+    """A pre-cool decided for one night (Issue #1378).
+
+    ``waking_date``: the day the night wakes into. ``modifier``: as decided. ``prev_high`` / ``prev_low``: the
+    forecast high/low of the day BEFORE ``waking_date``, as the deciding classification saw them -- the base the
+    fire-time re-check measures the warming trend into ``waking_date`` against.
+    """
+
+    waking_date: date
+    modifier: float
+    prev_high: float | None = None
+    prev_low: float | None = None
+
+
+def _warming_trend_modifier(avg_delta: float) -> float | None:
+    """The classifier's warming-trend setback modifier for a day-over-day ``avg_delta`` (classifier.py)."""
+    if avg_delta >= TREND_THRESHOLD_SIGNIFICANT:
+        return -3.0
+    if avg_delta >= TREND_THRESHOLD_MODERATE:
+        return -2.0
+    return None
+
+
 def resolve_pre_cool_modifier_for_night(
     classification: DayClassification | None,
     config: dict,
     *,
     at: datetime,
     now: datetime,
-    decided: tuple[date, float] | None = None,
+    decided: PreCoolDecision | None = None,
 ) -> float | None:
     """Pre-cool eligibility for the night containing ``at``, judged on the day that night wakes into (Issue #1378).
 
@@ -1016,31 +1041,40 @@ def resolve_pre_cool_modifier_for_night(
     classification is current and the night ahead wakes into tomorrow. From midnight until wake the
     classification is already the new day's, so the night in progress wakes into its TODAY and "tomorrow" is a
     day too far: a pre-cool decided in the evening for a hot day was dropped after midnight when the day after
-    was mild, and a night before a mild day was pre-cooled because the day after was hot. For that night:
+    was mild, and a night before a mild day was pre-cooled because the day after was hot. For that night the
+    same two gates are asked of TODAY, on the fresh forecast (re-checked at fire time, owner decision):
 
-    - ``decided`` -- ``(waking date, modifier)`` recorded when the trigger was scheduled the day before, judged
-      then on that day's forecast (with its warming trend) -- is kept;
-    - otherwise (nothing was decided, e.g. a restart after midnight) the night is eligible when TODAY is forecast
-      hot. The warming trend into today is not known from today's classification, so it does not count.
+    - warming trend into today: today's high/low against the previous day's, recorded in ``decided`` when the
+      trigger was scheduled (same ``avg_delta`` and thresholds as the classifier);
+    - else today forecast hot (``today_high >= threshold_hot``).
+
+    Without a decision for that night (e.g. a restart after midnight) only the hot-today gate can be asked. A
+    forecast revised overnight so that neither gate holds any more drops the night's pre-cool.
     """
     if classification is None:
         return None
     _tomorrow_frame = resolve_pre_cool_modifier(classification, config)
     _today_high = getattr(classification, "today_high", None)
-    _today_frame = (
+    _today_hot = (
         HOT_DAY_PRE_COOL_MODIFIER
         if isinstance(_today_high, (int, float))
         and _today_high >= float(config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT))
         else None
     )
-    if _tomorrow_frame is None and _today_frame is None and decided is None:
+    if _tomorrow_frame is None and _today_hot is None and decided is None:
         return None  # no night is eligible -- no need to work out which one ``at`` is in
     waking = pre_cool_waking_date(at, config)
     if waking != dt_util.as_local(now).date():
         return _tomorrow_frame
-    if decided is not None and decided[0] == waking:
-        return decided[1]
-    return _today_frame
+    if decided is not None and decided.waking_date == waking:
+        _today_low = getattr(classification, "today_low", None)
+        if all(isinstance(v, (int, float)) for v in (_today_high, _today_low, decided.prev_high, decided.prev_low)):
+            _trend = _warming_trend_modifier(
+                ((_today_high - decided.prev_high) + (_today_low - decided.prev_low)) / 2.0
+            )
+            if _trend is not None:
+                return _trend
+    return _today_hot
 
 
 # Natural-expiry clears already have their own Activity Log row (grace_expired / override_adopted),

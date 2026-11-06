@@ -168,6 +168,10 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # skipped, the deciding event (or its absence) is still what the assertion checks.
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
+        # Issue #1230 R1c: indoor_source_changed only announces which sensor the room reading now comes from
+        # (thermostat, its finer sensor, dedicated or sleep sensor). It never commands HVAC; the decision events that
+        # follow still map, so registering it unmapped cannot hide a real failure.
+        "indoor_source_changed",
         # Issue #1322: entity outage / recovery rows are observational (Activity log only; no decision to judge).
         "entity_unavailable",
         "entity_recovered",

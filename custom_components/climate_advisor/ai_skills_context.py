@@ -2255,6 +2255,23 @@ def _render_indoor_sensor_unavailable(p: dict, unit: str) -> tuple[str, str]:
     return label, ""
 
 
+def _render_indoor_source_changed(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1230 R1c: the sensor Climate Advisor reads the room temperature from changed."""
+    to_name = p.get("to_name") or p.get("to_entity") or "(unknown)"
+    from_name = p.get("from_name") or p.get("from_entity") or "(unknown)"
+    to_role = p.get("to_role")
+    label = f"Room temperature now from {to_name}" + (f" ({to_role})" if to_role else "")
+    label += f" instead of {from_name}"
+    parts: list[str] = []
+    if p.get("reason"):
+        parts.append(str(p["reason"]))
+    for key, text in (("to_value_f", "now"), ("from_value_f", "was")):
+        value_f = p.get(key)
+        if isinstance(value_f, (int, float)):
+            parts.append(f"{text} {format_temp(value_f, unit, 1)}")
+    return label, ", ".join(parts)
+
+
 def _render_indoor_sensor_recovered(p: dict, unit: str) -> tuple[str, str]:
     """Issue #1033: an indoor sensor is being read again."""
     role = "Sleep sensor" if p.get("role") == "sleep" else "Indoor sensor"
@@ -3325,6 +3342,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "entity_recovered": _render_entity_recovered,
     "indoor_sensor_unavailable": _render_indoor_sensor_unavailable,
     "indoor_sensor_recovered": _render_indoor_sensor_recovered,
+    "indoor_source_changed": _render_indoor_source_changed,
     "fan_blind_started": _render_fan_blind_started,
     "fan_blind_stopped": _render_fan_blind_stopped,
     "fan_blind_recovered": _render_fan_blind_recovered,
@@ -3438,6 +3456,7 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "outdoor_sensor_recovered",
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
+        "indoor_source_changed",
         "entity_unavailable",
         "entity_recovered",
         "fan_blind_started",

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.65] — 2026-11-06
+
+- Fix #1363: while the house is Away or on Vacation, Climate Advisor no longer sends the same setpoint to your thermostat every 5 minutes (about 12 identical writes an hour). The setback is now re-confirmed every 30 minutes, the same as at home, which cuts traffic to cloud thermostats and repeated Activity entries. The setback itself is unchanged and still applies as soon as you leave.
+
 ## [0.8.64] — 2026-11-06
 
 A Home Assistant restart that comes back on a later day (an overnight outage, or a restart between 23:59 and the first save after midnight) no longer makes Climate Advisor forget things. Only today's plan starts fresh: the day type, today's temperature history and record, and the briefing.

@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.1] — 2026-11-06
+
+- Feat #1230 (R0 foundations): Climate Advisor now keeps two new records for the coming prediction engine. No change to how it runs your home or what the dashboard shows.
+  - **Every indoor sensor, every row:** the chart log records the thermostat's reading, your dedicated indoor sensor and your sleep sensor on every row, whichever one Climate Advisor is using at the moment. Unavailable sensors are recorded as empty.
+  - **Forecast archive:** each zone keeps the full hourly forecast (up to 72 hours ahead) once an hour for a year, in `climate_advisor_forecast_archive_<zone>.json` (about 3–4 MB at most), so forecast accuracy can be measured at every lead time.
+
 ## [0.9.0] — 2026-11-06
 
 - Start of the 0.9 line (Issue #1230: new prediction engine, one operation timeline and the dashboard redesign). This release is 0.8.63 plus development tooling only, with no change to how Climate Advisor runs your home. 0.9 work lands on the `0.9.x` branch, which takes every 0.8.x fix from `main` before each deploy.

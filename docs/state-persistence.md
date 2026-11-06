@@ -8,6 +8,7 @@
 |---|---|---|
 | What file does operational state persist to, and where is the path defined? | `climate_advisor_state.json` in the HA config root; path assembled from `STATE_FILE` constant in `const.py`. | [JSON Serialization](#json-serialization) |
 | How does state survive HA restarts without corruption from a mid-write crash? | Atomic write: serialize to a uniquely-named `.tmp` file in the same directory, then `os.replace()` to rename it over the target. The original is never modified until the new file is complete. | [Atomic Write Pattern](#atomic-write-pattern) |
+| What happens to a zone's files when the zone is deleted, reloaded or unloaded? | Deleted: `async_remove_entry` (`__init__.py`) deletes the zone's state, learning, chart log and forecast archive files and its `weather_entity_not_found_<id>` / `reload_needed_<id>` Repairs issues. Reloaded or unloaded: nothing is deleted. | [Zone removal cleanup](#zone-removal-cleanup) |
 | What happens when the state file has a mismatched version or is malformed? | `load()` logs a WARNING and returns an empty dict — the coordinator starts fresh rather than attempting partial migration. | [Version Guard](#version-guard) |
 | Where does LearningState (thermal model, records, suggestions) persist, and is that this module's responsibility? | `LearningState` persists to `climate_advisor_learning.json` and is owned entirely by `LearningEngine` in `learning.py`. `state.py` does not touch that file. | [Scope](#scope) |
 | What is STATE_VERSION and when does it change? | Currently `1`. It is compared on load; any mismatch discards the file and starts fresh. It must be incremented whenever the state dict schema changes in a breaking way. | [Version Guard](#version-guard) |
@@ -19,11 +20,11 @@
 - `StatePersistence` class: atomic load and save of the coordinator's operational state dict to `climate_advisor_state.json`
 - Temp-file lifecycle: creation, rename, and cleanup of `climate_advisor_state_*.tmp` files
 - Version guard on load: reject files whose `version` field does not match `STATE_VERSION`
-- `delete()`: removes the state file and any leftover temp files (used on integration unload/reset)
+- `delete()`: removes the state file and any leftover temp files. **Not called anywhere in production** (an earlier version of this page said `async_unload_entry` called it; it never did). Zone removal uses `storage_paths.remove_entry_scoped_files()` instead, because `delete()`'s `climate_advisor_state_*.tmp` glob would also remove another zone's in-flight temp file — see [Zone removal cleanup](#zone-removal-cleanup)
 
 **Explicitly does NOT own:**
 - `LearningState` — lives in `learning.py`; persists to `climate_advisor_learning.json` via `LearningEngine`
-- The chart log (`climate_advisor_chart_log_<entry_id>.json`, [chart-log-spec.md](chart-log-spec.md)) and the forecast archive (`climate_advisor_forecast_archive_<entry_id>.json`, Issue #1230 R0, [forecast-archive-spec.md](forecast-archive-spec.md)) - separate entry-scoped files with their own persistence contracts. Like the other per-zone files, neither is removed when a config entry is deleted (no entry-removal cleanup exists)
+- The chart log (`climate_advisor_chart_log_<entry_id>.json`, [chart-log-spec.md](chart-log-spec.md)) and the forecast archive (`climate_advisor_forecast_archive_<entry_id>.json`, Issue #1230 R0, [forecast-archive-spec.md](forecast-archive-spec.md)) - separate entry-scoped files with their own persistence contracts. Both are deleted with the zone's other files when the config entry is deleted ([Zone removal cleanup](#zone-removal-cleanup))
 - The schema of the state dict — the coordinator (`coordinator.py`) is responsible for what keys are written and read
 - Nothing else — file permissions (`0o600` via `os.chmod` after `os.replace()`, guarded by `hasattr(os, "chmod")` for cross-platform safety) ARE set by this module; see Invariants
 - Migration logic — version mismatches are handled by discarding and starting fresh; no field-level upgrade path exists in `state.py`
@@ -56,7 +57,30 @@ class StatePersistence:
 | `StatePersistence.__init__` | `ClimateAdvisorCoordinator.__init__` | Constructed once with the HA config directory path |
 | `StatePersistence.load` | `_async_save_state` (coordinator, on startup) | Restore coordinator state after HA restart |
 | `StatePersistence.save` | `_async_save_state` (coordinator, periodic + on change) | Persist operational state to survive restarts |
-| `StatePersistence.delete` | `async_unload_entry` (\_\_init\_\_.py) | Clean up on integration removal |
+| `StatePersistence.delete` | _(none — not called in production)_ | Zone removal goes through `remove_entry_scoped_files()` instead |
+
+## Zone removal cleanup
+
+Added in 0.9.1 (Issue #1230 R0 follow-up). Occupant view: deleting a zone leaves nothing of it behind: no state,
+learning, chart log or forecast archive file in the config dir (several MB per zone on an SD card), and no Repairs
+card offering to "fix" a zone that no longer exists. Before 0.9.1 every one of these stayed forever.
+
+- **When:** only `async_remove_entry` (`__init__.py`), which HA calls on deletion, after `async_unload_entry` has
+  run the final save. A reload or settings save (unload + setup) never deletes anything.
+- **Files:** `storage_paths.remove_entry_scoped_files(config_dir, entry_id)`, run in the executor, deletes the
+  entry-scoped name of each base in `storage_paths.ENTRY_SCOPED_FILES` (`STATE_FILE`, `CHART_LOG_FILE`,
+  `LEARNING_DB_FILE`, `FORECAST_ARCHIVE_FILE`). Never another zone's file, never a legacy unscoped file (it may still
+  belong to an entry that has not migrated), and nothing for a falsy `entry_id` (that would resolve to the shared
+  unscoped names). Leftover `.tmp` files are not removed: their `mkstemp` names cannot be tied to one zone. A missing
+  file is skipped; an `OSError` on one file is logged at WARNING and the rest are still deleted; one INFO line lists
+  what was deleted. Never raises into the removal.
+- **Repairs:** the zone's two entry-scoped persistent issues, `weather_entity_not_found_<entry_id>` and
+  `reload_needed_<entry_id>`, are deleted. Domain-wide issues (`zone_resolution_ambiguous`) keep their own lifecycle
+  in `async_unload_entry`.
+- **Guard:** `tests/test_zone_removal_cleanup.py::test_every_entry_scoped_file_in_the_package_is_cleaned_up` fails if
+  any `resolve_entry_scoped_path()` caller in the package uses a base name missing from `ENTRY_SCOPED_FILES`, so a new
+  per-zone file cannot be forgotten. Real HA: `tests_ha/test_zone_removal_cleanup.py` (deletion removes files and
+  Repairs issues and keeps other zones' and legacy files; reload and unload keep them).
 
 ## Data Structures
 

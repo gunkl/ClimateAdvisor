@@ -23,7 +23,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .const import CHART_LOG_FILE, FORECAST_ARCHIVE_FILE, LEARNING_DB_FILE, STATE_FILE
+
 _LOGGER = logging.getLogger(__name__)
+
+# Every per-zone file Climate Advisor writes in the HA config dir, by its unscoped base name. A new
+# entry-scoped file must be added here, or a removed zone leaves it on disk forever:
+# tests/test_zone_removal_cleanup.py fails if any resolve_entry_scoped_path() caller in the package uses a base
+# name missing from this tuple.
+ENTRY_SCOPED_FILES: tuple[str, ...] = (STATE_FILE, CHART_LOG_FILE, LEARNING_DB_FILE, FORECAST_ARCHIVE_FILE)
 
 
 def resolve_entry_scoped_path(config_dir: Path, base_filename: str, entry_id: str) -> Path:
@@ -152,3 +160,33 @@ def migrate_legacy_storage_file(config_dir: Path, base_filename: str, entry_id: 
             legacy_path.name,
             err,
         )
+
+
+def remove_entry_scoped_files(config_dir: Path, entry_id: str) -> list[str]:
+    """Delete one removed zone's own storage files; return the names deleted (blocking: run in the executor).
+
+    Called only from ``async_remove_entry`` (the zone was deleted), never on unload or reload, which keep
+    their data. Deletes exactly the entry-scoped name of each ``ENTRY_SCOPED_FILES`` base, so another zone's
+    files and a legacy unscoped file (which may still belong to an entry that was never migrated) are never
+    touched. A falsy ``entry_id`` deletes nothing, because ``resolve_entry_scoped_path`` maps it to the shared
+    unscoped name. Leftover ``.tmp`` files are not removed: their mkstemp names cannot be tied to one zone.
+    A missing file is skipped; an OSError on one file is logged and the rest are still deleted. Never raises.
+    """
+    if not entry_id:
+        _LOGGER.warning("storage_paths: zone removal with no entry id; no files deleted")
+        return []
+    removed: list[str] = []
+    for base in ENTRY_SCOPED_FILES:
+        path = resolve_entry_scoped_path(config_dir, base, entry_id)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as err:
+            _LOGGER.warning("storage_paths: failed to delete %s for removed zone %s: %s", path.name, entry_id, err)
+            continue
+        removed.append(path.name)
+    _LOGGER.info(
+        "storage_paths: removed zone %s; deleted %d file(s): %s", entry_id, len(removed), ", ".join(removed) or "none"
+    )
+    return removed

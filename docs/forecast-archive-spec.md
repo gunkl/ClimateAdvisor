@@ -128,7 +128,7 @@ Decoded read shape (see below): `{"issued": "2026-11-06T14:05-07:00", "source": 
 
 ## Known Gaps
 
-- **No entry-removal cleanup:** deleting a config entry does not remove `climate_advisor_forecast_archive_<entry_id>.json`. This is a pre-existing gap shared by every per-zone file (state, learning, chart_log); it is not specific to the archive. See [State Persistence](state-persistence.md).
+- **Zone removal (fixed in 0.9.1):** deleting a config entry deletes `climate_advisor_forecast_archive_<entry_id>.json` with the zone's other files (`async_remove_entry` → `storage_paths.remove_entry_scoped_files`, base name listed in `ENTRY_SCOPED_FILES`). A reload or unload keeps it. See [State Persistence](state-persistence.md#zone-removal-cleanup).
 
 ## Code Reference
 

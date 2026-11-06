@@ -130,7 +130,6 @@ from .const import (
     TEMP_SOURCE_CLIMATE_FALLBACK,
     THERMAL_SWING_DEFAULT_F,
     TIMER_BOUNDARY_SETTLE_SECONDS,
-    VACATION_SETBACK_EXTRA,
 )
 from .desired_state import (
     MODE_SWITCH_DEDUPE_SECONDS,
@@ -295,6 +294,7 @@ from .remote_offset import (
     startup_wait_s,
     step_f,
 )
+from .setpoint_combinations import vacation_edges
 from .setpoint_verify_decision import (
     ModeAlignmentOutcome,
     SetpointVerifyOutcome,
@@ -879,8 +879,7 @@ def select_comfort_band(
     sleep_cool = float(config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
 
     if occupancy_mode == OCCUPANCY_VACATION:
-        floor = setback_heat - VACATION_SETBACK_EXTRA
-        ceiling = setback_cool + VACATION_SETBACK_EXTRA
+        floor, ceiling = vacation_edges(config)  # Issue #1347: optional vacation setpoints, else away -/+ 3
         active = "ceiling"
         ctx = "vacation"
     elif occupancy_mode == OCCUPANCY_AWAY:
@@ -1209,6 +1208,11 @@ def compute_bedtime_setback(
     the thermal model has insufficient data.
 
     Returns the setback TARGET temperature (not the depth).
+
+    An explicitly configured ``sleep_heat`` / ``sleep_cool`` is returned as-is, never clamped to the
+    away setback (Issue #1366): the engine's ``select_comfort_band()`` arms the raw sleep value, and
+    the briefing and chart (this function's only consumers) must quote what the thermostat holds,
+    even when sleep heat is set below away heat or sleep cool above away cool.
     """
     from .const import (
         CONF_MAX_SETBACK_DEPTH,
@@ -1230,7 +1234,7 @@ def compute_bedtime_setback(
         # Explicit sleep temp takes priority over adaptive calculation
         _explicit = config.get(CONF_SLEEP_HEAT)
         if _explicit is not None:
-            return max(float(_explicit), floor)
+            return float(_explicit)  # Issue #1366: unclamped, the raw value select_comfort_band() arms
     elif hvac_mode == "cool":
         comfort = config.get("comfort_cool", DEFAULT_COMFORT_COOL)
         floor = config.get("setback_cool", DEFAULT_SETBACK_COOL)
@@ -1241,7 +1245,7 @@ def compute_bedtime_setback(
         # not here. compute_bedtime_setback() always returns the raw configured sleep temp.
         _explicit = config.get(CONF_SLEEP_COOL)
         if _explicit is not None:
-            return min(float(_explicit), floor)
+            return float(_explicit)  # Issue #1366: unclamped, the raw value select_comfort_band() arms
     else:
         return config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
 
@@ -6073,6 +6077,44 @@ class AutomationEngine:
         self._update_write_record(result=result)
         return result
 
+    def _fit_to_thermostat_limits(self, service_temp: float, temperature_f: float) -> tuple[float, float]:
+        """Fit one setpoint to the thermostat's advertised ``min_temp``/``max_temp`` (Issue #1367).
+
+        Home Assistant refuses a ``climate.set_temperature`` value outside those limits
+        (``temp_out_of_range``), so an away heat of 42 F on a 45 F-minimum thermostat never landed: the
+        thermostat kept its old (comfort) setpoint for the whole absence. The limits are read in Home
+        Assistant's system unit, the unit ``service_temp`` is sent in; a fitted value is sent as the limit
+        itself (no unit round trip), and its internal-F twin is returned for verify/echo/retry. Unreadable or
+        inconsistent limits leave the value unchanged. Returns ``(service_temp, temperature_f)``.
+        """
+
+        def _limit(value: Any) -> float | None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            value = float(value)
+            return value if value - value == 0.0 else None  # finite only (nan/inf fail)
+
+        hass = getattr(self, "hass", None)
+        state = hass.states.get(self.climate_entity) if hass is not None else None
+        attrs = getattr(state, "attributes", None)
+        if not isinstance(attrs, dict):
+            return service_temp, temperature_f
+        lo, hi = _limit(attrs.get("min_temp")), _limit(attrs.get("max_temp"))
+        if lo is not None and hi is not None and lo > hi:
+            return service_temp, temperature_f
+        limit = lo if lo is not None and service_temp < lo else hi if hi is not None and service_temp > hi else None
+        if limit is None:
+            return service_temp, temperature_f
+        unit = self._temp_unit
+        _LOGGER.info(
+            "Setpoint %s is outside the thermostat's limits (min_temp=%s, max_temp=%s) -- sending %s instead",
+            format_temp(temperature_f, unit),
+            lo,
+            hi,
+            format_temp(to_fahrenheit(limit, unit), unit),
+        )
+        return limit, to_fahrenheit(limit, unit)
+
     async def _set_temperature_impl(
         self,
         temperature: float,
@@ -6132,8 +6174,9 @@ class AutomationEngine:
             self._remote_target_mode = mode
         _offset_f = self._remote_offset_for_write(_target_f, mode)
         temperature = _target_f + _offset_f
-        # Convert internal °F to user's unit before sending to HA climate entity
-        service_temp = from_fahrenheit(temperature, unit)
+        # Convert internal °F to user's unit before sending to HA climate entity; fitted to the thermostat's own
+        # min_temp/max_temp (Issue #1367), so verify, echo memory and retry all see the value actually sent.
+        service_temp, temperature = self._fit_to_thermostat_limits(from_fahrenheit(temperature, unit), temperature)
         if _refuse_if_shut_down(self, f"set temperature {temperature}"):
             return HvacCommandResult.FAILED  # before _write_seq / _note_* / verify / retry
         if self.dry_run:
@@ -6329,7 +6372,9 @@ class AutomationEngine:
                         return
                     if _action is SetpointRetryAction.NUDGE_THEN_TARGET:
                         _nudge_temp_f = _retry_commanded + 1.0 if _retry_mode == "cool" else _retry_commanded - 1.0
-                        _nudge_temp = from_fahrenheit(_nudge_temp_f, unit)
+                        _nudge_temp, _nudge_temp_f = self._fit_to_thermostat_limits(  # Issue #1367
+                            from_fahrenheit(_nudge_temp_f, unit), _nudge_temp_f
+                        )
                         _LOGGER.warning(
                             "Retrying setpoint write after repeated rejection (streak=%d):"
                             " nudging to %.1f %s before real target %.1f %s",

@@ -1269,7 +1269,10 @@ and that write is still outstanding in this memory (`own_write_echo.outstanding_
 same value after step rounding, inside `OWN_WRITE_ECHO_WINDOW_S`; an arrived echo is consumed, so it no longer counts), the
 verify is not answered yet and re-checks when the window ends (`AutomationEngine._setpoint_echo_wait_s`). Only then -- no
 echo inside the window -- is it a rejection, exactly as before. A thermostat that answered with a different value (clamped
-to its own limit, refused) is a rejection at once, as before. A newer write supersedes the pending check as always (its
+to its own limit, refused) is a rejection at once, as before. A value outside the thermostat's advertised
+`min_temp`/`max_temp` is never sent: it is fitted to the limit first (Issue #1367,
+`_fit_to_thermostat_limits`), so the read-back, the echo memory and the retry all see the value actually sent and the
+thermostat answering with its limit is neither a rejection nor a manual change. A newer write supersedes the pending check as always (its
 own check then waits for its own echo). Tests: `tests/test_setpoint_verify_late_echo_1194e.py` (echo at 45 s and 110 s, no
 echo by 180 s, a different value, an instant echo; heat and cool, both fan modes).
 

@@ -10,7 +10,7 @@
 | What triggers the 15-minute grace timer and what cancels it? | Any transition into AWAY mode starts the timer. Any subsequent toggle change to HOME, GUEST, or VACATION cancels it before setback fires. | [State Transitions](#state-transitions) |
 | What does arriving home do while a manual override, an unconfirmed change, a door pause or an open window is in effect? | `handle_occupancy_home()` never clears `_manual_override_active`, and (Issue #1050) it no longer forces comfort over it either: the restore is deferred (`occupancy_restore_deferred`) and the push says comfort resumes once the reason clears. Nat-vent/WHF ownership is not a hold. | [`handle_occupancy_home()`](#handlers) |
 | Does leaving home clear a manual override? | Yes. `handle_occupancy_away()` / `handle_occupancy_vacation()` clear a confirmed manual override, and since Issue #1050 also cancel an unconfirmed (confirm-pending) change, then apply the setback. A door pause still suppresses the setback and clears nothing. | [Manual Override Interaction](#manual-override-interaction) |
-| What setback temperature does VACATION mode apply vs AWAY? | VACATION adds an extra 3°F beyond AWAY: heat target drops an additional `VACATION_SETBACK_EXTRA`, cool target rises an additional `VACATION_SETBACK_EXTRA`. | [Setback Temperature Formulas](#setback-temperature-formulas) |
+| What setback temperature does VACATION mode apply vs AWAY? | The optional `vacation_heat`/`vacation_cool` (Options → Temperature Setpoints, Issue #1347) when set; otherwise VACATION adds an extra 3°F beyond AWAY: heat target drops an additional `VACATION_SETBACK_EXTRA`, cool target rises an additional `VACATION_SETBACK_EXTRA`. Each side falls back on its own; one resolver, `setpoint_combinations.vacation_edges()`. | [Setback Temperature Formulas](#setback-temperature-formulas) |
 | What happens to occupancy state if HA restarts mid-away-grace-period? | `occupancy_mode` is restored from `climate_advisor_state.json`; `occupancy_away_since` is also restored. However, the 15-minute grace timer is NOT re-armed on restart — the mode is synced to the engine via `set_occupancy_mode()` but the away timer callback is lost. | [Persistence](#persistence) |
 | What does `_set_temperature_for_mode()` do when called in AWAY or VACATION mode? | It is a safety net: it intercepts the call and redirects to `handle_occupancy_away()` or `handle_occupancy_vacation()` respectively, so no comfort temperature is ever applied while away. | [_set_temperature_for_mode() Safety Net](#_set_temperature_for_mode-safety-net) |
 | Does the remote-sensor setpoint loop (Issue #1194 b) run while the home is away or on vacation? | No. `_occupancy_mode` away/vacation closes `_remote_offset_gate()` through the shared scheduled-band gate: the setback is written without an offset, the loop writes nothing while the home is empty, and `handle_occupancy_home()` restores the plain comfort target followed by at most one fresh step (never the old +4 F cap). | [08 Remote-sensor outer loop, Gates](08-COMPUTATION-REFERENCE.md#remote-sensor-outer-loop-on-the-thermostat-setpoint-issue-1194-increment-a) |
@@ -43,7 +43,7 @@ This spec covers the occupancy toggle listener, mode priority resolution, state-
 |---|---|---|
 | `OCCUPANCY_HOME` | `"home"` | Normal occupied — full comfort temperatures |
 | `OCCUPANCY_AWAY` | `"away"` | Temporarily absent — energy setback after 15-minute grace |
-| `OCCUPANCY_VACATION` | `"vacation"` | Extended absence — deep setback (3°F beyond AWAY), no grace delay |
+| `OCCUPANCY_VACATION` | `"vacation"` | Extended absence — deep setback (the vacation setpoints, else 3°F beyond AWAY), no grace delay |
 | `OCCUPANCY_GUEST` | `"guest"` | Guests present — comfort same as HOME; routed through `handle_occupancy_home()` |
 
 **Supporting constants (`const.py`):**
@@ -51,7 +51,7 @@ This spec covers the occupancy toggle listener, mode priority resolution, state-
 | Constant | Value | Purpose |
 |---|---|---|
 | `OCCUPANCY_SETBACK_MINUTES` | `15` | Grace delay before away setback fires |
-| `VACATION_SETBACK_EXTRA` | `3` °F | Additional setback depth beyond AWAY for vacation mode |
+| `VACATION_SETBACK_EXTRA` | `3` °F | Additional setback depth beyond AWAY for vacation mode, used only when `vacation_heat`/`vacation_cool` are not set (Issue #1347) |
 
 ## Priority Resolution
 
@@ -159,7 +159,7 @@ Invoked after the 15-minute grace timer expires, and also called by `apply_class
 
 ### `handle_occupancy_vacation()` (`automation.py:L6851`)
 
-Invoked immediately (no grace) when VACATION mode is detected. Shares the exact sequence above (steps 2–6) — deep setback vs. standard setback is a `select_comfort_band()` parameter difference (`VACATION_SETBACK_EXTRA = 3°F` wider on both edges), not a different control-flow path.
+Invoked immediately (no grace) when VACATION mode is detected. Shares the exact sequence above (steps 2–6) — deep setback vs. standard setback is a `select_comfort_band()` parameter difference (`setpoint_combinations.vacation_edges()`: the optional vacation setpoints, else `VACATION_SETBACK_EXTRA = 3°F` wider on both edges), not a different control-flow path.
 
 ## Setback Temperature Formulas
 

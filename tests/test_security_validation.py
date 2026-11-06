@@ -68,6 +68,8 @@ class TestNotifyServiceValidation:
 # ---------------------------------------------------------------------------
 # TestCrossFieldValidation
 # ---------------------------------------------------------------------------
+# Issue #1347: the away-vs-home ordering is a WARNING (submit again to keep it), not an error, and it
+# is judged by the production helper rather than a replica. Equal is a legitimate "don't set back".
 
 
 def _check_setpoints(
@@ -76,85 +78,46 @@ def _check_setpoints(
     comfort_cool: int,
     setback_cool: int,
 ) -> dict[str, str]:
-    """Replicate the cross-field validation logic from config_flow."""
-    errors: dict[str, str] = {}
-    if setback_heat >= comfort_heat:
-        errors["setback_heat"] = "setback_must_be_lower"
-    if setback_cool <= comfort_cool:
-        errors["setback_cool"] = "setback_must_be_higher"
-    return errors
+    """Run the production setpoint-combination rules (sleep set to comfort so only away is judged)."""
+    from custom_components.climate_advisor.setpoint_combinations import setpoint_combination_findings
+
+    return setpoint_combination_findings(
+        {
+            "setback_heat": setback_heat,
+            "comfort_heat": comfort_heat,
+            "comfort_cool": comfort_cool,
+            "setback_cool": setback_cool,
+        }
+    )
 
 
 class TestCrossFieldValidation:
-    """Cross-field setpoint rules: setback_heat < comfort_heat, setback_cool > comfort_cool."""
+    """Away heat above home heat, and away cool below home cool, warn; equal does not."""
 
     def test_valid_ranges(self):
-        """Typical defaults — no errors expected."""
-        errors = _check_setpoints(
-            setback_heat=60,
-            comfort_heat=70,
-            comfort_cool=75,
-            setback_cool=80,
-        )
-        assert errors == {}
+        assert _check_setpoints(setback_heat=60, comfort_heat=70, comfort_cool=75, setback_cool=80) == {}
 
-    def test_setback_heat_equals_comfort(self):
-        """Setback heat equal to comfort heat is invalid."""
-        errors = _check_setpoints(
-            setback_heat=70,
-            comfort_heat=70,
-            comfort_cool=75,
-            setback_cool=80,
-        )
-        assert "setback_heat" in errors
-        assert errors["setback_heat"] == "setback_must_be_lower"
-        assert "setback_cool" not in errors
+    def test_setback_heat_equals_comfort_is_silent(self):
+        assert _check_setpoints(setback_heat=70, comfort_heat=70, comfort_cool=75, setback_cool=80) == {}
 
-    def test_setback_heat_above_comfort(self):
-        """Setback heat above comfort heat is invalid."""
-        errors = _check_setpoints(
-            setback_heat=72,
-            comfort_heat=70,
-            comfort_cool=75,
-            setback_cool=80,
-        )
-        assert "setback_heat" in errors
-        assert "setback_cool" not in errors
+    def test_setback_heat_above_comfort_warns(self):
+        errors = _check_setpoints(setback_heat=72, comfort_heat=70, comfort_cool=75, setback_cool=80)
+        assert errors == {"setback_heat": "away_heat_above_home_warning"}
 
-    def test_setback_cool_equals_comfort(self):
-        """Setback cool equal to comfort cool is invalid."""
-        errors = _check_setpoints(
-            setback_heat=60,
-            comfort_heat=70,
-            comfort_cool=75,
-            setback_cool=75,
-        )
-        assert "setback_cool" in errors
-        assert errors["setback_cool"] == "setback_must_be_higher"
-        assert "setback_heat" not in errors
+    def test_setback_cool_equals_comfort_is_silent(self):
+        assert _check_setpoints(setback_heat=60, comfort_heat=70, comfort_cool=75, setback_cool=75) == {}
 
-    def test_setback_cool_below_comfort(self):
-        """Setback cool below comfort cool is invalid."""
-        errors = _check_setpoints(
-            setback_heat=60,
-            comfort_heat=70,
-            comfort_cool=75,
-            setback_cool=74,
-        )
-        assert "setback_cool" in errors
-        assert "setback_heat" not in errors
+    def test_setback_cool_below_comfort_warns(self):
+        errors = _check_setpoints(setback_heat=60, comfort_heat=70, comfort_cool=75, setback_cool=74)
+        assert errors == {"setback_cool": "away_cool_below_home_warning"}
 
-    def test_both_invalid(self):
-        """Both cross-field constraints violated simultaneously."""
-        errors = _check_setpoints(
-            setback_heat=72,
-            comfort_heat=70,
-            comfort_cool=75,
-            setback_cool=74,
-        )
-        assert "setback_heat" in errors
-        assert "setback_cool" in errors
-        assert len(errors) == 2
+    def test_both_warn(self):
+        # away 72/77 keeps a 5 °F gap so only the two orderings fire (a gap under 4 °F would outrank them).
+        errors = _check_setpoints(setback_heat=72, comfort_heat=70, comfort_cool=78, setback_cool=77)
+        assert errors == {
+            "setback_heat": "away_heat_above_home_warning",
+            "setback_cool": "away_cool_below_home_warning",
+        }
 
 
 # ---------------------------------------------------------------------------

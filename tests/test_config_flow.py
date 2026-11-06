@@ -3262,11 +3262,16 @@ class TestOptionsFlowCelsiusRoundTrip:
         config_flow.selector.NumberSelectorConfig.reset_mock()
         result = asyncio.run(getattr(flow, step)(None))
         bounds = [(c.kwargs["min"], c.kwargs["max"]) for c in config_flow.selector.NumberSelectorConfig.call_args_list]
-        defaults = {str(k): k.default() for k in result["data_schema"].schema}
+        import voluptuous as vol
+
+        # Optional fields with no default (the #1347 vacation setpoints, blank = derived) are skipped.
+        defaults = {str(k): k.default() for k in result["data_schema"].schema if k.default is not vol.UNDEFINED}
         return defaults, bounds
 
     def _assert_defaults_in_bounds(self, defaults, bounds, keys):
-        for key, (mn, mx) in zip(keys, bounds, strict=True):
+        # The first len(keys) number fields are the required ones, in order (the #1347 vacation
+        # setpoints follow on the setpoints page).
+        for key, (mn, mx) in zip(keys, bounds[: len(keys)], strict=True):
             assert mn <= defaults[key] <= mx, f"{key}: {defaults[key]} outside [{mn}, {mx}]"
 
     def test_setpoints_noise_value_is_within_slider_bounds(self):
@@ -3312,7 +3317,7 @@ class TestOptionsFlowCelsiusRoundTrip:
             "comfort_cool": 75.2,
             "setback_heat": 64.4,
             "setback_cool": 80.6,
-            "sleep_heat": 60.8,
+            "sleep_heat": 66.2,  # 19 °C; at or above away heat so no #1347 warning interrupts the round trip
             "sleep_cool": 71.6,
             "threshold_hot": 95,
             "threshold_warm": 80.6,

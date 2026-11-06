@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.64] — 2026-11-06
+
+- Feat #1347: the Temperature Setpoints page no longer limits each temperature to a narrow range. Away heat can now be up to 95°F (35°C), so a mini-split can hold the house warm while you are out, and away can equal home. Instead, when a combination would make the heat and AC take turns (heat at or above cool, or less than 4°F apart, in any band), settle somewhere odd (away warmer than home, sleep beyond away, vacation milder than away), sit outside what your thermostat accepts, or put vacation heat below 45°F, a warning appears next to the field. Press Submit again to keep it. Vacation can now have its own heating and cooling temperatures in Options; left blank it stays 3°F beyond away.
+
 ## [0.8.63] — 2026-11-06
 
 - Feat #1345: each zone now has two diagnostic sensors, Heat Threshold and Cool Threshold, showing the band Climate Advisor holds the house to right now (it heats below Heat Threshold and cools above Cool Threshold). They follow your comfort, sleep, away and vacation settings, Prefer Savings and time-of-use widening; a context attribute names which band is in force. They keep history for graphs, show in your unit, and carry the same numbers as ca_target_heat / ca_target_cool in the REST API. They work with Automation off too, so you can compare what Climate Advisor would hold against your own controller. Note: Target Temperature shows the thermostat's own setpoint whenever it is not Off, so with Automation off it reflects your controller.

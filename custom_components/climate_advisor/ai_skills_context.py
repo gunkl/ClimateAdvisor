@@ -58,6 +58,7 @@ from .coordinator import _REJECTION_LOG_CAP
 from .fan_status import is_ca_fan_running
 from .hvac_action import is_hvac_action_active
 from .remote_offset import remote_offset_lines, remote_offset_view_for
+from .setpoint_combinations import vacation_edges
 from .swing import swing_tolerance, thermostat_holds_direction, within_thermostat_hysteresis
 from .temperature import UNIT_SYMBOL, display_temp, format_temp, format_temp_delta, read_attribute_temp_f
 
@@ -1270,6 +1271,10 @@ async def build_config_context(hass: Any, coordinator: Any, **kwargs: Any) -> st
 
         _comfort_heat = _cfg_temp("comfort_heat")
         _comfort_cool = _cfg_temp("comfort_cool")
+        _vac_heat_f, _vac_cool_f = vacation_edges(cfg)
+        _vac_heat = round(display_temp(_vac_heat_f, _cfg_unit), 1)
+        _vac_cool = round(display_temp(_vac_cool_f, _cfg_unit), 1)
+        _vac_configured = cfg.get("vacation_heat") is not None or cfg.get("vacation_cool") is not None
         lines = [
             "=== CONFIGURATION ===",
             f"  comfort_heat (lower bound): {_comfort_heat} — indoor must be >= this to be in comfort band",
@@ -1278,6 +1283,9 @@ async def build_config_context(hass: Any, coordinator: Any, **kwargs: Any) -> st
             " — temperature T is in-band only if comfort_heat <= T <= comfort_cool",
             f"  setback_heat:    {_cfg_temp('setback_heat')}",
             f"  setback_cool:    {_cfg_temp('setback_cool')}",
+            # Issue #1347: the vacation band the engine arms (optional setpoints, else away -/+ 3 °F).
+            f"  vacation_band:   [{_vac_heat:g}, {_vac_cool:g}]"
+            f" ({'configured' if _vac_configured else 'away -/+ 3°F'})",
             f"  wake_time:       {cfg.get('wake_time', 'unknown')}",
             f"  sleep_time:      {cfg.get('sleep_time', 'unknown')}",
             f"  briefing_time:   {cfg.get('briefing_time', 'unknown')}",

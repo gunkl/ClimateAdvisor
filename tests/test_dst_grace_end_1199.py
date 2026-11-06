@@ -367,7 +367,7 @@ def test_pre_cool_reschedule_candidate_and_comfort_hold_until_are_true_instants(
 # ---------------------------------------------------------------------------
 
 
-def _pre_cool_trigger(monkeypatch, now_local: datetime, *, window_close=None, wake="06:30"):
+def _pre_cool_trigger(monkeypatch, now_local: datetime, *, window_close=None, wake="06:30", decided=None):
     from types import SimpleNamespace
 
     from custom_components.climate_advisor.coordinator import _compute_pre_cool_trigger_time_pure
@@ -375,7 +375,7 @@ def _pre_cool_trigger(monkeypatch, now_local: datetime, *, window_close=None, wa
     _make_clock(monkeypatch, now_local)
     classification = SimpleNamespace(setback_modifier=-3.0, tomorrow_high=70.0, window_close_time=window_close)
     config = {"wake_time": wake, "comfort_cool": 74.0, "sleep_cool": 78.0}
-    return _compute_pre_cool_trigger_time_pure(classification, config, now_local.astimezone(_LA))
+    return _compute_pre_cool_trigger_time_pure(classification, config, now_local.astimezone(_LA), decided=decided)
 
 
 @pytest.mark.parametrize(
@@ -407,7 +407,14 @@ def test_pre_cool_window_close_trigger_is_thirty_real_minutes_after_close(monkey
     from datetime import time
 
     # Window closes 01:45 PDT on fall-back night; +30 min is 01:15 PST (09:15Z), not the wall-clock 02:15 PST (10:15Z)
-    trigger = _pre_cool_trigger(monkeypatch, datetime(2026, 11, 1, 0, 30, tzinfo=_LA), window_close=time(1, 45))
+    # Issue #1378: at 00:30 this night wakes into Nov 1, the classification's TODAY, so its warming trend (into Nov 2)
+    # does not make it eligible; the pre-cool decided the evening before for the night ending Nov 1 does.
+    trigger = _pre_cool_trigger(
+        monkeypatch,
+        datetime(2026, 11, 1, 0, 30, tzinfo=_LA),
+        window_close=time(1, 45),
+        decided=(datetime(2026, 11, 1).date(), -3.0),
+    )
     assert trigger == datetime(2026, 11, 1, 9, 15, tzinfo=UTC)
     assert trigger.utcoffset() == timedelta(0)
 

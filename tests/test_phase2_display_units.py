@@ -271,12 +271,12 @@ class TestWordingUnits:
         fake.config = {"temp_unit": "celsius"}
         fake._pre_cool_trigger_scheduled = False
         fake._compute_pre_cool_trigger_time.return_value = _dt.datetime(2026, 7, 1, 23, 0)
+        fake._pre_cool_modifier_for_night.return_value = 0.0  # Issue #1378: the coordinator's per-night judgment
         with (
             patch(
                 "custom_components.climate_advisor.coordinator.dt_util.now", return_value=_dt.datetime(2026, 7, 1, 20)
             ),
             patch("custom_components.climate_advisor.coordinator.compute_pre_cool_target", return_value=71.6),
-            patch("custom_components.climate_advisor.coordinator.resolve_pre_cool_modifier", return_value=0.0),
             patch("custom_components.climate_advisor.coordinator.async_track_point_in_time"),
         ):
             _get_coordinator_class()._maybe_schedule_pre_cool(fake)

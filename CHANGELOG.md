@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.67] — 2026-11-06
+
+- Fix #1370: Climate Advisor no longer turns a fan on while it can't read the indoor temperature. Before, if the indoor sensor dropped out with a window open, it could still switch the whole-house fan (or the thermostat's blower) on: the half-hourly "keep the fan on" re-send for fans that don't report their state, the hourly minimum-runtime cycle and the economizer never checked for a reading. Now no fan is started until the reading comes back. A fan that is already running is still stopped after about 30 minutes without a reading, as before. The minimum-runtime cycle tries again the next hour. Found by the nightly test run.
+
 ## [0.8.66] — 2026-11-06
 
 - Feat #1347: the Temperature Setpoints page no longer limits each temperature to a narrow range. Away heat can now be up to 95°F (35°C), so a mini-split can hold the house warm while you are out, and away can equal home. Instead, when a combination would make the heat and AC take turns (heat at or above cool, or less than 4°F apart, in any band), settle somewhere odd (away warmer than home, sleep beyond away, vacation milder than away), sit outside what your thermostat accepts, or put vacation heat below 45°F, a warning appears next to the field. Press Submit again to keep it. Vacation can now have its own heating and cooling temperatures in Options; left blank it stays 3°F beyond away.

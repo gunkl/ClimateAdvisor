@@ -18099,6 +18099,14 @@ class AutomationEngine:
                 return "restricted to cool — HVAC heated within the last 2h"
         return None
 
+    def _fan_start_blind(self) -> bool:
+        """True when Climate Advisor cannot read the indoor temperature, so it must not START a fan (Issue #1370, P5).
+
+        The one definition behind ``_activate_fan()``'s start refusal. The promise stamps each command with the
+        coordinator's ``_get_indoor_temp()``; both resolve through ``resolve_indoor_temp_f()``, so they cannot disagree.
+        """
+        return self._get_indoor_temp_f() is None
+
     async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> FanCommandResult:
         """Activate fan based on configured fan_mode.
 
@@ -18187,6 +18195,15 @@ class AutomationEngine:
         if self._fan_active:
             _LOGGER.debug("_activate_fan: already active — no-op (%s)", reason)
             return FanCommandResult.ALREADY_IN_STATE
+
+        # Issue #1370 (household promise P5): Climate Advisor never STARTS a fan while it cannot read the indoor
+        # temperature -- it could not tell whether the house is getting too cold. Same single choke point as the
+        # #1205 hold and #1144 sealed-house refusals, so the min-runtime cycle and the economizer (which never
+        # looked at indoor) are covered with nat-vent and cycling-on. After the already-running no-op: a fan
+        # that is already on is left to the blind-fan stop (#1037). Starts only: a stop is never refused.
+        if self._fan_start_blind():
+            _LOGGER.info("Fan activation refused: indoor temperature unreadable reason=%s role=%s", reason, self.role)
+            return FanCommandResult.SUPPRESSED
 
         # Issue #1050 (#1048 change 21): the fan switch ignored CA's on-command twice. Without
         # this gate every grace expiry re-activated it and the whole ignored -> give-up cycle

@@ -4381,7 +4381,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _grace_on = bool(_ae_cmd._grace_active)
                 _override_on = bool(_ae_cmd._fan_override_active)
                 _last_cmd = self._last_commanded_fan_state
-                if _desired_on and _last_cmd is not True and not _grace_on and not _override_on:
+                # Issue #1370 (P5): no on-command while the indoor reading is unreadable. This path bypasses
+                # _activate_fan(), so it needs its own refusal; for a command-only fan the re-send is a real
+                # start whenever someone switched the fan off at the wall. The off assert is never refused.
+                _blind = self._get_indoor_temp() is None
+                if _desired_on and _last_cmd is not True and not _grace_on and not _override_on and _blind:
+                    _LOGGER.info(
+                        "Fan command-only assert: desired=on skipped — indoor temperature unreadable (fan_entity=%s)",
+                        self.config.get(CONF_FAN_ENTITY, ""),
+                    )
+                elif _desired_on and _last_cmd is not True and not _grace_on and not _override_on:
                     _LOGGER.info(
                         "Fan command-only assert: desired=on last_commanded=%s → issuing on command (fan_entity=%s)",
                         _last_cmd,

@@ -1928,6 +1928,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except TypeError, ValueError:
             self.consecutive_failure_count = 0
 
+        # Issue #1349: observe-only (the Automation switch) is the occupant's own setting, not
+        # "today's" data, so it is restored regardless of date, like the health fields above. Below
+        # the date gate it was skipped whenever HA came back on a later calendar day (an overnight
+        # outage), and Climate Advisor took control of the thermostat after the startup window.
+        self._automation_enabled = state.get("automation_enabled", True)
+        self.automation_engine.dry_run = not self._automation_enabled
+        if not self._automation_enabled:
+            _LOGGER.info(
+                "Observe-only mode restored (automation off) from state saved %s",
+                state.get("last_saved"),
+            )
+
         if state_date != today_str:
             _LOGGER.debug(
                 "Persisted state is from %s (today is %s) — starting fresh",
@@ -2116,9 +2128,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Grace state is cleared by restore_state() (clean-slate design, Issue #282).
         # The coordinator does not reschedule grace timers on restart.
 
-        # Observe-only mode
-        self._automation_enabled = state.get("automation_enabled", True)
-        self.automation_engine.dry_run = not self._automation_enabled
+        # Observe-only mode: restored above the date gate (Issue #1349).
 
         # Occupancy state — sync to engine so guards are active from startup (Issue #85)
         self._occupancy_mode = state.get("occupancy_mode", OCCUPANCY_HOME)

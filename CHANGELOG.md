@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.63] — 2026-11-06
+
+- Fix #1349: observe-only mode (the Automation switch off) now survives a Home Assistant restart that comes back on a later day, for example after an overnight outage. Before, the switch came back on with no notice and, about five minutes after start-up, Climate Advisor started controlling your thermostat (an Off thermostat could be switched to heat). A restart on the same day already kept your choice. When observe-only is restored the log says so at INFO: `Observe-only mode restored (automation off)`.
+
 ## [0.8.62] — 2026-11-05
 
 - Feat #1343: the README now shows a badge for every test layer, in the same style as the version badges: combined coverage, unit tests, real Home Assistant tests, golden scenarios, golden scenarios on real Home Assistant, and the nightly run. A `badges` workflow rebuilds them after every change to `main` and once a day. No change to the integration itself.

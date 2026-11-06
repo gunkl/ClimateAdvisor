@@ -12,6 +12,7 @@
 | Where does LearningState (thermal model, records, suggestions) persist, and is that this module's responsibility? | `LearningState` persists to `climate_advisor_learning.json` and is owned entirely by `LearningEngine` in `learning.py`. `state.py` does not touch that file. | [Scope](#scope) |
 | What is STATE_VERSION and when does it change? | Currently `1`. It is compared on load; any mismatch discards the file and starts fresh. It must be incremented whenever the state dict schema changes in a breaking way. | [Version Guard](#version-guard) |
 | What is the `temp_unit` key in the state file and what does it do? | A top-level key (config unit at save time) written by the coordinator's `_build_state_dict`. On same-day restore, a differing string value discards temp history, `pred_archive` and `classification`; a missing key changes nothing. Older loaders ignore it (checks `version` only). | [temp_unit key and same-day restore rule](#temp_unit-key-and-same-day-restore-rule-issue-1015) |
+| Does observe-only (the Automation switch off) survive a restart that comes back on a later day (Issue #1349)? | Yes. `automation_enabled` (and the engine `dry_run` it drives) is restored above the date gate in `async_restore_state()`, so any restart keeps it; INFO `Observe-only mode restored (automation off)`. Every other same-day-only field is unchanged. Only a missing, corrupt or version-mismatched state file brings automation back on (the default). | [Restore across the date boundary](#restore-across-the-date-boundary-issue-1349) |
 
 ## Scope
 
@@ -112,6 +113,12 @@ The restore converts nothing (history is internal °F); the discard rule fires o
 A WARNING and a `unit_changed` event (persisted event log) are emitted. WARNING: `Temperature unit changed since last run: same-day readings discarded from=<saved_unit> to=<current_unit> dropped_outdoor=<n> dropped_indoor=<n> dropped_pred_archive=<n> dropped_classification=<True|False> dropped_pending_observations=<n>`. Event payload: `from`, `to`, `dropped_outdoor`, `dropped_indoor`, `dropped_pred_archive`, `dropped_classification`, `dropped_pending_observations`. A missing or non-string `temp_unit` is a no-op, so existing installs and the first upgrade to 0.7.83 behave as before (a unit change on that same restart is not detected). `STATE_VERSION` is unchanged: the key is additive, the loader checks only `version`, and older code ignores it, so the change is **downgrade-safe**. Not repaired: chart-log entries and learning/thermal records written while the unit was wrong.
 
 See [temperature-conversion.md](temperature-conversion.md#unit-change-handling-issue-1015).
+
+### Restore across the date boundary (Issue #1349)
+
+`async_restore_state()` returns early ("starting fresh") when the state file's `date` is not today (the Issue #10 design: same-day state = full restore; yesterday's = recover the `DailyRecord` to learning, then start fresh). Values restored **before** that gate survive any restart: `ai_stats`, `promise_stats`, `sensor_last_real_reading`, the coordinator health fields (#480) and, since Issue #1349, **`automation_enabled`** with `automation_engine.dry_run = not automation_enabled`. Observe-only is the occupant's setting, not "today's" data; below the gate an overnight outage turned it back on and Climate Advisor commanded the thermostat once the 5-minute startup window ended. A missing key still means on (state files written before Issue #13). When observe-only is restored the coordinator logs INFO `Observe-only mode restored (automation off) from state saved <last_saved>`.
+
+Everything else below the gate is still same-day only (classification, temp history, today's record, briefing state, `automation_state`, occupancy, backfill flags, `pred_archive`, kept forecast, investigation reports, event log, restart-cause classification, the #1015 unit check). Issue #1349 does not change those.
 
 ### Persisted end instants are UTC (Issue #1199)
 

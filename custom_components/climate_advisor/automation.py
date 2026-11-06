@@ -4801,13 +4801,16 @@ class AutomationEngine:
             # Issue #505: vacation must actively reapply the deep setback the same way away
             # does — "deep setback preserved" was never actually guaranteed once a manual
             # override (or anything else) has moved the thermostat off the setback value.
+            # Issue #1363: the reapply writes the setpoint, and that write schedules a 5-minute revisit; cancel it
+            # like the normal path does below, or Away/Vacation re-sends the same setpoint every 5 minutes.
             if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
                 if self._occupancy_mode == OCCUPANCY_VACATION:
                     _LOGGER.info("Vacation mode — reapplying deep setback instead of comfort temps")
                     await self.handle_occupancy_vacation()
-                    return
-                _LOGGER.info("Away mode — reapplying setback instead of comfort temps")
-                await self.handle_occupancy_away()
+                else:
+                    _LOGGER.info("Away mode — reapplying setback instead of comfort temps")
+                    await self.handle_occupancy_away()
+                self._cancel_classification_revisit()
                 return
 
             # Issue #337: while paused by open door/window, suppress the band and hold HVAC off.
@@ -4975,13 +4978,20 @@ class AutomationEngine:
             if classification.pre_condition and classification.pre_condition_target:
                 await self._schedule_pre_condition(classification)
 
-            # Issue #96 Root Cause E: apply_classification() runs on every coordinator refresh
-            # (30-min scheduled AND 5-min revisits). Cancel any revisit _record_action() scheduled —
-            # the 30-min cycle provides sufficient re-evaluation frequency.
-            if self._revisit_cancel:
-                self._revisit_cancel()
-                self._revisit_cancel = None
-            _LOGGER.debug("apply_classification: revisit canceled — 30-min cycle handles re-evaluation")
+            self._cancel_classification_revisit()
+
+    def _cancel_classification_revisit(self) -> None:
+        """Cancel the 5-minute follow-up that this classification pass's own writes scheduled.
+
+        Issue #96 Root Cause E: apply_classification() runs on every coordinator refresh (30-min scheduled AND
+        5-min revisits). Cancel any revisit _record_action() scheduled — the 30-min cycle provides sufficient
+        re-evaluation frequency. Issue #1363: every path that writes and then ends the pass must call this, or the
+        revisit re-runs the pass, which writes again and schedules the next revisit (a 5-minute write loop).
+        """
+        if self._revisit_cancel:
+            self._revisit_cancel()
+            self._revisit_cancel = None
+        _LOGGER.debug("apply_classification: revisit canceled — 30-min cycle handles re-evaluation")
 
     def _blower_session_holds_hvac_off(self) -> bool:
         """A thermostat-blower ventilation session is running with a monitored window open (Issue #1142 D7).

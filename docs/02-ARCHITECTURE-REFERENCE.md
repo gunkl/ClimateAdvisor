@@ -443,6 +443,8 @@ INFO  [DRY RUN] Would set temperature to 72°F — bedtime — heat setback (com
 INFO  [DRY RUN] Would send notification: Climate Advisor — 🏠 Welcome home! ...
 ```
 
+**Restart behavior (Issue #1349):** the person who switched Automation off expects it to stay off through any Home Assistant restart, including an overnight outage that comes back after midnight. `automation_enabled` and the engine `dry_run` are restored before the state file's date check; only a missing, corrupt or version-mismatched state file brings automation back on. See [state-persistence.md](state-persistence.md#restore-across-the-date-boundary-issues-1349-1354-1360).
+
 ### Implementation
 
 Guards are placed at the 3 thermostat primitives (`_set_hvac_mode`, `_set_temperature`, `_notify`) and the fan primitives (`_activate_fan`, `_deactivate_fan`) in `AutomationEngine`, the fan-entity command (`_async_command_fan_entity`, Issue #589) and the briefing notification in the coordinator. Higher-level logic (classification application, door/window pause tracking, grace periods, occupancy handling) continues unaffected.

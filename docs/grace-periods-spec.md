@@ -188,7 +188,7 @@ asked for had ended (both fan modes).
   `_maybe_restore_fan_off_grace()`. When the fan-off grace itself was the persisted grace it is re-armed as in Issue #1006 and the
   hold with it; when a thermostat override's grace (not restored, Issue #1046) was the persisted one, the hold is
   restored on its own (INFO `Fan-off hold restored across restart`) while its deadline is still in the future. A lapsed
-  persisted hold is not restored.
+  persisted hold is not restored. Since Issue #1358 `automation_state` is restored on any restart, so these re-arms (#1006/#1045/#1205) also work when the restart comes back after midnight; before, the date gate dropped them.
 - **Status surfaces:** while the fan-off grace runs the Status card shows it (trigger label "WHF turned off"). Once a
   thermostat override replaces the grace, `_grace_status_detail()` appends " — fan held off until H:MM" (hold in the
   future, running trigger not `fan_off`) and, for the occupant's fan run, " — your fan run continues until H:MM"

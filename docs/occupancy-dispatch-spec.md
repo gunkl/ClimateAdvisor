@@ -11,7 +11,7 @@
 | What does arriving home do while a manual override, an unconfirmed change, a door pause or an open window is in effect? | `handle_occupancy_home()` never clears `_manual_override_active`, and (Issue #1050) it no longer forces comfort over it either: the restore is deferred (`occupancy_restore_deferred`) and the push says comfort resumes once the reason clears. Nat-vent/WHF ownership is not a hold. | [`handle_occupancy_home()`](#handlers) |
 | Does leaving home clear a manual override? | Yes. `handle_occupancy_away()` / `handle_occupancy_vacation()` clear a confirmed manual override, and since Issue #1050 also cancel an unconfirmed (confirm-pending) change, then apply the setback. A door pause still suppresses the setback and clears nothing. | [Manual Override Interaction](#manual-override-interaction) |
 | What setback temperature does VACATION mode apply vs AWAY? | The optional `vacation_heat`/`vacation_cool` (Options → Temperature Setpoints, Issue #1347) when set; otherwise VACATION adds an extra 3°F beyond AWAY: heat target drops an additional `VACATION_SETBACK_EXTRA`, cool target rises an additional `VACATION_SETBACK_EXTRA`. Each side falls back on its own; one resolver, `setpoint_combinations.vacation_edges()`. | [Setback Temperature Formulas](#setback-temperature-formulas) |
-| What happens to occupancy state if HA restarts mid-away-grace-period? | `occupancy_mode` is restored from `climate_advisor_state.json`; `occupancy_away_since` is also restored. However, the 15-minute grace timer is NOT re-armed on restart — the mode is synced to the engine via `set_occupancy_mode()` but the away timer callback is lost. | [Persistence](#persistence) |
+| What happens to occupancy state if HA restarts mid-away-grace-period (Issue #1354)? | The person who is away or on vacation expects the setback without waiting. `async_setup()` syncs the live Vacation/Away toggles into the engine at once (no 15-minute away grace; live toggles win over a restored mode) and starts counting away minutes if `occupancy_away_since` is unset. The away timer is NOT re-armed and `handle_occupancy_away/vacation()` is not called at setup: the setback is applied by the normal plan application at the end of the startup window. A same-day restore also restores `occupancy_mode` and `occupancy_away_since`; a cross-day restore does not (the toggles decide). | [Persistence](#persistence) |
 | What does `_set_temperature_for_mode()` do when called in AWAY or VACATION mode? | It is a safety net: it intercepts the call and redirects to `handle_occupancy_away()` or `handle_occupancy_vacation()` respectively, so no comfort temperature is ever applied while away. | [_set_temperature_for_mode() Safety Net](#_set_temperature_for_mode-safety-net) |
 | Does the remote-sensor setpoint loop (Issue #1194 b) run while the home is away or on vacation? | No. `_occupancy_mode` away/vacation closes `_remote_offset_gate()` through the shared scheduled-band gate: the setback is written without an offset, the loop writes nothing while the home is empty, and `handle_occupancy_home()` restores the plain comfort target followed by at most one fresh step (never the old +4 F cap). | [08 Remote-sensor outer loop, Gates](08-COMPUTATION-REFERENCE.md#remote-sensor-outer-loop-on-the-thermostat-setpoint-issue-1194-increment-a) |
 
@@ -118,7 +118,7 @@ Executes whenever any configured toggle entity fires a state-change event:
 | AWAY (pending) | toggle → GUEST | GUEST | None | cancel away timer; `handle_occupancy_home()` |
 | AWAY (pending) | toggle → VACATION | VACATION | None | cancel away timer; `handle_occupancy_vacation()` immediately |
 | Any | toggle → HOME | HOME | None | cancel away timer; `handle_occupancy_home()` |
-| Any | HA restart | (restored) | — | mode read from `climate_advisor_state.json`; engine synced; away timer NOT re-armed |
+| Any | HA restart | (restored) | — | same-day restore reads the mode from `climate_advisor_state.json`; `async_setup()` then syncs the live toggles into the engine (Issue #1354, immediate, no away grace); away timer NOT re-armed |
 
 `_cancel_occupancy_away_timer()` (`coordinator.py:L2951`): calls the stored cancel handle and sets `_occupancy_away_timer_cancel = None`. Safe to call when no timer is running.
 
@@ -184,6 +184,7 @@ The trend `c.setback_modifier` is NOT applied to away/vacation setbacks (the eng
 3. **Gate resolves `DEFER_OCCUPANCY`** (occupancy is AWAY or VACATION):
    - **AWAY** → call `handle_occupancy_away()` to actively reapply the setback band, then return.
    - **VACATION** → call `handle_occupancy_vacation()` to actively reapply the deep setback band, then return. *(Issue #505: prior to this fix, VACATION just logged "deep setback preserved" and returned without ever re-arming the band — this was an original design gap from Issue #85, not caught by any existing test, that let vacation's setback go unenforced for the rest of a real trip once anything — most commonly a manual override — moved the thermostat off it. `handle_occupancy_vacation()` already existed and already did the correct thing; it was simply never called from this path.)*
+   - **Then cancel the pass's own 5-minute revisit** (`_cancel_classification_revisit()`, Issue #1363), exactly as the normal path does at its end (Issue #96 Root Cause E). The reapply writes the setpoint and `_record_action()` arms a revisit; before #1363 this branch returned without cancelling it, so the revisit re-ran the pass, which wrote the same setpoint again and armed the next one. The occupant saw no change, but the thermostat got about 12 identical writes an hour for the whole time the house was away (64 in 5.3 h per zone in production). Now the setback is re-confirmed on the 30-minute cycle like comfort is at home. Leaving (the toggle handler calling `handle_occupancy_away()`/`handle_occupancy_vacation()` directly) still keeps its one 5-minute follow-up check.
 4. **HOME or GUEST** → proceed to normal comfort application (never reaches the occupancy gate — `decide_scheduled_band_gate()` only routes AWAY/VACATION through `DEFER_OCCUPANCY`).
 
 The manual-override-first ordering means: if both `_manual_override_active` and `_occupancy_mode == VACATION` are true, the override check fires first and the function returns before the occupancy gate is ever evaluated. Once the override later clears (confirm or cancel), the next `apply_classification()` pass reaches the gate and actively reapplies the correct setback — it does not merely assume it's already there.
@@ -223,15 +224,17 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 | `"occupancy_mode"` | `str` | Current mode string (e.g., `"away"`) |
 | `"occupancy_away_since"` | `str` \| `null` | ISO datetime string of departure; `null` if home |
 
-**Restore sequence (`coordinator.py:L2333–L2340`):**
+**Restore sequence (same-day restore only, below the date gate; `coordinator.py` `async_restore_state`, Issues #1349/#1354):**
 
 1. Read `state.get("occupancy_mode", OCCUPANCY_HOME)` → `self._occupancy_mode`
 2. Call `automation_engine.set_occupancy_mode(self._occupancy_mode)` to sync engine
 3. Parse `state.get("occupancy_away_since")` → `self._occupancy_away_since` (as `datetime`) or `None`
 
+**At setup (Issue #1354):** `async_setup()` recomputes the mode from the live toggles, calls `automation_engine.set_occupancy_mode()` (live toggles win over the restored mode; INFO `Occupancy at startup: engine <old> -> live toggles <new>` on a difference) and, for a non-present mode with no `occupancy_away_since`, sets it to now. On a cross-day restore the mode and away-since are not restored (same-day only); the toggles alone decide.
+
 **Version mismatch:** `STATE_VERSION = 1` (defined in `state.py:L21`). If the file contains a different version (or is missing/corrupt), `StatePersistence.load()` returns an empty dict and logs a WARNING. The coordinator then defaults `occupancy_mode` to `OCCUPANCY_HOME`.
 
-**Away timer is NOT persisted.** If HA restarts while the 15-minute away timer is running, the timer callback is lost. The persisted `occupancy_mode` will be `"away"` and `occupancy_away_since` will reflect the departure time, but setback will not fire until the next toggle state change re-triggers `_async_occupancy_toggle_changed`. The 30-minute `apply_classification()` poll will reapply setback on its next cycle if the mode is still AWAY at that time.
+**Away timer is NOT persisted.** If HA restarts while the 15-minute away timer is running, the timer callback is lost. Since Issue #1354 the engine already holds the live away/vacation mode after setup, so the setback is applied by the normal plan application at the end of the startup window rather than waiting for the next toggle change. The 30-minute `apply_classification()` poll will reapply setback on its next cycle if the mode is still AWAY at that time.
 
 ## Manual Override Interaction
 
@@ -269,7 +272,7 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 | Failure | Handling | Observable effect |
 |---|---|---|
 | Toggle entity `unavailable` or `unknown` | `_is_toggle_on()` treats it as `False` (OFF); no exception raised | Entity effectively reads as "not toggled on"; may hold incorrect mode if the sensor is persistently unavailable |
-| HA restart while 15-minute away timer is pending | Timer callback lost; `occupancy_mode = "away"` and `occupancy_away_since` are restored from state file; timer is NOT re-armed | Setback does not fire automatically; fires on next `apply_classification()` 30-minute cycle or next toggle change |
+| HA restart while 15-minute away timer is pending | Timer callback lost. Since Issue #1354 `async_setup()` syncs the live Vacation/Away toggles into the engine and starts away-minute counting, so the mode is correct at once; the setback is applied by the normal plan application at the end of the startup window (or the next `apply_classification()` cycle / toggle change) | No 15-minute grace after a restart; setback follows the startup plan application |
 | `set_occupancy_mode()` receives an unrecognized mode string | Logs WARNING at `automation.py:L1129` (inside `set_occupancy_mode()`, `L1126`); defaults to `OCCUPANCY_HOME` | Engine remains in HOME mode; coordinator and engine may briefly be out of sync if coordinator accepted the invalid mode |
 | State file missing, corrupt, or wrong `STATE_VERSION` | `StatePersistence.load()` returns `{}` and logs WARNING; coordinator defaults to `OCCUPANCY_HOME` | Occupancy state is reset to HOME on restart; `_occupancy_away_since` is cleared |
 | No day classification available when handler fires | `handle_occupancy_away()` logs WARNING and returns; `handle_occupancy_home()` and `handle_occupancy_vacation()` return silently | No HVAC temperature change; setback or comfort restore is deferred until `apply_classification()` runs next |

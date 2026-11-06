@@ -13,7 +13,7 @@ import os
 import sys
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypedDict
@@ -966,13 +966,6 @@ class LearningState:
     # unload/reload, async_shutdown) or "ha_stop" (EVENT_HOMEASSISTANT_STOP). None for
     # state persisted before #1110 (classifier falls back to hass.is_running).
     last_shutdown_kind: str | None = None
-    # Issue #1230 R1: prediction engine v4 runs in shadow beside v3 (never read by a decision). ``v4_model`` is
-    # ``predictor_v4.to_dict(model)``; ``v4_mass_f`` is the hidden thermal-mass node carried between cycles and
-    # ``v4_mass_at`` the ISO time it was last advanced (so a long downtime re-seeds it instead of stepping from stale).
-    # Absent in files written before 0.9.3: the dataclass defaults load them unchanged, no migration needed.
-    v4_model: dict | None = None
-    v4_mass_f: float | None = None
-    v4_mass_at: str | None = None
 
 
 class LearningEngine:
@@ -1020,6 +1013,13 @@ class LearningEngine:
                     len(data.get("records", [])),
                 )
                 data.pop("pending_thermal_event", None)  # v2 field removed in Issue #133
+                # Forward compatibility: a file written by a newer release may hold keys this one does not know.
+                # Ignore them (the known fields load intact) instead of raising and resetting the whole history.
+                known = {f.name for f in fields(LearningState)}
+                unknown = sorted(k for k in data if k not in known)
+                if unknown:
+                    _LOGGER.debug("Learning state: ignoring unknown keys from a newer release: %s", ", ".join(unknown))
+                    data = {k: v for k, v in data.items() if k in known}
                 self._state = LearningState(**data)
                 # Validate all list fields — corrupted JSON may have wrong types
                 for field_name in (
@@ -1084,14 +1084,6 @@ class LearningEngine:
                     self._state.user_initiated_restart = False
                 if self._state.last_shutdown_kind not in SHUTDOWN_KINDS:
                     self._state.last_shutdown_kind = None
-                # Issue #1230 R1: v4 shadow model. A malformed value is dropped (the nightly fit rebuilds it);
-                # predictor_v4.from_dict() does the schema check when the model is used.
-                if not isinstance(self._state.v4_model, dict):
-                    self._state.v4_model = None
-                if isinstance(self._state.v4_mass_f, bool) or not isinstance(self._state.v4_mass_f, int | float):
-                    self._state.v4_mass_f = None
-                if not isinstance(self._state.v4_mass_at, str):
-                    self._state.v4_mass_at = None
                 return
             except (json.JSONDecodeError, TypeError) as err:
                 _LOGGER.warning("Failed to load learning state, starting fresh: %s", err)

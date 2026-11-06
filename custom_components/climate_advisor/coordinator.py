@@ -402,7 +402,7 @@ from .temperature import (
 )
 from .thermal_confidence import physics_eligibility
 from .time_utils import instant_after
-from .v4_archive import V4Archive
+from .v4_archive import V4Archive, V4ModelStore
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
     WHF_OWN_COMMAND_ECHO_S,
@@ -827,6 +827,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R1: prediction engine v4 in shadow. The archive keeps what v4 said 1/4/12/24 h ahead (first write
         # wins); load() is blocking -> async_restore_state(). Nothing on a decision path reads any of these.
         self._v4_archive = V4Archive(Path(hass.config.config_dir), entry_id=self._entry_id)
+        self._v4_store = V4ModelStore(Path(hass.config.config_dir), entry_id=self._entry_id)
         self._v4_fit_running = False
         self._v4_fit_task: asyncio.Task[Any] | None = None
         self._v4_last_fit_attempt: float | None = None
@@ -1964,6 +1965,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R1: same contract for the v4 predictions archive (load() never raises).
         if getattr(self, "_v4_archive", None) is not None:
             await self._executor_job(self._v4_archive.load)
+        if getattr(self, "_v4_store", None) is not None:
+            await self._executor_job(self._v4_store.load)
+            self._v4_last_fit = dict(self._v4_store.last_fit or {})
         await self._executor_job(self.learning.load_state)
         # Restore rejection_log from LearningState (load_state() already validated and capped it)
         loaded_rl = self.learning._state.rejection_log
@@ -5486,12 +5490,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         now=now,
                         primary=primary,
                         sensors=sensors,
-                        previous_model=self.learning._state.v4_model,
+                        previous_model=self._v4_store.v4_model,
                     )
                 )
                 if getattr(self, "_shut_down", False) is True:
                     return  # unloaded while fitting: drop the result
-                state = self.learning._state
+                state = self._v4_store
                 previous = state.v4_model if isinstance(state.v4_model, dict) else None
                 state.v4_model = model_dict
                 if previous is None or previous.get("primary") != model_dict.get("primary"):
@@ -5504,6 +5508,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "seconds": round(seconds, 1),
                     "ok": True,
                 }
+                state.last_fit = dict(self._v4_last_fit)
+                state.last_fit_error = None
                 mae = summary["mae_by_lead"]
                 _LOGGER.info(
                     "v4 fit (%s): %s span=%sd primary=%s sensors=%d took %.1fs",
@@ -5514,7 +5520,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     len(summary["sensors"]),
                     seconds,
                 )
-                await self._executor_job(self.learning.save_state)
+                await self._executor_job(self._v4_store.save)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a failed shadow fit keeps the previous model; nothing else is affected
@@ -5524,6 +5530,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "seconds": round(_monotonic() - started, 1),
                 "ok": False,
             }
+            self._v4_store.last_fit = dict(self._v4_last_fit)
+            self._v4_store.last_fit_error = "fit failed; see the log"
+            self._v4_store.dirty = True
             _LOGGER.warning("v4 fit (%s) failed; keeping the previous model", reason, exc_info=True)
         finally:
             self._v4_fit_running = False
@@ -5547,7 +5556,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _v4_shadow_cycle_impl(self) -> None:
         if getattr(self, "_shut_down", False) is True:
             return
-        state = self.learning._state
+        state = self._v4_store
         model_dict = state.v4_model
         if not isinstance(model_dict, dict):
             # First fit once startup coalescing is over (the chart log and forecast archive are loaded by then).
@@ -5636,15 +5645,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         state.v4_mass_f = new_mass
         state.v4_mass_at = now.isoformat()
+        state.dirty = True
         added = 0
         if predictions and inputs:
             added = self._v4_archive.record(now, predictions, model_dict.get("primary"))
         # The archive file is a few MB: rewrite it at most hourly (and once at shutdown).
         mono = _monotonic()
         last_save = self._v4_last_archive_save
-        if self._v4_archive.dirty and (last_save is None or mono - last_save >= V4_ARCHIVE_SAVE_MIN_INTERVAL_S):
+        if (self._v4_archive.dirty or state.dirty) and (
+            last_save is None or mono - last_save >= V4_ARCHIVE_SAVE_MIN_INTERVAL_S
+        ):
             self._v4_last_archive_save = mono
-            await self._executor_job(self._v4_archive.save)
+            if self._v4_archive.dirty:
+                await self._executor_job(self._v4_archive.save)
+            if state.dirty:
+                await self._executor_job(self._v4_store.save)
         cost_ms = (_perf_counter() - started) * 1000.0
         self._v4_last_cycle = {
             "at": now.isoformat(),
@@ -5658,13 +5673,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
     async def _v4_flush_on_shutdown(self) -> None:
-        """Write the v4 archive once more on unload if it changed since the last write. Never raises."""
+        """Write the v4 archive and model file once more on unload if they changed. Never raises.
+
+        A failed write is retried once; if it still fails the loss is logged at WARNING (shadow data only).
+        """
+        archive = getattr(self, "_v4_archive", None)
+        store = getattr(self, "_v4_store", None)
         try:
-            archive = getattr(self, "_v4_archive", None)
-            if archive is not None and archive.dirty:
-                await self._executor_job(self._v4_archive.save)
+            for attempt in (1, 2):
+                if archive is not None and archive.dirty and not await self._executor_job(self._v4_archive.save):
+                    if attempt == 2:
+                        _LOGGER.warning(
+                            "v4 archive: could not be written at shutdown; up to %d slots of predictions are lost",
+                            sum(len(rows) for rows in archive.data.values()),
+                        )
+                    continue
+                break
+            for attempt in (1, 2):
+                if store is not None and store.dirty and not await self._executor_job(self._v4_store.save):
+                    if attempt == 2:
+                        _LOGGER.warning("v4 model: could not be written at shutdown; the last fit state is lost")
+                    continue
+                break
         except Exception:  # noqa: BLE001 - shutdown must continue
-            _LOGGER.warning("v4 archive: could not flush on shutdown", exc_info=True)
+            _LOGGER.warning("v4: could not flush on shutdown", exc_info=True)
 
     def v4_accuracy_inputs(self) -> dict[str, Any]:
         """Everything the prediction-accuracy endpoint needs from this zone, read on the event loop (Issue #1230 R1).
@@ -5674,7 +5706,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         climate = self.config.get("climate_entity", "")
         companion = getattr(self, "_indoor_companion_in_use", None)
-        model = self.learning._state.v4_model
+        model = self._v4_store.v4_model
         ids = [s for s in (model.get("sensors") or []) if isinstance(s, str)] if isinstance(model, dict) else []
         for sid in self._read_chart_indoor_sensors():
             if sid not in ids:
@@ -5715,7 +5747,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         try:
             unit = self.config.get("temp_unit", "fahrenheit")
-            state = self.learning._state
+            state = self._v4_store
             out = v4_shadow.model_summary(state.v4_model)
             out["mae_by_lead"] = {k: display_delta(v, unit, 2) for k, v in out.get("mae_by_lead", {}).items()}
             out["unit"] = UNIT_SYMBOL.get(unit, "°F")

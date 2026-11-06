@@ -74,7 +74,7 @@ def test_real_fit_then_cycle_archives_and_is_cheap(real) -> None:
     with scheduler.installed():
         assert coord._v4_start_fit("first")
         scheduler.advance_by(0)
-    model = coord.learning._state.v4_model
+    model = coord._v4_store.v4_model
     assert model is not None, coord._v4_last_fit
     assert real.from_dict(model) is not None  # the persisted dict round-trips through the engine
     assert coord._v4_last_fit["ok"] is True

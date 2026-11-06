@@ -7,7 +7,7 @@ so a future edit that wires v4 into a decision fails here before it can reach a 
 Allowed to mention v4 (anything named ``v4``/``predictor_v4``):
 
 * the shadow modules: ``v4_shadow.py``, ``v4_archive.py``, ``prediction_accuracy.py`` (and ``predictor_v4.py``);
-* ``const.py`` (``V4_*`` constants), ``learning.py`` (the persisted model fields), ``api.py`` (the read-only endpoint
+* ``const.py`` (``V4_*`` constants), ``api.py`` (the read-only endpoint
   and the Debug ``engines`` field);
 * ``coordinator.py``, only in ``_v4*``/``v4_*`` methods and in five fixed wiring points that never feed v4 back: the
   constructor, ``async_setup`` (nightly timer), ``async_restore_state`` (archive load), ``async_shutdown``,
@@ -26,7 +26,7 @@ _PKG = Path(__file__).resolve().parent.parent / "custom_components" / "climate_a
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _SHADOW_MODULES = {"v4_shadow.py", "v4_archive.py", "prediction_accuracy.py", "predictor_v4.py"}
-_DATA_MODULES = {"const.py", "learning.py", "api.py"}  # fields/constants/endpoint only; checked below
+_DATA_MODULES = {"const.py", "api.py"}  # fields/constants/endpoint only; checked below
 _COORDINATOR_WIRING = {
     "__init__",
     "async_setup",
@@ -129,19 +129,9 @@ def test_shadow_modules_import_nothing_that_decides() -> None:
     assert offenders == []
 
 
-def test_learning_py_only_stores_the_v4_fields() -> None:
-    """learning.py holds the persisted model; no other learning code (rates, suggestions, thermal model) reads it."""
-    allowed = {"LearningState", "load_state"}
-    stray = [
-        f"line {getattr(n, 'lineno', '?')} {name} in {'.'.join(where)}"
-        for n, name, where in _references(_tree(_PKG / "learning.py"))
-        if not (set(where) & allowed)
-    ]
-    assert stray == []
-    # and inside load_state it is only validation of the three fields
-    for _node, name, where in _references(_tree(_PKG / "learning.py")):
-        if "load_state" in where:
-            assert name in {"v4_model", "v4_mass_f", "v4_mass_at"}, f"unexpected v4 use in load_state: {name}"
+def test_learning_py_knows_nothing_about_v4() -> None:
+    """The model lives in its own file: the learning file must stay readable by a release without v4 (rollback)."""
+    assert [n for _n, n, _w in _references(_tree(_PKG / "learning.py"))] == []
 
 
 def test_api_py_only_exposes_v4_read_only() -> None:
@@ -238,8 +228,8 @@ def test_shadow_methods_write_only_v4_state_and_never_touch_the_engine(name: str
             base = node.value
             if isinstance(base, ast.Name) and base.id == "self":
                 assert node.attr.startswith("_v4"), f"{name} writes self.{node.attr}"
-            elif isinstance(base, ast.Name) and base.id == "state":  # state = self.learning._state
-                assert node.attr.startswith("v4_"), f"{name} writes state.{node.attr}"
+            elif isinstance(base, ast.Name) and base.id == "state":  # state = self._v4_store: v4 data only
+                pass
         if isinstance(node, ast.Attribute):
             assert node.attr not in {"automation_engine", "_emit_event", "_emit_incident", "services", "async_call"}, (
                 f"{name} reaches {node.attr}"

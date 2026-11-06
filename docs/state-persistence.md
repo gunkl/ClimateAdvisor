@@ -27,6 +27,7 @@
 **Explicitly does NOT own:**
 - `LearningState` — lives in `learning.py`; persists to `climate_advisor_learning.json` via `LearningEngine`
 - The chart log (`climate_advisor_chart_log_<entry_id>.json`, [chart-log-spec.md](chart-log-spec.md)) and the forecast archive (`climate_advisor_forecast_archive_<entry_id>.json`, Issue #1230 R0, [forecast-archive-spec.md](forecast-archive-spec.md)) - separate entry-scoped files with their own persistence contracts. Both are deleted with the zone's other files when the config entry is deleted ([Zone removal cleanup](#zone-removal-cleanup))
+- The prediction-engine-v4 shadow files (Issue #1230 R1): `climate_advisor_v4_archive_<entry_id>.json` (first-write-wins 1/4/12/24 h predictions, `v4_archive.py`, hourly-throttled save plus a flush at unload with one retry), `climate_advisor_v4_model_<entry_id>.json` (the fitted model, hidden-node state and last fit, `V4ModelStore`) and the read-only `climate_advisor_v4_backtest_<entry_id>.json` published by `tools/predict_backtest.py`. The model is deliberately NOT in `LearningState`: a rollback to a release without those fields would make `LearningState(**data)` reject the learning file and reset it. Current releases also ignore unknown learning-file keys on load (logged once at DEBUG). All three are listed in `ENTRY_SCOPED_FILES` and deleted with the zone
 - The schema of the state dict — the coordinator (`coordinator.py`) is responsible for what keys are written and read
 - Nothing else — file permissions (`0o600` via `os.chmod` after `os.replace()`, guarded by `hasattr(os, "chmod")` for cross-platform safety) ARE set by this module; see Invariants
 - Migration logic — version mismatches are handled by discarding and starting fresh; no field-level upgrade path exists in `state.py`
@@ -71,7 +72,7 @@ card offering to "fix" a zone that no longer exists. Before 0.9.1 every one of t
   run the final save. A reload or settings save (unload + setup) never deletes anything.
 - **Files:** `storage_paths.remove_entry_scoped_files(config_dir, entry_id)`, run in the executor, deletes the
   entry-scoped name of each base in `const.ENTRY_SCOPED_FILES` (`STATE_FILE`, `CHART_LOG_FILE`,
-  `LEARNING_DB_FILE`, `FORECAST_ARCHIVE_FILE`). Never another zone's file, never a legacy unscoped file (it may still
+  `LEARNING_DB_FILE`, `FORECAST_ARCHIVE_FILE`, `V4_ARCHIVE_FILE`, `V4_MODEL_FILE`, `V4_BACKTEST_FILE`). Never another zone's file, never a legacy unscoped file (it may still
   belong to an entry that has not migrated), and nothing for a falsy `entry_id` (that would resolve to the shared
   unscoped names). Leftover `.tmp` files are not removed: their `mkstemp` names cannot be tied to one zone. A missing
   file is skipped; an `OSError` on one file is logged at WARNING and the rest are still deleted; one INFO line lists

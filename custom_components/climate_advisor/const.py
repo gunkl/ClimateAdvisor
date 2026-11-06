@@ -557,6 +557,7 @@ V4_BACKTEST_FILE = (
     "climate_advisor_v4_backtest.json"  # published by tools/predict_backtest.py --publish; read-only here
 )
 V4_ARCHIVE_MAX_DAYS = 400  # time-based retention (a year of seasons plus margin)
+V4_MODEL_FILE = "climate_advisor_v4_model.json"  # the fitted v4 model + hidden-node state (not in the learning file)
 V4_ARCHIVE_LEADS: tuple[str, ...] = ("1h", "4h", "12h", "24h")
 V4_ARCHIVE_SAVE_MIN_INTERVAL_S = 3600  # the file is a few MB: rewrite at most hourly (and once on shutdown)
 V4_FIT_HOUR = 3  # nightly fit, local time, after midnight bookkeeping
@@ -579,6 +580,7 @@ ENTRY_SCOPED_FILES: tuple[str, ...] = (
     FORECAST_ARCHIVE_FILE,
     V4_ARCHIVE_FILE,
     V4_BACKTEST_FILE,
+    V4_MODEL_FILE,
 )
 SUGGESTION_COOLDOWN_DAYS = 7  # Don't repeat the same suggestion within a week
 MIN_DATA_POINTS_FOR_SUGGESTION = 14  # Need 2 weeks of data before suggesting changes

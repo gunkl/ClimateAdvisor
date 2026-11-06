@@ -201,6 +201,8 @@ _BLOCKING_METHODS: set[tuple[str, str]] = {
     ("_forecast_archive", "save"),
     ("_v4_archive", "load"),
     ("_v4_archive", "save"),
+    ("_v4_store", "load"),
+    ("_v4_store", "save"),
     ("_state_persistence", "load"),
     ("_state_persistence", "save"),
     ("learning", "load_state"),

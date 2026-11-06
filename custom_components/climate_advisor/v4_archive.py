@@ -34,7 +34,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from .const import V4_ARCHIVE_FILE, V4_ARCHIVE_LEADS, V4_ARCHIVE_MAX_DAYS
+from .const import V4_ARCHIVE_FILE, V4_ARCHIVE_LEADS, V4_ARCHIVE_MAX_DAYS, V4_MODEL_FILE
 from .storage_paths import resolve_entry_scoped_path
 
 _LOGGER = logging.getLogger(__name__)
@@ -118,8 +118,8 @@ class V4Archive:
                 slots += len(kept)
         _LOGGER.info("v4_archive: loaded %d slots across %d sensor lines", slots, len(self.data))
 
-    def save(self) -> None:
-        """Atomic write to disk (tempfile + os.replace), 0o600 on non-Windows. Never raises."""
+    def save(self) -> bool:
+        """Atomic write to disk (tempfile + os.replace), 0o600 on non-Windows. True on success. Never raises."""
         try:
             leads = list(V4_ARCHIVE_LEADS)
             # list() copies: the executor thread must not iterate a dict the event loop is adding to.
@@ -130,7 +130,7 @@ class V4Archive:
             serialized = json.dumps({"v": _FORMAT_VERSION, "leads": leads, "sensors": sensors}, separators=(",", ":"))
         except (TypeError, ValueError, RuntimeError) as err:
             _LOGGER.error("v4_archive: failed to serialize archive: %s", err)
-            return
+            return False
 
         tmp_path_str: str | None = None
         try:
@@ -144,11 +144,13 @@ class V4Archive:
             if sys.platform != "win32":
                 os.chmod(str(self._path), 0o600)
             self.dirty = False
+            return True
         except OSError as err:
             _LOGGER.error("v4_archive: failed to save archive file: %s", err)
             if tmp_path_str is not None:
                 with contextlib.suppress(OSError):
                     os.unlink(tmp_path_str)
+        return False
 
     # ------------------------------------------------------------------
     # Recording (memory only)
@@ -242,3 +244,91 @@ def _lead_seconds(lead: str) -> float:
 def lead_hours(lead: str) -> float:
     """Hours in a look-ahead label such as ``"4h"``."""
     return float(lead.rstrip("h"))
+
+
+class V4ModelStore:
+    """The fitted v4 model and its live hidden-node state, in their own entry-scoped file (Issue #1230 R1).
+
+    Deliberately NOT part of the learning file: a rollback to a release that does not know the v4 fields would make
+    ``LearningState(**data)`` reject the file and reset the owner's whole learning history. A separate file is simply
+    ignored by the older release. A missing or corrupt file means "no model": the first fit runs.
+
+    On disk (``climate_advisor_v4_model_<entry_id>.json``)::
+
+        {"v": 1, "model": <predictor_v4.to_dict(...)> | null, "mass_f": 66.2 | null, "mass_at": iso | null,
+         "last_fit": {"at", "reason", "seconds", "ok"} | null, "last_fit_error": str | null}
+
+    Same persistence contract as ``V4Archive``: blocking load/save via the executor, atomic, 0o600, never raise.
+    """
+
+    def __init__(self, config_dir: Path, entry_id: str = "") -> None:
+        self._path = resolve_entry_scoped_path(config_dir, V4_MODEL_FILE, entry_id)
+        self.v4_model: dict | None = None
+        self.v4_mass_f: float | None = None
+        self.v4_mass_at: str | None = None
+        self.last_fit: dict | None = None
+        self.last_fit_error: str | None = None
+        self.dirty = False
+
+    def load(self) -> None:
+        """Load from disk; missing, corrupt or odd content means no model. Never raises."""
+        self.v4_model = self.v4_mass_f = self.v4_mass_at = self.last_fit = self.last_fit_error = None
+        self.dirty = False
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as err:
+            _LOGGER.warning("v4_model: could not read the model file, a new fit will run: %s", err)
+            return
+        if not isinstance(raw, dict):
+            _LOGGER.warning("v4_model: model file has an unexpected shape, a new fit will run")
+            return
+        model = raw.get("model")
+        self.v4_model = model if isinstance(model, dict) else None
+        mass = raw.get("mass_f")
+        self.v4_mass_f = (
+            float(mass)
+            if isinstance(mass, int | float) and not isinstance(mass, bool) and math.isfinite(mass)
+            else None
+        )
+        at = raw.get("mass_at")
+        self.v4_mass_at = at if isinstance(at, str) else None
+        last = raw.get("last_fit")
+        self.last_fit = last if isinstance(last, dict) else None
+        err = raw.get("last_fit_error")
+        self.last_fit_error = err if isinstance(err, str) else None
+
+    def save(self) -> bool:
+        """Atomic write (tempfile + os.replace), 0o600 on non-Windows. True on success. Never raises."""
+        tmp_path_str: str | None = None
+        try:
+            serialized = json.dumps(
+                {
+                    "v": _FORMAT_VERSION,
+                    "model": self.v4_model,
+                    "mass_f": self.v4_mass_f,
+                    "mass_at": self.v4_mass_at,
+                    "last_fit": self.last_fit,
+                    "last_fit_error": self.last_fit_error,
+                },
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            tmp_fd, tmp_path_str = tempfile.mkstemp(
+                dir=self._path.parent, prefix="climate_advisor_v4_model_", suffix=".tmp"
+            )
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                f.write(serialized)
+            os.replace(tmp_path_str, str(self._path))
+            tmp_path_str = None
+            if sys.platform != "win32":
+                os.chmod(str(self._path), 0o600)
+            self.dirty = False
+            return True
+        except (OSError, TypeError, ValueError) as err:
+            _LOGGER.error("v4_model: failed to save the model file: %s", err)
+            if tmp_path_str is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path_str)
+            return False

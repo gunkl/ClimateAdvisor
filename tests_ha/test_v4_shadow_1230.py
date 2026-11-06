@@ -66,7 +66,7 @@ async def test_nightly_timer_fits_the_zone_and_unload_leaves_nothing(
     engine = _install(monkeypatch)
     entry = await _setup_zone(hass, tmp_path)
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    assert coordinator.learning._state.v4_model is None
+    assert coordinator._v4_store.v4_model is None
 
     # The real 03:15 local timer fires the fit through HA's own scheduler.
     now = dt_util.now()
@@ -76,7 +76,7 @@ async def test_nightly_timer_fits_the_zone_and_unload_leaves_nothing(
     async_fire_time_changed(hass, fire + timedelta(seconds=1))
     await hass.async_block_till_done()
     assert engine.fit_calls == 1
-    assert coordinator.learning._state.v4_model["confidence"] == "ok"
+    assert coordinator._v4_store.v4_model["confidence"] == "ok"
     assert coordinator._v4_fit_running is False
 
     assert await hass.config_entries.async_unload(entry.entry_id)
@@ -103,7 +103,7 @@ async def test_unload_during_a_running_fit_drops_its_result_and_cancels_the_task
     engine.release.set()  # the executor thread now finishes; its result has nowhere to go
     await hass.async_block_till_done()
     assert task.done()
-    assert coordinator.learning._state.v4_model is None
+    assert coordinator._v4_store.v4_model is None
     assert engine.fit_calls == 1
 
 

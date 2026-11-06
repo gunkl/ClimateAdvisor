@@ -23,6 +23,7 @@ from custom_components.climate_advisor.const import (
     STATE_FILE,
     V4_ARCHIVE_FILE,
     V4_BACKTEST_FILE,
+    V4_MODEL_FILE,
 )
 from custom_components.climate_advisor.forecast_archive import ForecastArchive
 from custom_components.climate_advisor.learning import LearningEngine
@@ -33,7 +34,15 @@ from custom_components.climate_advisor.storage_paths import (
 )
 
 _PKG = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor"
-_ALL_BASES = (STATE_FILE, CHART_LOG_FILE, LEARNING_DB_FILE, FORECAST_ARCHIVE_FILE, V4_ARCHIVE_FILE, V4_BACKTEST_FILE)
+_ALL_BASES = (
+    STATE_FILE,
+    CHART_LOG_FILE,
+    LEARNING_DB_FILE,
+    FORECAST_ARCHIVE_FILE,
+    V4_ARCHIVE_FILE,
+    V4_BACKTEST_FILE,
+    V4_MODEL_FILE,
+)
 
 
 def _write_zone(config_dir: Path, entry_id: str) -> list[Path]:

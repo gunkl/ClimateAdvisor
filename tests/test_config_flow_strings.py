@@ -39,8 +39,22 @@ _HELPER_BUILT_KEYS = {
             "comfort_deadband_mild_f",
             "comfort_deadband_cool_f",
             "comfort_deadband_cold_f",
-        }
-    }
+        },
+        # Issue #1347: the setpoints schema is built in a loop over _SETPOINT_KEYS / _VACATION_KEYS.
+        "setpoints": {
+            "comfort_heat",
+            "comfort_cool",
+            "setback_heat",
+            "setback_cool",
+            "sleep_heat",
+            "sleep_cool",
+            "vacation_heat",
+            "vacation_cool",
+        },
+    },
+    "config": {
+        "setpoints": {"comfort_heat", "comfort_cool", "setback_heat", "setback_cool", "sleep_heat", "sleep_cool"},
+    },
 }
 # Steps whose strings block exists for HA but whose handler builds no schema of its own.
 _MENU_STEPS = {"options": {"init"}}

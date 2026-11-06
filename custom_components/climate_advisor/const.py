@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -251,8 +251,13 @@ OCCUPANCY_AWAY = "away"
 OCCUPANCY_VACATION = "vacation"
 OCCUPANCY_GUEST = "guest"
 
-# Vacation deeper setback (degrees beyond normal setback)
+# Vacation deeper setback (degrees beyond normal setback). Used only when the optional vacation
+# setpoints below are not set (Issue #1347); see setpoint_combinations.vacation_edges().
 VACATION_SETBACK_EXTRA = 3
+# Optional separate vacation setpoints (Issue #1347, options flow only, stored in °F). Absent or None
+# means "away setpoint -/+ VACATION_SETBACK_EXTRA", exactly the pre-#1347 behaviour.
+CONF_VACATION_HEAT = "vacation_heat"
+CONF_VACATION_COOL = "vacation_cool"
 
 # Fan control configuration
 CONF_FAN_ENTITY = "fan_entity"
@@ -534,6 +539,12 @@ STATE_FILE = "climate_advisor_state.json"
 # Chart state log
 CHART_LOG_FILE = "climate_advisor_chart_log.json"
 CHART_LOG_MAX_DAYS = 365  # 1-year rolling cap (~17,500 entries ≈ 2MB)
+
+# Forecast archive (Issue #1230 R0): what the hourly forecast SAID at each issue time, kept so the
+# per-lead-time forecast error can be scored later. Not read by any automation; nothing displayed.
+FORECAST_ARCHIVE_FILE = "climate_advisor_forecast_archive.json"
+FORECAST_ARCHIVE_HORIZON_HOURS = 72  # keep at most this many hours ahead of each issue time
+FORECAST_ARCHIVE_MAX_DAYS = 365  # time-based retention: all four seasons for backtests (~3-4 MB)
 CHART_DOWNSAMPLE_HOURLY_DAYS = 3  # raw points for ≤3 days; hourly averages beyond
 CHART_DOWNSAMPLE_DAILY_DAYS = 30  # daily summaries for >30 days
 
@@ -542,6 +553,12 @@ PRED_ARCHIVE_HORIZON_HOURS = 4  # only archive ODE entries within this lookahead
 
 # Learning system
 LEARNING_DB_FILE = "climate_advisor_learning.json"
+# Every per-zone file Climate Advisor writes in the HA config dir, by its unscoped base name (Issue #1375).
+# async_remove_entry deletes each one's entry-scoped copy when a zone is deleted. A new entry-scoped file must be
+# listed here, or a removed zone leaves it on disk forever: tests/test_zone_removal_cleanup.py fails if any
+# resolve_entry_scoped_path() caller in the package uses a base name missing from this tuple.
+# chart_log.py's own _CHART_LOG_FILE equals CHART_LOG_FILE (guarded by the same test).
+ENTRY_SCOPED_FILES: tuple[str, ...] = (STATE_FILE, CHART_LOG_FILE, LEARNING_DB_FILE, FORECAST_ARCHIVE_FILE)
 SUGGESTION_COOLDOWN_DAYS = 7  # Don't repeat the same suggestion within a week
 MIN_DATA_POINTS_FOR_SUGGESTION = 14  # Need 2 weeks of data before suggesting changes
 COMPLIANCE_THRESHOLD_LOW = 0.3  # Below 30% compliance triggers a suggestion
@@ -730,6 +747,24 @@ CONFIG_METADATA = {
         "description": (
             "Temperature when cooling and away from home."
             " Higher values save more energy but take longer to cool down when you return."
+        ),
+        "category": "setpoints",
+        "display_transform": "temp_abs",
+    },
+    "vacation_heat": {
+        "label": "Vacation Heat",
+        "description": (
+            "Temperature when heating and on vacation (Issue #1347)."
+            " When not set, vacation uses the away heat temperature minus 3°F."
+        ),
+        "category": "setpoints",
+        "display_transform": "temp_abs",
+    },
+    "vacation_cool": {
+        "label": "Vacation Cool",
+        "description": (
+            "Temperature when cooling and on vacation (Issue #1347)."
+            " When not set, vacation uses the away cool temperature plus 3°F."
         ),
         "category": "setpoints",
         "display_transform": "temp_abs",

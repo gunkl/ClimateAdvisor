@@ -96,6 +96,7 @@ from .const import (
     DEFAULT_TOU_LEAD_MINUTES,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
+    ENTRY_SCOPED_FILES,
     FAN_MODE_BOTH,
     FAN_MODE_WHOLE_HOUSE,
     PANEL_FRONTEND_PATH,
@@ -107,6 +108,7 @@ from .const import (
     VERSION,
 )
 from .coordinator import ClimateAdvisorCoordinator
+from .storage_paths import remove_entry_scoped_files
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -800,6 +802,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _LOGGER.info("Climate Advisor v%s loaded successfully", VERSION)
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """A zone was deleted: remove its storage files and its own Repairs issues.
+
+    Occupant view: after deleting a zone, nothing of it is left behind: no state, learning, chart log or
+    forecast archive file on the SD card, and no Repairs card offering to "fix" a zone that no longer exists.
+    HA calls this after ``async_unload_entry`` (which already ran the final save), and only on deletion, not
+    on a reload or settings save. Never raises: a failed delete is logged and must not block the removal.
+    """
+    for issue_id in (f"weather_entity_not_found_{entry.entry_id}", f"reload_needed_{entry.entry_id}"):
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+    try:
+        await hass.async_add_executor_job(
+            remove_entry_scoped_files, Path(hass.config.config_dir), entry.entry_id, ENTRY_SCOPED_FILES
+        )
+    except Exception:  # noqa: BLE001 - removal of a zone must never fail on cleanup
+        _LOGGER.exception("Climate Advisor: could not clean up files of removed zone %s", entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

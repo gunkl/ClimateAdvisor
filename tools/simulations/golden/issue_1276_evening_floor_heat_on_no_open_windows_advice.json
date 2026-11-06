@@ -1,0 +1,88 @@
+{
+  "name": "issue_1276_evening_floor_heat_on_no_open_windows_advice",
+  "description": "Issue #1276. Mild evening, heat on, house at its 68F comfort floor, outdoor 60.6F. The occupant must not be told to open windows, and nothing Climate Advisor does lets cold air in or stops the heat.",
+  "source": "incident",
+  "issue": 1276,
+  "notes": [
+    "Reported state of 2026-11-02 18:11 (issue evidence): mild day, heat, indoor 68.0F = comfort_heat, outdoor 60.6F, windows_recommended with the 10:00-17:00 plan already past.",
+    "Tier A limit: the #1276 fix lives in coordinator._compute_next_action (display text). The scenario sets capture_next_action, so the harness records the real card text at the end of the run (engine_state._next_action) and assertion 3 pins it. Without that hook the scenario passes with the fix deleted (mutation-checked 2026-11-06)."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "initial_thermostat_mode": "heat",
+    "fan_mode": "hvac_fan",
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ]
+  },
+  "events": [
+    {
+      "time": "2026-11-02T18:00:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.living_window",
+      "note": "window closed (seed)"
+    },
+    {
+      "time": "2026-11-02T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 61.5
+    },
+    {
+      "time": "2026-11-02T18:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "heat",
+      "windows_recommended": true,
+      "window_open_time": "10:00",
+      "window_close_time": "17:00",
+      "today_high": 66.9,
+      "today_low": 52,
+      "tomorrow_high": 66,
+      "tomorrow_low": 52
+    },
+    {
+      "time": "2026-11-02T18:11:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 60.6,
+      "note": "the reported moment: at the floor, heat on, outdoor cooler"
+    },
+    {
+      "time": "2026-11-02T18:40:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 59.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-02T18:40:00",
+      "expect": "nat_vent_not_active",
+      "track": "logic",
+      "reason": "cooler evening air at the floor never starts ventilation; the heat keeps the house at 68F"
+    },
+    {
+      "at": "2026-11-02T18:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._thermostat_hvac_mode",
+      "value": "heat",
+      "track": "logic",
+      "reason": "the heat stays on; nothing switched the thermostat off for the cool air"
+    },
+    {
+      "at": "2026-11-02T18:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.advises_opening_windows",
+      "value": false,
+      "track": "logic",
+      "reason": "The Next Action card must not tell the occupant to open windows into a house at its heat floor"
+    }
+  ],
+  "capture_next_action": true
+}

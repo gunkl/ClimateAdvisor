@@ -59,6 +59,25 @@ def _bucket_comfort_target(group: list[dict[str, Any]]) -> float | None:
     return round(sum(vals) / len(vals), 1)
 
 
+def _bucket_indoor_sensors(group: list[dict[str, Any]]) -> dict[str, float | None] | None:
+    """Per-entity mean (2 dp) of the rows' ``indoor_sensors``, or None when no row in the bucket carried the field.
+
+    Issue #1230 R0. Same precedent as ``comfort_target``: the key appears only when at least one row has it, under the
+    same name in the hourly and daily shapes. An entity whose every reading in the bucket is None stays in the mapping
+    as None (the sensor was configured but silent). Legacy rows without the field contribute nothing.
+    """
+    maps = [e["indoor_sensors"] for e in group if isinstance(e.get("indoor_sensors"), dict)]
+    if not maps:
+        return None
+    vals: dict[str, list[float]] = {}
+    for m in maps:
+        for entity_id, v in m.items():
+            bucket = vals.setdefault(entity_id, [])
+            if isinstance(v, int | float) and not isinstance(v, bool):
+                bucket.append(v)
+    return {k: (round(sum(v) / len(v), 2) if v else None) for k, v in vals.items()}
+
+
 class ChartStateLog:
     """Rolling log of HVAC state snapshots and event markers for charting."""
 
@@ -161,6 +180,7 @@ class ChartStateLog:
         nat_vent_target: float | None = None,
         indoor_primary: float | None = None,
         comfort_target: float | None = None,
+        indoor_sensors: dict[str, float | None] | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
 
@@ -184,6 +204,12 @@ class ChartStateLog:
             offset (Issue #1194 d), so ``setpoint`` (what the thermostat was told) and the target the room is
             supposed to reach are charted apart. The key is present only when an offset was in force, so every other
             row and older logs are unchanged.
+        indoor_sensors: every configured indoor sensor's reading, ``{entity_id: temp_f_or_None}`` in internal F rounded
+            to 2 dp (``indoor_temp.read_indoor_sensors_f()``; ``None`` = that sensor failed the resolver's
+            parse/plausibility/stale rules). Read on every row regardless of the sleep window, so the v4 model can fit
+            one line per sensor. The key is present only when a mapping is given (new rows from the coordinator always
+            give one); older rows lack it. Informational only: nothing reads it for a decision or a display, and
+            ``get_chart_data()`` strips it from ``state_log`` (Issue #1230 R0).
         nat_vent_target: the real thermostatic target the nat-vent fan was cycling
             around this cycle (Phase 3a), computed via
             ``nat_vent_cycling.compute_nat_vent_target()`` — only meaningful (non-None)
@@ -217,6 +243,8 @@ class ChartStateLog:
             entry["indoor_primary"] = indoor_primary
         if comfort_target is not None:
             entry["comfort_target"] = comfort_target
+        if indoor_sensors is not None:
+            entry["indoor_sensors"] = dict(indoor_sensors)
 
         self._entries.append(entry)
         self._maybe_prune()
@@ -339,6 +367,7 @@ class ChartStateLog:
             upper_vals = [e["upper"] for e in group if e.get("upper") is not None]
             nat_vent_target_vals = [e["nat_vent_target"] for e in group if e.get("nat_vent_target") is not None]
             comfort_target = _bucket_comfort_target(group)
+            indoor_sensors = _bucket_indoor_sensors(group)
 
             summary: dict[str, Any] = {
                 "ts": bucket_key,
@@ -363,6 +392,8 @@ class ChartStateLog:
             }
             if comfort_target is not None:
                 summary["comfort_target"] = comfort_target
+            if indoor_sensors is not None:
+                summary["indoor_sensors"] = indoor_sensors
             if events:
                 summary["event"] = events
             result.append(summary)
@@ -394,6 +425,7 @@ class ChartStateLog:
             upper_vals = [e["upper"] for e in group if e.get("upper") is not None]
             nat_vent_target_vals = [e["nat_vent_target"] for e in group if e.get("nat_vent_target") is not None]
             comfort_target = _bucket_comfort_target(group)
+            indoor_sensors = _bucket_indoor_sensors(group)
 
             summary: dict[str, Any] = {
                 "ts": f"{day_key}T00:00:00+00:00",
@@ -424,6 +456,8 @@ class ChartStateLog:
             }
             if comfort_target is not None:
                 summary["comfort_target"] = comfort_target
+            if indoor_sensors is not None:
+                summary["indoor_sensors"] = indoor_sensors
             if events:
                 summary["events"] = events
             result.append(summary)

@@ -3330,3 +3330,79 @@ class TestAwayHvacModeRowShowsHeldBand1253:
         )
         assert (armed.floor, armed.ceiling) == (60.0, 80.0)
         assert "(60–80°F)" in text and "Away band 60–80°F" in _row(text, "HVAC Mode")
+
+
+# ---------------------------------------------------------------------------
+# Issue #1369: the vacation wording says "deeper" only when the vacation band IS deeper than away
+# ---------------------------------------------------------------------------
+
+_OLD_VACATION_SENTENCE = (
+    "While you're on vacation, I'm keeping the house at a deeper energy-saving setback to save energy."
+    " Comfort temperatures will be restored when you return."
+)
+
+
+def _vac_text(day_type: str, high: float, low: float, **vac_keys) -> str:
+    c = _make_classification(day_type, today_high=high, today_low=low)
+    return _ref(c, occupancy_mode="vacation", runtime_config={**REF_CONFIG, **vac_keys})
+
+
+class TestVacationWordingHonest1369:
+    """Away is 60/80 in the reference house. With no vacation keys the band is away -/+ 3 (57/83): deeper. A
+    separate vacation setpoint may be equal to or milder than away (the config page warns but allows it); then
+    "deeper" is false and the briefing must say "your vacation temperatures" instead. The edge that matters is the
+    day's HVAC side (heat day: floor, cool day: ceiling); on an off day both edges are armed, so both must be deeper.
+    """
+
+    @pytest.mark.parametrize(("day", "high", "low"), [("cold", 35, 25), ("hot", 95, 72), ("mild", 68, 50)])
+    def test_default_install_keeps_the_deeper_sentence(self, day, high, low):
+        text = _vac_text(day, high, low)
+        assert _OLD_VACATION_SENTENCE in text
+        assert _row(text, "Occupancy") == "Occupancy: Vacation — deep setback active"
+
+    @pytest.mark.parametrize(("day", "high", "low"), [("cold", 35, 25), ("hot", 95, 72), ("mild", 68, 50)])
+    def test_separate_deeper_setpoints_keep_the_deeper_sentence(self, day, high, low):
+        text = _vac_text(day, high, low, vacation_heat=55.0, vacation_cool=85.0)
+        assert _OLD_VACATION_SENTENCE in text
+        assert _row(text, "Occupancy") == "Occupancy: Vacation — deep setback active"
+
+    @pytest.mark.parametrize(("day", "high", "low"), [("cold", 35, 25), ("hot", 95, 72), ("mild", 68, 50)])
+    def test_separate_setpoints_equal_to_away_are_not_called_deeper(self, day, high, low):
+        text = _vac_text(day, high, low, vacation_heat=60.0, vacation_cool=80.0)
+        assert "deeper" not in text and "deep setback" not in text
+        assert "I'm keeping the house at your vacation temperatures (60–80°F)." in text
+        assert _row(text, "Occupancy") == "Occupancy: Vacation — vacation temperatures active"
+
+    @pytest.mark.parametrize(("day", "high", "low"), [("cold", 35, 25), ("hot", 95, 72), ("mild", 68, 50)])
+    def test_separate_milder_setpoints_are_not_called_deeper(self, day, high, low):
+        text = _vac_text(day, high, low, vacation_heat=64.0, vacation_cool=77.0)
+        assert "deeper" not in text and "deep setback" not in text
+        assert "I'm keeping the house at your vacation temperatures (64–77°F)." in text
+        assert _row(text, "Occupancy") == "Occupancy: Vacation — vacation temperatures active"
+
+    @pytest.mark.parametrize(
+        ("vac_keys", "day", "high", "low", "deeper"),
+        [
+            # heat deeper (55 < 60), cool milder (77 < 80)
+            ({"vacation_heat": 55.0, "vacation_cool": 77.0}, "cold", 35, 25, True),
+            ({"vacation_heat": 55.0, "vacation_cool": 77.0}, "hot", 95, 72, False),
+            ({"vacation_heat": 55.0, "vacation_cool": 77.0}, "mild", 68, 50, False),
+            # heat milder (64 > 60), cool deeper (85 > 80)
+            ({"vacation_heat": 64.0, "vacation_cool": 85.0}, "cold", 35, 25, False),
+            ({"vacation_heat": 64.0, "vacation_cool": 85.0}, "hot", 95, 72, True),
+            ({"vacation_heat": 64.0, "vacation_cool": 85.0}, "mild", 68, 50, False),
+        ],
+    )
+    def test_mixed_band_is_deeper_only_on_the_edge_that_matters(self, vac_keys, day, high, low, deeper):
+        text = _vac_text(day, high, low, **vac_keys)
+        assert (_OLD_VACATION_SENTENCE in text) is deeper
+        assert ("deep setback" in text) is deeper
+        if not deeper:
+            band = f"{int(vac_keys['vacation_heat'])}–{int(vac_keys['vacation_cool'])}°F"
+            assert f"I'm keeping the house at your vacation temperatures ({band})." in text
+
+    def test_hvac_row_quotes_the_separate_vacation_setpoint(self):
+        """The TLDR header reads the same band the wording is judged against -- the separate vacation setpoint,
+        not away - 3 (the #1347 keys were not carried into the briefing's band config)."""
+        text = _vac_text("cold", 35, 25, vacation_heat=64.0, vacation_cool=77.0)
+        assert _row(text, "HVAC Mode") == "HVAC Mode: Heat at 64°F"

@@ -836,3 +836,47 @@ class TestEconomizerDeferredAtBedtime:
         asyncio.run(engine.handle_bedtime())
 
         engine._deactivate_economizer.assert_called_once()
+
+
+# ── Issue #1366: briefing/chart sleep value == the value the engine arms ──────
+
+
+class TestBriefingSleepValueMatchesArmedBand:
+    """Issue #1366: compute_bedtime_setback() (the briefing's and chart's sleep value) must equal the
+    sleep edge handle_bedtime() really arms, even when the occupant set sleep heat BELOW away heat or
+    sleep cool ABOVE away cool. Before the fix it clamped to the away setback, so the briefing said
+    60°F overnight while the thermostat held 58°F (heat), or 80°F while it held 82°F (cool)."""
+
+    @staticmethod
+    def _armed_band(config_overrides: dict, hvac_mode: str) -> tuple[dict, dict]:
+        engine = _make_engine(config_overrides)
+        emitted: list[tuple] = []
+        engine._emit_event_callback = lambda event, data: emitted.append((event, data))
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+        engine._current_classification = _make_classification(hvac_mode=hvac_mode)
+        asyncio.run(engine.handle_bedtime())
+        events = [d for e, d in emitted if e == "bedtime_setback"]
+        assert len(events) == 1, f"Expected one 'bedtime_setback' event, got {emitted}"
+        return engine.config, events[0]
+
+    def test_heat_sleep_below_away_quoted_as_armed(self):
+        from custom_components.climate_advisor.automation import compute_bedtime_setback
+
+        overrides = {"setback_heat": 60, "sleep_heat": 58, "sleep_cool": 78}
+        config, armed = self._armed_band(overrides, "heat")
+        assert armed["floor"] == 58.0
+        briefing_value = compute_bedtime_setback(config, {}, _make_classification(hvac_mode="heat"))
+        assert briefing_value == armed["floor"], (
+            f"Briefing/chart quote {briefing_value}°F but the thermostat holds {armed['floor']}°F"
+        )
+
+    def test_cool_sleep_above_away_quoted_as_armed(self):
+        from custom_components.climate_advisor.automation import compute_bedtime_setback
+
+        overrides = {"setback_cool": 80, "sleep_cool": 82, "sleep_heat": 66}
+        config, armed = self._armed_band(overrides, "cool")
+        assert armed["ceiling"] == 82.0
+        briefing_value = compute_bedtime_setback(config, {}, _make_classification(hvac_mode="cool"))
+        assert briefing_value == armed["ceiling"], (
+            f"Briefing/chart quote {briefing_value}°F but the thermostat holds {armed['ceiling']}°F"
+        )

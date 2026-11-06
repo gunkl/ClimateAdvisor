@@ -134,6 +134,7 @@ from tools.sim_harness.ha_stubs import install_ha_stubs  # noqa: E402
 from tools.sim_harness.scenario_model import (  # noqa: E402
     ProductionRunResult,
     build_classification_from_event,
+    capture_next_action,
     merged_scenario_config,
     parse_event_time,
     pin_scenario_thermal_model,
@@ -559,6 +560,13 @@ class FakeHassSession:
             engine_state = snapshot_engine_state(self.engine)
             if self.finalized_days:  # Issue #1310 (absent when no day was finalized: snapshots unchanged)
                 engine_state["_finalized_days"] = dict(self.finalized_days)
+            # Issue #1276 (opt-in, owner-approved 2026-11-06): record the real Next Action card text so a
+            # scenario can assert on what the occupant is told, which no other surface exposes. Computed once
+            # at the end of the run from the last temp_update outdoor value (Tier A runs no weather entity, so
+            # production's refresh cycle never computes the card). Absent unless the scenario sets
+            # "capture_next_action": true, so every other golden's snapshot is unchanged.
+            if self.scenario.get("capture_next_action") and self.coordinator is not None:
+                engine_state["_next_action"] = self._capture_next_action()
         finally:
             self.close()
         result = ProductionRunResult(
@@ -571,6 +579,14 @@ class FakeHassSession:
             result.promise_report = self.probe.report()
         self._result = result
         return result
+
+    def _capture_next_action(self) -> dict[str, Any]:
+        """Issue #1276: the real ``_compute_next_action`` text for the run's final state.
+
+        Delegates to ``scenario_model.capture_next_action``, shared with the real-HA adapter so the
+        opt-in field means the same thing on both tiers.
+        """
+        return capture_next_action(self.coordinator, self.engine, self.scenario)
 
     def close(self) -> None:
         """Leave the patched clock/timer context (idempotent)."""

@@ -84,7 +84,7 @@ The setup wizard asks for:
 
 1. **Core:** weather entity, climate entity and notification service.
 2. **Unit:** °F or °C. This applies to every displayed value and input.
-3. **Setpoints:** comfort and setback for heat and cool, plus optional sleep heat and sleep cool.
+3. **Setpoints:** comfort and setback for heat and cool, plus optional sleep heat and sleep cool. Each accepts 40–95°F (4–35°C). If a combination would make the heat and AC fight or settle somewhere odd, a warning appears next to the field; press Submit again to keep it. Separate vacation heating and cooling temperatures are in Options (blank = 3°F beyond away).
 4. **Temperature sources:** indoor and outdoor, from the weather service, a sensor, an input number or the thermostat (indoor only).
 5. **Doors/windows and fan:**
    - door/window sensors, their polarity and the open delay;

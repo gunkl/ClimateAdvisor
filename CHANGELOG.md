@@ -3,9 +3,53 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.1] — 2026-11-06
+
+- Includes every fix from 0.8.64 to 0.8.68 on `main`.
+- Feat #1230 (R0 foundations): Climate Advisor now keeps two new records for the coming prediction engine. No change to how it runs your home or what the dashboard shows.
+  - **Every indoor sensor, every row:** the chart log records the thermostat's reading, your dedicated indoor sensor and your sleep sensor on every row, whichever one Climate Advisor is using at the moment. Unavailable sensors are recorded as empty.
+  - **Forecast archive:** each zone keeps the full hourly forecast (up to 72 hours ahead) once an hour for a year, in `climate_advisor_forecast_archive_<zone>.json` (about 3–4 MB at most), so forecast accuracy can be measured at every lead time.
+  - **Fix #1375 — deleting a zone cleans up after it:** its state, learning, chart log and forecast archive files are removed, along with its Repairs cards. Before, every file stayed on disk forever. Reloading or saving settings never deletes anything.
+  - **Guard for #1276:** a new locked scenario checks that on a cool evening, with the heat on and the house at its comfort floor, the dashboard does not say "Open windows". It fails if that fix is undone.
+
 ## [0.9.0] — 2026-11-06
 
 - Start of the 0.9 line (Issue #1230: new prediction engine, one operation timeline and the dashboard redesign). This release is 0.8.63 plus development tooling only, with no change to how Climate Advisor runs your home. 0.9 work lands on the `0.9.x` branch, which takes every 0.8.x fix from `main` before each deploy.
+
+## [0.8.68] — 2026-11-06
+
+- Fix #1371: the overnight pre-cool now runs only at night and actually holds. Before, on a warm or mild day before a hotter one it fired at 10:30 AM or 5:30 PM, flipping the thermostat cool, then heat, then cool while the house was comfortable; and on hot-trend nights the regular 30-minute check put the normal sleep temperature back the same second, so the house never banked any extra cooling. Now pre-cool is scheduled inside your sleep hours, keeps its lower cooling temperature until wake-up, and counts as a deliberate cool so the heat does not switch on right after it. A pre-heat placeholder that never did anything (but logged that it was scheduling a pre-heat) is removed.
+- Fix #1376: a bedtime after midnight (for example 01:00, waking at 07:00) no longer makes Climate Advisor treat the whole day as sleep hours, so the daytime comfort temperatures apply during the day.
+
+## [0.8.67] — 2026-11-06
+
+- Fix #1370: Climate Advisor no longer turns a fan on while it can't read the indoor temperature. Before, if the indoor sensor dropped out with a window open, it could still switch the whole-house fan (or the thermostat's blower) on: the half-hourly "keep the fan on" re-send for fans that don't report their state, the hourly minimum-runtime cycle and the economizer never checked for a reading. Now no fan is started until the reading comes back. A fan that is already running is still stopped after about 30 minutes without a reading, as before. The minimum-runtime cycle tries again the next hour. Found by the nightly test run.
+
+## [0.8.66] — 2026-11-06
+
+- Feat #1347: the Temperature Setpoints page no longer limits each temperature to a narrow range. Away heat can now be up to 95°F (35°C), so a mini-split can hold the house warm while you are out, and away can equal home. Instead, when a combination would make the heat and AC take turns (heat at or above cool, or less than 4°F apart, in any band), settle somewhere odd (away warmer than home, sleep beyond away, vacation milder than away), sit outside what your thermostat accepts, or put vacation heat below 45°F, a warning appears next to the field. Press Submit again to keep it. Vacation can now have its own heating and cooling temperatures in Options; left blank it stays 3°F beyond away.
+- Fix #1366: the morning briefing and chart now show your actual sleep temperature overnight, even when it is cooler than your away heat setting or warmer than your away cool setting. Before, they showed the away temperature while the thermostat held the sleep one.
+- Fix #1367: a temperature outside what your thermostat accepts (for example away heat 42°F on a thermostat whose minimum is 45°F) is now sent as the thermostat's own limit. Before, Home Assistant refused it and the empty house stayed at your comfort temperature for the whole absence.
+- Fix #1368: a new household check (P10) logs when Climate Advisor switches the thermostat between heat and cool more than twice in 3 hours, so the heat and AC taking turns all day no longer goes unnoticed.
+- Fix #1369: the vacation briefing says "deeper setback" only when your vacation temperatures really are deeper than away; otherwise it quotes your vacation temperatures, and the HVAC row shows the separate vacation setpoint.
+
+## [0.8.65] — 2026-11-06
+
+- Fix #1363: while the house is Away or on Vacation, Climate Advisor no longer sends the same setpoint to your thermostat every 5 minutes (about 12 identical writes an hour). The setback is now re-confirmed every 30 minutes, the same as at home, which cuts traffic to cloud thermostats and repeated Activity entries. The setback itself is unchanged and still applies as soon as you leave.
+
+## [0.8.64] — 2026-11-06
+
+A Home Assistant restart that comes back on a later day (an overnight outage, or a restart between 23:59 and the first save after midnight) no longer makes Climate Advisor forget things. Only today's plan starts fresh: the day type, today's temperature history and record, and the briefing.
+
+- Fix #1349: observe-only mode (the Automation switch off) now survives such a restart. Before, the switch came back on with no notice and, about five minutes after start-up, Climate Advisor started controlling your thermostat (an Off thermostat could be switched to heat). The log says `Observe-only mode restored (automation off)`.
+- Fix #1354: Vacation and Away now take effect when Climate Advisor starts (the setback lands with the first plan, about five minutes after start-up), on a fresh install too. Before, if the toggle was already on when Climate Advisor started (after an overnight restart, on first setup, or if the toggle changed while Home Assistant was down), the empty house was heated or cooled to your comfort setting until the toggle was flipped again.
+- Fix #1358: if you turn the whole-house fan off (or on) shortly before midnight and Home Assistant restarts after midnight, Climate Advisor still respects that and does not turn it back on (or off) five minutes later. Recent heating/cooling and mode-change history (used to protect a wet coil and to avoid quick heat/cool switching) is kept too.
+- Fix #1355: such a restart no longer replays 30 days of history into thermal learning a second time, which skewed pre-heat, pre-cool and ventilation timing. Observations already duplicated are left to age out.
+- Fix #1357: the Activity log keeps its history (up to 7 days) and shows the "Home Assistant restarted" row after such a restart, and after a restart with no saved state. The next crash is no longer mislabelled as a user restart.
+- Fix #1356: AI Investigation History is no longer emptied by such a restart and then overwritten by the next report.
+- Fix #1359: a restart after midnight during a weather outage still has the kept forecast, and the chart's past "predicted" line is kept.
+- Fix #1360: after a temperature-unit change, such a restart still discards readings taken under the old unit.
+- Fix #1362: after any restart, the Activity log now shows that a whole-house-fan hold you started was re-armed. Before, the row was dropped although the fan behaved correctly.
 
 ## [0.8.63] — 2026-11-06
 

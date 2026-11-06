@@ -188,7 +188,7 @@ asked for had ended (both fan modes).
   `_maybe_restore_fan_off_grace()`. When the fan-off grace itself was the persisted grace it is re-armed as in Issue #1006 and the
   hold with it; when a thermostat override's grace (not restored, Issue #1046) was the persisted one, the hold is
   restored on its own (INFO `Fan-off hold restored across restart`) while its deadline is still in the future. A lapsed
-  persisted hold is not restored.
+  persisted hold is not restored. Since Issue #1358 `automation_state` is restored on any restart, so these re-arms (#1006/#1045/#1205) also work when the restart comes back after midnight; before, the date gate dropped them.
 - **Status surfaces:** while the fan-off grace runs the Status card shows it (trigger label "WHF turned off"). Once a
   thermostat override replaces the grace, `_grace_status_detail()` appends " — fan held off until H:MM" (hold in the
   future, running trigger not `fan_off`) and, for the occupant's fan run, " — your fan run continues until H:MM"
@@ -1269,7 +1269,10 @@ and that write is still outstanding in this memory (`own_write_echo.outstanding_
 same value after step rounding, inside `OWN_WRITE_ECHO_WINDOW_S`; an arrived echo is consumed, so it no longer counts), the
 verify is not answered yet and re-checks when the window ends (`AutomationEngine._setpoint_echo_wait_s`). Only then -- no
 echo inside the window -- is it a rejection, exactly as before. A thermostat that answered with a different value (clamped
-to its own limit, refused) is a rejection at once, as before. A newer write supersedes the pending check as always (its
+to its own limit, refused) is a rejection at once, as before. A value outside the thermostat's advertised
+`min_temp`/`max_temp` is never sent: it is fitted to the limit first (Issue #1367,
+`_fit_to_thermostat_limits`), so the read-back, the echo memory and the retry all see the value actually sent and the
+thermostat answering with its limit is neither a rejection nor a manual change. A newer write supersedes the pending check as always (its
 own check then waits for its own echo). Tests: `tests/test_setpoint_verify_late_echo_1194e.py` (echo at 45 s and 110 s, no
 echo by 180 s, a different value, an instant echo; heat and cool, both fan modes).
 

@@ -18,7 +18,9 @@
 | How does the Claude AI integration work — circuit breaker, rate limiting, skills, budget? | `ClaudeAPIClient` wraps all API calls with a three-state circuit breaker, per-month budget cap, and exponential-backoff retry. `AISkillRegistry` provides a pluggable skill framework; two skills are registered: `activity_report` and `investigator`. | [§AI Integration Brief](ai-integration.md) |
 | How does multi-zone support work — what is a "zone", and how does the coordinator/API/services resolve which one a call is for? | A zone is a second Climate Advisor config entry, not a new schema. `zone_registry.py` resolves/enumerates zone coordinators by `entry_id`; all 5 HA services require an `entry_id` field; all 21 REST endpoints accept an optional `entry_id` query param with a deterministic fallback. Shipped v0.7.0 (2026-09-01, Issue #796). | [Multi-Zone Spec](multi-zone-spec.md) |
 | Where is the full Tier 3 occupancy dispatch spec — priority resolution, state transitions, setback formulas? | The Territory spec covers all four occupancy modes, GUEST > VACATION > HOME/AWAY priority, toggle entity wiring, 7-row state transition table, setback formulas, and persistence across HA restarts. | [§Occupancy Dispatch Spec](occupancy-dispatch-spec.md) |
+| Which setpoint combinations warn on the setpoints page, and what range limits remain (Issue #1347)? | One 40–95 °F sanity range; thrash/incoherent combinations warn and save on an identical resubmit; pure rules in `setpoint_combinations.py`, vacation resolver `vacation_edges()`. | [Setpoint Combination Warnings](setpoint-combination-warnings.md) |
 | Where is the Tier 3 spec for the chart state log — entry schema, ring buffer contracts, retention, persistence? | The Territory spec covers the raw/hourly/daily entry schemas, append ordering invariant, 8-path load error table, atomic write contract, downsampling tiers, and the 17,520-entry (≈1 year) cap. New `fan_running`/`nat_vent_active` fields and merged Vent bar documented in §Vent Bar Fields (Issue #331). | [Chart State Log — Territory Spec](chart-log-spec.md) |
+| Where is the Tier 3 spec for the forecast archive (persisted hourly-forecast snapshots for error scoring)? | `forecast_archive.py` `ForecastArchive`: entry-scoped JSON, one snapshot per local hour, 72 h horizon, 365-day retention, recorded from `_refresh_hourly_forecast()` on successful fetches only; `get_snapshots()` is the R1 read contract. | [Forecast Archive Spec](forecast-archive-spec.md) |
 | Where is the Tier 3 spec for the Activity Report per-event table — event vocabulary, setpoint convention, renderer runbook? | The Territory spec covers the catalogued event types in 6 groups (authoritative count lives in its Event Catalog; every `EVENT_RENDERERS` key has a row, test-enforced), `_format_band_setpoint` single-setpoint convention, `EVENT_RENDERERS` registry, `_default_renderer` contract, dedup mechanics, and the four-step runbook for adding a new renderer. | [Activity Report Table Spec](activity-report-table.md) |
 | What replaced the ClimateSimulator and how does the production harness work? | Issue #236 eliminated the standalone simulator engine. `tools/sim_harness/` drives the real `AutomationEngine` headless via FakeHass + FakeScheduler. `tools/simulate.py` is now a CLI/MANIFEST shell only. | [Sim Harness Brief](sim-harness-brief.md) |
 | What are the full contracts for FakeHass, FakeScheduler, run_production, and outcomes? | FakeHass service-bus interception + state-feedback loop; FakeScheduler virtual clock patching contract; run_production event dispatch table including predicted_indoor ODE re-classification; outcomes custom assertion types. | [Sim Harness Spec](sim-harness-spec.md) |
@@ -52,6 +54,7 @@ custom_components/climate_advisor/
 ├── claude_api.py        # Centralized Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking. Provides async_request() for all AI features.
 ├── ai_skills.py         # AI skills framework: lightweight registry for pluggable AI analysis capabilities. Skills register a context builder, response parser, and optional fallback.
 ├── chart_log.py         # Chart state log: persistent 1-year ring buffer of HVAC/fan/temp data points and event markers, used by the Temperature Forecast chart.
+├── forecast_archive.py  # Forecast archive (Issue #1230 R0): persisted hourly-forecast snapshots, one per local hour, for forecast-error scoring. Record-only; entry-scoped JSON. See forecast-archive-spec.md.
 ├── repairs.py           # HA Repairs integration: surfaces actionable fix prompts when CA detects config or data problems.
 ├── ai_skills_investigator.py  # The sole registered AI skill ("investigator"): system prompt, response parser, deterministic fallback, thin context-assembly orchestrator. Serves both silent/scheduled narration and on-demand investigation — the former separate "Activity Report" skill (ai_skills_activity.py) was retired and merged into this one, Issue #563.
 ├── ai_skills_context.py  # ContextProviderRegistry + all 15 context providers the investigator's context is assembled from, including the event-timeline/renderer functions ported from the retired ai_skills_activity.py.
@@ -108,7 +111,7 @@ custom_components/climate_advisor/
 │
 │                         # --- Multi-zone support (Issue #796, v0.7.0) ---
 ├── zone_registry.py       # get_coordinator()/iter_coordinators()/get_default_coordinator()/list_zones() — resolves/enumerates zone coordinators by entry_id. See Multi-Zone Spec.
-├── storage_paths.py       # resolve_entry_scoped_path()/migrate_legacy_storage_file() — entry-scoped persistence filenames for learning.py/state.py/chart_log.py. See Multi-Zone Spec.
+├── storage_paths.py       # resolve_entry_scoped_path()/migrate_legacy_storage_file() — entry-scoped persistence filenames for learning.py/state.py/chart_log.py/forecast_archive.py; remove_entry_scoped_files() deletes (with const.ENTRY_SCOPED_FILES) a removed zone's files (0.9.1, State Persistence spec). See Multi-Zone Spec.
 ├── diagnostics.py         # Native HA diagnostics download hook (async_get_diagnostics_payload()).
 ├── diagnostic_snapshot.py # Shared redacted diagnostic snapshot: build_diagnostic_snapshot() (thermostat live attributes + parsed capabilities + last_command block), recent_hvac_events(), redact_sensitive(). Consumed by diagnostics.py, the api.py log downloads and the AI investigator (Issue #1049).
 ├── incident_payload.py    # Shared `incident_detected` payload builder (build_incident_payload) and climate-error classifier (is_climate_validation_error) used by both the coordinator and the engine emitters (Issue #1049). Tier 2: incident-payload-brief.md.
@@ -396,6 +399,12 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 - Retention cap: 365 days rolling (~17,500 entries ≈ 2MB)
 - Downsampling: raw points ≤3 days; hourly averages 4–30 days; daily summaries >30 days
 - Storage: `climate_advisor_chart_log.json` in HA config dir
+- Row fields added in 0.9.1 (Issue #1230 R0): `indoor_sensors` (per-sensor °F map; see [Chart Log Spec](chart-log-spec.md#indoor-sensors-field-issue-1230-r0))
+
+### Forecast Archive Parameters
+- Snapshot cadence: at most one per local clock hour (latest changed fetch in the hour wins; an unchanged refetch writes nothing), only from a successful fetch that returned entries
+- Horizon: 72 hours from the issue hour; retention 365 days (~3.9 MB)
+- Storage: `climate_advisor_forecast_archive_<entry_id>.json` in HA config dir (see [Forecast Archive Spec](forecast-archive-spec.md))
 
 ## Comfort Edge Selector (Issue #1066; settling guard Issue #1073)
 
@@ -441,6 +450,8 @@ INFO  [DRY RUN] Would set HVAC mode to cool — daily classification — hot day
 INFO  [DRY RUN] Would set temperature to 72°F — bedtime — heat setback (comfort 70 - 4 + modifier 2)
 INFO  [DRY RUN] Would send notification: Climate Advisor — 🏠 Welcome home! ...
 ```
+
+**Restart behavior (Issue #1349):** the person who switched Automation off expects it to stay off through any Home Assistant restart, including an overnight outage that comes back after midnight. `automation_enabled` and the engine `dry_run` are restored before the state file's date check; only a missing, corrupt or version-mismatched state file brings automation back on. See [state-persistence.md](state-persistence.md#restore-across-the-date-boundary-issues-1349-1354-1360).
 
 ### Implementation
 
@@ -638,7 +649,7 @@ unloads the way HA does via `build_coordinator.async_unload_entry_like_ha()`.
 
 | Method | Trigger | Behaviour |
 |--------|---------|-----------|
-| `handle_occupancy_vacation(active: bool)` | Vacation toggle changes | `active=True`: applies setback + `VACATION_SETBACK_EXTRA` offset. `active=False`: restores comfort setpoint. Logs mode change; respects dry-run guard. |
+| `handle_occupancy_vacation(active: bool)` | Vacation toggle changes | `active=True`: applies the vacation band (`setpoint_combinations.vacation_edges()`: the optional `vacation_heat`/`vacation_cool`, else setback ± `VACATION_SETBACK_EXTRA`; Issue #1347). `active=False`: restores comfort setpoint. Logs mode change; respects dry-run guard. |
 | `handle_occupancy_guest(active: bool)` | Guest toggle changes | `active=True`: sets comfort setpoint immediately, disables all setback paths. `active=False`: re-evaluates current occupancy state and applies appropriate setpoint. |
 | `handle_occupancy_home(home: bool)` | Home/Away toggle changes | Delegates to existing away/return logic with the configured setback delay. |
 

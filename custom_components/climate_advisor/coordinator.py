@@ -50,6 +50,7 @@ from .automation import (
     compute_pre_cool_target,
     fallback_edges_without_classification,
     hvac_outcome_label,
+    pre_cool_sleep_window_config,
     resolve_active_band,
     resolve_pre_cool_modifier,
 )
@@ -258,7 +259,6 @@ from .const import (
     THRESHOLD_HOT,
     THRESHOLD_MILD,
     THRESHOLD_WARM,
-    VACATION_SETBACK_EXTRA,
     VERSION,
     is_availability_recovery,
     is_unavailable_state,
@@ -285,6 +285,7 @@ from .fan_status import (
     remote_event_is_echo_of,
     resolve_untracked_fan_status,
 )
+from .forecast_archive import ForecastArchive
 from .hvac_action import (
     is_hvac_action_active,
     is_hvac_compressor_active,
@@ -292,7 +293,7 @@ from .hvac_action import (
     thermostat_reports_running,
 )
 from .incident_payload import build_incident_payload
-from .indoor_temp import IndoorTempReading, resolve_indoor_temp_with_provenance
+from .indoor_temp import IndoorTempReading, read_indoor_sensors_f, resolve_indoor_temp_with_provenance
 from .invariant_watchdog import (
     LEVEL_ALERT,
     PROMISES,
@@ -344,6 +345,7 @@ from .scheduler import (
     resolve_tou_away_vacation_phase,
     resolve_tou_phase,
 )
+from .setpoint_combinations import vacation_edges
 from .state import StatePersistence
 from .swing import (
     build_swing_audit_record,
@@ -470,6 +472,11 @@ _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
     "upper",
     "indoor_primary",
 )
+# Issue #1230 R0: chart-log keys that get_chart_data() deliberately REMOVES from ``state_log``. ``indoor_sensors`` is a
+# nested {entity_id: degrees F} mapping for the v4 thermal model (read from the raw file); no frontend or
+# post-conversion reader uses it, so stripping (not converting) guarantees a Celsius state_log can never carry a stray F
+# value and keeps the 24h/3d raw payload small. tests/test_chart_celsius.py requires every dict kwarg here.
+_CHART_LOG_STATE_LOG_STRIPPED_KEYS: Final[tuple[str, ...]] = ("indoor_sensors",)
 
 
 @dataclass
@@ -508,16 +515,18 @@ _AWAY_ACTION_MESSAGES: tuple[str, ...] = (
     "Nothing to do — even the thermostat's taking it easy.",
     "Away mode: the house is behaving better than usual.",
 )
+# Issue #1369: no "deep" here -- with the #1347 separate vacation setpoints a vacation band can be
+# as mild as (or milder than) away, so these lines only claim what is always true.
 _VACATION_ACTION_MESSAGES: tuple[str, ...] = (
-    "Vacation mode: deep setback engaged, nothing for you to do.",
+    "Vacation mode: your vacation temperatures are set, nothing for you to do.",
     "On vacation. The thermostat is unbothered.",
-    "Deep setback active — the house is coasting.",
+    "Vacation temperatures active — the house is coasting.",
     "Nothing needed here. Go be on vacation.",
     "Setback engaged. This message is the only work being done.",
     "Vacation mode — the house is on autopilot, saving you money while you're gone.",
     "Go have fun. The thermostat's got the boring part.",
     "On vacation — sit back, we're saving energy for you.",
-    "Deep setback engaged. The house is basically hibernating politely.",
+    "Vacation temperatures engaged. The house is basically hibernating politely.",
     "Vacation: lights out, temps relaxed, wallet happy.",
 )
 
@@ -789,6 +798,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._chart_log = ChartStateLog(
             Path(hass.config.config_dir), max_days=CHART_LOG_MAX_DAYS, entry_id=self._entry_id
         )
+        # Issue #1230 R0: persisted record of what the hourly forecast said at each issue time. Record-only
+        # (no automation reads it). load() is blocking -> async_restore_state(), like chart_log.
+        self._forecast_archive = ForecastArchive(Path(hass.config.config_dir), entry_id=self._entry_id)
         self.learning = LearningEngine(
             Path(hass.config.config_dir), entry_id=self._entry_id, temp_unit=config.get("temp_unit", "fahrenheit")
         )
@@ -1272,7 +1284,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Listeners: occupancy toggles
         self._subscribe_occupancy_listeners()
+        _restored_engine_mode = self.automation_engine._occupancy_mode
         self._occupancy_mode = self._compute_occupancy_mode()
+        # Issue #1354: the live toggles win over a restored mode (the engine is single, no shadow engine to sync).
+        # A restore from another day no longer carries the mode, and a same-day one may be stale.
+        self.automation_engine.set_occupancy_mode(self._occupancy_mode)
+        if _restored_engine_mode != self._occupancy_mode:
+            _LOGGER.info(
+                "Occupancy at startup: engine %s -> live toggles %s", _restored_engine_mode, self._occupancy_mode
+            )
+        if self._occupancy_mode not in {OCCUPANCY_HOME, OCCUPANCY_GUEST} and self._occupancy_away_since is None:
+            # Count away minutes from startup. No 15-minute away timer and no handle_occupancy_*() here: the
+            # setback reaches the thermostat through the normal plan application (startup coalesce).
+            self._occupancy_away_since = dt_util.now()
 
         # Issue #1256: startup counts as a setpoint change for swing sampling (before the listener exists).
         self._stamp_setpoint_change_at_startup(dt_util.now())
@@ -1864,6 +1888,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._ai_client_config = None
         # Issue #543: chart_log.load() does blocking file I/O — offload to executor.
         await self._executor_job(self._chart_log.load)
+        # Issue #1230 R0: ForecastArchive.load() never raises (corrupt/missing file -> empty archive).
+        # getattr: partially built coordinators (tests via __new__) have no archive, the same guard
+        # _record_forecast_archive() uses on the record side. Kept in the self.<attr>.<method> shape so the
+        # tests/test_executor_offload.py AST guard still sees it.
+        if getattr(self, "_forecast_archive", None) is not None:
+            await self._executor_job(self._forecast_archive.load)
         await self._executor_job(self.learning.load_state)
         # Restore rejection_log from LearningState (load_state() already validated and capped it)
         loaded_rl = self.learning._state.rejection_log
@@ -1874,8 +1904,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         else:
             self._rejection_log = {}
         state = await self._executor_job(self._state_persistence.load)
+
+        # Issue #1356: investigation reports are their own file, not part of the state file, so they load on
+        # every restore -- including the one with no state file at all (before the `if not state` return).
+        if self.claude_client:
+            await self._executor_job(self._load_investigation_reports)
+
         if not state:
             _LOGGER.debug("No persisted state found — starting fresh")
+            # Issue #1357: a restart with no state file is still a restart; classify and record it.
+            self._classify_restart_and_mark()
             return
 
         today_str = dt_util.now().strftime("%Y-%m-%d")
@@ -1928,16 +1966,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except TypeError, ValueError:
             self.consecutive_failure_count = 0
 
-        if state_date != today_str:
-            _LOGGER.debug(
-                "Persisted state is from %s (today is %s) — starting fresh",
-                state_date,
-                today_str,
+        # Issue #1349: observe-only (the Automation switch) is the occupant's own setting, not
+        # "today's" data, so it is restored regardless of date, like the health fields above. Below
+        # the date gate it was skipped whenever HA came back on a later calendar day (an overnight
+        # outage), and Climate Advisor took control of the thermostat after the startup window.
+        self._automation_enabled = state.get("automation_enabled", True)
+        self.automation_engine.dry_run = not self._automation_enabled
+        if not self._automation_enabled:
+            _LOGGER.info(
+                "Observe-only mode restored (automation off) from state saved %s",
+                state.get("last_saved"),
             )
-            return
-
-        # Same-day restore
-        _LOGGER.info("Restoring same-day state from %s", state.get("last_saved"))
 
         # Issue #1015: nothing is converted on restore — history is stored in internal °F.
         # What is wrong are samples taken while the configured unit disagreed with the
@@ -2001,6 +2040,71 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 if getattr(self, "automation_engine", None) is not None:
                     self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
+
+        # Restore the event log ring buffer (Issue #1357: any restart). Issue #1362: BEFORE the engine's
+        # restore_state() below, which re-arms a fan-off grace and emits grace_started; restoring the log
+        # afterwards replaced the buffer and dropped that row.
+        saved_log = state.get("event_log")
+        if isinstance(saved_log, list):
+            self._event_log = _prune_event_log(saved_log, dt_util.now())
+
+        # Automation state. restore_state() does not restore _natural_vent_active or the classification
+        # (its own documented clean-slate design); the fan-activity hints it keeps feed
+        # reconcile_fan_on_startup().
+        auto_state = state.get("automation_state", {})
+        if auto_state:
+            self.automation_engine.restore_state(auto_state)
+
+        # Grace state is cleared by restore_state() (clean-slate design, Issue #282).
+        # The coordinator does not reschedule grace timers on restart.
+        # Issue #1358: restored on any restart, not only a same-day one (before the date gate).
+
+        # Chart_log endpoint estimator backfill flags (Issue #137)
+        self._passive_k_backfilled = bool(state.get("passive_k_backfilled", False))
+        # Issue #587: new flag names (not vent_k_backfilled) — see __init__ comment.
+        self._vent_window_k_backfilled = bool(state.get("vent_window_k_backfilled", False))
+        self._vent_fan_k_backfilled = bool(state.get("vent_fan_k_backfilled", False))
+        # Dual-estimator backfill flags (v2)
+        self._passive_k_backfill_v2 = bool(state.get("passive_k_backfill_v2", False))
+        self._vent_window_k_backfill_v2 = bool(state.get("vent_window_k_backfill_v2", False))
+        self._vent_fan_k_backfill_v2 = bool(state.get("vent_fan_k_backfill_v2", False))
+        # Solar phase offset backfill flag (Issue #147)
+        self._solar_phase_backfill = bool(state.get("solar_phase_backfill", False))
+        self._solar_phase_ac_backfill = bool(state.get("solar_phase_ac_backfill", False))  # Issue #312
+        # Periodic daily re-fit tracker (Issue #310)
+        _fit_date_str = state.get("last_solar_phase_fit_date")
+        self._last_solar_phase_fit_date = date.fromisoformat(_fit_date_str) if _fit_date_str else None
+
+        # Prediction archive (Issue #1359): time-stamped (epoch keys) and self-expiring, so restored on any
+        # restart. Entries older than the 7-day expiry used in the update cycle are dropped.
+        raw_archive = None if unit_changed else state.get("pred_archive")
+        if isinstance(raw_archive, dict):
+            restored: dict[int, float] = {}
+            for k, v in raw_archive.items():
+                try:
+                    restored[int(k)] = float(v)
+                except ValueError, TypeError:
+                    continue
+            _archive_expire_cutoff = int((dt_util.now() - timedelta(days=7)).timestamp())
+            self._pred_archive = {k: v for k, v in restored.items() if k >= _archive_expire_cutoff}
+
+        # Issue #1015: emitted after the event-log restore above (which replaces the
+        # in-memory buffer) so the event survives into the persisted log.
+        if _unit_change_payload is not None:
+            self._emit_event("unit_changed", _unit_change_payload)
+
+        self._classify_restart_and_mark()
+
+        if state_date != today_str:
+            _LOGGER.info(
+                "Persisted state is from %s (today is %s) — settings and history restored; today's plan starts fresh",
+                state_date,
+                today_str,
+            )
+            return
+
+        # ── Same-day only: data whose meaning is "today" ──
+        _LOGGER.info("Restoring same-day state from %s", state.get("last_saved"))
 
         # Classification
         cls_data = None if unit_changed else state.get("classification")
@@ -2103,24 +2207,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except TypeError, ValueError:
             self._briefing_evening_open_time = None
 
-        # Automation state
-        auto_state = state.get("automation_state", {})
-        if auto_state:
-            self.automation_engine.restore_state(auto_state)
-            # Issue #615: restore the same fan-activity hints onto the shadow engine —
-            # now load-bearing since reconcile_fan_on_startup() (which reads them) is
-            # mirrored too. Still does not restore _natural_vent_active or
-            # _current_classification on either engine (restore_state()'s own
-            # documented clean-slate design).
-
-        # Grace state is cleared by restore_state() (clean-slate design, Issue #282).
-        # The coordinator does not reschedule grace timers on restart.
-
-        # Observe-only mode
-        self._automation_enabled = state.get("automation_enabled", True)
-        self.automation_engine.dry_run = not self._automation_enabled
-
-        # Occupancy state — sync to engine so guards are active from startup (Issue #85)
+        # Occupancy state (same-day only; async_setup() then lets the live toggles win, Issue #1354) —
+        # sync to engine so guards are active from startup (Issue #85)
         self._occupancy_mode = state.get("occupancy_mode", OCCUPANCY_HOME)
         self.automation_engine.set_occupancy_mode(self._occupancy_mode)
         away_since = state.get("occupancy_away_since")
@@ -2130,47 +2218,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             except ValueError, TypeError:
                 self._occupancy_away_since = None
 
-        # Chart_log endpoint estimator backfill flags (Issue #137)
-        self._passive_k_backfilled = bool(state.get("passive_k_backfilled", False))
-        # Issue #587: new flag names (not vent_k_backfilled) — see __init__ comment.
-        self._vent_window_k_backfilled = bool(state.get("vent_window_k_backfilled", False))
-        self._vent_fan_k_backfilled = bool(state.get("vent_fan_k_backfilled", False))
-        # Dual-estimator backfill flags (v2)
-        self._passive_k_backfill_v2 = bool(state.get("passive_k_backfill_v2", False))
-        self._vent_window_k_backfill_v2 = bool(state.get("vent_window_k_backfill_v2", False))
-        self._vent_fan_k_backfill_v2 = bool(state.get("vent_fan_k_backfill_v2", False))
-        # Solar phase offset backfill flag (Issue #147)
-        self._solar_phase_backfill = bool(state.get("solar_phase_backfill", False))
-        self._solar_phase_ac_backfill = bool(state.get("solar_phase_ac_backfill", False))  # Issue #312
-        # Periodic daily re-fit tracker (Issue #310)
-        _fit_date_str = state.get("last_solar_phase_fit_date")
-        self._last_solar_phase_fit_date = date.fromisoformat(_fit_date_str) if _fit_date_str else None
+        _LOGGER.info("State restore complete")
 
-        # Prediction archive — restore only on same-day restores (already gated above)
-        raw_archive = None if unit_changed else state.get("pred_archive")
-        if isinstance(raw_archive, dict):
-            restored: dict[int, float] = {}
-            for k, v in raw_archive.items():
-                try:
-                    restored[int(k)] = float(v)
-                except ValueError, TypeError:
-                    continue
-            self._pred_archive = restored
+    def _classify_restart_and_mark(self) -> None:
+        """Classify why we restarted, emit ``system_restarted``, and reset the shutdown markers (Issues #403, #1357).
 
-        # Load AI report history if AI subsystem is active
-        if self.claude_client:
-            await self._executor_job(self._load_investigation_reports)
-
-        # Restore event log ring buffer and emit restart boundary marker
-        saved_log = state.get("event_log")
-        if isinstance(saved_log, list):
-            self._event_log = _prune_event_log(saved_log, dt_util.now())
-
-        # Issue #1015: emitted after the event-log restore above (which replaces the
-        # in-memory buffer) so the event survives into the persisted log.
-        if _unit_change_payload is not None:
-            self._emit_event("unit_changed", _unit_change_payload)
-
+        Runs on every restore, including a restore with no state file or a state file from another day.
+        """
         # Restart-cause classification (Issue #403): compare the persisted last-shutdown
         # version against VERSION, and check whether the prior shutdown was clean.
         _last_shutdown_version = self.learning._state.last_shutdown_version
@@ -2207,8 +2261,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Not persisted here — it will be written on the next save_state() call.
         self.learning._state.clean_shutdown = False
         self.learning._state.last_shutdown_kind = None
-
-        _LOGGER.info("State restore complete")
 
     def _build_state_dict(self) -> dict[str, Any]:
         """Serialize current operational state for persistence."""
@@ -3872,6 +3924,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         lower=_band_lower_cc,
                         upper=_band_upper_cc,
                         nat_vent_target=self._nat_vent_target_now(),
+                        indoor_sensors=self._read_chart_indoor_sensors(),
                     )
 
             # Issue #968/#1018: validate the thermostat's reported unit (latched, once checkable).
@@ -4345,7 +4398,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _grace_on = bool(_ae_cmd._grace_active)
                 _override_on = bool(_ae_cmd._fan_override_active)
                 _last_cmd = self._last_commanded_fan_state
-                if _desired_on and _last_cmd is not True and not _grace_on and not _override_on:
+                # Issue #1370 (P5): no on-command while the indoor reading is unreadable. This path bypasses
+                # _activate_fan(), so it needs its own refusal; for a command-only fan the re-send is a real
+                # start whenever someone switched the fan off at the wall. The off assert is never refused.
+                _blind = self._get_indoor_temp() is None
+                if _desired_on and _last_cmd is not True and not _grace_on and not _override_on and _blind:
+                    _LOGGER.info(
+                        "Fan command-only assert: desired=on skipped — indoor temperature unreadable (fan_entity=%s)",
+                        self.config.get(CONF_FAN_ENTITY, ""),
+                    )
+                elif _desired_on and _last_cmd is not True and not _grace_on and not _override_on:
                     _LOGGER.info(
                         "Fan command-only assert: desired=on last_commanded=%s → issuing on command (fan_entity=%s)",
                         _last_cmd,
@@ -4548,6 +4610,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     lower=_band_lower_poll,
                     upper=_band_upper_poll,
                     nat_vent_target=self._nat_vent_target_now(),
+                    indoor_sensors=self._read_chart_indoor_sensors(),
                 )
                 await self._executor_job(self._chart_log.save)
                 _LOGGER.debug(
@@ -4874,6 +4937,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             else self.config.get("climate_entity")
         )
 
+    def _read_chart_indoor_sensors(self) -> dict[str, float | None]:
+        """Every configured indoor sensor's reading for chart_log's ``indoor_sensors`` (Issue #1230 R0).
+
+        ``{entity_id: internal degrees F (2 dp) or None}`` for the climate entity, ``indoor_temp_entity`` and
+        ``sleep_indoor_temp_entity`` (when configured), read on every row regardless of the sleep window or which source
+        is in use, under the resolver's own parse/plausibility/stale rules (``indoor_temp.read_indoor_sensors_f``).
+        Pure read: no events, nothing above DEBUG; never raises (an unreadable config yields ``{}``).
+        """
+        try:
+            return read_indoor_sensors_f(
+                hass=self.hass,
+                unit=self.config.get("temp_unit", "fahrenheit"),
+                climate_entity=self.config.get("climate_entity"),
+                indoor_temp_entity=self.config.get("indoor_temp_entity"),
+                sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
+            )
+        except Exception:  # noqa: BLE001 - a chart row must never fail on the sensor snapshot
+            _LOGGER.debug("chart_log: indoor sensor snapshot failed", exc_info=True)
+            return {}
+
     def _zone_log_id(self) -> str:
         """Zone identifier for log lines: the config entry id, else the climate entity (Issue #1233)."""
         return self.zone_label or self.config.get("climate_entity") or "unknown"
@@ -5016,6 +5099,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._hourly_forecast_temps = kept
             self._note_hourly_forecast_cache(kept)
         self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
+        if fetched:
+            # Issue #1230 R0: archive ONLY a successful fetch that returned entries - never the kept-forecast
+            # branch above (an outage snapshot would re-record old data under a new issue time).
+            try:
+                await self._record_forecast_archive(fetched)
+            except Exception:  # noqa: BLE001 - the archive must never break a coordinator cycle
+                _LOGGER.warning("Forecast archive: could not record snapshot", exc_info=True)
+
+    async def _record_forecast_archive(self, fetched: list) -> None:
+        """Archive the hourly forecast just fetched (Issue #1230 R0).
+
+        May raise; the caller (``_refresh_hourly_forecast``) swallows and logs, so the archive can
+        never break a cycle.
+
+        ``fetched`` is the list ``_get_hourly_forecast_data()`` returned: real provider hours, already
+        normalised to internal °F at that source (Issue #1015) - passed through, never converted again.
+        Entries flagged ``synthetic`` (the chart's extended days) are excluded defensively. The in-memory
+        record is cheap; only the file write goes to the executor, and only when the archive changed.
+        """
+        archive = getattr(self, "_forecast_archive", None)
+        if archive is None:
+            return
+        real = [e for e in fetched if isinstance(e, dict) and not e.get("synthetic")]
+        hourly = _parse_forecast_entries(real)
+        if hourly and archive.record(dt_util.now(), str(self.config.get("weather_entity", "")), hourly):
+            await self._executor_job(self._forecast_archive.save)  # self.<attr> shape: AST offload guard
 
     def _note_hourly_forecast_cache(self, kept: list[dict]) -> None:
         """Log, once per change, whether an outage is covered by the kept forecast or has run past it (#1337)."""
@@ -7315,6 +7424,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     lower=_band_lower_ov,
                     upper=_band_upper_ov,
                     nat_vent_target=self._nat_vent_target_now(),
+                    indoor_sensors=self._read_chart_indoor_sensors(),
                 )
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
@@ -7455,6 +7565,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     lower=_band_lower_hac,
                     upper=_band_upper_hac,
                     nat_vent_target=self._nat_vent_target_now(),
+                    indoor_sensors=self._read_chart_indoor_sensors(),
                 )
                 await self._executor_job(self._chart_log.save)
 
@@ -13639,6 +13750,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         def _conv_log_entry(e: dict) -> dict:
             e = dict(e)
+            for k in _CHART_LOG_STATE_LOG_STRIPPED_KEYS:
+                e.pop(k, None)
             for k in _CHART_LOG_CONVERTED_TEMP_KEYS:
                 if e.get(k) is not None:
                     e[k] = _conv(e[k])
@@ -14707,14 +14820,24 @@ def _compute_pre_cool_trigger_time_pure(
         if wct_dt < now:
             wct_dt = wct_dt + timedelta(days=1)
         trigger = instant_after(PRE_COOL_POST_NAT_VENT_DELAY_MINUTES * 60.0, now=wct_dt)  # Issue #1199: UTC
+        # Issue #1371: pre-cool is an OVERNIGHT banking phase. The classifier's window close is 10:00 on a warm
+        # day and 17:00 on a mild one, so "close + 30 min" used to fire at 10:30 AM / 5:30 PM while people were
+        # awake: it armed the sleep band's lowered ceiling for one cycle and the thermostat flipped
+        # cool -> heat -> cool. The window-close trigger now counts only when it lands in the sleep window.
+        if _in_sleep_window(dt_util.as_local(trigger), pre_cool_sleep_window_config(config)):
+            _LOGGER.info(
+                "Pre-cool scheduled for %s (nat-vent close %s + %dmin); target %.1f°F",
+                dt_util.as_local(trigger).strftime("%H:%M"),
+                c.window_close_time.strftime("%H:%M"),
+                PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
+                pre_cool_target,
+            )
+            return trigger
         _LOGGER.info(
-            "Pre-cool scheduled for %s (nat-vent close %s + %dmin); target %.1f°F",
-            dt_util.as_local(trigger).strftime("%H:%M"),
+            "Pre-cool: nat-vent close %s + %dmin is during awake hours; using the overnight trigger instead",
             c.window_close_time.strftime("%H:%M"),
             PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
-            pre_cool_target,
         )
-        return trigger
 
     # Fallback: wake_time - offset
     wake_str = config.get("wake_time", "06:30")
@@ -14723,7 +14846,30 @@ def _compute_pre_cool_trigger_time_pure(
     # If wake_time already passed, schedule for tomorrow night
     if wake_dt < now:
         wake_dt = wake_dt + timedelta(days=1)
-    trigger = instant_after(-PRE_COOL_WAKE_OFFSET_HOURS * 3600.0, now=wake_dt)  # Issue #1199: UTC
+
+    def _night_trigger(wake_at: datetime) -> datetime:
+        trig = instant_after(-PRE_COOL_WAKE_OFFSET_HOURS * 3600.0, now=wake_at)  # Issue #1199: UTC
+        # Issue #1371: never earlier than bedtime (a short night, e.g. 02:00 -> 05:00, would put wake - 4 h
+        # before the occupant is asleep). Bedtime is the last sleep_time before this wake time.
+        try:
+            _sp = str(config.get("sleep_time", "22:30")).split(":")
+            sleep_dt = dt_util.as_local(
+                datetime.combine(wake_at.date(), time(int(_sp[0]), int(_sp[1]))).replace(tzinfo=None)
+            )
+            if sleep_dt >= wake_at:
+                sleep_dt = sleep_dt - timedelta(days=1)
+            if trig < sleep_dt:
+                trig = dt_util.as_utc(sleep_dt)
+        except ValueError, IndexError:
+            pass  # malformed sleep_time: keep wake - offset
+        return trig
+
+    trigger = _night_trigger(wake_dt)
+    # Issue #1371: scheduled before wake (e.g. the 05:00 classification), "wake - 4 h" today is already in the
+    # past, and the caller then skipped pre-cool altogether. The night that banks for the coming day is the
+    # NEXT one, so move one day ahead.
+    if trigger <= now:
+        trigger = _night_trigger(wake_dt + timedelta(days=1))
     _LOGGER.info(
         "Pre-cool scheduled for %s (wake_time %s - %.0fh fallback); target %.1f°F",
         dt_util.as_local(trigger).strftime("%H:%M"),
@@ -14752,7 +14898,8 @@ def _compute_target_band_schedule(
 
     Logic per timestamp:
     - Away today: flat setback band ``[setback_heat, setback_cool]``.
-    - Vacation (any day): deep setback band (setback ± VACATION_SETBACK_EXTRA).
+    - Vacation (any day): deep setback band from setpoint_combinations.vacation_edges()
+      (the optional vacation setpoints, else setback ± VACATION_SETBACK_EXTRA; Issue #1347).
 
     The trend ``setback_modifier`` is deliberately NOT applied to the away/vacation edges (Issue #1076):
     the engine's ``select_comfort_band()`` does not apply it either (dropped by #249 P3), and this chart
@@ -14767,8 +14914,10 @@ def _compute_target_band_schedule(
     in chronological order.
 
     When thermal_model and classification are both provided, sleep_heat is derived
-    via compute_bedtime_setback() (the briefing's resolver; the engine arms the raw sleep_heat/cool, which
-    only differs when a sleep temp is outside the setback limits -- Issue #1089).
+    via compute_bedtime_setback() (the briefing's resolver). An explicitly configured sleep_heat/cool is
+    returned unclamped, so the chart shows the same raw sleep value the engine's select_comfort_band()
+    arms, even when sleep heat is below away heat or sleep cool above away cool (Issue #1366, closing
+    the #1089 divergence).
 
     ``tou_precondition_window`` (Issue #786): ``(window_start, window_end, target, mode)``
     — when a timestamp falls in ``[window_start, window_end)``, the resolved TOU banking
@@ -14800,8 +14949,8 @@ def _compute_target_band_schedule(
     )
 
     # G1/G2: use compute_bedtime_setback() when thermal model + classification available —
-    # the same sleep value the briefing quotes. NOTE (Issue #1089): the engine's select_comfort_band()
-    # arms the raw sleep_heat/sleep_cool; this only differs when a sleep temp is outside the setback limits.
+    # the same sleep value the briefing quotes. Issue #1366: an explicit sleep_heat/sleep_cool comes back
+    # unclamped, matching the raw value the engine's select_comfort_band() arms (closes #1089).
     if thermal_model is not None and classification is not None:
         _hvac_mode = getattr(classification, "hvac_mode", None)
         if _hvac_mode == "heat":
@@ -14834,8 +14983,7 @@ def _compute_target_band_schedule(
 
         # I5: vacation applies setback to ALL days (not just today); away only applies to today
         if occupancy_mode == OCCUPANCY_VACATION:
-            lower = setback_heat - VACATION_SETBACK_EXTRA
-            upper = setback_cool + VACATION_SETBACK_EXTRA
+            lower, upper = vacation_edges(config)  # Issue #1347: same resolver as the engine
         elif ts_date == now_date and (occupancy_mode == OCCUPANCY_AWAY or (restore_hold and ts <= now)):
             lower = setback_heat
             upper = setback_cool

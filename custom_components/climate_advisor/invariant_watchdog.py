@@ -204,6 +204,11 @@ class PromiseNumbers:
     P6_MAX_FLIPS: int = 2
     P6_WINDOW_MIN: float = 60.0
     P6_OCCUPANT_EXCUSE_MIN: float = 5.0
+    # Issue #1368 (P10 heat_cool_settles, owner thrashed-controls rule G2 "it settles"): more than this many
+    # heat<->cool switches COMMANDED by Climate Advisor inside the window is a thrash. Calibrated on generated days
+    # (docs/household-promises-spec.md, P10). The window is the journal's own 3 h evidence age, so it works at home.
+    P10_MAX_SWITCHES: int = 2
+    P10_WINDOW_MIN: float = 180.0
     P7_MAX_MIN: float = 45.0
     P7_SLACK_F: float = 1.0  # applies to every state OUTSIDE the thermostat-deadband exception below
     # Issue #1260 (owner-approved 2026-11-02): while the thermostat is in the matching mode, idle, set at or inside
@@ -1037,6 +1042,60 @@ def check_p6_mode_flip_rate(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
     return hits
 
 
+# ── P10 heat_cool_settles ──────────────────────────────────────────────────────
+_P10_FAMILIES = ("heat", "cool")
+
+
+def check_p10_heat_cool_settles(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
+    """Climate Advisor does not keep switching the thermostat between heat and cool (Issue #1368, rule G2).
+
+    Counts only switches Climate Advisor COMMANDED: a CA thermostat command into heat or cool while the current
+    family (the last one CA commanded or the occupant chose) is the other one. Pausing through off is not a switch.
+    The occupant's own mode change moves the current family, so CA following the occupant is not a switch, and the
+    occupant's presses are never counted themselves (owner rule A1-A3: one CA overwrite of a missed press is one
+    switch, far below the threshold). Ground truth only: commands sent and modes the thermostat reported.
+    """
+    timeline: list[tuple[datetime, int, str, bool]] = []  # (ts, order, family, commanded_by_ca)
+    for c in inp.commands:
+        mode = (c.mode or "").lower()
+        if c.origin == "ca" and c.target == "thermostat" and mode in _P10_FAMILIES:
+            timeline.append((c.ts, 1, mode, True))
+    by_ts = {r.ts: r for r in inp.readings}
+    for o in occupant_actions(inp):
+        if o.target != "thermostat" or o.what != "mode":
+            continue
+        r = by_ts.get(o.ts)
+        mode = (r.hvac_mode or "").lower() if r is not None else ""
+        if mode in _P10_FAMILIES:
+            timeline.append((o.ts, 0, mode, False))
+    timeline.sort(key=lambda t: (t[0], t[1]))
+    switches: list[datetime] = []
+    family: str | None = None
+    for ts, _order, mode, by_ca in timeline:
+        if by_ca and family is not None and mode != family:
+            switches.append(ts)
+        family = mode
+    hits: list[Hit] = []
+    n = NUMBERS.P10_MAX_SWITCHES
+    window = timedelta(minutes=NUMBERS.P10_WINDOW_MIN)
+    for i in range(len(switches)):
+        count = i - bisect_left(switches, switches[i] - window) + 1
+        if count > n:
+            hits.append(
+                Hit(
+                    promise="heat_cool_settles",
+                    ts=switches[i],
+                    key=f"heat_cool_settles:{switches[i].isoformat()}",
+                    detail=(
+                        f"Climate Advisor switched the thermostat between heat and cool {count} times "
+                        f"in the past {NUMBERS.P10_WINDOW_MIN / 60.0:g} hours."
+                    ),
+                    evidence=_ev(switches=count, window_min=NUMBERS.P10_WINDOW_MIN),
+                )
+            )
+    return hits
+
+
 # ── P7 comfort_kept ────────────────────────────────────────────────────────────
 def _state_timeline(
     marks: tuple[Mark, ...], on: frozenset[str], off: frozenset[str]
@@ -1289,6 +1348,8 @@ PROMISES: tuple[PromiseSpec, ...] = (
     PromiseSpec(7, "comfort_kept", "7", check_p7_comfort_kept, SEVERITY_WARNING, LEVEL_LOG, excused_p7_comfort_kept),
     # Issue #1144: owner rule 1. 8 is surfaces_agree (test-only, not in this registry).
     PromiseSpec(9, "whf_sealed", "9", check_p9_whf_sealed, SEVERITY_HARD, LEVEL_ALERT),
+    # Issue #1368: owner thrashed-controls rule G2 ("it settles") for heat<->cool. New promises start at log.
+    PromiseSpec(10, "heat_cool_settles", "10", check_p10_heat_cool_settles, SEVERITY_WARNING, LEVEL_LOG),
 )
 
 

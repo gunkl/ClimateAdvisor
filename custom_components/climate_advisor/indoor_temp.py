@@ -211,6 +211,63 @@ def resolve_indoor_temp_with_provenance(
     return IndoorTempReading(primary_val, primary_entity, primary_val, primary_reason, sleep_reason)
 
 
+def read_indoor_sensors_f(
+    *,
+    hass: Any,
+    unit: str,
+    climate_entity: str | None,
+    indoor_temp_entity: str | None = None,
+    sleep_indoor_temp_entity: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, float | None]:
+    """Read EVERY configured indoor temperature source: ``{entity_id: temp_f_or_None}`` (chart_log ``indoor_sensors``).
+
+    Occupant-first: the v4 thermal model fits one line per indoor sensor, so each chart-log row must carry what every
+    configured sensor read, not only the comfort-facing value (which swaps to the bedroom sensor in the sleep window).
+    Sources, in order and de-duplicated: the climate entity's ``current_temperature``, ``indoor_temp_entity`` (sensor or
+    input_number) and ``sleep_indoor_temp_entity``. To add a per-room sensor list later, extend ``sources`` below.
+
+    Each source is read under the SAME rules as the resolver (``read_sensor_state_f`` / ``read_attribute_temp_f``, the
+    ``_check_plausible`` band, and the ``INDOOR_SENSOR_STALE_HOURS`` stale rule, exempting ``input_number.*`` helpers);
+    a failed read is ``None``, never a placeholder. Values are internal degrees F rounded to 2 decimals (a 0.18 F-step
+    sensor keeps its resolution). Independent of the sleep window and of which source is in use.
+
+    Pure read: no events, nothing above DEBUG (``_refresh_indoor_sensor_health`` already announces failures), safe on an
+    executor thread, never raises (a failing source reads ``None``).
+    """
+    now = now or dt_util.utcnow()
+    sources: list[tuple[str, bool]] = []  # (entity_id, is_climate)
+    if climate_entity:
+        sources.append((climate_entity, True))
+    for extra in (indoor_temp_entity, sleep_indoor_temp_entity):
+        if extra:
+            sources.append((extra, False))
+
+    readings: dict[str, float | None] = {}
+    for entity_id, is_climate in sources:
+        if entity_id in readings:
+            continue
+        value: float | None = None
+        try:
+            state = hass.states.get(entity_id)
+            if is_climate:
+                val_f, reason = read_attribute_temp_f(state, "current_temperature", unit)
+            else:
+                val_f, reason = read_sensor_state_f(state, unit)
+            if reason is None and val_f is not None:
+                checked = _check_plausible(val_f, entity_id)
+                if checked is not None and (
+                    is_climate
+                    or entity_id.startswith("input_number.")
+                    or not is_sensor_stale(state, INDOOR_SENSOR_STALE_HOURS, now)
+                ):
+                    value = round(checked, 2)
+        except Exception:  # noqa: BLE001 - a chart row must never fail on a sensor read
+            _LOGGER.debug("Indoor sensor snapshot read failed for %s", entity_id, exc_info=True)
+        readings[entity_id] = value
+    return readings
+
+
 # Issue #1194 (a): LOG-ONLY memory of the comfort-facing source last logged per zone (keyed by climate entity), so the
 # "using the sleep sensor" line is INFO once per source change and DEBUG on every other call. The remote-sensor outer
 # loop resolves every minute, which made the old per-call INFO ~600 lines a night. Resolution itself stays a pure read:

@@ -42,6 +42,11 @@ from custom_components.climate_advisor.temperature import (  # noqa: E402
 _COORD_LOGGER = "custom_components.climate_advisor.coordinator"
 _FIXED_NOW = datetime(2026, 10, 6, 12, 0, 0)
 _TODAY_STR = _FIXED_NOW.strftime("%Y-%m-%d")
+# Issue #1359: the restore now drops pred_archive entries older than 7 days. The old keys 8/9 (1970 epoch) were
+# only ever valid because the restore kept the archive verbatim, so they are replaced by recent epoch keys.
+_ARCH_KEY_A = int((_FIXED_NOW - timedelta(hours=2)).timestamp())
+_ARCH_KEY_B = int((_FIXED_NOW - timedelta(hours=1)).timestamp())
+_ARCH_RESTORED = {_ARCH_KEY_A: 70.5, _ARCH_KEY_B: 71.0}
 
 
 def _get_coordinator_class():
@@ -293,7 +298,7 @@ def _saved_state(unit_key_present: bool = True, unit=FAHRENHEIT) -> dict:
             "outdoor": [["2026-10-06T08:00:00", 61.0], ["2026-10-06T09:00:00", 63.0]],
             "indoor": [["2026-10-06T08:00:00", 71.0]],
         },
-        "pred_archive": {"8": 70.5, "9": 71.0},
+        "pred_archive": {str(k): v for k, v in _ARCH_RESTORED.items()},
         "today_record": {"date": _TODAY_STR, "day_type": "warm", "trend_direction": "stable"},
         "occupancy_mode": "away",
         "event_log": [{"type": "earlier", "time": _FIXED_NOW.isoformat()}],
@@ -401,7 +406,7 @@ class TestRestoreUnitChange:
         _run_restore(coord, _saved_state(unit=FAHRENHEIT))
         assert len(coord._outdoor_temp_history) == 2
         assert len(coord._indoor_temp_history) == 1
-        assert coord._pred_archive == {8: 70.5, 9: 71.0}
+        assert coord._pred_archive == _ARCH_RESTORED
         assert coord._current_classification is not None
         assert not any(e["type"] == "unit_changed" for e in coord._event_log)
 
@@ -502,7 +507,7 @@ class TestRestoreUnitChange:
         coord = _make_coordinator(CELSIUS)
         _run_restore(coord, _saved_state(unit=bad))
         assert len(coord._outdoor_temp_history) == 2
-        assert coord._pred_archive == {8: 70.5, 9: 71.0}
+        assert coord._pred_archive == _ARCH_RESTORED
         assert not any(e["type"] == "unit_changed" for e in coord._event_log)
 
     def test_stub_without_config_is_noop(self):

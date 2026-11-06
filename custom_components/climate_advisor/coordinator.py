@@ -285,6 +285,7 @@ from .fan_status import (
     remote_event_is_echo_of,
     resolve_untracked_fan_status,
 )
+from .forecast_archive import ForecastArchive
 from .hvac_action import (
     is_hvac_action_active,
     is_hvac_compressor_active,
@@ -789,6 +790,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._chart_log = ChartStateLog(
             Path(hass.config.config_dir), max_days=CHART_LOG_MAX_DAYS, entry_id=self._entry_id
         )
+        # Issue #1230 R0: persisted record of what the hourly forecast said at each issue time. Record-only
+        # (no automation reads it). load() is blocking -> async_restore_state(), like chart_log.
+        self._forecast_archive = ForecastArchive(Path(hass.config.config_dir), entry_id=self._entry_id)
         self.learning = LearningEngine(
             Path(hass.config.config_dir), entry_id=self._entry_id, temp_unit=config.get("temp_unit", "fahrenheit")
         )
@@ -1864,6 +1868,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._ai_client_config = None
         # Issue #543: chart_log.load() does blocking file I/O — offload to executor.
         await self._executor_job(self._chart_log.load)
+        # Issue #1230 R0: ForecastArchive.load() never raises (corrupt/missing file -> empty archive).
+        await self._executor_job(self._forecast_archive.load)
         await self._executor_job(self.learning.load_state)
         # Restore rejection_log from LearningState (load_state() already validated and capped it)
         loaded_rl = self.learning._state.rejection_log
@@ -5016,6 +5022,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._hourly_forecast_temps = kept
             self._note_hourly_forecast_cache(kept)
         self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
+        if fetched:
+            # Issue #1230 R0: archive ONLY a successful fetch that returned entries - never the kept-forecast
+            # branch above (an outage snapshot would re-record old data under a new issue time).
+            try:
+                await self._record_forecast_archive(fetched)
+            except Exception:  # noqa: BLE001 - the archive must never break a coordinator cycle
+                _LOGGER.warning("Forecast archive: could not record snapshot", exc_info=True)
+
+    async def _record_forecast_archive(self, fetched: list) -> None:
+        """Archive the hourly forecast just fetched (Issue #1230 R0).
+
+        May raise; the caller (``_refresh_hourly_forecast``) swallows and logs, so the archive can
+        never break a cycle.
+
+        ``fetched`` is the list ``_get_hourly_forecast_data()`` returned: real provider hours, already
+        normalised to internal °F at that source (Issue #1015) - passed through, never converted again.
+        Entries flagged ``synthetic`` (the chart's extended days) are excluded defensively. The in-memory
+        record is cheap; only the file write goes to the executor, and only when the archive changed.
+        """
+        archive = getattr(self, "_forecast_archive", None)
+        if archive is None:
+            return
+        real = [e for e in fetched if isinstance(e, dict) and not e.get("synthetic")]
+        hourly = _parse_forecast_entries(real)
+        if hourly and archive.record(dt_util.now(), str(self.config.get("weather_entity", "")), hourly):
+            await self._executor_job(archive.save)
 
     def _note_hourly_forecast_cache(self, kept: list[dict]) -> None:
         """Log, once per change, whether an outage is covered by the kept forecast or has run past it (#1337)."""

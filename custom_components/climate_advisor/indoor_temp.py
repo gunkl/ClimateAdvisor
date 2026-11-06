@@ -50,9 +50,11 @@ sensor in use / back on the primary source) fires only when a zone's source chan
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, NamedTuple
 
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -218,6 +220,7 @@ def read_indoor_sensors_f(
     climate_entity: str | None,
     indoor_temp_entity: str | None = None,
     sleep_indoor_temp_entity: str | None = None,
+    companion_entities: Iterable[str] = (),
     now: datetime | None = None,
 ) -> dict[str, float | None]:
     """Read EVERY configured indoor temperature source: ``{entity_id: temp_f_or_None}`` (chart_log ``indoor_sensors``).
@@ -225,7 +228,10 @@ def read_indoor_sensors_f(
     Occupant-first: the v4 thermal model fits one line per indoor sensor, so each chart-log row must carry what every
     configured sensor read, not only the comfort-facing value (which swaps to the bedroom sensor in the sleep window).
     Sources, in order and de-duplicated: the climate entity's ``current_temperature``, ``indoor_temp_entity`` (sensor or
-    input_number) and ``sleep_indoor_temp_entity``. To add a per-room sensor list later, extend ``sources`` below.
+    input_number) and ``sleep_indoor_temp_entity``, then ``companion_entities`` (Issue #1230 R1: the temperature sensors
+    on the climate entity's own device, e.g. a thermostat whose climate attribute is whole degrees but whose device also
+    exposes a 0.18 F-step sensor; found by ``discover_companion_temp_sensors``, passed in so this stays a pure read).
+    Companions are read exactly like any other sensor (same unit conversion, plausibility band and 12 h stale rule).
 
     Each source is read under the SAME rules as the resolver (``read_sensor_state_f`` / ``read_attribute_temp_f``, the
     ``_check_plausible`` band, and the ``INDOOR_SENSOR_STALE_HOURS`` stale rule, exempting ``input_number.*`` helpers);
@@ -239,7 +245,7 @@ def read_indoor_sensors_f(
     sources: list[tuple[str, bool]] = []  # (entity_id, is_climate)
     if climate_entity:
         sources.append((climate_entity, True))
-    for extra in (indoor_temp_entity, sleep_indoor_temp_entity):
+    for extra in (indoor_temp_entity, sleep_indoor_temp_entity, *companion_entities):
         if extra:
             sources.append((extra, False))
 
@@ -266,6 +272,36 @@ def read_indoor_sensors_f(
             _LOGGER.debug("Indoor sensor snapshot read failed for %s", entity_id, exc_info=True)
         readings[entity_id] = value
     return readings
+
+
+def discover_companion_temp_sensors(hass: Any, climate_entity: str | None) -> tuple[str, ...]:
+    """``sensor.*`` temperature entities on the SAME device as ``climate_entity`` (Issue #1230 R1), sorted.
+
+    Occupant-first: many thermostats report ``current_temperature`` in whole degrees while the same device also exposes
+    a finer ``device_class: temperature`` sensor; logging that sensor lets the thermal model see the real heating curve.
+    Reads only the in-memory entity registry (no I/O) and so must run on the event loop. Disabled entities are skipped
+    (``include_disabled_entities=False``); ``device_class`` is the user override else the integration's original class.
+    No climate entity, an unregistered one, or one with no device -> ``()``. Never raises. LOG-ONLY consumer: nothing on
+    a decision path calls this.
+    """
+    if not climate_entity:
+        return ()
+    try:
+        ent_reg = er.async_get(hass)
+        entry = ent_reg.async_get(climate_entity)
+        if entry is None or entry.device_id is None:
+            return ()
+        found = [
+            sibling.entity_id
+            for sibling in er.async_entries_for_device(ent_reg, entry.device_id, include_disabled_entities=False)
+            if sibling.domain == "sensor"
+            and (sibling.device_class or sibling.original_device_class) == "temperature"
+            and sibling.entity_id != climate_entity
+        ]
+        return tuple(sorted(found))
+    except Exception:  # noqa: BLE001 - discovery is best-effort; a chart row must never fail on it
+        _LOGGER.debug("Companion temperature sensor discovery failed for %s", climate_entity, exc_info=True)
+        return ()
 
 
 # Issue #1194 (a): LOG-ONLY memory of the comfort-facing source last logged per zone (keyed by climate entity), so the

@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.2] — 2026-11-06
+
+- Feat #1230 (R1: finer indoor readings for the prediction engine): No change to how Climate Advisor runs your home or what the dashboard shows.
+  - **Your thermostat's finer temperature sensor is now logged:** many thermostats report the room temperature in whole degrees on the main thermostat entity while the same device also has a separate, finer temperature sensor (for example 68.54°F against 69°F). The chart log now records every enabled temperature sensor on your thermostat's device next to the thermostat's own reading, so the prediction engine can learn how your heating cycles and how fast the house warms and cools. Climate Advisor still makes every decision from the same reading as before. Humidity, motion and disabled sensors are ignored, and a sensor that is unavailable is recorded as empty.
+  - **Readings keep their precision:** nothing in the chart log rounds an indoor temperature coarser than the sensor itself reports.
+
 ## [0.9.1] — 2026-11-06
 
 - Includes every fix from 0.8.64 to 0.8.68 on `main`.

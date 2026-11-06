@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -582,6 +582,10 @@ OUTDOOR_SENSOR_STALE_HOURS = 6.0
 # Uncalibrated: 10 days of the install's only dedicated indoor-type sensor showed a max 2 h gap
 # between value-change records (true report cadence unknown) — revisit with real history.
 INDOOR_SENSOR_STALE_HOURS = 12.0
+
+# Issue #1230 R1: how long the coordinator caches the temperature sensors found on the climate entity's own device
+# (chart_log ``indoor_sensors`` companions) before re-reading the in-memory entity registry. Logging only.
+COMPANION_SENSOR_REFRESH_SECONDS = 900.0
 
 # Issue #1194 (a): remote-sensor outer loop. While the comfort-facing indoor reading comes from a REMOTE
 # sensor (today: the bedroom sensor in the sleep window) CA nudges the thermostat's setpoint so the

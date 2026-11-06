@@ -19,6 +19,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from time import monotonic as _monotonic
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
@@ -108,6 +109,7 @@ from .const import (
     COMFORT_STALL_MARGIN_F,
     COMFORT_STALL_REMINDER_SECONDS,
     COMFORT_STALL_SUSTAIN_SECONDS,
+    COMPANION_SENSOR_REFRESH_SECONDS,
     CONF_AI_API_KEY,
     CONF_AI_ENABLED,
     CONF_AUTOMATION_GRACE_PERIOD,
@@ -293,7 +295,12 @@ from .hvac_action import (
     thermostat_reports_running,
 )
 from .incident_payload import build_incident_payload
-from .indoor_temp import IndoorTempReading, read_indoor_sensors_f, resolve_indoor_temp_with_provenance
+from .indoor_temp import (
+    IndoorTempReading,
+    discover_companion_temp_sensors,
+    read_indoor_sensors_f,
+    resolve_indoor_temp_with_provenance,
+)
 from .invariant_watchdog import (
     LEVEL_ALERT,
     PROMISES,
@@ -1053,6 +1060,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # cached (the registry can populate asynchronously at startup — see
         # _resolve_fan_remote_speed_sensor()).
         self._fan_remote_speed_sensor_eid: str | None = None
+        # Issue #1230 R1: temperature sensors on the climate entity's own device (chart_log ``indoor_sensors``), cached
+        # with the monotonic time they were resolved; see ``_companion_temp_sensors``.
+        self._companion_temp_sensors_cache: tuple[tuple[str, ...], float] | None = None
         self._last_violation_check: datetime | None = None
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
@@ -4937,6 +4947,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             else self.config.get("climate_entity")
         )
 
+    def _companion_temp_sensors(self) -> tuple[str, ...]:
+        """Temperature sensors on this zone's climate-entity device, cached (Issue #1230 R1; logging only).
+
+        The entity registry is in memory, so a lookup is cheap, but rows are written from event handlers and a
+        thermostat can fire many state changes a minute, so the answer is cached for
+        ``COMPANION_SENSOR_REFRESH_SECONDS`` (monotonic). Setup and reload build a fresh coordinator, so they always
+        resolve anew; the refresh picks up an entity the occupant enables, disables or renames without a reload and
+        without owning a registry-event listener that would need teardown. Event loop only (registry access).
+        """
+        now = _monotonic()
+        cached = getattr(self, "_companion_temp_sensors_cache", None)  # getattr: bare-object test coordinators
+        if cached is not None and now - cached[1] < COMPANION_SENSOR_REFRESH_SECONDS:
+            return cached[0]
+        found = discover_companion_temp_sensors(self.hass, self.config.get("climate_entity"))
+        self._companion_temp_sensors_cache = (found, now)
+        return found
+
     def _read_chart_indoor_sensors(self) -> dict[str, float | None]:
         """Every configured indoor sensor's reading for chart_log's ``indoor_sensors`` (Issue #1230 R0).
 
@@ -4952,6 +4979,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 climate_entity=self.config.get("climate_entity"),
                 indoor_temp_entity=self.config.get("indoor_temp_entity"),
                 sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
+                companion_entities=self._companion_temp_sensors(),
             )
         except Exception:  # noqa: BLE001 - a chart row must never fail on the sensor snapshot
             _LOGGER.debug("chart_log: indoor sensor snapshot failed", exc_info=True)

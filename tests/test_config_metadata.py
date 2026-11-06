@@ -29,6 +29,7 @@ EXPECTED_KEYS = {
     "outdoor_temp_source",
     "indoor_temp_source",
     "sleep_indoor_temp_entity",
+    "thermostat_companion_sensor",  # Issue #1230 R1b
     "door_window_sensors",
     "sensor_polarity_inverted",
     "sensor_debounce_seconds",

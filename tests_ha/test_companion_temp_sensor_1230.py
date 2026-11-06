@@ -84,3 +84,38 @@ async def test_device_temperature_sensor_is_logged_in_a_chart_row(hass: HomeAssi
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
+
+
+async def test_control_reads_the_finer_sensor_and_falls_back(hass: HomeAssistant, tmp_path) -> None:
+    """Issue #1230 R1b: CA's indoor reading is 68.54 (not the thermostat's 69) once proven, 69 when the sensor drops.
+
+    Occupant view: heat/cool edges and the chart's ``indoor`` see the real temperature instead of 1 F steps, and a
+    dead companion sensor never stalls anything: CA simply goes back to the thermostat's own reading.
+    """
+    climate_id = _seed_entry()["data"]["climate_entity"]
+    _register(hass, climate_id)
+    entry = await _setup_zone(hass, tmp_path)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    assert coordinator._companion.entities == (TEMP,)
+
+    climate_attrs = dict(hass.states.get(climate_id).attributes)
+    hass.states.async_set(climate_id, "heat", {**climate_attrs, "current_temperature": 69})
+    hass.states.async_set(TEMP, "68.54", {"unit_of_measurement": "°F", "device_class": "temperature"})
+
+    assert coordinator._get_indoor_temp() == 68.54
+    assert coordinator.automation_engine._get_indoor_temp_f() == 68.54  # the engine decides on the same value
+    reading = coordinator._get_indoor_temp_with_provenance()
+    assert reading.source_entity == TEMP and reading.primary_value == 68.54
+
+    hass.states.async_set(TEMP, "unavailable")
+    assert coordinator._get_indoor_temp() == 69.0
+    assert coordinator._get_indoor_temp_with_provenance().companion_reason == "unavailable"
+
+    # Back to the finer sensor, then the occupant turns the option off: exactly today's behavior.
+    hass.states.async_set(TEMP, "68.72", {"unit_of_measurement": "°F", "device_class": "temperature"})
+    assert coordinator._get_indoor_temp() == 68.72
+    coordinator.config = {**coordinator.config, "thermostat_companion_sensor": "off"}
+    assert coordinator._get_indoor_temp() == 69.0
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()

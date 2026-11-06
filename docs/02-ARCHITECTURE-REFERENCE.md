@@ -288,6 +288,8 @@ weather_entity: weather.home
 climate_entity: climate.living_room
 outdoor_temp_entity: sensor.outdoor_temp (optional)
 indoor_temp_entity: sensor.indoor_temp (optional)
+thermostat_companion_sensor: auto | off (Issue #1230 R1b; default auto - use the thermostat's finer same-device
+  temperature sensor for indoor control once proven; see docs/08-COMPUTATION-REFERENCE.md "Bug D")
 sleep_indoor_temp_entity: sensor.bedroom_temp (optional — Issue #895; used for comfort/automation
   instead of the primary indoor sensor while the sleep schedule is active, never for thermal learning;
   since Issue #1194 (a) it is also the remote sensor of the setpoint outer loop, see

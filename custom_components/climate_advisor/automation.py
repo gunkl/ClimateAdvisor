@@ -40,6 +40,7 @@ from .const import (
     COMFORT_MODE_SWITCH_MIN_INTERVAL_S,
     COMFORT_REACTIVE_RETRY_S,
     COMFORT_RECENT_COMMAND_WINDOW_S,
+    COMPANION_SENSOR_OFF,
     CONF_ADAPTIVE_SETBACK,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
@@ -64,6 +65,7 @@ from .const import (
     CONF_SENSOR_DEBOUNCE,
     CONF_SLEEP_COOL,
     CONF_SLEEP_HEAT,
+    CONF_THERMOSTAT_COMPANION_SENSOR,
     CONF_THRESHOLD_HOT,
     CONF_WELCOME_HOME_DEBOUNCE,
     DAY_TYPE_COLD,
@@ -91,6 +93,7 @@ from .const import (
     DEFAULT_SETBACK_HEAT,
     DEFAULT_SLEEP_COOL,
     DEFAULT_SLEEP_HEAT,
+    DEFAULT_THERMOSTAT_COMPANION_SENSOR,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     ECONOMIZER_EVENING_END_HOUR,
@@ -229,6 +232,7 @@ from .fan_toggle_rate_limit import (
 from .hvac_action import is_hvac_compressor_active
 from .incident_payload import build_incident_payload, is_climate_validation_error
 from .indoor_temp import (
+    CompanionSensors,
     IndoorTempReading,
     remote_reading_fresh,
     resolve_indoor_temp_f,
@@ -1381,6 +1385,10 @@ class AutomationEngineCallbacks:
 class AutomationEngine:
     """Manages HVAC automations based on daily classification."""
 
+    # Issue #1230 R1b: class-level default so an engine built via object.__new__ (tests) still resolves; the
+    # coordinator assigns its shared holder in __init__.
+    indoor_companion: CompanionSensors | None = None
+
     # Issue #729: class-level default so a test fixture that partially constructs an
     # engine via object.__new__(AutomationEngine) (skipping __init__ — an established
     # pattern across many existing tests, see CLAUDE.md) still has a value for the
@@ -1548,6 +1556,9 @@ class AutomationEngine:
         self.notify_service = notify_service
         self.config = config
         self.sensor_polarity_inverted = sensor_polarity_inverted
+        # Issue #1230 R1b: the coordinator's thermostat-companion candidates + 'finer' latch, set by the coordinator
+        # after construction. None (headless harness, no registry) = the resolver behaves exactly as before.
+        self.indoor_companion: CompanionSensors | None = None
         # Issue #604: label only, for logging/future observability — never branched on
         # inside this class or the 9 coordinator callback methods. Isolation between a
         # production and a future shadow engine is structural (which callables get wired
@@ -20056,6 +20067,14 @@ class AutomationEngine:
             "climate_entity": self.climate_entity,
             "in_sleep_window": _in_sleep_window(dt_util.now(), self.config),
             "sleep_indoor_temp_entity": self.config.get("sleep_indoor_temp_entity"),
+            # Issue #1230 R1b: the coordinator's shared candidates + 'finer' latch (None headless / when off), so the
+            # engine and the coordinator resolve the same value.
+            "companion": (
+                None
+                if self.config.get(CONF_THERMOSTAT_COMPANION_SENSOR, DEFAULT_THERMOSTAT_COMPANION_SENSOR)
+                == COMPANION_SENSOR_OFF
+                else self.indoor_companion
+            ),
         }
 
     def _get_indoor_reading(self) -> IndoorTempReading:

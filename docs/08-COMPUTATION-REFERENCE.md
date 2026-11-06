@@ -21,6 +21,7 @@ The automation logic table and all threshold constants in this document are expr
 ## Anchors
 | Question | Short answer | → Full answer |
 |---|---|---|
+| What does Climate Advisor do when a thermostat reports whole degrees but its device has a finer temperature sensor (Issue #1230 R1b)? | On the `climate_fallback` source only, `resolve_indoor_temp_with_provenance(companion=...)` uses that companion as the primary indoor reading once it is consistent (within 1 F of the thermostat) and latched as finer (a fractional reading seen while the thermostat is whole-degree); otherwise it keeps the thermostat's value. Option `thermostat_companion_sensor` `auto` (default) / `off`. | [Bug D — thermostat companion sensor](08-COMPUTATION-REFERENCE.md#bug-d--thermostat-companion-sensor-issue-1230-r1b) |
 | What temperature thresholds map to each day type? | HOT ≥ 85°F, WARM ≥ 75°F, MILD ≥ 60°F, COOL ≥ 45°F, COLD < 45°F; all thresholds are °F constants in `const.py`. | [§1. Day Classification](08-COMPUTATION-REFERENCE.md#1-day-classification) |
 | How is the setback modifier computed and what values can it take? | `avg_delta = ((tomorrow_high − today_high) + (tomorrow_low − today_low)) / 2`; modifier ranges from −3.0 (strong warming) to +3.0 (significant cold front); stable trend → 0. | [§3. Setback Modifier](08-COMPUTATION-REFERENCE.md#3-setback-modifier) |
 | What is the bedtime setpoint formula and when does the thermal model change it? | Default: `comfort_heat − 4°F` (heat) / `comfort_cool + 3°F` (cool). When thermal model confidence ≥ "low", `compute_bedtime_setback()` scales depth from `heating_rate_f_per_hour × recovery_window_hours`, clamped to `[MIN_SETBACK_DEPTH, MAX_SETBACK_DEPTH]`. | [§5a. Adaptive Bedtime Setback](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) |
@@ -4088,6 +4089,50 @@ read from — neither re-derives "was the sleep sensor used" independently.
 The range check, unit conversion, and fallback-on-failure semantics are
 identical to the primary-sensor path in Bug B — this feature extends the
 resolver, it doesn't introduce a second set of rules.
+
+### Bug D — thermostat companion sensor (Issue #1230 R1b)
+
+**Occupant view:** many thermostats report `current_temperature` in whole degrees (69) while the same physical device also exposes a finer `sensor.*` with `device_class: temperature` (68.54, ~0.18 F steps). Comfort decisions (heat/cool edges, nat-vent, ODE ceiling guards, swing learning, the chart's `indoor`) then react to the real temperature instead of 1 F steps. A thermostat without such a sensor, or any doubt about the sensor, behaves exactly as before.
+
+**Where:** `indoor_temp.resolve_indoor_temp_with_provenance(..., companion=CompanionSensors)` via `_resolve_companion_f()`. The coordinator owns one `CompanionSensors` (candidates from `discover_companion_temp_sensors`, see the [Chart Log Spec](chart-log-spec.md#indoor-sensors-field-issue-1230-r0) and its 900 s refresh, plus the `proven` latch) and shares it with its `AutomationEngine` (`engine.indoor_companion`), so both resolve the same value. With no holder (headless harness, no registry, or the option set to `off`) resolution is byte-identical to Bug B/C.
+
+**Rules.** Applies only to the `climate_fallback` source (`sensor` / `input_number` are explicit user choices and are never overridden). Per reading a candidate must pass, in order: parse, plausibility (40-110 F), the 12 h stale rule, then
+1. *consistent* - `|companion_f - climate_f| <= COMPANION_CONSISTENCY_F` (1.0 F; the thermostat's value is the rounded companion, anything wider is a different sensor or room);
+2. *finer, latched* - `companion.proven` gains the entity the first time a consistent companion shows a fractional value while the thermostat's own attribute is whole-degree (evaluated in each reading's native unit, so Celsius installs work); it is never latched while the attribute itself has fractions, and the companion is not used until it is latched (no flapping on a whole reading). The latch lives for the coordinator's lifetime.
+
+With several candidates, one is used only when exactly one passes; if more than one passes the result is `ambiguous` (thermostat reading kept, noted once at INFO). If the climate attribute itself is unreadable the companion is not consulted: the failure is exactly today's.
+
+**Provenance.** `IndoorTempReading.companion_entity` (the sensor that supplied the primary reading, else None) and `companion_reason` (why a candidate was not used: `not_proven`, `inconsistent`, `unavailable`, `stale`, `implausible`, `entity_missing`, `non_numeric`, `non_finite`, `ambiguous`; None when used or no candidate). When used, `primary_value` is the companion value and `source_entity` names it (the thermal model's always-primary sample is therefore the finer value); the sleep-window sensor still takes priority over both for `value`, unchanged.
+
+**Announcement.** `_refresh_indoor_sensor_health()` -> `_note_indoor_companion()` tracks the sensor in use every call (it drives the Settings label) and writes INFO only when the sensor in use changes (companion -> thermostat reading, or back), never per call, and not during the startup coalesce (the first line then waits). A reason change while the companion stays out of use is silent; a flapping companion therefore produces one line per real change.
+
+**Setting.** `thermostat_companion_sensor` = `auto` (default; also when the key is absent) / `off` (exact pre-0.9.2 behavior), in Options > Temperature Sources. Read at resolve time by both the coordinator and the engine.
+
+**Status label.** Settings tab, `indoor_temp_source`: `Thermostat (finer sensor — sensor.x)` while in use ([REST API](rest-api.md)).
+
+**State matrix** (`tests/test_thermostat_companion_1230.py`, 112 combinations, coordinator path and engine path asserted identical):
+
+| Dimension | Values |
+|---|---|
+| Indoor source | `climate_fallback`, `sensor` |
+| Companion | none; one consistent fine; one inconsistent (> 1 F); unavailable; stale; two both usable; two with one unavailable |
+| Thermostat attribute | whole (69); fractional (68.5) |
+| Setting | `auto`, `off` |
+| Sleep window | off, on |
+
+| Condition | `value` / `source_entity` | `primary_value` |
+|---|---|---|
+| `sensor` source (any companion) | dedicated sensor | dedicated sensor |
+| `climate_fallback`, `off` | thermostat | thermostat |
+| `auto`, no candidate | thermostat | thermostat |
+| `auto`, fine companion, attribute whole | companion | companion |
+| `auto`, fine companion, attribute fractional | thermostat (`not_proven`) | thermostat |
+| `auto`, inconsistent / unavailable / stale | thermostat | thermostat |
+| `auto`, two candidates both usable | thermostat (`ambiguous`) | thermostat |
+| `auto`, two candidates, only one usable | that one | that one |
+| any of the above with the sleep window on and a sleep sensor | sleep sensor | as in the row |
+
+**Direct `current_temperature` readers left on the thermostat attribute** (reviewed Issue #1230 R1b): `coordinator._async_thermostat_changed` change check (an equality "did the thermostat report something new" trigger, and the override/echo comparison of the thermostat's own values; the resolved value used by the reactive checks it triggers is the resolver's); `ai_skills_context` display string and AI-context read (describe the thermostat entity, not a decision input); `indoor_temp.read_indoor_sensors_f` (chart-log `indoor_sensors` deliberately logs the thermostat's own attribute AND the companion as separate keys). Consequence: no new wake-up is registered for the companion, so a companion tick between thermostat events is picked up by the next event or cycle.
 
 ### Indoor sensor failure reasons and announcements (Issue #1033)
 

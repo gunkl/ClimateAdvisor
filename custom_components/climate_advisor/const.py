@@ -587,6 +587,17 @@ INDOOR_SENSOR_STALE_HOURS = 12.0
 # (chart_log ``indoor_sensors`` companions) before re-reading the in-memory entity registry. Logging only.
 COMPANION_SENSOR_REFRESH_SECONDS = 900.0
 
+# Issue #1230 R1b ("Bug D"): use the thermostat's finer companion temperature sensor for CONTROL when it is provably
+# the same reading at finer resolution. ``auto`` (default, also for entries saved before the option existed) = use it
+# when proven; ``off`` = exact pre-0.9.2 behavior (the thermostat's own current_temperature).
+CONF_THERMOSTAT_COMPANION_SENSOR = "thermostat_companion_sensor"
+COMPANION_SENSOR_AUTO = "auto"
+COMPANION_SENSOR_OFF = "off"
+DEFAULT_THERMOSTAT_COMPANION_SENSOR = COMPANION_SENSOR_AUTO
+# A companion is "consistent" with the thermostat's reading when within this many degrees F (the thermostat's value is
+# the rounded companion); anything wider is a different sensor or room.
+COMPANION_CONSISTENCY_F = 1.0
+
 # Issue #1194 (a): remote-sensor outer loop. While the comfort-facing indoor reading comes from a REMOTE
 # sensor (today: the bedroom sensor in the sleep window) CA nudges the thermostat's setpoint so the
 # thermostat -- which only sees its own sensor -- produces the target at the remote sensor.
@@ -805,6 +816,19 @@ CONFIG_METADATA = {
         ),
         "category": "sensors",
         "display_transform": "temp_source_label",
+    },
+    "thermostat_companion_sensor": {
+        "label": "Thermostat Finer Sensor",
+        "description": (
+            "Many thermostats report the room temperature in whole degrees on the main entity while the same device"
+            " also has a finer temperature sensor. 'Auto' (default) uses that finer sensor for comfort decisions once"
+            " it has proven to be the same reading at finer resolution (within 1 degree F of the thermostat's reading"
+            " and showing fractions while the thermostat shows whole degrees), and falls back to the thermostat's own"
+            " reading whenever it is missing, unavailable, stale or disagrees. Only applies when the indoor source is"
+            " the thermostat's built-in sensor. 'Off' always uses the thermostat's own reading."
+        ),
+        "category": "sensors",
+        "default": DEFAULT_THERMOSTAT_COMPANION_SENSOR,
     },
     "sleep_indoor_temp_entity": {
         "label": "Sleep Indoor Temp Sensor",

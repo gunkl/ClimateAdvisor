@@ -109,6 +109,7 @@ from .const import (
     COMFORT_STALL_MARGIN_F,
     COMFORT_STALL_REMINDER_SECONDS,
     COMFORT_STALL_SUSTAIN_SECONDS,
+    COMPANION_SENSOR_OFF,
     COMPANION_SENSOR_REFRESH_SECONDS,
     CONF_AI_API_KEY,
     CONF_AI_ENABLED,
@@ -129,6 +130,7 @@ from .const import (
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
     CONF_SLEEP_HEAT,
+    CONF_THERMOSTAT_COMPANION_SENSOR,
     CONF_THRESHOLD_COOL,
     CONF_THRESHOLD_HOT,
     CONF_THRESHOLD_MILD,
@@ -150,6 +152,7 @@ from .const import (
     DEFAULT_SETBACK_DEPTH_COOL_F,
     DEFAULT_SETBACK_DEPTH_F,
     DEFAULT_SETBACK_HEAT,
+    DEFAULT_THERMOSTAT_COMPANION_SENSOR,
     DEFAULT_THRESHOLD_COOL,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_THRESHOLD_MILD,
@@ -296,6 +299,7 @@ from .hvac_action import (
 )
 from .incident_payload import build_incident_payload
 from .indoor_temp import (
+    CompanionSensors,
     IndoorTempReading,
     discover_companion_temp_sensors,
     read_indoor_sensors_f,
@@ -1063,6 +1067,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R1: temperature sensors on the climate entity's own device (chart_log ``indoor_sensors``), cached
         # with the monotonic time they were resolved; see ``_companion_temp_sensors``.
         self._companion_temp_sensors_cache: tuple[tuple[str, ...], float] | None = None
+        # Issue #1230 R1b: the same candidates + 'finer' latch feed the resolver for control; shared with the engine.
+        self._companion = CompanionSensors()
+        self.automation_engine.indoor_companion = self._companion
+        with contextlib.suppress(Exception):
+            self._companion_temp_sensors()  # resolve the candidates now so the first reading already knows them
+        # Funnel state (``_refresh_indoor_sensor_health``): the companion in use now / last announced, and the
+        # one-time ambiguity note. Event loop only.
+        self._indoor_companion_in_use: str | None = None
+        self._indoor_companion_announced: str | None = None
+        self._indoor_companion_reason: str | None = None
+        self._indoor_companion_ambiguous_logged: bool = False
         self._last_violation_check: datetime | None = None
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
@@ -4869,6 +4884,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         reading = self._get_indoor_temp_with_provenance()
         primary_entity = self._primary_indoor_entity()
         self._note_indoor_sensor_state("primary", reading.reason, primary_entity, reading.primary_value)
+        self._note_indoor_companion(reading)
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
         if sleep_entity and _in_sleep_window(dt_util.now(), self.config):
             self._note_indoor_sensor_state("sleep", reading.sleep_reason, sleep_entity, reading.value)
@@ -4878,6 +4894,52 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._indoor_sleep_fallback_reason = None
             self._indoor_sleep_fallback_announced = None
             self._indoor_sleep_fallback_since = None
+
+    def _note_indoor_companion(self, reading: IndoorTempReading) -> None:
+        """Track and announce the thermostat's finer companion sensor entering/leaving use (Issue #1230 R1b).
+
+        Called only by ``_refresh_indoor_sensor_health`` (event loop). The current state always drives the Settings
+        label; INFO lines fire only on a change of the sensor in use (companion -> thermostat reading and back), once
+        per change, never per call, and not during the startup coalesce (the first announcement then waits). A
+        reason change while the companion stays out of use is DEBUG only, so a flapping 'unavailable' companion
+        cannot spam; ambiguity (two candidates both usable) is noted once at INFO.
+        """
+        using, reason = reading.companion_entity, reading.companion_reason
+        self._companion_ensure_tracking_attrs()
+        self._indoor_companion_in_use = using
+        self._indoor_companion_reason = reason
+        if reason == "ambiguous" and not self._indoor_companion_ambiguous_logged:
+            self._indoor_companion_ambiguous_logged = True
+            _LOGGER.info(
+                "Thermostat companion sensor not used: several temperature sensors on the thermostat's device all"
+                " match its reading (candidates=%s); keeping the thermostat's own reading",
+                ", ".join(getattr(self._companion, "entities", ())),
+            )
+        if getattr(self, "_startup_coalesce_active", True):
+            return
+        if using == self._indoor_companion_announced:
+            return
+        previous = self._indoor_companion_announced
+        self._indoor_companion_announced = using
+        if using is not None:
+            _LOGGER.info("Indoor reading source changed to the thermostat's finer sensor entity=%s", using)
+        elif previous is not None:
+            _LOGGER.info(
+                "Indoor reading source changed back to the thermostat's own reading (finer sensor %s: reason=%s)",
+                previous,
+                reason or "not_in_use",
+            )
+
+    def _companion_ensure_tracking_attrs(self) -> None:
+        """Default the funnel's companion attrs on coordinators built via ``object.__new__`` (tests)."""
+        for name, default in (
+            ("_indoor_companion_in_use", None),
+            ("_indoor_companion_announced", None),
+            ("_indoor_companion_reason", None),
+            ("_indoor_companion_ambiguous_logged", False),
+        ):
+            if not hasattr(self, name):
+                setattr(self, name, default)
 
     def _note_indoor_sensor_state(
         self, role: str, reason: str | None, entity_id: str | None, value_f: float | None
@@ -4941,11 +5003,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _primary_indoor_entity(self) -> str | None:
         """Entity id behind the always-primary indoor reading (sensor/input_number, else the climate entity)."""
         source = self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
-        return (
-            self.config.get("indoor_temp_entity")
-            if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
-            else self.config.get("climate_entity")
-        )
+        if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            return self.config.get("indoor_temp_entity")
+        # Issue #1230 R1b: the thermostat's finer companion sensor when it is the primary reading right now.
+        return self._get_indoor_temp_with_provenance().companion_entity or self.config.get("climate_entity")
 
     def _companion_temp_sensors(self) -> tuple[str, ...]:
         """Temperature sensors on this zone's climate-entity device, cached (Issue #1230 R1; logging only).
@@ -4962,7 +5023,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return cached[0]
         found = discover_companion_temp_sensors(self.hass, self.config.get("climate_entity"))
         self._companion_temp_sensors_cache = (found, now)
+        companion = getattr(self, "_companion", None)
+        if companion is not None:
+            companion.entities = found
         return found
+
+    def _companion_for_resolver(self) -> CompanionSensors | None:
+        """The companion holder for the indoor resolver, or None when the occupant set it Off (Issue #1230 R1b)."""
+        if (
+            self.config.get(CONF_THERMOSTAT_COMPANION_SENSOR, DEFAULT_THERMOSTAT_COMPANION_SENSOR)
+            == COMPANION_SENSOR_OFF
+        ):
+            return None
+        return getattr(self, "_companion", None)
 
     def _read_chart_indoor_sensors(self) -> dict[str, float | None]:
         """Every configured indoor sensor's reading for chart_log's ``indoor_sensors`` (Issue #1230 R0).
@@ -5008,6 +5081,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             climate_entity=self.config["climate_entity"],
             in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
             sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
+            companion=self._companion_for_resolver(),
         )
 
     async def _get_forecast_data(self) -> list:
@@ -9609,6 +9683,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         climate_fallback ``current_temperature`` as one whole degree of the configured unit.
         """
         if self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK) != TEMP_SOURCE_CLIMATE_FALLBACK:
+            return 0.0
+        if self._get_indoor_temp_with_provenance().companion_entity:  # Issue #1230 R1b: the finer sensor is in use
             return 0.0
         return whole_degree_resolution_f(self.config.get("temp_unit", "fahrenheit"))
 

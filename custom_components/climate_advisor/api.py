@@ -120,6 +120,10 @@ def _temp_source_display(coordinator: Any, key: str, raw_source: str, label: str
         return f"{label} — none selected ({consequence})"
     if raw_source == TEMP_SOURCE_CLIMATE_FALLBACK and not is_outdoor and reason is not None:
         return f"{label} ({_suffix(reason)})"
+    # Issue #1230 R1b: the thermostat's finer companion sensor is the indoor reading right now.
+    companion_in_use = getattr(coordinator, "_indoor_companion_in_use", None)
+    if raw_source == TEMP_SOURCE_CLIMATE_FALLBACK and not is_outdoor and isinstance(companion_in_use, str):
+        return f"Thermostat (finer sensor — {companion_in_use})"
     if entity is None:
         return label
     if not needs_entity:

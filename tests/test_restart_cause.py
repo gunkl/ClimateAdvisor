@@ -117,6 +117,9 @@ def _make_coord_stub():
     coord._persist_shutdown_diagnostics = types.MethodType(
         ClimateAdvisorCoordinator._persist_shutdown_diagnostics, coord
     )
+    # Issue #1357: the restart-cause logic moved out of async_restore_state() into this helper (it also runs on the
+    # no-state and other-day paths). The old stub relied on the logic being inline, so the helper must be bound.
+    coord._classify_restart_and_mark = types.MethodType(ClimateAdvisorCoordinator._classify_restart_and_mark, coord)
 
     return coord
 

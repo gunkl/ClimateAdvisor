@@ -451,7 +451,7 @@ Added in Issue #139. Resolves the structural convergence problem where re-seedin
 - **Write:** at each 30-min tick, after computing `_last_predicted_indoor`, the coordinator iterates its entries for times up to `now + PRED_ARCHIVE_HORIZON_HOURS` (default: 4h) and calls `setdefault` — **first write wins, never overwritten**.
 - **Read:** when writing chart_log at time T, `_select_pred_indoor(T)` calls `_lookup_pred_archive(T)` (source `archive`); falls back to `_last_predicted_indoor[0]` only on cache miss (warmup period, source `ode-warmup`); otherwise `(None, "none")`. It does not look at the current indoor reading.
 - **Expiry:** entries where `key < epoch(now − 7 days)` are purged at each tick. Bounded at ≤ 336 entries at 30-min resolution (7 days × 48 ticks/day).
-- **Persistence:** in-memory only (v1). Warmup after HA restart = 4 hours. Restarts are rare; the 4h warmup period is acceptable.
+- **Persistence:** saved with the state file and restored on any restart, including one that comes back on a later day (Issue #1359); entries older than the 7-day expiry are pruned on restore, and the archive is dropped on a temperature-unit change (Issue #1360). With no usable state file the archive starts empty and the warmup after the restart is 4 hours.
 - **Log source tag:** `(archive)` = archive hit; `(ode-warmup)` = warmup fallback active; `(none)` = both archive and cache empty.
 
 **30-min resolution:** `_build_predicted_indoor_future()` was extended (Issue #139) to insert a linearly-interpolated midpoint between each consecutive pair of hourly ODE outputs before returning. This gives archive entries 30-min resolution and eliminates the step-function artifact on the historical chart.

@@ -275,8 +275,10 @@ class TestRestoreStateRestoresHealthFields:
         """Occupant impact: an overnight coordinator failure followed by an HA
         restart the next morning must still surface the prior failure — the
         rest of async_restore_state() intentionally skips same-day-only fields
-        (classification, automation_state, etc.) once the date has rolled over,
-        but the health record must not be silently dropped along with them
+        (classification, temp_history, today_record, briefing, occupancy) once the
+        date has rolled over (automation_state and the other any-restart fields
+        are restored since Issue #1358; the old docstring wrongly listed it as
+        same-day-only), but the health record must not be silently dropped along with them
         (same reasoning as the existing ai_stats restore, which is also
         unconditional).
         """

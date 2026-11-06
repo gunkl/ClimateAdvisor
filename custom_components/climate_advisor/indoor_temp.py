@@ -42,9 +42,8 @@ unavailable (``IndoorTempReading.reason`` / ``sleep_reason``: ``not_configured``
 the once-per-episode log line and Activity Log events are owned by exactly one event-loop
 caller (``coordinator._refresh_indoor_sensor_health``). Announcing from here would be unsafe:
 ``get_chart_data`` reaches this module from an executor thread, and ``coordinator._emit_event``
-itself calls back into the indoor read. Per-call diagnostics are therefore DEBUG only; the one INFO line (sleep
-sensor in use / back on the primary source) fires only when a zone's source changes, through a log-only memory
-(``_logged_indoor_source``, Issue #1194 a) that never affects a reading.
+itself calls back into the indoor read. Per-call diagnostics are therefore DEBUG only; the one INFO line per real
+change of the room's sensor (Issue #1230 R1c) is written by ``coordinator._note_indoor_source``.
 """
 
 from __future__ import annotations
@@ -316,7 +315,7 @@ def resolve_indoor_temp_with_provenance(
             hass=hass, unit=unit, sleep_indoor_temp_entity=sleep_indoor_temp_entity, now=now
         )
         if val_f is not None:
-            _log_indoor_source(climate_entity, sleep_indoor_temp_entity, val_f, remote=True)
+            _log_indoor_source(sleep_indoor_temp_entity, val_f)
             return IndoorTempReading(
                 val_f,
                 sleep_indoor_temp_entity,
@@ -328,7 +327,6 @@ def resolve_indoor_temp_with_provenance(
                 companion_reason,
             )
 
-    _log_indoor_source(climate_entity, primary_entity, primary_val, remote=False)
     return IndoorTempReading(
         primary_val, primary_entity, primary_val, primary_reason, sleep_reason, None, companion_entity, companion_reason
     )
@@ -446,24 +444,16 @@ def discover_companion_temp_sensors(hass: Any, climate_entity: str | None) -> tu
         return ()
 
 
-# Issue #1194 (a): LOG-ONLY memory of the comfort-facing source last logged per zone (keyed by climate entity), so the
-# "using the sleep sensor" line is INFO once per source change and DEBUG on every other call. The remote-sensor outer
-# loop resolves every minute, which made the old per-call INFO ~600 lines a night. Resolution itself stays a pure read:
-# nothing here feeds any decision or the returned reading. Callers on an executor thread (``get_chart_data``) can at
-# worst race one duplicate or missing INFO line (single-key dict get/set), never a wrong reading.
-_logged_indoor_source: dict[str, str | None] = {}
+def _log_indoor_source(source: str | None, value_f: float | None) -> None:
+    """DEBUG detail of the sleep-sensor swap, per call.
 
-
-def _log_indoor_source(zone: str, source: str | None, value_f: float | None, *, remote: bool) -> None:
-    previous = _logged_indoor_source.get(zone, "<unset>")
-    _logged_indoor_source[zone] = source
-    changed = previous != source and (previous != "<unset>" or remote)
-    if remote:
-        (_LOGGER.info if changed else _LOGGER.debug)(
-            "Using sleep indoor sensor entity=%s value=%.1f°F", source, value_f if value_f is not None else float("nan")
-        )
-    elif changed:
-        _LOGGER.info("Indoor reading source changed to the primary source entity=%s (was %s)", source, previous)
+    Issue #1230 R1c: the one INFO line per real change of the room's sensor (and its Activity entry) is owned by
+    ``coordinator._note_indoor_source``, which has the zone, the friendly names and the reason. This resolver runs on
+    several paths (every minute in the sleep window, chart rows on an executor thread) and keeps no memory.
+    """
+    _LOGGER.debug(
+        "Using sleep indoor sensor entity=%s value=%.1f°F", source, value_f if value_f is not None else float("nan")
+    )
 
 
 def remote_reading_fresh(state: Any, entity_id: str | None, now: datetime) -> bool:

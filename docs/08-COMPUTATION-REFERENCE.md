@@ -22,6 +22,7 @@ The automation logic table and all threshold constants in this document are expr
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What does Climate Advisor do when a thermostat reports whole degrees but its device has a finer temperature sensor (Issue #1230 R1b)? | On the `climate_fallback` source only, `resolve_indoor_temp_with_provenance(companion=...)` uses that companion as the primary indoor reading once it is consistent (within 1 F of the thermostat) and latched as finer (a fractional reading seen while the thermostat is whole-degree); otherwise it keeps the thermostat's value. Option `thermostat_companion_sensor` `auto` (default) / `off`. | [Bug D — thermostat companion sensor](08-COMPUTATION-REFERENCE.md#bug-d--thermostat-companion-sensor-issue-1230-r1b) |
+| Which log line says Climate Advisor switched the sensor it reads the room temperature from (thermostat, its finer sensor, dedicated or sleep sensor)? | One INFO line per real switch per zone: `Zone <title>: room temperature now from "<name>" (<id>, <role>, <°F>) instead of "<name>" (<id>, <role>, <°F>): <reason>`, plus an `indoor_source_changed` Activity row (Issue #1230 R1c, 0.9.3). Silent during startup coalescing; one `room temperature using ...` line after it. Owner: `coordinator._note_indoor_source()`; the resolver logs DEBUG only. | [Bug C — Indoor source changes](08-COMPUTATION-REFERENCE.md#bug-c--sleep-window-bedroom-sensor-override-issue-895) |
 | What temperature thresholds map to each day type? | HOT ≥ 85°F, WARM ≥ 75°F, MILD ≥ 60°F, COOL ≥ 45°F, COLD < 45°F; all thresholds are °F constants in `const.py`. | [§1. Day Classification](08-COMPUTATION-REFERENCE.md#1-day-classification) |
 | How is the setback modifier computed and what values can it take? | `avg_delta = ((tomorrow_high − today_high) + (tomorrow_low − today_low)) / 2`; modifier ranges from −3.0 (strong warming) to +3.0 (significant cold front); stable trend → 0. | [§3. Setback Modifier](08-COMPUTATION-REFERENCE.md#3-setback-modifier) |
 | What is the bedtime setpoint formula and when does the thermal model change it? | Default: `comfort_heat − 4°F` (heat) / `comfort_cool + 3°F` (cool). When thermal model confidence ≥ "low", `compute_bedtime_setback()` scales depth from `heating_rate_f_per_hour × recovery_window_hours`, clamped to `[MIN_SETBACK_DEPTH, MAX_SETBACK_DEPTH]`. | [§5a. Adaptive Bedtime Setback](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) |
@@ -4072,11 +4073,28 @@ module-level `_sleep_sensor_miss_streaks` dict (an INFO-then-WARNING escalation 
 dependent and shared across zones using one sensor) was **removed in Issue #1033**.
 The failure is reported in `IndoorTempReading.sleep_reason` and announced once per
 episode by `_refresh_indoor_sensor_health()` (INFO log, `indoor_sensor_unavailable`
-with `role=sleep`). The `"Using sleep indoor sensor" entity=<id> value=<X.X>°F` line is `INFO` only when the
-comfort-facing source changes for that zone (and `"Indoor reading source changed to the primary source"` on the way
-back); every other call logs it at `DEBUG` (Issue #1194 a: the outer loop resolves every minute, which made the old
-per-call `INFO` ~600 lines a night). The per-zone memory behind this (`indoor_temp._logged_indoor_source`, keyed by
-climate entity) is log-only: it never changes a reading or a decision.
+with `role=sleep`). The resolver's `"Using sleep indoor sensor" entity=<id> value=<X.X>°F` line is `DEBUG` on every call (Issue #1194 a:
+the outer loop resolves every minute, which made the old per-call `INFO` ~600 lines a night); since Issue #1230 R1c the
+resolver keeps no memory (the former log-only `_logged_indoor_source` is gone) and writes no INFO.
+
+**Indoor source changes (Issue #1230 R1c).** The single owner of the "which sensor is the room read from" INFO line is
+`coordinator._note_indoor_source()`, called only by `_refresh_indoor_sensor_health()` (event loop, zone context). It
+compares `IndoorTempReading.source_entity` (the comfort-facing sensor: thermostat attribute, thermostat's finer
+sensor, dedicated indoor sensor or sleep sensor) with the one last announced for the zone and, on a real change,
+writes exactly one INFO line and emits one `indoor_source_changed` Activity event:
+`Zone <entry title>: room temperature now from "<new friendly name>" (<new id>, <role>, <value>°F) instead of "<old
+friendly name>" (<old id>, <role>, <value>°F): <reason>`. Roles: `thermostat`, `thermostat's finer sensor`,
+`dedicated indoor sensor`, `sleep sensor`. Friendly name is the HA state's `friendly_name`, falling back to the id; a
+reading that cannot be read now shows `no reading`. Reasons: `finer sensor proven` / `finer sensor available again`,
+`finer sensor unavailable|stopped updating|reading out of range|not found — using the thermostat`, `more than 1.0 °F
+apart`, `two candidate sensors`, `setting off`, `sleep window started`, `sleep window ended`, `sleep sensor not usable
+(<reason>)`, `sleep sensor reporting again`, `indoor sensor setting changed`. Rules: nothing while
+`_startup_coalesce_active`; the first announcement after it (nothing announced yet) is a `... room temperature using
+"<name>" (<id>, <role>, <value>°F)` line with no event; a moment with no usable reading changes nothing (the outage is
+`indoor_sensor_unavailable`'s job, and the same sensor coming back is not a switch); a companion that flaps while out
+of use is silent, while a return to a sensor after a switch is logged. The previous sensor's value is read at that
+moment without refreshing any cache. Event payload: `zone, from_entity, from_name, from_role, from_value_f,
+to_entity, to_name, to_role, to_value_f, reason`. Tests: `tests/test_indoor_source_log_1230.py`.
 
 **Provenance, computed once.** `resolve_indoor_temp_with_provenance()` returns
 an `IndoorTempReading(value, source_entity, primary_value, reason, sleep_reason)` — `value`/
@@ -4110,7 +4128,7 @@ With several candidates, one is used only when exactly one passes; if more than 
 
 **Provenance.** `IndoorTempReading.companion_entity` (the sensor that supplied the primary reading, else None) and `companion_reason` (why a candidate was not used: `not_proven`, `inconsistent`, `unavailable`, `stale`, `implausible`, `entity_missing`, `non_numeric`, `non_finite`, `ambiguous`; None when used or no candidate). When used, `primary_value` is the companion value and `source_entity` names it (the thermal model's always-primary sample is therefore the finer value); the sleep-window sensor still takes priority over both for `value`, unchanged.
 
-**Announcement.** `_refresh_indoor_sensor_health()` -> `_note_indoor_companion()` tracks the sensor in use every call (it drives the Settings label) and writes INFO only when the sensor in use changes (companion -> thermostat reading, or back), never per call, and not during the startup coalesce (the first line then waits). A reason change while the companion stays out of use is silent; a flapping companion therefore produces one line per real change.
+**Announcement.** `_refresh_indoor_sensor_health()` -> `_note_indoor_companion()` tracks the sensor in use every call (it drives the Settings label) and notes ambiguity once at INFO; it writes no switch line. The one INFO line and the `indoor_source_changed` Activity entry per real change of the room's sensor (companion -> thermostat reading, or back) come from `_note_indoor_source()` (Issue #1230 R1c, see "Indoor source changes" under Bug C). A reason change while the companion stays out of use is silent; a flapping companion therefore produces one line per real change.
 
 **Setting.** `thermostat_companion_sensor` = `auto` (default; also when the key is absent) / `off` (exact pre-0.9.2 behavior), in Options > Temperature Sources. Read at resolve time by both the coordinator and the engine.
 
@@ -4193,7 +4211,9 @@ the sleep episode silently. Log format: outcome phrase then `key=value`:
 INFO for `sleep`) and `Indoor sensor recovered: role=… entity=… previous_reason=…
 minutes_down=…` (INFO). Activity Log events: `indoor_sensor_unavailable`
 `{role, reason, entity, using, value_f}` and `indoor_sensor_recovered`
-`{role, entity, value_f, previous_reason, minutes_down}`.
+`{role, entity, value_f, previous_reason, minutes_down}`. A switch between healthy sensors
+(not a failure) is a separate event, `indoor_source_changed`, from `_note_indoor_source()` in the same funnel (see
+"Indoor source changes" under Bug C).
 
 | Condition (`reason`) | Value used | Log | Activity Log | Settings → Indoor Temp Source |
 |---|---|---|---|---|

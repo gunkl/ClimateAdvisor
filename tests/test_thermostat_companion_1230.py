@@ -317,7 +317,9 @@ class TestFunnel:
             patch.object(ClimateAdvisorCoordinator, "_emit_event", MagicMock()),
         ):
             coord._refresh_indoor_sensor_health()
-        return [r.getMessage() for r in caplog.records if r.levelname == "INFO" and "finer sensor" in r.getMessage()]
+        return [
+            r.getMessage() for r in caplog.records if r.levelname == "INFO" and "room temperature" in r.getMessage()
+        ]
 
     def test_announces_once_per_transition_and_never_per_call(self, caplog):
         import logging
@@ -326,19 +328,19 @@ class TestFunnel:
         companion = CompanionSensors((COMP,))
         states = {CLIMATE: _state("heat", {"current_temperature": 69}), COMP: _state("68.54")}
         coord = _funnel_coord(states, companion)
-        assert len(self._tick(coord, caplog)) == 1  # companion enters use
+        assert len(self._tick(coord, caplog)) == 1  # companion in use: the startup "using" line
         assert self._tick(coord, caplog) == []  # steady: silent
         assert self._tick(coord, caplog) == []
         assert coord._indoor_companion_in_use == COMP
         states[COMP] = _state("unavailable")
         msgs = self._tick(coord, caplog)  # companion -> thermostat reading
-        assert len(msgs) == 1 and "back to the thermostat" in msgs[0]
+        assert len(msgs) == 1 and "finer sensor unavailable" in msgs[0]
         assert self._tick(coord, caplog) == []  # still out: silent, even if the reason changes
         states[COMP] = _state("68.6", age_h=INDOOR_SENSOR_STALE_HOURS + 1)
         assert self._tick(coord, caplog) == []
         states[COMP] = _state("68.6")
         msgs = self._tick(coord, caplog)  # and back: exactly one more
-        assert len(msgs) == 1 and "changed to the thermostat's finer sensor" in msgs[0]
+        assert len(msgs) == 1 and "finer sensor available again" in msgs[0]
         assert coord._indoor_companion_in_use == COMP
 
     def test_nothing_announced_during_startup_coalesce_then_once(self, caplog):

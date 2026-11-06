@@ -109,14 +109,14 @@ def _debug(caplog):
 def test_companion_enters_and_leaves_one_line_each(caplog):
     env = Env(_states())
     first = env.tick(caplog)
-    assert len(first) == 1 and first[0].startswith("Zone Zone 1: room temperature using ")  # startup "using"
+    assert len(first) == 1 and first[0].startswith('Zone "Zone 1": room temperature using ')  # startup "using"
     assert env.tick(caplog) == [] and env.tick(caplog) == []  # repeated identical readings: silent
     assert env.events() == []  # "using" is not a switch
 
     env.states[COMP] = _state("unavailable", "Santa Maria Hallway Current Temperature")
     out = env.tick(caplog)
     assert out == [
-        'Zone Zone 1: room temperature now from "Santa Maria Hallway" (climate.santa_maria_hallway, thermostat, 69°F)'
+        'Zone "Zone 1": room temperature now from "Santa Maria Hallway" (climate.santa_maria_hallway, thermostat, 69°F)'
         ' instead of "Santa Maria Hallway Current Temperature" (sensor.santa_maria_hallway_current_temperature,'
         " thermostat's finer sensor, no reading): finer sensor unavailable — using the thermostat"
     ]
@@ -139,7 +139,7 @@ def test_first_proof_line_matches_documented_shape(caplog):
     env.states[COMP] = _state("68.72", "Santa Maria Hallway Current Temperature")
     out = env.tick(caplog)
     assert out == [
-        'Zone Zone 1: room temperature now from "Santa Maria Hallway Current Temperature"'
+        'Zone "Zone 1": room temperature now from "Santa Maria Hallway Current Temperature"'
         " (sensor.santa_maria_hallway_current_temperature, thermostat's finer sensor, 68.72°F)"
         ' instead of "Santa Maria Hallway" (climate.santa_maria_hallway, thermostat, 69°F): finer sensor proven'
     ]
@@ -231,7 +231,7 @@ def test_sleep_sensor_in_and_out(caplog):
     env.sleep_on = True
     out = env.tick(caplog)
     assert out == [
-        'Zone Zone 1: room temperature now from "Bedroom" (sensor.bedroom_temp, sleep sensor, 66.4°F)'
+        'Zone "Zone 1": room temperature now from "Bedroom" (sensor.bedroom_temp, sleep sensor, 66.4°F)'
         ' instead of "Santa Maria Hallway" (climate.santa_maria_hallway, thermostat, 69°F): sleep window started'
     ]
     assert env.tick(caplog) == []

@@ -5024,7 +5024,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if previous is None:
             self._record_indoor_source(using, role)
             _LOGGER.info(
-                'Zone %s: room temperature using "%s" (%s, %s, %s)',
+                'Zone "%s": room temperature using "%s" (%s, %s, %s)',
                 zone,
                 self._indoor_friendly_name(using),
                 using,
@@ -5039,7 +5039,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._indoor_source_left_sleep_failed = was_role == "sleep sensor" and bool(reading.sleep_reason)
         self._record_indoor_source(using, role)
         _LOGGER.info(
-            'Zone %s: room temperature now from "%s" (%s, %s, %s) instead of "%s" (%s, %s, %s): %s',
+            'Zone "%s": room temperature now from "%s" (%s, %s, %s) instead of "%s" (%s, %s, %s): %s',
             zone,
             to_name,
             using,

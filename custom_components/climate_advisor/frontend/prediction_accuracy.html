@@ -646,6 +646,7 @@
   }
   function renderGate() {
     var rows = (S.data && Array.isArray(S.data.gate)) ? S.data.gate : [];
+    var gateSummary = (S.data && S.data.gate_summary) || null;
     var lim = isC() ? +(BIAS_LIMIT_F * 5 / 9).toFixed(2) : BIAS_LIMIT_F;
     $('th-bias').textContent = 'Bias within ±' + lim + ' ' + unit();
     var body = $('gate-body');
@@ -665,9 +666,12 @@
         return '<tr>' + head + '<td>—</td><td>—</td><td>—</td><td>—</td><td class="na" colspan="3">Not scored yet</td></tr>';
       }
       var c1 = r.v4 < r.v3, c2 = r.v4 < r.flat, c3 = Math.abs(r.bias) <= lim;
-      if (!info) { seasons[r.season] = true; if (!(c1 && c2 && c3) || r.pass === false) failed++; }
+      // The server's verdict is authoritative (it also checks sample size and v4 coverage); the cells explain it.
+      var rowOk = (typeof r.pass === 'boolean') ? r.pass : (c1 && c2 && c3);
+      if (!info) { seasons[r.season] = true; if (!rowOk) failed++; }
       function cell(ok) { return '<td class="' + (ok ? 'pass' : 'fail') + '">' + (ok ? 'Pass' : 'Fail') + '</td>'; }
-      return '<tr>' + head + '<td style="font-weight:600">' + fnum(r.v4) + '</td><td>' + fnum(r.v3) + '</td><td>' + fnum(r.flat) + '</td><td>' + fbias(r.bias).replace(' ' + unit(), '') + '</td>' + cell(c1) + cell(c2) + cell(c3) + '</tr>';
+      var why = (!rowOk && c1 && c2 && c3 && r.reasons && r.reasons.length) ? ' title="' + esc(r.reasons.join('; ')) + '"' : '';
+      return '<tr' + why + '>' + head + '<td style="font-weight:600">' + fnum(r.v4) + '</td><td>' + fnum(r.v3) + '</td><td>' + fnum(r.flat) + '</td><td>' + fbias(r.bias).replace(' ' + unit(), '') + '</td>' + cell(c1) + cell(c2) + cell(c3) + '</tr>';
     }).join('');
     var v = $('gate-verdict');
     var reasons = [];
@@ -675,6 +679,9 @@
     if (unscored) reasons.push(unscored + ' row' + (unscored === 1 ? '' : 's') + ' not scored');
     if (!seasons.summer) reasons.push('summer is not scored');
     if (!seasons.heating) reasons.push('heating season is not scored');
+    var srv = gateSummary && typeof gateSummary.ready === 'boolean' ? gateSummary.ready : null;
+    if (srv === false && !reasons.length) reasons.push('the backtest has not passed this zone');
+    if (srv === true) reasons = [];
     if (reasons.length) { v.textContent = 'Not yet: ' + reasons.join(', '); v.className = 'verdict'; }
     else { v.textContent = 'Ready: every gate row passes'; v.className = 'verdict ready'; }
   }

@@ -305,6 +305,17 @@ class ChartStateLog:
             return self._bucket_hourly(filtered)
         return self._bucket_daily(filtered)
 
+    def last_entry(self) -> dict[str, Any] | None:
+        """The newest row appended (any kind), or None (Issue #1230 R1: the v4 shadow reads this cycle's row)."""
+        return self._entries[-1] if self._entries else None
+
+    def raw_entries(self) -> list[dict[str, Any]]:
+        """A shallow copy of every retained row, undownsampled (Issue #1230 R1: v4 fit and accuracy page).
+
+        Rows are never mutated after append, so the copy is safe to hand to an executor thread.
+        """
+        return list(self._entries)
+
     @property
     def entry_count(self) -> int:
         """Return number of entries currently in memory."""

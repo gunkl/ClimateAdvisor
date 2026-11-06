@@ -13,7 +13,7 @@ import os
 import sys
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypedDict
@@ -1013,6 +1013,13 @@ class LearningEngine:
                     len(data.get("records", [])),
                 )
                 data.pop("pending_thermal_event", None)  # v2 field removed in Issue #133
+                # Forward compatibility: a file written by a newer release may hold keys this one does not know.
+                # Ignore them (the known fields load intact) instead of raising and resetting the whole history.
+                known = {f.name for f in fields(LearningState)}
+                unknown = sorted(k for k in data if k not in known)
+                if unknown:
+                    _LOGGER.debug("Learning state: ignoring unknown keys from a newer release: %s", ", ".join(unknown))
+                    data = {k: v for k, v in data.items() if k in known}
                 self._state = LearningState(**data)
                 # Validate all list fields — corrupted JSON may have wrong types
                 for field_name in (

@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - main
+      - 0.9.x
   pull_request:
     branches:
       - main
+      - 0.9.x
 
 jobs:
   validate-and-test:
@@ -41,12 +43,12 @@ jobs:
           CA_UNIT_WORKERS: "4"
 
       # Issue #1186: each changed test file must also pass ALONE (order-dependence guard).
-      # No-op when no tests/test_*.py changed (e.g. a push to main).
+      # No-op when no tests/test_*.py changed (e.g. a push to main or 0.9.x). Diffs against the PR's base branch.
       # Workers split one file's tests, never mix in another file: every xdist worker collects only that
       # file, so a file that passes only because another file ran first still fails here. Serial, a PR
       # touching tests/test_sim_generator.py paid ~6 min for that one file.
       - name: Run changed unit test files in isolation
-        run: python3 scripts/test_changed_isolated.py --base origin/main --strict
+        run: python3 scripts/test_changed_isolated.py --base "origin/${{ github.base_ref || github.ref_name }}" --strict
         env:
           CA_UNIT_WORKERS: "4"
 

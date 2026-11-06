@@ -35,6 +35,7 @@
   .row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
   .grp-label { font-size: 12px; color: var(--muted); }
   .grp { display: flex; align-items: center; flex-wrap: wrap; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+  .grp.range { flex-wrap: nowrap; max-width: 100%; overflow-x: auto; }
   .grp button, .reset, .retry, .zone-sel {
     min-height: 36px; font: inherit; font-size: 13px; color: var(--ink);
   }
@@ -107,7 +108,7 @@
     </div>
 
     <div class="row">
-      <div class="grp" role="group" aria-label="Time range" id="grp-range"></div>
+      <div class="grp range" role="group" aria-label="Time range" id="grp-range"></div>
       <button type="button" class="reset" id="reset-zoom" hidden>Reset zoom</button>
       <span class="small" id="window-label"></span>
       <span class="grow"></span>
@@ -146,7 +147,7 @@
         <tbody id="gate-body"></tbody>
       </table>
     </div>
-    <div class="small" id="seasons-note">Seasons are scored apart: heating season (Nov to Mar) and summer (Jun to Sep, including fan nights); shoulder months are reported separately. Each must pass on its own.</div>
+    <div class="small" id="seasons-note">Seasons are scored apart by what the HVAC was doing: heating days, and summer days (cooling or the whole-house fan); days with neither are reported separately. Each must pass on its own.</div>
   </section>
   <div class="sub">Preview. v4 runs in shadow beside today&#8217;s prediction and changes nothing Climate Advisor does. At 7 d and longer, lines are hourly averages, and at 1 y daily averages, as on today&#8217;s chart.</div>
 </main>
@@ -464,7 +465,7 @@
   function tickLabel(ms) {
     var w = windowMs(), span = w[1] - w[0], d = new Date(ms);
     if (span <= 36 * 3600e3) return d.toLocaleTimeString(undefined, { hour: 'numeric' });
-    if (span <= 8 * 24 * 3600e3) return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(undefined, { hour: 'numeric' });
+    if (span <= 8 * 24 * 3600e3) return d.toLocaleDateString(undefined, { weekday: 'short', month: 'numeric', day: 'numeric' }) + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric' });
     return d.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' });
   }
 

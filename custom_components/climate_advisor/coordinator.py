@@ -258,7 +258,6 @@ from .const import (
     THRESHOLD_HOT,
     THRESHOLD_MILD,
     THRESHOLD_WARM,
-    VACATION_SETBACK_EXTRA,
     VERSION,
     is_availability_recovery,
     is_unavailable_state,
@@ -344,6 +343,7 @@ from .scheduler import (
     resolve_tou_away_vacation_phase,
     resolve_tou_phase,
 )
+from .setpoint_combinations import vacation_edges
 from .state import StatePersistence
 from .swing import (
     build_swing_audit_record,
@@ -508,16 +508,18 @@ _AWAY_ACTION_MESSAGES: tuple[str, ...] = (
     "Nothing to do — even the thermostat's taking it easy.",
     "Away mode: the house is behaving better than usual.",
 )
+# Issue #1369: no "deep" here -- with the #1347 separate vacation setpoints a vacation band can be
+# as mild as (or milder than) away, so these lines only claim what is always true.
 _VACATION_ACTION_MESSAGES: tuple[str, ...] = (
-    "Vacation mode: deep setback engaged, nothing for you to do.",
+    "Vacation mode: your vacation temperatures are set, nothing for you to do.",
     "On vacation. The thermostat is unbothered.",
-    "Deep setback active — the house is coasting.",
+    "Vacation temperatures active — the house is coasting.",
     "Nothing needed here. Go be on vacation.",
     "Setback engaged. This message is the only work being done.",
     "Vacation mode — the house is on autopilot, saving you money while you're gone.",
     "Go have fun. The thermostat's got the boring part.",
     "On vacation — sit back, we're saving energy for you.",
-    "Deep setback engaged. The house is basically hibernating politely.",
+    "Vacation temperatures engaged. The house is basically hibernating politely.",
     "Vacation: lights out, temps relaxed, wallet happy.",
 )
 
@@ -14795,7 +14797,8 @@ def _compute_target_band_schedule(
 
     Logic per timestamp:
     - Away today: flat setback band ``[setback_heat, setback_cool]``.
-    - Vacation (any day): deep setback band (setback ± VACATION_SETBACK_EXTRA).
+    - Vacation (any day): deep setback band from setpoint_combinations.vacation_edges()
+      (the optional vacation setpoints, else setback ± VACATION_SETBACK_EXTRA; Issue #1347).
 
     The trend ``setback_modifier`` is deliberately NOT applied to the away/vacation edges (Issue #1076):
     the engine's ``select_comfort_band()`` does not apply it either (dropped by #249 P3), and this chart
@@ -14810,8 +14813,10 @@ def _compute_target_band_schedule(
     in chronological order.
 
     When thermal_model and classification are both provided, sleep_heat is derived
-    via compute_bedtime_setback() (the briefing's resolver; the engine arms the raw sleep_heat/cool, which
-    only differs when a sleep temp is outside the setback limits -- Issue #1089).
+    via compute_bedtime_setback() (the briefing's resolver). An explicitly configured sleep_heat/cool is
+    returned unclamped, so the chart shows the same raw sleep value the engine's select_comfort_band()
+    arms, even when sleep heat is below away heat or sleep cool above away cool (Issue #1366, closing
+    the #1089 divergence).
 
     ``tou_precondition_window`` (Issue #786): ``(window_start, window_end, target, mode)``
     — when a timestamp falls in ``[window_start, window_end)``, the resolved TOU banking
@@ -14843,8 +14848,8 @@ def _compute_target_band_schedule(
     )
 
     # G1/G2: use compute_bedtime_setback() when thermal model + classification available —
-    # the same sleep value the briefing quotes. NOTE (Issue #1089): the engine's select_comfort_band()
-    # arms the raw sleep_heat/sleep_cool; this only differs when a sleep temp is outside the setback limits.
+    # the same sleep value the briefing quotes. Issue #1366: an explicit sleep_heat/sleep_cool comes back
+    # unclamped, matching the raw value the engine's select_comfort_band() arms (closes #1089).
     if thermal_model is not None and classification is not None:
         _hvac_mode = getattr(classification, "hvac_mode", None)
         if _hvac_mode == "heat":
@@ -14877,8 +14882,7 @@ def _compute_target_band_schedule(
 
         # I5: vacation applies setback to ALL days (not just today); away only applies to today
         if occupancy_mode == OCCUPANCY_VACATION:
-            lower = setback_heat - VACATION_SETBACK_EXTRA
-            upper = setback_cool + VACATION_SETBACK_EXTRA
+            lower, upper = vacation_edges(config)  # Issue #1347: same resolver as the engine
         elif ts_date == now_date and (occupancy_mode == OCCUPANCY_AWAY or (restore_hold and ts <= now)):
             lower = setback_heat
             upper = setback_cool

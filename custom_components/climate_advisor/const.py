@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.8.66"
+VERSION = "0.8.67"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -251,8 +251,13 @@ OCCUPANCY_AWAY = "away"
 OCCUPANCY_VACATION = "vacation"
 OCCUPANCY_GUEST = "guest"
 
-# Vacation deeper setback (degrees beyond normal setback)
+# Vacation deeper setback (degrees beyond normal setback). Used only when the optional vacation
+# setpoints below are not set (Issue #1347); see setpoint_combinations.vacation_edges().
 VACATION_SETBACK_EXTRA = 3
+# Optional separate vacation setpoints (Issue #1347, options flow only, stored in °F). Absent or None
+# means "away setpoint -/+ VACATION_SETBACK_EXTRA", exactly the pre-#1347 behaviour.
+CONF_VACATION_HEAT = "vacation_heat"
+CONF_VACATION_COOL = "vacation_cool"
 
 # Fan control configuration
 CONF_FAN_ENTITY = "fan_entity"
@@ -730,6 +735,24 @@ CONFIG_METADATA = {
         "description": (
             "Temperature when cooling and away from home."
             " Higher values save more energy but take longer to cool down when you return."
+        ),
+        "category": "setpoints",
+        "display_transform": "temp_abs",
+    },
+    "vacation_heat": {
+        "label": "Vacation Heat",
+        "description": (
+            "Temperature when heating and on vacation (Issue #1347)."
+            " When not set, vacation uses the away heat temperature minus 3°F."
+        ),
+        "category": "setpoints",
+        "display_transform": "temp_abs",
+    },
+    "vacation_cool": {
+        "label": "Vacation Cool",
+        "description": (
+            "Temperature when cooling and on vacation (Issue #1347)."
+            " When not set, vacation uses the away cool temperature plus 3°F."
         ),
         "category": "setpoints",
         "display_transform": "temp_abs",

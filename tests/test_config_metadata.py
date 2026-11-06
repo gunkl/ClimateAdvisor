@@ -12,6 +12,8 @@ EXPECTED_KEYS = {
     "comfort_cool",
     "setback_heat",
     "setback_cool",
+    "vacation_heat",  # Issue #1347
+    "vacation_cool",  # Issue #1347
     "notify_service",
     "briefing_notifications_enabled",
     "push_briefing",

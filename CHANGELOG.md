@@ -8,7 +8,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 - Feat #1230 (R0 foundations): Climate Advisor now keeps two new records for the coming prediction engine. No change to how it runs your home or what the dashboard shows.
   - **Every indoor sensor, every row:** the chart log records the thermostat's reading, your dedicated indoor sensor and your sleep sensor on every row, whichever one Climate Advisor is using at the moment. Unavailable sensors are recorded as empty.
   - **Forecast archive:** each zone keeps the full hourly forecast (up to 72 hours ahead) once an hour for a year, in `climate_advisor_forecast_archive_<zone>.json` (about 3–4 MB at most), so forecast accuracy can be measured at every lead time.
-  - **Guard for #1276:** a new locked scenario checks that on a cool evening, with the heat on and the house at its comfort floor, the dashboard never says "Open windows" again. It fails if that fix is ever undone.
+  - **Guard for #1276:** a new locked scenario checks that on a cool evening, with the heat on and the house at its comfort floor, the dashboard does not say "Open windows". It fails if that fix is undone.
 
 ## [0.9.0] — 2026-11-06
 

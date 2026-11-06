@@ -12,13 +12,13 @@ test = [
     "pytest-cov>=4.0",
     # optional parallel unit tier: CA_UNIT_WORKERS (scripts/test.py)
     "pytest-xdist>=3.5",
-    "ruff>=0.4.0,<0.17",
+    "ruff>=0.17.3,<0.18",
     "pre-commit>=4.0",
     # zoneinfo needs a tz database; absent on Windows (Issue #906)
     "tzdata>=2024.1",
     "voluptuous>=0.14",
     # property-based random-day generator (Issue #1128 Step 3, I3)
-    "hypothesis>=6.100",
+    "hypothesis>=6.170.14",
 ]
 test-ha = [
     # Pinned to the plugin release that pins HA 2026.10.4 (needs Python >=3.14.2).

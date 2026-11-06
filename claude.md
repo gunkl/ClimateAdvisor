@@ -726,6 +726,23 @@ git tag -f deployed/current HEAD
 git branch -d deploy/staging
 ```
 
+**Long-lived `0.9.x` branch (Issue #1230, owner decision 2026-11-06)**: the new prediction
+engine, operation timeline and dashboard redesign (releases R0–R7) are built on `0.9.x`, not
+`main`. Other fixes keep going to `main` as 0.8.x.
+- #1230 work: branch from `origin/0.9.x`, open the PR against `0.9.x`. CI (validate, hacs,
+  hassfest) runs for PRs and pushes on `0.9.x` too.
+- Keep it current: merge (never rebase) `origin/main` into `0.9.x` through a PR, before every
+  deploy and whenever main has something worth having on the server.
+- Conflicts on that merge: `const.py` VERSION and `manifest.json` keep the branch's 0.9.N;
+  `CHANGELOG.md` keeps both entries, newest first; `fix_history.jsonl` keeps both lines.
+- Version bumps on `0.9.x` PRs go 0.9.0 → 0.9.1 → ... (same inline-bump rule as main).
+- Deploy from the `/workspace/ClimateAdvisor-0.9.x` worktree only. `tools/deploy.py` refuses
+  to deploy `0.9.x` unless `origin/main` is merged into it (`--allow-stale-main` overrides);
+  `main` and every other branch are not checked, so the deploy after the final merge back to
+  main works as before.
+- While the server runs 0.9.x, never deploy from `main`: it would remove the 0.9 work and may
+  meet stored data in a newer format. `python tools/deploy.py --rollback` restores the last backup.
+
 **Conflict resolution**: coordinator.py conflicts between the ODE section (`_build_predicted_indoor_future()`,
 module-level near the end of the file) and the briefing/daily-record section (class methods) are independent — accept all changes from both.
 

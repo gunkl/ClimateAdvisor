@@ -30,6 +30,14 @@ LOG_DIR = REPO_ROOT / "logs"
 BACKUP_DIR = REPO_ROOT / "backups"
 BACKUP_KEEP_COUNT = 5
 
+# Long-lived development lines that the owner deploys from (Issue #1230: the 0.9.x
+# prediction/dashboard line). A deploy from one of these must already contain every
+# commit on origin/main, otherwise it silently drops main's newer fixes from the
+# server (each deploy replaces the whole integration directory). main itself and any
+# other branch are not checked, so the standard deploy after merging back is unchanged.
+LONG_LIVED_BRANCHES = ("0.9.x",)
+MAIN_REF = "origin/main"
+
 _log = logging.getLogger("deploy")
 _log_path: Path | None = None
 
@@ -272,6 +280,53 @@ def _split_marked_output(output: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Deploy steps
 # ---------------------------------------------------------------------------
+
+
+def _git(*args: str) -> tuple[int, str]:
+    """Run a git command in the repo checkout. Returns (returncode, stripped stdout+stderr)."""
+    result = subprocess.run(["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True)
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def current_branch() -> str:
+    """Branch checked out in this repo, or "" when detached or git is unavailable."""
+    try:
+        rc, out = _git("rev-parse", "--abbrev-ref", "HEAD")
+    except OSError:
+        return ""
+    return out if rc == 0 and out != "HEAD" else ""
+
+
+def local_version() -> str:
+    """VERSION from const.py of the tree about to be deployed (display only)."""
+    match = re.search(r'^VERSION\s*=\s*"([^"]+)"', (COMPONENT_DIR / "const.py").read_text(), re.MULTILINE)
+    return match.group(1) if match else "unknown"
+
+
+def check_main_merged(branch: str, fetch: bool = True) -> tuple[bool, str]:
+    """Is origin/main fully merged into a long-lived branch before it is deployed?
+
+    Returns (ok, message). Branches not in LONG_LIVED_BRANCHES (main included) always
+    pass with an empty message. A failed fetch only warns: the check then uses the
+    last fetched origin/main.
+    """
+    if branch not in LONG_LIVED_BRANCHES:
+        return True, ""
+    notes = []
+    if fetch:
+        rc, out = _git("fetch", "--quiet", "origin", "main")
+        if rc != 0:
+            notes.append(f"could not fetch origin/main ({out or 'no output'}); using the last fetched copy")
+    rc, _ = _git("merge-base", "--is-ancestor", MAIN_REF, "HEAD")
+    if rc == 0:
+        return True, "; ".join(notes + [f"{MAIN_REF} is merged into {branch}"])
+    _, missing = _git("rev-list", "--count", f"HEAD..{MAIN_REF}")
+    notes.append(
+        f"{branch} is missing {missing or 'some'} commit(s) from {MAIN_REF}. Deploying it would remove "
+        f"main's newer fixes from the server. Merge main into {branch} first "
+        f"(git merge {MAIN_REF}, via a PR so CI runs), or pass --allow-stale-main to deploy anyway."
+    )
+    return False, "; ".join(notes)
 
 
 def run_validation() -> bool:
@@ -589,6 +644,11 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Validate only, show what would deploy")
     parser.add_argument("--skip-restart", action="store_true", help="Deploy without restarting HA")
     parser.add_argument("--rollback", action="store_true", help="Restore most recent backup")
+    parser.add_argument(
+        "--allow-stale-main",
+        action="store_true",
+        help=f"Deploy a long-lived branch ({', '.join(LONG_LIVED_BRANCHES)}) even if origin/main is not merged into it",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -614,10 +674,19 @@ def main() -> None:
     print(f"{Color.CYAN}============================================{Color.RESET}")
     print(f"  Host: {config['HA_HOST']}:{config['HA_SSH_PORT']}")
     print(f"  Target: {rpath}")
+    branch = current_branch()
+    print(f"  Branch: {branch or '(detached or unknown)'}  Version: {local_version()}")
 
     if args.rollback:
         do_rollback(config)
         sys.exit(0)
+
+    # Step 0: a long-lived branch must already contain origin/main (Issue #1230)
+    merged, message = check_main_merged(branch)
+    if message:
+        (info if merged else fail)(message)
+    if not merged and not args.dry_run and not args.allow_stale_main:
+        sys.exit(1)
 
     # Step 1: Validate
     if not run_validation():

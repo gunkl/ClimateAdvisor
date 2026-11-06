@@ -40,7 +40,6 @@ from .const import (
     COMFORT_MODE_SWITCH_MIN_INTERVAL_S,
     COMFORT_REACTIVE_RETRY_S,
     COMFORT_RECENT_COMMAND_WINDOW_S,
-    CONF_ADAPTIVE_PREHEAT,
     CONF_ADAPTIVE_SETBACK,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
@@ -311,7 +310,6 @@ from .temperature import (
     read_state_temp_f,
     to_fahrenheit,
 )
-from .thermal_lead_time import compute_lead_minutes_from_rate
 from .time_utils import instant_after
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
@@ -338,7 +336,7 @@ WHF_SEALED_CYCLE_RETRY_S = 300
 
 # Issue #1066: allowed reason codes / keys for commanded-mode ring-buffer entries.
 _MODE_CHANGE_REASONS = frozenset(
-    {"selector", "pause", "restore", "tou", "ode_guard", "nat_vent", "user", "startup", "other"}
+    {"selector", "pause", "restore", "tou", "ode_guard", "nat_vent", "user", "startup", "pre_cool", "other"}
 )
 # Issue #1073 (M1): the activity-record ``reason`` for ``thermostat_mode_set`` is ALWAYS one of these fixed
 # labels, keyed by the ring-buffer reason code -- never free text. Callers' reason strings can carry an entity
@@ -349,6 +347,7 @@ _MODE_SET_REASON_LABELS: dict[str, str] = {
     "restore": "restoring after a pause",
     "tou": "time-of-use schedule",
     "ode_guard": "predicted ceiling breach",
+    "pre_cool": "overnight pre-cool",  # Issue #1371
     "nat_vent": "natural ventilation",
     "user": "you changed it at the thermostat",
     "startup": "startup",
@@ -1076,6 +1075,13 @@ def active_thresholds_for(coordinator: Any, now: datetime | None = None) -> dict
             now=now,
             tou_expansion_f=(ae._tou_av_expansion_f if ae is not None else 0.0),
         )
+        # Issue #1371: a held overnight pre-cool is what the thermostat is armed with, so the status API and the
+        # threshold sensors quote it (the same substitution apply_classification() makes).
+        _hold = getattr(ae, "_hold_pre_cool_band", None) if ae is not None else None
+        if callable(_hold):
+            _held = _hold(band)
+            if isinstance(_held, ComfortBand):
+                band = _held
         return {"heat": band.floor, "cool": band.ceiling, "context": band.context, "provisional": False}
     heat, cool = fallback_edges_without_classification(now, config)
     return {
@@ -1086,13 +1092,29 @@ def active_thresholds_for(coordinator: Any, now: datetime | None = None) -> dict
     }
 
 
+def pre_cool_sleep_window_config(config: dict) -> dict:
+    """``config`` with the pre-cool code's own sleep/wake defaults (22:30 / 06:30) filled in (Issue #1371).
+
+    ``_in_sleep_window()`` treats a missing time as "awake"; pre-cool (trigger and handler) has always used
+    these defaults, so gating it on the sleep window must not silently disable it for a config without them.
+    """
+    return {
+        **config,
+        "sleep_time": config.get("sleep_time") or "22:30",
+        "wake_time": config.get("wake_time") or "06:30",
+    }
+
+
 def _in_sleep_window(now: datetime, config: dict) -> bool:
     """Return True if ``now`` falls in the configured sleep window (Issue #249).
 
-    The window runs ``sleep_time`` → ``wake_time`` with midnight wraparound (the common night-owl
-    case where ``sleep_time > wake_time``, e.g. 22:30 → 07:00): in-window iff
-    ``now >= sleep_time OR now < wake_time``. Returns False when either time is unset or malformed —
-    callers treat "unknown" as awake (apply the daytime program), matching the prior inline behavior.
+    The window runs ``sleep_time`` → ``wake_time``. Usually it wraps midnight (``sleep_time > wake_time``,
+    e.g. 22:30 → 07:00): in-window iff ``now >= sleep_time OR now < wake_time``. A bedtime after midnight
+    (``sleep_time < wake_time``, e.g. 01:00 → 07:00) does not wrap: in-window iff
+    ``sleep_time <= now < wake_time`` (Issue #1376: the wrap formula alone counted the whole day as
+    asleep for such a schedule). Equal times are an empty window. Returns False when either time is unset
+    or malformed — callers treat "unknown" as awake (apply the daytime program), matching the prior
+    inline behavior.
     """
     from datetime import time as dt_time  # noqa: PLC0415
 
@@ -1110,6 +1132,10 @@ def _in_sleep_window(now: datetime, config: dict) -> bool:
         wake_t = dt_time(wake_h, wake_m)
     except ValueError, AttributeError:
         return False
+    if sleep_t == wake_t:
+        return False
+    if sleep_t < wake_t:  # bedtime after midnight: no wrap (Issue #1376)
+        return sleep_t <= now_time < wake_t
     return now_time >= sleep_t or now_time < wake_t
 
 
@@ -1295,7 +1321,9 @@ def compute_bedtime_setback(
         return min(raw, floor)
 
 
-_DELIBERATE_MODE_REASONS: frozenset[str] = frozenset({"user", "tou", "ode_guard"})
+# Issue #1371: "pre_cool" is deliberate too -- the spec (comfort-edge-selection-spec section 2) has always said a
+# pre-cool counts as "cool ran" (R3), but its writes were labelled "selector" and the guard never saw them.
+_DELIBERATE_MODE_REASONS: frozenset[str] = frozenset({"user", "tou", "ode_guard", "pre_cool"})
 # Issue #1073: a settling-guard hold that re-enters within this many seconds of the previous episode's end
 # (same candidate) reopens that episode rather than starting a new one.
 _COMFORT_HOLD_MERGE_S = 600.0
@@ -4956,7 +4984,12 @@ class AutomationEngine:
                 in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
                 aggressive_savings=bool(self.config.get("aggressive_savings", False)),
             )
-            await self._apply_comfort_band(_band, reason=cls_reason)
+            # Issue #1371: an overnight pre-cool in force is kept, not overwritten by the plain sleep band.
+            _held = self._hold_pre_cool_band(_band)
+            if _held is not _band:
+                await self._apply_comfort_band(_held, reason=cls_reason + " (pre-cool held)", mode_reason="pre_cool")
+            else:
+                await self._apply_comfort_band(_band, reason=cls_reason)
 
             # ODE ceiling guard (Issue #136): if thermal model predicts indoor will breach
             # comfort_cool within lead_time AND outdoor is already warmer than indoor
@@ -4973,10 +5006,6 @@ class AutomationEngine:
                 classification=classification, predicted_indoor=predicted_indoor
             )
             await self._apply_ode_ceiling_guard_decision(classification, predicted_indoor, _cls_decision)
-
-            # Handle pre-conditioning
-            if classification.pre_condition and classification.pre_condition_target:
-                await self._schedule_pre_condition(classification)
 
             self._cancel_classification_revisit()
 
@@ -5006,8 +5035,14 @@ class AutomationEngine:
             and not self._manual_change_protected()
         )
 
-    async def _apply_comfort_band(self, band: ComfortBand, *, reason: str) -> HvacCommandResult | None:
+    async def _apply_comfort_band(
+        self, band: ComfortBand, *, reason: str, mode_reason: str = "selector"
+    ) -> HvacCommandResult | None:
         """Arm the thermostat with the comfort band (always single-setpoint).
+
+        ``mode_reason`` labels the mode change for the settling guard and the Activity log (Issue #1371): the
+        selector's own writes are ``"selector"``; pre-cool passes ``"pre_cool"`` so its cool command counts as
+        deliberate. An outer ``_mode_change_context`` cannot do this -- the inner label here always wins.
 
         Issue #858: caches ``band`` on entry (before any early return below) so
         ``comfort_family_temperature_check()`` always has the most recently
@@ -5116,7 +5151,7 @@ class AutomationEngine:
         _effective_active = {"cool": "ceiling", "heat": "floor"}.get(_resolved_mode, band.active)
 
         if _effective_active == "ceiling" and caps.supports_cool:
-            with self._mode_change_context("selector", band=band):
+            with self._mode_change_context(mode_reason, band=band):
                 _write_result = await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
             _target = band.ceiling
@@ -5128,7 +5163,7 @@ class AutomationEngine:
             # to preserve, unlike _set_temperature_for_mode()'s two equivalent
             # branches below.)
         elif _effective_active == "floor" and caps.supports_heat:
-            with self._mode_change_context("selector", band=band):
+            with self._mode_change_context(mode_reason, band=band):
                 _write_result = await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
             _target = band.floor
@@ -6074,8 +6109,14 @@ class AutomationEngine:
         inside ``_set_temperature_impl`` (the one setpoint path). ``keep_pre_cool_hold=True`` is for the loop's own
         offset-step rewrite only: it re-sends the SAME target with a different offset, so it must not release a
         held pre-cool band the way a new target does.
+
+        Issue #1371: re-sending the held pre-cool ceiling itself (the 30-minute cycle keeping the pre-cool, see
+        ``_hold_pre_cool_band()``) is not a new target either, so it keeps the hold. Any other write -- heat at the
+        floor, wake-up, a restore to another band -- still ends it.
         """
-        if not keep_pre_cool_hold:
+        _held = self._pre_cool_band_in_force
+        _rewrites_held = _held is not None and mode == "cool" and abs(float(temperature) - _held.ceiling) < 0.05
+        if not keep_pre_cool_hold and not _rewrites_held:
             self._pre_cool_band_in_force = None
             self._pre_cool_band_since = None
         result = await self._set_temperature_impl(
@@ -7025,15 +7066,32 @@ class AutomationEngine:
             self._remote_startup_latency_s,
         )
 
+    def _hold_pre_cool_band(self, band: ComfortBand) -> ComfortBand:
+        """Issue #1371: the held overnight pre-cool band when it should stay armed, else ``band`` unchanged.
+
+        Occupant: on a hot-trend night pre-cool lowers the cool ceiling to bank cold mass before tomorrow. The
+        30-minute cycle used to re-arm the plain sleep band in the very same second (and every cycle after), so the
+        pre-cool never held. While ``_pre_cool_band_in_force_now()`` holds a band (ends at wake time, or at any write
+        of a different target) and the band that would apply is the SLEEP band, the pre-cool band is used instead.
+        Away/vacation, comfort and every other band are never replaced.
+        """
+        held = self._pre_cool_band_in_force_now()
+        if held is None or getattr(band, "context", "") != BAND_CONTEXT_SLEEP:
+            return band
+        return held
+
     def _resolved_comfort_band(self, c: DayClassification) -> ComfortBand:
         """The comfort band in force right now for ``c`` (Issue #1073, S6): the SAME
         ``select_comfort_band()`` inputs ``apply_classification()`` feeds ``_apply_comfort_band()``
         (occupancy, sleep window, aggressive savings) plus, since Issue #1080, the TOU away/vacation
         expansion ``handle_occupancy_away/vacation`` arm. Falls back to the flat
         ``comfort_heat``/``comfort_cool`` band if the resolver cannot run, so a restore is never
-        skipped by a resolver fault (graceful degradation)."""
+        skipped by a resolver fault (graceful degradation).
+
+        Issue #1371: a held overnight pre-cool replaces the sleep band here too, so restores and every reader see
+        the band ``apply_classification()`` keeps armed."""
         try:
-            return resolve_active_band(
+            band = resolve_active_band(
                 c,
                 self.config,
                 occupancy_mode=self._occupancy_mode,
@@ -7042,6 +7100,8 @@ class AutomationEngine:
                 # read-only readers (status, incidents, override matching) must resolve it too.
                 tou_expansion_f=getattr(self, "_tou_av_expansion_f", 0.0),
             )
+            held = self._hold_pre_cool_band(band)
+            return held if isinstance(held, ComfortBand) else band
         except Exception:  # noqa: BLE001 - a resolver fault must not strand a restore
             _LOGGER.warning(
                 "Resolved comfort band unavailable, restoring on the flat comfort band: zone=%s",
@@ -7425,100 +7485,6 @@ class AutomationEngine:
                     "outcome": _tou_av_outcome,
                 },
             )
-
-    async def _schedule_pre_condition(self, c: DayClassification) -> None:
-        """Schedule pre-heating or pre-cooling based on trend.
-
-        For warming trends: overnight pre-cool banking (setback_modifier feeds
-        compute_pre_cool_target() only; it is not applied to away/vacation setbacks)
-        For cooling trends: pre-heat in the evening
-        """
-        unit = self._temp_unit
-        if c.trend_direction == "cooling" and c.pre_condition_target and c.pre_condition_target > 0:
-            # Pre-heat: schedule a bump relative to sleep_time using adaptive timing
-            from .const import (
-                CONF_DEFAULT_PREHEAT_MINUTES,
-                CONF_MAX_PREHEAT_MINUTES,
-                CONF_MIN_PREHEAT_MINUTES,
-                CONF_PREHEAT_SAFETY_MARGIN,
-                DEFAULT_PREHEAT_MINUTES,
-                MAX_PREHEAT_MINUTES,
-                MIN_PREHEAT_MINUTES,
-                PREHEAT_SAFETY_MARGIN,
-            )
-
-            preheat_target = self.config["comfort_heat"] + c.pre_condition_target
-
-            # Compute adaptive pre-heat start time
-            thermal_model = self._thermal_model or {}
-            if not self.config.get("learning_enabled", True) or not self.config.get(CONF_ADAPTIVE_PREHEAT, True):
-                _LOGGER.debug(
-                    "Adaptive pre-heat disabled — using default %d min",
-                    self.config.get(CONF_DEFAULT_PREHEAT_MINUTES, DEFAULT_PREHEAT_MINUTES),
-                )
-                thermal_model = {}
-
-            confidence = thermal_model.get("confidence", "none")
-            heating_rate = thermal_model.get("heating_rate_f_per_hour")
-
-            # pre_condition_target is the degrees to raise (positive for heating)
-            temp_rise = getattr(c, "pre_condition_target", 2.0) or 2.0
-
-            min_min = self.config.get(CONF_MIN_PREHEAT_MINUTES, MIN_PREHEAT_MINUTES)
-            max_min = self.config.get(CONF_MAX_PREHEAT_MINUTES, MAX_PREHEAT_MINUTES)
-            default_min = self.config.get(CONF_DEFAULT_PREHEAT_MINUTES, DEFAULT_PREHEAT_MINUTES)
-            safety = self.config.get(CONF_PREHEAT_SAFETY_MARGIN, PREHEAT_SAFETY_MARGIN)
-            _LOGGER.debug(
-                "Pre-heat thresholds: min=%d max=%d default=%d safety=%.2f (from config)",
-                min_min,
-                max_min,
-                default_min,
-                safety,
-            )
-            _rate_usable = heating_rate if (confidence != "none" and heating_rate and heating_rate > 0) else None
-            minutes_needed = compute_lead_minutes_from_rate(
-                delta_t=temp_rise,
-                rate=_rate_usable,
-                min_minutes=min_min,
-                max_minutes=max_min,
-                safety_multiplier=safety,
-                fallback_minutes=max(min_min, min(max_min, default_min)),
-            )
-            _adaptive_preheat_active = _rate_usable is not None
-
-            # Compute preheat start time relative to sleep_time
-            sleep_str = self.config.get("sleep_time", "22:30")
-            sleep_parts = sleep_str.split(":")
-            sleep_total_minutes = int(sleep_parts[0]) * 60 + int(sleep_parts[1])
-            preheat_total_minutes = sleep_total_minutes - int(minutes_needed)
-            if preheat_total_minutes < 0:
-                preheat_total_minutes += 24 * 60
-            preheat_hour = preheat_total_minutes // 60
-            preheat_minute = preheat_total_minutes % 60
-            preheat_time_str = f"{preheat_hour:02d}:{preheat_minute:02d}"
-
-            if _adaptive_preheat_active:
-                _LOGGER.debug(
-                    "Adaptive pre-heat: rate=%.2f°F/hr delta=%.1f°F → %d min (safety ×%.1f), start=%s",
-                    heating_rate,
-                    temp_rise,
-                    int(minutes_needed),
-                    safety,
-                    preheat_time_str,
-                )
-
-            _LOGGER.info(
-                "Scheduling pre-heat to %s at %s (cold front coming)",
-                format_temp(preheat_target, unit),
-                preheat_time_str,
-            )
-            # In a full implementation, this would register a time-based listener
-            # For now, store the intent for the coordinator to act on
-            self.config["_pending_preheat"] = {
-                "time": preheat_time_str,
-                "target": preheat_target,
-                "duration_hours": 2,
-            }
 
     @property
     def _sensor_debounce_pending(self) -> bool:
@@ -11932,6 +11898,12 @@ class AutomationEngine:
             )
             return "skipped: not eligible"
 
+        # Issue #1371 (defence in depth): pre-cool banks cold thermal mass overnight. A late timer, a restart
+        # or an old schedule must never arm the sleep band's lowered ceiling while people are awake.
+        if not _in_sleep_window(dt_util.now(), pre_cool_sleep_window_config(self.config)):
+            _LOGGER.info("Pre-cool trigger fired: skipped — awake hours (pre-cool runs only in the sleep window)")
+            return "skipped: awake hours"
+
         # Issue #593: computed up front (pure config + modifier, no gate/indoor dependency)
         # so the DEFER_NAT_VENT "active_session" branch below can show the target it's
         # deferring to, not just a generic "already achieved" label that never applied here.
@@ -12066,11 +12038,13 @@ class AutomationEngine:
             ceiling=pre_cool_target,
             active="ceiling",
             reason=f"pre-cool — thermal mass banking (target {self._t(pre_cool_target, 0)})",
+            context=BAND_CONTEXT_SLEEP,  # Issue #1371: a night band; keeps #1345 readers on a known context
         )
 
         _pre_cool_result = await self._apply_comfort_band(
             _pre_cool_band,
             reason=f"pre-cool [{self._band_num(_sleep_band.floor)}/{self._band_num(pre_cool_target)}]",
+            mode_reason="pre_cool",  # Issue #1371: deliberate for the settling guard (spec R3)
         )
         # Issue #1049 (change 5): announce AFTER the write, with its real outcome -- the
         # event/log used to claim "applied" before anything was sent.
@@ -18099,6 +18073,14 @@ class AutomationEngine:
                 return "restricted to cool — HVAC heated within the last 2h"
         return None
 
+    def _fan_start_blind(self) -> bool:
+        """True when Climate Advisor cannot read the indoor temperature, so it must not START a fan (Issue #1370, P5).
+
+        The one definition behind ``_activate_fan()``'s start refusal. The promise stamps each command with the
+        coordinator's ``_get_indoor_temp()``; both resolve through ``resolve_indoor_temp_f()``, so they cannot disagree.
+        """
+        return self._get_indoor_temp_f() is None
+
     async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> FanCommandResult:
         """Activate fan based on configured fan_mode.
 
@@ -18187,6 +18169,15 @@ class AutomationEngine:
         if self._fan_active:
             _LOGGER.debug("_activate_fan: already active — no-op (%s)", reason)
             return FanCommandResult.ALREADY_IN_STATE
+
+        # Issue #1370 (household promise P5): Climate Advisor never STARTS a fan while it cannot read the indoor
+        # temperature -- it could not tell whether the house is getting too cold. Same single choke point as the
+        # #1205 hold and #1144 sealed-house refusals, so the min-runtime cycle and the economizer (which never
+        # looked at indoor) are covered with nat-vent and cycling-on. After the already-running no-op: a fan
+        # that is already on is left to the blind-fan stop (#1037). Starts only: a stop is never refused.
+        if self._fan_start_blind():
+            _LOGGER.info("Fan activation refused: indoor temperature unreadable reason=%s role=%s", reason, self.role)
+            return FanCommandResult.SUPPRESSED
 
         # Issue #1050 (#1048 change 21): the fan switch ignored CA's on-command twice. Without
         # this gate every grace expiry re-activated it and the whole ignored -> give-up cycle

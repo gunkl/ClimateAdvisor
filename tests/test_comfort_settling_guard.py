@@ -678,9 +678,11 @@ class TestR6:
         _apply(e2, clk2, "mild", 67.0)  # 1 F under the comfort floor right after the cool run
         assert _mode(e2) == "cool"
 
-        # the pre-cool morning writer feeds the mode-change clock like any other writer
+        # the pre-cool writer feeds the mode-change clock as a DELIBERATE cool. Issue #1371: this used to fake a "tou"
+        # label, which masked that the real pre-cool was labelled "selector" (not deliberate). It now uses the real
+        # "pre_cool" label; tests/test_pre_cool_overnight_1371.py drives the real handle_pre_cool() end to end.
         e3 = _make_engine(indoor=70.0, mode="off")
-        with patch(f"{_AUTOMATION}.dt_util.now", side_effect=_Clock()), e3._mode_change_context("tou"):
+        with patch(f"{_AUTOMATION}.dt_util.now", side_effect=_Clock()), e3._mode_change_context("pre_cool"):
             _run(e3._set_hvac_mode("cool", reason="pre-cool"))
         e3._test_state.state = "cool"
         _apply(e3, _Clock(_T0 + timedelta(minutes=30)), "mild", 67.0)

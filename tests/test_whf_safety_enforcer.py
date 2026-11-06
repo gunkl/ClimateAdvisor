@@ -78,6 +78,9 @@ def _engine(*, thermostat_mode: str = "off") -> tuple[AutomationEngine, dict]:
             CONF_FAN_ENTITY: "fan.whf",
         },
     )
+    # Issue #1370: these tests are about fan commands, not indoor handling; Climate Advisor refuses every fan start
+    # while indoor is unreadable (promise P5, tests/test_blind_fan_start_refusal_1370.py), so lift that one check.
+    engine._fan_start_blind = lambda: False
     world = {
         "fan_on": True,
         "fan_on_for_s": 300.0,

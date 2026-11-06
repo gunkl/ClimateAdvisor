@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -21,9 +20,7 @@ from custom_components.climate_advisor.automation import (
 )
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
-    CONF_ADAPTIVE_PREHEAT,
     CONF_ADAPTIVE_SETBACK,
-    DEFAULT_PREHEAT_MINUTES,
     DEFAULT_SETBACK_DEPTH_COOL_F,
     DEFAULT_SETBACK_DEPTH_F,
     MAX_WEATHER_BIAS_APPLY_F,
@@ -145,61 +142,6 @@ def _default_preheat_time(config: dict, minutes: int) -> str:
 
 # ---------------------------------------------------------------------------
 # Tests: Adaptive Preheat Toggle
-# ---------------------------------------------------------------------------
-
-
-class TestAdaptivePreheatToggle:
-    """Tests for CONF_ADAPTIVE_PREHEAT with learning_enabled=True."""
-
-    def test_preheat_uses_default_when_adaptive_preheat_disabled(self):
-        """adaptive_preheat_enabled=False with high-confidence model → DEFAULT_PREHEAT_MINUTES used."""
-        config = dict(_BASE_CONFIG, **{CONF_ADAPTIVE_PREHEAT: False})
-        engine = _make_engine(config)
-
-        # Inject high-confidence model — must be ignored because toggle is off
-        engine._thermal_model = _HIGH_CONFIDENCE_THERMAL_MODEL
-
-        c = _make_classification(
-            trend_direction="cooling",
-            pre_condition=True,
-            pre_condition_target=2.0,
-        )
-        asyncio.run(engine._schedule_pre_condition(c))
-
-        preheat = engine.config.get("_pending_preheat")
-        assert preheat is not None
-
-        expected_time = _default_preheat_time(config, DEFAULT_PREHEAT_MINUTES)
-        assert preheat["time"] == expected_time
-
-    def test_preheat_uses_model_when_adaptive_preheat_enabled(self):
-        """adaptive_preheat_enabled=True with slow house → model time differs from default."""
-        config = dict(_BASE_CONFIG, **{CONF_ADAPTIVE_PREHEAT: True})
-        engine = _make_engine(config)
-
-        # Slow house: 1.0°F/hr, delta=5°F → 5hr × 60 × 1.3 safety = 390 min → clamped to MAX
-        engine._thermal_model = {
-            "confidence": "low",
-            "heating_rate_f_per_hour": 1.0,
-        }
-
-        c = _make_classification(
-            trend_direction="cooling",
-            pre_condition=True,
-            pre_condition_target=5.0,
-        )
-        asyncio.run(engine._schedule_pre_condition(c))
-
-        preheat = engine.config.get("_pending_preheat")
-        assert preheat is not None
-
-        default_time = _default_preheat_time(config, DEFAULT_PREHEAT_MINUTES)
-        # Model-driven time should differ from default (will be earlier for a slow house)
-        assert preheat["time"] != default_time
-
-
-# ---------------------------------------------------------------------------
-# Tests: Adaptive Setback Toggle
 # ---------------------------------------------------------------------------
 
 

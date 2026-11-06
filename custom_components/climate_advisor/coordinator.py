@@ -50,6 +50,7 @@ from .automation import (
     compute_pre_cool_target,
     fallback_edges_without_classification,
     hvac_outcome_label,
+    pre_cool_sleep_window_config,
     resolve_active_band,
     resolve_pre_cool_modifier,
 )
@@ -4397,7 +4398,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _grace_on = bool(_ae_cmd._grace_active)
                 _override_on = bool(_ae_cmd._fan_override_active)
                 _last_cmd = self._last_commanded_fan_state
-                if _desired_on and _last_cmd is not True and not _grace_on and not _override_on:
+                # Issue #1370 (P5): no on-command while the indoor reading is unreadable. This path bypasses
+                # _activate_fan(), so it needs its own refusal; for a command-only fan the re-send is a real
+                # start whenever someone switched the fan off at the wall. The off assert is never refused.
+                _blind = self._get_indoor_temp() is None
+                if _desired_on and _last_cmd is not True and not _grace_on and not _override_on and _blind:
+                    _LOGGER.info(
+                        "Fan command-only assert: desired=on skipped — indoor temperature unreadable (fan_entity=%s)",
+                        self.config.get(CONF_FAN_ENTITY, ""),
+                    )
+                elif _desired_on and _last_cmd is not True and not _grace_on and not _override_on:
                     _LOGGER.info(
                         "Fan command-only assert: desired=on last_commanded=%s → issuing on command (fan_entity=%s)",
                         _last_cmd,
@@ -14810,14 +14820,24 @@ def _compute_pre_cool_trigger_time_pure(
         if wct_dt < now:
             wct_dt = wct_dt + timedelta(days=1)
         trigger = instant_after(PRE_COOL_POST_NAT_VENT_DELAY_MINUTES * 60.0, now=wct_dt)  # Issue #1199: UTC
+        # Issue #1371: pre-cool is an OVERNIGHT banking phase. The classifier's window close is 10:00 on a warm
+        # day and 17:00 on a mild one, so "close + 30 min" used to fire at 10:30 AM / 5:30 PM while people were
+        # awake: it armed the sleep band's lowered ceiling for one cycle and the thermostat flipped
+        # cool -> heat -> cool. The window-close trigger now counts only when it lands in the sleep window.
+        if _in_sleep_window(dt_util.as_local(trigger), pre_cool_sleep_window_config(config)):
+            _LOGGER.info(
+                "Pre-cool scheduled for %s (nat-vent close %s + %dmin); target %.1f°F",
+                dt_util.as_local(trigger).strftime("%H:%M"),
+                c.window_close_time.strftime("%H:%M"),
+                PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
+                pre_cool_target,
+            )
+            return trigger
         _LOGGER.info(
-            "Pre-cool scheduled for %s (nat-vent close %s + %dmin); target %.1f°F",
-            dt_util.as_local(trigger).strftime("%H:%M"),
+            "Pre-cool: nat-vent close %s + %dmin is during awake hours; using the overnight trigger instead",
             c.window_close_time.strftime("%H:%M"),
             PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
-            pre_cool_target,
         )
-        return trigger
 
     # Fallback: wake_time - offset
     wake_str = config.get("wake_time", "06:30")
@@ -14826,7 +14846,30 @@ def _compute_pre_cool_trigger_time_pure(
     # If wake_time already passed, schedule for tomorrow night
     if wake_dt < now:
         wake_dt = wake_dt + timedelta(days=1)
-    trigger = instant_after(-PRE_COOL_WAKE_OFFSET_HOURS * 3600.0, now=wake_dt)  # Issue #1199: UTC
+
+    def _night_trigger(wake_at: datetime) -> datetime:
+        trig = instant_after(-PRE_COOL_WAKE_OFFSET_HOURS * 3600.0, now=wake_at)  # Issue #1199: UTC
+        # Issue #1371: never earlier than bedtime (a short night, e.g. 02:00 -> 05:00, would put wake - 4 h
+        # before the occupant is asleep). Bedtime is the last sleep_time before this wake time.
+        try:
+            _sp = str(config.get("sleep_time", "22:30")).split(":")
+            sleep_dt = dt_util.as_local(
+                datetime.combine(wake_at.date(), time(int(_sp[0]), int(_sp[1]))).replace(tzinfo=None)
+            )
+            if sleep_dt >= wake_at:
+                sleep_dt = sleep_dt - timedelta(days=1)
+            if trig < sleep_dt:
+                trig = dt_util.as_utc(sleep_dt)
+        except ValueError, IndexError:
+            pass  # malformed sleep_time: keep wake - offset
+        return trig
+
+    trigger = _night_trigger(wake_dt)
+    # Issue #1371: scheduled before wake (e.g. the 05:00 classification), "wake - 4 h" today is already in the
+    # past, and the caller then skipped pre-cool altogether. The night that banks for the coming day is the
+    # NEXT one, so move one day ahead.
+    if trigger <= now:
+        trigger = _night_trigger(wake_dt + timedelta(days=1))
     _LOGGER.info(
         "Pre-cool scheduled for %s (wake_time %s - %.0fh fallback); target %.1f°F",
         dt_util.as_local(trigger).strftime("%H:%M"),

@@ -534,6 +534,12 @@ STATE_FILE = "climate_advisor_state.json"
 # Chart state log
 CHART_LOG_FILE = "climate_advisor_chart_log.json"
 CHART_LOG_MAX_DAYS = 365  # 1-year rolling cap (~17,500 entries ≈ 2MB)
+
+# Forecast archive (Issue #1230 R0): what the hourly forecast SAID at each issue time, kept so the
+# per-lead-time forecast error can be scored later. Not read by any automation; nothing displayed.
+FORECAST_ARCHIVE_FILE = "climate_advisor_forecast_archive.json"
+FORECAST_ARCHIVE_HORIZON_HOURS = 72  # keep at most this many hours ahead of each issue time
+FORECAST_ARCHIVE_MAX_DAYS = 365  # time-based retention: all four seasons for backtests (~3-4 MB)
 CHART_DOWNSAMPLE_HOURLY_DAYS = 3  # raw points for ≤3 days; hourly averages beyond
 CHART_DOWNSAMPLE_DAILY_DAYS = 30  # daily summaries for >30 days
 

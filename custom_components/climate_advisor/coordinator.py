@@ -44,6 +44,7 @@ from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
     AutomationEngineCallbacks,
+    PreCoolDecision,
     _in_sleep_window,
     _refuse_if_shut_down,
     awake_comfort_edges,
@@ -935,10 +936,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pre_cool_status: str | None = None  # surfaced in status API
         self._pre_cool_trigger_dt: datetime | None = None  # full tz-aware trigger datetime
         self._pre_cool_target: float | None = None  # pre-cool ceiling target temp
-        # Issue #1378: (waking date, modifier) of the night the pending/last trigger was decided for. Survives the
-        # 23:59 day reset while that night is still ahead, so a pre-cool decided on day D for D+1 is not re-judged
-        # on D+1's forecast (which looks at D+2) after midnight.
-        self._pre_cool_decided: tuple[date, float] | None = None
+        # Issue #1378: PreCoolDecision (waking date, modifier, deciding day's high/low) of the night the pending/last
+        # trigger was decided for. Survives the 23:59 day reset while that night is still ahead; after midnight the
+        # night is re-checked on the fresh forecast for its waking day, not on D+1's "tomorrow" (D+2).
+        self._pre_cool_decided: PreCoolDecision | None = None
         # #437 follow-up: tracks natural_vent_active across _emit_event() calls so a
         # True->False transition (nat-vent genuinely exiting, any of its 6 real exit
         # paths) can pull a pending pre-cool trigger earlier instead of leaving it on
@@ -6416,7 +6417,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             decided=self._pre_cool_decision(),
         )
 
-    def _pre_cool_decision(self) -> tuple[date, float] | None:
+    def _pre_cool_decision(self) -> PreCoolDecision | None:
         """``_pre_cool_decided`` when it is a real record (Issue #1378; tests build partial coordinators)."""
         decided = getattr(self, "_pre_cool_decided", None)
         return decided if isinstance(decided, tuple) else None
@@ -6865,7 +6866,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         pre_cool_target = compute_pre_cool_target(self.config, _modifier if _modifier is not None else 0.0)
         if _modifier is not None:
             # Issue #1378: remember which night this was decided for, and how, so it survives the 23:59 reset.
-            self._pre_cool_decided = (pre_cool_waking_date(trigger_time, self.config), _modifier)
+            # The deciding day's own forecast high/low is the base for the fire-time trend re-check -- only when
+            # that day is the one before the night's waking day (decided before midnight / after wake).
+            _waking = pre_cool_waking_date(trigger_time, self.config)
+            _c = self._current_classification
+            _prev_is_today = _waking != dt_util.as_local(now).date()
+            self._pre_cool_decided = PreCoolDecision(
+                _waking,
+                _modifier,
+                getattr(_c, "today_high", None) if _prev_is_today else None,
+                getattr(_c, "today_low", None) if _prev_is_today else None,
+            )
 
         self._pre_cool_trigger_cancel = async_track_point_in_time(
             self.hass, self._zone_scoped(self._async_pre_cool_trigger), trigger_time
@@ -6882,7 +6893,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Handle the overnight pre-cool trigger point."""
         self._pre_cool_trigger_dt = None  # trigger has fired; no longer a future candidate
         # Issue #1378: judge the night on the day it wakes into. After midnight the classification is already that
-        # day's, so its "tomorrow" is a day too far; the decision recorded when this trigger was scheduled stands.
+        # day's, so its "tomorrow" is a day too far; it is re-checked on the fresh forecast for today
+        # (warming trend from the recorded decision, or hot).
         _modifier = self._pre_cool_modifier_for_night(now)
         if _modifier is None:
             _LOGGER.info("Pre-cool trigger fired: skipped — the day this night wakes into is not pre-cool eligible")
@@ -15084,7 +15096,7 @@ def _compute_pre_cool_trigger_time_pure(
     config: dict[str, Any],
     now: datetime,
     *,
-    decided: tuple[date, float] | None = None,
+    decided: PreCoolDecision | None = None,
 ) -> datetime | None:
     """Pure computation behind ``ClimateAdvisorCoordinator._compute_pre_cool_trigger_time()``
     (Issue #514) — takes ``classification``/``config``/``now`` explicitly instead of reading

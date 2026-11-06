@@ -5,6 +5,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.9.3] — 2026-11-06
 
+- Includes fix 0.8.70 from `main` (#1378 follow-up).
 - Feat #1230 (R1c: switches between room sensors are now visible): every time Climate Advisor changes which sensor it reads the room temperature from, the log and the dashboard's Activity log say so, once, with the sensor's name.
   - **One clear log line per switch:** for example `Zone "Zone 1": room temperature now from "Santa Maria Hallway Current Temperature" (sensor.santa_maria_hallway_current_temperature, thermostat's finer sensor, 68.72°F) instead of "Santa Maria Hallway" (climate.santa_maria_hallway, thermostat, 69°F): finer sensor proven`. It names the zone, both sensors (friendly name and entity id), what kind of sensor each is (the thermostat, its finer sensor, your dedicated indoor sensor or your sleep sensor), both readings, and why it switched (finer sensor proven, unavailable, stopped updating, more than 1.0 °F apart, two candidate sensors, sleep window started or ended, option set to Off). Before, a switch wrote two differently worded lines, one of which said "changed to the primary source" even when the finer sensor had just taken over.
   - **Also in the Activity log:** each switch adds an "indoor source changed" row with the same details.
@@ -30,6 +31,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ## [0.9.0] — 2026-11-06
 
 - Start of the 0.9 line (Issue #1230: new prediction engine, one operation timeline and the dashboard redesign). This release is 0.8.63 plus development tooling only, with no change to how Climate Advisor runs your home. 0.9 work lands on the `0.9.x` branch, which takes every 0.8.x fix from `main` before each deploy.
+
+## [0.8.70] — 2026-11-06
+
+- Fix #1378 (follow-up): the overnight pre-cool planned in the evening is now checked again against the latest forecast when it is due (around 2:30 AM). If the hot day it was planned for has been revised down overnight, so it is no longer hot and no longer much warmer than the day before, the AC does not run. Before, the evening's plan ran regardless.
 
 ## [0.8.69] — 2026-11-06
 

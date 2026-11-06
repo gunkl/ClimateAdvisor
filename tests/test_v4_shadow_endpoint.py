@@ -356,3 +356,50 @@ def test_view_before_and_zone_aliases(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_view_unloaded_integration_is_503(tmp_path: Path) -> None:
     resp, _ = _get(None)
     assert resp.status == 503
+
+
+def test_view_with_several_zones_and_no_zone_refuses_instead_of_guessing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scorecard silently showing another zone's numbers would mislead the owner's per-zone v4 decision."""
+    monkeypatch.setattr("custom_components.climate_advisor.api.dt_util.now", lambda: _NOW, raising=False)
+    monkeypatch.setattr("custom_components.climate_advisor.zone_registry.ir.async_create_issue", MagicMock())
+    monkeypatch.setattr("custom_components.climate_advisor.api.zone_registry.list_zones", lambda _h: [])
+    view = ClimateAdvisorPredictionAccuracyView()
+    a, b = _coordinator(tmp_path), _coordinator(tmp_path)
+    req, ran = _request(a)
+    req.app["hass"].data = {DOMAIN: {"zoneA": a, "zoneB": b}}
+    resp = asyncio.run(view.get(req))
+    assert resp.status == 400
+    assert _payload(resp)["zone_selection_required"] is True
+    assert ran == [] and not a.v4_accuracy_inputs.called and not b.v4_accuracy_inputs.called
+    # With the zone named, the same install answers for that zone.
+    req, _ = _request(a, {"zone": "zoneB"})
+    req.app["hass"].data = {DOMAIN: {"zoneA": a, "zoneB": b}}
+    resp = asyncio.run(view.get(req))
+    assert resp.status == 200 and b.v4_accuracy_inputs.called and not a.v4_accuracy_inputs.called
+
+
+def test_view_single_zone_needs_no_zone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("custom_components.climate_advisor.api.dt_util.now", lambda: _NOW, raising=False)
+    resp, _ = _get(_coordinator(tmp_path), {})
+    assert resp.status == 200 and _payload(resp)["zone"] == "zoneA"
+
+
+def test_page_fixture_has_exactly_the_endpoint_keys(tmp_path: Path) -> None:
+    """The preview page's tests run on tests/fixtures/prediction_accuracy_sample.json: it must stay the real shape."""
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "prediction_accuracy_sample.json").read_text(encoding="utf-8")
+    )
+    out = _build(tmp_path)
+    assert set(fixture) == set(out)
+    assert fixture["sensors"][0]["id"] == out["sensors"][0]["id"] == "_ca"
+    assert set(fixture["stats"]) == set(out["stats"]) and set(fixture["model"]) == set(out["model"])
+
+
+@pytest.mark.parametrize("bad", [7, [{"t": 1}], "points", {"_ca": 3}, {"_ca": {"4h": "x"}}])
+def test_malformed_backtest_points_never_break_the_page(tmp_path: Path, bad) -> None:
+    """A hand-edited or truncated backtest file must degrade to "no backtest", never to a 500."""
+    out = _build(tmp_path, backtest={"points": bad, "gate": "nope", "gate_summary": [1]})
+    assert out["points"] and out["gate"] == [] and out["gate_summary"] is None
+    json.dumps(out)

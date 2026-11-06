@@ -566,6 +566,15 @@ class TestConfidenceGates:
         one, _t, _ = simulate(T0, 0.1)
         assert p4.fit(one, primary=HALL, sensors=[HALL], tz=TZ, now=T0).confidence == "none"
 
+    def test_early_none_says_why_on_the_model(self):
+        """The Debug tab and the fit log line read ``model.fit``: an early "none" must carry its reason and count."""
+        one, _t, _ = simulate(T0, 0.1)
+        m = p4.fit(one, primary=HALL, sensors=[HALL], tz=TZ, now=T0)
+        assert m.fit["reason"] == "too few samples" and "too few samples" in p4.summary_line(m)
+        samples, _t, _ = simulate(T0, 6, noise=0.03)
+        m = p4.fit(samples, primary="sensor.not_in_history", sensors=["sensor.not_in_history"], tz=TZ, now=T0)
+        assert m.confidence == "none" and m.fit["reason"] == "too few anchors" and m.fit["n_anchors"] == 0
+
     def test_between_three_and_ten_days_is_low(self):
         samples, _t, _ = simulate(T0, 6, noise=0.03)
         m = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts)

@@ -298,7 +298,8 @@ def build_prediction_accuracy(
 
     known = {str(s.get("id")) for s in sensors_meta}
     sensors_out = [dict(s) for s in sensors_meta]
-    for extra in [*archive.sensor_ids(), *(backtest.get("points", {}) if isinstance(backtest, Mapping) else {})]:
+    bt_points = backtest.get("points") if isinstance(backtest, Mapping) else None
+    for extra in [*archive.sensor_ids(), *(bt_points if isinstance(bt_points, Mapping) else {})]:
         if isinstance(extra, str) and extra not in known:
             known.add(extra)
             sensors_out.append({"id": extra, "name": extra, "role": ""})

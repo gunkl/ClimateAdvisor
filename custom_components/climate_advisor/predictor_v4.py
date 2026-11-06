@@ -824,21 +824,21 @@ def fit(
     base = _default_model(primary, sensor_list, fitted_at, thermostat, forecast, info)
     horizon_steps = max(4, int(horizon_h * 60 / V4_STEP_MINUTES))
     if n_samples < 16:
-        info["reason"] = "too few samples"
+        base.fit["reason"] = "too few samples"  # ``base`` holds a copy of ``info``: record the reason on the model
         return base
     try:
         prob = _Problem(
             samples, primary=primary, extra=extra, tz=tz, horizon_steps=horizon_steps, max_anchors=max_anchors
         )
         if len(prob.anchors) < GATE_MIN_ANCHORS:
-            info["n_anchors"] = len(prob.anchors)
-            info["reason"] = "too few anchors"
+            base.fit["n_anchors"] = len(prob.anchors)
+            base.fit["reason"] = "too few anchors"
             return base
         return _fit_problem(
             prob, base, sensor_list, thermostat, forecast, info, sample_days, max_iterations, warm_start
         )
     except (ArithmeticError, ValueError, TypeError, IndexError, OverflowError) as exc:  # pragma: no cover
-        info["reason"] = f"fit failed: {type(exc).__name__}"
+        base.fit["reason"] = f"fit failed: {type(exc).__name__}"
         return base
 
 

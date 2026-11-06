@@ -5534,6 +5534,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._v4_store.last_fit_error = "fit failed; see the log"
             self._v4_store.dirty = True
             _LOGGER.warning("v4 fit (%s) failed; keeping the previous model", reason, exc_info=True)
+            # Persist the failure now: with no model the cycle returns before its own throttled save, so the Debug
+            # tab would otherwise lose last_fit_error on a restart.
+            if getattr(self, "_shut_down", False) is not True:
+                try:
+                    await self._executor_job(self._v4_store.save)
+                except Exception:  # noqa: BLE001 - save() never raises; this only guards a closing executor
+                    _LOGGER.debug("v4 fit: could not save the failure record", exc_info=True)
         finally:
             self._v4_fit_running = False
             self._v4_fit_task = None
@@ -5558,13 +5565,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         state = self._v4_store
         model_dict = state.v4_model
-        if not isinstance(model_dict, dict):
-            # First fit once startup coalescing is over (the chart log and forecast archive are loaded by then).
+        has_model = isinstance(model_dict, dict)
+        if not has_model or model_dict.get("confidence", "none") == "none":
+            # First fit once startup coalescing is over (the chart log and forecast archive are loaded by then). A
+            # stored "none" model (too little history yet) counts as no model here: retried at most every 6 h instead
+            # of waiting for the 03:15 refit.
             if getattr(self, "_startup_coalesce_active", False) is not True:
                 last = self._v4_last_fit_attempt
                 if last is None or _monotonic() - last >= V4_FIT_RETRY_MIN_INTERVAL_S:
-                    self._v4_start_fit("first")
-            return
+                    self._v4_start_fit("first" if not has_model else "retry")
+            if not has_model:
+                return
         started = _perf_counter()
         now = dt_util.now()
         # The row this cycle just wrote: the fit trains on exactly these fields.

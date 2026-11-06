@@ -197,6 +197,41 @@ def test_failed_first_fit_retries_only_after_the_back_off(fake: FakePredictor) -
     assert len(fake.fit_calls) == 2 and coord._v4_store.v4_model is not None
 
 
+def test_failed_first_fit_is_persisted_at_once(fake: FakePredictor) -> None:
+    """With no model the cycle returns before its own save: the failure must reach the file anyway."""
+    coord, fake_hass, scheduler = _build()
+    _seed_cycle_inputs(coord, scheduler)
+    fake.fail_fit = True
+    _cycle(coord, scheduler, drain=True)
+    reloaded = V4ModelStore(Path(coord.hass.config.config_dir), entry_id=coord._entry_id)
+    reloaded.load()
+    assert reloaded.v4_model is None
+    assert reloaded.last_fit_error == "fit failed; see the log" and reloaded.last_fit["ok"] is False
+    assert coord._v4_store.dirty is False
+
+
+def test_confidence_none_model_is_retried_like_no_model(fake: FakePredictor) -> None:
+    """A fit on too little history stores a "none" model; it is refitted within 6 h, not only at 03:15."""
+    coord, fake_hass, scheduler = _build(coalesced=False)
+    coord._v4_store.v4_model = _fake_model_dict(coord, confidence="none")
+    _seed_cycle_inputs(coord, scheduler)
+    _cycle(coord, scheduler, drain=True)  # startup coalescing: never during it
+    assert fake.fit_calls == []
+    coord._startup_coalesce_active = False
+    fake.confidence = "none"
+    _cycle(coord, scheduler, drain=True)  # first cycle after coalescing: retried at once
+    assert len(fake.fit_calls) == 1 and coord._v4_last_fit["reason"] == "retry"
+    _cycle(coord, scheduler, drain=True)  # still "none", but backed off
+    assert len(fake.fit_calls) == 1
+    coord._v4_last_fit_attempt -= 7 * 3600
+    fake.confidence = "ok"
+    _cycle(coord, scheduler, drain=True)
+    assert len(fake.fit_calls) == 2 and coord._v4_store.v4_model["confidence"] == "ok"
+    coord._v4_last_fit_attempt -= 7 * 3600
+    _cycle(coord, scheduler, drain=True)  # a usable model: only the nightly timer refits it
+    assert len(fake.fit_calls) == 2
+
+
 def test_failed_nightly_fit_keeps_the_previous_model(fake: FakePredictor, caplog: pytest.LogCaptureFixture) -> None:
     coord, fake_hass, scheduler = _build()
     _seed_cycle_inputs(coord, scheduler)
@@ -482,6 +517,19 @@ def test_unknown_top_level_key_is_ignored_and_known_fields_survive(
     assert engine._state.dismissed_suggestions == ["x"] and engine._state.clean_shutdown is True
     drops = [r.getMessage() for r in caplog.records if "ignoring unknown keys" in r.getMessage()]
     assert len(drops) == 1 and "another_new_key" in drops[0] and "from_a_newer_release" in drops[0]
+
+
+def test_a_file_with_no_learning_field_is_warned_not_silently_emptied(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The tolerance must not hide a real problem: another file written over the learning file is a WARNING."""
+    (tmp_path / "climate_advisor_learning.json").write_text(json.dumps({"entries": [{"ts": "x"}]}), encoding="utf-8")
+    caplog.set_level(logging.INFO)
+    engine = LearningEngine(tmp_path)
+    engine.load_state()
+    assert engine._state.records == []
+    drops = [r for r in caplog.records if "ignoring unknown keys" in r.getMessage()]
+    assert len(drops) == 1 and drops[0].levelno == logging.WARNING and "no known field" in drops[0].getMessage()
 
 
 def _store(coord) -> V4ModelStore:

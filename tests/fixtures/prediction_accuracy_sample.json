@@ -3,6 +3,11 @@
  "unit": "°F",
  "sensors": [
   {
+   "id": "_ca",
+   "name": "Climate Advisor reading",
+   "role": "the reading Climate Advisor uses"
+  },
+  {
    "id": "sensor.hallway_temp",
    "name": "Hallway",
    "role": "thermostat's finer sensor"
@@ -13,6 +18,7 @@
    "role": ""
   }
  ],
+ "sensor": "_ca",
  "lead": "4h",
  "range": "3d",
  "start": "2026-10-31T04:00-07:00",
@@ -474,64 +480,93 @@
  },
  "model": {
   "confidence": "ok",
-  "fitted_at": "2026-11-02T03:15:00-07:00",
+  "fitted_at": "2026-11-02T03:15:00-08:00",
   "span_days": 30
  },
  "gate": [
   {
    "zone": "Zone 1",
+   "sensor": "_ca",
    "season": "heating",
    "lead": "1h",
    "v4": 0.61,
    "v3": 1.08,
    "flat": 0.67,
    "bias": 0.11,
+   "n": 180,
+   "coverage": 0.97,
    "pass": true,
-   "scored": true
+   "scored": true,
+   "reasons": []
   },
   {
    "zone": "Zone 1",
+   "sensor": "_ca",
    "season": "heating",
    "lead": "4h",
    "v4": 0.76,
    "v3": 1.6,
    "flat": 1.51,
    "bias": 0.07,
+   "n": 180,
+   "coverage": 0.97,
    "pass": true,
-   "scored": true
+   "scored": true,
+   "reasons": []
   },
   {
    "zone": "Zone 1",
+   "sensor": "_ca",
    "season": "heating",
    "lead": "12h",
    "v4": 0.88,
    "v3": 2.42,
    "flat": 2.73,
    "bias": 0.35,
+   "n": 180,
+   "coverage": 0.97,
    "pass": true,
-   "scored": true
+   "scored": true,
+   "reasons": []
   },
   {
    "zone": "Zone 1",
+   "sensor": "_ca",
    "season": "heating",
    "lead": "24h",
    "v4": 0.8,
    "v3": 2.57,
    "flat": 1.07,
    "bias": 0.18,
+   "n": 180,
+   "coverage": 0.97,
    "pass": true,
-   "scored": true
+   "scored": true,
+   "reasons": []
   },
   {
    "zone": "Zone 1",
+   "sensor": "_ca",
    "season": "summer",
    "lead": "4h",
    "v4": null,
    "v3": null,
    "flat": null,
    "bias": null,
+   "n": 0,
+   "coverage": null,
    "pass": false,
-   "scored": false
+   "scored": false,
+   "reasons": [
+    "no anchors in this season (HVAC never ran that way in the recorded history)"
+   ]
   }
- ]
+ ],
+ "gate_summary": {
+  "ready": false,
+  "passed": 3,
+  "scored": 3,
+  "total": 4,
+  "other_sensors_failing": 0
+ }
 }

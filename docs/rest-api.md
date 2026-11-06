@@ -66,7 +66,7 @@ Occupant view: a read-only page that shows how well the new prediction engine (v
 
 | Param | Values | Default | Notes |
 |---|---|---|---|
-| `zone` | config entry id (`entry_id` accepted too) | the only zone; with several zones and no `zone`, `resolve_zone(..., allow_guess=True)` uses the default zone (read-only, so a guess is allowed; `get_default_coordinator`) | |
+| `zone` | config entry id (`entry_id` accepted too) | the only zone; with several zones and no `zone` the view refuses with 400 (`resolve_zone(..., allow_guess=False)`, the `_ambiguous_zone_payload` body with `zones`) instead of guessing: a scorecard showing another zone's numbers would mislead the per-zone v4 decision. The preview page always sends `zone` once `/status` has listed the zones | |
 | `sensor` | an indoor entity id, or `_ca` | `_ca` | `_ca` = the reading Climate Advisor itself uses. Unknown ids simply return no points |
 | `lead` | `1h`, `4h`, `12h`, `24h` | `4h` | How far ahead the prediction was made. Invalid -> `4h` |
 | `range` | `6h`, `12h`, `24h`, `3d`, `7d`, `30d`, `1y` | `24h` | Window length. Invalid -> `24h` |
@@ -105,17 +105,17 @@ Sample (trimmed; full fixture `tests/fixtures/prediction_accuracy_sample.json`):
  "points": [{"t": "2026-10-31T04:00-07:00", "actual": 65.7, "v4": 64.6, "v3": 66.0}],
  "heat_runs": [["2026-10-31T06:30-07:00", "2026-10-31T06:45-07:00"]],
  "stats": {"n": 65, "v4_mae": 0.76, "v3_mae": 1.6, "flat_mae": 1.51, "v4_bias": 0.07, "v3_bias": 1.36},
- "model": {"confidence": "ok", "fitted_at": "2026-11-02T03:15:00-07:00", "span_days": 30},
+ "model": {"confidence": "ok", "fitted_at": "2026-11-02T03:15:00-08:00", "span_days": 30},
  "gate": [{"zone": "Zone 1", "season": "heating", "lead": "4h", "v4": 0.76, "v3": 1.6, "flat": 1.51, "bias": 0.07, "pass": true, "scored": true}],
  "gate_summary": null}
 ```
 
-Errors: 503 Climate Advisor not loaded. The view's 400 ambiguous-zone branch never fires because it resolves with `allow_guess=True`. The payload is built in the executor (it reads the backtest file and walks the chart log); the view itself only calls `coordinator.v4_accuracy_inputs()` on the loop.
+Errors: 400 several zones loaded and no `zone`/`entry_id` given (body `{message, zone_selection_required: true, zones, zone_count}`, the zone-resolution Repairs issue is raised once); 503 Climate Advisor not loaded or an unknown `zone`. The payload is built in the executor (it reads the backtest file and walks the chart log); the view itself only calls `coordinator.v4_accuracy_inputs()` on the loop.
 
 ### Engines and debug keys for v4
 
 - `GET /api/climate_advisor/engines` -> existing engine status plus `v4` = `coordinator.v4_model_summary()` (`api.py#L1370`).
-- `GET /api/climate_advisor/automation_state` (debug state) -> `v4_model` = the same dict (`coordinator.py#L14872`).
+- `GET /api/climate_advisor/automation_state` (debug state) -> `v4_model` = the same dict (`coordinator.py#L14883`).
 - Keys (temperatures/errors in the user's unit; `unit` carries the symbol): `has_model`, `confidence`, `fitted_at`, `span_days`, `n_anchors`, `mae_by_lead` (`{"1h","4h","12h"}` training MAE), `primary`, `sensors`, `schema_version`, `unit`, `engine_available`, `mass` (hidden thermal-mass estimate), `fit_running`, `last_fit` (`{at, reason: nightly|first, seconds, ok}`), `last_cycle` (`{at, ms, predicted, archived, inputs}`), `archive_slots` (slots per sensor line). Failure yields `{has_model: false, confidence: "none", error: true}`. Debug visibility only; nothing consumes it for a decision.
 
 ### POST Endpoints

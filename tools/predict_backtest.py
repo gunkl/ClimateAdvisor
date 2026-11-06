@@ -18,7 +18,7 @@ HOW (walk-forward, no future leakage)
   * Scored at 1 / 4 / 12 / 24 h against the sensor reading at A+lead (linear between log rows).
 
 MODELS COMPARED ON THE SAME INPUTS (same anchors, forecast, setpoints, windows plan)
-  * v4   - ``predictor_v4.fit`` / ``predict``  (lane A, pure Python)
+  * v4   - ``predictor_v4.fit`` / ``predict``  (the integration module, pure Python)
   * v3   - the PRODUCTION ``coordinator._build_predicted_indoor_future`` imported headless (HA stubs
            from tools/sim_harness/ha_stubs.py), fed the learning DB's thermal model: the current cache
            (``--v3-model current``, the default) or one rebuilt with production's own
@@ -458,13 +458,13 @@ def interp_hourly(vals: list[float], step_s: float) -> float:
 
 
 def load_predictor() -> Any:
-    """``predictor_v4`` (lane A). Pure Python, loaded by path; falls back to the stubbed package import."""
+    """``predictor_v4`` (integration module). Pure Python, loaded by path; else the stubbed package import."""
     global _PREDICTOR  # noqa: PLW0603
     if _PREDICTOR is not None:
         return _PREDICTOR
     path = _PKG_DIR / "predictor_v4.py"
     if not path.exists():
-        raise SystemExit(f"ERROR: {path} not found - predictor_v4 (lane A) is required.")
+        raise SystemExit(f"ERROR: {path} not found - custom_components/climate_advisor/predictor_v4.py is required.")
     try:
         spec = importlib.util.spec_from_file_location("_ca_predictor_v4_standalone", path)
         module = importlib.util.module_from_spec(spec)

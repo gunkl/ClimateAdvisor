@@ -9,7 +9,7 @@ Allowed to mention v4 (anything named ``v4``/``predictor_v4``):
 * the shadow modules: ``v4_shadow.py``, ``v4_archive.py``, ``prediction_accuracy.py`` (and ``predictor_v4.py``);
 * ``const.py`` (``V4_*`` constants), ``api.py`` (the read-only endpoint
   and the Debug ``engines`` field);
-* ``coordinator.py``, only in ``_v4*``/``v4_*`` methods and in five fixed wiring points that never feed v4 back: the
+* ``coordinator.py``, only in ``_v4*``/``v4_*`` methods and in six fixed wiring points that never feed v4 back: the
   constructor, ``async_setup`` (nightly timer), ``async_restore_state`` (archive load), ``async_shutdown``,
   the per-cycle call and the Debug payload.
 """

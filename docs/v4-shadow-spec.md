@@ -7,7 +7,7 @@
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What does the occupant experience from the v4 shadow? | Nothing. No setpoint, fan, window decision, briefing line or Status number reads v4; v3 still drives the house and the Status chart. A broken or missing v4 only means the "Prediction accuracy (preview)" page stays empty. | [Invariants](#invariants), [No-decision-path guarantee](#nothing-on-a-decision-path-reads-v4) |
-| When does v4 fit, and when does it predict? | Fit: every night at 03:15 local, plus once after startup when no model exists (retried by the cycle at most every 6 h if the fit itself raised). Predict: once per 30-minute coordinator cycle, after the chart row is written. Never two fits at once. | [Scheduling](#scheduling) |
+| When does v4 fit, and when does it predict? | Fit: every night at 03:15 local, plus once after startup when no model exists or the stored model has confidence `none` (retried by the cycle at most every 6 h). Predict: once per 30-minute coordinator cycle, after the chart row is written. Never two fits at once. | [Scheduling](#scheduling) |
 | What does a cycle feed `predict()`? | The chart row this cycle just wrote (live readings per sensor, `_ca`), the raw hourly forecast, the target-band schedule as setpoints (heat sp on a heat day, cool sp on a cool day), planned windows, fan off, and the hidden-mass state stepped once per elapsed 15 min. | [Per-cycle inputs](#per-cycle-inputs) |
 | Which files does the shadow write, and what is in them? | Three entry-scoped files: `climate_advisor_v4_archive_<id>.json` (1/4/12/24 h predictions per sensor, 400 days), `climate_advisor_v4_model_<id>.json` (fitted model, hidden-mass state, last fit) and `climate_advisor_v4_backtest_<id>.json` (written only by `tools/predict_backtest.py --publish`; the integration only reads it). | [Files](#files) |
 | How often is the archive written? | At most hourly from the cycle (monotonic clock), and once on unload with one retry. A crash loses at most about an hour of shadow predictions, never anything v3 or the house depends on. | [Persistence timing](#persistence-timing), [Error Conditions](#error-conditions) |
@@ -16,7 +16,7 @@
 
 ## Scope
 
-- **Files:** `custom_components/climate_advisor/v4_shadow.py` (pure/executor halves, 238 lines), `v4_archive.py` (`V4Archive` and `V4ModelStore`, 334 lines), `prediction_accuracy.py` (endpoint payload, 345 lines), the coordinator block "Prediction engine v4 in shadow" (`coordinator.py#L5436`-`L5763`) plus its wiring points (constructor `L827`, nightly timer `L1337`, restore `L1965`, per-cycle call `L4710`, debug payload `L14872`, unload `L15005`), the two views in `api.py` (`ClimateAdvisorEnginesView`, `ClimateAdvisorPredictionAccuracyView`), the `V4_*` constants and `ENTRY_SCOPED_FILES` in `const.py#L554-L585`, `ChartStateLog.last_entry()` / `raw_entries()` in `chart_log.py`, and the unknown-key-tolerant load in `learning.py#L1016`.
+- **Files:** `custom_components/climate_advisor/v4_shadow.py` (pure/executor halves, 238 lines), `v4_archive.py` (`V4Archive` and `V4ModelStore`, 334 lines), `prediction_accuracy.py` (endpoint payload, 345 lines), the coordinator block "Prediction engine v4 in shadow" (`coordinator.py#L5436`-`L5775`) plus its wiring points (constructor `L827`, nightly timer `L1337`, restore `L1965`, per-cycle call `L4710`, debug payload `L14883`, unload `L15016`), the two views in `api.py` (`ClimateAdvisorEnginesView`, `ClimateAdvisorPredictionAccuracyView`), the `V4_*` constants and `ENTRY_SCOPED_FILES` in `const.py#L554-L585`, `ChartStateLog.last_entry()` / `raw_entries()` in `chart_log.py`, and the unknown-key-tolerant load in `learning.py#L1016`.
 - **Entry points:** `V4Archive.load/save/record`, `V4ModelStore.load/save`, `v4_shadow.run_fit/run_cycle/build_inputs/model_summary`, `Coordinator._v4_start_fit`, `_v4_shadow_cycle`, `_v4_flush_on_shutdown`, `v4_accuracy_inputs`, `v4_model_summary`, `prediction_accuracy.build_prediction_accuracy`.
 - **Not covered here:** the model equations, fit, gates and `predict()` contract ([Predictor v4 Spec](predictor-v4-spec.md)); the walk-forward backtest that writes the third file ([Debugging Guide: prediction backtest](09-DEBUGGING-GUIDE.md#prediction-backtest-toolspredict_backtestpy-issue-1230-r1)); the endpoint's request/response reference ([REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1)); the preview page ([Architecture Reference](02-ARCHITECTURE-REFERENCE.md#prediction-accuracy-preview-page-issue-1230-r1)). v3 stays the decision model ([Thermal Model v3](thermal-model-v3-spec.md)).
 
@@ -25,14 +25,14 @@
 | Trigger | Code | What happens |
 |---|---|---|
 | Nightly timer, 03:15 local (`V4_FIT_HOUR`/`V4_FIT_MINUTE`) | `async_track_time_change` registered in `async_setup`, kept in `_unsub_listeners` (cancelled on unload), callback wrapped by `_zone_scoped` (`coordinator.py#L1337`) -> `_v4_nightly_fit` -> `_v4_start_fit("nightly")` | Refit this zone from all retained chart_log rows plus forecast-archive snapshots, warm-started from the stored model |
-| First fit | `_v4_shadow_cycle_impl` (`coordinator.py#L5556`): no stored model dict, startup coalescing over (`_startup_coalesce_active` is not `True`) | `_v4_start_fit("first")`. If this is not the first attempt, only when the last attempt is at least `V4_FIT_RETRY_MIN_INTERVAL_S` (6 h) old (monotonic) |
+| First fit / retry | `_v4_shadow_cycle_impl` (`coordinator.py#L5563`): no stored model dict, or a stored model with `confidence == "none"`; startup coalescing over (`_startup_coalesce_active` is not `True`) | `_v4_start_fit("first")` (no model) or `_v4_start_fit("retry")` (a `none` model; the cycle then continues and only advances the hidden node, since `predict()` returns `None`). If this is not the first attempt since startup, only when the last attempt is at least `V4_FIT_RETRY_MIN_INTERVAL_S` (6 h) old (monotonic) |
 | 30-minute cycle | `_async_update_data_impl` calls `await self._v4_shadow_cycle()` right after the chart row and `_pred_archive` purge (`coordinator.py#L4710`) | Predict 24 h, archive 1/4/12/24 h |
 | Unload | `async_shutdown` | `_v4_flush_on_shutdown()` (inside `try`), then `_v4_cancel_fit()` (in `finally`) |
 
 - **No concurrency.** `_v4_start_fit` check-and-sets `_v4_fit_running` on the event loop; a second request while one runs is skipped (DEBUG "skipped, a fit is already running"). It also refuses after `_shut_down` and when `v4_shadow.predictor_available()` is false (the engine failed to import).
 - **Off the event loop.** The fit runs as a background task (`self._spawn(..., background=True)`, so HA cancels it on unload) and its CPU work, `v4_shadow.run_fit`, runs in the executor through `_executor_job`. Inputs (`chart_log.raw_entries()`, `forecast_archive.get_snapshots`, sensor ids, previous model) are captured on the loop before the job starts.
 - **Result handling.** After the job: if `_shut_down` the result is dropped. Otherwise the model dict replaces `V4ModelStore.v4_model`; when the primary sensor changed (or there was no previous model) `v4_mass_f`/`v4_mass_at` are cleared so the hidden node re-seeds from the reading; `last_fit` = `{at, reason, seconds, ok: true}`; one INFO line (`v4 fit (<reason>): <summary_line> span=..d primary=.. sensors=N took ..s`); `V4ModelStore.save` in the executor.
-- **The "6 h retry" only covers a fit that raised.** A fit that completes with `confidence == "none"` (thin data, no skill) still stores a model dict, so `_v4_shadow_cycle_impl` no longer starts a "first" fit; the next attempt is the next 03:15 timer. See [Doc/code notes](#doc-and-code-notes).
+- **The "6 h retry" covers a missing model and a `none` model.** A fit that raised leaves no model (or the previous one); a fit that completes with `confidence == "none"` (thin data, no skill) stores a model dict but is treated like no model for the retry rule, so a new install or a newly added sensor gets a usable model within about 6 h of enough history instead of waiting for 03:15. A failed fit saves the model file right away so `last_fit_error` survives a restart.
 - **Cost.** A 30-day fit is 5-8 s typical on a Raspberry Pi 4 class CPU (worst case 25 s), budget 60 s ([Predictor v4: Performance](predictor-v4-spec.md#performance)); a cycle predict is about 1 ms; the cycle logs its measured cost at DEBUG and in `last_cycle.ms`.
 
 ## Per-cycle inputs
@@ -93,7 +93,7 @@ Written by `tools/predict_backtest.py --publish` over SSH ([Debugging Guide](09-
 
 - **Throttle.** After each cycle, if the archive or the store is dirty and `V4_ARCHIVE_SAVE_MIN_INTERVAL_S` (3600 s, monotonic clock) has passed since the last cycle-triggered save (or there was none since start), the archive (if dirty) and then the store (if dirty) are saved in the executor. The first cycle after a restart therefore saves immediately. The store is dirty after every cycle (the mass moved), so the model file is rewritten on the same hourly beat.
 - **Fit.** A successful fit saves the model file at once. A failed fit marks the store dirty (`last_fit` + `last_fit_error`) and leaves the write to the next hourly save or the shutdown flush.
-- **Shutdown flush** (`_v4_flush_on_shutdown`, `coordinator.py#L5675`): if dirty, save the archive; on failure retry once; a second failure logs a WARNING with the slot count that is lost. Same for the model file. The whole block is wrapped in `try/except` so unload continues.
+- **Shutdown flush** (`_v4_flush_on_shutdown`, `coordinator.py#L5686`): if dirty, save the archive; on failure retry once; a second failure logs a WARNING with the slot count that is lost. Same for the model file. The whole block is wrapped in `try/except` so unload continues.
 - **Restore** (`coordinator.py#L1965`): `V4Archive.load` then `V4ModelStore.load`, both in the executor; `_v4_last_fit` is restored from the file.
 
 ## Nothing on a decision path reads v4
@@ -119,7 +119,7 @@ Behavioural companions: `tests/test_v4_shadow_wiring.py` (scheduling, throttle, 
 User view: if the owner rolls back to a release without the shadow, their learned thermal model, history and suggestions are untouched and the house runs as before.
 
 1. The fitted model is stored in `climate_advisor_v4_model_<id>.json`, NOT in `LearningState`. An older release would reject a learning file with an extra field (`LearningState(**data)` raises) and reset the whole learning history; it never opens the v4 files.
-2. This release also hardens the other direction: `LearningEngine.load()` drops top-level keys it does not know before building `LearningState` (`learning.py#L1016`, logged once at DEBUG as "ignoring unknown keys from a newer release"), so a future field added to the learning file cannot wipe history on a downgrade.
+2. This release also hardens the other direction: `LearningEngine.load()` drops top-level keys it does not know before building `LearningState` (`learning.py#L1016`, logged once at INFO as "ignoring unknown keys from a newer release", at WARNING when no known field is present at all), so a future field added to the learning file cannot wipe history on a downgrade.
 3. The learning file is never written by the v4 code (`learning.py` has no v4 reference; structural test above).
 4. The three v4 files stay on disk after a rollback and are picked up again on a roll-forward; deleting the config entry removes them.
 
@@ -148,8 +148,8 @@ User view: if the owner rolls back to a release without the shadow, their learne
 | Failure | Handling | Occupant / caller sees |
 |---|---|---|
 | v4 engine fails to import | `predictor_available()` false: fits skipped (DEBUG); `engine_available: false` in the Debug view | Nothing; preview page shows its empty state |
-| Fit raises | WARNING with traceback; `last_fit.ok = false`, `last_fit_error = "fit failed; see the log"`; previous model kept; `_v4_last_fit_attempt` set so the cycle retries a missing first model only after 6 h | Nothing |
-| Fit completes with `confidence == "none"` | Model stored; `predict()` returns `None`; nothing archived | Page empty state until the next nightly fit |
+| Fit raises | WARNING with traceback; `last_fit.ok = false`, `last_fit_error = "fit failed; see the log"`; previous model kept; `_v4_last_fit_attempt` set so the cycle retries a missing first model only after 6 h; the model file is saved at once (`last_fit_error` persists) | Nothing |
+| Fit completes with `confidence == "none"` | Model stored; `predict()` returns `None`; nothing archived; the cycle retries the fit at most every 6 h (and 03:15) | Page empty state until a fit reaches `low` or `ok` |
 | Stored model unreadable (`from_dict` -> `None`) | `run_cycle` raises `ValueError`, caught by the cycle wrapper (WARNING once) | Nothing |
 | No chart row for this cycle (event row, or older than 120 s) | Cycle skipped (DEBUG) | A 30-minute hole in the archive |
 | Cycle exception | Caught, WARNING once, DEBUG after; the mass update for that cycle is lost | Nothing |
@@ -160,7 +160,7 @@ User view: if the owner rolls back to a release without the shadow, their learne
 
 ## Debug visibility
 
-- `GET /api/climate_advisor/engines` -> `v4` key = `coordinator.v4_model_summary()` (`api.py#L1370`). `get_debug_state()` -> `v4_model` (`coordinator.py#L14872`). Same dict, temperatures and errors in the user's unit: `has_model`, `confidence`, `fitted_at`, `span_days`, `n_anchors`, `mae_by_lead` (training MAE for `1h`/`4h`/`12h`), `primary`, `sensors`, `schema_version`, `unit`, `engine_available`, `mass`, `fit_running`, `last_fit`, `last_cycle`, `archive_slots` (slot count per sensor line). A failure yields `{has_model: false, confidence: "none", error: true}`.
+- `GET /api/climate_advisor/engines` -> `v4` key = `coordinator.v4_model_summary()` (`api.py#L1370`). `get_debug_state()` -> `v4_model` (`coordinator.py#L14883`). Same dict, temperatures and errors in the user's unit: `has_model`, `confidence`, `fitted_at`, `span_days`, `n_anchors`, `mae_by_lead` (training MAE for `1h`/`4h`/`12h`), `primary`, `sensors`, `schema_version`, `unit`, `engine_available`, `mass`, `fit_running`, `last_fit`, `last_cycle`, `archive_slots` (slot count per sensor line). A failure yields `{has_model: false, confidence: "none", error: true}`.
 - Log lines: INFO `v4 fit (nightly|first): ...`; WARNING `v4 fit (...) failed; keeping the previous model`; WARNING `v4 shadow cycle failed (v3 and the house are unaffected)`; DEBUG `v4 shadow: predicted=.. inputs=.. archived=.. cost=..ms`.
 - Fetch order for a "v4 page is empty" report: Debug `v4_model` (has_model? confidence? last_fit?), then `python tools/ha_logs.py` filtered on `v4`, then the file sizes on the host.
 
@@ -170,8 +170,6 @@ Details a reader of the contract (`ca-group-briefs/1230-r1-v4-contract.md`) woul
 
 - The contract put the model in `LearningState.v4_model`/`v4_mass_f`; the build uses `V4ModelStore` and its own file (rollback safety above).
 - The contract's `v3` is "only for `_ca`"; the endpoint further limits it to look-ahead `4h`, the only lead v3 archives.
-- A completed fit with `confidence == "none"` is not retried by the 6 h rule (only a raised fit is). The next try is 03:15.
-- A fit failure's `last_fit_error` is not written until the next save point (hourly beat once a model exists, or unload).
 - `step_mass` catch-up steps reuse the current cycle's reading for every elapsed step.
 
 ## Code Reference
@@ -179,6 +177,6 @@ Details a reader of the contract (`ca-group-briefs/1230-r1-v4-contract.md`) woul
 - `v4_shadow.py`: `run_fit` L62, `build_inputs` L116, `run_cycle` L168, `model_summary` L217, `predictor_available` L41
 - `v4_archive.py`: `slot_key` L46, `V4Archive` L51 (`record` L159, `_maybe_prune` L201, `series` L224), `V4ModelStore` L249
 - `prediction_accuracy.py`: `build_prediction_accuracy` L181, `load_backtest` L51, `RANGES` L42
-- `coordinator.py`: `_v4_start_fit` L5447, `_v4_run_fit` L5474, `_v4_shadow_cycle` L5541, `_v4_shadow_cycle_impl` L5556, `_v4_flush_on_shutdown` L5675, `v4_accuracy_inputs` L5701, `v4_model_summary` L5743
+- `coordinator.py`: `_v4_start_fit` L5447, `_v4_run_fit` L5474, `_v4_shadow_cycle` L5548, `_v4_shadow_cycle_impl` L5563, `_v4_flush_on_shutdown` L5686, `v4_accuracy_inputs` L5712, `v4_model_summary` L5754
 - `const.py`: `V4_*` L554-L567, `ENTRY_SCOPED_FILES` L576
 - Tests: see [the structural test table](#nothing-on-a-decision-path-reads-v4)

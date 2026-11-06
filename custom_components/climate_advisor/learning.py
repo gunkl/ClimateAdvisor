@@ -1018,7 +1018,15 @@ class LearningEngine:
                 known = {f.name for f in fields(LearningState)}
                 unknown = sorted(k for k in data if k not in known)
                 if unknown:
-                    _LOGGER.debug("Learning state: ignoring unknown keys from a newer release: %s", ", ".join(unknown))
+                    # Visible at INFO (once per load): the next save drops these keys for good. A file with no known
+                    # key at all is not a learning file (e.g. another file written over it): WARNING, it loads empty.
+                    has_known = any(k in known for k in data)
+                    _LOGGER.log(
+                        logging.INFO if has_known else logging.WARNING,
+                        "Learning state: ignoring unknown keys from a newer release: %s%s",
+                        ", ".join(unknown),
+                        "" if has_known else " (no known field present: loading an empty learning state)",
+                    )
                     data = {k: v for k, v in data.items() if k in known}
                 self._state = LearningState(**data)
                 # Validate all list fields — corrupted JSON may have wrong types

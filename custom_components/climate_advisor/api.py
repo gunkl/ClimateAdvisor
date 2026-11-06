@@ -1389,8 +1389,11 @@ class ClimateAdvisorPredictionAccuracyView(HomeAssistantView):
         hass = request.app["hass"]
         query = request.rel_url.query
         zone = query.get("zone") or query.get("entry_id")
+        # No guess with several zones and no ``zone`` (unlike the other GET views): a scorecard silently showing
+        # another zone's numbers would mislead the owner's per-zone v4 decision. The preview page always sends
+        # ``zone`` once ``/status`` has listed the zones; a single-zone install still resolves its only zone.
         coordinator, ambiguous_refused = zone_registry.resolve_zone(
-            hass, zone, context=f"{request.method} {request.path} from {request.remote}", allow_guess=True
+            hass, zone, context=f"{request.method} {request.path} from {request.remote}", allow_guess=False
         )
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)

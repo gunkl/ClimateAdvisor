@@ -112,7 +112,7 @@ Retention is **time-based**. On `load()` and on each `append()` call that passes
 
 - Default: `max_days = 365`
 - Effective entry cap at ~30-minute coordinator cadence: **~17,520 entries**
-- Expected file size: **~2 MB** (uncompressed JSON)
+- Expected file size: **~2 MB** (uncompressed JSON) before 0.9.1; `indoor_sensors` (Issue #1230 R0) adds roughly 40-45 bytes per configured indoor sensor per row, about **+2.3 MB a year** with three sensors
 - No count-based cap exists. Long periods of sub-30-minute ticks can produce more entries.
 
 Entries with unparseable `ts` fields are treated differently in the two prune contexts:

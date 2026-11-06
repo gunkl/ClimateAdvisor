@@ -305,3 +305,220 @@ class TestChartLog:
         a, b = log._bucket_daily(log._entries)
         assert a["indoor_sensors"] == {CLIMATE: 70.0}
         assert b["indoor_sensors"] == {CLIMATE: 60.0}
+
+
+# ---------------------------------------------------------------------------
+# Issue #1230 R1: companion temperature sensors on the climate entity's own device
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from custom_components.climate_advisor.indoor_temp import discover_companion_temp_sensors  # noqa: E402
+
+COMPANION = "sensor.hallway_current_temperature"
+
+
+def _reg_entry(
+    entity_id,
+    *,
+    device_id="dev1",
+    device_class=None,
+    original_device_class=None,
+    original_name=None,
+    translation_key=None,
+):
+    return SimpleNamespace(
+        entity_id=entity_id,
+        domain=entity_id.split(".")[0],
+        device_id=device_id,
+        device_class=device_class,
+        original_device_class=original_device_class,
+        original_name=original_name,
+        translation_key=translation_key,
+    )
+
+
+def _fake_er(entries: dict, *, disabled: set[str] = frozenset()):
+    """A stand-in for the ``entity_registry`` module: ``entries`` maps entity_id -> registry entry."""
+    reg = SimpleNamespace(async_get=lambda eid: entries.get(eid))
+
+    def siblings(_reg, device_id, include_disabled_entities=True):
+        assert include_disabled_entities is False  # the contract: disabled entities are never logged
+        return [e for e in entries.values() if e.device_id == device_id and e.entity_id not in disabled]
+
+    return SimpleNamespace(async_get=lambda _hass: reg, async_entries_for_device=siblings)
+
+
+def _discover(entries, **kw):
+    with patch("custom_components.climate_advisor.indoor_temp.er", _fake_er(entries, **kw)):
+        return discover_companion_temp_sensors(MagicMock(), CLIMATE)
+
+
+class TestCompanionDiscovery:
+    def test_temperature_sensor_on_same_device_found(self):
+        entries = {
+            CLIMATE: _reg_entry(CLIMATE),
+            COMPANION: _reg_entry(COMPANION, original_device_class="temperature"),
+        }
+        assert _discover(entries) == (COMPANION,)
+
+    def test_non_temperature_companions_excluded(self):
+        entries = {
+            CLIMATE: _reg_entry(CLIMATE),
+            "sensor.hallway_humidity": _reg_entry("sensor.hallway_humidity", original_device_class="humidity"),
+            "binary_sensor.hallway_motion": _reg_entry("binary_sensor.hallway_motion", original_device_class="motion"),
+            "sensor.hallway_misc": _reg_entry("sensor.hallway_misc"),
+            "sensor.other_device_temp": _reg_entry(
+                "sensor.other_device_temp", device_id="dev2", original_device_class="temperature"
+            ),
+        }
+        assert _discover(entries) == ()
+
+    def test_user_device_class_override_wins(self):
+        entries = {
+            CLIMATE: _reg_entry(CLIMATE),
+            COMPANION: _reg_entry(COMPANION, device_class="temperature", original_device_class="humidity"),
+            "sensor.x": _reg_entry("sensor.x", device_class="humidity", original_device_class="temperature"),
+        }
+        assert _discover(entries) == (COMPANION,)
+
+    def test_disabled_entity_excluded(self):
+        entries = {
+            CLIMATE: _reg_entry(CLIMATE),
+            COMPANION: _reg_entry(COMPANION, original_device_class="temperature"),
+        }
+        assert _discover(entries, disabled={COMPANION}) == ()
+
+    def test_no_device_or_not_in_registry_or_no_climate(self):
+        assert _discover({CLIMATE: _reg_entry(CLIMATE, device_id=None)}) == ()
+        assert _discover({}) == ()
+        with patch("custom_components.climate_advisor.indoor_temp.er", _fake_er({})):
+            assert discover_companion_temp_sensors(MagicMock(), None) == ()
+
+    def test_registry_failure_never_raises(self):
+        boom = SimpleNamespace(async_get=MagicMock(side_effect=RuntimeError("x")))
+        with patch("custom_components.climate_advisor.indoor_temp.er", boom):
+            assert discover_companion_temp_sensors(MagicMock(), CLIMATE) == ()
+
+    def test_sorted_deterministic(self):
+        a, b = "sensor.a_temp", "sensor.b_temp"
+        entries = {
+            CLIMATE: _reg_entry(CLIMATE),
+            b: _reg_entry(b, original_device_class="temperature"),
+            a: _reg_entry(a, original_device_class="temperature"),
+        }
+        assert _discover(entries) == (a, b)
+
+    def test_outdoor_and_floor_sensors_on_the_thermostat_device_excluded(self):
+        """Issue #1230 R1b: a Honeywell-style "Outdoor temperature" or a floor-heating "Floor temperature" on the
+        thermostat's device never becomes a candidate: within 1 F of the room by coincidence it would otherwise be
+        used as CA's indoor reading. Matched on the entity's own name, so a thermostat named "First Floor" keeps its
+        room sensor."""
+        entries = {
+            CLIMATE: _reg_entry(CLIMATE),
+            COMPANION: _reg_entry(COMPANION, original_device_class="temperature", original_name="Current temperature"),
+            "sensor.hallway_outdoor_temperature": _reg_entry(
+                "sensor.hallway_outdoor_temperature",
+                original_device_class="temperature",
+                original_name="Outdoor temperature",
+                translation_key="outdoor_temperature",
+            ),
+            "sensor.hallway_floor": _reg_entry(
+                "sensor.hallway_floor", original_device_class="temperature", translation_key="floor_temperature"
+            ),
+            "sensor.first_floor_temperature": _reg_entry(
+                "sensor.first_floor_temperature", original_device_class="temperature", original_name="Temperature"
+            ),
+        }
+        assert _discover(entries) == ("sensor.first_floor_temperature", COMPANION)
+
+
+class TestCompanionReading:
+    def _read_c(self, states, companions=(COMPANION,), **kw):
+        return read_indoor_sensors_f(
+            hass=_hass(states),
+            unit=kw.pop("unit", "fahrenheit"),
+            climate_entity=CLIMATE,
+            indoor_temp_entity=kw.pop("sensor", None),
+            sleep_indoor_temp_entity=None,
+            companion_entities=companions,
+            now=NOW,
+        )
+
+    def test_companion_logged_at_native_resolution_after_configured(self):
+        out = self._read_c({CLIMATE: _state("heat", {"current_temperature": 69}), COMPANION: _state("68.54")})
+        assert out == {CLIMATE: 69, COMPANION: 68.54}
+        assert list(out) == [CLIMATE, COMPANION]
+
+    def test_companion_equal_to_configured_entity_deduped(self):
+        states = {CLIMATE: _state("heat", {"current_temperature": 69}), COMPANION: _state("68.54")}
+        out = self._read_c(states, sensor=COMPANION)
+        assert list(out) == [CLIMATE, COMPANION] and out[COMPANION] == 68.54
+
+    def test_no_companions_means_configured_sources_only(self):
+        out = self._read_c({CLIMATE: _state("heat", {"current_temperature": 69})}, companions=())
+        assert out == {CLIMATE: 69}
+
+    def test_unavailable_companion_is_null(self):
+        out = self._read_c({CLIMATE: _state("heat", {"current_temperature": 69}), COMPANION: _state("unavailable")})
+        assert out == {CLIMATE: 69, COMPANION: None}
+
+    def test_missing_companion_state_is_null(self):
+        assert self._read_c({CLIMATE: _state("heat", {"current_temperature": 69})})[COMPANION] is None
+
+    def test_stale_and_implausible_companion_are_null(self):
+        assert self._read_c({COMPANION: _state("68.5", age_h=INDOOR_SENSOR_STALE_HOURS + 1)})[COMPANION] is None
+        assert self._read_c({COMPANION: _state("12.0")})[COMPANION] is None
+
+    def test_celsius_companion_stored_fahrenheit(self):
+        out = self._read_c(
+            {CLIMATE: _state("heat", {"current_temperature": 20.5}), COMPANION: _state("20.3")}, unit="celsius"
+        )
+        assert out[COMPANION] == pytest.approx(68.54, abs=0.005)
+        assert out[CLIMATE] == pytest.approx(68.9, abs=0.005)
+
+
+class TestCoordinatorCompanions:
+    def test_coordinator_logs_companion_and_caches_discovery(self, frozen_now):
+        frozen_now(NOW)
+        coord = _coord(
+            {
+                CLIMATE: _state("heat", {"current_temperature": 69}),
+                SENSOR: _state("70.18"),
+                SLEEP: _state("66.2"),
+                COMPANION: _state("68.54"),
+            }
+        )
+        coord._companion_temp_sensors_cache = None
+        with patch(
+            "custom_components.climate_advisor.coordinator.discover_companion_temp_sensors", return_value=(COMPANION,)
+        ) as disc:
+            first = coord._read_chart_indoor_sensors()
+            second = coord._read_chart_indoor_sensors()
+        assert first == second == {CLIMATE: 69, SENSOR: 70.18, SLEEP: 66.2, COMPANION: 68.54}
+        assert disc.call_count == 1  # cached: not a registry scan per row
+
+    def test_discovery_refreshes_after_ttl(self):
+        from custom_components.climate_advisor.const import COMPANION_SENSOR_REFRESH_SECONDS
+
+        coord = _coord({})
+        coord._companion_temp_sensors_cache = None
+        with (
+            patch(
+                "custom_components.climate_advisor.coordinator.discover_companion_temp_sensors",
+                side_effect=[(COMPANION,), ()],
+            ) as disc,
+            patch("custom_components.climate_advisor.coordinator._monotonic") as mono,
+        ):
+            mono.return_value = 1000.0
+            assert coord._companion_temp_sensors() == (COMPANION,)
+            mono.return_value = 1000.0 + COMPANION_SENSOR_REFRESH_SECONDS - 1
+            assert coord._companion_temp_sensors() == (COMPANION,)
+            mono.return_value = 1000.0 + COMPANION_SENSOR_REFRESH_SECONDS + 1
+            assert coord._companion_temp_sensors() == ()
+        assert disc.call_count == 2
+
+    def test_state_log_still_strips_field_with_companions(self):
+        from custom_components.climate_advisor.coordinator import _CHART_LOG_STATE_LOG_STRIPPED_KEYS
+
+        assert "indoor_sensors" in _CHART_LOG_STATE_LOG_STRIPPED_KEYS

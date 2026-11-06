@@ -20,6 +20,8 @@ from . import zone_registry
 from .const import (
     AI_MODELS,
     AI_REASONING_OPTIONS,
+    COMPANION_SENSOR_AUTO,
+    COMPANION_SENSOR_OFF,
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
     CONF_AI_ENABLED,
@@ -64,6 +66,7 @@ from .const import (
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
     CONF_TEMP_UNIT,
+    CONF_THERMOSTAT_COMPANION_SENSOR,
     CONF_THRESHOLD_COOL,
     CONF_THRESHOLD_HOT,
     CONF_THRESHOLD_MILD,
@@ -98,6 +101,7 @@ from .const import (
     DEFAULT_SLEEP_COOL,
     DEFAULT_SLEEP_HEAT,
     DEFAULT_TEMP_UNIT,
+    DEFAULT_THERMOSTAT_COMPANION_SENSOR,
     DEFAULT_THRESHOLD_COOL,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_THRESHOLD_MILD,
@@ -152,6 +156,13 @@ OUTDOOR_SOURCE_OPTIONS = [
     selector.SelectOptionDict(value=TEMP_SOURCE_WEATHER_SERVICE, label="Weather service (recommended)"),
     selector.SelectOptionDict(value=TEMP_SOURCE_SENSOR, label="Dedicated sensor"),
     selector.SelectOptionDict(value=TEMP_SOURCE_INPUT_NUMBER, label="Input helper (input_number)"),
+]
+
+THERMOSTAT_COMPANION_OPTIONS = [
+    selector.SelectOptionDict(
+        value=COMPANION_SENSOR_AUTO, label="Auto (use the thermostat's finer sensor when proven)"
+    ),
+    selector.SelectOptionDict(value=COMPANION_SENSOR_OFF, label="Off (always use the thermostat's own reading)"),
 ]
 
 INDOOR_SOURCE_OPTIONS = [
@@ -1202,6 +1213,15 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         description={"suggested_value": current.get("sleep_indoor_temp_entity")},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+                    ),
+                    vol.Required(
+                        CONF_THERMOSTAT_COMPANION_SENSOR,
+                        default=current.get(CONF_THERMOSTAT_COMPANION_SENSOR, DEFAULT_THERMOSTAT_COMPANION_SENSOR),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=THERMOSTAT_COMPANION_OPTIONS,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
                     ),
                 }
             ),

@@ -21,11 +21,12 @@ The automation logic table and all threshold constants in this document are expr
 ## Anchors
 | Question | Short answer | → Full answer |
 |---|---|---|
+| What does Climate Advisor do when a thermostat reports whole degrees but its device has a finer temperature sensor (Issue #1230 R1b)? | On the `climate_fallback` source only, `resolve_indoor_temp_with_provenance(companion=...)` uses that companion as the primary indoor reading once it is consistent (within 1 F of the thermostat) and latched as finer (a fractional reading seen while the thermostat is whole-degree); otherwise it keeps the thermostat's value. Option `thermostat_companion_sensor` `auto` (default) / `off`. | [Bug D — thermostat companion sensor](08-COMPUTATION-REFERENCE.md#bug-d--thermostat-companion-sensor-issue-1230-r1b) |
 | What temperature thresholds map to each day type? | HOT ≥ 85°F, WARM ≥ 75°F, MILD ≥ 60°F, COOL ≥ 45°F, COLD < 45°F; all thresholds are °F constants in `const.py`. | [§1. Day Classification](08-COMPUTATION-REFERENCE.md#1-day-classification) |
 | How is the setback modifier computed and what values can it take? | `avg_delta = ((tomorrow_high − today_high) + (tomorrow_low − today_low)) / 2`; modifier ranges from −3.0 (strong warming) to +3.0 (significant cold front); stable trend → 0. | [§3. Setback Modifier](08-COMPUTATION-REFERENCE.md#3-setback-modifier) |
 | What is the bedtime setpoint formula and when does the thermal model change it? | Default: `comfort_heat − 4°F` (heat) / `comfort_cool + 3°F` (cool). When thermal model confidence ≥ "low", `compute_bedtime_setback()` scales depth from `heating_rate_f_per_hour × recovery_window_hours`, clamped to `[MIN_SETBACK_DEPTH, MAX_SETBACK_DEPTH]`. | [§5a. Adaptive Bedtime Setback](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) |
 | When does nat-vent continue past bedtime instead of stopping, and what stops it afterward? | Bedtime no longer makes its own outdoor-vs-sleep_cool comparison (removed in Issue #498). It defers entirely — leaving the fan alone AND (Issue #764) leaving an active economizer session alone — whenever `decide_scheduled_band_gate()` returns `DEFER_NAT_VENT` (nat-vent active or WHF owns HVAC), emitting `nat_vent_bedtime_continue`. `outdoor_temp`/`sleep_cool` on that event are informational payload only, not a comparison. Through the sleep window the fan cycles on/off around `sleep_heat + hysteresis` (`nat_vent_temperature_check()`); the session itself only ends via the Priority 2 comfort-floor exit (`indoor ≤ sleep_heat − hysteresis`, event `nat_vent_comfort_floor_exit`) — the old Priority 0 `nat_vent_sleep_ceiling_reached` exit was removed in Issue #371. | [§5a nat-vent continuation gate](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) · [Exit Hierarchy](08-COMPUTATION-REFERENCE.md#exit-hierarchy) |
-| When and how does CA pre-cool the home overnight? | Mid-night trigger, always inside the sleep window (nat-vent close + 30 min when that is asleep, else wake − 4 h, never before bedtime; Issue #1371), held against the 30-minute cycle until wake, eligible on a warming trend OR when tomorrow is independently forecast hot (`resolve_pre_cool_modifier()`, Issue #558); target = `sleep_cool + modifier` floored at `sleep_heat + hysteresis` (`compute_pre_cool_target()`, single source of truth for all 5 call sites). AC suppressed if nat-vent already reached target. Morning guard emits `pre_cool_overshoot` if indoor < `comfort_heat` at wake-up. | [§5a-i. Overnight Pre-Cool Phase](08-COMPUTATION-REFERENCE.md#5a-i-overnight-pre-cool-phase-issue-258-trigger-broadened-in-558) |
+| When and how does CA pre-cool the home overnight? | Mid-night trigger, always inside the sleep window (nat-vent close + 30 min when that is asleep, else wake − 4 h, never before bedtime; Issue #1371), held against the 30-minute cycle until wake, eligible on a warming trend OR when tomorrow is independently forecast hot (`resolve_pre_cool_modifier()`, Issue #558), judged on the day the night wakes into and kept through the midnight reset (`resolve_pre_cool_modifier_for_night()`, Issue #1378); target = `sleep_cool + modifier` floored at `sleep_heat + hysteresis` (`compute_pre_cool_target()`, single source of truth for all 5 call sites). AC suppressed if nat-vent already reached target. Morning guard emits `pre_cool_overshoot` if indoor < `comfort_heat` at wake-up. | [§5a-i. Overnight Pre-Cool Phase](08-COMPUTATION-REFERENCE.md#5a-i-overnight-pre-cool-phase-issue-258-trigger-broadened-in-558) |
 | How does the physics ODE predict future indoor temperature? | `T(t+dt) = T_outdoor + (T − T_outdoor) × exp(k_p × dt) + (Q/k_p) × (exp(k_p × dt) − 1)`, where Q switches between k_active_heat, k_active_cool, and 0 per schedule period. | [§5c. Predicted Temperature Graph — Physics Path](08-COMPUTATION-REFERENCE.md#5c-predicted-temperature-graph--physics-path) |
 | What is the dynamic target band and how does occupancy mode change it? | `_compute_target_band_schedule()` returns `[{ts, lower, upper}]` per forecast hour; away = setback today only, vacation = deep setback all days, home/guest = comfort with sleep/wake ramps. | [§5d. Dynamic Target Band](08-COMPUTATION-REFERENCE.md#5d-dynamic-target-band--_compute_target_band_schedule) |
 | How does comfort score accumulate and what triggers a suggestion? | `comfort_score = 1 − (total_violation_minutes / (days_recorded × 1440))`; a violation minute is indoor outside the **target band in effect** (sleep/away setbacks are not violations, Issue #1107; static `comfort_heat`/`comfort_cool` fallback until a band is resolved) **by more than the thermostat's own swing** (Issue #1258: not counted while it is no more than the learned swing past the edge and the thermostat is in the matching mode; 1.5 F default, 0.5 F floor, 2.5 F cap; Off/opposite mode counts as before); more than 5 days with > 30 violation minutes triggers the `comfort_violations` suggestion. | [§Metric Definitions — Comfort Score](05-LEARNING-ENGINE-DESIGN.md#comfort-score-comfort_score) |
@@ -217,7 +218,13 @@ Now:
 - **Hold:** while `_pre_cool_band_in_force_now()` holds a band, `_hold_pre_cool_band()` makes `apply_classification()` and `_resolved_comfort_band()` keep it instead of the sleep band. The hold ends at wake time, or at any write of a different target (`_set_temperature()` keeps the hold only when it re-sends the held ceiling in cool). Away/vacation and every non-sleep band are never replaced.
 - **Settling guard:** pre-cool writes carry the deliberate reason `pre_cool` (comfort-edge-selection-spec R3).
 
-Known limit (#1378): the midnight day-reset still cancels a trigger scheduled the evening before, and the handler re-judges eligibility on the post-midnight classification, so a warm day before a hot one often gets no overnight pre-cool (it no longer gets the useless daytime one either).
+**Issue #1378 (a night is judged on the day it wakes into).** What the occupant saw before the fix: on a warm day before a hot one the 02:30 pre-cool was scheduled, the 23:59 day reset cancelled it, and the 00:00 re-decision used the new day's classification, whose `tomorrow` is the day AFTER the hot one, so the house usually got no overnight banking. The mirror: after midnight a night before a mild day was pre-cooled because the day after it was hot. Original design gap since #258 (the reset and the tomorrow-only gate), made visible by #1371 putting every trigger in the night. Now:
+- **Which night:** `pre_cool_waking_date(at, config)` is the date of the wake-up that ends the night containing `at` (same date before wake time, next date from wake on; wake default 06:30).
+- **Eligibility:** `resolve_pre_cool_modifier_for_night(classification, config, at=, now=, decided=)` wraps `resolve_pre_cool_modifier()`. When the night wakes into the classification's tomorrow (before midnight / after wake) it is the unchanged #558 rule. From midnight to wake the night wakes into the classification's TODAY: the decision recorded when the trigger was scheduled (`decided` = `(waking date, modifier)`, judged the day before with its warming trend) is kept; with none (e.g. a restart after midnight) the night is eligible only when `today_high >= threshold_hot` (the trend into today is not in today's classification).
+- **Coordinator:** `_maybe_schedule_pre_cool()` records `_pre_cool_decided`; the 23:59 reset keeps a pre-cool decided for the coming night (so the 00:00 cycle does not re-decide or double-schedule it) and clears everything else; once the decided night is over (after wake), the next night is decided on today's classification instead of waiting for 23:59. `_async_pre_cool_trigger()` judges the night itself and passes `modifier=` to `handle_pre_cool()` (skips when ineligible); `handle_pre_cool()` without `modifier` keeps judging its current classification (the Tier-A harness and goldens call it that way, modelling a trigger decided the evening before). The trigger-time function, nat-vent-exit reschedule, chart dip and ODE fallback all use the same judgment. The briefing's "tonight I'll pre-cool" still uses `resolve_pre_cool_modifier()`: its tonight wakes into tomorrow.
+- Pre-cool state is not persisted: a restart after midnight falls back to the today-hot rule above.
+
+Tests: `tests/test_pre_cool_midnight_1378.py`, `tests_ha/test_pre_cool_overnight_1371.py::test_pre_cool_decided_in_the_evening_survives_midnight`.
 
 Tests: `tests/test_pre_cool_overnight_1371.py` and `tests_ha/test_pre_cool_overnight_1371.py`.
 
@@ -4088,6 +4095,50 @@ read from — neither re-derives "was the sleep sensor used" independently.
 The range check, unit conversion, and fallback-on-failure semantics are
 identical to the primary-sensor path in Bug B — this feature extends the
 resolver, it doesn't introduce a second set of rules.
+
+### Bug D — thermostat companion sensor (Issue #1230 R1b)
+
+**Occupant view:** many thermostats report `current_temperature` in whole degrees (69) while the same physical device also exposes a finer `sensor.*` with `device_class: temperature` (68.54, ~0.18 F steps). Comfort decisions (heat/cool edges, nat-vent, ODE ceiling guards, swing learning, the chart's `indoor`) then react to the real temperature instead of 1 F steps. A thermostat without such a sensor, or any doubt about the sensor, behaves exactly as before.
+
+**Where:** `indoor_temp.resolve_indoor_temp_with_provenance(..., companion=CompanionSensors)` via `_resolve_companion_f()`. The coordinator owns one `CompanionSensors` (candidates from `discover_companion_temp_sensors`, which skips a sensor whose own name says outdoor / outside / exterior / floor, see the [Chart Log Spec](chart-log-spec.md#indoor-sensors-field-issue-1230-r0) and its 900 s refresh, plus the `proven` latch) and shares it with its `AutomationEngine` (`engine.indoor_companion`), so both resolve the same value. With no holder (headless harness, no registry, or the option set to `off`) resolution is byte-identical to Bug B/C.
+
+**Rules.** Applies only to the `climate_fallback` source (`sensor` / `input_number` are explicit user choices and are never overridden). Per reading a candidate must pass, in order: parse, plausibility (40-110 F), the 12 h stale rule, then
+1. *consistent* - `|companion_f - climate_f| <= COMPANION_CONSISTENCY_F` (1.0 F; the thermostat's value is the rounded companion, anything wider is a different sensor or room);
+2. *finer, latched* - `companion.proven` gains the entity the first time a consistent companion shows a fractional value while the thermostat's own attribute is whole-degree (evaluated in each reading's native unit, so Celsius installs work); it is never latched while the attribute itself has fractions, and the companion is not used until it is latched (no flapping on a whole reading). The latch lives for the coordinator's lifetime.
+
+With several candidates, one is used only when exactly one passes; if more than one passes the result is `ambiguous` (thermostat reading kept, noted once at INFO). If the climate attribute itself is unreadable the companion is not consulted: the failure is exactly today's.
+
+**Provenance.** `IndoorTempReading.companion_entity` (the sensor that supplied the primary reading, else None) and `companion_reason` (why a candidate was not used: `not_proven`, `inconsistent`, `unavailable`, `stale`, `implausible`, `entity_missing`, `non_numeric`, `non_finite`, `ambiguous`; None when used or no candidate). When used, `primary_value` is the companion value and `source_entity` names it (the thermal model's always-primary sample is therefore the finer value); the sleep-window sensor still takes priority over both for `value`, unchanged.
+
+**Announcement.** `_refresh_indoor_sensor_health()` -> `_note_indoor_companion()` tracks the sensor in use every call (it drives the Settings label) and writes INFO only when the sensor in use changes (companion -> thermostat reading, or back), never per call, and not during the startup coalesce (the first line then waits). A reason change while the companion stays out of use is silent; a flapping companion therefore produces one line per real change.
+
+**Setting.** `thermostat_companion_sensor` = `auto` (default; also when the key is absent) / `off` (exact pre-0.9.2 behavior), in Options > Temperature Sources. Read at resolve time by both the coordinator and the engine.
+
+**Status label.** Settings tab, `indoor_temp_source`: `Thermostat (finer sensor — sensor.x)` while in use ([REST API](rest-api.md)).
+
+**State matrix** (`tests/test_thermostat_companion_1230.py`, 112 combinations, coordinator path and engine path asserted identical):
+
+| Dimension | Values |
+|---|---|
+| Indoor source | `climate_fallback`, `sensor` |
+| Companion | none; one consistent fine; one inconsistent (> 1 F); unavailable; stale; two both usable; two with one unavailable |
+| Thermostat attribute | whole (69); fractional (68.5) |
+| Setting | `auto`, `off` |
+| Sleep window | off, on |
+
+| Condition | `value` / `source_entity` | `primary_value` |
+|---|---|---|
+| `sensor` source (any companion) | dedicated sensor | dedicated sensor |
+| `climate_fallback`, `off` | thermostat | thermostat |
+| `auto`, no candidate | thermostat | thermostat |
+| `auto`, fine companion, attribute whole | companion | companion |
+| `auto`, fine companion, attribute fractional | thermostat (`not_proven`) | thermostat |
+| `auto`, inconsistent / unavailable / stale | thermostat | thermostat |
+| `auto`, two candidates both usable | thermostat (`ambiguous`) | thermostat |
+| `auto`, two candidates, only one usable | that one | that one |
+| any of the above with the sleep window on and a sleep sensor | sleep sensor | as in the row |
+
+**Direct `current_temperature` readers left on the thermostat attribute** (reviewed Issue #1230 R1b): `coordinator._async_thermostat_changed` change check (an equality "did the thermostat report something new" trigger, and the override/echo comparison of the thermostat's own values; the resolved value used by the reactive checks it triggers is the resolver's); `ai_skills_context` display string and AI-context read (describe the thermostat entity, not a decision input); `indoor_temp.read_indoor_sensors_f` (chart-log `indoor_sensors` deliberately logs the thermostat's own attribute AND the companion as separate keys). Consequence: no new wake-up is registered for the companion, so a companion tick between thermostat events is picked up by the next event or cycle.
 
 ### Indoor sensor failure reasons and announcements (Issue #1033)
 

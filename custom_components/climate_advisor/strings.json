@@ -223,14 +223,16 @@
           "outdoor_temp_entity": "Outdoor Temperature Entity",
           "indoor_temp_source": "Indoor Temperature Source",
           "indoor_temp_entity": "Indoor Temperature Entity",
-          "sleep_indoor_temp_entity": "Sleep Indoor Temp Sensor"
+          "sleep_indoor_temp_entity": "Sleep Indoor Temp Sensor",
+          "thermostat_companion_sensor": "Thermostat Finer Sensor"
         },
         "data_description": {
           "outdoor_temp_source": "Where to read outside temperature. 'Weather service' uses your weather integration; a dedicated sensor or input helper lets you use a specific entity. Switching back to 'Weather service' removes the chosen entity.",
           "outdoor_temp_entity": "Pick the sensor or input helper that reports outdoor temperature - the source above switches to match automatically. Clear this field to go back to the weather service.",
           "indoor_temp_source": "Where to read inside temperature. 'Climate entity' uses your thermostat's built-in sensor; a dedicated sensor or input helper lets you use a separate entity.",
           "indoor_temp_entity": "Pick the sensor or input helper that reports indoor temperature - the source above switches to match automatically. Clear this field to go back to the thermostat's built-in sensor.",
-          "sleep_indoor_temp_entity": "Optional bedroom sensor used for comfort and automation decisions while your sleep schedule is active (the thermal model always uses the primary sensor). Falls back to the primary sensor if unavailable. Leave blank to disable."
+          "sleep_indoor_temp_entity": "Optional bedroom sensor used for comfort and automation decisions while your sleep schedule is active (the thermal model always uses the primary sensor). Falls back to the primary sensor if unavailable. Leave blank to disable.",
+          "thermostat_companion_sensor": "Many thermostats report whole degrees on the main entity but also have a finer temperature sensor on the same device. Auto uses that finer sensor once it proves to be the same reading (within 1 degree F, showing fractions while the thermostat shows whole degrees) and falls back to the thermostat's own reading if it goes missing or disagrees. Only applies to the thermostat's built-in sensor source. Off always uses the thermostat's own reading."
         }
       },
       "sensors": {

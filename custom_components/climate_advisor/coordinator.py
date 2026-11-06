@@ -19,6 +19,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from time import monotonic as _monotonic
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
@@ -51,8 +52,10 @@ from .automation import (
     fallback_edges_without_classification,
     hvac_outcome_label,
     pre_cool_sleep_window_config,
+    pre_cool_waking_date,
     resolve_active_band,
     resolve_pre_cool_modifier,
+    resolve_pre_cool_modifier_for_night,
 )
 from .briefing import generate_briefing
 from .chart_log import ChartStateLog
@@ -108,6 +111,8 @@ from .const import (
     COMFORT_STALL_MARGIN_F,
     COMFORT_STALL_REMINDER_SECONDS,
     COMFORT_STALL_SUSTAIN_SECONDS,
+    COMPANION_SENSOR_OFF,
+    COMPANION_SENSOR_REFRESH_SECONDS,
     CONF_AI_API_KEY,
     CONF_AI_ENABLED,
     CONF_AUTOMATION_GRACE_PERIOD,
@@ -127,6 +132,7 @@ from .const import (
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
     CONF_SLEEP_HEAT,
+    CONF_THERMOSTAT_COMPANION_SENSOR,
     CONF_THRESHOLD_COOL,
     CONF_THRESHOLD_HOT,
     CONF_THRESHOLD_MILD,
@@ -148,6 +154,7 @@ from .const import (
     DEFAULT_SETBACK_DEPTH_COOL_F,
     DEFAULT_SETBACK_DEPTH_F,
     DEFAULT_SETBACK_HEAT,
+    DEFAULT_THERMOSTAT_COMPANION_SENSOR,
     DEFAULT_THRESHOLD_COOL,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_THRESHOLD_MILD,
@@ -293,7 +300,13 @@ from .hvac_action import (
     thermostat_reports_running,
 )
 from .incident_payload import build_incident_payload
-from .indoor_temp import IndoorTempReading, read_indoor_sensors_f, resolve_indoor_temp_with_provenance
+from .indoor_temp import (
+    CompanionSensors,
+    IndoorTempReading,
+    discover_companion_temp_sensors,
+    read_indoor_sensors_f,
+    resolve_indoor_temp_with_provenance,
+)
 from .invariant_watchdog import (
     LEVEL_ALERT,
     PROMISES,
@@ -921,6 +934,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pre_cool_status: str | None = None  # surfaced in status API
         self._pre_cool_trigger_dt: datetime | None = None  # full tz-aware trigger datetime
         self._pre_cool_target: float | None = None  # pre-cool ceiling target temp
+        # Issue #1378: (waking date, modifier) of the night the pending/last trigger was decided for. Survives the
+        # 23:59 day reset while that night is still ahead, so a pre-cool decided on day D for D+1 is not re-judged
+        # on D+1's forecast (which looks at D+2) after midnight.
+        self._pre_cool_decided: tuple[date, float] | None = None
         # #437 follow-up: tracks natural_vent_active across _emit_event() calls so a
         # True->False transition (nat-vent genuinely exiting, any of its 6 real exit
         # paths) can pull a pending pre-cool trigger earlier instead of leaving it on
@@ -1053,6 +1070,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # cached (the registry can populate asynchronously at startup — see
         # _resolve_fan_remote_speed_sensor()).
         self._fan_remote_speed_sensor_eid: str | None = None
+        # Issue #1230 R1: temperature sensors on the climate entity's own device (chart_log ``indoor_sensors``), cached
+        # with the monotonic time they were resolved; see ``_companion_temp_sensors``.
+        self._companion_temp_sensors_cache: tuple[tuple[str, ...], float] | None = None
+        # Issue #1230 R1b: the same candidates + 'finer' latch feed the resolver for control; shared with the engine.
+        self._companion = CompanionSensors()
+        self.automation_engine.indoor_companion = self._companion
+        with contextlib.suppress(Exception):
+            self._companion_temp_sensors()  # resolve the candidates now so the first reading already knows them
+        # Funnel state (``_refresh_indoor_sensor_health``): the companion in use now / last announced, and the
+        # one-time ambiguity note. Event loop only.
+        self._indoor_companion_in_use: str | None = None
+        self._indoor_companion_announced: str | None = None
+        self._indoor_companion_reason: str | None = None
+        self._indoor_companion_ambiguous_logged: bool = False
         self._last_violation_check: datetime | None = None
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
@@ -4859,6 +4890,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         reading = self._get_indoor_temp_with_provenance()
         primary_entity = self._primary_indoor_entity()
         self._note_indoor_sensor_state("primary", reading.reason, primary_entity, reading.primary_value)
+        self._note_indoor_companion(reading)
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
         if sleep_entity and _in_sleep_window(dt_util.now(), self.config):
             self._note_indoor_sensor_state("sleep", reading.sleep_reason, sleep_entity, reading.value)
@@ -4868,6 +4900,52 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._indoor_sleep_fallback_reason = None
             self._indoor_sleep_fallback_announced = None
             self._indoor_sleep_fallback_since = None
+
+    def _note_indoor_companion(self, reading: IndoorTempReading) -> None:
+        """Track and announce the thermostat's finer companion sensor entering/leaving use (Issue #1230 R1b).
+
+        Called only by ``_refresh_indoor_sensor_health`` (event loop). The current state always drives the Settings
+        label; INFO lines fire only on a change of the sensor in use (companion -> thermostat reading and back), once
+        per change, never per call, and not during the startup coalesce (the first announcement then waits). A
+        reason change while the companion stays out of use is DEBUG only, so a flapping 'unavailable' companion
+        cannot spam; ambiguity (two candidates both usable) is noted once at INFO.
+        """
+        using, reason = reading.companion_entity, reading.companion_reason
+        self._companion_ensure_tracking_attrs()
+        self._indoor_companion_in_use = using
+        self._indoor_companion_reason = reason
+        if reason == "ambiguous" and not self._indoor_companion_ambiguous_logged:
+            self._indoor_companion_ambiguous_logged = True
+            _LOGGER.info(
+                "Thermostat companion sensor not used: several temperature sensors on the thermostat's device all"
+                " match its reading (candidates=%s); keeping the thermostat's own reading",
+                ", ".join(getattr(self._companion, "entities", ())),
+            )
+        if getattr(self, "_startup_coalesce_active", True):
+            return
+        if using == self._indoor_companion_announced:
+            return
+        previous = self._indoor_companion_announced
+        self._indoor_companion_announced = using
+        if using is not None:
+            _LOGGER.info("Indoor reading source changed to the thermostat's finer sensor entity=%s", using)
+        elif previous is not None:
+            _LOGGER.info(
+                "Indoor reading source changed back to the thermostat's own reading (finer sensor %s: reason=%s)",
+                previous,
+                reason or "not_in_use",
+            )
+
+    def _companion_ensure_tracking_attrs(self) -> None:
+        """Default the funnel's companion attrs on coordinators built via ``object.__new__`` (tests)."""
+        for name, default in (
+            ("_indoor_companion_in_use", None),
+            ("_indoor_companion_announced", None),
+            ("_indoor_companion_reason", None),
+            ("_indoor_companion_ambiguous_logged", False),
+        ):
+            if not hasattr(self, name):
+                setattr(self, name, default)
 
     def _note_indoor_sensor_state(
         self, role: str, reason: str | None, entity_id: str | None, value_f: float | None
@@ -4931,11 +5009,39 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _primary_indoor_entity(self) -> str | None:
         """Entity id behind the always-primary indoor reading (sensor/input_number, else the climate entity)."""
         source = self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
-        return (
-            self.config.get("indoor_temp_entity")
-            if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
-            else self.config.get("climate_entity")
-        )
+        if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            return self.config.get("indoor_temp_entity")
+        # Issue #1230 R1b: the thermostat's finer companion sensor when it is the primary reading right now.
+        return self._get_indoor_temp_with_provenance().companion_entity or self.config.get("climate_entity")
+
+    def _companion_temp_sensors(self) -> tuple[str, ...]:
+        """Temperature sensors on this zone's climate-entity device, cached (Issue #1230 R1 chart_log, R1b control).
+
+        The entity registry is in memory, so a lookup is cheap, but rows are written from event handlers and a
+        thermostat can fire many state changes a minute, so the answer is cached for
+        ``COMPANION_SENSOR_REFRESH_SECONDS`` (monotonic). Setup and reload build a fresh coordinator, so they always
+        resolve anew; the refresh picks up an entity the occupant enables, disables or renames without a reload and
+        without owning a registry-event listener that would need teardown. Event loop only (registry access).
+        """
+        now = _monotonic()
+        cached = getattr(self, "_companion_temp_sensors_cache", None)  # getattr: bare-object test coordinators
+        if cached is not None and now - cached[1] < COMPANION_SENSOR_REFRESH_SECONDS:
+            return cached[0]
+        found = discover_companion_temp_sensors(self.hass, self.config.get("climate_entity"))
+        self._companion_temp_sensors_cache = (found, now)
+        companion = getattr(self, "_companion", None)
+        if companion is not None:
+            companion.entities = found
+        return found
+
+    def _companion_for_resolver(self) -> CompanionSensors | None:
+        """The companion holder for the indoor resolver, or None when the occupant set it Off (Issue #1230 R1b)."""
+        if (
+            self.config.get(CONF_THERMOSTAT_COMPANION_SENSOR, DEFAULT_THERMOSTAT_COMPANION_SENSOR)
+            == COMPANION_SENSOR_OFF
+        ):
+            return None
+        return getattr(self, "_companion", None)
 
     def _read_chart_indoor_sensors(self) -> dict[str, float | None]:
         """Every configured indoor sensor's reading for chart_log's ``indoor_sensors`` (Issue #1230 R0).
@@ -4952,6 +5058,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 climate_entity=self.config.get("climate_entity"),
                 indoor_temp_entity=self.config.get("indoor_temp_entity"),
                 sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
+                companion_entities=self._companion_temp_sensors(),
             )
         except Exception:  # noqa: BLE001 - a chart row must never fail on the sensor snapshot
             _LOGGER.debug("chart_log: indoor sensor snapshot failed", exc_info=True)
@@ -4980,6 +5087,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             climate_entity=self.config["climate_entity"],
             in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
             sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
+            companion=self._companion_for_resolver(),
         )
 
     async def _get_forecast_data(self) -> list:
@@ -6146,7 +6254,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         (nat-vent window close + delay, or wake_time - offset fallback). Kept as a method
         for existing callers that expect bound access to live classification/config/clock.
         """
-        return _compute_pre_cool_trigger_time_pure(self._current_classification, self.config, dt_util.now())
+        return _compute_pre_cool_trigger_time_pure(
+            self._current_classification,
+            self.config,
+            dt_util.now(),
+            decided=self._pre_cool_decision(),
+        )
+
+    def _pre_cool_decision(self) -> tuple[date, float] | None:
+        """``_pre_cool_decided`` when it is a real record (Issue #1378; tests build partial coordinators)."""
+        decided = getattr(self, "_pre_cool_decided", None)
+        return decided if isinstance(decided, tuple) else None
+
+    def _pre_cool_modifier_for_night(self, at: datetime) -> float | None:
+        """Pre-cool eligibility for the night containing ``at``, on the day it wakes into (Issue #1378)."""
+        return resolve_pre_cool_modifier_for_night(
+            self._current_classification,
+            self.config,
+            at=at,
+            now=dt_util.now(),
+            decided=self._pre_cool_decision(),
+        )
 
     def _build_target_band_for(
         self,
@@ -6181,14 +6309,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Compute pre-cool band parameters for chart dip visualization
         _pc_trigger_h: float | None = None
         _pc_target: float | None = None
-        _pc_modifier = (
-            resolve_pre_cool_modifier(self._current_classification, self.config)
-            if self._current_classification
-            else None
-        )
-        if _pc_modifier is not None:
-            _pc_trigger_time = self._compute_pre_cool_trigger_time()
-            if _pc_trigger_time is not None:
+        # Issue #1378: eligibility is judged for the trigger's own night (after midnight that night wakes into
+        # TODAY, not the classification's tomorrow), the same way the scheduler and the handler judge it.
+        _pc_trigger_time = self._compute_pre_cool_trigger_time() if self._current_classification else None
+        if _pc_trigger_time is not None:
+            _pc_modifier = self._pre_cool_modifier_for_night(_pc_trigger_time)
+            if _pc_modifier is not None:
                 _pc_local = dt_util.as_local(_pc_trigger_time)
                 _pc_trigger_h = _pc_local.hour + _pc_local.minute / 60.0
                 _pc_target = compute_pre_cool_target(self.config, _pc_modifier)
@@ -6561,12 +6687,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _maybe_schedule_pre_cool(self) -> None:
         """Schedule the overnight pre-cool trigger if tonight is eligible and not yet scheduled."""
+        now = dt_util.now()
         if self._pre_cool_trigger_scheduled:
-            return
+            decided = self._pre_cool_decision()
+            if decided is None or decided[0] >= pre_cool_waking_date(now, self.config):
+                return
+            # Issue #1378: the night it was decided for is over (it fired before this morning's wake); decide the
+            # next one now, while today's classification still sees that night's day as "tomorrow".
+            self._pre_cool_trigger_scheduled = False
         trigger_time = self._compute_pre_cool_trigger_time()
         if trigger_time is None:
             return
-        now = dt_util.now()
         if trigger_time <= now:
             _LOGGER.info(
                 "Pre-cool trigger time %s already passed; skipping scheduling",
@@ -6575,9 +6706,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
 
         # Build the pre-cool target for status display
-        c = self._current_classification
-        _modifier = resolve_pre_cool_modifier(c, self.config) if c else None
+        _modifier = self._pre_cool_modifier_for_night(trigger_time)
         pre_cool_target = compute_pre_cool_target(self.config, _modifier if _modifier is not None else 0.0)
+        if _modifier is not None:
+            # Issue #1378: remember which night this was decided for, and how, so it survives the 23:59 reset.
+            self._pre_cool_decided = (pre_cool_waking_date(trigger_time, self.config), _modifier)
 
         self._pre_cool_trigger_cancel = async_track_point_in_time(
             self.hass, self._zone_scoped(self._async_pre_cool_trigger), trigger_time
@@ -6593,11 +6726,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _async_pre_cool_trigger(self, now: datetime) -> None:
         """Handle the overnight pre-cool trigger point."""
         self._pre_cool_trigger_dt = None  # trigger has fired; no longer a future candidate
+        # Issue #1378: judge the night on the day it wakes into. After midnight the classification is already that
+        # day's, so its "tomorrow" is a day too far; the decision recorded when this trigger was scheduled stands.
+        _modifier = self._pre_cool_modifier_for_night(now)
+        if _modifier is None:
+            _LOGGER.info("Pre-cool trigger fired: skipped — the day this night wakes into is not pre-cool eligible")
+            self._pre_cool_status = None
+            await self.async_refresh()
+            return
         nat_vent_just_closed = not self.automation_engine.natural_vent_active
         indoor_temp = self._get_indoor_temp()
         result = await self.automation_engine.handle_pre_cool(
             indoor_temp=indoor_temp,
             nat_vent_just_closed=nat_vent_just_closed,
+            modifier=_modifier,
         )
         _LOGGER.info("Pre-cool trigger handler completed: %s", result)
         if "suppressed" in result:
@@ -6625,7 +6767,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         if not self._current_classification:
             return
-        _modifier = resolve_pre_cool_modifier(self._current_classification, self.config)
+        # Issue #1378: judged for the pending trigger's own night (see _pre_cool_modifier_for_night()).
+        _modifier = self._pre_cool_modifier_for_night(self._pre_cool_trigger_dt or dt_util.now())
         new_trigger = _decide_pre_cool_reschedule(
             current_trigger_at=self._pre_cool_trigger_dt,
             pre_cool_eligible=_modifier is not None,
@@ -6747,12 +6890,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # to the raw (pre-Issue #511) weather attribute with a WARNING each time.
         await self._refresh_hourly_forecast()
 
-        # Reset pre-cool state for the new day
-        self._cancel_pre_cool_trigger()
-        self._pre_cool_trigger_scheduled = False
-        self._pre_cool_status = None
-        self._pre_cool_trigger_dt = None
-        self._pre_cool_target = None
+        # Reset pre-cool state for the new day -- except a pre-cool decided for the night now starting (Issue #1378).
+        # Its trigger is usually after midnight (wake - 4 h); cancelling it here and re-deciding on the new day's
+        # classification judged the night on the day AFTER the one it banks for, so a warm day before a hot one
+        # lost its overnight pre-cool. Kept, the 00:00 cycle does not schedule a second one for the same night.
+        _decided = getattr(self, "_pre_cool_decided", None)
+        if isinstance(_decided, tuple) and _decided[0] > dt_util.as_local(dt_util.now()).date():
+            _LOGGER.info(
+                "Day reset: keeping the pre-cool decided for the night ending %s (Issue #1378)",
+                _decided[0].isoformat(),
+            )
+        else:
+            self._cancel_pre_cool_trigger()
+            self._pre_cool_trigger_scheduled = False
+            self._pre_cool_status = None
+            self._pre_cool_trigger_dt = None
+            self._pre_cool_target = None
+            self._pre_cool_decided = None
 
         await self._async_save_state()
 
@@ -9581,6 +9735,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         climate_fallback ``current_temperature`` as one whole degree of the configured unit.
         """
         if self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK) != TEMP_SOURCE_CLIMATE_FALLBACK:
+            return 0.0
+        if self._get_indoor_temp_with_provenance().companion_entity:  # Issue #1230 R1b: the finer sensor is in use
             return 0.0
         return whole_degree_resolution_f(self.config.get("temp_unit", "fahrenheit"))
 
@@ -14772,6 +14928,8 @@ def _compute_pre_cool_trigger_time_pure(
     classification: DayClassification | None,
     config: dict[str, Any],
     now: datetime,
+    *,
+    decided: tuple[date, float] | None = None,
 ) -> datetime | None:
     """Pure computation behind ``ClimateAdvisorCoordinator._compute_pre_cool_trigger_time()``
     (Issue #514) — takes ``classification``/``config``/``now`` explicitly instead of reading
@@ -14785,8 +14943,9 @@ def _compute_pre_cool_trigger_time_pure(
 
     Primary: nat-vent window close time + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES.
     Fallback: wake_time - PRE_COOL_WAKE_OFFSET_HOURS.
-    Returns None if tonight isn't eligible for pre-cool — see ``resolve_pre_cool_modifier()``
-    (warming trend, or tomorrow independently forecast hot).
+    Returns None if the trigger's night isn't eligible for pre-cool — see
+    ``resolve_pre_cool_modifier_for_night()`` (Issue #1378: judged on the day that night wakes into; ``decided`` is
+    the coordinator's record of a night already decided).
     """
     from .const import (
         CONF_SLEEP_COOL,
@@ -14796,20 +14955,33 @@ def _compute_pre_cool_trigger_time_pure(
     )
 
     c = classification
-    _modifier = resolve_pre_cool_modifier(c, config) if c else None
-    if _modifier is None:
+    if c is None:
         return None
-
-    # Verify the pre-cool target would actually differ from sleep_cool
+    # Neither night this could land on (one waking into today, one into tomorrow) is eligible: nothing to schedule.
+    _local_midnight = dt_util.as_local(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    if (
+        resolve_pre_cool_modifier(c, config) is None
+        and resolve_pre_cool_modifier_for_night(c, config, at=_local_midnight, now=now, decided=decided) is None
+    ):
+        return None
     sleep_cool = float(config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
-    pre_cool_target = compute_pre_cool_target(config, _modifier)
-    if pre_cool_target >= sleep_cool:
-        _LOGGER.info(
-            "Pre-cool scheduling: clamped target (%.1f°F) == sleep_cool (%.1f°F); skipping",
-            pre_cool_target,
-            sleep_cool,
-        )
-        return None
+
+    def _eligible_target(trigger_at: datetime) -> float | None:
+        # Issue #1378: eligibility belongs to the trigger's own night -- the day it wakes into -- not always to the
+        # classification's "tomorrow" (a day too far once the classification is the new day's, after midnight).
+        _modifier = resolve_pre_cool_modifier_for_night(c, config, at=trigger_at, now=now, decided=decided)
+        if _modifier is None:
+            return None
+        # Verify the pre-cool target would actually differ from sleep_cool
+        _target = compute_pre_cool_target(config, _modifier)
+        if _target >= sleep_cool:
+            _LOGGER.info(
+                "Pre-cool scheduling: clamped target (%.1f°F) == sleep_cool (%.1f°F); skipping",
+                _target,
+                sleep_cool,
+            )
+            return None
+        return _target
 
     today = now.date()
 
@@ -14825,6 +14997,9 @@ def _compute_pre_cool_trigger_time_pure(
         # awake: it armed the sleep band's lowered ceiling for one cycle and the thermostat flipped
         # cool -> heat -> cool. The window-close trigger now counts only when it lands in the sleep window.
         if _in_sleep_window(dt_util.as_local(trigger), pre_cool_sleep_window_config(config)):
+            pre_cool_target = _eligible_target(trigger)
+            if pre_cool_target is None:
+                return None
             _LOGGER.info(
                 "Pre-cool scheduled for %s (nat-vent close %s + %dmin); target %.1f°F",
                 dt_util.as_local(trigger).strftime("%H:%M"),
@@ -14870,6 +15045,9 @@ def _compute_pre_cool_trigger_time_pure(
     # NEXT one, so move one day ahead.
     if trigger <= now:
         trigger = _night_trigger(wake_dt + timedelta(days=1))
+    pre_cool_target = _eligible_target(trigger)
+    if pre_cool_target is None:
+        return None
     _LOGGER.info(
         "Pre-cool scheduled for %s (wake_time %s - %.0fh fallback); target %.1f°F",
         dt_util.as_local(trigger).strftime("%H:%M"),
@@ -15330,7 +15508,13 @@ def _build_predicted_indoor_future(
         # Compute pre-cool band parameters so the prediction curve tracks the pre-cool setpoint
         _ode_pc_trigger_h: float | None = None
         _ode_pc_target: float | None = None
-        _ode_pc_modifier = resolve_pre_cool_modifier(classification, config) if classification is not None else None
+        # Issue #1378: eligibility for the coming night (the one ending at the next wake-up), judged on the day it
+        # wakes into, as the scheduler judges it.
+        _ode_pc_modifier = (
+            resolve_pre_cool_modifier_for_night(classification, config, at=now, now=now)
+            if classification is not None
+            else None
+        )
         if _ode_pc_modifier is not None:
             from .const import (
                 PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,

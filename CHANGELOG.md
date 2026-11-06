@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.2] — 2026-11-06
+
+- Includes fix 0.8.69 from `main` (#1378).
+- Feat #1230 (R1: finer indoor readings for the prediction engine and for comfort decisions): the chart log gains the finer sensor, and thermostats that have one now get decisions made on it (details below).
+  - **Your thermostat's finer temperature sensor is now logged:** many thermostats report the room temperature in whole degrees on the main thermostat entity while the same device also has a separate, finer temperature sensor (for example 68.54°F against 69°F). The chart log now records every enabled temperature sensor on your thermostat's device next to the thermostat's own reading, so the prediction engine can learn how your heating cycles and how fast the house warms and cools. Humidity, motion and disabled sensors are ignored, and a sensor that is unavailable is recorded as empty.
+  - **Climate Advisor now uses that finer sensor for comfort decisions (new option "Thermostat Finer Sensor", Auto by default):** once the finer sensor has shown it is the same reading as the thermostat's (within 1°F, and showing fractions while the thermostat shows whole degrees), heating and cooling decisions, natural ventilation and the dashboard's indoor temperature use 68.54°F instead of the thermostat's rounded 69°F. If the finer sensor goes missing, unavailable, stale or disagrees with the thermostat, Climate Advisor goes straight back to the thermostat's own reading. It never replaces a dedicated indoor sensor you chose, and a thermostat without such a sensor behaves exactly as before. Settings shows "Thermostat (finer sensor — sensor.x)" while it is in use; set the option to Off in Options > Temperature Sources for the old behavior.
+  - **Readings keep their precision:** nothing in the chart log rounds an indoor temperature coarser than the sensor itself reports.
+
 ## [0.9.1] — 2026-11-06
 
 - Includes every fix from 0.8.64 to 0.8.68 on `main`.
@@ -15,6 +23,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ## [0.9.0] — 2026-11-06
 
 - Start of the 0.9 line (Issue #1230: new prediction engine, one operation timeline and the dashboard redesign). This release is 0.8.63 plus development tooling only, with no change to how Climate Advisor runs your home. 0.9 work lands on the `0.9.x` branch, which takes every 0.8.x fix from `main` before each deploy.
+
+## [0.8.69] — 2026-11-06
+
+- Fix #1378: on a warm day before a hot one, the overnight pre-cool Climate Advisor plans in the evening now actually runs before the hot day. Before, the midnight reset cancelled it, and after midnight it was re-decided by looking one day too far ahead (at the day after the hot one), so the house usually went into the hot day without any extra cooling banked. Now the plan for a night is kept through midnight, and a night is always judged on the day you wake up into. The reverse case is fixed too: after midnight, Climate Advisor no longer runs the AC at 2:30 AM before a mild day just because the day after it is hot.
 
 ## [0.8.68] — 2026-11-06
 

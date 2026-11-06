@@ -12,7 +12,8 @@ import logging
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,7 @@ from .const import (
     COMFORT_MODE_SWITCH_MIN_INTERVAL_S,
     COMFORT_REACTIVE_RETRY_S,
     COMFORT_RECENT_COMMAND_WINDOW_S,
+    COMPANION_SENSOR_OFF,
     CONF_ADAPTIVE_SETBACK,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
@@ -64,6 +66,7 @@ from .const import (
     CONF_SENSOR_DEBOUNCE,
     CONF_SLEEP_COOL,
     CONF_SLEEP_HEAT,
+    CONF_THERMOSTAT_COMPANION_SENSOR,
     CONF_THRESHOLD_HOT,
     CONF_WELCOME_HOME_DEBOUNCE,
     DAY_TYPE_COLD,
@@ -91,6 +94,7 @@ from .const import (
     DEFAULT_SETBACK_HEAT,
     DEFAULT_SLEEP_COOL,
     DEFAULT_SLEEP_HEAT,
+    DEFAULT_THERMOSTAT_COMPANION_SENSOR,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     ECONOMIZER_EVENING_END_HOUR,
@@ -229,6 +233,7 @@ from .fan_toggle_rate_limit import (
 from .hvac_action import is_hvac_compressor_active
 from .incident_payload import build_incident_payload, is_climate_validation_error
 from .indoor_temp import (
+    CompanionSensors,
     IndoorTempReading,
     remote_reading_fresh,
     resolve_indoor_temp_f,
@@ -981,6 +986,63 @@ def resolve_pre_cool_modifier(classification: DayClassification, config: dict) -
     return None
 
 
+def pre_cool_waking_date(at: datetime, config: dict) -> date:
+    """The local date of the wake-up that ends the night ``at`` belongs to (Issue #1378).
+
+    Before wake time that is the same date (a 02:30 trigger banks for the day you wake into this morning);
+    from wake time on it is the next date (tonight banks for tomorrow). Uses the pre-cool wake default
+    (06:30) for a missing or malformed wake time, like the rest of the pre-cool code.
+    """
+    local = dt_util.as_local(at)
+    try:
+        _h, _m = (int(x) for x in str(pre_cool_sleep_window_config(config)["wake_time"]).split(":")[:2])
+        wake = dt_time(_h, _m)
+    except ValueError, TypeError:
+        wake = dt_time(6, 30)
+    return local.date() if local.time() < wake else local.date() + timedelta(days=1)
+
+
+def resolve_pre_cool_modifier_for_night(
+    classification: DayClassification | None,
+    config: dict,
+    *,
+    at: datetime,
+    now: datetime,
+    decided: tuple[date, float] | None = None,
+) -> float | None:
+    """Pre-cool eligibility for the night containing ``at``, judged on the day that night wakes into (Issue #1378).
+
+    ``resolve_pre_cool_modifier()`` asks "is TOMORROW hot, or warming into?" -- right while today's
+    classification is current and the night ahead wakes into tomorrow. From midnight until wake the
+    classification is already the new day's, so the night in progress wakes into its TODAY and "tomorrow" is a
+    day too far: a pre-cool decided in the evening for a hot day was dropped after midnight when the day after
+    was mild, and a night before a mild day was pre-cooled because the day after was hot. For that night:
+
+    - ``decided`` -- ``(waking date, modifier)`` recorded when the trigger was scheduled the day before, judged
+      then on that day's forecast (with its warming trend) -- is kept;
+    - otherwise (nothing was decided, e.g. a restart after midnight) the night is eligible when TODAY is forecast
+      hot. The warming trend into today is not known from today's classification, so it does not count.
+    """
+    if classification is None:
+        return None
+    _tomorrow_frame = resolve_pre_cool_modifier(classification, config)
+    _today_high = getattr(classification, "today_high", None)
+    _today_frame = (
+        HOT_DAY_PRE_COOL_MODIFIER
+        if isinstance(_today_high, (int, float))
+        and _today_high >= float(config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT))
+        else None
+    )
+    if _tomorrow_frame is None and _today_frame is None and decided is None:
+        return None  # no night is eligible -- no need to work out which one ``at`` is in
+    waking = pre_cool_waking_date(at, config)
+    if waking != dt_util.as_local(now).date():
+        return _tomorrow_frame
+    if decided is not None and decided[0] == waking:
+        return decided[1]
+    return _today_frame
+
+
 # Natural-expiry clears already have their own Activity Log row (grace_expired / override_adopted),
 # so clear_fan_override() stays silent for them (Issue #1029).
 _FAN_CLEAR_SILENT_REASONS: frozenset[str] = frozenset({"grace_expired", "adopted_matching_decision"})
@@ -1381,6 +1443,10 @@ class AutomationEngineCallbacks:
 class AutomationEngine:
     """Manages HVAC automations based on daily classification."""
 
+    # Issue #1230 R1b: class-level default so an engine built via object.__new__ (tests) still resolves; the
+    # coordinator assigns its shared holder in __init__.
+    indoor_companion: CompanionSensors | None = None
+
     # Issue #729: class-level default so a test fixture that partially constructs an
     # engine via object.__new__(AutomationEngine) (skipping __init__ — an established
     # pattern across many existing tests, see CLAUDE.md) still has a value for the
@@ -1548,6 +1614,9 @@ class AutomationEngine:
         self.notify_service = notify_service
         self.config = config
         self.sensor_polarity_inverted = sensor_polarity_inverted
+        # Issue #1230 R1b: the coordinator's thermostat-companion candidates + 'finer' latch, set by the coordinator
+        # after construction. None (headless harness, no registry) = the resolver behaves exactly as before.
+        self.indoor_companion: CompanionSensors | None = None
         # Issue #604: label only, for logging/future observability — never branched on
         # inside this class or the 9 coordinator callback methods. Isolation between a
         # production and a future shadow engine is structural (which callables get wired
@@ -11879,18 +11948,23 @@ class AutomationEngine:
             reason=f"bedtime — sleep band [{self._band_num(_sleep_band.floor)}/{self._band_num(_sleep_band.ceiling)}]",
         )
 
-    async def handle_pre_cool(self, indoor_temp: float | None, nat_vent_just_closed: bool) -> str:
+    async def handle_pre_cool(
+        self, indoor_temp: float | None, nat_vent_just_closed: bool, *, modifier: float | None = None
+    ) -> str:
         """Apply overnight pre-cool setpoint to bank cold thermal mass before a hot day.
 
         Fires at the pre-cool trigger time (nat-vent close + delay, or wake_time - 4h), gated by
         ``resolve_pre_cool_modifier()`` — either a warming trend tonight, or tomorrow's forecast
         classifying hot on its own (Issue #558, closing the plateau gap where consecutive hot
         days with no further warming got no overnight banking at all).
+        ``modifier``: the eligibility the caller already judged for this night (the coordinator, which knows
+        when the trigger was decided and which day the night wakes into -- Issue #1378). ``None`` judges it
+        from the current classification as before.
         Suppressed when nat-vent already brought indoor to or below the target.
         Returns a short status string for logging.
         """
         c = self._current_classification
-        _modifier = resolve_pre_cool_modifier(c, self.config) if c else None
+        _modifier = modifier if modifier is not None else (resolve_pre_cool_modifier(c, self.config) if c else None)
         if _modifier is None:
             _LOGGER.info(
                 "Pre-cool trigger fired: skipped — no warming trend and tomorrow not hot (modifier=%s)",
@@ -20056,6 +20130,14 @@ class AutomationEngine:
             "climate_entity": self.climate_entity,
             "in_sleep_window": _in_sleep_window(dt_util.now(), self.config),
             "sleep_indoor_temp_entity": self.config.get("sleep_indoor_temp_entity"),
+            # Issue #1230 R1b: the coordinator's shared candidates + 'finer' latch (None headless / when off), so the
+            # engine and the coordinator resolve the same value.
+            "companion": (
+                None
+                if self.config.get(CONF_THERMOSTAT_COMPANION_SENSOR, DEFAULT_THERMOSTAT_COMPANION_SENSOR)
+                == COMPANION_SENSOR_OFF
+                else self.indoor_companion
+            ),
         }
 
     def _get_indoor_reading(self) -> IndoorTempReading:

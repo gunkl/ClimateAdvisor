@@ -288,6 +288,8 @@ weather_entity: weather.home
 climate_entity: climate.living_room
 outdoor_temp_entity: sensor.outdoor_temp (optional)
 indoor_temp_entity: sensor.indoor_temp (optional)
+thermostat_companion_sensor: auto | off (Issue #1230 R1b; default auto - use the thermostat's finer same-device
+  temperature sensor for indoor control once proven; see docs/08-COMPUTATION-REFERENCE.md "Bug D")
 sleep_indoor_temp_entity: sensor.bedroom_temp (optional — Issue #895; used for comfort/automation
   instead of the primary indoor sensor while the sleep schedule is active, never for thermal learning;
   since Issue #1194 (a) it is also the remote sensor of the setpoint outer loop, see
@@ -399,7 +401,7 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 - Retention cap: 365 days rolling (~17,500 entries ≈ 2MB)
 - Downsampling: raw points ≤3 days; hourly averages 4–30 days; daily summaries >30 days
 - Storage: `climate_advisor_chart_log.json` in HA config dir
-- Row fields added in 0.9.1 (Issue #1230 R0): `indoor_sensors` (per-sensor °F map; see [Chart Log Spec](chart-log-spec.md#indoor-sensors-field-issue-1230-r0))
+- Row fields added in 0.9.1 (Issue #1230 R0): `indoor_sensors` (per-sensor °F map; see [Chart Log Spec](chart-log-spec.md#indoor-sensors-field-issue-1230-r0)); 0.9.2 adds the climate entity's device-companion temperature sensors to that map
 
 ### Forecast Archive Parameters
 - Snapshot cadence: at most one per local clock hour (latest changed fetch in the hour wins; an unchanged refetch writes nothing), only from a successful fetch that returned entries

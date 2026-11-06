@@ -395,6 +395,25 @@ def read_indoor_sensors_f(
     return readings
 
 
+# Issue #1230 R1b: a thermostat device can also carry temperature sensors that do NOT read the room air - e.g. a
+# Honeywell TCC thermostat's "Outdoor temperature", or a floor-heating thermostat's "Floor temperature". The 1 F
+# consistency rule alone would let such a sensor become CA's indoor reading whenever it happens to sit within 1 F of the
+# room. The words are matched on the entity's OWN name (``original_name`` / ``translation_key``, i.e. without the
+# device name), so a thermostat named "First Floor" keeps its room sensor. A false exclusion only means the
+# pre-0.9.2 behavior (the thermostat's own reading).
+_NON_ROOM_SENSOR_WORDS = ("outdoor", "outside", "exterior", "floor")
+
+
+def _names_non_room_sensor(entry: Any) -> bool:
+    """True when the registry entry's own name says it measures something other than the room air."""
+    for raw in (getattr(entry, "original_name", None), getattr(entry, "translation_key", None)):
+        if isinstance(raw, str):
+            words = raw.lower().replace("_", " ").split()
+            if any(word in words for word in _NON_ROOM_SENSOR_WORDS):
+                return True
+    return False
+
+
 def discover_companion_temp_sensors(hass: Any, climate_entity: str | None) -> tuple[str, ...]:
     """``sensor.*`` temperature entities on the SAME device as ``climate_entity`` (Issue #1230 R1), sorted.
 
@@ -402,8 +421,9 @@ def discover_companion_temp_sensors(hass: Any, climate_entity: str | None) -> tu
     a finer ``device_class: temperature`` sensor; logging that sensor lets the thermal model see the real heating curve.
     Reads only the in-memory entity registry (no I/O) and so must run on the event loop. Disabled entities are skipped
     (``include_disabled_entities=False``); ``device_class`` is the user override else the integration's original class.
-    No climate entity, an unregistered one, or one with no device -> ``()``. Never raises. LOG-ONLY consumer: nothing on
-    a decision path calls this.
+    A sensor whose own name says outdoor / outside / exterior / floor is skipped (``_names_non_room_sensor``).
+    No climate entity, an unregistered one, or one with no device -> ``()``. Never raises. Consumers: chart_log
+    ``indoor_sensors`` and (Issue #1230 R1b) the ``CompanionSensors`` candidates the resolver may use for control.
     """
     if not climate_entity:
         return ()
@@ -418,6 +438,7 @@ def discover_companion_temp_sensors(hass: Any, climate_entity: str | None) -> tu
             if sibling.domain == "sensor"
             and (sibling.device_class or sibling.original_device_class) == "temperature"
             and sibling.entity_id != climate_entity
+            and not _names_non_room_sensor(sibling)
         ]
         return tuple(sorted(found))
     except Exception:  # noqa: BLE001 - discovery is best-effort; a chart row must never fail on it

@@ -584,7 +584,7 @@ OUTDOOR_SENSOR_STALE_HOURS = 6.0
 INDOOR_SENSOR_STALE_HOURS = 12.0
 
 # Issue #1230 R1: how long the coordinator caches the temperature sensors found on the climate entity's own device
-# (chart_log ``indoor_sensors`` companions) before re-reading the in-memory entity registry. Logging only.
+# (chart_log ``indoor_sensors`` companions and the R1b control candidates) before re-reading the entity registry.
 COMPANION_SENSOR_REFRESH_SECONDS = 900.0
 
 # Issue #1230 R1b ("Bug D"): use the thermostat's finer companion temperature sensor for CONTROL when it is provably

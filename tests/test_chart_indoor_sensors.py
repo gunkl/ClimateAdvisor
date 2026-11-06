@@ -318,13 +318,23 @@ from custom_components.climate_advisor.indoor_temp import discover_companion_tem
 COMPANION = "sensor.hallway_current_temperature"
 
 
-def _reg_entry(entity_id, *, device_id="dev1", device_class=None, original_device_class=None):
+def _reg_entry(
+    entity_id,
+    *,
+    device_id="dev1",
+    device_class=None,
+    original_device_class=None,
+    original_name=None,
+    translation_key=None,
+):
     return SimpleNamespace(
         entity_id=entity_id,
         domain=entity_id.split(".")[0],
         device_id=device_id,
         device_class=device_class,
         original_device_class=original_device_class,
+        original_name=original_name,
+        translation_key=translation_key,
     )
 
 
@@ -398,6 +408,29 @@ class TestCompanionDiscovery:
             a: _reg_entry(a, original_device_class="temperature"),
         }
         assert _discover(entries) == (a, b)
+
+    def test_outdoor_and_floor_sensors_on_the_thermostat_device_excluded(self):
+        """Issue #1230 R1b: a Honeywell-style "Outdoor temperature" or a floor-heating "Floor temperature" on the
+        thermostat's device never becomes a candidate: within 1 F of the room by coincidence it would otherwise be
+        used as CA's indoor reading. Matched on the entity's own name, so a thermostat named "First Floor" keeps its
+        room sensor."""
+        entries = {
+            CLIMATE: _reg_entry(CLIMATE),
+            COMPANION: _reg_entry(COMPANION, original_device_class="temperature", original_name="Current temperature"),
+            "sensor.hallway_outdoor_temperature": _reg_entry(
+                "sensor.hallway_outdoor_temperature",
+                original_device_class="temperature",
+                original_name="Outdoor temperature",
+                translation_key="outdoor_temperature",
+            ),
+            "sensor.hallway_floor": _reg_entry(
+                "sensor.hallway_floor", original_device_class="temperature", translation_key="floor_temperature"
+            ),
+            "sensor.first_floor_temperature": _reg_entry(
+                "sensor.first_floor_temperature", original_device_class="temperature", original_name="Temperature"
+            ),
+        }
+        assert _discover(entries) == ("sensor.first_floor_temperature", COMPANION)
 
 
 class TestCompanionReading:

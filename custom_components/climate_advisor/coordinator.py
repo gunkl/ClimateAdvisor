@@ -5015,7 +5015,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return self._get_indoor_temp_with_provenance().companion_entity or self.config.get("climate_entity")
 
     def _companion_temp_sensors(self) -> tuple[str, ...]:
-        """Temperature sensors on this zone's climate-entity device, cached (Issue #1230 R1; logging only).
+        """Temperature sensors on this zone's climate-entity device, cached (Issue #1230 R1 chart_log, R1b control).
 
         The entity registry is in memory, so a lookup is cheap, but rows are written from event handlers and a
         thermostat can fire many state changes a minute, so the answer is cached for

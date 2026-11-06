@@ -82,6 +82,7 @@ def _make_coord_stub():
     coord._cancel_occupancy_away_timer = MagicMock()
     coord._unsubscribe_door_window_listeners = MagicMock()
     coord._async_save_state = AsyncMock()
+    coord._v4_flush_on_shutdown = AsyncMock()  # Issue #1230 R1: the v4 shadow flush is awaited at unload
 
     coord._rejection_log = {}
     coord._state_persistence = MagicMock()

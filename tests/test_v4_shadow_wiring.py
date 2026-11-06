@@ -680,3 +680,19 @@ def test_low_confidence_still_predicts_and_is_archived(fake: FakePredictor) -> N
     _seed_cycle_inputs(coord, scheduler)
     _cycle(coord, scheduler)
     assert coord._v4_archive.data and coord.v4_model_summary()["confidence"] == "low"
+
+
+def test_a_fit_that_cannot_be_scheduled_does_not_block_later_fits(fake: FakePredictor, monkeypatch) -> None:
+    """If spawning the fit task fails, "running" must not stay stuck (every later fit would be skipped)."""
+    coord, fake_hass, scheduler = _build()
+
+    def boom(coro, **_kw):
+        raise RuntimeError("entry not loaded")
+
+    monkeypatch.setattr(coord, "_spawn", boom)
+    with pytest.raises(RuntimeError):
+        coord._v4_start_fit("nightly")
+    assert coord._v4_fit_running is False
+    monkeypatch.undo()
+    with scheduler.installed():
+        assert coord._v4_start_fit("nightly") is True

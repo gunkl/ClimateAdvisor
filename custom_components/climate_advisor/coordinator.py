@@ -5460,7 +5460,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_fit_running = True
         self._v4_last_fit_attempt = _monotonic()
         # background=True: HA cancels it on unload instead of waiting up to a minute for the fit.
-        self._v4_fit_task = self._spawn(self._v4_run_fit(reason), background=True)
+        coro = self._v4_run_fit(reason)
+        try:
+            self._v4_fit_task = self._spawn(coro, background=True)
+        except Exception:
+            # Could not schedule (e.g. the entry is going away): never leave "running" stuck true, which would block
+            # every later fit, and close the coroutine instead of leaking it unawaited. The caller logs the error.
+            coro.close()
+            self._v4_fit_running = False
+            raise
         return True
 
     def _v4_cancel_fit(self) -> None:
@@ -5554,7 +5562,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             raise
         except Exception:  # noqa: BLE001 - v4 failure must never affect the cycle
             # First failure at WARNING with the traceback, repeats at DEBUG: a broken shadow must not spam the log.
-            if not self._v4_cycle_failed_logged:
+            # getattr: the handler itself must never raise (a partially built coordinator has no flag yet).
+            if not getattr(self, "_v4_cycle_failed_logged", False):
                 self._v4_cycle_failed_logged = True
                 _LOGGER.warning("v4 shadow cycle failed (v3 and the house are unaffected)", exc_info=True)
             else:
@@ -5563,7 +5572,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _v4_shadow_cycle_impl(self) -> None:
         if getattr(self, "_shut_down", False) is True:
             return
-        state = self._v4_store
+        state = getattr(self, "_v4_store", None)
+        if state is None or getattr(self, "_v4_archive", None) is None:
+            return  # a partially built coordinator (tests via __new__, headless tools): the shadow is simply off
         model_dict = state.v4_model
         has_model = isinstance(model_dict, dict)
         if not has_model or model_dict.get("confidence", "none") == "none":

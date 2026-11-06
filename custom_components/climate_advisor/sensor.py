@@ -15,9 +15,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .automation import active_thresholds_for
 from .const import (
     ATTR_AI_STATUS,
     ATTR_AUTOMATION_STATUS,
@@ -25,6 +27,7 @@ from .const import (
     ATTR_BRIEFING_SHORT,
     ATTR_COMPLIANCE_SCORE,
     ATTR_CONTACT_STATUS,
+    ATTR_COOL_THRESHOLD,
     ATTR_DAY_TYPE,
     ATTR_EFFECTIVE_TARGET_TEMP,
     ATTR_FAN_OVERRIDE_SINCE,
@@ -36,6 +39,7 @@ from .const import (
     ATTR_FORECAST_HIGH_BIAS,
     ATTR_FORECAST_LOW,
     ATTR_FORECAST_LOW_BIAS,
+    ATTR_HEAT_THRESHOLD,
     ATTR_INDOOR_TEMP,
     ATTR_LAST_ACTION_REASON,
     ATTR_LAST_ACTION_TIME,
@@ -87,6 +91,8 @@ async def async_setup_entry(
         ClimateAdvisorForecastHighSensor(coordinator, entry),
         ClimateAdvisorForecastLowSensor(coordinator, entry),
         ClimateAdvisorEffectiveTargetTempSensor(coordinator, entry),
+        ClimateAdvisorHeatThresholdSensor(coordinator, entry),
+        ClimateAdvisorCoolThresholdSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -474,6 +480,76 @@ class ClimateAdvisorEffectiveTargetTempSensor(ClimateAdvisorBaseSensor):
             "Target Temperature",
             "mdi:thermostat",
         )
+
+
+class _ClimateAdvisorThresholdSensor(ClimateAdvisorBaseSensor):
+    """One edge of the comfort band Climate Advisor holds the house to right now (Issue #1345).
+
+    Heat Threshold = the band floor (CA heats below it), Cool Threshold = the band ceiling (CA
+    cools above it). Both read ONE ``automation.active_thresholds_for()`` result -- the same
+    assembly as the status API's ``ca_target_heat`` / ``ca_target_cool`` -- so the sensors, the
+    API and the thermostat arming can never disagree, and the two edges always come from the
+    same band. Unlike Target Temperature they never mirror the thermostat's live setpoint, so
+    an observe-only install sees what CA would hold, not what its own controller set.
+
+    Native °F like the other temperature sensors; HA converts to the system unit.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _edge: str  # "heat" | "cool"
+    _resolve_failed_warned: bool = False
+
+    def _thresholds(self) -> dict[str, Any] | None:
+        try:
+            return active_thresholds_for(self.coordinator)
+        except Exception:  # noqa: BLE001 - a resolver fault must not break the state write
+            if not self._resolve_failed_warned:
+                _LOGGER.warning("Threshold unavailable: sensor=%s", self._key, exc_info=True)
+                self._resolve_failed_warned = True
+            return None
+
+    @property
+    def native_value(self) -> float | None:
+        """The threshold in °F, or None when it cannot be resolved."""
+        thresholds = self._thresholds()
+        if thresholds is None or thresholds[self._edge] is None:
+            return None
+        return float(thresholds[self._edge])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Which band is in force (comfort / prefer_savings / sleep / away / vacation / tou_expansion).
+
+        ``provisional`` is True right after a restart, before the first classification: the
+        value is then a clock-only placeholder that nothing is armed with yet.
+        """
+        thresholds = self._thresholds()
+        if thresholds is None:
+            return {"context": None, "provisional": None}
+        return {"context": thresholds["context"], "provisional": thresholds["provisional"]}
+
+
+class ClimateAdvisorHeatThresholdSensor(_ClimateAdvisorThresholdSensor):
+    """Heat threshold in force: the comfort band floor (Issue #1345)."""
+
+    _edge = "heat"
+
+    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the heat threshold sensor."""
+        super().__init__(coordinator, entry, ATTR_HEAT_THRESHOLD, "Heat Threshold", "mdi:thermometer-low")
+
+
+class ClimateAdvisorCoolThresholdSensor(_ClimateAdvisorThresholdSensor):
+    """Cool threshold in force: the comfort band ceiling (Issue #1345)."""
+
+    _edge = "cool"
+
+    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the cool threshold sensor."""
+        super().__init__(coordinator, entry, ATTR_COOL_THRESHOLD, "Cool Threshold", "mdi:thermometer-high")
 
 
 class ClimateAdvisorForecastHighSensor(ClimateAdvisorBaseSensor):

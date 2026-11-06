@@ -782,6 +782,9 @@ class ComfortBand:
     ceiling: float
     active: str  # "ceiling" | "floor"
     reason: str
+    # Issue #1345: which band is in force, as one of ``BAND_CONTEXTS`` ("" for bands built
+    # outside select_comfort_band(), e.g. the pre-cool band or the resolver-fault fallback).
+    context: str = ""
 
 
 def _band_num(value_f: float, unit: str) -> str:
@@ -791,6 +794,26 @@ def _band_num(value_f: float, unit: str) -> str:
     ``f"{value:.0f}"``.
     """
     return f"{display_temp(value_f, unit, 0):.0f}"
+
+
+# Issue #1345: values of ``ComfortBand.context`` -- the band in force, exposed as the ``context``
+# attribute of the Heat/Cool Threshold sensors. "tou_expansion" is an away/vacation band widened
+# for a time-of-use high-cost window; "prefer_savings" is the awake comfort band widened by
+# Prefer Savings.
+BAND_CONTEXT_COMFORT = "comfort"
+BAND_CONTEXT_PREFER_SAVINGS = "prefer_savings"
+BAND_CONTEXT_SLEEP = "sleep"
+BAND_CONTEXT_AWAY = "away"
+BAND_CONTEXT_VACATION = "vacation"
+BAND_CONTEXT_TOU_EXPANSION = "tou_expansion"
+BAND_CONTEXTS: tuple[str, ...] = (
+    BAND_CONTEXT_COMFORT,
+    BAND_CONTEXT_PREFER_SAVINGS,
+    BAND_CONTEXT_SLEEP,
+    BAND_CONTEXT_AWAY,
+    BAND_CONTEXT_VACATION,
+    BAND_CONTEXT_TOU_EXPANSION,
+)
 
 
 def awake_comfort_edges(config: dict, *, aggressive_savings: bool) -> tuple[float, float]:
@@ -883,6 +906,15 @@ def select_comfort_band(
         elif classification.hvac_mode == "heat":
             floor -= tou_expansion_f
 
+    # Issue #1345: the band-in-force label the Heat/Cool Threshold sensors expose. Derived here,
+    # from the same branch that picked the edges, so the label can never disagree with them.
+    if ctx in ("away", "vacation") and tou_expansion_f and classification.hvac_mode in ("cool", "heat"):
+        context = BAND_CONTEXT_TOU_EXPANSION
+    elif ctx == "comfort" and aggressive_savings:
+        context = BAND_CONTEXT_PREFER_SAVINGS
+    else:
+        context = ctx
+
     _unit = config.get("temp_unit", "fahrenheit")
     reason = (
         f"{ctx} band [{_band_num(floor, _unit)}/{_band_num(ceiling, _unit)}]"
@@ -890,7 +922,7 @@ def select_comfort_band(
         f"{', aggressive' if aggressive_savings else ''}"
         f"{f', tou_expansion={display_delta(tou_expansion_f, _unit, 1):.1f}' if tou_expansion_f else ''})"
     )
-    return ComfortBand(floor=floor, ceiling=ceiling, active=active, reason=reason)
+    return ComfortBand(floor=floor, ceiling=ceiling, active=active, reason=reason, context=context)
 
 
 def compute_pre_cool_target(config: dict, setback_modifier: float) -> float:
@@ -1017,6 +1049,42 @@ def fallback_edges_without_classification(now: datetime, config: dict) -> tuple[
             "sleep_cool", config.get("comfort_cool")
         )
     return config.get("comfort_heat"), config.get("comfort_cool")
+
+
+def active_thresholds_for(coordinator: Any, now: datetime | None = None) -> dict[str, Any]:
+    """The heat and cool thresholds in force right now for one zone, in °F (Issue #1345).
+
+    The ONE assembly behind the status API's ``ca_target_heat`` / ``ca_target_cool`` and the
+    Heat / Cool Threshold sensors, so they can never disagree: heat = the band floor and cool =
+    the band ceiling of ONE ``resolve_active_band()`` call (sleep window, Prefer Savings and the
+    TOU away/vacation expansion included). Neither edge is resolved on a path of its own.
+
+    Returns ``{"heat", "cool", "context", "provisional"}``. Before the first classification
+    (right after a restart) the edges are the display-only ``fallback_edges_without_classification()``
+    placeholder, ``context`` is "sleep" or "comfort" by the clock, and ``provisional`` is True:
+    nothing is armed with them yet.
+    """
+    if now is None:
+        now = dt_util.now()
+    config = coordinator.config
+    classification = coordinator.current_classification
+    if classification is not None:
+        ae = coordinator.automation_engine
+        band = resolve_active_band(
+            classification,
+            config,
+            occupancy_mode=coordinator._occupancy_mode,
+            now=now,
+            tou_expansion_f=(ae._tou_av_expansion_f if ae is not None else 0.0),
+        )
+        return {"heat": band.floor, "cool": band.ceiling, "context": band.context, "provisional": False}
+    heat, cool = fallback_edges_without_classification(now, config)
+    return {
+        "heat": heat,
+        "cool": cool,
+        "context": BAND_CONTEXT_SLEEP if _in_sleep_window(now, config) else BAND_CONTEXT_COMFORT,
+        "provisional": True,
+    }
 
 
 def _in_sleep_window(now: datetime, config: dict) -> bool:

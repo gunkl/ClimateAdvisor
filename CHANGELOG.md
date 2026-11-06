@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.4] — 2026-11-06
+
+- Feat #1230 (R1: the new prediction engine, v4, runs in shadow). Nothing about how Climate Advisor runs your home or what the Status tab shows changes; today's prediction line (v3) still drives every decision.
+  - **v4 runs next to today's line:** each zone fits its own model of the house every night at 3:15 (a hidden "thermal mass" for the walls and furniture, one line per room sensor, your thermostat's own on/off pattern, and a correction for how far your weather forecast is usually off). Every 30 minutes it predicts each sensor 1, 4, 12 and 24 hours ahead and keeps those predictions, so they can be checked against what really happened.
+  - **New preview page, "Prediction accuracy":** linked from the dashboard. Pick a sensor, how far ahead, and a range from 6 hours to a year (scroll, zoom and hover work like today's chart) to see actual vs v4 vs today's line, and whether v4 has earned a place on Status.
+  - **Evidence first:** v4 appears on Status only for a zone that passes the backtest over all its recorded history (beats today's line and "no change" at 1, 4 and 12 hours, heating and summer days scored apart, no more than 0.5 °F warm or cold on average). No zone passes yet, so Status is unchanged.
+  - **Safe to roll back:** v4 keeps its state in its own files per zone; the learning file is unchanged, and it now ignores fields it doesn't recognise instead of starting over.
+- Developer tool: `tools/predict_backtest.py` replays recorded history to score v4 against v3 and "no change" for every zone.
+
 ## [0.9.3] — 2026-11-06
 
 - Includes fix 0.8.70 from `main` (#1378 follow-up).

@@ -551,6 +551,20 @@ CHART_DOWNSAMPLE_DAILY_DAYS = 30  # daily summaries for >30 days
 # Prediction archive — first-write-wins historical pred_indoor
 PRED_ARCHIVE_HORIZON_HOURS = 4  # only archive ODE entries within this lookahead window
 
+# Prediction engine v4 in shadow (Issue #1230 R1): runs beside v3, never read by a decision or the Status chart.
+V4_ARCHIVE_FILE = "climate_advisor_v4_archive.json"  # what v4 said 1/4/12/24 h ahead, per sensor (first write wins)
+V4_BACKTEST_FILE = (
+    "climate_advisor_v4_backtest.json"  # published by tools/predict_backtest.py --publish; read-only here
+)
+V4_ARCHIVE_MAX_DAYS = 400  # time-based retention (a year of seasons plus margin)
+V4_ARCHIVE_LEADS: tuple[str, ...] = ("1h", "4h", "12h", "24h")
+V4_ARCHIVE_SAVE_MIN_INTERVAL_S = 3600  # the file is a few MB: rewrite at most hourly (and once on shutdown)
+V4_FIT_HOUR = 3  # nightly fit, local time, after midnight bookkeeping
+V4_FIT_MINUTE = 15
+V4_FIT_RETRY_MIN_INTERVAL_S = 6 * 3600  # a first fit that failed is retried by the cycle at most this often
+V4_PREDICT_HORIZON_HOURS = 24
+V4_MASS_MAX_GAP_S = 7200  # a hidden-node state older than this is re-seeded from the reading instead of stepped
+
 # Learning system
 LEARNING_DB_FILE = "climate_advisor_learning.json"
 # Every per-zone file Climate Advisor writes in the HA config dir, by its unscoped base name (Issue #1375).
@@ -558,7 +572,14 @@ LEARNING_DB_FILE = "climate_advisor_learning.json"
 # listed here, or a removed zone leaves it on disk forever: tests/test_zone_removal_cleanup.py fails if any
 # resolve_entry_scoped_path() caller in the package uses a base name missing from this tuple.
 # chart_log.py's own _CHART_LOG_FILE equals CHART_LOG_FILE (guarded by the same test).
-ENTRY_SCOPED_FILES: tuple[str, ...] = (STATE_FILE, CHART_LOG_FILE, LEARNING_DB_FILE, FORECAST_ARCHIVE_FILE)
+ENTRY_SCOPED_FILES: tuple[str, ...] = (
+    STATE_FILE,
+    CHART_LOG_FILE,
+    LEARNING_DB_FILE,
+    FORECAST_ARCHIVE_FILE,
+    V4_ARCHIVE_FILE,
+    V4_BACKTEST_FILE,
+)
 SUGGESTION_COOLDOWN_DAYS = 7  # Don't repeat the same suggestion within a week
 MIN_DATA_POINTS_FOR_SUGGESTION = 14  # Need 2 weeks of data before suggesting changes
 COMPLIANCE_THRESHOLD_LOW = 0.3  # Below 30% compliance triggers a suggestion
@@ -706,6 +727,7 @@ API_RESUME_FROM_PAUSE = f"{API_BASE}/resume_from_pause"
 API_TOGGLE_AUTOMATION = f"{API_BASE}/toggle_automation"
 API_EVENT_LOG = f"{API_BASE}/event_log"
 API_ENGINES = f"{API_BASE}/engines"
+API_PREDICTION_ACCURACY = f"{API_BASE}/prediction_accuracy"
 
 # Panel
 PANEL_URL = "/climate_advisor/frontend"

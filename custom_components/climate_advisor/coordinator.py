@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from time import monotonic as _monotonic
+from time import perf_counter as _perf_counter
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import log_capture
+from . import log_capture, v4_shadow
 from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
@@ -268,6 +269,11 @@ from .const import (
     THRESHOLD_HOT,
     THRESHOLD_MILD,
     THRESHOLD_WARM,
+    V4_ARCHIVE_SAVE_MIN_INTERVAL_S,
+    V4_FIT_HOUR,
+    V4_FIT_MINUTE,
+    V4_FIT_RETRY_MIN_INTERVAL_S,
+    V4_MASS_MAX_GAP_S,
     VERSION,
     is_availability_recovery,
     is_unavailable_state,
@@ -375,6 +381,7 @@ from .swing import (
     within_thermostat_hysteresis,
 )
 from .temperature import (
+    UNIT_SYMBOL,
     convert_delta,
     display_delta,
     display_temp,
@@ -395,6 +402,7 @@ from .temperature import (
 )
 from .thermal_confidence import physics_eligibility
 from .time_utils import instant_after
+from .v4_archive import V4Archive
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
     WHF_OWN_COMMAND_ECHO_S,
@@ -816,6 +824,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R0: persisted record of what the hourly forecast said at each issue time. Record-only
         # (no automation reads it). load() is blocking -> async_restore_state(), like chart_log.
         self._forecast_archive = ForecastArchive(Path(hass.config.config_dir), entry_id=self._entry_id)
+        # Issue #1230 R1: prediction engine v4 in shadow. The archive keeps what v4 said 1/4/12/24 h ahead (first write
+        # wins); load() is blocking -> async_restore_state(). Nothing on a decision path reads any of these.
+        self._v4_archive = V4Archive(Path(hass.config.config_dir), entry_id=self._entry_id)
+        self._v4_fit_running = False
+        self._v4_fit_task: asyncio.Task[Any] | None = None
+        self._v4_last_fit_attempt: float | None = None
+        self._v4_last_fit: dict[str, Any] = {}
+        self._v4_last_cycle: dict[str, Any] = {}
+        self._v4_cycle_failed_logged = False
+        self._v4_last_archive_save: float | None = None
         self.learning = LearningEngine(
             Path(hass.config.config_dir), entry_id=self._entry_id, temp_unit=config.get("temp_unit", "fahrenheit")
         )
@@ -1312,6 +1330,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.hass,
                 self._zone_scoped_sync(self._async_whf_safety_tick),
                 timedelta(seconds=15),
+            )
+        )
+
+        # Issue #1230 R1: nightly v4 fit (shadow). Kept in _unsub_listeners so unload cancels it; the callback is
+        # _zone_scoped so it refuses once the instance is shut down.
+        self._unsub_listeners.append(
+            async_track_time_change(
+                self.hass,
+                self._zone_scoped(self._v4_nightly_fit),
+                hour=V4_FIT_HOUR,
+                minute=V4_FIT_MINUTE,
+                second=0,
             )
         )
 
@@ -1931,6 +1961,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # tests/test_executor_offload.py AST guard still sees it.
         if getattr(self, "_forecast_archive", None) is not None:
             await self._executor_job(self._forecast_archive.load)
+        # Issue #1230 R1: same contract for the v4 predictions archive (load() never raises).
+        if getattr(self, "_v4_archive", None) is not None:
+            await self._executor_job(self._v4_archive.load)
         await self._executor_job(self.learning.load_state)
         # Restore rejection_log from LearningState (load_state() already validated and capped it)
         loaded_rl = self.learning._state.rejection_log
@@ -4667,6 +4700,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _archive_expire_cutoff = int((dt_util.now() - timedelta(days=7)).timestamp())
         self._pred_archive = {k: v for k, v in self._pred_archive.items() if k >= _archive_expire_cutoff}
 
+        # Issue #1230 R1: v4 predicts beside v3 and archives its values. Runs after the cycle's decisions and the
+        # chart row (it reads that row, so it sees exactly what the fit trains on). Result unused, errors swallowed
+        # inside: v3 still drives every decision and the Status chart.
+        await self._v4_shadow_cycle()
+
         # Detect and emit post-cycle incidents
         self._detect_and_emit_incidents()
 
@@ -5389,6 +5427,308 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         hourly = _parse_forecast_entries(real)
         if hourly and archive.record(dt_util.now(), str(self.config.get("weather_entity", "")), hourly):
             await self._executor_job(self._forecast_archive.save)  # self.<attr> shape: AST offload guard
+
+    # ------------------------------------------------------------------
+    # Prediction engine v4 in shadow (Issue #1230 R1)
+    #
+    # Occupant view: v4 predicts beside v3 so its accuracy can be compared on the real house. It has ZERO effect on how
+    # the house is run or what Status shows: nothing here is read by a decision, and every failure is caught and logged.
+    # The pure/executor halves live in v4_shadow.py; the file in v4_archive.py; the REST view in api.py.
+    # ------------------------------------------------------------------
+
+    async def _v4_nightly_fit(self, _now: Any = None) -> None:
+        """03:15 local timer: refit this zone's v4 model (skipped when a fit is already running)."""
+        self._v4_start_fit("nightly")
+
+    def _v4_start_fit(self, reason: str) -> bool:
+        """Start one background fit unless one is running or the v4 engine is unavailable. True when started.
+
+        The check-and-set of ``_v4_fit_running`` happens on the event loop, so two fits can never overlap.
+        """
+        if getattr(self, "_shut_down", False) is True:
+            return False
+        if self._v4_fit_running:
+            _LOGGER.debug("v4 fit (%s): skipped, a fit is already running", reason)
+            return False
+        if not v4_shadow.predictor_available():
+            _LOGGER.debug("v4 fit (%s): skipped, the v4 engine is not available", reason)
+            return False
+        self._v4_fit_running = True
+        self._v4_last_fit_attempt = _monotonic()
+        # background=True: HA cancels it on unload instead of waiting up to a minute for the fit.
+        self._v4_fit_task = self._spawn(self._v4_run_fit(reason), background=True)
+        return True
+
+    def _v4_cancel_fit(self) -> None:
+        """Cancel a running fit task (unload). The executor thread cannot be interrupted; its result is dropped."""
+        task = getattr(self, "_v4_fit_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._v4_fit_task = None
+        self._v4_fit_running = False
+
+    async def _v4_run_fit(self, reason: str) -> None:
+        """Fit off the event loop and store the model; on any failure the previous model is kept."""
+        started = _monotonic()
+        try:
+            with log_capture.zone_scope(self.zone_label):
+                now = dt_util.now()
+                tz = now.tzinfo
+                primary = self._primary_indoor_entity() or self.config.get("climate_entity", "")
+                sensors = list(self._read_chart_indoor_sensors())
+                # Captured on the loop (rule: no self.* reads inside the executor job); the row copy is shallow.
+                model_dict, seconds, fit_line = await self._executor_job(
+                    functools.partial(
+                        v4_shadow.run_fit,
+                        chart_entries=self._chart_log.raw_entries(),
+                        snapshots_fn=self._forecast_archive.get_snapshots,
+                        tz=tz,
+                        now=now,
+                        primary=primary,
+                        sensors=sensors,
+                        previous_model=self.learning._state.v4_model,
+                    )
+                )
+                if getattr(self, "_shut_down", False) is True:
+                    return  # unloaded while fitting: drop the result
+                state = self.learning._state
+                previous = state.v4_model if isinstance(state.v4_model, dict) else None
+                state.v4_model = model_dict
+                if previous is None or previous.get("primary") != model_dict.get("primary"):
+                    state.v4_mass_f = None  # a different primary node: re-seed the hidden node from the reading
+                    state.v4_mass_at = None
+                summary = v4_shadow.model_summary(model_dict)
+                self._v4_last_fit = {
+                    "at": now.isoformat(),
+                    "reason": reason,
+                    "seconds": round(seconds, 1),
+                    "ok": True,
+                }
+                mae = summary["mae_by_lead"]
+                _LOGGER.info(
+                    "v4 fit (%s): %s span=%sd primary=%s sensors=%d took %.1fs",
+                    reason,
+                    fit_line or f"confidence={summary['confidence']} anchors={summary['n_anchors']} mae={mae}",
+                    summary["span_days"],
+                    summary["primary"],
+                    len(summary["sensors"]),
+                    seconds,
+                )
+                await self._executor_job(self.learning.save_state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a failed shadow fit keeps the previous model; nothing else is affected
+            self._v4_last_fit = {
+                "at": dt_util.now().isoformat(),
+                "reason": reason,
+                "seconds": round(_monotonic() - started, 1),
+                "ok": False,
+            }
+            _LOGGER.warning("v4 fit (%s) failed; keeping the previous model", reason, exc_info=True)
+        finally:
+            self._v4_fit_running = False
+            self._v4_fit_task = None
+
+    async def _v4_shadow_cycle(self) -> None:
+        """Per 30-minute cycle: predict 24 h with v4 and archive 1/4/12/24 h. Never raises into the cycle."""
+        try:
+            await self._v4_shadow_cycle_impl()
+            self._v4_cycle_failed_logged = False
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - v4 failure must never affect the cycle
+            # First failure at WARNING with the traceback, repeats at DEBUG: a broken shadow must not spam the log.
+            if not self._v4_cycle_failed_logged:
+                self._v4_cycle_failed_logged = True
+                _LOGGER.warning("v4 shadow cycle failed (v3 and the house are unaffected)", exc_info=True)
+            else:
+                _LOGGER.debug("v4 shadow cycle failed again", exc_info=True)
+
+    async def _v4_shadow_cycle_impl(self) -> None:
+        if getattr(self, "_shut_down", False) is True:
+            return
+        state = self.learning._state
+        model_dict = state.v4_model
+        if not isinstance(model_dict, dict):
+            # First fit once startup coalescing is over (the chart log and forecast archive are loaded by then).
+            if getattr(self, "_startup_coalesce_active", False) is not True:
+                last = self._v4_last_fit_attempt
+                if last is None or _monotonic() - last >= V4_FIT_RETRY_MIN_INTERVAL_S:
+                    self._v4_start_fit("first")
+            return
+        started = _perf_counter()
+        now = dt_util.now()
+        # The row this cycle just wrote: the fit trains on exactly these fields.
+        row = self._chart_log.last_entry()
+        row_ts = dt_util.parse_datetime(row.get("ts", "")) if row else None
+        if row is None or row.get("event") is not None or row_ts is None or abs((now - row_ts).total_seconds()) > 120:
+            _LOGGER.debug("v4 shadow: no chart row for this cycle; skipped")
+            return
+        readings: dict[str, float | None] = dict(row.get("indoor_sensors") or {})
+        readings["_ca"] = row.get("indoor")
+        climate = self.hass.states.get(self.config.get("climate_entity", ""))
+        mode = climate.state if climate is not None else ""
+        setpoint = row.get("setpoint")
+        sample_fields = {
+            "outdoor_f": row.get("outdoor"),
+            "forecast_outdoor_f": row.get("pred_outdoor"),
+            "hvac_action": row.get("hvac") or None,
+            "fan_running": bool(row.get("fan_running")),
+            "windows_open": bool(row.get("windows_open")),
+            "heat_sp_f": setpoint if mode == "heat" else None,
+            "cool_sp_f": setpoint if mode == "cool" else None,
+        }
+
+        # The plan v3 follows: raw hourly forecast, target-band setpoints, per-day mode, window span.
+        local_tz = now.tzinfo
+        hourly = [
+            (d if d.tzinfo is not None else d.replace(tzinfo=local_tz), t)
+            for d, t in _parse_forecast_entries(self._hourly_forecast_temps)
+        ]
+        band: list[tuple[datetime, float | None, float | None]] = []
+        lower_now, upper_now = self._target_band_lower_upper_now()
+        band.append((now, lower_now, upper_now))
+        for b in getattr(self, "_target_band_schedule", None) or []:
+            b_ts = dt_util.parse_datetime(b.get("ts", ""))
+            if b_ts is not None and b_ts > now:
+                band.append((b_ts, b.get("lower"), b.get("upper")))
+        c = self._current_classification
+        windows = (
+            bool(c.windows_recommended) if c else False,
+            getattr(c, "window_open_time", None) if c else None,
+            getattr(c, "window_close_time", None) if c else None,
+        )
+        inputs = v4_shadow.build_inputs(
+            now=now,
+            hourly=hourly,
+            band=band,
+            day_modes=_compute_day_hvac_modes(self._hourly_forecast_temps, now, c),
+            windows=windows,
+            step_min=v4_shadow.step_minutes(),
+        )
+
+        # Hidden thermal-mass node: step it for the time since it was last advanced, or re-seed after a long gap.
+        mass = state.v4_mass_f
+        at = dt_util.parse_datetime(state.v4_mass_at) if state.v4_mass_at else None
+        step_s = v4_shadow.step_minutes() * 60
+        gap = (now - at).total_seconds() if at is not None else None
+        if mass is None or gap is None or gap < 0 or gap > V4_MASS_MAX_GAP_S:
+            mass, mass_steps = None, 1
+        else:
+            mass_steps = max(1, round(gap / step_s))
+
+        predictions, new_mass = await self._executor_job(
+            functools.partial(
+                v4_shadow.run_cycle,
+                model_dict=model_dict,
+                now=now,
+                tz=now.tzinfo,
+                readings=readings,
+                outdoor_now_f=row.get("outdoor"),
+                forecast_now_f=row.get("pred_outdoor"),
+                mass_f=mass,
+                mass_steps=mass_steps,
+                sample_fields=sample_fields,
+                inputs=inputs,
+            )
+        )
+        if getattr(self, "_shut_down", False) is True:
+            return
+        state.v4_mass_f = new_mass
+        state.v4_mass_at = now.isoformat()
+        added = 0
+        if predictions and inputs:
+            added = self._v4_archive.record(now, predictions, model_dict.get("primary"))
+        # The archive file is a few MB: rewrite it at most hourly (and once at shutdown).
+        mono = _monotonic()
+        last_save = self._v4_last_archive_save
+        if self._v4_archive.dirty and (last_save is None or mono - last_save >= V4_ARCHIVE_SAVE_MIN_INTERVAL_S):
+            self._v4_last_archive_save = mono
+            await self._executor_job(self._v4_archive.save)
+        cost_ms = (_perf_counter() - started) * 1000.0
+        self._v4_last_cycle = {
+            "at": now.isoformat(),
+            "ms": round(cost_ms, 1),
+            "predicted": bool(predictions),
+            "archived": added,
+            "inputs": len(inputs),
+        }
+        _LOGGER.debug(
+            "v4 shadow: predicted=%s inputs=%d archived=%d cost=%.1fms", bool(predictions), len(inputs), added, cost_ms
+        )
+
+    async def _v4_flush_on_shutdown(self) -> None:
+        """Write the v4 archive once more on unload if it changed since the last write. Never raises."""
+        try:
+            archive = getattr(self, "_v4_archive", None)
+            if archive is not None and archive.dirty:
+                await self._executor_job(self._v4_archive.save)
+        except Exception:  # noqa: BLE001 - shutdown must continue
+            _LOGGER.warning("v4 archive: could not flush on shutdown", exc_info=True)
+
+    def v4_accuracy_inputs(self) -> dict[str, Any]:
+        """Everything the prediction-accuracy endpoint needs from this zone, read on the event loop (Issue #1230 R1).
+
+        The endpoint builds its payload in the executor from these (shallow copies and the archive object), so no
+        coordinator attribute is read off the loop. Read-only: nothing here changes zone state.
+        """
+        climate = self.config.get("climate_entity", "")
+        companion = getattr(self, "_indoor_companion_in_use", None)
+        model = self.learning._state.v4_model
+        ids = [s for s in (model.get("sensors") or []) if isinstance(s, str)] if isinstance(model, dict) else []
+        for sid in self._read_chart_indoor_sensors():
+            if sid not in ids:
+                ids.append(sid)
+
+        def _name(entity_id: str) -> str:
+            st = self.hass.states.get(entity_id)
+            friendly = st.attributes.get("friendly_name") if st is not None else None
+            return str(friendly) if friendly else entity_id
+
+        def _role(entity_id: str) -> str:
+            if entity_id == companion:
+                return "thermostat's finer sensor"
+            if entity_id == climate:
+                return "thermostat"
+            if entity_id == self.config.get("sleep_indoor_temp_entity"):
+                return "bedroom sensor"
+            return "room sensor"
+
+        meta: list[dict[str, str]] = [
+            {"id": "_ca", "name": "Climate Advisor reading", "role": "the reading Climate Advisor uses"}
+        ]
+        meta.extend({"id": sid, "name": _name(sid), "role": _role(sid)} for sid in ids)
+        return {
+            "zone": self._entry_id,
+            "unit": self.config.get("temp_unit", "fahrenheit"),
+            "config_dir": Path(self.hass.config.config_dir),
+            "chart_rows": self._chart_log.raw_entries(),
+            "archive": self._v4_archive,
+            "model": self.v4_model_summary(),
+            "sensors_meta": meta,
+        }
+
+    def v4_model_summary(self) -> dict[str, Any]:
+        """Debug/diagnostics view of the v4 shadow: model confidence, fit time, span, per-lead training MAE.
+
+        Temperatures and errors are shown in the user's unit. Never raises (a bad stored model reads as no model).
+        """
+        try:
+            unit = self.config.get("temp_unit", "fahrenheit")
+            state = self.learning._state
+            out = v4_shadow.model_summary(state.v4_model)
+            out["mae_by_lead"] = {k: display_delta(v, unit, 2) for k, v in out.get("mae_by_lead", {}).items()}
+            out["unit"] = UNIT_SYMBOL.get(unit, "°F")
+            out["engine_available"] = v4_shadow.predictor_available()
+            out["mass"] = display_temp(state.v4_mass_f, unit)
+            out["fit_running"] = self._v4_fit_running
+            out["last_fit"] = dict(self._v4_last_fit)
+            out["last_cycle"] = dict(self._v4_last_cycle)
+            out["archive_slots"] = {k: len(v) for k, v in self._v4_archive.data.items()}
+            return out
+        except Exception:  # noqa: BLE001 - a debug field must never break the debug payload
+            _LOGGER.debug("v4_model_summary failed", exc_info=True)
+            return {"has_model": False, "confidence": "none", "error": True}
 
     def _note_hourly_forecast_cache(self, kept: list[dict]) -> None:
         """Log, once per change, whether an outage is covered by the kept forecast or has run past it (#1337)."""
@@ -14496,6 +14836,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 (getattr(self, "_unit_check_info", None) or {}).get("sensor_unit_mismatches", {})
             ),
             "thermal_pipeline": self._build_thermal_pipeline_summary(),
+            # Issue #1230 R1: prediction engine v4 (shadow) - model confidence, fit time, span, training MAE.
+            "v4_model": self.v4_model_summary(),
             "startup_coalesce_active": self._startup_coalesce_active,
             "startup_coalesce_seconds_remaining": (
                 max(
@@ -14628,8 +14970,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # _flush_hvac_runtime() so an in-progress fan_only session isn't lost on shutdown.
             self._flush_runtime_for_mode(self._hvac_session_mode)
             await self._async_save_state()
+            await self._v4_flush_on_shutdown()
         finally:
             # Issue #1102: release always runs, even if a save above raised.
+            self._v4_cancel_fit()  # Issue #1230 R1: a running fit's result is dropped; the executor thread just ends
             # Cancel any pending occupancy away setback timer
             self._cancel_occupancy_away_timer()
             # Issue #899: cancel any pending TOU away/vacation T_start guard timer

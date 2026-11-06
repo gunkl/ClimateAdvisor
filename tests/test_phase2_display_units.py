@@ -195,6 +195,8 @@ class TestConfigViewTemperatureUnits:
         "setback_cool",
         "sleep_heat",
         "sleep_cool",
+        "vacation_heat",  # Issue #1347
+        "vacation_cool",  # Issue #1347
         "threshold_hot",
         "threshold_warm",
         "threshold_mild",
@@ -219,7 +221,7 @@ class TestConfigViewTemperatureUnits:
         resp = asyncio.run(ClimateAdvisorConfigView().get(_make_view_request(coord)))
         return {s["key"]: s for s in resp.json_data["settings"]}
 
-    def test_metadata_declares_the_transform_on_exactly_the_sixteen_keys(self):
+    def test_metadata_declares_the_transform_on_exactly_the_declared_keys(self):
         from custom_components.climate_advisor.const import CONFIG_METADATA
 
         abs_keys = {k for k, m in CONFIG_METADATA.items() if m.get("display_transform") == "temp_abs"}

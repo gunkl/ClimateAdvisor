@@ -27,7 +27,7 @@
       },
       "setpoints": {
         "title": "Temperature Setpoints",
-        "description": "Set your comfort, away, and sleep temperature targets.",
+        "description": "Set your comfort, away, and sleep temperature targets. If a combination would make the heat and AC fight or settle somewhere odd, a warning appears next to the field; submit again to keep it.",
         "data": {
           "comfort_heat": "Comfortable Heating Temperature",
           "comfort_cool": "Comfortable Cooling Temperature",
@@ -134,12 +134,20 @@
     },
     "error": {
       "invalid_notify_service": "Must be in domain.service format (e.g. notify.mobile_app_phone)",
-      "setback_must_be_lower": "Setback heating temp must be lower than comfort heating temp",
-      "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp",
       "zone_name_too_long": "Zone name must be 50 characters or fewer",
       "whf_entity_shared_zone": "This fan is already controlled by another Climate Advisor zone. A whole-house fan can belong to only one zone. Pick a different fan, or remove it from the other zone first.",
       "whf_no_sensors_warning": "No door or window sensors are selected, so Climate Advisor cannot tell when the house is sealed and will not stop the whole-house fan for it. Submit again to keep this, or add sensors.",
-      "whf_command_only_warning": "Climate Advisor cannot see the fan's real state, so it cannot see or stop a fan it did not start. Submit again to keep this, or add a fan state sensor in Sensors & Fan options."
+      "whf_command_only_warning": "Climate Advisor cannot see the fan's real state, so it cannot see or stop a fan it did not start. Submit again to keep this, or add a fan state sensor in Sensors & Fan options.",
+      "setpoint_band_inverted_warning": "This heating temperature is at or above the matching cooling temperature. On a system with both heat and AC, they will take turns all day, heating the house and then cooling it again. Set heating at least 4 °F (2.5 °C) below cooling. Submit again to keep this.",
+      "setpoint_band_narrow_warning": "This heating temperature is less than 4 °F (2.5 °C) below the matching cooling temperature. Equipment overshoots its setpoint, so with a gap this small the heat and AC may switch back and forth more than they need to. Submit again to keep this.",
+      "setpoint_outside_thermostat_warning": "Your thermostat does not accept this temperature, so Climate Advisor will send the closest temperature it does accept instead. Submit again to keep this.",
+      "away_heat_above_home_warning": "Away heating is warmer than home heating, so the house is heated more while nobody is home than while you are. Submit again to keep this.",
+      "away_cool_below_home_warning": "Away cooling is cooler than home cooling, so the AC works harder while nobody is home than while you are. Submit again to keep this.",
+      "sleep_heat_below_away_warning": "Sleep heating is cooler than away heating, so overnight the house is kept cooler than when nobody is home. Submit again to keep this.",
+      "sleep_cool_above_away_warning": "Sleep cooling is warmer than away cooling, so overnight the house is allowed to get warmer than when nobody is home. Submit again to keep this.",
+      "vacation_heat_above_away_warning": "Vacation heating is warmer than away heating, so a vacation uses more energy than a normal day out. Submit again to keep this.",
+      "vacation_cool_below_away_warning": "Vacation cooling is cooler than away cooling, so a vacation uses more energy than a normal day out. Submit again to keep this.",
+      "vacation_freeze_warning": "With this setting, vacation heating ends up below 45 °F (7 °C). Pipes can freeze during a long trip. Submit again to keep this."
     },
     "abort": {
       "already_configured": "This thermostat already has a Climate Advisor zone configured."
@@ -185,14 +193,16 @@
       },
       "setpoints": {
         "title": "Temperature Setpoints",
-        "description": "Configure comfort, setback, and sleep temperature targets.",
+        "description": "Configure comfort, away, sleep, and vacation temperature targets. If a combination would make the heat and AC fight or settle somewhere odd, a warning appears next to the field; submit again to keep it.",
         "data": {
           "comfort_heat": "Comfortable Heating Temperature",
           "comfort_cool": "Comfortable Cooling Temperature",
           "setback_heat": "Away Heating Temperature",
           "setback_cool": "Away Cooling Temperature",
           "sleep_heat": "Sleep Heating Temperature",
-          "sleep_cool": "Sleep Cooling Temperature"
+          "sleep_cool": "Sleep Cooling Temperature",
+          "vacation_heat": "Vacation Heating Temperature",
+          "vacation_cool": "Vacation Cooling Temperature"
         },
         "data_description": {
           "comfort_heat": "Target temperature when heating and someone is home.",
@@ -200,7 +210,9 @@
           "setback_heat": "Lower temperature used when away from home to save energy.",
           "setback_cool": "Higher temperature used when away from home to save energy.",
           "sleep_heat": "Target temperature when heating during sleep hours (when home).",
-          "sleep_cool": "Target temperature when cooling during sleep hours (when home)."
+          "sleep_cool": "Target temperature when cooling during sleep hours (when home).",
+          "vacation_heat": "Heating temperature while the vacation switch is on. Leave blank to use away heating minus 3 °F (about 1.5 °C).",
+          "vacation_cool": "Cooling temperature while the vacation switch is on. Leave blank to use away cooling plus 3 °F (about 1.5 °C)."
         }
       },
       "temperature_sources": {
@@ -465,8 +477,6 @@
       "invalid_notify_service": "Must be in domain.service format (e.g. notify.mobile_app_phone)",
       "schedule_days_required": "Select at least one day",
       "schedule_start_end_equal": "Start and end time must be different",
-      "setback_must_be_lower": "Setback heating temp must be lower than comfort heating temp",
-      "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp",
       "preheat_min_exceeds_max": "Minimum pre-heat time must not exceed maximum pre-heat time",
       "preheat_default_exceeds_max": "Default pre-heat time must not exceed maximum pre-heat time",
       "ai_connection_failed": "Could not connect to Claude API. Check your API key and try again.",
@@ -478,7 +488,17 @@
       "whf_entity_shared_zone": "This fan is already controlled by another Climate Advisor zone. A whole-house fan can belong to only one zone. Pick a different fan, or remove it from the other zone first.",
       "whf_no_sensors_warning": "No door or window sensors are selected, so Climate Advisor cannot tell when the house is sealed and will not stop the whole-house fan for it. Submit again to keep this, or add sensors.",
       "whf_command_only_warning": "Climate Advisor cannot see the fan's real state, so it cannot see or stop a fan it did not start. Submit again to keep this, or add a fan state sensor in Sensors & Fan options.",
-      "thresholds_must_be_ascending": "Day-type thresholds must increase from Cool to Mild to Warm to Hot (Cool < Mild < Warm < Hot)."
+      "thresholds_must_be_ascending": "Day-type thresholds must increase from Cool to Mild to Warm to Hot (Cool < Mild < Warm < Hot).",
+      "setpoint_band_inverted_warning": "This heating temperature is at or above the matching cooling temperature. On a system with both heat and AC, they will take turns all day, heating the house and then cooling it again. Set heating at least 4 °F (2.5 °C) below cooling. Submit again to keep this.",
+      "setpoint_band_narrow_warning": "This heating temperature is less than 4 °F (2.5 °C) below the matching cooling temperature. Equipment overshoots its setpoint, so with a gap this small the heat and AC may switch back and forth more than they need to. Submit again to keep this.",
+      "setpoint_outside_thermostat_warning": "Your thermostat does not accept this temperature, so Climate Advisor will send the closest temperature it does accept instead. Submit again to keep this.",
+      "away_heat_above_home_warning": "Away heating is warmer than home heating, so the house is heated more while nobody is home than while you are. Submit again to keep this.",
+      "away_cool_below_home_warning": "Away cooling is cooler than home cooling, so the AC works harder while nobody is home than while you are. Submit again to keep this.",
+      "sleep_heat_below_away_warning": "Sleep heating is cooler than away heating, so overnight the house is kept cooler than when nobody is home. Submit again to keep this.",
+      "sleep_cool_above_away_warning": "Sleep cooling is warmer than away cooling, so overnight the house is allowed to get warmer than when nobody is home. Submit again to keep this.",
+      "vacation_heat_above_away_warning": "Vacation heating is warmer than away heating, so a vacation uses more energy than a normal day out. Submit again to keep this.",
+      "vacation_cool_below_away_warning": "Vacation cooling is cooler than away cooling, so a vacation uses more energy than a normal day out. Submit again to keep this.",
+      "vacation_freeze_warning": "With this setting, vacation heating ends up below 45 °F (7 °C). Pipes can freeze during a long trip. Submit again to keep this."
     }
   },
   "issues": {

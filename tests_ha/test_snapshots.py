@@ -117,7 +117,13 @@ async def test_mild_day_with_window_open_and_whole_house_fan(make_house, snapsho
 
 
 async def test_away_day(make_house, snapshot) -> None:
-    """Occupant away (home toggle off): setback wording on the briefing and the cards."""
+    """Occupant away (home toggle off): setback wording on the briefing and the cards.
+
+    Snapshot history: before Issue #1354 the engine wrongly started in "home" (it commanded the 75 F comfort setpoint to
+    the empty house). #1354 fixed that, and the snapshot briefly showed 'Bedtime check' only because the away setback's
+    5-minute re-send loop (Issue #1363) refreshed the card at exactly 06:30. With that loop gone the card refreshes on
+    the 30-minute cycle like the Home reference day, and shows the 06:30 wake-up check, as the Home warm day does.
+    """
     house = await _day(
         make_house,
         "warm",

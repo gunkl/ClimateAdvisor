@@ -53,9 +53,9 @@ from .const import (
     DEFAULT_SETBACK_HEAT,
     OCCUPANCY_VACATION,
     TOU_SETBACK_PRECOND_MAX_DELTA_F,
-    VACATION_SETBACK_EXTRA,
 )
 from .nat_vent_gate import resolve_comfort_cool, resolve_comfort_heat
+from .setpoint_combinations import vacation_edges
 from .thermal_lead_time import compute_lead_minutes_from_rate
 
 MAX_SCHEDULES = 5  # enforced by config_flow.py, not this module — see module docstring
@@ -423,8 +423,7 @@ def resolve_tou_away_vacation_phase(
     setback_heat = float(config.get("setback_heat", DEFAULT_SETBACK_HEAT))
     setback_cool = float(config.get("setback_cool", DEFAULT_SETBACK_COOL))
     if occupancy_mode == OCCUPANCY_VACATION:
-        setback_heat -= VACATION_SETBACK_EXTRA
-        setback_cool += VACATION_SETBACK_EXTRA
+        setback_heat, setback_cool = vacation_edges(config)  # Issue #1347
 
     k_passive = thermal_model.get("k_passive")
     confidence = thermal_model.get("confidence_k_passive", thermal_model.get("confidence", "none"))

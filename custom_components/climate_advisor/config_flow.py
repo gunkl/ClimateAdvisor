@@ -68,6 +68,8 @@ from .const import (
     CONF_THRESHOLD_HOT,
     CONF_THRESHOLD_MILD,
     CONF_THRESHOLD_WARM,
+    CONF_VACATION_COOL,
+    CONF_VACATION_HEAT,
     CONF_VACATION_TOGGLE,
     CONF_VACATION_TOGGLE_INVERT,
     CONF_WELCOME_HOME_DEBOUNCE,
@@ -115,6 +117,11 @@ from .const import (
     TEMP_SOURCE_WEATHER_SERVICE,
 )
 from .scheduler import ALL_DAYS, COST_TAG_HIGH, MAX_SCHEDULES, WEEKDAY_ABBREVS, _parse_hhmm
+from .setpoint_combinations import (
+    SETPOINT_SANITY_MAX_F,
+    SETPOINT_SANITY_MIN_F,
+    setpoint_combination_findings,
+)
 from .temperature import CELSIUS, FAHRENHEIT, convert_delta, from_fahrenheit, ha_system_unit, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
@@ -370,6 +377,18 @@ def delta_fields_to_fahrenheit(user_input: dict[str, Any], stored: Any, unit: st
     return result
 
 
+_SETPOINT_KEYS: tuple[str, ...] = (
+    "comfort_heat",
+    "comfort_cool",
+    "setback_heat",
+    "setback_cool",
+    "sleep_heat",
+    "sleep_cool",
+)
+# Issue #1347: optional separate vacation setpoints (options flow only; blank = away -/+ 3 °F).
+_VACATION_KEYS: tuple[str, ...] = (CONF_VACATION_HEAT, CONF_VACATION_COOL)
+
+
 def setpoint_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, float, float]]:
     """Slider ``(min, max, default, step)`` for the 6 setpoints, keyed by field name.
 
@@ -382,30 +401,32 @@ def setpoint_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, fl
     to the 0.5 step) rather than a second set of hand-picked literals, so the two unit
     branches — and any future reformat of the DEFAULT_* constants — can never drift
     apart again (#438: stale hardcoded sleep defaults shipped to every new install).
-    Celsius bounds cover the full Fahrenheit slider span converted (Issue #1049: 65 °F =
+    Celsius bounds cover the full Fahrenheit span converted (Issue #1049: 65 °F =
     18.33 °C used to exceed a hard-coded 18 °C max).
+
+    Issue #1347 (owner direction): every field shares ONE physical sanity range,
+    ``SETPOINT_SANITY_MIN_F``..``SETPOINT_SANITY_MAX_F``; the old per-field ranges (away heat capped
+    at 65 °F / 18.5 °C, away cool floored at 75 °F) are gone. Combinations that would make the
+    system thrash are warned about, not blocked (``setpoint_combinations``). The °C bounds are the
+    °F bounds converted and widened outward to the 0.5 step, never hand-picked.
     """
 
     def _c_default(f_value: float, lo: float, hi: float) -> float:
         return _display_default(f_value, True, lo, hi, snap_step=0.5)
 
-    if is_celsius:
-        return {
-            "comfort_heat": (12.5, 27, _c_default(DEFAULT_COMFORT_HEAT, 12.5, 27), 0.5),
-            "comfort_cool": (20, 29.5, _c_default(DEFAULT_COMFORT_COOL, 20, 29.5), 0.5),
-            "setback_heat": (7, 18.5, _c_default(DEFAULT_SETBACK_HEAT, 7, 18.5), 0.5),
-            "setback_cool": (23.5, 32.5, _c_default(DEFAULT_SETBACK_COOL, 23.5, 32.5), 0.5),
-            "sleep_heat": (12.5, 26.5, _c_default(DEFAULT_SLEEP_HEAT, 12.5, 26.5), 0.5),
-            "sleep_cool": (20.5, 32, _c_default(DEFAULT_SLEEP_COOL, 20.5, 32), 0.5),
-        }
-    return {
-        "comfort_heat": (55, 80, DEFAULT_COMFORT_HEAT, 1),
-        "comfort_cool": (68, 85, DEFAULT_COMFORT_COOL, 1),
-        "setback_heat": (45, 65, DEFAULT_SETBACK_HEAT, 1),
-        "setback_cool": (75, 90, DEFAULT_SETBACK_COOL, 1),
-        "sleep_heat": (55, 79, DEFAULT_SLEEP_HEAT, 1),
-        "sleep_cool": (69, 89, DEFAULT_SLEEP_COOL, 1),
+    defaults_f = {
+        "comfort_heat": DEFAULT_COMFORT_HEAT,
+        "comfort_cool": DEFAULT_COMFORT_COOL,
+        "setback_heat": DEFAULT_SETBACK_HEAT,
+        "setback_cool": DEFAULT_SETBACK_COOL,
+        "sleep_heat": DEFAULT_SLEEP_HEAT,
+        "sleep_cool": DEFAULT_SLEEP_COOL,
     }
+    if is_celsius:
+        lo = math.floor(from_fahrenheit(SETPOINT_SANITY_MIN_F, CELSIUS) * 2) / 2
+        hi = math.ceil(from_fahrenheit(SETPOINT_SANITY_MAX_F, CELSIUS) * 2) / 2
+        return {key: (lo, hi, _c_default(f, lo, hi), 0.5) for key, f in defaults_f.items()}
+    return {key: (SETPOINT_SANITY_MIN_F, SETPOINT_SANITY_MAX_F, f, 1) for key, f in defaults_f.items()}
 
 
 def threshold_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, float]]:
@@ -463,6 +484,45 @@ def _whf_setup_findings(
     return errors, warnings
 
 
+def _setpoint_warnings(hass: HomeAssistant, climate_entity: str | None, values_f: dict[str, Any]) -> dict[str, str]:
+    """Issue #1347: warnings for setpoint combinations that would thrash or settle incoherently.
+
+    ``values_f`` are the submitted setpoints already converted to °F. The thermostat's advertised
+    ``hvac_modes`` (a heat-only or cool-only system cannot flip between heat and AC) and its
+    ``min_temp``/``max_temp`` (reported in Home Assistant's system unit) feed the pure rules in
+    ``setpoint_combinations``. An unavailable or unknown entity is treated as a two-mode system
+    with no limits. Warnings never block: the step shows them once and accepts the identical resubmit.
+    """
+    supports_heat: bool | None = None
+    supports_cool: bool | None = None
+    min_f: float | None = None
+    max_f: float | None = None
+    state = hass.states.get(climate_entity) if climate_entity else None
+    if state is not None:
+        attrs = state.attributes or {}
+        modes = attrs.get("hvac_modes")
+        if isinstance(modes, (list, tuple)) and modes:
+            supports_heat = "heat" in modes or "heat_cool" in modes or "auto" in modes
+            supports_cool = "cool" in modes or "heat_cool" in modes or "auto" in modes
+        system_unit = ha_system_unit(hass) or FAHRENHEIT
+        for attr in ("min_temp", "max_temp"):
+            raw = attrs.get(attr)
+            # Climate entities report these as plain numbers; anything else (missing, a string) is ignored.
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+                continue
+            if attr == "min_temp":
+                min_f = to_fahrenheit(raw, system_unit)
+            else:
+                max_f = to_fahrenheit(raw, system_unit)
+    return setpoint_combination_findings(
+        values_f,
+        supports_heat=supports_heat,
+        supports_cool=supports_cool,
+        thermostat_min_f=min_f,
+        thermostat_max_f=max_f,
+    )
+
+
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
@@ -471,11 +531,15 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # Class-level default so a flow built without __init__ (tests) still works; only ever re-assigned.
     _whf_acknowledged: dict[str, str] = {}
 
+    _setpoints_acknowledged: dict[str, Any] = {}
+
     def __init__(self) -> None:
         """Initialize the config flow."""
         self._data: dict[str, Any] = {}
         # Issue #1144: the sealed-house warnings last shown (a resubmit with the same set is accepted).
         self._whf_acknowledged: dict[str, str] = {}
+        # Issue #1347: the setpoint warnings last shown, with the values they were shown for.
+        self._setpoints_acknowledged: dict[str, Any] = {}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """Handle the initial setup step — core entities and notify service."""
@@ -542,23 +606,27 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         is_celsius = unit == CELSIUS
 
         if user_input is not None:
-            # Cross-field validation (on display values — ordering is unit-invariant)
-            if user_input.get("setback_heat", 0) >= user_input.get("comfort_heat", 999):
-                errors["setback_heat"] = "setback_must_be_lower"
-            if user_input.get("setback_cool", 999) <= user_input.get("comfort_cool", 0):
-                errors["setback_cool"] = "setback_must_be_higher"
-            if not errors:
-                # Convert display values → stored °F (canonical internal unit)
-                converted = {**user_input}
-                for key in ("comfort_heat", "comfort_cool", "setback_heat", "setback_cool", "sleep_heat", "sleep_cool"):
-                    if key in converted:
-                        converted[key] = to_fahrenheit(converted[key], unit)
+            # Convert display values → stored °F (canonical internal unit), then judge the combination
+            # in °F (Issue #1347: warn, never block; the identical resubmit is accepted).
+            converted = {**user_input}
+            for key in _SETPOINT_KEYS:
+                if key in converted:
+                    converted[key] = to_fahrenheit(converted[key], unit)
+            warnings = _setpoint_warnings(self.hass, self._data.get("climate_entity"), converted)
+            shown = {"warnings": warnings, "values": dict(user_input)}
+            if warnings and self._setpoints_acknowledged != shown:
+                self._setpoints_acknowledged = shown
+                errors = dict(warnings)
+            else:
+                self._setpoints_acknowledged = {}
                 self._data.update(converted)
                 return await self.async_step_temperature_sources()
 
-        # Slider ranges and defaults depend on chosen unit — see setpoint_slider_ranges().
+        # Ranges and defaults depend on chosen unit — see setpoint_slider_ranges().
         ranges = setpoint_slider_ranges(is_celsius)
         unit_label = "°C" if is_celsius else "°F"
+        # A re-shown form (warnings) keeps what the occupant typed, so "Submit again" really resubmits it.
+        shown_values = user_input or {}
 
         def _num(key: str) -> selector.NumberSelector:
             mn, mx, default, step = ranges[key]
@@ -568,21 +636,14 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     max=mx,
                     step=step,
                     unit_of_measurement=unit_label,
-                    mode="slider",
+                    mode=selector.NumberSelectorMode.BOX,
                 )
             )
 
         return self.async_show_form(
             step_id="setpoints",
             data_schema=vol.Schema(
-                {
-                    vol.Required("comfort_heat", default=ranges["comfort_heat"][2]): _num("comfort_heat"),
-                    vol.Required("comfort_cool", default=ranges["comfort_cool"][2]): _num("comfort_cool"),
-                    vol.Required("setback_heat", default=ranges["setback_heat"][2]): _num("setback_heat"),
-                    vol.Required("setback_cool", default=ranges["setback_cool"][2]): _num("setback_cool"),
-                    vol.Required("sleep_heat", default=ranges["sleep_heat"][2]): _num("sleep_heat"),
-                    vol.Required("sleep_cool", default=ranges["sleep_cool"][2]): _num("sleep_cool"),
-                }
+                {vol.Required(key, default=shown_values.get(key, ranges[key][2])): _num(key) for key in _SETPOINT_KEYS}
             ),
             errors=errors,
         )
@@ -818,9 +879,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
 
     # Class-level default so a flow built without __init__ (tests) still works; only ever re-assigned.
     _whf_acknowledged: dict[str, str] = {}
+    _setpoints_acknowledged: dict[str, Any] = {}
 
     def __init__(self) -> None:
         """Initialize the options flow."""
+        # Issue #1347: the setpoint warnings last shown, with the values they were shown for.
+        self._setpoints_acknowledged: dict[str, Any] = {}
         # Scratch space used only within a single section's commit — see
         # _commit_section(). Not carried across steps: each section persists
         # immediately on submit (Issue #557), so there is no multi-step
@@ -965,30 +1029,22 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     # ---- Temperature Setpoints ----
 
     async def async_step_setpoints(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
-        """Comfort, setback, and sleep temperature setpoints."""
+        """Comfort, away, sleep and (optional) vacation temperature setpoints.
+
+        Issue #1347: no cross-field errors. A combination that would thrash or settle incoherently is
+        shown as a warning next to the field; submitting the identical values again saves them.
+        """
         errors: dict[str, str] = {}
 
         current = self.config_entry.data
         unit = current.get(CONF_TEMP_UNIT, FAHRENHEIT)
         is_celsius = unit == CELSIUS
 
-        if user_input is not None:
-            # Cross-field: setback must be more conservative than comfort
-            if user_input.get("setback_heat", 0) >= user_input.get("comfort_heat", 999):
-                errors["setback_heat"] = "setback_must_be_lower"
-            if user_input.get("setback_cool", 999) <= user_input.get("comfort_cool", 0):
-                errors["setback_cool"] = "setback_must_be_higher"
-            if not errors:
-                # Convert display values → stored °F
-                for key in ("comfort_heat", "comfort_cool", "setback_heat", "setback_cool", "sleep_heat", "sleep_cool"):
-                    if key in user_input:
-                        user_input[key] = to_fahrenheit(user_input[key], unit)
-                await self._commit_section(user_input)
-                return await self.async_step_init()
-
         unit_label = "°C" if is_celsius else "°F"
         slider = setpoint_slider_ranges(is_celsius)
         ranges = {k: (mn, mx, step) for k, (mn, mx, _default, step) in slider.items()}
+        for key in _VACATION_KEYS:
+            ranges[key] = ranges["setback_heat"]
         defaults_f = {
             "comfort_heat": DEFAULT_COMFORT_HEAT,
             "comfort_cool": DEFAULT_COMFORT_COOL,
@@ -997,95 +1053,59 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             "sleep_heat": DEFAULT_SLEEP_HEAT,
             "sleep_cool": DEFAULT_SLEEP_COOL,
         }
+        stored_f: dict[str, float | None] = {k: current.get(k, defaults_f[k]) for k in _SETPOINT_KEYS}
+        for key in _VACATION_KEYS:
+            stored_f[key] = current.get(key)
         disp = {
-            k: _display_default(current.get(k, defaults_f[k]), is_celsius, ranges[k][0], ranges[k][1])
-            for k in defaults_f
+            k: _display_default(v, is_celsius, ranges[k][0], ranges[k][1]) for k, v in stored_f.items() if v is not None
         }
-        comfort_heat_disp = disp["comfort_heat"]
-        comfort_cool_disp = disp["comfort_cool"]
-        setback_heat_disp = disp["setback_heat"]
-        setback_cool_disp = disp["setback_cool"]
-        sleep_heat_disp = disp["sleep_heat"]
-        sleep_cool_disp = disp["sleep_cool"]
+
+        if user_input is not None:
+            # Display → stored °F. A value left as shown keeps the stored °F exactly, so re-saving a
+            # °C page never drifts a setpoint by rounding (Issue #1347 row 12, #1049 history).
+            converted: dict[str, Any] = dict(user_input)
+            for key in (*_SETPOINT_KEYS, *_VACATION_KEYS):
+                if key not in converted:
+                    continue
+                if key in disp and float(converted[key]) == disp[key]:
+                    converted[key] = float(stored_f[key])
+                else:
+                    converted[key] = to_fahrenheit(converted[key], unit)
+            warnings = _setpoint_warnings(self.hass, current.get("climate_entity"), converted)
+            shown = {"warnings": warnings, "values": dict(user_input)}
+            if warnings and self._setpoints_acknowledged != shown:
+                self._setpoints_acknowledged = shown
+                errors = dict(warnings)
+            else:
+                self._setpoints_acknowledged = {}
+                await self._commit_section(converted, clearable_keys=_VACATION_KEYS)
+                return await self.async_step_init()
+
+        # A re-shown form (warnings) keeps what the occupant typed, so "Submit again" really resubmits it.
+        shown_values = user_input if user_input is not None else disp
+
+        def _num(key: str) -> selector.NumberSelector:
+            mn, mx, step = ranges[key]
+            return selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=mn,
+                    max=mx,
+                    step=step,
+                    unit_of_measurement=unit_label,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+
+        schema: dict[Any, Any] = {
+            vol.Required(key, default=shown_values.get(key, disp[key])): _num(key) for key in _SETPOINT_KEYS
+        }
+        # Optional vacation setpoints: blank = away -/+ 3 °F (suggested_value so the field can be cleared).
+        for key in _VACATION_KEYS:
+            schema[vol.Optional(key, description={"suggested_value": shown_values.get(key)})] = _num(key)
 
         return self.async_show_form(
             step_id="setpoints",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        "comfort_heat",
-                        default=comfort_heat_disp,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=ranges["comfort_heat"][0],
-                            max=ranges["comfort_heat"][1],
-                            step=ranges["comfort_heat"][2],
-                            unit_of_measurement=unit_label,
-                            mode="slider",
-                        )
-                    ),
-                    vol.Required(
-                        "comfort_cool",
-                        default=comfort_cool_disp,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=ranges["comfort_cool"][0],
-                            max=ranges["comfort_cool"][1],
-                            step=ranges["comfort_cool"][2],
-                            unit_of_measurement=unit_label,
-                            mode="slider",
-                        )
-                    ),
-                    vol.Required(
-                        "setback_heat",
-                        default=setback_heat_disp,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=ranges["setback_heat"][0],
-                            max=ranges["setback_heat"][1],
-                            step=ranges["setback_heat"][2],
-                            unit_of_measurement=unit_label,
-                            mode="slider",
-                        )
-                    ),
-                    vol.Required(
-                        "setback_cool",
-                        default=setback_cool_disp,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=ranges["setback_cool"][0],
-                            max=ranges["setback_cool"][1],
-                            step=ranges["setback_cool"][2],
-                            unit_of_measurement=unit_label,
-                            mode="slider",
-                        )
-                    ),
-                    vol.Required(
-                        "sleep_heat",
-                        default=sleep_heat_disp,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=ranges["sleep_heat"][0],
-                            max=ranges["sleep_heat"][1],
-                            step=ranges["sleep_heat"][2],
-                            unit_of_measurement=unit_label,
-                            mode="slider",
-                        )
-                    ),
-                    vol.Required(
-                        "sleep_cool",
-                        default=sleep_cool_disp,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=ranges["sleep_cool"][0],
-                            max=ranges["sleep_cool"][1],
-                            step=ranges["sleep_cool"][2],
-                            unit_of_measurement=unit_label,
-                            mode="slider",
-                        )
-                    ),
-                }
-            ),
+            data_schema=vol.Schema(schema),
             errors=errors,
         )
 

@@ -227,8 +227,12 @@ class TestSleepTempOverridesAdaptive:
         result = compute_bedtime_setback(config, thermal_model, c)
         assert result == pytest.approx(78.0)
 
-    def test_sleep_heat_floored_by_setback_heat(self):
-        """If sleep_heat < setback_heat (bad config data), setback_heat floor wins."""
+    def test_sleep_heat_below_setback_heat_not_clamped(self):
+        """Issue #1366: sleep_heat < setback_heat is returned as-is (the engine arms 60, not 65).
+
+        The old expectation (65.0, the away floor) was wrong: select_comfort_band() arms the raw
+        sleep_heat, so a clamped value made the briefing/chart quote a temperature the thermostat
+        never held."""
         config = {
             "comfort_heat": 70.0,
             "setback_heat": 65.0,
@@ -238,7 +242,20 @@ class TestSleepTempOverridesAdaptive:
         }
         c = _make_classification(hvac_mode="heat")
         result = compute_bedtime_setback(config, None, c)
-        assert result == pytest.approx(65.0)
+        assert result == pytest.approx(60.0)
+
+    def test_sleep_cool_above_setback_cool_not_clamped(self):
+        """Issue #1366 (cool mirror): sleep_cool > setback_cool is returned as-is."""
+        config = {
+            "comfort_cool": 75.0,
+            "setback_cool": 80.0,
+            "sleep_cool": 82.0,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+        }
+        c = _make_classification(hvac_mode="cool")
+        result = compute_bedtime_setback(config, None, c)
+        assert result == pytest.approx(82.0)
 
     def test_no_sleep_heat_falls_through_to_adaptive(self):
         """Without sleep_heat, adaptive logic runs unchanged (falls back to default depth)."""

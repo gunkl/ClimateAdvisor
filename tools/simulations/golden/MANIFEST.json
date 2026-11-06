@@ -487,5 +487,15 @@
     "sha256": "47bf6eea0b11e953ebad33ae8c8135a747cffd727d349fadc8037c2604c403c1",
     "signed": "2026-11-02",
     "issue": 1222
+  },
+  "issue_1276_evening_floor_heat_on_no_open_windows_advice": {
+    "sha256": "e831e2f796a78bec0bb6a0fd54adcb1d9ba4996acdc61f7b8cc467aa2b7927a2",
+    "signed": "2026-11-06",
+    "issue": 1276
+  },
+  "issue_1276_evening_floor_heat_on_no_open_windows_advice__whf": {
+    "sha256": "2057a4ca3ffddbb268dcd55e786c650ba17ed0d9f83a196e5d724d5a9b64149b",
+    "signed": "2026-11-06",
+    "issue": 1276
   }
 }

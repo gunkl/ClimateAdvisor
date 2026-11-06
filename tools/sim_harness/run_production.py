@@ -559,6 +559,13 @@ class FakeHassSession:
             engine_state = snapshot_engine_state(self.engine)
             if self.finalized_days:  # Issue #1310 (absent when no day was finalized: snapshots unchanged)
                 engine_state["_finalized_days"] = dict(self.finalized_days)
+            # Issue #1276 (opt-in, owner-approved 2026-11-06): record the real Next Action card text so a
+            # scenario can assert on what the occupant is told, which no other surface exposes. Computed once
+            # at the end of the run from the last temp_update outdoor value (Tier A runs no weather entity, so
+            # production's refresh cycle never computes the card). Absent unless the scenario sets
+            # "capture_next_action": true, so every other golden's snapshot is unchanged.
+            if self.scenario.get("capture_next_action") and self.coordinator is not None:
+                engine_state["_next_action"] = self._capture_next_action()
         finally:
             self.close()
         result = ProductionRunResult(
@@ -571,6 +578,25 @@ class FakeHassSession:
             result.promise_report = self.probe.report()
         self._result = result
         return result
+
+    def _capture_next_action(self) -> dict[str, Any]:
+        """Issue #1276: the real ``_compute_next_action`` text for the run's final state.
+
+        Same arguments production passes in ``_async_update_data`` (classification, indoor reading,
+        outdoor, physical window state, engine); outdoor is the scenario's last ``temp_update``
+        ``outdoor_f``. ``advises_opening_windows`` lets a scenario assert the card's direction with
+        the existing ``field_equals`` assertion, so ``outcomes.py`` is unchanged.
+        """
+        co = self.coordinator
+        updates = [e for e in sorted_events(self.scenario) if e.get("type") == "temp_update" and "outdoor_f" in e]
+        text = co._compute_next_action(
+            co._current_classification,
+            indoor_temp=co._get_indoor_temp(),
+            outdoor_temp=float(updates[-1]["outdoor_f"]) if updates else None,
+            windows_physically_open=co._any_sensor_open(),
+            ae=self.engine,
+        )
+        return {"text": text, "advises_opening_windows": str(text).startswith("Open windows")}
 
     def close(self) -> None:
         """Leave the patched clock/timer context (idempotent)."""

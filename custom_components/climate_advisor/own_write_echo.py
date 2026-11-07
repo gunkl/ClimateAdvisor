@@ -35,6 +35,12 @@ Rules (owner decisions 2026-11-02):
 
 Mode echoes (Issue #1246) use the same memory shape and window: ``OwnModeWrite`` / ``decide_mode_echo``.
 
+Setpoint hold (Issue #1397, owner decision 2026-11-07): a thermostat that reports a value within
+``SETPOINT_HOLD_TOLERANCE_F`` (0.5 F, 0.28 C) of the setpoint Climate Advisor last wrote to it is holding that setpoint
+-- a HomeKit thermostat reports 18.0 C, then 17.9 C a minute later -- not the occupant turning the dial
+(``holds_own_setpoint``, no time window, never consumed). The same tolerance lets the value echo match such a
+report. Every one-step occupant change (1 F, 0.5 C = 0.9 F) is larger, so it is still caught.
+
 Pure: no Home Assistant imports, no I/O, no clock reads (``now`` is passed in).
 """
 
@@ -51,6 +57,7 @@ from .const import (
     SETPOINT_ECHO_DEFAULT_STEP_C,
     SETPOINT_ECHO_DEFAULT_STEP_F,
     SETPOINT_ECHO_MEMORY_MAX,
+    SETPOINT_HOLD_TOLERANCE_F,
 )
 
 #: The attributes a setpoint write can be recorded on.
@@ -124,6 +131,11 @@ def default_step(unit: str | None) -> float:
     return SETPOINT_ECHO_DEFAULT_STEP_C if unit == "celsius" else SETPOINT_ECHO_DEFAULT_STEP_F
 
 
+def hold_tolerance(unit: str | None) -> float:
+    """``SETPOINT_HOLD_TOLERANCE_F`` in the thermostat's unit (Issue #1397): 0.5 F, or 0.28 C on a Celsius install."""
+    return SETPOINT_HOLD_TOLERANCE_F / 1.8 if unit == "celsius" else SETPOINT_HOLD_TOLERANCE_F
+
+
 def resolve_step(raw_step: object, unit: str | None) -> float:
     """The thermostat's advertised ``target_temp_step`` when it is a usable positive number, else the default."""
     try:
@@ -135,20 +147,21 @@ def resolve_step(raw_step: object, unit: str | None) -> float:
     return step
 
 
-def values_match(recorded: float, observed: float, step: float) -> bool:
+def values_match(recorded: float, observed: float, step: float, *, hold_tolerance: float = 0.0) -> bool:
     """Does the thermostat's reported value equal what CA wrote, after rounding to the thermostat's step?
 
-    A value already on the thermostat's step grid must come back exactly (so an occupant's one-step tweak
-    from CA's value is never mistaken for the echo). An off-grid value (72 F converted to 22.22 C on a
-    0.5 C thermostat) is rounded by the thermostat -- up, down or to nearest depending on the make -- so
-    either neighbouring grid value, i.e. anything strictly within one step, is the echo.
+    A value already on the thermostat's step grid must come back exactly, or within ``hold_tolerance`` (Issue #1397:
+    a thermostat reporting 17.9 C for a written 18.0 C), so an occupant's one-step tweak from CA's value is never
+    mistaken for the echo. An off-grid value (72 F converted to 22.22 C on a 0.5 C thermostat) is rounded by the
+    thermostat -- up, down or to nearest depending on the make -- so either neighbouring grid value, i.e. anything
+    strictly within one step, is the echo.
     """
     if not (math.isfinite(recorded) and math.isfinite(observed)) or step <= 0:
         return False
     tolerance = max(1e-6, step * 0.02)
     snapped = round(recorded / step) * step
     if abs(recorded - snapped) <= tolerance:
-        return abs(observed - recorded) <= tolerance
+        return abs(observed - recorded) <= max(tolerance, hold_tolerance + 1e-6)
     return abs(observed - recorded) < step - tolerance
 
 
@@ -233,6 +246,7 @@ def decide_setpoint_echo(
     event_context_parent_id: str | None = None,
     event_context_user_id: str | None = None,
     window_s: float = OWN_WRITE_ECHO_WINDOW_S,
+    hold_tolerance: float = 0.0,
 ) -> EchoVerdict:
     """Is this thermostat setpoint change Climate Advisor's own write coming back?
 
@@ -268,7 +282,9 @@ def decide_setpoint_echo(
             if context_id_matches(write.context_id, event_context_id, event_context_parent_id):
                 accounted = used_context = True
                 consumed.append(write)
-            elif event_context_user_id is None and values_match(write.value, value, step):
+            elif event_context_user_id is None and values_match(
+                write.value, value, step, hold_tolerance=hold_tolerance
+            ):
                 accounted = True
                 consumed.append(write)
         if not accounted:
@@ -288,3 +304,39 @@ def _superseded_by(
     return tuple(
         w for index, w in enumerate(live) if w not in consumed and w.attribute in newest and index < newest[w.attribute]
     )
+
+
+def holds_own_setpoint(
+    *,
+    held: Mapping[str, float],
+    observed: Mapping[str, object],
+    tolerance: float,
+    event_context_user_id: str | None = None,
+) -> bool:
+    """Is the thermostat still holding the setpoint Climate Advisor last wrote to it? (Issue #1397)
+
+    ``held`` maps each attribute of CA's last write that reached this thermostat to its value (thermostat unit);
+    ``observed`` maps each CHANGED setpoint attribute to its new value. True when every changed attribute is within
+    ``tolerance`` of a held value that applies to it (a ``temperature`` write applies to a band edge, as in
+    ``decide_setpoint_echo``). No time window and nothing is consumed: a thermostat that keeps reporting 17.9 C for
+    a written 18.0 C is holding it every time. A change made by a signed-in person (``user_id``) is never this.
+    The caller drops ``held`` once a change is counted as the occupant's, so dialling back to CA's value after a
+    real change is the occupant again.
+    """
+    if not held or not observed or event_context_user_id is not None:
+        return False
+    for attribute, raw in observed.items():
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except TypeError, ValueError:
+            return False
+        if not math.isfinite(value):
+            return False
+        candidates = [
+            held_value
+            for held_attribute, held_value in held.items()
+            if held_attribute == attribute or (held_attribute == "temperature" and attribute in _BAND_ATTRIBUTES)
+        ]
+        if not any(abs(value - held_value) <= tolerance + 1e-6 for held_value in candidates):
+            return False
+    return True

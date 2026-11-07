@@ -5,6 +5,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.9.5] — 2026-11-07
 
+- Includes fix 0.8.72 from `main` (#1397: a thermostat that reports Climate Advisor's setpoint a little off, for example 18.0 °C then 17.9 °C, is no longer read as you changing it).
 - Fix #1400: v4 is now visible. v4 makes the decisions (pre-heat and pre-cool timing, the ceiling guard, the window-close time, setback depth), but nothing from it was drawn. The Status chart now draws v4's "Climate Advisor reading" line for the past and the next hours, broken at bedtime and wake-up so it never shows a hallway-to-bedroom jump that happened in neither room (the actual reading and v3's line break the same way). The Prediction accuracy page scores v3 and the "no change" guess even before v4 has scored anything, and its history tables fill in: a deploy now publishes each zone's backtest (`tools/deploy.py --no-backtest` skips it). The duplicate "Climate Advisor reading" in the sensor list is gone.
 - Fix #1399 (dashboard): eleven fixes from the owner's review of 0.9.4.
   - **Temperature chart:** your line choices are remembered, and with no saved choice "CA reading" is the only sensor line shown. Choosing a different engine keeps your choices. The key folds at every width, starts folded, and says in one line what is drawn. The default view shows at least 24 hours ahead on every range (a remembered "12h" choice no longer shortens it). The "Made" row is now "Past v4 lines: predicted 1 h / 4 h / 12 h / 24 h earlier" and says in words when there is nothing to show. The hover readout sits below the chart, grows to fit every line (no scroll bar you can't use) and can be pinned with a click or a tap (Esc or another click releases it).
@@ -95,6 +96,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ## [0.9.0] — 2026-11-06
 
 - Start of the 0.9 line (Issue #1230: new prediction engine, one operation timeline and the dashboard redesign). This release is 0.8.63 plus development tooling only, with no change to how Climate Advisor runs your home. 0.9 work lands on the `0.9.x` branch, which takes every 0.8.x fix from `main` before each deploy.
+
+## [0.8.72] — 2026-11-07
+
+- Fix #1397: a thermostat that reports Climate Advisor's setpoint a little off is no longer read as you changing it. A HomeKit thermostat answered a 18.0 °C write with 18.0 and then, a minute later, 17.9. Climate Advisor took the 17.9 as someone turning the dial, paused the zone for the 30-minute manual grace (with an "override expired" notification), rewrote 18.0, and the drift started the next round, every ~40 minutes all evening. Now, once the thermostat has shown the setpoint Climate Advisor wrote, a report within 0.5 °F (0.28 °C) of it counts as the thermostat holding that setpoint, however long afterwards and however often. A real change of one step or more (1 °F, or 0.5 °C) is still a manual override, as is a change made by a signed-in person in the Home Assistant app, and turning the dial back to Climate Advisor's value after a real change.
 
 ## [0.8.71] — 2026-11-06
 

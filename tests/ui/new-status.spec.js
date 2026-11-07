@@ -91,6 +91,19 @@ test.describe('New dashboard: Status tab', () => {
     await expect(page.locator('#night-sample-badge')).toBeHidden();
   });
 
+  test('the night card says its figures are from v4', async ({ page }) => {
+    await open(page);
+    await expect(page.locator('#night-source')).toHaveText('from v4');
+    await expect(page.locator('#night-source-note')).toContainText('always built on v4');
+  });
+
+  test('v4 off (503 v4_off): the card says v4 is switched off and where to turn it on', async ({ page }) => {
+    await page.route('**/api/climate_advisor/night_strategy**', (r) => r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"night_strategy_not_ready","reason":"v4_off"}' }));
+    await open(page);
+    await expect(page.locator('#night-empty')).toContainText('v4 is switched off');
+    await expect(page.locator('#night-empty')).toContainText('Settings, Prediction engine');
+  });
+
   test('no night plan yet (503) is an empty state, not an error', async ({ page }) => {
     await page.route('**/api/climate_advisor/night_strategy**', (r) => r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"night_strategy_not_ready"}' }));
     await open(page);

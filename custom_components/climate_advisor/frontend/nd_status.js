@@ -141,7 +141,11 @@
   // ---------- night card ----------
   var NO_NIGHT = 'No night plan yet. It appears once Climate Advisor has classified today.';
   var NO_NIGHT_DAY = "Tonight's plan appears 6 hours before bedtime.";
-  function noNight(e) { return e && e.body && e.body.reason === 'no_night_in_view' ? NO_NIGHT_DAY : NO_NIGHT; }
+  var V4_OFF = "v4 is switched off, so there is no bedroom figures plan tonight. The plan for the day is under Next 24 hours; turn v4 on under Settings, Prediction engine, to plan the bedroom.";
+  function noNight(e) {
+    var r = e && e.body && e.body.reason;
+    return r === 'no_night_in_view' ? NO_NIGHT_DAY : r === 'v4_off' ? V4_OFF : NO_NIGHT;
+  }
   function setNight(mode, data, msg) { // mode: live | sample | empty | error
     var host = ND.$('night-card');
     ND.$('night-sample-badge').hidden = mode !== 'sample';

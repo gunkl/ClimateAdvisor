@@ -131,10 +131,10 @@ async def test_prediction_accuracy_needs_a_login_and_serves_a_logged_in_client(
     await hass.async_block_till_done()
 
 
-async def test_chart_data_carries_the_status_chart_v2_keys_and_the_v4_gate(
+async def test_chart_data_carries_the_status_chart_v2_keys_and_the_engine_block(
     hass: HomeAssistant, tmp_path, hass_client, monkeypatch
 ) -> None:
-    """Issue #1230 R2 on real HA: chart_data adds per-sensor lines and the v4 block, withholding v4 until the gate."""
+    """Issue #1230 R2 on real HA: chart_data adds per-sensor lines, the v4 block and the prediction-engine block."""
     import json
     from pathlib import Path
 
@@ -164,17 +164,23 @@ async def test_chart_data_carries_the_status_chart_v2_keys_and_the_v4_gate(
     assert {climate, "sensor.bedroom"} <= {m["id"] for m in body["indoor_sensors"]}
     assert body["actual_indoor_sensors"]["sensor.bedroom"][-1]["temp"] == 66.0
     assert all("indoor_sensors" not in e for e in body["state_log"])
-    assert body["v4"]["ready"] is False and body["v4"]["reason"] == "no_backtest"
+    # a fresh zone: v4 (the default primary engine) has nothing to draw yet, says so, and the page shows the schedule
+    assert body["v4"]["ready"] is False and body["v4"]["reason"] == "no_model"
     assert body["v4"]["past"] == {} and body["v4"]["future"] == {} and body["v4"]["leads"] == ["1h", "4h", "12h", "24h"]
+    engines = body["prediction_engines"]
+    assert engines["primary"] == "v4" and engines["shadow"] == "none"
+    assert engines["fallback"] is True and engines["primary_state"] == "learning" and engines["text"]
+    assert "schedule_estimate" in body
 
-    # a published, passing backtest opens the gate (the file is read in the executor, never on the loop)
+    # a published backtest is information only: it neither hides nor shows anything (read in the executor)
     path = resolve_entry_scoped_path(Path(hass.config.config_dir), V4_BACKTEST_FILE, entry.entry_id)
     path.write_text(
         json.dumps({"gate_summary": {"ready": True, "passed": 6, "scored": 6, "total": 6}}), encoding="utf-8"
     )
     resp = await client.get("/api/climate_advisor/chart_data", params={"entry_id": entry.entry_id, "range": "24h"})
     body = await resp.json()
-    assert body["v4"]["ready"] is True and body["v4"]["gate"]["passed"] == 6
+    assert body["v4"]["scores"] == {"v4_best_rows": 6, "scored_rows": 6, "rows": 6}
+    assert body["v4"]["ready"] is False and body["v4"]["reason"] == "no_model"  # still no model: nothing invented
     assert body["v4"]["corrected_outdoor"] == {"past": [], "future": []}  # no model yet: nothing invented
 
     assert await hass.config_entries.async_unload(entry.entry_id)

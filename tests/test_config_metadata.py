@@ -95,6 +95,8 @@ EXPECTED_KEYS = {
     "threshold_warm",
     "threshold_mild",
     "threshold_cool",
+    "primary_engine",
+    "shadow_engine",
 }
 
 VALID_CATEGORIES = {

@@ -155,9 +155,9 @@
       var d = await ND.api('prediction_accuracy?lead=' + lead + '&range=' + range), s = d.stats || {}, u = d.unit || ND.sym(ND.unit), g = d.gate_summary || {}, m = d.model || {};
       var tile = function (l, v) { return '<div class="tile"><div class="l">' + esc(l) + '</div><div class="v">' + esc(v) + '</div></div>'; };
       var f = function (x) { return x == null ? '—' : Number(x).toFixed(2) + ' ' + u; };
-      host.innerHTML = head + '<div class="note" style="margin:8px 0">' + (g.ready === true ? 'Ready: every gate row passes.' : g.ready === false ? 'Not yet: ' + g.passed + ' of ' + g.scored + ' scored rows pass (' + g.total + ' rows in all).' : 'The gate has not been scored yet.') +
+      host.innerHTML = head + '<div class="note" style="margin:8px 0">' + (g.scored != null ? 'v4 beats both v3 and "no change" in ' + g.passed + ' of ' + g.scored + ' scored backtest rows (' + g.total + ' rows in all).' : 'The backtest has not been scored yet.') + ' Main prediction on Status: ' + esc(d.primary_engine || 'v4') + '.' +
         ' Model: ' + esc(m.confidence || 'n/a') + (m.span_days != null ? ', ' + m.span_days + ' days of data' : '') + (m.fitted_at ? ', fitted ' + esc(ND.fmtDateTime(m.fitted_at)) : '') + '.</div>' +
-        '<div class="tiles">' + tile('Points scored', s.n != null ? String(s.n) : '—') + tile('v4 average miss', f(s.v4_mae)) + tile('v3 average miss', f(s.v3_mae)) + tile('"No change" miss', f(s.flat_mae)) + tile('v4 bias', f(s.v4_bias)) + tile('v3 bias', f(s.v3_bias)) + '</div>';
+        '<div class="tiles">' + tile('Points scored', s.n != null ? String(s.n) : '—') + (d.primary_engine !== 'v3' ? tile('v4 average miss', f(s.v4_mae)) + tile('v3 average miss', f(s.v3_mae)) : tile('v3 average miss', f(s.v3_mae)) + tile('v4 average miss', f(s.v4_mae))) + tile('"No change" miss', f(s.flat_mae)) + (d.primary_engine !== 'v3' ? tile('v4 bias', f(s.v4_bias)) + tile('v3 bias', f(s.v3_bias)) : tile('v3 bias', f(s.v3_bias)) + tile('v4 bias', f(s.v4_bias))) + '</div>';
     } catch (e) { host.innerHTML = head + '<div class="empty" style="margin-top:8px">Backtest data is not available yet (' + esc(e.message) + ').</div>'; }
   }
 

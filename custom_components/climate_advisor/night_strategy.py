@@ -902,7 +902,7 @@ def plan_night(inp: NightInputs) -> NightStrategy:
     )
 
 
-# ---------------------------------------------------------------------------------------------- the v4 gate (C11)
+# ---------------------------------------------------------------------------------------------- the payload
 FIGURE_KEYS = (
     "bedroom_low_f",
     "bedroom_high_f",
@@ -913,19 +913,12 @@ FIGURE_KEYS = (
     "hvac_minutes",
     "score",
 )
-
-
-def gate_numbers(strategy: NightStrategy, v4_gate_ready: bool) -> NightStrategy:
-    """Plan decision C11: predicted figures only for a zone whose v4 accuracy gate (``gate_summary.ready``) passes.
-
-    Occupant view: a house whose prediction has not yet been shown to beat "nothing changes" still gets tonight's plan
-    in words, but no bedroom temperatures or minutes of heat/AC that nobody has checked. Never turns figures ON:
-    ``show_numbers`` stays False when the strategy's own confidence already said so."""
-    if v4_gate_ready or not strategy.show_numbers:
-        return strategy
-    return dataclasses.replace(
-        strategy, show_numbers=False, debug={**dict(strategy.debug), "numbers_hidden_by": "v4_gate_not_ready"}
-    )
+#: Shown on the night card: the plan is built on v4's rates whichever model the Status chart shows (Settings).
+SOURCE_MODEL = "v4"
+SOURCE_NOTE = (
+    "From v4. Tonight's bedroom plan is always built on v4's learned rates, "
+    "whichever prediction model the Status chart shows."
+)
 
 
 def api_payload(
@@ -933,24 +926,24 @@ def api_payload(
     *,
     unit: str,
     convert: Any,
-    v4_gate_ready: bool,
     include_debug: bool = False,
 ) -> dict[str, Any]:
     """The REST body of ``GET /api/climate_advisor/night_strategy``: ``NightStrategy.to_dict()`` with temperatures in
     the display unit (keys keep their ``_f`` names, like the timeline payload), ``unit`` added, the headline and the
-    trade-off lines, and the gate verdict.
+    trade-off lines, and the source label (``source_model``/``source_note``: always v4).
 
-    ``convert`` is the caller's ``display_temp(value_f, unit)``. When ``show_numbers`` is False (the model is not
-    trustworthy yet, or the zone's v4 gate has not passed) every predicted figure is ``null`` and the path is empty, so
+    ``convert`` is the caller's ``display_temp(value_f, unit)``. When ``show_numbers`` is False (the bedroom model is
+    below medium confidence; there is no accuracy gate) every predicted figure is ``null`` and the path is empty, so
     the guarantee does not depend on the page remembering to hide them; the plan itself (options, actions, labels) is
     unchanged."""
-    gated = gate_numbers(strategy, v4_gate_ready)
+    gated = strategy
     d = gated.to_dict(include_debug=include_debug)
     scale = 5.0 / 9.0 if unit == "celsius" else 1.0
     d["unit"] = unit
     d["floor_f"] = convert(d["floor_f"], unit)
     d["ceiling_f"] = convert(d["ceiling_f"], unit)
-    d["v4_gate_ready"] = bool(v4_gate_ready)
+    d["source_model"] = SOURCE_MODEL
+    d["source_note"] = SOURCE_NOTE
     show = gated.show_numbers
     opts = []
     for o in d["options"]:

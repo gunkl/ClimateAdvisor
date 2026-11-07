@@ -67,11 +67,10 @@
   table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 13px; font-variant-numeric: tabular-nums; }
   td, th { padding: 6px 8px; border-top: 1px solid var(--rule); text-align: left; vertical-align: top; }
   th { font-weight: 500; color: var(--muted); border-top: 0; }
-  td.pass { font-weight: 600; color: var(--ok); }
-  td.fail { font-weight: 600; color: var(--warn); }
+  td.yes { font-weight: 600; }
+  td.no { opacity: 0.7; }
   td.na { color: var(--muted); }
   .verdict { font-size: 12px; color: var(--warn); }
-  .verdict.ready { color: var(--ok); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   [hidden] { display: none !important; }
 </style>
@@ -119,7 +118,7 @@
 
     <div class="legend" id="legend">
       <span class="k"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2"></line></svg>Actual</span>
-      <span class="k" style="color: var(--s1)"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2.5"></line></svg>v4 (new, shadow)</span>
+      <span class="k" style="color: var(--s1)"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2.5"></line></svg>v4 (new)</span>
       <span class="k" id="legend-v3" style="color: var(--s2)"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2" stroke-dasharray="5 3"></line></svg>v3 (today&#8217;s line)</span>
       <span class="k" style="color: var(--heat)"><svg width="14" height="8" aria-hidden="true"><rect width="14" height="8" rx="2" fill="currentColor" opacity="0.6"></rect></svg>Heat ran</span>
       <span class="grow"></span>
@@ -137,19 +136,19 @@
 
   <section class="card" aria-labelledby="gate-title">
     <div class="row" style="justify-content: space-between">
-      <h2 id="gate-title">Ready to show v4 on Status?</h2>
+      <h2 id="gate-title">How each model has scored</h2>
       <span class="verdict" id="gate-verdict"></span>
     </div>
-    <div class="sub" id="gate-sub">Average miss over all recorded history. v4 is shown on Status for a zone only when every check in its row passes (DP-8). The gate is fixed at 1, 4 and 12 h; 24 h is shown for information.</div>
+    <div class="sub" id="gate-sub">Average miss over all recorded history, for information. Nothing here switches a model on or off: which one the Status chart shows is your choice under Settings, Prediction engine. Rows are scored at 1, 4 and 12 h; 24 h is shown for information.</div>
     <div class="scroll-x">
       <table id="gate-table">
-        <thead><tr><th>Zone</th><th>Season</th><th>Look-ahead</th><th>v4</th><th>v3</th><th>&#8220;No change&#8221; guess</th><th>v4 runs warm/cold</th><th>Beats v3</th><th>Beats no change</th><th id="th-bias">Bias within limit</th></tr></thead>
+        <thead><tr><th>Zone</th><th>Season</th><th>Look-ahead</th><th>v4</th><th>v3</th><th>&#8220;No change&#8221; guess</th><th>v4 runs warm/cold</th><th>v4 beats v3</th><th>v4 beats no change</th><th id="th-bias">Bias within limit</th></tr></thead>
         <tbody id="gate-body"></tbody>
       </table>
     </div>
-    <div class="small" id="seasons-note">Seasons are scored apart by what the HVAC was doing: heating days, and summer days (cooling or the whole-house fan); days with neither are reported separately. Each must pass on its own.</div>
+    <div class="small" id="seasons-note">Seasons are scored apart by what the HVAC was doing: heating days, and summer days (cooling or the whole-house fan); days with neither are reported separately.</div>
   </section>
-  <div class="sub">Preview. v4 runs in shadow beside today&#8217;s prediction and changes nothing Climate Advisor does. At 7 d and longer, lines are hourly averages, and at 1 y daily averages, as on today&#8217;s chart.</div>
+  <div class="sub">Preview. v4 runs beside today&#8217;s prediction (v3). Choose which one the Status chart shows under Settings, Prediction engine; Climate Advisor makes every heating, cooling and ventilation decision with v3 either way. At 7 d and longer, lines are hourly averages, and at 1 y daily averages, as on today&#8217;s chart.</div>
 </main>
 
 <script>
@@ -622,11 +621,13 @@
 
   function renderTiles() {
     var sc = scoreInView(), v3 = hasV3(), box = $('tiles');
-    var tiles = [
-      { l: 'v4 average miss', v: fmiss(sc.v4_mae), n: (sc.n || 0) + ' predictions in view' },
-      { l: 'v3 average miss', v: v3 ? fmiss(sc.v3_mae) : '—', n: v3 ? 'today’s line' : 'v3 predicts only the reading CA uses' },
-      { l: 'v4 runs warm or cold', v: fbias(sc.v4_bias), n: v3 ? 'v3 ' + fbias(sc.v3_bias) : 'in view' }
-    ];
+    var selected = (S.data && S.data.primary_engine) === 'v3' ? 'v3' : 'v4'; // the primary engine chosen in Settings leads; the comparison engine follows
+    var v4Miss = { l: 'v4 average miss', v: fmiss(sc.v4_mae), n: (sc.n || 0) + ' predictions in view' };
+    var v3Miss = { l: 'v3 average miss', v: v3 ? fmiss(sc.v3_mae) : '—', n: v3 ? 'today’s line' : 'v3 predicts only the reading CA uses' };
+    var v4Bias = { l: 'v4 runs warm or cold', v: fbias(sc.v4_bias), n: v3 ? 'v3 ' + fbias(sc.v3_bias) : 'in view' };
+    var v3Bias = { l: 'v3 runs warm or cold', v: v3 ? fbias(sc.v3_bias) : '—', n: 'v4 ' + fbias(sc.v4_bias) };
+    var tiles = selected === 'v3' ? [v3Miss, v4Miss, v3Bias] : [v4Miss, v3Miss, v4Bias];
+    tiles[0].n += ' · main prediction on Status' + (S.data && S.data.shadow_engine && S.data.shadow_engine !== 'none' ? ' (comparison: ' + S.data.shadow_engine + ')' : '');
     if (!sc.local && sc.flat_mae != null) tiles.push({ l: '“No change” guess', v: fmiss(sc.flat_mae), n: 'if the temperature just stayed put' });
     box.innerHTML = tiles.map(function (t) {
       return '<div class="tile"><div class="l">' + esc(t.l) + '</div><div class="v">' + esc(t.v) + '</div><div class="n">' + esc(t.n) + '</div></div>';
@@ -669,21 +670,19 @@
       // The server's verdict is authoritative (it also checks sample size and v4 coverage); the cells explain it.
       var rowOk = (typeof r.pass === 'boolean') ? r.pass : (c1 && c2 && c3);
       if (!info) { seasons[r.season] = true; if (!rowOk) failed++; }
-      function cell(ok) { return '<td class="' + (ok ? 'pass' : 'fail') + '">' + (ok ? 'Pass' : 'Fail') + '</td>'; }
+      function cell(ok) { return '<td class="' + (ok ? 'yes' : 'no') + '">' + (ok ? 'Yes' : 'No') + '</td>'; }
       var why = (!rowOk && c1 && c2 && c3 && r.reasons && r.reasons.length) ? ' title="' + esc(r.reasons.join('; ')) + '"' : '';
       return '<tr' + why + '>' + head + '<td style="font-weight:600">' + fnum(r.v4) + '</td><td>' + fnum(r.v3) + '</td><td>' + fnum(r.flat) + '</td><td>' + fbias(r.bias).replace(' ' + unit(), '') + '</td>' + cell(c1) + cell(c2) + cell(c3) + '</tr>';
     }).join('');
+    // Descriptive only: how many scored rows v4 beats both v3 and "no change" on. No ready / not-ready language.
     var v = $('gate-verdict');
-    var reasons = [];
-    if (failed) reasons.push(failed + ' check row' + (failed === 1 ? '' : 's') + ' failing');
-    if (unscored) reasons.push(unscored + ' row' + (unscored === 1 ? '' : 's') + ' not scored');
-    if (!seasons.summer) reasons.push('summer is not scored');
-    if (!seasons.heating) reasons.push('heating season is not scored');
-    var srv = gateSummary && typeof gateSummary.ready === 'boolean' ? gateSummary.ready : null;
-    if (srv === false && !reasons.length) reasons.push('the backtest has not passed this zone');
-    if (srv === true) reasons = [];
-    if (reasons.length) { v.textContent = 'Not yet: ' + reasons.join(', '); v.className = 'verdict'; }
-    else { v.textContent = 'Ready: every gate row passes'; v.className = 'verdict ready'; }
+    v.className = 'verdict';
+    if (gateSummary && gateSummary.scored != null) {
+      v.textContent = 'v4 beats both v3 and "no change" in ' + gateSummary.passed + ' of ' + gateSummary.scored + ' scored rows' +
+        (unscored ? ' (' + unscored + ' not scored yet)' : '');
+    } else {
+      v.textContent = unscored ? unscored + ' row' + (unscored === 1 ? '' : 's') + ' not scored yet' : '';
+    }
   }
 
   // ---------- boot ----------

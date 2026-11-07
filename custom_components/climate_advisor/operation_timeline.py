@@ -585,6 +585,10 @@ class TimelineSnapshot:
     forecast_age_h: float | None = None
     thermal_model: Mapping[str, Any] | None = None  # v3 thermal_model_cache
     v3_path: Sequence[tuple[datetime, float]] = ()  # the authoritative predicted path until R6
+    selected_path: Sequence[
+        tuple[datetime, float]
+    ] = ()  # the user-selected display model's path (not v3); DISPLAY only
+    selected_path_model: str = "v3"
     sensor_paths: Mapping[str, Sequence[tuple[datetime, float]]] = field(default_factory=dict)
     sensor_path_model: str = "v3"  # label the caller gives the engine behind ``sensor_paths``
     path_fn: Callable[[Sequence[tuple[datetime, datetime]]], Sequence[tuple[datetime, float]] | None] | None = None
@@ -735,7 +739,7 @@ class PredictedRun:
 class DetailedTimeline(Timeline):
     """A ``Timeline`` plus the builder's working data (debug, replay, tests). Surfaces read ``Timeline`` only."""
 
-    path_source: str = "none"  # v3 | v3_replanned | sim | none
+    path_source: str = "none"  # v3 | v3_replanned | <selected model id, e.g. v4> | sim | none
     band: tuple[tuple[datetime, float, float, str], ...] = ()  # (segment start, floor, ceiling, context)
     runs: tuple[PredictedRun, ...] = ()
     candidates: tuple[WindowCandidate, ...] = ()
@@ -2011,6 +2015,8 @@ def _choose_path(
     same_as_v3 = sorted(sp for sp in accepted if sp[0].date() == today) == sorted(
         sp for sp in planned if sp[0].date() == today
     )
+    if snap.selected_path and same_as_v3:  # the occupant chose another model for the display (Settings)
+        return list(snap.selected_path), snap.selected_path_model
     if snap.path_fn is not None:
         try:
             pts = snap.path_fn(list(accepted))

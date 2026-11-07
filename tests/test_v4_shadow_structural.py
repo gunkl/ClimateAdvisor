@@ -29,6 +29,8 @@ _PKG = Path(__file__).resolve().parent.parent / "custom_components" / "climate_a
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _SHADOW_MODULES = {"v4_shadow.py", "v4_archive.py", "prediction_accuracy.py", "predictor_v4.py", "night_replay.py"}
+# The DISPLAY registry (Issue #1230): the primary/shadow engines feed the chart, the Next 24 hours path, the tiles.
+_DISPLAY_MODULES = {"prediction_engines.py"}
 _ADVISORY_MODULES = {"night_strategy.py"}  # advise only (DP-7): see test_advisory_modules_command_nothing
 _DATA_MODULES = {"const.py", "api.py"}  # fields/constants/endpoint only; checked below
 _COORDINATOR_WIRING = {
@@ -38,7 +40,7 @@ _COORDINATOR_WIRING = {
     "async_shutdown",
     "_async_update_data_impl",
     "get_debug_state",
-    # Issue #1230 R2: the Status chart DISPLAYS v4 (and only for a zone whose backtest gate is ready). Display only:
+    # Issue #1230 R2: the Status chart DISPLAYS v4 (when v4 has data or the occupant selected it). Display only:
     # see test_get_chart_data_only_displays_v4 for how narrowly it may touch v4.
     "get_chart_data",
     # Issue #1230 R6: the night strategy ADVISES (DP-7: nothing commands a fan, window or setpoint). These two read the
@@ -47,12 +49,22 @@ _COORDINATOR_WIRING = {
     "_timeline_night_apply",
     "_timeline_night_plan",
     "night_strategy_payload",
+    # Issue #1230: the DISPLAY reads which engine is primary/shadow (the Next 24 hours path source) and the engine
+    # status block; control never does (test_no_decision_path_reads_the_primary_or_shadow_engine_setting).
+    "_timeline_snapshot",
+    "primary_engine_id",
+    "shadow_engine_id",
+    "engine_running",
+    "prediction_engines_payload",
 }
 
 
 def _is_v4(name: str) -> bool:
     # `v4` as its own token (v4_model, V4Archive, predictor_v4), not inside `ipv4`.
-    return re.search(r"(?<![a-z0-9])v4", name.lower()) is not None
+    low = name.lower()
+    if low.startswith("prediction_model"):  # the setting's own constants (PREDICTION_MODEL_V4), checked separately
+        return False
+    return re.search(r"(?<![a-z0-9])v4", low) is not None
 
 
 def _references(tree: ast.AST) -> list[tuple[ast.AST, str, list[str]]]:
@@ -122,7 +134,7 @@ def _tree(path: Path) -> ast.AST:
 def test_no_module_outside_the_shadow_wiring_mentions_v4() -> None:
     offenders = []
     for path in sorted(_PKG.glob("*.py")):
-        if path.name in _SHADOW_MODULES | _ADVISORY_MODULES | _DATA_MODULES | {"coordinator.py"}:
+        if path.name in _SHADOW_MODULES | _ADVISORY_MODULES | _DATA_MODULES | _DISPLAY_MODULES | {"coordinator.py"}:
             continue
         for node, name, where in _references(_tree(path)):
             offenders.append(f"{path.name}:{getattr(node, 'lineno', '?')} {name} in {'.'.join(where) or '<module>'}")
@@ -133,7 +145,7 @@ def test_shadow_modules_import_nothing_that_decides() -> None:
     """The shadow halves may not import the engine, classifier, briefing or anything that commands."""
     forbidden = {"automation", "classifier", "briefing", "desired_state", "swing", "nat_vent_fsm", "fan_fsm"}
     offenders = []
-    for name in sorted(_SHADOW_MODULES - {"predictor_v4.py"}):
+    for name in sorted((_SHADOW_MODULES | _DISPLAY_MODULES) - {"predictor_v4.py"}):
         path = _PKG / name
         for node in ast.walk(_tree(path)):
             if isinstance(node, ast.ImportFrom) and node.level == 1:
@@ -285,3 +297,121 @@ def test_get_chart_data_only_displays_v4() -> None:
     assert isinstance(ret_dict, ast.Dict)
     pairs = {k.value: v for k, v in zip(ret_dict.keys, ret_dict.values, strict=True) if isinstance(k, ast.Constant)}
     assert isinstance(pairs["v4"], ast.Name) and pairs["v4"].id == "_v4_block"
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Issue #1230: the primary/shadow engine SETTINGS are display (and v4 orchestration) only. Control uses v3 in 0.9.4.
+# ---------------------------------------------------------------------------------------------------------------
+
+_SELECTION_NAMES = {
+    "prediction_engines",
+    "CONF_PRIMARY_ENGINE",
+    "CONF_SHADOW_ENGINE",
+    "primary_engine",
+    "shadow_engine",
+    "primary_engine_id",
+    "shadow_engine_id",
+    "engine_running",
+    "prediction_engines_payload",
+}
+# Modules that may name the selection: the registry itself, the setting's definition and form, nothing else.
+_SELECTION_MODULES = {"prediction_engines.py", "prediction_accuracy.py", "const.py", "config_flow.py", "coordinator.py"}
+# Coordinator methods that may read it. Display (chart payloads, the accuracy tiles' input, the Next 24 hours path) and
+# orchestration of v4 itself (is v4 the primary or shadow? then fit/predict/archive it). NEVER a control method.
+_SELECTION_COORDINATOR_METHODS = {
+    "_timeline_snapshot",
+    "_timeline_night_apply",
+    "get_chart_data",
+    "primary_engine_id",
+    "shadow_engine_id",
+    "engine_running",
+    "prediction_engines_payload",
+}
+
+
+def _selection_refs(tree: ast.AST) -> list[tuple[int, str, list[str]]]:
+    out: list[tuple[int, str, list[str]]] = []
+
+    class V(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.stack: list[str] = []
+
+        def _f(self, node: ast.AST) -> None:
+            self.stack.append(node.name)  # type: ignore[attr-defined]
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = _f  # type: ignore[assignment]
+
+        def _note(self, node: ast.AST, name: str) -> None:
+            if name in _SELECTION_NAMES:
+                out.append((getattr(node, "lineno", 0), name, list(self.stack)))
+
+        def visit_Name(self, node: ast.Name) -> None:
+            self._note(node, node.id)
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            self._note(node, node.attr)
+            self.generic_visit(node)
+
+        def visit_alias(self, node: ast.alias) -> None:
+            self._note(node, node.name)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            if node.module:
+                self._note(node, node.module)
+            self.generic_visit(node)
+
+        def visit_Constant(self, node: ast.Constant) -> None:
+            if isinstance(node.value, str):
+                self._note(node, node.value)
+
+    V().visit(tree)
+    return out
+
+
+def test_no_decision_path_reads_the_primary_or_shadow_engine_setting_or_the_registry() -> None:
+    """Control stays v3-only in 0.9.4: only the registry, the setting's definition/form and display code name it."""
+    offenders = []
+    for path in sorted(_PKG.glob("*.py")):
+        if path.name in _SELECTION_MODULES:
+            continue
+        for line, name, where in _selection_refs(_tree(path)):
+            offenders.append(f"{path.name}:{line} {name} in {'.'.join(where) or '<module>'}")
+    assert offenders == [], "a decision-path module reads the display selection:\n" + "\n".join(offenders)
+
+
+def test_the_coordinator_reads_the_engine_setting_only_in_display_and_v4_orchestration_methods() -> None:
+    stray = []
+    for line, name, where in _selection_refs(_tree(_PKG / "coordinator.py")):
+        if not where:
+            continue  # module-level import
+        method = where[1] if where[0] == "ClimateAdvisorCoordinator" and len(where) > 1 else where[0]
+        if method not in _SELECTION_COORDINATOR_METHODS and not method.startswith(("_v4", "v4_")):
+            stray.append(f"line {line} {name} in {'.'.join(where)}")
+    assert stray == [], "coordinator code outside the display methods reads the selection:\n" + "\n".join(stray)
+
+
+def test_control_calls_still_receive_the_v3_curve() -> None:
+    """Every ``predicted_indoor=`` handed to the engine or the nat-vent plan is v3's ``_last_predicted_indoor``."""
+    tree = _tree(_PKG / "coordinator.py")
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg != "predicted_indoor":
+                continue
+            src = ast.unparse(kw.value)
+            if any(w in src for w in ("selected", "prediction_engines", "primary_engine", "v4", "primary_path")):
+                bad.append(f"line {node.lineno}: predicted_indoor={src}")
+    assert bad == []
+
+
+def test_the_registry_and_the_timeline_selection_are_display_inputs_only() -> None:
+    """``TimelineSnapshot.selected_path`` is read only by ``_choose_path`` (the path the occupant sees)."""
+    src = (_PKG / "operation_timeline.py").read_text(encoding="utf-8")
+    assert len(re.findall(r"snap\.selected_path\b", src)) == 2 and "def _choose_path" in src
+    for name in ("automation.py", "desired_state.py", "ode_ceiling_guard.py", "nat_vent_plan.py", "swing.py"):
+        text = (_PKG / name).read_text(encoding="utf-8")
+        assert "prediction_engines" not in text and "primary_engine" not in text and "selected_path" not in text, name

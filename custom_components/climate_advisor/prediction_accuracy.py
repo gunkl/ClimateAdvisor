@@ -192,6 +192,8 @@ def build_prediction_accuracy(
     backtest: Mapping[str, Any] | None,
     model: Mapping[str, Any] | None,
     sensors_meta: Sequence[Mapping[str, Any]],
+    primary_engine: str = "v4",
+    shadow_engine: str = "none",
 ) -> dict[str, Any]:
     """The endpoint payload. ``lead``/``range_str`` must already be valid (the view resets bad values to defaults)."""
     tz = now.tzinfo or datetime.now().astimezone().tzinfo
@@ -340,6 +342,8 @@ def build_prediction_accuracy(
         "stats": out_stats,
         "model": model_out,
         "gate": gate_out,
+        "primary_engine": primary_engine,
+        "shadow_engine": shadow_engine,
         "gate_summary": dict(backtest["gate_summary"])
         if isinstance(backtest, Mapping) and isinstance(backtest.get("gate_summary"), Mapping)
         else None,
@@ -353,18 +357,17 @@ def build_prediction_accuracy(
 CHART_LEADS = ("1h", "4h", "12h", "24h")
 
 
-def gate_state(backtest: Mapping[str, Any] | None) -> dict[str, Any]:
-    """The zone's DP-8 verdict for the Status chart: ``ready`` only when the published ``gate_summary.ready is True``.
+def backtest_scores(backtest: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The published backtest's row counts as INFORMATION for the chart payload, or None without a backtest.
 
-    Occupant view: v4 lines appear on the Status chart only after the backtest says v4 beat today's prediction on this
-    house; without a published backtest, or with a failing one, the chart shows v3 alone and says why.
+    Nothing is gated on it: which model the Status chart shows is the occupant's setting, not a pass mark. The counts
+    are descriptive (rows where v4 beats both v3 and "no change", of the rows scored).
     """
     summary = backtest.get("gate_summary") if isinstance(backtest, Mapping) else None
     if not isinstance(summary, Mapping):
-        return {"ready": False, "reason": "no_backtest", "summary": None}
-    keep = {k: summary[k] for k in ("passed", "scored", "total", "other_sensors_failing") if k in summary}
-    ready = summary.get("ready") is True
-    return {"ready": ready, "reason": "ok" if ready else "not_ready", "summary": keep}
+        return None
+    names = {"passed": "v4_best_rows", "scored": "scored_rows", "total": "rows"}
+    return {out: summary[k] for k, out in names.items() if k in summary}
 
 
 def _downsample_pairs(pairs: list[tuple[float, float]], range_days: float, tz: tzinfo) -> list[tuple[float, float]]:
@@ -401,24 +404,25 @@ def build_chart_v4(
     sensor_ids: Sequence[str],
     corrected_past: Sequence[tuple[datetime, float]] = (),
 ) -> dict[str, Any]:
-    """The ``v4`` block of ``get_chart_data()``: gate verdict, per-sensor past (archived) and future lines.
+    """The ``v4`` block of ``get_chart_data()``: availability, per-sensor past (archived) and future lines.
 
     Pure and blocking-safe (called from the chart-data executor job). Internal degrees F in, ``unit`` out. Past lines
     are what v4 said ``lead`` ahead for each 30-minute slot (live archive first, the published backtest for older),
-    for every look-ahead; the page picks one. Everything except the verdict is left empty while the gate is not ready,
-    so a v4 line the backtest has not cleared never reaches the chart. ``_ca`` is not drawn: it follows the sensor
+    for every look-ahead; the page picks one. There is no accuracy gate: the lines are always supplied when v4 has
+    anything to say (the coordinator does not call this while v4 is neither primary nor shadow), and the page draws
+    them as the main prediction when v4 is the primary engine, as the comparison line when it is the shadow.
+    ``_ca`` is not drawn: it follows the sensor
     Climate Advisor happens to use and jumps when that swaps (the owner's no-swap rule); each real sensor has its line.
     """
     tz = now.tzinfo or datetime.now().astimezone().tzinfo
     assert tz is not None
-    gate = gate_state(backtest)
     model_out: dict[str, Any] = {"confidence": "none", "fitted_at": None}
     if isinstance(model, Mapping) and model.get("has_model"):
         model_out = {"confidence": model.get("confidence", "none"), "fitted_at": model.get("fitted_at")}
     out: dict[str, Any] = {
-        "ready": gate["ready"],
-        "reason": gate["reason"],
-        "gate": gate["summary"],
+        "ready": False,
+        "reason": "no_model",
+        "scores": backtest_scores(backtest),
         "model": model_out,
         "leads": list(CHART_LEADS),
         "sensors": [],
@@ -428,9 +432,7 @@ def build_chart_v4(
         "past": {},
         "corrected_outdoor": {"past": [], "future": []},
     }
-    if not gate["ready"]:
-        return out
-
+    has_model = bool(isinstance(model, Mapping) and model.get("has_model"))
     range_days = RANGES.get(range_str, 1.0)
     bt_points = backtest.get("points") if isinstance(backtest, Mapping) else None
     ids = [s for s in sensor_ids if s != CA_SENSOR]
@@ -481,4 +483,6 @@ def build_chart_v4(
         _downsample_pairs([(t.timestamp(), v) for t, v in corrected_past], range_days, tz), tz, unit
     )
     out["sensors"] = sorted(set(out["past"]) | set(out["future"]) | set(out["baseline"]), key=ids.index)
+    out["ready"] = has_model or bool(out["sensors"])  # "has something to draw"; not an accuracy verdict
+    out["reason"] = "ok" if out["ready"] else "no_model"
     return out

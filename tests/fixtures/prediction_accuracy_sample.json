@@ -1,6 +1,6 @@
 {
  "zone": "fixture-zone-1",
- "unit": "°F",
+ "unit": "\u00b0F",
  "sensors": [
   {
    "id": "_ca",
@@ -568,5 +568,7 @@
   "scored": 3,
   "total": 4,
   "other_sensors_failing": 0
- }
+ },
+ "primary_engine": "v4",
+ "shadow_engine": "none"
 }

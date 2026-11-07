@@ -286,6 +286,16 @@ DEFAULT_FAN_MODE = FAN_MODE_DISABLED
 # CONF_FAN_MODE selects which physical fan mechanism is used; this selects *when* the
 # hvac_fan/both mechanism is allowed to run, to avoid re-evaporating condensate off wet
 # coils shortly after a cooling cycle in humid climates.
+# Prediction engines (Issue #1230): per zone, a PRIMARY engine (the display's main prediction) and an optional SHADOW
+# engine (shown for comparison). At most these two run; an engine that is neither is not fitted, predicted or
+# archived. v3 is the exception while it drives control (0.9.4). The valid ids come from ``prediction_engines``.
+CONF_PRIMARY_ENGINE = "primary_engine"
+CONF_SHADOW_ENGINE = "shadow_engine"
+ENGINE_NONE = "none"  # shadow_engine's "no shadow"
+ENGINE_V3 = "v3"
+ENGINE_V4 = "v4"
+DEFAULT_PRIMARY_ENGINE = ENGINE_V4  # upgrades AND new installs (owner decision); read with this default, no migration
+DEFAULT_SHADOW_ENGINE = ENGINE_NONE
 CONF_HVAC_FAN_RESTRICT_MODE = "hvac_fan_restrict_mode"
 HVAC_FAN_RESTRICT_HEAT = "heat"
 HVAC_FAN_RESTRICT_COOL = "cool"
@@ -557,7 +567,8 @@ CHART_DOWNSAMPLE_DAILY_DAYS = 30  # daily summaries for >30 days
 # Prediction archive — first-write-wins historical pred_indoor
 PRED_ARCHIVE_HORIZON_HOURS = 4  # only archive ODE entries within this lookahead window
 
-# Prediction engine v4 in shadow (Issue #1230 R1): runs beside v3, never read by a decision or the Status chart.
+# Prediction engine v4 (Issue #1230 R1): runs beside v3 as the default primary DISPLAY engine (CONF_PRIMARY_ENGINE);
+# no decision reads it or the engine selection in 0.9.4.
 V4_ARCHIVE_FILE = "climate_advisor_v4_archive.json"  # what v4 said 1/4/12/24 h ahead, per sensor (first write wins)
 V4_BACKTEST_FILE = (
     "climate_advisor_v4_backtest.json"  # published by tools/predict_backtest.py --publish; read-only here
@@ -1125,6 +1136,27 @@ CONFIG_METADATA = {
             " Should be before wake_time so you see it when you get up."
         ),
         "category": "schedule",
+    },
+    "primary_engine": {
+        "label": "Prediction engine",
+        "description": (
+            "Which prediction engine the Status chart, the Next 24 hours plan and the preview pages show as the main"
+            " prediction: v4 (default, a per-sensor model learned from your house) or v3 (the established model)."
+            " Display only for now: Climate Advisor still makes every heating, cooling and ventilation decision"
+            " with v3. While the chosen engine is still learning, the schedule estimate is shown."
+        ),
+        "category": "advanced",
+        "default": DEFAULT_PRIMARY_ENGINE,
+    },
+    "shadow_engine": {
+        "label": "Comparison engine",
+        "description": (
+            "An optional second engine drawn as a comparison line next to the main prediction. It must differ from"
+            " the prediction engine. Only the prediction engine and the comparison engine run; any other engine is"
+            " switched off."
+        ),
+        "category": "advanced",
+        "default": DEFAULT_SHADOW_ENGINE,
     },
     "learning_enabled": {
         "label": "Learning Engine",
@@ -1994,6 +2026,8 @@ _METADATA_DEFAULTS: dict[str, Any] = {
     "wake_time": "06:30:00",
     "sleep_time": "22:30:00",
     "briefing_time": "06:00:00",
+    "primary_engine": DEFAULT_PRIMARY_ENGINE,
+    "shadow_engine": DEFAULT_SHADOW_ENGINE,
     "learning_enabled": True,
     "adaptive_preheat_enabled": True,
     "adaptive_setback_enabled": True,

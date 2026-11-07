@@ -85,15 +85,25 @@ def test_zoom_and_hover_wiring():
     assert 'id="hover"' in PAGE
 
 
-def test_heat_strip_tiles_gate_and_seasons():
+def test_heat_strip_tiles_scorecard_and_seasons():
     assert "heat_runs" in PAGE and "Heat ran" in PAGE
     for t in ("v4 average miss", "v3 average miss", "v4 runs warm or cold"):
         assert t in PAGE
     assert "S.data.stats" in PAGE
-    assert 'id="gate-table"' in PAGE and "Ready to show v4 on Status?" in PAGE
-    assert "Beats v3" in PAGE and "Beats no change" in PAGE
+    # DP-8 is information, never a gate: no ready / pass / fail language, the table only compares
+    assert 'id="gate-table"' in PAGE and "How each model has scored" in PAGE
+    assert "Ready to show v4" not in PAGE and "Pass'" not in PAGE and "'Fail'" not in PAGE
+    assert "v4 beats v3" in PAGE and "v4 beats no change" in PAGE
+    assert "Settings, Prediction engine" in PAGE  # which engine Status shows is the occupant's choice
     assert 'id="seasons-note"' in PAGE and "Seasons are scored apart" in PAGE
+    assert "must pass on its own" not in PAGE
     assert "r.scored === false" in PAGE and "Not scored yet" in PAGE
+
+
+def test_tiles_lead_with_the_primary_engine_and_name_the_comparison_engine():
+    tiles = _func("renderTiles")
+    assert "S.data.primary_engine" in tiles and "S.data.shadow_engine" in tiles
+    assert "main prediction on Status" in tiles
 
 
 # ---- request building --------------------------------------------------------------------------
@@ -217,4 +227,4 @@ def test_index_links_to_page_in_analysis_tab():
     assert "Prediction accuracy (preview)" in INDEX
     start = INDEX.index('id="tab-ai"')
     assert "prediction_accuracy.html" in INDEX[start : start + 3000]
-    assert INDEX.count("prediction_accuracy") == 2  # the Analysis link and the chart's v4-gate note (R2)
+    assert INDEX.count("prediction_accuracy") == 2  # the Analysis link and the chart's note

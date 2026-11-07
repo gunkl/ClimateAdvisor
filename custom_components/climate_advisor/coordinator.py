@@ -40,7 +40,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import log_capture, v4_shadow
+from . import log_capture, prediction_engines, v4_shadow
 from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
@@ -356,7 +356,7 @@ from .operation_timeline import detail_dict as timeline_detail_dict
 from .operation_timeline import to_dict as timeline_to_dict
 from .override_confirm_split import ca_expected_mode
 from .prediction_accuracy import RANGES as CHART_RANGE_DAYS
-from .prediction_accuracy import build_chart_v4, gate_state, load_backtest
+from .prediction_accuracy import build_chart_v4, load_backtest
 from .promise_journal import (
     Command as _PromiseCommand,
 )
@@ -886,8 +886,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R6: tonight's bedroom strategy (advice) is computed beside the timeline and applied to it.
         self._timeline_night: dict[str, Any] | None = None
         self._timeline_night_failed_logged = False
-        self._v4_night_gate: dict[str, Any] = {"ready": False, "reason": "no_backtest", "summary": None}
-        self._v4_night_gate_at: float | None = None
         self._v4_night_replay_failed_logged = False
         self._v4_night_replay_running = False
         self.learning = LearningEngine(
@@ -5522,6 +5520,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         if getattr(self, "_shut_down", False) is True:
             return False
+        if not self.engine_running("v4"):
+            _LOGGER.debug("v4 fit (%s): skipped, v4 is neither the primary nor the comparison engine", reason)
+            return False
         if self._v4_fit_running:
             _LOGGER.debug("v4 fit (%s): skipped, a fit is already running", reason)
             return False
@@ -5631,7 +5632,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Start the night-strategy replay alone (a model without a record: an upgrade, a failed replay).
 
         Its own running flag, so it never makes a nightly fit skip; the domain lock serialises it with every fit."""
-        if getattr(self, "_shut_down", False) is True or getattr(self, "_v4_night_replay_running", False):
+        if (
+            getattr(self, "_shut_down", False) is True
+            or getattr(self, "_v4_night_replay_running", False)
+            or not self.engine_running("v4")
+        ):
             return False
         if not v4_shadow.predictor_available():
             return False
@@ -5860,6 +5865,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ts = dt_util.parse_datetime(entry.get("ts", ""))
             if ts is not None and entry.get("temp") is not None:
                 v3_pts.append((ts, float(entry["temp"])))
+        # DISPLAY: the selected model's own path for the "Next 24 hours" line and its text (v3 keeps the sources above).
+        primary_id = self.primary_engine_id()
+        selected_pts: list[tuple[datetime, float]] = []
+        if primary_id != "v3":
+            try:
+                chosen = prediction_engines.ENGINES[primary_id]
+                if prediction_engines.usable(chosen, self):  # still learning: today's default path stands in
+                    selected_pts = [
+                        (t, v) for t, v in prediction_engines.primary_path(chosen.future_path(self)) if t >= now
+                    ]
+            except Exception:  # noqa: BLE001 - display only; v3's path stands in
+                _LOGGER.debug("primary-engine timeline path failed", exc_info=True)
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
         ceiling_breach = plan.get("ceiling_breach_time") if c.windows_recommended else None
         today_plan = {
@@ -5952,6 +5969,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             hourly=hourly,
             thermal_model=model or None,
             v3_path=v3_pts,
+            selected_path=selected_pts,
+            selected_path_model=primary_id,
             path_fn=_path_fn,
             automation_enabled=bool(self.automation_enabled),
             manual_override_active=bool(ae._manual_override_active),
@@ -5969,9 +5988,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         about what it holds. Advice only (DP-7): nothing here starts a fan or moves a setpoint.
 
         The strategy is planned when it has not been for this night, when the plan regenerated, when the evidence
-        (model, validation, v4 gate) changed or after an hour; between those it is re-applied from the cache every cycle
-        (the builder's fresh path replaces the night's path each update). The zone's v4 gate decides whether predicted
-        figures show (plan decision C11)."""
+        (model, validation) changed or after an hour; between those it is re-applied from the cache every cycle
+        (the builder's fresh path replaces the night's path each update). Predicted figures show whenever the bedroom
+        model has at least medium confidence; there is no accuracy gate."""
         latch = getattr(self, "_timeline_latch", None)
         if latch is None or latch.timeline is None:
             return
@@ -5979,6 +5998,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             from . import night_replay, night_strategy  # noqa: PLC0415 - lazy: a broken engine costs the plan only
 
             now = snap.now
+            if not self.engine_running("v4"):
+                self._timeline_night = {"strategy": None, "reason": "v4_off", "at": now}
+                return
             cache = getattr(self, "_timeline_night", None)
             window = None
             if snap.sleep_time is not None and snap.wake_time is not None:
@@ -5990,18 +6012,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             state = self._v4_store
             model_dict = state.v4_model if isinstance(state.v4_model, dict) else None
             record = state.night_validation if isinstance(state.night_validation, dict) else None
-            gate = bool((getattr(self, "_v4_night_gate", None) or {}).get("ready"))
             evidence_key = (
                 (model_dict or {}).get("fitted_at"),
                 (record or {}).get("generated"),
-                gate,
                 end.isoformat(),
             )
             age = (now - cache["at"]).total_seconds() if cache and isinstance(cache.get("at"), datetime) else None
             retry_s = 600.0 if cache is not None and cache.get("strategy") is None else 3600.0
             if cache is None or regenerated or cache.get("key") != evidence_key or age is None or age >= retry_s:
                 strategy, reason = self._timeline_night_plan(
-                    snap, start, end, night_replay, night_strategy, model_dict, record, gate
+                    snap, start, end, night_replay, night_strategy, model_dict, record
                 )
                 if strategy is None and cache and cache.get("strategy") is not None and (age or 0.0) < 10800.0:
                     strategy, reason = cache["strategy"], cache.get("reason", "ok")  # keep the last good plan briefly
@@ -6033,7 +6053,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         night_strategy: Any,
         model_dict: dict[str, Any] | None,
         record: dict[str, Any] | None,
-        gate: bool,
     ) -> tuple[Any, str]:
         """``(NightStrategy | None, reason)`` for the night ``start``..``end`` from the live v4 state (pure reads)."""
         if model_dict is None:
@@ -6080,13 +6099,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if inp is None:
             return None, "cannot_plan"
         plan = night_strategy.plan_night(inp)
-        return night_strategy.gate_numbers(plan, gate), "ok"
+        return plan, "ok"
 
     def night_strategy_payload(self) -> tuple[dict[str, Any] | None, str]:
         """``(body, reason)`` for ``GET /api/climate_advisor/night_strategy``: the strategy in the display unit.
 
         ``body`` is None (the view answers 503) until a night is in view and planned; ``reason`` says why. The same
-        figures-hidden rule as the timeline step applies: no predicted figures unless the zone's v4 gate passed."""
+        figures-hidden rule as the timeline step applies: none below medium confidence (no accuracy gate)."""
         try:
             from . import night_strategy  # noqa: PLC0415
 
@@ -6096,8 +6115,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if strategy is None:
                 return None, str(cache.get("reason") or "not_ready")
             unit = self.config.get("temp_unit", "fahrenheit")
-            gate = bool((getattr(self, "_v4_night_gate", None) or {}).get("ready"))
-            return night_strategy.api_payload(strategy, unit=unit, convert=display_temp, v4_gate_ready=gate), "ok"
+            return night_strategy.api_payload(strategy, unit=unit, convert=display_temp), "ok"
         except Exception:  # noqa: BLE001 - a read-only view answers "not ready", never a 500
             _LOGGER.debug("night_strategy_payload failed", exc_info=True)
             return None, "error"
@@ -6160,30 +6178,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("timeline_debug failed", exc_info=True)
             return {"shadow": True, "error": True}
 
-    async def _v4_night_refresh_gate(self) -> None:
-        """Refresh the zone's v4 gate verdict (``gate_summary.ready`` of the published backtest) for the night plan.
-
-        The file read is blocking, so it happens here (executor), at most every 10 minutes; the timeline code that
-        needs the verdict reads the cached answer. Plan decision C11: no predicted bedroom figures unless it is
-        ready. Never raises; a failure reads as "not ready"."""
-        try:
-            last = getattr(self, "_v4_night_gate_at", None)
-            if last is not None and _monotonic() - last < 600.0:
-                return
-            self._v4_night_gate_at = _monotonic()
-            backtest = await self._executor_job(
-                load_backtest, Path(self.hass.config.config_dir), getattr(self, "_entry_id", "")
-            )
-            self._v4_night_gate = gate_state(backtest)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - advisory gate input; "not ready" is the safe reading
-            self._v4_night_gate = {"ready": False, "reason": "error", "summary": None}
-            _LOGGER.debug("night strategy: could not read the v4 gate", exc_info=True)
-
     async def _v4_shadow_cycle(self) -> None:
-        """Per 30-minute cycle: predict 24 h with v4 and archive 1/4/12/24 h. Never raises into the cycle."""
-        await self._v4_night_refresh_gate()
+        """Per 30-minute cycle: predict 24 h with v4 and archive 1/4/12/24 h. Never raises into the cycle.
+
+        Skipped while v4 is neither the primary nor the shadow engine: an engine that is switched off is not fitted,
+        predicted or archived."""
+        if not self.engine_running("v4"):
+            return
         try:
             await self._v4_shadow_cycle_impl()
             self._v4_cycle_failed_logged = False
@@ -6427,6 +6428,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "archive": self._v4_archive,
             "model": self.v4_model_summary(),
             "sensors_meta": meta,
+            "primary_engine": self.primary_engine_id(),
+            "shadow_engine": self.shadow_engine_id(),
         }
 
     def v4_indoor_sensors_meta(self, ids: Sequence[str]) -> list[dict[str, Any]]:
@@ -6484,11 +6487,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             archive = getattr(self, "_v4_archive", None)
             if store is None or archive is None:
                 return off
+            if not self.engine_running("v4"):
+                return {**off, "reason": "not_running"}
             backtest = load_backtest(Path(self.hass.config.config_dir), self._entry_id)
-            gate = gate_state(backtest)
             model_dict = store.v4_model if isinstance(store.v4_model, dict) else None
             corrected_past: list[tuple[datetime, float]] = []
-            if gate["ready"] and model_dict is not None:
+            if model_dict is not None:
                 rows = [r for r in raw_log if r.get("pred_outdoor") is not None and r.get("ts")]
                 times = [parsed for parsed in (dt_util.parse_datetime(r["ts"]) for r in rows) if parsed is not None]
                 if times and len(times) == len(rows):
@@ -6522,6 +6526,54 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:  # noqa: BLE001 - display only; a failure must never break chart_data
             _LOGGER.debug("v4 chart series failed", exc_info=True)
             return {**off, "reason": "error"}
+
+    def primary_engine_id(self) -> str:
+        """The engine whose line is the DISPLAY's main prediction (Settings -> Prediction engine; default v4).
+
+        DISPLAY ONLY (Issue #1230): no decision path calls this; control uses v3 in 0.9.4
+        (``tests/test_v4_shadow_structural.py`` guards it). Never raises."""
+        try:
+            return prediction_engines.primary_id(self.config)
+        except Exception:  # noqa: BLE001 - display only
+            return "v4"
+
+    def shadow_engine_id(self) -> str:
+        """The optional comparison engine ("none" when unset or equal to the primary). Display only. Never raises."""
+        try:
+            return prediction_engines.shadow_id(self.config)
+        except Exception:  # noqa: BLE001 - display only
+            return "none"
+
+    def engine_running(self, engine_id: str) -> bool:
+        """True when ``engine_id`` is the primary, the shadow, or v3 (which drives control in 0.9.4).
+
+        An engine that is neither primary nor shadow is not fitted, predicted or archived. Orchestration only: the
+        answer never reaches a decision. A broken config reads as "running" for v3 and the default for v4."""
+        try:
+            return prediction_engines.is_running(self.config, engine_id)
+        except Exception:  # noqa: BLE001 - display/orchestration only
+            return engine_id in ("v3", "v4")
+
+    def prediction_engines_payload(self) -> dict[str, Any]:
+        """The chart payload's engine block: primary/shadow, per-engine status, and the learning/fallback state.
+
+        Logs once per episode when the primary has no usable fit (the display shows the schedule estimate)."""
+        try:
+            out = prediction_engines.engine_state(self, self.config)
+        except Exception:  # noqa: BLE001 - display only
+            _LOGGER.debug("prediction engines payload failed", exc_info=True)
+            return {"primary": "v4", "shadow": "none", "engines": [], "primary_state": "ready", "fallback": False}
+        if out["fallback"]:
+            if not getattr(self, "_engine_fallback_logged", False):
+                self._engine_fallback_logged = True
+                _LOGGER.info(
+                    "Prediction engine %s has no usable fit yet: the display shows the schedule estimate "
+                    "(control is unaffected: it uses v3)",
+                    out["primary"],
+                )
+        else:
+            self._engine_fallback_logged = False
+        return out
 
     def v4_model_summary(self) -> dict[str, Any]:
         """Debug/diagnostics view of the v4 shadow: model confidence, fit time, span, per-lead training MAE.
@@ -15331,6 +15383,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if is_historical:
             predicted_indoor = []
             forecast_outdoor = []
+            _fallback_inputs = None
             _raw_predicted_indoor: list[dict] = []
             _raw_forecast_outdoor: list[dict] = []
         else:
@@ -15359,6 +15412,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 band_schedule=_raw_band,
             )
             predicted_indoor = [{"ts": p["ts"], "temp": _conv(p["temp"])} for p in _raw_predicted_indoor]
+            _fallback_inputs = (_extended_forecast, now, _raw_band)
             _raw_forecast_outdoor = _build_future_forecast_outdoor(
                 _extended_forecast,
                 classification=self._current_classification,
@@ -15407,6 +15461,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             raw_log=log_entries,
         )
         _indoor_sensors_out = self.v4_indoor_sensors_meta(_shown_sensor_ids)
+        _engines_block = self.prediction_engines_payload()
+        # While the primary engine has no usable fit, the main line is the plain schedule estimate (the engine-agnostic
+        # no-model path of _build_predicted_indoor_future), never the other engine. DISPLAY ONLY.
+        _schedule_estimate: list[dict] = []
+        if _engines_block.get("fallback") and _fallback_inputs is not None:
+            try:
+                _schedule_estimate = [
+                    {"ts": p["ts"], "temp": _conv(p["temp"])}
+                    for p in _build_predicted_indoor_future(
+                        _fallback_inputs[0],
+                        self.config,
+                        _fallback_inputs[1],
+                        current_indoor_temp=self._get_indoor_temp(),
+                        thermal_model={},
+                        occupancy_mode=self._occupancy_mode,
+                        classification=self._current_classification,
+                        band_schedule=_fallback_inputs[2],
+                    )
+                ]
+            except Exception:  # noqa: BLE001 - optional line
+                _LOGGER.debug("schedule estimate failed", exc_info=True)
 
         log_entries = [_conv_log_entry(e) for e in log_entries]
 
@@ -15555,10 +15630,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "effective_target_history": _effective_target_history,
             "effective_target_forecast": _effective_target_forecast,
             "commanded_setpoint_history": _commanded_setpoint_history,
-            # Issue #1230 R2 (additive): per-sensor actual lines and the v4 block (gate verdict + lines when ready).
+            # Issue #1230 R2 (additive): per-sensor actual lines, the v4 block and the prediction engine block.
             "indoor_sensors": _indoor_sensors_out,
             "actual_indoor_sensors": _actual_by_sensor,
             "v4": _v4_block,
+            "prediction_engines": _engines_block,
+            "schedule_estimate": _schedule_estimate,
             "unit": unit,
         }
 

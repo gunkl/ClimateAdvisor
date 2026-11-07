@@ -1013,6 +1013,8 @@ The dashboard is a single-file HTML/CSS/JS panel. When adding new status grid ca
 - For clipboard operations, always include a `document.execCommand('copy')` fallback via temporary textarea — `navigator.clipboard` is unavailable in HA iframe panels without secure context
 - Use `escapeHtml()` for any user-provided or API-returned content rendered as innerHTML
 
+**Status chart v2 (Issue #1230 R2):** the chart reads one series catalog (`_buildSeries()`): charts, key, hover readout and table view all use it, so add a line there, never in one place only. v4 lines are gated server-side (`v4.ready`); never draw a v4 value the payload withheld. Choices persist in `localStorage` (`ca_chart_v2:<zone>`) inside try/catch. Static checks: `tests/test_status_chart_v2_page.py`.
+
 **Target Band (Issue #119):** The chart overlay previously called "Comfort Band" is now "Target Band". The `get_chart_data()` API response sends `target_band: [{ts, lower, upper}]` — a time-series array, not static scalars. The frontend renders this as a stepped/interpolated shaded region that changes with time of day and occupancy mode. If modifying chart rendering code, never assume `target_band` is a single pair of values; always iterate the array. The `_compute_target_band_schedule()` function in `coordinator.py` is the single source of truth for band logic — do not replicate band calculations in `index.html`.
 
 `_compute_target_band_schedule()` full signature: `(hourly_timestamps, config, occupancy_mode, now, thermal_model=None, classification=None, pre_cool_trigger_h=None, pre_cool_target=None, tou_precondition_window=None, restore_hold=False)`. Key behaviors:

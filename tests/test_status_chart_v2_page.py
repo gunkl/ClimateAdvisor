@@ -1,0 +1,267 @@
+"""Issue #1230 R2: static checks for the Status chart v2 in ``frontend/index.html``.
+
+There is no JS runtime in the unit tier, so (like ``test_prediction_accuracy_page.py``) these read the page source and
+assert what matters: every control exists with its aria wiring, every toggle and group is in the key, ranges / scroll /
+zoom / pin / table / remembered choices / units / the v4 gate are wired, and only bundled libraries load. The behaviour
+is exercised in a real browser (Playwright) by the R2 check recorded in the PR.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+INDEX = (ROOT / "custom_components" / "climate_advisor" / "frontend" / "index.html").read_text(encoding="utf-8")
+
+
+def _func(name: str) -> str:
+    m = re.search(rf"  (?:async )?function {name}\(.*?\n  \}}\n", INDEX, re.DOTALL)
+    assert m, f"{name} not found"
+    return m.group(0)
+
+
+def test_two_charts_one_strip_canvas_and_a_cursor():
+    for cid in ("temp-chart", "out-chart", "activity-chart", "chart-cursor", "chart-hover-panel", "chart-key"):
+        assert f'id="{cid}"' in INDEX, cid
+    assert "chart-container-out" in INDEX
+    # the plot areas of the two charts line up: fixed axis widths and a fixed right gutter
+    assert "const OUT_PX = 44" in INDEX and "const RIGHT_PX = 40" in INDEX
+    assert "sc.width = OUT_PX" in INDEX and "sc.width = RIGHT_PX" in INDEX and "padRight: RIGHT_PX" in INDEX
+
+
+def test_time_controls_past_ahead_scroll_now():
+    for r in ("6h", "12h", "24h", "3d", "7d", "30d", "1y"):
+        assert f'data-range="{r}"' in INDEX and f"setChartRange('{r}', this)" in INDEX
+    for a in ("12h", "24h", "48h", "5d"):
+        assert f'data-ahead="{a}"' in INDEX and f"setChartAhead('{a}')" in INDEX
+    assert 'onclick="shiftChartWindow(-1)"' in INDEX and 'onclick="shiftChartWindow(1)"' in INDEX
+    assert 'onclick="chartGoNow()"' in INDEX
+    assert "const CHART_RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y']" in INDEX
+    assert "const CHART_LEADS = ['1h', '4h', '12h', '24h']" in INDEX
+
+
+def test_scroll_is_half_a_view_and_loads_older_data_on_demand():
+    assert "(w.max - w.min) / 2" in _func("_scrollStep")
+    shift = _func("shiftChartWindow")
+    assert "loadChart(vpEnd)" in shift and "loadChart();" in shift
+    load = _func("loadChart")
+    assert "before_ts=" in load and "_coveringRange(" in load  # a scrolled fetch covers past and ahead
+
+
+def test_window_is_past_plus_ahead_and_zoom_is_remembered_across_redraws():
+    base = _func("_baseWindow")
+    assert "_hoursOf(_chartRange)" in base and "_hoursOf(_chartAhead)" in base
+    assert "return _zoomWin || _baseWindow()" in _func("_viewWindow")
+
+
+def test_zoom_drag_and_pinch_apply_to_both_charts_with_reset():
+    assert "drag: { enabled: true" in INDEX and "pinch: { enabled: true }" in INDEX
+    z = _func("_onZoomed")
+    assert "_zoomWin = {" in z and "_applyWindow()" in z
+    ap = _func("_applyWindow")
+    assert "[_tempChart, _outChart]" in ap and "drawStrips()" in ap
+    assert "resetZoom" in _func("resetChartZoom") and 'id="chart-zoom-reset"' in INDEX
+
+
+def test_every_toggle_group_is_in_the_key():
+    key = _func("renderKey")
+    for group in ("Indoor", "Predicted", "Outdoor", "Overlays", "Activity"):
+        assert f"_group('{group}'" in key, group
+    for sid in ("ov:band", "ov:target", "ov:humidity", "ov:feelslike", "strip:events"):
+        assert f"'{sid}'" in key, sid
+    assert "STRIP_ROWS.map(r => _chip('strip:' + r.id" in key
+    for row in ("heating", "cooling", "fan", "natvent", "windows", "windowsplan"):
+        assert f"id: '{row}'" in INDEX, row
+    ser = _func("_buildSeries")
+    for sid in (
+        "'ind:' + m.id",
+        "'ind:_ca'",
+        "'v3'",
+        "'v4:' + m.id",
+        "'base:' + m.id",
+        "'out:sensor'",
+        "'out:service'",
+        "'out:corrected'",
+    ):
+        assert sid in ser, sid
+    # chips are real buttons with aria-pressed; the key is one delegated handler
+    chip = _func("_chip")
+    assert '<button type="button"' in chip and "aria-pressed" in chip
+    assert "data-series" in INDEX and "closest('[data-series]')" in INDEX
+
+
+def test_defaults_baseline_overlays_and_ca_reading_start_off():
+    d = _func("_defaultOn")
+    assert "id.startsWith('base:')) return false" in d
+    assert "'ov:humidity'" in d and "'ov:feelslike'" in d
+    assert "id === 'ind:_ca'" in d
+
+
+def test_per_sensor_lines_use_one_pattern_per_sensor_and_color_means_method():
+    assert "const SENSOR_DASH = [[], [8, 3, 2, 3], [2, 3]" in INDEX
+    for token in ("--c-ink", "--c-plan", "--c-base", "--c-v3", "--c-out", "--c-svc"):
+        assert INDEX.count(token + ":") >= 2, token  # light and dark values
+    ser = _func("_buildSeries")
+    assert "color: 'plan'" in ser and "color: 'base'" in ser and "color: 'v3'" in ser and "color: 'svc'" in ser
+
+
+def test_gaps_are_shown_as_gaps():
+    assert "y: null" in _func("_withGaps")
+    assert "spanGaps: false" in _func("_dsFor")
+
+
+def test_v4_is_gated_by_the_server_verdict():
+    ser = _func("_buildSeries")
+    assert "v4.ready === true" in ser
+    assert "v4Ready ? [...past, ...fut] : []" in ser and "v4Ready ? base : []" in ser and "v4Ready ? corr : []" in ser
+    assert "v4 is shown after it passes its accuracy check" in ser
+    key = _func("renderKey")
+    assert "v4 shown after it passes its accuracy check" in key
+    assert 'href="prediction_accuracy.html"' in key
+    assert "disabled: !!s.disabledReason" in key
+    assert "(ready ? '' : ' disabled')" in key  # the lead buttons wait for the gate too
+    assert "chart-v4-note" in INDEX
+
+
+def test_backtest_lead_is_selectable_and_defaults_to_four_hours():
+    assert "let _chartLead = '4h'" in INDEX
+    assert "[_chartLead]" in _func("_buildSeries")  # past v4 lines read the chosen lead
+    assert "data-lead" in _func("renderKey") and "CHART_LEADS.map" in _func("renderKey")
+    assert "_chartPrefs.lead = lead" in _func("setChartLead")
+
+
+def test_choices_are_remembered_per_zone_in_try_catch_storage():
+    assert "const CHART_PREFS_KEY = 'ca_chart_v2'" in INDEX
+    assert "CHART_PREFS_KEY + ':' + (_selectedEntryId || 'default')" in _func("_prefsKey")
+    read, write = _func("_readPrefs"), _func("_writePrefs")
+    assert "try {" in read and "catch" in read and "try {" in write and "catch" in write
+    assert "localStorage.setItem" in write and "localStorage.getItem" in read
+    assert "_writePrefs()" in _func("toggleSeries") and "_writePrefs()" in _func("setChartRange")
+    assert "_chartPrefsZone === zone" in _func("_ensurePrefs")  # switching zone loads that zone's choices
+
+
+def test_hover_readout_lists_every_visible_value_and_the_forecast_miss():
+    r = _func("_renderReadout")
+    for group in ("Indoor", "Predicted", "Outdoor", "Overlays"):
+        assert f"'{group}'" in r
+    assert "missVs" in r and "chp-miss" in r and "isPast" in r
+    assert "!_isOn(s.id) || s.disabledReason" in r  # nothing hidden is read out
+    assert "_valueAt(" in r
+
+
+def test_touch_tap_pins_the_readout_and_a_second_tap_lets_go():
+    init = _func("_initChartInteraction")
+    assert "'touchend'" in init and "_setCursor(ms, true)" in init and "_clearCursor()" in init
+    assert "_multiTouch" in init  # a pinch is never read as a tap or swipe
+    assert "_lastTouchAt" in init  # synthesised mouse events after a tap are ignored
+    assert "clearChartPin()" in _func("_renderReadout")
+    assert "ArrowLeft" in init and "Escape" in init
+
+
+def test_key_folds_into_a_lines_sheet_on_phones():
+    assert "<summary>Lines " in INDEX
+    assert "@media (max-width: 640px)" in INDEX and ".chart-key > summary { display: list-item; }" in INDEX
+    assert "(max-width: 640px)" in _func("_syncKeyOpen")
+    assert "min-height: 36px" in INDEX  # touch targets
+
+
+def test_table_view_is_an_accessible_table_of_the_visible_window():
+    assert 'id="chart-table-toggle"' in INDEX and 'aria-pressed="false" onclick="toggleTableView()"' in INDEX
+    t = _func("_applyTableView")
+    assert "<caption>" in t and 'scope="col"' in t and 'scope="row"' in t
+    m = _func("buildTableModel")
+    assert "_viewWindow()" in m and "_isOn(s.id)" in m and "!s.disabledReason" in m
+    assert 'role="region"' in INDEX and 'aria-label="Chart values as a table"' in INDEX
+    assert "_copyText(" in _func("copyChartTable")  # copy and paste, with the execCommand fallback
+    assert "_applyTableView()" in _func("toggleSeries") and "_applyTableView()" in _func("_applyWindow")
+
+
+def test_units_come_from_the_payload():
+    assert "unitSymbol(_lastChartData ? _lastChartData.unit" in _func("_unitSym")
+    assert "'Temperature (' + _unitSym() + ')'" in INDEX
+    assert "Temperatures in ' + escapeHtml(sym)" in _func("_applyTableView")
+    assert "callback: v => v + '°'" in INDEX  # axis ticks carry the degree sign, the title the unit
+
+
+def test_activity_strips_toggle_and_future_is_dimmer():
+    s = _func("drawStrips")
+    assert "_stripOn(r.id)" in s and "sg.future ? 0.4 : 1" in s
+    seg = _func("_stripSegments")
+    assert "fan: () => false" in seg  # a forecast cannot assert the fan is running
+    assert "windowsplan: p => !!p.windows_recommended" in seg
+
+
+def test_every_existing_overlay_is_kept():
+    assert "label: 'Target Band'" in INDEX and "label: 'Humidity %'" in INDEX and "label: 'Feels-like'" in INDEX
+    assert "label: 'Target'" in INDEX and "label: 'Thermostat set'" in INDEX
+    assert "segment: { borderColor:" in INDEX  # heat / cool coloured target line
+    assert "chartData.commanded_setpoint_history" in INDEX
+    assert "effective_target_history" in INDEX and "effective_target_forecast" in INDEX
+    assert "'override', 'classification_change'" in INDEX  # event markers
+
+
+def test_reading_cards_keep_every_old_reading():
+    cards = _func("renderReadingCards")
+    for needle in (
+        "Outdoor sensor",
+        "service says",
+        "Today",
+        "trend-arrow",
+        "Doors/Windows",
+        "c.unreadable",
+        "_fanLines(data)",
+        "Occupancy",
+        "comfort score",
+        "data.automation_status",
+        "data.coordinator_healthy === false",
+        "data.invariant_violations",
+        "data.hvac_control_issues",
+        "data.entity_health_issues",
+        "pause_suppressed_classification_text",
+        "nat_vent_off_threshold",
+        "sleep_indoor_sensor_active",
+        "remote-offset-line",
+        "data.next_action",
+        "data.next_automation_action",
+        "data.next_automation_time",
+        "hvac_runtime_today",
+        "hvacNote",
+    ):
+        assert needle in cards, needle
+    fans = _func("_fanLines")
+    for needle in ("whf_status", "hvac_fan_status", "fan_status", "fan_remote_timer_hours", "fan_remote_speed"):
+        assert needle in fans, needle
+    assert "contact_sensors" in cards
+    # the thermostat card is the one that carries "HVAC" (the older browser specs find it by that word)
+    assert "HVAC ${escapeHtml(data.hvac_mode" in cards
+    assert 'id="status-next"' in INDEX and 'id="status-grid"' in INDEX
+
+
+def test_only_bundled_libraries_load_and_the_old_chart_helpers_are_gone():
+    srcs = re.findall(r'<script src="([^"]+)"', INDEX)
+    assert srcs and all(not s.startswith(("http", "//")) for s in srcs)
+    assert "drawActivityTimeline" not in INDEX and "_rangeToWindow" not in INDEX
+    assert 'id="overlay-comfort"' not in INDEX
+
+
+def test_accessibility_names_on_canvases_and_controls():
+    for cid in ("temp-chart", "out-chart", "activity-chart"):
+        assert re.search(rf'<canvas id="{cid}" role="img" aria-label="[^"]+"', INDEX), cid
+    assert 'role="group" aria-label="Past: how much history to show"' in INDEX
+    assert 'role="group" aria-label="Ahead: how much forecast to show"' in INDEX
+    assert ".key-chip:focus-visible" in INDEX
+
+
+def test_away_and_override_strips_read_the_chart_log_context_and_forecast_draws_nothing():
+    assert "id: 'away'" in INDEX and "id: 'override'" in INDEX
+    seg = _func("_stripSegments")
+    assert "e.occupancy === 'away' || e.occupancy === 'vacation'" in seg and "e.override === true" in seg
+    assert "away: () => false" in seg and "override: () => false" in seg
+
+
+def test_band_is_labelled_with_the_sensor_it_applies_to_in_key_and_hover():
+    assert "function _bandLabelInView()" in INDEX and "'Band (' + names.join(' / ') + ')'" in INDEX
+    assert "e.band_sensor" in _func("_bandLabelAt") and "bedroom sensor" in _func("_sensorLabel")
+    assert "_bandLabelInView()" in _func("renderKey")
+    assert "_bandLabelAt(ms)" in _func("_renderReadout")

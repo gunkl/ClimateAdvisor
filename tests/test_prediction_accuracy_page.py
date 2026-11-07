@@ -213,4 +213,4 @@ def test_index_links_to_page_in_analysis_tab():
     assert "Prediction accuracy (preview)" in INDEX
     start = INDEX.index('id="tab-ai"')
     assert "prediction_accuracy.html" in INDEX[start : start + 3000]
-    assert INDEX.count("prediction_accuracy") == 1  # the link only
+    assert INDEX.count("prediction_accuracy") == 2  # the Analysis link and the chart's v4-gate note (R2)

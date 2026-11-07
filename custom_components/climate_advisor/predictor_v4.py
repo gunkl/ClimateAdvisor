@@ -558,6 +558,37 @@ def _corrected_outdoor(
     ]
 
 
+def corrected_forecast(
+    model: V4Model,
+    *,
+    times: Sequence[datetime],
+    raw_f: Sequence[float],
+    tz: tzinfo,
+    now: datetime | None = None,
+    outdoor_now_f: float | None = None,
+    forecast_now_f: float | None = None,
+) -> list[float]:
+    """The weather service's hourly outdoor values after the model's learned correction (display, Issue #1230 R2).
+
+    The same arithmetic ``predict()`` applies to its outdoor input: the learned hour-of-day bias plus, when ``now`` and
+    both ``*_now_f`` values are given, the current miss decaying over the nowcast time. Without ``now`` (a past line,
+    where today's miss no longer applies) only the hourly bias is added.
+    """
+    hours = [_local_hour(t, tz) for t in times]
+    if now is None:
+        return [float(r) + _bias_interp(model.forecast.hourly_bias_f, h) for r, h in zip(raw_f, hours, strict=True)]
+    lead_h = [(t.timestamp() - now.timestamp()) / 3600.0 for t in times]
+    return _corrected_outdoor(
+        model.forecast,
+        raw=list(raw_f),
+        hours=hours,
+        lead_h=lead_h,
+        now_hour=_local_hour(now, tz),
+        outdoor_now=outdoor_now_f,
+        forecast_now=forecast_now_f,
+    )
+
+
 # ------------------------------------------------------------------------------------- the fit
 @dataclass
 class _Anchor:

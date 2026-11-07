@@ -57,8 +57,9 @@ test.describe('Temperature Forecast Chart', () => {
 
     const panel = page.locator('#chart-hover-panel');
     const html = await panel.innerHTML();
-    expect(html).toContain('P-Indoor');
-    expect(html).toContain('P-Outdoor');
+    // Chart v2 (#1230 R2): the readout is grouped Indoor / Predicted / Outdoor
+    expect(html).toContain('Predicted');
+    expect(html).toContain('Outdoor');
     expect(html).toMatch(/Indoor/);
     expect(html).toMatch(/Outdoor/);
   });
@@ -93,7 +94,7 @@ test.describe('Temperature Forecast Chart', () => {
     }
   });
 
-  test('range button 6h centers x-axis on now (±3h)', async ({ page }) => {
+  test('range button 6h shows 6h of past and 24h ahead', async ({ page }) => {
     await page.click('button[data-range="6h"]');
     await page.waitForTimeout(500);
 
@@ -104,10 +105,10 @@ test.describe('Temperature Forecast Chart', () => {
     });
 
     const now = Date.now();
-    // 6h range centered: min ≈ now-3h, max ≈ now+3h (allow 2 min tolerance)
+    // Chart v2: Past 6h + Ahead 24h (default): min ≈ now-6h, max ≈ now+24h (allow 2 min tolerance)
     expect(axisMin).not.toBeNull();
-    expect(Math.abs(axisMin - (now - 3 * 3600000))).toBeLessThan(2 * 60 * 1000);
-    expect(Math.abs(axisMax - (now + 3 * 3600000))).toBeLessThan(2 * 60 * 1000);
+    expect(Math.abs(axisMin - (now - 6 * 3600000))).toBeLessThan(2 * 60 * 1000);
+    expect(Math.abs(axisMax - (now + 24 * 3600000))).toBeLessThan(2 * 60 * 1000);
   });
 
   test('hover panel clears when mouse leaves chart', async ({ page }) => {
@@ -140,12 +141,13 @@ test.describe('Temperature Forecast Chart', () => {
     expect(html.trim()).toBe('');
   });
 
-  test('activity timeline renders with 4 rows', async ({ page }) => {
+  test('activity timeline renders at least one strip row below the chart', async ({ page }) => {
     const canvas = page.locator('#activity-chart');
     await expect(canvas).toBeVisible();
     const box = await canvas.boundingBox();
-    // H should be ~86px for 4 rows (rowH=14, gap=10 between rows)
-    expect(box.height).toBeGreaterThan(70);
+    // The base spec expected 4 rows (~86px) but the page has drawn 3 since the Vent row merge (66px), so it failed on
+    // 0.9.x. Chart v2 draws one 12px row per strip that has activity: at least one row must be drawn.
+    expect(box.height).toBeGreaterThanOrEqual(12);
     // Timeline should appear BELOW the temp chart
     const chartBox = await page.locator('#temp-chart').boundingBox();
     expect(box.y).toBeGreaterThan(chartBox.y + chartBox.height - 5);
@@ -278,12 +280,12 @@ test.describe('Temperature Forecast Chart', () => {
 
   test('predicted outdoor dataset contains points from state_log (historical predicted)', async ({ page }) => {
     // The fixture state_log has 48 entries with pred_outdoor set. After drawChart(),
-    // the 'Predicted Outdoor' dataset must include points sourced from those stored values.
+    // the 'Service forecast' dataset must include points sourced from those stored values.
     const predOutdoorCount = await page.evaluate(() => {
-      const canvas = document.getElementById('temp-chart');
+      const canvas = document.getElementById('out-chart');
       const chart = Chart.getChart(canvas);
       if (!chart) return 0;
-      const ds = chart.data.datasets.find(d => d.label === 'Predicted Outdoor');
+      const ds = chart.data.datasets.find(d => d.label === 'Service forecast');
       return ds ? ds.data.length : 0;
     });
     // 48 fixture state_log entries all have pred_outdoor; plus today's remaining forecast hours
@@ -294,10 +296,10 @@ test.describe('Temperature Forecast Chart', () => {
     // If predicted series were today-only (hourToDate based), all x values would be >= todayMidnight.
     // With historical storage, at least some points must be before today midnight.
     const hasPastPoints = await page.evaluate(() => {
-      const canvas = document.getElementById('temp-chart');
+      const canvas = document.getElementById('out-chart');
       const chart = Chart.getChart(canvas);
       if (!chart) return false;
-      const ds = chart.data.datasets.find(d => d.label === 'Predicted Outdoor');
+      const ds = chart.data.datasets.find(d => d.label === 'Service forecast');
       if (!ds || !ds.data.length) return false;
       const todayMidnight = new Date();
       todayMidnight.setHours(0, 0, 0, 0);
@@ -308,17 +310,17 @@ test.describe('Temperature Forecast Chart', () => {
 
   // ── Navigation / windowing tests (TDD — written before implementation) ──────
 
-  test('24h default view is centered on now — max ≈ now+12h', async ({ page }) => {
+  test('24h default view: past 24h and 24h ahead — max ≈ now+24h', async ({ page }) => {
     const axisMax = await page.evaluate(() => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));
       return chart ? chart.scales.x.max : null;
     });
     expect(axisMax).not.toBeNull();
     // 24h centered: max = now + 12h (allow 2 min tolerance)
-    expect(Math.abs(axisMax - (Date.now() + 12 * 3600000))).toBeLessThan(2 * 60 * 1000);
+    expect(Math.abs(axisMax - (Date.now() + 24 * 3600000))).toBeLessThan(2 * 60 * 1000);
   });
 
-  test('forward nav button shifts 24h window forward by 4h', async ({ page }) => {
+  test('forward nav button shifts the window forward by half a view (24h)', async ({ page }) => {
     const maxBefore = await page.evaluate(() => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));
       return chart ? chart.scales.x.max : null;
@@ -329,11 +331,11 @@ test.describe('Temperature Forecast Chart', () => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));
       return chart ? chart.scales.x.max : null;
     });
-    // Step for 24h = 4h
-    expect(Math.abs((maxAfter - maxBefore) - 4 * 3600000)).toBeLessThan(60 * 1000);
+    // half of a 48h view
+    expect(Math.abs((maxAfter - maxBefore) - 24 * 3600000)).toBeLessThan(60 * 1000);
   });
 
-  test('back nav button shifts 24h window backward by 4h', async ({ page }) => {
+  test('back nav button shifts the window backward by half a view (24h)', async ({ page }) => {
     const minBefore = await page.evaluate(() => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));
       return chart ? chart.scales.x.min : null;
@@ -344,11 +346,11 @@ test.describe('Temperature Forecast Chart', () => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));
       return chart ? chart.scales.x.min : null;
     });
-    // min should decrease by 4h
-    expect(Math.abs((minBefore - minAfter) - 4 * 3600000)).toBeLessThan(60 * 1000);
+    // min should decrease by half a view
+    expect(Math.abs((minBefore - minAfter) - 24 * 3600000)).toBeLessThan(60 * 1000);
   });
 
-  test('switching range resets pan offset — 12h window midpoint ≈ now', async ({ page }) => {
+  test('switching range resets pan offset — 12h past window starts at now-12h', async ({ page }) => {
     // After switching to any range the window should be re-centered on now (offset = 0)
     await page.click('button[data-range="12h"]');
     await page.waitForTimeout(500);
@@ -357,8 +359,10 @@ test.describe('Temperature Forecast Chart', () => {
       return chart ? { xMin: chart.scales.x.min, xMax: chart.scales.x.max } : {};
     });
     const midpoint = (xMin + xMax) / 2;
-    // Midpoint of a 0-offset 12h window must be ≈ now (allow 5 min)
-    expect(Math.abs(midpoint - Date.now())).toBeLessThan(5 * 60 * 1000);
+    // Chart v2 (#1230 R2): the window is Past 12h + Ahead 24h (default), so with offset 0 the left edge is now-12h
+    // and the right edge now+24h (the midpoint is no longer now).
+    expect(Math.abs(xMin - (Date.now() - 12 * 3600000))).toBeLessThan(5 * 60 * 1000);
+    expect(Math.abs(xMax - (Date.now() + 24 * 3600000))).toBeLessThan(5 * 60 * 1000);
   });
 
   test('3d view: predicted outdoor curve extends beyond 24h', async ({ page }) => {
@@ -367,10 +371,10 @@ test.describe('Temperature Forecast Chart', () => {
     await page.waitForTimeout(500);
 
     const maxX = await page.evaluate(() => {
-      const canvas = document.getElementById('temp-chart');
+      const canvas = document.getElementById('out-chart');
       const chart = Chart.getChart(canvas);
       if (!chart) return null;
-      const ds = chart.data.datasets.find(d => d.label === 'Predicted Outdoor');
+      const ds = chart.data.datasets.find(d => d.label === 'Service forecast');
       if (!ds || !ds.data.length) return null;
       return Math.max(...ds.data.map(p => p.x));
     });

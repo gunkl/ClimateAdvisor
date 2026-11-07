@@ -344,3 +344,141 @@ def build_prediction_accuracy(
         if isinstance(backtest, Mapping) and isinstance(backtest.get("gate_summary"), Mapping)
         else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Status chart (Issue #1230 R2)
+# ---------------------------------------------------------------------------
+
+CHART_LEADS = ("1h", "4h", "12h", "24h")
+
+
+def gate_state(backtest: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The zone's DP-8 verdict for the Status chart: ``ready`` only when the published ``gate_summary.ready is True``.
+
+    Occupant view: v4 lines appear on the Status chart only after the backtest says v4 beat today's prediction on this
+    house; without a published backtest, or with a failing one, the chart shows v3 alone and says why.
+    """
+    summary = backtest.get("gate_summary") if isinstance(backtest, Mapping) else None
+    if not isinstance(summary, Mapping):
+        return {"ready": False, "reason": "no_backtest", "summary": None}
+    keep = {k: summary[k] for k in ("passed", "scored", "total", "other_sensors_failing") if k in summary}
+    ready = summary.get("ready") is True
+    return {"ready": ready, "reason": "ok" if ready else "not_ready", "summary": keep}
+
+
+def _downsample_pairs(pairs: list[tuple[float, float]], range_days: float, tz: tzinfo) -> list[tuple[float, float]]:
+    """Same buckets as the chart log: raw to 3 days, local-hour means to 30 days, local-day means beyond."""
+    if range_days <= _RAW_MAX_DAYS or not pairs:
+        return sorted(pairs)
+    hourly = range_days <= _HOURLY_MAX_DAYS
+    groups: dict[datetime, list[float]] = defaultdict(list)
+    for t, v in pairs:
+        dt = datetime.fromtimestamp(t, tz)
+        key = dt.replace(minute=0, second=0, microsecond=0)
+        if not hourly:
+            key = key.replace(hour=0)
+        groups[key].append(v)
+    return [(k.timestamp(), sum(vs) / len(vs)) for k, vs in sorted(groups.items())]
+
+
+def _out_pairs(pairs: Sequence[tuple[float, float]], tz: tzinfo, unit: str) -> list[dict[str, Any]]:
+    return [{"ts": _iso(t, tz), "temp": display_temp(v, unit, 1)} for t, v in pairs]
+
+
+def build_chart_v4(
+    *,
+    now: datetime,
+    start: float,
+    end: float,
+    range_str: str,
+    unit: str,
+    historical: bool,
+    archive: V4Archive | None,
+    backtest: Mapping[str, Any] | None,
+    model: Mapping[str, Any] | None,
+    last_future: Mapping[str, Any] | None,
+    sensor_ids: Sequence[str],
+    corrected_past: Sequence[tuple[datetime, float]] = (),
+) -> dict[str, Any]:
+    """The ``v4`` block of ``get_chart_data()``: gate verdict, per-sensor past (archived) and future lines.
+
+    Pure and blocking-safe (called from the chart-data executor job). Internal degrees F in, ``unit`` out. Past lines
+    are what v4 said ``lead`` ahead for each 30-minute slot (live archive first, the published backtest for older),
+    for every look-ahead; the page picks one. Everything except the verdict is left empty while the gate is not ready,
+    so a v4 line the backtest has not cleared never reaches the chart. ``_ca`` is not drawn: it follows the sensor
+    Climate Advisor happens to use and jumps when that swaps (the owner's no-swap rule); each real sensor has its line.
+    """
+    tz = now.tzinfo or datetime.now().astimezone().tzinfo
+    assert tz is not None
+    gate = gate_state(backtest)
+    model_out: dict[str, Any] = {"confidence": "none", "fitted_at": None}
+    if isinstance(model, Mapping) and model.get("has_model"):
+        model_out = {"confidence": model.get("confidence", "none"), "fitted_at": model.get("fitted_at")}
+    out: dict[str, Any] = {
+        "ready": gate["ready"],
+        "reason": gate["reason"],
+        "gate": gate["summary"],
+        "model": model_out,
+        "leads": list(CHART_LEADS),
+        "sensors": [],
+        "future": {},
+        "future_at": None,
+        "baseline": {},
+        "past": {},
+        "corrected_outdoor": {"past": [], "future": []},
+    }
+    if not gate["ready"]:
+        return out
+
+    range_days = RANGES.get(range_str, 1.0)
+    bt_points = backtest.get("points") if isinstance(backtest, Mapping) else None
+    ids = [s for s in sensor_ids if s != CA_SENSOR]
+    for sid in ids:
+        per_lead: dict[str, list[dict[str, Any]]] = {}
+        for lead in CHART_LEADS:
+            live = archive.series(sid, lead, start, end) if archive is not None else {}
+            pairs: list[tuple[float, float]] = [(float(slot), v) for slot, v in live.items()]
+            live_slots = set(live)
+            by_sensor = bt_points.get(sid) if isinstance(bt_points, Mapping) else None
+            rows = by_sensor.get(lead) if isinstance(by_sensor, Mapping) else None
+            for item in rows if isinstance(rows, list) else []:
+                if not isinstance(item, Mapping):
+                    continue
+                t = _epoch(item.get("t"))
+                v4 = _num(item.get("v4"))
+                if t is None or v4 is None or not (start <= t < end):
+                    continue
+                if slot_key(datetime.fromtimestamp(t, tz)) in live_slots:
+                    continue
+                pairs.append((t, v4))
+            if pairs:
+                per_lead[lead] = _out_pairs(_downsample_pairs(pairs, range_days, tz), tz, unit)
+        if per_lead:
+            out["past"][sid] = per_lead
+
+    future = last_future.get("predictions") if isinstance(last_future, Mapping) else None
+    if not historical and isinstance(future, Mapping):
+        now_ts = now.timestamp()
+        for sid in ids:
+            pts = [(t.timestamp(), v) for t, v in future.get(sid, []) if t.timestamp() > now_ts and math.isfinite(v)]
+            if pts:
+                out["future"][sid] = _out_pairs(pts, tz, unit)
+        out["future_at"] = last_future.get("at")
+        base = last_future.get("baseline")
+        for sid in ids:
+            pts = [
+                (t.timestamp(), v) for t, v in (base or {}).get(sid, []) if t.timestamp() > now_ts and math.isfinite(v)
+            ]
+            if pts:
+                out["baseline"][sid] = _out_pairs(pts, tz, unit)
+        corrected = last_future.get("corrected") if isinstance(last_future, Mapping) else None
+        if isinstance(corrected, list):
+            out["corrected_outdoor"]["future"] = _out_pairs(
+                [(t.timestamp(), v) for t, v in corrected if t.timestamp() > now_ts], tz, unit
+            )
+    out["corrected_outdoor"]["past"] = _out_pairs(
+        _downsample_pairs([(t.timestamp(), v) for t, v in corrected_past], range_days, tz), tz, unit
+    )
+    out["sensors"] = sorted(set(out["past"]) | set(out["future"]) | set(out["baseline"]), key=ids.index)
+    return out

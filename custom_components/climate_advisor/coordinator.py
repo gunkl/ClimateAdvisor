@@ -15,7 +15,7 @@ import hashlib
 import logging
 import math
 import statistics
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -349,6 +349,8 @@ from .operation_timeline import TIMELINE_TRIGGER_EVENTS, TimelineLatch, Timeline
 from .operation_timeline import detail_dict as timeline_detail_dict
 from .operation_timeline import to_dict as timeline_to_dict
 from .override_confirm_split import ca_expected_mode
+from .prediction_accuracy import RANGES as CHART_RANGE_DAYS
+from .prediction_accuracy import build_chart_v4, gate_state, load_backtest
 from .promise_journal import (
     Command as _PromiseCommand,
 )
@@ -838,6 +840,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_last_fit_attempt: float | None = None
         self._v4_last_fit: dict[str, Any] = {}
         self._v4_last_cycle: dict[str, Any] = {}
+        self._v4_last_future: dict[str, Any] | None = None  # newest 24 h prediction, for the Status chart (R2)
         self._v4_cycle_failed_logged = False
         self._v4_last_archive_save: float | None = None
         # Issue #1230 R3a: the operation timeline in shadow. Computed beside the plan every cycle and on triggers,
@@ -4014,6 +4017,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         upper=_band_upper_cc,
                         nat_vent_target=self._nat_vent_target_now(),
                         indoor_sensors=self._read_chart_indoor_sensors(),
+                        **self._read_chart_context(),
                     )
 
             # Issue #968/#1018: validate the thermostat's reported unit (latched, once checkable).
@@ -4700,6 +4704,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_poll,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
+                    **self._read_chart_context(),
                 )
                 await self._executor_job(self._chart_log.save)
                 _LOGGER.debug(
@@ -5870,6 +5875,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         added = 0
         if predictions and inputs:
             added = self._v4_archive.record(now, predictions, model_dict.get("primary"))
+        # Status chart (R2): keep the newest 24 h lines, the corrected outdoor forecast and the no-plan baseline for
+        # get_chart_data (display only; each extra fails on its own into an empty line).
+        self._v4_last_future = None
+        if predictions and inputs:
+            try:
+                corrected, baseline = await self._executor_job(
+                    functools.partial(
+                        v4_shadow.chart_extras,
+                        model_dict=model_dict,
+                        now=now,
+                        tz=now.tzinfo,
+                        readings=readings,
+                        mass_f=new_mass,
+                        inputs=inputs,
+                        outdoor_now_f=row.get("outdoor"),
+                        forecast_now_f=row.get("pred_outdoor"),
+                    )
+                )
+            except Exception:  # noqa: BLE001 - the extra lines are optional; v4 lines still draw
+                _LOGGER.debug("v4 shadow: chart extras failed", exc_info=True)
+                corrected, baseline = [], {}
+            self._v4_last_future = {
+                "at": now.isoformat(),
+                "predictions": predictions,
+                "corrected": corrected,
+                "baseline": baseline,
+            }
         # The archive file is a few MB: rewrite it at most hourly (and once at shutdown).
         mono = _monotonic()
         last_save = self._v4_last_archive_save
@@ -5925,32 +5957,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         The endpoint builds its payload in the executor from these (shallow copies and the archive object), so no
         coordinator attribute is read off the loop. Read-only: nothing here changes zone state.
         """
-        climate = self.config.get("climate_entity", "")
-        companion = getattr(self, "_indoor_companion_in_use", None)
         model = self._v4_store.v4_model
         ids = [s for s in (model.get("sensors") or []) if isinstance(s, str)] if isinstance(model, dict) else []
         for sid in self._read_chart_indoor_sensors():
             if sid not in ids:
                 ids.append(sid)
-
-        def _name(entity_id: str) -> str:
-            st = self.hass.states.get(entity_id)
-            friendly = st.attributes.get("friendly_name") if st is not None else None
-            return str(friendly) if friendly else entity_id
-
-        def _role(entity_id: str) -> str:
-            if entity_id == companion:
-                return "thermostat's finer sensor"
-            if entity_id == climate:
-                return "thermostat"
-            if entity_id == self.config.get("sleep_indoor_temp_entity"):
-                return "bedroom sensor"
-            return "room sensor"
-
         meta: list[dict[str, str]] = [
             {"id": "_ca", "name": "Climate Advisor reading", "role": "the reading Climate Advisor uses"}
         ]
-        meta.extend({"id": sid, "name": _name(sid), "role": _role(sid)} for sid in ids)
+        meta.extend({"id": m["id"], "name": m["name"], "role": m["role"]} for m in self.v4_indoor_sensors_meta(ids))
         return {
             "zone": self._entry_id,
             "unit": self.config.get("temp_unit", "fahrenheit"),
@@ -5960,6 +5975,100 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "model": self.v4_model_summary(),
             "sensors_meta": meta,
         }
+
+    def v4_indoor_sensors_meta(self, ids: Sequence[str]) -> list[dict[str, Any]]:
+        """``[{id, name, role, primary}]`` for indoor sensor entity ids: friendly name and a plain-language role.
+
+        Used by the prediction-accuracy page and the Status chart (Issue #1230 R2) so both name a sensor the same way.
+        """
+        climate = self.config.get("climate_entity", "")
+        companion = getattr(self, "_indoor_companion_in_use", None)
+        sleep_entity = self.config.get("sleep_indoor_temp_entity")
+        model = getattr(getattr(self, "_v4_store", None), "v4_model", None)
+        primary = (model.get("primary") if isinstance(model, dict) else None) or climate
+
+        def _name(entity_id: str) -> str:
+            try:
+                st = self.hass.states.get(entity_id)
+                friendly = st.attributes.get("friendly_name") if st is not None else None
+            except Exception:  # noqa: BLE001 - a name is cosmetic
+                friendly = None
+            return str(friendly) if isinstance(friendly, str) and friendly else entity_id
+
+        def _role(entity_id: str) -> str:
+            if entity_id == companion:
+                return "thermostat's finer sensor"
+            if entity_id == climate:
+                return "thermostat"
+            if entity_id == sleep_entity:
+                return "bedroom sensor"
+            return "room sensor"
+
+        return [{"id": sid, "name": _name(sid), "role": _role(sid), "primary": sid == primary} for sid in ids]
+
+    def v4_chart_series(
+        self,
+        *,
+        now: datetime,
+        start: float,
+        end: float,
+        range_str: str,
+        unit: str,
+        historical: bool,
+        sensor_ids: Sequence[str],
+        raw_log: Sequence[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """The ``v4`` block of ``get_chart_data()`` (Issue #1230 R2). Runs in the chart-data executor job.
+
+        Occupant view: the Status chart may draw v4's lines next to today's prediction, but only for a zone whose
+        published backtest says v4 beat today's prediction on this house; otherwise it carries just the verdict so the
+        page can say "v4 shown after it passes its accuracy check". DISPLAY ONLY: no decision reads this, and it
+        never raises (a failure reads as "not ready").
+        """
+        off: dict[str, Any] = {"ready": False, "reason": "shadow_off", "gate": None, "leads": [], "sensors": []}
+        try:
+            store = getattr(self, "_v4_store", None)
+            archive = getattr(self, "_v4_archive", None)
+            if store is None or archive is None:
+                return off
+            backtest = load_backtest(Path(self.hass.config.config_dir), self._entry_id)
+            gate = gate_state(backtest)
+            model_dict = store.v4_model if isinstance(store.v4_model, dict) else None
+            corrected_past: list[tuple[datetime, float]] = []
+            if gate["ready"] and model_dict is not None:
+                rows = [r for r in raw_log if r.get("pred_outdoor") is not None and r.get("ts")]
+                times = [parsed for parsed in (dt_util.parse_datetime(r["ts"]) for r in rows) if parsed is not None]
+                if times and len(times) == len(rows):
+                    try:
+                        corrected_past = v4_shadow.corrected_forecast(
+                            model_dict=model_dict,
+                            times=times,
+                            raw_f=[r["pred_outdoor"] for r in rows],
+                            tz=now.tzinfo,
+                        )
+                    except Exception:  # noqa: BLE001 - optional line
+                        _LOGGER.debug("v4 chart: past corrected forecast failed", exc_info=True)
+            ids = list(sensor_ids)
+            for sid in (model_dict.get("sensors") or []) if model_dict else []:
+                if isinstance(sid, str) and sid not in ids:
+                    ids.append(sid)
+            return build_chart_v4(
+                now=now,
+                start=start,
+                end=end,
+                range_str=range_str,
+                unit=unit,
+                historical=historical,
+                archive=archive,
+                backtest=backtest,
+                model=self.v4_model_summary(),
+                last_future=getattr(self, "_v4_last_future", None),
+                sensor_ids=ids,
+                corrected_past=corrected_past,
+            )
+        except Exception:  # noqa: BLE001 - display only; a failure must never break chart_data
+            _LOGGER.debug("v4 chart series failed", exc_info=True)
+            return {**off, "reason": "error"}
 
     def v4_model_summary(self) -> dict[str, Any]:
         """Debug/diagnostics view of the v4 shadow: model confidence, fit time, span, per-lead training MAE.
@@ -8339,6 +8448,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_ov,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
+                    **self._read_chart_context(),
                 )
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
@@ -8480,6 +8590,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_hac,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
+                    **self._read_chart_context(),
                 )
                 await self._executor_job(self._chart_log.save)
 
@@ -13697,6 +13808,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return "cooling"
         return hvac_action
 
+    def _read_chart_context(self) -> dict[str, Any]:
+        """Per-row context for chart_log (Issue #1230 R2): occupancy mode, override/grace flag, the comfort sensor.
+
+        ``occupancy`` draws the Away / Vacation strip, ``override`` the Override / grace strip, ``band_sensor`` names
+        the sensor the Target Band applied to on that row. Read only; never raises into a chart row.
+        """
+        out: dict[str, Any] = {}
+        try:
+            mode = getattr(self, "_occupancy_mode", None)
+            if isinstance(mode, str) and mode:
+                out["occupancy"] = mode
+            engine = self.automation_engine
+            if engine is not None and (bool(engine._manual_override_active) or bool(engine._grace_active)):
+                out["override"] = True
+            source = self._get_indoor_temp_with_provenance().source_entity
+            if isinstance(source, str) and source:
+                out["band_sensor"] = source
+        except Exception:  # noqa: BLE001 - a chart row must never fail on context
+            _LOGGER.debug("chart_log: could not read row context", exc_info=True)
+        return out
+
     def _read_chart_comfort_target(self) -> float | None:
         """The room's comfort target (internal F) while the remote-sensor outer loop holds an offset, else None.
 
@@ -14682,6 +14814,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             e.setdefault("nat_vent_active", False)
             return e
 
+        # Issue #1230 R2: one actual line per indoor sensor (chart_log ``indoor_sensors``, internal F, read from the raw
+        # rows BEFORE _conv_log_entry strips the field), converted once here like actual_indoor/actual_outdoor above.
+        # Occupant view: the hallway and the bedroom each get their own line, so the chart never draws one line across
+        # the moment Climate Advisor swaps which sensor it reads.
+        _sensor_order: list[str] = []
+        _actual_by_sensor: dict[str, list[dict[str, Any]]] = {}
+        for _row in log_entries:
+            _row_ts = _row.get("ts")
+            _readings = _row.get("indoor_sensors")
+            if not _row_ts or not isinstance(_readings, dict):
+                continue
+            for _sid, _val in _readings.items():
+                if _sid not in _sensor_order:
+                    _sensor_order.append(_sid)
+                if _val is not None:
+                    _actual_by_sensor.setdefault(_sid, []).append({"time": _row_ts, "temp": _conv(_val)})
+        _shown_sensor_ids = [sid for sid in _sensor_order if sid in _actual_by_sensor]
+        _window_end = (anchor_dt or now).timestamp()
+        _v4_block = self.v4_chart_series(
+            now=now,
+            start=_window_end - CHART_RANGE_DAYS.get(range_str, 1.0) * 86400.0,
+            end=_window_end,
+            range_str=range_str,
+            unit=unit,
+            historical=is_historical,
+            sensor_ids=_shown_sensor_ids,
+            raw_log=log_entries,
+        )
+        _indoor_sensors_out = self.v4_indoor_sensors_meta(_shown_sensor_ids)
+
         log_entries = [_conv_log_entry(e) for e in log_entries]
 
         # Phase 3 (Investigation B, #786 follow-up): unified "effective target" chart line —
@@ -14829,6 +14991,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "effective_target_history": _effective_target_history,
             "effective_target_forecast": _effective_target_forecast,
             "commanded_setpoint_history": _commanded_setpoint_history,
+            # Issue #1230 R2 (additive): per-sensor actual lines and the v4 block (gate verdict + lines when ready).
+            "indoor_sensors": _indoor_sensors_out,
+            "actual_indoor_sensors": _actual_by_sensor,
+            "v4": _v4_block,
             "unit": unit,
         }
 

@@ -34,6 +34,9 @@ _COORDINATOR_WIRING = {
     "async_shutdown",
     "_async_update_data_impl",
     "get_debug_state",
+    # Issue #1230 R2: the Status chart DISPLAYS v4 (and only for a zone whose backtest gate is ready). Display only:
+    # see test_get_chart_data_only_displays_v4 for how narrowly it may touch v4.
+    "get_chart_data",
 }
 
 
@@ -234,3 +237,23 @@ def test_shadow_methods_write_only_v4_state_and_never_touch_the_engine(name: str
             assert node.attr not in {"automation_engine", "_emit_event", "_emit_incident", "services", "async_call"}, (
                 f"{name} reaches {node.attr}"
             )
+
+
+def test_get_chart_data_only_displays_v4() -> None:
+    """Issue #1230 R2: the Status chart may show v4; get_chart_data touches it in two calls and one payload key.
+
+    The result of ``v4_chart_series`` may only flow into the returned dict (never into a band, target, activity or any
+    other series), so a v4 value can be drawn but can never steer what the chart says Climate Advisor will do.
+    """
+    method = _method("get_chart_data")
+    names = {name for _node, name, where in _coordinator_refs() if "get_chart_data" in where}
+    assert names <= {"v4_chart_series", "v4_indoor_sensors_meta", "_v4_block", "v4"}, names
+    block_uses = [n for n in ast.walk(method) if isinstance(n, ast.Name) and n.id == "_v4_block"]
+    stores = [n for n in block_uses if isinstance(n.ctx, ast.Store)]
+    loads = [n for n in block_uses if isinstance(n.ctx, ast.Load)]
+    assert len(stores) == 1 and len(loads) == 1
+    ret = next(n for n in ast.walk(method) if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict))
+    ret_dict = ret.value
+    assert isinstance(ret_dict, ast.Dict)
+    pairs = {k.value: v for k, v in zip(ret_dict.keys, ret_dict.values, strict=True) if isinstance(k, ast.Constant)}
+    assert isinstance(pairs["v4"], ast.Name) and pairs["v4"].id == "_v4_block"

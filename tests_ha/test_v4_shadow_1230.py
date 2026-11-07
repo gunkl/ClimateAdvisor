@@ -129,3 +129,53 @@ async def test_prediction_accuracy_needs_a_login_and_serves_a_logged_in_client(
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
+
+
+async def test_chart_data_carries_the_status_chart_v2_keys_and_the_v4_gate(
+    hass: HomeAssistant, tmp_path, hass_client, monkeypatch
+) -> None:
+    """Issue #1230 R2 on real HA: chart_data adds per-sensor lines and the v4 block, withholding v4 until the gate."""
+    import json
+    from pathlib import Path
+
+    from custom_components.climate_advisor.const import V4_BACKTEST_FILE
+    from custom_components.climate_advisor.storage_paths import resolve_entry_scoped_path
+
+    _install(monkeypatch)
+    entry = await _setup_zone(hass, tmp_path)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    climate = coordinator.config["climate_entity"]
+    coordinator._chart_log.append(
+        hvac="idle",
+        fan=False,
+        indoor=70.0,
+        outdoor=50.0,
+        indoor_sensors={climate: 70.0, "sensor.bedroom": 66.0},
+    )
+    client = await hass_client()
+
+    resp = await client.get("/api/climate_advisor/chart_data", params={"entry_id": entry.entry_id, "range": "24h"})
+    assert resp.status == 200
+    body = await resp.json()
+    # additive keys, every old key still there
+    for key in ("predicted_indoor", "forecast_outdoor", "actual_indoor", "actual_outdoor", "state_log", "unit"):
+        assert key in body, key
+    assert {climate, "sensor.bedroom"} <= set(body["actual_indoor_sensors"])
+    assert {climate, "sensor.bedroom"} <= {m["id"] for m in body["indoor_sensors"]}
+    assert body["actual_indoor_sensors"]["sensor.bedroom"][-1]["temp"] == 66.0
+    assert all("indoor_sensors" not in e for e in body["state_log"])
+    assert body["v4"]["ready"] is False and body["v4"]["reason"] == "no_backtest"
+    assert body["v4"]["past"] == {} and body["v4"]["future"] == {} and body["v4"]["leads"] == ["1h", "4h", "12h", "24h"]
+
+    # a published, passing backtest opens the gate (the file is read in the executor, never on the loop)
+    path = resolve_entry_scoped_path(Path(hass.config.config_dir), V4_BACKTEST_FILE, entry.entry_id)
+    path.write_text(
+        json.dumps({"gate_summary": {"ready": True, "passed": 6, "scored": 6, "total": 6}}), encoding="utf-8"
+    )
+    resp = await client.get("/api/climate_advisor/chart_data", params={"entry_id": entry.entry_id, "range": "24h"})
+    body = await resp.json()
+    assert body["v4"]["ready"] is True and body["v4"]["gate"]["passed"] == 6
+    assert body["v4"]["corrected_outdoor"] == {"past": [], "future": []}  # no model yet: nothing invented
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()

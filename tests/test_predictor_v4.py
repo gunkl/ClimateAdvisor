@@ -849,3 +849,53 @@ class TestPerformance:
             p4.predict(m, now=samples[100].ts, readings=samples[100].readings, mass_f=None, inputs=ins, tz=TZ)
         per_call = (time.perf_counter() - t1) / 20
         assert per_call < 0.05, f"predict took {per_call * 1000:.1f} ms"
+
+
+class TestCorrectedForecast:
+    """Issue #1230 R2: the Status chart's "corrected forecast" is the same arithmetic ``predict()`` applies."""
+
+    TZ = ZoneInfo("America/Los_Angeles")
+
+    def _model(self, bias: float, tau: float):
+        return p4._default_model(
+            "a",
+            ["a"],
+            "2026-11-06T03:15:00+00:00",
+            p4.thermostat_default(),
+            p4.V4ForecastCorrection(hourly_bias_f=(bias,) * 24, nowcast_tau_h=tau),
+            {},
+        )
+
+    def test_history_adds_only_the_hourly_bias(self):
+        model = self._model(1.5, 3.0)
+        t0 = datetime(2026, 11, 6, 12, 0, tzinfo=self.TZ)
+        times = [t0 + timedelta(hours=k) for k in range(3)]
+        assert p4.corrected_forecast(model, times=times, raw_f=[50.0, 51.0, 52.0], tz=self.TZ) == pytest.approx(
+            [51.5, 52.5, 53.5]
+        )
+
+    def test_future_adds_the_nowcast_miss_decaying_with_lead(self):
+        model = self._model(0.0, 3.0)
+        now = datetime(2026, 11, 6, 12, 0, tzinfo=self.TZ)
+        times = [now + timedelta(hours=k) for k in (0, 3)]
+        out = p4.corrected_forecast(
+            model, times=times, raw_f=[50.0, 50.0], tz=self.TZ, now=now, outdoor_now_f=54.0, forecast_now_f=50.0
+        )
+        assert out[0] == pytest.approx(54.0) and out[1] == pytest.approx(50.0 + 4.0 * math.exp(-1.0))
+
+    def test_predict_uses_the_same_corrected_outdoor(self):
+        model = self._model(2.0, 3.0)
+        t = datetime(2026, 11, 6, 12, 0, tzinfo=self.TZ)
+        assert p4.corrected_forecast(model, times=[t], raw_f=[40.0], tz=self.TZ) == [
+            pytest.approx(
+                p4._corrected_outdoor(
+                    model.forecast,
+                    raw=[40.0],
+                    hours=[12.0],
+                    lead_h=[1e9],
+                    now_hour=12.0,
+                    outdoor_now=None,
+                    forecast_now=None,
+                )[0]
+            )
+        ]

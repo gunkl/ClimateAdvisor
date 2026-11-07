@@ -137,7 +137,7 @@ User view: if the owner rolls back to a release without the shadow, their learne
 
 ## Invariants
 
-1. Zero effect on decisions, Status sensors and the Status chart (above).
+1. Zero effect on decisions and Status sensors (above). The Status chart DISPLAYS v4 since Issue #1230 R2, only for a zone whose backtest `gate_summary.ready is True` (`prediction_accuracy.build_chart_v4`, called from `get_chart_data()` via `v4_chart_series`); `test_get_chart_data_only_displays_v4` pins that the result flows only into the `v4` payload key. The cycle keeps `_v4_last_future` (newest 24 h lines, the corrected outdoor forecast and the no-plan baseline from `v4_shadow.chart_extras`) for it; after a restart the future lines are absent until the first cycle (up to 30 minutes).
 2. A v4 failure never propagates: `_v4_shadow_cycle` catches everything but `CancelledError` (first failure WARNING with traceback, repeats DEBUG, reset by the next success); `_v4_run_fit` keeps the previous model on any exception; `V4Archive.record/load/save` and `V4ModelStore.load/save` never raise.
 3. The archive is first-write-wins and in internal degrees F; unit conversion happens only in the endpoint.
 4. Never two fits at once; a fit result arriving after unload is dropped.

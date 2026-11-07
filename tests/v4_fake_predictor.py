@@ -108,6 +108,11 @@ class FakePredictor:
             fit=dict(d.get("fit") or {}),
         )
 
+    def corrected_forecast(
+        self, model: FakeModel, *, times: Any, raw_f: Any, tz: Any, now: Any = None, **_kw: Any
+    ) -> list:
+        return [float(r) + 1.5 for r in raw_f]  # a constant "learned bias" so the tests can see it was applied
+
     def step_mass(self, model: FakeModel, *, mass_f: float | None, readings: dict, sample: V4Sample) -> float:
         self.step_calls.append({"mass_in": mass_f, "ts": sample.ts})
         base = readings.get(model.primary) if mass_f is None else mass_f

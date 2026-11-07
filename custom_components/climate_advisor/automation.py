@@ -1760,6 +1760,10 @@ class AutomationEngine:
     # actually resuming (see occupancy_restore_hold_reason()). Class-level default for engines
     # built via object.__new__ in tests.
     _occupancy_restore_deferred_pending: bool = False
+    # Issue #1425: True once the thermostat was actually sent a band (or a time-of-use bank) while away/vacation, in
+    # this away period. Reset when the house goes away; a deferred arrival restore is a "still on the setback" hold
+    # only when it is True (a setback a door/window pause skipped never reached the thermostat).
+    _away_setback_sent: bool = False
     # Issue #1050 (#1048 change 21): fan command read-back. Attempts = how many times a CA fan-on
     # was found ignored by the command entity (0 -> next ignore retries once without a grace period;
     # >=1 -> gives up with the normal grace period + one warning episode). Episode fields use
@@ -2735,6 +2739,9 @@ class AutomationEngine:
             mode = OCCUPANCY_HOME
         if mode != self._occupancy_mode:
             _LOGGER.info("Occupancy mode changed: %s → %s", self._occupancy_mode, mode)
+            _away = (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+            if mode in _away and self._occupancy_mode not in _away:
+                self._away_setback_sent = False  # Issue #1425: a new away period; nothing sent for it yet
         self._occupancy_mode = mode
 
     def update_outdoor_temp(self, temp: float | None) -> None:
@@ -5559,6 +5566,8 @@ class AutomationEngine:
         # Issue #1417: a deliberate band write (the overnight pre-cool and its 30-minute re-assert) is a "ran" record
         # for its side even in the mode already armed; selector writes are not deliberate and record nothing.
         self._note_deliberate_command(_cmd_shape, mode_reason, result=_write_result)
+        if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION) and hvac_outcome_label(_write_result) == "sent":
+            self._away_setback_sent = True  # Issue #1425: the thermostat now holds an away/vacation band
 
         # Issue #444, revised by Issue #591/#590 Finding D: _set_temperature() above is always
         # called (unconditional thermostat re-assertion) — only the human-facing ANNOUNCEMENT
@@ -17439,6 +17448,8 @@ class AutomationEngine:
                 )
             self._emit_event_callback("occupancy_setback", _payload)
         if _bank_write is not None:
+            if hvac_outcome_label(_bank_write.result) == "sent":
+                self._away_setback_sent = True  # Issue #1425: the thermostat holds the away/vacation bank
             return
         await self._apply_comfort_band(_band, reason=f"occupancy {mode} — setback band")
 
@@ -17538,8 +17549,10 @@ class AutomationEngine:
         # Issue #1208: the family the restore writes (band-derived), for every log/event/notification below.
         family = self._comfort_restore_family(c)
         if decision.restore_deferred_reason is not None:
-            # Issue #1050 (#1048 #18): the restore waits for the reason to clear.
-            self._occupancy_restore_deferred_pending = True
+            # Issue #1050 (#1048 #18): the restore waits for the reason to clear. Issue #1425: the chart and Status
+            # read the pending marker as "the thermostat is still on the away setback", so it is set only when a
+            # setback was actually sent this away period (a door/window pause that skipped it left nothing to hold).
+            self._occupancy_restore_deferred_pending = self._away_setback_sent
             if decision.restore_deferred_reason == "override_confirm_pending":
                 self._deferred_while_pending = True  # Issue #1133 F-E
             _LOGGER.info(
@@ -17560,6 +17573,7 @@ class AutomationEngine:
                 )
         if decision.restore:
             self._occupancy_restore_deferred_pending = False
+            self._away_setback_sent = False
             _bank_write = await self._bank_takes_occupancy_write("home")
             if _bank_write is None:
                 with self._mode_change_context("restore"):

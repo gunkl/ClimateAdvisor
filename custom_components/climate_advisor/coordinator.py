@@ -3345,11 +3345,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             self._cancel_occupancy_away_timer()
 
+            async def _apply_away_setback() -> None:
+                await self._run_occupancy_handler(OCCUPANCY_AWAY)
+                self._append_occupancy_chart_row("occupancy_setback")  # Issue #1425: the band changes here
+
             @callback
             def _occupancy_away_timer_expired(_now: Any) -> None:
                 self._occupancy_away_timer_cancel = None
                 _LOGGER.info("Occupancy away timer expired — applying setback")
-                self.hass.async_create_task(self._run_occupancy_handler(OCCUPANCY_AWAY))
+                self.hass.async_create_task(_apply_away_setback())
 
             self._occupancy_away_timer_cancel = async_call_later(
                 self.hass,
@@ -3364,6 +3368,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._cancel_tou_av_stop_timer()
             await self._run_occupancy_handler(new_mode)
 
+        # Issue #1425: a chart row at the change itself, so the Away strip and the band start and end when you left
+        # and came home, not at the next 30-minute poll.
+        self._append_occupancy_chart_row("occupancy_change")
         await self._async_save_state()
 
     # ── End occupancy methods ──────────────────────────────────────
@@ -8424,6 +8431,46 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         with ae.occupancy_change():  # scoped to this task (a context variable), not engine-wide
             await handler()
 
+    def _append_occupancy_chart_row(self, event: str) -> None:
+        """Issue #1425: one chart_log row at an occupancy moment -- leaving, coming home (``occupancy_change``) and
+        the away setback being applied or skipped when the away timer expires (``occupancy_setback``).
+
+        Occupant view: without it the band and the Away strip changed only at the next 30-minute poll, so a short Away
+        was a single row (a band spike, a bar off by up to 15 minutes). The band schedule is re-resolved first so the
+        row carries the band of the new occupancy, the same one-choke-point band every other row reads. Never raises:
+        a chart row must never break an occupancy change.
+        """
+        if getattr(self, "_chart_log", None) is None:
+            return
+        try:
+            self._resolve_target_band_schedule()
+            _weather_attrs, _weather_down = self._weather_attrs_and_down()
+            _fan_status = self._compute_fan_status() if self.automation_engine else "disabled"
+            _lower, _upper = self._target_band_lower_upper_now()
+            _LOGGER.debug("chart_log append: event=%s occupancy=%s", event, self._occupancy_mode)
+            self._chart_log.append(
+                hvac=self._read_chart_hvac_action(_fan_status),
+                fan=self._fan_is_running(_fan_status),
+                indoor=self._get_indoor_temp(),
+                outdoor=self._get_outdoor_temp(_weather_attrs, weather_down=_weather_down),
+                windows_open=self._any_sensor_open(),
+                windows_recommended=bool(self._current_classification.windows_recommended)
+                if self._current_classification
+                else False,
+                setpoint=self._read_chart_setpoint(),
+                comfort_target=self._read_chart_comfort_target(),
+                event=event,
+                fan_running=self._fan_physically_running(_fan_status),
+                nat_vent_active=bool(self.automation_engine._natural_vent_active if self.automation_engine else False),
+                lower=_lower,
+                upper=_upper,
+                nat_vent_target=self._nat_vent_target_now(),
+                indoor_sensors=self._read_chart_indoor_sensors(),
+                **self._read_chart_context(),
+            )
+        except Exception:  # noqa: BLE001 - a chart row must never break an occupancy change
+            _LOGGER.debug("chart_log: occupancy row not written (%s)", event, exc_info=True)
+
     async def _apply_tou_schedule(self) -> None:
         """Act on ``self._tou_phase_resolution`` (resolved earlier this cycle by
         ``_resolve_tou_schedule_state()``) — drives the banking setpoint if a
@@ -8561,6 +8608,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         hourly_forecast_override: list[dict] | None = None,
         *,
         with_tou_window: bool = True,
+        occupancy_mode: str | None = None,
     ) -> list[dict]:
         """Compute the target-band schedule for *now* — the single shared implementation
         behind both ``get_chart_data()``'s own on-demand computation (which supplies its
@@ -8572,6 +8620,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         hourly-timestamp list, resolves the pre-cool trigger/target, and calls
         ``_compute_target_band_schedule()`` — no second, independently-maintained copy of
         this block anywhere in the module.
+
+        ``occupancy_mode`` (Issue #1425) overrides the zone's occupancy for a DISPLAY layer only (the home band drawn
+        while the away timer has not applied the setback yet); every decision caller leaves it None.
         """
         _band_timestamps = []
         for _fc_entry in (
@@ -8603,7 +8654,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _compute_target_band_schedule(
                 _band_timestamps,
                 self.config,
-                self._occupancy_mode,
+                occupancy_mode if occupancy_mode is not None else self._occupancy_mode,
                 now,
                 thermal_model=thermal_model,
                 classification=self._current_classification,
@@ -8635,8 +8686,45 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if raw_band is None:
             raw_band = self._build_target_band_for(now, thermal_model, hourly_forecast_override)
         return self._chart_widened_band(
-            self._chart_bank_band(now, thermal_model, hourly_forecast_override, raw_band), now
+            self._chart_bank_band(
+                now,
+                thermal_model,
+                hourly_forecast_override,
+                self._chart_away_pending_band(now, thermal_model, hourly_forecast_override, raw_band),
+            ),
+            now,
         )
+
+    def _chart_away_pending_band(
+        self,
+        now: datetime,
+        thermal_model: dict | None,
+        hourly_forecast_override: list[dict] | None,
+        raw_band: list[dict],
+    ) -> list[dict]:
+        """``_chart_display_band``'s away-timer layer (Issue #1425), DISPLAY ONLY.
+
+        Occupant view: after everyone leaves, Climate Advisor waits ``OCCUPANCY_SETBACK_MINUTES`` before it sends the
+        setback, so the thermostat is still on the home band; the band schedule (the zone's occupancy is already away)
+        drew the setback from the moment you left. While that timer is pending the hour in force now is drawn as the
+        home band. The band schedule itself (prediction, comfort score, chart_log ``lower``/``upper``) is unchanged.
+        """
+        if (
+            not raw_band
+            or self._occupancy_mode != OCCUPANCY_AWAY
+            or getattr(self, "_occupancy_away_timer_cancel", None) is None
+        ):
+            return raw_band
+        try:
+            home = self._build_target_band_for(
+                now, thermal_model, hourly_forecast_override, occupancy_mode=OCCUPANCY_HOME
+            )
+            home_by_ts = {e.get("ts"): e for e in home}
+            now_ts = _band_entry_at(raw_band, now).get("ts")
+            return [home_by_ts.get(now_ts, e) if e.get("ts") == now_ts else e for e in raw_band]
+        except Exception:  # noqa: BLE001 - a display layer must never break the chart
+            _LOGGER.debug("chart away-pending band unavailable", exc_info=True)
+            return raw_band
 
     def _chart_widened_band(self, band: list[dict], now: datetime) -> list[dict]:
         """Away/Vacation: the high-cost period's hours drawn widened (Issue #1404 mirror).

@@ -866,6 +866,8 @@ Nat-vent/WHF ownership is **not** a hold, so arrival behavior during nat-vent is
 
 When a restore WOULD have happened (every classification since Issue #1208: the family is the resolved band's active edge, `_comfort_restore_family()`, not the `hvac_mode` label) but is held, `HomeDecision.restore` is False and `restore_deferred_reason` is set: no `_set_temperature_for_mode()` call and no `occupancy_comfort_restored` event; INFO `Occupancy home -- restore deferred: reason=... mode=...`; event `occupancy_restore_deferred` `{mode, reason, indoor_f}` (windowed 600 s via `_recent_duplicate`, keyed on `reason`); the welcome-home push (still subject to the near-comfort and debounce suppressions) reads "Comfort temperature will resume once {your manual thermostat change / your pending thermostat change / the open door/window} clears." The restore resumes through the normal paths (grace expiry, close/resume, next 30-min cycle). Two holds clear without any event: a pending change that resolves itself (`override_self_resolved`, "no action taken") and an open window that never caused a pause. No dedicated trigger was added for them on purpose: a second restore call site would duplicate the write `apply_classification()` already makes on every regular cycle (a double-write risk) and would re-enter `handle_occupancy_home()`'s push/event dedup. The wait is bounded by the 30-minute cycle, and comfort is already served meanwhile because the held setback band is what the chart shows and what the thermostat holds. The public accessor `occupancy_restore_hold_reason()` stays non-None until the reason clears or occupancy leaves home; `_compute_target_band_schedule(restore_hold=True)` shows the setback band for today's Home timestamps up to `now`, so the chart never claims comfort the engine is not commanding.
 
+**Held only after a setback that was sent (Issue #1425).** The pending marker behind `occupancy_restore_hold_reason()` (`_occupancy_restore_deferred_pending`) is set on a deferral only when `_away_setback_sent` is True: the thermostat was actually sent an away/vacation band (`_apply_comfort_band()` with outcome `sent` while occupancy is away/vacation) or an away/vacation time-of-use bank in this away period. `set_occupancy_mode()` clears it when the house goes away from home/guest (away to vacation keeps it); a restore clears it. A door/window pause that skipped the setback on leaving (`SUPPRESSED_PAUSED`) leaves it False, so coming home with the window still open defers the restore exactly as before but draws the home band: on 2026-11-07 the chart showed the 63-79 F setback at 12:23 while the occupant was home, for a setback the thermostat never received. The marker and the flag live in memory only (a restart clears both, as before).
+
 **Leaving home with an unconfirmed change:** `AwayVacationInputs.override_confirm_pending` makes `decide_away_vacation_dispatch()` set `clear_override = manual_override_active or override_confirm_pending`, so away/vacation cancels the pending change (reusing `clear_manual_override()`) and applies the setback, exactly as for a confirmed override. A door pause still suppresses the setback (Fix #339, above).
 
 Tests: `tests/test_occupancy_restore_hold.py`, `tests/test_phase2_coordinator_followups.py` (chart band, accessor). See [occupancy-dispatch-spec.md](occupancy-dispatch-spec.md).
@@ -4012,7 +4014,7 @@ This logic table MUST be kept current for any changes to automation behavior.
 
 ## 19. Chart Activity Bar Invariants
 
-The temperature forecast chart displays four activity bars fed by `ChartStateLog.append()` in `coordinator.py`. All four append call sites must use these helper methods — do not substitute raw thermostat state strings.
+The temperature forecast chart displays four activity bars fed by `ChartStateLog.append()` in `coordinator.py`. All five append call sites must use these helper methods — do not substitute raw thermostat state strings.
 
 | Bar | Field name | Required source | Frontend color |
 |---|---|---|---|
@@ -4026,11 +4028,12 @@ The temperature forecast chart displays four activity bars fed by `ChartStateLog
 - Use `_read_chart_hvac_action()` at every append site. It encapsulates the #109 fan→heating/cooling remap (only applies when `fan_mode` is auto).
 - Use `_fan_is_running()` for the `fan` field — never `_fan_active` directly. The helper includes ground-truth thermostat fallback for untracked fan runs.
 
-**Four append sites in coordinator.py:**
+**Five append sites in coordinator.py:**
 1. Classification change event (event-driven)
 2. 30-minute poll (periodic)
 3. Manual override event (event-driven)
 4. HVAC action transition event (event-driven)
+5. Occupancy moment (`_append_occupancy_chart_row()`, Issue #1425): `event=occupancy_change` when the occupancy changes (leaving, coming home, guest/vacation) and `event=occupancy_setback` when the away timer expires and the setback is applied or skipped. The band schedule is re-resolved first, so the row carries the new occupancy's band; the Away strip and the band then change at the real moment, not at the next poll.
 
 The 30-minute poll site's `pred_indoor` selection is covered by real-code tests that
 call `ClimateAdvisorCoordinator._select_pred_indoor()` and the real chart-log append

@@ -1129,6 +1129,26 @@ def resolve_active_band(
     )
 
 
+def band_resolver_for(classification: DayClassification, config: dict) -> Callable[[datetime, str], ComfortBand]:
+    """``(instant, occupancy_mode) -> ComfortBand`` for the operation timeline (Issue #1230 R3a).
+
+    The same ``select_comfort_band()`` call ``resolve_active_band()`` makes, but asked about any instant and
+    occupancy, so the timeline reads the engine's own band at every wake/sleep boundary instead of keeping a second
+    copy of the band maths. Read-only: it commands nothing.
+    """
+
+    def _band(at: datetime, occupancy_mode: str) -> ComfortBand:
+        return select_comfort_band(
+            classification,
+            config,
+            occupancy_mode=occupancy_mode,
+            in_sleep_window=_in_sleep_window(at, config),
+            aggressive_savings=bool(config.get("aggressive_savings", False)),
+        )
+
+    return _band
+
+
 def fallback_edges_without_classification(now: datetime, config: dict) -> tuple[float | None, float | None]:
     """Display-only (heat, cool) edges before the first classification exists (Issue #1080).
 
@@ -1462,6 +1482,9 @@ class AutomationEngineCallbacks:
     # Issue #1264: display-only push of the override/grace cards (no automation cycle).
     push_card_status: Callable[[], None] | None = None
     post_grace_fan_check: Callable[[], None] | None = None
+    # Issue #1390: re-run the fan reconcile (fresh inputs) once a reconcile turn-off the 5-minute floor deferred
+    # can land. None (shadow engine, bare tests) -> the deferral is only retried by a later reconcile, as before.
+    deferred_reconcile: Callable[[], None] | None = None
     get_fan_physical_state: Callable[[], Any] | None = None
     is_recent_fan_command: Callable[[], bool] | None = None
     reclassify: Callable[..., None] | None = None
@@ -2287,6 +2310,9 @@ class AutomationEngine:
         # should be adopted from the current fan state (Issue #359).
         # Set by coordinator after construction.
         self._post_grace_fan_check_callback: Callable[[], None] | None = None
+        # Issue #1390: re-runs the reconcile when its deferred turn-off can land; the one-shot timer's cancel.
+        self._deferred_reconcile_callback: Callable[[], None] | None = None
+        self._deferred_reconcile_cancel: Callable[[], None] | None = None
 
         # Reclassify callback — called by _release_whf_and_reclassify() when a manual/remote
         # WHF session ends, so the coordinator re-runs apply_classification() with its own
@@ -2336,6 +2362,10 @@ class AutomationEngine:
 
         # Thermal model — set by coordinator before apply_classification()
         self._thermal_model: dict = {}
+        # Issue #1230 R6b: the coordinator hands the engine a live provider of the thermal-model scalars the
+        # prediction-dependent decisions read (the primary prediction engine's; see ``_control_model``). None on a bare
+        # engine: the decisions then read ``_thermal_model`` itself.
+        self._control_model_provider: Callable[[dict | None], dict | None] | None = None
 
         # Issue #899: away/vacation TOU pre-conditioning — live state pushed by the
         # coordinator each cycle (_resolve_tou_schedule_state()), read by
@@ -2385,6 +2415,7 @@ class AutomationEngine:
         self._request_refresh_callback = callbacks.request_refresh
         self._push_card_status_callback = callbacks.push_card_status
         self._post_grace_fan_check_callback = callbacks.post_grace_fan_check
+        self._deferred_reconcile_callback = callbacks.deferred_reconcile
         self._get_fan_physical_state_callback = callbacks.get_fan_physical_state
         self._is_recent_fan_command_callback = callbacks.is_recent_fan_command
         self._reclassify_callback = callbacks.reclassify
@@ -4819,6 +4850,7 @@ class AutomationEngine:
         indoor_temp: float | None = None,
         nat_vent_cutoff: datetime | None = None,
         nat_vent_cutoff_already_reached: bool = False,
+        tou_bank_owns_setpoint: bool = False,
     ) -> None:
         """Apply a new day classification — adjust HVAC behavior accordingly.
 
@@ -4847,6 +4879,12 @@ class AutomationEngine:
                 crossing already behind us, so ``nat_vent_cutoff`` is only the next grid point after "now").
                 When True the planned window period is over. Callers that pass no cutoff reset both to
                 None/False.
+            tou_bank_owns_setpoint: Issue #1393 -- the coordinator's resolved time-of-use phase this cycle is
+                ``PRECONDITIONING`` (Home/Guest) and ``_apply_tou_schedule()`` runs right after this call and writes
+                the bank target. The comfort band edge is then NOT written here (it would be contradicted in the same
+                second: cool 76 then 68, heat 68 then 76); every other path of this method is unchanged. Honoured only
+                when the shared gate is ``PROCEED`` and no door/window or blower hold applies -- exactly the cases in
+                which ``apply_tou_precondition()`` is guaranteed to write.
         """
         async with self._decision_pass("apply_classification"):
             self._current_classification = classification
@@ -4934,6 +4972,16 @@ class AutomationEngine:
             # override (or anything else) has moved the thermostat off the setback value.
             # Issue #1363: the reapply writes the setpoint, and that write schedules a 5-minute revisit; cancel it
             # like the normal path does below, or Away/Vacation re-sends the same setpoint every 5 minutes.
+            if _gate == ScheduledBandGate.DEFER_OCCUPANCY and self._tou_bank_skips_band_write(tou_bank_owns_setpoint):
+                # Issue #1395 (the Away/Vacation mirror of #1393): the split-delta bank write follows this pass, so the
+                # setback band (cool 82/85, heat mirror) is not written first.
+                _LOGGER.info(
+                    "apply_classification: time-of-use bank owns the setpoint this cycle (%s) -- setback band not "
+                    "written (the bank target is written once by the TOU step)",
+                    self._occupancy_mode,
+                )
+                self._cancel_classification_revisit()
+                return
             if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
                 if self._occupancy_mode == OCCUPANCY_VACATION:
                     _LOGGER.info("Vacation mode — reapplying deep setback instead of comfort temps")
@@ -5089,7 +5137,17 @@ class AutomationEngine:
             )
             # Issue #1371: an overnight pre-cool in force is kept, not overwritten by the plain sleep band.
             _held = self._hold_pre_cool_band(_band)
-            if _held is not _band:
+            if _gate == ScheduledBandGate.PROCEED and self._tou_bank_skips_band_write(tou_bank_owns_setpoint):
+                # Issue #1393: the time-of-use bank owns the setpoint this cycle -- _apply_tou_schedule() writes the
+                # bank target once, right after this pass. Keep the cached intended band (the reactive comfort check
+                # reads it) but do not write the edge the bank target would immediately contradict.
+                self._last_comfort_band = _held
+                _LOGGER.info(
+                    "apply_classification: time-of-use bank owns the setpoint this cycle -- comfort band edge not "
+                    "written (the bank target is written once by the TOU step); day_type=%s",
+                    classification.day_type,
+                )
+            elif _held is not _band:
                 await self._apply_comfort_band(_held, reason=cls_reason + " (pre-cool held)", mode_reason="pre_cool")
             else:
                 await self._apply_comfort_band(_band, reason=cls_reason)
@@ -5111,6 +5169,39 @@ class AutomationEngine:
             await self._apply_ode_ceiling_guard_decision(classification, predicted_indoor, _cls_decision)
 
             self._cancel_classification_revisit()
+
+    def _tou_gate_ignoring_occupancy(self) -> ScheduledBandGate:
+        """The shared scheduled-band gate with the occupancy check taken out (Issue #1395).
+
+        The occupancy answer (``DEFER_OCCUPANCY``) comes first in ``decide_scheduled_band_gate()`` and hides the holds
+        below it. A time-of-use bank (Home/Guest or Away/Vacation) cares only about those: a manual override, a
+        door/window pause, nat-vent or whole-house-fan ownership.
+        """
+        return decide_scheduled_band_gate(
+            occupancy_mode=OCCUPANCY_HOME,
+            manual_override_active=self._manual_override_active,
+            paused_by_door=self._paused_by_door,
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+        )
+
+    def _tou_bank_skips_band_write(self, tou_bank_owns_setpoint: bool) -> bool:
+        """Issue #1393/#1395: True when this pass must not write a band because the time-of-use bank write follows it.
+
+        Only when the coordinator says the bank owns the setpoint AND nothing that would make the band pass pause or
+        hold the thermostat applies (a paused door/window, a settled-open sensor, a blower session): in those cases the
+        band pass keeps its own behaviour, exactly as before the skip existed.
+        """
+        return bool(
+            tou_bank_owns_setpoint
+            and self._tou_gate_ignoring_occupancy() == ScheduledBandGate.PROCEED
+            and not decide_open_sensor_hold(
+                natural_vent_active=self._natural_vent_active,
+                whf_owns_hvac=self._whf_owns_hvac(),
+                any_sensor_settled_open=self._any_monitored_sensor_settled_open(),
+            )
+            and not self._blower_session_holds_hvac_off()
+        )
 
     def _cancel_classification_revisit(self) -> None:
         """Cancel the 5-minute follow-up that this classification pass's own writes scheduled.
@@ -7483,6 +7574,11 @@ class AutomationEngine:
                 target_override=target,
                 skip_setpoint_sanity_check=True,
             )
+        # Issue #1395: the bank write schedules a 5-minute follow-up, which re-runs the whole cycle and so re-writes the
+        # same bank target (and schedules the next follow-up): a write every 5 minutes for the whole bank. The 30-minute
+        # cycle re-asserts and the 5-minute bank check re-banks from the thermostat's state, so cancel it (same rule as
+        # apply_classification(), #96 Root Cause E / #1363).
+        self._cancel_classification_revisit()
 
         # Emit only when the write above actually banked toward `target` — not when
         # _set_temperature_for_mode() redirected to away/vacation setback (Issue #85),
@@ -7542,13 +7638,10 @@ class AutomationEngine:
             return
 
         await self._sync_paused_by_door_with_live_sensors()
-        _gate = decide_scheduled_band_gate(
-            occupancy_mode=self._occupancy_mode,
-            manual_override_active=self._manual_override_active,
-            paused_by_door=self._paused_by_door,
-            natural_vent_active=self._natural_vent_active,
-            whf_owns_hvac=self._whf_owns_hvac(),
-        )
+        # Issue #1395: the shared gate answers DEFER_OCCUPANCY first for Away/Vacation, which hid every hold below it
+        # (override, door/window pause, nat-vent/WHF) from this bank. Ask it with the occupancy check taken out, so the
+        # Away/Vacation bank respects exactly the holds the Home/Guest bank respects.
+        _gate = self._tou_gate_ignoring_occupancy()
         if _gate in (
             ScheduledBandGate.DEFER_OVERRIDE,
             ScheduledBandGate.DEFER_PAUSED,
@@ -7574,6 +7667,7 @@ class AutomationEngine:
                 mode=mode,
                 skip_setpoint_sanity_check=True,
             )
+        self._cancel_classification_revisit()  # Issue #1395: see apply_tou_precondition()
 
         _tou_av_outcome = hvac_outcome_label(_tou_av_result)
         _signature = (schedule_id, mode, round(target, 2), _tou_av_outcome)
@@ -10632,6 +10726,7 @@ class AutomationEngine:
                     _last_correction.isoformat(),
                 )
                 return
+            _prev_correction_at = _last_correction
             self._last_unwarranted_fan_correction_at = _now
 
             # Ensure flags are correct before deactivating — _exit_nat_vent()'s internal
@@ -10667,7 +10762,15 @@ class AutomationEngine:
             # fixed above, but 2 of this method's 4 triggers are event-driven and can
             # fire sub-minute. Without this, a turn-off issued from THIS call site left
             # no lockout timer for a subsequent reconcile call to check.
-            await self._exit_nat_vent(reason=_turn_off_reason, set_outdoor_exit_time=True)
+            _exit_result = await self._exit_nat_vent(reason=_turn_off_reason, set_outdoor_exit_time=True)
+            if _exit_result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+                # Issue #1390: the 5-minute toggle floor deferred the turn-off, and nothing else asks again --
+                # this reconcile runs once (no nat-vent session is left to retry its exit), so the fan was left
+                # running, unmanaged, with the HVAC restore held behind it. Nothing went out, so this is not a
+                # correction for the #446 cooldown (it would refuse the retry), and the reconcile re-runs when
+                # the floor lets the command land, deciding again on fresh readings.
+                self._last_unwarranted_fan_correction_at = _prev_correction_at
+                self._arm_deferred_reconcile_retry(trigger)
         else:
             # Issue #984: FAN_MODE_HVAC, not nat_vent_eligible, AND no monitored sensor
             # open — this is ordinary HVAC-fan circulation (fan_min_runtime_per_hour's
@@ -10704,6 +10807,39 @@ class AutomationEngine:
                 decision,
                 archetype,
             )
+
+    def _arm_deferred_reconcile_retry(self, trigger: str) -> None:
+        """Re-run the fan reconcile once its deferred turn-off can land (Issue #1390).
+
+        One timer at the deferral's ``applies_at`` (+1 s), replacing any earlier one. The coordinator re-reads
+        the fan, the sensors and the temperatures, so a fan that is warranted again by then is adopted, not
+        stopped. No callback (shadow engine, bare tests): the deferral waits for a later reconcile, as before.
+        """
+        if self._deferred_reconcile_callback is None:
+            return
+        if self._deferred_reconcile_cancel is not None:
+            self._deferred_reconcile_cancel()
+            self._deferred_reconcile_cancel = None
+        applies_at = self._fan_rate_limited_until
+        delay_s = (
+            max(0.0, (applies_at - dt_util.now()).total_seconds())
+            if isinstance(applies_at, datetime) and self._fan_rate_limited_direction == "deactivate"
+            else float(FAN_MIN_TOGGLE_INTERVAL_S)
+        ) + 1.0
+        _LOGGER.info(
+            "Fan reconcile (%s): turn-off deferred by the 5-minute floor — reconcile re-runs in %.0fs (Issue #1390)",
+            trigger,
+            delay_s,
+        )
+
+        @callback
+        def _fire(_now: Any) -> None:
+            self._deferred_reconcile_cancel = None
+            if self._shut_down or self._deferred_reconcile_callback is None:
+                return
+            self._deferred_reconcile_callback()
+
+        self._deferred_reconcile_cancel = async_call_later(self.hass, delay_s, _fire)
 
     def _discard_pause_record_for_manual_change(self) -> None:
         """Drop the door/window pause record because the occupant's own thermostat change replaces it.
@@ -14524,11 +14660,24 @@ class AutomationEngine:
         ]
         return max(temps) if temps else None
 
+    def _control_model(self) -> dict:
+        """The thermal-model dict the prediction-dependent decisions read (ceiling guard, nat-vent start veto).
+
+        Occupant view: these guards act on the rates and confidence of the prediction engine chosen in Settings, and on
+        a fresh install's defaults while that engine has not finished learning. The engine never names an engine: it
+        asks the provider the coordinator installed. Without one (a bare engine) it is ``_thermal_model`` unchanged.
+        """
+        base = self._thermal_model or {}
+        provider = getattr(self, "_control_model_provider", None)  # getattr: tests build engines via __new__
+        if provider is None:
+            return base
+        return provider(base) or {}
+
     def _build_nat_vent_start_veto_inputs(
         self, *, now: datetime, indoor: float | None, outdoor: float | None
     ) -> NatVentStartVetoInputs:
         """Inputs for the forecast-peak / thermal-floor start guards (Issue #1138)."""
-        thermal = self._thermal_model or {}
+        thermal = self._control_model()
         return NatVentStartVetoInputs(
             outdoor=outdoor,
             indoor=indoor,
@@ -16497,7 +16646,7 @@ class AutomationEngine:
         resolver's calling convention matches every other ``_resolve_*_fsm_state()``
         dispatcher's shape: one snapshot in, one full decision out.
         """
-        _thermal = self._thermal_model or {}
+        _thermal = self._control_model()
         comfort_cool = self.config.get("comfort_cool")
         inputs = ClassificationFsmInputs(
             occupancy_mode=self._occupancy_mode,
@@ -16555,7 +16704,7 @@ class AutomationEngine:
         if outcome_obj is None or outcome_obj.outcome is OdeCeilingGuardOutcome.NOT_APPLICABLE:
             return
 
-        _thermal = self._thermal_model or {}
+        _thermal = self._control_model()
         _k_passive = _thermal.get("k_passive")
         _conf = _thermal.get("confidence_k_passive") or _thermal.get("confidence", "none")
         _k_via_bridge = bool(_thermal.get("k_passive_via_bridge"))
@@ -16755,6 +16904,28 @@ class AutomationEngine:
         # thermostat to cool (explicit mode switch, change 1) -- do not send a second
         # identical set_hvac_mode moments later.
         _mode_result_cg: HvacCommandResult | None = None  # None: mode call skipped (already cool this cycle)
+        # Issue #1230 R6 (X1): the guard never raises a cool setpoint and never re-sends what the thermostat already
+        # does. When the thermostat is already cooling at or BELOW the guard ceiling -- whoever set it (the comfort
+        # band, the sleep band at 72 against an awake ceiling of 74, an occupant) -- there is nothing to defend: no mode
+        # write, no setpoint write, no ceiling_guard_fired row. Before this rule the primary engine's no-AC forecast
+        # (v4) predicted the breach on every cycle, so every 2 hours the guard re-sent cool + the same setpoint and,
+        # from bedtime, each half hour the sleep band wrote 72 and the guard wrote 74 in the same second (the bedroom
+        # held at 74 instead of 72). An occupant's mode change or a setpoint ABOVE the ceiling fails this test, so the
+        # guard still acts exactly as before (off / heat / cool above the ceiling). Observe-only keeps recording its
+        # would-do.
+        if (
+            not self.dry_run
+            and _old_mode_cg == "cool"
+            and _old_setpoint_f_cg is not None
+            and _old_setpoint_f_cg <= _ceiling_cg + 0.05
+        ):
+            _LOGGER.debug(
+                "ODE ceiling guard: thermostat already cooling at %.1f (<= ceiling %.1f) -- nothing to send",
+                _old_setpoint_f_cg,
+                _ceiling_cg,
+            )
+            self._arm_comfort_family("cooling", dt_util.now())
+            return
         with self._mode_change_context("ode_guard"):
             if self._mode_switch_marker_recent("cool"):
                 _LOGGER.debug(
@@ -20610,6 +20781,9 @@ class AutomationEngine:
         if self._revisit_cancel:
             self._revisit_cancel()
             self._revisit_cancel = None
+        if self._deferred_reconcile_cancel:  # Issue #1390
+            self._deferred_reconcile_cancel()
+            self._deferred_reconcile_cancel = None
         if self._override_confirm_cancel:
             self._override_confirm_cancel()
             self._override_confirm_cancel = None

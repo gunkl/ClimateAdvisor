@@ -765,6 +765,11 @@ class TestBriefingNotificationSplit:
         coord._occupancy_mode = "home"
         coord._apply_outdoor_windows_gate = MagicMock()
         coord._last_predicted_indoor = []
+        # Issue #1230 R6b: the primary engine's prediction and rates feed the decisions. With v3 as the primary (what
+        # this bare mock models) the curve is v3's and the model is the learning engine's, unchanged.
+        coord._refresh_control_prediction = AsyncMock()
+        coord.control_predicted_indoor = MagicMock(side_effect=lambda: coord._last_predicted_indoor)
+        coord.control_thermal_model = MagicMock(side_effect=lambda base: base)
 
         # async_add_executor_job is now awaited by _async_send_briefing for ODE offload.
         # Execute the partial synchronously so patched _build_predicted_indoor_future is used.
@@ -1486,6 +1491,10 @@ class TestBriefingRegeneration:
         coord._occupancy_mode = "home"
         coord._apply_outdoor_windows_gate = MagicMock()
         coord._last_predicted_indoor = []
+        # Issue #1230 R6b: v3 as the primary (what this bare mock models): v3's curve and model, unchanged.
+        coord._refresh_control_prediction = AsyncMock()
+        coord.control_predicted_indoor = MagicMock(side_effect=lambda: coord._last_predicted_indoor)
+        coord.control_thermal_model = MagicMock(side_effect=lambda base: base)
         coord._current_classification = None
 
         # async_add_executor_job is now awaited by _async_update_data/_async_send_briefing for ODE offload.

@@ -1,0 +1,2109 @@
+{
+ "status": {
+  "version": "0.9.4",
+  "day_type": "mild",
+  "trend_direction": "stable",
+  "trend_magnitude": 0.8,
+  "hvac_mode": "heat",
+  "hvac_action": "idle",
+  "hvac_runtime_today": 49.6,
+  "current_setpoint": 69,
+  "target_temp_low": null,
+  "target_temp_high": null,
+  "indoor_temp": 68.0,
+  "sleep_indoor_sensor_active": false,
+  "outdoor_temp": 57.2,
+  "unit": "fahrenheit",
+  "automation_status": "grace period (manual) \u2014 thermostat override \u2014 3h (ends 10:33 PM)",
+  "invariant_violations": [],
+  "promise_summary": {
+   "promises": [
+    {
+     "promise": "comfort_kept",
+     "label": "7: comfort kept",
+     "hits": 2,
+     "last_hit": "2026-11-02T00:17:43.875481-08:00"
+    },
+    {
+     "promise": "whf_sealed",
+     "label": "9: whf sealed",
+     "hits": 1,
+     "last_hit": "2026-11-01T15:04:04.247127-08:00"
+    }
+   ],
+   "total_hits": 3
+  },
+  "hvac_control_issues": [],
+  "entity_health_issues": [],
+  "compliance_score": 0.5685122388078705,
+  "next_action": "Open windows \u2014 outdoor's cooler now (57\u00b0F vs 69\u00b0F).",
+  "next_automation_action": "Bedtime check",
+  "next_automation_time": "8:30 PM",
+  "automation_enabled": true,
+  "occupancy_mode": "home",
+  "fan_status": "inactive",
+  "whf_status": "inactive",
+  "hvac_fan_status": null,
+  "contact_status": "all closed",
+  "contact_sensors": [
+   {
+    "entity_id": "binary_sensor.contacts",
+    "friendly_name": "Contact group",
+    "open": false,
+    "unreadable": false,
+    "last_reading": "closed",
+    "treated_as": "closed"
+   }
+  ],
+  "manual_override_active": true,
+  "fan_override_active": false,
+  "grace_active": true,
+  "fan_off_hold_active": false,
+  "fan_remote_timer_hours": null,
+  "fan_remote_timer_ends": null,
+  "fan_remote_speed": "low",
+  "paused_by_door": false,
+  "pause_suppressed_classification": false,
+  "pause_suppressed_classification_text": null,
+  "ca_target_heat": 68.0,
+  "ca_target_cool": 74.0,
+  "remote_offset": {
+   "state": "inactive",
+   "detail": null,
+   "context": null,
+   "context_label": "Remote sensor",
+   "mode": "heat",
+   "comfort_target": 68.0,
+   "commanded": 68.0,
+   "offset_applied_f": 0.0,
+   "offset_applied": 0.0,
+   "offset_active": false,
+   "expected_setpoint": null,
+   "clamp_limit": null,
+   "gate_reason": null,
+   "last_decision_reason": null,
+   "remote_reading": null,
+   "remote_reading_age_s": null,
+   "unit": "fahrenheit",
+   "text": null
+  },
+  "nat_vent_active": false,
+  "nat_vent_ac_assist": false,
+  "nat_vent_target": null,
+  "nat_vent_on_threshold": null,
+  "nat_vent_off_threshold": null,
+  "pre_cool_status": null,
+  "coordinator_healthy": true,
+  "zone_count": 2,
+  "zones": [
+   {
+    "entry_id": "zone-1",
+    "title": "Zone 1"
+   },
+   {
+    "entry_id": "zone-2",
+    "title": "Simulated 2"
+   }
+  ]
+ },
+ "automation_state": {
+  "automation_enabled": true,
+  "promise_summary": {
+   "promises": [
+    {
+     "promise": "comfort_kept",
+     "label": "7: comfort kept",
+     "hits": 2,
+     "last_hit": "2026-11-02T00:17:43.875481-08:00"
+    },
+    {
+     "promise": "whf_sealed",
+     "label": "9: whf sealed",
+     "hits": 1,
+     "last_hit": "2026-11-01T15:04:04.247127-08:00"
+    }
+   ],
+   "total_hits": 3
+  },
+  "occupancy_mode": "home",
+  "paused_by_door": false,
+  "pause_suppressed_classification": false,
+  "pre_pause_mode": null,
+  "grace_active": true,
+  "last_resume_source": "manual",
+  "grace_end_time": "2026-11-03T06:33:38.697289+00:00",
+  "door_window_sensors": {
+   "binary_sensor.contacts": {
+    "open": false,
+    "friendly_name": "Contact group"
+   }
+  },
+  "pending_debounce_timers": [],
+  "classification": {
+   "day_type": "mild",
+   "trend_direction": "stable",
+   "trend_magnitude": 0.8,
+   "hvac_mode": "off",
+   "windows_recommended": true,
+   "window_open_time": "10:00:00",
+   "window_close_time": "17:00:00",
+   "window_opportunity_morning": false,
+   "window_opportunity_evening": false,
+   "window_opportunity_morning_start": null,
+   "window_opportunity_morning_end": null,
+   "window_opportunity_evening_start": null,
+   "window_opportunity_evening_end": null,
+   "pre_condition": false,
+   "pre_condition_target": null,
+   "setback_modifier": 0.0,
+   "today_low": 47.3,
+   "tomorrow_low": 49.4
+  },
+  "last_action_time": "2026-11-02T18:57:59.387989-08:00",
+  "last_action_reason": "Set temp to 68\u00b0F (mode=heat) \u2014 daily classification \u2014 mild day, trend stable 1\u00b0F",
+  "manual_override_active": true,
+  "manual_override_mode": "heat",
+  "manual_override_time": "2026-11-02T19:33:38.697146-08:00",
+  "manual_grace_duration": 10800,
+  "next_automation_action": "Bedtime check",
+  "next_automation_time": "8:30 PM",
+  "fan_active": false,
+  "fan_on_since": null,
+  "fan_runtime_minutes": 0.0,
+  "thermostat_fan_only_runtime_minutes": 0.0,
+  "fan_override_active": false,
+  "fan_override_time": null,
+  "fan_remote_timer_hours": null,
+  "fan_remote_timer_ends": null,
+  "fan_remote_speed": "low",
+  "fan_mode_config": "whole_house_fan",
+  "comfort_family_armed": "heating",
+  "comfort_family_hold": null,
+  "comfort_family_last_switch": null,
+  "economizer_active": false,
+  "economizer_phase": "inactive",
+  "resumed_from_pause": false,
+  "occupancy_away_timer_pending": false,
+  "unit": "fahrenheit",
+  "unit_mismatch": false,
+  "provider_unit": "fahrenheit",
+  "configured_unit": "fahrenheit",
+  "ha_system_unit": "fahrenheit",
+  "ha_unit_mismatch": false,
+  "sensor_unit_mismatches": {},
+  "thermal_pipeline": {
+   "pending": [
+    {
+     "obs_type": "passive_decay",
+     "status": "monitoring",
+     "elapsed_minutes": 30.8,
+     "sample_count": 6,
+     "last_sample_age_minutes": 0.8,
+     "indoor_range_f": [
+      68.0,
+      69.0
+     ],
+     "indoor_delta_f": 1.0,
+     "outdoor_f": 57.4
+    }
+   ],
+   "rejection_log_counts": {
+    "ventilated_decay": 100,
+    "solar_gain": 100,
+    "passive_decay": 100,
+    "hvac_heat": 30,
+    "hvac_cool": 100,
+    "fan_only_decay": 34,
+    "vent_window_decay": 100,
+    "vent_fan_decay": 100
+   }
+  },
+  "startup_coalesce_active": false,
+  "startup_coalesce_seconds_remaining": null,
+  "decision_lock_holder": null,
+  "decision_lock_held_seconds": null,
+  "grace_stuck": false,
+  "nat_vent_active": false,
+  "nat_vent_soft_start": false,
+  "nat_vent_ac_assist": false,
+  "nat_vent_target": null,
+  "nat_vent_on_threshold": null,
+  "nat_vent_off_threshold": null,
+  "nat_vent_cycling_paused": false,
+  "v4_model": {
+   "confidence": "ok",
+   "fitted_at": "2026-11-02T03:15:00-08:00",
+   "span_days": 30,
+   "training_mae": 0.7
+  }
+ },
+ "learning": {
+  "today_record": {
+   "date": "2026-11-02",
+   "day_type": "mild",
+   "trend_direction": "stable",
+   "windows_recommended": true,
+   "window_open_time": "10:00:00",
+   "window_close_time": "17:00:00",
+   "hvac_mode_recommended": "off",
+   "windows_physically_opened": true,
+   "window_physical_open_time": "2026-11-02T09:08:30.108685-08:00",
+   "window_physical_close_time": "2026-11-02T11:11:04.980779-08:00",
+   "windows_opened": true,
+   "window_open_actual_time": "2026-11-02T15:04:03.400190-08:00",
+   "window_close_actual_time": "2026-11-02T16:24:04.999708-08:00",
+   "hvac_runtime_minutes": 49.58457303333334,
+   "thermostat_fan_only_runtime_minutes": 0.0,
+   "occupancy_away_minutes": 58.69901411666667,
+   "occupancy_mode": "home",
+   "door_window_pause_events": 2,
+   "door_pause_by_sensor": {
+    "group_contact_sensors_climate_advisor": 2
+   },
+   "manual_overrides": 6,
+   "override_details": [
+    {
+     "time": "06:12",
+     "old_temp": 66.0,
+     "new_temp": 68.0,
+     "direction": "up",
+     "magnitude": 2.0
+    },
+    {
+     "time": "06:48",
+     "old_temp": 68.0,
+     "new_temp": 69.0,
+     "direction": "up",
+     "magnitude": 1.0
+    },
+    {
+     "time": "07:34",
+     "old_temp": 68.0,
+     "new_temp": 69.0,
+     "direction": "up",
+     "magnitude": 1.0
+    },
+    {
+     "time": "07:46",
+     "old_temp": 69.0,
+     "new_temp": 68.0,
+     "direction": "down",
+     "magnitude": 1.0
+    },
+    {
+     "time": "16:50",
+     "old_temp": 68.0,
+     "new_temp": 69.0,
+     "direction": "up",
+     "magnitude": 1.0
+    },
+    {
+     "time": "19:23",
+     "old_temp": 68.0,
+     "new_temp": 69.0,
+     "direction": "up",
+     "magnitude": 1.0
+    }
+   ],
+   "avg_indoor_temp": null,
+   "comfort_violations_minutes": 793.4701165166666,
+   "estimated_cost": null,
+   "suggestion_sent": [],
+   "suggestion_response": null,
+   "thermal_session_count": 4,
+   "thermal_plateau_count": 0,
+   "peak_hvac_rate_f_per_hour": null,
+   "forecast_high_f": 67.0,
+   "forecast_low_f": 49.0,
+   "observed_high_f": null,
+   "observed_low_f": null,
+   "setback_heat_applied_f": null,
+   "setback_cool_applied_f": null,
+   "setback_depth_f": null,
+   "setback_was_adaptive": null,
+   "setback_skipped_reason": null
+  },
+  "yesterday_record": {
+   "date": "2026-11-01",
+   "day_type": "mild",
+   "trend_direction": "warming",
+   "windows_recommended": true,
+   "window_open_time": "10:00:00",
+   "window_close_time": "17:00:00",
+   "hvac_mode_recommended": "off",
+   "windows_physically_opened": true,
+   "window_physical_open_time": "2026-11-01T09:14:57.587450-08:00",
+   "window_physical_close_time": "2026-11-01T09:56:33.522118-08:00",
+   "windows_opened": false,
+   "window_open_actual_time": null,
+   "window_close_actual_time": null,
+   "hvac_runtime_minutes": 46.753745099999996,
+   "thermostat_fan_only_runtime_minutes": 0.0,
+   "occupancy_away_minutes": 39.71920548333333,
+   "occupancy_mode": "home",
+   "door_window_pause_events": 1,
+   "door_pause_by_sensor": {
+    "group_contact_sensors_climate_advisor": 1
+   },
+   "manual_overrides": 3,
+   "override_details": [
+    {
+     "time": "06:10",
+     "old_temp": 66.0,
+     "new_temp": 68.0,
+     "direction": "up",
+     "magnitude": 2.0
+    },
+    {
+     "time": "07:02",
+     "old_temp": 68.0,
+     "new_temp": 69.0,
+     "direction": "up",
+     "magnitude": 1.0
+    },
+    {
+     "time": "10:32",
+     "old_temp": 68.0,
+     "new_temp": 69.0,
+     "direction": "up",
+     "magnitude": 1.0
+    }
+   ],
+   "avg_indoor_temp": 67.6,
+   "comfort_violations_minutes": 765.5835016499997,
+   "estimated_cost": null,
+   "suggestion_sent": [],
+   "suggestion_response": null,
+   "thermal_session_count": 6,
+   "thermal_plateau_count": 0,
+   "peak_hvac_rate_f_per_hour": null,
+   "forecast_high_f": 64.0,
+   "forecast_low_f": 49.0,
+   "observed_high_f": 69.3,
+   "observed_low_f": 50.0,
+   "setback_heat_applied_f": null,
+   "setback_cool_applied_f": null,
+   "setback_depth_f": null,
+   "setback_was_adaptive": null,
+   "setback_skipped_reason": null
+  },
+  "tomorrow_plan": {
+   "date": "2026-11-03",
+   "day_type": "mild",
+   "trend_direction": "stable",
+   "hvac_mode": "off",
+   "windows_recommended": false,
+   "window_open_time": "10:00:00",
+   "window_close_time": "17:00:00",
+   "pre_condition": false,
+   "expected_high": 66.3,
+   "expected_low": 49.4
+  },
+  "suggestions": [],
+  "compliance": {
+   "status": "active",
+   "days_recorded": 91,
+   "window_compliance": 0.7142857142857143,
+   "window_compliance_denominator": 14,
+   "avg_daily_hvac_runtime_minutes": 120.64475541309524,
+   "avg_daily_thermostat_fan_only_runtime_minutes": 0.0,
+   "comfort_score": 0.5685122388078705,
+   "total_manual_overrides": 17,
+   "pending_suggestions": 0
+  },
+  "comfort_range_low": 68.0,
+  "comfort_range_high": 74.0,
+  "unit": "fahrenheit"
+ },
+ "engines": {
+  "k_passive": {
+   "active": true,
+   "value": -0.023497414487469743,
+   "confidence": "high"
+  },
+  "k_solar": {
+   "active": true,
+   "value": 0.7246585171781443,
+   "confidence": "high"
+  },
+  "solar_phase_offset_h": {
+   "active": true,
+   "value": 3.231073227730141
+  },
+  "k_vent_window": {
+   "active": true,
+   "value": -0.10224389577129969
+  },
+  "k_vent_fan": {
+   "active": true,
+   "value": -0.1493111900580408
+  },
+  "k_active_hvac": {
+   "active": true,
+   "value": {
+    "heat": 5.55421357007801,
+    "cool": -6.128648864608749
+   },
+   "confidence": "high"
+  },
+  "ode_version": "v3",
+  "physics_eligible": true,
+  "physics_eligible_reason": "k_passive + confidence=high",
+  "unit": "fahrenheit",
+  "v4": {
+   "confidence": "ok",
+   "span_days": 30
+  }
+ },
+ "ai_status": {
+  "status": {
+   "status": "active",
+   "error_count": 4,
+   "total_requests": 160,
+   "last_request_time": null,
+   "model": "claude-sonnet-5",
+   "circuit_breaker_state": "closed",
+   "monthly_cost_estimate": 0.0,
+   "auto_requests_today": 0,
+   "manual_requests_today": 0,
+   "investigator_requests_today": 1,
+   "investigator_requests_limit": 10,
+   "investigator_enabled": true
+  },
+  "recent_requests": []
+ },
+ "briefing": {
+  "briefing": "\ud83c\udfe0 Your Home Climate Plan for Today\n========================================\n\n  Day Type: Mild (67\u00b0F)\n  HVAC Mode: Comfort band 68\u201374\u00b0F (windows day)\n  Windows: Close by 5:00 PM\n  Bedtime Setback: No setback\n  Tomorrow: Stable (66\u00b0F)\n\nA day where the house practically takes care of itself. I warmed to 68\u00b0F before sunrise \u2014 now the weather does the rest and the thermostat holds 68\u201374\u00b0F.\n\nOpen south and east windows for a natural cross-breeze that freshens the air and warms the house for free.\n\nClose up by 5:00 PM to trap the warmth. If the house dips below 68\u00b0F tonight, the heater comes back on automatically.\n\nIf you head out, not much changes today \u2014 after about 15 minutes I'll widen the band to 63\u201379\u00b0F to save energy, and restore comfort when you're back.\n\nIf you want to open a window for some fresh air, go for it \u2014 the thermostat is holding 68\u201374\u00b0F today. Enjoy the breeze. If the heat or AC does need to run while a window is still open, I'll give it 10 minutes and then pause until you close up.\n\nOne heads-up: you manually turned the HVAC back on earlier, so I'm in a 180 minutes hands-off window right now. During that window, opening a door or window won't trigger a pause \u2014 I'm giving you space to settle in without the system jumping in. Once the window closes, door/window sensing goes back to normal.\n\nTomorrow looks pretty similar to today \u2014 66\u00b0F for a high. Nothing special planned overnight.",
+  "briefing_sent_today": true,
+  "verbosity": "normal"
+ },
+ "config": {
+  "settings": [
+   {
+    "key": "weather_entity",
+    "value": "weather.forecast_home",
+    "label": "Weather Entity",
+    "description": "The weather integration used for forecast data. Determines day type classification and all downstream automation decisions.",
+    "category": "core"
+   },
+   {
+    "key": "climate_entity",
+    "value": "climate.hallway",
+    "label": "Thermostat Entity",
+    "description": "The climate entity Climate Advisor controls. All HVAC mode and temperature commands go to this entity.",
+    "category": "core"
+   },
+   {
+    "key": "comfort_heat",
+    "value": 68.0,
+    "label": "Comfort Heat",
+    "description": "Target temperature when heating is active. Lowering saves energy but may feel cooler. Used for morning wake-up and occupancy-home restores.",
+    "category": "setpoints",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "comfort_cool",
+    "value": 74.0,
+    "label": "Comfort Cool",
+    "description": "Target temperature when cooling is active. Raising saves energy but may feel warmer. The economizer uses this as the threshold for window cooling decisions.",
+    "category": "setpoints",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "setback_heat",
+    "value": 63.0,
+    "label": "Setback Heat",
+    "description": "Temperature when heating and away from home. Lower values save more energy but take longer to recover when you return.",
+    "category": "setpoints",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "setback_cool",
+    "value": 79.0,
+    "label": "Setback Cool",
+    "description": "Temperature when cooling and away from home. Higher values save more energy but take longer to cool down when you return.",
+    "category": "setpoints",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "notify_service",
+    "value": "configured",
+    "label": "Notification Service",
+    "description": "The HA notify service used for alerts and briefings (e.g., notify.mobile_app).",
+    "category": "core"
+   },
+   {
+    "key": "temp_unit",
+    "value": "fahrenheit",
+    "label": "Temperature Unit",
+    "description": "Whether setpoints and displayed temperatures use Fahrenheit or Celsius. Setpoints are stored internally in Fahrenheit; changing this unit affects how they are displayed and entered in the UI.",
+    "category": "core"
+   },
+   {
+    "key": "outdoor_temp_source",
+    "value": "Dedicated sensor \u2014 sensor.outside_temp_temperature",
+    "label": "Outdoor Temp Source",
+    "description": "Where outdoor temperature is read from: the weather service, a dedicated sensor, or an input_number helper. The Settings value also names the selected sensor, and says so when it has failed and the weather service is in use instead.",
+    "category": "sensors"
+   },
+   {
+    "key": "indoor_temp_source",
+    "value": "Thermostat's built-in sensor",
+    "label": "Indoor Temp Source",
+    "description": "Where indoor temperature is read from: the thermostat's built-in sensor, a dedicated sensor, or an input_number helper.",
+    "category": "sensors"
+   },
+   {
+    "key": "sleep_indoor_temp_entity",
+    "value": "sensor.primary_bedroom_temperature_temperature",
+    "label": "Sleep Indoor Temp Sensor",
+    "description": "Optional bedroom sensor used for comfort and automation decisions while your sleep schedule is active (the thermal model always uses the primary sensor). Falls back to the primary sensor if unavailable. Leave blank to disable.",
+    "category": "sensors"
+   },
+   {
+    "key": "door_window_sensors",
+    "value": "1 configured",
+    "label": "Door/Window Sensors",
+    "description": "Binary sensors that detect open doors and windows. When open past the debounce period, HVAC pauses to avoid wasting energy.",
+    "category": "sensors"
+   },
+   {
+    "key": "sensor_polarity_inverted",
+    "value": false,
+    "label": "Sensor Polarity Inverted",
+    "description": "Enable if your sensors report 'off' when open (some reed switches work this way). Incorrect polarity means HVAC pauses when doors are closed.",
+    "category": "sensors"
+   },
+   {
+    "key": "sensor_debounce_seconds",
+    "value": 10,
+    "label": "Sensor Debounce (minutes)",
+    "description": "How long a door/window sensor's state must hold steady before Climate Advisor acts on it \u2014 pausing/resuming HVAC, or engaging/exiting natural-ventilation fan control (whole-house fan or HVAC fan). Applies to every controlled device, not just HVAC. Short values react faster but are more exposed to quick trips through a door or a flaky sensor bounce; longer values are steadier but slower to respond to a genuine change.",
+    "category": "sensors"
+   },
+   {
+    "key": "manual_grace_seconds",
+    "value": 180,
+    "label": "Manual Grace Period (minutes)",
+    "description": "After you manually change the thermostat \u2014 either the HVAC mode or the target temperature \u2014 CA waits this many minutes before resuming automated setpoint control. Also prevents re-pausing if a door/window opens during this window. Default: 30 minutes.",
+    "category": "sensors"
+   },
+   {
+    "key": "manual_grace_notify",
+    "value": true,
+    "label": "Push: Manual Grace Expired",
+    "description": "Push notification when manual grace expires and normal behavior resumes.",
+    "category": "notifications"
+   },
+   {
+    "key": "automation_grace_seconds",
+    "value": 5,
+    "label": "Automation Grace Period (minutes)",
+    "description": "After Climate Advisor resumes HVAC (all doors/windows closed), this grace window prevents immediate re-pausing if a door opens briefly.",
+    "category": "sensors"
+   },
+   {
+    "key": "automation_grace_notify",
+    "value": true,
+    "label": "Push: Automation Grace Expired",
+    "description": "Send a push notification when the automation grace period expires.",
+    "category": "notifications"
+   },
+   {
+    "key": "override_confirm_seconds",
+    "value": 10,
+    "label": "Override Confirmation Delay (minutes)",
+    "description": "Time between system changes and confirmation of manual override. When a change looks like a manual override, Climate Advisor waits this long before formally accepting it. Transient events (thermostat restart, fan cycle) that resolve within the window are ignored. Set to 0 to confirm overrides immediately.",
+    "category": "sensors"
+   },
+   {
+    "key": "fan_mode",
+    "value": "whole_house_fan",
+    "label": "Fan Control Mode",
+    "description": "Controls how fans assist ventilation. 'Whole house fan' controls a dedicated entity. 'HVAC fan' uses the thermostat fan mode. Fan activates during economizer maintain phase.",
+    "category": "fan"
+   },
+   {
+    "key": "hvac_fan_restrict_mode",
+    "value": "both",
+    "label": "HVAC Fan Mode Restriction",
+    "description": "Restricts when the HVAC fan (thermostat blower circulation) is allowed to run, based on which HVAC mode last ran. Does not affect the whole-house fan. 'Heat only' blocks the HVAC fan while the thermostat is in cool mode, or off within 2 hours of a cooling cycle \u2014 avoids raising humidity by re-evaporating condensate off wet coils, useful in humid climates. 'Cool only' is the symmetric restriction. 'Both' (default) applies no restriction \u2014 current behavior.",
+    "category": "fan"
+   },
+   {
+    "key": "nat_vent_soft_start_enabled",
+    "value": true,
+    "label": "Nat-Vent Soft-Start (Purge Mode)",
+    "description": "When enabled, the whole-house fan may start at outdoor/indoor temperature parity (not waiting for outdoor to be measurably cooler) once today's outdoor temperature is confirmed past its peak and declining \u2014 for air movement and attic/thermal-mass purge, not bulk cooling. On by default; disable if you only want the fan to run once outdoor is measurably cooler than indoor. No humidity/dew-point sensor guards this today.",
+    "category": "fan"
+   },
+   {
+    "key": "fan_entity",
+    "value": "fan.basement_quietcool_transmitter_quietcool_whole_house_fan",
+    "label": "Fan Entity",
+    "description": "The fan or switch entity to control for whole-house ventilation. Only used when fan mode is 'whole_house_fan' or 'both'.",
+    "category": "fan"
+   },
+   {
+    "key": "fan_remote_entity",
+    "value": "event.basement_quietcool_transmitter_quietcool_remote",
+    "label": "Fan RF Remote Event Entity",
+    "description": "Optional event entity (e.g. from the gunkl/quietcool-house-fan ESPHome firmware) that fires when the physical RF wall remote is pressed. When set, a remote timer selection (1/2/4/8/12 hours) sets the duration of the fan manual-override grace period, so CA honors the user's chosen runtime instead of the configured default. Leave blank to disable \u2014 no subscription is created and behavior is unchanged.",
+    "category": "fan"
+   },
+   {
+    "key": "fan_state_entity",
+    "value": "input_boolean.quietcool_detectpower",
+    "label": "Fan State Entity",
+    "description": "Optional separate sensor entity to read the actual physical state of the whole-house fan. Use when the fan has a dedicated control entity and a separate state sensor (WHF dual-entity). If left blank, the Fan Entity is used for both control and state.",
+    "category": "fan"
+   },
+   {
+    "key": "fan_state_feedback",
+    "value": true,
+    "label": "Fan state feedback reliable",
+    "description": "Turn ON if your fan entity or state sensor reports actual motor state (not just the last command sent). Leave OFF if you're not sure \u2014 CA will command the fan to the desired state on every cycle without reading back the entity state. Physical wall-switch overrides are undetectable when OFF.",
+    "category": "fan"
+   },
+   {
+    "key": "fan_min_runtime_per_hour",
+    "value": 0.0,
+    "label": "Fan Minimum Runtime Per Hour",
+    "description": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). Activates the fan for the specified duration each hour for air circulation. The cycle start time is offset from the clock hour based on when HA started.",
+    "category": "fan"
+   },
+   {
+    "key": "home_toggle_entity",
+    "value": "input_boolean.anyone_home",
+    "label": "Home/Away Toggle",
+    "description": "An entity that indicates whether someone is home. ON = home, OFF = away. Climate Advisor applies setback temperatures when away.",
+    "category": "occupancy"
+   },
+   {
+    "key": "home_toggle_invert",
+    "value": false,
+    "label": "Invert Home Toggle",
+    "description": "Enable if your toggle reports ON when you're away and OFF when you're home.",
+    "category": "occupancy"
+   },
+   {
+    "key": "vacation_toggle_entity",
+    "value": "input_boolean.vacation_mode",
+    "label": "Vacation Mode Toggle",
+    "description": "An entity that indicates vacation mode. When active, Climate Advisor applies a deeper temperature setback for extended energy savings.",
+    "category": "occupancy"
+   },
+   {
+    "key": "vacation_toggle_invert",
+    "value": false,
+    "label": "Invert Vacation Toggle",
+    "description": "Enable if your toggle reports ON when you're NOT on vacation.",
+    "category": "occupancy"
+   },
+   {
+    "key": "guest_toggle_entity",
+    "value": "input_boolean.guest_mode",
+    "label": "Guest Mode Toggle",
+    "description": "An entity that indicates guests are present. Overrides vacation and away modes \u2014 the house stays at comfort temperature while guests are visiting.",
+    "category": "occupancy"
+   },
+   {
+    "key": "guest_toggle_invert",
+    "value": false,
+    "label": "Invert Guest Toggle",
+    "description": "Enable if your toggle reports ON when guests are NOT present.",
+    "category": "occupancy"
+   },
+   {
+    "key": "welcome_home_debounce_seconds",
+    "value": 60,
+    "label": "Welcome Home Quiet Period (minutes)",
+    "description": "Minimum time between welcome home notifications. If someone leaves and returns within this window, the notification is suppressed. Set to 0 to always notify.",
+    "category": "occupancy"
+   },
+   {
+    "key": "wake_time",
+    "value": "06:30",
+    "label": "Wake Time",
+    "description": "When morning comfort temperatures are restored. Earlier times mean the house is comfortable when you get up but use more energy overnight.",
+    "category": "schedule"
+   },
+   {
+    "key": "sleep_time",
+    "value": "20:30",
+    "label": "Sleep Time",
+    "description": "When bedtime temperatures take effect. The system transitions to your sleep temperatures at this time.",
+    "category": "schedule"
+   },
+   {
+    "key": "sleep_heat",
+    "value": 66.0,
+    "label": "Sleep Temperature (Heat)",
+    "description": "Target temperature during sleep hours when you are home. Independent from your away setback \u2014 use this to stay warmer at night than when you leave the house.",
+    "category": "setpoints",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "sleep_cool",
+    "value": 72.0,
+    "label": "Sleep Temperature (Cool)",
+    "description": "Target temperature during sleep hours when you are home. Independent from your away setback \u2014 use this to stay cooler at night than when you leave the house.",
+    "category": "setpoints",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "briefing_time",
+    "value": "06:00",
+    "label": "Briefing Time",
+    "description": "When the daily climate briefing is generated and sent. Should be before wake_time so you see it when you get up.",
+    "category": "schedule"
+   },
+   {
+    "key": "learning_enabled",
+    "value": true,
+    "label": "Learning Engine",
+    "description": "When enabled, Climate Advisor tracks patterns (manual overrides, window compliance, runtime) and generates adaptive suggestions over time.",
+    "category": "advanced"
+   },
+   {
+    "key": "adaptive_preheat_enabled",
+    "value": true,
+    "label": "Adaptive Pre-heat Timing",
+    "description": "Use learned heating rate to compute pre-heat start time.",
+    "category": "advanced"
+   },
+   {
+    "key": "adaptive_setback_enabled",
+    "value": true,
+    "label": "Adaptive Bedtime Setback",
+    "description": "Use learned heating/cooling rate to compute maximum safe setback depth.",
+    "category": "advanced"
+   },
+   {
+    "key": "weather_bias_enabled",
+    "value": true,
+    "label": "Weather Forecast Bias Correction",
+    "description": "Apply a location-specific correction to tomorrow's forecast based on observed forecast accuracy.",
+    "category": "advanced"
+   },
+   {
+    "key": "min_preheat_minutes",
+    "value": 30,
+    "label": "Minimum Pre-heat Time (min)",
+    "description": "Shortest pre-heat window the system will ever schedule.",
+    "category": "advanced"
+   },
+   {
+    "key": "max_preheat_minutes",
+    "value": 240,
+    "label": "Maximum Pre-heat Time (min)",
+    "description": "Longest pre-heat window the system will ever schedule.",
+    "category": "advanced"
+   },
+   {
+    "key": "default_preheat_minutes",
+    "value": 120,
+    "label": "Default Pre-heat Time (min)",
+    "description": "Pre-heat duration used before enough observations are collected.",
+    "category": "advanced"
+   },
+   {
+    "key": "default_tou_lead_minutes",
+    "value": 45,
+    "label": "Default TOU Pre-conditioning Lead Time (min)",
+    "description": "How long before a scheduled high-cost period the system starts pre-conditioning, used until enough heat/cool cycles are observed to compute your home's actual rate.",
+    "category": "advanced"
+   },
+   {
+    "key": "preheat_safety_margin",
+    "value": 1.3,
+    "label": "Pre-heat Safety Margin",
+    "description": "Multiplier applied to model-computed pre-heat time as a buffer (e.g. 1.2 = 20% extra).",
+    "category": "advanced"
+   },
+   {
+    "key": "max_setback_depth_f",
+    "value": 8.0,
+    "label": "Maximum Setback Depth",
+    "description": "Largest overnight setback the adaptive engine may compute.",
+    "category": "advanced",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "comfort_mode_switch_min_interval_s",
+    "value": null,
+    "label": "Minimum Time Between Heat/Cool Switches (sec)",
+    "description": "Minimum wait between routine heat/cool switches, to prevent rapid back-and-forth. A real breach (indoor temp actually past a comfort edge) ignores this wait and switches immediately.",
+    "category": "advanced"
+   },
+   {
+    "key": "comfort_deadband_hot_f",
+    "value": null,
+    "label": "Comfort Edge Overshoot Tolerance \u2014 Hot Days",
+    "description": "On a hot day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a hot day this applies to switching to heating (the cooling side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
+    "category": "advanced"
+   },
+   {
+    "key": "comfort_deadband_warm_f",
+    "value": null,
+    "label": "Comfort Edge Overshoot Tolerance \u2014 Warm Days",
+    "description": "On a warm day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a warm day this applies to switching to heating (the cooling side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
+    "category": "advanced"
+   },
+   {
+    "key": "comfort_deadband_mild_f",
+    "value": null,
+    "label": "Comfort Edge Overshoot Tolerance \u2014 Mild Days",
+    "description": "On a mild or off-classified day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. Mild days have no favored side, so this applies to both heat and cool. Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
+    "category": "advanced"
+   },
+   {
+    "key": "comfort_deadband_cool_f",
+    "value": null,
+    "label": "Comfort Edge Overshoot Tolerance \u2014 Cool Days",
+    "description": "On a cool day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a cool day this applies to switching to cooling (the heating side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
+    "category": "advanced"
+   },
+   {
+    "key": "comfort_deadband_cold_f",
+    "value": null,
+    "label": "Comfort Edge Overshoot Tolerance \u2014 Cold Days",
+    "description": "On a cold day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a cold day this applies to switching to cooling (the heating side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
+    "category": "advanced"
+   },
+   {
+    "key": "comfort_family_recency_window_min",
+    "value": null,
+    "label": "Recent Run Window (min)",
+    "description": "How long the heat or cool side counts as having \"recently run\" (equipment that actually ran, or a time-of-use, predicted-ceiling or you-initiated mode change; not every Climate Advisor write). Used by the overshoot tolerance above (a small overshoot inside this window does not flip the thermostat to the opposite mode) and by the predicted-temperature ceiling guard (which waits instead of acting on a predicted overshoot).",
+    "category": "advanced"
+   },
+   {
+    "key": "aggressive_savings",
+    "value": false,
+    "label": "Prefer Savings Over Comfort",
+    "description": "When enabled, favors energy savings: the economizer skips AC-assisted cooling (ventilation only when windows open), and setbacks may be more aggressive. When disabled, AC actively cools to comfort when outdoor temps drop.",
+    "category": "advanced"
+   },
+   {
+    "key": "threshold_hot",
+    "value": 85.0,
+    "label": "Hot Day Threshold",
+    "description": "Days whose forecast high is at or above this temperature are classified as Hot. Default: 85\u00b0F / 29\u00b0C.",
+    "category": "advanced",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "threshold_warm",
+    "value": 75.0,
+    "label": "Warm Day Threshold",
+    "description": "Days whose forecast high is at or above this temperature (but below Hot) are classified as Warm. Default: 75\u00b0F / 24\u00b0C.",
+    "category": "advanced",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "threshold_mild",
+    "value": 60.0,
+    "label": "Mild Day Threshold",
+    "description": "Days whose forecast high is at or above this temperature (but below Warm) are classified as Mild. Default: 60\u00b0F / 16\u00b0C.",
+    "category": "advanced",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "threshold_cool",
+    "value": 45.0,
+    "label": "Cool Day Threshold",
+    "description": "Days whose forecast high is at or above this temperature (but below Mild) are classified as Cool; below is Cold. Default: 45\u00b0F / 7\u00b0C.",
+    "category": "advanced",
+    "unit": "\u00b0F"
+   },
+   {
+    "key": "briefing_notifications_enabled",
+    "value": true,
+    "label": "Send Daily Briefing Notifications (This Zone)",
+    "description": "On a multi-zone install, only one zone should send the scheduled daily briefing push/email \u2014 otherwise you get one copy per zone. Turn this ON for exactly one zone. Manually clicking Send Briefing on the debug tab always sends, even when this is off.",
+    "category": "notifications"
+   },
+   {
+    "key": "push_briefing",
+    "value": true,
+    "label": "Push: Daily Briefing",
+    "description": "Send a short TLDR briefing summary to your phone each morning.",
+    "category": "notifications"
+   },
+   {
+    "key": "push_door_window_pause",
+    "value": true,
+    "label": "Push: HVAC Paused",
+    "description": "Send a push notification when HVAC is paused due to an open door or window.",
+    "category": "notifications"
+   },
+   {
+    "key": "push_occupancy_home",
+    "value": true,
+    "label": "Push: Welcome Home",
+    "description": "Send a push notification when someone arrives home and comfort temperature is restored.",
+    "category": "notifications"
+   },
+   {
+    "key": "push_entity_health",
+    "value": null,
+    "label": "Push: Entity Not Found",
+    "description": "Send a push notification when a configured entity (thermostat, weather source, sensor, fan, toggle, or notification service) is removed or stops responding.",
+    "category": "notifications"
+   },
+   {
+    "key": "email_briefing",
+    "value": true,
+    "label": "Email: Full Daily Briefing",
+    "description": "Send the full daily briefing via email with complete forecast and plan details.",
+    "category": "notifications"
+   },
+   {
+    "key": "email_door_window_pause",
+    "value": true,
+    "label": "Email: HVAC Paused",
+    "description": "Send an email when HVAC is paused due to an open door or window.",
+    "category": "notifications"
+   },
+   {
+    "key": "email_grace_expired",
+    "value": false,
+    "label": "Email: Grace Period Expired",
+    "description": "Send an email when a grace period expires and normal sensor behavior resumes.",
+    "category": "notifications"
+   },
+   {
+    "key": "email_grace_repause",
+    "value": false,
+    "label": "Email: Re-paused",
+    "description": "Email when HVAC is re-paused because a door/window is still open after grace.",
+    "category": "notifications"
+   },
+   {
+    "key": "email_occupancy_home",
+    "value": false,
+    "label": "Email: Welcome Home",
+    "description": "Send an email when someone arrives home and comfort temperature is restored.",
+    "category": "notifications"
+   },
+   {
+    "key": "email_entity_health",
+    "value": null,
+    "label": "Email: Entity Not Found",
+    "description": "Send an email when a configured entity (thermostat, weather source, sensor, fan, toggle, or notification service) is removed or stops responding.",
+    "category": "notifications"
+   },
+   {
+    "key": "ai_enabled",
+    "value": true,
+    "label": "Enable AI Features",
+    "description": "Master switch for all AI-powered features. When disabled, Climate Advisor uses only its built-in coded logic.",
+    "category": "ai_settings"
+   },
+   {
+    "key": "ai_api_key",
+    "value": "configured",
+    "label": "Claude API Key",
+    "description": "Your Anthropic API key. Stored securely in Home Assistant's config entry. Never logged or exposed in sensor attributes.",
+    "category": "ai_settings"
+   },
+   {
+    "key": "ai_model",
+    "value": "claude-sonnet-5",
+    "label": "AI Model",
+    "description": "Which Claude model to use. Sonnet is recommended for cost/quality balance. Haiku is cheapest. Opus is most capable but expensive.",
+    "category": "ai_settings"
+   },
+   {
+    "key": "ai_reasoning_effort",
+    "value": "low",
+    "label": "Reasoning Effort",
+    "description": "How much reasoning effort Claude uses. Higher effort produces better analysis but uses more tokens and costs more.",
+    "category": "ai_settings"
+   },
+   {
+    "key": "ai_max_tokens",
+    "value": 8192,
+    "label": "Max Response Length (tokens)",
+    "description": "Maximum length of AI responses in tokens. Higher values allow more detailed analysis but cost more.",
+    "category": "ai_settings"
+   },
+   {
+    "key": "ai_temperature",
+    "value": 0.3,
+    "label": "Creativity (temperature)",
+    "description": "Controls randomness in AI responses. 0 = deterministic, 1.0 = most creative. 0.3 recommended for analysis.",
+    "category": "ai_settings"
+   },
+   {
+    "key": "ai_monthly_budget",
+    "value": 5,
+    "label": "Monthly Budget Cap ($)",
+    "description": "Maximum estimated monthly spend in USD. Set to 0 for no limit. AI features pause when budget is reached.",
+    "category": "ai_settings"
+   },
+   {
+    "key": "ai_auto_requests_per_day",
+    "value": 5,
+    "label": "Auto Requests Per Day",
+    "description": "Maximum automated/scheduled AI requests per day. Limits unattended usage from features like daily plan generation. Resets at midnight.",
+    "category": "ai_settings"
+   },
+   {
+    "key": "ai_manual_requests_per_day",
+    "value": 20,
+    "label": "Manual Requests Per Day",
+    "description": "Maximum user-triggered AI requests per day. Limits on-demand usage from features like the Investigative Analysis report. Resets at midnight.",
+    "category": "ai_settings"
+   },
+   {
+    "key": "ai_investigator_enabled",
+    "value": true,
+    "label": "Enable Investigative Agent",
+    "description": "Enable the investigative agent, which performs deep cross-source analysis to find incongruities, data quality issues, and system errors. Requires AI to be enabled and configured. Default is off.",
+    "category": "ai_settings"
+   },
+   {
+    "key": "ai_investigator_requests_per_day",
+    "value": 10,
+    "label": "Investigator Requests Per Day",
+    "description": "Maximum investigative analysis runs per day. Each investigation uses extended thinking and is more expensive than other AI requests. Resets at midnight.",
+    "category": "ai_settings"
+   }
+  ]
+ },
+ "event_log": {
+  "events": [
+   {
+    "time": "2026-11-02T14:51:38.311655-08:00",
+    "type": "thermostat_mode_set",
+    "zone": "thermostat",
+    "from_mode": "heat",
+    "to_mode": "off",
+    "reason": "you changed it at the thermostat",
+    "source": "user",
+    "indoor_f": 67.0,
+    "floor_f": 68.0,
+    "ceiling_f": 74.0,
+    "outcome": "requested",
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:51:38.312220-08:00",
+    "type": "override_detected",
+    "detected_mode": "off",
+    "source": "normal",
+    "confirm_delay_seconds": 600,
+    "old_mode": "heat",
+    "new_mode": "off",
+    "classification_mode": "off",
+    "old_setpoint_f": null,
+    "new_setpoint_f": null,
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:51:48.175319-08:00",
+    "type": "fan_manual_override",
+    "fan_before": "?",
+    "fan_after": "on",
+    "override_active_since": "2026-11-02T14:51:48.175148-08:00",
+    "fan_device": "whf",
+    "event_context_id": null,
+    "remote_timer_hours": 2.0,
+    "remote_speed": null,
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:51:48.175840-08:00",
+    "type": "grace_started",
+    "source": "manual",
+    "duration_seconds": 7200,
+    "trigger": "fan_manual_override",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:51:48.206549-08:00",
+    "type": "whf_hvac_suppressed",
+    "prior_mode": "off",
+    "reason": "whole-house fan manually turned on \u2014 suppressing HVAC to prevent AC/fan fighting",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:51:58.678810-08:00",
+    "type": "fan_deactivated",
+    "reason": "sealed house \u2014 stopping whole-house fan",
+    "fan_mode": "whole_house_fan",
+    "fan_device": "whf",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:51:58.679333-08:00",
+    "type": "grace_cancelled",
+    "reason": "whf_safety_stop",
+    "source": "automation",
+    "trigger": "fan_manual_override",
+    "grace_source": "manual",
+    "remaining_minutes": 119,
+    "protects_override": true,
+    "continues": false,
+    "remote_timer_hours": 2.0,
+    "grace_end_time": "2026-11-03T00:51:48.175656+00:00",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:51:58.679967-08:00",
+    "type": "fan_override_cleared",
+    "reason": "whf_safety_stop",
+    "source": "automation",
+    "remote_timer_hours": 2.0,
+    "active_since": "2026-11-02T14:51:48.175148-08:00",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:52:20.362147-08:00",
+    "type": "stranded_hvac_suppression_restored",
+    "reason": "whole-house fan confirmed off after the sealed-house stop",
+    "restore_mode": "off",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:52:24.221570-08:00",
+    "type": "fan_manual_override",
+    "fan_before": "off",
+    "fan_after": "on",
+    "override_active_since": "2026-11-02T14:52:24.221410-08:00",
+    "fan_device": "whf",
+    "event_context_id": "01M6F7DF8VENKRWYBBWCYEFNYJ",
+    "remote_timer_hours": null,
+    "remote_speed": null,
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:52:24.222071-08:00",
+    "type": "grace_started",
+    "source": "manual",
+    "duration_seconds": 10800,
+    "trigger": "fan_manual_override",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:52:24.341181-08:00",
+    "type": "whf_hvac_suppressed",
+    "prior_mode": "off",
+    "reason": "whole-house fan manually turned on \u2014 suppressing HVAC to prevent AC/fan fighting",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:52:34.723373-08:00",
+    "type": "fan_deactivated",
+    "reason": "sealed house \u2014 stopping whole-house fan",
+    "fan_mode": "whole_house_fan",
+    "fan_device": "whf",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:52:34.723921-08:00",
+    "type": "grace_cancelled",
+    "reason": "whf_safety_stop",
+    "source": "automation",
+    "trigger": "fan_manual_override",
+    "grace_source": "manual",
+    "remaining_minutes": 179,
+    "protects_override": true,
+    "continues": false,
+    "remote_timer_hours": null,
+    "grace_end_time": "2026-11-03T01:52:24.221892+00:00",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:52:34.724567-08:00",
+    "type": "fan_override_cleared",
+    "reason": "whf_safety_stop",
+    "source": "automation",
+    "remote_timer_hours": null,
+    "active_since": "2026-11-02T14:52:24.221410-08:00",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:52:56.407674-08:00",
+    "type": "stranded_hvac_suppression_restored",
+    "reason": "whole-house fan confirmed off after the sealed-house stop",
+    "restore_mode": "off",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:01.410541-08:00",
+    "type": "thermostat_mode_set",
+    "zone": "thermostat",
+    "from_mode": "off",
+    "to_mode": "heat",
+    "reason": "comfort range decision",
+    "source": "selector",
+    "indoor_f": 67.0,
+    "floor_f": 68.0,
+    "ceiling_f": 74.0,
+    "outcome": "requested",
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:10.475317-08:00",
+    "type": "fan_manual_override",
+    "fan_before": "off",
+    "fan_after": "on",
+    "override_active_since": "2026-11-02T14:53:10.475157-08:00",
+    "fan_device": "whf",
+    "event_context_id": "01M6F7EWE9SR8BTAMMQC9CCFQ2",
+    "remote_timer_hours": null,
+    "remote_speed": null,
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:10.475829-08:00",
+    "type": "grace_started",
+    "source": "manual",
+    "duration_seconds": 10800,
+    "trigger": "fan_manual_override",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:10.476571-08:00",
+    "type": "thermostat_mode_set",
+    "zone": "thermostat",
+    "from_mode": "heat",
+    "to_mode": "off",
+    "reason": "natural ventilation",
+    "source": "nat_vent",
+    "indoor_f": 67.0,
+    "floor_f": 68.0,
+    "ceiling_f": 74.0,
+    "outcome": "requested",
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:10.599769-08:00",
+    "type": "whf_hvac_suppressed",
+    "prior_mode": "heat",
+    "reason": "whole-house fan manually turned on \u2014 suppressing HVAC to prevent AC/fan fighting",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:20.977465-08:00",
+    "type": "fan_deactivated",
+    "reason": "sealed house \u2014 stopping whole-house fan",
+    "fan_mode": "whole_house_fan",
+    "fan_device": "whf",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:20.977985-08:00",
+    "type": "grace_cancelled",
+    "reason": "whf_safety_stop",
+    "source": "automation",
+    "trigger": "fan_manual_override",
+    "grace_source": "manual",
+    "remaining_minutes": 179,
+    "protects_override": true,
+    "continues": false,
+    "remote_timer_hours": null,
+    "grace_end_time": "2026-11-03T01:53:10.475659+00:00",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:20.978619-08:00",
+    "type": "fan_override_cleared",
+    "reason": "whf_safety_stop",
+    "source": "automation",
+    "remote_timer_hours": null,
+    "active_since": "2026-11-02T14:53:10.475157-08:00",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:42.725278-08:00",
+    "type": "thermostat_mode_set",
+    "zone": "thermostat",
+    "from_mode": "off",
+    "to_mode": "heat",
+    "reason": "natural ventilation",
+    "source": "nat_vent",
+    "indoor_f": 67.0,
+    "floor_f": 68.0,
+    "ceiling_f": 74.0,
+    "outcome": "requested",
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:42.738246-08:00",
+    "type": "stranded_hvac_suppression_restored",
+    "reason": "whole-house fan confirmed off after the sealed-house stop",
+    "restore_mode": "heat",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:54.816202-08:00",
+    "type": "fan_manual_override",
+    "fan_before": "off",
+    "fan_after": "on",
+    "override_active_since": "2026-11-02T14:53:54.816079-08:00",
+    "fan_device": "whf",
+    "event_context_id": "01M6F7G7QY3PAGZX1WW90RQSZM",
+    "remote_timer_hours": null,
+    "remote_speed": null,
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:54.816644-08:00",
+    "type": "grace_started",
+    "source": "manual",
+    "duration_seconds": 10800,
+    "trigger": "fan_manual_override",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:54.817202-08:00",
+    "type": "thermostat_mode_set",
+    "zone": "thermostat",
+    "from_mode": "heat",
+    "to_mode": "off",
+    "reason": "natural ventilation",
+    "source": "nat_vent",
+    "indoor_f": 67.0,
+    "floor_f": 68.0,
+    "ceiling_f": 74.0,
+    "outcome": "requested",
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T14:53:54.851586-08:00",
+    "type": "whf_hvac_suppressed",
+    "prior_mode": "heat",
+    "reason": "whole-house fan manually turned on \u2014 suppressing HVAC to prevent AC/fan fighting",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02
+   },
+   {
+    "time": "2026-11-02T15:31:27.045679-08:00",
+    "type": "fan_cancel",
+    "fan_before": "on",
+    "fan_after": "off",
+    "trigger": "fan_off",
+    "fan_device": "whf",
+    "event_context_id": "01M6F9MZ63D59HCJ0GGJ0KG6NW",
+    "indoor_f": 66.0,
+    "outdoor_f": 66.92
+   },
+   {
+    "time": "2026-11-02T15:31:27.046303-08:00",
+    "type": "grace_cancelled",
+    "reason": "superseded",
+    "source": "automation",
+    "trigger": "fan_manual_override",
+    "grace_source": "manual",
+    "remaining_minutes": 142,
+    "protects_override": true,
+    "continues": false,
+    "remote_timer_hours": null,
+    "grace_end_time": "2026-11-03T01:53:54.816506+00:00",
+    "indoor_f": 66.0,
+    "outdoor_f": 66.92
+   },
+   {
+    "time": "2026-11-02T15:31:27.046701-08:00",
+    "type": "grace_started",
+    "source": "manual",
+    "duration_seconds": 10800,
+    "trigger": "fan_off",
+    "indoor_f": 66.0,
+    "outdoor_f": 66.92
+   },
+   {
+    "time": "2026-11-02T15:31:27.047084-08:00",
+    "type": "unprotected_grace_started",
+    "source": "manual",
+    "trigger": "fan_off",
+    "indoor_f": 66.0,
+    "outdoor_f": 66.92
+   },
+   {
+    "time": "2026-11-02T15:31:27.047564-08:00",
+    "type": "whf_hvac_released",
+    "reason": "fan turned off by user (on->off)",
+    "indoor_f": 66.0,
+    "outdoor_f": 66.92
+   },
+   {
+    "time": "2026-11-02T15:31:27.065007-08:00",
+    "type": "sensor_opened",
+    "entity": "monitored door/window",
+    "result": "paused",
+    "indoor_f": 66.0,
+    "outdoor_f": 66.92
+   },
+   {
+    "time": "2026-11-02T15:31:27.065583-08:00",
+    "type": "classification_suppressed_paused",
+    "day_type": "mild",
+    "hvac_mode": "off",
+    "paused_entity": "monitored door/window",
+    "paused_minutes": 0,
+    "indoor_f": 66.0,
+    "outdoor_f": 66.92
+   },
+   {
+    "time": "2026-11-02T15:31:27.241588-08:00",
+    "type": "incident_detected",
+    "incident_class": "comfort_undertemp",
+    "incident_id": "2026-11-02T15:31:27.241072-08:00",
+    "comfort_cool": 74.0,
+    "comfort_heat": 68.0,
+    "occupancy_mode": "home",
+    "indoor_f": 66.0,
+    "outdoor_f": 66.92,
+    "hvac_mode": "off",
+    "nat_vent_active": false,
+    "thermostat_mode": "off",
+    "thermostat_action": "idle",
+    "last_commanded_mode": "off",
+    "last_commanded_setpoint_f": 68.0,
+    "last_command_result": "sent"
+   },
+   {
+    "time": "2026-11-02T16:01:27.567863-08:00",
+    "type": "incident_detected",
+    "incident_class": "comfort_undertemp",
+    "incident_id": "2026-11-02T16:01:27.567344-08:00",
+    "comfort_cool": 74.0,
+    "comfort_heat": 68.0,
+    "occupancy_mode": "home",
+    "indoor_f": 67.0,
+    "outdoor_f": 66.02,
+    "hvac_mode": "off",
+    "nat_vent_active": false,
+    "thermostat_mode": "off",
+    "thermostat_action": "idle",
+    "last_commanded_mode": "off",
+    "last_commanded_setpoint_f": 68.0,
+    "last_command_result": "sent"
+   },
+   {
+    "time": "2026-11-02T16:24:04.999898-08:00",
+    "type": "sensor_all_closed",
+    "was_paused": true,
+    "was_nat_vent": false,
+    "fan_device": "whf",
+    "fan_mode_change": null,
+    "indoor_f": 68.0,
+    "outdoor_f": 65.66
+   },
+   {
+    "time": "2026-11-02T16:24:15.317947-08:00",
+    "type": "comfort_family_switch",
+    "resolved_family": "heating",
+    "from_family": "unknown",
+    "reason": "within heat arming margin",
+    "margin_applied_f": 2.0,
+    "indoor_f": 68.0,
+    "floor_f": 68.0,
+    "ceiling_f": 74.0,
+    "breach": false,
+    "outdoor_f": 65.66
+   },
+   {
+    "time": "2026-11-02T16:24:15.318351-08:00",
+    "type": "thermostat_mode_set",
+    "zone": "thermostat",
+    "from_mode": "off",
+    "to_mode": "heat",
+    "reason": "comfort range decision",
+    "source": "selector",
+    "indoor_f": 68.0,
+    "floor_f": 68.0,
+    "ceiling_f": 74.0,
+    "outcome": "requested",
+    "outdoor_f": 65.66
+   },
+   {
+    "time": "2026-11-02T16:50:48.446065-08:00",
+    "type": "override_detected",
+    "detected_mode": "heat",
+    "source": "setpoint",
+    "confirm_delay_seconds": 600,
+    "old_mode": "heat",
+    "new_mode": "heat",
+    "classification_mode": "off",
+    "old_setpoint_f": 68.0,
+    "new_setpoint_f": 69.0,
+    "indoor_f": 68.0,
+    "outdoor_f": 64.76
+   },
+   {
+    "time": "2026-11-02T16:53:48.787295-08:00",
+    "type": "sensor_all_closed",
+    "was_paused": false,
+    "was_nat_vent": false,
+    "fan_device": "whf",
+    "fan_mode_change": null,
+    "indoor_f": 68.0,
+    "outdoor_f": 64.76
+   },
+   {
+    "time": "2026-11-02T16:54:27.202302-08:00",
+    "type": "sensor_all_closed",
+    "was_paused": false,
+    "was_nat_vent": false,
+    "fan_device": "whf",
+    "fan_mode_change": null,
+    "indoor_f": 68.0,
+    "outdoor_f": 64.76
+   },
+   {
+    "time": "2026-11-02T16:55:40.470430-08:00",
+    "type": "sensor_all_closed",
+    "was_paused": false,
+    "was_nat_vent": false,
+    "fan_device": "whf",
+    "fan_mode_change": null,
+    "indoor_f": 68.0,
+    "outdoor_f": 64.76
+   },
+   {
+    "time": "2026-11-02T17:00:48.447857-08:00",
+    "type": "grace_cancelled",
+    "reason": "superseded",
+    "source": "automation",
+    "trigger": "fan_off",
+    "grace_source": "manual",
+    "remaining_minutes": 90,
+    "protects_override": false,
+    "continues": true,
+    "remote_timer_hours": null,
+    "grace_end_time": "2026-11-03T02:31:27.046546+00:00",
+    "indoor_f": 68.0,
+    "outdoor_f": 64.22
+   },
+   {
+    "time": "2026-11-02T17:00:48.448513-08:00",
+    "type": "grace_started",
+    "source": "manual",
+    "duration_seconds": 10800,
+    "trigger": "override_confirmed",
+    "indoor_f": 68.0,
+    "outdoor_f": 64.22
+   },
+   {
+    "time": "2026-11-02T17:00:48.449614-08:00",
+    "type": "override_confirmed",
+    "mode": "heat",
+    "confirm_delay_seconds": 600,
+    "cls_mode": "off",
+    "source": "setpoint",
+    "indoor_f": 68.0,
+    "outdoor_f": 64.22
+   },
+   {
+    "time": "2026-11-02T17:23:59.002900-08:00",
+    "type": "sensor_all_closed",
+    "was_paused": false,
+    "was_nat_vent": false,
+    "fan_device": "whf",
+    "fan_mode_change": null,
+    "indoor_f": 68.0,
+    "outdoor_f": 63.68
+   },
+   {
+    "time": "2026-11-02T18:06:38.530234-08:00",
+    "type": "version_changed",
+    "old_version": "0.8.41",
+    "new_version": "0.8.48",
+    "indoor_f": null,
+    "outdoor_f": null
+   },
+   {
+    "time": "2026-11-02T18:06:38.530459-08:00",
+    "type": "system_restarted",
+    "recovered_events": 707,
+    "old_version": "0.8.41",
+    "new_version": "0.8.48",
+    "cause": "version_changed",
+    "indoor_f": null,
+    "outdoor_f": null
+   },
+   {
+    "time": "2026-11-02T18:11:38.541268-08:00",
+    "type": "classification_applied",
+    "day_type": "mild",
+    "hvac_mode": "off",
+    "trend": "stable",
+    "trend_magnitude": 0.7750000000000021,
+    "old_hvac_mode": "heat",
+    "indoor_f": 68.0,
+    "today_high": 66.92,
+    "applied_threshold_f": 60,
+    "threshold_margin_f": 6.9,
+    "outdoor_f": 60.62
+   },
+   {
+    "time": "2026-11-02T18:11:38.550622-08:00",
+    "type": "comfort_band_applied",
+    "floor": 68.0,
+    "ceiling": 74.0,
+    "active": "floor",
+    "mode": "heat",
+    "reason": "comfort band [68/74] (day=mild, active=ceiling) -- floor edge used (heat at 68\u00b0F)",
+    "outcome": "sent",
+    "indoor_f": 68.0,
+    "outdoor_f": 60.62
+   },
+   {
+    "time": "2026-11-02T18:11:38.551542-08:00",
+    "type": "startup_coalesced",
+    "nat_vent_activated": false,
+    "hvac_commanded": true,
+    "sensors_open_count": 0,
+    "indoor_f": 68.0,
+    "outdoor_f": 60.62,
+    "fan_archetype": "whole_house_fan"
+   },
+   {
+    "time": "2026-11-02T18:27:23.957698-08:00",
+    "type": "sensor_all_closed",
+    "was_paused": false,
+    "was_nat_vent": false,
+    "fan_device": "whf",
+    "fan_mode_change": null,
+    "indoor_f": 68.0,
+    "outdoor_f": 59.72
+   },
+   {
+    "time": "2026-11-02T18:27:52.633812-08:00",
+    "type": "sensor_all_closed",
+    "was_paused": false,
+    "was_nat_vent": false,
+    "fan_device": "whf",
+    "fan_mode_change": null,
+    "indoor_f": 68.0,
+    "outdoor_f": 59.72
+   },
+   {
+    "time": "2026-11-02T19:23:38.695385-08:00",
+    "type": "override_detected",
+    "detected_mode": "heat",
+    "source": "setpoint",
+    "confirm_delay_seconds": 600,
+    "old_mode": "heat",
+    "new_mode": "heat",
+    "classification_mode": "off",
+    "old_setpoint_f": 68.0,
+    "new_setpoint_f": 69.0,
+    "indoor_f": 67.0,
+    "outdoor_f": 57.74
+   },
+   {
+    "time": "2026-11-02T19:33:38.697490-08:00",
+    "type": "grace_started",
+    "source": "manual",
+    "duration_seconds": 10800,
+    "trigger": "override_confirmed",
+    "indoor_f": 69.0,
+    "outdoor_f": 57.74
+   },
+   {
+    "time": "2026-11-02T19:33:38.698734-08:00",
+    "type": "override_confirmed",
+    "mode": "heat",
+    "confirm_delay_seconds": 600,
+    "cls_mode": "off",
+    "source": "setpoint",
+    "indoor_f": 69.0,
+    "outdoor_f": 57.74
+   }
+  ],
+  "total": 60,
+  "hours": 24,
+  "is_truncated": false,
+  "oldest_available": "2026-11-02T14:51:38.311655-08:00",
+  "diagnostics": {
+   "version": "0.8.48",
+   "control_quality": {
+    "schema": 3,
+    "generated_at": "2026-11-03T04:07:26.781173+00:00",
+    "temp_unit": "fahrenheit",
+    "windows": {
+     "24h": {
+      "samples": {
+       "mode_changes": 8,
+       "chart_entries": 99,
+       "coverage_hours": 23.6
+      },
+      "misarmed": {
+       "minutes": 0.0,
+       "episodes": 0,
+       "longest_minutes": 0.0,
+       "percent_of_window": 0.0
+      },
+      "mode_changes": {
+       "count": 8,
+       "per_day": 8.0,
+       "edge_to_armed_latency_s": {
+        "median": 17070.9,
+        "max": 17112.3,
+        "n": 3
+       }
+      },
+      "runtime": {
+       "heating": {
+        "minutes": 99.2,
+        "runs": 6,
+        "median_run_minutes": 13.1,
+        "short_runs_lt_10m": 3
+       },
+       "cooling": {
+        "minutes": 0.0,
+        "runs": 0,
+        "median_run_minutes": null,
+        "short_runs_lt_10m": 0
+       }
+      },
+      "run_context": {
+       "cooling_minutes_house_gaining_heat": 0.0,
+       "cooling_minutes_passive_loss": 0.0,
+       "heating_minutes_house_losing_heat": 99.2,
+       "heating_minutes_passive_gain": 0.0
+      },
+      "would_have_deferred": {
+       "cooling_minutes": 0.0,
+       "heating_minutes": 0.0
+      },
+      "prediction_error": {
+       "horizons": {
+        "30m": {
+         "mean_abs_f": 1.0,
+         "mean_signed_f": 0.4,
+         "n": 82
+        },
+        "60m": {
+         "mean_abs_f": 1.0,
+         "mean_signed_f": 0.3,
+         "n": 80
+        },
+        "120m": {
+         "mean_abs_f": 1.2,
+         "mean_signed_f": 0.2,
+         "n": 72
+        }
+       },
+       "archive_lead": {
+        "mean_abs_f": 1.6,
+        "mean_signed_f": 1.4,
+        "n": 85
+       }
+      },
+      "settling_guard": {
+       "hold_episodes": 0,
+       "hold_minutes_total": 0.0,
+       "median_hold_minutes": null,
+       "outcomes": {
+        "recovered": 0,
+        "switched": 0,
+        "lapsed": 0,
+        "open": 0
+       },
+       "recovered_share": null,
+       "max_depth_f": null,
+       "holds_by_zone": {
+        "breach": 0,
+        "margin": 0,
+        "unknown": 0
+       },
+       "holds_by_model_confidence": {
+        "none": 0,
+        "low": 0,
+        "medium": 0,
+        "high": 0,
+        "unknown": 0
+       },
+       "mode_writes": {
+        "by_reason": {
+         "nat_vent": 3,
+         "pause": 1,
+         "restore": 1,
+         "selector": 2,
+         "user": 1
+        }
+       }
+      }
+     },
+     "7d": {
+      "samples": {
+       "mode_changes": 45,
+       "chart_entries": 506,
+       "coverage_hours": 167.0
+      },
+      "misarmed": {
+       "minutes": 0.0,
+       "episodes": 0,
+       "longest_minutes": 0.0,
+       "percent_of_window": 0.0
+      },
+      "mode_changes": {
+       "count": 45,
+       "per_day": 6.4,
+       "edge_to_armed_latency_s": {
+        "median": 12799.7,
+        "max": 39626.9,
+        "n": 10
+       }
+      },
+      "runtime": {
+       "heating": {
+        "minutes": 351.3,
+        "runs": 17,
+        "median_run_minutes": 9.2,
+        "short_runs_lt_10m": 10
+       },
+       "cooling": {
+        "minutes": 0.0,
+        "runs": 0,
+        "median_run_minutes": null,
+        "short_runs_lt_10m": 0
+       }
+      },
+      "run_context": {
+       "cooling_minutes_house_gaining_heat": 0.0,
+       "cooling_minutes_passive_loss": 0.0,
+       "heating_minutes_house_losing_heat": 351.3,
+       "heating_minutes_passive_gain": 0.0
+      },
+      "would_have_deferred": {
+       "cooling_minutes": 0.0,
+       "heating_minutes": 0.0
+      },
+      "prediction_error": {
+       "horizons": {
+        "30m": {
+         "mean_abs_f": 0.8,
+         "mean_signed_f": 0.2,
+         "n": 366
+        },
+        "60m": {
+         "mean_abs_f": 0.9,
+         "mean_signed_f": 0.1,
+         "n": 460
+        },
+        "120m": {
+         "mean_abs_f": 1.1,
+         "mean_signed_f": 0.3,
+         "n": 453
+        }
+       },
+       "archive_lead": {
+        "mean_abs_f": 1.0,
+        "mean_signed_f": 0.5,
+        "n": 472
+       }
+      },
+      "settling_guard": {
+       "hold_episodes": 0,
+       "hold_minutes_total": 0.0,
+       "median_hold_minutes": null,
+       "outcomes": {
+        "recovered": 0,
+        "switched": 0,
+        "lapsed": 0,
+        "open": 0
+       },
+       "recovered_share": null,
+       "max_depth_f": null,
+       "holds_by_zone": {
+        "breach": 0,
+        "margin": 0,
+        "unknown": 0
+       },
+       "holds_by_model_confidence": {
+        "none": 0,
+        "low": 0,
+        "medium": 0,
+        "high": 0,
+        "unknown": 0
+       },
+       "mode_writes": {
+        "by_reason": {
+         "nat_vent": 13,
+         "pause": 11,
+         "restore": 4,
+         "selector": 10,
+         "user": 7
+        }
+       }
+      }
+     }
+    }
+   },
+   "promise_stats": {
+    "comfort_kept": {
+     "hits": 2,
+     "first_ts": "2026-11-01T03:46:56.273689-08:00",
+     "last_ts": "2026-11-02T00:17:43.875481-08:00"
+    },
+    "whf_sealed": {
+     "hits": 1,
+     "first_ts": "2026-11-01T15:04:04.247127-08:00",
+     "last_ts": "2026-11-01T15:04:04.247127-08:00"
+    }
+   },
+   "last_command": {
+    "mode": "heat",
+    "mode_time": "2026-11-02T18:57:59.387806-08:00",
+    "setpoint_f": 68.0,
+    "setpoint": 68.0,
+    "setpoint_unit": "fahrenheit",
+    "setpoint_time": "2026-11-02T18:57:59.387806-08:00",
+    "result": "executed",
+    "live_state": "heat",
+    "live_state_matches_commanded": true,
+    "read_back_skip_reason": null,
+    "mode_mismatch_since": null,
+    "mode_mismatch_episode_mode": null,
+    "command_failure_since": null,
+    "command_failure_mode": null
+   }
+  }
+ },
+ "settings_extra": {
+  "changed": {
+   "comfort_heat": {
+    "default": 70,
+    "unit": "\u00b0F"
+   },
+   "learning_enabled": {
+    "default": true
+   }
+  },
+  "schedules": [
+   {
+    "id": "a",
+    "name": "Evening peak",
+    "days": [
+     "mon",
+     "tue",
+     "wed",
+     "thu",
+     "fri"
+    ],
+    "start": "16:00",
+    "end": "21:00",
+    "cost_tag": "high"
+   }
+  ],
+  "github": {
+   "repo": "owner/home",
+   "token_set": true,
+   "configured": true
+  },
+  "reload_needed": false
+ },
+ "chart_data": {
+  "thermal_model": {
+   "unit": "fahrenheit",
+   "k_passive": -0.0235,
+   "k_vent_window": -0.102,
+   "k_vent_fan": -0.149,
+   "k_solar": 0.72,
+   "solar_phase_offset_h": 3.2,
+   "confidence_k_passive": "high",
+   "confidence": "high",
+   "observation_count_passive": 42,
+   "observation_count_vent_window": 6,
+   "observation_count_vent_fan": 4,
+   "observation_count_solar": 12,
+   "observation_count_heat": 88,
+   "observation_count_cool": 0,
+   "heating_rate": 5.55,
+   "cooling_rate": 6.1,
+   "swing_heat": 1.5,
+   "swing_cool": 1.5,
+   "swing_heat_measured": false,
+   "swing_cool_measured": false,
+   "last_observation_date": "2026-11-02",
+   "learning_health": {
+    "passive_decay": {
+     "attempts": 120,
+     "committed": 42,
+     "rejections": {
+      "poor_fit": 50,
+      "outlier": 28
+     },
+     "last_rejection": {
+      "reason_code": "poor_fit"
+     }
+    },
+    "hvac_heat": {
+     "attempts": 118,
+     "committed": 88,
+     "rejections": {
+      "state_changed": 30
+     },
+     "last_rejection": {
+      "reason_code": "state_changed"
+     }
+    }
+   }
+  }
+ },
+ "investigation_reports": [
+  {
+   "timestamp": "2026-10-30T10:25:26-07:00",
+   "report_type": "investigation",
+   "focus": "",
+   "result": {
+    "success": true,
+    "source": "ai",
+    "data": {
+     "activity_summary": "10:48 AM to 10:50 AM: All doors and windows were confirmed closed.",
+     "recommended_actions": "Nothing to do."
+    }
+   }
+  },
+  {
+   "timestamp": "2026-10-21T07:18:02-07:00",
+   "report_type": "investigation",
+   "focus": "",
+   "result": {
+    "success": true,
+    "source": "ai",
+    "data": {
+     "activity_summary": "A brief momentary override that resolved itself."
+    }
+   }
+  }
+ ],
+ "activity_record": {
+  "table": "| Time | Event |\n|---|---|\n| 6:12 | override **detected** |",
+  "hours": 12,
+  "is_truncated": false
+ }
+}

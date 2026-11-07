@@ -86,7 +86,8 @@ def _advanced(entry_data: dict, user_input=None):
 def _form_values(entry_data: dict) -> dict:
     """The payload an untouched form would post (every field at its shown default)."""
     result, _ = _advanced(entry_data)
-    return {str(k): k.default() for k in result["data_schema"].schema}
+    # Optional fields with no default (the energy inputs, #1230 R5c) post nothing when left blank.
+    return {str(k): k.default() for k in result["data_schema"].schema if callable(k.default)}
 
 
 class TestDeltaFieldDisplay:

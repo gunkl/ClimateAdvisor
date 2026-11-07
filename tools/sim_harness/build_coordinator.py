@@ -36,7 +36,7 @@ from tools.sim_harness._loop import run_coro
 from tools.sim_harness.build_engine import _DEFAULT_CONFIG
 from tools.sim_harness.fake_hass import FakeHass, FakeState
 from tools.sim_harness.fake_scheduler import FakeScheduler
-from tools.sim_harness.ha_stubs import install_ha_stubs
+from tools.sim_harness.ha_stubs import EVENT_HOMEASSISTANT_STARTED, install_ha_stubs
 
 
 def build_headless_coordinator(
@@ -243,6 +243,11 @@ def build_headless_coordinator(
         run_coro(coordinator.async_restore_state())
         run_coro(coordinator.async_setup())
         run_coro(coordinator.async_config_entry_first_refresh())
+        # Issue #1389: real HA fires EVENT_HOMEASSISTANT_STARTED once bootstrap finishes, after the integrations
+        # set up; the coordinator starts the unreadable-door/window-sensor grace there. Scenario entities are
+        # readable from t0, so bootstrap finishes at t0 (the grace runs from setup, as before this issue).
+        # FakeHass.is_running stays False: setup-time readers take it as "set up during bootstrap".
+        fake_hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
         # Settle any fire-and-forget hass.async_create_task() calls AND any
         # heap entries (async_call_later) they schedule, before leaving the
         # patched context — see run_production.py's matching fix for why a

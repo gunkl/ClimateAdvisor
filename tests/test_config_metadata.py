@@ -30,6 +30,9 @@ EXPECTED_KEYS = {
     "indoor_temp_source",
     "sleep_indoor_temp_entity",
     "thermostat_companion_sensor",  # Issue #1230 R1b
+    "energy_rate",  # #1230 R5c (DP-10)
+    "heat_power_kw",
+    "cool_power_kw",
     "door_window_sensors",
     "sensor_polarity_inverted",
     "sensor_debounce_seconds",
@@ -92,6 +95,8 @@ EXPECTED_KEYS = {
     "threshold_warm",
     "threshold_mild",
     "threshold_cool",
+    "primary_engine",
+    "shadow_engine",
 }
 
 VALID_CATEGORIES = {
@@ -120,6 +125,72 @@ class TestConfigMetadataHasAllKeys:
         assert not extra, f"CONFIG_METADATA has unexpected keys: {extra}"
 
 
+# Form fields that are not settings a user "sets" (schedule-editor scratch fields, the zone's display name,
+# the GitHub section which settings_extra reports separately) or are entity picks with no default.
+_NOT_SETTINGS = {"?key", "manage", "delete_schedule", "days", "start", "end", "name", "zone_name"}
+_UNREGISTERED_NO_DEFAULT = {"github_repo", "github_token", "indoor_temp_entity", "outdoor_temp_entity"}
+
+
+def _options_flow_keys() -> set[str]:
+    """Every config key an options-flow step can write, read from the real step source (#1230 R5c)."""
+    import re  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    from custom_components.climate_advisor import config_flow, const  # noqa: PLC0415
+
+    src = Path(config_flow.__file__).read_text(encoding="utf-8")
+    body = src[src.index("class ClimateAdvisorOptionsFlow") :]
+    keys: set[str] = set()
+    for m in re.finditer(r"vol\.(?:Required|Optional)\(\s*([A-Za-z_\"']+)", body):
+        token = m.group(1)
+        keys.add(token.strip("\"'") if token[0] in "\"'" else getattr(const, token, "?" + token))
+    # Built in loops over key tuples rather than literal vol.Required(...) calls.
+    keys |= set(config_flow._SETPOINT_KEYS) | set(config_flow._VACATION_KEYS)
+    return keys - _NOT_SETTINGS
+
+
+class TestDefaultsRegistry:
+    """#1230 R5c: one source of truth for defaults, complete over every options-flow key."""
+
+    def test_every_options_flow_key_has_a_default_or_is_no_default(self):
+        missing = []
+        for key in sorted(_options_flow_keys()):
+            if key in _UNREGISTERED_NO_DEFAULT:
+                continue
+            meta = CONFIG_METADATA.get(key)
+            if meta is None or not ("default" in meta or meta.get("no_default") is True):
+                missing.append(key)
+        assert not missing, f"options-flow keys with neither a CONFIG_METADATA default nor no_default: {missing}"
+
+    def test_every_metadata_entry_is_classified_exactly_once(self):
+        for key, meta in CONFIG_METADATA.items():
+            assert ("default" in meta) != (meta.get("no_default") is True), (
+                f"{key}: needs exactly one of default / no_default"
+            )
+
+    def test_unknown_keys_do_not_read_as_having_a_default(self):
+        from custom_components.climate_advisor.dashboard_api import default_for  # noqa: PLC0415
+
+        assert default_for("energy_rate", CONFIG_METADATA["energy_rate"]) is None
+        assert default_for("heat_power_kw", CONFIG_METADATA["heat_power_kw"]) is None
+
+    def test_defaults_match_the_options_forms(self):
+        """The few defaults that live as literals in the form must equal the registry value."""
+        from custom_components.climate_advisor import config_flow  # noqa: PLC0415
+
+        assert (
+            CONFIG_METADATA["max_setback_depth_f"]["default"] == config_flow._DELTA_FIELDS_F["max_setback_depth_f"][2]
+        )
+        for key in (
+            "comfort_deadband_hot_f",
+            "comfort_deadband_warm_f",
+            "comfort_deadband_mild_f",
+            "comfort_deadband_cool_f",
+            "comfort_deadband_cold_f",
+        ):
+            assert CONFIG_METADATA[key]["default"] == config_flow._DELTA_FIELDS_F[key][2], key
+
+
 class TestConfigMetadataStructure:
     """Each entry must have the required fields."""
 
@@ -140,7 +211,7 @@ class TestConfigMetadataStructure:
             assert "category" in meta, f"Entry '{key}' is missing 'category'"
 
     def test_each_entry_has_only_known_fields(self):
-        allowed = {"label", "description", "category", "display_transform", "sensitive", "default"}
+        allowed = {"label", "description", "category", "display_transform", "sensitive", "default", "no_default"}
         for key, meta in CONFIG_METADATA.items():
             extra = set(meta.keys()) - allowed
             assert not extra, f"Entry '{key}' has unexpected fields: {extra}"
@@ -167,3 +238,16 @@ class TestConfigMetadataCategoriesValid:
     def test_schedule_category_populated(self):
         schedule_keys = [k for k, m in CONFIG_METADATA.items() if m["category"] == "schedule"]
         assert len(schedule_keys) >= 3, "Expected at least 3 entries in 'schedule' category"
+
+
+def test_changed_markers_cover_formerly_unknown_defaults():
+    """#1230 R5c: keys that had no known default (wake time, notify toggles, ...) now get a marker."""
+    from custom_components.climate_advisor.dashboard_api import build_settings_extra  # noqa: PLC0415
+
+    changed = build_settings_extra(
+        {"wake_time": "07:15:00", "push_briefing": False, "ai_investigator_requests_per_day": 9, "energy_rate": 0.3}
+    )["changed"]
+    assert changed["wake_time"]["default"] == "06:30:00"
+    assert changed["push_briefing"]["default"] is True
+    assert changed["ai_investigator_requests_per_day"]["default"] == 3
+    assert "energy_rate" not in changed  # no default: set-or-not is not "changed"

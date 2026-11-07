@@ -497,9 +497,13 @@ class TestFrontend:
     def _html(self):
         from pathlib import Path
 
+        fe = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "frontend"
+        # classic page + the shared chart module (R6fe moved the chart code out of the page)
         return (
-            Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "frontend" / "index.html"
-        ).read_text(encoding="utf-8")
+            fe.joinpath("index.html").read_text(encoding="utf-8")
+            + "\n"
+            + fe.joinpath("chart_v2.js").read_text(encoding="utf-8")
+        )
 
     def test_status_card_reads_the_payload_fields(self):
         html = self._html()
@@ -513,7 +517,8 @@ class TestFrontend:
         assert "chartData.commanded_setpoint_history" in html
         assert "const _hasCommanded = commandedPts.some(p => p.y != null);" in html and "if (_hasCommanded) {" in html
         assert "label: 'Thermostat set'" in html
-        assert "d.label === 'Thermostat set'" in html  # the Target toggle drives it too
+        # the Target toggle drives it too: both datasets carry the 'ov:target' id, and toggleSeries flips every one
+        assert "caId: 'ov:target', label: 'Thermostat set'" in html and "if (d.caId !== id) return;" in html
 
 
 # ---------------------------------------------------------------------------

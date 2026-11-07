@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Climate Advisor - Prediction accuracy (preview)</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --ink: #0b0b0b; --ink2: #52514e; --muted: #6b6a66;
+    --rule: #e4e3df; --chip: #f1f0ec; --s1: #1a64ba; --s2: #b3461a; --heat: #e34948;
+    --warn: #a35400; --ok: #17703f; --sel: rgba(42, 120, 214, 0.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --panel: #1f1f1d; --ink: #f0efec; --ink2: #c3c2b7; --muted: #a3a29b;
+      --rule: #3a3936; --chip: #2c2c2a; --s1: #5aa0f0; --s2: #f08a5d; --heat: #e66767;
+      --warn: #f0a63c; --ok: #4cc38a; --sel: rgba(90, 160, 240, 0.18);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    padding: 0 0 40px; overflow-x: hidden;
+  }
+  a { color: var(--s1); }
+  main { max-width: 1240px; margin: 0 auto; padding: 14px 16px 0; display: flex; flex-direction: column; gap: 12px; }
+  header.top { background: var(--panel); border-bottom: 1px solid var(--rule); }
+  .top-in { max-width: 1240px; margin: 0 auto; padding: 10px 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+  .brand { font-size: 17px; font-weight: 700; }
+  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  h1, h2 { margin: 0; font-size: 16px; }
+  .sub { font-size: 12px; color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+  .grp-label { font-size: 12px; color: var(--muted); }
+  .grp { display: flex; align-items: center; flex-wrap: wrap; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+  .grp.range { flex-wrap: nowrap; max-width: 100%; overflow-x: auto; }
+  .grp button, .reset, .retry, .zone-sel {
+    min-height: 36px; font: inherit; font-size: 13px; color: var(--ink);
+  }
+  .grp button { padding: 0 11px; border: 0; background: transparent; cursor: pointer; }
+  .grp button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+  .grp button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .grp button.nav { min-width: 36px; font-size: 16px; padding: 0 8px; }
+  .reset, .retry { padding: 0 12px; border-radius: 8px; border: 1px solid var(--rule); background: transparent; cursor: pointer; }
+  .zone-sel { border-radius: 8px; border: 1px solid var(--rule); background: var(--panel); padding: 0 8px; }
+  button:focus-visible, select:focus-visible, canvas:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+  .grow { flex: 1 1 0; }
+  .small { font-size: 12px; color: var(--ink2); }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--ink2); align-items: center; }
+  .legend span.k { display: flex; align-items: center; gap: 6px; }
+  .hover { color: var(--ink); font-variant-numeric: tabular-nums; min-height: 1.2em; }
+  .chart-wrap { position: relative; height: 320px; touch-action: pan-y; }
+  .chart-wrap canvas { cursor: crosshair; }
+  .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px; color: var(--muted); font-size: 14px; pointer-events: none; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+  .tile { border: 1px solid var(--rule); border-radius: 10px; padding: 8px 10px; }
+  .tile .l { font-size: 12px; color: var(--muted); }
+  .tile .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .tile .n { font-size: 12px; color: var(--ink2); }
+  .state { border: 1px solid var(--rule); border-radius: 10px; padding: 12px 14px; font-size: 14px; }
+  .state.err { border-color: var(--warn); color: var(--ink); }
+  .state.err strong { color: var(--warn); }
+  .state.empty { background: var(--chip); }
+  .scroll-x { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 13px; font-variant-numeric: tabular-nums; }
+  td, th { padding: 6px 8px; border-top: 1px solid var(--rule); text-align: left; vertical-align: top; }
+  th { font-weight: 500; color: var(--muted); border-top: 0; }
+  td.yes { font-weight: 600; }
+  td.no { opacity: 0.7; }
+  td.na { color: var(--muted); }
+  .verdict { font-size: 12px; color: var(--warn); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  [hidden] { display: none !important; }
+</style>
+<!-- Bundled libraries only, same files as index.html (no CDN) -->
+<script src="hammer.min.js"></script>
+<script src="chart.umd.min.js"></script>
+<script src="chartjs-plugin-zoom.min.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <div class="brand">Climate Advisor</div>
+    <label class="row small" for="zone-select" id="zone-wrap" hidden>Zone
+      <select id="zone-select" class="zone-sel"></select>
+    </label>
+    <a href="index.html" id="back-link">&#8592; Back to dashboard</a>
+    <div class="grow"></div>
+    <span class="sub">Preview page</span>
+  </div>
+</header>
+<main>
+  <section class="card" aria-labelledby="pa-title">
+    <div class="row" style="justify-content: space-between">
+      <div>
+        <h1 id="pa-title">Prediction accuracy</h1>
+        <div class="sub" id="pa-sub">Each point is what a model said a few hours earlier, drawn at the time it was about, next to what the sensor read</div>
+      </div>
+      <div class="row">
+        <div class="row" style="gap: 6px"><span class="grp-label" id="lbl-sensor">Sensor</span>
+          <div class="grp" role="group" aria-labelledby="lbl-sensor" id="grp-sensor"></div></div>
+        <div class="row" style="gap: 6px"><span class="grp-label" id="lbl-lead">Predicted</span>
+          <div class="grp" role="group" aria-label="How far ahead the prediction was made" id="grp-lead"></div></div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="grp range" role="group" aria-label="Time range" id="grp-range"></div>
+      <button type="button" class="reset" id="reset-zoom" hidden>Reset zoom</button>
+      <span class="small" id="window-label"></span>
+      <span class="grow"></span>
+      <span class="grp-label">Drag or pinch across the chart to zoom</span>
+    </div>
+
+    <div id="state-box" aria-live="polite"></div>
+
+    <div class="legend" id="legend">
+      <span class="k"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2"></line></svg>Actual</span>
+      <span class="k" style="color: var(--s1)"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2.5"></line></svg>v4 (new)</span>
+      <span class="k" id="legend-v3" style="color: var(--s2)"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2" stroke-dasharray="5 3"></line></svg>v3 (today&#8217;s line)</span>
+      <span class="k" style="color: var(--heat)"><svg width="14" height="8" aria-hidden="true"><rect width="14" height="8" rx="2" fill="currentColor" opacity="0.6"></rect></svg>Heat ran</span>
+      <span class="grow"></span>
+      <span class="hover" id="hover" aria-live="off"></span>
+    </div>
+
+    <div class="chart-wrap" id="chart-wrap">
+      <canvas id="pa-chart" tabindex="0" role="img" aria-label="Actual vs predicted indoor temperature. Use left and right arrow keys to read values."></canvas>
+      <div class="overlay" id="chart-overlay" hidden></div>
+    </div>
+
+    <div class="tiles" id="tiles"></div>
+    <div class="small" id="tile-note"></div>
+  </section>
+
+  <section class="card" aria-labelledby="gate-title">
+    <div class="row" style="justify-content: space-between">
+      <h2 id="gate-title">How each model has scored</h2>
+      <span class="verdict" id="gate-verdict"></span>
+    </div>
+    <div class="sub" id="gate-sub">Average miss over all recorded history, for information. Nothing here switches a model on or off: which one the Status chart shows is your choice under Settings, Prediction engine. Rows are scored at 1, 4 and 12 h; 24 h is shown for information.</div>
+    <div class="scroll-x">
+      <table id="gate-table">
+        <thead><tr><th>Zone</th><th>Season</th><th>Look-ahead</th><th>v4</th><th>v3</th><th>&#8220;No change&#8221; guess</th><th>v4 runs warm/cold</th><th>v4 beats v3</th><th>v4 beats no change</th><th id="th-bias">Bias within limit</th></tr></thead>
+        <tbody id="gate-body"></tbody>
+      </table>
+    </div>
+    <div class="small" id="seasons-note">Seasons are scored apart by what the HVAC was doing: heating days, and summer days (cooling or the whole-house fan); days with neither are reported separately.</div>
+  </section>
+  <div class="sub">Preview. v4 runs beside today&#8217;s prediction (v3). Choose which one the Status chart shows under Settings, Prediction engine; Climate Advisor makes every heating, cooling and ventilation decision with v3 either way. At 7 d and longer, lines are hourly averages, and at 1 y daily averages, as on today&#8217;s chart.</div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  var API_PATH = '/api/climate_advisor/prediction_accuracy';
+  var ZONE_STORAGE_KEY = 'climate_advisor_selected_zone'; // same key as index.html
+  var CA_SENSOR = '_ca';
+  var LEADS = ['1h', '4h', '12h', '24h'];
+  var RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y'];
+  var RANGE_MS = {
+    '6h': 6 * 3600e3, '12h': 12 * 3600e3, '24h': 24 * 3600e3, '3d': 72 * 3600e3,
+    '7d': 168 * 3600e3, '30d': 720 * 3600e3, '1y': 8760 * 3600e3
+  };
+  var GATE_LEADS = ['1h', '4h', '12h'];
+  var BIAS_LIMIT_F = 0.5;
+
+  var S = {
+    zone: null, zones: [], sensor: CA_SENSOR, lead: '4h', range: '3d', before: null,
+    sensors: [], data: null, loading: false, error: null, zoom: null, hoverIdx: null
+  };
+  var chart = null, reqSeq = 0, reqCtl = null;
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+
+  // ---------- auth (same approach as index.html) ----------
+  function hassAuth() {
+    try {
+      var ha = window.parent.document.querySelector('home-assistant');
+      if (ha && ha.hass && ha.hass.auth) return ha.hass.auth;
+    } catch (e) { /* not embedded or cross-origin */ }
+    return null;
+  }
+  async function getAuthToken() {
+    var auth = hassAuth();
+    if (auth) {
+      if (auth.data && auth.data.expires && auth.data.expires - Date.now() < 300000) {
+        try { await auth.refreshAccessToken(); } catch (e) { /* refresh failed */ }
+      }
+      if (auth.data && auth.data.access_token) return auth.data.access_token;
+    }
+    try {
+      var stored = localStorage.getItem('hassTokens');
+      if (stored) {
+        var t = JSON.parse(stored);
+        if (t && t.access_token) return t.access_token;
+      }
+    } catch (e) { /* unavailable */ }
+    return null;
+  }
+  async function forceTokenRefresh() {
+    var auth = hassAuth();
+    if (auth) {
+      try {
+        await auth.refreshAccessToken();
+        if (auth.data && auth.data.access_token) return auth.data.access_token;
+      } catch (e) { /* refresh failed */ }
+    }
+    return null;
+  }
+  async function authedFetch(url, signal) {
+    var token = await getAuthToken();
+    var headers = {};
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    var resp = await fetch(url, { credentials: 'same-origin', headers: headers, signal: signal });
+    if (resp.status === 401) {
+      var fresh = await forceTokenRefresh();
+      if (fresh && fresh !== token) {
+        resp = await fetch(url, { credentials: 'same-origin', headers: { 'Authorization': 'Bearer ' + fresh }, signal: signal });
+      }
+    }
+    if (!resp.ok) {
+      var msg = 'HTTP ' + resp.status;
+      try { var b = await resp.json(); if (b && b.message) msg = b.message; } catch (e) { /* ignore */ }
+      throw new Error(msg);
+    }
+    return resp.json();
+  }
+
+  // ---------- request building ----------
+  // One request per control state: zone, sensor, lead, range and (when scrolled back) before.
+  function buildQuery(st) {
+    var p = new URLSearchParams();
+    if (st.zone) p.set('zone', st.zone);
+    p.set('sensor', st.sensor);
+    p.set('lead', st.lead);
+    p.set('range', st.range);
+    if (st.before) p.set('before', st.before);
+    return p.toString();
+  }
+  function buildUrl(st) { return API_PATH + '?' + buildQuery(st); }
+
+  // ---------- formatting ----------
+  function unit() { return (S.data && S.data.unit) || '°F'; }
+  function isC() { return /C/.test(unit()); }
+  function fnum(v, d) { return v == null || isNaN(v) ? '—' : Number(v).toFixed(d == null ? 2 : d); }
+  function fmiss(v) { return v == null ? '—' : fnum(v) + ' ' + unit(); }
+  function fbias(v) { return v == null ? '—' : (v > 0 ? '+' : '') + fnum(v) + ' ' + unit(); }
+  function leadText(l) { return String(l).replace('h', ' h'); }
+  function fmtT(ms) {
+    return new Date(ms).toLocaleString(undefined, { weekday: 'short', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+  function toMs(t) { var v = Date.parse(t); return isNaN(v) ? null : v; }
+
+  // ---------- window / data helpers ----------
+  function pts() {
+    if (!S.data || !Array.isArray(S.data.points)) return [];
+    var out = [];
+    S.data.points.forEach(function (p) {
+      var ms = toMs(p.t);
+      if (ms != null) out.push({ ms: ms, a: p.actual == null ? null : p.actual, v4: p.v4 == null ? null : p.v4, v3: p.v3 == null ? null : p.v3 });
+    });
+    out.sort(function (a, b) { return a.ms - b.ms; });
+    return out;
+  }
+  function windowMs() {
+    var d = S.data;
+    var s = d && toMs(d.start), e = d && toMs(d.end);
+    if (s == null || e == null) {
+      e = S.before ? toMs(S.before) : Date.now();
+      s = e - RANGE_MS[S.range];
+    }
+    return [s, e];
+  }
+  function viewWindow() { return S.zoom ? S.zoom : windowMs(); }
+  function hasV3() {
+    return S.sensor === CA_SENSOR && pts().some(function (p) { return p.v3 != null; });
+  }
+  function scoreInView() {
+    // Time in view: server stats for the whole window, local scoring once the viewer zooms in.
+    var w = viewWindow();
+    if (!S.zoom && S.data && S.data.stats) {
+      var st = S.data.stats;
+      return { n: st.n, v4_mae: st.v4_mae, v3_mae: st.v3_mae, flat_mae: st.flat_mae, v4_bias: st.v4_bias, v3_bias: st.v3_bias, local: false };
+    }
+    var inView = pts().filter(function (p) { return p.ms >= w[0] && p.ms <= w[1] && p.a != null && p.v4 != null; });
+    function mae(k) {
+      var g = inView.filter(function (p) { return p[k] != null; });
+      return g.length ? g.reduce(function (s, p) { return s + Math.abs(p[k] - p.a); }, 0) / g.length : null;
+    }
+    function bias(k) {
+      var g = inView.filter(function (p) { return p[k] != null; });
+      return g.length ? g.reduce(function (s, p) { return s + (p[k] - p.a); }, 0) / g.length : null;
+    }
+    return { n: inView.length, v4_mae: mae('v4'), v3_mae: mae('v3'), flat_mae: null, v4_bias: bias('v4'), v3_bias: bias('v3'), local: true };
+  }
+
+  // ---------- controls ----------
+  function segButton(label, pressed, onClick, opts) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+    if (opts && opts.disabled) b.disabled = true;
+    if (opts && opts.cls) b.className = opts.cls;
+    if (opts && opts.aria) b.setAttribute('aria-label', opts.aria);
+    if (opts && opts.value) b.dataset.value = opts.value;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+  function sensorList() {
+    var list = [{ id: CA_SENSOR, name: 'CA reading' }];
+    (S.sensors || []).forEach(function (s) {
+      if (s && s.id && s.id !== CA_SENSOR) list.push({ id: s.id, name: s.name || s.id, role: s.role });
+    });
+    return list;
+  }
+  function renderControls() {
+    var gs = $('grp-sensor'); gs.textContent = '';
+    sensorList().forEach(function (s) {
+      var b = segButton(s.name, S.sensor === s.id, function () { pickSensor(s.id); }, { value: s.id });
+      if (s.role) b.title = s.role;
+      gs.appendChild(b);
+    });
+    var gl = $('grp-lead'); gl.textContent = '';
+    LEADS.forEach(function (l) {
+      gl.appendChild(segButton(leadText(l) + ' ahead', S.lead === l, function () { pickLead(l); }, { value: l }));
+    });
+    var gr = $('grp-range'); gr.textContent = '';
+    var back = segButton('‹', false, function () { scroll(-1); }, { cls: 'nav', aria: 'Scroll back', disabled: !S.data });
+    back.id = 'nav-back';
+    gr.appendChild(back);
+    RANGES.forEach(function (r) {
+      gr.appendChild(segButton(r, S.range === r, function () { pickRange(r); }, { value: r }));
+    });
+    var fwd = segButton('›', false, function () { scroll(1); }, { cls: 'nav', aria: 'Scroll forward', disabled: !S.before });
+    fwd.id = 'nav-fwd';
+    gr.appendChild(fwd);
+    // Nav arrows are plain buttons, not toggles.
+    back.removeAttribute('aria-pressed'); fwd.removeAttribute('aria-pressed');
+    $('reset-zoom').hidden = !S.zoom;
+    $('legend-v3').hidden = S.sensor !== CA_SENSOR;
+    $('lbl-lead').textContent = 'Predicted';
+    $('pa-sub').textContent = 'Each point is what a model said ' + leadText(S.lead) + ' earlier, drawn at the time it was about, next to what the sensor read';
+    var zw = $('zone-wrap'); zw.hidden = !(S.zones && S.zones.length > 1);
+  }
+
+  function pickSensor(id) { S.sensor = id; S.zoom = null; load(); }
+  function pickLead(l) { S.lead = l; S.zoom = null; load(); }
+  function pickRange(r) { S.range = r; S.before = null; S.zoom = null; load(); }
+  function scroll(dir) {
+    var span = RANGE_MS[S.range];
+    var end = S.before ? toMs(S.before) : Date.now();
+    var next = end + dir * span;
+    S.zoom = null;
+    if (dir > 0 && next >= Date.now() - span / 20) S.before = null; // snap back to live
+    else S.before = new Date(next).toISOString();
+    load();
+  }
+  function resetZoom() {
+    S.zoom = null;
+    if (chart && chart.resetZoom) chart.resetZoom();
+    renderAll();
+  }
+
+  // ---------- loading ----------
+  async function load() {
+    var seq = ++reqSeq;
+    if (reqCtl) { try { reqCtl.abort(); } catch (e) { /* ignore */ } }
+    reqCtl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    S.loading = true; S.error = null;
+    renderAll();
+    try {
+      var d = await authedFetch(buildUrl(S), reqCtl ? reqCtl.signal : undefined);
+      if (seq !== reqSeq) return;
+      S.data = d;
+      if (Array.isArray(d.sensors)) S.sensors = d.sensors;
+      S.loading = false;
+    } catch (e) {
+      if (seq !== reqSeq || (e && e.name === 'AbortError')) return;
+      S.loading = false;
+      S.error = (e && e.message) ? e.message : 'request failed';
+    }
+    renderAll();
+  }
+
+  async function loadZones() {
+    try {
+      var st = await authedFetch('/api/climate_advisor/status');
+      if (st && Array.isArray(st.zones) && st.zone_count > 1) {
+        S.zones = st.zones;
+        var sel = $('zone-select'); sel.textContent = '';
+        st.zones.forEach(function (z) {
+          var o = document.createElement('option');
+          o.value = z.entry_id; o.textContent = z.title || z.entry_id;
+          sel.appendChild(o);
+        });
+        if (!S.zone || !st.zones.some(function (z) { return z.entry_id === S.zone; })) S.zone = st.zones[0].entry_id;
+        sel.value = S.zone;
+      }
+    } catch (e) { /* single zone or status unavailable: zone-less request */ }
+  }
+
+  // ---------- rendering ----------
+  function renderAll() {
+    renderControls();
+    renderState();
+    renderChart();
+    renderTiles();
+    renderGate();
+  }
+
+  function isEmptyModel() {
+    var d = S.data;
+    if (!d) return false;
+    var noPts = !Array.isArray(d.points) || d.points.length === 0;
+    var conf = d.model && d.model.confidence;
+    return noPts && (!d.model || conf === 'none' || conf == null);
+  }
+
+  function renderState() {
+    var box = $('state-box'); box.textContent = '';
+    var overlay = $('chart-overlay');
+    overlay.hidden = true;
+    if (S.error) {
+      var e = document.createElement('div');
+      e.className = 'state err'; e.setAttribute('role', 'alert');
+      e.innerHTML = '<strong>Could not load prediction accuracy.</strong> ' + esc(S.error) + ' ';
+      var r = document.createElement('button');
+      r.type = 'button'; r.className = 'retry'; r.id = 'retry'; r.textContent = 'Retry';
+      r.addEventListener('click', load);
+      e.appendChild(r);
+      box.appendChild(e);
+      return;
+    }
+    if (S.loading && !S.data) { overlay.hidden = false; overlay.textContent = 'Loading…'; return; }
+    if (isEmptyModel()) {
+      var m = document.createElement('div');
+      m.className = 'state empty'; m.id = 'empty-state';
+      m.textContent = 'v4 has not been fitted yet; it fits nightly at 3:15. This page fills in after the first fit, or after the backtest results are published.';
+      box.appendChild(m);
+      return;
+    }
+    if (S.data && pts().length === 0) {
+      overlay.hidden = false; overlay.textContent = 'No predictions in this window';
+    }
+  }
+
+  function readColors() {
+    return {
+      ink: cssVar('--ink'), ink2: cssVar('--ink2'), muted: cssVar('--muted'), rule: cssVar('--rule'),
+      s1: cssVar('--s1'), s2: cssVar('--s2'), heat: cssVar('--heat'), chip: cssVar('--chip')
+    };
+  }
+
+  function tickLabel(ms) {
+    var w = windowMs(), span = w[1] - w[0], d = new Date(ms);
+    if (span <= 36 * 3600e3) return d.toLocaleTimeString(undefined, { hour: 'numeric' });
+    if (span <= 8 * 24 * 3600e3) return d.toLocaleDateString(undefined, { weekday: 'short', month: 'numeric', day: 'numeric' }) + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric' });
+    return d.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' });
+  }
+
+  // Draws the heat-run strip along the bottom of the plot, a "no data" shade, and the hover cursor.
+  var overlayPlugin = {
+    id: 'paOverlay',
+    beforeDatasetsDraw: function (c) {
+      var xs = c.scales.x, ca = c.chartArea, ctx = c.ctx, col = readColors();
+      if (!xs || !ca) return;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(ca.left, ca.top, ca.right - ca.left, ca.bottom - ca.top); ctx.clip();
+      var p = pts();
+      if (S.data && p.length) {
+        var first = p[0].ms, last = p[p.length - 1].ms;
+        ctx.fillStyle = col.chip;
+        if (first > xs.min) { var x1 = Math.min(xs.getPixelForValue(first), ca.right); ctx.fillRect(ca.left, ca.top, x1 - ca.left, ca.bottom - ca.top); }
+        if (last < xs.max) { var x0 = Math.max(xs.getPixelForValue(last), ca.left); ctx.fillRect(x0, ca.top, ca.right - x0, ca.bottom - ca.top); }
+      }
+      var runs = (S.data && S.data.heat_runs) || [];
+      ctx.fillStyle = col.heat; ctx.globalAlpha = 0.6;
+      runs.forEach(function (r) {
+        var a = toMs(r[0]), b = toMs(r[1]);
+        if (a == null || b == null || b < xs.min || a > xs.max) return;
+        var xa = xs.getPixelForValue(Math.max(a, xs.min)), xb = xs.getPixelForValue(Math.min(b, xs.max));
+        ctx.fillRect(xa, ca.bottom - 8, Math.max(2, xb - xa), 8);
+      });
+      ctx.globalAlpha = 1;
+      if (S.hoverIdx != null) {
+        var hp = pts()[S.hoverIdx];
+        if (hp) {
+          var hx = xs.getPixelForValue(hp.ms);
+          ctx.strokeStyle = col.ink2; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(hx, ca.top); ctx.lineTo(hx, ca.bottom); ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+  };
+
+  function datasets() {
+    var col = readColors(), p = pts(), few = p.length <= 120;
+    function ser(k) { return p.map(function (q) { return { x: q.ms, y: q[k] }; }); }
+    var ds = [
+      { label: 'Actual', data: ser('a'), borderColor: col.ink, borderWidth: 1.6, pointRadius: few ? 2 : 0, pointBackgroundColor: col.ink, spanGaps: false, order: 3 },
+      { label: 'v4', data: ser('v4'), borderColor: col.s1, borderWidth: 2.4, pointRadius: few ? 2 : 0, pointBackgroundColor: col.s1, spanGaps: false, order: 1 }
+    ];
+    if (hasV3()) {
+      ds.push({ label: 'v3', data: ser('v3'), borderColor: col.s2, borderWidth: 2, borderDash: [6, 4], pointRadius: 0, spanGaps: false, order: 2 });
+    }
+    return ds;
+  }
+
+  function renderChart() {
+    var canvas = $('pa-chart');
+    var wl = $('window-label');
+    if (typeof Chart === 'undefined') { wl.textContent = 'Chart library failed to load'; return; }
+    var w = viewWindow(), col = readColors();
+    var ds = S.data ? datasets() : [];
+    var d = S.data;
+    var avg = d && d.downsample === 'hourly' ? ' · hourly averages' : (d && d.downsample === 'daily' ? ' · daily averages' : '');
+    wl.textContent = S.data ? fmtT(w[0]) + ' to ' + fmtT(w[1]) + avg : '';
+    canvas.setAttribute('aria-label', 'Actual vs predicted indoor temperature in ' + unit() + ', predictions made ' + leadText(S.lead) + ' ahead. Use left and right arrow keys to read values.');
+    if (!chart) {
+      chart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { datasets: ds },
+        plugins: [overlayPlugin],
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false, parsing: false, normalized: true,
+          layout: { padding: { bottom: 2 } },
+          interaction: { mode: 'nearest', axis: 'x', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: { enabled: false },
+            zoom: {
+              zoom: {
+                drag: { enabled: true, backgroundColor: cssVar('--sel') },
+                pinch: { enabled: true },
+                wheel: { enabled: false },
+                mode: 'x',
+                onZoomComplete: function (ctx) {
+                  var xs = ctx.chart.scales.x;
+                  S.zoom = [xs.min, xs.max];
+                  renderControls(); renderTiles();
+                  $('window-label').textContent = fmtT(xs.min) + ' to ' + fmtT(xs.max) + avgLabel();
+                }
+              },
+              pan: { enabled: false }
+            }
+          },
+          scales: {
+            x: { type: 'linear', ticks: { maxTicksLimit: 8, autoSkip: true, callback: function (v) { return tickLabel(v); } }, grid: {} },
+            y: { grace: '5%', ticks: { callback: function (v) { return v + '°'; } }, grid: {} }
+          },
+          onHover: function (evt, els, c) { hoverFromEvent(evt, c); }
+        }
+      });
+      canvas.addEventListener('pointerleave', function () { S.hoverIdx = null; $('hover').textContent = ''; if (chart) chart.draw(); });
+      canvas.addEventListener('keydown', onKey);
+    }
+    chart.data.datasets = ds;
+    var sx = chart.options.scales.x, sy = chart.options.scales.y;
+    sx.min = w[0]; sx.max = w[1];
+    sx.ticks.color = col.muted; sy.ticks.color = col.muted;
+    sx.grid.color = col.rule; sy.grid.color = col.rule;
+    chart.options.plugins.zoom.zoom.drag.backgroundColor = cssVar('--sel');
+    if (!S.zoom && chart.isZoomedOrPanned && chart.isZoomedOrPanned()) chart.resetZoom('none');
+    chart.update('none');
+    S.hoverIdx = null; $('hover').textContent = '';
+  }
+  function avgLabel() {
+    var d = S.data;
+    return d && d.downsample === 'hourly' ? ' · hourly averages' : (d && d.downsample === 'daily' ? ' · daily averages' : '');
+  }
+
+  function showHover(idx) {
+    var p = pts()[idx];
+    if (!p) return;
+    S.hoverIdx = idx;
+    var u = unit(), t = [fmtT(p.ms)];
+    if (p.a != null) t.push('actual ' + fnum(p.a, 1) + u);
+    if (p.v4 != null) t.push('v4 ' + fnum(p.v4, 1) + u);
+    if (p.v3 != null && S.sensor === CA_SENSOR) t.push('v3 ' + fnum(p.v3, 1) + u);
+    $('hover').textContent = t.join(' · ');
+    if (chart) chart.draw();
+  }
+  function nearestIdx(ms) {
+    var p = pts(), best = null, bd = Infinity, w = viewWindow();
+    p.forEach(function (q, i) {
+      if (q.ms < w[0] || q.ms > w[1]) return;
+      var dd = Math.abs(q.ms - ms);
+      if (dd < bd) { bd = dd; best = i; }
+    });
+    return best;
+  }
+  function hoverFromEvent(evt, c) {
+    if (!evt || evt.type === 'mouseout' || evt.x == null) return;
+    var xs = c.scales.x;
+    var i = nearestIdx(xs.getValueForPixel(evt.x));
+    if (i != null) showHover(i);
+  }
+  function onKey(e) {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    var p = pts(), w = viewWindow();
+    var vis = [];
+    p.forEach(function (q, i) { if (q.ms >= w[0] && q.ms <= w[1]) vis.push(i); });
+    if (!vis.length) return;
+    var pos = S.hoverIdx == null ? -1 : vis.indexOf(S.hoverIdx);
+    if (pos < 0) pos = e.key === 'ArrowRight' ? -1 : vis.length;
+    pos = Math.max(0, Math.min(vis.length - 1, pos + (e.key === 'ArrowRight' ? 1 : -1)));
+    showHover(vis[pos]);
+    e.preventDefault();
+  }
+
+  function renderTiles() {
+    var sc = scoreInView(), v3 = hasV3(), box = $('tiles');
+    var selected = (S.data && S.data.primary_engine) === 'v3' ? 'v3' : 'v4'; // the primary engine chosen in Settings leads; the comparison engine follows
+    var v4Miss = { l: 'v4 average miss', v: fmiss(sc.v4_mae), n: (sc.n || 0) + ' predictions in view' };
+    var v3Miss = { l: 'v3 average miss', v: v3 ? fmiss(sc.v3_mae) : '—', n: v3 ? 'today’s line' : 'v3 predicts only the reading CA uses' };
+    var v4Bias = { l: 'v4 runs warm or cold', v: fbias(sc.v4_bias), n: v3 ? 'v3 ' + fbias(sc.v3_bias) : 'in view' };
+    var v3Bias = { l: 'v3 runs warm or cold', v: v3 ? fbias(sc.v3_bias) : '—', n: 'v4 ' + fbias(sc.v4_bias) };
+    var tiles = selected === 'v3' ? [v3Miss, v4Miss, v3Bias] : [v4Miss, v3Miss, v4Bias];
+    tiles[0].n += ' · main prediction on Status' + (S.data && S.data.shadow_engine && S.data.shadow_engine !== 'none' ? ' (comparison: ' + S.data.shadow_engine + ')' : '');
+    if (!sc.local && sc.flat_mae != null) tiles.push({ l: '“No change” guess', v: fmiss(sc.flat_mae), n: 'if the temperature just stayed put' });
+    box.innerHTML = tiles.map(function (t) {
+      return '<div class="tile"><div class="l">' + esc(t.l) + '</div><div class="v">' + esc(t.v) + '</div><div class="n">' + esc(t.n) + '</div></div>';
+    }).join('');
+    var note = 'Numbers cover the time in view, so zooming or scrolling scores just that stretch.';
+    if (S.sensor !== CA_SENSOR) {
+      var s = sensorList().filter(function (x) { return x.id === S.sensor; })[0];
+      note = (s && s.role ? s.name + ' (' + s.role + '): ' : '') + 'one prediction line per sensor shows where v4 is weakest instead of averaging it away.';
+    }
+    if (sc.local) note += ' Zoomed: scored from the points in view.';
+    $('tile-note').textContent = note;
+  }
+
+  function zoneName(z) {
+    var m = (S.zones || []).filter(function (x) { return x.entry_id === z; })[0];
+    return m ? (m.title || z) : z;
+  }
+  function renderGate() {
+    var rows = (S.data && Array.isArray(S.data.gate)) ? S.data.gate : [];
+    var gateSummary = (S.data && S.data.gate_summary) || null;
+    var lim = isC() ? +(BIAS_LIMIT_F * 5 / 9).toFixed(2) : BIAS_LIMIT_F;
+    $('th-bias').textContent = 'Bias within ±' + lim + ' ' + unit();
+    var body = $('gate-body');
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="10" class="na">No scored results yet.</td></tr>';
+      $('gate-verdict').textContent = 'Not yet: nothing scored';
+      $('gate-verdict').className = 'verdict';
+      return;
+    }
+    var unscored = 0, failed = 0, seasons = {};
+    body.innerHTML = rows.map(function (r) {
+      var info = GATE_LEADS.indexOf(r.lead) < 0;
+      var season = r.season === 'summer' ? 'Summer' : (r.season === 'heating' ? 'Heating' : esc(r.season || ''));
+      var head = '<td>' + esc(zoneName(r.zone)) + '</td><td>' + season + '</td><td>' + esc(leadText(r.lead)) + (info ? ' (info)' : '') + '</td>';
+      if (r.scored === false) {
+        if (!info) unscored++;
+        return '<tr>' + head + '<td>—</td><td>—</td><td>—</td><td>—</td><td class="na" colspan="3">Not scored yet</td></tr>';
+      }
+      var c1 = r.v4 < r.v3, c2 = r.v4 < r.flat, c3 = Math.abs(r.bias) <= lim;
+      // The server's verdict is authoritative (it also checks sample size and v4 coverage); the cells explain it.
+      var rowOk = (typeof r.pass === 'boolean') ? r.pass : (c1 && c2 && c3);
+      if (!info) { seasons[r.season] = true; if (!rowOk) failed++; }
+      function cell(ok) { return '<td class="' + (ok ? 'yes' : 'no') + '">' + (ok ? 'Yes' : 'No') + '</td>'; }
+      var why = (!rowOk && c1 && c2 && c3 && r.reasons && r.reasons.length) ? ' title="' + esc(r.reasons.join('; ')) + '"' : '';
+      return '<tr' + why + '>' + head + '<td style="font-weight:600">' + fnum(r.v4) + '</td><td>' + fnum(r.v3) + '</td><td>' + fnum(r.flat) + '</td><td>' + fbias(r.bias).replace(' ' + unit(), '') + '</td>' + cell(c1) + cell(c2) + cell(c3) + '</tr>';
+    }).join('');
+    // Descriptive only: how many scored rows v4 beats both v3 and "no change" on. No ready / not-ready language.
+    var v = $('gate-verdict');
+    v.className = 'verdict';
+    if (gateSummary && gateSummary.scored != null) {
+      v.textContent = 'v4 beats both v3 and "no change" in ' + gateSummary.passed + ' of ' + gateSummary.scored + ' scored rows' +
+        (unscored ? ' (' + unscored + ' not scored yet)' : '');
+    } else {
+      v.textContent = unscored ? unscored + ' row' + (unscored === 1 ? '' : 's') + ' not scored yet' : '';
+    }
+  }
+
+  // ---------- boot ----------
+  function init() {
+    try { S.zone = localStorage.getItem(ZONE_STORAGE_KEY) || null; } catch (e) { S.zone = null; }
+    try {
+      var qz = new URLSearchParams(location.search).get('zone');
+      if (qz) S.zone = qz;
+    } catch (e) { /* ignore */ }
+    $('reset-zoom').addEventListener('click', resetZoom);
+    $('zone-select').addEventListener('change', function (ev) {
+      S.zone = ev.target.value; S.before = null; S.zoom = null; S.sensors = []; S.sensor = CA_SENSOR;
+      try { localStorage.setItem(ZONE_STORAGE_KEY, S.zone); } catch (e) { /* ignore */ }
+      load();
+    });
+    if (window.matchMedia) {
+      var mq = window.matchMedia('(prefers-color-scheme: dark)');
+      var onTheme = function () { if (chart) renderChart(); };
+      if (mq.addEventListener) mq.addEventListener('change', onTheme); else if (mq.addListener) mq.addListener(onTheme);
+    }
+    window.addEventListener('resize', function () { if (chart) chart.resize(); });
+    renderControls();
+    loadZones().then(load);
+  }
+  init();
+})();
+</script>
+</body>
+</html>

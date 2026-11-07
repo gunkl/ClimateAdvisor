@@ -472,7 +472,9 @@ class TestRegressionGuardAutomationPathsUnaffected:
         # comparison above happened not to distinguish the two inputs for some fixture.
         import inspect
 
-        src = inspect.getsource(coord_mod.ClimateAdvisorCoordinator._compute_next_automation_action)
+        # Issue #1230 R3b: the nat-vent start prediction moved out of the card into a helper the timeline snapshot also
+        # calls (same code, extracted unchanged), so the structural check reads the helper.
+        src = inspect.getsource(coord_mod.ClimateAdvisorCoordinator._predict_nat_vent_start)
         assert "_build_future_forecast_outdoor(self._hourly_forecast_temps, c)" in src, (
             "expected the nat-vent-gate forecast input to be built from self._hourly_forecast_temps "
             "directly, not an extended/synthetic list — scope-boundary table violation if this changed"

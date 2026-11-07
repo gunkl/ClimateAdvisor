@@ -545,12 +545,14 @@ class TestOdeGuardSkipsWhileSelectorGuardsFloor:
 
     def test_hysteresis_gap_with_cool_armed_still_writes(self):
         events, mode = self._fire(self._engine(71.0, mode="cool"))
-        assert "ceiling_guard_fired" in events and mode == "cool"
+        # Issue #1230 R6 (X1): the band arms cool at the ceiling itself, so the guard has nothing left to write
+        assert "ceiling_guard_fired" not in events and mode == "cool"
 
     def test_cool_zone_writes(self):
         for indoor in (72.0, 73.5):
             events, mode = self._fire(self._engine(indoor, mode="heat"))
-            assert "ceiling_guard_fired" in events and mode == "cool", indoor
+            # Issue #1230 R6 (X1): the band switches heat -> cool at the ceiling itself; the guard adds nothing
+            assert "ceiling_guard_fired" not in events and mode == "cool", indoor
 
 
 # ---------------------------------------------------------------------------

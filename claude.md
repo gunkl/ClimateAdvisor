@@ -471,6 +471,8 @@ Single source of truth for how config-flow and options-flow fields are built.
 - **HA facts vs unknowns**: HA docs say `data` = field labels and `data_description` = text under the field, and labels should be succinct. The docs say nothing about label size or placement, so never claim to control label font size from the integration. The integration cannot and must not style HA's frontend or theme (HA Boundary Rule).
 - **Out of scope**: CONFIG_METADATA labels (dashboard Settings tab) intentionally keep units in their labels because that UI has no selector suffix.
 - **Checklist — adding a field**: add `data` + `data_description` to `strings.json` and `en.json`, unit via selector, label <=5 words, then run `tests/test_config_flow_strings.py`.
+- **Defaults registry (#1230 R5c (DP-10))**: every key an options-flow step can write has its default in `CONFIG_METADATA` (`"default": <value>`), or `"no_default": True` when none is meaningful (entity pickers, optional overrides such as `vacation_heat`, optional energy settings). `tests/test_config_metadata.py` fails on a new options-flow key with neither. The default must equal the options form's actual `default=` / `current.get(key, X)` value. Never add a second defaults table (the dashboard's changed-from-default markers read this).
+- **Optional numeric settings** (`energy_rate`, `heat_power_kw`, `cool_power_kw`): no default, `suggested_value` in the form, listed in the step's `clearable_keys`, read with `config.get(KEY)` and treated as "not set" when `None`. No migration. Derived numbers (e.g. `estimated_cost`) stay `None` when an input is missing; never invent a figure.
 
 ### Automation Logic Table (CRITICAL)
 
@@ -1012,6 +1014,8 @@ The dashboard is a single-file HTML/CSS/JS panel. When adding new status grid ca
 - Match the existing pattern in the Status tab's `loadStatus()` function
 - For clipboard operations, always include a `document.execCommand('copy')` fallback via temporary textarea — `navigator.clipboard` is unavailable in HA iframe panels without secure context
 - Use `escapeHtml()` for any user-provided or API-returned content rendered as innerHTML
+
+**Status chart v2 (Issue #1230 R2):** the chart reads one series catalog (`_buildSeries()`): charts, key, hover readout and table view all use it, so add a line there, never in one place only. v4 lines are gated server-side (`v4.ready`); never draw a v4 value the payload withheld. Choices persist in `localStorage` (`ca_chart_v2:<zone>`) inside try/catch. Static checks: `tests/test_status_chart_v2_page.py`.
 
 **Target Band (Issue #119):** The chart overlay previously called "Comfort Band" is now "Target Band". The `get_chart_data()` API response sends `target_band: [{ts, lower, upper}]` — a time-series array, not static scalars. The frontend renders this as a stepped/interpolated shaded region that changes with time of day and occupancy mode. If modifying chart rendering code, never assume `target_band` is a single pair of values; always iterate the array. The `_compute_target_band_schedule()` function in `coordinator.py` is the single source of truth for band logic — do not replicate band calculations in `index.html`.
 

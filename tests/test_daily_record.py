@@ -164,6 +164,20 @@ class TestYesterdayRecord:
 # ---------------------------------------------------------------------------
 
 
+def _tomorrow_plan(coord):
+    """The property on a stand-in coordinator: classification projection real, no timeline (degraded path, Issue
+    #1230 R3b)."""
+    import functools
+
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    coord._tomorrow_classification_plan = functools.partial(
+        ClimateAdvisorCoordinator._tomorrow_classification_plan, coord
+    )
+    coord._surface_timeline = lambda: None
+    return ClimateAdvisorCoordinator.tomorrow_plan.fget(coord)
+
+
 class TestTomorrowPlan:
     """Tests for the tomorrow_plan coordinator property."""
 
@@ -171,10 +185,9 @@ class TestTomorrowPlan:
         """No classification → no plan."""
         coord = MagicMock()
         coord._current_classification = None
-        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
 
         # Call the property's fget directly
-        result = ClimateAdvisorCoordinator.tomorrow_plan.fget(coord)
+        result = _tomorrow_plan(coord)
         assert result is None
 
     def test_returns_valid_dict_with_classification(self):
@@ -187,9 +200,7 @@ class TestTomorrowPlan:
             today_low=58,
         )
 
-        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
-
-        result = ClimateAdvisorCoordinator.tomorrow_plan.fget(coord)
+        result = _tomorrow_plan(coord)
 
         assert result is not None
         assert "date" in result
@@ -212,9 +223,7 @@ class TestTomorrowPlan:
             today_low=72,
         )
 
-        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
-
-        result = ClimateAdvisorCoordinator.tomorrow_plan.fget(coord)
+        result = _tomorrow_plan(coord)
 
         assert result is not None
         assert result["day_type"] == "hot"
@@ -229,9 +238,7 @@ class TestTomorrowPlan:
             today_low=40,
         )
 
-        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
-
-        result = ClimateAdvisorCoordinator.tomorrow_plan.fget(coord)
+        result = _tomorrow_plan(coord)
 
         assert result is not None
         assert result["day_type"] == "cool"
@@ -246,9 +253,7 @@ class TestTomorrowPlan:
             today_low=55,
         )
 
-        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
-
-        result = ClimateAdvisorCoordinator.tomorrow_plan.fget(coord)
+        result = _tomorrow_plan(coord)
 
         assert result is not None
         assert result["trend_direction"] == "stable"

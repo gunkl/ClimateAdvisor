@@ -1,0 +1,135 @@
+{
+  "name": "r6b_tou_bank_lead_follows_primary__v3",
+  "description": "The same peak, house, models and events with v3 chosen (v4 is the live comparison engine): v3's slow 1 F per hour rate needs the maximum 240-minute lead, so the window opened at 12:15; the first cycle inside it (13:00, the start of the run) tells the thermostat 68 F once (issue #1393: no 76 F first), and 68 F is held.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ],
+    "shadow_engine": "v4"
+  },
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 14:00 plan cycle."
+    },
+    {
+      "time": "2026-07-13T14:20:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 14:20 plan cycle (the v4 bank window has not started)."
+    },
+    {
+      "time": "2026-07-13T14:28:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 90.0,
+      "note": "End of run: three minutes after the 14:25 check."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T14:28:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.tou_window.start",
+      "value": "12:15",
+      "reason": "v3's rate hits the 240-minute cap: the window opened at 12:15 (the v4 twin: 14:24)."
+    },
+    {
+      "at": "2026-07-13T13:00:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T12:59:00",
+      "values": [
+        68.0
+      ],
+      "reason": "First cycle inside the window: the bank setpoint is written once, without the comfort setpoint first (issue #1393)."
+    },
+    {
+      "at": "2026-07-13T14:28:00",
+      "expect": "tou_precondition_applied",
+      "tou_precondition": {
+        "schedule_id": "peak1",
+        "target": 68.0,
+        "mode": "cool"
+      },
+      "reason": "Banking since 13:00."
+    },
+    {
+      "at": "2026-07-13T14:28:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.ca_steps",
+      "value": [
+        "22:30 sleep_band",
+        "02:30 precool_start",
+        "06:00 briefing_send",
+        "06:30 wake_band",
+        "22:30 sleep_band",
+        "06:30 mode_change",
+        "06:30 wake_band"
+      ],
+      "reason": "Once banking is active no start step is pending."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "With v3 chosen the bank lead is v3's, as before",
+    "observed_behavior": "Window 12:15; banking from the first cycle.",
+    "expected_behavior": "Choosing v3 keeps v3's rate deciding; the shadow v4 (fitted, faster) changes nothing."
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "v4_model": {
+    "confidence": "ok",
+    "house": {
+      "a_o": 0.05,
+      "q_c": 3.5,
+      "q_h": 3.5
+    }
+  },
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions), redesigned per the independent review; DP-11 pending, unsigned",
+  "issue": 1230,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true
+}

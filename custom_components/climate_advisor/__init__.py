@@ -108,6 +108,7 @@ from .const import (
     VERSION,
 )
 from .coordinator import ClimateAdvisorCoordinator
+from .dashboard_api import DASHBOARD_VIEWS
 from .storage_paths import remove_entry_scoped_files
 
 _LOGGER = logging.getLogger(__name__)
@@ -758,10 +759,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         with log_capture.zone_scope(coordinator.zone_label):
             try:
                 # Register REST API views for the dashboard panel
-                for view_cls in API_VIEWS:
+                for view_cls in (*API_VIEWS, *DASHBOARD_VIEWS):
                     hass.http.register_view(view_cls())
 
-                # Register dashboard panel (iframe serving frontend/index.html)
+                # Register dashboard panel (iframe serving frontend/entry.html, which opens the new dashboard
+                # by default or classic index.html when this browser chose classic)
                 frontend_path = Path(__file__).parent / "frontend"
                 from homeassistant.components.http import StaticPathConfig
 
@@ -772,7 +774,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 from homeassistant.components.frontend import async_register_built_in_panel
 
-                _panel_bytes = await hass.async_add_executor_job((frontend_path / "index.html").read_bytes)
+                def _read_panel_bytes() -> bytes:
+                    return b"".join(
+                        (frontend_path / name).read_bytes()
+                        for name in ("entry.html", "index.html", "new_dashboard.html")
+                    )
+
+                _panel_bytes = await hass.async_add_executor_job(_read_panel_bytes)
                 _panel_hash = hashlib.md5(_panel_bytes).hexdigest()[:8]
                 async_register_built_in_panel(
                     hass,
@@ -781,7 +789,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     sidebar_icon="mdi:thermostat",
                     frontend_url_path=PANEL_FRONTEND_PATH,
                     require_admin=False,
-                    config={"url": f"{PANEL_URL}/index.html?v={_panel_hash}"},
+                    config={"url": f"{PANEL_URL}/entry.html?v={_panel_hash}"},
                 )
             except Exception as err:  # noqa: BLE001 — see comment above: any failure here
                 # means the shared panel/views are already registered by another

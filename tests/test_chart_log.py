@@ -942,3 +942,81 @@ class TestNatVentTargetField:
         assert log.entry_count == 1
         result = log.get_entries("24h")
         assert result[0].get("nat_vent_target") is None
+
+
+import pytest  # noqa: E402
+
+
+class TestRowContextFields:
+    """Issue #1230 R2: occupancy, override and band_sensor per row, bucketed like the other optional fields."""
+
+    def _log(self, tmp_path):
+        from custom_components.climate_advisor.chart_log import ChartStateLog
+
+        return ChartStateLog(tmp_path)
+
+    def test_written_only_when_given_and_override_only_when_true(self, tmp_path):
+        log = self._log(tmp_path)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=50.0, ts="2026-01-10T03:00:00+00:00")
+        log.append(
+            hvac="off",
+            fan=False,
+            indoor=70.0,
+            outdoor=50.0,
+            ts="2026-01-10T03:30:00+00:00",
+            occupancy="away",
+            override=True,
+            band_sensor="sensor.bed",
+        )
+        log.append(
+            hvac="off",
+            fan=False,
+            indoor=70.0,
+            outdoor=50.0,
+            ts="2026-01-10T04:00:00+00:00",
+            occupancy="home",
+            override=False,
+        )
+        a, b, c = log._entries
+        assert not ({"occupancy", "override", "band_sensor"} & set(a))
+        assert (b["occupancy"], b["override"], b["band_sensor"]) == ("away", True, "sensor.bed")
+        assert c["occupancy"] == "home" and "override" not in c and "band_sensor" not in c
+
+    @pytest.mark.parametrize("bucket", ["_bucket_hourly", "_bucket_daily"])
+    def test_buckets_keep_dominant_mode_any_override_and_dominant_sensor(self, tmp_path, bucket):
+        log = self._log(tmp_path)
+        rows = [
+            ("03:00", "away", False, "sensor.hall"),
+            ("03:20", "home", True, "sensor.bed"),
+            ("03:40", "home", False, "sensor.bed"),
+        ]
+        for t, occ, ovr, sens in rows:
+            log.append(
+                hvac="off",
+                fan=False,
+                indoor=70.0,
+                outdoor=50.0,
+                ts=f"2026-01-10T{t}:00+00:00",
+                occupancy=occ,
+                override=ovr,
+                band_sensor=sens,
+            )
+        [b] = getattr(log, bucket)(log._entries)
+        assert b["occupancy"] == "home" and b["override"] is True and b["band_sensor"] == "sensor.bed"
+
+    @pytest.mark.parametrize("bucket", ["_bucket_hourly", "_bucket_daily"])
+    def test_legacy_rows_add_no_keys(self, tmp_path, bucket):
+        log = self._log(tmp_path)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=50.0, ts="2026-01-10T03:00:00+00:00")
+        [b] = getattr(log, bucket)(log._entries)
+        assert not ({"occupancy", "override", "band_sensor"} & set(b))
+
+    def test_every_coordinator_append_site_writes_the_context(self):
+        import re
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "custom_components/climate_advisor/coordinator.py").read_text(
+            encoding="utf-8"
+        )
+        sites = re.findall(r"self\._chart_log\.append\(", src)
+        assert len(sites) == 4 and src.count("**self._read_chart_context()") == 4

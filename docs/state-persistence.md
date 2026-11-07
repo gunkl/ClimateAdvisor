@@ -1,4 +1,4 @@
-<!-- Nav: ← [02-ARCHITECTURE-REFERENCE.md](02-ARCHITECTURE-REFERENCE.md) | → [state.py](../custom_components/climate_advisor/state.py) -->
+<!-- Nav: ← [02-ARCHITECTURE-REFERENCE.md](02-ARCHITECTURE-REFERENCE.md) | → [state.py](../custom_components/climate_advisor/state.py) | ↔ [v4 Shadow](v4-shadow-spec.md) -->
 
 # State Persistence — Architecture Brief (Tier 2)
 
@@ -6,9 +6,10 @@
 
 | Question | Short answer | → Full answer |
 |---|---|---|
+| Where do the prediction-engine-v4 shadow files live, are they in the learning file, and what happens on rollback? | Three entry-scoped files (`climate_advisor_v4_archive_<id>.json`, `..._v4_model_<id>.json`, `..._v4_backtest_<id>.json`), all in `ENTRY_SCOPED_FILES` and deleted with the zone; the model is NOT in `LearningState`, and learning load ignores unknown keys, so a rollback cannot reset learning. | [v4 Shadow Spec](v4-shadow-spec.md#rollback-safety) |
 | What file does operational state persist to, and where is the path defined? | `climate_advisor_state.json` in the HA config root; path assembled from `STATE_FILE` constant in `const.py`. | [JSON Serialization](#json-serialization) |
 | How does state survive HA restarts without corruption from a mid-write crash? | Atomic write: serialize to a uniquely-named `.tmp` file in the same directory, then `os.replace()` to rename it over the target. The original is never modified until the new file is complete. | [Atomic Write Pattern](#atomic-write-pattern) |
-| What happens to a zone's files when the zone is deleted, reloaded or unloaded? | Deleted: `async_remove_entry` (`__init__.py`) deletes the zone's state, learning, chart log and forecast archive files and its `weather_entity_not_found_<id>` / `reload_needed_<id>` Repairs issues. Reloaded or unloaded: nothing is deleted. | [Zone removal cleanup](#zone-removal-cleanup) |
+| What happens to a zone's files when the zone is deleted, reloaded or unloaded? | Deleted: `async_remove_entry` (`__init__.py`) deletes the zone's state, learning, chart log, forecast archive and three v4 shadow files (archive, model, backtest) and its `weather_entity_not_found_<id>` / `reload_needed_<id>` Repairs issues. Reloaded or unloaded: nothing is deleted. | [Zone removal cleanup](#zone-removal-cleanup) |
 | What happens when the state file has a mismatched version or is malformed? | `load()` logs a WARNING and returns an empty dict — the coordinator starts fresh rather than attempting partial migration. | [Version Guard](#version-guard) |
 | Where does LearningState (thermal model, records, suggestions) persist, and is that this module's responsibility? | `LearningState` persists to `climate_advisor_learning.json` and is owned entirely by `LearningEngine` in `learning.py`. `state.py` does not touch that file. | [Scope](#scope) |
 | What is STATE_VERSION and when does it change? | Currently `1`. It is compared on load; any mismatch discards the file and starts fresh. It must be incremented whenever the state dict schema changes in a breaking way. | [Version Guard](#version-guard) |
@@ -27,6 +28,7 @@
 **Explicitly does NOT own:**
 - `LearningState` — lives in `learning.py`; persists to `climate_advisor_learning.json` via `LearningEngine`
 - The chart log (`climate_advisor_chart_log_<entry_id>.json`, [chart-log-spec.md](chart-log-spec.md)) and the forecast archive (`climate_advisor_forecast_archive_<entry_id>.json`, Issue #1230 R0, [forecast-archive-spec.md](forecast-archive-spec.md)) - separate entry-scoped files with their own persistence contracts. Both are deleted with the zone's other files when the config entry is deleted ([Zone removal cleanup](#zone-removal-cleanup))
+- The prediction-engine-v4 shadow files (Issue #1230 R1): `climate_advisor_v4_archive_<entry_id>.json` (first-write-wins 1/4/12/24 h predictions, `v4_archive.py`, hourly-throttled save plus a flush at unload with one retry), `climate_advisor_v4_model_<entry_id>.json` (the fitted model, hidden-node state, last fit and, since R6, the nightly night-strategy `night_validation` record, `V4ModelStore`) and the read-only `climate_advisor_v4_backtest_<entry_id>.json` published by `tools/predict_backtest.py`. The model is deliberately NOT in `LearningState`: a rollback to a release without those fields would make `LearningState(**data)` reject the learning file and reset it. Current releases also ignore unknown learning-file keys on load (logged once at INFO; WARNING when no known field is present). All three are listed in `ENTRY_SCOPED_FILES` and deleted with the zone
 - The schema of the state dict — the coordinator (`coordinator.py`) is responsible for what keys are written and read
 - Nothing else — file permissions (`0o600` via `os.chmod` after `os.replace()`, guarded by `hasattr(os, "chmod")` for cross-platform safety) ARE set by this module; see Invariants
 - Migration logic — version mismatches are handled by discarding and starting fresh; no field-level upgrade path exists in `state.py`
@@ -71,7 +73,7 @@ card offering to "fix" a zone that no longer exists. Before 0.9.1 every one of t
   run the final save. A reload or settings save (unload + setup) never deletes anything.
 - **Files:** `storage_paths.remove_entry_scoped_files(config_dir, entry_id)`, run in the executor, deletes the
   entry-scoped name of each base in `const.ENTRY_SCOPED_FILES` (`STATE_FILE`, `CHART_LOG_FILE`,
-  `LEARNING_DB_FILE`, `FORECAST_ARCHIVE_FILE`). Never another zone's file, never a legacy unscoped file (it may still
+  `LEARNING_DB_FILE`, `FORECAST_ARCHIVE_FILE`, `V4_ARCHIVE_FILE`, `V4_MODEL_FILE`, `V4_BACKTEST_FILE`). Never another zone's file, never a legacy unscoped file (it may still
   belong to an entry that has not migrated), and nothing for a falsy `entry_id` (that would resolve to the shared
   unscoped names). Leftover `.tmp` files are not removed: their `mkstemp` names cannot be tied to one zone. A missing
   file is skipped; an `OSError` on one file is logged at WARNING and the rest are still deleted; one INFO line lists

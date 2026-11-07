@@ -39,6 +39,12 @@ DEFAULT_TICK_SECONDS = 30
 # when it has no better live estimate yet.
 DEFAULT_DEADBAND_HEAT_F = 1.5
 DEFAULT_DEADBAND_COOL_F = 1.5
+# Issue #1387: by default the compressor STOPS 0.9 F short of the target, the owner's real thermostat as measured in
+# #1234 (heat on at setpoint-1.4, off at setpoint-0.9; runs of ~8 min, ~3% duty). The old default, the symmetric
+# far-side edge (target+1.5), gave a 3 F swing that overshot the setpoint every cycle. The cool default mirrors the
+# measured heat value (no cool cycles were measured). Set off_offset_*_f to deadband_*_f for the old symmetric band.
+DEFAULT_OFF_OFFSET_HEAT_F = -0.9
+DEFAULT_OFF_OFFSET_COOL_F = -0.9
 # 300s (5 min) matches typical compressor short-cycle equipment protection.
 DEFAULT_MIN_RUN_SECONDS = 300
 DEFAULT_MIN_OFF_SECONDS = 300

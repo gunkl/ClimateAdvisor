@@ -1,4 +1,4 @@
-<!-- Nav: ← [Architecture Reference](02-ARCHITECTURE-REFERENCE.md) -->
+<!-- Nav: ← [Architecture Reference](02-ARCHITECTURE-REFERENCE.md) | ↔ [Predictor v4](predictor-v4-spec.md) [v4 Shadow](v4-shadow-spec.md) -->
 
 # Debugging Guide — Climate Advisor
 
@@ -21,6 +21,8 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 | How well is the comfort-band arming / HVAC cycling working in a home, and is model-based deferral worth building? | Read `control_quality` in Download Logs / Download Full Logs / HA Download diagnostics (`thermostat_snapshot.control_quality`): misarmed minutes should be near zero; `would_have_deferred` vs total run minutes sizes the deferral opportunity; `prediction_error` is the accuracy gate. Issue #1066. | [Control quality report](#control-quality-report-issue-1066) |
 | The house has been cold/hot for hours and the equipment never ran -- where do I look? | The stall alert (Issue #1050): an `hvac_output_stall` Activity Log row, a push (no email), and an `output_stall` line in Status `hvac_control_issues`. | [Debugging a house-off-target stall alert](#debugging-a-house-off-target-stall-alert-issue-1050) |
 | A whole-house-fan switch ignores CA's on-command and the AC stays suppressed -- how do I confirm it? | `fan_cancel` with `readback: true` in the Activity Log, then a single WARNING `Fan command ignored twice`. | [Debugging a fan switch that ignores the on-command](#debugging-a-fan-switch-that-ignores-the-on-command-issue-1050) |
+| How do I check whether prediction engine v4 is good enough to show, and where does the preview page's history come from? | Run `python3 tools/predict_backtest.py --zone <entry_id> --publish`: walk-forward (fit only on data before each test week), v3 replayed with production code, "no change" baseline, seasons by what the HVAC did that day, DP-8 gate at 1/4/12 h. `--publish` writes `climate_advisor_v4_backtest_<entry_id>.json`, which the Prediction accuracy page merges with the live v4 archive. | [Prediction backtest](#prediction-backtest-toolspredict_backtestpy-issue-1230-r1) |
+| How do I check whether the night-strategy options (windows, whole-house fan, blower) are validated for a house, and what does tonight's recommendation look like? | `python tools/night_strategy_replay.py --chart-log chart.json --json replay.json` replays every recorded night (fit before each week, predict under the windows/fan that happened, compare with the recorded hallway) and prints MAE per option class; `--tonight --forecast-archive fa.json --validation replay.json` prints tonight's ranked options and the hidden ones with reasons. | [Night-strategy replay](#night-strategy-replay-toolsnight_strategy_replaypy-issue-1230-r4) |
 
 ## Primary Debugging Data Sources
 
@@ -423,6 +425,81 @@ equipment.)
 
 The history tool needs `--hours` above 24 to span several days; before Issue #1233 it silently returned only the
 oldest 24 h (no `end_time` was sent).
+
+## Prediction Backtest (`tools/predict_backtest.py`, Issue #1230 R1)
+
+> From 0.9.4 the backtest is **information only**: it does not decide whether v4 may be shown. Which engine the charts show is Settings -> Prediction engine (`primary_engine`, default v4; optional `shadow_engine`). The DP-8 "gate" rows and `gate_summary` remain as a scorecard ("How each model has scored" on the preview page).
+
+Occupant view: before the owner is ever shown the new prediction (v4) on Status, this tool answers "over all the history this house has recorded, would v4 have told them the room temperature hours ahead better than today's line (v3) and better than 'it will stay as it is'?" It only reads recorded history; it never touches the thermostat or the integration's decisions.
+
+**Why a walk-forward test.** A model scored on the data it was fitted on always looks good. Test weeks start Monday 00:00 local; before each week the v4 model is fitted on chart-log rows strictly before that week (`--train-days` back, default 30 - the live nightly fit uses the same window, `V4_FIT_TRAIN_DAYS`) and then predicts hourly anchors inside the week, exactly as the live shadow would.
+
+**Leakage guard.** Every input handed to `predictor_v4.fit` is checked by `assert_no_leak`; a row, sample or forecast snapshot from the test week (or later) raises `LeakageError` and aborts the run. At an anchor only what a live prediction would know is used: readings at-or-before the anchor, the forecast issued at-or-before the anchor, the planned setpoints, planned windows/fan.
+
+**Inputs.** Chart log (local file, `--local-dir`, or over SSH like `thermal_replay.py`; `_zone_storage` resolves entry-scoped names), the learning DB (v3's thermal model) and optionally the forecast archive. The forecast is the archive snapshot issued at-or-before the anchor; hours it lacks fall back to the chart-log `pred_outdoor` of that hour. Without an archive the chart log holds only the lead-0 forecast, so absolute errors are optimistic for both models while the comparison stays fair (the report prints which source was used). Setpoints: the logged target band at each future step ("as scheduled", `--setpoints scheduled`) or frozen at the anchor (`hold`); `--setpoint-source band` (default; what the live shadow knows) or `commanded` (diagnostic). Windows closed and fan off, like v3 and the live shadow, unless the log's `windows_recommended` is true at the anchor (then open over the times the engine planned that day, the learning DB daily record's `window_open_time`/`window_close_time`, through `v4_shadow.planned_window_span`, the rule the live shadow shares; no record for the day: the first `--window-plan-hours`, default 4, from the anchor; `--window-plan-source fallback` always uses the 4 h rule), for both models. v4 additionally opens tomorrow's planned period (Issue #1391) from the next day's record, only for anchors at or after `--tomorrow-plan-hour` (default 18 local; 24 = never; earlier anchors never see a plan the record only got at day end); v3 follows the same today+tomorrow rule. A "v4 with actual inputs" variant (actual outdoor, windows, fan) is printed as a diagnostic and never enters the gate (`--no-diagnostic` skips it). Pre-September rows can have a null `setpoint` while cooling; the band edge is used so summer cycles can be learned.
+
+**Models compared on the same anchors.** `v4` = `predictor_v4.fit`/`predict`; `v3` = **v3 as it was** (the default, `--v3-model honest`, Issue #1230 R1b): at 4 h the logged chart-log `pred_indoor` (the line exactly as the occupant saw it, first-write-wins) wherever present; at 1 h and 12 h (and 4 h where no logged value exists) the production `coordinator._build_predicted_indoor_future` (imported headless, HA stubs from `tools/sim_harness/ha_stubs.py`) replayed with the thermal model rebuilt by production's own `LearningEngine` from the learning DB's observations dated BEFORE the anchor's day (cached per day). The DB keeps only ~200 observations (about two weeks), so an anchor with fewer than `--v3-asof-min-obs` (default 30) retained observations before it cannot be rebuilt: it is marked `v3_asof_unavailable`, EXCLUDED from the v3 comparison and from that row's n (never replayed with today's model), and counted in the report's `v3ex` column and `run.v3.asof_unavailable_anchors`. `--v3-model current` (today's learned model: hindsight, flatters v3) and `asof` (rebuilt once per test week) remain as diagnostics; the hindsight replay is always printed beside the gate as the `v3cur` column; `flat` = persistence (the reading at the anchor); plus the logged `pred_indoor` (the real ~4 h archive) as a sanity row for the v3 replay (`_ca` only, 4 h). v3 predicts one line, so it is scored for the reading CA uses (`_ca`) only.
+
+**Setpoint hygiene** (R1b, default on; `--include-unknown-setpoint` is the diagnostic off switch): an anchor whose setpoint in force is unknown - no logged `setpoint` and no `lower`/`upper` band (Zone 1 before August 2026) - is excluded for EVERY model (v3, v4 and "no change") because none can be predicted or judged honestly from it; a band could be reconstructed only from later rows, which is hindsight. The report prints how many anchors were excluded, by season (`run.setpoint_hygiene`). Fits also ignore such windows when calibrating the thermostat.
+
+**Same nodes as the live shadow.** The primary and extra nodes come from `predictor_v4.resolve_nodes` (`week_nodes` delegates to it), with older rows mapped onto the entity primary exactly as the live fit does; the sleep sensor and window are inferred from the log (`infer_sleep`) and the `_ca` line follows the sleep sensor inside the window.
+
+**Seasons are by HVAC mode, not calendar month** (owner decision, reversible; `day_seasons`): per local day, any `heating` action makes it a **heating** day; otherwise a day with `cooling`, or the whole-house fan running (`fan_running` with `nat_vent_active`, or an `hvac` action starting `fan`), is a **summer** (cooling/fan) day; every other day is **shoulder**. Shoulder is reported but not gated. The label only groups scores; no model sees it.
+
+**Scoring.** Error = predicted - actual (positive = ran warm), versus the sensor reading at anchor + lead (1, 4, 12, 24 h; linear between log rows). Per zone x sensor x season x lead: MAE, mean signed error (bias), n, v4 coverage. All MAEs of a row use the SAME anchors (v4, v3 and flat all present).
+
+**DP-8 gate** (rows for `_ca`, per season heating and summer, at 1 h, 4 h and 12 h; 24 h is informational): **pass** = v4 MAE < v3 MAE, and v4 MAE < flat MAE, and |v4 bias| <= 0.5 F (`BIAS_LIMIT_F`), and n >= `--min-n` (default 72 anchors), and v4 coverage >= `--min-coverage` (default 0.8). A row with too few anchors is `scored: false` with a reason ("no anchors in this season (HVAC never ran that way in the recorded history)", "not scored (n=.., need ..)"). Other sensors get v4-vs-flat rows in `gate_sensors` (not part of the verdict). `gate_summary.ready` is true only when every `_ca` gate row passes and the v3 replay ran. The preview page shows the same rows.
+
+**Usage**
+
+```
+python3 tools/predict_backtest.py --chart-log chart.json --learning-db learning.json   # local files
+python3 tools/predict_backtest.py --zone <entry_id> --json out.json --publish           # SSH, one zone
+python3 tools/predict_backtest.py --all-zones --since 2026-04-01 --publish              # every zone on the host
+python3 tools/predict_backtest.py --local-dir ./copied --zone <entry_id> --max-weeks 4  # quick run on copied files
+```
+
+SSH mode needs `tools/.deploy.env` (never printed) and discovers files like `thermal_replay.py`; with several zones and neither `--zone` nor `--all-zones` it exits 2 listing them. `--local-dir` treats every `climate_advisor_chart_log_<entry>.json` (plus the matching `climate_advisor_learning_<entry>.json` and `climate_advisor_forecast_archive_<entry>.json`) as one zone.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--chart-log PATH` / `--local-dir DIR` / `--zone ID` / `--all-zones` | SSH | Where the chart log comes from; `--zone` is the entry id (SSH) or a label (local) |
+| `--learning-db PATH` / `--forecast-archive PATH` / `--no-archive` / `--no-v3` | fetched over SSH | v3 thermal model / forecast archive inputs; `--no-v3` skips the v3 replay (then no verdict can be "ready") |
+| `--tz ZONE` | HA `core.config` over SSH, `TZ`, `/etc/timezone`, row offset | Local zone for week boundaries and seasons |
+| `--primary ENTITY` | sensor tracking chart-log `indoor`, else `_ca` | The thermostat's room reading, the primary node |
+| `--since YYYY-MM-DD` / `--max-weeks N` | all | First test week on/after a date; only the newest N weeks |
+| `--train-days N` / `--min-train-days N` / `--refit-every-weeks N` | 30 / 5 / 1 | Training window (0 = all history); no test week without that much training data; refit cadence |
+| `--anchor-step-hours H` | 1 | Spacing of anchors inside a week |
+| `--setpoints {scheduled,hold}` / `--setpoint-source {band,commanded}` / `--window-plan-hours H` / `--window-plan-source {record,fallback}` | scheduled / band / 4 / record | Planned-input choices above |
+| `--v3-model {honest,asof,current}` / `--v3-asof-min-obs N` | honest / 30 | v3 comparator (above); observations needed before an anchor to rebuild its as-of model |
+| `--include-unknown-setpoint` | off | Diagnostic: also score anchors whose setpoint is unknown |
+| `--no-diagnostic` | off | Skip the v4-with-actual-inputs variant |
+| `--min-n N` / `--min-coverage F` | 72 / 0.8 | Gate sample-size and v4-coverage floors |
+| `--json PATH` / `--json-points` | off | Write the full report(s) (`{"zones": {...}}`), optionally with the point series |
+| `--publish` | off | Write `/config/climate_advisor_v4_backtest_<entry_id>.json` on the HA host (temp file, `chmod 600`, `mv`) |
+| `-q` | off | No progress lines on stderr |
+
+**Output.** A text table per zone (`=== Zone ... ===` header, forecast source note, v3 replay note, skipped-anchor counts, then one line per sensor x season x lead with n, flat/v3/v4 MAE, v4 bias, v4-with-actual-inputs MAE, logged MAE and PASS/FAIL/n/s for gate rows). The published file (`schema_version` 1, `resolution: "hourly"`, internal degrees F) holds `zone`, `generated_at`, `range`, `sensors`, `model` (`confidence`, `fitted_at`, `span_days`, `weeks_fitted`), `points` (sensor -> `"1h"|"4h"|"12h"|"24h"` -> `[{t, actual, flat, v4?, v3?}]`), `stats`, `gate`, `gate_sensors`, `gate_summary` (`ready`, `passed`, `scored`, `total`, `other_sensors_failing`). The endpoint ignores `schema_version`, `resolution`, `stats` and `gate_sensors` and merges `points`/`gate`/`gate_summary` as described in [REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1).
+
+**Cost.** Each test week refits v4 (5-8 s on a Pi-class CPU, less on a laptop); a year of history is about 50 weeks per zone, so run it on a workstation, not on the HA host (the tool only SSHes in to fetch inputs and publish).
+
+**Reading a failure.** "v4 not better than v3" in one season with "no anchors in this season" in the other is normal for a home that has not run the other mode yet: that row stays unscored and the verdict stays "Not yet". `--setpoint-source commanded` re-runs the same weeks with the thermostat's logged setpoint instead of the plan's band edge, to see how much a gate miss depends on that input. Specs: [Predictor v4](predictor-v4-spec.md), [v4 Shadow](v4-shadow-spec.md).
+
+## Night-Strategy Replay (`tools/night_strategy_replay.py`, Issue #1230 R4, R6)
+
+R6: the integration now runs the same replay itself every night after the v4 fit (`night_replay.py`) and keeps the result in the v4 model file (`night_validation`: classes, evidence hours, `provisional`, counts); this tool reproduces it from a copied chart log (default `--train-days 30`, the live rule). Check a zone's live record in the Debug tab's v4 model file or with `GET /api/climate_advisor/night_strategy`.
+
+Occupant view: before Climate Advisor suggests "open the bedroom windows until 1 AM" or "run the whole-house fan", this tool answers "does the model predict the nights this house actually had, when the windows were open or the fan ran?". An option class (closed / windows / fan / blower) that fails here is hidden from the occupant.
+
+**Replay.** For every recorded night (local 20:30 to 06:30, unbroken readings) it fits v4 on rows before that week's Monday, predicts the night from the bedtime reading with the recorded outdoor, windows, fan and heat/cool duty, and compares with the recorded hallway at every 15 minutes. Output: nights, mean absolute error, "nothing changes" error and bias per class and sub-type (fan short / long / then AC, windows all night, closed idle / heat / AC), plus a closed-loop variant that uses the planner's own controller from the recorded setpoints. A class is validated at >= 3 nights, MAE <= 1.5 F and better than "nothing changes". `--train-days 30` limits each fit to the last 30 days (Zone 1: fan class 1.79 F with the full history, 1.30 F with 30 days).
+
+```
+python tools/night_strategy_replay.py --chart-log chart.json --json replay.json
+python tools/night_strategy_replay.py --chart-log chart.json --forecast-archive fa.json --tonight \
+    --validation replay.json --bedroom-sensor sensor.primary_bedroom_temperature_temperature
+```
+
+Reading `--tonight`: `RECOMMENDED` is the one sentence the occupant would get; the table lists offered options (best first); `HIDDEN (debug only)` lines give the reason an option was withheld (rate frozen in the fit, effect not resolved, too few hours of bedroom readings, class not validated). Limits: hallway only (no bedroom history before 2026-11-06), recorded outdoor instead of forecast, provisional until R1b's model fix lands. Spec: [Night Strategy](night-strategy-spec.md).
 
 ## Debugging Thermal Model Learning
 

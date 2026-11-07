@@ -78,6 +78,25 @@ def _bucket_indoor_sensors(group: list[dict[str, Any]]) -> dict[str, float | Non
     return {k: (round(sum(v) / len(v), 2) if v else None) for k, v in vals.items()}
 
 
+def _bucket_context(group: list[dict[str, Any]]) -> dict[str, Any]:
+    """Bucket the Issue #1230 R2 context fields: dominant occupancy and band_sensor, override if any row had it.
+
+    Each key appears only when at least one row in the bucket carried it (same precedent as ``comfort_target``).
+    """
+    out: dict[str, Any] = {}
+    for key in ("occupancy", "band_sensor"):
+        counts: dict[str, int] = defaultdict(int)
+        for e in group:
+            v = e.get(key)
+            if isinstance(v, str) and v:
+                counts[v] += 1
+        if counts:
+            out[key] = max(counts, key=lambda k: counts[k])
+    if any(e.get("override") is True for e in group):
+        out["override"] = True
+    return out
+
+
 class ChartStateLog:
     """Rolling log of HVAC state snapshots and event markers for charting."""
 
@@ -181,6 +200,9 @@ class ChartStateLog:
         indoor_primary: float | None = None,
         comfort_target: float | None = None,
         indoor_sensors: dict[str, float | None] | None = None,
+        occupancy: str | None = None,
+        override: bool | None = None,
+        band_sensor: str | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
 
@@ -210,6 +232,12 @@ class ChartStateLog:
             one line per sensor. The key is present only when a mapping is given (new rows from the coordinator always
             give one); older rows lack it. Informational only: nothing reads it for a decision or a display, and
             ``get_chart_data()`` strips it from ``state_log`` (Issue #1230 R0).
+        occupancy: the zone occupancy mode on this row (home, away, vacation or guest; Issue #1230 R2),
+            so the Status chart can draw an Away / Vacation strip. Written when given; absent on older rows.
+        override: True while a manual override or its grace period is active on this row (Issue #1230 R2). Written only
+            when True, so ordinary rows stay as small as before; absent means "no override".
+        band_sensor: entity id of the sensor Climate Advisor was reading for comfort on this row, i.e. the sensor the
+            Target Band applied to (the bedroom sensor in the sleep window; Issue #1230 R2). Written when known.
         nat_vent_target: the real thermostatic target the nat-vent fan was cycling
             around this cycle (Phase 3a), computed via
             ``nat_vent_cycling.compute_nat_vent_target()`` — only meaningful (non-None)
@@ -245,6 +273,12 @@ class ChartStateLog:
             entry["comfort_target"] = comfort_target
         if indoor_sensors is not None:
             entry["indoor_sensors"] = dict(indoor_sensors)
+        if occupancy is not None:
+            entry["occupancy"] = occupancy
+        if override:
+            entry["override"] = True
+        if band_sensor is not None:
+            entry["band_sensor"] = band_sensor
 
         self._entries.append(entry)
         self._maybe_prune()
@@ -304,6 +338,17 @@ class ChartStateLog:
         if range_days <= _HOURLY_THRESHOLD_DAYS:
             return self._bucket_hourly(filtered)
         return self._bucket_daily(filtered)
+
+    def last_entry(self) -> dict[str, Any] | None:
+        """The newest row appended (any kind), or None (Issue #1230 R1: the v4 shadow reads this cycle's row)."""
+        return self._entries[-1] if self._entries else None
+
+    def raw_entries(self) -> list[dict[str, Any]]:
+        """A shallow copy of every retained row, undownsampled (Issue #1230 R1: v4 fit and accuracy page).
+
+        Rows are never mutated after append, so the copy is safe to hand to an executor thread.
+        """
+        return list(self._entries)
 
     @property
     def entry_count(self) -> int:
@@ -394,6 +439,7 @@ class ChartStateLog:
                 summary["comfort_target"] = comfort_target
             if indoor_sensors is not None:
                 summary["indoor_sensors"] = indoor_sensors
+            summary.update(_bucket_context(group))
             if events:
                 summary["event"] = events
             result.append(summary)
@@ -458,6 +504,7 @@ class ChartStateLog:
                 summary["comfort_target"] = comfort_target
             if indoor_sensors is not None:
                 summary["indoor_sensors"] = indoor_sensors
+            summary.update(_bucket_context(group))
             if events:
                 summary["events"] = events
             result.append(summary)

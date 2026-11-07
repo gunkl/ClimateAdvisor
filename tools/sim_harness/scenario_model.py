@@ -12,7 +12,7 @@ final engine-state snapshot.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -47,10 +47,20 @@ def parse_event_time(time_str: str, default: datetime) -> datetime:
         return default
 
 
+# Issue #1230 R6b: the PRIMARY prediction engine drives the prediction-dependent decisions and defaults to v4 in
+# production. Every golden was authored and signed against v3's behaviour (a thermal model pinned in the scenario) and a
+# scenario home has no fitted v4 model, so under the production default the decisions would fall back to the
+# learning-not-finished defaults and the ceiling-guard goldens would stop describing what they were written to describe.
+# Scenarios therefore run with v3 as the primary unless one states ``config.primary_engine``. That returns the goldens
+# to the engine they were signed against; it changes no assertion and no outcome mapping. Direct builders
+# (``build_headless_coordinator`` in unit tests) keep the production default.
+SCENARIO_PRIMARY_ENGINE = "v3"
+
+
 def merged_scenario_config(scenario: dict) -> dict[str, Any]:
-    """Scenario ``config`` laid over the harness defaults."""
+    """Scenario ``config`` laid over the harness defaults (and the scenario primary engine, see above)."""
     scenario_config: dict[str, Any] = scenario.get("config", {})
-    return {**_DEFAULT_CONFIG, **scenario_config}
+    return {**_DEFAULT_CONFIG, "primary_engine": SCENARIO_PRIMARY_ENGINE, **scenario_config}
 
 
 def sorted_events(scenario: dict) -> list[dict]:
@@ -172,6 +182,53 @@ def build_classification_from_event(event: dict, config: dict | None = None) -> 
     return c
 
 
+def v4_model_from_spec(spec: dict) -> dict:
+    """A valid stored v4 model dict from a compact scenario ``v4_model`` spec (Issue #1230 R6b).
+
+    ``{"confidence": "ok" | "low" | "none", "primary": "<node>", "sensors": [...], "house": {"a_o": 0.05, ...}}``;
+    every key is optional. The default primary node is ``_ca`` (the reading Climate Advisor itself uses, the node a
+    model falls back to when no entity reads often enough), which every world fills the same way. ``{"model": {...}}``
+    is a whole stored model (e.g. one fitted from a recorded history), used as given. Goes through the predictor's own
+    ``_default_model`` / ``to_dict`` so ``from_dict`` accepts it exactly as it accepts a fitted model (the house
+    parameters not given keep the predictor's start values).
+    """
+    from custom_components.climate_advisor import predictor_v4 as p  # noqa: PLC0415
+
+    if isinstance(spec.get("model"), dict):  # a whole stored model (e.g. one fitted from a recorded history)
+        return dict(spec["model"])
+    primary = str(spec.get("primary", "_ca"))
+    sensors = [primary, *[s for s in spec.get("sensors", []) if s != primary]]
+    model = p._default_model(  # noqa: SLF001 - the fixture builder is the predictor's sanctioned constructor
+        primary,
+        sensors,
+        str(spec.get("fitted_at", "2026-01-01T00:00:00+00:00")),
+        p.thermostat_default(),
+        p.V4ForecastCorrection(hourly_bias_f=tuple([0.0] * 24), nowcast_tau_h=3.0),
+        {"reason": ""},
+    )
+    house = dict(model.house)
+    house.update({k: float(v) for k, v in (spec.get("house") or {}).items()})
+    model = replace(model, house=house, confidence=str(spec.get("confidence", "ok")))
+    return p.to_dict(model)
+
+
+def pin_scenario_v4_model(coordinator: Any, spec: dict) -> None:
+    """Install the scenario's fitted v4 model and keep it for the whole run (Issue #1230 R6b).
+
+    The scenario's model IS the zone's fitted model for that run (the way ``thermal_model`` is the learned v3 model,
+    see ``pin_scenario_thermal_model``). A run that crosses the nightly 03:15 fit would otherwise refit it from the
+    scenario home's near-empty chart log and replace it with a model of confidence "none", so the decisions would fall
+    back mid-run for a reason no home has. Test-infrastructure semantics: the previous behaviour (no way to give a
+    scenario a v4 model) could not express the situation at all; pinning cannot hide a real failure because a fit's
+    own correctness is covered by its own tests (``test_v4_shadow_*``), not by a scenario.
+    """
+    store = getattr(coordinator, "_v4_store", None)
+    if store is None:
+        return
+    store.v4_model = v4_model_from_spec(spec)
+    coordinator._v4_start_fit = lambda *_a, **_k: False  # noqa: SLF001 - the pinned model is not refitted
+
+
 def pin_scenario_thermal_model(coordinator: Any, model: dict) -> None:
     """Make a coordinator-mode run use the scenario's ``thermal_model`` through every refresh (Issue #1211).
 
@@ -214,8 +271,12 @@ def snapshot_engine_state(engine: Any) -> dict[str, Any]:
         "_outdoor_temp_today_sample_count",  # Issue #633
         "_comfort_mode_family",  # Issue #821 - "heating"/"cooling"/None
         "_fan_manual_origin_unclosed",  # Issue #829
+        "_nat_vent_cutoff_already_reached",  # Issue #1230 R6b
     ):
         snap[attr] = getattr(engine, attr, None)
+    # Issue #1230 R6b: the nat-vent plan's cutoff the engine acts on (ISO string; None when no plan set one).
+    _cutoff = getattr(engine, "_nat_vent_cutoff", None)
+    snap["_nat_vent_cutoff"] = _cutoff.isoformat() if hasattr(_cutoff, "isoformat") else None
 
     # Issue #633: indoor temp is never cached on the engine itself (always a
     # live hass state read) - snapshot it explicitly the same way any other
@@ -243,7 +304,7 @@ def snapshot_engine_state(engine: Any) -> dict[str, Any]:
 
 
 def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[str, Any]:
-    """Issue #1276: the real ``_compute_next_action`` card text for the run's final state.
+    """The surfaces an occupant reads, for the run's final state (Issue #1276; extended by Issue #1230 R3b).
 
     Shared by both adapters (FakeHass Tier A and real-HA Tier B) so a scenario that sets
     ``"capture_next_action": true`` is judged the same way on both. Same arguments production passes in
@@ -251,13 +312,96 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
     outdoor is the scenario's last ``temp_update`` ``outdoor_f`` (Tier A runs no weather entity, so this
     keeps the two tiers on one input). ``advises_opening_windows`` lets a scenario assert the card's
     direction with the existing ``field_equals`` assertion, so ``outcomes.py`` is unchanged.
+
+    R3b additions (all read-only, same call, same clock): ``source`` ("timeline" when the card/automation read the
+    operation timeline, "legacy" for the degraded path), ``window_step`` (the timeline step the card came from, or
+    None), ``next_automation`` (the Next Automation card's action and time), ``timeline`` (the occupant steps and the
+    CA step kinds the plan holds, as ``HH:MM`` strings), ``briefing_windows_row`` (the briefing TLDR "Windows" row),
+    ``agrees`` (the card never invites a window the timeline does not hold), and inside ``timeline``: ``held_ca_steps``,
+    ``sensor_swap`` and ``has_resume_step``. Existing keys are unchanged.
     """
     updates = [e for e in sorted_events(scenario) if e.get("type") == "temp_update" and "outdoor_f" in e]
+    windows_open = coordinator._any_sensor_open()
     text = coordinator._compute_next_action(
         coordinator._current_classification,
         indoor_temp=coordinator._get_indoor_temp(),
         outdoor_temp=float(updates[-1]["outdoor_f"]) if updates else None,
-        windows_physically_open=coordinator._any_sensor_open(),
+        windows_physically_open=windows_open,
         ae=engine,
     )
-    return {"text": text, "advises_opening_windows": str(text).startswith("Open windows")}
+    out: dict[str, Any] = {"text": text, "advises_opening_windows": str(text).startswith("Open windows")}
+    tl = coordinator._surface_timeline() if hasattr(coordinator, "_surface_timeline") else None
+    out["source"] = "timeline" if tl is not None else "legacy"
+    action, at = coordinator._compute_next_automation_action(coordinator._current_classification)
+    out["next_automation"] = {"action": action, "time": at}
+    if tl is not None:
+        from homeassistant.util import dt as _dt  # noqa: PLC0415
+
+        from custom_components.climate_advisor.timeline_surfaces import card_user_step  # noqa: PLC0415
+
+        now = _dt.now()
+        step = card_user_step(tl, now, windows_open=windows_open)
+        you = [s for s in tl.steps if s.actor.value == "you"]
+        out["window_step"] = None if step is None else {"kind": step.kind.value, "at": step.ts.strftime("%H:%M")}
+        # the card step's state (R3b redesign): "held" with the veto rule id when the live direction rule vetoes it, and
+        # the sentence the plan list shows for it
+        out["window_step_state"] = (
+            None if step is None else {"status": step.status, "hold": step.meta.get("hold"), "text": step.text}
+        )
+        _resume = next((s for s in tl.steps if s.kind.value == "resume_schedule"), None)
+        out["timeline"] = {
+            "you_steps": [f"{s.ts:%H:%M} {s.kind.value}" for s in you],
+            "you_step_states": [f"{s.ts:%H:%M} {s.kind.value} {s.status}" for s in you],
+            "resume_step": None if _resume is None else {"at": f"{_resume.ts:%H:%M}", "text": _resume.text},
+            "ca_kinds": sorted({s.kind.value for s in tl.steps if s.actor.value == "ca"}),
+            "ca_steps": [f"{s.ts:%H:%M} {s.kind.value}" for s in tl.steps if s.actor.value == "ca"],
+            "window_confidence": sorted({s.confidence for s in you}),
+            # steps CA words as a held step (an override/grace or a door pause is in force) and the sensor swap
+            # sentences
+            "held_ca_steps": [
+                f"{s.ts:%H:%M} {s.kind.value}" for s in tl.steps if s.actor.value == "ca" and s.status == "held"
+            ],
+            "sensor_swap": {
+                "wake": any(s.reason == "wake_band.sensor_swap" for s in tl.steps),
+                "sleep": any(s.reason == "sleep_band.sensor_swap" for s in tl.steps),
+            },
+            "has_resume_step": any(s.kind.value == "resume_schedule" for s in tl.steps),
+        }
+        # the card may only invite a window the plan holds (a period open now, or ahead today)
+        out["agrees"] = (not out["advises_opening_windows"]) or any(
+            s.kind.value == "windows_open" and s.ts.date() == now.date() and s.status != "done" for s in you
+        )
+    # Issue #1230 R6 (X7): the time-of-use bank window the plan shows (the coordinator's resolved window), as HH:MM, so
+    # a scenario can pin the exact start the surfaces quote against the time the thermostat is first told (additive).
+    _tw = (
+        coordinator._tou_precondition_window_tuple() if hasattr(coordinator, "_tou_precondition_window_tuple") else None
+    )
+    out["tou_window"] = (
+        None
+        if _tw is None
+        else {"start": f"{_tw[0]:%H:%M}", "end": f"{_tw[1]:%H:%M}", "target": _tw[2], "mode": _tw[3]}
+    )
+    classification = coordinator._current_classification
+    if classification is not None:
+        _full, short = coordinator._build_briefing_text(classification, suggestions=[])
+        row = next((ln.strip() for ln in short.splitlines() if ln.strip().startswith("Windows:")), None)
+        out["briefing_windows_row"] = row
+    return out
+
+
+def sync_coordinator_occupancy(coordinator: Any, mode: str) -> None:
+    """Production's occupancy toggle writes the COORDINATOR's mode, hands it to the engine, then regenerates the
+    operation timeline (``coordinator._async_occupancy_toggle_changed``). The Tier A event driver only reached the
+    engine, so a surface the coordinator computes (Next Action, the timeline, the briefing) kept reading ``home``.
+    Shared by the FakeHass and real-HA adapters.
+    Semantic justification (Issue #1230 R3b, test-infrastructure rule): the previous driver modelled one half of a
+    two-part production step; scenarios that read coordinator surfaces after an occupancy event were therefore
+    exercising a state production cannot reach (engine away, coordinator home). Could this let a real failure pass
+    silently? No: it only makes the coordinator's mode equal the engine's, as production does; every engine decision
+    is unchanged (the engine call above is untouched) and the timeline run is the same call production makes.
+    """
+    if coordinator is None or not hasattr(coordinator, "_occupancy_mode"):
+        return
+    coordinator._occupancy_mode = mode
+    if hasattr(coordinator, "_timeline_shadow_run"):
+        coordinator._timeline_shadow_run("occupancy")

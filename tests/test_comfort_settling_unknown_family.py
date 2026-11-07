@@ -327,7 +327,9 @@ class TestOdeCeilingGuardGateWithUnknownFamily:
         events, mode, writes = self._fire(indoor, "cool")
         assert "heat" not in writes, "the AC just ran: a shallow dip must not start the furnace"
         assert mode == "cool"
-        assert "ceiling_guard_fired" in events
+        # the settling hold made the comfort band arm cool at the ceiling itself, so the guard (Issue #1230 R6, X1) has
+        # nothing left to write: the thermostat already cools at the ceiling
+        assert "ceiling_guard_fired" not in events
 
     @pytest.mark.parametrize("ran", [None, "heat"])
     def test_nothing_or_the_furnace_ran_the_write_is_still_skipped(self, ran):

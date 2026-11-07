@@ -138,9 +138,11 @@ from tools.sim_harness.scenario_model import (  # noqa: E402
     merged_scenario_config,
     parse_event_time,
     pin_scenario_thermal_model,
+    pin_scenario_v4_model,
     scenario_start_time,
     snapshot_engine_state,
     sorted_events,
+    sync_coordinator_occupancy,
 )
 from tools.sim_harness.session import drive_scenario  # noqa: E402
 
@@ -443,6 +445,10 @@ class FakeHassSession:
             engine._thermal_model = scenario["thermal_model"]
             if coordinator is not None:
                 pin_scenario_thermal_model(coordinator, scenario["thermal_model"])
+        # Issue #1230 R6b: ``v4_model`` is a compact spec of the zone's FITTED v4 model (see v4_model_from_spec). The
+        # primary engine (``config.primary_engine``, harness default v3) reads it for the decisions' rates and path.
+        if "v4_model" in scenario and isinstance(scenario["v4_model"], dict) and coordinator is not None:
+            pin_scenario_v4_model(coordinator, scenario["v4_model"])
         if "hourly_forecast" in scenario and isinstance(scenario["hourly_forecast"], list):
             engine._hourly_forecast_temps = scenario["hourly_forecast"]
             if coordinator is not None:
@@ -764,32 +770,40 @@ def _dispatch_event(
             # which this harness never fires unless a scenario explicitly seeds
             # weather), silently blocking setpoint-only override detection.
             coordinator._ensure_today_record(classification)
-        run_coro(engine.apply_classification(classification, indoor_temp=_cls_indoor_f))
-        # Issue #786: TOU scheduler — mirrors real production's per-cycle sequence
-        # (coordinator.py's _async_update_data_impl(): apply_classification() then
-        # _resolve_tou_schedule_state() then _apply_tou_schedule()). Purely additive: every
-        # existing scenario has no "schedules" key in its config, and
-        # _resolve_tou_schedule_state() no-ops immediately when config.get("schedules") is
-        # empty — so this changes nothing for any scenario that doesn't opt in.
+        # Issue #786/#1393: mirrors real production's per-cycle sequence (coordinator.py's
+        # _async_update_data_impl(): _resolve_tou_schedule_state() EARLY, then apply_classification(), then
+        # _apply_tou_schedule()). Purely additive for every scenario without a "schedules" config key
+        # (_resolve_tou_schedule_state() no-ops and the flag is False). With a bank window open the cycle's
+        # apply_classification() is told the bank owns the setpoint, exactly as the coordinator tells it.
+        _tou_owns = False
         if coordinator is not None:
             coordinator._resolve_tou_schedule_state()
+            _tou_owns = coordinator._tou_bank_owns_setpoint()
+        run_coro(
+            engine.apply_classification(classification, indoor_temp=_cls_indoor_f, tou_bank_owns_setpoint=_tou_owns)
+        )
+        if coordinator is not None:
             run_coro(coordinator._apply_tou_schedule())
 
     elif etype == "occupancy_away":
         engine.set_occupancy_mode("away")
+        sync_coordinator_occupancy(coordinator, "away")
         run_coro(engine.handle_occupancy_away())
 
     elif etype == "occupancy_home":
         engine.set_occupancy_mode("home")
+        sync_coordinator_occupancy(coordinator, "home")
         run_coro(engine.handle_occupancy_home())
 
     elif etype == "occupancy_vacation":
         engine.set_occupancy_mode("vacation")
+        sync_coordinator_occupancy(coordinator, "vacation")
         run_coro(engine.handle_occupancy_vacation())
 
     elif etype == "occupancy_change":
         mode = event.get("mode", "home")
         engine.set_occupancy_mode(mode)
+        sync_coordinator_occupancy(coordinator, mode)
         if mode == "away":
             run_coro(engine.handle_occupancy_away())
         elif mode == "vacation":
@@ -802,6 +816,7 @@ def _dispatch_event(
         engine._manual_override_active = True
         mode = event.get("mode", "home")
         engine.set_occupancy_mode(mode)
+        sync_coordinator_occupancy(coordinator, mode)
         if mode == "away":
             run_coro(engine.handle_occupancy_away())
         elif mode == "vacation":
@@ -1248,13 +1263,34 @@ def _handle_temp_update(
     # apply_classification (with the current classification) — faithfully reproducing the
     # periodic ceiling-guard re-evaluation. Legacy ignores this field.
     predicted = event.get("predicted_indoor")
-    if predicted and getattr(engine, "_current_classification", None) is not None:
+    # Issue #1230 R6b: ``plan_cycle`` models the coordinator's periodic plan cycle without a v3 predicted curve: the
+    # primary engine predicts and the classification is re-applied with what the decisions would read.
+    plan_cycle = bool(event.get("plan_cycle"))
+    if (predicted or plan_cycle) and getattr(engine, "_current_classification", None) is not None:
         # Issue #295: pass current indoor temp so achievement gate is evaluated on cycle.
         _tu_indoor_f = float(indoor_f) if indoor_f is not None else None
+        _plan_kwargs: dict[str, Any] = {}
+        if coordinator is not None:
+            # In production the decisions read the PRIMARY engine's curve (control_predicted_indoor), refreshed by the
+            # cycle just before them. With the harness default (primary v3) that is the event's own curve, injected
+            # into the coordinator above: byte-identical to passing it to the engine directly.
+            run_coro(coordinator._refresh_control_prediction())
+            predicted = coordinator.control_predicted_indoor()
+            if plan_cycle:
+                # The rest of the production sequence (coordinator._async_update_data_impl): the nat-vent plan is
+                # computed from that curve and its cutoff handed to apply_classification. Only for ``plan_cycle``:
+                # an event that merely carries a curve keeps handing the engine no cutoff, as every golden was signed.
+                coordinator._compute_and_cache_nat_vent_plan()
+                _plan = getattr(coordinator, "_nat_vent_plan", None) or {}
+                _plan_kwargs = {
+                    "nat_vent_cutoff": _plan.get("nat_vent_cutoff"),
+                    "nat_vent_cutoff_already_reached": bool(_plan.get("nat_vent_cutoff_already_reached", False)),
+                }
         run_coro(
             engine.apply_classification(
                 engine._current_classification,
                 predicted_indoor=predicted,
                 indoor_temp=_tu_indoor_f,
+                **_plan_kwargs,
             )
         )

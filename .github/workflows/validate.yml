@@ -18,12 +18,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0  # the isolated-file step diffs against origin/main
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install test dependencies
         run: uv sync --locked --only-group test
@@ -67,10 +67,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Run real-HA lifecycle tests
         run: python3 scripts/test.py ha --durations=15  # uv run --locked --only-group test-ha (own venv)

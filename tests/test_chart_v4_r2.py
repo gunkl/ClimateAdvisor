@@ -274,6 +274,9 @@ class TestV4Block:
         _chart(coord)
         msgs = [r for r in caplog.records if "no usable fit yet" in r.getMessage()]
         assert len(msgs) == 1
+        # Issue #1398: since R6b the primary drives control; without a fit the decisions use defaults, never v3.
+        assert "uses v3" not in msgs[0].getMessage()
+        assert "default behaviour until it has learned" in msgs[0].getMessage()
         coord._v4_store.v4_model = {**_model(), "confidence": "medium"}
         _chart(coord)  # the episode ends...
         coord._v4_store.v4_model = None

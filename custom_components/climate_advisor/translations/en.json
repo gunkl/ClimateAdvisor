@@ -398,7 +398,7 @@
           "cool_power_kw": "Cooling Power"
         },
         "data_description": {
-          "primary_engine": "Which prediction engine the Status chart, the Next 24 hours plan and the preview pages show as the main prediction: v4 (default) or v3. Display only for now: Climate Advisor makes every heating, cooling and ventilation decision with v3 either way. While the chosen engine is still learning, the schedule estimate is shown.",
+          "primary_engine": "Which prediction engine Climate Advisor uses: v4 (default) or v3. It times pre-heat and pre-cool, the ceiling guard, the window-close time and setback depth, and it is the main line on the Status chart and the Next 24 hours plan. While the chosen engine is still learning, those decisions use their default behaviour (never the other engine) and the chart shows the schedule estimate.",
           "shadow_engine": "Optional second engine drawn as a comparison line. It must differ from the prediction engine. Only these two engines run; any other is switched off.",
           "learning_enabled": "When enabled, Climate Advisor learns from your manual adjustments and suggests improvements over time.",
           "adaptive_preheat_enabled": "Use learned heating rate to compute pre-heat start time. Requires learning to be enabled.",

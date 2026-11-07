@@ -4852,9 +4852,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _archive_expire_cutoff = int((dt_util.now() - timedelta(days=7)).timestamp())
         self._pred_archive = {k: v for k, v in self._pred_archive.items() if k >= _archive_expire_cutoff}
 
-        # Issue #1230 R1: v4 predicts beside v3 and archives its values. Runs after the cycle's decisions and the
-        # chart row (it reads that row, so it sees exactly what the fit trains on). Result unused, errors swallowed
-        # inside: v3 still drives every decision and the Status chart.
+        # Issue #1230 R1: v4 predicts and archives its values. Runs after the cycle's decisions and the chart row (it
+        # reads that row, so it sees exactly what the fit trains on); errors are swallowed inside. Since R6b the primary
+        # engine's path feeds the decisions through the control feed, not through this call (Issue #1398).
         await self._v4_shadow_cycle()
 
         # Detect and emit post-cycle incidents
@@ -6931,8 +6931,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if not getattr(self, "_engine_fallback_logged", False):
                 self._engine_fallback_logged = True
                 _LOGGER.info(
-                    "Prediction engine %s has no usable fit yet: the display shows the schedule estimate "
-                    "(control is unaffected: it uses v3)",
+                    "Prediction engine %s has no usable fit yet: the display shows the schedule estimate, and "
+                    "pre-heat, the ceiling guard, the time-of-use bank and setback depth use their default "
+                    "behaviour until it has learned (Issue #1398)",
                     out["primary"],
                 )
         else:

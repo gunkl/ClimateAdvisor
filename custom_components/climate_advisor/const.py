@@ -1140,10 +1140,11 @@ CONFIG_METADATA = {
     "primary_engine": {
         "label": "Prediction engine",
         "description": (
-            "Which prediction engine the Status chart, the Next 24 hours plan and the preview pages show as the main"
-            " prediction: v4 (default, a per-sensor model learned from your house) or v3 (the established model)."
-            " Display only for now: Climate Advisor still makes every heating, cooling and ventilation decision"
-            " with v3. While the chosen engine is still learning, the schedule estimate is shown."
+            "Which prediction engine Climate Advisor uses: v4 (default, a per-sensor model learned from your house)"
+            " or v3 (the established model). It times pre-heat and pre-cool, the ceiling guard, the window-close time"
+            " and setback depth, and it is the main line on the Status chart and the Next 24 hours plan. While it is"
+            " still learning, those decisions use their default behaviour (never the other engine) and the chart"
+            " shows the schedule estimate."
         ),
         "category": "advanced",
         "default": DEFAULT_PRIMARY_ENGINE,

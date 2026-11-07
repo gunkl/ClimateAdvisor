@@ -6,6 +6,7 @@
 <title>Climate Advisor - new dashboard (preview)</title>
 <!-- Issue #1230 R5: the opt-in new dashboard. Classic (index.html) stays the default; every call below is an
      existing read endpoint or the same POST classic makes. Scripts are plain files in this folder (no CDN). -->
+<link rel="stylesheet" href="chart_v2.css">
 <style>
   :root {
     --bg: #f6f6f4; --panel: #ffffff; --ink: #0b0b0b; --ink2: #52514e; --muted: #6b6a66;
@@ -30,6 +31,9 @@
     --infobg: #14263d; --band: #3987e51f;
     --c1: #5aa0f0; --c2: #f08a5d; --c3: #4cc38a; --c4: #e0b030; --c5: #e57fa8;
   }
+  /* the shared chart (chart_v2.css, also used by the classic page) reads these names: map them onto this page's tokens */
+  :root { --text: var(--ink); --text-secondary: var(--muted); --border: var(--rule); --primary: var(--s1);
+          --primary-light: var(--infobg); --card-bg: var(--panel); }
   * { box-sizing: border-box; }
   html, body { margin: 0; }
   body {
@@ -176,6 +180,17 @@
     nav.tabs button { flex: 1 1 0; padding: 0 6px; }
     .cols { columns: 1; }
   }
+  /* the shared chart's controls on this page's tokens: selected states use the page's own on-colour, and a line with no
+     data (or a disabled one) is marked by a dashed outline instead of fading, so its label keeps its contrast */
+  .chart-range-bar .range-btn.active, .chart-range-bar .ahead-btn.active, .chart-tool-btn.active,
+  .chart-tool-btn[aria-pressed="true"] { color: var(--on-s1); }
+  .key-chip.no-data, .key-chip:disabled, .seg-btn:disabled { opacity: 1; border-style: dashed; }
+  .key-chip.on { background: var(--chip); }
+  .status-next { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
+  .status-next .tile .v { font-size: 16px; font-weight: 600; }
+  .chart-card .chart-head { margin-bottom: 0; }
+  .brief-text { white-space: pre-wrap; font-size: 13px; line-height: 1.55; max-height: 320px; overflow: auto; background: var(--chip); border-radius: 8px; padding: 10px 12px; }
+  .brief-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 </style>
 </head>
 <body>
@@ -211,18 +226,93 @@
 <div id="banners" aria-label="Alerts"></div>
 
 <main>
-  <!-- ============ Status (assembled later from the R2 chart, R3 timeline and R4 night card) ============ -->
+  <!-- ============ Status: what is happening now, and what do I need to do? ============ -->
   <div id="panel-status" class="panel-tab" role="tabpanel" aria-labelledby="tab-btn-status" tabindex="0">
-    <section class="card" aria-labelledby="status-title">
-      <div class="card-head"><h2 id="status-title">Status</h2><a href="index.html" id="status-classic-link">Open the classic Status tab</a></div>
-      <div class="note">The new Status tab is being assembled. Until the new chart and plan list land, today&#8217;s readings, chart and briefing stay on the classic Status tab. Alerts, health and actions above already work here.</div>
+    <div class="status-next" aria-label="What to do next">
+      <div class="tile"><div class="l">For you</div><div class="v" id="status-for-you">…</div></div>
+      <div class="tile"><div class="l">CA next</div><div class="v" id="status-ca-next">…</div><div class="n" id="status-ca-next-time"></div></div>
+    </div>
+    <div class="tiles" id="status-grid" aria-label="Readings"></div>
+
+    <section class="card chart-card" id="status-chart" aria-labelledby="chart-title">
+      <div class="chart-head">
+        <h2 id="chart-title">Temperature</h2>
+        <div class="chart-head-actions">
+          <button type="button" class="chart-zoom-reset" id="chart-zoom-reset" onclick="resetChartZoom()">Reset Zoom</button>
+          <button type="button" class="chart-tool-btn" id="chart-table-toggle" aria-pressed="false" onclick="toggleTableView()">Table view</button>
+        </div>
+      </div>
+      <div class="chart-range-bar" id="status-chart-range">
+        <div class="ctl-group" role="group" aria-label="Past: how much history to show">
+          <span class="ctl-label">Past</span>
+          <button type="button" class="range-btn" data-range="6h" aria-pressed="false" onclick="setChartRange('6h', this)">6h</button>
+          <button type="button" class="range-btn" data-range="12h" aria-pressed="false" onclick="setChartRange('12h', this)">12h</button>
+          <button type="button" class="range-btn active" data-range="24h" aria-pressed="true" onclick="setChartRange('24h', this)">24h</button>
+          <button type="button" class="range-btn" data-range="3d" aria-pressed="false" onclick="setChartRange('3d', this)">3d</button>
+          <button type="button" class="range-btn" data-range="7d" aria-pressed="false" onclick="setChartRange('7d', this)">7d</button>
+          <button type="button" class="range-btn" data-range="30d" aria-pressed="false" onclick="setChartRange('30d', this)">30d</button>
+          <button type="button" class="range-btn" data-range="1y" aria-pressed="false" onclick="setChartRange('1y', this)">1y</button>
+        </div>
+        <div class="ctl-group" role="group" aria-label="Ahead: how much forecast to show">
+          <span class="ctl-label">Ahead</span>
+          <button type="button" class="ahead-btn" data-ahead="12h" aria-pressed="false" onclick="setChartAhead('12h')">12h</button>
+          <button type="button" class="ahead-btn active" data-ahead="24h" aria-pressed="true" onclick="setChartAhead('24h')">24h</button>
+          <button type="button" class="ahead-btn" data-ahead="48h" aria-pressed="false" onclick="setChartAhead('48h')">48h</button>
+          <button type="button" class="ahead-btn" data-ahead="5d" aria-pressed="false" onclick="setChartAhead('5d')">5d</button>
+        </div>
+        <div class="ctl-group" role="group" aria-label="Move through time" id="status-chart-nav">
+          <button type="button" class="chart-nav-btn" id="chart-nav-back" title="Scroll back" aria-label="Scroll back half a view" onclick="shiftChartWindow(-1)">&#8249;</button>
+          <button type="button" class="chart-nav-btn now-btn" id="chart-nav-now" title="Back to now" onclick="chartGoNow()">Now</button>
+          <button type="button" class="chart-nav-btn" id="chart-nav-fwd" title="Scroll forward" aria-label="Scroll forward half a view" onclick="shiftChartWindow(1)">&#8250;</button>
+        </div>
+      </div>
+      <details class="chart-key" id="chart-key" open>
+        <summary>Lines <span id="chart-key-count"></span></summary>
+        <div id="chart-key-body"></div>
+        <div class="cl-item key-extra" id="legend-thermostat-set" style="display:none"><span class="cl-swatch" style="border-top:2px dashed rgba(255,193,7,0.95)"></span><span>Thermostat set</span></div>
+      </details>
+      <p class="chart-note" id="chart-v4-note" hidden></p>
+      <div id="chart-hover-panel" class="chart-hover-panel" aria-live="off"></div>
+      <div class="chart-stack" id="chart-stack" tabindex="0" aria-label="Temperature chart. Left and right arrows move a readout along the time axis; Escape clears it. Table view lists the same values.">
+        <div class="chart-container">
+          <canvas id="temp-chart" role="img" aria-label="Indoor temperature by sensor with predictions"></canvas>
+        </div>
+        <div class="chart-container chart-container-out">
+          <canvas id="out-chart" role="img" aria-label="Outdoor temperature: sensor, weather service forecast and corrected forecast"></canvas>
+        </div>
+        <div class="activity-timeline" id="status-chart-strips">
+          <canvas id="activity-chart" role="img" aria-label="Heating, cooling, fan, ventilation and window activity over time"></canvas>
+        </div>
+        <div class="chart-cursor" id="chart-cursor" hidden></div>
+      </div>
+      <p class="chart-note" id="chart-empty" hidden>No chart data yet. The chart fills in as Climate Advisor logs readings.</p>
+      <div class="chart-table-wrap" id="chart-table-wrap" hidden>
+        <div class="chart-table-actions"><button type="button" class="chart-tool-btn" id="chart-table-copy" onclick="copyChartTable()">Copy table</button></div>
+        <div class="chart-table-scroll" tabindex="0" role="region" aria-label="Chart values as a table"><table class="chart-table"></table></div>
+      </div>
     </section>
-    <div id="status-slot-chart" class="slot" data-slot="chart" aria-label="Temperature chart (coming)">Temperature chart: arrives with the new chart.</div>
-    <div id="status-slot-plan" class="slot" data-slot="plan" aria-label="Next 24 hours (coming)">Next 24 hours plan list: arrives with the operation timeline.</div>
+
+    <section class="card" id="status-plan" aria-labelledby="status-plan-h">
+      <div class="card-head"><h2 id="status-plan-h">Next 24 hours</h2><span class="sub">What Climate Advisor will do, and what you are asked to do. The same steps are marked on the chart.</span></div>
+      <div class="plan">
+        <ol class="plan-list" id="status-plan-list" aria-live="polite"></ol>
+        <div class="plan-foot" id="status-natvent-line"></div>
+      </div>
+    </section>
+
     <section class="card night" id="status-slot-night" data-slot="night" aria-labelledby="night-title">
-      <div class="card-head"><h2 id="night-title">Tonight in the bedroom</h2><span class="badge sample" id="night-sample-badge">Sample data, not your house</span></div>
-      <div id="night-card"></div>
+      <div class="card-head"><h2 id="night-title">Tonight in the bedroom</h2><span class="badge sample" id="night-sample-badge" hidden>Sample data, not your house</span></div>
+      <div id="night-card"><div class="empty">Loading...</div></div>
     </section>
+
+    <details class="card" id="status-briefing">
+      <summary>Today&#8217;s briefing</summary>
+      <div class="brief-bar" style="margin:8px 0">
+        <button type="button" class="btn small" id="status-briefing-regenerate" title="Refreshes the plan shown here. It does not send a push or email notification.">Regenerate</button>
+        <button type="button" class="btn small" id="status-briefing-send" title="Sends today's briefing as a notification">Send</button>
+      </div>
+      <div class="brief-text" id="status-briefing-text" aria-live="polite">Loading...</div>
+    </details>
   </div>
 
   <!-- ============ Analysis ============ -->
@@ -368,6 +458,10 @@
 </dialog>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 
+<script src="hammer.min.js"></script>
+<script src="chart.umd.min.js"></script>
+<script src="chartjs-plugin-zoom.min.js"></script>
+<script src="chart_v2.js"></script>
 <script src="nd_core.js"></script>
 <script src="nd_night_card.js"></script>
 <script src="nd_status.js"></script>

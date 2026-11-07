@@ -12,11 +12,18 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-INDEX = (ROOT / "custom_components" / "climate_advisor" / "frontend" / "index.html").read_text(encoding="utf-8")
+_FE = ROOT / "custom_components" / "climate_advisor" / "frontend"
+# R6fe: the chart lives in the shared module chart_v2.js (and chart_v2.css); the classic page loads both. The checks
+# below read the classic page plus those two files as one source, as they did when the chart was inline.
+INDEX = "\n".join((_FE / n).read_text(encoding="utf-8") for n in ("index.html", "chart_v2.js", "chart_v2.css"))
 
 
 def _func(name: str) -> str:
-    m = re.search(rf"  (?:async )?function {name}\(.*?\n  \}}\n", INDEX, re.DOTALL)
+    # the shared module's definition wins over a page-level wrapper of the same name (classic's loadChart)
+    module = (_FE / "chart_v2.js").read_text(encoding="utf-8")
+    m = re.search(rf"  (?:async )?function {name}\(.*?\n  \}}\n", module, re.DOTALL) or re.search(
+        rf"  (?:async )?function {name}\(.*?\n  \}}\n", INDEX, re.DOTALL
+    )
     assert m, f"{name} not found"
     return m.group(0)
 
@@ -133,7 +140,7 @@ def test_backtest_lead_is_selectable_and_defaults_to_four_hours():
 
 def test_choices_are_remembered_per_zone_in_try_catch_storage():
     assert "const CHART_PREFS_KEY = 'ca_chart_v2'" in INDEX
-    assert "CHART_PREFS_KEY + ':' + (_selectedEntryId || 'default')" in _func("_prefsKey")
+    assert "CHART_PREFS_KEY + ':' + (_host.zone() || 'default')" in _func("_prefsKey")
     read, write = _func("_readPrefs"), _func("_writePrefs")
     assert "try {" in read and "catch" in read and "try {" in write and "catch" in write
     assert "localStorage.setItem" in write and "localStorage.getItem" in read

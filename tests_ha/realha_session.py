@@ -599,7 +599,7 @@ class RealHASession:
             classification = build_classification_from_event(event, cfg)
             coordinator._current_classification = classification
             coordinator._ensure_today_record(classification)
-            # Issue #1393: production order -- resolve early, tell apply_classification() when the bank owns the setpoint.
+            # Issue #1393: production order -- resolve early, tell apply_classification() the bank owns the setpoint.
             coordinator._resolve_tou_schedule_state()
             await engine.apply_classification(
                 classification,

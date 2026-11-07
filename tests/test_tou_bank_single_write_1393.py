@@ -142,10 +142,124 @@ class TestCoordinatorOwnership:
         assert self._coord(phase)._tou_bank_owns_setpoint() is False
 
     @pytest.mark.parametrize("occ", [OCCUPANCY_AWAY, OCCUPANCY_VACATION])
-    def test_away_vacation_not_covered(self, occ):
-        assert self._coord(TOUPhase.PRECONDITIONING, occ)._tou_bank_owns_setpoint() is False
+    def test_away_vacation_bank_also_owns(self, occ):
+        assert self._coord(TOUPhase.PRECONDITIONING, occ)._tou_bank_owns_setpoint() is True
 
     def test_no_attribute_is_false(self):
         coord = object.__new__(ClimateAdvisorCoordinator)
         coord._occupancy_mode = OCCUPANCY_HOME
         assert coord._tou_bank_owns_setpoint() is False
+
+
+# --- Issue #1395: the Away/Vacation mirror ------------------------------------------------------------------------
+def _away(occupancy: str):
+    engine = _make_engine(indoor_temp=76.0, current_mode="cool")
+    engine.set_occupancy_mode(occupancy)
+    return engine, _make_cool_day_classification()
+
+
+class TestAwayVacationBankWritesOnce:
+    """Before: away cool 82 then 73 (vacation 85 then 73) in the same second at every cycle inside the window."""
+
+    @pytest.mark.parametrize("occupancy", ["away", "vacation"])
+    def test_without_the_skip_the_setback_band_is_written_first(self, occupancy):
+        engine, c = _away(occupancy)
+        asyncio.run(engine.apply_classification(c, indoor_temp=76.0))
+        asyncio.run(engine.apply_tou_away_vacation_precondition(c, 73.0, "peak1", "cool"))
+        writes = _writes(engine)
+        assert len(writes) == 2 and writes[1] == ("cool", 73.0) and writes[0][1] > 73.0
+
+    @pytest.mark.parametrize("occupancy", ["away", "vacation"])
+    def test_with_the_bank_owning_the_setpoint_only_the_bank_target_is_written(self, occupancy):
+        engine, c = _away(occupancy)
+        asyncio.run(engine.apply_classification(c, indoor_temp=76.0, tou_bank_owns_setpoint=True))
+        asyncio.run(engine.apply_tou_away_vacation_precondition(c, 73.0, "peak1", "cool"))
+        assert _writes(engine) == [("cool", 73.0)]
+
+    def test_heat_mirror(self):
+        engine = _make_engine(indoor_temp=62.0, current_mode="heat")
+        engine.set_occupancy_mode("away")
+        c = _make_cool_day_classification()
+        c.hvac_mode, c.day_type = "heat", "cold"
+        asyncio.run(engine.apply_classification(c, indoor_temp=62.0, tou_bank_owns_setpoint=True))
+        asyncio.run(engine.apply_tou_away_vacation_precondition(c, 66.0, "peak1", "heat"))
+        assert _writes(engine) == [("heat", 66.0)]
+
+    def test_outside_the_bank_the_setback_band_is_still_written(self):
+        engine, c = _away("away")
+        asyncio.run(engine.apply_classification(c, indoor_temp=76.0, tou_bank_owns_setpoint=False))
+        assert len(_writes(engine)) == 1
+
+    def test_a_paused_door_keeps_the_setback_path(self):
+        engine, c = _away("away")
+        engine._paused_by_door = True
+        engine.handle_occupancy_away = AsyncMock()
+        asyncio.run(engine.apply_classification(c, indoor_temp=76.0, tou_bank_owns_setpoint=True))
+        engine.handle_occupancy_away.assert_awaited_once()
+
+
+# --- Issue #1393 wiring / #1395 call sites -------------------------------------------------------------------------
+def _apply_classification_sites() -> dict[tuple[str, str], list[str]]:
+    import ast  # noqa: PLC0415
+
+    root = Path(__file__).parent.parent / "custom_components" / "climate_advisor"
+    sites: dict[tuple[str, str], list[str]] = {}
+    for name in ("coordinator.py", "api.py", "automation.py"):
+        tree = ast.parse((root / name).read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                for node in ast.walk(fn):
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "apply_classification"
+                    ):
+                        kw = [k for k in node.keywords if k.arg == "tou_bank_owns_setpoint"]
+                        sites[(name, fn.name)] = [ast.unparse(k.value) for k in kw]
+    return sites
+
+
+class TestCoordinatorWiring:
+    def test_the_regular_cycle_passes_the_ownership_flag(self):
+        """Fails if the coordinator stops telling apply_classification() the bank owns the setpoint."""
+        sites = _apply_classification_sites()
+        assert sites[("coordinator.py", "_async_update_data_impl")] == ["self._tou_bank_owns_setpoint()"]
+
+    @pytest.mark.parametrize(
+        ("file", "func"),
+        [
+            ("coordinator.py", "_do_startup_coalesce"),
+            ("coordinator.py", "_async_send_briefing"),
+            ("coordinator.py", "_async_reassert_setpoint_now"),
+            ("api.py", "_apply_after_delay"),
+            ("api.py", "_schedule_reclassify_after_cancel"),
+            ("automation.py", "comfort_family_temperature_check"),
+            ("automation.py", "_apply_current_scheduled_state"),
+        ],
+    )
+    def test_other_call_sites_write_the_plain_band_and_rely_on_the_five_minute_check(self, file, func):
+        """These passes are not followed by the TOU step, so they must not skip the band write (the thermostat would
+        get no write at all); a comfort edge they leave mid-bank is re-banked by the 5-minute check (state-based)."""
+        sites = _apply_classification_sites()
+        assert sites[(file, func)] == []
+
+    def test_every_call_site_is_accounted_for(self):
+        """A new apply_classification() call site must be added to the two lists above on purpose."""
+        assert len(_apply_classification_sites()) == 8
+
+
+class TestBankWriteDoesNotScheduleAFiveMinuteLoop:
+    """Issue #1395: each bank write scheduled a 5-minute follow-up that re-ran the cycle and re-sent the same bank
+    target, for the whole bank (a write every 5 minutes)."""
+
+    def test_home_bank_write_cancels_the_follow_up(self):
+        engine, c = _cool()
+        engine._cancel_classification_revisit = MagicMock()
+        asyncio.run(engine.apply_tou_precondition(c, target=68.0, schedule_id="peak1"))
+        engine._cancel_classification_revisit.assert_called()
+
+    def test_away_bank_write_cancels_the_follow_up(self):
+        engine, c = _away("away")
+        engine._cancel_classification_revisit = MagicMock()
+        asyncio.run(engine.apply_tou_away_vacation_precondition(c, 73.0, "peak1", "cool"))
+        engine._cancel_classification_revisit.assert_called()

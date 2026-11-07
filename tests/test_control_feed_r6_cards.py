@@ -119,10 +119,16 @@ def test_no_fit_primary_does_not_read_v3s_hot_curve_in_the_guard() -> None:
 
 
 # ----------------------------------------------------------------------------- X7: the 5-minute TOU check
-def _coordinator(resolution: TOUPhaseResolution | None, now: datetime):
+def _coordinator(resolution: TOUPhaseResolution | None, now: datetime, *, thermostat=("cool", 68.0)):
     from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator  # noqa: PLC0415
 
     c = object.__new__(ClimateAdvisorCoordinator)
+    # Issue #1395: the check reads the thermostat (mode, setpoint) to tell a held bank from a lost one.
+    c.config = {"climate_entity": "climate.t", "temp_unit": "fahrenheit"}
+    c.hass = MagicMock()
+    state = MagicMock()
+    state.state, state.attributes = thermostat[0], {"temperature": thermostat[1]}
+    c.hass.states.get.return_value = state
     c._tou_phase_resolution = resolution
     c._current_classification = MagicMock()
     c._suppress_during_startup_coalescing = lambda _d: False
@@ -149,7 +155,7 @@ def test_the_tou_bank_opens_on_the_first_check_after_its_window_starts() -> None
     ("phase", "start_off", "end_off"),
     [
         (TOUPhase.NONE, 20, 125),  # the window has not started
-        (TOUPhase.PRECONDITIONING, -30, 75),  # already banking: the cycle owns the re-assert
+        (TOUPhase.PRECONDITIONING, -30, 75),  # already banking and the thermostat holds the bank target
         (TOUPhase.NONE, -200, -10),  # the peak already started
     ],
 )
@@ -159,6 +165,21 @@ def test_the_tou_check_is_a_no_op_unless_a_window_just_opened(phase, start_off, 
         dtu.now.return_value = _NOW
         asyncio.run(c._async_tou_bank_tick(_NOW))
     c._apply_tou_schedule.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "thermostat",
+    [("cool", 76.0), ("heat", 68.0), ("off", 68.0), ("cool", None)],
+    ids=["comfort-edge-left-on", "wrong-mode", "off", "no-setpoint"],
+)
+def test_a_bank_the_thermostat_no_longer_holds_is_re_banked_from_its_state(thermostat) -> None:
+    """Issue #1395: a briefing / fan-off re-assert / startup / Resume pass wrote the comfort edge mid-bank."""
+    start, end = _NOW + timedelta(minutes=-30), _NOW + timedelta(minutes=75)
+    c = _coordinator(_res(TOUPhase.PRECONDITIONING, start, end), _NOW, thermostat=thermostat)
+    with patch("custom_components.climate_advisor.coordinator.dt_util") as dtu:
+        dtu.now.return_value = _NOW
+        asyncio.run(c._async_tou_bank_tick(_NOW))
+    c._apply_tou_schedule.assert_awaited_once()
 
 
 def test_the_tou_check_is_a_no_op_without_a_schedule_or_a_classification() -> None:

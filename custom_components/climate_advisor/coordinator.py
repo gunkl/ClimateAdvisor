@@ -7922,16 +7922,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
     def _tou_bank_owns_setpoint(self) -> bool:
-        """Issue #1393: this cycle's resolved time-of-use phase is Home/Guest ``PRECONDITIONING``, so
-        ``_apply_tou_schedule()`` (which runs right after ``apply_classification()`` on the regular cycle) writes the
-        bank target and ``apply_classification()`` must not write the comfort edge first. Away/Vacation take the split
-        delta path instead and are not covered."""
+        """Issue #1393/#1395: this cycle's resolved time-of-use phase is ``PRECONDITIONING`` (Home/Guest bank, or the
+        Away/Vacation split-delta bank), so ``_apply_tou_schedule()`` writes the bank target right after
+        ``apply_classification()`` and that pass must not write a band edge first."""
         resolution = getattr(self, "_tou_phase_resolution", None)
-        return bool(
-            resolution is not None
-            and resolution.phase == TOUPhase.PRECONDITIONING
-            and self._occupancy_mode not in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
-        )
+        return bool(resolution is not None and resolution.phase == TOUPhase.PRECONDITIONING)
 
     async def _apply_tou_schedule(self) -> None:
         """Act on ``self._tou_phase_resolution`` (resolved earlier this cycle by
@@ -7953,6 +7948,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._current_classification, resolution.target, resolution.schedule_id
                 )
 
+    def _thermostat_holds_tou_bank(self, resolution: Any) -> bool:
+        """The thermostat is in the bank's mode at the bank target (Issue #1395). Unreadable counts as not held."""
+        cs = self.hass.states.get(self.config.get("climate_entity", ""))
+        if cs is None or resolution.target is None:
+            return False
+        setpoint_f = read_state_temp_f(cs, "temperature", self.config.get("temp_unit", "fahrenheit"))
+        return bool(
+            setpoint_f is not None and cs.state == resolution.mode and abs(setpoint_f - float(resolution.target)) < 0.6
+        )
+
     async def _async_tou_bank_tick(self, _now: Any) -> None:
         """Open the time-of-use bank on the 5-minute check after its window starts (Issue #1230 X7).
 
@@ -7962,11 +7967,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         (the 76-then-68 flicker of the cycle path). Cheap no-op unless a window has just opened: the cached
         resolution says banking has not started yet and the window start has passed."""
         resolution = getattr(self, "_tou_phase_resolution", None)
-        if resolution is None or resolution.schedule_id is None or resolution.phase == TOUPhase.PRECONDITIONING:
+        if resolution is None or resolution.schedule_id is None:
             return
         start, end = resolution.precondition_start, resolution.schedule_start
         now = dt_util.now()
         if start is None or end is None or not (start <= now < end) or self._current_classification is None:
+            return
+        # Issue #1395: banking already underway is left alone while the thermostat holds the bank target. A pass that
+        # is not followed by the bank write (briefing, setpoint re-assert after the fan stops, startup, dashboard
+        # Resume) can leave the comfort edge on mid-bank; the check re-banks then, from the thermostat's state, so a
+        # healthy bank is never rewritten and nothing can flicker.
+        if resolution.phase == TOUPhase.PRECONDITIONING and self._thermostat_holds_tou_bank(resolution):
             return
         if self._suppress_during_startup_coalescing("time-of-use bank check"):
             return

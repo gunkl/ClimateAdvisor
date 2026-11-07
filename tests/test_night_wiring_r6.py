@@ -451,7 +451,7 @@ def _request(coordinators: dict, query: dict | None = None):
     req = MagicMock()
     req.app = {"hass": hass}
     req.method, req.path, req.remote = "GET", API_NIGHT_STRATEGY, "127.0.0.1"
-    req.rel_url.query = query or {}
+    req.query = req.rel_url.query = query or {}
     return req
 
 

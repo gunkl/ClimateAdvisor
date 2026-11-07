@@ -36,6 +36,7 @@ def _coord(persisted_state: dict):
     coord.hass = MagicMock()
     coord.hass.is_running = False
     coord._executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
+    coord.async_load_investigation_reports = AsyncMock()  # Issue #1415: restore awaits the per-zone loader
     coord.config = {"climate_entity": "climate.thermostat"}
     coord.learning = MagicMock()
     coord.learning._state = LearningState()

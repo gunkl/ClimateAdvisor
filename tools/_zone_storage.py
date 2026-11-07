@@ -31,6 +31,15 @@ def remote_path(base_filename: str, entry_id: str | None) -> str:
     return str(resolve_entry_scoped_path(REMOTE_CONFIG_DIR, base_filename, entry_id or ""))
 
 
+def entry_id_from_remote_path(base_filename: str, path: str) -> str | None:
+    """The entry_id a ``remote_path(base_filename, entry_id)`` result was scoped to (None for the unscoped path)."""
+    if path == remote_path(base_filename, None):
+        return None
+    stem = PurePosixPath(base_filename).stem + "_"
+    name = PurePosixPath(path).stem
+    return name[len(stem) :] if name.startswith(stem) and len(name) > len(stem) else None
+
+
 def discover_entry_ids(config: dict, base_filename: str, build_cmd) -> list[str]:
     """List entry_ids with an existing entry-scoped file for base_filename on the remote host.
 
@@ -93,3 +102,67 @@ def resolve_remote_path_with_discovery(
         sys.exit(1)
     # No entry-scoped file found — legacy unscoped path (pre-#796 single-zone).
     return remote_path(base_filename, None)
+
+
+# ---------------------------------------------------------------------------
+# REST zone scoping (Issue #1418)
+# ---------------------------------------------------------------------------
+#
+# Every Climate Advisor REST view answers for ONE zone. With several zones and
+# no ``?zone=``, a GET answers for the first zone (and raises the "Ambiguous
+# zone selection" Repairs card) — so a tool that sends no zone silently reports
+# Zone 1 while the user thinks it is looking at another zone. Tools resolve the
+# zone here: an explicit --entry-id is sent as ``?zone=``; without one, a
+# multi-zone install is detected from GET /status and the tool must ask.
+
+STATUS_API_PATH = "/api/climate_advisor/status"
+
+
+class ZoneSelectionRequired(Exception):  # noqa: N818 - a signal, not an error state of the tool itself
+    """Several zones are loaded and no --entry-id was given; ``zones`` lists them."""
+
+    def __init__(self, zones: list[dict]) -> None:
+        super().__init__(f"{len(zones)} Climate Advisor zones are loaded; pass --entry-id")
+        self.zones = zones
+
+
+def with_zone(url: str, entry_id: str | None) -> str:
+    """``url`` with ``zone=<entry_id>`` appended (unchanged when ``entry_id`` is None/empty)."""
+    if not entry_id:
+        return url
+    from urllib.parse import quote
+
+    return f"{url}{'&' if '?' in url else '?'}zone={quote(entry_id, safe='')}"
+
+
+def format_zone_choices(zones: list[dict]) -> str:
+    """One ``  <entry_id>  <title>`` line per zone, for an error message."""
+    return "\n".join(f"  {z.get('entry_id', '?')}  {z.get('title') or ''}".rstrip() for z in zones)
+
+
+def _get_json(url: str, ha_token: str, timeout: float = 10) -> dict | None:
+    import json
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {ha_token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError, OSError, ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def resolve_api_zone(ha_url: str, ha_token: str, entry_id: str | None, *, get_json=_get_json) -> str | None:
+    """The zone to send on REST calls: ``entry_id`` when given, else None for a single-zone install.
+
+    Raises ZoneSelectionRequired when no ``entry_id`` was given and /status reports several zones. When /status
+    can't be read, returns None (the caller's own request reports the failure).
+    """
+    if entry_id:
+        return entry_id
+    status = get_json(f"{ha_url.rstrip('/')}{STATUS_API_PATH}", ha_token)
+    if status and status.get("zone_selection_required"):
+        raise ZoneSelectionRequired(list(status.get("zones") or []))
+    return None

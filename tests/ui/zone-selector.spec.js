@@ -410,3 +410,122 @@ test.describe('Zone selector (Issue #796 PR9)', () => {
   });
 
 });
+
+// Issue #1418: the selected zone is mid-reload (its status 503s, e.g. right after saving that zone's options). The
+// 503 self-heal used to clear the selection before re-picking, so requests fired in that gap (the chart's plan
+// reload, the re-fired loads, a poll) went out with no entry_id and were answered with the first zone's data under
+// the clicked zone's tab, raising the "Ambiguous zone selection" card. Now no request leaves without a zone.
+const ZONES_1418 = [ // three zones, so the list stays multi-zone while one reloads (the owner has seven)
+  { entry_id: 'zone-bedroom', title: 'Bedroom' },
+  { entry_id: 'zone-living', title: 'Living Room' },
+  { entry_id: 'zone-studio', title: 'Studio' },
+];
+async function routeStatus1418(page) {
+  await page.route('**/api/climate_advisor/status**', (route) => {
+    const url = new URL(route.request().url());
+    const entryId = url.searchParams.get('entry_id');
+    if (entryId === 'zone-living') {
+      return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Climate Advisor not loaded' }) });
+    }
+    if (!entryId) { // the real list_zones() omits a zone whose coordinator is not loaded (mid-reload)
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ zone_selection_required: true, zones: ZONES_1418.filter((z) => z.entry_id !== 'zone-living'), zone_count: 2 }) });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ day_type: 'mild', hvac_mode: 'off', automation_enabled: true, occupancy_mode: 'home', automation_status: 'active', compliance_score: 1.0, zones: ZONES_1418, zone_count: 3 }),
+    });
+  });
+}
+const UNSCOPED_1418 = /\/api\/climate_advisor\/(chart_data|automation_state|briefing|learning|engines|timeline|settings_extra)(\?|$)/;
+
+test('Issue #1418 (classic): a zone mid-reload does not leave the page polling with no zone', async ({ page }) => {
+  await routeStatus1418(page);
+  await page.addInitScript(() => localStorage.setItem('climate_advisor_selected_zone', 'zone-bedroom'));
+  await page.goto('/');
+  await page.waitForSelector('#status-grid', { state: 'visible' });
+  const buttons = page.locator('#zone-selector-row .zone-tab-btn');
+  await expect(buttons).toHaveCount(3);
+
+  const unscoped = [];
+  page.on('request', (req) => { if (UNSCOPED_1418.test(req.url()) && !req.url().includes('entry_id=')) unscoped.push(req.url()); });
+  const healed = page.waitForRequest((req) => req.url().includes('/api/climate_advisor/status') && req.url().includes('entry_id=zone-bedroom'));
+  await buttons.nth(1).click();
+  await healed;
+  await expect(buttons.nth(0)).toHaveClass(/active/);
+  await page.waitForTimeout(500);
+  expect(unscoped).toEqual([]);
+  expect(await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'))).toBe('zone-bedroom');
+});
+
+test('Issue #1418 (new dashboard): a zone mid-reload does not leave the page polling with no zone', async ({ page }) => {
+  await routeStatus1418(page);
+  await page.addInitScript(() => localStorage.setItem('climate_advisor_selected_zone', 'zone-bedroom'));
+  await page.goto('/new_dashboard.html');
+  const sel = page.locator('#zone-select');
+  await expect(sel).toHaveValue('zone-bedroom');
+
+  const unscoped = [];
+  page.on('request', (req) => { if (UNSCOPED_1418.test(req.url()) && !req.url().includes('entry_id=')) unscoped.push(req.url()); });
+  const healed = page.waitForRequest((req) => req.url().includes('/api/climate_advisor/status') && req.url().includes('entry_id=zone-bedroom'));
+  await sel.selectOption('zone-living');
+  await healed;
+  await expect(sel).toHaveValue('zone-bedroom');
+  await page.waitForTimeout(500);
+  expect(unscoped).toEqual([]);
+  expect(await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'))).toBe('zone-bedroom');
+});
+
+// Issue #1418, second shape: the zone's reload finishes between its 503 and the unscoped retry, so the zone list is
+// unchanged. Before the fix both pages kept the cleared (null) selection because the list "had not changed", and
+// every later request went out with no entry_id. Now the page stays on the zone the owner picked.
+async function routeStatusReloadedOnce(page) {
+  let living503 = 1;
+  await page.route('**/api/climate_advisor/status**', (route) => {
+    const entryId = new URL(route.request().url()).searchParams.get('entry_id');
+    if (entryId === 'zone-living' && living503 > 0) {
+      living503 -= 1;
+      return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Climate Advisor not loaded' }) });
+    }
+    if (!entryId) {
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ zone_selection_required: true, zones: ZONES_1418, zone_count: 3 }) });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ day_type: 'mild', hvac_mode: 'off', automation_enabled: true, occupancy_mode: 'home', automation_status: 'active', compliance_score: 1.0, zones: ZONES_1418, zone_count: 3 }),
+    });
+  });
+}
+
+test('Issue #1418 (classic): a zone back from its reload stays selected and every request names it', async ({ page }) => {
+  await routeStatusReloadedOnce(page);
+  await page.addInitScript(() => localStorage.setItem('climate_advisor_selected_zone', 'zone-bedroom'));
+  await page.goto('/');
+  await page.waitForSelector('#status-grid', { state: 'visible' });
+  const buttons = page.locator('#zone-selector-row .zone-tab-btn');
+  await expect(buttons).toHaveCount(3);
+  const unscoped = [];
+  page.on('request', (req) => { if (UNSCOPED_1418.test(req.url()) && !req.url().includes('entry_id=')) unscoped.push(req.url()); });
+  await buttons.nth(1).click();
+  await expect(buttons.nth(1)).toHaveClass(/active/);
+  await page.waitForTimeout(800);
+  await expect(buttons.nth(1)).toHaveClass(/active/);
+  expect(unscoped).toEqual([]);
+  expect(await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'))).toBe('zone-living');
+});
+
+test('Issue #1418 (new dashboard): a zone back from its reload stays selected and every request names it', async ({ page }) => {
+  await routeStatusReloadedOnce(page);
+  await page.addInitScript(() => localStorage.setItem('climate_advisor_selected_zone', 'zone-bedroom'));
+  await page.goto('/new_dashboard.html');
+  const sel = page.locator('#zone-select');
+  await expect(sel).toHaveValue('zone-bedroom');
+  const unscoped = [];
+  page.on('request', (req) => { if (UNSCOPED_1418.test(req.url()) && !req.url().includes('entry_id=')) unscoped.push(req.url()); });
+  await sel.selectOption('zone-living');
+  await page.waitForTimeout(800);
+  await expect(sel).toHaveValue('zone-living');
+  expect(unscoped).toEqual([]);
+  expect(await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'))).toBe('zone-living');
+});

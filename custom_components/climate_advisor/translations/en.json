@@ -546,7 +546,7 @@
     },
     "zone_resolution_ambiguous": {
       "title": "Ambiguous zone selection",
-      "description": "Multiple Climate Advisor zones are configured. Some requests that don't specify a zone may resolve to the wrong one."
+      "description": "Climate Advisor has more than one zone, and a request did not say which zone it was for: {request}. It was {outcome}. Whatever sent it (a script, an automation, a command-line tool or an old browser tab) may be showing another zone's information.\n\nTo fix it, add `?zone=ENTRY_ID` to that request, where ENTRY_ID is the zone's `entry_id` as listed by `GET /api/climate_advisor/status`. The Climate Advisor dashboards already do this. This notice clears the next time Climate Advisor starts."
     }
   }
 }

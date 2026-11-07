@@ -261,3 +261,65 @@ class TestAmbiguousZonePostRefusal:
 
         assert resp.status == 200
         assert "zone_selection_required" not in (resp.json_data or {})
+
+
+class TestZoneParam:
+    """Issue #1418: ``?zone=`` is the same as ``?entry_id=`` on every view behind ``_get_coordinator()``.
+
+    Before, these views read only ``entry_id``: ``automation_state?zone=entry_b`` answered with zone A (the first)
+    and raised the ambiguous-zone Repairs card. Deleting the ``zone`` read in ``api._zone_param()`` fails these.
+    """
+
+    def _request(self, coordinators, query, method="GET"):
+        req = TestAmbiguousZonePostRefusal()._make_ambiguous_request(coordinators)
+        req.query = query
+        req.method = method
+        return req
+
+    def test_zone_param_resolves_named_zone_without_guessing(self):
+        from unittest.mock import patch
+
+        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a.get_debug_state.return_value = {"zone": "a"}
+        zone_b.get_debug_state.return_value = {"zone": "b"}
+        req = self._request({"entry_a": zone_a, "entry_b": zone_b}, {"zone": "entry_b"})
+        with patch("custom_components.climate_advisor.zone_registry.ir.async_create_issue") as mock_create:
+            resp = asyncio.run(ClimateAdvisorAutomationStateView().get(req))
+        assert resp.status == 200
+        zone_b.get_debug_state.assert_called_once()
+        zone_a.get_debug_state.assert_not_called()
+        mock_create.assert_not_called()
+
+    def test_zone_param_post_acts_only_on_named_zone(self):
+        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a.automation_enabled = zone_b.automation_enabled = True
+        req = self._request({"entry_a": zone_a, "entry_b": zone_b}, {"zone": "entry_b"}, method="POST")
+        resp = asyncio.run(ClimateAdvisorToggleAutomationView().post(req))
+        assert resp.status == 200
+        zone_b.set_automation_enabled.assert_called_once()
+        zone_a.set_automation_enabled.assert_not_called()
+
+    def test_same_zone_in_both_params_is_fine(self):
+        zone_a, zone_b = MagicMock(), MagicMock()
+        req = self._request({"entry_a": zone_a, "entry_b": zone_b}, {"zone": "entry_b", "entry_id": "entry_b"})
+        resp = asyncio.run(ClimateAdvisorAutomationStateView().get(req))
+        assert resp.status == 200
+        zone_b.get_debug_state.assert_called_once()
+
+    def test_conflicting_params_refused_and_nothing_actuated(self):
+        zone_a, zone_b = MagicMock(), MagicMock()
+        req = self._request({"entry_a": zone_a, "entry_b": zone_b}, {"zone": "entry_a", "entry_id": "entry_b"}, "POST")
+        resp = asyncio.run(ClimateAdvisorToggleAutomationView().post(req))
+        assert resp.status == 400
+        assert resp.json_data["zone_selection_required"] is True
+        assert "?zone=" in resp.json_data["message"]
+        zone_a.set_automation_enabled.assert_not_called()
+        zone_b.set_automation_enabled.assert_not_called()
+
+    def test_conflicting_params_refused_on_get_too(self):
+        zone_a, zone_b = MagicMock(), MagicMock()
+        req = self._request({"entry_a": zone_a, "entry_b": zone_b}, {"zone": "entry_a", "entry_id": "entry_b"})
+        resp = asyncio.run(ClimateAdvisorAutomationStateView().get(req))
+        assert resp.status == 400
+        zone_a.get_debug_state.assert_not_called()
+        zone_b.get_debug_state.assert_not_called()

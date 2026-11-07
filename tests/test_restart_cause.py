@@ -61,6 +61,7 @@ def _make_coord_stub():
     # `coord` here is a bare MagicMock, not a real coordinator instance, so
     # this needs its own explicit stub matching the hass-level one above.
     coord._executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
+    coord.async_load_investigation_reports = AsyncMock()  # Issue #1415: restore awaits the per-zone loader
 
     coord.config = {"climate_entity": "climate.thermostat"}
     coord._unsub_listeners = []

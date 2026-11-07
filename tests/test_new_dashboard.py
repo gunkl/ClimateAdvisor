@@ -35,6 +35,14 @@ FIX = json.loads((ROOT / "tests" / "fixtures" / "new_dashboard_api.json").read_t
 
 # (classic ids covered, classic anchor in index.html, new home description, anchors that must exist in the new dashboard, status, reason)
 PARITY = [
+    (
+        ["chart-main-model"],
+        "chart-main-model",
+        "Chart key: main prediction engine and comparison (engine registry)",
+        ["chart-main-model"],
+        "placed",
+        "",
+    ),
     # ---- header / shell
     (
         ["zone-selector-row"],
@@ -653,9 +661,14 @@ def test_no_external_resources_and_no_chart_library():
 
 
 def test_classic_has_exactly_one_new_link_beside_prediction_accuracy():
-    assert INDEX.count("new_dashboard.html") == 1
-    link_at = INDEX.index("new_dashboard.html")
+    """One "Try the new dashboard" link beside Prediction accuracy; any other reference is a Settings deep link
+    (the chart key's "change it in Settings" link added with the prediction-engine registry)."""
+    try_links = INDEX.count('href="new_dashboard.html"')
+    assert try_links == 1
+    link_at = INDEX.index('href="new_dashboard.html"')
     assert abs(link_at - INDEX.index('id="prediction-accuracy-link"')) < 600
+    others = INDEX.count("new_dashboard.html") - try_links
+    assert others == INDEX.count("new_dashboard.html#settings")
 
 
 # ---------------------------------------------------------------------------------------------

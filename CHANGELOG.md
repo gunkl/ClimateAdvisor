@@ -5,6 +5,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.9.4] — 2026-11-06
 
+- Feat #1230 (R5: an optional new dashboard, preview). Nothing changes unless you choose it: the classic dashboard stays the default, and "Try the new dashboard" (beside "Prediction accuracy (preview)" on the classic Analysis tab) opens it.
+  - **Same information, tidier:** Status, Analysis, Debug and Settings tabs, a zone picker, a health line, one Actions menu, and banners for automation off, away or vacation, weather or sensor problems, and settings waiting for a reload. "Back to classic" is always one click away.
+  - **Analysis:** six headline numbers, yesterday / today / tomorrow, your house in plain language, control quality, suggestions, reports and the prediction accuracy view. **Debug:** every internal field in groups with a search and an event log. **Settings:** grouped, searchable, with "changed from default" markers and time-of-use schedules (still edited in Home Assistant).
+  - **Status is not finished yet:** its readings, chart and plan list arrive with the new chart and timeline; until then use the classic Status tab.
 - Feat #1230 (R1: the new prediction engine, v4, runs in shadow). Nothing about how Climate Advisor runs your home or what the Status tab shows changes; today's prediction line (v3) still drives every decision.
   - **v4 runs next to today's line:** each zone fits its own model of the house every night at 3:15 (a hidden "thermal mass" for the walls and furniture, one line per room sensor, your thermostat's own on/off pattern, and a correction for how far your weather forecast is usually off). Every 30 minutes it predicts each sensor 1, 4, 12 and 24 hours ahead and keeps those predictions, so they can be checked against what really happened.
   - **New preview page, "Prediction accuracy":** linked from the dashboard. Pick a sensor, how far ahead, and a range from 6 hours to a year (scroll, zoom and hover work like today's chart) to see actual vs v4 vs today's line, and whether v4 has earned a place on Status.

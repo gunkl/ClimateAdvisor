@@ -114,6 +114,20 @@ Bounded Levenberg-Marquardt on multi-step rollout residuals:
 10. After the optimum: thermostat calibration (above), then the expected-openness prior is stored (below).
 11. `c_mh >= 0.02`. With the bound at 0 the fit drove the hidden mass to a near-constant "ambient level" (0.006 on a simulated zone) that carried the heating-season level into the summer; the bound improved Zone 1 heating 12 h from -0.68 to -0.32 F bias and its MAE from 1.51 to 1.23 (backtest, unchanged elsewhere). `from_dict` clamps an older model's smaller `c_mh` instead of rejecting it.
 
+## Training Window
+
+The fit trains on a bounded window: the last 30 days before the fit (`const.V4_FIT_TRAIN_DAYS`; `v4_shadow.run_fit(train_days=)` keeps the chart rows - and the forecast snapshots - inside it; the backtest's `--train-days` default is the same 30). One rule, live and backtest. Months-old rows are a different season, a different sensor era and sometimes a different thermostat behaviour: with all history the Zone 1 whole-house-fan rate `a_f` came out 0.014/h (unresolved) and R4's night replay found fan nights at MAE 1.79 F / bias +1.18 on all-history fits versus 1.30 / +0.51 on the last 30 days. Chosen by walk-forward on all seven zones (22 scored `_ca` gate rows, honest v3, setpoint hygiene), not on one zone:
+
+| train window | gate rows passing | mean v4 MAE | mean abs bias | worst abs bias | mean v4/flat MAE |
+|---|---|---|---|---|---|
+| 30 d | 15/22 | 0.99 | 0.29 | 0.59 | 0.54 |
+| 45 d | 12/22 | 0.98 | 0.33 | 0.81 | 0.52 |
+| 60 d | 12/22 | 1.00 | 0.37 | 1.07 | 0.52 |
+| 90 d | 12/22 | 1.00 | 0.39 | 1.24 | 0.52 |
+| all history | 13/22 | 1.00 | 0.38 | 1.24 | 0.51 |
+
+The gain comes from the zones whose early history differs from the test weeks (S1 12 h bias -1.07 -> -0.46, HEAT 4 h -0.59 -> -0.40, S3 12 h -0.65 -> -0.43); Zone 1 is unchanged within noise (its 4/12 h heating and 4 h summer rows pass at every window). The cost is the COOL zone (bias +0.28 -> +0.56 at 4 h; v3 wins that zone at every window) and a thinner window per fit: a 30-day window sees both modes less often, so confidence stays `low` more often in shoulder seasons ("heating or cooling not yet observed" keeps the unseen mode's gain tied to the seen one by the production ratio). Exponential recency weights over all history were not implemented: a bounded window is the same rule in the fit and the backtest with no extra parameters, and the 45-90 d windows already show most of the benefit is simply dropping stale rows.
+
 ## Expected-Openness Prior
 
 Occupant view: on a house that cools itself with open windows and the whole-house fan at night, the plan hands the predictor "windows closed, fan off" after the first hours, so the line said the room would stay ~0.5 F warmer at 12 h than it does (Zone 1 summer, +0.84 F).

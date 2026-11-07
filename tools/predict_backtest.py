@@ -1507,7 +1507,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--since", help="YYYY-MM-DD: first test week on/after this date")
     p.add_argument("--max-weeks", type=int, default=0, help="only the newest N test weeks (quick runs)")
-    p.add_argument("--train-days", type=int, default=60, help="training window before each week (0 = all history)")
+    p.add_argument("--train-days", type=int, default=30, help="training window before each week (0 = all history)")
     p.add_argument("--min-train-days", type=float, default=5.0, help="no test week without this much training data")
     p.add_argument("--refit-every-weeks", type=int, default=1)
     p.add_argument("--anchor-step-hours", type=float, default=1.0)

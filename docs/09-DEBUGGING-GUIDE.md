@@ -429,7 +429,7 @@ oldest 24 h (no `end_time` was sent).
 
 Occupant view: before the owner is ever shown the new prediction (v4) on Status, this tool answers "over all the history this house has recorded, would v4 have told them the room temperature hours ahead better than today's line (v3) and better than 'it will stay as it is'?" It only reads recorded history; it never touches the thermostat or the integration's decisions.
 
-**Why a walk-forward test.** A model scored on the data it was fitted on always looks good. Test weeks start Monday 00:00 local; before each week the v4 model is fitted on chart-log rows strictly before that week (`--train-days` back, default 60) and then predicts hourly anchors inside the week, exactly as the live shadow would.
+**Why a walk-forward test.** A model scored on the data it was fitted on always looks good. Test weeks start Monday 00:00 local; before each week the v4 model is fitted on chart-log rows strictly before that week (`--train-days` back, default 30 - the live nightly fit uses the same window, `V4_FIT_TRAIN_DAYS`) and then predicts hourly anchors inside the week, exactly as the live shadow would.
 
 **Leakage guard.** Every input handed to `predictor_v4.fit` is checked by `assert_no_leak`; a row, sample or forecast snapshot from the test week (or later) raises `LeakageError` and aborts the run. At an anchor only what a live prediction would know is used: readings at-or-before the anchor, the forecast issued at-or-before the anchor, the planned setpoints, planned windows/fan.
 
@@ -465,7 +465,7 @@ SSH mode needs `tools/.deploy.env` (never printed) and discovers files like `the
 | `--tz ZONE` | HA `core.config` over SSH, `TZ`, `/etc/timezone`, row offset | Local zone for week boundaries and seasons |
 | `--primary ENTITY` | sensor tracking chart-log `indoor`, else `_ca` | The thermostat's room reading, the primary node |
 | `--since YYYY-MM-DD` / `--max-weeks N` | all | First test week on/after a date; only the newest N weeks |
-| `--train-days N` / `--min-train-days N` / `--refit-every-weeks N` | 60 / 5 / 1 | Training window (0 = all history); no test week without that much training data; refit cadence |
+| `--train-days N` / `--min-train-days N` / `--refit-every-weeks N` | 30 / 5 / 1 | Training window (0 = all history); no test week without that much training data; refit cadence |
 | `--anchor-step-hours H` | 1 | Spacing of anchors inside a week |
 | `--setpoints {scheduled,hold}` / `--setpoint-source {band,commanded}` / `--window-plan-hours H` | scheduled / band / 4 | Planned-input choices above |
 | `--v3-model {honest,asof,current}` / `--v3-asof-min-obs N` | honest / 30 | v3 comparator (above); observations needed before an anchor to rebuild its as-of model |

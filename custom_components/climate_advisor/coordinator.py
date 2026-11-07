@@ -274,6 +274,7 @@ from .const import (
     V4_FIT_MINUTE,
     V4_FIT_RETRY_MIN_INTERVAL_S,
     V4_FIT_STAGGER_S,
+    V4_FIT_TRAIN_DAYS,
     V4_MASS_MAX_GAP_S,
     VERSION,
     is_availability_recovery,
@@ -5519,6 +5520,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             previous_model=self._v4_store.v4_model,
                             primary_aliases=aliases,
                             in_sleep=in_sleep,
+                            train_days=V4_FIT_TRAIN_DAYS,
                         )
                     )
                 if getattr(self, "_shut_down", False) is True:

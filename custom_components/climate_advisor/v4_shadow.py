@@ -71,6 +71,7 @@ def run_fit(
     previous_model: Mapping[str, Any] | None = None,
     primary_aliases: Sequence[str] = (),
     in_sleep: Callable[[datetime], bool] | None = None,
+    train_days: float | None = None,
 ) -> tuple[dict, float, str]:
     """Fit a model from the retained history. Blocking and CPU-bound: run via the executor only.
 
@@ -81,17 +82,24 @@ def run_fit(
     the entity ``primary`` is kept when it reads on 80 % of the history (older rows are mapped onto it through
     ``primary_aliases`` / ``indoor_primary`` / ``indoor`` outside the sleep window ``in_sleep``), else the model is
     the ``_ca`` reading alone.
+
+    ``train_days`` bounds the training window to the last N days before ``now`` (rows and forecast snapshots): the
+    same rule as the backtest's ``--train-days`` (Issue #1230 R1b). Months-old rows describe a different season, a
+    different sensor era and a different thermostat behaviour, and contaminated the all-history fit (the fan rate
+    ``a_f`` came out at 0.014/h on Zone 1). ``None`` = every retained row.
     """
     p = _predictor()
     t0 = time.perf_counter()
     snapshots: list[dict] = []
     if snapshots_fn is not None:
         try:
-            snapshots = snapshots_fn(now - timedelta(days=400), now + timedelta(hours=1))
+            snapshots = snapshots_fn(now - timedelta(days=(train_days or 400) + 1), now + timedelta(hours=1))
         except Exception:  # noqa: BLE001 - a bad forecast archive degrades the fit to chart-log-only, not to no fit
             _LOGGER.warning("v4 fit: forecast archive unreadable; fitting from the chart log alone", exc_info=True)
             snapshots = []
     entries = list(chart_entries)
+    if train_days:
+        entries = rows_in_window(entries, now, train_days)
     if hasattr(p, "resolve_nodes"):
         primary, ordered = p.resolve_nodes(
             entries, primary=primary, sensors=list(sensors), aliases=tuple(primary_aliases), in_sleep=in_sleep, tz=tz
@@ -133,6 +141,21 @@ def _interp(points: Sequence[tuple[float, float]], t: float) -> float:
             hi = mid
     (t0, v0), (t1, v1) = points[lo], points[hi]
     return v0 if t1 <= t0 else v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+
+
+def rows_in_window(entries: Sequence[Mapping[str, Any]], now: datetime, days: float) -> list[Mapping[str, Any]]:
+    """The chart rows from the last ``days`` days up to ``now`` (rows with an unreadable ``ts`` are dropped)."""
+    lo = now.timestamp() - days * 86400.0
+    out = []
+    for e in entries:
+        ts = _parse_row_ts(e.get("ts")) if isinstance(e, Mapping) else None
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=now.tzinfo)
+        if lo <= ts.timestamp() <= now.timestamp() + 1.0:
+            out.append(e)
+    return out
 
 
 def fit_offset_s(entry_id: str, span_s: int = 1800) -> int:

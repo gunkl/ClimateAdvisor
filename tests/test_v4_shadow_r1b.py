@@ -239,3 +239,24 @@ def test_fit_offsets_are_stable_bounded_and_spread():
     assert len(set(offs)) >= 7  # eight zones do not fit in the same second
     assert max(offs) - min(offs) > 600  # and are spread over many minutes
     assert V4_FIT_STAGGER_S == 30 * 60
+
+
+# -------------------------------------------------------------------------- bounded training window (live == backtest)
+def test_rows_in_window_keeps_the_last_n_days_only():
+    base = datetime(2026, 1, 1, tzinfo=TZ)
+    rows = [{"ts": (base + timedelta(days=d)).isoformat()} for d in range(0, 100, 5)] + [{"ts": "garbage"}, {}]
+    now = base + timedelta(days=95)
+    got = v4_shadow.rows_in_window(rows, now, 30)
+    assert [r["ts"][:10] for r in got] == [(base + timedelta(days=d)).date().isoformat() for d in range(65, 100, 5)]
+
+
+def test_run_fit_trains_on_the_bounded_window_like_the_backtest():
+    samples, _t, _ = simulate(T0, 40, base=44.0, amp=7.0, noise=0.03)
+    rows = _rows_from(samples, sensor_map_from=0)
+    now = samples[-1].ts
+    full, *_ = v4_shadow.run_fit(chart_entries=rows, snapshots_fn=None, tz=TZ, now=now, primary=HALL, sensors=[HALL])
+    last20, *_ = v4_shadow.run_fit(
+        chart_entries=rows, snapshots_fn=None, tz=TZ, now=now, primary=HALL, sensors=[HALL], train_days=20
+    )
+    assert full["fit"]["primary_samples"] > 35 * 96
+    assert 19 * 96 <= last20["fit"]["primary_samples"] <= 21 * 96

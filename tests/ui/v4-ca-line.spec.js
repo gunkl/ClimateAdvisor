@@ -111,3 +111,39 @@ test.describe('Prediction accuracy page with an empty v4 archive (Issue #1400)',
     expect(names).not.toContain('_ca');
   });
 });
+
+test.describe('CA-reading swap breaks with v4 switched off (Issue #1400 follow-up)', () => {
+  test('v3 primary, no comparison: the actual CA reading and v3 break at the top-level ca_swaps', async ({ page }) => {
+    const now = Date.now();
+    const swaps = [now - 6 * 3600000 + 60000, now + 6 * 3600000 + 60000];
+    await page.route('**/api/climate_advisor/chart_data**', async (route) => {
+      const resp = await route.fetch();
+      const body = await resp.json();
+      body.prediction_engines = Object.assign({}, engines, {
+        primary: 'v3',
+        engines: [
+          { id: 'v3', label: 'v3', running: true, primary: true, shadow: false, usable: true, confidence: 'high' },
+          { id: 'v4', label: 'v4', running: false, primary: false, shadow: false, usable: false, confidence: 'none' },
+        ],
+      });
+      body.v4 = { ready: false, reason: 'not_running', leads: [], sensors: [] }; // no v4.breaks at all
+      body.ca_swaps = swaps.map((ms) => new Date(ms).toISOString());
+      await route.fulfill({ response: resp, body: JSON.stringify(body) });
+    });
+    await page.goto('/');
+    await page.waitForFunction(() => document.getElementById('temp-chart') && typeof Chart !== 'undefined'
+      && !!Chart.getChart(document.getElementById('temp-chart')), { timeout: 8000 });
+    const res = await page.evaluate((sw) => {
+      const c = Chart.getChart(document.getElementById('temp-chart'));
+      const gapAt = (id, s) => {
+        const pts = c.data.datasets.find((x) => x.caId === id).data;
+        const i = pts.findIndex((p) => p.x >= s);
+        if (i <= 0) return null;
+        return pts[i - 1].y == null; // the point just before the first one on the new sensor is a break
+      };
+      return { ca: gapAt('ind:_ca', sw[0]), v3past: gapAt('v3', sw[0]), v3future: gapAt('v3', sw[1]),
+        v4: !!c.data.datasets.find((x) => x.caId === 'v4:_ca') };
+    }, swaps);
+    expect(res).toEqual({ ca: true, v3past: true, v3future: true, v4: false });
+  });
+});

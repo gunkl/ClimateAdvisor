@@ -355,7 +355,7 @@
     _syncEnginePrefs();
     const state = cd.state_log || [];
     // Every line that follows the reading CA uses (actual, v3, v4) is broken at its sensor swaps (Issue #1400).
-    const caBreaks = (((v4.breaks || {})._ca) || []).map(_parseTs);
+    const caBreaks = (cd.ca_swaps || ((v4.breaks || {})._ca) || []).map(_parseTs); // top-level: any engine (older: v4's)
 
     // Indoor: one actual line per sensor, then the CA reading (follows the sensor CA reads).
     metas.forEach((m, i) => {

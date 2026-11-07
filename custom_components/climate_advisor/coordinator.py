@@ -6731,19 +6731,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if isinstance(sid, str) and sid not in ids:
                     ids.append(sid)
             # Issue #1400: the "_ca" line is broken wherever CA swaps the sensor it reads (bedtime / wake-up).
-            try:
-                ca_swaps = ca_swap_epochs(
-                    raw_log,
-                    start,
-                    end if historical else max(end, now.timestamp()) + (V4_PREDICT_HORIZON_HOURS + 1) * 3600.0,
-                    tz=now.tzinfo or datetime.now().astimezone().tzinfo,
-                    sleep_sensor=self.config.get("sleep_indoor_temp_entity"),
-                    sleep_time=self.config.get("sleep_time"),
-                    wake_time=self.config.get("wake_time"),
-                )
-            except Exception:  # noqa: BLE001 - display only: an unbroken line beats no line
-                _LOGGER.debug("v4 chart: sensor swap times failed", exc_info=True)
-                ca_swaps = []
+            ca_swaps = self._chart_ca_swaps(
+                raw_log, start, end, now=now, historical=historical, ahead_s=(V4_PREDICT_HORIZON_HOURS + 1) * 3600.0
+            )
             return build_chart_v4(
                 now=now,
                 start=start,
@@ -15773,6 +15763,39 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "expected_low": c.tomorrow_low,
         }
 
+    _CA_SWAPS_AHEAD_S = 6 * 86400.0  # the chart's longest look-ahead (5 d) plus a day
+
+    def _chart_ca_swaps(
+        self,
+        raw_log: Sequence[dict[str, Any]],
+        start: float,
+        end: float,
+        *,
+        now: datetime,
+        historical: bool,
+        ahead_s: float = _CA_SWAPS_AHEAD_S,
+    ) -> list[float]:
+        """Epochs at which the reading CA uses swaps sensor (bedtime / wake-up), for breaking the chart's CA lines.
+
+        Occupant view: the hallway and the bedroom read differently, so a line that follows "the reading Climate
+        Advisor uses" (the actual CA reading, today's prediction, v4's line) must not be drawn straight through the
+        swap. Engine-independent (Issue #1400 follow-up): the top-level ``ca_swaps`` key works with any engine
+        selection. ``prediction_accuracy.ca_swap_epochs`` holds the rule. Display only; never raises.
+        """
+        try:
+            return ca_swap_epochs(
+                raw_log,
+                start,
+                end if historical else max(end, now.timestamp()) + ahead_s,
+                tz=now.tzinfo or datetime.now().astimezone().tzinfo,
+                sleep_sensor=self.config.get("sleep_indoor_temp_entity"),
+                sleep_time=self.config.get("sleep_time"),
+                wake_time=self.config.get("wake_time"),
+            )
+        except Exception:  # noqa: BLE001 - display only: an unbroken line beats no line
+            _LOGGER.debug("chart: sensor swap times failed", exc_info=True)
+            return []
+
     def get_chart_data(self, range_str: str = "24h", before_ts: float | None = None) -> dict[str, Any]:
         """Build chart data for the dashboard panel.
 
@@ -15958,6 +15981,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             sensor_ids=_shown_sensor_ids,
             raw_log=log_entries,
         )
+        # Issue #1400 follow-up: CA's sensor swaps for EVERY line that follows the reading CA uses, any engine
+        # (the v4 block's breaks only exist while v4 does). None at daily resolution: a daily mean is no one sensor's.
+        _ca_swaps: list[str] = []
+        if CHART_RANGE_DAYS.get(range_str, 1.0) <= 30.0:
+            _swap_tz = now.tzinfo or datetime.now().astimezone().tzinfo
+            _ca_swaps = [
+                datetime.fromtimestamp(t, _swap_tz).isoformat(timespec="seconds")
+                for t in self._chart_ca_swaps(
+                    log_entries,
+                    _window_end - CHART_RANGE_DAYS.get(range_str, 1.0) * 86400.0,
+                    _window_end,
+                    now=now,
+                    historical=is_historical,
+                )
+            ]
         _indoor_sensors_out = self.v4_indoor_sensors_meta(_shown_sensor_ids)
         _engines_block = self.prediction_engines_payload()
         # While the primary engine has no usable fit, the main line is the plain schedule estimate (the engine-agnostic
@@ -16137,6 +16175,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "indoor_sensors": _indoor_sensors_out,
             "actual_indoor_sensors": _actual_by_sensor,
             "v4": _v4_block,
+            # Issue #1400: [iso, ...] sensor swaps; v4.breaks._ca stays as the same times within v4's 24 h horizon.
+            "ca_swaps": _ca_swaps,
             "prediction_engines": _engines_block,
             "schedule_estimate": _schedule_estimate,
             "unit": unit,

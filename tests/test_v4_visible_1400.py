@@ -171,6 +171,7 @@ class TestChartCaLine:
             engine_running=lambda _e: True,
             v4_model_summary=lambda: CA_ONLY_MODEL,
         )
+        coord._chart_ca_swaps = types.MethodType(cls._chart_ca_swaps, coord)
         out = cls.v4_chart_series(
             coord,
             now=NOW,
@@ -330,3 +331,35 @@ def test_swap_helper_handles_a_bedtime_after_midnight_and_bad_times():
     assert [datetime.fromtimestamp(s, TZ).strftime("%H:%M") for s in got] == ["01:00", "07:00"]
     assert pa.ca_swap_epochs([], lo, hi, tz=TZ, sleep_sensor=BED, sleep_time="bad", wake_time="07:00") == []
     assert pa.ca_swap_epochs([], lo, hi, tz=TZ, sleep_sensor=BED, sleep_time="07:00", wake_time="07:00") == []
+
+
+# ------------------------------------------------------------- follow-up: swap breaks independent of the engine
+class TestTopLevelCaSwaps:
+    """With v4 switched off (v3 primary, no comparison) the actual CA reading and v3's line still break at swaps."""
+
+    def _chart(self, tmp_path, primary="v3", range_str="24h"):
+        from tests.test_chart_v4_r2 import _chart, _coord  # noqa: PLC0415
+
+        coord = _coord(tmp_path)
+        coord.config.update(primary_engine=primary, shadow_engine="none", sleep_time="22:30", wake_time="07:00")
+        return _chart(coord, range_str)
+
+    def test_v4_off_still_gets_the_swaps_at_the_top_level(self, tmp_path):
+        out = self._chart(tmp_path)
+        assert out["v4"]["reason"] == "not_running" and "breaks" not in out["v4"]
+        times = sorted({datetime.fromisoformat(t).strftime("%H:%M") for t in out["ca_swaps"]})
+        assert times == ["07:00", "22:30"]
+        # past window plus the chart's longest look-ahead: about two swaps a day over 7 days
+        assert 10 <= len(out["ca_swaps"]) <= 16
+
+    def test_v4_alias_agrees_with_the_top_level_key(self, tmp_path):
+        from tests.test_chart_v4_r2 import _archive_with, _chart, _coord, _future, _model  # noqa: PLC0415
+
+        coord = _coord(tmp_path, model=_model(), archive=_archive_with(tmp_path), last_future=_future())
+        coord.config.update(sleep_time="22:30", wake_time="07:00")
+        out = _chart(coord)
+        alias = out["v4"]["breaks"]["_ca"]
+        assert alias and set(alias) <= set(out["ca_swaps"])  # the same swaps; v4's stop at its 24 h horizon
+
+    def test_no_swaps_at_daily_resolution(self, tmp_path):
+        assert self._chart(tmp_path, range_str="1y")["ca_swaps"] == []

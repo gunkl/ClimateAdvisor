@@ -497,9 +497,13 @@ class TestFrontend:
     def _html(self):
         from pathlib import Path
 
+        fe = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "frontend"
+        # classic page + the shared chart module (R6fe moved the chart code out of the page)
         return (
-            Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "frontend" / "index.html"
-        ).read_text(encoding="utf-8")
+            fe.joinpath("index.html").read_text(encoding="utf-8")
+            + "\n"
+            + fe.joinpath("chart_v2.js").read_text(encoding="utf-8")
+        )
 
     def test_status_card_reads_the_payload_fields(self):
         html = self._html()

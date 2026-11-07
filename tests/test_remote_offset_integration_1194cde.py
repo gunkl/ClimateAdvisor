@@ -241,7 +241,13 @@ def _index_html() -> str:
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    return (root / "custom_components" / "climate_advisor" / "frontend" / "index.html").read_text(encoding="utf-8")
+    # classic page + the shared chart module (R6fe moved the chart code out of the page)
+    fe = root / "custom_components" / "climate_advisor" / "frontend"
+    return (
+        fe.joinpath("index.html").read_text(encoding="utf-8")
+        + "\n"
+        + fe.joinpath("chart_v2.js").read_text(encoding="utf-8")
+    )
 
 
 def test_the_thermostat_set_series_has_a_legend_item_shown_only_with_the_series():

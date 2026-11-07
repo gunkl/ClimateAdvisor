@@ -20,16 +20,18 @@ ROOT = Path(__file__).resolve().parent.parent
 FE = ROOT / "custom_components" / "climate_advisor" / "frontend"
 HTML = (FE / "new_dashboard.html").read_text(encoding="utf-8")
 JS = {p.name: p.read_text(encoding="utf-8") for p in sorted(FE.glob("nd_*.js"))}
-CORPUS = HTML + "\n".join(JS.values())
-INDEX = (FE / "index.html").read_text(encoding="utf-8")
+# R6fe: the chart (and the plan list and overlay) is one shared module, chart_v2.js + chart_v2.css, loaded by BOTH pages.
+CHART_JS = (FE / "chart_v2.js").read_text(encoding="utf-8")
+CHART_CSS = (FE / "chart_v2.css").read_text(encoding="utf-8")
+CORPUS = HTML + "\n".join(JS.values()) + "\n" + CHART_JS + "\n" + CHART_CSS
+# the classic page's behaviour = its own file + the shared chart module it loads
+INDEX = (FE / "index.html").read_text(encoding="utf-8") + "\n" + CHART_JS
 FIX = json.loads((ROOT / "tests" / "fixtures" / "new_dashboard_api.json").read_text(encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------------------------------
 # Parity: classic element -> new home
 # ---------------------------------------------------------------------------------------------
-PENDING_STATUS = "Status tab parts: assembled from the R2 chart, R3 timeline list and cards"
-PENDING_R2 = "R2 chart v2 (Status temperature chart)"
 
 # (classic ids covered, classic anchor in index.html, new home description, anchors that must exist in the new dashboard, status, reason)
 PARITY = [
@@ -59,25 +61,25 @@ PARITY = [
         [],
         'id="status-grid"',
         "Status reading cards (R2 replaced the classic 'Conditions' grid; 'Today' / 'Outdoor sensor' cards)",
-        ['id="status-card-today"'],
-        "pending",
-        PENDING_STATUS,
+        ["status-card-today", "status-card-outdoor", "status-card-occupancy"],
+        "placed",
+        "",
     ),
     (
         [],
         'label">${escapeHtml(m.name)} · ${escapeHtml(role)}<',
         "Status 'Hallway' card (mode, action, set, CA target, #1194 offset text)",
-        ['id="status-card-hallway"'],
-        "pending",
-        PENDING_STATUS,
+        ["status-card-hallway"],
+        "placed",
+        "",
     ),
     (
         [],
         "data.automation_status",
         "Header health line carries on/off; the status sentence goes on the Hallway card",
         ['id="status-automation-line"'],
-        "pending",
-        PENDING_STATUS,
+        "placed",
+        "",
     ),
     (
         [],
@@ -116,17 +118,17 @@ PARITY = [
         [],
         "nat_vent_off_threshold",
         "Nat-vent cycling range in the plan list",
-        ['id="status-natvent-line"'],
-        "pending",
-        "R3 plan list (nat-vent cycling line)",
+        ['id="status-natvent-line"', "cycling"],
+        "placed",
+        "",
     ),
     (
         [],
         "sleep_indoor_sensor_active",
         "Sleep sensor note on the Bedroom card",
         ['id="status-sleep-sensor"'],
-        "pending",
-        PENDING_STATUS,
+        "placed",
+        "",
     ),
     (
         [],
@@ -137,23 +139,23 @@ PARITY = [
         "",
     ),
     ([], "<td>Comfort Score</td>", "Analysis headline 'Comfort score'", ["Comfort score"], "placed", ""),
-    ([], "Next User Action", "Status 'For you'", ['id="status-for-you"'], "pending", "R3 timeline (Next Action)"),
-    ([], "Next Automation", "Status 'CA next'", ['id="status-ca-next"'], "pending", "R3 timeline (Next Action)"),
+    ([], "Next User Action", "Status 'For you'", ['id="status-for-you"', "next_action"], "placed", ""),
+    ([], "Next Automation", "Status 'CA next'", ['id="status-ca-next"', "next_automation_action"], "placed", ""),
     (
         [],
         "Automation Time",
         "Status 'CA next' time",
-        ['id="status-ca-next-time"'],
-        "pending",
-        "R3 timeline (Next Action)",
+        ['id="status-ca-next-time"', "next_automation_time"],
+        "placed",
+        "",
     ),
     (
         [],
         "Fan (WHF)",
         "Doors & windows card fan note; fan override banner",
-        ['id="status-card-doors"'],
-        "pending",
-        PENDING_STATUS,
+        ["status-card-doors", "Fan (WHF)"],
+        "placed",
+        "",
     ),
     (
         [],
@@ -163,27 +165,34 @@ PARITY = [
         "placed",
         "",
     ),
-    ([], "Doors/Windows", "Status 'Doors & windows' card", ['id="status-card-doors"'], "pending", PENDING_STATUS),
+    ([], "Doors/Windows", "Status 'Doors & windows' card", ["status-card-doors"], "placed", ""),
     ([], "not responding", "Unreadable contact sensor banner", ["Sensor problem: ", "unreadable"], "placed", ""),
     # ---- Status: briefing
     (
         ["briefing-loading", "briefing-text", "briefing-action-result"],
         "Today's Strategy",
         "Collapsed briefing panel on Status",
-        ['id="status-briefing"'],
-        "pending",
-        PENDING_STATUS,
+        ['id="status-briefing"', "status-briefing-text"],
+        "placed",
+        "",
     ),
     (
         [],
         "doAction('send_briefing', {notify: false})",
         "Briefing panel Regenerate",
-        ['id="status-briefing-regenerate"'],
-        "pending",
-        PENDING_STATUS,
+        ['id="status-briefing-regenerate"', "notify: false"],
+        "placed",
+        "",
     ),
     # ---- Status: chart
-    (["temp-chart"], "temp-chart", "Temperature chart", ['id="status-chart"'], "pending", PENDING_R2),
+    (
+        ["temp-chart"],
+        "temp-chart",
+        "Temperature chart",
+        ['id="status-chart"', 'id="temp-chart"', "CAChartV2.init"],
+        "placed",
+        "",
+    ),
     (
         [
             "chart-card",
@@ -203,59 +212,74 @@ PARITY = [
         ],
         "chart-stack",
         "Chart v2 parts (R2): split indoor/outdoor charts, key, Now, table view, v4 gate note, empty state",
-        ['id="status-chart"'],
-        "pending",
-        PENDING_R2,
+        ['id="status-chart"', 'id="temp-chart"', "CAChartV2.init"],
+        "placed",
+        "",
     ),
     (
         ["status-next"],
         "status-next",
         "Status 'what to do / CA next' row (R2 cards)",
-        ['id="status-plan-list"'],
-        "pending",
-        PENDING_STATUS,
+        ['id="status-plan-list"', 'id="status-for-you"'],
+        "placed",
+        "",
     ),
     (
         ["activity-chart"],
         "activity-chart",
         "Activity strips under the chart",
-        ['id="status-chart-strips"'],
-        "pending",
-        PENDING_R2,
+        ['id="status-chart-strips"', 'id="activity-chart"'],
+        "placed",
+        "",
     ),
-    (["chart-zoom-reset"], "chart-zoom-reset", "Chart reset zoom", ['id="status-chart-reset"'], "pending", PENDING_R2),
+    (
+        ["chart-zoom-reset"],
+        "chart-zoom-reset",
+        "Chart reset zoom",
+        ['id="chart-zoom-reset"', "resetChartZoom"],
+        "placed",
+        "",
+    ),
     (
         ["chart-nav-back", "chart-nav-fwd"],
         "chart-nav-back",
         "Chart scroll back / forward",
-        ['id="status-chart-nav"'],
-        "pending",
-        PENDING_R2,
+        ['id="status-chart-nav"', 'id="chart-nav-back"', 'id="chart-nav-fwd"'],
+        "placed",
+        "",
     ),
-    ([], 'data-range="6h"', "Chart range 6h..1y", ['id="status-chart-range"'], "pending", PENDING_R2),
+    ([], 'data-range="6h"', "Chart range 6h..1y", ['id="status-chart-range"', 'data-range="1y"'], "placed", ""),
     (
         ["chart-hover-panel"],
         "chart-hover-panel",
         "Chart hover panel",
-        ['id="status-chart-hover"'],
-        "pending",
-        PENDING_R2,
+        ['id="chart-hover-panel"'],
+        "placed",
+        "",
     ),
     (
         ["legend-thermostat-set"],
         "legend-thermostat-set",
         "Chart legend (compact key)",
-        ['id="status-chart-key"'],
-        "pending",
-        PENDING_R2,
+        ['id="chart-key"', 'id="legend-thermostat-set"'],
+        "placed",
+        "",
     ),
     (
         [],
         "_group('Overlays', 'Overlays', overlays)",
         "Chart overlays (target band, humidity, feels-like, target)",
-        ['id="status-chart-overlays"'],
-        "pending",
-        PENDING_R2,
+        ["_group('Overlays', 'Overlays', overlays)", "ov:plan"],
+        "placed",
+        "",
+    ),
+    (
+        ["plan-card", "plan-foot", "plan-list", "plan-sub"],
+        "plan-card",
+        "Status 'Next 24 hours' plan list (R3 timeline; classic gained it in R6fe, the new Status has the same list)",
+        ['id="status-plan-list"', "renderPlanList", "may help"],
+        "placed",
+        "",
     ),
     # ---- Status: thermal model + actions
     (
@@ -510,7 +534,8 @@ def test_parity_summary():
     pending = [r for r in PARITY if r[4] == "pending"]
     assert len(placed) + len(pending) == len(PARITY)
     assert len(placed) >= 40
-    # Every pending row belongs to the Status tab (R2 chart, R3 list, cards): nothing outside Status is missing.
+    # R6fe: every Status row is placed with a real anchor; nothing is pending.
+    assert not pending, [r[1] for r in pending]
     assert all(
         (
             "Status" in r[2]
@@ -619,7 +644,10 @@ def test_auth_and_zone_handling_matches_classic():
 
 def test_no_external_resources_and_no_chart_library():
     assert not re.search(r'(?:src|href)="https?://', HTML)
-    assert "chart.umd" not in HTML  # Status chart is R2's; Night card is plain SVG
+    # R6fe: Status carries R2's chart (the bundled Chart.js, hammer and zoom plugin; no CDN); the Night card stays plain SVG
+    assert "chart.umd" not in JS["nd_night_card.js"] and "Chart(" not in JS["nd_night_card.js"]
+    for lib in ("hammer.min.js", "chart.umd.min.js", "chartjs-plugin-zoom.min.js"):
+        assert f'<script src="{lib}"></script>' in HTML
     for name in re.findall(r'<script src="([^"]+)"', HTML):
         assert (FE / name).exists(), name
 
@@ -648,8 +676,12 @@ def _endpoints_used(js: str) -> set[str]:
     return found
 
 
+# Endpoints the parallel R6 backend lane adds (GET night_strategy); remove from here once it is merged.
+LANDING_WITH_R6_BACKEND = {"night_strategy"}
+
+
 def test_every_endpoint_called_exists():
-    known = _known_endpoints()
+    known = _known_endpoints() | LANDING_WITH_R6_BACKEND
     for name, js in JS.items():
         for ep in _endpoints_used(js):
             assert ep in known, f"{name} calls unknown endpoint {ep}"
@@ -818,9 +850,9 @@ def test_settings_groups_use_real_keys_and_leave_few_in_other():
 # ---------------------------------------------------------------------------------------------
 # Night card (Status mounts it; R4 supplies live data)
 # ---------------------------------------------------------------------------------------------
-def test_night_card_is_a_self_contained_component_fed_sample_data():
+def test_night_card_is_a_self_contained_component():
     card = JS["nd_night_card.js"]
-    assert "window.NDNightCard = { mount: mount }" in card
+    assert "window.NDNightCard = { mount: mount, fromStrategy: fromStrategy }" in card
     assert "fetch(" not in card and "ND." not in card  # no network, no dependency on the page's globals
     for frag in (
         "Tonight",
@@ -834,8 +866,8 @@ def test_night_card_is_a_self_contained_component_fed_sample_data():
     ):
         assert frag in card or frag.lower() in card.lower(), frag
     status = JS["nd_status.js"]
-    assert "nd_night_sample.json" in status and "NDNightCard.mount" in status
-    assert "Sample data, not your house" in HTML  # visibly labelled until R4 supplies the real plan
+    assert "NDNightCard.mount" in status and "NDNightCard.fromStrategy" in status
+    assert "Sample data, not your house" in HTML  # the labelled fallback for an install without the endpoint
     sample = json.loads((FE / "nd_night_sample.json").read_text(encoding="utf-8"))
     assert sample["nights"] and all({"t", "out", "floor", "ceiling", "rows"} <= set(n) for n in sample["nights"])
     for n in sample["nights"]:
@@ -844,11 +876,67 @@ def test_night_card_is_a_self_contained_component_fed_sample_data():
             assert len(r["bed"]) == len(n["t"])
 
 
-def test_status_has_only_wiring_slots():
-    for slot in ('data-slot="chart"', 'data-slot="plan"', 'data-slot="night"'):
-        assert slot in HTML
-    assert "NDNightCard" in JS["nd_status.js"]
-    assert len(JS["nd_status.js"].splitlines()) < 30
+def test_status_tab_is_assembled_from_the_shared_parts():
+    status = JS["nd_status.js"]
+    # the placeholder slots are gone: every part is real
+    for gone in ('data-slot="chart"', 'data-slot="plan"', "arrives with", "coming)"):
+        assert gone not in HTML, gone
+    # order on the page: for you / CA next, readings, chart, plan list, night card, briefing
+    order = [
+        'id="status-for-you"',
+        'id="status-grid"',
+        'id="status-chart"',
+        'id="status-plan-list"',
+        'id="night-card"',
+        'id="status-briefing"',
+    ]
+    at = [HTML.index(o) for o in order]
+    assert at == sorted(at)
+    # the chart is the shared module: one implementation for both pages, no copy of its code here
+    assert '<script src="chart_v2.js"></script>' in HTML and '<script src="chart_v2.js"></script>' in (
+        FE / "index.html"
+    ).read_text(encoding="utf-8")
+    assert '<link rel="stylesheet" href="chart_v2.css">' in HTML
+    assert "new Chart(" not in status and "new Chart(" not in HTML and "new Chart(" in CHART_JS
+    assert "CAChartV2.init" in status and "CAChartV2.mountPlan" in status and "CAChartV2.loadTimeline" in status
+    # the readings and the next lines come from the status payload (the timeline is authoritative for them since R3b)
+    for key in (
+        "next_action",
+        "next_automation_action",
+        "next_automation_time",
+        "automation_status",
+        "sleep_indoor_sensor_active",
+    ):
+        assert key in status
+    # the briefing: text, Regenerate (no notification) and Send, the classic calls
+    assert "ND.api('briefing')" in status
+    assert "ND.runAction('send_briefing', { notify: false }" in status
+    assert "ND.runAction('send_briefing', undefined" in status
+
+
+def test_status_tab_reads_the_live_night_plan_and_gates_its_figures():
+    status, card = JS["nd_status.js"], JS["nd_night_card.js"]
+    assert "ND.api('night_strategy')" in status
+    # empty state on 503 (no plan yet), the labelled sample only for a missing endpoint (404), the badge off when live
+    assert "e.status === 503" in status and "e.status === 404" in status
+    assert "ND.$('night-sample-badge').hidden = mode !== 'sample'" in status
+    assert 'id="night-sample-badge"' in HTML and "hidden" in re.search(r'id="night-sample-badge"[^>]*', HTML).group(0)
+    # show_numbers false: the plan and its steps, no predicted figures (decision C11)
+    assert "if (data.show_numbers === false ||" in card and "night-nonumbers" in card
+    plan_only = card[card.index("if (data.show_numbers === false ||") : card.index("var W = 1000")]
+    for figure in ("bed_min", "bed_max", "bed_wake", "d1(", "heat_min", "<svg", "<table"):
+        assert figure not in plan_only, f"plan-only view must not show {figure}"
+    # low-confidence steps keep the qualifier (decision C13)
+    assert "may help" in card
+
+
+def test_status_places_the_same_actors_as_the_timeline():
+    mod = CHART_JS
+    # "you" and "CA" are named in words and by shape (never colour alone), low confidence says "may help"
+    assert "'You'" in mod and "'CA'" in mod and "may help" in mod
+    assert "s.confidence === 'low'" in mod
+    # nothing in the list invents wording: the step's own text is what is shown
+    assert "escapeHtml(s.text || '')" in mod
 
 
 # ---------------------------------------------------------------------------------------------

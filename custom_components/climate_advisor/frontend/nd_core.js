@@ -143,7 +143,8 @@
     if (!resp.ok) {
       var msg = 'HTTP ' + resp.status;
       try { var b = await resp.json(); if (b && b.message) msg = b.message; } catch (e) { /* ignore */ }
-      throw new Error(msg);
+      var err = new Error(msg); err.status = resp.status; // callers tell 'no plan yet' (503) from a failure
+      throw err;
     }
     return parse ? resp.json() : resp;
   }
@@ -310,6 +311,7 @@
     try {
       var data = await ND.post(action, body);
       ND.toast(data.message || 'Done');
+      ND.emit('action', action);
       if (action === 'toggle_automation' || action === 'cancel_override' || action === 'cancel_fan_override' || action === 'resume_from_pause') ND.emit('state-changed');
       setTimeout(function () { ND.loadStatus(); }, 700);
       return data;

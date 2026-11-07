@@ -1,9 +1,15 @@
-/* Issue #1230 R5: the "Tonight in the bedroom" card as a self-contained component.
-   Status mounts it; R4 supplies live data in the same shape. Today it is fed sample data (nd_night_sample.json,
-   the approved Night mock). It uses nothing from the rest of the page except the CSS tokens
-   (--panel --ink --ink2 --muted --rule --chip --band --c1..--c5 --warn --warnbg).
+/* Issue #1230 R5/R6fe: the "Tonight in the bedroom" card as a self-contained component.
+   Status mounts it on the live night plan (GET /api/climate_advisor/night_strategy, R4's NightStrategy.to_dict()
+   with temperatures in the display unit and `unit` added), turned into the card's shape by
+   NDNightCard.fromStrategy(payload). nd_night_sample.json (the approved Night mock) stays as a labelled fallback.
+   It uses nothing from the rest of the page except the CSS tokens (--panel --ink --ink2 --muted --rule --chip --band
+   --c1..--c5 --warn --warnbg) and the plan-list classes of chart_v2.css (plan-row, plan-time, plan-actor, ...).
 
      NDNightCard.mount(containerElement, data, { unit: 'fahrenheit' | 'celsius' }) -> { update(data) }
+     NDNightCard.fromStrategy(payload) -> data
+
+   With data.show_numbers === false (the zone's bedroom model has not passed its accuracy check, decision C11) the card
+   shows the recommended plan and its steps only: no predicted temperatures, chart or comparison table.
 
    data = { note?: string, nights: [ { title, t: [iso...], out: [degF...], floor, ceiling, label?,
             rows: [ { key, label, bed: [degF...], bed_min, bed_max, bed_wake, miss_dh, heat_min, cool_min,
@@ -15,6 +21,68 @@
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; });
+  }
+
+  // ---------- live payload -> card data ----------
+  function resample(path, grid) { // [[iso, temp]] onto the grid's timestamps (linear; ends held)
+    var pts = (path || []).map(function (p) { return [new Date(p[0]).getTime(), p[1]]; });
+    return grid.map(function (g) {
+      var x = new Date(g).getTime();
+      if (!pts.length) return null;
+      if (x <= pts[0][0]) return pts[0][1];
+      for (var i = 1; i < pts.length; i++) {
+        if (x <= pts[i][0]) {
+          var a = pts[i - 1], b = pts[i];
+          return b[0] === a[0] ? b[1] : a[1] + (b[1] - a[1]) * (x - a[0]) / (b[0] - a[0]);
+        }
+      }
+      return pts[pts.length - 1][1];
+    });
+  }
+
+  function fromStrategy(p) {
+    var celsius = /c/i.test((p && p.unit) || '');
+    function F(v) { return v == null ? null : (celsius ? v * 9 / 5 + 32 : v); }   // card values are internal degF
+    function dF(v) { return v == null ? 0 : (celsius ? v * 9 / 5 : v); }
+    var opts = (p && p.options) || [], grid = [];
+    opts.some(function (o) { if (o.path && o.path.length) { grid = o.path.map(function (pt) { return pt[0]; }); return true; } return false; });
+    var rows = opts.map(function (o) {
+      var steps = o.n_actions || 0;
+      var tags = [steps === 0 ? 'Nothing for you to do' : steps + (steps === 1 ? ' step' : ' steps') + ' for you'];
+      if (o.runs === false) tags.push('would not run tonight');
+      tags.push(o.confidence === 'low' ? 'may help' : (o.confidence || 'medium') + ' confidence');
+      return {
+        key: o.key, label: o.label, bed: grid.length ? resample(o.path, grid).map(F) : [],
+        bed_min: F(o.bedroom_low_f), bed_max: F(o.bedroom_high_f), bed_wake: F(o.bedroom_wake_f),
+        miss_dh: dF(o.discomfort_fh), heat_min: o.heat_min || 0, cool_min: o.cool_min || 0, cost: o.score,
+        tags: tags.join(' · '), best: o.key === p.recommended, actions: o.actions || [], confidence: o.confidence, note: o.note || ''
+      };
+    });
+    if (rows.length && !rows.some(function (r) { return r.best; })) rows[0].best = true;
+    return {
+      live: true, show_numbers: !p || p.show_numbers !== false, unit: p && p.unit,
+      nights: rows.length ? [{ title: 'Tonight', t: grid, out: null, floor: F(p.floor_f), ceiling: F(p.ceiling_f), start: p.start, end: p.end, rows: rows }] : []
+    };
+  }
+
+  var ACTION_TEXT = {
+    windows_open: 'Open the windows', windows_close: 'Close the windows',
+    fan_on: 'Turn the fan on', fan_off: 'Turn the fan off'
+  };
+  function clock(iso) { var d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+  function stepsHtml(row) { // one thing to do, at a time
+    var acts = (row && row.actions) || [];
+    if (!acts.length) return '<div class="note" id="night-steps">Nothing for you to do: keep the windows closed and let Climate Advisor hold the sleep band.</div>';
+    var low = row.confidence === 'low';
+    return '<ol class="plan-list" id="night-steps" aria-label="Steps for tonight">' + acts.map(function (a) {
+      var you = a.actor !== 'ca';
+      var text = ACTION_TEXT[a.kind] || String(a.kind || '').replace(/_/g, ' ');
+      if (a.through_night) text = 'Leave the windows open until you wake, then close them';
+      else if (a.predicted) text += ' once the bedroom reaches the target (about this time)';
+      return '<li class="plan-row ' + (you ? 'plan-you' : 'plan-ca') + '"><span class="plan-time">' + esc(a.predicted ? 'about ' + clock(a.ts) : clock(a.ts)) + '</span>' +
+        '<span class="plan-actor">' + (you ? 'You' : 'CA') + '</span><span class="plan-text">' + esc(text) +
+        (low ? ' <span class="plan-qual">may help</span>' : '') + '</span></li>';
+    }).join('') + '</ol>';
   }
 
   function mount(el, data, opts) {
@@ -30,10 +98,16 @@
       if (state.ni >= nights.length) state.ni = 0;
       var N = nights[state.ni], rows = N.rows || [];
       var best = rows.filter(function (r) { return r.best; })[0] || rows[0];
+      if (data.show_numbers === false || !(N.t && N.t.length > 1)) { // plan only: no predicted figures (decision C11)
+        el.innerHTML = '<div class="rec"><div class="sub">RECOMMENDED FOR ' + esc(String(N.title || 'TONIGHT').toUpperCase()) + '</div>' +
+          '<div style="font-size:20px;font-weight:650;margin-top:2px">' + esc(best.label) + '</div></div>' + stepsHtml(best) +
+          '<div class="sub" id="night-nonumbers">Predicted bedroom temperatures are not shown yet. Climate Advisor shows them once it has checked how well it predicts your bedroom.</div>';
+        return;
+      }
       var W = 1000, H = 260, off = state.off;
       var all = [];
       rows.forEach(function (r) { all = all.concat(r.bed); });
-      all = all.concat(N.out, [N.floor - 2, N.ceiling + 1]).map(D);
+      all = all.concat(N.out || [], [N.floor - 2, N.ceiling + 1]).map(D);
       var lo = Math.floor(Math.min.apply(null, all)) - 1, hi = Math.ceil(Math.max.apply(null, all)) + 1;
       var ts = N.t.map(function (s) { return new Date(s).getTime(); }), t0 = ts[0], t1 = ts[ts.length - 1];
       function Y(v) { return H - ((v - lo) / (hi - lo)) * H; }
@@ -51,7 +125,7 @@
         h += '<div class="rec"><div class="sub">RECOMMENDED FOR ' + esc(String(N.title || 'TONIGHT').toUpperCase()) + '</div>' +
           '<div style="font-size:20px;font-weight:650;margin-top:2px">' + esc(best.label) + '</div>' +
           '<div class="note" style="margin-top:4px">Bedroom ' + d1(best.bed_min) + '–' + d1(best.bed_max) + '° against a ' +
-          D(N.floor).toFixed(0) + '–' + D(N.ceiling).toFixed(0) + '° sleep band; ' + ((best.heat_min || 0) + (best.cool_min || 0)) + ' min of HVAC.</div></div>';
+          D(N.floor).toFixed(0) + '–' + D(N.ceiling).toFixed(0) + '° sleep band; ' + ((best.heat_min || 0) + (best.cool_min || 0)) + ' min of HVAC.</div></div>' + stepsHtml(best);
       }
       h += '<div class="row"><span class="sub">Bedroom under each option:</span>' + rows.map(function (r, i) {
         return '<button type="button" class="pill" data-opt="' + esc(r.key) + '" aria-pressed="' + (!off[r.key]) + '">' +
@@ -74,14 +148,15 @@
         return '<path d="' + path(r.bed) + '" fill="none" stroke="' + COL[i % 5] + '" stroke-width="' + (r.best ? 3 : 2) + '" stroke-dasharray="' + DASH[i % 5] +
           '" vector-effect="non-scaling-stroke" opacity="' + (off[r.key] ? 0 : 1) + '"></path>';
       }).join('');
-      var outLo = Math.min.apply(null, N.out.map(D)).toFixed(0), outHi = Math.max.apply(null, N.out.map(D)).toFixed(0);
+      var hasOut = !!(N.out && N.out.length);
+      var outLo = hasOut ? Math.min.apply(null, N.out.map(D)).toFixed(0) : '', outHi = hasOut ? Math.max.apply(null, N.out.map(D)).toFixed(0) : '';
       var label = 'Predicted bedroom temperature for each strategy' + (best ? '. Best: ' + best.label + ', ' + d1(best.bed_min) + ' to ' + d1(best.bed_max) + ' degrees' : '');
       h += '<div style="display:flex;gap:8px"><div style="position:relative;width:30px;height:' + H + 'px;font-size:11px;color:var(--muted)" aria-hidden="true">' + yt + '</div>' +
         '<div style="position:relative;flex:1;min-width:0;height:' + H + 'px">' +
         '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%" role="img" aria-label="' + esc(label) + '">' + grid +
         '<rect x="0" y="' + Y(D(N.ceiling)) + '" width="' + W + '" height="' + (Y(D(N.floor)) - Y(D(N.ceiling))) + '" fill="var(--band)"></rect>' +
-        '<path d="' + path(N.out) + '" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"></path>' + lines + '</svg>' +
-        '<div style="position:absolute;right:4px;top:2px;font-size:11px;color:var(--muted)">shaded = sleep band · dotted = outdoor ' + outLo + '–' + outHi + '°</div></div></div>' +
+        (hasOut ? '<path d="' + path(N.out) + '" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"></path>' : '') + lines + '</svg>' +
+        '<div style="position:absolute;right:4px;top:2px;font-size:11px;color:var(--muted)">shaded = sleep band' + (hasOut ? ' · dotted = outdoor ' + outLo + '–' + outHi + '°' : '') + '</div></div></div>' +
         '<div style="display:flex;gap:8px"><div style="width:30px"></div><div style="position:relative;flex:1;min-width:0;height:16px;font-size:11px;color:var(--muted)" aria-hidden="true">' + xt + '</div></div>';
 
       h += '<div class="scroll-x"><table style="min-width:640px"><caption class="sr-only">Each night option compared</caption><thead><tr><th>Option</th><th>Bedroom low–high</th><th>At wake</th><th>Outside comfort</th><th>Heat</th><th>AC</th><th>Score</th><th></th></tr></thead><tbody>' +
@@ -109,5 +184,5 @@
     return { update: function (d) { data = d; state = { ni: 0, off: {} }; render(); } };
   }
 
-  window.NDNightCard = { mount: mount };
+  window.NDNightCard = { mount: mount, fromStrategy: fromStrategy };
 })();

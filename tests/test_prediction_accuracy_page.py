@@ -15,7 +15,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "custom_components" / "climate_advisor" / "frontend"
 PAGE = (FRONTEND / "prediction_accuracy.html").read_text(encoding="utf-8")
-INDEX = (FRONTEND / "index.html").read_text(encoding="utf-8")
+INDEX = (
+    (FRONTEND / "index.html").read_text(encoding="utf-8")
+    + "\n"
+    + (FRONTEND / "chart_v2.js").read_text(encoding="utf-8")
+)
 FIXTURE = json.loads((ROOT / "tests" / "fixtures" / "prediction_accuracy_sample.json").read_text(encoding="utf-8"))
 
 

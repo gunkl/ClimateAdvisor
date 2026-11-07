@@ -56,6 +56,53 @@ function makeChartFixture() {
   };
 }
 
+// The operation timeline (R3) as GET /api/climate_advisor/timeline returns it: steps relative to now, display unit.
+function makeTimelineFixture() {
+  const now = Date.now();
+  const at = (min) => new Date(now + min * 60000).toISOString();
+  const step = (min, actor, kind, text, extra) => Object.assign({
+    ts: at(min), actor, kind, text, reason: 'test.' + kind, target_f: null, mode: null, confidence: 'ok',
+    lead_minutes: actor === 'you' ? 30 : 0, source: 'test', meta: { id: kind + min, status: 'planned', facts: {} },
+  }, extra || {});
+  return {
+    schema_version: 1, zone: 'mock', generated_at: at(-5), day: new Date(now).toISOString().slice(0, 10),
+    horizon_end: at(48 * 60), latched: true, regen_reason: null, unit: 'fahrenheit',
+    steps: [
+      step(-120, 'ca', 'setback_end', 'Past step that must not be listed.', { meta: { id: 'past', status: 'done', facts: {} } }),
+      step(45, 'you', 'windows_open', 'Open the windows. Outdoor air is cooler than the house.'),
+      step(150, 'ca', 'precool_start', 'Start cooling a little early to ride out the afternoon.'),
+      step(240, 'you', 'windows_close', 'Close the windows before the afternoon warms up.', { confidence: 'low' }),
+      step(300, 'ca', 'briefing_send', 'Send the daily briefing.'),
+      step(600, 'ca', 'sleep_band', 'Bedtime: comfort moves to the bedroom, 66 to 72.'),
+      step(1500, 'ca', 'wake_band', 'Tomorrow, wake: comfort moves back to the hallway.'),
+    ],
+    path: Array.from({ length: 25 }, (_, i) => ({ ts: at(i * 60), temp_f: 70 + 2 * Math.sin(i / 4), sensor: '_ca', model: 'v3' })),
+  };
+}
+
+// GET /api/climate_advisor/night_strategy: NightStrategy.to_dict(), display unit, `unit` added (see the R6 backend lane).
+function makeNightFixture(showNumbers) {
+  const now = Date.now();
+  const at = (min) => new Date(now + min * 60000).toISOString();
+  const path = (base, amp) => Array.from({ length: 33 }, (_, i) => [at(i * 15), +(base + amp * Math.sin(i / 6)).toFixed(2)]);
+  const opt = (key, label, cls, base, amp, actions, extra) => Object.assign({
+    key, label, class: cls, bedroom_low_f: base - amp, bedroom_high_f: base + amp, bedroom_wake_f: base - 1,
+    discomfort_fh: 0, heat_min: 20, cool_min: 0, hvac_minutes: 20, score: 0.5, confidence: 'high',
+    n_actions: actions.length, runs: true, note: '', actions, path: path(base, amp),
+  }, extra || {});
+  return {
+    schema_version: 1, unit: 'fahrenheit', start: at(30), end: at(8 * 60), floor_f: 66, ceiling_f: 72,
+    target_sensor: 'sensor.bedroom', fan_mode: 'whole_house_fan', recommended: 'closed', show_numbers: showNumbers,
+    options: [
+      opt('closed', 'Keep closed', 'closed', 67, 1.5, []),
+      opt('windows_2h', 'Windows open 2 h', 'windows', 66.5, 2, [
+        { ts: at(60), kind: 'windows_open', actor: 'you', predicted: false, through_night: false },
+        { ts: at(180), kind: 'windows_close', actor: 'you', predicted: false, through_night: false },
+      ], { score: 0.9, heat_min: 30, hvac_minutes: 30 }),
+    ],
+  };
+}
+
 const server = http.createServer((req, res) => {
   const parsedUrl = url.parse(req.url, true);
   const pathname = parsedUrl.pathname;
@@ -88,13 +135,32 @@ try { localStorage.setItem('hassTokens', JSON.stringify({access_token:'mock-toke
     return;
   }
 
+  // The new dashboard (R5/R6fe), same mock token
+  if (pathname === '/new_dashboard.html') {
+    try {
+      let html = fs.readFileSync(path.join(FRONTEND_DIR, 'new_dashboard.html'), 'utf8');
+      const authScript = `<script>
+try { localStorage.setItem('hassTokens', JSON.stringify({access_token:'mock-token'})); } catch(e) {}
+</script>`;
+      html = html.replace('</head>', authScript + '\n</head>');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
   // Serve frontend JS files
-  const jsFiles = ['/hammer.min.js', '/chart.umd.min.js', '/chartjs-plugin-zoom.min.js'];
-  if (jsFiles.includes(pathname)) {
+  const jsFiles = ['/hammer.min.js', '/chart.umd.min.js', '/chartjs-plugin-zoom.min.js', '/chart_v2.js'];
+  const ndFiles = /^\/(nd_[a-z_]+\.(js|json)|chart_v2\.css|prediction_accuracy\.html)$/;
+  if (jsFiles.includes(pathname) || ndFiles.test(pathname)) {
     try {
       const filename = pathname.slice(1);
       const data = fs.readFileSync(path.join(FRONTEND_DIR, filename));
-      res.writeHead(200, { 'Content-Type': 'application/javascript' });
+      const types = { '.js': 'application/javascript', '.css': 'text/css', '.json': 'application/json', '.html': 'text/html' };
+      res.writeHead(200, { 'Content-Type': types[path.extname(filename)] || 'application/octet-stream' });
       res.end(data);
     } catch (e) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -122,6 +188,18 @@ try { localStorage.setItem('hassTokens', JSON.stringify({access_token:'mock-toke
       automation_enabled: true,
       occupancy_mode: 'home'
     }));
+    return;
+  }
+
+  if (pathname === '/api/climate_advisor/timeline') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(makeTimelineFixture()));
+    return;
+  }
+
+  if (pathname === '/api/climate_advisor/night_strategy') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(makeNightFixture(parsedUrl.query.numbers !== '0')));
     return;
   }
 

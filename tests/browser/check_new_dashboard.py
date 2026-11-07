@@ -11,9 +11,11 @@ banners, deep links, keyboard model, zone switching and the "no new write path" 
 
 from __future__ import annotations
 
+import datetime as dt
 import functools
 import http.server
 import json
+import math
 import pathlib
 import sys
 import threading
@@ -65,6 +67,105 @@ CONTRAST_JS = """
 """
 
 
+def live_timeline() -> dict:
+    """GET timeline as the endpoint returns it (R3b contract, display unit): steps and path relative to now."""
+    now = dt.datetime.now(dt.UTC).astimezone()
+
+    def at(m: int) -> str:
+        return (now + dt.timedelta(minutes=m)).isoformat()
+
+    def st(m, actor, kind, text, **kw):
+        d = {
+            "ts": at(m),
+            "actor": actor,
+            "kind": kind,
+            "text": text,
+            "reason": "t." + kind,
+            "target_f": None,
+            "mode": None,
+            "confidence": "ok",
+            "lead_minutes": 30 if actor == "you" else 0,
+            "source": "t",
+            "meta": {"id": f"{kind}{m}", "status": "planned", "facts": {}},
+        }
+        d.update(kw)
+        return d
+
+    return {
+        "schema_version": 1,
+        "zone": "z",
+        "generated_at": at(-4),
+        "day": now.date().isoformat(),
+        "horizon_end": at(2880),
+        "latched": True,
+        "regen_reason": None,
+        "unit": "fahrenheit",
+        "steps": [
+            st(45, "you", "windows_open", "Open windows at the time shown. Outdoor air is cooler than the house."),
+            st(150, "ca", "precool_start", "Start cooling a little early to ride out the afternoon."),
+            st(240, "you", "windows_close", "Close windows before the evening cools off.", confidence="low"),
+            st(600, "ca", "sleep_band", "Bedtime: comfort moves to the bedroom, 66 to 72."),
+        ],
+        "path": [
+            {"ts": at(i * 30), "temp_f": round(70 + 2.5 * math.sin(i / 5), 2), "sensor": "_ca", "model": "v3"}
+            for i in range(60)
+        ],
+    }
+
+
+def live_night(show_numbers: bool = True) -> dict:
+    """GET night_strategy as NightStrategy.to_dict() (R4) with the display unit added."""
+    now = dt.datetime.now(dt.UTC).astimezone()
+
+    def at(m: int) -> str:
+        return (now + dt.timedelta(minutes=m)).isoformat()
+
+    def path(base, amp):
+        return [[at(30 + i * 15), round(base + amp * math.sin(i / 6), 2)] for i in range(33)]
+
+    def opt(key, label, base, amp, actions, **kw):
+        d = {
+            "key": key,
+            "label": label,
+            "class": "windows",
+            "bedroom_low_f": base - amp,
+            "bedroom_high_f": base + amp,
+            "bedroom_wake_f": base - 1,
+            "discomfort_fh": 0.0,
+            "heat_min": 20,
+            "cool_min": 0,
+            "hvac_minutes": 20,
+            "score": 0.5,
+            "confidence": "high",
+            "n_actions": len(actions),
+            "runs": True,
+            "note": "",
+            "actions": actions,
+            "path": path(base, amp),
+        }
+        d.update(kw)
+        return d
+
+    wo = {"ts": at(90), "kind": "windows_open", "actor": "you", "predicted": False, "through_night": False}
+    wc = {"ts": at(210), "kind": "windows_close", "actor": "you", "predicted": False, "through_night": False}
+    return {
+        "schema_version": 1,
+        "unit": "fahrenheit",
+        "start": at(30),
+        "end": at(510),
+        "floor_f": 66,
+        "ceiling_f": 72,
+        "target_sensor": "sensor.bed",
+        "fan_mode": "whole_house_fan",
+        "recommended": "closed",
+        "show_numbers": show_numbers,
+        "options": [
+            opt("closed", "Keep closed", 67, 1.5, []),
+            opt("windows_2h", "Windows open 2 h", 66.5, 2, [wo, wc], score=0.9, heat_min=30, confidence="medium"),
+        ],
+    }
+
+
 def route_factory(overrides: dict):
     def route(r):
         u = urllib.parse.urlparse(r.request.url)
@@ -80,6 +181,10 @@ def route_factory(overrides: dict):
             payload = {"message": "ok", "success": True, "automation_enabled": False}
         elif ep == "chart_data":
             payload = FX["chart_data"]
+        elif ep == "timeline":
+            payload = live_timeline()
+        elif ep == "night_strategy":
+            payload = live_night()
         elif ep.startswith("activity_record"):
             payload = FX["activity_record"]
         elif ep in FX:
@@ -433,16 +538,27 @@ def behaviour(browser):
     if pg.evaluate("localStorage.getItem('climate_advisor_dashboard')") != "classic":
         problems.append("Back to classic did not remember the choice")
     ctx.close()
-    # night card (sample data)
+    # night card on the live plan: no sample badge, options toggle, steps listed; then the plan without figures; then empty
     ctx, pg = new_page(browser, {"width": 1280, "height": 900}, "dark", name="night")
     pg.goto(BASE)
     pg.wait_for_timeout(1200)
     if pg.locator("#night-card svg[role=img]").count() != 1:
         problems.append("night card chart missing")
+    if pg.locator("#night-sample-badge").is_visible():
+        problems.append("the sample badge is still shown on the live night plan")
     pg.locator("#night-card [data-opt]").first.click()
-    pg.get_by_role("button", name="Warm night example: Aug 25 (actual outdoor)").click()
     pg.wait_for_timeout(200)
     pg.screenshot(path=str(OUT / "r5-night-card-dark.png"), full_page=True)
+    ctx.close()
+    ctx, pg = new_page(
+        browser, {"width": 1280, "height": 900}, "light", {"night_strategy": live_night(False)}, name="night-nonumbers"
+    )
+    pg.goto(BASE)
+    pg.wait_for_timeout(1200)
+    if pg.locator("#night-card svg[role=img]").count() or "°" in pg.locator("#night-card").inner_text():
+        problems.append("night card shows figures although show_numbers is false")
+    if not pg.locator("#night-nonumbers").count():
+        problems.append("night card without figures lacks its explanation")
     ctx.close()
 
 

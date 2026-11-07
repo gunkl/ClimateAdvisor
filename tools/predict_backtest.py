@@ -19,10 +19,15 @@ HOW (walk-forward, no future leakage)
 
 MODELS COMPARED ON THE SAME INPUTS (same anchors, forecast, setpoints, windows plan)
   * v4   - ``predictor_v4.fit`` / ``predict``  (the integration module, pure Python)
-  * v3   - the PRODUCTION ``coordinator._build_predicted_indoor_future`` imported headless (HA stubs
-           from tools/sim_harness/ha_stubs.py), fed the learning DB's thermal model: the current cache
-           (``--v3-model current``, the default) or one rebuilt with production's own
-           ``LearningEngine`` EWMA from observations dated before the week (``asof``, see below)
+  * v3   - v3 AS IT WAS (``--v3-model honest``, the default and the gate): at 4 h the logged
+           chart_log ``pred_indoor`` (exactly the line the occupant saw) where present; at 1/12 h (and
+           4 h where nothing was logged) the PRODUCTION ``coordinator._build_predicted_indoor_future``
+           imported headless (HA stubs from tools/sim_harness/ha_stubs.py) replayed with the thermal
+           model rebuilt by production's own ``LearningEngine`` from observations dated before the
+           anchor's day. Anchors the retained observations cannot rebuild (fewer than
+           ``--v3-asof-min-obs``) are EXCLUDED from the v3 comparison and its n, never replayed with
+           today's model. ``--v3-model current`` (today's cache: hindsight, flatters v3) and ``asof``
+           (rebuilt once per week) are diagnostics; the hindsight replay is always shown as ``v3cur``.
   * flat - persistence: the reading at A
   * logged ``pred_indoor`` - the real ~4 h archive, a sanity row for the v3 replay (``_ca`` only)
 
@@ -223,7 +228,20 @@ def assert_no_leak(items: list, cutoff: datetime, what: str, key=lambda x: x) ->
 class ChartIndex:
     """Sorted chart_log rows with the series the backtest reads (all internal F)."""
 
-    def __init__(self, rows: list[dict], tz: tzinfo, sensors: list[str]) -> None:
+    def __init__(
+        self,
+        rows: list[dict],
+        tz: tzinfo,
+        sensors: list[str],
+        primary: str | None = None,
+        aliases: tuple[str, ...] = (),
+        in_sleep: Any = None,
+    ) -> None:
+        # ``primary``: the live fit's primary node. Rows that lack it (older logs, the climate-attribute era) read
+        # it through predictor_v4's shared row mapping, exactly as ``samples_from_chart_log`` does.
+        self._primary = primary
+        self._aliases = aliases
+        self._in_sleep = in_sleep
         parsed = []
         for r in rows:
             if not isinstance(r, dict):
@@ -243,7 +261,7 @@ class ChartIndex:
             xs: list[float] = []
             vs: list[float] = []
             for t, r in zip(self.t, self.rows, strict=True):
-                v = self._raw(key, r)
+                v = self._primary_raw(r) if (primary and key == primary and key != CA) else self._raw(key, r)
                 if v is not None:
                     xs.append(t)
                     vs.append(v)
@@ -255,6 +273,12 @@ class ChartIndex:
             v = _num(r.get("pred_outdoor"))
             if v is not None:
                 self.pred_by_hour.setdefault(hour_key(dt), v)
+
+    def _primary_raw(self, r: dict) -> float | None:
+        fn = getattr(_PREDICTOR, "_row_primary_value", None)
+        if fn is None:
+            return self._raw(self._primary or CA, r)
+        return fn(r, self._primary, self._aliases, self._in_sleep, self.tz)
 
     @staticmethod
     def _raw(key: str, r: dict) -> float | None:
@@ -527,12 +551,17 @@ def prod_rebuild_cache(observations: list[dict]) -> dict | None:
     return stub._state.thermal_model_cache
 
 
+V3_ASOF_MIN_OBS = 30  # retained observations needed before an anchor for an honest as-of v3 rebuild
+
+
 class V3Models:
     """The v3 thermal model per test week: the DB's current cache, or rebuilt as-of the week."""
 
-    def __init__(self, db: dict | None, mode: str) -> None:
+    def __init__(self, db: dict | None, mode: str, min_obs: int = V3_ASOF_MIN_OBS) -> None:
         self.db = db or {}
         self.mode = mode
+        self.min_obs = min_obs
+        self._asof_cache: dict[str, dict | None] = {}
         self.cache = self.db.get("thermal_model_cache") or {}
         self.current = prod_model_from_cache(self.cache) if self.cache else None
         self.obs = [o for o in self.db.get("thermal_observations") or [] if isinstance(o, dict) and o.get("date")]
@@ -541,6 +570,21 @@ class V3Models:
     @property
     def available(self) -> bool:
         return self.current is not None or bool(self.obs)
+
+    def for_anchor(self, anchor: datetime) -> dict | None:
+        """The v3 thermal model AS IT WAS at ``anchor`` (``--v3-model honest``): production's EWMA rebuilt from the
+        retained observations dated before the anchor's day, cached per day. ``None`` when fewer than ``min_obs``
+        retained observations precede the anchor (the DB keeps only ~200, about two weeks, so older anchors cannot
+        be rebuilt) - the caller excludes those anchors; it never falls back to today's model."""
+        day = anchor.date().isoformat()
+        if day in self._asof_cache:
+            return self._asof_cache[day]
+        prior = [o for o in self.obs if str(o["date"])[:10] < day]
+        model: dict | None = None
+        if len(prior) >= self.min_obs:
+            model = prod_model_from_cache(prod_rebuild_cache(prior) or {}) or None
+        self._asof_cache[day] = model
+        return model
 
     def for_week(self, week_start: datetime) -> tuple[dict, str]:
         if self.mode == "asof" and self.obs:
@@ -667,27 +711,91 @@ def plan_weeks(first: datetime, last: datetime, args: argparse.Namespace) -> lis
     return weeks
 
 
-def week_nodes(train_rows: list[dict], cand_primary: str, cand_nodes: list[str], forced: bool) -> tuple[str, list[str]]:
+def infer_sleep(rows: list[dict], primary: str, tz: tzinfo) -> tuple[str | None, Any]:
+    """(sleep sensor, ``in_sleep(local_dt)``) inferred from the log, since the backtest has no HA config.
+
+    The comfort-facing ``indoor`` is the sleep sensor's reading inside the sleep window (Issue #964), so a sensor
+    other than ``primary`` that EQUALS ``indoor`` while ``primary`` differs from it, on at least 100 rows, is the
+    sleep sensor, and the local hours where that holds on most such rows are the window. ``(None, None)`` when
+    there is no such sensor (the live shadow then follows the primary node).
+    """
+    if primary == CA:
+        return None, None
+    hits: dict[str, int] = {}
+    per_hour: dict[str, dict[int, list[int]]] = {}
+    for r in rows:
+        sens = r.get("indoor_sensors")
+        ind, prim = _num(r.get("indoor")), (_num(sens.get(primary)) if isinstance(sens, dict) else None)
+        if ind is None or prim is None or not isinstance(sens, dict):
+            continue
+        try:
+            hr = parse_ts(r.get("ts"), tz).astimezone(tz).hour
+        except TypeError, ValueError:
+            continue
+        for k, v in sens.items():
+            fv = _num(v)
+            if k == primary or fv is None or abs(fv - prim) < 0.1:
+                continue  # only rows where this sensor and the primary disagree can tell them apart
+            ph = per_hour.setdefault(k, {}).setdefault(hr, [0, 0])
+            ph[1] += 1
+            if abs(fv - ind) < 0.05:
+                ph[0] += 1
+                hits[k] = hits.get(k, 0) + 1
+    if not hits:
+        return None, None
+    node = max(hits, key=lambda k: hits[k])
+    if hits[node] < 100:
+        return None, None
+    hours = {h for h, (a, b) in per_hour[node].items() if b >= 20 and a / b >= 0.5}
+    if not hours:
+        return None, None
+    return node, (lambda dt, _h=frozenset(hours): dt.hour in _h)
+
+
+def week_nodes(
+    train_rows: list[dict],
+    cand_primary: str,
+    cand_nodes: list[str],
+    forced: bool,
+    *,
+    aliases: tuple[str, ...] = (),
+    tz: tzinfo = UTC,
+    in_sleep: Any = None,
+) -> tuple[str, list[str]]:
     """Primary + extra nodes usable for a fit on ``train_rows``: judged on the TRAINING rows only.
 
-    Rows before 0.9.1 have no ``indoor_sensors``; the entity primary is used only when it reads on
-    at least 80 % of the training rows, else the model is a single ``_ca`` node (the reading CA
-    used). Extra entities need 50 % coverage.
+    Delegates to ``predictor_v4.resolve_nodes`` - the one rule the live shadow also uses (Issue #1230 R1b, M1):
+    the entity primary counts every row that reads it directly, through a climate-attribute alias,
+    ``indoor_primary`` or ``indoor``; at least 80 % coverage keeps it, else the model is a single ``_ca`` node.
+    Extra entities need 50 % coverage.
     """
-    n = len(train_rows) or 1
-
-    def cov(key: str) -> float:
-        return sum(1 for r in train_rows if ChartIndex._raw(key, r) is not None) / n
-
-    primary = cand_primary if (forced or cov(cand_primary) >= 0.8) else CA
-    extras = [k for k in cand_nodes if k not in (primary, CA) and cov(k) >= 0.5]
-    return primary, [primary, *extras]
+    return load_predictor().resolve_nodes(
+        train_rows, primary=cand_primary, sensors=cand_nodes, aliases=aliases, tz=tz, forced=forced, in_sleep=in_sleep
+    )
 
 
 def grid_steps(anchor: datetime, count: int) -> list[datetime]:
     """The predictor's own DST-safe UTC-stepped grid when it has one, else the same by epoch."""
     fn = getattr(_PREDICTOR, "grid_steps", None)
     return fn(anchor, count) if fn else [at(anchor, STEP_S * k) for k in range(1, count + 1)]
+
+
+def _v4_value(v4, src_key, sensor, t_ep, T, sleep_node, in_sleep, sensors_model, tz):
+    """The v4 value scored for ``sensor`` at ``t_ep``. ``_ca`` is the reading CA used: the sleep node's prediction
+    inside the sleep window when that node was modelled (Issue #1230 R1b, M3), else the primary node's."""
+    if not v4:
+        return None
+    if (
+        sensor == CA
+        and sleep_node
+        and sleep_node in sensors_model
+        and in_sleep is not None
+        and in_sleep(T.astimezone(tz))
+    ):
+        v = v4.get(sleep_node, {}).get(t_ep)
+        if v is not None:
+            return v
+    return v4.get(src_key, {}).get(t_ep)
 
 
 def run_backtest(
@@ -705,7 +813,9 @@ def run_backtest(
     pred = load_predictor()
     rows = prepare_rows(rows)
     cand_primary, cand_nodes = select_sensors(rows, getattr(args, "primary", None), min_cov=0.0)
-    idx = ChartIndex(rows, tz, cand_nodes)
+    aliases = tuple(sorted({k for r in rows for k in (r.get("indoor_sensors") or {}) if str(k).startswith("climate.")}))
+    sleep_node, in_sleep = infer_sleep(rows, cand_primary, tz)
+    idx = ChartIndex(rows, tz, cand_nodes, cand_primary, aliases, in_sleep)
     seasons_by_day = day_seasons(rows, tz)
     idx.set_commanded(seasons_by_day)
     commanded = getattr(args, "setpoint_source", "band") == "commanded"
@@ -721,7 +831,9 @@ def run_backtest(
     snaps_sorted = archive_snapshots or []
 
     coord = None
-    v3_models = V3Models(learning_db, args.v3_model)
+    v3_models = V3Models(learning_db, args.v3_model, getattr(args, "v3_asof_min_obs", V3_ASOF_MIN_OBS))
+    honest = args.v3_model == "honest"
+    asof_unavailable = 0
     if not args.no_v3:
         try:
             coord = load_coordinator()
@@ -734,7 +846,9 @@ def run_backtest(
     records: list[dict] = []
     week_info: list[dict] = []
     src_counts = {"archive": 0, "chart_log": 0}
-    skipped = {"no_reading": 0, "no_forecast": 0, "v4_none": 0, "v4_error": 0, "v3_error": 0}
+    skipped = {"no_reading": 0, "no_forecast": 0, "no_setpoint": 0, "v4_none": 0, "v4_error": 0, "v3_error": 0}
+    hygiene_by_season: dict[str, int] = {}
+    hygiene_on = not getattr(args, "include_unknown_setpoint", False)
     model = None
     last_fit_week = -999
     anchors_total = 0
@@ -749,10 +863,25 @@ def run_backtest(
             snaps = [s for s in snaps_sorted if parse_ts(s["issued"], tz).timestamp() < W_ep]
             assert_no_leak(train_rows, W, "fit rows", key=lambda r: parse_ts(r["ts"], tz))
             assert_no_leak(snaps, W, "fit forecast snapshots", key=lambda s: parse_ts(s["issued"], tz))
-            primary, nodes = week_nodes(train_rows, cand_primary, cand_nodes, bool(getattr(args, "primary", None)))
+            primary, nodes = week_nodes(
+                train_rows,
+                cand_primary,
+                cand_nodes,
+                bool(getattr(args, "primary", None)),
+                aliases=aliases,
+                tz=tz,
+                in_sleep=in_sleep,
+            )
             info["primary"], info["nodes"] = primary, list(nodes)
             seen_nodes.update(dict.fromkeys(nodes))
-            samples = pred.samples_from_chart_log(train_rows, tz=tz, archive_snapshots=snaps or None)
+            samples = pred.samples_from_chart_log(
+                train_rows,
+                tz=tz,
+                archive_snapshots=snaps or None,
+                primary=None if primary == CA else primary,
+                primary_aliases=aliases,
+                in_sleep=in_sleep,
+            )
             kept = [s for s in samples if s.ts.timestamp() < W_ep]
             info["dropped_future_samples"] = len(samples) - len(kept)
             assert_no_leak(kept, W, "fit samples", key=lambda s: s.ts)
@@ -789,6 +918,9 @@ def run_backtest(
                 [r for t, r in zip(idx.t, idx.rows, strict=True) if W_ep - 12 * 3600 <= t < w_end_ep],
                 tz=tz,
                 archive_snapshots=None,
+                primary=None if primary == CA else primary,
+                primary_aliases=aliases,
+                in_sleep=in_sleep,
             ),
             key=lambda s: s.ts,
         )
@@ -816,6 +948,16 @@ def run_backtest(
                     mass = None
                 prev_ep = s_ep
                 si += 1
+            if hygiene_on:
+                # Data hygiene (Issue #1230 R1b): an anchor whose setpoint in force is unknown (no logged setpoint, no
+                # target band) cannot be predicted or judged honestly by ANY model, so it leaves v3, v4 and "no
+                # change" alike. A band could be reconstructed only from later rows, which would be hindsight.
+                lo_a, hi_a = idx.band_at(A.timestamp(), commanded)
+                if lo_a is None and hi_a is None:
+                    skipped["no_setpoint"] += 1
+                    sea = seasons_by_day.get(A.astimezone(tz).date(), "shoulder")
+                    hygiene_by_season[sea] = hygiene_by_season.get(sea, 0) + 1
+                    continue
             readings = {k: idx.last_at(k, A.timestamp()) for k in sensors_model}
             primary_reading = readings.get(sensors_model[0]) if sensors_model else None
             if primary_reading is None:
@@ -857,7 +999,21 @@ def run_backtest(
                     )
                 return out
 
-            def run_v4(inputs, A=A, readings=readings, mass=mass, model=model, hourly=hourly):
+            run_state = pred.run_state_at(test_samples, si - 1) if si > 0 else None
+            act_now = None if run_state is None else ("heating" if run_state[0] == 1 else "cooling")
+            run_min = None if run_state is None else run_state[1]
+
+            def run_v4(
+                inputs,
+                prior=True,
+                act_now=act_now,
+                run_min=run_min,
+                A=A,
+                readings=readings,
+                mass=mass,
+                model=model,
+                hourly=hourly,
+            ):
                 for inp in inputs:
                     if inp.ts.timestamp() <= A.timestamp():
                         raise LeakageError("a predict() input is not in the future")
@@ -870,6 +1026,9 @@ def run_backtest(
                     tz=tz,
                     outdoor_now_f=idx.last_at("outdoor", A.timestamp()),
                     forecast_now_f=hourly[0],
+                    hvac_action_now=act_now,
+                    run_elapsed_min=run_min,
+                    openness_prior=prior,
                 )
                 if res is None:
                     return None
@@ -881,13 +1040,31 @@ def run_backtest(
                 if v4 is None:
                     skipped["v4_none"] += 1
                 elif not args.no_diagnostic:
-                    v4a = run_v4(build_inputs(True))
+                    v4a = run_v4(build_inputs(True), prior=False)
             except LeakageError:
                 raise
             except Exception:  # noqa: BLE001
                 skipped["v4_error"] += 1
                 v4 = None
             v3c: dict[int, float] | None = None
+            v3c_asof: dict[int, float] | None = None
+            asof_model = v3_models.for_anchor(A) if (v3_enabled and honest) else None
+            if v3_enabled and honest and asof_model is None:
+                asof_unavailable += 1
+            if v3_enabled and asof_model is not None:
+                try:
+                    v3c_asof = v3_curve(
+                        coord,
+                        idx=idx,
+                        anchor=A,
+                        hourly=hourly,
+                        model=asof_model,
+                        band_fn=band_fn,
+                        plan_windows=plan_win,
+                        plan_hours=args.window_plan_hours,
+                    )
+                except Exception:  # noqa: BLE001
+                    skipped["v3_error"] += 1
             if v3_enabled:
                 try:
                     v3c = v3_curve(
@@ -913,6 +1090,20 @@ def run_backtest(
                     actual = idx.value_at(sensor, T.timestamp())
                     if actual is None:
                         continue
+                    logged = idx.value_at("_logged", T.timestamp(), 600) if (sensor == CA and lead == 4) else None
+                    v3_hind = v3c.get(t_ep) if (v3c is not None and sensor == CA) else None
+                    v3_unavail = False
+                    if honest and sensor == CA:
+                        # v3 as it was: the line the occupant saw at 4 h, else the as-of replay, else excluded
+                        if logged is not None:
+                            v3_val = logged
+                        elif v3c_asof is not None:
+                            v3_val = v3c_asof.get(t_ep)
+                        else:
+                            v3_val = None
+                        v3_unavail = v3_val is None
+                    else:
+                        v3_val = v3_hind
                     records.append(
                         {
                             "sensor": sensor,
@@ -922,12 +1113,12 @@ def run_backtest(
                             "season": seasons_by_day.get(A.astimezone(tz).date(), "shoulder"),
                             "actual": actual,
                             "flat": base,
-                            "v4": v4.get(src_key, {}).get(t_ep) if v4 else None,
+                            "v4": _v4_value(v4, src_key, sensor, t_ep, T, sleep_node, in_sleep, sensors_model, tz),
                             "v4a": v4a.get(src_key, {}).get(t_ep) if v4a else None,
-                            "v3": v3c.get(t_ep) if (v3c is not None and sensor == CA) else None,
-                            "logged": (
-                                idx.value_at("_logged", T.timestamp(), 600) if (sensor == CA and lead == 4) else None
-                            ),
+                            "v3": v3_val,
+                            "v3cur": v3_hind,
+                            "v3_unavail": v3_unavail,
+                            "logged": logged,
                         }
                     )
                     week_records += 1
@@ -981,10 +1172,17 @@ def run_backtest(
                 else "chart_log pred_outdoor (lead-0 forecast: absolute errors optimistic, comparison fair)"
             ),
             "skipped": skipped,
+            "setpoint_hygiene": {
+                "enabled": hygiene_on,
+                "excluded_anchors": skipped["no_setpoint"],
+                "by_season": hygiene_by_season,
+            },
             "v3": {
                 "enabled": v3_enabled,
                 "model_mode": args.v3_model,
                 "weeks_by_source": v3_models.used,
+                "asof_unavailable_anchors": asof_unavailable,
+                "asof_min_obs": v3_models.min_obs,
                 "drift_check": v3_models.drift_note() if v3_enabled else None,
             },
             "inputs": {
@@ -1026,12 +1224,16 @@ def _r(v: float | None, nd: int = 3) -> float | None:
 def _season_stats(recs: list[dict], sensor: str, v3_enabled: bool) -> dict:
     need_v3 = v3_enabled and sensor == CA
     base = [r for r in recs if (not need_v3 or r["v3"] is not None)]
+    unavailable = sum(1 for r in recs if r.get("v3_unavail"))
     common = [r for r in base if r["v4"] is not None]
-    out: dict[str, Any] = {"n": len(common), "base_n": len(base)}
+    out: dict[str, Any] = {"n": len(common), "base_n": len(base), "v3_unavailable_n": unavailable}
     out["coverage"] = _r(len(common) / len(base)) if base else None
     for name in ("v4", "v3", "flat"):
         mae, bias = _mae_bias([(r[name], r["actual"]) for r in common if r[name] is not None])
         out[f"{name}_mae"], out[f"{name}_bias"] = _r(mae), _r(bias)
+    cur = [r for r in common if r.get("v3cur") is not None]
+    mae, bias = _mae_bias([(r["v3cur"], r["actual"]) for r in cur])
+    out["v3_current_mae"], out["v3_current_bias"], out["v3_current_n"] = _r(mae), _r(bias), len(cur)
     diag = [r for r in common if r["v4a"] is not None]
     mae, bias = _mae_bias([(r["v4a"], r["actual"]) for r in diag])
     out["v4_actual_inputs_mae"], out["v4_actual_inputs_bias"] = _r(mae), _r(bias)
@@ -1165,12 +1367,18 @@ def format_report(report: dict) -> str:
         f"model={run['v3']['model_mode']} {run['v3']['weeks_by_source']}"
         + (f"  [{run['v3']['drift_check']}]" if run["v3"].get("drift_check") else ""),
         f"skipped anchors: {run['skipped']}",
+        (
+            f"setpoint hygiene: {run['setpoint_hygiene']['excluded_anchors']} anchors with no known setpoint excluded "
+            f"for every model {run['setpoint_hygiene']['by_season']}"
+            if run.get("setpoint_hygiene", {}).get("enabled")
+            else "setpoint hygiene: OFF (unknown-setpoint anchors are scored)"
+        ),
         "error = predicted - actual (F); bias>0 = too warm. MAEs share the same anchors.",
         "seasons by the day's HVAC activity: heating = any heating, summer = cooling or whole-house fan, "
         "shoulder = neither",
         "",
         f"{'sensor':<34}{'season':<9}{'lead':>5}{'n':>6}{'flat':>7}{'v3':>7}{'v4':>7}{'v4bias':>8}"
-        f"{'v4+act':>8}{'logged':>8}  gate",
+        f"{'v4+act':>8}{'logged':>8}{'v3cur':>7}{'v3ex':>7}  gate",
     ]
     gate_idx = {(g["sensor"], g["season"], g["lead"]): g for g in report["gate"] + report["gate_sensors"]}
     for sensor, per_lead in report["stats"].items():
@@ -1186,7 +1394,8 @@ def format_report(report: dict) -> str:
                 lines.append(
                     f"{sensor[:33]:<34}{season:<9}{lead:>5}{st['n']:>6}{_f(st['flat_mae'], 7)}{_f(st['v3_mae'], 7)}"
                     f"{_f(st['v4_mae'], 7)}{_f(st['v4_bias'], 8, sign=True)}{_f(st['v4_actual_inputs_mae'], 8)}"
-                    f"{_f(st.get('logged_pred_indoor_mae'), 8)}  {mark}"
+                    f"{_f(st.get('logged_pred_indoor_mae'), 8)}{_f(st.get('v3_current_mae'), 7)}"
+                    f"{str(st.get('v3_unavailable_n') or '-').rjust(7)}  {mark}"
                 )
     s = report["gate_summary"]
     lines += ["", f"DP-8 gate (_ca, heating+summer x 1/4/12 h): {s['passed']}/{s['total']} pass, {s['scored']} scored"]
@@ -1298,7 +1507,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--since", help="YYYY-MM-DD: first test week on/after this date")
     p.add_argument("--max-weeks", type=int, default=0, help="only the newest N test weeks (quick runs)")
-    p.add_argument("--train-days", type=int, default=60, help="training window before each week (0 = all history)")
+    p.add_argument("--train-days", type=int, default=30, help="training window before each week (0 = all history)")
     p.add_argument("--min-train-days", type=float, default=5.0, help="no test week without this much training data")
     p.add_argument("--refit-every-weeks", type=int, default=1)
     p.add_argument("--anchor-step-hours", type=float, default=1.0)
@@ -1311,7 +1520,27 @@ def build_parser() -> argparse.ArgumentParser:
         "setpoint of the day's mode (diagnostic - the commanded value is typically 1-2 F above the band floor)",
     )
     p.add_argument("--window-plan-hours", type=float, default=4.0)
-    p.add_argument("--v3-model", choices=("asof", "current"), default="current")
+    p.add_argument(
+        "--v3-model",
+        choices=("honest", "asof", "current"),
+        default="honest",
+        help="honest (default, the gate): v3 as it was - the logged 4 h pred_indoor where present, else production's "
+        "model rebuilt from observations dated before the anchor; anchors that cannot be rebuilt are EXCLUDED from "
+        "the v3 comparison (v3ex column). current: today's learned model (hindsight, flatters v3; always shown as "
+        "the v3cur column). asof: rebuilt once per test week",
+    )
+    p.add_argument(
+        "--v3-asof-min-obs",
+        type=int,
+        default=V3_ASOF_MIN_OBS,
+        help="honest v3: retained observations needed before an anchor to rebuild its as-of model",
+    )
+    p.add_argument(
+        "--include-unknown-setpoint",
+        action="store_true",
+        help="diagnostic: also score anchors whose setpoint in force is unknown (no logged setpoint, no target band); "
+        "by default they are excluded for every model",
+    )
     p.add_argument("--no-v3", action="store_true")
     p.add_argument("--no-diagnostic", action="store_true", help="skip the v4-with-actual-inputs variant")
     p.add_argument("--min-n", type=int, default=72, help="anchors needed before a gate row is scored")

@@ -274,6 +274,8 @@ from .const import (
     V4_FIT_HOUR,
     V4_FIT_MINUTE,
     V4_FIT_RETRY_MIN_INTERVAL_S,
+    V4_FIT_STAGGER_S,
+    V4_FIT_TRAIN_DAYS,
     V4_MASS_MAX_GAP_S,
     VERSION,
     is_availability_recovery,
@@ -421,6 +423,7 @@ from .whf_safety_decision import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_V4_FIT_LOCK_KEY = "climate_advisor_v4_fit_lock"  # hass.data key of the domain-wide v4 fit lock (Issue #1230 R1b, M5)
 
 # Issue #1020: (role label, entity config key, source config key or None). A role with a
 # source key is only checked when that source reads the entity's state (sensor/input_number).
@@ -1350,13 +1353,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Issue #1230 R1: nightly v4 fit (shadow). Kept in _unsub_listeners so unload cancels it; the callback is
         # _zone_scoped so it refuses once the instance is shut down.
+        # M5: 03:15 plus a stable per-zone offset (up to 30 min); fits are also serialised domain-wide (_v4_run_fit).
+        _v4_off = v4_shadow.fit_offset_s(self._entry_id, V4_FIT_STAGGER_S)
         self._unsub_listeners.append(
             async_track_time_change(
                 self.hass,
                 self._zone_scoped(self._v4_nightly_fit),
                 hour=V4_FIT_HOUR,
-                minute=V4_FIT_MINUTE,
-                second=0,
+                minute=V4_FIT_MINUTE + _v4_off // 60,
+                second=_v4_off % 60,
             )
         )
 
@@ -5494,6 +5499,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             raise
         return True
 
+    def _v4_fit_lock(self) -> asyncio.Lock:
+        """The lock every zone's v4 fit takes (one per Home Assistant instance, in ``hass.data``)."""
+        return self.hass.data.setdefault(_V4_FIT_LOCK_KEY, asyncio.Lock())
+
     def _v4_cancel_fit(self) -> None:
         """Cancel a running fit task (unload). The executor thread cannot be interrupted; its result is dropped."""
         task = getattr(self, "_v4_fit_task", None)
@@ -5511,19 +5520,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 tz = now.tzinfo
                 primary = self._primary_indoor_entity() or self.config.get("climate_entity", "")
                 sensors = list(self._read_chart_indoor_sensors())
-                # Captured on the loop (rule: no self.* reads inside the executor job); the row copy is shallow.
-                model_dict, seconds, fit_line = await self._executor_job(
-                    functools.partial(
-                        v4_shadow.run_fit,
-                        chart_entries=self._chart_log.raw_entries(),
-                        snapshots_fn=self._forecast_archive.get_snapshots,
-                        tz=tz,
-                        now=now,
-                        primary=primary,
-                        sensors=sensors,
-                        previous_model=self._v4_store.v4_model,
-                    )
+                # Rows older than the entity primary carry only ``indoor`` / the climate attribute: map them onto the
+                # primary node (M1). While a sleep sensor is configured, ``indoor`` inside the sleep window was the
+                # bedroom, so those rows are skipped for the primary node.
+                aliases = tuple(c for c in (self.config.get("climate_entity"),) if c)
+                cfg = dict(self.config)
+                in_sleep = (
+                    (lambda dt, _cfg=cfg: _in_sleep_window(dt, _cfg)) if cfg.get("sleep_indoor_temp_entity") else None
                 )
+                # Captured on the loop (rule: no self.* reads inside the executor job); the row copy is shallow.
+                # One fit at a time across ALL zones (M5): several zones fitting at once starve the event loop (GIL).
+                async with self._v4_fit_lock():
+                    model_dict, seconds, fit_line = await self._executor_job(
+                        functools.partial(
+                            v4_shadow.run_fit,
+                            chart_entries=self._chart_log.raw_entries(),
+                            snapshots_fn=self._forecast_archive.get_snapshots,
+                            tz=tz,
+                            now=now,
+                            primary=primary,
+                            sensors=sensors,
+                            previous_model=self._v4_store.v4_model,
+                            primary_aliases=aliases,
+                            in_sleep=in_sleep,
+                            train_days=V4_FIT_TRAIN_DAYS,
+                        )
+                    )
                 if getattr(self, "_shut_down", False) is True:
                     return  # unloaded while fitting: drop the result
                 state = self._v4_store
@@ -5793,6 +5815,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return
         started = _perf_counter()
         now = dt_util.now()
+        run_action, run_minutes = v4_shadow.run_state_from_rows(self._chart_log.raw_entries()[-80:], now)
+        sleep_entity = self.config.get("sleep_indoor_temp_entity")
+        sleep_node = sleep_entity if sleep_entity and sleep_entity in (model_dict.get("sensors") or []) else None
+        sleep_time = self.config.get("sleep_time") if sleep_node else None
+        wake_time = self.config.get("wake_time") if sleep_node else None
+        self._v4_archive.set_ca_source(
+            model_dict.get("primary"),
+            sleep=sleep_node,
+            sleep_time=sleep_time,
+            wake_time=wake_time,
+            tz=getattr(now.tzinfo, "key", None),
+        )
         # The row this cycle just wrote: the fit trains on exactly these fields.
         row = self._chart_log.last_entry()
         row_ts = dt_util.parse_datetime(row.get("ts", "")) if row else None
@@ -5861,6 +5895,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 readings=readings,
                 outdoor_now_f=row.get("outdoor"),
                 forecast_now_f=row.get("pred_outdoor"),
+                hvac_action_now=run_action,
+                run_elapsed_min=run_minutes,
+                ca_sleep_node=sleep_node,
+                ca_sleep_time=sleep_time,
+                ca_wake_time=wake_time,
                 mass_f=mass,
                 mass_steps=mass_steps,
                 sample_fields=sample_fields,
@@ -5938,7 +5977,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     if attempt == 2:
                         _LOGGER.warning(
                             "v4 archive: could not be written at shutdown; up to %d slots of predictions are lost",
-                            sum(len(rows) for rows in archive.data.values()),
+                            sum(archive.slot_count().values()),
                         )
                     continue
                 break
@@ -6086,7 +6125,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             out["fit_running"] = self._v4_fit_running
             out["last_fit"] = dict(self._v4_last_fit)
             out["last_cycle"] = dict(self._v4_last_cycle)
-            out["archive_slots"] = {k: len(v) for k, v in self._v4_archive.data.items()}
+            out["archive_slots"] = self._v4_archive.slot_count()
             return out
         except Exception:  # noqa: BLE001 - a debug field must never break the debug payload
             _LOGGER.debug("v4_model_summary failed", exc_info=True)

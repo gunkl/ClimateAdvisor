@@ -41,7 +41,7 @@ def test_file_is_entry_scoped_and_listed_for_zone_removal(tmp_path: Path) -> Non
 def test_records_1_4_12_24h_per_sensor_and_ca_alias(tmp_path: Path) -> None:
     arch = _archive(tmp_path)
     added = arch.record(_NOW, {"climate.a": _points(_NOW, 68.0), "sensor.b": _points(_NOW, 66.0)}, primary="climate.a")
-    assert added == 12  # 3 lines (two sensors + _ca) x 4 leads
+    assert added == 8  # 2 stored lines x 4 leads: "_ca" is derived on read, never stored
     assert set(arch.data) == {"climate.a", "sensor.b", "_ca"}
     for lead_h in (1, 4, 12, 24):
         slot = slot_key(_NOW + timedelta(hours=lead_h))
@@ -89,7 +89,8 @@ def test_save_and_load_round_trip_atomic_and_private(tmp_path: Path) -> None:
     if sys.platform != "win32":
         assert stat.S_IMODE(os.stat(arch._path).st_mode) == 0o600
     raw = json.loads(arch._path.read_text())
-    assert raw["leads"] == ["1h", "4h", "12h", "24h"] and set(raw["sensors"]) == {"climate.a", "_ca"}
+    assert raw["leads"] == ["1h", "4h", "12h", "24h"] and set(raw["sensors"]) == {"climate.a"}
+    assert raw["ca"]["primary"] == "climate.a"  # "_ca" is derived on read, not stored twice
 
     reloaded = _archive(tmp_path)
     reloaded.load()
@@ -134,16 +135,18 @@ def test_load_drops_expired_and_non_finite(tmp_path: Path) -> None:
 def test_retention_prunes_old_slots_once_an_hour(tmp_path: Path) -> None:
     arch = _archive(tmp_path)
     ancient = _NOW - timedelta(days=V4_ARCHIVE_MAX_DAYS + 10)
-    arch.data = {"_ca": {int(ancient.timestamp()): {"4h": 60.0}}, "gone": {int(ancient.timestamp()): {"4h": 1.0}}}
+    old = int(ancient.timestamp())
+    arch.put("climate.a", old, "4h", 60.0)
+    arch.put("gone", old, "4h", 1.0)
     arch.record(_NOW, {"climate.a": _points(_NOW, 68.0)}, primary="climate.a")
-    assert int(ancient.timestamp()) not in arch.data["_ca"]
+    assert old not in arch.data["climate.a"]
     assert "gone" not in arch.data  # a sensor line with nothing left is dropped
     # a second record inside the hour does not prune again (cheap path)
-    arch.data["_ca"][int(ancient.timestamp())] = {"4h": 60.0}
+    arch.put("climate.a", old, "4h", 60.0)
     arch.record(_NOW + timedelta(minutes=30), {"climate.a": _points(_NOW, 70.0)}, primary="climate.a")
-    assert int(ancient.timestamp()) in arch.data["_ca"]
+    assert old in arch.data["climate.a"]
     arch.record(_NOW + timedelta(hours=2), {"climate.a": _points(_NOW + timedelta(hours=2), 70.0)}, primary="climate.a")
-    assert int(ancient.timestamp()) not in arch.data["_ca"]
+    assert old not in arch.data["climate.a"]
 
 
 def test_save_failure_is_logged_not_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

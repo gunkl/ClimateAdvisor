@@ -60,7 +60,7 @@ def _archive(
         for sensor in sensors:
             extra = 0.1 if sensor == _FINE else 0.0
             for lead in leads:
-                arch.data.setdefault(sensor, {}).setdefault(epoch, {})[lead] = round(_indoor_at(ts) + extra + bias, 2)
+                arch.put(sensor, epoch, lead, round(_indoor_at(ts) + extra + bias, 2))
     return arch
 
 

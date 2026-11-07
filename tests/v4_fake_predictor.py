@@ -69,8 +69,8 @@ class FakePredictor:
     step_calls: list[dict] = field(default_factory=list)
     sample_calls: list[dict] = field(default_factory=list)
 
-    def samples_from_chart_log(self, entries: Any, *, tz: Any, archive_snapshots: Any = None) -> list:
-        self.sample_calls.append({"entries": len(entries), "snapshots": archive_snapshots})
+    def samples_from_chart_log(self, entries: Any, *, tz: Any, archive_snapshots: Any = None, **kw: Any) -> list:
+        self.sample_calls.append({"entries": len(entries), "snapshots": archive_snapshots, **kw})
         return list(entries)
 
     def fit(self, samples: Any, *, primary: str, sensors: Any, tz: Any, now: datetime, **_kw: Any) -> FakeModel:
@@ -129,9 +129,11 @@ class FakePredictor:
         tz: Any,
         outdoor_now_f: float | None = None,
         forecast_now_f: float | None = None,
+        **extra: Any,
     ) -> dict | None:
         self.predict_calls.append(
             {
+                "extra": dict(extra),
                 "now": now,
                 "inputs": list(inputs),
                 "mass_f": mass_f,

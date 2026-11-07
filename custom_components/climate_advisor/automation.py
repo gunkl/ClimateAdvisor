@@ -1583,6 +1583,18 @@ def compute_bedtime_setback(
 # Issue #1371: "pre_cool" is deliberate too -- the spec (comfort-edge-selection-spec section 2) has always said a
 # pre-cool counts as "cool ran" (R3), but its writes were labelled "selector" and the guard never saw them.
 _DELIBERATE_MODE_REASONS: frozenset[str] = frozenset({"user", "tou", "ode_guard", "pre_cool"})
+# Issues #1416/#1417: the side(s) a deliberate command of each reason stands for, for the "ran" record a deliberate
+# write leaves even when it does not change the mode (``_note_deliberate_command``). Pre-cool and the ceiling guard
+# are cool commands: a heat write the selector makes inside a pre-cool pass is not the pre-cool. A TOU bank stands
+# for whichever side it banked. ``user`` is absent on purpose: an occupant's MODE change is in the ring buffer
+# already, and a setpoint-only change says nothing about a side having run (raising the cool setpoint asks for LESS
+# cooling), so it counts only when the equipment is seen running
+# (test_setpoint_only_override_without_equipment_run_does_not_hold).
+_DELIBERATE_COMMAND_SIDES: dict[str, frozenset[str]] = {
+    "tou": frozenset({"heat", "cool"}),
+    "pre_cool": frozenset({"cool"}),
+    "ode_guard": frozenset({"cool"}),
+}
 # Issue #1073: a settling-guard hold that re-enters within this many seconds of the previous episode's end
 # (same candidate) reopens that episode rather than starting a new one.
 _COMFORT_HOLD_MERGE_S = 600.0
@@ -1957,6 +1969,11 @@ class AutomationEngine:
         # forgetting a recent cycle on restart would defeat the guard's purpose.
         self._last_hvac_heating_active: str | None = None  # ISO timestamp
         self._last_hvac_cooling_active: str | None = None  # ISO timestamp
+        # Issues #1416/#1417: the newest DELIBERATE command per side ("heat"/"cool" -> {"ts": ISO, "reason": ...}):
+        # a TOU bank write, an overnight pre-cool write or a ceiling-guard cool write, each one the thermostat
+        # accepted. It counts as "that side ran" for the settling guard
+        # (_minutes_since_family_ran) even when the mode did not change. Persisted like the stamps above.
+        self._deliberate_commands: dict[str, dict[str, str]] = {}
         # Issue #843: same continuously-refreshed-while-active / frozen-once-inactive
         # pattern as the two fields above (Issue #835), extended to fan/nat-vent
         # activity — used by the comfort-family FSM's recency-gated deadband
@@ -5539,6 +5556,10 @@ class AutomationEngine:
             )
             return None
 
+        # Issue #1417: a deliberate band write (the overnight pre-cool and its 30-minute re-assert) is a "ran" record
+        # for its side even in the mode already armed; selector writes are not deliberate and record nothing.
+        self._note_deliberate_command(_cmd_shape, mode_reason, result=_write_result)
+
         # Issue #444, revised by Issue #591/#590 Finding D: _set_temperature() above is always
         # called (unconditional thermostat re-assertion) — only the human-facing ANNOUNCEMENT
         # is deduped here, via the shared _recent_duplicate() helper. Permanent
@@ -7743,6 +7764,8 @@ class AutomationEngine:
                 target_override=target,
                 skip_setpoint_sanity_check=True,
             )
+        # None = redirected to the Away/Vacation setback (no bank was written), which records nothing.
+        self._note_deliberate_command(classification.hvac_mode, "tou", result=_tou_result)
         # Issue #1395: the bank write schedules a 5-minute follow-up, which re-runs the whole cycle and so re-writes the
         # same bank target (and schedules the next follow-up): a write every 5 minutes for the whole bank. The 30-minute
         # cycle re-asserts and the 5-minute bank check re-banks from the thermostat's state, so cancel it (same rule as
@@ -7836,6 +7859,7 @@ class AutomationEngine:
                 mode=mode,
                 skip_setpoint_sanity_check=True,
             )
+        self._note_deliberate_command(mode, "tou", result=_tou_av_result)
         self._cancel_classification_revisit()  # Issue #1395: see apply_tou_precondition()
 
         _tou_av_outcome = hvac_outcome_label(_tou_av_result)
@@ -16258,12 +16282,69 @@ class AutomationEngine:
         except TypeError:  # naive vs aware mix: treat the window as lapsed
             return False
 
+    def _note_deliberate_command(self, mode: str | None, reason: str, *, result: HvacCommandResult | None) -> None:
+        """Issues #1416/#1417: record a DELIBERATE command for ``mode``'s side ("that side ran").
+
+        Occupant view: on a thermostat that reports no ``hvac_action``, a deliberate write in the mode the thermostat
+        was already in left no record that its side ran -- a cool TOU bank ended with heat 68 F on a hot afternoon
+        (#1416), and a hot morning after an overnight pre-cool got heat at wake-up (#1417). Mode CHANGES are
+        recorded by the mode-change ring buffer; this is the record for the same-mode case, read by
+        ``_minutes_since_family_ran`` next to it.
+
+        ``reason`` is a key of ``_DELIBERATE_COMMAND_SIDES`` and the side must be one it stands for (a pre-cool
+        or ceiling-guard pass records only cool). A CA write records only when it reached the thermostat
+        (``result`` EXECUTED, or UNCONFIRMED: sent, answer unknown -- the ``_apply_tou_schedule`` test); a failed,
+        blocked, dry-run or superseded write, or no write (``None``), records nothing.
+        """
+        side = self._direction_key(mode) if isinstance(mode, str) else None
+        if side is None or side not in _DELIBERATE_COMMAND_SIDES.get(reason, frozenset()):
+            return
+        if result not in (HvacCommandResult.EXECUTED, HvacCommandResult.UNCONFIRMED):
+            return
+        records = getattr(self, "_deliberate_commands", None)
+        if not isinstance(records, dict):
+            records = {}
+        records[side] = {"ts": dt_util.now().isoformat(), "reason": reason}
+        self._deliberate_commands = records
+
+    def minutes_since_deliberate_command(self, direction: str, now: datetime) -> float | None:
+        """Issues #1416/#1417: minutes since the newest deliberate command for ``direction`` ("heat"/"cool";
+        "heating"/"cooling" accepted), or None if never / unknown."""
+        key = self._direction_key(direction)
+        records = getattr(self, "_deliberate_commands", None)
+        if key is None or not isinstance(records, dict):
+            return None
+        entry = records.get(key)
+        return self._minutes_since_iso(entry.get("ts") if isinstance(entry, dict) else None, now=now)
+
+    @staticmethod
+    def _sanitize_deliberate_commands(raw: Any) -> dict[str, dict[str, str]]:
+        """Validate a persisted ``_deliberate_commands`` (Issues #1416/#1417): heat/cool keys only, each with an ISO
+        ``ts`` and a known deliberate ``reason`` that stands for that side; anything else is dropped."""
+        out: dict[str, dict[str, str]] = {}
+        if isinstance(raw, dict):
+            for side in ("heat", "cool"):
+                entry = raw.get(side)
+                if not isinstance(entry, dict):
+                    continue
+                ts, reason = entry.get("ts"), entry.get("reason")
+                if not isinstance(ts, str) or side not in _DELIBERATE_COMMAND_SIDES.get(reason, frozenset()):
+                    continue
+                try:
+                    datetime.fromisoformat(ts)
+                except ValueError:
+                    continue
+                out[side] = {"ts": ts, "reason": reason}
+        return out
+
     def _minutes_since_family_ran(self, family: str, now: datetime) -> float | None:
         """Issue #1073/#1149: minutes since ``family`` ("heating"/"cooling") ran or was DELIBERATELY commanded.
 
-        min() of the equipment clock and the mode-change clock; either None = unknown, so the result is
-        None when neither is known. Only DELIBERATE commands count (user, TOU bank, ODE guard); a
-        selector/restore/default write says nothing about the equipment having run (the #1066 09:17 symptom).
+        min() of the equipment clock, the mode-change clock and (Issues #1416/#1417) the deliberate-command
+        clock; None = unknown, so the result is None when none is known. Only DELIBERATE commands count (user,
+        TOU bank, ODE guard, pre-cool); a selector/restore/default write says nothing about the equipment having
+        run (the #1066 09:17 symptom). A deliberate command counts even when it did not change the mode: without
+        ``hvac_action`` it is the only record that its side ran.
         The ONE place this fact is computed, for the known-family and the unknown-family settling guard alike.
         """
         _cands = [
@@ -16271,6 +16352,7 @@ class AutomationEngine:
             for v in (
                 self.minutes_since_equipment_ran(family, now),
                 self.minutes_since_mode_set(family, now, _DELIBERATE_MODE_REASONS),
+                self.minutes_since_deliberate_command(family, now),
             )
             # A negative value is a future timestamp (clock jump / restore): unknown, not "just ran".
             if v is not None and v >= 0.0
@@ -17174,6 +17256,8 @@ class AutomationEngine:
                 reason="ODE ceiling guard — target comfort ceiling",
                 mode="cool",
             )
+        # Issue #1417: the guard's cool write is a deliberate "cool ran" record even when cool was already armed.
+        self._note_deliberate_command("cool", "ode_guard", result=_temp_result_cg)
         # Issue #843: this guard writes mode directly rather than going through
         # _resolve_comfort_family_via_fsm(), so it must arm the family state
         # itself — otherwise the FSM's own dwell/recency bookkeeping goes stale
@@ -20783,6 +20867,9 @@ class AutomationEngine:
         # coil, recreating exactly the humidity issue the feature exists to prevent.
         self._last_hvac_heating_active = state.get("last_hvac_heating_active")
         self._last_hvac_cooling_active = state.get("last_hvac_cooling_active")
+        # Issues #1416/#1417: same rationale -- a restart right after a bank or pre-cool must not forget that its
+        # side ran.
+        self._deliberate_commands = self._sanitize_deliberate_commands(state.get("deliberate_commands"))
         # Issue #843: same restore rationale as the two fields above — forgetting
         # recent fan/nat-vent activity on restart would let the comfort-family FSM's
         # recency gate immediately treat a genuinely-recent cooling session as if it
@@ -21044,6 +21131,8 @@ class AutomationEngine:
             # Issue #835: NOT clean-slate — restored on restart (see restore_state()).
             "last_hvac_heating_active": self._last_hvac_heating_active,
             "last_hvac_cooling_active": self._last_hvac_cooling_active,
+            # Issues #1416/#1417: NOT clean-slate -- restored on restart (see restore_state()).
+            "deliberate_commands": {k: dict(v) for k, v in (getattr(self, "_deliberate_commands", None) or {}).items()},
             # Issue #843: NOT clean-slate — restored on restart (see restore_state()).
             "last_fan_active": self._last_fan_active,
             "last_natvent_active": self._last_natvent_active,

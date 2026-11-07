@@ -1,0 +1,158 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ]
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T15:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T16:00:00",
+      "type": "temp_update",
+      "indoor_f": 68.5,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T16:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T16:35:00",
+      "type": "temp_update",
+      "indoor_f": 68.5,
+      "outdoor_f": 90.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T16:14:59",
+      "expect": "hvac_mode_writes",
+      "since": "2026-07-13T14:00:00",
+      "values": [],
+      "reason": "The thermostat stays in the bank's cool mode until the period starts."
+    },
+    {
+      "at": "2026-07-13T16:14:59",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T15:30:00",
+      "values": [],
+      "reason": "Nothing is written between the 15:30 cycle (which re-asserted the bank) and the period's start."
+    },
+    {
+      "at": "2026-07-13T16:15:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T16:14:59",
+      "values": [
+        76.0
+      ],
+      "reason": "At the high-cost period's start (16:15) the bank ends and the comfort band is written once: cool 76 F, so the AC stops (indoor 68.5 F is far below it). Before #1416 this write was heat 68 F on a thermostat without hvac_action."
+    },
+    {
+      "at": "2026-07-13T16:15:00",
+      "expect": "hvac_mode_writes",
+      "since": "2026-07-13T16:14:59",
+      "values": [],
+      "reason": "No mode change at 16:15: the 15:30 bank write (same mode, no hvac_action) counts as 'cool ran', so the comfort-edge settling guard keeps cool. Before #1416 the thermostat was switched to heat here, the furnace armed on a hot day."
+    },
+    {
+      "at": "2026-07-13T16:29:59",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T16:15:00",
+      "values": [],
+      "reason": "No re-send between the bank end and the next cycle."
+    },
+    {
+      "at": "2026-07-13T16:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T16:29:59",
+      "values": [
+        76.0
+      ],
+      "reason": "The regular cycle re-asserts cool 76 F (the 15:30 bank record is 60 minutes old, inside the 120-minute window); before #1416 it re-asserted heat 68 F."
+    },
+    {
+      "at": "2026-07-13T16:30:00",
+      "expect": "hvac_mode_writes",
+      "since": "2026-07-13T16:15:00",
+      "values": [],
+      "reason": "No mode change between the bank end and the 16:30 cycle: cool stays armed."
+    },
+    {
+      "at": "2026-07-13T16:35:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.text",
+      "value": null,
+      "reason": "After the bank no surface claims one (issue #1404)."
+    },
+    {
+      "at": "2026-07-13T16:35:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.briefing_hvac_row",
+      "value": "HVAC Mode: Cool at 76°F",
+      "reason": "After the bank the briefing quotes the band write actually made at the period start."
+    }
+  ],
+  "name": "tou_home_cool_bank_ends_no_hvac_action_1416",
+  "description": "Issue #1416: the #1405 bank-end golden on a thermostat that does NOT report hvac_action. A home pre-cooled to 68 F for a 16:15 high-cost period; the bank's mode was set at 14:00 and the 15:30 cycle re-asserted the bank in the same mode. Before the fix nothing recorded that the cool side ran (no hvac_action, and a same-mode write is not a mode change; the 14:00 mode change is outside the 120-minute window by 16:15), so at the period's start the selector armed the nearer edge: heat 68 F, the furnace armed on a hot afternoon. Now every accepted bank write records its side, the settling guard holds cool, and the band write is cool 76 F, the same as on a thermostat that reports hvac_action.",
+  "verdict": {
+    "type": "positive",
+    "summary": "Without hvac_action, the end of a cool bank keeps cool armed instead of arming the furnace",
+    "observed_behavior": "16:15 and 16:30: cool 76 F, no mode write. On f877c50 (before #1416): 16:15 set_hvac_mode heat + heat 68 F, 16:30 heat 68 F.",
+    "expected_behavior": "Occupant view: on a hot day the native side stays armed after the bank and the AC idles; the furnace is not armed 0.5 F under the house temperature.",
+    "effectiveness": "Fails on f877c50 (rows 16:15 setpoint and mode, 16:30 setpoint, briefing row: heat 68 F). Removing the bank-write record (_note_tou_bank_command) brings that back.",
+    "alignment": "docs/comfort-edge-selection-spec.md (R3: a TOU bank write counts as 'ran' even when the mode is unchanged, Issue #1416), docs/08-COMPUTATION-REFERENCE.md TOU paragraph and docs/scheduler-spec.md (Issue #1405 bank end).",
+    "user_outcome": "If this regressed, a home whose thermostat reports no hvac_action would get the furnace armed at every cool bank's end (heat 68 F on a hot day), the flip-flop the settling guard exists to prevent."
+  },
+  "source": "synthetic: Issue #1416 (copy of the #1405 bank-end golden on a thermostat without hvac_action)",
+  "issue": 1416
+}

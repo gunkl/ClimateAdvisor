@@ -5170,6 +5170,21 @@ class AutomationEngine:
 
             self._cancel_classification_revisit()
 
+    def _tou_gate_ignoring_occupancy(self) -> ScheduledBandGate:
+        """The shared scheduled-band gate with the occupancy check taken out (Issue #1395).
+
+        The occupancy answer (``DEFER_OCCUPANCY``) comes first in ``decide_scheduled_band_gate()`` and hides the holds
+        below it. A time-of-use bank (Home/Guest or Away/Vacation) cares only about those: a manual override, a
+        door/window pause, nat-vent or whole-house-fan ownership.
+        """
+        return decide_scheduled_band_gate(
+            occupancy_mode=OCCUPANCY_HOME,
+            manual_override_active=self._manual_override_active,
+            paused_by_door=self._paused_by_door,
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+        )
+
     def _tou_bank_skips_band_write(self, tou_bank_owns_setpoint: bool) -> bool:
         """Issue #1393/#1395: True when this pass must not write a band because the time-of-use bank write follows it.
 
@@ -5179,7 +5194,7 @@ class AutomationEngine:
         """
         return bool(
             tou_bank_owns_setpoint
-            and not self._paused_by_door
+            and self._tou_gate_ignoring_occupancy() == ScheduledBandGate.PROCEED
             and not decide_open_sensor_hold(
                 natural_vent_active=self._natural_vent_active,
                 whf_owns_hvac=self._whf_owns_hvac(),
@@ -7623,13 +7638,10 @@ class AutomationEngine:
             return
 
         await self._sync_paused_by_door_with_live_sensors()
-        _gate = decide_scheduled_band_gate(
-            occupancy_mode=self._occupancy_mode,
-            manual_override_active=self._manual_override_active,
-            paused_by_door=self._paused_by_door,
-            natural_vent_active=self._natural_vent_active,
-            whf_owns_hvac=self._whf_owns_hvac(),
-        )
+        # Issue #1395: the shared gate answers DEFER_OCCUPANCY first for Away/Vacation, which hid every hold below it
+        # (override, door/window pause, nat-vent/WHF) from this bank. Ask it with the occupancy check taken out, so the
+        # Away/Vacation bank respects exactly the holds the Home/Guest bank respects.
+        _gate = self._tou_gate_ignoring_occupancy()
         if _gate in (
             ScheduledBandGate.DEFER_OVERRIDE,
             ScheduledBandGate.DEFER_PAUSED,

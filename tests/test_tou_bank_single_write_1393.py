@@ -263,3 +263,54 @@ class TestBankWriteDoesNotScheduleAFiveMinuteLoop:
         engine._cancel_classification_revisit = MagicMock()
         asyncio.run(engine.apply_tou_away_vacation_precondition(c, 73.0, "peak1", "cool"))
         engine._cancel_classification_revisit.assert_called()
+
+
+# --- Issue #1395: the Away/Vacation bank respects the same holds as the Home bank -----------------------------------
+class TestAwayVacationBankRespectsHolds:
+    """The shared gate answers DEFER_OCCUPANCY first for Away/Vacation and used to hide every hold below it."""
+
+    @staticmethod
+    def _bank(engine, c):
+        asyncio.run(engine.apply_tou_away_vacation_precondition(c, 73.0, "peak1", "cool"))
+        return _writes(engine)
+
+    @pytest.mark.parametrize("occupancy", ["away", "vacation"])
+    def test_no_hold_banks(self, occupancy):
+        engine, c = _away(occupancy)
+        assert self._bank(engine, c) == [("cool", 73.0)]
+
+    @pytest.mark.parametrize("occupancy", ["away", "vacation"])
+    @pytest.mark.parametrize(
+        "hold",
+        ["manual_override", "paused_by_door", "natural_vent", "whf"],
+    )
+    def test_each_hold_defers_the_bank(self, occupancy, hold):
+        engine, c = _away(occupancy)
+        if hold == "manual_override":
+            engine._manual_override_active = True
+        elif hold == "paused_by_door":
+            engine._paused_by_door = True
+            engine._sync_paused_by_door_with_live_sensors = AsyncMock()
+        elif hold == "natural_vent":
+            engine._natural_vent_active = True
+        else:
+            engine._whf_owns_hvac = MagicMock(return_value=True)
+        assert self._bank(engine, c) == []
+
+    @pytest.mark.parametrize("occupancy", ["away", "vacation"])
+    def test_pending_override_confirm_defers_the_bank(self, occupancy):
+        engine, c = _away(occupancy)
+        engine._override_confirm_pending = True
+        assert self._bank(engine, c) == []
+
+    @pytest.mark.parametrize("hold", ["natural_vent", "whf"])
+    def test_a_hold_keeps_the_setback_band_when_the_bank_defers(self, hold):
+        """With nat-vent/WHF the bank writes nothing, so the cycle must not skip the setback band as well."""
+        engine, c = _away("away")
+        if hold == "natural_vent":
+            engine._natural_vent_active = True
+        else:
+            engine._whf_owns_hvac = MagicMock(return_value=True)
+        engine.handle_occupancy_away = AsyncMock()
+        asyncio.run(engine.apply_classification(c, indoor_temp=76.0, tou_bank_owns_setpoint=True))
+        engine.handle_occupancy_away.assert_awaited_once()

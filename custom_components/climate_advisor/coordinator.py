@@ -46,6 +46,7 @@ from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
     AutomationEngineCallbacks,
+    HvacCommandResult,
     PreCoolDecision,
     _in_sleep_window,
     _refuse_if_shut_down,
@@ -7935,28 +7936,54 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         resolution = self._tou_phase_resolution
         if resolution is not None and resolution.phase == TOUPhase.PRECONDITIONING:
+            engine = self.automation_engine
+            _record_before = engine._hvac_write_record
             if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
                 # Issue #899: split-delta precool/preheat, bypassing the Issue #85
                 # occupancy-redirect safety net (this call site already IS the
                 # occupancy-aware away/vacation path — see
                 # apply_tou_away_vacation_precondition()'s own docstring).
-                await self.automation_engine.apply_tou_away_vacation_precondition(
+                await engine.apply_tou_away_vacation_precondition(
                     self._current_classification, resolution.target, resolution.schedule_id, resolution.mode
                 )
             else:
-                await self.automation_engine.apply_tou_precondition(
+                await engine.apply_tou_precondition(
                     self._current_classification, resolution.target, resolution.schedule_id
                 )
+            # Issue #1395: remember a bank write the thermostat accepted, for a device whose state shows neither a
+            # single setpoint nor a range (see _thermostat_holds_tou_bank()).
+            _record = engine._hvac_write_record
+            if _record is not _record_before and _record.result in (
+                HvacCommandResult.EXECUTED,
+                HvacCommandResult.UNCONFIRMED,
+            ):
+                self._tou_bank_written = (resolution.schedule_id, resolution.schedule_start)
 
     def _thermostat_holds_tou_bank(self, resolution: Any) -> bool:
-        """The thermostat is in the bank's mode at the bank target (Issue #1395). Unreadable counts as not held."""
+        """The thermostat holds the bank target in the bank's mode (Issue #1395).
+
+        Three kinds of device, read in this order: a single setpoint (``temperature``) in the bank's mode; a range-only
+        device (``target_temp_low``/``target_temp_high``, no single setpoint) whose edge for the bank's mode (cool is
+        the high edge, heat the low edge) is at the target while it is in the bank's mode or a range mode; a device
+        that reports neither, for which the answer is whether OUR last bank write in this window was accepted, so it is
+        written once rather than every five minutes. Unreadable counts as not held.
+        """
         cs = self.hass.states.get(self.config.get("climate_entity", ""))
         if cs is None or resolution.target is None:
             return False
-        setpoint_f = read_state_temp_f(cs, "temperature", self.config.get("temp_unit", "fahrenheit"))
-        return bool(
-            setpoint_f is not None and cs.state == resolution.mode and abs(setpoint_f - float(resolution.target)) < 0.6
-        )
+        unit = self.config.get("temp_unit", "fahrenheit")
+        target = float(resolution.target)
+        single = read_state_temp_f(cs, "temperature", unit)
+        if single is not None:
+            return bool(cs.state == resolution.mode and abs(single - target) < 0.6)
+        low = read_state_temp_f(cs, "target_temp_low", unit)
+        high = read_state_temp_f(cs, "target_temp_high", unit)
+        if low is not None or high is not None:
+            edge = high if resolution.mode == "cool" else low
+            return bool(
+                edge is not None and cs.state in (resolution.mode, "heat_cool", "auto") and abs(edge - target) < 0.6
+            )
+        return getattr(self, "_tou_bank_written", None) == (resolution.schedule_id, resolution.schedule_start)
 
     async def _async_tou_bank_tick(self, _now: Any) -> None:
         """Open the time-of-use bank on the 5-minute check after its window starts (Issue #1230 X7).

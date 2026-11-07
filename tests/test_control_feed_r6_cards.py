@@ -119,7 +119,7 @@ def test_no_fit_primary_does_not_read_v3s_hot_curve_in_the_guard() -> None:
 
 
 # ----------------------------------------------------------------------------- X7: the 5-minute TOU check
-def _coordinator(resolution: TOUPhaseResolution | None, now: datetime, *, thermostat=("cool", 68.0)):
+def _coordinator(resolution: TOUPhaseResolution | None, now: datetime, *, thermostat=("cool", 68.0), attrs=None):
     from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator  # noqa: PLC0415
 
     c = object.__new__(ClimateAdvisorCoordinator)
@@ -127,7 +127,8 @@ def _coordinator(resolution: TOUPhaseResolution | None, now: datetime, *, thermo
     c.config = {"climate_entity": "climate.t", "temp_unit": "fahrenheit"}
     c.hass = MagicMock()
     state = MagicMock()
-    state.state, state.attributes = thermostat[0], {"temperature": thermostat[1]}
+    state.state = thermostat[0]
+    state.attributes = attrs if attrs is not None else {"temperature": thermostat[1]}
     c.hass.states.get.return_value = state
     c._tou_phase_resolution = resolution
     c._current_classification = MagicMock()
@@ -225,3 +226,83 @@ def test_a_window_open_steps_until_follows_its_periods_current_close() -> None:
     assert texts["windows_close"].ts == early_close.ts
     assert texts["windows_open"].text.endswith("until about 11:00 AM.")
     assert texts["windows_open"].ts == open_step.ts and texts["windows_open"].status == "done"  # time/status untouched
+
+
+# ---------------------------------------------- Issue #1395: range-only thermostats
+def _tick_writes(c, resolution) -> bool:
+    c._tou_phase_resolution = resolution
+    with patch("custom_components.climate_advisor.coordinator.dt_util") as dtu:
+        dtu.now.return_value = _NOW
+        asyncio.run(c._async_tou_bank_tick(_NOW))
+    return c._apply_tou_schedule.await_count == 1
+
+
+_BANKING = _res(TOUPhase.PRECONDITIONING, _NOW + timedelta(minutes=-30), _NOW + timedelta(minutes=75))
+
+
+@pytest.mark.parametrize(
+    ("state", "attrs", "writes"),
+    [
+        (
+            "heat_cool",
+            {"temperature": None, "target_temp_low": 60.0, "target_temp_high": 68.0},
+            False,
+        ),  # cool edge held
+        ("heat_cool", {"target_temp_low": 60.0, "target_temp_high": 76.0}, True),  # comfort edge left on
+        ("cool", {"target_temp_low": 60.0, "target_temp_high": 68.0}, False),
+        ("off", {"target_temp_low": 60.0, "target_temp_high": 68.0}, True),
+        ("heat_cool", {"target_temp_low": 60.0}, True),  # no high edge to read for a cool bank
+    ],
+    ids=["range-held", "range-comfort-edge", "range-in-bank-mode", "range-off", "range-missing-edge"],
+)
+def test_range_only_thermostat_held_check_reads_the_edge_for_the_banks_mode(state, attrs, writes) -> None:
+    c = _coordinator(_BANKING, _NOW, thermostat=(state, None), attrs=attrs)
+    assert _tick_writes(c, _BANKING) is writes
+
+
+def test_range_only_heat_bank_reads_the_low_edge() -> None:
+    res = TOUPhaseResolution(
+        TOUPhase.PRECONDITIONING, 76.0, "heat", "peak1", _NOW + timedelta(minutes=75), _NOW + timedelta(minutes=-30)
+    )
+    c = _coordinator(
+        res, _NOW, thermostat=("heat_cool", None), attrs={"target_temp_low": 76.0, "target_temp_high": 80.0}
+    )
+    assert _tick_writes(c, res) is False
+    c = _coordinator(
+        res, _NOW, thermostat=("heat_cool", None), attrs={"target_temp_low": 68.0, "target_temp_high": 76.0}
+    )
+    assert _tick_writes(c, res) is True
+
+
+def test_a_device_reporting_neither_is_trusted_after_our_accepted_bank_write() -> None:
+    attrs = {"hvac_modes": ["off", "cool"]}
+    c = _coordinator(_BANKING, _NOW, thermostat=("cool", None), attrs=attrs)
+    assert _tick_writes(c, _BANKING) is True  # nothing written yet in this window: write once
+    c2 = _coordinator(_BANKING, _NOW, thermostat=("cool", None), attrs=attrs)
+    c2._tou_bank_written = ("peak1", _BANKING.schedule_start)
+    assert _tick_writes(c2, _BANKING) is False  # written once already: leave it
+    c3 = _coordinator(_BANKING, _NOW, thermostat=("cool", None), attrs=attrs)
+    c3._tou_bank_written = ("peak1", _BANKING.schedule_start - timedelta(days=1))  # another window's write
+    assert _tick_writes(c3, _BANKING) is True
+
+
+def test_apply_tou_schedule_records_an_accepted_bank_write_only() -> None:
+    from custom_components.climate_advisor.automation import HvacCommandResult  # noqa: PLC0415
+    from custom_components.climate_advisor.const import OCCUPANCY_HOME  # noqa: PLC0415
+
+    for result, recorded in ((HvacCommandResult.EXECUTED, True), (HvacCommandResult.FAILED, False), (None, False)):
+        c = _coordinator(_BANKING, _NOW)
+        c._apply_tou_schedule = type(c)._apply_tou_schedule.__get__(c)
+        c._occupancy_mode = OCCUPANCY_HOME
+        engine = MagicMock()
+        engine._hvac_write_record = MagicMock(result=None)
+        new_record = MagicMock(result=result)
+
+        async def _precondition(*_a, _e=engine, _r=new_record, _w=result):
+            if _w is not None:
+                _e._hvac_write_record = _r
+
+        engine.apply_tou_precondition = _precondition
+        c.automation_engine = engine
+        asyncio.run(c._apply_tou_schedule())
+        assert (getattr(c, "_tou_bank_written", None) == ("peak1", _BANKING.schedule_start)) is recorded

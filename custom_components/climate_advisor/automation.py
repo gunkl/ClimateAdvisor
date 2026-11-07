@@ -16924,11 +16924,43 @@ class AutomationEngine:
         # held at 74 instead of 72). An occupant's mode change or a setpoint ABOVE the ceiling fails this test, so the
         # guard still acts exactly as before (off / heat / cool above the ceiling). Observe-only keeps recording its
         # would-do.
+        # Issue #1403: a thermostat that reports CA's own write a fraction ABOVE what was sent (a write of 23.3 C under
+        # a 74 F ceiling reported as 23.5 C) is still holding CA's setpoint (#1397 tolerance), so the guard must not
+        # read it as "cooling above the ceiling" and re-send every cycle. CA's own setpoint is the held one (shown by
+        # the thermostat) or one still in the echo window (the band re-sends it earlier in this same cycle, which
+        # clears the held record until the echo). Only CA's own write counts: an occupant's setpoint above the
+        # ceiling still gets the guard.
+        _own_temps_cg: list[float] = []
+        _held_temp_cg = ((getattr(self, "_held_own_setpoints", None) or {}).get(self.climate_entity) or {}).get(
+            "temperature"
+        )
+        if isinstance(_held_temp_cg, (int, float)):
+            _own_temps_cg.append(float(_held_temp_cg))
+        for _w_cg in getattr(self, "_own_setpoint_writes", None) or ():
+            if (
+                getattr(_w_cg, "entity_id", None) == self.climate_entity
+                and getattr(_w_cg, "attribute", "") == "temperature"
+            ):
+                _own_temps_cg.append(float(_w_cg.value))
+        _holds_own_at_ceiling_cg = False
+        if _old_setpoint_raw_cg is not None:
+            try:
+                _holds_own_at_ceiling_cg = any(
+                    to_fahrenheit(_own, _unit) <= _ceiling_cg + 0.05
+                    and holds_own_setpoint(
+                        held={"temperature": _own},
+                        observed={"temperature": _old_setpoint_raw_cg},
+                        tolerance=hold_tolerance(_unit),
+                    )
+                    for _own in _own_temps_cg
+                )
+            except TypeError, ValueError:
+                _holds_own_at_ceiling_cg = False
         if (
             not self.dry_run
             and _old_mode_cg == "cool"
             and _old_setpoint_f_cg is not None
-            and _old_setpoint_f_cg <= _ceiling_cg + 0.05
+            and (_old_setpoint_f_cg <= _ceiling_cg + 0.05 or _holds_own_at_ceiling_cg)
         ):
             _LOGGER.debug(
                 "ODE ceiling guard: thermostat already cooling at %.1f (<= ceiling %.1f) -- nothing to send",

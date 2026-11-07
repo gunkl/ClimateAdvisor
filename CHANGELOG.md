@@ -14,6 +14,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **Debug tab:** no raw JSON. The prediction-engine section is plain rows (primary and comparison engine, what decisions use, last learned, typical miss, sensors, last prediction, archive), the plan is a short "Plan" group, and the "Other" group is gone. Download diagnostics still has all the raw data.
   - **Scoring page:** "Back to dashboard" is a button and returns to the dashboard you use (classic if you came from classic).
   - **Fixed on the way:** on °C installs the Debug tab's learning pipeline showed the indoor change unconverted; the remote-offset sentence no longer shows a signed "+4°F" gap.
+- Fix #1403: the ceiling guard no longer re-sends "cool" every cycle when the thermostat reports Climate Advisor's own setpoint a fraction above the ceiling (for example a 23.3 °C write shown as 23.5 °C). Within 0.5 °F of CA's own write is CA's setpoint (the #1397 rule); an occupant's setpoint above the ceiling still gets the guard.
 - Fix #1398: Settings (Prediction engine help), the Prediction accuracy page, the log and the 0.9.4 release notes no longer say decisions use v3. The engine you choose times them; while it is still learning they use their defaults, never the other engine.
 - Docs: README brought up to 0.9.4 (prediction engines, the plan, the new dashboard as the default, upgrading), a new CONTRIBUTING.md, and every spec under `docs/` checked against the code.
 - Tests: a signed golden scenario pins the Away/Vacation time-of-use bank single write (#1395).

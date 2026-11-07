@@ -572,5 +572,50 @@
     "sha256": "053f6e6c1f162e526faa5fd03e6c74902a8a9a8842d78bbbdf69b1a380658916",
     "signed": "2026-11-06",
     "issue": 1230
+  },
+  "r6b_warm_off_day_no_redundant_guard_writes__v4": {
+    "sha256": "ca4d9e438b0b27b258e9b5d0ce1c72d411299d89fe647cbfc014e4e7464f698c",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r6b_warm_off_day_no_redundant_guard_writes__v3": {
+    "sha256": "1af904e243481c206e6b9cde18b3b3adebba5d86e744f52979eb05c1b175a8ac",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r6b_natvent_window_close_follows_primary__v4": {
+    "sha256": "7575446eeaf2a984e7761e177558791a07b3550a888cbd60d50ffe108da5bb4d",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r6b_natvent_window_close_follows_primary__v3": {
+    "sha256": "d19a5a1fd734e05e82fb73733c04dcdc72af4410d14e39b63eae2513347eaea0",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r6b_tou_bank_lead_follows_primary__v4": {
+    "sha256": "7e364a270444dd77a270263fb3f880312162c520dea86ebe1d006bb337286b26",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r6b_tou_bank_lead_follows_primary__v3": {
+    "sha256": "42ea1db2561b4a8e67105fa203de2e876e8d02d037aafc353379f356758796e9",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r6b_primary_without_a_fit_uses_defaults_tou_lead__v4": {
+    "sha256": "abb699907f173ae990e626d5eced6b47d221fb14e19564b0fe993c2c16ba39e3",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r6b_primary_without_a_fit_uses_defaults_tou_lead_plan__v4": {
+    "sha256": "c0246ff80de8291cdb3f08aa5c7534b59067af4339740a8b23e9927af7582aa9",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r6b_tou_bank_lead_follows_primary_heat__v4": {
+    "sha256": "1e9ef11bcddb30dacca582df7cc6489d628915bc33257fe8cc4828f5b9948cd4",
+    "signed": "2026-11-06",
+    "issue": 1230
   }
 }

@@ -275,7 +275,6 @@
         <div class="cl-item key-extra" id="legend-thermostat-set" style="display:none"><span class="cl-swatch" style="border-top:2px dashed rgba(255,193,7,0.95)"></span><span>Thermostat set</span></div>
       </details>
       <p class="chart-note" id="chart-v4-note" hidden></p>
-      <div id="chart-hover-panel" class="chart-hover-panel" aria-live="off"></div>
       <div class="chart-stack" id="chart-stack" tabindex="0" aria-label="Temperature chart. Left and right arrows move a readout along the time axis; Escape clears it. Table view lists the same values.">
         <div class="chart-container">
           <canvas id="temp-chart" role="img" aria-label="Indoor temperature by sensor with predictions"></canvas>
@@ -288,6 +287,7 @@
         </div>
         <div class="chart-cursor" id="chart-cursor" hidden></div>
       </div>
+      <div id="chart-hover-panel" class="chart-hover-panel" aria-live="off"></div>
       <p class="chart-note" id="chart-empty" hidden>No chart data yet. The chart fills in as Climate Advisor logs readings.</p>
       <div class="chart-table-wrap" id="chart-table-wrap" hidden>
         <div class="chart-table-actions"><button type="button" class="chart-tool-btn" id="chart-table-copy" onclick="copyChartTable()">Copy table</button></div>

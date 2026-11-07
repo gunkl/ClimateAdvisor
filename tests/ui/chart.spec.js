@@ -235,11 +235,12 @@ test.describe('Temperature Forecast Chart', () => {
     expect(html).not.toContain('Sched fan');
   });
 
-  test('hover panel height stays fixed when state badges appear', async ({ page }) => {
-    // Get panel offsetHeight when empty (no hover yet)
-    const emptyHeight = await page.evaluate(() =>
-      document.getElementById('chart-hover-panel').offsetHeight
-    );
+  test('state badges appearing in the readout do not move the chart (readout is below it)', async ({ page }) => {
+    // The readout used to sit above the chart with a fixed 104px height so badges could not push the chart down.
+    // It now sits below the chart stack and sizes to its content; the layout-jump guard is that the chart itself
+    // stays put while the readout fills with HVAC/fan badges.
+    const chartTop = () => page.evaluate(() => document.getElementById('temp-chart').getBoundingClientRect().top + window.scrollY);
+    const before = await chartTop();
 
     // Trigger hover at HVAC=fan segment (fixture i=5 → ts = now - 42*1800000)
     const fanX = await page.evaluate(() => {
@@ -252,12 +253,8 @@ test.describe('Temperature Forecast Chart', () => {
     await page.evaluate((x) => window.__triggerHoverAt(x), fanX);
     await page.waitForTimeout(150);
 
-    const badgeHeight = await page.evaluate(() =>
-      document.getElementById('chart-hover-panel').offsetHeight
-    );
-
-    // Panel height must not grow when HVAC/fan badges appear — layout jump is a UX bug
-    expect(badgeHeight).toBe(emptyHeight);
+    expect((await page.locator('#chart-hover-panel').innerHTML()).toLowerCase()).toContain('fan');
+    expect(Math.abs((await chartTop()) - before)).toBeLessThan(0.5);
   });
 
   test('fan state shown once — HVAC fan mode does not also show Fan on badge', async ({ page }) => {

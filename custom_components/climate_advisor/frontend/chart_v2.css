@@ -195,7 +195,16 @@
   .chart-stack .chart-container-out { height: 130px; }
   .chart-cursor { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--text-secondary); pointer-events: none; opacity: 0.8; z-index: 2; }
   .chart-cursor.pinned { border-left: 2px solid var(--primary); opacity: 1; }
-  .chart-hover-panel { height: 104px; overflow: auto; display: block; padding: 2px 0 6px; }
+  /* The readout sits below the chart stack, so growing never moves the chart under the pointer. It never scrolls: it
+     grows to fit every row (laid out in a responsive grid). Idle it is one short hint line; while the pointer is over
+     the chart chart_v2.js holds it at the tallest height reached (inline min-height) so content below does not jump. */
+  .chart-hover-panel { box-sizing: border-box; height: auto; min-height: 22px; overflow: visible; display: block; padding: 4px 0 6px; }
+  .chart-hover-panel .chp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 2px 18px; align-items: start; }
+  .chart-hover-panel .chp-grid .chp-row { min-width: 0; }
+  .chart-hover-panel .chp-grid .chp-item { white-space: normal; overflow-wrap: anywhere; min-width: 0; }
+  .chart-hover-panel:empty::before { content: 'Hover the chart to read values; click to pin.'; font-size: 0.74rem; opacity: 0.8; }
+  @media (hover: none) { .chart-hover-panel:empty::before { content: 'Tap the chart to pin the values there.'; } }
+  .chart-hover-panel:empty:has(+ .chart-note:not([hidden]))::before { content: none; }
   .chart-hover-panel .chp-time { display: flex; gap: 10px; align-items: center; color: var(--text-secondary); margin-bottom: 2px; font-weight: 600; }
   .chart-hover-panel .chp-row { display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: center; min-height: 20px; }
   .chart-hover-panel .chp-row-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; width: 5.2em; flex: 0 0 5.2em; }

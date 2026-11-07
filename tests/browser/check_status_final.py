@@ -343,6 +343,35 @@ def layout(pg, name, vp):
     check(f"{name}: no horizontal scroll", sw <= vp["width"] + 1, f"{sw}px > {vp['width']}px")
 
 
+READOUT_JS = """() => {
+  const r = id => document.getElementById(id).getBoundingClientRect();
+  const p = document.getElementById('chart-hover-panel');
+  return { stackBottom: r('chart-stack').bottom, top: r('chart-hover-panel').top, h: p.offsetHeight,
+           chartTop: r('temp-chart').top + window.scrollY, html: p.innerHTML };
+}"""
+
+
+def readout_checks(pg, name, label):
+    # The hover readout sits below the chart; idle it is one hint line, not a reserved empty block.
+    idle = pg.evaluate(READOUT_JS)
+    check(f"{name}: readout is below the chart", idle["top"] >= idle["stackBottom"] - 0.5, str(idle))
+    check(f"{name}: idle readout is compact", not idle["html"].strip() and idle["h"] <= 40, f"{idle['h']}px")
+    pg.evaluate("() => window.__triggerHoverAt(document.getElementById('temp-chart').getBoundingClientRect().width * 0.4)")
+    pg.wait_for_timeout(150)
+    hov = pg.evaluate(READOUT_JS)
+    check(f"{name}: hover fills the readout", "chp-row" in hov["html"] and hov["h"] > idle["h"], f"{hov['h']}px")
+    check(f"{name}: hover does not move the chart", abs(hov["chartTop"] - idle["chartTop"]) < 0.5)
+    y = pg.evaluate("window.scrollY") + pg.locator("#chart-stack").bounding_box()["y"]
+    h = pg.locator("#chart-stack").bounding_box()["height"]
+    pg.screenshot(
+        path=str(OUT / f"readout-{name.split('/')[0]}-{label}.png"),
+        full_page=True,
+        clip={"x": 0, "y": max(0, y - 60), "width": pg.viewport_size["width"], "height": h + 60 + hov["h"] + 40},
+    )
+    pg.evaluate("() => document.getElementById('chart-stack').dispatchEvent(new MouseEvent('mouseleave'))")
+    pg.wait_for_timeout(100)
+
+
 def click_every_status_control(pg, name):
     """Every visible Status button once (re-queried as the DOM redraws). Navigation links are skipped."""
     open_key(pg)
@@ -521,6 +550,7 @@ def run_page(browser, page, label, vp, scheme):
         )
     plan_checks(pg, name, "#status-plan-list" if new else "#plan-list")
     layout(pg, name, vp)
+    readout_checks(pg, name, label)
     if new:
         bad = pg.evaluate(CONTRAST_JS)
         check(f"{name}: Status text contrast", not bad, f"{len(bad)} low: {bad[:5]}")

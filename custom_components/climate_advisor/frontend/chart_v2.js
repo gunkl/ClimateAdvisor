@@ -122,6 +122,8 @@
   let _chartPrefs = null;
   let _chartPrefsZone = '\u0000';
   let _cursorMs = null;           // hover / pinned readout time (ms)
+  let _readoutHeld = 0;           // tallest readout height (px) while the pointer is over the chart; 0 = not held
+  let _downX = null, _downY = null; // mousedown point: a click pins, a drag (zoom) does not
   let _cursorPinned = false;
   let _series = [];               // the catalog of the last draw
   let _tableView = false;
@@ -1043,7 +1045,10 @@
     _renderReadout(ms);
   }
 
-  function _clearCursor() {
+  // keepHeight: the pointer is still over the chart (between canvases, in an axis gutter), so the readout keeps the
+  // height it has reached; otherwise (pointer left, unpinned, Esc) it shrinks back to its content.
+  function _clearCursor(keepHeight) {
+    if (!keepHeight) _releaseReadoutHeight();
     _cursorMs = null;
     _cursorPinned = false;
     window.__test_cursorPx = null;
@@ -1051,6 +1056,19 @@
     if (line) line.hidden = true;
     const panel = document.getElementById('chart-hover-panel');
     if (panel) panel.innerHTML = '';
+  }
+
+  function _releaseReadoutHeight() {
+    _readoutHeld = 0;
+    const panel = document.getElementById('chart-hover-panel');
+    if (panel) panel.style.minHeight = '';
+  }
+
+  // Hold the readout at the tallest height it has reached, so moving between points with fewer rows does not make the
+  // content below the chart jump up and down. Released by _clearCursor().
+  function _holdReadoutHeight(panel) {
+    const h = panel.offsetHeight;
+    if (h > _readoutHeld) { _readoutHeld = h; panel.style.minHeight = h + 'px'; }
   }
 
   function _chpItem(color, text) {
@@ -1122,10 +1140,12 @@
       if (closest.event) stateHtml += '<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">' + escapeHtml(String(closest.event).replace(/_/g, ' ')) + '</div>';
     }
     const when = new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const pin = _cursorPinned ? '<button type="button" class="chp-clear" onclick="clearChartPin()">Pinned · clear</button>' : '';
+    const touchOnly = window.matchMedia && window.matchMedia('(hover: none)').matches;
+    const pin = _cursorPinned ? '<button type="button" class="chp-clear" onclick="clearChartPin()">Pinned · ' + (touchOnly ? 'tap' : 'click') + ' to release</button>' : '';
     const body = _readoutRow('Indoor', lines.indoor) + _readoutRow('Predicted', lines.predicted) + _readoutRow('Outdoor', lines.outdoor) +
       _readoutRow('Overlays', overlay) + (stateHtml ? '<div class="chp-row">' + stateHtml + '</div>' : '');
-    panel.innerHTML = body ? '<div class="chp-time">' + when + pin + '</div>' + body : '';
+    panel.innerHTML = body ? '<div class="chp-time">' + when + pin + '</div><div class="chp-grid">' + body + '</div>' : '';
+    _holdReadoutHeight(panel);
   }
 
   function clearChartPin() { _clearCursor(); }
@@ -1155,12 +1175,26 @@
     stack.addEventListener('mousemove', e => {
       if (Date.now() - _lastTouchAt < 700 || _cursorPinned) return;   // a synthesised mouse event after a tap
       const ms = _msAtClientX(e.clientX);
-      if (ms == null) { _clearCursor(); return; }
+      if (ms == null) { _clearCursor(true); return; }
       _setCursor(ms, false);
     });
-    const leave = () => { if (!_cursorPinned) _clearCursor(); };
-    stack.addEventListener('mouseleave', leave);
-    ['temp-chart', 'out-chart', 'activity-chart'].forEach(id => { const c = document.getElementById(id); if (c) c.addEventListener('mouseleave', leave); });
+    stack.addEventListener('mouseleave', () => { if (!_cursorPinned) _clearCursor(); });
+    ['temp-chart', 'out-chart', 'activity-chart'].forEach(id => {
+      const c = document.getElementById(id);
+      if (c) c.addEventListener('mouseleave', () => { if (!_cursorPinned) _clearCursor(true); });
+    });
+    // Desktop pin: a click freezes the readout on that moment; the next click (or Esc) lets go. A drag (zoom select)
+    // is not a click, and the mouse events a browser synthesises after a tap are left to the touch pin below.
+    stack.addEventListener('mousedown', e => { _downX = e.clientX; _downY = e.clientY; });
+    stack.addEventListener('click', e => {
+      if (Date.now() - _lastTouchAt < 700) return;
+      const dragged = _downX != null && (Math.abs(e.clientX - _downX) > 5 || Math.abs(e.clientY - _downY) > 5);
+      _downX = _downY = null;
+      if (dragged) return;
+      if (_cursorPinned) { _clearCursor(); const ms = _msAtClientX(e.clientX); if (ms != null) _setCursor(ms, false); return; }
+      const ms = _msAtClientX(e.clientX);
+      if (ms != null) _setCursor(ms, true);
+    });
     stack.addEventListener('touchstart', e => {
       _multiTouch = e.touches.length > 1;
       if (e.touches.length === 1) {

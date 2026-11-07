@@ -4850,6 +4850,7 @@ class AutomationEngine:
         indoor_temp: float | None = None,
         nat_vent_cutoff: datetime | None = None,
         nat_vent_cutoff_already_reached: bool = False,
+        tou_bank_owns_setpoint: bool = False,
     ) -> None:
         """Apply a new day classification — adjust HVAC behavior accordingly.
 
@@ -4878,6 +4879,12 @@ class AutomationEngine:
                 crossing already behind us, so ``nat_vent_cutoff`` is only the next grid point after "now").
                 When True the planned window period is over. Callers that pass no cutoff reset both to
                 None/False.
+            tou_bank_owns_setpoint: Issue #1393 -- the coordinator's resolved time-of-use phase this cycle is
+                ``PRECONDITIONING`` (Home/Guest) and ``_apply_tou_schedule()`` runs right after this call and writes
+                the bank target. The comfort band edge is then NOT written here (it would be contradicted in the same
+                second: cool 76 then 68, heat 68 then 76); every other path of this method is unchanged. Honoured only
+                when the shared gate is ``PROCEED`` and no door/window or blower hold applies -- exactly the cases in
+                which ``apply_tou_precondition()`` is guaranteed to write.
         """
         async with self._decision_pass("apply_classification"):
             self._current_classification = classification
@@ -5120,7 +5127,26 @@ class AutomationEngine:
             )
             # Issue #1371: an overnight pre-cool in force is kept, not overwritten by the plain sleep band.
             _held = self._hold_pre_cool_band(_band)
-            if _held is not _band:
+            if (
+                tou_bank_owns_setpoint
+                and _gate == ScheduledBandGate.PROCEED
+                and not decide_open_sensor_hold(
+                    natural_vent_active=self._natural_vent_active,
+                    whf_owns_hvac=self._whf_owns_hvac(),
+                    any_sensor_settled_open=self._any_monitored_sensor_settled_open(),
+                )
+                and not self._blower_session_holds_hvac_off()
+            ):
+                # Issue #1393: the time-of-use bank owns the setpoint this cycle -- _apply_tou_schedule() writes the
+                # bank target once, right after this pass. Keep the cached intended band (the reactive comfort check
+                # reads it) but do not write the edge the bank target would immediately contradict.
+                self._last_comfort_band = _held
+                _LOGGER.info(
+                    "apply_classification: time-of-use bank owns the setpoint this cycle -- comfort band edge not "
+                    "written (the bank target is written once by the TOU step); day_type=%s",
+                    classification.day_type,
+                )
+            elif _held is not _band:
                 await self._apply_comfort_band(_held, reason=cls_reason + " (pre-cool held)", mode_reason="pre_cool")
             else:
                 await self._apply_comfort_band(_band, reason=cls_reason)

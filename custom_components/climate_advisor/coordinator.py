@@ -4239,6 +4239,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._current_classification,
                     predicted_indoor=self.control_predicted_indoor(),
                     indoor_temp=self._get_indoor_temp(),
+                    tou_bank_owns_setpoint=self._tou_bank_owns_setpoint(),
                     nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
                     nat_vent_cutoff_already_reached=bool(
                         (getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff_already_reached", False)
@@ -7918,6 +7919,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "preconditioned": preconditioned,
                 "hvac_mode": mode,
             },
+        )
+
+    def _tou_bank_owns_setpoint(self) -> bool:
+        """Issue #1393: this cycle's resolved time-of-use phase is Home/Guest ``PRECONDITIONING``, so
+        ``_apply_tou_schedule()`` (which runs right after ``apply_classification()`` on the regular cycle) writes the
+        bank target and ``apply_classification()`` must not write the comfort edge first. Away/Vacation take the split
+        delta path instead and are not covered."""
+        resolution = getattr(self, "_tou_phase_resolution", None)
+        return bool(
+            resolution is not None
+            and resolution.phase == TOUPhase.PRECONDITIONING
+            and self._occupancy_mode not in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
         )
 
     async def _apply_tou_schedule(self) -> None:

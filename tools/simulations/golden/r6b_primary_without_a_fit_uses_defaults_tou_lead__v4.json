@@ -80,10 +80,9 @@
       "expect": "setpoint_writes",
       "since": "2026-07-13T15:00:30",
       "values": [
-        76.0,
         68.0
       ],
-      "reason": "The 15:30 cycle is the first inside the window: the comfort setpoint then the bank setpoint (pre-existing flicker, issue #1393: the assertion changes to a single write when it is fixed)."
+      "reason": "The 15:30 cycle is the first inside the window: the bank setpoint is written once, without the comfort setpoint first (issue #1393)."
     },
     {
       "at": "2026-07-13T15:30:00",

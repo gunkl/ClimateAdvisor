@@ -599,12 +599,12 @@
     "issue": 1230
   },
   "r6b_tou_bank_lead_follows_primary__v3": {
-    "sha256": "42ea1db2561b4a8e67105fa203de2e876e8d02d037aafc353379f356758796e9",
+    "sha256": "5b48cb7d1d047f3749e88c2c0cec349fb63521fa47b081530d3b8e655677a28f",
     "signed": "2026-11-06",
     "issue": 1230
   },
   "r6b_primary_without_a_fit_uses_defaults_tou_lead__v4": {
-    "sha256": "abb699907f173ae990e626d5eced6b47d221fb14e19564b0fe993c2c16ba39e3",
+    "sha256": "3ec6b1d424c28cf1e3d0635ffbbfaefc8e66ed356c468557af1af011f439b4e2",
     "signed": "2026-11-06",
     "issue": 1230
   },
@@ -614,7 +614,7 @@
     "issue": 1230
   },
   "r6b_tou_bank_lead_follows_primary_heat__v4": {
-    "sha256": "1e9ef11bcddb30dacca582df7cc6489d628915bc33257fe8cc4828f5b9948cd4",
+    "sha256": "8a66977357d62549c2831a684bc336922caaafe9bf03c403bf769330874227fb",
     "signed": "2026-11-06",
     "issue": 1230
   }

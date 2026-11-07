@@ -599,8 +599,13 @@ class RealHASession:
             classification = build_classification_from_event(event, cfg)
             coordinator._current_classification = classification
             coordinator._ensure_today_record(classification)
-            await engine.apply_classification(classification, indoor_temp=house.thermostat.indoor_f)
+            # Issue #1393: production order -- resolve early, tell apply_classification() when the bank owns the setpoint.
             coordinator._resolve_tou_schedule_state()
+            await engine.apply_classification(
+                classification,
+                indoor_temp=house.thermostat.indoor_f,
+                tou_bank_owns_setpoint=coordinator._tou_bank_owns_setpoint(),
+            )
             await coordinator._apply_tou_schedule()
             return "direct-callback"
 

@@ -1057,7 +1057,7 @@ def _fmt_time(dt: datetime) -> str:
 
 # ---------------------------------------------------------------------------------------------- the timeline step
 def _timeline_module() -> Any:
-    """The R3 timeline module (a function so tests can stand a contract-shaped module in until R3a lands)."""
+    """The R3 timeline module (a function so tests can stand a contract-shaped module in)."""
     from . import operation_timeline  # noqa: PLC0415
 
     return operation_timeline

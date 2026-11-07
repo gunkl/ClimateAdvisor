@@ -104,7 +104,7 @@ def _coord(persisted_state: dict, *, claude_client=None, config=None):
     coord.learning._state = LearningState()
     coord.claude_client = claude_client
     coord._ai_client_config = None  # a MagicMock attribute would otherwise build a real API client
-    coord._load_investigation_reports = MagicMock()
+    coord.async_load_investigation_reports = AsyncMock()  # Issue #1415: the async wrapper owns the zone list
     coord._rejection_log = {}
     coord._state_persistence = MagicMock()
     coord._state_persistence.load = MagicMock(return_value=persisted_state)
@@ -309,13 +309,13 @@ class TestInvestigationReports1356:
         """Occupant impact: the AI investigation history shown on the dashboard is not empty after an overnight
         restart or a missing state file."""
         coord = _restore(state, claude_client=MagicMock())
-        coord._load_investigation_reports.assert_called_once_with()
+        coord.async_load_investigation_reports.assert_awaited_once_with()
 
     @pytest.mark.parametrize("state", [_base(_YESTERDAY), {}], ids=["cross_day", "no_state"])
     def test_reports_not_loaded_without_ai(self, state):
         """Occupant impact: an install without the AI subsystem never touches the reports file."""
         coord = _restore(state, claude_client=None)
-        coord._load_investigation_reports.assert_not_called()
+        coord.async_load_investigation_reports.assert_not_called()
 
 
 class TestUnitChangeAcrossDays1360:

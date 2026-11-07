@@ -308,6 +308,7 @@ DISPLAY_CALLERS = {
     "timeline_payload",
     "_chart_display_band",
     "_chart_bank_band",
+    "_chart_hold_lower_upper_now",  # Issue #1406: chart_log hold_lower/hold_upper, read only by the chart history
     "get_chart_data",
     "active_thresholds_for",
     "_current_hold_payload",

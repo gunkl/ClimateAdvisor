@@ -19,6 +19,7 @@ from custom_components.climate_advisor.const import (
     CHART_LOG_FILE,
     ENTRY_SCOPED_FILES,
     FORECAST_ARCHIVE_FILE,
+    INVESTIGATION_REPORTS_FILE,
     LEARNING_DB_FILE,
     STATE_FILE,
     V4_ARCHIVE_FILE,
@@ -37,6 +38,7 @@ _PKG = Path(__file__).resolve().parent.parent / "custom_components" / "climate_a
 _ALL_BASES = (
     STATE_FILE,
     CHART_LOG_FILE,
+    INVESTIGATION_REPORTS_FILE,
     LEARNING_DB_FILE,
     FORECAST_ARCHIVE_FILE,
     V4_ARCHIVE_FILE,
@@ -65,7 +67,7 @@ def test_other_zone_and_legacy_files_are_kept(tmp_path: Path) -> None:
     legacy = [tmp_path / base for base in _ALL_BASES]
     for p in legacy:
         p.write_text("{}", encoding="utf-8")
-    unrelated = tmp_path / "climate_advisor_investigation_reports.json"
+    unrelated = tmp_path / "climate_advisor_ai_reports.json"  # retired file (#578), not in ENTRY_SCOPED_FILES
     unrelated.write_text("[]", encoding="utf-8")
     tmp_leftover = tmp_path / "climate_advisor_state_zoneA_x1.tmp"
     tmp_leftover.write_text("", encoding="utf-8")

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from custom_components.climate_advisor.automation import ComfortBand, select_comfort_band
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
@@ -108,10 +110,19 @@ class TestResolveTouAwayVacationPhase:
         # enormous delta immediately clamped to the 6.0F cap, giving half=3.0 instead of 0.2.
         thermal_model = {"k_passive": -0.05, "confidence_k_passive": "high", "k_active_cool": -8.0}
         schedule = Schedule(id="s1", name="s", days=("all",), start="16:00", end="18:00", cost_tag=COST_TAG_HIGH)
+        # Issue #1410: the split is snapped to the thermostat's step; a 0.1 F step keeps the 0.2 F half visible.
         resolution = resolve_tou_away_vacation_phase(
-            [schedule], _dt(2026, 1, 5, 15, 45), 76.0, 80.0, "cool", thermal_model, _CONFIG, OCCUPANCY_AWAY
+            [schedule],
+            _dt(2026, 1, 5, 15, 45),
+            76.0,
+            80.0,
+            "cool",
+            thermal_model,
+            _CONFIG,
+            OCCUPANCY_AWAY,
+            target_temp_step=0.1,
         )
-        assert resolution.expansion_f == 0.2  # NOT 3.0 (which would result from using k_active_cool)
+        assert resolution.expansion_f == pytest.approx(0.2)  # NOT 3.0 (which would result from using k_active_cool)
 
     def test_fallback_to_cap_when_passive_rate_unknown(self):
         """No confident k_passive -> required_delta falls back to the cap itself, feature

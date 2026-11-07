@@ -2,8 +2,8 @@ const { test, expect } = require('@playwright/test');
 
 // The chart's hover readout (#chart-hover-panel: Indoor / Predicted / Outdoor / Overlays at the hovered time) sits
 // BELOW the chart stack on both dashboards. Above the chart it reserved a 104px block that was an empty gap whenever
-// nothing was hovered. Idle it is now one short hint line; hovered or pinned it grows, and because it is below the
-// chart that growth never moves the chart under the pointer.
+// nothing was hovered. Issue #1408: off the chart it now shows the values at NOW ("Now · <time>", a small hover/pin
+// hint); hovered or pinned it follows the pointer, and because it is below the chart its size never moves the chart.
 
 const PAGES = [
   { name: 'classic', url: '/' },
@@ -32,6 +32,8 @@ const geom = (page) => page.evaluate(() => {
     panelTop: r('chart-hover-panel').top,
     panelHeight: panel.offsetHeight,
     html: panel.innerHTML,
+    mode: panel.dataset.mode || '',
+    time: panel.querySelector('.chp-time') ? panel.querySelector('.chp-time').textContent : '',
   };
 });
 
@@ -40,28 +42,31 @@ for (const pg of PAGES) {
     test.describe(`hover readout below the chart: ${pg.name}, ${vp.name}`, () => {
       test.use({ viewport: vp.size });
 
-      test('sits after the canvases, is compact idle, and fills on hover without moving the chart', async ({ page }) => {
+      test('sits after the canvases, shows NOW idle, and follows a hover without moving the chart', async ({ page }) => {
         await openChart(page, pg.url);
         const idle = await geom(page);
-        expect(idle.html.trim()).toBe('');
+        expect(idle.mode).toBe('rest');                       // Issue #1408: the values at NOW, not an empty hint
+        expect(idle.time).toMatch(/^Now · /);
+        expect(idle.html).toContain('Indoor');
         expect(idle.panelTop).toBeGreaterThanOrEqual(idle.canvasBottom - 0.5);
         expect(idle.panelTop).toBeGreaterThanOrEqual(idle.stackBottom - 0.5);
-        expect(idle.panelHeight).toBeLessThanOrEqual(40);   // one hint line, not the old 104px block
 
         const w = await page.evaluate(() => document.getElementById('temp-chart').getBoundingClientRect().width);
         await page.evaluate((x) => window.__triggerHoverAt(x), w / 2);
         await page.waitForTimeout(150);
         const hov = await geom(page);
+        expect(hov.mode).toBe('hover');
         expect(hov.html).toContain('Indoor');
-        expect(hov.panelHeight).toBeGreaterThan(idle.panelHeight);
+        expect(hov.panelHeight).toBeGreaterThanOrEqual(idle.panelHeight);   // never shrinks between NOW and a hover
         expect(hov.panelTop).toBeGreaterThanOrEqual(hov.canvasBottom - 0.5);
         expect(Math.abs(hov.tempTop - idle.tempTop)).toBeLessThan(0.5);   // the chart does not jump
 
         await page.evaluate(() => document.getElementById('chart-stack').dispatchEvent(new MouseEvent('mouseleave')));
         await page.waitForTimeout(100);
         const back = await geom(page);
-        expect(back.html.trim()).toBe('');
-        expect(back.panelHeight).toBe(idle.panelHeight);
+        expect(back.mode).toBe('rest');
+        expect(back.time).toMatch(/^Now · /);
+        expect(back.panelHeight).toBe(hov.panelHeight);       // the tallest height is kept, so leaving does not jump
       });
     });
   }
@@ -69,7 +74,7 @@ for (const pg of PAGES) {
   test.describe(`hover readout touch pin: ${pg.name}, phone`, () => {
     test.use({ viewport: { width: 375, height: 812 }, hasTouch: true, isMobile: true });
 
-    test('a tap pins the readout below the chart; tapping the same spot again lets go', async ({ page }) => {
+    test('a tap pins the readout below the chart; tapping the same spot again goes back to NOW', async ({ page }) => {
       await openChart(page, pg.url);
       const canvas = page.locator('#temp-chart');
       await canvas.scrollIntoViewIfNeeded();
@@ -82,14 +87,16 @@ for (const pg of PAGES) {
       expect(pinned.panelTop).toBeGreaterThanOrEqual(pinned.canvasBottom - 0.5);
       await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
       await page.waitForTimeout(200);
-      expect((await geom(page)).html.trim()).toBe('');
+      const released = await geom(page);
+      expect(released.mode).toBe('rest');
+      expect(released.time).toMatch(/^Now · /);
     });
   });
 }
 
 // Owner bug: with many lines on, the readout had a fixed height and a scroll bar that could not be used, because moving
 // the mouse to the scroll bar changed the readout. It now grows to fit every row (no scroll bar), holds its tallest
-// height while the pointer is over the chart, and a click pins it so the values can be read.
+// height (also across NOW and a hover, Issue #1408), and a click pins it so the values can be read.
 
 async function allLinesOn(page) {
   for (let i = 0; i < 60; i++) {
@@ -154,13 +161,14 @@ for (const pg of PAGES) {
         }
         const nowTop = await page.evaluate(() => document.getElementById('temp-chart').getBoundingClientRect().top + window.scrollY);
         expect(Math.abs(nowTop - chartTop)).toBeLessThan(0.5);
-        // pointer leaves: the readout empties and shrinks back
+        // pointer leaves: the readout goes back to NOW and keeps its height (no jump, Issue #1408)
         await page.mouse.move(2, 2);
         await page.evaluate(() => document.getElementById('chart-stack').dispatchEvent(new MouseEvent('mouseleave')));
         await page.waitForTimeout(100);
         const idle = await fit(page);
-        expect(idle.html.trim()).toBe('');
-        expect(idle.height).toBeLessThanOrEqual(40);
+        expect(idle.html).toMatch(/^<div class="chp-time">Now · /);
+        expect(idle.height).toBe(tallest);
+        expect(idle.scrollH).toBeLessThanOrEqual(idle.clientH);
       });
 
       test('a click pins the readout; mouse moves do not change it; a drag does not pin; click or Esc releases', async ({ page }) => {
@@ -201,7 +209,8 @@ for (const pg of PAGES) {
         expect((await fit(page)).html).toContain('Pinned');
         await page.keyboard.press('Escape');
         await page.waitForTimeout(100);
-        expect((await fit(page)).html.trim()).toBe('');
+        // released: back to resting, at NOW, or at the view's right edge when the drag above zoomed NOW out of view
+        expect((await fit(page)).html).toMatch(/^<div class="chp-time">(Now · |[^<]* \(end of view\))/);
       });
     });
   }

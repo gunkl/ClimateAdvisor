@@ -196,8 +196,10 @@
   .chart-cursor { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--text-secondary); pointer-events: none; opacity: 0.8; z-index: 2; }
   .chart-cursor.pinned { border-left: 2px solid var(--primary); opacity: 1; }
   /* The readout sits below the chart stack, so growing never moves the chart under the pointer. It never scrolls: it
-     grows to fit every row (laid out in a responsive grid). Idle it is one short hint line; while the pointer is over
-     the chart chart_v2.js holds it at the tallest height reached (inline min-height) so content below does not jump. */
+     grows to fit every row (laid out in a responsive grid). Off the chart it shows the values at NOW (or the view's
+     right edge) with a small hint; chart_v2.js holds it at the tallest height reached (inline min-height) so entering,
+     leaving and moving over the chart does not make the content below jump (Issue #1408). The :empty hint below is
+     only seen before the chart has data. */
   .chart-hover-panel { box-sizing: border-box; height: auto; min-height: 22px; overflow: visible; display: block; padding: 4px 0 6px; }
   .chart-hover-panel .chp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 2px 18px; align-items: start; }
   .chart-hover-panel .chp-grid .chp-row { min-width: 0; }
@@ -205,10 +207,11 @@
   .chart-hover-panel:empty::before { content: 'Hover the chart to read values; click to pin.'; font-size: 0.74rem; opacity: 0.8; }
   @media (hover: none) { .chart-hover-panel:empty::before { content: 'Tap the chart to pin the values there.'; } }
   .chart-hover-panel:empty:has(+ .chart-note:not([hidden]))::before { content: none; }
-  .chart-hover-panel .chp-time { display: flex; gap: 10px; align-items: center; color: var(--text-secondary); margin-bottom: 2px; font-weight: 600; }
+  .chart-hover-panel .chp-time { display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: center; color: var(--text-secondary); margin-bottom: 2px; font-weight: 600; }
   .chart-hover-panel .chp-row { display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: center; min-height: 20px; }
-  .chart-hover-panel .chp-row-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; width: 5.2em; flex: 0 0 5.2em; }
-  .chart-hover-panel .chp-miss { opacity: 0.75; }
+  .chart-hover-panel .chp-row-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; min-width: 5.2em; flex: 0 0 auto; white-space: nowrap; }
+  .chart-hover-panel .chp-miss { color: var(--text-secondary); }
+  .chart-hover-panel .chp-hint { font-size: 0.72rem; font-weight: 400; display: inline-flex; align-items: center; min-height: 24px; }
   .chart-hover-panel .chp-clear { font-size: 0.72rem; padding: 2px 8px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: var(--text); cursor: pointer; min-height: 24px; }
   .chart-table-wrap { margin-top: 4px; }
   .chart-table-actions { display: flex; justify-content: flex-end; margin-bottom: 6px; }
@@ -224,7 +227,7 @@
     .chart-stack .chart-container-out { height: 110px; }
     .chart-range-bar { gap: 6px 10px; }
     .key-chip, .seg-btn, .chart-tool-btn, .range-btn, .ahead-btn, .chart-nav-btn { min-height: 36px; }
-    .chart-hover-panel .chp-row-label { width: 4.4em; flex-basis: 4.4em; }
+    .chart-hover-panel .chp-row-label { min-width: 4.4em; }   /* a longer label ("Predicted") widens, never overlaps */
   }
 
   /* ---- Plan: the "Next 24 hours" list (R3 timeline; Issue #1230 R6fe) ---- */

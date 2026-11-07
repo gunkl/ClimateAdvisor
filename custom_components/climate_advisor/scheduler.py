@@ -42,7 +42,8 @@ numeric shift.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from datetime import time as dt_time
 from enum import Enum
@@ -55,7 +56,9 @@ from .const import (
     TOU_SETBACK_PRECOND_MAX_DELTA_F,
 )
 from .nat_vent_gate import resolve_comfort_cool, resolve_comfort_heat
+from .own_write_echo import resolve_step
 from .setpoint_combinations import vacation_edges
+from .temperature import from_fahrenheit, to_fahrenheit
 from .thermal_lead_time import compute_lead_minutes_from_rate
 
 MAX_SCHEDULES = 5  # enforced by config_flow.py, not this module — see module docstring
@@ -137,6 +140,37 @@ class TOUPhaseResolution:
     # should revert, since (unlike Home/Guest's open-ended "coast" phase) away/vacation's
     # widened edge is only correct for the duration of the window, not indefinitely after.
     window_end: datetime | None = None
+    # Issue #1410 (C23), away/vacation only: what identifies this bank window's split (schedule, window, mode,
+    # occupancy, setback edge, thermostat step and unit). The coordinator keeps the resolution that opened the window
+    # and hands it back as ``frozen`` while the key still matches, so the target and the widening stay put for the
+    # whole window instead of following the live indoor reading.
+    split_key: tuple | None = None
+    frozen: bool = False  # True when target/expansion_f/precondition_start come from the frozen resolution
+
+
+def quantize_split_delta(edge_f: float, half_f: float, mode: str, step: float, unit: str | None) -> tuple[float, float]:
+    """Snap the Away/Vacation split to the thermostat's step (Issue #1410, decision C23).
+
+    Occupant view: the empty house is told a number a person could set (cool 77 or 77.5, not 77.3875), and the
+    widened edge during the period is on the same grid (83, not 82.6125). ``edge_f`` is the setback edge
+    (internal F), ``half_f`` half the capped drift. The bank target (edge -/+ half) and the widened edge
+    (edge +/- half) are each rounded to the nearest ``step`` IN THE THERMOSTAT'S UNIT (``unit``: F or C), and the
+    expansion is returned as the distance from the edge to the snapped widened edge, so ``edge + expansion`` is on a
+    step. Returns ``(target_f, expansion_f)``; a widening that would snap inside the edge is 0 (no widening).
+    """
+
+    def _snap(value_f: float) -> float:
+        native = from_fahrenheit(value_f, unit or "fahrenheit")
+        snapped = math.floor(native / step + 0.5) * step  # half-up, not Python's round-half-to-even
+        return round(to_fahrenheit(snapped, unit or "fahrenheit"), 6)
+
+    if mode == "cool":
+        target = _snap(edge_f - half_f)
+        expansion = _snap(edge_f + half_f) - edge_f
+    else:
+        target = _snap(edge_f + half_f)
+        expansion = edge_f - _snap(edge_f - half_f)
+    return target, max(0.0, round(expansion, 6))
 
 
 def _parse_hhmm(value: str) -> float:
@@ -339,6 +373,9 @@ def resolve_tou_away_vacation_phase(
     thermal_model: dict | None,
     config: dict,
     occupancy_mode: str,
+    *,
+    target_temp_step: object = None,
+    frozen: TOUPhaseResolution | None = None,
 ) -> TOUPhaseResolution:
     """Away/Vacation TOU pre-conditioning (Issue #899, grounded in Issue #892).
 
@@ -391,6 +428,14 @@ def resolve_tou_away_vacation_phase(
     duration) and ``phase`` is correctly ``NONE`` (``PRECONDITIONING`` only ever means
     "before the window, actively driving toward the precool/preheat target" — once inside
     the window the coordinator reads ``window_end`` directly rather than ``phase``).
+
+    **Whole steps, frozen per window (Issue #1410, decision C23).** ``target`` and ``expansion_f`` are snapped to the
+    thermostat's step (``target_temp_step`` via ``own_write_echo.resolve_step``: 1 F / 0.5 C when unknown) in the
+    thermostat's unit (``config["temp_unit"]``) by ``quantize_split_delta()``; the lead time is computed from the
+    snapped depth. ``frozen`` is the resolution that opened this window (kept by the coordinator): when its
+    ``split_key`` matches this window's key and the window has not ended, its ``target``, ``expansion_f`` and
+    ``precondition_start`` are reused instead of being re-derived from the live indoor reading, so the value does
+    not creep from cycle to cycle. Home/Guest (``resolve_tou_phase()``) is unchanged.
     """
     if hvac_mode not in ("heat", "cool"):
         return TOUPhaseResolution(TOUPhase.NONE, None, None, None, None, None)
@@ -445,17 +490,32 @@ def resolve_tou_away_vacation_phase(
     half = capped_delta / 2.0
 
     if hvac_mode == "cool":
-        target = setback_cool - half  # precool depth below the away/vacation ceiling
+        edge = setback_cool  # precool depth below the away/vacation ceiling
         rate = thermal_model.get("k_active_cool")
         mode = "cool"
     else:
-        target = setback_heat + half  # preheat depth above the away/vacation floor
+        edge = setback_heat  # preheat depth above the away/vacation floor
         rate = thermal_model.get("k_active_heat")
         mode = "heat"
 
+    # Issue #1410 (C23): the thermostat's own step, in its unit.
+    unit = config.get("temp_unit", "fahrenheit")
+    step = resolve_step(target_temp_step, unit)
+    split_key = (schedule.id, schedule_start, window_end, mode, occupancy_mode, edge, step, unit)
+    if frozen is not None and frozen.split_key == split_key and now < window_end:
+        precondition_start = frozen.precondition_start
+        phase = (
+            TOUPhase.PRECONDITIONING
+            if precondition_start is not None and precondition_start <= now < schedule_start
+            else TOUPhase.NONE
+        )
+        return replace(frozen, phase=phase, frozen=True)
+
+    target, expansion = quantize_split_delta(edge, half, mode, step, unit)
+
     fallback_minutes = float(config.get("default_tou_lead_minutes", _TOU_LEAD_MIN_FALLBACK))
     lead_minutes = compute_lead_minutes_from_rate(
-        delta_t=half,
+        delta_t=abs(target - edge),
         rate=rate,
         min_minutes=_TOU_LEAD_MIN_FLOOR,
         max_minutes=_TOU_LEAD_MIN_CEIL,
@@ -466,5 +526,13 @@ def resolve_tou_away_vacation_phase(
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)
     phase = TOUPhase.PRECONDITIONING if precondition_start <= now < schedule_start else TOUPhase.NONE
     return TOUPhaseResolution(
-        phase, target, mode, schedule.id, schedule_start, precondition_start, expansion_f=half, window_end=window_end
+        phase,
+        target,
+        mode,
+        schedule.id,
+        schedule_start,
+        precondition_start,
+        expansion_f=expansion,
+        window_end=window_end,
+        split_key=split_key,
     )

@@ -346,32 +346,62 @@ def layout(pg, name, vp):
 READOUT_JS = """() => {
   const r = id => document.getElementById(id).getBoundingClientRect();
   const p = document.getElementById('chart-hover-panel');
+  const t = p.querySelector('.chp-time');
+  const names = [...p.querySelectorAll('.chp-grid .chp-item')].map(e => e.textContent.split(':')[0].trim());
   return { stackBottom: r('chart-stack').bottom, top: r('chart-hover-panel').top, h: p.offsetHeight,
-           chartTop: r('temp-chart').top + window.scrollY, html: p.innerHTML };
+           chartTop: r('temp-chart').top + window.scrollY, html: p.innerHTML, mode: p.dataset.mode || '',
+           time: t ? t.textContent : '', hint: !!p.querySelector('.chp-hint'), names: names };
 }"""
+
+NOW_PX_JS = """() => { const c = Chart.getChart(document.getElementById('temp-chart')); return c.scales.x.getPixelForValue(Date.now()); }"""
+
+
+def _shot(pg, name, label, kind, h_readout):
+    y = pg.evaluate("window.scrollY") + pg.locator("#chart-stack").bounding_box()["y"]
+    h = pg.locator("#chart-stack").bounding_box()["height"]
+    pg.screenshot(
+        path=str(OUT / f"{kind}-{name.split('/')[0]}-{label}.png"),
+        full_page=True,
+        clip={"x": 0, "y": max(0, y - 60), "width": pg.viewport_size["width"], "height": h + 60 + h_readout + 40},
+    )
 
 
 def readout_checks(pg, name, label):
-    # The hover readout sits below the chart; idle it is one hint line, not a reserved empty block.
-    idle = pg.evaluate(READOUT_JS)
-    check(f"{name}: readout is below the chart", idle["top"] >= idle["stackBottom"] - 0.5, str(idle))
-    check(f"{name}: idle readout is compact", not idle["html"].strip() and idle["h"] <= 40, f"{idle['h']}px")
+    # Issue #1408: the readout sits below the chart and, with the pointer off the chart, shows what a hover at NOW
+    # would (labelled "Now · <time>", with a small hover/pin hint), never a blank line.
+    rest = pg.evaluate(READOUT_JS)
+    check(f"{name}: readout is below the chart", rest["top"] >= rest["stackBottom"] - 0.5, str(rest)[:200])
+    check(
+        f"{name}: readout rests on NOW", rest["mode"] == "rest" and rest["time"].startswith("Now \u00b7 "), rest["time"]
+    )
+    check(f"{name}: NOW readout has rows", "chp-row" in rest["html"] and "Indoor" in rest["html"], rest["html"][:200])
+    check(f"{name}: NOW readout keeps the hover/pin hint", rest["hint"], rest["time"])
+    _shot(pg, name, label, "readout-now", rest["h"])
+    # the same rows as a hover at NOW (one row builder)
+    pg.evaluate(f"() => window.__triggerHoverAt(({NOW_PX_JS})())")
+    pg.wait_for_timeout(100)
+    at_now = pg.evaluate(READOUT_JS)
+    check(
+        f"{name}: NOW readout = hover at NOW", at_now["names"] == rest["names"], f"{rest['names']} vs {at_now['names']}"
+    )
     pg.evaluate(
         "() => window.__triggerHoverAt(document.getElementById('temp-chart').getBoundingClientRect().width * 0.4)"
     )
     pg.wait_for_timeout(150)
     hov = pg.evaluate(READOUT_JS)
-    check(f"{name}: hover fills the readout", "chp-row" in hov["html"] and hov["h"] > idle["h"], f"{hov['h']}px")
-    check(f"{name}: hover does not move the chart", abs(hov["chartTop"] - idle["chartTop"]) < 0.5)
-    y = pg.evaluate("window.scrollY") + pg.locator("#chart-stack").bounding_box()["y"]
-    h = pg.locator("#chart-stack").bounding_box()["height"]
-    pg.screenshot(
-        path=str(OUT / f"readout-{name.split('/')[0]}-{label}.png"),
-        full_page=True,
-        clip={"x": 0, "y": max(0, y - 60), "width": pg.viewport_size["width"], "height": h + 60 + hov["h"] + 40},
-    )
+    check(f"{name}: hover fills the readout", "chp-row" in hov["html"] and hov["mode"] == "hover", f"{hov['h']}px")
+    check(f"{name}: hover does not shrink the readout", hov["h"] >= rest["h"], f"{hov['h']} < {rest['h']}px")
+    check(f"{name}: hover does not move the chart", abs(hov["chartTop"] - rest["chartTop"]) < 0.5)
+    _shot(pg, name, label, "readout", hov["h"])
     pg.evaluate("() => document.getElementById('chart-stack').dispatchEvent(new MouseEvent('mouseleave'))")
     pg.wait_for_timeout(100)
+    back = pg.evaluate(READOUT_JS)
+    check(
+        f"{name}: leaving the chart returns to NOW",
+        back["mode"] == "rest" and back["time"].startswith("Now \u00b7 "),
+        back["time"],
+    )
+    check(f"{name}: leaving keeps the readout height", back["h"] == hov["h"], f"{back['h']} vs {hov['h']}px")
 
 
 def click_every_status_control(pg, name):
@@ -798,9 +828,52 @@ def tou_bank(browser):
             ctx.close()
 
 
+def tou_bank_history(browser):
+    """Issue #1406: the past band draws a time-of-use bank as what the thermostat held. Rows of the last 4 h carry
+    hold_lower/hold_upper 60/77 (an Away cool bank to 77 F, band schedule 77-80 F); older rows have no hold (written
+    before 0.9.6) and keep 77-80. Both pages, light 1280 / dark 390. Screenshots final-<page>-tou-history-*.png."""
+    ch = shift(CH["chart_data"], now_local() - dt.datetime.fromisoformat(CH["now"]))
+    now = now_local()
+    rows = []
+    for e in ch["state_log"]:
+        t = dt.datetime.fromisoformat(e["ts"])
+        if t > now:
+            continue
+        e = {**e, "lower": 77.0, "upper": 80.0}
+        if now - t < dt.timedelta(hours=4):
+            e.update(hold_lower=60.0, hold_upper=77.0)
+        else:
+            e.pop("hold_lower", None)
+            e.pop("hold_upper", None)
+        rows.append(e)
+    ch = {**ch, "state_log": rows}
+    probe = """(ago) => { const c = Chart.getChart(document.getElementById('temp-chart')); if (!c) return null;
+        const up = c.data.datasets.find(d => d.label === 'Target Band'), lo = c.data.datasets.find(d => d.label === '_target_band_lower');
+        if (!up || !lo || !up.data.length) return null; const t = Date.now() - ago * 3600000;
+        const near = ds => ds.data.reduce((b, p) => (Math.abs(p.x - t) < Math.abs(b.x - t) ? p : b)).y;
+        return [near(lo), near(up)]; }"""
+    for page in ("index.html", "new_dashboard.html"):
+        for label, vp, scheme in (
+            ("light-1280", {"width": 1280, "height": 1000}, "light"),
+            ("dark-390", {"width": 390, "height": 900}, "dark"),
+        ):
+            name = f"tou-history:{page}:{label}"
+            ctx, pg = new_page(browser, vp, scheme, {"chart_data": ch}, name=name)
+            pg.goto(f"http://127.0.0.1:{PORT}/{page}")
+            pg.wait_for_timeout(1500)
+            held, old = pg.evaluate(probe, 2), pg.evaluate(probe, 6)
+            check(f"{name}: a past bank row draws the hold 60-77", held == [60, 77], str(held))
+            check(f"{name}: a pre-0.9.6 row keeps the schedule shape 77-80", old == [77, 80], str(old))
+            layout(pg, name, vp)
+            pg.locator("#temp-chart").scroll_into_view_if_needed()
+            pg.screenshot(path=str(OUT / f"final-{page.split('.')[0]}-tou-history-{label}.png"), full_page=False)
+            ctx.close()
+
+
 with sync_playwright() as p:
     b = p.chromium.launch()
     tou_bank(b)
+    tou_bank_history(b)
     v4_ca_only(b)
     for page in ("index.html", "new_dashboard.html"):
         for label, vp, scheme in [

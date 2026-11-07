@@ -82,6 +82,12 @@ class Reading:
     # Issue #1144: False while automation is switched off (observe-only). Climate Advisor commands nothing then,
     # so the AC/whole-house-fan mutex (P2) cannot be CA's failure; see check_p2_ac_whf_mutex.
     automation_enabled: bool = True
+    # Issues #1411/#1412: the occupancy mode Climate Advisor is acting on at this instant ("home" / "away" /
+    # "vacation" / "guest", ``AutomationEngine._occupancy_mode``). P7 decides Away/Vacation from it, so an Away
+    # period is known even when no ``occupancy_setback`` was journaled (Away set before the first classification)
+    # or the setback mark has aged out of the window. None = the source does not know (P7 then falls back to the
+    # occupancy marks).
+    occupancy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +141,10 @@ class PromiseInput:
     # Issue #1144: (opened, closed-or-None) spans of observe-only sealed-fan notices, kept past the window so a long
     # run whose start has aged out is still recognised as the noticed one (see PromiseJournal.on_event).
     observe_notices: tuple[tuple[datetime, datetime | None], ...] = ()
+    # Issue #1412: per STATE_MARK_FAMILIES family, the newest of its marks that has left ``marks`` (aged out of the
+    # window or evicted by the cap), time-ordered. A state timeline starts from these, so a state that began before
+    # the window (an Away setback, a nat-vent session) still governs the readings inside it.
+    carried_state_marks: tuple[Mark, ...] = ()
 
 
 # event type -> payload keys read into Mark.attrs. A test asserts every mapped type exists in
@@ -180,6 +190,17 @@ NAT_VENT_END_KINDS = frozenset(
         "nat_vent_exit_resume",
     }
 )
+
+# Issue #1412: marks that SET a lasting state (P7's away and nat-vent timelines). When such a mark leaves the window
+# (aged out after 3 h, or evicted by the mark cap) the newest one of its family is kept and handed back with the
+# window (``PromiseInput.carried_state_marks``): it is the state the house was in when the window starts. Without it
+# an Away setback journaled at 13:00 stopped excusing the 13:05-15:40 Away readings once the window slid past 13:00,
+# and P7 judged them against the home band.
+STATE_MARK_FAMILIES: dict[str, frozenset[str]] = {
+    "occupancy": frozenset({"occupancy_setback", "occupancy_comfort_restored", "occupancy_comfort_restore_held"}),
+    "nat_vent": frozenset({"nat_vent_activated"}) | NAT_VENT_END_KINDS,
+}
+_STATE_FAMILY_OF: dict[str, str] = {k: fam for fam, kinds in STATE_MARK_FAMILIES.items() for k in kinds}
 
 # Marks that drive episode derivation (kept longer than the window while an episode is open).
 _EPISODE_KINDS = frozenset(
@@ -468,6 +489,8 @@ class PromiseJournal:
         self._commands: deque[Command] = deque(maxlen=MAX_COMMANDS)
         self._marks: deque[Mark] = deque(maxlen=MAX_MARKS)
         self._episode_marks: deque[Mark] = deque(maxlen=MAX_EPISODE_MARKS)
+        # Issue #1412: per STATE_MARK_FAMILIES family, the newest of its marks that has left the window.
+        self._state_before_window: dict[str, Mark] = {}
         self._latest: Reading | None = None
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._notices: deque[list] = deque(maxlen=MAX_NOTICES)  # [opened, closed|None]
@@ -496,6 +519,7 @@ class PromiseJournal:
             or last.hvac_action != new.hvac_action
             or last.fan_on != new.fan_on
             or last.contacts_open != new.contacts_open
+            or last.occupancy != new.occupancy
             or (last.indoor_f is None) != (new.indoor_f is None)
         ):
             return True
@@ -518,9 +542,20 @@ class PromiseJournal:
         self._commands.append(command)
 
     def record_mark(self, mark: Mark) -> None:
+        if self._marks.maxlen is not None and len(self._marks) == self._marks.maxlen:
+            self._leaves_window(self._marks[0])  # the cap evicts the oldest mark on append
         self._marks.append(mark)
         if mark.kind in _EPISODE_KINDS:
             self._episode_marks.append(mark)
+
+    def _leaves_window(self, mark: Mark) -> None:
+        """Remember ``mark`` if it sets a lasting state and is its family's newest to leave the window (#1412)."""
+        family = _STATE_FAMILY_OF.get(mark.kind)
+        if family is None:
+            return
+        kept = self._state_before_window.get(family)
+        if kept is None or mark.ts >= kept.ts:
+            self._state_before_window[family] = mark
 
     def on_event(self, ts: datetime, event_type: str, payload: dict[str, Any] | None = None) -> Mark | None:
         """Map and record one CA event; returns the mark or None when not read by any promise."""
@@ -537,6 +572,7 @@ class PromiseJournal:
         self._commands.clear()
         self._marks.clear()
         self._episode_marks.clear()
+        self._state_before_window.clear()
         self._notices.clear()
         self._latest = None
 
@@ -546,8 +582,10 @@ class PromiseJournal:
         cutoff = now - self._max_age
         self._prune(self._readings, cutoff)
         self._prune(self._commands, cutoff)
-        self._prune(self._marks, cutoff)
+        while self._marks and self._marks[0].ts < cutoff:
+            self._leaves_window(self._marks.popleft())
         readings = tuple(self._readings)
+        marks = tuple(self._marks)
         # Open episodes are never aged out: keep their marks until an end mark closes them.
         eps = derive_episodes(tuple(self._episode_marks), readings)
         open_starts = [e.start_ts for e in eps if e.end_ts is None]
@@ -560,9 +598,11 @@ class PromiseJournal:
             latest=self._latest,
             readings=readings,
             commands=tuple(self._commands),
-            marks=tuple(self._marks),
+            marks=marks,
             episodes=eps,
             observe_notices=tuple((o, c) for o, c in self._notices),
+            # Older than every mark still in the window, so these followed by ``marks`` stay time-ordered.
+            carried_state_marks=tuple(sorted(self._state_before_window.values(), key=lambda m: m.ts)),
         )
 
     @staticmethod

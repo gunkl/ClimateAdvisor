@@ -764,7 +764,16 @@ with the wake/sleep ramps; away/vacation: the setback range). Issue #1107: befor
 the static `comfort_heat`–`comfort_cool` range, so CA's own planned setbacks counted as discomfort.
 Issue #1258: a minute is also not counted while indoor is no more than the thermostat's own learned swing past the band edge and the thermostat is in the matching mode (`coordinator._is_tolerated_comfort_deviation()`; 1.5 °F default, 0.5 °F floor, 2.5 °F cap; Off or the opposite mode count as before).
 The band is read via `coordinator._comfort_score_band_now()` → `_target_band_lower_upper_now()`
-(the per-cycle cached band, Issue #514); while no band has been resolved yet (`(None, None)`: before
+(the per-cycle cached band, Issue #514). **During a time-of-use bank (Issue #1407, decision C22, reversible)** a
+minute counts only when indoor is outside BOTH the hold (what the thermostat is told, `tou_bank_band()`: pre-cool
+[min(floor, target), target], pre-heat [target, max(ceiling, target)]) and the schedule band (home, sleep, Away or
+Vacation, `AutomationEngine._resolved_comfort_band()`), each past the thermostat's swing
+(`coordinator._comfort_score_bank_bands()`, read from the control source `_tou_bank_in_force()`; a deferred bank
+keeps the cached band). A pre-cool pulling the house from 74 °F toward 68 °F is inside the 68–76 °F comfort range,
+so the person is comfortable and those minutes do not count or feed the `comfort_violations` suggestion; a house
+outside both is a real miss. The cached band draws a bank in the #786 shape (target on the opposite edge: an Away
+pre-heat to 63 °F reads 60–63 °F), which counted a house at 70 °F, inside its Away band, as uncomfortable. Score
+only: no decision reads it, and its one caller is pinned (`tests/test_comfort_score_tou_bank_1407.py`). While no band has been resolved yet (`(None, None)`: before
 the first cycle's band, or a weather source with no hourly forecast) it falls back to the static
 `comfort_heat`–`comfort_cool` range. The nat-vent tolerance gate (Issue #411) is judged against the
 same resolved range. History is not rewritten; the 14-day window turns over within 14 days.

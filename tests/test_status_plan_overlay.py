@@ -112,7 +112,7 @@ def test_the_module_adds_no_mechanism_words_to_the_plan_list():
 
 def test_plan_overlay_is_one_toggle_in_the_overlays_group_remembered_with_the_others():
     overlays = MOD[MOD.index("const overlays =") : MOD.index("const stripChips")]
-    assert "_chip('ov:plan'" in overlays and "<span>Plan</span>" in overlays
+    assert "ovChip('ov:plan'" in overlays and "<span>Plan</span>" in overlays
     # it goes through the same toggle and storage path as every other chip (try/catch storage, per zone)
     # the stored key is per role since #1399 (_prefId), so an engine switch keeps the choice
     assert "if (id.startsWith('strip:'))" in MOD and "_chartPrefs.on[_prefId(id)] = !_isOn(id)" in MOD

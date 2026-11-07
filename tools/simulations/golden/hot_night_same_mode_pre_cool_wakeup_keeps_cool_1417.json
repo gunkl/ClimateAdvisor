@@ -1,0 +1,110 @@
+{
+  "name": "hot_night_same_mode_pre_cool_wakeup_keeps_cool_1417",
+  "description": "Issue #1417 (mirror of #1416): a thermostat that does NOT report hvac_action, a heat wave. Cool is armed all evening (cool 74, then the 72 sleep band at bedtime); the 02:30 overnight pre-cool lowers it to cool 70 in the mode already armed, and the 30-minute cycle keeps the pre-cool (re-asserting cool 70 at 05:00 and 06:00). At the 06:30 wake-up the house reads 70.5 F, inside the 2 F heat arming margin of the 70/74 day band. Before the fix nothing recorded that the cool side ran (no hvac_action, and a same-mode pre-cool is not a mode change), so the wake-up armed heat 70 F on a 95 F day. Now every accepted pre-cool write records 'cool ran', the settling guard holds cool, and wake-up writes cool 74 F.",
+  "source": "synthetic: Issue #1417",
+  "issue": 1417,
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "wake_time": "06:30",
+    "sleep_time": "22:30"
+  },
+  "events": [
+    {
+      "time": "2026-07-16T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "setback_modifier": 0.0,
+      "today_high": 91.0,
+      "tomorrow_high": 95.0
+    },
+    {
+      "time": "2026-07-16T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 84.0
+    },
+    {
+      "time": "2026-07-16T22:30:00",
+      "type": "bedtime"
+    },
+    {
+      "time": "2026-07-17T02:30:00",
+      "type": "pre_cool",
+      "indoor_f": 72.5,
+      "nat_vent_just_closed": false
+    },
+    {
+      "time": "2026-07-17T05:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "setback_modifier": 0.0,
+      "today_high": 95.0,
+      "tomorrow_high": 95.0,
+      "note": "The 30-minute cycle while the pre-cool is held (modelled explicitly)."
+    },
+    {
+      "time": "2026-07-17T06:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "setback_modifier": 0.0,
+      "today_high": 95.0,
+      "tomorrow_high": 95.0
+    },
+    {
+      "time": "2026-07-17T06:10:00",
+      "type": "temp_update",
+      "indoor_f": 70.5,
+      "outdoor_f": 78.0
+    },
+    {
+      "time": "2026-07-17T06:30:00",
+      "type": "wakeup"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-17T02:30:00",
+      "expect": "hvac_mode_writes",
+      "since": "2026-07-16T22:00:00",
+      "values": [],
+      "reason": "The pre-cool is written in the mode already armed (cool): no mode change, so before #1417 no 'cool ran' record existed."
+    },
+    {
+      "at": "2026-07-17T02:30:00",
+      "expect": "commanded_setpoint_at",
+      "value": 70.0,
+      "reason": "Pre-cool to 70 F (sleep_cool 72 + the hot-day modifier -2); 22:30 wrote 72, so 70 can only be the pre-cool. The value, not the count: on real HA the coordinator's own 02:30 pre-cool timer fires and the scenario's pre_cool event (a direct callback) calls the same handler again, so it is written twice there; production has only the timer (one write)."
+    },
+    {
+      "at": "2026-07-17T06:30:00",
+      "expect": "hvac_mode_writes",
+      "since": "2026-07-17T06:29:00",
+      "values": [],
+      "reason": "No mode change at wake-up: the pre-cool (re-asserted at 06:00) counts as 'cool ran', so the settling guard keeps cool. Before #1417 the thermostat was switched to heat here on a 95 F day."
+    },
+    {
+      "at": "2026-07-17T06:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-17T06:29:00",
+      "values": [
+        74.0
+      ],
+      "reason": "Wake-up writes the day band in cool: cool 74 F, the AC idles (indoor 70.5 F). Before #1417 it was heat 70 F, the furnace armed 0.5 F under the house temperature."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Without hvac_action, wake-up after a same-mode overnight pre-cool keeps cool armed instead of arming the furnace",
+    "observed_behavior": "06:30 wake-up: cool 74 F, no mode write.",
+    "expected_behavior": "Occupant view: on a hot morning after a pre-cool the AC side stays armed and idles; the furnace is not armed just under the house temperature.",
+    "effectiveness": "Fails on 2523b71 (5e33f00^, before #1416/#1417) and on f877c50: 06:30 set_hvac_mode heat + heat 70 F. Removing the pre-cool 'ran' record (_note_deliberate_command in _apply_comfort_band), or the guard's read of it (minutes_since_deliberate_command in _minutes_since_family_ran), brings that back. The hold comes from the 06:00 re-assert (30 min old at wake-up); the 02:30 write alone is 240 min old, outside the 120-minute window. Real HA cannot catch this: its thermostat reports hvac_action, and this scenario passes there on the old code too.",
+    "alignment": "docs/comfort-edge-selection-spec.md R3 (a deliberate write counts as 'ran' even when the mode is unchanged, Issues #1416/#1417) and section 6 item 1 (wake-up after pre-cool); docs/08-COMPUTATION-REFERENCE.md section 6f.",
+    "user_outcome": "If this regressed, a home whose thermostat reports no hvac_action would get the furnace armed every hot morning after an overnight pre-cool, the flip-flop the settling guard exists to prevent."
+  }
+}

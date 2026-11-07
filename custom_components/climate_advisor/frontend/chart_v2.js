@@ -777,8 +777,11 @@
 
     // Target band (Issue #514: past from the immutable per-cycle snapshot, future from the live schedule)
     const bandOn = _isOn('ov:band');
-    const histBandUpper = log.map(e => ({ x: _parseTs(e.ts), y: e.upper })).filter(p => p.y != null && p.x <= nowMs);
-    const histBandLower = log.map(e => ({ x: _parseTs(e.ts), y: e.lower })).filter(p => p.y != null && p.x <= nowMs);
+    // Issue #1406: a row carrying hold_lower/hold_upper is drawn as that hold (a past time-of-use bank as what the
+    // thermostat held, the same band the live chart drew); older rows and ordinary rows keep lower/upper.
+    const _histHold = e => e.hold_lower != null && e.hold_upper != null;
+    const histBandUpper = log.map(e => ({ x: _parseTs(e.ts), y: _histHold(e) ? e.hold_upper : e.upper })).filter(p => p.y != null && p.x <= nowMs);
+    const histBandLower = log.map(e => ({ x: _parseTs(e.ts), y: _histHold(e) ? e.hold_lower : e.lower })).filter(p => p.y != null && p.x <= nowMs);
     const futBandUpper = (chartData.target_band || []).map(e => ({ x: _parseTs(e.ts), y: e.upper })).filter(p => p.x > nowMs);
     const futBandLower = (chartData.target_band || []).map(e => ({ x: _parseTs(e.ts), y: e.lower })).filter(p => p.x > nowMs);
     const bandUpper = [...histBandUpper, ...futBandUpper].sort((a, b) => a.x - b.x);

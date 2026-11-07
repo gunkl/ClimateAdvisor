@@ -526,6 +526,8 @@ _ONTOLOGY_TIME_EXCEPTIONS: Final[set[str]] = set()
 # ``indoor_primary`` (Issue #1234, hvac_action_change rows only): no frontend or post-conversion
 # reader uses it (tools/thermal_replay.py reads the raw file), so it is converted like any
 # display-facing temperature and a Celsius state_log never carries a stray F value.
+# ``hold_lower``/``hold_upper`` (Issue #1406): the past band the frontend draws straight from state_log during a
+# time-of-use bank, so converted like ``lower``/``upper``.
 _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
     "pred_outdoor",
     "pred_indoor",
@@ -533,6 +535,8 @@ _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
     "pred_indoor_avg",
     "lower",
     "upper",
+    "hold_lower",
+    "hold_upper",
     "indoor_primary",
 )
 # Issue #1230 R0: chart-log keys that get_chart_data() deliberately REMOVES from ``state_log``. ``indoor_sensors`` is a
@@ -8971,21 +8975,52 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         schedule = getattr(self, "_target_band_schedule", None)
         if not schedule:
             return None, None
-        now = dt_util.now()
-        best: tuple[datetime, dict] | None = None
-        for entry in schedule:
-            ts_str = entry.get("ts")
-            if not ts_str:
-                continue
-            try:
-                ts_dt = datetime.fromisoformat(ts_str)
-                ts_dt = dt_util.as_local(ts_dt) if ts_dt.tzinfo else ts_dt
-            except ValueError, TypeError:
-                continue
-            if ts_dt <= now and (best is None or ts_dt > best[0]):
-                best = (ts_dt, entry)
-        chosen = best[1] if best is not None else schedule[0]
+        chosen = _band_entry_at(schedule, dt_util.now())
         return chosen.get("lower"), chosen.get("upper")
+
+    def _chart_hold_lower_upper_now(self) -> tuple[float | None, float | None]:
+        """The band the chart DRAWS for the current instant (Issue #1406), internal F, or ``(None, None)``.
+
+        Occupant view: during an Away cool bank to 77 F in a 60-80 F band the live chart draws 60-77 (what the
+        thermostat holds), while ``_target_band_lower_upper_now()`` (the band SCHEDULE that chart_log's
+        ``lower``/``upper`` persist for the replay tools, the prediction and the comfort score) keeps 77-80. This is the
+        live chart's own function, ``_chart_display_band()``, run on this cycle's cached schedule
+        (``_target_band_schedule``) with the same thermal model the cycle built it with, and read at the same bucket
+        (``_band_entry_at``) as ``_target_band_lower_upper_now()``, so a row's hold is what the live chart drew for
+        it: the bank as the hold while it owns the thermostat, the schedule band while it is deferred, the
+        Away/Vacation period widened. DISPLAY ONLY: no decision reads it. Never raises (a chart row must never fail).
+        """
+        schedule = getattr(self, "_target_band_schedule", None)
+        if not schedule:
+            return None, None
+        try:
+            now = dt_util.now()
+            engine = getattr(self, "automation_engine", None)
+            thermal_model = self.control_thermal_model(engine._thermal_model if engine else None)
+            display = self._chart_display_band(now, thermal_model, raw_band=list(schedule))
+            if not display:
+                return None, None
+            chosen = _band_entry_at(display, now)
+            return chosen.get("lower"), chosen.get("upper")
+        except Exception:  # noqa: BLE001 - a display read must never break a chart row
+            _LOGGER.debug("chart_log: hold band unavailable", exc_info=True)
+            return None, None
+
+    def _read_chart_hold(self) -> dict[str, float]:
+        """chart_log's ``hold_lower``/``hold_upper`` for this row (Issue #1406), or {} when the chart draws the band
+        schedule itself (``lower``/``upper``), so ordinary rows stay as small as before. See
+        ``_chart_hold_lower_upper_now()``. Equal within 0.05 F (the display band rounds a bank hour to 1 dp) counts as
+        the same band; the pair is stored to 2 dp (at most ~42 bytes a row, the chart-log size budget)."""
+        lower, upper = self._target_band_lower_upper_now()
+        hold_lower, hold_upper = self._chart_hold_lower_upper_now()
+        if lower is None or upper is None or hold_lower is None or hold_upper is None:
+            return {}
+        try:
+            if abs(float(hold_lower) - float(lower)) < 0.05 and abs(float(hold_upper) - float(upper)) < 0.05:
+                return {}
+            return {"hold_lower": round(float(hold_lower), 2), "hold_upper": round(float(hold_upper), 2)}
+        except TypeError, ValueError:
+            return {}
 
     def _fan_cycling_target_now(self) -> float:
         """This cycle's real nat-vent-style thermostatic cycling target — the same
@@ -15440,12 +15475,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return hvac_action
 
     def _read_chart_context(self) -> dict[str, Any]:
-        """Per-row context for chart_log (Issue #1230 R2): occupancy mode, override/grace flag, the comfort sensor.
+        """Per-row context for chart_log (Issue #1230 R2): occupancy mode, override/grace flag, the comfort sensor, and
+        (Issue #1406) the drawn hold ``hold_lower``/``hold_upper`` when it differs from the band schedule.
 
         ``occupancy`` draws the Away / Vacation strip, ``override`` the Override / grace strip, ``band_sensor`` names
         the sensor the Target Band applied to on that row. Read only; never raises into a chart row.
         """
         out: dict[str, Any] = {}
+        # Issue #1406: the band the chart drew on this row, when it differs from the band schedule (lower/upper).
+        out.update(self._read_chart_hold())
         try:
             mode = getattr(self, "_occupancy_mode", None)
             if isinstance(mode, str) and mode:
@@ -19090,6 +19128,28 @@ def _extract_historical_setpoint(log_entries: list[dict]) -> list[dict]:
     return result
 
 
+def _band_entry_at(schedule: list[dict], now: datetime) -> dict:
+    """The band-schedule entry in force at ``now``: the latest ``ts`` at or before ``now``, else the first entry.
+
+    Shared by ``_target_band_lower_upper_now()`` (chart_log ``lower``/``upper``) and
+    ``_chart_hold_lower_upper_now()`` (``hold_lower``/``hold_upper``, Issue #1406) so both read the same bucket.
+    ``schedule`` must be non-empty.
+    """
+    best: tuple[datetime, dict] | None = None
+    for entry in schedule:
+        ts_str = entry.get("ts")
+        if not ts_str:
+            continue
+        try:
+            ts_dt = datetime.fromisoformat(ts_str)
+            ts_dt = dt_util.as_local(ts_dt) if ts_dt.tzinfo else ts_dt
+        except ValueError, TypeError:
+            continue
+        if ts_dt <= now and (best is None or ts_dt > best[0]):
+            best = (ts_dt, entry)
+    return best[1] if best is not None else schedule[0]
+
+
 def _extract_historical_target_band(log_entries: list[dict]) -> list[dict]:
     """Extract {ts, lower, upper} pairs from state_log entries (Issue #514).
 
@@ -19099,13 +19159,20 @@ def _extract_historical_target_band(log_entries: list[dict]) -> list[dict]:
     keys at all (old ``chart_log`` schema); ``.get()`` returns ``None`` for those the
     same way it already does for setpoint on entries predating that field, requiring
     no separate "is this an old entry" branch.
+
+    Issue #1406: a row (raw or bucketed) that carries ``hold_lower``/``hold_upper`` is drawn as that hold, the band
+    the live chart drew at that time (a time-of-use bank as what the thermostat held); rows without the pair (every
+    row before 0.9.6, and every row where the chart drew the band schedule) keep ``lower``/``upper``.
     """
     result = []
     for e in log_entries:
         ts = e.get("ts")
         if not ts:
             continue
-        result.append({"ts": ts, "lower": e.get("lower"), "upper": e.get("upper")})
+        if e.get("hold_lower") is not None and e.get("hold_upper") is not None:
+            result.append({"ts": ts, "lower": e["hold_lower"], "upper": e["hold_upper"]})
+        else:
+            result.append({"ts": ts, "lower": e.get("lower"), "upper": e.get("upper")})
     return result
 
 

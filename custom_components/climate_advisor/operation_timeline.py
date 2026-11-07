@@ -2230,6 +2230,17 @@ class TimelineLatch:
     def timeline(self) -> DetailedTimeline | None:
         return self._timeline
 
+    def amend(self, fn: Callable[[DetailedTimeline], DetailedTimeline]) -> DetailedTimeline | None:
+        """Replace the held timeline with ``fn(timeline)``: a pure advisory transformer (R6: ``apply_night_strategy``).
+
+        The signature and generation are untouched, so an amendment never counts as a plan change; the next
+        ``update`` keeps the amended steps (they are latched like any other) and the caller re-applies its transformer
+        after every update to refresh what the fresh build replaces (the predicted path)."""
+        if self._timeline is None:
+            return None
+        self._timeline = fn(self._timeline)
+        return self._timeline
+
     def update(self, snap: TimelineSnapshot, *, force: str | None = None) -> LatchOutcome:
         end = snap.now + timedelta(hours=TIMELINE_HORIZON_HOURS)
         segments = build_segments(snap, end)
@@ -2272,6 +2283,8 @@ def _merge_latched(latched: DetailedTimeline, fresh: DetailedTimeline, now: date
     fresh_closes = [f for f in fresh.steps if f.kind == StepKind.WINDOWS_CLOSE and f.ts >= now]
     steps: list[TimelineStep] = []
     for s in latched.steps:
+        if s.meta.get("source_module") == "night_strategy":
+            continue  # R6: night strategy steps are re-applied by the caller after every update, never latched
         if _is_live(s) and s.ts >= now:
             continue  # replaced below by the fresh answer
         if s.kind == StepKind.WINDOWS_CLOSE and s.ts >= now:
@@ -2294,3 +2307,30 @@ def _merge_latched(latched: DetailedTimeline, fresh: DetailedTimeline, now: date
         generation=latched.generation,
         regenerated_for=latched.regenerated_for,
     )
+
+
+def _register_night_sentences() -> None:
+    """Plan section 9: the night strategy's sentences live in the one sentence table (R6 registration).
+
+    ``night_strategy`` renders them itself (its temperatures are rounded to the half degree before conversion) and
+    imports this module lazily, so the table is filled here once, at import, without a circular import."""
+    from .night_strategy import NIGHT_SENTENCES  # noqa: PLC0415
+
+    for key, ns_ in NIGHT_SENTENCES.items():
+        SENTENCES.setdefault(
+            key,
+            Sentence(
+                key,
+                ns_.template,
+                ns_.facts,
+                ns_.source,
+                ns_.guard,
+                "advice only (DP-7): CA never starts a fan for a strategy; occupant steps only for an offered grade",
+            ),
+        )
+
+
+try:
+    _register_night_sentences()
+except Exception:  # noqa: BLE001 - a broken prediction engine must cost the night plan, never the whole timeline
+    _LOGGER.warning("night strategy sentences could not be registered; the night plan is off", exc_info=True)

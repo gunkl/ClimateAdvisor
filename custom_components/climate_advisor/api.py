@@ -32,6 +32,7 @@ from .const import (
     API_FORCE_RECLASSIFY,
     API_INVESTIGATION_REPORTS,
     API_LEARNING,
+    API_NIGHT_STRATEGY,
     API_PREDICTION_ACCURACY,
     API_RESPOND_SUGGESTION,
     API_RESUME_FROM_PAUSE,
@@ -1466,6 +1467,40 @@ class ClimateAdvisorTimelineView(HomeAssistantView):
             return self.json(payload)
 
 
+class ClimateAdvisorNightStrategyView(HomeAssistantView):
+    """GET /api/climate_advisor/night_strategy - tonight's bedroom strategy for the "Tonight in the bedroom" card
+    (Issue #1230 R6). Read-only advice: the page shows it, nothing starts a fan or opens a window.
+
+    Query: ``zone`` (entry id; ``entry_id`` also accepted); with several zones and no ``zone`` the answer is 400, the
+    same refusal as ``timeline``. The body is
+     ``NightStrategy.to_dict()`` with temperatures in the display unit, ``unit``,
+    ``headline``, ``tradeoffs`` and ``v4_gate_ready`` added. ``show_numbers`` is false (and every predicted figure
+    ``null``) unless the zone's v4 gate passed. 503 ``{"error": "night_strategy_not_ready", "reason": ...}`` before a
+    night is in view and planned (daytime, no model yet, no forecast).
+    """
+
+    url = API_NIGHT_STRATEGY
+    name = "api:climate_advisor:night_strategy"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        query = request.rel_url.query
+        zone = query.get("zone") or query.get("entry_id")
+        coordinator, ambiguous_refused = zone_registry.resolve_zone(
+            hass, zone, context=f"{request.method} {request.path} from {request.remote}", allow_guess=False
+        )
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+        with log_capture.zone_scope(coordinator.zone_label):
+            payload, reason = coordinator.night_strategy_payload()
+            if payload is None:
+                return self.json({"error": "night_strategy_not_ready", "reason": reason}, status_code=503)
+            return self.json(payload)
+
+
 class ClimateAdvisorDeleteReportView(HomeAssistantView):
     """POST /api/climate_advisor/delete_report — delete a report by type + timestamp."""
 
@@ -1597,4 +1632,5 @@ API_VIEWS = [
     ClimateAdvisorEnginesView,
     ClimateAdvisorPredictionAccuracyView,
     ClimateAdvisorTimelineView,
+    ClimateAdvisorNightStrategyView,
 ]

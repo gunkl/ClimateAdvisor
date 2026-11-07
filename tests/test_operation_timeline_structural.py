@@ -179,6 +179,7 @@ def test_briefing_and_api_reach_the_timeline_only_through_the_surface_module_or_
 
 
 _SURFACE_READERS = {
+    "night_strategy_payload",  # R6: refreshes the plan (and the night strategy) before reading the cached advice
     "_compute_next_action",
     "_compute_next_automation_action",
     "tomorrow_plan",
@@ -218,7 +219,7 @@ def test_each_wiring_point_is_one_discarded_call_and_nothing_uses_the_result() -
                 "_timeline_last",
                 "_timeline_failed_logged",
                 "_timeline_dirty",
-            }
+            }  # (R6: the night-strategy cache attributes are `_timeline_night*`, not timeline identifiers)
             continue
         if kind == "debug":
             assert [m.attr for m in mentions] == ["timeline_debug"]
@@ -268,6 +269,8 @@ def test_the_shadow_methods_write_only_timeline_state_and_never_command_anything
         "timeline_payload",
         "_surface_timeline",
         "timeline_operations_lines",
+        "_timeline_night_apply",  # R6: the night strategy cache is `_timeline_night*` state; advice only
+        "_timeline_night_plan",
     ):
         method = _method(name)
         for node in ast.walk(method):

@@ -181,3 +181,28 @@ def test_a_day_without_a_record_or_enough_forecast_is_skipped_quietly(zone_files
     zone = tr.load_zone(chart, learn, _tz())
     result = tr.replay_zone(zone, tr.infer_config(zone, "06:30", "22:30"), days=None, with_v3=False)
     assert result["summary"]["days"] <= 1
+
+
+def test_windows_recommended_comes_from_the_live_flag_rows_not_the_day_record(zone_files) -> None:
+    """R3b question 5 (Issue #1230 R6): the record holds the END of the day's state; the plan is made from the flag the
+    live row carried at day start. A record that says False with a live flag True is replayed as recommended."""
+    chart, learn = zone_files
+    zone = tr.load_zone(chart, learn, _tz())
+    day = datetime(2026, 11, 2, tzinfo=_tz()).date()
+    at = datetime(2026, 11, 2, 0, 5, tzinfo=_tz())
+    assert zone.records[day]["windows_recommended"] is False
+    assert tr._live_windows_flag(zone, day, at) is False  # rows carry the flag, and it is False
+    for r in zone.by_day[day]:
+        r.windows_recommended = r.ts.hour >= 0  # the live flag is True all day
+    assert tr._live_windows_flag(zone, day, at) is True
+    assert tr._engine_recommended_live(zone, day, zone.records[day]) is True
+    # a flag that was only True LATER in the day is not the plan's flag at day start (record unchanged: False)
+    for r in zone.by_day[day]:
+        r.windows_recommended = r.ts.hour >= 12
+    assert tr._live_windows_flag(zone, day, at) is False
+    assert tr._engine_recommended_live(zone, day, zone.records[day]) is True  # but the engine did recommend that day
+    # rows without the flag (older chart rows): fall back to the record
+    for r in zone.by_day[day]:
+        r.windows_recommended_known = False
+    assert tr._live_windows_flag(zone, day, at) is None
+    assert tr._engine_recommended_live(zone, day, {"windows_recommended": True}) is True

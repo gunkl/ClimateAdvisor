@@ -26,7 +26,12 @@ HOW (walk-forward, no future leakage)
 
 LIMITS (printed in the report): the chart_log has no bedroom history before 2026-11-06, so only the hallway is
 validated; the bedroom node needs its own hours of readings (gate: 72 h). Forecast error is excluded on purpose
-(recorded outdoor). Results are PROVISIONAL until R1b's model fix lands (the rates come from v4).
+(recorded outdoor). A replay is PROVISIONAL (grades capped at medium) unless its fits followed the live 30-day rule
+(``--train-days 30``, the default) AND every replayed class has at least 10 nights predicted with an "ok" fit
+(``night_replay.is_provisional``).
+
+The replay itself is ``custom_components/climate_advisor/night_replay.py``: the integration runs the same code every
+night after the v4 fit and stores the result next to the model, so this tool reproduces what the gate reads.
 
 Usage:
     python tools/night_strategy_replay.py --chart-log chart.json --json out.json
@@ -38,11 +43,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import statistics
 import sys
-import time
-from collections import defaultdict
-from datetime import UTC, date, datetime, timedelta, tzinfo
+from datetime import date, datetime, timedelta, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -53,173 +55,20 @@ from tools.sim_harness.ha_stubs import install_ha_stubs  # noqa: E402
 
 install_ha_stubs()
 
+from custom_components.climate_advisor import night_replay as nr  # noqa: E402
 from custom_components.climate_advisor import night_strategy as ns  # noqa: E402
 from custom_components.climate_advisor import predictor_v4 as p4  # noqa: E402
 
 CA = "_ca"
-STEP_S = p4.V4_STEP_MINUTES * 60
-SCHEMA_VERSION = 1
-FAN_MIN_STEPS = 4  # >= 1 h of fan makes it a fan night
-WINDOWS_MIN_SHARE = 0.6
-CLOSED_MAX_SHARE = 0.1
-MIN_AC_MIN = 30.0  # minutes of recorded cooling (heating) that make a night an AC (heat) night
-PROVISIONAL_REASON = "rates come from v4 before the R1b model fix (a_f / q_h fits on the full history are unreliable)"
+STEP_S = nr.STEP_S
 
 
-# --------------------------------------------------------------------------------------------- nights
-def find_nights(
-    samples: list[p4.V4Sample], tz: tzinfo, bed: tuple[int, int], wake: tuple[int, int]
-) -> list[tuple[datetime, datetime, list[p4.V4Sample]]]:
-    """(start, end, step samples) per local date with an unbroken run of readings from bedtime to wake time."""
-    by_epoch = {int(s.ts.timestamp()): s for s in samples}
-    if not samples:
-        return []
-    first = samples[0].ts.astimezone(tz).date()
-    last = samples[-1].ts.astimezone(tz).date()
-    nights = []
-    d = first
-    while d <= last:
-        start = datetime(d.year, d.month, d.day, bed[0], bed[1], tzinfo=tz)
-        nxt = d + timedelta(days=1)
-        end = datetime(nxt.year, nxt.month, nxt.day, wake[0], wake[1], tzinfo=tz)
-        n = int((end.timestamp() - start.timestamp()) // STEP_S)
-        grid = [start] + p4.grid_steps(start, n)
-        rows = [by_epoch.get(int(t.timestamp())) for t in grid]
-        if all(r is not None for r in rows) and all(
-            r.readings.get(CA) is not None and r.outdoor_f is not None for r in rows if r is not None
-        ):
-            nights.append((start, end, [r for r in rows if r is not None]))
-        d = nxt
-    return nights
-
-
-def classify(rows: list[p4.V4Sample]) -> tuple[str, str, dict[str, float]]:
-    """(class, subtype, stats) of a night from its recorded steps (rows[0] is the bedtime state, not a step)."""
-    steps = rows[1:]
-    n = len(steps)
-    fan_steps = sum(1 for r in steps if r.fan_running)
-    win_steps = sum(1 for r in steps if r.windows_open)
-    heat_min = sum((r.heat_duty or 0.0) for r in steps) * p4.V4_STEP_MINUTES
-    cool_min = sum((r.cool_duty or 0.0) for r in steps) * p4.V4_STEP_MINUTES
-    stats = {
-        "fan_h": fan_steps * 0.25,
-        "win_h": win_steps * 0.25,
-        "heat_min": round(heat_min),
-        "cool_min": round(cool_min),
-    }
-    if fan_steps >= FAN_MIN_STEPS:
-        sub = "fan:long" if fan_steps * 0.25 > 3.0 else "fan:short"
-        if cool_min >= MIN_AC_MIN:
-            sub = "fan:then_ac"
-        return ns.CLS_FAN, sub, stats
-    if win_steps >= WINDOWS_MIN_SHARE * n:
-        return ns.CLS_WINDOWS, "windows:all_night" if win_steps >= 0.9 * n else "windows:part", stats
-    if win_steps <= CLOSED_MAX_SHARE * n:
-        sub = "closed:ac" if cool_min >= MIN_AC_MIN else ("closed:heat" if heat_min >= MIN_AC_MIN else "closed:idle")
-        return ns.CLS_CLOSED, sub, stats
-    return "mixed", "mixed", stats
-
-
-def _mass_at(
-    model: p4.V4Model, samples: list[p4.V4Sample], idx_by_epoch: dict[int, int], start: datetime
-) -> float | None:
-    i = idx_by_epoch.get(int(start.timestamp()))
-    if i is None:
-        return None
-    mass: float | None = None
-    for s in samples[max(0, i - 24) : i + 1]:
-        mass = p4.step_mass(model, mass_f=mass, readings=s.readings)
-    return mass
-
-
-# --------------------------------------------------------------------------------------------- one night
-def replay_night(
-    model: p4.V4Model,
-    tz: tzinfo,
-    start: datetime,
-    end: datetime,
-    rows: list[p4.V4Sample],
-    mass: float | None,
-) -> dict[str, object]:
-    steps = rows[1:]
-    h0 = float(rows[0].readings[CA])
-    house = [model.house[k] for k in p4.HOUSE_KEYS]
-    out = [float(r.outdoor_f) for r in steps]
-    win = [1.0 if r.windows_open else 0.0 for r in steps]
-    fan = [1.0 if r.fan_running else 0.0 for r in steps]
-    hrs = [p4._local_hour(r.ts, tz) for r in steps]
-    uh = [
-        float(r.heat_duty if r.heat_duty is not None else (1.0 if r.hvac_action == "heating" else 0.0)) for r in steps
-    ]
-    uc = [
-        float(r.cool_duty if r.cool_duty is not None else (1.0 if r.hvac_action == "cooling" else 0.0)) for r in steps
-    ]
-    roll = p4.rollout(
-        house,
-        [],
-        h0=h0,
-        m0=mass if mass is not None else h0,
-        b0=[],
-        out=out,
-        win=win,
-        fan=fan,
-        hours=hrs,
-        heat_u=uh,
-        cool_u=uc,
-    )
-    actual = [float(r.readings[CA]) for r in steps]
-    err = [p - a for p, a in zip(roll.primary, actual, strict=True)]
-    flat = [h0 - a for a in actual]
-    res: dict[str, object] = {
-        "mae_f": statistics.fmean(abs(e) for e in err),
-        "bias_f": statistics.fmean(err),
-        "flat_mae_f": statistics.fmean(abs(e) for e in flat),
-        "end_err_f": err[-1],
-        "max_abs_f": max(abs(e) for e in err),
-        "actual_drop_f": actual[-1] - h0,
-        "pred_drop_f": roll.primary[-1] - h0,
-    }
-    # variant C: the planner's controller from the recorded setpoints (needs a recorded setpoint)
-    sps = [(r.heat_sp_f, r.cool_sp_f) for r in steps]
-    if any(a is not None or b is not None for a, b in sps):
-        inp = ns.NightInputs(
-            model=model,
-            start=start,
-            end=end,
-            tz=tz,
-            fan_mode="whole_house_fan",
-            outdoor=[(r.ts, float(r.outdoor_f)) for r in steps],
-            readings={CA: h0},
-            floor_f=66.0,
-            ceiling_f=72.0,
-            mass_f=mass,
-            offset_loop=False,
-        )
-        sim = ns.replay_recorded(inp, list(zip(win, fan, strict=True)), sps)
-        if sim is not None:
-            cerr = [p - a for p, a in zip(sim.hall, actual, strict=True)]
-            res["closed_loop_mae_f"] = statistics.fmean(abs(e) for e in cerr)
-            res["closed_loop_bias_f"] = statistics.fmean(cerr)
-            res["closed_loop_end_err_f"] = cerr[-1]
-    return res
-
-
-# --------------------------------------------------------------------------------------------- the run
-def _agg(vals: list[dict[str, object]], key: str = "mae_f") -> dict[str, object] | None:
-    xs = [v for v in vals if key in v]
-    if not xs:
-        return None
-    return {
-        "n_nights": len(xs),
-        "mae_f": round(statistics.fmean(float(v[key]) for v in xs), 3),
-        "flat_mae_f": round(statistics.fmean(float(v["flat_mae_f"]) for v in xs), 3)
-        if all("flat_mae_f" in v for v in xs)
-        else None,
-        "bias_f": round(
-            statistics.fmean(float(v["bias_f" if key == "mae_f" else "closed_loop_bias_f"]) for v in xs), 3
-        ),
-        "max_abs_f": round(max(float(v.get("max_abs_f", 0.0)) for v in xs), 2),
-    }
+# The replay itself lives in the integration (``night_replay``): the nightly job runs the SAME functions, so this tool
+# and the stored validation record cannot drift apart.
+find_nights = nr.find_nights
+classify = nr.classify
+replay_night = nr.replay_night
+_mass_at = nr.mass_at
 
 
 def run(
@@ -233,81 +82,19 @@ def run(
     until: date | None = None,
     log=print,
 ) -> dict[str, object]:
-    nights = find_nights(samples, tz, bed, wake)
-    if since:
-        nights = [n for n in nights if n[0].astimezone(tz).date() >= since]
-    if until:
-        nights = [n for n in nights if n[0].astimezone(tz).date() <= until]
-    idx = {int(s.ts.timestamp()): i for i, s in enumerate(samples)}
-    weeks: dict[date, list] = defaultdict(list)
-    for n in nights:
-        d = n[0].astimezone(tz).date()
-        weeks[d - timedelta(days=d.weekday())].append(n)
-    records: list[dict[str, object]] = []
-    excluded: dict[str, int] = defaultdict(int)
-    t0 = time.time()
-    for monday in sorted(weeks):
-        wk_start = datetime(monday.year, monday.month, monday.day, tzinfo=tz)
-        train = [
-            s for s in samples if s.ts < wk_start and (not train_days or s.ts >= wk_start - timedelta(days=train_days))
-        ]
-        model = p4.fit(train, primary=CA, sensors=[CA], tz=tz, now=wk_start)
-        frozen = ns._frozen_set(model)
-        log(f"  week {monday}: {len(weeks[monday])} nights, model {model.confidence} (frozen {sorted(frozen) or '-'})")
-        for start, end, rows in weeks[monday]:
-            cls, sub, stats = classify(rows)
-            rec: dict[str, object] = {"night": start.date().isoformat(), "class": cls, "subtype": sub, **stats}
-            if model.confidence == "none":
-                excluded["model_none"] += 1
-                continue
-            if (cls == ns.CLS_FAN and "h/a_f" in frozen) or (cls in (ns.CLS_WINDOWS, ns.CLS_FAN) and "h/a_w" in frozen):
-                excluded[f"{cls}_rate_frozen"] += 1
-                rec["excluded"] = "rate frozen in the fit"
-                records.append(rec)
-                continue
-            rec.update(replay_night(model, tz, start, end, rows, _mass_at(model, samples, idx, start)))
-            rec["model_confidence"] = model.confidence
-            rec["a_f"], rec["a_w"] = round(model.house["a_f"], 3), round(model.house["a_w"], 3)
-            records.append(rec)
-    scored = [r for r in records if "mae_f" in r]
-    classes: dict[str, object] = {}
-    for cls in (ns.CLS_CLOSED, ns.CLS_WINDOWS, ns.CLS_FAN, ns.CLS_BLOWER):
-        a = _agg([r for r in scored if r["class"] == cls])
-        if a:
-            classes[cls] = {k: a[k] for k in ("n_nights", "mae_f", "flat_mae_f", "bias_f")}
-    subtypes: dict[str, object] = {}
-    for sub in sorted({str(r["subtype"]) for r in scored}):
-        a = _agg([r for r in scored if r["subtype"] == sub])
-        if a:
-            subtypes[sub] = a
-    closed_loop = {}
-    for cls in (ns.CLS_CLOSED, ns.CLS_WINDOWS, ns.CLS_FAN):
-        a = _agg([r for r in scored if r["class"] == cls], "closed_loop_mae_f")
-        if a:
-            closed_loop[cls] = a
-    log(f"replayed {len(scored)} of {len(nights)} nights in {time.time() - t0:.0f} s")
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "provisional": True,
-        "provisional_reason": PROVISIONAL_REASON,
-        "generated": datetime.now(UTC).isoformat(timespec="seconds"),
-        "params": {
-            "bed": f"{bed[0]:02d}:{bed[1]:02d}",
-            "wake": f"{wake[0]:02d}:{wake[1]:02d}",
-            "train_days": train_days,
-        },
-        "n_nights_found": len(nights),
-        "classes": classes,
-        "subtypes": subtypes,
-        "closed_loop_variant": closed_loop,
-        "excluded": dict(excluded),
-        "limits": [
-            "hallway only: the chart_log has no bedroom sensor before 2026-11-06",
-            "recorded outdoor temperature (forecast error excluded on purpose)",
-            "provisional until the R1b model fix lands: " + PROVISIONAL_REASON,
-        ],
-        "nights": records,
-    }
+    rep = nr.run(samples, tz, primary=CA, bed=bed, wake=wake, train_days=train_days, since=since, until=until, log=log)
+    rep["provisional"] = nr.is_provisional(rep)
+    rep["provisional_reason"] = (
+        None
+        if not rep["provisional"]
+        else "fits were not the live 30-day rule, or a replayed class has fewer than "
+        f"{ns.VALIDATION_HIGH_NIGHTS} nights predicted with an 'ok' fit"
+    )
+    rep["limits"] = [
+        "hallway only: the chart_log has no bedroom sensor before 2026-11-06",
+        "recorded outdoor temperature (forecast error excluded on purpose)",
+    ]
+    return rep
 
 
 def print_report(rep: dict[str, object], log=print) -> None:
@@ -336,7 +123,13 @@ def print_report(rep: dict[str, object], log=print) -> None:
         log("Closed-loop variant (planner controller from recorded setpoints; informational)")
         for cls, v in cl.items():
             log(f"  {cls:<10} nights {v['n_nights']:>3}  MAE {v['mae_f']:.2f} F  bias {v['bias_f']:+.2f} F")
-    log(f"\nexcluded: {rep['excluded']}")
+    ok = rep.get("classes_ok_fits_only") or {}
+    if ok:
+        log("\nOnly nights whose fit was confidence 'ok' (the fits the planner itself would trust):")
+        for cls, v in ok.items():
+            log(f"  {cls:<10} nights {v['n_nights']:>3}  MAE {v['mae_f']:.2f} F  'no change' {v['flat_mae_f']:.2f} F")
+    log(f"\nprovisional: {rep.get('provisional')} ({rep.get('provisional_reason') or 'final'})")
+    log(f"excluded: {rep['excluded']}")
     for lim in rep["limits"]:  # type: ignore[attr-defined]
         log(f"LIMIT: {lim}")
 
@@ -476,7 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tz", default="America/Los_Angeles")
     ap.add_argument("--bed", default="20:30")
     ap.add_argument("--wake", default="06:30")
-    ap.add_argument("--train-days", type=int, default=0, help="training look-back per week (0 = all history)")
+    ap.add_argument(
+        "--train-days", type=int, default=30, help="training look-back per week (the live rule: 30; 0 = all history)"
+    )
     ap.add_argument("--since", type=date.fromisoformat)
     ap.add_argument("--until", type=date.fromisoformat)
     ap.add_argument("--json", type=Path, help="write the replay result (also the NightValidation input)")

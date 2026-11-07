@@ -40,7 +40,10 @@ INPUT CHOICES (documented because they decide how honest the numbers are)
     step ("as scheduled"), or frozen at A with ``--setpoints hold``. An occupant change after A that
     moves the band leaks a little; identical for v3 and v4.
   * windows/fan: closed/off, like v3 and the live shadow, UNLESS chart_log ``windows_recommended`` is
-    true at A, then open for ``--window-plan-hours`` (default 4) for BOTH models (v3 through the
+    true at A, then open over the times the engine planned that day (the learning DB daily record's
+    ``window_open_time``/``window_close_time``; the live shadow reads the same plan from the classification)
+    through ``v4_shadow.planned_window_span``, the ONE rule both share; no record for the day -> the
+    first ``--window-plan-hours`` (default 4) from A. Both models get the same span (v3 through the
     classification's window times). Fan is never planned. A "v4 with actual inputs" variant (actual
     outdoor, windows, fan) is reported apart as a diagnostic, never in the gate.
 
@@ -617,6 +620,45 @@ def windows_plan(idx: ChartIndex, anchor: datetime, plan_hours: float) -> bool:
     return bool(row and row.get("windows_recommended") and plan_hours > 0)
 
 
+def _shadow_module() -> Any:
+    """``v4_shadow``: the module that owns the window-plan rule the live shadow also uses (one shared builder)."""
+    _install_ha_stubs()
+    return importlib.import_module("custom_components.climate_advisor.v4_shadow")
+
+
+def window_records(learning_db: dict | None) -> dict[str, tuple[dtime, dtime]]:
+    """``{local date: (planned open, planned close)}`` from the learning DB's daily records: the times the engine's
+    classification actually planned that day (``DailyRecord.window_open_time`` / ``window_close_time``)."""
+    out: dict[str, tuple[dtime, dtime]] = {}
+    for rec in (learning_db or {}).get("records") or []:
+        try:
+            o, c = rec.get("window_open_time"), rec.get("window_close_time")
+            if o and c:
+                out[str(rec["date"])[:10]] = (dtime.fromisoformat(o), dtime.fromisoformat(c))
+        except KeyError, TypeError, ValueError:
+            continue
+    return out
+
+
+def window_plan_span(
+    idx: ChartIndex,
+    anchor: datetime,
+    args: argparse.Namespace,
+    records: dict[str, tuple[dtime, dtime]],
+) -> tuple[datetime, datetime] | None:
+    """The window span both models predict under at ``anchor``: ``v4_shadow.planned_window_span`` (the live shadow's
+    own rule). Recommended = the live flag at the anchor; times = the day's record when ``--window-plan-source record``
+    (the default) and one exists, else the documented fallback of ``--window-plan-hours`` from the anchor."""
+    recommended = windows_plan(idx, anchor, args.window_plan_hours)
+    local = anchor.astimezone(idx.tz)
+    open_t = close_t = None
+    if getattr(args, "window_plan_source", "record") == "record":
+        open_t, close_t = records.get(local.date().isoformat(), (None, None))
+    return _shadow_module().planned_window_span(
+        local, recommended, open_t, close_t, fallback_hours=args.window_plan_hours
+    )
+
+
 def v3_curve(
     coord: Any,
     *,
@@ -625,8 +667,7 @@ def v3_curve(
     hourly: list[float],
     model: dict,
     band_fn,
-    plan_windows: bool,
-    plan_hours: float,
+    span: tuple[datetime, datetime] | None,
 ) -> dict[int, float]:
     """The production v3 predicted-indoor curve at ``anchor`` -> {epoch: temp_f} (hourly + :30 points)."""
     tz = idx.tz
@@ -655,13 +696,13 @@ def v3_curve(
         )
     modes = coord._compute_day_hvac_modes(entries, anchor, None)
     open_t = close_t = None
-    if plan_windows:
-        open_t = a_local.time()
-        end = at(anchor, plan_hours * 3600).astimezone(tz)
-        close_t = end.time() if end.date() == a_local.date() else dtime(23, 59, 59)
+    if span is not None:  # v3 takes one time-of-day span on the anchor's day (clipped at midnight)
+        s0, s1 = span[0].astimezone(tz), span[1].astimezone(tz)
+        open_t = s0.time() if s0.date() == a_local.date() else dtime(0, 0)
+        close_t = s1.time() if s1.date() == a_local.date() else dtime(23, 59, 59)
     classification = SimpleNamespace(
         hvac_mode=modes.get(a_local.date(), "off"),
-        windows_recommended=plan_windows,
+        windows_recommended=span is not None,
         window_open_time=open_t,
         window_close_time=close_t,
     )
@@ -828,6 +869,7 @@ def run_backtest(
     last = idx.dts[-1].astimezone(tz)
     weeks = plan_weeks(first, last, args)
     forecasts = ForecastIndex(archive_snapshots, idx)
+    win_records = window_records(learning_db)
     snaps_sorted = archive_snapshots or []
 
     coord = None
@@ -968,12 +1010,12 @@ def run_backtest(
                 skipped["no_forecast"] += 1
                 continue
             src_counts[src] += 1
-            plan_win = windows_plan(idx, A, args.window_plan_hours)
+            plan_span = window_plan_span(idx, A, args, win_records)
 
             def band_fn(anchor_ep: float, t_ep: float) -> tuple[float | None, float | None]:
                 return idx.band_at(anchor_ep if args.setpoints == "hold" else t_ep, commanded)
 
-            def build_inputs(actual: bool, A=A, hourly=hourly, plan_win=plan_win):
+            def build_inputs(actual: bool, A=A, hourly=hourly, plan_span=plan_span):
                 out = []
                 last_lo = last_hi = None
                 steps = grid_steps(A, HORIZON_H * 3600 // STEP_S)
@@ -989,7 +1031,7 @@ def run_backtest(
                         fan = bool(row.get("fan_running", row.get("fan")))
                     else:
                         outdoor = interp_hourly(hourly, STEP_S * k)
-                        win = plan_win and STEP_S * k <= args.window_plan_hours * 3600
+                        win = _shadow_module().window_open_at(plan_span, t)
                         fan = False
                     out.append(
                         pred.V4Input(
@@ -1059,8 +1101,7 @@ def run_backtest(
                         hourly=hourly,
                         model=asof_model,
                         band_fn=band_fn,
-                        plan_windows=plan_win,
-                        plan_hours=args.window_plan_hours,
+                        span=plan_span,
                     )
                 except Exception:  # noqa: BLE001
                     skipped["v3_error"] += 1
@@ -1073,8 +1114,7 @@ def run_backtest(
                         hourly=hourly,
                         model=v3_model,
                         band_fn=band_fn,
-                        plan_windows=plan_win,
-                        plan_hours=args.window_plan_hours,
+                        span=plan_span,
                     )
                 except Exception:  # noqa: BLE001
                     skipped["v3_error"] += 1
@@ -1188,6 +1228,7 @@ def run_backtest(
                 "setpoints": args.setpoints,
                 "setpoint_source": getattr(args, "setpoint_source", "band"),
                 "window_plan_hours": args.window_plan_hours,
+                "window_plan_source": getattr(args, "window_plan_source", "record"),
                 "train_days": args.train_days,
                 "refit_every_weeks": args.refit_every_weeks,
                 "anchor_step_hours": args.anchor_step_hours,
@@ -1518,7 +1559,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="band: the plan's lower/upper (what the live shadow knows); commanded: the logged thermostat "
         "setpoint of the day's mode (diagnostic - the commanded value is typically 1-2 F above the band floor)",
     )
-    p.add_argument("--window-plan-hours", type=float, default=4.0)
+    p.add_argument(
+        "--window-plan-hours",
+        type=float,
+        default=4.0,
+        help="fallback span: windows recommended but no planned times for the day -> open this long from the anchor "
+        "(0 = never plan windows)",
+    )
+    p.add_argument(
+        "--window-plan-source",
+        choices=("record", "fallback"),
+        default="record",
+        help="record (default, same rule as the live shadow): the windows are open over the times the engine planned "
+        "that day (learning DB daily record window_open_time/window_close_time); fallback: always the first "
+        "--window-plan-hours from the anchor (the pre-R6 backtest rule)",
+    )
     p.add_argument(
         "--v3-model",
         choices=("honest", "asof", "current"),

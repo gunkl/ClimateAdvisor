@@ -91,6 +91,11 @@ disk:   {"v": 1, "leads": ["1h","4h","12h","24h"],
 
 Written by `tools/predict_backtest.py --publish` over SSH ([Debugging Guide](09-DEBUGGING-GUIDE.md#prediction-backtest-toolspredict_backtestpy-issue-1230-r1)); the integration never writes it. `prediction_accuracy.load_backtest()` returns `None` for a missing or unreadable file (WARNING for unreadable) or a non-dict. Keys consumed (all optional): `points` = sensor -> lead -> `[{t, actual, flat, v4, v3}]`, `gate` (rows), `gate_summary`. See [Payload and merge rule](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1).
 
+## Window Plan Rule And Night Evidence (R6)
+
+- **One window assumption** (`v4_shadow.planned_window_span`, shared by the live shadow and `tools/predict_backtest.py`): windows recommended -> open over the engine's planned open/close times on the anchor's local day (live: the classification; backtest: the learning DB's daily record `window_open_time` / `window_close_time`, the same plan source), never repeated on the next day (tomorrow's planned window period is not modelled in either path: gunkl/ClimateAdvisor#1391); recommended with no planned times -> the first `WINDOW_PLAN_FALLBACK_HOURS` (4 h) from the anchor. `--window-plan-source fallback` restores the pre-R6 backtest rule. Zone 1 backtest before/after: the gate verdict is unchanged (3 of 6 pass, not ready); `_ca` 4 h v4 MAE 1.03 F both ways, bias +0.12 -> +0.14 F.
+- **Night-strategy evidence:** after every successful fit the coordinator runs `night_replay.run_nightly` (executor, same domain lock) and stores its record in the model file under `night_validation` (see [Night Strategy](night-strategy-spec.md)). An older model file without the key reads as none; the next cycle starts the replay.
+
 ## Persistence timing
 
 - **Throttle.** After each cycle, if the archive or the store is dirty and `V4_ARCHIVE_SAVE_MIN_INTERVAL_S` (3600 s, monotonic clock) has passed since the last cycle-triggered save (or there was none since start), the archive (if dirty) and then the store (if dirty) are saved in the executor. The first cycle after a restart therefore saves immediately. The store is dirty after every cycle (the mass moved), so the model file is rewritten on the same hourly beat.

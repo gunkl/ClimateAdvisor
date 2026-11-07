@@ -16,8 +16,10 @@ WHAT A DAY'S DIFF HOLDS
 INPUT CHOICES (they decide how honest the numbers are; the report states them):
   * config (comfort/sleep band, wake/sleep time) is INFERRED from the logged target band ramps: the chart_log has no
     config. ``--wake/--sleep`` override the inference.
-  * classification: the learning record's day type, window plan and recommended mode, with ``classify_day`` filling the
-    fields the record lacks. Occupancy is the record's (all zones are 'home' all days in the current data).
+  * classification: the learning record's day type, window times and recommended mode, with ``classify_day`` filling the
+    fields the record lacks. ``windows_recommended`` is the chart_log's LIVE flag at the moment of the plan (the record
+    holds the end of the day's state; only a zone whose rows lack the flag falls back to the record). Occupancy is
+    the record's (all zones are 'home' all days in the current data).
   * forecast: the chart_log ``pred_outdoor`` of the day (lead 0: hindsight, so optimistic). The forecast archive is
     empty on these copies.
   * thermal model: the learning DB's current cache (hindsight for older days, flattering to the timeline).
@@ -108,6 +110,7 @@ class Row:
     windows_recommended: bool
     nat_vent: bool
     fan_running: bool
+    windows_recommended_known: bool = False  # the row carries the live flag at all (older chart rows do not)
 
     @classmethod
     def of(cls, e: dict, tz: tzinfo) -> Row | None:
@@ -134,6 +137,7 @@ class Row:
             bool(e.get("windows_recommended")),
             bool(e.get("nat_vent_active")),
             bool(e.get("fan_running")),
+            e.get("windows_recommended") is not None,
         )
 
 
@@ -303,8 +307,13 @@ def build_snapshot(zone: ZoneData, day: date, cfg: dict[str, Any], mods: tuple[A
     updates: dict[str, Any] = {"day_type": rec.get("day_type", c.day_type)}
     if rec.get("hvac_mode_recommended"):
         updates["hvac_mode"] = rec["hvac_mode_recommended"]
-    if "windows_recommended" in rec:
-        updates["windows_recommended"] = bool(rec["windows_recommended"])
+    # R6: ``windows_recommended`` is the LIVE flag the chart_log row carried at the moment the plan is made (the
+    # engine's classification at day start), not the day record, which holds the END of the day's state (R3b
+    # question 5). The planned open/close times exist only in the record (no row carries them); a zone whose rows do
+    # not carry the flag at all falls back to the record's.
+    live = _live_windows_flag(zone, day, now)
+    if live is not None or "windows_recommended" in rec:
+        updates["windows_recommended"] = live if live is not None else bool(rec["windows_recommended"])
         updates["window_open_time"] = _t(rec.get("window_open_time"))
         updates["window_close_time"] = _t(rec.get("window_close_time"))
     c = replace(c, **updates)
@@ -374,6 +383,18 @@ def build_snapshot(zone: ZoneData, day: date, cfg: dict[str, Any], mods: tuple[A
 
         snap.path_fn = _path_fn
     return snap, c, rec
+
+
+def _live_windows_flag(zone: ZoneData, day: date, at: datetime) -> bool | None:
+    """The chart_log ``windows_recommended`` flag in force at ``at`` (the latest row at or before it; the day's first
+    row when none is yet), or None when the zone's rows of that day do not carry the flag."""
+    rows = zone.by_day.get(day, [])
+    if not any(r.windows_recommended_known for r in rows):
+        return None
+    row = _row_at(zone, at) or next((r for r in rows if r.windows_recommended_known), None)
+    if row is None or not row.windows_recommended_known:
+        row = next((r for r in rows if r.windows_recommended_known), None)
+    return None if row is None else bool(row.windows_recommended)
 
 
 def _t(text: Any) -> time | None:
@@ -693,10 +714,19 @@ def compare_day(tl: Any, act: Actual, rec: dict, day: date, zone: ZoneData, zone
         "candidates": [f"{c.kind}:{c.reason}:{c.end_reason}" for c in tl.candidates],
         "windows": {
             "timeline_open_steps": len(open_steps),
-            "engine_recommended": bool(rec.get("windows_recommended")),
+            "engine_recommended": _engine_recommended_live(zone, day, rec),
+            "engine_recommended_record": bool(rec.get("windows_recommended")),
             "occupant_opened": bool(rec.get("windows_physically_opened")),
         },
     }
+
+
+def _engine_recommended_live(zone: ZoneData, day: date, rec: dict) -> bool:
+    """Did the engine recommend windows at any point of the day: the live flag rows, else the day record."""
+    rows = zone.by_day.get(day, [])
+    if any(r.windows_recommended_known for r in rows):
+        return any(r.windows_recommended for r in rows)
+    return bool(rec.get("windows_recommended"))
 
 
 def _row_at(zone: ZoneData, ts: datetime) -> Row | None:

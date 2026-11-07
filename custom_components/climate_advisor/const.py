@@ -741,6 +741,7 @@ API_EVENT_LOG = f"{API_BASE}/event_log"
 API_ENGINES = f"{API_BASE}/engines"
 API_PREDICTION_ACCURACY = f"{API_BASE}/prediction_accuracy"
 API_TIMELINE = f"{API_BASE}/timeline"  # Issue #1230 R3b: the operation timeline, read-only
+API_NIGHT_STRATEGY = f"{API_BASE}/night_strategy"  # Issue #1230 R6: tonight's bedroom strategy (advice), read-only
 
 # Panel
 PANEL_URL = "/climate_advisor/frontend"

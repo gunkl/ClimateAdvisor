@@ -575,7 +575,15 @@ def test_model_file_round_trip_private_and_atomic(fake: FakePredictor, tmp_path:
     assert not list(tmp_path.glob("*.tmp"))
     if sys.platform != "win32":
         assert stat.S_IMODE(os.stat(store._path).st_mode) == 0o600
-    assert set(json.loads(store._path.read_text())) == {"v", "model", "mass_f", "mass_at", "last_fit", "last_fit_error"}
+    assert set(json.loads(store._path.read_text())) == {
+        "v",
+        "model",
+        "mass_f",
+        "mass_at",
+        "last_fit",
+        "last_fit_error",
+        "night_validation",
+    }
     again = V4ModelStore(tmp_path, entry_id="zoneA")
     again.load()
     assert (again.v4_model, again.v4_mass_f, again.v4_mass_at) == (store.v4_model, 66.25, "2026-11-06T10:00:00+00:00")
@@ -725,3 +733,130 @@ def test_a_fit_that_cannot_be_scheduled_does_not_block_later_fits(fake: FakePred
     monkeypatch.undo()
     with scheduler.installed():
         assert coord._v4_start_fit("nightly") is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #1230 R6: the nightly night-strategy replay (evidence behind tonight's bedroom plan)
+# ---------------------------------------------------------------------------
+
+
+def _record(**over: Any) -> dict:
+    return {
+        "schema_version": 1,
+        "provisional": True,
+        "generated": "2026-11-06T03:20:00+00:00",
+        "classes": {},
+        "n_nights_replayed": 3,
+        "n_ok_confidence_fits": 0,
+        **over,
+    }
+
+
+def test_a_model_without_a_night_record_gets_the_replay_without_a_refit(
+    fake: FakePredictor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from custom_components.climate_advisor import night_replay
+
+    coord, fake_hass, scheduler = _build()
+    coord._v4_store.v4_model = _fake_model_dict(coord)
+    _seed_cycle_inputs(coord, scheduler)
+    calls: list[dict] = []
+
+    def fake_run(**kw: Any) -> dict:
+        calls.append(kw)
+        return _record()
+
+    monkeypatch.setattr(night_replay, "run_nightly", fake_run)
+    coord._timeline_night = {"strategy": object(), "reason": "ok"}
+    with scheduler.installed():
+        run_coro(coord._v4_shadow_cycle())
+        scheduler.advance_by(0)
+    assert len(calls) == 1 and calls[0]["train_days"] == 30  # the live training rule
+    assert coord._v4_store.night_validation == _record()
+    assert coord._timeline_night is None  # the next cycle plans against the new evidence
+    assert not fake.fit_calls  # a replay alone never refits the model
+    assert coord._v4_night_replay_running is False
+    # saved next to the model
+    again = V4ModelStore(Path(coord.hass.config.config_dir), entry_id=coord._entry_id)
+    again.load()
+    assert again.night_validation == _record()
+
+
+def test_a_replay_in_flight_never_makes_the_nightly_fit_skip(fake: FakePredictor) -> None:
+    coord, fake_hass, scheduler = _build()
+    coord._v4_night_replay_running = True
+    with scheduler.installed():
+        assert coord._v4_start_fit("nightly") is True
+    assert coord._v4_start_night_replay("night_replay") is False  # and a second replay is not started either
+
+
+def test_a_failed_replay_keeps_the_previous_record_and_logs_once(
+    fake: FakePredictor, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from custom_components.climate_advisor import night_replay
+
+    coord, fake_hass, scheduler = _build()
+    coord._v4_store.v4_model = _fake_model_dict(coord)
+    coord._v4_store.night_validation = _record(generated="old")
+
+    def boom(**_kw: Any) -> dict:
+        raise RuntimeError("replay broke")
+
+    monkeypatch.setattr(night_replay, "run_nightly", boom)
+    with scheduler.installed(), caplog.at_level(logging.DEBUG):
+        run_coro(coord._v4_run_night_replay("nightly"))
+        run_coro(coord._v4_run_night_replay("nightly"))
+    assert coord._v4_store.night_validation["generated"] == "old"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "night strategy replay" in r.message]
+    assert len(warnings) == 1  # the second failure is DEBUG
+
+
+def test_no_replay_without_a_usable_model(fake: FakePredictor, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custom_components.climate_advisor import night_replay
+
+    coord, fake_hass, scheduler = _build()
+    monkeypatch.setattr(night_replay, "run_nightly", lambda **_k: pytest.fail("must not run"))
+    with scheduler.installed():
+        run_coro(coord._v4_run_night_replay("nightly"))  # no model at all
+        coord._v4_store.v4_model = _fake_model_dict(coord, confidence="none")
+        run_coro(coord._v4_run_night_replay("nightly"))  # a model that cannot predict
+    assert coord._v4_store.night_validation is None
+
+
+def test_the_gate_verdict_is_read_from_the_published_backtest_and_throttled(
+    fake: FakePredictor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord, fake_hass, scheduler = _build()
+    reads: list[int] = []
+    backtest = {"gate_summary": {"ready": True, "passed": 6, "scored": 6, "total": 6}}
+
+    def load(config_dir: Any, entry_id: str) -> dict:
+        reads.append(1)
+        return backtest
+
+    monkeypatch.setattr("custom_components.climate_advisor.coordinator.load_backtest", load)
+    assert coord._v4_night_gate["ready"] is False  # nothing published yet reads as not ready
+    coord._v4_night_gate_at = None  # (the harness's startup cycles already read once)
+    with scheduler.installed():
+        run_coro(coord._v4_night_refresh_gate())
+        run_coro(coord._v4_night_refresh_gate())  # within 10 minutes: not read again
+    assert coord._v4_night_gate["ready"] is True and len(reads) == 1
+    coord._v4_night_gate_at = None
+    backtest["gate_summary"]["ready"] = False
+    with scheduler.installed():
+        run_coro(coord._v4_night_refresh_gate())
+    assert coord._v4_night_gate["ready"] is False
+
+
+def test_an_unreadable_backtest_reads_as_not_ready(fake: FakePredictor, monkeypatch: pytest.MonkeyPatch) -> None:
+    coord, fake_hass, scheduler = _build()
+
+    def boom(*_a: Any) -> dict:
+        raise OSError("disk")
+
+    monkeypatch.setattr("custom_components.climate_advisor.coordinator.load_backtest", boom)
+    coord._v4_night_gate = {"ready": True}
+    coord._v4_night_gate_at = None
+    with scheduler.installed():
+        run_coro(coord._v4_night_refresh_gate())
+    assert coord._v4_night_gate["ready"] is False and coord._v4_night_gate["reason"] == "error"

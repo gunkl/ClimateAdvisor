@@ -28,7 +28,7 @@ import pytest
 _PKG = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor"
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-_SHADOW_MODULES = {"v4_shadow.py", "v4_archive.py", "prediction_accuracy.py", "predictor_v4.py"}
+_SHADOW_MODULES = {"v4_shadow.py", "v4_archive.py", "prediction_accuracy.py", "predictor_v4.py", "night_replay.py"}
 _ADVISORY_MODULES = {"night_strategy.py"}  # advise only (DP-7): see test_advisory_modules_command_nothing
 _DATA_MODULES = {"const.py", "api.py"}  # fields/constants/endpoint only; checked below
 _COORDINATOR_WIRING = {
@@ -41,6 +41,12 @@ _COORDINATOR_WIRING = {
     # Issue #1230 R2: the Status chart DISPLAYS v4 (and only for a zone whose backtest gate is ready). Display only:
     # see test_get_chart_data_only_displays_v4 for how narrowly it may touch v4.
     "get_chart_data",
+    # Issue #1230 R6: the night strategy ADVISES (DP-7: nothing commands a fan, window or setpoint). These two read the
+    # v4 model/state to plan tonight's bedroom advice and publish it read-only; they never feed v4 back
+    # (test_night_wiring_is_advisory_only pins what they may write and call).
+    "_timeline_night_apply",
+    "_timeline_night_plan",
+    "night_strategy_payload",
 }
 
 

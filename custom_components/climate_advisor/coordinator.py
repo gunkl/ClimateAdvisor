@@ -883,6 +883,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._timeline_last: dict[str, Any] = {}
         self._timeline_failed_logged = False
         self._timeline_dirty: str | None = None
+        # Issue #1230 R6: tonight's bedroom strategy (advice) is computed beside the timeline and applied to it.
+        self._timeline_night: dict[str, Any] | None = None
+        self._timeline_night_failed_logged = False
+        self._v4_night_gate: dict[str, Any] = {"ready": False, "reason": "no_backtest", "summary": None}
+        self._v4_night_gate_at: float | None = None
+        self._v4_night_replay_failed_logged = False
+        self._v4_night_replay_running = False
         self.learning = LearningEngine(
             Path(hass.config.config_dir), entry_id=self._entry_id, temp_unit=config.get("temp_unit", "fahrenheit")
         )
@@ -5547,6 +5554,105 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_fit_task = None
         self._v4_fit_running = False
 
+    def _v4_node_inputs(self) -> dict[str, Any]:
+        """What ``v4_shadow.build_samples`` needs, captured on the event loop: the fit's node choice and row mapping.
+
+        Shared by the nightly fit and the nightly night-strategy replay so both read the chart log the same way."""
+        primary = self._primary_indoor_entity() or self.config.get("climate_entity", "")
+        sensors = list(self._read_chart_indoor_sensors())
+        # Rows older than the entity primary carry only ``indoor`` / the climate attribute: map them onto the primary
+        # node (M1). While a sleep sensor is configured, ``indoor`` inside the sleep window was the bedroom, so those
+        # rows are skipped for the primary node.
+        aliases = tuple(c for c in (self.config.get("climate_entity"),) if c)
+        cfg = dict(self.config)
+        in_sleep = (lambda dt, _cfg=cfg: _in_sleep_window(dt, _cfg)) if cfg.get("sleep_indoor_temp_entity") else None
+        return {"primary": primary, "sensors": sensors, "aliases": aliases, "in_sleep": in_sleep}
+
+    async def _v4_run_night_replay(self, reason: str) -> None:
+        """The nightly recorded-night replay behind the night-strategy gate (Issue #1230 R6). Never raises.
+
+        Runs in the executor, after the v4 fit and serialised with every zone's fit under the same domain lock, and
+        stores its record next to the model (``night_validation``). A failure keeps the previous record."""
+        state = getattr(self, "_v4_store", None)
+        model_dict = state.v4_model if state is not None else None
+        if state is None or not isinstance(model_dict, dict) or model_dict.get("confidence", "none") == "none":
+            return
+        started = _monotonic()
+        try:
+            from . import night_replay  # noqa: PLC0415 - lazy: a broken engine costs the night plan, not setup
+
+            now = dt_util.now()
+            node = self._v4_node_inputs()
+            sleep_t = _parse_time(self.config.get("sleep_time", "22:30"))
+            wake_t = _parse_time(self.config.get("wake_time", "06:30"))
+            async with self._v4_fit_lock():
+                record = await self._executor_job(
+                    functools.partial(
+                        night_replay.run_nightly,
+                        chart_entries=self._chart_log.raw_entries(),
+                        snapshots_fn=self._forecast_archive.get_snapshots,
+                        tz=now.tzinfo,
+                        now=now,
+                        primary=node["primary"],
+                        sensors=node["sensors"],
+                        primary_aliases=node["aliases"],
+                        in_sleep=node["in_sleep"],
+                        bed=(sleep_t.hour, sleep_t.minute),
+                        wake=(wake_t.hour, wake_t.minute),
+                        train_days=V4_FIT_TRAIN_DAYS,
+                        model_fitted_at=str(model_dict.get("fitted_at") or ""),
+                    )
+                )
+            if getattr(self, "_shut_down", False) is True:
+                return
+            state.night_validation = record
+            state.dirty = True
+            self._timeline_night = None  # the next cycle plans against the new evidence
+            self._v4_night_replay_failed_logged = False
+            _LOGGER.info(
+                "night strategy replay (%s): %s nights replayed, %s with an ok fit, provisional=%s, took %.1fs",
+                reason,
+                record.get("n_nights_replayed"),
+                record.get("n_ok_confidence_fits"),
+                record.get("provisional"),
+                _monotonic() - started,
+            )
+            await self._executor_job(self._v4_store.save)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - advisory data only; the previous record (or none) stays
+            if not getattr(self, "_v4_night_replay_failed_logged", False):
+                self._v4_night_replay_failed_logged = True
+                _LOGGER.warning("night strategy replay (%s) failed; keeping the previous record", reason, exc_info=True)
+            else:
+                _LOGGER.debug("night strategy replay failed again", exc_info=True)
+
+    def _v4_start_night_replay(self, reason: str) -> bool:
+        """Start the night-strategy replay alone (a model without a record: an upgrade, a failed replay).
+
+        Its own running flag, so it never makes a nightly fit skip; the domain lock serialises it with every fit."""
+        if getattr(self, "_shut_down", False) is True or getattr(self, "_v4_night_replay_running", False):
+            return False
+        if not v4_shadow.predictor_available():
+            return False
+        self._v4_night_replay_running = True
+        self._v4_last_fit_attempt = _monotonic()
+        coro = self._v4_night_replay_task(reason)
+        try:
+            self._spawn(coro, background=True)
+        except Exception:
+            coro.close()
+            self._v4_night_replay_running = False
+            raise
+        return True
+
+    async def _v4_night_replay_task(self, reason: str) -> None:
+        try:
+            with log_capture.zone_scope(self.zone_label):
+                await self._v4_run_night_replay(reason)
+        finally:
+            self._v4_night_replay_running = False
+
     async def _v4_run_fit(self, reason: str) -> None:
         """Fit off the event loop and store the model; on any failure the previous model is kept."""
         started = _monotonic()
@@ -5554,15 +5660,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             with log_capture.zone_scope(self.zone_label):
                 now = dt_util.now()
                 tz = now.tzinfo
-                primary = self._primary_indoor_entity() or self.config.get("climate_entity", "")
-                sensors = list(self._read_chart_indoor_sensors())
-                # Rows older than the entity primary carry only ``indoor`` / the climate attribute: map them onto the
-                # primary node (M1). While a sleep sensor is configured, ``indoor`` inside the sleep window was the
-                # bedroom, so those rows are skipped for the primary node.
-                aliases = tuple(c for c in (self.config.get("climate_entity"),) if c)
-                cfg = dict(self.config)
-                in_sleep = (
-                    (lambda dt, _cfg=cfg: _in_sleep_window(dt, _cfg)) if cfg.get("sleep_indoor_temp_entity") else None
+                node = self._v4_node_inputs()
+                primary, sensors, aliases, in_sleep = (
+                    node["primary"],
+                    node["sensors"],
+                    node["aliases"],
+                    node["in_sleep"],
                 )
                 # Captured on the loop (rule: no self.* reads inside the executor job); the row copy is shallow.
                 # One fit at a time across ALL zones (M5): several zones fitting at once starve the event loop (GIL).
@@ -5610,6 +5713,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     seconds,
                 )
                 await self._executor_job(self._v4_store.save)
+                # Issue #1230 R6: the night-strategy gate's evidence is re-run right after every fit (own failures).
+                await self._v4_run_night_replay(reason)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a failed shadow fit keeps the previous model; nothing else is affected
@@ -5674,6 +5779,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         snap = self._timeline_snapshot(c)
         force = trigger if trigger in ("occupancy",) else None
         outcome = latch.update(snap, force=force)
+        self._timeline_night_apply(snap, outcome.regenerated)
         cost_ms = (_perf_counter() - started) * 1000.0
         self._timeline_last = {
             "at": snap.now.isoformat(),
@@ -5855,6 +5961,147 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             nat_vent_active=bool(ae._natural_vent_active),
         )
 
+    def _timeline_night_apply(self, snap: TimelineSnapshot, regenerated: bool) -> None:
+        """Plan tonight's bedroom strategy and add it to the held timeline (Issue #1230 R6). Never raises.
+
+        Occupant view: from early evening until you get up, "Next 24 hours", the briefing and the Next Action also say
+        what to do about the bedroom tonight (open the windows until about 1 AM, then close up), with CA's own line
+        about what it holds. Advice only (DP-7): nothing here starts a fan or moves a setpoint.
+
+        The strategy is planned when it has not been for this night, when the plan regenerated, when the evidence
+        (model, validation, v4 gate) changed or after an hour; between those it is re-applied from the cache every cycle
+        (the builder's fresh path replaces the night's path each update). The zone's v4 gate decides whether predicted
+        figures show (plan decision C11)."""
+        latch = getattr(self, "_timeline_latch", None)
+        if latch is None or latch.timeline is None:
+            return
+        try:
+            from . import night_replay, night_strategy  # noqa: PLC0415 - lazy: a broken engine costs the plan only
+
+            now = snap.now
+            cache = getattr(self, "_timeline_night", None)
+            window = None
+            if snap.sleep_time is not None and snap.wake_time is not None:
+                window = v4_shadow.night_window(now, snap.sleep_time, snap.wake_time)
+            if window is None or snap.occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
+                self._timeline_night = {"strategy": None, "reason": "no_night_in_view", "at": now}
+                return
+            start, end = window
+            state = self._v4_store
+            model_dict = state.v4_model if isinstance(state.v4_model, dict) else None
+            record = state.night_validation if isinstance(state.night_validation, dict) else None
+            gate = bool((getattr(self, "_v4_night_gate", None) or {}).get("ready"))
+            evidence_key = (
+                (model_dict or {}).get("fitted_at"),
+                (record or {}).get("generated"),
+                gate,
+                end.isoformat(),
+            )
+            age = (now - cache["at"]).total_seconds() if cache and isinstance(cache.get("at"), datetime) else None
+            retry_s = 600.0 if cache is not None and cache.get("strategy") is None else 3600.0
+            if cache is None or regenerated or cache.get("key") != evidence_key or age is None or age >= retry_s:
+                strategy, reason = self._timeline_night_plan(
+                    snap, start, end, night_replay, night_strategy, model_dict, record, gate
+                )
+                if strategy is None and cache and cache.get("strategy") is not None and (age or 0.0) < 10800.0:
+                    strategy, reason = cache["strategy"], cache.get("reason", "ok")  # keep the last good plan briefly
+                self._timeline_night = cache = {
+                    "strategy": strategy,
+                    "reason": reason,
+                    "at": now,
+                    "key": evidence_key,
+                }
+            strategy = cache.get("strategy") if cache else None
+            if strategy is None:
+                return
+            unit = snap.unit
+            latch.amend(lambda tl: night_strategy.apply_night_strategy(tl, strategy, unit=unit, now=now))
+            self._timeline_night_failed_logged = False
+        except Exception:  # noqa: BLE001 - advice must never cost the plan or the cycle
+            if not getattr(self, "_timeline_night_failed_logged", False):
+                self._timeline_night_failed_logged = True
+                _LOGGER.warning("night strategy failed; the plan and the house are unaffected", exc_info=True)
+            else:
+                _LOGGER.debug("night strategy failed again", exc_info=True)
+
+    def _timeline_night_plan(
+        self,
+        snap: TimelineSnapshot,
+        start: datetime,
+        end: datetime,
+        night_replay: Any,
+        night_strategy: Any,
+        model_dict: dict[str, Any] | None,
+        record: dict[str, Any] | None,
+        gate: bool,
+    ) -> tuple[Any, str]:
+        """``(NightStrategy | None, reason)`` for the night ``start``..``end`` from the live v4 state (pure reads)."""
+        if model_dict is None:
+            return None, "no_model"
+        future = getattr(self, "_v4_last_future", None)
+        if not future or not future.get("corrected"):
+            return None, "no_forecast"
+        band = snap.band_at(start + timedelta(minutes=1), snap.occupancy_mode) if snap.band_at else None
+        if band is None:
+            return None, "no_band"
+        row = self._chart_log.last_entry() or {}
+        current: dict[str, float | None] = dict(row.get("indoor_sensors") or {})
+        current["_ca"] = row.get("indoor")
+        if snap.indoor_primary is not None:
+            current.setdefault(str(model_dict.get("primary")), snap.indoor_primary)
+        held = self._timeline_latch.timeline
+        path = [(p.ts, p.temp_f) for p in (held.path if held is not None else ()) if p.sensor == "_ca"]
+        caps = self.automation_engine._get_thermostat_capabilities()
+        unknown = not (caps.supports_heat or caps.supports_cool)
+        model_thermal = snap.thermal_model or {}
+        sleep_entity = self.config.get("sleep_indoor_temp_entity")
+        inp = v4_shadow.night_inputs(
+            model_dict=model_dict,
+            start=start,
+            end=end,
+            now=snap.now,
+            fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+            corrected_outdoor=future["corrected"],
+            predictions=future.get("predictions"),
+            current_readings=current,
+            floor_f=float(band.floor),
+            ceiling_f=float(band.ceiling),
+            target_sensor=sleep_entity or None,
+            evidence=night_replay.evidence_from_record(record),
+            validation=night_strategy.NightValidation.from_dict(record) if record else None,
+            can_heat=unknown or caps.supports_heat,
+            can_cool=unknown or caps.supports_cool,
+            swing_heat_f=model_thermal.get("swing_heat_f"),
+            swing_cool_f=model_thermal.get("swing_cool_f"),
+            mass_f=self._v4_store.v4_mass_f,
+            path=path,
+            unit=snap.unit,
+        )
+        if inp is None:
+            return None, "cannot_plan"
+        plan = night_strategy.plan_night(inp)
+        return night_strategy.gate_numbers(plan, gate), "ok"
+
+    def night_strategy_payload(self) -> tuple[dict[str, Any] | None, str]:
+        """``(body, reason)`` for ``GET /api/climate_advisor/night_strategy``: the strategy in the display unit.
+
+        ``body`` is None (the view answers 503) until a night is in view and planned; ``reason`` says why. The same
+        figures-hidden rule as the timeline step applies: no predicted figures unless the zone's v4 gate passed."""
+        try:
+            from . import night_strategy  # noqa: PLC0415
+
+            self._surface_timeline()  # refreshes the plan (and with it the night strategy) when stale
+            cache = getattr(self, "_timeline_night", None) or {}
+            strategy = cache.get("strategy")
+            if strategy is None:
+                return None, str(cache.get("reason") or "not_ready")
+            unit = self.config.get("temp_unit", "fahrenheit")
+            gate = bool((getattr(self, "_v4_night_gate", None) or {}).get("ready"))
+            return night_strategy.api_payload(strategy, unit=unit, convert=display_temp, v4_gate_ready=gate), "ok"
+        except Exception:  # noqa: BLE001 - a read-only view answers "not ready", never a 500
+            _LOGGER.debug("night_strategy_payload failed", exc_info=True)
+            return None, "error"
+
     def _surface_timeline(self) -> Any:
         """The timeline the occupant-facing surfaces read (Issue #1230 R3b), or None in a degraded coordinator.
 
@@ -5913,8 +6160,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("timeline_debug failed", exc_info=True)
             return {"shadow": True, "error": True}
 
+    async def _v4_night_refresh_gate(self) -> None:
+        """Refresh the zone's v4 gate verdict (``gate_summary.ready`` of the published backtest) for the night plan.
+
+        The file read is blocking, so it happens here (executor), at most every 10 minutes; the timeline code that
+        needs the verdict reads the cached answer. Plan decision C11: no predicted bedroom figures unless it is
+        ready. Never raises; a failure reads as "not ready"."""
+        try:
+            last = getattr(self, "_v4_night_gate_at", None)
+            if last is not None and _monotonic() - last < 600.0:
+                return
+            self._v4_night_gate_at = _monotonic()
+            backtest = await self._executor_job(
+                load_backtest, Path(self.hass.config.config_dir), getattr(self, "_entry_id", "")
+            )
+            self._v4_night_gate = gate_state(backtest)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - advisory gate input; "not ready" is the safe reading
+            self._v4_night_gate = {"ready": False, "reason": "error", "summary": None}
+            _LOGGER.debug("night strategy: could not read the v4 gate", exc_info=True)
+
     async def _v4_shadow_cycle(self) -> None:
         """Per 30-minute cycle: predict 24 h with v4 and archive 1/4/12/24 h. Never raises into the cycle."""
+        await self._v4_night_refresh_gate()
         try:
             await self._v4_shadow_cycle_impl()
             self._v4_cycle_failed_logged = False
@@ -5947,6 +6216,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._v4_start_fit("first" if not has_model else "retry")
             if not has_model:
                 return
+        elif (
+            state.night_validation is None
+            and not self._v4_fit_running
+            and not getattr(self, "_v4_night_replay_running", False)
+            and getattr(self, "_startup_coalesce_active", False) is not True
+        ):
+            # Issue #1230 R6: a model without a night-strategy record (an upgrade; a failed replay) gets the replay
+            # now rather than at the next 03:15 fit, at most every 6 h.
+            last = self._v4_last_fit_attempt
+            if last is None or _monotonic() - last >= V4_FIT_RETRY_MIN_INTERVAL_S:
+                self._v4_start_night_replay("night_replay")
         started = _perf_counter()
         now = dt_util.now()
         run_action, run_minutes = v4_shadow.run_state_from_rows(self._chart_log.raw_entries()[-80:], now)

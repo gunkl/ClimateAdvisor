@@ -417,9 +417,10 @@ def _simulate(
     flags: Sequence[tuple[float, float]] | None = None,
     setpoints: Sequence[tuple[float | None, float | None]] | None = None,
 ) -> _Sim | None:
-    """Run one option through the night. Physics: ``predictor_v4.rollout`` one step at a time (replaying the duty
-    the controller below chose); controller: thermostat on the hallway + #1194 outer loop on the target + HVAC pause
-    while windows or the whole-house fan are open.
+    """Run one option through the night. Physics AND thermostat: ``predictor_v4.rollout`` one step at a time with the
+    predictor's own R1b emulator (hysteretic stop, calibrated start offsets, learned minimum run), so a night figure
+    and the v4 prediction of the same hours cannot disagree about when the heat or AC runs. What stays here is the
+    sleep-band outer loop on the target (#1194) and the HVAC pause while windows or the whole-house fan are open.
 
     ``flags`` / ``setpoints`` (replay only) override the option schedule and the band-derived setpoints per step with
     what was RECORDED, so the replay tool exercises the same controller and physics."""
@@ -446,9 +447,6 @@ def _simulate(
     h = float(h)
 
     th = model.thermostat
-    rstep = th.reading_step_f if th.reading_step_f >= 0.05 else 0.0
-    burst_h = float(th.burst_minutes)
-    burst_c = float(th.burst_cool_minutes if th.burst_cool_minutes is not None else th.burst_minutes)
 
     out_pts = sorted((t.timestamp(), float(v)) for t, v in inp.outdoor)
     if not out_pts:
@@ -459,8 +457,8 @@ def _simulate(
     use_loop = inp.offset_loop and tgt_j is not None
     off_h = 0.0
     off_c = 0.0
-    left = 0.0
-    mode = 0
+    run_mode = 0  # the emulated thermostat's run in progress: +1 heating, -1 cooling, 0 none
+    run_min = 0.0  # minutes that run has lasted (the predictor's minimum-run rule counts from it)
     elapsed_h = 0.0
     adaptive_on = spec.mode in ("until_floor", "until_ceiling")
     done = False
@@ -488,7 +486,7 @@ def _simulate(
         # HVAC is paused while a window is open or the whole-house fan runs (owner rules 2-3); the blower is HVAC
         paused = win > 0 or (fan > 0 and spec.cls == CLS_FAN)
         # --- sleep-band outer loop (#1194): only between runs, at most one step per step
-        if use_loop and left <= 0.0 and not paused and setpoints is None:
+        if use_loop and run_mode == 0 and not paused and setpoints is None:
             gap_h = inp.floor_f - tgt_now
             gap_c = tgt_now - inp.ceiling_f
             if gap_h > inp.swing_heat_f:
@@ -503,32 +501,17 @@ def _simulate(
         sp_c = max(inp.ceiling_f - off_c, inp.floor_f + 1.0) if inp.can_cool else None
         if setpoints is not None:
             sp_h, sp_c = setpoints[len(sim.ts)] if len(sim.ts) < len(setpoints) else (None, None)
-        # --- thermostat emulation (bursts of the learned length, start offsets, reading quantisation)
-        uh = uc = 0.0
+        # --- thermostat: the PREDICTOR's own emulator (R1b: hysteretic stop at setpoint + off offset, calibrated
+        # start offsets, learned minimum run, reading quantisation), one step at a time so the outer loop and the HVAC
+        # pause can act between steps. The run in progress is carried in and out through ``init_run``.
         if paused:
-            left = 0.0
-            mode = 0
+            hsp: list[float | None] = [None]  # no setpoint: a run in progress stops (owner rules 2-3)
+            csp: list[float | None] = [None]
+            init_run = None
             sim.paused_steps += 1
         else:
-            if left <= 0.0:
-                rd = h if rstep <= 0.0 else math.floor(h / rstep + 0.5) * rstep
-                if sp_h is not None and rd <= sp_h - th.on_below_f + 1e-6:
-                    left, mode = burst_h, 1
-                    if (sp_h - th.on_below_f) - rd >= 1.0 and left < STEP_MINUTES:
-                        left = float(STEP_MINUTES)
-                elif sp_c is not None and rd >= sp_c + th.on_above_f - 1e-6:
-                    left, mode = burst_c, -1
-                    if rd - (sp_c + th.on_above_f) >= 1.0 and left < STEP_MINUTES:
-                        left = float(STEP_MINUTES)
-                else:
-                    mode = 0
-            if left > 0.0:
-                dur = min(left, float(STEP_MINUTES))
-                left -= dur
-                if mode == 1:
-                    uh = dur / STEP_MINUTES
-                elif mode == -1:
-                    uc = dur / STEP_MINUTES
+            hsp, csp = [sp_h], [sp_c]
+            init_run = (run_mode, run_min) if run_mode else None
         roll = p4.rollout(
             house,
             node_params,
@@ -539,9 +522,22 @@ def _simulate(
             win=[win],
             fan=[fan],
             hours=[_local_hour(ts, inp.tz)],
-            heat_u=[uh],
-            cool_u=[uc],
+            thermostat=th,
+            heat_sp=hsp,
+            cool_sp=csp,
+            init_run=init_run,
         )
+        uh = roll.heat_duty[0]
+        uc = roll.cool_duty[0]
+        # a full-duty step leaves the run going; a partial step is the run landing on its stop point
+        if uh >= 1.0 - 1e-9:
+            run_min = (run_min if run_mode == 1 else 0.0) + STEP_MINUTES
+            run_mode = 1
+        elif uc >= 1.0 - 1e-9:
+            run_min = (run_min if run_mode == -1 else 0.0) + STEP_MINUTES
+            run_mode = -1
+        else:
+            run_mode, run_min = 0, 0.0
         h = roll.primary[0]
         m = roll.mass_end
         b = [roll.nodes[j][0] for j in range(len(node_ids))]
@@ -906,6 +902,75 @@ def plan_night(inp: NightInputs) -> NightStrategy:
     )
 
 
+# ---------------------------------------------------------------------------------------------- the v4 gate (C11)
+FIGURE_KEYS = (
+    "bedroom_low_f",
+    "bedroom_high_f",
+    "bedroom_wake_f",
+    "discomfort_fh",
+    "heat_min",
+    "cool_min",
+    "hvac_minutes",
+    "score",
+)
+
+
+def gate_numbers(strategy: NightStrategy, v4_gate_ready: bool) -> NightStrategy:
+    """Plan decision C11: predicted figures only for a zone whose v4 accuracy gate (``gate_summary.ready``) passes.
+
+    Occupant view: a house whose prediction has not yet been shown to beat "nothing changes" still gets tonight's plan
+    in words, but no bedroom temperatures or minutes of heat/AC that nobody has checked. Never turns figures ON:
+    ``show_numbers`` stays False when the strategy's own confidence already said so."""
+    if v4_gate_ready or not strategy.show_numbers:
+        return strategy
+    return dataclasses.replace(
+        strategy, show_numbers=False, debug={**dict(strategy.debug), "numbers_hidden_by": "v4_gate_not_ready"}
+    )
+
+
+def api_payload(
+    strategy: NightStrategy,
+    *,
+    unit: str,
+    convert: Any,
+    v4_gate_ready: bool,
+    include_debug: bool = False,
+) -> dict[str, Any]:
+    """The REST body of ``GET /api/climate_advisor/night_strategy``: ``NightStrategy.to_dict()`` with temperatures in
+    the display unit (keys keep their ``_f`` names, like the timeline payload), ``unit`` added, the headline and the
+    trade-off lines, and the gate verdict.
+
+    ``convert`` is the caller's ``display_temp(value_f, unit)``. When ``show_numbers`` is False (the model is not
+    trustworthy yet, or the zone's v4 gate has not passed) every predicted figure is ``null`` and the path is empty, so
+    the guarantee does not depend on the page remembering to hide them; the plan itself (options, actions, labels) is
+    unchanged."""
+    gated = gate_numbers(strategy, v4_gate_ready)
+    d = gated.to_dict(include_debug=include_debug)
+    scale = 5.0 / 9.0 if unit == "celsius" else 1.0
+    d["unit"] = unit
+    d["floor_f"] = convert(d["floor_f"], unit)
+    d["ceiling_f"] = convert(d["ceiling_f"], unit)
+    d["v4_gate_ready"] = bool(v4_gate_ready)
+    show = gated.show_numbers
+    opts = []
+    for o in d["options"]:
+        o2 = dict(o)
+        if show:
+            for k in ("bedroom_low_f", "bedroom_high_f", "bedroom_wake_f"):
+                o2[k] = convert(o2[k], unit)
+            o2["discomfort_fh"] = round(o2["discomfort_fh"] * scale, 2)
+            o2["path"] = [[ts, convert(v, unit)] for ts, v in o2.get("path", [])]
+        else:
+            for k in FIGURE_KEYS:
+                o2[k] = None
+            o2["path"] = []
+        opts.append(o2)
+    d["options"] = opts
+    d["headline"] = headline(gated, unit)
+    d["tradeoffs"] = tradeoffs(gated, unit) if show else []
+    return d
+
+
 # ---------------------------------------------------------------------------------------------- presentation
 def tradeoffs(strategy: NightStrategy, unit: str = FAHRENHEIT) -> list[dict[str, Any]]:
     """One line per alternative against the recommendation: what you gain or lose. Facts plus a sentence."""
@@ -920,10 +985,12 @@ def tradeoffs(strategy: NightStrategy, unit: str = FAHRENHEIT) -> list[dict[str,
         d_hvac = o.hvac_minutes - best.hvac_minutes
         d_disc = o.discomfort_fh - best.discomfort_fh
         parts: list[str] = []
-        if d_disc > 0.05:
-            parts.append(f"{d_disc:.1f} more F-hours outside your sleep band")
-        elif d_disc < -0.05:
-            parts.append(f"{-d_disc:.1f} fewer F-hours outside your sleep band")
+        d_disc_u = d_disc * (5.0 / 9.0 if unit == "celsius" else 1.0)  # a degree-hours figure in the user's unit
+        deg = "C" if unit == "celsius" else "F"
+        if d_disc_u > 0.05:
+            parts.append(f"{d_disc_u:.1f} more {deg}-hours outside your sleep band")
+        elif d_disc_u < -0.05:
+            parts.append(f"{-d_disc_u:.1f} fewer {deg}-hours outside your sleep band")
         if d_hvac >= 5:
             parts.append(f"{d_hvac} more minutes of heat or AC")
         elif d_hvac <= -5:
@@ -1106,6 +1173,7 @@ def apply_night_strategy(
     start: datetime | None = None,
     end: datetime | None = None,
     target_sensor: str | None = None,
+    now: datetime | None = None,
 ) -> Any:
     """Return a NEW timeline with tonight's chosen strategy added (R3 contract: pure, never mutates, idempotent).
 
@@ -1118,6 +1186,9 @@ def apply_night_strategy(
       advice with actor YOU, EXCEPT when the timeline already holds a CA nat-vent session (``NAT_VENT_START`` /
       ``NAT_VENT_STOP``, actor CA) that runs the fan across the same span: then the fan runs on CA's own rule and
       no fan step is added (the nat-vent steps already say it). A partly covered span keeps the YOU steps.
+
+    ``now`` (optional): steps already in the past are marked ``status: done`` (the latch does the same for its own
+    steps), so re-applying every cycle never turns a step that has happened back into a pending one.
 
     Existing YOU window/fan steps inside the night span are replaced by the chosen option's (for a "closed" pick only
     the OPEN steps are removed, so a generic "close at bedtime" survives). The target sensor's path points in the
@@ -1232,6 +1303,8 @@ def apply_night_strategy(
             )
     if natvent_covers:
         new = [_with_natvent_flag(s, StepKind) for s in new]
+    if now is not None:
+        new = [dataclasses.replace(s, meta={**s.meta, "status": "done"}) if s.ts < now else s for s in new]
 
     order = {StepKind.NIGHT_STRATEGY: 0}
     steps = sorted([*kept, *new], key=lambda s: (s.ts, order.get(s.kind, 1)))

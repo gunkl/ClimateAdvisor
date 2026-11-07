@@ -24,6 +24,7 @@ import time
 import zlib
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import time as dtime
 from typing import Any
 
 from .const import V4_PREDICT_HORIZON_HOURS
@@ -31,6 +32,7 @@ from .const import V4_PREDICT_HORIZON_HOURS
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_STEP_MINUTES = 15  # predictor_v4.V4_STEP_MINUTES; used only when the engine does not export it
+WINDOW_PLAN_FALLBACK_HOURS = 4.0  # windows recommended but no planned times known: open for this long from the anchor
 
 
 def _predictor() -> Any:
@@ -59,6 +61,38 @@ def step_minutes() -> int:
 # ---------------------------------------------------------------------------
 # Fit
 # ---------------------------------------------------------------------------
+
+
+def build_samples(
+    p: Any,
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    snapshots: Sequence[dict] | None,
+    tz: tzinfo,
+    primary: str,
+    sensors: Sequence[str],
+    aliases: Sequence[str] = (),
+    in_sleep: Callable[[datetime], bool] | None = None,
+) -> tuple[list[Any], str, list[str]]:
+    """``(samples, primary, ordered nodes)`` from chart rows: the ONE rule the live fit, the backtest and the nightly
+    night-strategy replay share (``resolve_nodes`` chooses the nodes; rows older than the entity primary map onto it).
+    Blocking CPU: executor only."""
+    if hasattr(p, "resolve_nodes"):
+        primary, ordered = p.resolve_nodes(
+            entries, primary=primary, sensors=list(sensors), aliases=tuple(aliases), in_sleep=in_sleep, tz=tz
+        )
+        samples = p.samples_from_chart_log(
+            entries,
+            tz=tz,
+            archive_snapshots=snapshots,
+            primary=None if primary == getattr(p, "CA_NODE", "_ca") else primary,
+            primary_aliases=tuple(aliases),
+            in_sleep=in_sleep,
+        )
+    else:
+        samples = p.samples_from_chart_log(entries, tz=tz, archive_snapshots=snapshots)
+        ordered = [primary, *(s for s in sensors if s != primary)]
+    return samples, primary, list(ordered)
 
 
 def run_fit(
@@ -101,21 +135,16 @@ def run_fit(
     entries = list(chart_entries)
     if train_days:
         entries = rows_in_window(entries, now, train_days)
-    if hasattr(p, "resolve_nodes"):
-        primary, ordered = p.resolve_nodes(
-            entries, primary=primary, sensors=list(sensors), aliases=tuple(primary_aliases), in_sleep=in_sleep, tz=tz
-        )
-        samples = p.samples_from_chart_log(
-            entries,
-            tz=tz,
-            archive_snapshots=snapshots,
-            primary=None if primary == getattr(p, "CA_NODE", "_ca") else primary,
-            primary_aliases=tuple(primary_aliases),
-            in_sleep=in_sleep,
-        )
-    else:
-        samples = p.samples_from_chart_log(entries, tz=tz, archive_snapshots=snapshots)
-        ordered = [primary, *(s for s in sensors if s != primary)]
+    samples, primary, ordered = build_samples(
+        p,
+        entries,
+        snapshots=snapshots,
+        tz=tz,
+        primary=primary,
+        sensors=sensors,
+        aliases=tuple(primary_aliases),
+        in_sleep=in_sleep,
+    )
     warm = p.from_dict(dict(previous_model)) if previous_model else None
     model = p.fit(samples, primary=primary, sensors=ordered, tz=tz, now=now, warm_start=warm)
     line = p.summary_line(model) if hasattr(p, "summary_line") else ""
@@ -202,6 +231,44 @@ def _plan_setpoints_fallback(lo: float | None, hi: float | None, last: tuple[flo
     return (lo if lo is not None else last[0], hi if hi is not None else last[1])
 
 
+def planned_window_span(
+    anchor: datetime,
+    recommended: bool,
+    open_t: dtime | None,
+    close_t: dtime | None,
+    *,
+    fallback_hours: float = WINDOW_PLAN_FALLBACK_HOURS,
+) -> tuple[datetime, datetime] | None:
+    """The one window assumption v4 predicts under, live AND in the backtest (Issue #1230 R6 task 3).
+
+    Occupant view: when Climate Advisor recommends opening the windows, the prediction shows the house cooling (or
+    warming) only while the windows are planned to be open, from the time the engine planned, not for an arbitrary
+    four hours from whenever the prediction was made.
+
+    Rule: windows not recommended -> ``None``. Recommended with the engine's own planned ``open_t`` / ``close_t`` (the
+    classification live; the day's record ``window_open_time`` / ``window_close_time`` in the backtest) -> that span on
+    the ANCHOR's local day (a close at or before the open runs past midnight); a span already over at the anchor is
+    ``None``. Recommended without planned times -> the documented fallback, ``fallback_hours`` from the anchor.
+    The span covers one plan day only: a recommendation is today's, it is never repeated at the same clock time
+    tomorrow.
+    """
+    if not recommended:
+        return None
+    if open_t is not None and close_t is not None:
+        day = anchor.date()
+        start = datetime.combine(day, open_t, tzinfo=anchor.tzinfo)
+        end = datetime.combine(day, close_t, tzinfo=anchor.tzinfo)
+        if end <= start:
+            end += timedelta(days=1)
+        return (start, end) if end > anchor else None
+    return (anchor, anchor + timedelta(hours=fallback_hours)) if fallback_hours > 0 else None
+
+
+def window_open_at(span: tuple[datetime, datetime] | None, ts: datetime) -> bool:
+    """True when ``ts`` is inside the planned window span (``[start, end)``)."""
+    return span is not None and span[0] <= ts < span[1]
+
+
 def build_inputs(
     *,
     now: datetime,
@@ -218,7 +285,7 @@ def build_inputs(
     the target-band schedule for setpoints (BOTH edges at every step, whatever the day's mode: heat setpoint = band
     floor, cool setpoint = band ceiling - exactly the backtest's inputs, ``predictor_v4.plan_setpoints``; the emulated
     thermostat starts whichever side the room crosses), windows open inside the classification's window span when
-    windows are recommended,
+    windows are recommended (``planned_window_span``: the same rule the backtest uses),
     fan off (v3 has no forecast fan schedule). The forecast is not extrapolated: the list stops half an hour after the
     last forecast hour. Returns [] when there is not enough forecast to predict from.
     """
@@ -229,6 +296,7 @@ def build_inputs(
     band_pts_lower = sorted((dt.timestamp(), float(lo)) for dt, lo, _hi in band if lo is not None)
     band_pts_upper = sorted((dt.timestamp(), float(hi)) for dt, _lo, hi in band if hi is not None)
     recommended, open_t, close_t = windows
+    span = planned_window_span(now, bool(recommended), open_t, close_t)
     last_fc = pts[-1][0] + 1800
     inputs: list[Any] = []
     _plan_setpoints = getattr(p, "plan_setpoints", None) or _plan_setpoints_fallback
@@ -245,9 +313,7 @@ def build_inputs(
             last_sp,
         )
         last_sp = (heat_sp, cool_sp)
-        windows_open = bool(
-            recommended and open_t is not None and close_t is not None and open_t <= ts.time() < close_t
-        )
+        windows_open = window_open_at(span, ts)
         inputs.append(
             p.V4Input(
                 ts=ts,
@@ -434,3 +500,161 @@ def model_summary(model_dict: Mapping[str, Any] | None) -> dict[str, Any]:
         "sensors": list(model_dict.get("sensors") or []),
         "schema_version": model_dict.get("schema_version"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Tonight's bedroom strategy (Issue #1230 R6): the pure input builders
+# ---------------------------------------------------------------------------
+
+NIGHT_PLAN_LEAD_H = 6.0  # the evening plan appears this long before bedtime (and stays until wake time)
+NIGHT_MIN_HOURS = 2.0  # a night shorter than this (late bedtime, almost wake time) is not planned
+
+
+def night_window(now: datetime, sleep_time: dtime, wake_time: dtime) -> tuple[datetime, datetime] | None:
+    """``(start, end)`` of the night in view, or None outside the planning window.
+
+    Occupant view: from early evening until you get up, "Tonight in the bedroom" describes the coming (or current)
+    night: bedtime to wake time, starting NOW when bedtime has already passed. Outside that (daytime) there is no
+    night plan, the card says so rather than showing last night's.
+
+    ``start`` = the later of bedtime and ``now``; ``end`` = the next wake time. A bedtime after midnight (sleep time
+    earlier than wake time on the clock) is handled. DST-safe: wall-clock combine on the local zone.
+    """
+    tz = now.tzinfo
+    today = now.date()
+
+    def at(day: Any, t: dtime) -> datetime:
+        return datetime.combine(day, t, tzinfo=tz)
+
+    one = timedelta(days=1)
+    if sleep_time > wake_time:  # the usual evening bedtime
+        if now.time() < wake_time:  # after midnight, before wake: last evening's night is in progress
+            bed, end = at(today - one, sleep_time), at(today, wake_time)
+        else:
+            bed, end = at(today, sleep_time), at(today + one, wake_time)
+    else:  # bedtime after midnight (sleep_time <= wake_time on the clock)
+        if now.time() < wake_time:
+            bed, end = at(today, sleep_time), at(today, wake_time)
+        else:
+            bed, end = at(today + one, sleep_time), at(today + one, wake_time)
+    if now < bed - timedelta(hours=NIGHT_PLAN_LEAD_H) or now >= end:
+        return None
+    start = max(bed, now)
+    if (end - start) < timedelta(hours=NIGHT_MIN_HOURS):
+        return None
+    return start, end
+
+
+def _at_time(series: Sequence[tuple[datetime, float]] | None, ts: datetime) -> float | None:
+    """Linear interpolation of a ``(time, value)`` series at ``ts`` (None when the series is empty or ``ts`` is more
+    than 45 minutes outside it)."""
+    pts = sorted((t.timestamp(), float(v)) for t, v in (series or ()) if math.isfinite(float(v)))
+    if not pts:
+        return None
+    x = ts.timestamp()
+    if x < pts[0][0] - 2700 or x > pts[-1][0] + 2700:
+        return None
+    return _interp(pts, x)
+
+
+def _mass_at_bedtime(
+    p4: Any,
+    model: Any,
+    mass_f: float | None,
+    primary_path: Sequence[tuple[datetime, float]] | None,
+    now: datetime,
+    start: datetime,
+) -> float | None:
+    """The hidden-mass node at bedtime: the live state relaxed along v4's predicted primary path from now to
+    ``start`` (the same filter the live shadow runs every cycle, so the plan starts from the state a running house would
+    have, the one the nightly replay validates). None -> seed the node at the bedtime reading (no live state)."""
+    if mass_f is None or not math.isfinite(mass_f) or not primary_path:
+        return None
+    mass = float(mass_f)
+    for ts, value in sorted(primary_path, key=lambda p: p[0]):
+        if ts <= now:
+            continue
+        if ts > start:
+            break
+        mass = p4.step_mass(model, mass_f=mass, readings={model.primary: float(value)})
+    return mass
+
+
+def night_inputs(
+    *,
+    model_dict: Mapping[str, Any],
+    start: datetime,
+    end: datetime,
+    now: datetime,
+    fan_mode: str,
+    corrected_outdoor: Sequence[tuple[datetime, float]],
+    predictions: Mapping[str, Sequence[tuple[datetime, float]]] | None,
+    current_readings: Mapping[str, float | None],
+    floor_f: float,
+    ceiling_f: float,
+    target_sensor: str | None,
+    evidence: Any = None,
+    validation: Any = None,
+    can_heat: bool = True,
+    can_cool: bool = True,
+    swing_heat_f: float | None = None,
+    swing_cool_f: float | None = None,
+    mass_f: float | None = None,
+    path: Sequence[tuple[datetime, float]] | None = None,
+    unit: str = "fahrenheit",
+) -> Any:
+    """``night_strategy.NightInputs`` from the live state, or None when the night cannot be planned.
+
+    The state at ``start``: when bedtime is still ahead, each model sensor's value is the PLAN's predicted reading at
+    bedtime (``predictions``: v4's per-sensor path under the same plan the timeline follows); the primary sensor falls
+    back to the timeline's ``_ca`` ``path`` and any other sensor to its current reading. When the night is already
+    under way (``start`` == ``now``) it is the live reading. ``corrected_outdoor`` is tonight's forecast after v4's
+    learned correction. Pure: no clock, no I/O.
+    """
+    from . import night_strategy as ns  # noqa: PLC0415 - lazy: a broken engine disables the plan, not setup
+    from . import predictor_v4 as p4  # noqa: PLC0415
+
+    model = p4.from_dict(dict(model_dict))
+    if model is None or model.confidence == "none":
+        return None
+    outdoor = [(t, v) for t, v in corrected_outdoor if start - timedelta(hours=2) <= t <= end + timedelta(hours=2)]
+    if len(outdoor) < 2:
+        return None
+    ahead = start > now + timedelta(minutes=5)
+    mass = _mass_at_bedtime(p4, model, mass_f, (predictions or {}).get(model.primary), now, start) if ahead else mass_f
+    readings: dict[str, float] = {}
+    for sid in model.sensors:
+        value: float | None = None
+        if ahead:
+            value = _at_time((predictions or {}).get(sid), start)
+            if value is None and sid == model.primary:
+                value = _at_time(path, start)
+        if value is None:
+            raw = current_readings.get(sid)
+            if sid == model.primary and raw is None:
+                raw = current_readings.get(p4.CA_NODE)
+            value = float(raw) if isinstance(raw, (int, float)) and math.isfinite(raw) else None
+        if value is not None:
+            readings[sid] = value
+    if model.primary not in readings:
+        return None
+    return ns.NightInputs(
+        model=model,
+        start=start,
+        end=end,
+        tz=now.tzinfo or UTC,
+        fan_mode=fan_mode,
+        outdoor=outdoor,
+        readings=readings,
+        floor_f=floor_f,
+        ceiling_f=ceiling_f,
+        target_sensor=target_sensor,
+        mass_f=mass,
+        swing_heat_f=swing_heat_f if swing_heat_f else ns.THERMAL_SWING_DEFAULT_F,
+        swing_cool_f=swing_cool_f if swing_cool_f else ns.THERMAL_SWING_DEFAULT_F,
+        can_heat=can_heat,
+        can_cool=can_cool,
+        evidence=evidence,
+        validation=validation,
+        unit=unit,
+    )

@@ -126,6 +126,7 @@ from .const import (
     REMOTE_OFFSET_EXIT_GRACE_S,
     REMOTE_OFFSET_LATENCY_EWMA_ALPHA,
     REVISIT_DELAY_SECONDS,
+    SETPOINT_HOLD_TOLERANCE_F,
     SETPOINT_RETRY_DELAY_S,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     THERMAL_SWING_DEFAULT_F,
@@ -159,6 +160,8 @@ from .own_write_echo import (
     context_id_matches,
     decide_mode_echo,
     decide_setpoint_echo,
+    hold_tolerance,
+    holds_own_setpoint,
     outstanding_own_write,
     prune_own_writes,
     resolve_step,
@@ -1950,6 +1953,11 @@ class AutomationEngine:
         # cloud thermostat echoing a write 30-120 s late is recognised by value/Context and not read as the occupant.
         # Transient (a 180 s memory is meaningless across a restart); see own_write_echo.py.
         self._own_setpoint_writes: list[OwnSetpointWrite] = []
+        # Issue #1397: per thermostat, the setpoint CA wrote once the thermostat has shown it (its echo recognised, or
+        # the read-back confirmed it), thermostat unit. A thermostat then reporting 17.9 C for a written 18.0 C is
+        # holding CA's setpoint, not the occupant. No window; dropped on CA's next write and when a setpoint change is
+        # counted as the occupant's. Transient (CA rewrites after a restart).
+        self._held_own_setpoints: dict[str, dict[str, float]] = {}
         # Issue #1246: the same memory for CA's own HVAC MODE writes (a door-close restore then a family flip is two
         # writes inside the echo window; ``_last_commanded_hvac_mode`` keeps only the last). Transient too.
         self._own_mode_writes: list[OwnModeWrite] = []
@@ -6611,6 +6619,9 @@ class AutomationEngine:
                 self._rearm_timer("_setpoint_retry_cancel", SETPOINT_RETRY_DELAY_S, _schedule_retry)
             else:
                 self._setpoint_reject_streak = 0
+                with contextlib.suppress(TypeError, ValueError):
+                    # Issue #1397: the thermostat shows CA's setpoint; hold the value CA sent (thermostat unit).
+                    self._hold_own_setpoint(self.climate_entity, {"temperature": float(service_temp)})
                 _LOGGER.info(
                     "Setpoint confirmed by thermostat: temperature=%.1f (%s mode)",
                     reported,
@@ -18016,6 +18027,7 @@ class AutomationEngine:
             new.append(OwnSetpointWrite(entity_id, attribute, value, now, context_id))
         if not new:
             return
+        self.forget_held_own_setpoint(entity_id)  # Issue #1397: held again once the thermostat shows this write
         try:
             kept = prune_own_writes(getattr(self, "_own_setpoint_writes", []), now)
             self._own_setpoint_writes = list(prune_own_writes([*kept, *new], now))
@@ -18073,6 +18085,47 @@ class AutomationEngine:
         now = dt_util.now()
         self._own_setpoint_writes = [replace(w, written_at=now) if w.context_id == context_id else w for w in writes]
 
+    def _hold_own_setpoint(self, entity_id: str, held: dict[str, float]) -> None:
+        """The thermostat has shown the setpoint CA wrote (Issue #1397): hold it as the reference (thermostat unit)."""
+        if held and isinstance(getattr(self, "_held_own_setpoints", None), dict):
+            # One write may be echoed edge by edge (a band): merge, the send cleared the old one.
+            self._held_own_setpoints.setdefault(entity_id, {}).update(held)
+
+    def forget_held_own_setpoint(self, entity_id: str | None = None) -> None:
+        """CA no longer holds this thermostat's setpoint (#1397): it sent a new one, or the occupant changed it."""
+        held = getattr(self, "_held_own_setpoints", None)
+        if isinstance(held, dict):
+            held.pop(entity_id or self.climate_entity, None)
+
+    def holds_own_setpoint(self, observed: dict[str, Any], *, event_context_user_id: str | None = None) -> bool:
+        """True when this thermostat setpoint change is within 0.5 F of CA's last write to it (Issue #1397).
+
+        The thermostat is holding Climate Advisor's setpoint (it reports 17.9 C for a written 18.0 C), not the
+        occupant turning the dial. The one rule is ``own_write_echo.holds_own_setpoint``.
+        """
+        held_all = getattr(self, "_held_own_setpoints", None)
+        held = held_all.get(self.climate_entity) if isinstance(held_all, dict) else None
+        if not held:
+            return False
+        config = getattr(self, "config", None)
+        unit = config.get("temp_unit") if isinstance(config, dict) else None
+        holding = holds_own_setpoint(
+            held=held,
+            observed=observed,
+            tolerance=hold_tolerance(unit),
+            event_context_user_id=event_context_user_id if isinstance(event_context_user_id, str) else None,
+        )
+        if holding:
+            _LOGGER.info(
+                "Setpoint change within %.1f°F of Climate Advisor's own setpoint, not a manual change: "
+                "observed=%s written=%s role=%s",
+                SETPOINT_HOLD_TOLERANCE_F,
+                observed,
+                held,
+                self.role,
+            )
+        return holding
+
     def recognise_own_setpoint_echo(
         self,
         observed: dict[str, Any],
@@ -18106,6 +18159,7 @@ class AutomationEngine:
                 event_context_id=event_context_id if isinstance(event_context_id, str) else None,
                 event_context_parent_id=event_context_parent_id if isinstance(event_context_parent_id, str) else None,
                 event_context_user_id=event_context_user_id if isinstance(event_context_user_id, str) else None,
+                hold_tolerance=hold_tolerance(unit),
             )
         except TypeError:  # naive/aware (or stubbed) clock mix: no memory, so evaluate as before
             return False
@@ -18118,6 +18172,8 @@ class AutomationEngine:
         consumed = set(verdict.consumed) | set(verdict.superseded)
         self._own_setpoint_writes = [w for w in live if w not in consumed]
         if verdict.recognised:
+            # Issue #1397: the thermostat has shown CA's newest answered write; hold it as the reference.
+            self._hold_own_setpoint(self.climate_entity, {w.attribute: w.value for w in verdict.consumed})
             _LOGGER.info(
                 "Setpoint change recognised as Climate Advisor's own write echoing back (%s): observed=%s "
                 "age_s=%s role=%s",

@@ -238,6 +238,9 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         # historical instant, Context-carrying behaviour; only the test house turns it on (``set_echo_delay``).
         self._echo_delay_s: float = 0.0
         self._cancel_echo: list[Any] = []
+        # Setpoint drift (Issue #1397): a HomeKit thermostat reports the setpoint it was told, then ``delay`` seconds
+        # later the same setpoint ``offset`` off (18.0 C, then 17.9 C). None = off; only the test house turns it on.
+        self._setpoint_drift: tuple[float, float] | None = None
 
     async def async_added_to_hass(self) -> None:
         """Restore prior simulated state (if any) and start the tick timer."""
@@ -437,6 +440,10 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             cancel()
         self._cancel_echo.clear()
 
+    def set_setpoint_drift(self, offset: float | None, delay_s: float = 30.0) -> None:
+        """After reporting each new setpoint, report it again ``offset`` off ``delay_s`` later (None = off, #1397)."""
+        self._setpoint_drift = None if offset is None else (float(offset), float(delay_s))
+
     def set_echo_delay(self, seconds: float) -> None:
         """Make the thermostat report a set_temperature or set_hvac_mode ``seconds`` after the call (0 = instant)."""
         self._echo_delay_s = float(seconds)
@@ -462,6 +469,17 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             return
         self._target_temp = float(temperature)
         self.async_write_ha_state()
+        if self._setpoint_drift is not None:
+            offset, delay_s = self._setpoint_drift
+            drifted = round(float(temperature) + offset, 2)
+
+            @callback
+            def _drift(_now: datetime) -> None:  # @callback: runs in the event loop (it writes entity state)
+                if self._target_temp == float(temperature):  # nothing newer was set meanwhile
+                    self._target_temp = drifted
+                    self.async_write_ha_state()
+
+            self._cancel_echo.append(async_call_later(self.hass, delay_s, _drift))
 
     def _read_outdoor_temp(self) -> float | None:
         """Read outdoor temp from the configured source, trying weather then sensor shapes."""

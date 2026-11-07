@@ -15,6 +15,7 @@ import hashlib
 import logging
 import math
 import statistics
+import threading
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -391,6 +392,7 @@ from .scheduler import (
 )
 from .setpoint_combinations import vacation_edges
 from .state import StatePersistence
+from .storage_paths import resolve_entry_scoped_path, split_shared_list_file
 from .swing import (
     build_swing_audit_record,
     coast_feed,
@@ -449,6 +451,9 @@ from .whf_safety_decision import (
 
 _LOGGER = logging.getLogger(__name__)
 _V4_FIT_LOCK_KEY = "climate_advisor_v4_fit_lock"  # hass.data key of the domain-wide v4 fit lock (Issue #1230 R1b, M5)
+# Issue #1415: the one-time split of the old shared investigation-reports file runs in executor threads; two zones
+# starting at once must not split it twice (each would copy, one would remove it under the other).
+_INVESTIGATION_MIGRATION_LOCK = threading.Lock()
 
 # Issue #1020: (role label, entity config key, source config key or None). A role with a
 # source key is only checked when that source reads the entity's state (sensor/input_number).
@@ -2124,7 +2129,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1356: investigation reports are their own file, not part of the state file, so they load on
         # every restore -- including the one with no state file at all (before the `if not state` return).
         if self.claude_client:
-            await self._executor_job(self._load_investigation_reports)
+            await self.async_load_investigation_reports()
 
         if not state:
             _LOGGER.debug("No persisted state found — starting fresh")
@@ -2671,13 +2676,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ]
         return len(self._investigation_report_history) < before
 
+    def _investigation_reports_path(self) -> Path:
+        """This zone's own investigation-history file (Issue #1415; the unscoped name only with no entry id)."""
+        return resolve_entry_scoped_path(Path(self.hass.config.config_dir), INVESTIGATION_REPORTS_FILE, self._entry_id)
+
     def _save_investigation_reports(self) -> None:
-        """Save investigation report history to disk (atomic write)."""
+        """Save this zone's investigation report history to its own file (atomic write).
+
+        Issue #1415: per zone, so one zone's save can never erase another zone's reports.
+        """
         import json
         import os
         import sys
 
-        filepath = self.hass.config.path(INVESTIGATION_REPORTS_FILE)
+        filepath = str(self._investigation_reports_path())
         tmp_path = filepath + ".tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -2692,11 +2704,45 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             with contextlib.suppress(OSError):
                 os.remove(tmp_path)
 
-    def _load_investigation_reports(self) -> None:
-        """Load investigation report history from disk."""
+    def _all_zone_entry_ids(self) -> tuple[list[str], bool]:
+        """Every configured zone's entry id (this one first) and whether that list is complete.
+
+        Event-loop only (reads the config-entries registry). Used to split the old shared reports file.
+        """
+        own = self._entry_id
+        try:
+            others = [e.entry_id for e in self.hass.config_entries.async_entries(DOMAIN)]
+        except Exception:  # noqa: BLE001 - registry unavailable: migrate this zone only, keep the shared file
+            _LOGGER.debug("Zone list unavailable; investigation reports migrate for this zone only")
+            return [own], False
+        ids = [own] + [e for e in others if isinstance(e, str) and e and e != own]
+        return ids, True
+
+    async def async_load_investigation_reports(self) -> None:
+        """Load this zone's investigation history, splitting the old shared file first if it is still there."""
+        zone_ids, complete = self._all_zone_entry_ids() if self._entry_id else ([], False)
+        await self._executor_job(self._load_investigation_reports, zone_ids, complete)
+
+    def _load_investigation_reports(self, zone_ids: list[str] | None = None, all_zones_known: bool = False) -> None:
+        """Load this zone's investigation report history from disk (blocking).
+
+        Issue #1415: with an entry id, the pre-fix shared file is first split into every zone's own file (one
+        time, under a process-wide lock; see ``storage_paths.split_shared_list_file``).
+        """
         import json
 
-        filepath = self.hass.config.path(INVESTIGATION_REPORTS_FILE)
+        if self._entry_id:
+            try:
+                with _INVESTIGATION_MIGRATION_LOCK:
+                    split_shared_list_file(
+                        Path(self.hass.config.config_dir),
+                        INVESTIGATION_REPORTS_FILE,
+                        list(zone_ids or [self._entry_id]),
+                        all_zones_known=all_zones_known,
+                    )
+            except Exception:  # noqa: BLE001 - a failed split must not stop this zone loading its own file
+                _LOGGER.exception("Failed to split the shared investigation reports file")
+        filepath = self._investigation_reports_path()
         try:
             with open(filepath, encoding="utf-8") as f:
                 data = json.load(f)

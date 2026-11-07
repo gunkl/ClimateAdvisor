@@ -268,7 +268,7 @@ python3 tools/ha_logs.py --history --entity sensor.climate_advisor_ai_status --h
 
 ### AI Report Persistence
 
-Investigation reports are stored at `climate_advisor_investigation_reports.json` in the HA config root directory, capped at `INVESTIGATION_REPORT_HISTORY_CAP` entries. Request history is capped at 50 entries (`AI_REQUEST_HISTORY_CAP`). (The separate `climate_advisor_ai_reports.json` file from the retired AI Activity Report feature — Issue #578 — is no longer read or written; it may still exist on disk from before the upgrade and can be safely deleted.)
+Investigation reports are stored per zone at `climate_advisor_investigation_reports_<entry_id>.json` in the HA config root directory (Issue #1415; before 0.9.6 one shared `climate_advisor_investigation_reports.json`, split into every zone on the first start and removed), capped at `INVESTIGATION_REPORT_HISTORY_CAP` entries. Request history is capped at 50 entries (`AI_REQUEST_HISTORY_CAP`). (The separate `climate_advisor_ai_reports.json` file from the retired AI Activity Report feature — Issue #578 — is no longer read or written; it may still exist on disk from before the upgrade and can be safely deleted.)
 
 ### Circuit Breaker
 

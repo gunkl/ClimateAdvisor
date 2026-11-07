@@ -5,6 +5,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.9.6] — unreleased
 
+- Fix #1415: with two or more zones, running an AI investigation in one zone no longer erases another zone's reports from History, and each zone's History shows only its own reports. The history is now one file per zone (`climate_advisor_investigation_reports_<entry_id>.json`, deleted with the zone); on the first start the old shared file is copied to every zone (its reports carry no zone tag) and removed.
+
 - Docs #1401: the Home Assistant Boundary Rule (`claude.md`, `CONTRIBUTING.md`, `docs/HA-BOUNDARY-EXCEPTIONS.md`) now names everything the integration has always done: control of the configured whole-house fan (`turn_on`/`turn_off` on its `fan` or `switch` entity), `climate.set_fan_mode`, `notify.send_email`, the read-only weather forecast call, and the per-zone data files, with `const.py` `ENTRY_SCOPED_FILES` as the single list. No code or behavior change.
 
 ## [0.9.5] — 2026-11-07

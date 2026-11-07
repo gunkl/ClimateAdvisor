@@ -595,6 +595,8 @@ V4_MASS_MAX_GAP_S = 7200  # a hidden-node state older than this is re-seeded fro
 
 # Learning system
 LEARNING_DB_FILE = "climate_advisor_learning.json"
+# AI investigation history (Issue #82). Per zone since Issue #1415: one shared file let one zone erase another's.
+INVESTIGATION_REPORTS_FILE = "climate_advisor_investigation_reports.json"
 # Every per-zone file Climate Advisor writes in the HA config dir, by its unscoped base name (Issue #1375).
 # async_remove_entry deletes each one's entry-scoped copy when a zone is deleted. A new entry-scoped file must be
 # listed here, or a removed zone leaves it on disk forever: tests/test_zone_removal_cleanup.py fails if any
@@ -608,6 +610,7 @@ ENTRY_SCOPED_FILES: tuple[str, ...] = (
     V4_ARCHIVE_FILE,
     V4_BACKTEST_FILE,
     V4_MODEL_FILE,
+    INVESTIGATION_REPORTS_FILE,
 )
 SUGGESTION_COOLDOWN_DAYS = 7  # Don't repeat the same suggestion within a week
 MIN_DATA_POINTS_FOR_SUGGESTION = 14  # Need 2 weeks of data before suggesting changes
@@ -1992,7 +1995,6 @@ AI_REQUEST_HISTORY_CAP = 50
 
 # Investigation report history (Issue #82)
 INVESTIGATION_REPORT_HISTORY_CAP = 60
-INVESTIGATION_REPORTS_FILE = "climate_advisor_investigation_reports.json"
 
 # Sensor attributes for AI status
 ATTR_AI_STATUS = "ai_status"

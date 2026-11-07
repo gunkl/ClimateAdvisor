@@ -365,6 +365,18 @@ def test_the_path_is_v3_when_the_plan_matches_and_replanned_when_it_does_not() -
     assert broken.path_source == "sim" and broken.path
 
 
+def test_the_primary_engines_path_is_the_next_24_hours_line_when_it_has_one() -> None:
+    """Issue #1230: the display's path source is the PRIMARY engine; with none (still learning) the default stands."""
+    snap = make_snapshot("mild", now=NOON)
+    v3 = [(NOON + timedelta(minutes=30 * i), 70.0) for i in range(1, 10)]
+    v4 = [(NOON + timedelta(minutes=30 * i), 68.5) for i in range(1, 10)]
+    base = replace(snap, v3_path=v3, windows_recommended=False, opportunity_spans=())
+    tl = build_timeline(replace(base, selected_path=v4, selected_path_model="v4"))
+    assert tl.path_source == "v4" and [(p.ts, p.temp_f) for p in tl.path] == v4
+    still_learning = build_timeline(replace(base, selected_path=(), selected_path_model="v4"))
+    assert still_learning.path_source == "v3"
+
+
 def test_runs_are_clustered_and_only_claimed_at_medium_confidence_or_better() -> None:
     tl = build_timeline(make_snapshot("cold", now=NOON))
     assert tl.runs and all(r.minutes >= ot.RUN_MIN_MINUTES for r in tl.runs)

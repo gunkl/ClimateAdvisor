@@ -59,8 +59,8 @@
   //
   // Occupant view: one readable chart on the Status tab. Indoor and outdoor are two charts on one time axis, every
   // indoor sensor (hallway, bedroom, the thermostat's finer sensor) has its own line so a line never jumps when
-  // Climate Advisor swaps the sensor it reads, today's prediction (v3) sits beside v4's lines (shown only for a zone
-  // whose accuracy check passed), and a compact grouped key switches each line on or off. Choices are remembered in
+  // Climate Advisor swaps the sensor it reads, today's prediction (v3) sits beside v4's lines (whichever the occupant
+  // selected in Settings is the main line, the other is an optional line), and a compact grouped key switches each line on or off. Choices are remembered in
   // this browser, per zone. The chart is display only: nothing here decides anything.
   //
   // Series catalog: _buildSeries() is the single list the charts, the key, the hover readout and the table view all
@@ -130,7 +130,7 @@
   function _prefsKey() { return CHART_PREFS_KEY + ':' + (_host.zone() || 'default'); }
 
   function _readPrefs() {
-    const prefs = { on: {}, range: '24h', ahead: '24h', lead: '4h', table: false };
+    const prefs = { on: {}, range: '24h', ahead: '24h', lead: '4h', table: false, model: null };
     try {
       const raw = window.localStorage.getItem(_prefsKey());
       if (!raw) return prefs;
@@ -143,6 +143,7 @@
         if (CHART_AHEADS.includes(p.ahead)) prefs.ahead = p.ahead;
         if (CHART_LEADS.includes(p.lead)) prefs.lead = p.lead;
         prefs.table = p.table === true;
+        if (typeof p.model === 'string') prefs.model = p.model;
       }
     } catch (_e) { /* storage blocked or corrupt: start from the defaults */ }
     return prefs;
@@ -170,11 +171,33 @@
 
   // The baseline ("no plan") and the two optional overlays start off (DP-1); the CA-reading line starts off once the
   // per-sensor lines exist (it follows whichever sensor CA reads, so it jumps when that swaps).
+  // Prediction engines (Settings -> Prediction engine): the PRIMARY engine's line is the main prediction, the optional
+  // SHADOW engine's line is drawn for comparison, and any other engine's lines start off but stay in the key. While
+  // the primary has no usable fit the main line is the plain schedule estimate (never the other engine).
+  function _engines() {
+    const pe = _lastChartData && _lastChartData.prediction_engines;
+    return pe && typeof pe.primary === 'string' ? pe : { primary: 'v3', shadow: 'none', fallback: false, text: '' }; // an older backend: v3 is the line
+  }
+  function _shown(engine) { const e = _engines(); return e.primary === engine || e.shadow === engine; }
+  function _v4HasData() { return !!(_lastChartData && _lastChartData.v4 && _lastChartData.v4.ready === true); }
   function _defaultOn(id) {
+    if (id === 'v3') return _shown('v3');
+    if (id === 'schedule') return !!_engines().fallback && _engines().primary !== 'v3';
+    if (id.startsWith('v4:') || id === 'out:corrected') return _shown('v4') && _v4HasData();
     if (id.startsWith('base:')) return false;
     if (id === 'ov:humidity' || id === 'ov:feelslike') return false;
     if (id === 'ind:_ca') return !((_lastChartData && _lastChartData.indoor_sensors) || []).length;
     return true;
+  }
+
+  // Choices made under another primary/shadow pairing must not pin the lines: forget the engine-dependent ones.
+  function _syncEnginePrefs() {
+    const e = _engines();
+    const key = e.primary + '+' + e.shadow;
+    if (!_chartPrefs || _chartPrefs.model === key) return;
+    Object.keys(_chartPrefs.on).forEach(k => { if (k === 'v3' || k === 'schedule' || k === 'out:corrected' || k.startsWith('v4:')) delete _chartPrefs.on[k]; });
+    _chartPrefs.model = key;
+    _writePrefs();
   }
 
   function _isOn(id) {
@@ -308,6 +331,7 @@
     const metas = cd.indoor_sensors || [];
     const v4 = cd.v4 || {};
     const v4Ready = v4.ready === true;
+    _syncEnginePrefs();
     const state = cd.state_log || [];
 
     // Indoor: one actual line per sensor, then the CA reading (follows the sensor CA reads).
@@ -327,8 +351,15 @@
     S.push(_mkSeries({ id: 'v3', group: 'predicted', short: 'v3', label: "Today's prediction (v3)", role: 'made 4 h ahead on the left of NOW',
       color: 'v3', dash: [7, 4], width: 2, missVs: 'ind:_ca', kind: 'pred' }, [...histPredIndoor, ...futPredIndoor]));
 
-    // v4: only a zone whose accuracy check passed has data here (the server withholds the rest).
-    const why = v4Ready ? '' : 'v4 is shown after it passes its accuracy check';
+    // The schedule estimate: the main line while the primary engine is still learning.
+    const sched = (cd.schedule_estimate || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
+    S.push(_mkSeries({ id: 'schedule', group: 'predicted', short: 'Schedule estimate', label: 'Schedule estimate (learning)',
+      role: 'shown while the main prediction engine is still learning', color: 'base', dash: [4, 3], width: 2, missVs: 'ind:_ca', kind: 'pred',
+      disabledReason: sched.length ? '' : 'Not needed: the main engine has a usable fit' }, sched));
+
+    // v4: drawn whenever it has data; there is no accuracy gate (which model is the main line is the occupant's setting).
+    const why = v4Ready ? '' : (_engines().engines || []).some(x => x.id === 'v4' && !x.running)
+      ? 'v4 is switched off (Settings, Prediction engine)' : 'v4 has no data for this zone yet (it is still learning this house)';
     metas.forEach((m, i) => {
       const dash = SENSOR_DASH[i % SENSOR_DASH.length];
       const past = (((v4.past || {})[m.id] || {})[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
@@ -462,7 +493,12 @@
     const v3 = S.find(s => s.id === 'v3');
     const plan = S.filter(s => s.sub === 'plan');
     const base = S.filter(s => s.sub === 'base');
-    let predHtml = '<div class="key-row"><span class="key-sub">Today</span>' + chipFor(v3) + '</div>';
+    const eng = _engines();
+    const shadowTxt = eng.shadow && eng.shadow !== 'none' ? 'Comparison: ' + eng.shadow : 'No comparison engine';
+    let predHtml = '<div class="key-row" id="chart-main-model"><span class="key-sub">Main</span><span>' +
+      escapeHtml('Main prediction: ' + eng.primary + ' \u00b7 ' + shadowTxt) + ' \u2014 change it in <a href="new_dashboard.html#settings">Settings \u2192 Prediction engine</a>.' +
+      (eng.text ? ' ' + escapeHtml(eng.text) + '.' : '') + ' <a href="prediction_accuracy.html">How each engine has scored</a>.</span></div>' +
+      '<div class="key-row"><span class="key-sub">Today</span>' + chipFor(v3) + (hasLines(S.find(s => s.id === 'schedule')) ? chipFor(S.find(s => s.id === 'schedule')) : '') + '</div>';
     if (plan.length) {
       predHtml += '<div class="key-row"><span class="key-sub">v4 with plan</span>' + plan.map(chipFor).join('') + '</div>';
       predHtml += '<div class="key-row"><span class="key-sub">v4 no plan</span>' + base.map(chipFor).join('') + '</div>';
@@ -497,10 +533,11 @@
 
     const note = document.getElementById('chart-v4-note');
     if (note) {
-      const show = !!v4 && v4.ready !== true;
+      const show = !!eng.fallback && !!eng.text;
       note.hidden = !show;
       if (show) {
-        note.innerHTML = 'v4 shown after it passes its accuracy check — see <a href="prediction_accuracy.html">Prediction accuracy</a>.';
+        note.textContent = eng.text;
+        note.setAttribute('data-engine-state', eng.fitting ? 'fitting' : 'learning');
       }
     }
     const count = document.getElementById('chart-key-count');
@@ -1302,8 +1339,8 @@
       .sort((a, b) => a._ms - b._ms);
   }
 
-  // The plan path for the chart: the hallway/CA line of the timeline from NOW on. A v4 path is drawn only for a zone
-  // whose accuracy check passed (the same gate as the v4 lines).
+  // The plan path for the chart: the hallway/CA line of the timeline from NOW on. A v4 path is drawn only when v4 has
+  // data (the same availability as the v4 lines).
   function _planPath() {
     if (!_timeline || !Array.isArray(_timeline.path) || !_timeline.path.length) return [];
     const v4ok = !!(_lastChartData && _lastChartData.v4 && _lastChartData.v4.ready === true);

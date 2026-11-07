@@ -373,6 +373,8 @@
         "title": "Learning & Behavior",
         "description": "Configure how Climate Advisor learns from your preferences and balances comfort vs. savings.",
         "data": {
+          "primary_engine": "Prediction engine",
+          "shadow_engine": "Comparison engine",
           "learning_enabled": "Enable Learning & Suggestions",
           "adaptive_preheat_enabled": "Adaptive Pre-heat Timing",
           "adaptive_setback_enabled": "Adaptive Bedtime Setback",
@@ -396,6 +398,8 @@
           "cool_power_kw": "Cooling Power"
         },
         "data_description": {
+          "primary_engine": "Which prediction engine the Status chart, the Next 24 hours plan and the preview pages show as the main prediction: v4 (default) or v3. Display only for now: Climate Advisor makes every heating, cooling and ventilation decision with v3 either way. While the chosen engine is still learning, the schedule estimate is shown.",
+          "shadow_engine": "Optional second engine drawn as a comparison line. It must differ from the prediction engine. Only these two engines run; any other is switched off.",
           "learning_enabled": "When enabled, Climate Advisor learns from your manual adjustments and suggests improvements over time.",
           "adaptive_preheat_enabled": "Use learned heating rate to compute pre-heat start time. Requires learning to be enabled.",
           "adaptive_setback_enabled": "Use learned heating/cooling rate to compute maximum safe setback depth. Requires learning to be enabled.",
@@ -487,6 +491,8 @@
       "schedule_start_end_equal": "Start and end time must be different",
       "preheat_min_exceeds_max": "Minimum pre-heat time must not exceed maximum pre-heat time",
       "preheat_default_exceeds_max": "Default pre-heat time must not exceed maximum pre-heat time",
+      "shadow_same_as_primary": "The comparison engine must be different from the prediction engine. Pick another engine or None.",
+      "unknown_engine": "That prediction engine is not available.",
       "ai_connection_failed": "Could not connect to Claude API. Check your API key and try again.",
       "ai_key_required": "API key is required when AI features are enabled.",
       "ai_temperature_out_of_range": "Temperature must be between 0.0 and 1.0.",

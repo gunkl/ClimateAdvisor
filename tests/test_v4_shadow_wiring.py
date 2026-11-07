@@ -823,40 +823,40 @@ def test_no_replay_without_a_usable_model(fake: FakePredictor, monkeypatch: pyte
     assert coord._v4_store.night_validation is None
 
 
-def test_the_gate_verdict_is_read_from_the_published_backtest_and_throttled(
+def test_v4_is_not_fitted_predicted_or_archived_unless_primary_or_comparison(fake: FakePredictor) -> None:
+    """Issue #1230: at most two engines run (primary + optional shadow). v4 off = no cycle, no fit, no archive."""
+    coord, fake_hass, scheduler = _build()
+    coord.config.update({"primary_engine": "v3", "shadow_engine": "none"})
+    coord._v4_store.v4_model = _fake_model_dict(coord)
+    _seed_cycle_inputs(coord, scheduler)
+    _cycle(coord, scheduler)
+    assert fake.predict_calls == [] and coord._v4_archive.data == {} and coord._v4_last_future is None
+    assert coord._v4_start_fit("first") is False and coord._v4_fit_running is False
+    assert coord._v4_start_night_replay("nightly") is False
+    # as the comparison engine v4 runs again
+    coord.config["shadow_engine"] = "v4"
+    _cycle(coord, scheduler)
+    assert fake.predict_calls and coord._v4_archive.data
+
+
+def test_switching_the_primary_to_v4_fits_from_history_first_then_takes_over(
     fake: FakePredictor, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No model yet: the cycle starts the first fit (the learning state), and the chart says so until it lands."""
     coord, fake_hass, scheduler = _build()
-    reads: list[int] = []
-    backtest = {"gate_summary": {"ready": True, "passed": 6, "scored": 6, "total": 6}}
+    coord.config.update({"primary_engine": "v4", "shadow_engine": "none"})
+    coord._v4_store.v4_model = None
+    started: list[str] = []
+    monkeypatch.setattr(coord, "_v4_start_fit", lambda reason: started.append(reason) or True)
+    coord._startup_coalesce_active = False
+    coord._v4_last_fit_attempt = None
+    _seed_cycle_inputs(coord, scheduler)
+    _cycle(coord, scheduler)
+    assert started == ["first"]
+    from custom_components.climate_advisor import prediction_engines as pe  # noqa: PLC0415
 
-    def load(config_dir: Any, entry_id: str) -> dict:
-        reads.append(1)
-        return backtest
-
-    monkeypatch.setattr("custom_components.climate_advisor.coordinator.load_backtest", load)
-    assert coord._v4_night_gate["ready"] is False  # nothing published yet reads as not ready
-    coord._v4_night_gate_at = None  # (the harness's startup cycles already read once)
-    with scheduler.installed():
-        run_coro(coord._v4_night_refresh_gate())
-        run_coro(coord._v4_night_refresh_gate())  # within 10 minutes: not read again
-    assert coord._v4_night_gate["ready"] is True and len(reads) == 1
-    coord._v4_night_gate_at = None
-    backtest["gate_summary"]["ready"] = False
-    with scheduler.installed():
-        run_coro(coord._v4_night_refresh_gate())
-    assert coord._v4_night_gate["ready"] is False
-
-
-def test_an_unreadable_backtest_reads_as_not_ready(fake: FakePredictor, monkeypatch: pytest.MonkeyPatch) -> None:
-    coord, fake_hass, scheduler = _build()
-
-    def boom(*_a: Any) -> dict:
-        raise OSError("disk")
-
-    monkeypatch.setattr("custom_components.climate_advisor.coordinator.load_backtest", boom)
-    coord._v4_night_gate = {"ready": True}
-    coord._v4_night_gate_at = None
-    with scheduler.installed():
-        run_coro(coord._v4_night_refresh_gate())
-    assert coord._v4_night_gate["ready"] is False and coord._v4_night_gate["reason"] == "error"
+    state = pe.engine_state(coord, coord.config)
+    assert state["fallback"] is True and state["primary_state"] == "learning"
+    coord._v4_store.v4_model = _fake_model_dict(coord, confidence="medium")  # the fit landed: v4 takes over
+    state = pe.engine_state(coord, coord.config)
+    assert state["fallback"] is False and state["primary_state"] == "ready" and state["text"] == ""

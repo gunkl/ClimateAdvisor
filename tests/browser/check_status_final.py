@@ -178,9 +178,12 @@ def _night(show_numbers=True) -> dict:
 
 
 def night(show_numbers=True) -> dict:
-    """As the endpoint answers: with the v4 gate closed every figure is null and the path empty (never 0)."""
+    """As the endpoint answers: below medium confidence every figure is null and the path empty (never 0)."""
     d = _night(show_numbers)
-    d["v4_gate_ready"] = show_numbers
+    d["source_model"] = "v4"
+    d["source_note"] = (
+        "From v4. Tonight's bedroom plan is always built on v4's learned rates, whichever prediction model the Status chart shows."
+    )
     d["headline"] = "Keep the windows closed tonight; CA keeps the heat for the bedroom at 66°F."
     d["tradeoffs"] = (
         [{"key": "windows_2h", "label": "Windows open 2 h", "text": "Windows open 2 h: 10 more minutes of heat or AC"}]

@@ -8,7 +8,7 @@
      NDNightCard.mount(containerElement, data, { unit: 'fahrenheit' | 'celsius' }) -> { update(data) }
      NDNightCard.fromStrategy(payload) -> data
 
-   With data.show_numbers === false (the zone's bedroom model has not passed its accuracy check, decision C11) the card
+   With data.show_numbers === false (the zone's bedroom model is below medium confidence; there is no accuracy gate) the card
    shows the recommended plan and its steps only: no predicted temperatures, chart or comparison table.
 
    data = { note?: string, nights: [ { title, t: [iso...], out: [degF...], floor, ceiling, label?,
@@ -60,7 +60,7 @@
     });
     if (rows.length && !rows.some(function (r) { return r.best; })) rows[0].best = true;
     return {
-      live: true, show_numbers: !p || p.show_numbers !== false, unit: p && p.unit, headline: p && p.headline, tradeoffs: (p && p.tradeoffs) || [],
+      live: true, source_note: p && p.source_note, show_numbers: !p || p.show_numbers !== false, unit: p && p.unit, headline: p && p.headline, tradeoffs: (p && p.tradeoffs) || [],
       nights: rows.length ? [{ title: 'Tonight', t: grid, out: null, floor: F(p.floor_f), ceiling: F(p.ceiling_f), start: p.start, end: p.end, rows: rows }] : []
     };
   }
@@ -102,7 +102,7 @@
         el.innerHTML = '<div class="rec"><div class="sub">RECOMMENDED FOR ' + esc(String(N.title || 'TONIGHT').toUpperCase()) + '</div>' +
           '<div style="font-size:20px;font-weight:650;margin-top:2px">' + esc(best.label) + '</div>' +
           (data.headline ? '<div class="note" id="night-headline" style="margin-top:4px">' + esc(data.headline) + '</div>' : '') + '</div>' + stepsHtml(best) +
-          '<div class="sub" id="night-nonumbers">Predicted bedroom temperatures are not shown yet. Climate Advisor shows them once it has checked how well it predicts your bedroom.</div>';
+          '<div class="sub" id="night-nonumbers">Predicted bedroom temperatures are not shown yet. Climate Advisor shows them once its bedroom model has learned enough about your bedroom.</div>';
         return;
       }
       var W = 1000, H = 260, off = state.off;
@@ -125,7 +125,7 @@
       if (best) {
         h += '<div class="rec"><div class="sub">RECOMMENDED FOR ' + esc(String(N.title || 'TONIGHT').toUpperCase()) + '</div>' +
           '<div style="font-size:20px;font-weight:650;margin-top:2px">' + esc(best.label) + '</div>' +
-          '<div class="note" style="margin-top:4px">Bedroom ' + d1(best.bed_min) + '–' + d1(best.bed_max) + '° against a ' +
+          '<div class="note" style="margin-top:4px">' + (data.source_note ? '<span class="badge" id="night-source">from v4</span> ' : '') + 'Bedroom ' + d1(best.bed_min) + '–' + d1(best.bed_max) + '° against a ' +
           D(N.floor).toFixed(0) + '–' + D(N.ceiling).toFixed(0) + '° sleep band; ' + ((best.heat_min || 0) + (best.cool_min || 0)) + ' min of HVAC.</div>' +
           (data.headline ? '<div class="note" id="night-headline" style="margin-top:4px">' + esc(data.headline) + '</div>' : '') + '</div>' + stepsHtml(best);
       }
@@ -172,6 +172,7 @@
       if (data.tradeoffs && data.tradeoffs.length) {
         h += '<ul class="note" id="night-tradeoffs" aria-label="Compared with the recommendation" style="margin:0;padding-left:18px">' + data.tradeoffs.map(function (t) { return '<li>' + esc(t.text) + '</li>'; }).join('') + '</ul>';
       }
+      if (data.source_note) h += '<div class="sub" id="night-source-note">' + esc(data.source_note) + '</div>';
       if (data.note) h += '<div class="note-box"><strong>Not validated yet.</strong> ' + esc(String(data.note).replace(/^Not validated yet\.\s*/, '')) + '</div>';
       el.innerHTML = h;
     }

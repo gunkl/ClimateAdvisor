@@ -94,7 +94,8 @@ function makeNightFixture(showNumbers) {
   const res = {
     schema_version: 1, unit: 'fahrenheit', start: at(30), end: at(8 * 60), floor_f: 66, ceiling_f: 72,
     target_sensor: 'sensor.bedroom', fan_mode: 'whole_house_fan', recommended: 'closed', show_numbers: showNumbers,
-    v4_gate_ready: showNumbers,
+    source_model: 'v4',
+    source_note: "From v4. Tonight's bedroom plan is always built on v4's learned rates, whichever prediction model the Status chart shows.",
     headline: 'Keep the windows closed tonight; CA keeps the heat for the bedroom at 66°F.',
     tradeoffs: showNumbers ? [{ key: 'windows_2h', label: 'Windows open 2 h', score_delta: 0.4, hvac_minutes_delta: 10, discomfort_fh_delta: 0, text: 'Windows open 2 h: 10 more minutes of heat or AC, 2 more thing(s) for you to do' }] : [],
     options: [

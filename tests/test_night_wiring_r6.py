@@ -1,8 +1,9 @@
 """Night strategy wiring, endpoint, nightly replay and the shared window rule (Issue #1230 R6).
 
 Occupant view: each evening the plan says what to do about the bedroom tonight (or that CA holds it and nothing is
-needed), the bedroom card reads the same plan, predicted figures only appear for a house whose v4 accuracy gate has
-passed, and the night's numbers agree with the v4 prediction of the same hours. The window assumption v4 predicts
+needed), the bedroom card reads the same plan, predicted figures appear whenever v4 runs and the bedroom model is at
+least medium confidence (no accuracy gate), and the night's numbers agree with the v4 prediction of the same hours.
+The window assumption v4 predicts
 under is one rule shared by the live shadow and the backtest.
 """
 
@@ -270,27 +271,27 @@ def _plan(**kw):
     )  # fmt: skip
 
 
-def test_figures_are_hidden_unless_the_zones_v4_gate_passed() -> None:
+def test_figures_follow_the_bedroom_models_own_confidence_there_is_no_accuracy_gate() -> None:
     plan = _plan()
-    assert plan.show_numbers is True  # the strategy's own confidence is fine
-    assert ns.gate_numbers(plan, True).show_numbers is True
-    gated = ns.gate_numbers(plan, False)
-    assert gated.show_numbers is False and gated.debug["numbers_hidden_by"] == "v4_gate_not_ready"
-    # never turns figures ON
+    assert plan.show_numbers is True
+    assert not hasattr(ns, "gate_numbers")  # DP-8 is information, never a gate (Issue #1230)
     low = ns.NightStrategy(**{**plan.__dict__, "show_numbers": False})
-    assert ns.gate_numbers(low, True).show_numbers is False
+    payload = ns.api_payload(low, unit="fahrenheit", convert=display_temp)
+    assert payload["show_numbers"] is False  # below medium confidence: the plan in words only
 
 
 def test_payload_nulls_every_figure_when_hidden_and_converts_units_when_shown() -> None:
     plan = _plan()
-    hidden = ns.api_payload(plan, unit="fahrenheit", convert=display_temp, v4_gate_ready=False)
-    assert hidden["show_numbers"] is False and hidden["v4_gate_ready"] is False and hidden["tradeoffs"] == []
+    low = ns.NightStrategy(**{**plan.__dict__, "show_numbers": False})
+    hidden = ns.api_payload(low, unit="fahrenheit", convert=display_temp)
+    assert hidden["show_numbers"] is False and hidden["tradeoffs"] == []
     for o in hidden["options"]:
         assert all(o[k] is None for k in ns.FIGURE_KEYS) and o["path"] == []
         assert o["key"] and o["label"] and "actions" in o  # the plan itself is still there
     assert hidden["headline"]
-    shown_c = ns.api_payload(plan, unit="celsius", convert=display_temp, v4_gate_ready=True)
+    shown_c = ns.api_payload(plan, unit="celsius", convert=display_temp)
     assert shown_c["unit"] == "celsius" and shown_c["show_numbers"] is True
+    assert shown_c["source_model"] == "v4" and "v4" in shown_c["source_note"]  # labelled "from v4"
     assert shown_c["floor_f"] == pytest.approx(display_temp(66.0, "celsius"))
     best = shown_c["options"][0]
     assert best["bedroom_low_f"] == pytest.approx(display_temp(plan.options[0].bed_min_f, "celsius"))
@@ -315,7 +316,7 @@ class _Chart:
         return {"indoor_sensors": {HALL: 70.0, BED: 69.0}, "indoor": 70.0}
 
 
-def _coordinator(*, gate: bool, validation=True, snap_now: datetime = NOW, fan_mode: str = "whole_house_fan"):
+def _coordinator(*, gate: bool = True, validation=True, snap_now: datetime = NOW, fan_mode: str = "whole_house_fan"):
     c = object.__new__(ClimateAdvisorCoordinator)
     snap = make_snapshot("mild", now=snap_now, fan_mode=fan_mode, thermal_model=None)
     latch = TimelineLatch()
@@ -324,7 +325,6 @@ def _coordinator(*, gate: bool, validation=True, snap_now: datetime = NOW, fan_m
     c._timeline_last = {"at": snap_now.isoformat()}
     c._timeline_night = None
     c._timeline_night_failed_logged = False
-    c._v4_night_gate = {"ready": gate}
     model = make_model()
     c._v4_store = SimpleNamespace(
         v4_model=p4.to_dict(model),
@@ -353,6 +353,8 @@ def _coordinator(*, gate: bool, validation=True, snap_now: datetime = NOW, fan_m
     caps = SimpleNamespace(supports_heat=True, supports_cool=True)
     c.automation_engine = SimpleNamespace(_get_thermostat_capabilities=lambda: caps)
     c.config = {"sleep_indoor_temp_entity": BED, "fan_mode": fan_mode, "temp_unit": "fahrenheit"}
+    if not gate:  # "gate" now means "v4 is running": off when it is neither the primary nor the comparison engine
+        c.config.update({"primary_engine": "v3", "shadow_engine": "none"})
     return c, snap
 
 
@@ -373,12 +375,21 @@ def test_the_evening_adds_the_night_strategy_and_its_steps_to_the_timeline() -> 
     assert [(s.ts, s.kind, s.reason) for s in again.steps] == [(s.ts, s.kind, s.reason) for s in after.steps]
 
 
-def test_a_failing_gate_hides_the_figures_in_the_step_and_the_payload() -> None:
+def test_with_v4_off_there_is_no_night_plan_and_the_reason_says_so() -> None:
     c, snap = _coordinator(gate=False)
     c._timeline_night_apply(snap, True)
+    assert c._timeline_night["strategy"] is None and c._timeline_night["reason"] == "v4_off"
+    assert not [s for s in c._timeline_latch.timeline.steps if s.kind == StepKind.NIGHT_STRATEGY]
+    c._surface_timeline = lambda: None
+    assert c.night_strategy_payload() == (None, "v4_off")
+
+
+def test_v4_as_the_comparison_engine_still_plans_the_night_without_any_gate() -> None:
+    c, snap = _coordinator(gate=False)
+    c.config.update({"primary_engine": "v3", "shadow_engine": "v4"})
+    c._timeline_night_apply(snap, True)
     step = next(s for s in c._timeline_latch.timeline.steps if s.kind == StepKind.NIGHT_STRATEGY)
-    assert step.meta["show_numbers"] is False
-    assert step.confidence == "low"  # no figures to stand behind: the step is shown with a qualifier
+    assert step.meta["show_numbers"] is True
 
 
 def test_the_night_steps_survive_the_latchs_next_update_without_duplicates() -> None:
@@ -428,10 +439,8 @@ def test_the_payload_reads_the_cache_and_answers_not_ready_before_a_night_is_in_
     assert body is None and reason == "not_ready"
     c._timeline_night_apply(snap, True)
     body, reason = c.night_strategy_payload()
-    assert reason == "ok" and body["unit"] == "fahrenheit" and body["recommended"] and body["v4_gate_ready"] is True
-    c._v4_night_gate = {"ready": False}
-    body, _ = c.night_strategy_payload()
-    assert body["show_numbers"] is False  # the gate is re-read at every request
+    assert reason == "ok" and body["unit"] == "fahrenheit" and body["recommended"] and body["source_model"] == "v4"
+    assert body["show_numbers"] is True  # no accuracy gate: the bedroom model's own confidence decides
 
 
 # ------------------------------------------------------------------------------------ endpoint

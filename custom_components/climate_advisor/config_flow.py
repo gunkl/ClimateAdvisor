@@ -16,7 +16,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector
 
-from . import zone_registry
+from . import prediction_engines, zone_registry
 from .const import (
     AI_MODELS,
     AI_REASONING_OPTIONS,
@@ -62,12 +62,14 @@ from .const import (
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_SOFT_START_ENABLED,
     CONF_OVERRIDE_CONFIRM_PERIOD,
+    CONF_PRIMARY_ENGINE,
     CONF_PUSH_BRIEFING,
     CONF_PUSH_DOOR_WINDOW_PAUSE,
     CONF_PUSH_ENTITY_HEALTH,
     CONF_PUSH_OCCUPANCY_HOME,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
+    CONF_SHADOW_ENGINE,
     CONF_TEMP_UNIT,
     CONF_THERMOSTAT_COMPANION_SENSOR,
     CONF_THRESHOLD_COOL,
@@ -98,9 +100,11 @@ from .const import (
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NAT_VENT_SOFT_START_ENABLED,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
+    DEFAULT_PRIMARY_ENGINE,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_SETBACK_COOL,
     DEFAULT_SETBACK_HEAT,
+    DEFAULT_SHADOW_ENGINE,
     DEFAULT_SLEEP_COOL,
     DEFAULT_SLEEP_HEAT,
     DEFAULT_TEMP_UNIT,
@@ -146,9 +150,18 @@ FAN_MODE_OPTIONS = [
     selector.SelectOptionDict(value=FAN_MODE_HVAC, label="HVAC fan mode"),
 ]
 
+
 # Issue #835: restricts *when* the hvac_fan/both fan mechanism is allowed to run,
 # based on which HVAC mode last ran — avoids raising humidity by circulating air
 # over wet coils shortly after a cooling cycle.
+def _engine_select(include_none: bool) -> selector.SelectSelectorConfig:
+    """The engine dropdown, straight from the engine registry (a newly registered engine appears with no edit here)."""
+    return selector.SelectSelectorConfig(
+        options=[selector.SelectOptionDict(value=i, label=lb) for i, lb in prediction_engines.options(include_none)],
+        mode=selector.SelectSelectorMode.DROPDOWN,
+    )
+
+
 HVAC_FAN_RESTRICT_OPTIONS = [
     selector.SelectOptionDict(value=HVAC_FAN_RESTRICT_HEAT, label="Heat only (avoid humidity after cooling)"),
     selector.SelectOptionDict(value=HVAC_FAN_RESTRICT_COOL, label="Cool only"),
@@ -1710,6 +1723,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 errors["min_preheat_minutes"] = "preheat_min_exceeds_max"
             if default_p > max_p:
                 errors["default_preheat_minutes"] = "preheat_default_exceeds_max"
+            engine_error = prediction_engines.validate(
+                user_input.get(CONF_PRIMARY_ENGINE, DEFAULT_PRIMARY_ENGINE),
+                user_input.get(CONF_SHADOW_ENGINE, DEFAULT_SHADOW_ENGINE),
+            )
+            if engine_error:
+                errors[CONF_SHADOW_ENGINE] = engine_error
             if not errors:
                 await self._commit_section(
                     delta_fields_to_fahrenheit(
@@ -1739,6 +1758,14 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             step_id="advanced",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_PRIMARY_ENGINE,
+                        default=current.get(CONF_PRIMARY_ENGINE, DEFAULT_PRIMARY_ENGINE),
+                    ): selector.SelectSelector(_engine_select(False)),
+                    vol.Required(
+                        CONF_SHADOW_ENGINE,
+                        default=current.get(CONF_SHADOW_ENGINE, DEFAULT_SHADOW_ENGINE),
+                    ): selector.SelectSelector(_engine_select(True)),
                     vol.Required(
                         "learning_enabled",
                         default=current.get("learning_enabled", True),

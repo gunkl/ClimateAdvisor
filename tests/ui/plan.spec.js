@@ -132,7 +132,7 @@ test.describe('Next 24 hours and the plan overlay (classic Status)', () => {
     await expect(page.locator('#plan-list .plan-empty')).toHaveText('Nothing is planned for the next 24 hours.');
   });
 
-  test('a v4 plan path is not drawn for a zone whose accuracy check has not passed', async ({ page }) => {
+  test('a v4 plan path is not drawn for a zone where v4 has no data', async ({ page }) => {
     await page.route('**/api/climate_advisor/timeline**', async (r) => {
       const resp = await r.fetch();
       const body = await resp.json();

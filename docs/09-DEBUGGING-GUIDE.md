@@ -428,6 +428,8 @@ oldest 24 h (no `end_time` was sent).
 
 ## Prediction Backtest (`tools/predict_backtest.py`, Issue #1230 R1)
 
+> From 0.9.4 the backtest is **information only**: it does not decide whether v4 may be shown. Which engine the charts show is Settings -> Prediction engine (`primary_engine`, default v4; optional `shadow_engine`). The DP-8 "gate" rows and `gate_summary` remain as a scorecard ("How each model has scored" on the preview page).
+
 Occupant view: before the owner is ever shown the new prediction (v4) on Status, this tool answers "over all the history this house has recorded, would v4 have told them the room temperature hours ahead better than today's line (v3) and better than 'it will stay as it is'?" It only reads recorded history; it never touches the thermostat or the integration's decisions.
 
 **Why a walk-forward test.** A model scored on the data it was fitted on always looks good. Test weeks start Monday 00:00 local; before each week the v4 model is fitted on chart-log rows strictly before that week (`--train-days` back, default 30 - the live nightly fit uses the same window, `V4_FIT_TRAIN_DAYS`) and then predicts hourly anchors inside the week, exactly as the live shadow would.

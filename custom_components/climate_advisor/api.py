@@ -1474,8 +1474,9 @@ class ClimateAdvisorNightStrategyView(HomeAssistantView):
     Query: ``zone`` (entry id; ``entry_id`` also accepted); with several zones and no ``zone`` the answer is 400, the
     same refusal as ``timeline``. The body is
      ``NightStrategy.to_dict()`` with temperatures in the display unit, ``unit``,
-    ``headline``, ``tradeoffs`` and ``v4_gate_ready`` added. ``show_numbers`` is false (and every predicted figure
-    ``null``) unless the zone's v4 gate passed. 503 ``{"error": "night_strategy_not_ready", "reason": ...}`` before a
+    ``headline``, ``tradeoffs``, ``source_model`` ("v4") and ``source_note`` added. ``show_numbers`` is false (and every
+    predicted figure ``null``) only while the bedroom model is below medium confidence; there is no accuracy gate.
+    503 ``{"error": "night_strategy_not_ready", "reason": ...}`` before a
     night is in view and planned (daytime, no model yet, no forecast).
     """
 

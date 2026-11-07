@@ -99,7 +99,15 @@ def _coord(tmp_path: Path, *, unit="fahrenheit", rows=None, backtest=None, model
     coord._v4_last_fit = {}
     coord._v4_last_cycle = {}
     coord._v4_last_future = last_future
-    for name in ("v4_chart_series", "v4_indoor_sensors_meta", "v4_model_summary"):
+    for name in (
+        "v4_chart_series",
+        "v4_indoor_sensors_meta",
+        "v4_model_summary",
+        "primary_engine_id",
+        "shadow_engine_id",
+        "engine_running",
+        "prediction_engines_payload",
+    ):
         setattr(coord, name, types.MethodType(getattr(cls, name), coord))
     if backtest is not None:
         resolve_entry_scoped_path(tmp_path, V4_BACKTEST_FILE, ENTRY).write_text(json.dumps(backtest), encoding="utf-8")
@@ -201,26 +209,106 @@ def _future() -> dict:
 
 
 class TestV4Block:
-    def test_no_backtest_means_v4_is_not_drawn_and_says_why(self, tmp_path):
+    def test_no_backtest_does_not_withhold_v4_there_is_no_accuracy_gate(self, tmp_path):
         coord = _coord(tmp_path, model=_model(), archive=_archive_with(tmp_path), last_future=_future())
         v4 = _chart(coord)["v4"]
-        assert v4["ready"] is False and v4["reason"] == "no_backtest"
-        assert v4["past"] == {} and v4["future"] == {} and v4["corrected_outdoor"] == {"past": [], "future": []}
+        assert v4["ready"] is True and v4["reason"] == "ok" and v4["scores"] is None
+        assert set(v4["past"]) == {HALL, BED, FINE} and set(v4["future"]) == {HALL, BED}
+        assert v4["corrected_outdoor"]["future"]
 
-    def test_failing_gate_withholds_every_line(self, tmp_path):
+    def test_a_backtest_that_scores_badly_no_longer_withholds_any_line(self, tmp_path):
         coord = _coord(
             tmp_path, model=_model(), archive=_archive_with(tmp_path), last_future=_future(), backtest=NOT_READY
         )
         v4 = _chart(coord)["v4"]
-        assert v4["ready"] is False and v4["reason"] == "not_ready"
-        assert v4["gate"]["passed"] == 4 and v4["gate"]["total"] == 9
-        assert v4["past"] == {} and v4["future"] == {}
+        assert v4["ready"] is True and v4["reason"] == "ok"
+        assert v4["scores"] == {"v4_best_rows": 4, "scored_rows": 9, "rows": 9}  # information only
+        assert "gate" not in v4 and "note" not in v4
+        assert v4["past"] and v4["future"]
 
-    @pytest.mark.parametrize("flag", ["true", 1, "yes", None])
-    def test_only_a_literal_true_opens_the_gate(self, tmp_path, flag):
-        bt = {"gate_summary": {"ready": flag}}
-        coord = _coord(tmp_path, model=_model(), archive=_archive_with(tmp_path), last_future=_future(), backtest=bt)
-        assert _chart(coord)["v4"]["ready"] is False
+    def test_nothing_to_draw_reads_no_model(self, tmp_path):
+        coord = _coord(tmp_path)
+        v4 = _chart(coord)["v4"]
+        assert v4["ready"] is False and v4["reason"] == "no_model" and v4["past"] == {} and v4["future"] == {}
+
+    def test_engines_block_defaults_to_v4_primary_no_shadow(self, tmp_path):
+        coord = _coord(
+            tmp_path, model={**_model(), "confidence": "medium"}, archive=_archive_with(tmp_path), last_future=_future()
+        )
+        eng = _chart(coord)["prediction_engines"]
+        assert eng["primary"] == "v4" and eng["shadow"] == "none"
+        assert [e["id"] for e in eng["engines"]] == ["v3", "v4"]
+        v4e = next(e for e in eng["engines"] if e["id"] == "v4")
+        assert v4e["running"] and v4e["primary"] and not v4e["shadow"]
+        assert eng["primary_state"] == "ready" and eng["fallback"] is False and eng["text"] == ""
+
+    def test_schedule_estimate_is_supplied_only_while_the_primary_is_learning(self, tmp_path, monkeypatch):
+        mod = _get_coordinator_module()
+        calls = []
+
+        def fake_build(forecast, config, now, **kw):
+            calls.append(kw.get("thermal_model"))
+            return [{"ts": (now + timedelta(hours=1)).isoformat(), "temp": 69.0}]
+
+        coord = _coord(tmp_path, model=None, archive=_archive_with(tmp_path), last_future=None)
+        monkeypatch.setattr(mod, "_build_predicted_indoor_future", fake_build)
+        out = _chart(coord)
+        # the extra call has NO thermal model: the engine-agnostic schedule path, never another engine
+        assert (
+            len(calls) == 2
+            and calls[-1] == {}
+            and out["schedule_estimate"] == [{"ts": out["schedule_estimate"][0]["ts"], "temp": 69.0}]
+        )
+        ready = _coord(
+            tmp_path, model={**_model(), "confidence": "medium"}, archive=_archive_with(tmp_path), last_future=_future()
+        )
+        calls.clear()
+        assert _chart(ready)["schedule_estimate"] == [] and len(calls) == 1
+
+    def test_the_fallback_is_logged_once_per_episode(self, tmp_path, caplog):
+        import logging  # noqa: PLC0415
+
+        caplog.set_level(logging.INFO)
+        coord = _coord(tmp_path, model=None, archive=_archive_with(tmp_path), last_future=None)
+        _chart(coord)
+        _chart(coord)
+        msgs = [r for r in caplog.records if "no usable fit yet" in r.getMessage()]
+        assert len(msgs) == 1
+        coord._v4_store.v4_model = {**_model(), "confidence": "medium"}
+        _chart(coord)  # the episode ends...
+        coord._v4_store.v4_model = None
+        _chart(coord)  # ...and a new one logs again
+        assert len([r for r in caplog.records if "no usable fit yet" in r.getMessage()]) == 2
+
+    def test_v4_not_running_is_not_drawn_not_even_from_the_archive(self, tmp_path):
+        coord = _coord(tmp_path, model=_model(), archive=_archive_with(tmp_path), last_future=_future())
+        coord.config["primary_engine"] = "v3"  # shadow stays none: v4 is switched off
+        out = _chart(coord)
+        assert out["v4"]["ready"] is False and out["v4"]["reason"] == "not_running"
+        assert out["v4"].get("past", {}) == {} and out["prediction_engines"]["primary"] == "v3"
+        v4e = next(e for e in out["prediction_engines"]["engines"] if e["id"] == "v4")
+        assert v4e["running"] is False
+        coord.config["shadow_engine"] = "v4"  # as the comparison engine it runs again
+        assert _chart(coord)["v4"]["ready"] is True
+
+    def test_primary_without_a_usable_fit_falls_back_to_the_schedule_estimate_and_says_so(self, tmp_path):
+        coord = _coord(tmp_path, model=None, archive=_archive_with(tmp_path), last_future=None)
+        eng = _chart(coord)["prediction_engines"]
+        assert eng["fallback"] is True and eng["primary_state"] == "learning"
+        assert eng["text"] == "Prediction: learning \u2014 showing the schedule estimate"
+        coord._v4_fit_running = True
+        eng = _chart(coord)["prediction_engines"]
+        assert eng["fitting"] is True and eng["text"] == "Learning: v4 is fitting from your history"
+
+    def test_an_unknown_or_duplicate_selection_reads_as_the_defaults(self, tmp_path):
+        coord = _coord(tmp_path, model=_model(), archive=_archive_with(tmp_path), last_future=_future())
+        coord.config["primary_engine"] = "v9"
+        coord.config["shadow_engine"] = "v9"
+        eng = _chart(coord)["prediction_engines"]
+        assert eng["primary"] == "v4" and eng["shadow"] == "none"
+        coord.config["primary_engine"] = "v3"
+        coord.config["shadow_engine"] = "v3"  # equals the primary: no comparison engine
+        assert _chart(coord)["prediction_engines"]["shadow"] == "none"
 
     def test_ready_zone_gets_past_lines_per_sensor_and_lead_and_future_lines(self, tmp_path):
         coord = _coord(tmp_path, model=_model(), archive=_archive_with(tmp_path), last_future=_future(), backtest=READY)
@@ -298,7 +386,7 @@ class TestV4Block:
         coord = _coord(tmp_path, model=_model(), archive=_archive_with(tmp_path), backtest=READY)
         coord._v4_archive = None
         out = _chart(coord)
-        assert out["v4"]["ready"] is False
+        assert out["v4"].get("past", {}) == {}
         for key in _OLD_KEYS:
             assert key in out
 

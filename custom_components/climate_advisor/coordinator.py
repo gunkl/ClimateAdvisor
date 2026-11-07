@@ -3754,15 +3754,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #1107: judged against the target range in effect (sleep/away
             # setbacks included), not the static awake comfort range.
             if self._today_record:
-                comfort_low, comfort_high = self._comfort_score_band_now()
                 now = dt_util.now()
+                # Issue #1407 (C22): in a bank, outside BOTH the hold and the schedule band; else the band in effect.
+                bands = self._comfort_score_bank_bands(now) or (self._comfort_score_band_now(),)
                 if self._last_violation_check is not None:
                     elapsed_minutes = min((now - self._last_violation_check).total_seconds() / 60, 30.0)
                 else:
                     elapsed_minutes = 30.0
                 self._last_violation_check = now
-                if (indoor < comfort_low or indoor > comfort_high) and not self._is_tolerated_comfort_deviation(
-                    indoor, comfort_low, comfort_high
+                if all(
+                    (indoor < low or indoor > high) and not self._is_tolerated_comfort_deviation(indoor, low, high)
+                    for low, high in bands
                 ):
                     self._today_record.comfort_violations_minutes += elapsed_minutes
 
@@ -11611,7 +11613,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             fan_on=self._get_fan_physical_state(),
             contacts_open=contacts,
             automation_enabled=bool(self._automation_enabled),
+            occupancy=self._promise_occupancy(),
         )
+
+    def _promise_occupancy(self) -> str | None:
+        """The occupancy mode Climate Advisor acts on now, for the comfort-kept promise (Issues #1411/#1412).
+
+        The engine's mode (what the setpoint-writing handlers use; the coordinator sets it first), else the
+        coordinator's own; None when neither is known.
+        """
+        mode = getattr(self.automation_engine, "_occupancy_mode", None)
+        if not isinstance(mode, str):
+            mode = getattr(self, "_occupancy_mode", None)
+        return mode if isinstance(mode, str) and mode else None
 
     def _record_promise_reading(self) -> None:
         try:
@@ -14991,6 +15005,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
             )
         return float(lower), float(upper)
+
+    def _comfort_score_bank_bands(self, now: datetime | None = None) -> tuple[tuple[float, float], ...] | None:
+        """The ranges the Comfort Score judges against while a time-of-use bank owns the thermostat (Issue #1407).
+
+        Decision C22 (reversible): ``(hold, schedule band)``, and a minute counts only when indoor is outside BOTH
+        (and past the thermostat's swing for each). The hold is what the thermostat is told (``tou_bank_band()``:
+        pre-cool [min(floor, target), target], pre-heat [target, max(ceiling, target)]); the schedule band is the
+        home / sleep / Away / Vacation band (``AutomationEngine._resolved_comfort_band()``). Occupant: a pre-cool
+        pulling the house from 74 F toward 68 F is inside the 68-76 F comfort range, so the person is comfortable and
+        those minutes must not feed the ``comfort_violations`` suggestion; a house outside both is a real miss. The
+        cached chart band keeps the #786 shape for a bank (the target on the opposite edge: an Away pre-heat to 63 F
+        reads 60-63), which counted a house above an Away pre-heat target as uncomfortable.
+
+        Reads the CONTROL source ``_tou_bank_in_force()`` (never the display resolver). None outside a bank (a
+        deferred bank included) or on any fault: the caller keeps ``_comfort_score_band_now()``. Score only.
+        """
+        try:
+            res = self._tou_bank_in_force(now if now is not None else dt_util.now())
+            c = getattr(self, "_current_classification", None)
+            ae = self.automation_engine
+            if res is None or c is None or ae is None:
+                return None
+            schedule = ae._resolved_comfort_band(c)
+            hold = tou_bank_band(schedule, float(res.target), str(res.mode))
+            return (float(hold.floor), float(hold.ceiling)), (float(schedule.floor), float(schedule.ceiling))
+        except Exception:  # noqa: BLE001 - a score read must never break the update cycle
+            _LOGGER.debug("Comfort Score bank bands unavailable; using the cached band", exc_info=True)
+            return None
 
     def _is_nat_vent_tolerated_deviation(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
         """True if this comfort-band deviation is expected nat-vent cycling tolerance, not a violation.

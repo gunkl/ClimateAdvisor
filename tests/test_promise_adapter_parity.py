@@ -93,6 +93,7 @@ def _reading_key(r) -> tuple:
         r.setpoint_high_f,
         r.fan_on,
         r.contacts_open,
+        r.occupancy,  # Issues #1411/#1412: P7 decides Away/Vacation from it
     )
 
 

@@ -1166,6 +1166,24 @@ def _p7_thermostat_deadband(r: Reading, side: str, edge: float) -> bool:
     return past <= limit and past_sp <= limit
 
 
+# Issues #1411/#1412: the occupancy modes in which nobody is home, so P7 does not judge comfort (the house is held to
+# the wide Away / Vacation setback the person chose, not to the comfort range this promise protects).
+_P7_UNOCCUPIED_MODES = frozenset({"away", "vacation"})
+
+
+def _p7_unoccupied(r: Reading, away_tl: tuple[list[datetime], list[bool]]) -> bool:
+    """True while Climate Advisor holds the house for Away / Vacation at ``r`` (Issues #1411/#1412).
+
+    The reading's own occupancy mode decides when the source reports one: it is known from the very first reading,
+    with or without an ``occupancy_setback`` mark (none is journaled when Away is set before the first
+    classification) and however long ago the setback was. Only a source that does not report it (``None``) falls
+    back to the mark timeline (setback on, comfort restored / restore held off).
+    """
+    if r.occupancy is not None:
+        return r.occupancy.lower() in _P7_UNOCCUPIED_MODES
+    return _state_at(away_tl, r.ts)
+
+
 def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
     """Every open P7 run: ``start``/``last``/``side``/``worst``, ``cross`` (set only by a NON-excused reading past
     the allowance) and ``excused_min`` (time spent in the thermostat's deadband, Issue #1260).
@@ -1176,17 +1194,20 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
     """
     rs = inp.readings
     marks = tuple(sorted(inp.marks, key=lambda m: m.ts))
+    # Issue #1412: the away and nat-vent timelines start from the state marks carried past the window, so a state that
+    # began before the window still governs the readings inside it (the other P7 inputs use the window's marks only).
+    state_marks = tuple(sorted(inp.carried_state_marks, key=lambda m: m.ts)) + marks
     occ_ts = sorted(o.ts for o in occupant_actions(inp))
     widen = NUMBERS.P7_AGGRESSIVE_WIDEN_F if cfg.aggressive_savings else 0.0
     excl = timedelta(minutes=NUMBERS.P7_EXCLUSION_MIN)
     # Issue #1245: a HELD arrival restore (whf_session / blower_hold) also ends the away timeline: the occupant is
     # home and the setback ended, only the write was withheld. The vent_tl exclusion below covers the held window.
     away_tl = _state_timeline(
-        marks,
+        state_marks,
         frozenset({"occupancy_setback"}),
         frozenset({"occupancy_comfort_restored", "occupancy_comfort_restore_held"}),
     )
-    vent_tl = _state_timeline(marks, frozenset({"nat_vent_activated"}), NAT_VENT_END_KINDS)
+    vent_tl = _state_timeline(state_marks, frozenset({"nat_vent_activated"}), NAT_VENT_END_KINDS)
     off_cmd_ts = sorted(c.ts for c in inp.commands if c.origin == "ca" and c.automation_enabled is False)
     restart_ts = sorted(m.ts for m in marks if m.kind in ("system_restarted", "startup_coalesced"))
     window = timedelta(minutes=NUMBERS.P7_OVERSHOOT_WINDOW_MIN)
@@ -1214,7 +1235,7 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
     def in_control(idx: int, r: Reading, side: str, dist: float) -> bool:
         if r.hvac_mode is None or r.contacts_open is True or r.fan_on is True:
             return False
-        if _state_at(away_tl, r.ts) or _state_at(vent_tl, r.ts):
+        if _p7_unoccupied(r, away_tl) or _state_at(vent_tl, r.ts):
             return False
         if any(e.start_ts <= r.ts and (e.end_ts is None or e.end_ts >= r.ts) for e in inp.episodes):
             return False

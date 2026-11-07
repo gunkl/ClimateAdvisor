@@ -547,5 +547,30 @@
     "sha256": "52ec47cdd52a26e2b135d0fe5c68548c72c1708561e35e5496564c1473198a5e",
     "signed": "2026-11-06",
     "issue": 1230
+  },
+  "r3b_mild_disabled_home_windows_plan_open_at": {
+    "sha256": "83e253f1a35598f5d5261b5d836538b848916309d8ec790af36f33741559ed3a",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_mild_disabled_guest_windows_plan": {
+    "sha256": "2109df9861beecc9e1770421169a3fdfc8374a7064790f4a4e2548750e9b27c5",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_mild_hvac_fan_override_mid_plan": {
+    "sha256": "a3e2ec5d5106b2cfb55d37108ea42a993c76dc4ba1ec660cff146b958e2606c6",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_mild_evening_period_active_direction_veto": {
+    "sha256": "668596370e4a7157444f83a2df1bd78ddb37ebe96429f304a0aebd779d61755b",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_warm_whf_cooling_needed_plan_has_no_window": {
+    "sha256": "053f6e6c1f162e526faa5fd03e6c74902a8a9a8842d78bbbdf69b1a380658916",
+    "signed": "2026-11-06",
+    "issue": 1230
   }
 }

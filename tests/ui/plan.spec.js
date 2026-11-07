@@ -108,7 +108,8 @@ test.describe('Next 24 hours and the plan overlay (classic Status)', () => {
     await page.waitForTimeout(150);
     const html = await page.locator('#chart-hover-panel').innerHTML();
     expect(html).toContain('CA ');
-    expect(html).toContain('CA pre-cools the house to 70°F');   // the hover keeps the canonical sentence (Issue #1399 changes the list only)
+    expect(html).toContain('Pre-cools the house to 70°F');   // Issue #1399: the hover shows "CA <time>:" once, then the time-free sentence
+    expect(html).not.toMatch(/<strong>\s*\d{1,2}:\d{2}\s*[AP]M/);   // the time is not repeated inside the sentence
     expect(box.width).toBeGreaterThan(100);
   });
 

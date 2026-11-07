@@ -1124,7 +1124,7 @@
     }
     const planStep = ms > Date.now() ? _planNear(ms) : null;
     if (planStep) overlay += _chpItem(planStep.actor === 'you' ? 'var(--c-target)' : 'var(--c-plan)',
-      escapeHtml(planStep.actor === 'you' ? 'You' : 'CA') + ' ' + escapeHtml(_clock(planStep._ms)) + ': <strong>' + escapeHtml(planStep.text || '') + '</strong>');
+      escapeHtml(planStep.actor === 'you' ? 'You' : 'CA') + ' ' + escapeHtml(_clock(planStep._ms)) + ': <strong>' + escapeHtml(planStep.text_short || planStep.text || '') + '</strong>');
     let closest = null, minDiff = Infinity;
     log.forEach(e => {
       const diff = Math.abs(_parseTs(e.ts) - ms);

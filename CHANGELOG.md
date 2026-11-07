@@ -3,6 +3,20 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.5] — 2026-11-07
+
+- Fix #1400: v4 is now visible. v4 makes the decisions (pre-heat and pre-cool timing, the ceiling guard, the window-close time, setback depth), but nothing from it was drawn. The Status chart now draws v4's "Climate Advisor reading" line for the past and the next hours, broken at bedtime and wake-up so it never shows a hallway-to-bedroom jump that happened in neither room (the actual reading and v3's line break the same way). The Prediction accuracy page scores v3 and the "no change" guess even before v4 has scored anything, and its history tables fill in: a deploy now publishes each zone's backtest (`tools/deploy.py --no-backtest` skips it). The duplicate "Climate Advisor reading" in the sensor list is gone.
+- Fix #1399 (dashboard): eleven fixes from the owner's review of 0.9.4.
+  - **Temperature chart:** your line choices are remembered, and with no saved choice "CA reading" is the only sensor line shown. Choosing a different engine keeps your choices. The key folds at every width, starts folded, and says in one line what is drawn. The default view shows at least 24 hours ahead on every range (a remembered "12h" choice no longer shortens it). The "Made" row is now "Past v4 lines: predicted 1 h / 4 h / 12 h / 24 h earlier" and says in words when there is nothing to show. The hover readout sits below the chart, grows to fit every line (no scroll bar you can't use) and can be pinned with a click or a tap (Esc or another click releases it).
+  - **Status cards:** the outdoor card no longer prints the gap between your sensor and the weather service like a reading ("sensor −6.2°F"); it says "The weather service says 54.0°F, 6.2° warmer than your outdoor sensor". The thermostat card's bare "68°F" and "active" are sentences ("Heating to 68°F · idle now", "Climate Advisor: following today's plan"), fan and remote lines too. The day type ("Warm") is the Today card's big value, and the big values line up across each row.
+  - **Next 24 hours:** rows no longer repeat the time and "CA" that the columns already show ("Bedtime: switches to the sleep band, 66°F to 72°F, …").
+  - **Debug tab:** no raw JSON. The prediction-engine section is plain rows (primary and comparison engine, what decisions use, last learned, typical miss, sensors, last prediction, archive), the plan is a short "Plan" group, and the "Other" group is gone. Download diagnostics still has all the raw data.
+  - **Scoring page:** "Back to dashboard" is a button and returns to the dashboard you use (classic if you came from classic).
+  - **Fixed on the way:** on °C installs the Debug tab's learning pipeline showed the indoor change unconverted; the remote-offset sentence no longer shows a signed "+4°F" gap.
+- Fix #1398: Settings (Prediction engine help), the Prediction accuracy page, the log and the 0.9.4 release notes no longer say decisions use v3. The engine you choose times them; while it is still learning they use their defaults, never the other engine.
+- Docs: README brought up to 0.9.4 (prediction engines, the plan, the new dashboard as the default, upgrading), a new CONTRIBUTING.md, and every spec under `docs/` checked against the code.
+- Tests: a signed golden scenario pins the Away/Vacation time-of-use bank single write (#1395).
+
 ## [0.9.4] — 2026-11-06
 
 - Includes fix 0.8.71 from `main` (#1389, #1390: a restart no longer stops or strands the whole-house fan).

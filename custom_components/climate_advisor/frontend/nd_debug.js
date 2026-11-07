@@ -1,7 +1,7 @@
 /* Issue #1230 R5: Debug tab - every internal field. Reads automation_state, engines, event_log (diagnostics) and
-   prediction_accuracy. Every automation_state key is shown exactly once: in a named group, or under "Other" if the
-   key is not mapped yet (so a field added later is never lost). The one deliberate exception, promise_summary,
-   lives in Analysis. */
+   prediction_accuracy. Every automation_state key is shown exactly once in a named group, in words (never raw data),
+   except promise_summary (shown in Analysis) and any key listed in DOWNLOAD_ONLY. There is no catch-all group:
+   tests/test_new_dashboard.py fails when get_debug_state() gains a key that is in none of these lists (Issue #1399). */
 (function () {
   'use strict';
   var $ = ND.$, esc = ND.esc;
@@ -18,10 +18,18 @@
     ['Comfort edge', ['comfort_family_armed', 'comfort_family_hold', 'comfort_family_last_switch']],
     ['Occupancy', ['occupancy_mode', 'occupancy_away_timer_pending']],
     ['Units', ['unit', 'configured_unit', 'provider_unit', 'ha_system_unit', 'unit_mismatch', 'ha_unit_mismatch', 'sensor_unit_mismatches']],
-    ['Prediction engines (v4 shadow)', ['v4_model']]
+    ['Prediction engines (v4 shadow)', ['v4_model', 'control_feed']],
+    ['Plan', ['operation_timeline']]
   ];
   var NESTED = { classification: 1, thermal_pipeline: 1 };      // expanded into their own groups
   var MOVED = { promise_summary: 'Analysis' };                    // shown in Analysis, not repeated here
+  // Issue #1399: keys deliberately not shown on this tab; their full data is in Download diagnostics (this tab's button
+  // saves the whole automation_state; HA's native diagnostics file carries it as debug_state). Every key of
+  // get_debug_state() must be in a GROUPS list, NESTED, MOVED or here: tests/test_new_dashboard.py enforces it.
+  var DOWNLOAD_ONLY = [];
+  // Object-valued keys rendered as plain-language rows by their own builders below (engineRows, planRows).
+  var CUSTOM = { v4_model: 1, control_feed: 1, operation_timeline: 1 };
+  var DASH = '—';
   var HINTS = {
     occupancy_mode: 'Guest > Vacation > Home/Away', pre_pause_mode: 'HVAC mode before a door paused automation',
     comfort_family_armed: 'Which comfort edge the thermostat is guarding, and the last heat/cool switch',
@@ -32,40 +40,127 @@
     'classification.today_low': 'Window opportunity needs today low at or below the threshold', 'classification.tomorrow_low': 'Evening opportunity needs tomorrow low at or below the threshold'
   };
 
+  // Issue #1399: no raw JSON on this tab. An object reads "key value · key value", a list of objects "...; ...".
   function fmt(v) {
-    if (v == null) return '—';
+    if (v == null) return DASH;
     if (typeof v === 'boolean') return v ? 'yes' : 'no';
     if (typeof v === 'number') return String(Math.round(v * 1000) / 1000);
     if (typeof v === 'string') return /^\d{4}-\d\d-\d\dT/.test(v) ? new Date(v).toLocaleString([], { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }) : v;
-    if (Array.isArray(v)) return v.length ? v.map(function (x) { return typeof x === 'object' ? JSON.stringify(x) : String(x); }).join(', ') : 'none';
-    return JSON.stringify(v);
+    if (Array.isArray(v)) return v.length ? v.map(fmt).join(v.some(function (x) { return x && typeof x === 'object'; }) ? '; ' : ', ') : 'none';
+    if (typeof v === 'object') { var ks = Object.keys(v); return ks.length ? ks.map(function (k) { return k.replace(/_/g, ' ') + ' ' + fmt(v[k]); }).join(' · ') : 'none'; }
+    return String(v);
   }
   function fmtKey(k, v) {
     if (k === 'door_window_sensors' && v && typeof v === 'object') {
       var names = Object.keys(v);
       return names.length ? names.map(function (n) { return (v[n].friendly_name || n) + ': ' + (v[n].open ? 'open' : 'closed'); }).join('; ') : 'none';
     }
+    if (k === 'comfort_family_last_switch' && v && typeof v === 'object') {
+      return (v.from || '?') + ' → ' + (v.to || '?') + ' at ' + tDay(v.ts) + (v.reason ? ' (' + v.reason + ')' : '');
+    }
     return fmt(v);
   }
 
+  // ---------- plain-language times ----------
+  function when(iso) { var d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d : null; }
+  function tShort(d) { return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+  function tDay(iso) {  // "7:30 AM" today, "Mon 7:30 AM" on another day
+    var d = when(iso); if (!d) return DASH;
+    return (d.toDateString() === new Date().toDateString() ? '' : d.toLocaleDateString([], { weekday: 'short' }) + ' ') + tShort(d);
+  }
+  function dayLabel(ymd) {  // "2026-11-07" (a local calendar day, not UTC midnight) -> "Sat 11/7"
+    var m = /^(\d{4})-(\d\d)-(\d\d)/.exec(ymd || ''); if (!m) return DASH;
+    var d = new Date(+m[1], +m[2] - 1, +m[3]);
+    return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + (d.getMonth() + 1) + '/' + d.getDate();
+  }
+  function count(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+  function has(x) { return x != null && x !== ''; }
+
+  // ---------- Prediction engines, in words (Issue #1399) ----------
+  // v = v4_model_summary() (engines.v4, or automation_state.v4_model), pe = its prediction_engines block
+  // (prediction_engines.engine_state()), cf = automation_state.control_feed. Temperatures and errors arrive in the user's unit (v.unit).
+  function engineRows(v, pe, cf) {
+    var cat = (pe && pe.engines) || [], u = (v && v.unit) || ND.sym(ND.unit), rows = [];
+    function find(id) { for (var i = 0; i < cat.length; i++) if (cat[i].id === id) return cat[i]; return null; }
+    function label(id) { var e = find(id); return (e && e.label) || id; }
+    function conf(e) { return e.confidence && e.confidence !== 'none' ? e.confidence + ' confidence' : ''; }
+    var prim = pe ? find(pe.primary) : null, sh = pe && pe.shadow && pe.shadow !== 'none' ? find(pe.shadow) : null;
+    rows.push(['Primary engine', !pe || !pe.primary ? DASH : !prim ? pe.primary : prim.label + ': ' + (prim.usable ? ['usable', conf(prim)].filter(Boolean).join(', ') : 'still learning')]);
+    rows.push(['Shadow engine', !pe ? DASH : !pe.shadow || pe.shadow === 'none' ? 'none' : !sh ? pe.shadow : sh.label + ': ' + (sh.usable ? conf(sh) || 'usable' : 'still learning')]);
+    var dec = DASH;
+    if (cf && cf.mode) {
+      var pts = has(cf.path_points) ? ' (' + count(cf.path_points, 'point', 'points') + ')' : '';
+      if (cf.mode === 'defaults') dec = 'default behaviour (' + (prim ? prim.label : (pe && pe.primary) || 'the main engine') + ' still learning)';
+      else dec = label(cf.mode) + '’s ' + (cf.own_path ? 'own path' : 'curve') + pts;
+    }
+    rows.push(['Decisions use', dec]);
+    v = v && !v.error ? v : {};
+    var learned = DASH, lf = v.last_fit || {};
+    if (v.has_model === false) learned = 'not yet';
+    else if (has(v.fitted_at)) {
+      learned = tDay(v.fitted_at) + (has(v.span_days) ? ' from ' + count(Math.round(v.span_days * 10) / 10, 'day', 'days') + ' of history' : '') + (has(v.n_anchors) ? ', ' + count(v.n_anchors, 'point', 'points') : '');
+      if (lf.at && lf.ok !== false) learned += ' (' + ({ first: 'first fit', nightly: 'nightly refit', retry: 'retry' }[lf.reason] || String(lf.reason || 'fit').replace(/_/g, ' ')) + (has(lf.seconds) ? ', ' + lf.seconds + ' s' : '') + ')';
+    }
+    if (lf.at && lf.ok === false) learned = (learned === DASH || learned === 'not yet' ? '' : learned + '; ') + 'last attempt ' + tDay(lf.at) + ' failed';
+    rows.push(['Last learned', learned]);
+    var mae = v.mae_by_lead && typeof v.mae_by_lead === 'object' ? v.mae_by_lead : {};
+    var leads = Object.keys(mae).filter(function (k) { return mae[k] != null; }).sort(function (a, b) { return parseFloat(a) - parseFloat(b); });
+    rows.push(['Typical miss', leads.length ? leads.map(function (k) { return k.replace(/^(\d+)\s*h$/, '$1 h') + ' ' + Number(mae[k]).toFixed(2) + u; }).join(' · ') : DASH]);
+    var sens = Array.isArray(v.sensors) ? v.sensors : [], names = v.sensor_names || {};
+    var sname = function (id) { return id === '_ca' ? 'Climate Advisor reading' : names[id] || id; };
+    rows.push(['Sensors modelled', !sens.length ? DASH : sens.length === 1 && sens[0] === '_ca' ? 'Climate Advisor reading only' : sens.map(sname).join(', ')]);
+    var lc = v.last_cycle || {};
+    rows.push(['Last prediction', !lc.at ? DASH : [tDay(lc.at), has(lc.inputs) ? count(lc.inputs, 'forecast input', 'forecast inputs') : '', has(lc.ms) ? Math.round(lc.ms) + ' ms' : '', has(lc.archived) ? count(lc.archived, 'slot', 'slots') + ' archived' : '', lc.predicted === false ? 'no prediction made' : ''].filter(Boolean).join(', ')]);
+    var ar = v.archive_slots, arTxt = DASH;
+    if (ar && typeof ar === 'object') {
+      var vals = Object.keys(ar).map(function (k) { return Number(ar[k]) || 0; });
+      var n = '_ca' in ar ? Number(ar._ca) || 0 : Math.max.apply(null, vals.concat([0]));
+      var since = when(v.archive_since);
+      arTxt = n ? count(n, 'slot', 'slots') + (since ? ' since ' + (since.getMonth() + 1) + '/' + since.getDate() : '') : 'empty';
+    }
+    rows.push(['Archive', arTxt]);
+    rows.push(['Mass node', has(v.mass) ? Number(v.mass).toFixed(1) + u : DASH]);
+    rows.push(['Fitting now', v.fit_running == null ? DASH : fmt(!!v.fit_running)]);
+    rows.push(['Engine available', v.engine_available == null ? DASH : fmt(!!v.engine_available)]);
+    return rows;
+  }
+
+  // ---------- the operation timeline ("Plan"), in words (Issue #1399): no step list ----------
+  function planRows(t) {
+    if (!t || t.error || !t.generated_at) return [['Plan', 'not built yet']];
+    var lr = t.last_run || {}, reasons = Array.isArray(lr.reasons) ? lr.reasons.filter(Boolean) : [];
+    var rows = [
+      ['Generated', tDay(t.generated_at) + (t.day ? ' for ' + dayLabel(t.day) : '')],
+      ['Covers through', tDay(t.horizon_end)],
+      ['Steps', String((t.steps || []).length)],
+      ['Last checked', !lr.at ? DASH : tDay(lr.at) + (lr.regenerated ? ', regenerated' + (reasons.length ? ' (' + reasons.join(', ').replace(/_/g, ' ') + ')' : '') : ', not regenerated')]
+    ];
+    if (t.regen_reason) rows.push(['Last regenerated because', String(t.regen_reason)]);
+    return rows;
+  }
+
   function buildGroups() {
-    var groups = [], used = {};
+    var groups = [];
     function row(k, v, hintKey) { return { k: k, v: v, hint: HINTS[hintKey || k] || '' }; }
+    function rowsOf(list) { return list.map(function (r) { return row(r[0], r[1]); }); }
     GROUPS.forEach(function (g) {
-      var rows = g[1].filter(function (k) { return A && k in A; }).map(function (k) { used[k] = 1; return row(k, fmtKey(k, A[k])); });
-      if (g[0].indexOf('Prediction engines') === 0 && E) {
-        ['k_passive', 'k_solar', 'solar_phase_offset_h', 'k_vent_window', 'k_vent_fan'].forEach(function (k) {
-          var e = E[k]; if (e) rows.push(row(k, e.active ? fmt(e.value) + (e.confidence ? ' (' + e.confidence + ')' : '') : '(not yet active)'));
-        });
-        var h = E.k_active_hvac; if (h) rows.push(row('k_active_hvac', h.active && h.value ? 'heat ' + fmt(h.value.heat) + ' · cool ' + fmt(h.value.cool) + (h.confidence ? ' (' + h.confidence + ')' : '') : '(not yet active)'));
-        rows.push(row('physics', (E.ode_version || '?') + ' · ' + (E.physics_eligible ? 'eligible' : 'not eligible') + (E.physics_eligible_reason ? ' · ' + E.physics_eligible_reason : '')));
-        if (E.v4 && typeof E.v4 === 'object') Object.keys(E.v4).forEach(function (k) { rows.push(row('engines.v4.' + k, fmt(E.v4[k]))); });
+      var rows = g[1].filter(function (k) { return A && k in A && !CUSTOM[k]; }).map(function (k) { return row(k, fmtKey(k, A[k])); });
+      if (g[0].indexOf('Prediction engines') === 0) {
+        var v4s = (E && E.v4) || (A && A.v4_model);
+        rows = rows.concat(rowsOf(engineRows(v4s, v4s && v4s.prediction_engines, A && A.control_feed)));
+        if (E) {
+          ['k_passive', 'k_solar', 'solar_phase_offset_h', 'k_vent_window', 'k_vent_fan'].forEach(function (k) {
+            var e = E[k]; if (e) rows.push(row(k, e.active ? fmt(e.value) + (e.confidence ? ' (' + e.confidence + ')' : '') : '(not yet active)'));
+          });
+          var h = E.k_active_hvac; if (h) rows.push(row('k_active_hvac', h.active && h.value ? 'heat ' + fmt(h.value.heat) + ' · cool ' + fmt(h.value.cool) + (h.confidence ? ' (' + h.confidence + ')' : '') : '(not yet active)'));
+          rows.push(row('physics', (E.ode_version || '?') + ' · ' + (E.physics_eligible ? 'eligible' : 'not eligible') + (E.physics_eligible_reason ? ' · ' + E.physics_eligible_reason : '')));
+        }
       }
+      if (g[0] === 'Plan' && A && 'operation_timeline' in A) rows = rowsOf(planRows(A.operation_timeline));
       groups.push({ title: g[0] === 'Prediction engines (v4 shadow)' ? 'Prediction engines' : g[0], rows: rows });
     });
-    if (A && A.classification) { used.classification = 1; groups.splice(8, 0, { title: 'Today’s classification', rows: Object.keys(A.classification).map(function (k) { return row(k, fmt(A.classification[k]), 'classification.' + k); }) }); }
+    if (A && A.classification) { groups.splice(8, 0, { title: 'Today’s classification', rows: Object.keys(A.classification).map(function (k) { return row(k, fmt(A.classification[k]), 'classification.' + k); }) }); }
     if (A && A.thermal_pipeline) {
-      used.thermal_pipeline = 1;
       var tp = A.thermal_pipeline;
       groups.push({ title: 'Learning pipeline', rows: (tp.pending || []).map(function (p) {
         return row('pending ' + p.obs_type, p.status + ' · ' + p.elapsed_minutes + ' min · ' + p.sample_count + ' samples · indoor Δ' + p.indoor_delta_f + '° · outdoor ' + p.outdoor_f + '°');
@@ -73,10 +168,6 @@
     }
     var lc = EV && EV.diagnostics && EV.diagnostics.last_command;
     if (lc) groups.push({ title: 'Last thermostat command', rows: Object.keys(lc).map(function (k) { return row(k, fmt(lc[k])); }) });
-    if (A) {
-      var other = Object.keys(A).filter(function (k) { return !used[k] && !NESTED[k] && !MOVED[k]; }).map(function (k) { return row(k, fmtKey(k, A[k])); });
-      groups.push({ title: 'Other', rows: other });
-    }
     return groups;
   }
 
@@ -107,7 +198,7 @@
     $('dbg-ev-rows').innerHTML = rows.length ? rows.map(function (e) {
       var d = Object.assign({}, e); delete d.time; delete d.type;
       return '<tr><td style="white-space:nowrap;color:var(--ink2)">' + esc(ND.fmtTime(e.time)) + '</td><td>' + esc(String(e.type).replace(/_/g, ' ')) + '</td><td class="mono" style="color:var(--ink2);font-size:12px">' +
-        esc(Object.keys(d).map(function (k) { return k + '=' + (typeof d[k] === 'object' ? JSON.stringify(d[k]) : d[k]); }).join('  ')) + '</td></tr>';
+        esc(Object.keys(d).map(function (k) { return k + '=' + (d[k] && typeof d[k] === 'object' ? fmt(d[k]) : d[k]); }).join('  ')) + '</td></tr>';
     }).join('') : '<tr><td colspan="3" class="empty">' + (EV ? 'No events in this window.' : 'Event log unavailable.') + '</td></tr>';
     $('dbg-ev-count').textContent = 'last ' + $('dbg-ev-hours').selectedOptions[0].textContent + ' · ' + rows.length + ' of ' + evs.length;
     if (EV && EV.is_truncated) $('dbg-ev-count').textContent += ' · older events were not kept';
@@ -186,4 +277,5 @@
   ND.on('refresh', function () { if (ND.active === 'debug') load(); });
   ND.on('state-changed', function () { if (ND.active === 'debug') load(); });
   ND.GROUPS = GROUPS;
+  ND.DEBUG_UNGROUPED = { nested: NESTED, moved: MOVED, downloadOnly: DOWNLOAD_ONLY };
 })();

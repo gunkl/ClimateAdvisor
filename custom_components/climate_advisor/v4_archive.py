@@ -422,6 +422,11 @@ class V4Archive:
             out[CA_LINE] = out[str(self.ca["primary"])]
         return out
 
+    def oldest_slot(self) -> int | None:
+        """The earliest archived slot (Unix seconds) across every sensor, or None while the archive is empty."""
+        firsts = [slots[0] for slots in (line.slots() for line in self._lines.values()) if slots]
+        return min(firsts) if firsts else None
+
     def series(self, sensor: str, lead: str, start: float, end: float) -> dict[int, float]:
         """``{slot_epoch: value}`` for one sensor and look-ahead with ``start <= slot < end`` (Unix seconds).
 

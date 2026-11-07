@@ -175,3 +175,13 @@ def test_series_reads_a_window(tmp_path: Path) -> None:
     got = arch.series("climate.a", "4h", lo, hi)
     assert list(got) == [slot_key(_NOW + timedelta(hours=4))]
     assert arch.series("nope", "4h", lo, hi) == {}
+
+
+def test_oldest_slot_is_the_earliest_slot_across_sensors_or_none_when_empty(tmp_path: Path) -> None:
+    """Issue #1399: the Debug tab says "N slots since <date>" from this."""
+    arch = _archive(tmp_path)
+    assert arch.oldest_slot() is None
+    t0 = int(_NOW.timestamp()) // 1800 * 1800
+    arch.put("climate.a", t0, "4h", 60.0)
+    arch.put("sensor.b", t0 - 3600, "1h", 61.0)
+    assert arch.oldest_slot() == t0 - 3600

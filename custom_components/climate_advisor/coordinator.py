@@ -6957,6 +6957,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             out["last_fit"] = dict(self._v4_last_fit)
             out["last_cycle"] = dict(self._v4_last_cycle)
             out["archive_slots"] = self._v4_archive.slot_count()
+            # Issue #1399: what the Debug tab needs to say it in words: when the archive starts, the modelled sensors'
+            # friendly names, and the primary/shadow engine status (the chart payload's block, display only). Cosmetic,
+            # so a failure here only drops these fields.
+            try:
+                out["prediction_engines"] = self.prediction_engines_payload()
+                oldest = self._v4_archive.oldest_slot()
+                out["archive_since"] = (
+                    datetime.fromtimestamp(oldest, tz=UTC).isoformat() if oldest is not None else None
+                )
+                ids = [s for s in out.get("sensors") or [] if s != "_ca"]
+                out["sensor_names"] = {m["id"]: m["name"] for m in self.v4_indoor_sensors_meta(ids)}
+            except Exception:  # noqa: BLE001 - cosmetic
+                _LOGGER.debug("v4_model_summary names/archive start failed", exc_info=True)
             return out
         except Exception:  # noqa: BLE001 - a debug field must never break the debug payload
             _LOGGER.debug("v4_model_summary failed", exc_info=True)

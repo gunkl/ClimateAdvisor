@@ -6,11 +6,11 @@
 
 | Question | Short answer | → Full answer |
 |---|---|---|
-| What does the archive record, and why? | One snapshot per local clock hour of what the provider's hourly forecast said (up to 72 h ahead), so the R1 backtest can score forecast error at each lead time (1 h, 4 h, 12 h, 24 h...). chart_log `pred_outdoor` keeps only the current hour's value and cannot answer that. Record-only: no automation, display or REST reads it. | [Scope](#scope) |
+| What does the archive record, and why? | One snapshot per local clock hour of what the provider's hourly forecast said (up to 72 h ahead), so forecast error can be scored at each lead time (1 h, 4 h, 12 h, 24 h...). chart_log `pred_outdoor` keeps only the current hour's value and cannot answer that. No automation decision, display or REST view reads it directly; its readers are training inputs: the v4 fit (`v4_shadow.run_fit`, forecast-correction learning, via `snapshots_fn=get_snapshots`), the nightly night-strategy replay (`night_replay.run_nightly`) and the offline `tools/predict_backtest.py` (raw file). A v4 PRIMARY then drives decisions from the model it learned (see [Prediction Engines Spec](prediction-engines-spec.md)). | [Scope](#scope) |
 | When is a snapshot recorded, and when is it not? | Only on a successful fetch that returned entries, from the single choke point `_refresh_hourly_forecast()`. A kept-forecast reuse during an outage and the chart's synthetic extended days are never recorded. | [Record Rules](#record-rules), [Outage Behavior](#outage-behavior) |
 | What if the forecast is fetched several times in one hour? | The latest fetch in a local clock hour REPLACES that hour's snapshot; a refetch with identical content (same source, grid start and temperatures, at any minute of the hour) changes nothing, keeps the earlier issue time and triggers no write. | [Record Rules](#record-rules) |
 | What is on disk, and how big does it get? | `climate_advisor_forecast_archive_<entry_id>.json`, `{"snapshots": [{"i","s","h0","t":[...]}]}`, one hourly grid per snapshot; 365 days at 72 h is about 3.9 MB. | [On-Disk Schema](#on-disk-schema), [Retention and Size](#retention-and-size) |
-| How does R1 read it? | `ForecastArchive.get_snapshots(start, end)` returns snapshots issued in `[start, end)`, ascending, as `{"issued","source","hours":[[iso_hour, temp_f], ...]}`; never raises. | [R1 Consumer Contract](#r1-consumer-contract) |
+| How do the v4 fit and the backtest read it? | `ForecastArchive.get_snapshots(start, end)` returns snapshots issued in `[start, end)`, ascending, as `{"issued","source","hours":[[iso_hour, temp_f], ...]}`; never raises. | [R1 Consumer Contract](#r1-consumer-contract) |
 | Can the archive break a coordinator cycle or block the event loop? | No. `record()` and `get_snapshots()` never raise; the coordinator also wraps the call; `load()`/`save()` run via the executor and are registered in `_BLOCKING_METHODS`. | [Failure Handling](#error-conditions) |
 | What temperature unit is stored? | Internal °F, 1 decimal, verbatim. The list is already normalised at its source (Issue #1015); the archive never converts. | [Invariants](#invariants) |
 
@@ -19,13 +19,13 @@
 The persisted hourly-forecast snapshot archive added by Issue #1230 R0 and its coordinator wiring.
 
 - **File:** `custom_components/climate_advisor/forecast_archive.py` (class `ForecastArchive`); constants in `const.py` (`FORECAST_ARCHIVE_FILE`, `FORECAST_ARCHIVE_HORIZON_HOURS = 72`, `FORECAST_ARCHIVE_MAX_DAYS = 365`)
-- **Coordinator wiring:** construction (`coordinator.py#L800`), `async_restore_state` load (`#L1881`), `_refresh_hourly_forecast()` (`#L5036`) → `_record_forecast_archive()` (`#L5064`)
+- **Coordinator wiring:** construction (`coordinator.py` `__init__`), `async_restore_state` load, `_refresh_hourly_forecast()` → `_record_forecast_archive()`; readers `_v4_run_fit` / the night replay pass `snapshots_fn=self._forecast_archive.get_snapshots`
 - **Entry points:** `ForecastArchive.record()`, `.get_snapshots()`, `.load()`, `.save()`
 
 **Out of scope:**
 
 - Fetching, parsing and unit-normalising the forecast, and the outage keep/expire logic - see [Forecast Pipeline](forecast-pipeline-spec.md#weather-source-outage) and [Temperature Conversion](temperature-conversion.md)
-- The R1 backtest tool itself (not yet written; only its read contract is specified here)
+- The backtest tool itself (`tools/predict_backtest.py`, which reads the raw file into the same read shape; see [Debugging Guide](09-DEBUGGING-GUIDE.md#prediction-backtest-toolspredict_backtestpy-issue-1230-r1)) and the v4 fit that consumes snapshots ([v4 Shadow Spec](v4-shadow-spec.md))
 - The chart's synthetic extended forecast days - see [Chart Log Spec](chart-log-spec.md#chart-forecast-horizon-extension-issue-906)
 
 Persistence mirrors `ChartStateLog` ([Chart Log Spec](chart-log-spec.md)): atomic tempfile + `os.replace`, `0o600`, time-based retention, prune at most once per hour, no public method raises.
@@ -48,7 +48,7 @@ Persistence mirrors `ChartStateLog` ([Chart Log Spec](chart-log-spec.md)): atomi
 
 ## Invariants
 
-1. **Record-only:** no automation decision, sensor, REST view or frontend reads the archive.
+1. **No direct decision reader:** no automation decision, sensor, REST view or frontend reads the archive; only the v4 fit, the nightly night replay (training inputs, in the executor) and the offline backtest do.
 2. **°F verbatim:** values are `round(temp, 1)` of what the caller passed; the module never converts units. A Celsius install stores °F (the list is normalised at `_get_hourly_forecast_data()`).
 3. **Real hours only:** entries flagged `synthetic` are filtered out by `_record_forecast_archive()`; no synthetic day, cosine curve or placeholder is ever stored, and a gap hour is `null`, never invented.
 4. **One snapshot per local clock hour:** the latest issue in the hour wins when its content differs; an unchanged refetch keeps the earlier issue time. Replacement is checked against the most recent stored snapshot (issue times arrive in order). Equality uses aware datetimes so a DST fall-back repeat hour stays distinct from its first occurrence.
@@ -138,7 +138,7 @@ Decoded read shape (see below): `{"issued": "2026-11-06T14:05-07:00", "source": 
 - [`ForecastArchive.record`](../custom_components/climate_advisor/forecast_archive.py#L203) / [`_record`](../custom_components/climate_advisor/forecast_archive.py#L216) - snapshot encoding and replace rule
 - [`ForecastArchive._maybe_prune`](../custom_components/climate_advisor/forecast_archive.py#L282) - hourly-gated retention
 - [`ForecastArchive.get_snapshots`](../custom_components/climate_advisor/forecast_archive.py#L298) / [`_decode`](../custom_components/climate_advisor/forecast_archive.py#L318) - R1 read path
-- [`const.py#L540`](../custom_components/climate_advisor/const.py#L540) - `FORECAST_ARCHIVE_FILE`, `_HORIZON_HOURS`, `_MAX_DAYS`
-- [`ClimateAdvisorCoordinator._refresh_hourly_forecast`](../custom_components/climate_advisor/coordinator.py#L5036) - single choke point
-- [`ClimateAdvisorCoordinator._record_forecast_archive`](../custom_components/climate_advisor/coordinator.py#L5064) - filter synthetic, parse, record, save via executor
+- [`const.py`](../custom_components/climate_advisor/const.py) - `FORECAST_ARCHIVE_FILE`, `_HORIZON_HOURS`, `_MAX_DAYS`
+- [`ClimateAdvisorCoordinator._refresh_hourly_forecast`](../custom_components/climate_advisor/coordinator.py#L5536) - single choke point
+- [`ClimateAdvisorCoordinator._record_forecast_archive`](../custom_components/climate_advisor/coordinator.py#L5564) - filter synthetic, parse, record, save via executor
 - `tests/test_forecast_archive.py` - unit and coordinator-wiring tests; `tests/test_executor_offload.py` (`_BLOCKING_METHODS`)

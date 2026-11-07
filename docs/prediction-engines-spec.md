@@ -7,7 +7,7 @@
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What does the occupant choose? | Settings -> Prediction engine (`primary_engine`, default **v4**) and an optional Comparison engine (`shadow_engine`, default **none**). The primary's line is the Status chart's main prediction, the shadow's is drawn for comparison, the Next 24 hours path and its text follow the primary. | [Settings](#settings) |
-| How many engines run? | At most two: the primary and the optional shadow. An engine that is neither is not fitted, not predicted and not archived. v3 is the exception: its learned observations (swing, solar phase) and its own curve (chart-log `pred_indoor`, its accuracy archive) still run whatever the two settings say. | [Which engines run](#which-engines-run) |
+| How many engines run? | At most two: the primary and the optional shadow. The registry itself is open (a dict; built for more engines, e.g. a v5, with no count cap), but an engine that is neither primary nor shadow is not fitted, not predicted and not archived. v3's learned OBSERVATIONS (swing, solar phase, the learning database's samples) are inputs, not an engine, and are always collected; v3's own modelled curve (`_last_predicted_indoor`, chart-log `pred_indoor`) and its 4 h `pred_archive` are built only while v3 is the primary or the shadow (Issue #1230 R6, X5). | [Which engines run](#which-engines-run) |
 | What does an engine have to provide? | The `PredictionEngine` contract: `id`, `label`, `state_file`, `archive_file`, `fit(history)`, `predict(state, horizon_hours, plan_inputs)`, `confidence(state)`, `state_of(source)`, `future_path(source)`, `past(...)`. | [Contract](#contract) |
 | How do I add a v5? | `prediction_engines.register(V5Engine())`. The options form, validation, "at most two", the chart payload's engine catalogue and the archive lookups read the registry; `tests/test_prediction_engines.py` proves it with a fake v5. | [Adding an engine](#adding-an-engine) |
 | What shows while the primary is still learning? | The plain schedule estimate (the engine-agnostic no-model path of `_build_predicted_indoor_future`, called with no thermal model), labelled "Prediction: learning - showing the schedule estimate", or "Learning: v4 is fitting from your history" while a fit runs, plus (R6b) "Climate Advisor is using its default plan for pre-heat, the time-of-use bank, the ceiling guard, setbacks and the window close time until v4 has learned your home." Never the other engine. Logged once per episode. | [Fallback](#fallback-while-the-primary-is-learning) |
@@ -33,12 +33,12 @@ Both live in `CONFIG_METADATA` (with defaults, so the dashboard Settings tab lis
 id, label, state_file, archive_file
 fit(history) -> state                       blocking; v4: v4_shadow.run_fit, v3: the learning engine's thermal model
 predict(state, horizon_h, plan_inputs)      {sensor: [(ts, temp_f)]}; "_ca" = the line CA reads
-confidence(state) -> none|low|medium|high   "none" = still learning
+confidence(state) -> str                    "none" = still learning; v3 grades none|low|medium|high, v4 none|low|ok
 state_of(source) / future_path(source)      what the coordinator holds / its newest cached prediction
 past(source, sensor, lead, start, end)      {slot_epoch: temp_f} the engine said `lead` ahead (the archive)
 ```
 
-`usable(engine, source)` is true once `confidence` is above `none`. `engine_state(source, config)` builds the payload block (`primary`, `shadow`, per-engine `running/primary/shadow/usable/confidence`, `primary_state`, `fallback`, `fitting`, `text`).
+`usable(engine, source)` is true once `confidence` is in `USABLE_CONFIDENCE` = `("low", "ok", "medium", "high")` ("ok", v4's top grade, was missing before R6b, so a fully fitted v4 read as still learning); a read that raises counts as not usable. `engine_state(source, config)` builds the payload block (`primary`, `shadow`, per-engine `running/primary/shadow/usable/confidence`, `primary_state`, `fallback`, `fitting`, `text`, and since R6b `control` = `{engine, source: "<id>"|"defaults", ready, text}`).
 
 ## Fallback while the primary is learning
 
@@ -58,7 +58,7 @@ The nat-vent plan (cached once per cycle, read by the briefing, the Next Automat
 
 ## Control feed (R6b)
 
-Occupant view: the prediction engine chosen in Settings (v4 by default) decides when the AC is switched on ahead of the heat, when the time-of-use bank starts, how deep the setback is sized and when the windows are planned to close. While it has not finished learning your house, all of that behaves as on a fresh install. The comparison engine only draws a line.
+Occupant view: the prediction engine chosen in Settings (v4 by default) decides when the AC is switched on ahead of the house overheating (the ceiling guard), when the time-of-use bank starts, how deep the setback is sized and when the windows are planned to close. While it has not finished learning your house, all of that behaves as on a fresh install. The comparison engine only draws a line.
 
 **Design.** The coordinator asks the registry for the two things the decisions read and hands them over as plain values; no decision module imports the registry or names an engine.
 

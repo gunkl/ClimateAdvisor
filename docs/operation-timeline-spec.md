@@ -17,7 +17,7 @@
 
 - **Files:** `custom_components/climate_advisor/operation_timeline.py` (the pure module), `coordinator.py` (`_timeline_*`, `timeline_debug`, five fixed hook points), `automation.py::band_resolver_for`, `temperature.py::outdoor_direction_ok_for_thermostat`, `tools/timeline_replay.py`.
 - **Entry points:** `build_timeline(snapshot)`, `TimelineLatch.update(snapshot, force=None)`.
-- Not covered: night strategy (R4), the surfaces that will read it (R3b), v4 as the path source (R6). The sentence table is shared with them.
+- Covered further down: the surfaces that read it ([Authoritative surfaces (R3b)](#authoritative-surfaces-r3b), `timeline_surfaces.py`), the night strategy's steps (R6, applied by `night_strategy.apply_night_strategy`; model and scoring in the [Night Strategy Spec](night-strategy-spec.md)) and the primary engine's path (`TimelineSnapshot.selected_path`, below). The sentence table is shared with them.
 
 ## Output contract
 
@@ -41,22 +41,22 @@ Appended to the contract by R3a: `resume_schedule`. Emitted members and their co
 | `resume_schedule` | ca | grace expiry -> `_apply_current_scheduled_state("grace_expired")` |
 | `windows_open` / `windows_close` | you | CA has no window actuator |
 
-Contract members R3a does not emit, and why: `setpoint_change` (every setpoint CA writes belongs to a named cause; a causeless one would be invented), `fan_on`/`fan_off` (the only planned fan runs are nat-vent sessions), `setback_end`/`occupancy` (arrivals and departures are unscheduled), `night_strategy` (R4). A predicted heat/AC run is not a step: the thermostat starts it. It is listed in `runs`.
+Contract members R3a does not emit, and why: `setpoint_change` (every setpoint CA writes belongs to a named cause; a causeless one would be invented), `fan_on`/`fan_off` (the only planned fan runs are nat-vent sessions), `setback_end`/`occupancy` (arrivals and departures are unscheduled). (`night_strategy` is not emitted by the builder; since R6 `apply_night_strategy` adds it, with `windows_*`/`fan_*` advice steps, to the held timeline each cycle. R3b appended `briefing_send` and `ceiling_guard` and emits `setpoint_change` for one cause, see [Authoritative surfaces](#authoritative-surfaces-r3b).) A predicted heat/AC run is not a step: the thermostat starts it. It is listed in `runs`.
 
 ## Pre-conditions
 
 1. All inputs are in `TimelineSnapshot` (local-aware datetimes, internal degrees F). The band comes from the injected `band_at(instant, occupancy)` - production passes `automation.band_resolver_for(classification, config)`, i.e. `select_comfort_band`, so band maths exists once.
-2. The v3 predicted path and the `path_fn` callback (`_build_predicted_indoor_future` with the windows replanned) are optional; without them the internal simulation (the v3 ODE step) supplies the path.
+2. The path sources are optional and tried in order by `_choose_path`: the PRIMARY engine's path (`selected_path`, `selected_path_model`, set by `coordinator._timeline_snapshot` from Settings -> Prediction engine; used only while the timeline holds the same window plan for today as the engine), the `path_fn` callback (`_build_predicted_indoor_future` with the windows replanned, model `v3`/`v3_replanned`), the v3 path, then the internal simulation (the v3 ODE step, model `sim`). While the primary has no usable fit no `selected_path` is passed (the default path stays).
 
 ## Post-conditions
 
 1. Steps are sorted by `ts` (CA before "you" at the same instant). A step whose sentence facts are missing is dropped and its rule id listed in `dropped`; nothing is guessed.
-2. A "you" step is never produced with `confidence="low"`: a window period is only offered when its effect is validated.
+2. A "you" step carries `confidence="low"` when its window effect is not validated (contract amendment, decision C13: an engine-recommended period is kept, graded low); the surfaces show it as "may help". A scanned period is only offered when its effect is validated.
 3. A window period never runs into the sleep window (nobody is awake to close it): it ends at bedtime (`windows_close.bedtime`).
 
 ## Invariants
 
-1. **Nothing reads it (R3a).** `tests/test_operation_timeline_structural.py` checks on the source (AST) that no module except `operation_timeline.py` and the five coordinator hook points mentions it, each hook is a discarded call, the shadow methods write only `self._timeline_*` and command nothing, and the module imports no engine, classifier, briefing, coordinator or Home Assistant code.
+1. **No decision reads it (R3a; since R3b the occupant-facing surfaces do).** `tests/test_operation_timeline_structural.py` checks on the source (AST) that only the pure modules (`operation_timeline.py`, `timeline_surfaces.py`), the coordinator's build wiring and surface readers, and the briefing/API through the surface module or the coordinator mention it; each wiring point is a discarded call, the shadow methods write only `self._timeline_*` and command nothing, the notified events only mark the plan stale, and the modules import no engine, classifier, briefing, coordinator or Home Assistant code.
 2. **One direction rule.** Planned window hours are judged by `temperature.outdoor_direction_ok_for_thermostat`, the same function `coordinator._outdoor_direction_ok` (the live Next Action card, #1276) now calls, with the swing margin for the mode the thermostat is expected to hold.
 3. **One ODE.** `ode_step` and `solar_factor` are tested equal to `_simulate_indoor_physics_v3` and `_solar_factor`.
 4. **#1276 invariant (for R3b):** Next Action must equal `Timeline.first_user_step()`.

@@ -1,4 +1,4 @@
-<!-- Nav: ← [Thermal Model v3](thermal-model-v3-spec.md) | → [predictor_v4.py](../custom_components/climate_advisor/predictor_v4.py) [fit#L781](../custom_components/climate_advisor/predictor_v4.py#L781) [predict#L1085](../custom_components/climate_advisor/predictor_v4.py#L1085) | ↔ [v4 Shadow](v4-shadow-spec.md) [Chart State Log](chart-log-spec.md) [Forecast Archive](forecast-archive-spec.md) -->
+<!-- Nav: ← [Thermal Model v3](thermal-model-v3-spec.md) | → [predictor_v4.py](../custom_components/climate_advisor/predictor_v4.py) [fit#L1079](../custom_components/climate_advisor/predictor_v4.py#L1079) [predict#L1464](../custom_components/climate_advisor/predictor_v4.py#L1464) | ↔ [v4 Shadow](v4-shadow-spec.md) [Chart State Log](chart-log-spec.md) [Forecast Archive](forecast-archive-spec.md) -->
 
 # Predictor v4 - Territory Spec (Tier 3)
 
@@ -6,15 +6,15 @@
 
 | Question | Short answer | → Full answer |
 |---|---|---|
-| What does v4 predict and for whom? | The temperature each configured room sensor will read 1-24 h ahead, learned from the home's own chart_log. On Zone 1 (real data) its 4 h MAE on the reading CA shows is about 0.6-0.8 F against 1.5 F for "nothing changes" and 1.6 F for v3. | [Model](#model-equations), `predictor_v4.py#L781` |
+| What does v4 predict and for whom? | The temperature each configured room sensor will read 1-24 h ahead, learned from the home's own chart_log. On Zone 1 (real data) its 4 h MAE on the reading CA shows is about 0.6-0.8 F against 1.5 F for "nothing changes" and 1.6 F for v3. | [Model](#model-equations), `predictor_v4.py#L1079` |
 | Does anything decide with v4? | Only when v4 is the PRIMARY engine (default, Issue #1230 R6b): the ceiling guard and nat-vent plan read its no-HVAC baseline path (`run_cycle(baseline=True)`), the rate decisions read `control_rates()`. As the comparison engine, or when its fit is `none`, nothing decides with it. | [Control feed](prediction-engines-spec.md#control-feed-r6b), [v4 Shadow: invariant](v4-shadow-spec.md#nothing-on-a-decision-path-reads-v4) |
 | What is the state, and what are the inputs? | Primary node `H` (the thermostat's room reading), hidden thermal mass `M`, one node `B_j` per extra sensor. Inputs per 15-min step: outdoor temperature, sun, windows open, fan running, heating duty, cooling duty. | [Model](#model-equations) |
-| How is the thermostat modelled? | Replayed from the recorded heating/cooling duty when fitting; emulated when predicting, from the plan's heat/cool setpoints with learned start offsets, burst length and reading quantisation. | [Thermostat](#thermostat-learning-and-emulation), `predictor_v4.py#L408` |
-| When is `predict()` allowed to answer? | Never when `confidence == "none"` (< 3 days of samples, diverged fit, or no 10 % skill over "no change" at 4 h on the training data). Callers then show/score v3 only. | [Confidence Gates](#confidence-gates), `predictor_v4.py#L82-L86` |
-| How is the forecast corrected? | 24 learned hourly biases (actual - forecast, interpolated around the clock) plus today's current miss decaying with a learned time constant, applied INSIDE `predict()` to the RAW forecast. | [Forecast Correction](#forecast-correction), `predictor_v4.py#L488` |
+| How is the thermostat modelled? | Replayed from the recorded heating/cooling duty when fitting; emulated when predicting, from the plan's heat/cool setpoints with learned start offsets, burst length and reading quantisation. | [Thermostat](#thermostat-learning-and-emulation), `predictor_v4.py#L487` |
+| When is `predict()` allowed to answer? | Never when `confidence == "none"` (< 3 days of samples, diverged fit, or no 10 % skill over "no change" at 4 h on the training data). Callers then treat v4 as not learned yet: as primary the chart shows the schedule estimate and the decisions take their "learning not finished" defaults (never v3, [Prediction Engines Spec](prediction-engines-spec.md#fallback-while-the-primary-is-learning)); the accuracy views score nothing for v4. | [Confidence Gates](#confidence-gates), `predictor_v4.py#L97-L101` |
+| How is the forecast corrected? | 24 learned hourly biases (actual - forecast, interpolated around the clock) plus today's current miss decaying with a learned time constant, applied INSIDE `predict()` to the RAW forecast. | [Forecast Correction](#forecast-correction), `predictor_v4.py#L753` |
 | How long does a fit take? | Typically 0.2-6 s for 30-60 days of data on a laptop (100-iteration cap, 160 anchors, 2 sensors; a warm refit runs a second start). `predict()` is about 1 ms. | [Performance](#performance) |
 | Where does the fitted model live, who calls `fit()`/`predict()` and when? | `v4_shadow.py` and the coordinator call them: nightly fit 03:15, predict every 30-min cycle, model in `climate_advisor_v4_model_<id>.json`, predictions in `climate_advisor_v4_archive_<id>.json`. | [v4 Shadow Spec](v4-shadow-spec.md) |
-| How is v4 scored against v3 and "no change"? | `GET /api/climate_advisor/prediction_accuracy` (live archive) and `tools/predict_backtest.py` (walk-forward history; DP-8 gate). | [REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1), [Debugging Guide](09-DEBUGGING-GUIDE.md#prediction-backtest-toolspredict_backtestpy-issue-1230-r1) |
+| How is v4 scored against v3 and "no change"? | `GET /api/climate_advisor/prediction_accuracy` (live archive) and `tools/predict_backtest.py` (walk-forward history; the DP-8 rows are information only since 0.9.4: they switch nothing on or off). | [REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1), [Debugging Guide](09-DEBUGGING-GUIDE.md#prediction-backtest-toolspredict_backtestpy-issue-1230-r1) |
 
 ## Decision rates (Issue #1230 R6b)
 
@@ -25,7 +25,7 @@
 - **File:** `custom_components/climate_advisor/predictor_v4.py` (pure Python; `math`, lists, dataclasses; no numpy/scipy, no `hass` import)
 - **Entry points:** `fit()`, `predict()`, `step_mass()`, `samples_from_chart_log()`, `learn_thermostat()`, `learn_forecast_correction()`, `to_dict()` / `from_dict()`, `rollout()`
 - **Integration step:** 15 minutes (`V4_STEP_MINUTES`); all temperatures internal degrees F, time in hours inside the equations.
-- **Not covered here:** where the fitted model is stored and when it is fitted, the per-cycle inputs, the v4 prediction archive and the three files ([v4 Shadow Spec](v4-shadow-spec.md)); the REST endpoint ([REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1)); the walk-forward backtest `tools/predict_backtest.py` ([Debugging Guide](09-DEBUGGING-GUIDE.md#prediction-backtest-toolspredict_backtestpy-issue-1230-r1)); the preview page ([Architecture Reference](02-ARCHITECTURE-REFERENCE.md#prediction-accuracy-preview-page-issue-1230-r1)). v3 stays the decision model and is [Thermal Model v3](thermal-model-v3-spec.md). v4 trains on the [Chart State Log](chart-log-spec.md) rows and, when available, [Forecast Archive](forecast-archive-spec.md) snapshots.
+- **Not covered here:** where the fitted model is stored and when it is fitted, the per-cycle inputs, the v4 prediction archive and the three files ([v4 Shadow Spec](v4-shadow-spec.md)); the REST endpoint ([REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1)); the walk-forward backtest `tools/predict_backtest.py` ([Debugging Guide](09-DEBUGGING-GUIDE.md#prediction-backtest-toolspredict_backtestpy-issue-1230-r1)); the preview page ([Architecture Reference](02-ARCHITECTURE-REFERENCE.md#prediction-accuracy-preview-page-issue-1230-r1)). Which engine drives the decisions is the [Prediction Engines Spec](prediction-engines-spec.md) (v4 as primary by default; v3 is [Thermal Model v3](thermal-model-v3-spec.md)). v4 trains on the [Chart State Log](chart-log-spec.md) rows and, when available, [Forecast Archive](forecast-archive-spec.md) snapshots.
 
 ## Model Equations
 
@@ -227,13 +227,16 @@ R1b cost (7 zones, 60 days of 30-min rows, `_ca` primary, same machine): per fit
 
 `custom_components/climate_advisor/predictor_v4.py`:
 
-- Constants and bounds: `V4_STEP_MINUTES` L35, `HOUSE_BOUNDS`/`NODE_BOUNDS` L48-L65, `HOUSE_START`/`NODE_START` L66-L79, confidence gates `GATE_*` L82-L86
-- Dataclasses: `V4Sample` L96, `V4Input` L119, `V4Thermostat` L131, `V4ForecastCorrection` L141, `V4Model` L147, `V4Roll` L161
-- Integrator: `rollout()` L251, `_roll_house()` L284, `_roll_node()` L369
-- Learning: `learn_thermostat()` L408, `learn_forecast_correction()` L488, `_corrected_outdoor()` L541
-- Fitter: `_Problem` L577, `fit()` L781, `_fit_problem()` L845 (gates at L1032-L1051)
-- Live: `step_mass()` L1067, `predict()` L1085
-- Serialisation: `to_dict()` L1157, `from_dict()` L1194, `summary_line()` L1266
-- Chart-log adapter: `samples_from_chart_log()` L1290 and helpers `_duty()` L1421, `_mode_for()` L1411, `_archive_forecast()` L1480; `grid_steps()` L1497
+Line numbers as of 0.9.4:
+
+- Constants and bounds: `V4_STEP_MINUTES` L36, `HOUSE_BOUNDS`/`NODE_BOUNDS` L65-L82, `HOUSE_START`/`NODE_START` L83-L94, confidence gates `GATE_*` L97-L101 (plus `GATE_MIN_ACCEPTED_STARTS` L48)
+- Dataclasses: `V4Sample` L111, `V4Input` L136, `V4Thermostat` L148, `V4Openness` L167, `V4ForecastCorrection` L176, `V4Model` L182, `V4Roll` L197
+- Integrator: `rollout()` L287, `_roll_house()` L322, `_roll_node()` L438
+- Learning: `learn_thermostat()` L487, `learn_openness()` L720, `learn_forecast_correction()` L753, `_corrected_outdoor()` L806
+- Fitter: `_Problem` L873, `fit()` L1079, `_fit_problem()` L1163 (gates at L1407-L1429)
+- Live: `step_mass()` L1446, `predict()` L1464
+- Serialisation: `to_dict()` L1571, `from_dict()` L1622, `summary_line()` L1722
+- Chart-log adapter: `samples_from_chart_log()` L1798, `resolve_nodes()` L1959 and helpers `_mode_for()` L2010, `_duty()` L2020, `_archive_forecast()` L2079; `grid_steps()` L2117
+- Decisions (R6b): `control_rates()` L2129
 - Callers: `v4_shadow.run_fit` / `run_cycle` ([v4 Shadow Spec](v4-shadow-spec.md#code-reference)), `tools/predict_backtest.py`
 - Tests: `tests/test_predictor_v4.py` (synthetic house with known parameters, gates, serialisation, DST, gaps, chart_log), `tests/test_predictor_v4_real.py` (Zone 1 replay, `tests/fixtures/v4_zone1_replay.json`), `tests/test_v4_shadow_real_engine.py` (the shadow wiring against the real engine)

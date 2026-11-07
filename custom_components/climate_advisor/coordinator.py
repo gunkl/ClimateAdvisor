@@ -49,6 +49,7 @@ from .automation import (
     _in_sleep_window,
     _refuse_if_shut_down,
     awake_comfort_edges,
+    band_resolver_for,
     compute_bedtime_setback,
     compute_pre_cool_target,
     fallback_edges_without_classification,
@@ -344,6 +345,9 @@ from .nat_vent_plan import (
 )
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
+from .operation_timeline import TIMELINE_TRIGGER_EVENTS, TimelineLatch, TimelineSnapshot
+from .operation_timeline import detail_dict as timeline_detail_dict
+from .operation_timeline import to_dict as timeline_to_dict
 from .override_confirm_split import ca_expected_mode
 from .promise_journal import (
     Command as _PromiseCommand,
@@ -392,6 +396,7 @@ from .temperature import (
     is_sensor_stale,
     next_fallback_episode,
     outdoor_direction_ok,
+    outdoor_direction_ok_for_thermostat,
     read_attribute_temp_f,
     read_sensor_state_f,
     read_state_temp_f,
@@ -835,6 +840,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_last_cycle: dict[str, Any] = {}
         self._v4_cycle_failed_logged = False
         self._v4_last_archive_save: float | None = None
+        # Issue #1230 R3a: the operation timeline in shadow. Computed beside the plan every cycle and on triggers,
+        # shown only in the debug payload; nothing on a decision or display path reads it.
+        self._timeline_latch = TimelineLatch()
+        self._timeline_last: dict[str, Any] = {}
+        self._timeline_failed_logged = False
+        self._timeline_dirty: str | None = None
         self.learning = LearningEngine(
             Path(hass.config.config_dir), entry_id=self._entry_id, temp_unit=config.get("temp_unit", "fahrenheit")
         )
@@ -1806,6 +1817,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _async_thermal_sample_tick(self, now: datetime) -> None:
         """Sample active thermal observations on the 5-min tick."""
         self._refresh_outdoor_temp()
+        # Issue #1230 R3a: an engine event marked the timeline stale (override, grace, pause): re-evaluate now.
+        self._timeline_tick()
         # Issue #1211 (O4): the planned window period can end with the clock; nothing else fires then.
         self._schedule_planned_window_exit_check()
         # Issue #1128: the household promises' heartbeat (a 45 minute rule cannot ride a 30 minute poll).
@@ -3037,6 +3050,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #85: sync occupancy mode to engine immediately so guards
         # take effect even before the delayed away timer fires
         self.automation_engine.set_occupancy_mode(new_mode)
+        # Issue #1230 R3a: an occupancy change regenerates the timeline (shadow; never raises).
+        self._timeline_shadow_run("occupancy")
 
         # Call appropriate automation handler
         if new_mode == OCCUPANCY_VACATION:
@@ -4709,6 +4724,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # inside: v3 still drives every decision and the Status chart.
         await self._v4_shadow_cycle()
 
+        # Issue #1230 R3a: the operation timeline, in shadow. Result unused, errors swallowed inside.
+        self._timeline_shadow_run("cycle")
+
         # Detect and emit post-cycle incidents
         self._detect_and_emit_incidents()
 
@@ -5552,6 +5570,187 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         finally:
             self._v4_fit_running = False
             self._v4_fit_task = None
+
+    # ── Issue #1230 R3a: operation timeline (shadow) ─────────────────────────────────────────────────────────────
+    # The pure plan lives in operation_timeline.py. Here: build the snapshot from the live plan, run the per-day latch,
+    # keep the last result for the debug payload. Nothing below writes to the engine, the classification or a surface.
+
+    def _timeline_note_event(self, event_type: str) -> None:
+        """An engine event that can change the plan marks the timeline stale; the 5-minute tick re-evaluates it."""
+        if event_type in TIMELINE_TRIGGER_EVENTS and getattr(self, "_timeline_latch", None) is not None:
+            self._timeline_dirty = event_type
+
+    def _timeline_tick(self) -> None:
+        reason = getattr(self, "_timeline_dirty", None)
+        if reason is not None:
+            self._timeline_shadow_run(reason)
+
+    def _timeline_shadow_run(self, trigger: str) -> None:
+        """Rebuild (or keep) the timeline. Never raises into the cycle (first failure WARNING, repeats DEBUG)."""
+        try:
+            self._timeline_shadow_run_impl(trigger)
+            self._timeline_failed_logged = False
+        except Exception:  # noqa: BLE001 - the shadow must never affect the cycle
+            if not getattr(self, "_timeline_failed_logged", False):
+                self._timeline_failed_logged = True
+                _LOGGER.warning(
+                    "operation timeline (shadow) failed; the plan and the house are unaffected", exc_info=True
+                )
+            else:
+                _LOGGER.debug("operation timeline (shadow) failed again", exc_info=True)
+
+    def _timeline_shadow_run_impl(self, trigger: str) -> None:
+        latch = getattr(self, "_timeline_latch", None)
+        if latch is None or getattr(self, "_shut_down", False) is True:
+            return  # a partially built coordinator (tests via __new__, headless tools): the shadow is simply off
+        c = self._current_classification
+        if c is None:
+            return
+        self._timeline_dirty = None
+        started = _perf_counter()
+        snap = self._timeline_snapshot(c)
+        force = trigger if trigger in ("occupancy",) else None
+        outcome = latch.update(snap, force=force)
+        cost_ms = (_perf_counter() - started) * 1000.0
+        self._timeline_last = {
+            "at": snap.now.isoformat(),
+            "trigger": trigger,
+            "ms": round(cost_ms, 1),
+            "regenerated": outcome.regenerated,
+            "reasons": list(outcome.reasons),
+            "steps": len(outcome.timeline.steps),
+            "generation": outcome.timeline.generation,
+        }
+        if outcome.regenerated:
+            _LOGGER.info(
+                "Operation timeline (shadow) regenerated: %s, %d steps, %.1f ms",
+                ",".join(outcome.reasons),
+                len(outcome.timeline.steps),
+                cost_ms,
+            )
+        else:
+            _LOGGER.debug("Operation timeline (shadow) kept: %d steps, %.1f ms", len(outcome.timeline.steps), cost_ms)
+
+    def _timeline_snapshot(self, c: DayClassification) -> TimelineSnapshot:
+        """Everything the timeline reads, taken from the live plan (read-only)."""
+        now = dt_util.now()
+        ae = self.automation_engine
+        local_tz = now.tzinfo
+        hourly = [
+            (d if d.tzinfo is not None else d.replace(tzinfo=local_tz), t)
+            for d, t in _parse_forecast_entries(self._hourly_forecast_temps)
+        ]
+        plan = getattr(self, "_nat_vent_plan", None) or {}
+        cutoff = plan.get("nat_vent_cutoff")
+        opportunity: list[tuple[time, time]] = []
+        for start, end in (
+            (c.window_opportunity_morning_start, c.window_opportunity_morning_end),
+            (c.window_opportunity_evening_start, c.window_opportunity_evening_end),
+        ):
+            if start is not None and end is not None:
+                opportunity.append((start, end))
+        tou = getattr(self, "_tou_phase_resolution", None)
+        tou_ok = tou is not None and getattr(tou, "precondition_start", None) is not None
+        reading = self._get_indoor_temp_with_provenance()
+        model = dict(getattr(ae, "_thermal_model", None) or {})
+        band_schedule = self._target_band_schedule
+        tou_window = self._tou_precondition_window_tuple()
+        config = self.config
+        occupancy = self._occupancy_mode
+        thermal_model = model
+
+        def _path_fn(spans: Any) -> list[tuple[datetime, float]] | None:
+            """Today's v3 predicted path with these window periods (v3 takes one span: the longest)."""
+            if spans:
+                a, b = max(spans, key=lambda ab: ab[1] - ab[0])
+                c2 = dataclasses.replace(
+                    c, windows_recommended=True, window_open_time=a.time(), window_close_time=b.time()
+                )
+            else:
+                c2 = dataclasses.replace(c, windows_recommended=False)
+            out = _build_predicted_indoor_future(
+                self._hourly_forecast_temps,
+                config,
+                now,
+                current_indoor_temp=reading.primary_value,
+                thermal_model=thermal_model,
+                occupancy_mode=occupancy,
+                classification=c2,
+                band_schedule=band_schedule,
+                tou_precondition_window=tou_window,
+            )
+            pts = []
+            for entry in out:
+                ts = dt_util.parse_datetime(entry.get("ts", ""))
+                if ts is not None:
+                    pts.append((ts, float(entry["temp"])))
+            return pts
+
+        v3_pts: list[tuple[datetime, float]] = []
+        for entry in self._last_predicted_indoor or []:
+            ts = dt_util.parse_datetime(entry.get("ts", ""))
+            if ts is not None and entry.get("temp") is not None:
+                v3_pts.append((ts, float(entry["temp"])))
+        sleep_entity = self.config.get("sleep_indoor_temp_entity")
+        return TimelineSnapshot(
+            now=now,
+            zone=self._entry_id,
+            unit=self.config.get("temp_unit", "fahrenheit"),
+            wake_time=_parse_time(self.config.get("wake_time", "06:30")),
+            sleep_time=_parse_time(self.config.get("sleep_time", "22:30")),
+            fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+            sleep_sensor_label="bedroom sensor" if sleep_entity else None,
+            primary_sensor_label="thermostat",
+            band_at=band_resolver_for(c, self.config),
+            occupancy_mode=self._occupancy_mode,
+            day_modes=_compute_day_hvac_modes(self._hourly_forecast_temps, now, c),
+            day_type=c.day_type,
+            windows_recommended=bool(c.windows_recommended),
+            window_open_time=c.window_open_time,
+            window_close_time=c.window_close_time,
+            nat_vent_cutoff=cutoff if isinstance(cutoff, datetime) else None,
+            opportunity_spans=tuple(opportunity),
+            pre_cool_trigger=self._pre_cool_trigger_dt,
+            pre_cool_target=self._pre_cool_target,
+            tou_precondition_start=getattr(tou, "precondition_start", None) if tou_ok else None,
+            tou_schedule_start=getattr(tou, "schedule_start", None) if tou_ok else None,
+            tou_target=getattr(tou, "target", None) if tou_ok else None,
+            tou_mode=getattr(tou, "mode", None) if tou_ok else None,
+            indoor=reading.value,
+            indoor_primary=reading.primary_value,
+            outdoor=getattr(self, "_last_outdoor_temp", None),
+            thermostat_mode=self._thermostat_hvac_mode(),
+            windows_physically_open=self._any_sensor_open(),
+            hourly=hourly,
+            thermal_model=model or None,
+            v3_path=v3_pts,
+            path_fn=_path_fn,
+            automation_enabled=bool(self.automation_enabled),
+            manual_override_active=bool(ae._manual_override_active),
+            grace_active=bool(ae._grace_active),
+            grace_end=dt_util.parse_datetime(ae._grace_end_time) if isinstance(ae._grace_end_time, str) else None,
+            paused_by_door=bool(ae._paused_by_door),
+            nat_vent_active=bool(ae._natural_vent_active),
+        )
+
+    def timeline_debug(self) -> dict[str, Any]:
+        """The shadow timeline for the debug payload: steps, path, runs, window candidates, the last run's cost."""
+        try:
+            latch = getattr(self, "_timeline_latch", None)
+            tl = latch.timeline if latch is not None else None
+            out: dict[str, Any] = {
+                "shadow": True,
+                "unit": self.config.get("temp_unit", "fahrenheit"),
+                "last_run": dict(getattr(self, "_timeline_last", {})),
+            }
+            if tl is not None:
+                # The frozen contract dict (temperatures in internal degrees F) plus the builder's working data.
+                out.update(timeline_to_dict(tl))
+                out["detail"] = timeline_detail_dict(tl)
+            return out
+        except Exception:  # noqa: BLE001 - a debug field must never break the debug payload
+            _LOGGER.debug("timeline_debug failed", exc_info=True)
+            return {"shadow": True, "error": True}
 
     async def _v4_shadow_cycle(self) -> None:
         """Per 30-minute cycle: predict 24 h with v4 and archive 1/4/12/24 h. Never raises into the cycle."""
@@ -12640,6 +12839,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         self._event_log.append(entry)
         self._event_log = _prune_event_log(self._event_log, _now)
+        self._timeline_note_event(event_type)
         # Issue #1128: CA's declared lifecycle words feed promise 4 (and promise 7's exclusions).
         self._record_promise_event(_now, event_type, data)
 
@@ -13085,10 +13285,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if mode == "off" and ae is not None and ae._paused_by_door and ae._pre_pause_mode:
             mode = ae._pre_pause_mode
         swing_heat, swing_cool = self._learned_swings()
-        heat_margin = swing_tolerance(swing_heat)[0] if thermostat_holds_direction("heat", mode) else 0.0
-        cool_margin = swing_tolerance(swing_cool)[0] if thermostat_holds_direction("cool", mode) else 0.0
-        return outdoor_direction_ok(
-            outdoor, indoor, comfort_heat, comfort_cool, heat_margin=heat_margin, cool_margin=cool_margin
+        return outdoor_direction_ok_for_thermostat(
+            outdoor,
+            indoor,
+            comfort_heat,
+            comfort_cool,
+            thermostat_mode=mode,
+            swing_heat_f=swing_heat,
+            swing_cool_f=swing_cool,
         )
 
     def _is_within_thermostat_hysteresis(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
@@ -14892,6 +15096,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "thermal_pipeline": self._build_thermal_pipeline_summary(),
             # Issue #1230 R1: prediction engine v4 (shadow) - model confidence, fit time, span, training MAE.
             "v4_model": self.v4_model_summary(),
+            # Issue #1230 R3a: the operation timeline (shadow, debug only: nothing reads it for a decision or display).
+            "operation_timeline": self.timeline_debug(),
             "startup_coalesce_active": self._startup_coalesce_active,
             "startup_coalesce_seconds_remaining": (
                 max(

@@ -11,6 +11,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **Evidence first:** v4 appears on Status only for a zone that passes the backtest over all its recorded history (beats today's line and "no change" at 1, 4 and 12 hours, heating and summer days scored apart, no more than 0.5 °F warm or cold on average). No zone passes yet, so Status is unchanged.
   - **Safe to roll back:** v4 keeps its state in its own files per zone; the learning file is unchanged, and it now ignores fields it doesn't recognise instead of starting over.
 - Developer tool: `tools/predict_backtest.py` replays recorded history to score v4 against v3 and "no change" for every zone.
+- Feat #1230 (R3a: the operation timeline, in shadow). Climate Advisor now builds one ordered plan of the next 24-48 hours (its own band changes, pre-cool, fan sessions, and the few times you should open or close a window) with the predicted temperature path, and checks it against every recorded day. Nothing you see or feel changes: no card, briefing, chart or setpoint reads it yet; it appears only in the Debug data. Window periods are only offered when the same direction rule as the Next Action card allows them, the house's learned window effect is proven, and the plan is better with them. Developer tool: `tools/timeline_replay.py`.
 
 ## [0.9.3] — 2026-11-06
 

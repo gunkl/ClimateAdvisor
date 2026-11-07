@@ -1129,6 +1129,26 @@ def resolve_active_band(
     )
 
 
+def band_resolver_for(classification: DayClassification, config: dict) -> Callable[[datetime, str], ComfortBand]:
+    """``(instant, occupancy_mode) -> ComfortBand`` for the operation timeline (Issue #1230 R3a).
+
+    The same ``select_comfort_band()`` call ``resolve_active_band()`` makes, but asked about any instant and
+    occupancy, so the timeline reads the engine's own band at every wake/sleep boundary instead of keeping a second
+    copy of the band maths. Read-only: it commands nothing.
+    """
+
+    def _band(at: datetime, occupancy_mode: str) -> ComfortBand:
+        return select_comfort_band(
+            classification,
+            config,
+            occupancy_mode=occupancy_mode,
+            in_sleep_window=_in_sleep_window(at, config),
+            aggressive_savings=bool(config.get("aggressive_savings", False)),
+        )
+
+    return _band
+
+
 def fallback_edges_without_classification(now: datetime, config: dict) -> tuple[float | None, float | None]:
     """Display-only (heat, cool) edges before the first classification exists (Issue #1080).
 

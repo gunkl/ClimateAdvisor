@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import NamedTuple
 
 from .const import ECONOMIZER_TEMP_DELTA, UNAVAILABLE_STATES, WINDOWS_RECOMMENDED_HYSTERESIS_F
+from .swing import swing_tolerance, thermostat_holds_direction
 
 FAHRENHEIT = "fahrenheit"
 CELSIUS = "celsius"
@@ -324,6 +325,31 @@ def outdoor_direction_ok(
     if outdoor < indoor and indoor < comfort_heat + heat_margin:
         return False
     return not (outdoor > indoor and indoor > comfort_cool - cool_margin)
+
+
+def outdoor_direction_ok_for_thermostat(
+    outdoor: float | None,
+    indoor: float | None,
+    comfort_heat: float,
+    comfort_cool: float,
+    *,
+    thermostat_mode: str | None,
+    swing_heat_f: float | None,
+    swing_cool_f: float | None,
+) -> bool:
+    """``outdoor_direction_ok`` with the thermostat's own swing at a band edge it holds (Issue #1276).
+
+    The ONE place the margin is derived: a side the thermostat holds (``thermostat_holds_direction``) gets the
+    learned swing tolerance (``swing_tolerance``), a side it does not hold gets 0. ``coordinator._outdoor_direction_ok``
+    (the live Next User Action / windows advice) and the operation timeline's planned-window check
+    (``operation_timeline``, Issue #1230 R3a, a planned hour passes the mode the thermostat is expected to hold) both
+    call this, so the two can never apply different rules.
+    """
+    heat_margin = swing_tolerance(swing_heat_f)[0] if thermostat_holds_direction("heat", thermostat_mode) else 0.0
+    cool_margin = swing_tolerance(swing_cool_f)[0] if thermostat_holds_direction("cool", thermostat_mode) else 0.0
+    return outdoor_direction_ok(
+        outdoor, indoor, comfort_heat, comfort_cool, heat_margin=heat_margin, cool_margin=cool_margin
+    )
 
 
 def outdoor_air_helps(

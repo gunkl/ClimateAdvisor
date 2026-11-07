@@ -429,7 +429,7 @@ SENTENCES: dict[str, Sentence] = dict(
             "peak.warmest",
             "Warmest point: about {temp} at {t}.",
             {"temp": "temp", "t": "time"},
-            "predicted path (v3 until R6)",
+            "predicted path (v3; v4 stays in shadow until its backtest passes)",
             "daytime maximum of the predicted path, rounded to 0.5",
             "hidden when the forecast is older than 6 h",
         ),
@@ -584,7 +584,7 @@ class TimelineSnapshot:
     hourly: Sequence[tuple[datetime, float]] = ()  # raw service forecast, local-aware
     forecast_age_h: float | None = None
     thermal_model: Mapping[str, Any] | None = None  # v3 thermal_model_cache
-    v3_path: Sequence[tuple[datetime, float]] = ()  # the authoritative predicted path until R6
+    v3_path: Sequence[tuple[datetime, float]] = ()  # the authoritative predicted path (v4 is shadow only)
     sensor_paths: Mapping[str, Sequence[tuple[datetime, float]]] = field(default_factory=dict)
     sensor_path_model: str = "v3"  # label the caller gives the engine behind ``sensor_paths``
     path_fn: Callable[[Sequence[tuple[datetime, datetime]]], Sequence[tuple[datetime, float]] | None] | None = None
@@ -2281,6 +2281,9 @@ def _merge_latched(latched: DetailedTimeline, fresh: DetailedTimeline, now: date
     Path, runs, band, candidates and summary are always the fresh ones: only the step list is latched.
     """
     fresh_closes = [f for f in fresh.steps if f.kind == StepKind.WINDOWS_CLOSE and f.ts >= now]
+    window_kinds = (StepKind.WINDOWS_OPEN, StepKind.WINDOWS_CLOSE)
+    latched_window_ts = sorted(w.ts for w in latched.steps if w.kind in window_kinds)
+    used: set[int] = set()
     steps: list[TimelineStep] = []
     for s in latched.steps:
         if s.meta.get("source_module") == "night_strategy":
@@ -2288,9 +2291,22 @@ def _merge_latched(latched: DetailedTimeline, fresh: DetailedTimeline, now: date
         if _is_live(s) and s.ts >= now:
             continue  # replaced below by the fresh answer
         if s.kind == StepKind.WINDOWS_CLOSE and s.ts >= now:
-            earlier = [f for f in fresh_closes if f.ts < s.ts and s.ts - f.ts <= timedelta(hours=12)]
+            # The replacement must close THIS period: strictly after the latched window step before it (its own open,
+            # or the previous period's close for a period already open). Without that bound, tomorrow morning's close
+            # was swapped for tonight's bedtime close (11.5 h earlier): the plan said "close the windows before you
+            # turn in" twice and tomorrow's window period lost its close. A fresh close is used at most once.
+            prev = max((t for t in latched_window_ts if t < s.ts), default=None)
+            earlier = [
+                f
+                for f in fresh_closes
+                if f.ts < s.ts
+                and s.ts - f.ts <= timedelta(hours=12)
+                and (prev is None or f.ts > prev)
+                and id(f) not in used
+            ]
             repl = min(earlier, key=lambda f: s.ts - f.ts, default=None)  # the nearest earlier close
             if repl is not None:
+                used.add(id(repl))
                 s = repl
         if s.ts < now and s.status == "planned":
             s = replace(s, meta={**s.meta, "status": "done"})

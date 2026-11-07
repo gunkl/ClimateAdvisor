@@ -524,6 +524,42 @@ def test_the_window_close_can_only_move_earlier_within_a_day() -> None:
     assert kept.ts <= new_close.ts
 
 
+def test_a_close_only_moves_earlier_within_its_own_window_period() -> None:
+    """Tonight's bedtime close must never stand in for tomorrow morning's close (seen on the real-HA warm day).
+
+    Occupant view: the plan read "10:30 PM: bedtime, close the windows before you turn in." twice and tomorrow's
+    6:30 AM window period had no close at all, because the latch let a close move to ANY fresh close up to 12 h earlier.
+    """
+    base = build_timeline(_evening_cooling())
+    o = next(s for s in base.steps if s.kind == "windows_open")
+    c = next(s for s in base.steps if s.kind == "windows_close")
+    day = datetime(2026, 11, 4, tzinfo=TZ)
+
+    def _step(proto, hh: int, mm: int, *, days: int = 0):
+        ts = day + timedelta(days=days, hours=hh, minutes=mm)
+        return replace(proto, ts=ts, meta={**proto.meta, "id": f"{ts:%Y%m%dT%H%M}:{proto.kind}"})
+
+    tonight = [_step(o, 21, 0), _step(c, 22, 30)]
+    tomorrow = [_step(o, 6, 30, days=1), _step(c, 10, 0, days=1)]
+    latched = replace(base, steps=tuple(tonight + tomorrow))
+    now = day + timedelta(hours=21, minutes=30)
+
+    same = ot._merge_latched(latched, replace(base, steps=tuple(tonight + tomorrow)), now)
+    closes = [s.ts for s in same.steps if s.kind == "windows_close"]
+    assert closes == [tonight[1].ts, tomorrow[1].ts]
+    assert len({s.id for s in same.steps}) == len(same.steps)
+
+    # tonight's close really moving earlier still moves; tomorrow's close stays its own
+    fresh = replace(base, steps=(tonight[0], _step(c, 22, 0), *tomorrow))
+    moved = [s.ts for s in ot._merge_latched(latched, fresh, now).steps if s.kind == "windows_close"]
+    assert moved == [day + timedelta(hours=22), tomorrow[1].ts]
+
+    # tomorrow's close moving earlier inside its own period still moves (but never before that period's open)
+    fresh2 = replace(base, steps=(*tonight, tomorrow[0], _step(c, 9, 0, days=1)))
+    moved2 = [s.ts for s in ot._merge_latched(latched, fresh2, now).steps if s.kind == "windows_close"]
+    assert moved2 == [tonight[1].ts, day + timedelta(days=1, hours=9)]
+
+
 def test_material_changes_is_empty_for_identical_plans() -> None:
     snap = make_snapshot("mild", now=NOON)
     segs = ot.build_segments(snap, NOON + timedelta(hours=48))

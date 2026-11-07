@@ -879,6 +879,35 @@ def compute_k_active_single_point(
     return k_active
 
 
+def estimate_daily_cost(
+    heat_minutes: float,
+    cool_minutes: float,
+    total_minutes: float,
+    energy_rate: float | None,
+    heat_power_kw: float | None,
+    cool_power_kw: float | None,
+) -> float | None:
+    """Estimated electricity cost of one day's heating and cooling (#1230 R5c, DP-10).
+
+    ``minutes / 60 * power_kw * energy_rate`` per mode, summed. Returns ``None`` (never a guess) when:
+    no positive energy rate is set; a mode that ran has no power rating; or the per-mode minutes do not
+    account for the day's total runtime (a record from before the per-mode split). Fan-only runtime is not
+    costed (its draw is not modelled). A day where nothing ran costs 0.0.
+    """
+    if not energy_rate or energy_rate <= 0:
+        return None
+    if heat_minutes + cool_minutes < total_minutes - 1.0:
+        return None
+    cost = 0.0
+    for minutes, power_kw in ((heat_minutes, heat_power_kw), (cool_minutes, cool_power_kw)):
+        if minutes <= 0:
+            continue
+        if not power_kw or power_kw <= 0:
+            return None
+        cost += minutes / 60.0 * power_kw * energy_rate
+    return round(cost, 2)
+
+
 @dataclass
 class DailyRecord:
     """One day's worth of tracked data."""
@@ -903,6 +932,10 @@ class DailyRecord:
     window_open_actual_time: str | None = None
     window_close_actual_time: str | None = None
     hvac_runtime_minutes: float = 0.0
+    # #1230 R5c: the same runtime split by mode (heat + cool == hvac_runtime_minutes for new records), so the
+    # optional cost estimate can price heating and cooling at their own power ratings.
+    hvac_heat_runtime_minutes: float = 0.0
+    hvac_cool_runtime_minutes: float = 0.0
     # Issue #912: fan_only (thermostat or WHF-driven) runtime tracked separately from
     # true compressor/burner runtime above — never blend the two into a number that
     # implies heat/cool actually ran. Deliberately prefixed "thermostat_" to avoid

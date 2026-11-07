@@ -7732,6 +7732,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 is True
             )
+        # Issue #1397: a thermostat reporting a value within 0.5 F of the setpoint CA last wrote to it (a HomeKit
+        # thermostat answers 18.0 C, then 17.9 C a minute later) is holding CA's setpoint, not the occupant. No time
+        # window; the reference is dropped below once a change is counted as the occupant's.
+        _holds_own_setpoint = False
+        if _setpoint_changed and not _is_availability_recovery and not _own_setpoint_echo:
+            _ev_context = getattr(event, "context", None)
+            _holds_own_setpoint = (
+                self.automation_engine.holds_own_setpoint(
+                    {_a: new_state.attributes.get(_a) for _a in _sp_attrs},
+                    event_context_user_id=getattr(_ev_context, "user_id", None),
+                )
+                is True
+            )
 
         _setpoint_candidate = bool(
             _setpoint_changed
@@ -7746,6 +7759,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
             and not self._is_recent_temp_command(threshold_seconds=30.0)
             and not _own_setpoint_echo  # Issue #1232: CA's own write echoing back late (value/Context match)
+            and not _holds_own_setpoint  # Issue #1397: within 0.5 F of CA's own setpoint
             and not self._is_recent_fan_command(threshold_seconds=30.0)
             and not _fan_cancel_in_this_event  # Issue #359 Fix A: fan-off echo suppresses grace
         )
@@ -7809,6 +7823,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         "magnitude": abs(magnitude),
                     }
                 )
+                # Issue #1397: counted as the occupant's, so CA no longer holds this setpoint (dialling back to CA's
+                # value is the occupant again, until CA writes it).
+                self.automation_engine.forget_held_own_setpoint()
             except ValueError, TypeError:
                 # A missing PRIOR setpoint with a readable new one (Sensi reports temperature=null while Off)
                 # is a real occupant change and keeps its original override semantics (Issue #1049, pinned by

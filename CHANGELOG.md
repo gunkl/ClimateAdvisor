@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.72] — 2026-11-07
+
+- Fix #1397: a thermostat that reports Climate Advisor's setpoint a little off is no longer read as you changing it. A HomeKit thermostat answered a 18.0 °C write with 18.0 and then, a minute later, 17.9. Climate Advisor took the 17.9 as someone turning the dial, paused the zone for the 30-minute manual grace (with an "override expired" notification), rewrote 18.0, and the drift started the next round, every ~40 minutes all evening. Now, once the thermostat has shown the setpoint Climate Advisor wrote, a report within 0.5 °F (0.28 °C) of it counts as the thermostat holding that setpoint, however long afterwards and however often. A real change of one step or more (1 °F, or 0.5 °C) is still a manual override, as is a change made by a signed-in person in the Home Assistant app, and turning the dial back to Climate Advisor's value after a real change.
+
 ## [0.8.71] — 2026-11-06
 
 - Fix #1389: a Home Assistant restart no longer turns off the whole-house fan that is cooling the house through open windows. A door/window sensor reads "unavailable" from the shutdown until it loads on the next start (a group helper waits for its members, about 1.5 minutes on the production install). Climate Advisor counted it as closed after 60 s, while Home Assistant was still starting, so it called the house sealed, sent the fan off and e-mailed "door/window sensor unavailable". The 60 s now starts once Home Assistant has finished starting. A sensor that is still dark a minute after that is still counted closed, as before, so a fan on a really sealed house is still stopped.

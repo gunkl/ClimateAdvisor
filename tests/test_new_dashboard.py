@@ -676,12 +676,8 @@ def _endpoints_used(js: str) -> set[str]:
     return found
 
 
-# Endpoints the parallel R6 backend lane adds (GET night_strategy); remove from here once it is merged.
-LANDING_WITH_R6_BACKEND = {"night_strategy"}
-
-
 def test_every_endpoint_called_exists():
-    known = _known_endpoints() | LANDING_WITH_R6_BACKEND
+    known = _known_endpoints()
     for name, js in JS.items():
         for ep in _endpoints_used(js):
             assert ep in known, f"{name} calls unknown endpoint {ep}"

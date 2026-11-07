@@ -32,7 +32,13 @@ pytestmark = pytest.mark.house
 
 _DATA = json.loads((Path(__file__).parent / "data" / "zone1_variant_days.json").read_text(encoding="utf-8"))
 _DAYS = {d["date"]: d for d in _DATA["days"]}
-_TOTALS: dict = {"advised": 0, "window_steps": 0, "briefing_close": 0, "plan_has_window_steps": 0, "cards": set()}
+
+# Which recorded days must have made the surfaces talk about windows (checked inside each day's own test, so the proof
+# never depends on several tests sharing one process -- CI spreads them over xdist workers). A day on the sim house does
+# not reproduce what the recorded engine said (the live outdoor gate and the sim forecast differ): on 2026-11-01 the sim
+# heats instead (indoor sits below the floor), so that day is held to the agreement invariants only. The two others each
+# exercised the card's open and keep-closed wording, the briefing's close time and the plan's window steps.
+_TALKS_ABOUT_WINDOWS = {"2026-10-15": True, "2026-11-01": False, "2026-10-03": True}
 
 
 def _clock(dt: datetime) -> str:
@@ -43,6 +49,8 @@ def _assert_surfaces_agree(house, *, day_label: str, seen: dict) -> None:
     c = house.coordinator
     tl = c._surface_timeline()
     assert tl is not None, f"{day_label}: the coordinator has no timeline"
+    # one plan, each step once: the latch must never duplicate a step (two identical "close before bed" lines)
+    assert len({s.id for s in tl.steps}) == len(tl.steps), [(s.id, s.text) for s in tl.steps]
     from homeassistant.util import dt as dt_util
 
     now = dt_util.now()
@@ -98,7 +106,7 @@ def _assert_surfaces_agree(house, *, day_label: str, seen: dict) -> None:
     assert payload["detail"]["days"][0]["day_type"] == cls.day_type
 
 
-@pytest.mark.parametrize("day", ["2026-10-15", "2026-11-01", "2026-10-03"])
+@pytest.mark.parametrize("day", list(_TALKS_ABOUT_WINDOWS))
 async def test_every_surface_agrees_with_the_timeline_on_a_recorded_zone_1_day(make_house, day) -> None:
     rec = _DAYS[day]
     y, m, d = (int(x) for x in day.split("-"))
@@ -154,20 +162,16 @@ async def test_every_surface_agrees_with_the_timeline_on_a_recorded_zone_1_day(m
         _assert_surfaces_agree(house, day_label=day, seen=seen)
 
     assert minutes_total == 18 * 60
-    for key in ("advised", "window_steps", "briefing_close", "plan_has_window_steps"):
-        _TOTALS[key] += seen[key]
-    _TOTALS["cards"] |= seen["cards"]
+    if _TALKS_ABOUT_WINDOWS[day]:
+        # not vacuous: the agreement checks above really compared window wording, not just empty plans
+        assert seen["plan_has_window_steps"] > 0, (day, seen)
+        assert seen["advised"] > 0, f"{day}: the card never invited a window: {seen}"
+        assert seen["window_steps"] > 0 and seen["briefing_close"] > 0, (day, seen)
+        assert any(c.startswith("Open windows") for c in seen["cards"]), (day, seen)
+        assert any(c.startswith("Keep windows") for c in seen["cards"]), (day, seen)
 
 
-def test_the_three_variant_days_were_not_vacuous() -> None:
-    """Runs after the three days above (file order): across them the surfaces really did talk about windows.
-
-    A day on the sim house does not reproduce what the recorded engine said (the live outdoor gate and the sim forecast
-    differ), so each day is held to the agreement invariants at every checkpoint, and the three together to having
-    exercised the card's open and close wording, the briefing's close time and the plan's window steps.
-    """
-    assert _TOTALS["plan_has_window_steps"] > 0, _TOTALS
-    assert _TOTALS["advised"] > 0, f"the card never invited a window on any variant day: {_TOTALS}"
-    assert _TOTALS["window_steps"] > 0 and _TOTALS["briefing_close"] > 0, _TOTALS
-    assert any(c.startswith("Open windows") for c in _TOTALS["cards"]), _TOTALS
-    assert any(c.startswith("Keep windows") for c in _TOTALS["cards"]), _TOTALS
+def test_at_least_one_variant_day_must_talk_about_windows() -> None:
+    """Guard on the table itself: the per-day non-vacuity checks above can never all be switched off."""
+    assert set(_TALKS_ABOUT_WINDOWS) <= set(_DAYS), "every replayed day is a recorded day"
+    assert sum(_TALKS_ABOUT_WINDOWS.values()) >= 2, _TALKS_ABOUT_WINDOWS

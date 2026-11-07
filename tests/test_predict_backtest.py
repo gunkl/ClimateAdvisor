@@ -454,7 +454,11 @@ def test_windows_planned_open_only_when_recommended_at_anchor(fake):
     run(rows, "--max-weeks", "1", "--no-diagnostic")
     open_call = next(c for c in fake.predict_calls if c["now"].hour == 20)
     flags = [i.windows_open for i in open_call["inputs"]]
-    assert flags[0] and sum(flags) == 16  # 4 h of 15-min steps
+    # No day record -> the shared fallback span [A, A + 4 h) (v4_shadow.planned_window_span / window_open_at, the rule
+    # the live shadow uses since R6): the grid starts at A + 15 min, so steps A+15m .. A+3h45m are open (15 steps).
+    span = (open_call["now"], open_call["now"] + timedelta(hours=4))
+    want = [span[0] <= i.ts < span[1] for i in open_call["inputs"]]
+    assert flags[0] and flags == want and sum(flags) == 15
     assert not any(
         i.windows_open or i.fan_running for c in fake.predict_calls if c["now"].hour == 3 for i in c["inputs"]
     )
@@ -753,8 +757,7 @@ def test_production_coordinator_helper_imports_headless_and_predicts():
         hourly=hourly,
         model=model,
         band_fn=lambda a, t: idx.band_at(t),
-        plan_windows=False,
-        plan_hours=4,
+        span=None,
     )
     leads = {h: int(round((anchor + timedelta(hours=h)).timestamp())) for h in (1, 4, 12, 24)}
     assert all(k in out for k in leads.values()), "production curve must cover 1/4/12/24 h"

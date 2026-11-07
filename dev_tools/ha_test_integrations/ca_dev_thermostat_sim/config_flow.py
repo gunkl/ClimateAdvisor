@@ -121,7 +121,8 @@ def _build_schema(*, defaults: dict[str, Any]) -> vol.Schema:
                 CONF_DEADBAND_COOL_F, default=defaults.get(CONF_DEADBAND_COOL_F, DEFAULT_DEADBAND_COOL_F)
             ): _num(min_=0.1, max_=10.0, step=0.1, unit="°F"),
             # Issue #1234: optional asymmetric deadband - where the compressor STOPS relative to the target
-            # (signed, in the direction of travel). Leave empty for the symmetric default.
+            # (signed, in the direction of travel). Leave empty for the default: 0.9 F short of the target, the
+            # measured real thermostat (Issue #1387). Enter deadband_*_f for the old symmetric band.
             vol.Optional(
                 CONF_OFF_OFFSET_HEAT_F, description={"suggested_value": defaults.get(CONF_OFF_OFFSET_HEAT_F)}
             ): _num(min_=-10.0, max_=10.0, step=0.1, unit="°F"),

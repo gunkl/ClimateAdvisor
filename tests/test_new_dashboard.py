@@ -996,8 +996,9 @@ def test_status_places_the_same_actors_as_the_timeline():
     # "you" and "CA" are named in words and by shape (never colour alone), low confidence says "may help"
     assert "'You'" in mod and "'CA'" in mod and "may help" in mod
     assert "s.confidence === 'low'" in mod
-    # nothing in the list invents wording: the step's own text is what is shown
-    assert "escapeHtml(s.text || '')" in mod
+    # nothing in the list invents wording: the step's own server-side text is what is shown (its plan-list row form
+    # text_short, Issue #1399, built by timeline_surfaces.plan_list_text; else the canonical text)
+    assert "escapeHtml(s.text_short || s.text || '')" in mod
 
 
 # ---------------------------------------------------------------------------------------------

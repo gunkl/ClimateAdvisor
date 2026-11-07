@@ -80,7 +80,16 @@ def timeline() -> dict:
     def at(m):
         return (now + dt.timedelta(minutes=m)).isoformat()
 
+    def clock(m):
+        # operation_timeline._fmt_time: the canonical sentence opens with the step's time ("Sun 6:15 AM" on another day)
+        when = now + dt.timedelta(minutes=m)
+        t = when.strftime("%I:%M %p").lstrip("0")
+        return t if when.date() == now.date() else f"{when.strftime('%a')} {t}"
+
     def st(m, actor, kind, text, **kw):
+        text = text.replace("{t}", clock(m)).replace("{wake}", clock(1700))
+        if "text_short" in kw:
+            kw["text_short"] = kw["text_short"].replace("{wake}", clock(1700))
         d = {
             "ts": at(m),
             "actor": actor,
@@ -114,12 +123,44 @@ def timeline() -> dict:
                 "A step that is already done.",
                 meta={"id": "p", "status": "done", "facts": {}},
             ),
-            st(45, "you", "windows_open", "Open windows. Outdoor air is cooler than the house."),
-            st(150, "ca", "precool_start", "Start cooling a little early to ride out the afternoon."),
-            st(240, "you", "windows_close", "Close windows before the evening cools off.", confidence="low"),
-            st(300, "ca", "briefing_send", "Send the daily briefing."),
-            st(600, "ca", "sleep_band", "Bedtime: comfort moves to the bedroom, 66 to 72."),
-            st(1700, "ca", "wake_band", "Tomorrow, wake: comfort moves back to the hallway."),
+            # canonical `text` opens with the time; `text_short` is timeline_surfaces.plan_list_text (Issue #1399)
+            st(
+                45,
+                "you",
+                "windows_open",
+                "{t}: open the windows. Outdoor is 6°F cooler than the house.",
+                text_short="Open the windows. Outdoor is 6°F cooler than the house.",
+            ),
+            st(
+                150,
+                "ca",
+                "precool_start",
+                "{t}: CA pre-cools the house to 70°F so tomorrow's heat starts from a cooler house.",
+                text_short="Pre-cools the house to 70°F so tomorrow's heat starts from a cooler house.",
+            ),
+            st(
+                240,
+                "you",
+                "windows_close",
+                "{t}: close the windows. Outdoor stops helping (it is warming past the house).",
+                confidence="low",
+                text_short="Close the windows. Outdoor stops helping (it is warming past the house).",
+            ),
+            st(300, "ca", "briefing_send", "{t}: CA sends the daily briefing.", text_short="Sends the daily briefing."),
+            st(
+                600,
+                "ca",
+                "sleep_band",
+                "{t}: bedtime, CA switches to the sleep band, 66°F to 72°F, and reads the bedroom sensor until {wake}.",
+                text_short="Bedtime: switches to the sleep band, 66°F to 72°F, and reads the bedroom sensor until {wake}.",
+            ),
+            st(
+                1700,
+                "ca",
+                "wake_band",
+                "{t}: CA switches to the daytime comfort band, 68°F to 74°F, and reads the thermostat again.",
+                text_short="Switches to the daytime comfort band, 68°F to 74°F, and reads the thermostat again.",
+            ),
         ],
         "path": [
             {"ts": at(i * 30), "temp_f": round(70 + 2.5 * math.sin(i / 5), 2), "sensor": "_ca", "model": "v3"}
@@ -388,6 +429,29 @@ def plan_checks(pg, name, list_sel):
     check(
         f"{name}: no reminder on a CA step",
         "Reminder" not in pg.locator(f'{list_sel} .plan-row[data-kind="precool_start"]').inner_text(),
+    )
+    # Issue #1399: the row's sentence does not repeat the time its own time column shows, starts with a capital, and a
+    # CA row does not open with "CA" beside the CA badge
+    cells = rows.evaluate_all(
+        "els => els.map(e => ({actor: e.dataset.actor, time: e.querySelector('.plan-time').innerText.trim(),"
+        " text: e.querySelector('.plan-text').innerText.trim()}))"
+    )
+    for c in cells:
+        clock = next((w for w in c["time"].split() if any(ch.isdigit() for ch in w)), c["time"])
+        check(
+            f"{name}: row text does not open with its own time",
+            not c["text"].startswith((c["time"], clock))
+            and not re.match(r"^(?:[A-Za-z]{2,4}\.? )?\d{1,2}:\d{2}", c["text"]),
+            f"{c['time']} | {c['text'][:60]}",
+        )
+        check(f"{name}: row text starts with a capital", c["text"][:1].isupper(), c["text"][:60])
+        if c["actor"] == "ca":
+            check(f"{name}: CA row text does not open with 'CA'", not re.match(r"^CA\b", c["text"]), c["text"][:60])
+    bed = pg.locator(f'{list_sel} .plan-row[data-kind="sleep_band"] .plan-text').inner_text()
+    check(
+        f"{name}: bedtime row reads 'Bedtime: switches to the sleep band, ...'",
+        bed.startswith("Bedtime: switches to the sleep band, 66°F to 72°F"),
+        bed[:80],
     )
     text = pg.locator(list_sel).inner_text().lower()
     for word in ("waiting", "paused", "grace", "override"):

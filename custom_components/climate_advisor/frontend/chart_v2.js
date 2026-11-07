@@ -1415,7 +1415,7 @@
           ? '<path d="M0 -6 L6 0 L0 6 L-6 0 Z" fill="' + (low ? 'none' : 'var(--c-target)') + '" stroke="var(--c-ink)" stroke-width="1.5"/>'
           : '<circle r="4.5" fill="' + (low ? 'none' : 'var(--c-plan)') + '" stroke="var(--c-plan)" stroke-width="1.5"/>') + '</svg>' +
         (you ? 'You' : 'CA') + '</span>' +
-      '<span class="plan-text">' + escapeHtml(s.text || '') + (low && !held ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
+      '<span class="plan-text">' + escapeHtml(s.text_short || s.text || '') + (low && !held ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
   }
 
   // Render the "Next 24 hours" list into `el`. opts.extra() may return extra HTML for the foot (the page's own

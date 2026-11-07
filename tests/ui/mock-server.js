@@ -60,21 +60,33 @@ function makeChartFixture() {
 function makeTimelineFixture() {
   const now = Date.now();
   const at = (min) => new Date(now + min * 60000).toISOString();
-  const step = (min, actor, kind, text, extra) => Object.assign({
-    ts: at(min), actor, kind, text, reason: 'test.' + kind, target_f: null, mode: null, confidence: 'ok',
-    lead_minutes: actor === 'you' ? 30 : 0, source: 'test', meta: { id: kind + min, status: 'planned', facts: {} },
-  }, extra || {});
+  // Like operation_timeline._fmt_time: "8:30 PM", with the weekday on another day ("Sun 6:15 AM"). The backend's
+  // sentences open with it; text_short (timeline_surfaces.plan_list_text) is the plan-list row wording without it.
+  const clock = (min) => {
+    const d = new Date(now + min * 60000), h = d.getHours() % 12 || 12, m = String(d.getMinutes()).padStart(2, '0');
+    const t = h + ':' + m + ' ' + (d.getHours() < 12 ? 'AM' : 'PM');
+    return d.toDateString() === new Date(now).toDateString() ? t : d.toLocaleDateString('en-US', { weekday: 'short' }) + ' ' + t;
+  };
+  const fill = (min, text) => text.replace('{t}', clock(min)).replace('{wake}', clock(1500));
+  const step = (min, actor, kind, text, extra) => {
+    const s = Object.assign({
+      ts: at(min), actor, kind, text: fill(min, text), reason: 'test.' + kind, target_f: null, mode: null, confidence: 'ok',
+      lead_minutes: actor === 'you' ? 30 : 0, source: 'test', meta: { id: kind + min, status: 'planned', facts: {} },
+    }, extra || {});
+    if (s.text_short) s.text_short = fill(min, s.text_short);
+    return s;
+  };
   return {
     schema_version: 1, zone: 'mock', generated_at: at(-5), day: new Date(now).toISOString().slice(0, 10),
     horizon_end: at(48 * 60), latched: true, regen_reason: null, unit: 'fahrenheit',
     steps: [
       step(-120, 'ca', 'setback_end', 'Past step that must not be listed.', { meta: { id: 'past', status: 'done', facts: {} } }),
-      step(45, 'you', 'windows_open', 'Open the windows. Outdoor air is cooler than the house.'),
-      step(150, 'ca', 'precool_start', 'Start cooling a little early to ride out the afternoon.'),
-      step(240, 'you', 'windows_close', 'Close the windows before the afternoon warms up.', { confidence: 'low' }),
-      step(300, 'ca', 'briefing_send', 'Send the daily briefing.'),
-      step(600, 'ca', 'sleep_band', 'Bedtime: comfort moves to the bedroom, 66 to 72.'),
-      step(1500, 'ca', 'wake_band', 'Tomorrow, wake: comfort moves back to the hallway.'),
+      step(45, 'you', 'windows_open', '{t}: open the windows. Outdoor is 6°F cooler than the house.', { text_short: 'Open the windows. Outdoor is 6°F cooler than the house.' }),
+      step(150, 'ca', 'precool_start', '{t}: CA pre-cools the house to 70°F so tomorrow\'s heat starts from a cooler house.', { text_short: 'Pre-cools the house to 70°F so tomorrow\'s heat starts from a cooler house.' }),
+      step(240, 'you', 'windows_close', '{t}: close the windows. Outdoor stops helping (it is warming past the house).', { confidence: 'low', text_short: 'Close the windows. Outdoor stops helping (it is warming past the house).' }),
+      step(300, 'ca', 'briefing_send', '{t}: CA sends the daily briefing.', { text_short: 'Sends the daily briefing.' }),
+      step(600, 'ca', 'sleep_band', '{t}: bedtime, CA switches to the sleep band, 66°F to 72°F, and reads the bedroom sensor until {wake}.', { text_short: 'Bedtime: switches to the sleep band, 66°F to 72°F, and reads the bedroom sensor until {wake}.' }),
+      step(1500, 'ca', 'wake_band', '{t}: CA switches to the daytime comfort band, 68°F to 74°F, and reads the thermostat again.', { text_short: 'Switches to the daytime comfort band, 68°F to 74°F, and reads the thermostat again.' }),
     ],
     path: Array.from({ length: 25 }, (_, i) => ({ ts: at(i * 60), temp_f: 70 + 2 * Math.sin(i / 4), sensor: '_ca', model: 'v3' })),
   };

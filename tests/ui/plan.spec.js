@@ -107,7 +107,7 @@ test.describe('Next 24 hours and the plan overlay (classic Status)', () => {
     await page.waitForTimeout(150);
     const html = await page.locator('#chart-hover-panel').innerHTML();
     expect(html).toContain('CA ');
-    expect(html).toContain('Start cooling a little early');
+    expect(html).toContain('CA pre-cools the house to 70°F');   // the hover keeps the canonical sentence (Issue #1399 changes the list only)
     expect(box.width).toBeGreaterThan(100);
   });
 

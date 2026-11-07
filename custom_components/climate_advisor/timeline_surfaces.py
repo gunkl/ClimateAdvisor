@@ -16,6 +16,7 @@ advises something the timeline does not hold.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -369,10 +370,58 @@ def timeline_windows(tl: Timeline, day: Any) -> TimelineWindows:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Plan list row text (Issue #1399)
+# ---------------------------------------------------------------------------
+
+# The time a table sentence opens with ("8:30 PM: ", "Sun 6:15 AM: "): ``operation_timeline._fmt_time`` plus ": ".
+# Kept loose on the weekday and AM/PM words (strftime is locale-dependent); a sentence that does not open with a time
+# (a direction-veto rewrite, a summary) does not match and is left whole.
+_TIME_LEAD = re.compile(r"^(?:[^\W\d]{2,4}\.? )?\d{1,2}:\d{2}(?: ?[^\W\d]{1,4}\.?)?: ")
+
+# After the time is gone: leading phrases rewritten so the row reads as its own sentence. (old, new, actor or None for
+# any actor); the first match wins, so the specific phrases come before the bare "CA ". "CA" is dropped only on a CA
+# step, where the row's actor badge already says CA; an occupant step keeps its "you" wording.
+_LEAD_REWRITES: tuple[tuple[str, str, str | None], ...] = (
+    ("bedtime, CA ", "bedtime: ", Actor.CA.value),
+    ("bedtime, ", "bedtime: ", None),
+    ("nobody is home, CA ", "nobody is home: ", Actor.CA.value),
+    ("vacation mode, CA ", "vacation mode: ", Actor.CA.value),
+    ("high-cost period, CA ", "high-cost period: ", Actor.CA.value),
+    ("the high-cost period ends, CA ", "the high-cost period ends: ", Actor.CA.value),
+    ("once a window is open, CA ", "once a window is open: ", Actor.CA.value),
+    ("your change ends and CA ", "your change ends: ", Actor.CA.value),
+    ("CA ", "", Actor.CA.value),
+)
+
+
+def plan_list_text(text: str, actor: str) -> str:
+    """A step's sentence as the "Next 24 hours" row shows it, beside its own time and actor badge.
+
+    The row's left columns already show the time (with the weekday on another day) and who acts, so the sentence's own
+    leading time is dropped, a leading "CA" is dropped on a CA step, and the first letter is capitalised:
+    "8:30 PM: bedtime, CA switches to the sleep band, ..." -> "Bedtime: switches to the sleep band, ...".
+    Derived from the final sentence (after any hold or veto rewrite), so it never says anything the full sentence does
+    not; the full ``text`` stays the canonical wording for every surface that shows a step on its own.
+    """
+    m = _TIME_LEAD.match(text)
+    if m is None:
+        return text
+    rest = text[m.end() :]
+    for old, new, who in _LEAD_REWRITES:
+        if (who is None or who == actor) and rest.startswith(old):
+            rest = new + rest[len(old) :]
+            break
+    if not rest:
+        return text
+    return rest[0].upper() + rest[1:]
+
+
 def timeline_api_payload(
     contract: dict[str, Any], detail: dict[str, Any] | None, unit: str, convert: Any
 ) -> dict[str, Any]:
-    """The REST body: the contract dict with temperatures in the display unit and ``unit`` added.
+    """The REST body: the contract dict with temperatures in the display unit, ``unit`` added, and each step's
+    ``text_short`` (its plan-list row wording, ``plan_list_text``; a view field, not part of the stored contract).
 
     ``convert`` is the caller's ``display_temp(value_f, unit)`` (kept out of this module so it stays unit-library
     free). Sentences were already written in the user's unit by the builder, so only the numeric fields convert.
@@ -382,6 +431,7 @@ def timeline_api_payload(
     steps = []
     for s in contract.get("steps", []):
         s2 = dict(s)
+        s2["text_short"] = plan_list_text(str(s2.get("text", "")), str(s2.get("actor", "")))
         if s2.get("target_f") is not None:
             s2["target_f"] = convert(s2["target_f"], unit)
         meta = dict(s2.get("meta") or {})

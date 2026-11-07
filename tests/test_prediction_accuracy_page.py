@@ -224,6 +224,8 @@ def test_text_contrast_at_least_4_5():
 
 def test_index_links_to_page_in_analysis_tab():
     assert 'href="prediction_accuracy.html"' in INDEX
+    # classic's own link says where it came from, so the page's "Back to dashboard" returns to classic
+    assert 'href="prediction_accuracy.html?from=classic" id="prediction-accuracy-link"' in INDEX
     assert "Prediction accuracy (preview)" in INDEX
     start = INDEX.index('id="tab-ai"')
     assert "prediction_accuracy.html" in INDEX[start : start + 3000]

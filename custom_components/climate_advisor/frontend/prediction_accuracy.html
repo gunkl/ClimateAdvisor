@@ -44,6 +44,14 @@
   .grp button:disabled { opacity: 0.4; cursor: not-allowed; }
   .grp button.nav { min-width: 36px; font-size: 16px; padding: 0 8px; }
   .reset, .retry { padding: 0 12px; border-radius: 8px; border: 1px solid var(--rule); background: transparent; cursor: pointer; }
+  /* Same look as the new dashboard's .btn ("Back to classic" in new_dashboard.html) */
+  .btn {
+    display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border-radius: 8px;
+    border: 1px solid var(--rule); background: var(--panel); color: var(--ink); font-size: 13px;
+    text-decoration: none; cursor: pointer; white-space: nowrap;
+  }
+  a.btn:hover { color: var(--ink); }
+  a.btn:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
   .zone-sel { border-radius: 8px; border: 1px solid var(--rule); background: var(--panel); padding: 0 8px; }
   button:focus-visible, select:focus-visible, canvas:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
   .grow { flex: 1 1 0; }
@@ -86,7 +94,9 @@
     <label class="row small" for="zone-select" id="zone-wrap" hidden>Zone
       <select id="zone-select" class="zone-sel"></select>
     </label>
-    <a href="index.html" id="back-link">&#8592; Back to dashboard</a>
+    <!-- Back to whichever dashboard this browser uses: entry.html applies the remembered
+         'climate_advisor_dashboard' choice (classic -> index.html, otherwise new_dashboard.html). -->
+    <a class="btn" href="entry.html" id="back-link">Back to dashboard</a>
     <div class="grow"></div>
     <span class="sub">Preview page</span>
   </div>
@@ -692,6 +702,16 @@
       var qz = new URLSearchParams(location.search).get('zone');
       if (qz) S.zone = qz;
     } catch (e) { /* ignore */ }
+    // Opened from classic (?from=classic): go back to classic even if nothing is remembered (classic may have been
+    // opened for one visit with ?classic=1). The rest of the query is kept; otherwise entry.html picks the dashboard.
+    try {
+      var bq = new URLSearchParams(location.search);
+      if (bq.get('from') === 'classic') {
+        bq.delete('from');
+        var rest = bq.toString();
+        $('back-link').setAttribute('href', 'index.html' + (rest ? '?' + rest : ''));
+      }
+    } catch (e) { /* keep entry.html */ }
     $('reset-zoom').addEventListener('click', resetZoom);
     $('zone-select').addEventListener('change', function (ev) {
       S.zone = ev.target.value; S.before = null; S.zoom = null; S.sensors = []; S.sensor = CA_SENSOR;

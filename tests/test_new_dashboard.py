@@ -652,10 +652,10 @@ def test_no_external_resources_and_no_chart_library():
         assert (FE / name).exists(), name
 
 
-def test_classic_has_exactly_one_new_link_beside_prediction_accuracy():
+def test_classic_has_exactly_one_new_link_in_its_header():
+    # R6a: visible on every classic tab (it sits above the tab bar), not only on Analysis
     assert INDEX.count("new_dashboard.html") == 1
-    link_at = INDEX.index("new_dashboard.html")
-    assert abs(link_at - INDEX.index('id="prediction-accuracy-link"')) < 600
+    assert INDEX.index("new_dashboard.html") < INDEX.index('<div class="tabs">')
 
 
 # ---------------------------------------------------------------------------------------------

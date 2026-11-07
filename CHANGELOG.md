@@ -5,6 +5,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.9.4] — 2026-11-06
 
+- Feat #1230 (R6a: the new dashboard opens by default). The new dashboard opens by default; 'Back to classic' is one click away and remembered in this browser, and the classic dashboard stays fully working (its header now offers 'Try the new dashboard' on every tab). Links to `#analysis` or `#settings/...` still land, and `?classic=1` or a bookmark of the classic page still opens classic.
+
 - Feat #1230 (R6: tonight's bedroom plan, backend). Each evening Climate Advisor now works out what to do about the bedroom tonight (keep the windows closed and let it hold the room, open the windows for a while, or run the whole-house or HVAC fan) and adds it to the same plan "Next 24 hours", the briefing and the Next Action read; a new read-only endpoint feeds the "Tonight in the bedroom" card. It is advice only: Climate Advisor never starts a fan or opens a window for it.
   - **Only what the house has proved:** an option is offered only when this house's own recorded nights show the model gets that kind of night right, and bedroom temperatures and minutes of heat or AC are shown only for a zone whose prediction accuracy check (the Prediction accuracy page's verdict) has passed. Until then the plan is in words with no figures.
   - **The evidence now refreshes itself:** every night after the 03:15 model fit, Climate Advisor replays the last two months of nights (with the same 30-day training rule the live fit uses) and keeps the result next to the model.

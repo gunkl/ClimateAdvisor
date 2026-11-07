@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const PORT = 7531;
+const PORT = Number(process.env.MOCK_PORT) || 7531;
 const FRONTEND_DIR = path.join(__dirname, '../../custom_components/climate_advisor/frontend');
 
 function makeChartFixture() {
@@ -124,7 +124,7 @@ const server = http.createServer((req, res) => {
   }
 
   // Serve index.html — inject a mock auth token so initLoad() fires immediately
-  if (pathname === '/') {
+  if (pathname === '/' || pathname === '/index.html') {
     try {
       let html = fs.readFileSync(path.join(FRONTEND_DIR, 'index.html'), 'utf8');
       // Inject script before </head> so localStorage has a token before the IIFE runs
@@ -160,7 +160,7 @@ try { localStorage.setItem('hassTokens', JSON.stringify({access_token:'mock-toke
 
   // Serve frontend JS files
   const jsFiles = ['/hammer.min.js', '/chart.umd.min.js', '/chartjs-plugin-zoom.min.js', '/chart_v2.js'];
-  const ndFiles = /^\/(nd_[a-z_]+\.(js|json)|chart_v2\.css|prediction_accuracy\.html)$/;
+  const ndFiles = /^\/(nd_[a-z_]+\.(js|json)|chart_v2\.css|prediction_accuracy\.html|entry\.html)$/;
   if (jsFiles.includes(pathname) || ndFiles.test(pathname)) {
     try {
       const filename = pathname.slice(1);

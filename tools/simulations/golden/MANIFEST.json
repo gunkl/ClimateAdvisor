@@ -677,5 +677,25 @@
     "sha256": "da47dad92f3ae897708c009aa1c125a1e218bd03cd104a45ca6a24552b1447c5",
     "signed": "2026-11-07",
     "issue": 1404
+  },
+  "tou_away_cool_bank_frozen_for_window_1410": {
+    "sha256": "8a65a7a3ecfe2d0c76af6d870cc735efa719af71beb9d17ac0d9c465c6587ec6",
+    "signed": "2026-11-07",
+    "issue": 1410
+  },
+  "tou_home_cool_bank_ends_no_hvac_action_1416": {
+    "sha256": "f6486b3c7efade089c62eba7bef00514aace8379e491b14c771292a755ed2d35",
+    "signed": "2026-11-07",
+    "issue": 1416
+  },
+  "tou_home_heat_bank_ends_no_hvac_action_1416": {
+    "sha256": "1933acd5cb883df76f74d7bc02c6d877fe24c30747249273b4c739d040ed1357",
+    "signed": "2026-11-07",
+    "issue": 1416
+  },
+  "hot_night_same_mode_pre_cool_wakeup_keeps_cool_1417": {
+    "sha256": "ccd843b35c03dff959c7296dbf1c436c0b976c8b808b8653d2159a62cf75d5b1",
+    "signed": "2026-11-07",
+    "issue": 1417
   }
 }

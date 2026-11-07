@@ -149,7 +149,7 @@
     "summary": "Without hvac_action, the end of a heat bank keeps heat armed instead of arming the AC",
     "observed_behavior": "16:15 and 16:30: heat 68 F, no mode write. On f877c50 (before #1416): 16:15 set_hvac_mode cool + cool 76 F, 16:30 cool 76 F.",
     "expected_behavior": "Occupant view: on a cold day the native side stays armed after the bank and the furnace idles; the AC is not armed 0.5 F over the house temperature.",
-    "effectiveness": "Fails on f877c50 (rows 16:15 setpoint and mode, 16:30 setpoint, briefing row: cool 76 F). Removing the bank-write record (_note_tou_bank_command) brings that back.",
+    "effectiveness": "Fails on f877c50 and on 2523b71 (5e33f00^): 16:15 set_hvac_mode cool + cool 76 F, 16:30 cool 76 F (rows 16:15 setpoint and mode, 16:30 setpoint, briefing row). Removing the bank write's 'ran' record (the _note_deliberate_command(..., \"tou\", ...) call in _apply_tou_schedule), or the guard's read of it (minutes_since_deliberate_command in _minutes_since_family_ran), brings that back. Real HA cannot catch this: its thermostat reports hvac_action, and this scenario passes there on the old code too.",
     "alignment": "docs/comfort-edge-selection-spec.md (R3: a TOU bank write counts as 'ran' even when the mode is unchanged, Issue #1416), docs/08-COMPUTATION-REFERENCE.md TOU paragraph and docs/scheduler-spec.md (Issue #1405 bank end).",
     "user_outcome": "If this regressed, a home whose thermostat reports no hvac_action would get the AC armed at every heat bank's end (cool 76 F on a cold day), the flip-flop the settling guard exists to prevent."
   },

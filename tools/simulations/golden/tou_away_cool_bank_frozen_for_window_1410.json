@@ -176,8 +176,9 @@
     {
       "at": "2026-07-13T16:14:59",
       "expect": "setpoint_writes",
-      "since": "2026-07-13T12:59:59",
+      "since": "2026-07-13T12:29:59",
       "values": [
+        77.0,
         77.0,
         77.0,
         77.0,
@@ -186,7 +187,7 @@
         77.0,
         77.0
       ],
-      "reason": "Every cycle of the bank (13:00-16:00) re-asserts the same whole-degree target while the house cools 79 -> 77 F (0.9.5: 77.3875, 77.15, 77.15, then 77)."
+      "reason": "Every cycle of the bank (12:30-16:00) writes the same whole-degree target while the house cools 79 -> 77 F; the bank opens at the 12:30 cycle because the lead comes from the rounded 3 F depth (0.9.5: cool 80 at 12:30, then 77.3875 at 12:55, 77.3875, 77.15, 77.15, then 77)."
     },
     {
       "at": "2026-07-13T16:15:00",
@@ -212,7 +213,7 @@
       "reason": "The widening stays 83 F for the whole period while the empty house drifts 79 -> 81 F (0.9.5: 83, 82.6125, 82.6125, 82.375, 82.375, 82.1375; rounding without the freeze: 83, 83, 83, 82, 82, 82)."
     }
   ],
-  "description": "Issue #1410 (decision C23): an empty house on a hot day (outdoor 90 F, k_passive -0.1, so the drift is below the 6 F cap and the raw split is fractional) with a 16:15-21:00 high-cost period, a cycle every 30 minutes until 19:00. Indoor reads 79 F when the bank opens, 78 at 13:10 and 77 at 14:10 as it pre-cools, then 79, 80 and 81 F as it drifts during the period. The bank target and the widened edge are snapped to the thermostat's step (1 F, none advertised) and frozen when the window opens, so the thermostat is told cool 77 for the whole bank and cool 83 for the whole period.",
+  "description": "Issue #1410 (decision C23): an empty house on a hot day (outdoor 90 F, k_passive -0.1, so the drift is below the 6 F cap and the raw split is fractional) with a 16:15-21:00 high-cost period, a cycle every 30 minutes until 19:00. Indoor reads 79 F when the bank opens, 78 at 13:10 and 77 at 14:10 as it pre-cools, then 79, 80 and 81 F as it drifts during the period. The bank target and the widened edge are snapped to the thermostat's step (1 F, none advertised) and frozen when the window opens, so the thermostat is told cool 77 for the whole bank and cool 83 for the whole period. (Here the bank stays 77 through rounding alone; the freeze is what keeps the period at 83 as the house drifts to 80 and 81 F.)",
   "verdict": {
     "type": "positive",
     "summary": "The Away bank target and the widened edge are whole degrees and do not creep as the indoor reading changes",

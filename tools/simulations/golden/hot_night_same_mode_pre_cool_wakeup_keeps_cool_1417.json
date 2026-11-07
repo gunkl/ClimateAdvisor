@@ -79,7 +79,7 @@
       "at": "2026-07-17T02:30:00",
       "expect": "commanded_setpoint_at",
       "value": 70.0,
-      "reason": "Pre-cool to 70 F (sleep_cool 72 + the hot-day modifier -2). The value, not the count: on real HA the production pre-cool timer also fires at 02:30 next to the scenario's pre_cool event, so it is written twice there."
+      "reason": "Pre-cool to 70 F (sleep_cool 72 + the hot-day modifier -2); 22:30 wrote 72, so 70 can only be the pre-cool. The value, not the count: on real HA the coordinator's own 02:30 pre-cool timer fires and the scenario's pre_cool event (a direct callback) calls the same handler again, so it is written twice there; production has only the timer (one write)."
     },
     {
       "at": "2026-07-17T06:30:00",
@@ -103,7 +103,7 @@
     "summary": "Without hvac_action, wake-up after a same-mode overnight pre-cool keeps cool armed instead of arming the furnace",
     "observed_behavior": "06:30 wake-up: cool 74 F, no mode write.",
     "expected_behavior": "Occupant view: on a hot morning after a pre-cool the AC side stays armed and idles; the furnace is not armed just under the house temperature.",
-    "effectiveness": "Fails on 4d63400 (06:30 rows: set_hvac_mode heat + heat 70 F). Removing the pre-cool 'ran' record (_note_deliberate_command in _apply_comfort_band) brings that back.",
+    "effectiveness": "Fails on 2523b71 (5e33f00^, before #1416/#1417) and on f877c50: 06:30 set_hvac_mode heat + heat 70 F. Removing the pre-cool 'ran' record (_note_deliberate_command in _apply_comfort_band), or the guard's read of it (minutes_since_deliberate_command in _minutes_since_family_ran), brings that back. The hold comes from the 06:00 re-assert (30 min old at wake-up); the 02:30 write alone is 240 min old, outside the 120-minute window. Real HA cannot catch this: its thermostat reports hvac_action, and this scenario passes there on the old code too.",
     "alignment": "docs/comfort-edge-selection-spec.md R3 (a deliberate write counts as 'ran' even when the mode is unchanged, Issues #1416/#1417) and section 6 item 1 (wake-up after pre-cool); docs/08-COMPUTATION-REFERENCE.md section 6f.",
     "user_outcome": "If this regressed, a home whose thermostat reports no hvac_action would get the furnace armed every hot morning after an overnight pre-cool, the flip-flop the settling guard exists to prevent."
   }

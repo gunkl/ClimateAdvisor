@@ -562,8 +562,8 @@ V4_ARCHIVE_LEADS: tuple[str, ...] = ("1h", "4h", "12h", "24h")
 V4_ARCHIVE_SAVE_MIN_INTERVAL_S = 3600  # the file is a few MB: rewrite at most hourly (and once on shutdown)
 V4_FIT_HOUR = 3  # nightly fit, local time, after midnight bookkeeping
 V4_FIT_MINUTE = 15
-# The v4 fit trains on the last N days of chart_log rows: the backtest's --train-days default, chosen by walk-forward
-# results on all seven zones (30 d: 15/22 gate rows pass, mean |bias| 0.29 F; 60 d: 12/22, 0.37; all history: 13/22, 0.38).
+# The v4 fit trains on the last N days of chart_log rows (the backtest --train-days default), chosen by walk-forward
+# on all seven zones: 30 d passes 15/22 gate rows (mean abs bias 0.29 F), 60 d 12/22 (0.37), all history 13/22 (0.38).
 V4_FIT_TRAIN_DAYS = 30
 V4_FIT_STAGGER_S = 30 * 60  # each zone fits at 03:15 + a stable per-entry offset in [0, this) (Issue #1230 R1b, M5)
 V4_FIT_RETRY_MIN_INTERVAL_S = 6 * 3600  # a first fit that failed is retried by the cycle at most this often

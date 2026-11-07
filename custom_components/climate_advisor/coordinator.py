@@ -49,6 +49,7 @@ from .automation import (
     ComfortBand,
     CurrentHold,
     HvacCommandResult,
+    OccupancyBankWrite,
     PreCoolDecision,
     TouBankHold,
     _in_sleep_window,
@@ -8137,13 +8138,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         resolution = getattr(self, "_tou_phase_resolution", None)
         return bool(resolution is not None and resolution.phase == TOUPhase.PRECONDITIONING)
 
-    def _active_tou_bank(self, now: datetime) -> TouBankHold | None:
-        """The time-of-use bank that owns the thermostat at ``now`` (Issue #1404), or None.
-
-        Owns = the cached phase is ``PRECONDITIONING`` with a heat/cool target, ``now`` is inside
-        ``[precondition_start, schedule_start)``, and nothing defers the bank write (``tou_bank_holds_setpoint()``:
-        an unconfirmed or confirmed manual change, a door/window pause, nat-vent or the whole-house fan, a settled-open
-        sensor, a blower session). Read-only."""
+    def _tou_bank_in_force(self, now: datetime) -> Any | None:
+        """CONTROL (Issues #1404/#1409): this cycle's time-of-use resolution when its bank owns the thermostat at
+        ``now``, else None. Owns = the phase is ``PRECONDITIONING`` with a heat/cool target, ``now`` is inside
+        ``[precondition_start, schedule_start)``, and the bank gates pass (``AutomationEngine.tou_bank_gates_pass()``:
+        no unconfirmed or confirmed manual change, door/window pause, nat-vent or whole-house fan, settled-open sensor,
+        blower session). Read-only. The occupancy-change bank write (``_occupancy_bank_write``) and the display
+        resolver (``_active_tou_bank`` -> ``current_hold``) both read it; display reads control, never the reverse."""
         res = getattr(self, "_tou_phase_resolution", None)
         if (
             res is None
@@ -8160,7 +8161,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except TypeError:  # naive vs aware mix: do not guess
             return None
         ae = self.automation_engine
-        if ae is None or not ae.tou_bank_holds_setpoint():
+        if ae is None or not ae.tou_bank_gates_pass():
+            return None
+        return res
+
+    def _active_tou_bank(self, now: datetime) -> TouBankHold | None:
+        """DISPLAY: the bank that owns the thermostat at ``now`` as a ``TouBankHold`` (Issue #1404), or None; read
+        from the control source ``_tou_bank_in_force()``."""
+        res = self._tou_bank_in_force(now)
+        if res is None:
             return None
         period_end = res.window_end if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION) else None
         return TouBankHold(
@@ -8258,25 +8267,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "after_text": hold_after_text(hold, unit),
         }
 
-    async def _occupancy_bank_write(self) -> bool:
-        """Write the new occupancy's time-of-use bank target in place of its band (Issue #1409); True when written.
+    async def _occupancy_bank_write(self) -> OccupancyBankWrite | None:
+        """Write the new occupancy's time-of-use bank target in place of its band (Issue #1409); the write, or None.
 
         Occupant view: leaving during a home pre-cool used to write the Away band (cool 80, AC off) and then the Away
         bank (cool 77) five minutes later, which can stop and restart the AC; coming home during an Away pre-heat
         wrote heat 68 then heat 76. Now the bank for the new occupancy is written once. Uses the bank's own gates:
         nothing is claimed during start-up coalescing, outside the bank window, or when an override, door/window pause,
-        nat-vent or whole-house fan would defer the bank (``tou_bank_holds_setpoint``); the bank write itself
-        re-checks them (``_apply_tou_schedule``). When it writes nothing the caller writes the band as before.
+        nat-vent or whole-house fan would defer the bank (``_tou_bank_in_force``: ``tou_bank_gates_pass``); the bank
+        write itself re-checks them (``_apply_tou_schedule``). A write counts only when the thermostat accepted it
+        (EXECUTED or UNCONFIRMED, the test ``_apply_tou_schedule`` uses for ``_tou_bank_written``); a failed or
+        rejected write returns None so the caller still writes the band, instead of leaving the old occupancy's bank
+        on until the bank check.
         """
         ae = self.automation_engine
         if ae is None or self._current_classification is None or self._startup_coalesce_active:
-            return False
+            return None
         self._resolve_tou_schedule_state()  # the resolution for the NEW occupancy
-        if self._active_tou_bank(dt_util.now()) is None:
-            return False
+        res = self._tou_bank_in_force(dt_util.now())  # control source: the bank's own window and gates
+        if res is None:
+            return None
         before = ae._hvac_write_record
         await self._apply_tou_schedule()
-        return ae._hvac_write_record is not before
+        record = ae._hvac_write_record
+        if record is before or getattr(record, "result", None) not in (
+            HvacCommandResult.EXECUTED,
+            HvacCommandResult.UNCONFIRMED,
+        ):
+            return None
+        return OccupancyBankWrite(target_f=float(res.target), mode=str(res.mode), result=record.result)
 
     async def _run_occupancy_handler(self, mode: str) -> None:
         """Run the engine's occupancy handler for an occupancy CHANGE (Issue #1409): inside an open bank window the
@@ -8288,11 +8307,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             OCCUPANCY_VACATION: ae.handle_occupancy_vacation,
         }.get(mode, ae.handle_occupancy_home)
         ae._occupancy_bank_write = self._occupancy_bank_write
-        ae._occupancy_change_in_progress = True
-        try:
+        with ae.occupancy_change():  # scoped to this task (a context variable), not engine-wide
             await handler()
-        finally:
-            ae._occupancy_change_in_progress = False
 
     async def _apply_tou_schedule(self) -> None:
         """Act on ``self._tou_phase_resolution`` (resolved earlier this cycle by

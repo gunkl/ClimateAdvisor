@@ -304,10 +304,7 @@ DISPLAY_CALLERS = {
     "_compute_next_automation_action",
     "_build_briefing_text",
     "_briefing_tou_bank_key",
-    "_maybe_regenerate_briefing_for_drift",
-    # Issue #1409: the occupancy-change bank writer asks whether a bank is active for the new occupancy; what it then
-    # writes is the bank's own decision path (_apply_tou_schedule with its gates), not a display value.
-    "_occupancy_bank_write",  # text only: regenerates the shown briefing, never a setpoint
+    "_maybe_regenerate_briefing_for_drift",  # text only: regenerates the shown briefing, never a setpoint
     "timeline_payload",
     "_chart_display_band",
     "_chart_bank_band",

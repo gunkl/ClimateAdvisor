@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
@@ -803,6 +804,20 @@ def _band_num(value_f: float, unit: str) -> str:
     ``f"{value:.0f}"``.
     """
     return f"{display_temp(value_f, unit, 0):.0f}"
+
+
+# Issue #1409: the engine whose occupancy CHANGE is running in THIS task (a context variable, so a concurrent coroutine
+# -- a cycle's away/vacation reapply, a timer -- that calls the same handler while this one awaits never sees it).
+_OCCUPANCY_CHANGE: contextvars.ContextVar[Any] = contextvars.ContextVar("ca_occupancy_change", default=None)
+
+
+@dataclass(frozen=True)
+class OccupancyBankWrite:
+    """The time-of-use bank write an occupancy change made instead of its band (Issue #1409)."""
+
+    target_f: float
+    mode: str
+    result: Any = None  # HvacCommandResult of the write
 
 
 # Issue #1345: values of ``ComfortBand.context`` -- the band in force, exposed as the ``context``
@@ -2235,12 +2250,10 @@ class AutomationEngine:
         # family, for the reactive-retry rate limit and the once-per-realised-switch event.
         self._last_selector_write_attempt: tuple[str, datetime] | None = None
         self._last_resolved_family: str | None = None
-        # Issue #1409: set by the coordinator only around an OCCUPANCY CHANGE's handler call. While a time-of-use bank
-        # window is open, the handler's band write is replaced by the new occupancy's bank write (one write, no
-        # band-then-bank short cycle). ``_occupancy_bank_write`` is the coordinator's writer (returns True when it
-        # wrote the bank). Every other caller of the occupancy handlers (cycle, timers, redirects) is unaffected.
-        self._occupancy_change_in_progress: bool = False
-        self._occupancy_bank_write: Callable[[], Awaitable[bool]] | None = None
+        # Issue #1409: the coordinator's occupancy-change bank writer (returns the write it made, or None). Asked only
+        # inside ``occupancy_change()`` (this task's OCCUPANCY CHANGE); every other caller of the occupancy handlers
+        # (cycle, timers, redirects) is unaffected.
+        self._occupancy_bank_write: Callable[[], Awaitable[OccupancyBankWrite | None]] | None = None
 
         # Nat-vent soft-start sub-mode (Issue #540, scoped from #533): qualifies WHY an
         # active nat-vent session was entered — True when entered via the parity/
@@ -5324,15 +5337,19 @@ class AutomationEngine:
             whf_owns_hvac=self._whf_owns_hvac(),
         )
 
-    def tou_bank_holds_setpoint(self) -> bool:
-        """DISPLAY read (Issue #1404): nothing defers a time-of-use bank right now, so its write lands.
+    def tou_bank_gates_pass(self) -> bool:
+        """CONTROL (Issues #1404/#1409): nothing defers a time-of-use bank right now, so its write would land.
 
         The bank writes skip on an unconfirmed manual change, then on the same holds ``_tou_bank_skips_band_write()``
         checks (a manual override, a door/window pause, nat-vent or whole-house-fan ownership, a settled-open sensor,
-        a blower session). Asked by ``ClimateAdvisorCoordinator.current_hold()`` only; it reads state and changes
-        nothing, and no decision path calls it.
+        a blower session). Reads state only. The control source the coordinator's ``_tou_bank_in_force()`` uses; the
+        display resolver reads it through there (display reads control, never the reverse).
         """
         return bool(not self._override_confirm_pending and self._tou_bank_skips_band_write(True))
+
+    def tou_bank_holds_setpoint(self) -> bool:
+        """DISPLAY alias of ``tou_bank_gates_pass()`` (Issue #1404), kept for display callers and tests."""
+        return self.tou_bank_gates_pass()
 
     def _tou_bank_skips_band_write(self, tou_bank_owns_setpoint: bool) -> bool:
         """Issue #1393/#1395: True when this pass must not write a band because the time-of-use bank write follows it.
@@ -12031,24 +12048,36 @@ class AutomationEngine:
                 nat_vent_cutoff_already_reached=self._nat_vent_cutoff_already_reached,
             )
 
-    async def _bank_takes_occupancy_write(self, mode: str) -> bool:
-        """Issue #1409: on an occupancy change inside an open time-of-use bank window, write the new occupancy's bank
-        target instead of its band. True when the bank was written (the caller then writes no band); False keeps the
-        band write exactly as before (no occupancy change in progress, no bank window, a gate defers the bank, start-up
-        coalescing, or the bank write did not happen)."""
-        if not self._occupancy_change_in_progress or self._occupancy_bank_write is None:
-            return False
+    @contextlib.contextmanager
+    def occupancy_change(self) -> Iterator[None]:
+        """Mark this task as running an occupancy CHANGE for this engine (Issue #1409), for the ``with`` body only."""
+        token = _OCCUPANCY_CHANGE.set(self)
         try:
-            wrote = bool(await self._occupancy_bank_write())
+            yield
+        finally:
+            _OCCUPANCY_CHANGE.reset(token)
+
+    async def _bank_takes_occupancy_write(self, mode: str) -> OccupancyBankWrite | None:
+        """Issue #1409: on an occupancy change inside an open time-of-use bank window, write the new occupancy's bank
+        target instead of its band. Returns the write when the bank was written and accepted (the caller then writes
+        no band and records the bank); None keeps the band write exactly as before (not inside this task's occupancy
+        change, no bank window, a gate defers the bank, start-up coalescing, a failed or rejected write, a fault)."""
+        if _OCCUPANCY_CHANGE.get() is not self or self._occupancy_bank_write is None:
+            return None
+        try:
+            wrote = await self._occupancy_bank_write()
         except Exception:  # noqa: BLE001 - never lose the band write to a bank fault
             _LOGGER.warning("Occupancy %s: time-of-use bank write failed, writing the band", mode, exc_info=True)
-            return False
-        if wrote:
-            _LOGGER.info(
-                "Occupancy %s inside a time-of-use bank window: the bank target was written instead of the band "
-                "(one write, no band-then-bank pair)",
-                mode,
-            )
+            return None
+        if not isinstance(wrote, OccupancyBankWrite):
+            return None
+        _LOGGER.info(
+            "Occupancy %s inside a time-of-use bank window: the bank target %s %.1f F was written instead of the band "
+            "(one write, no band-then-bank pair)",
+            mode,
+            wrote.mode,
+            wrote.target_f,
+        )
         return wrote
 
     async def handle_occupancy_away(self) -> None:
@@ -17297,22 +17326,35 @@ class AutomationEngine:
                         _band.ceiling,
                     )
 
+        # Issue #1409: inside an open time-of-use bank window the change writes the bank instead (decided first, so the
+        # record below states what the thermostat was actually sent).
+        _bank_write = await self._bank_takes_occupancy_write(mode)
         # Issue #591: WINDOWED dedup — see handle_occupancy_away()'s original comment for
         # the full rationale (repeated bands are often intentional re-confirmations, but
         # an unguarded site reopens the #584 double-emit shape within seconds).
         _sig = (mode, round(_band.floor, 2), round(_band.ceiling, 2))
+        if _bank_write is not None:
+            _sig = (mode, "tou_bank", _bank_write.mode, round(_bank_write.target_f, 2))
         if self._emit_event_callback and not self._recent_duplicate("occupancy_setback", _sig, window_seconds=600):
-            self._emit_event_callback(
-                "occupancy_setback",
-                {
-                    "mode": mode,
-                    "floor": _band.floor,
-                    "ceiling": _band.ceiling,
-                    "occupancy": mode,
-                    "indoor_f": self._get_indoor_temp_f(),
-                },
-            )
-        if await self._bank_takes_occupancy_write(mode):
+            _payload: dict[str, Any] = {
+                "mode": mode,
+                "floor": _band.floor,
+                "ceiling": _band.ceiling,
+                "occupancy": mode,
+                "indoor_f": self._get_indoor_temp_f(),
+            }
+            if _bank_write is not None:
+                _payload.update(
+                    {
+                        "tou_bank": True,
+                        "target_f": _bank_write.target_f,
+                        "hvac_mode": _bank_write.mode,
+                        "outcome": hvac_outcome_label(_bank_write.result),
+                        "note": "a time-of-use bank owns the setpoint; the band applies after it",
+                    }
+                )
+            self._emit_event_callback("occupancy_setback", _payload)
+        if _bank_write is not None:
             return
         await self._apply_comfort_band(_band, reason=f"occupancy {mode} — setback band")
 
@@ -17434,7 +17476,8 @@ class AutomationEngine:
                 )
         if decision.restore:
             self._occupancy_restore_deferred_pending = False
-            if not await self._bank_takes_occupancy_write("home"):
+            _bank_write = await self._bank_takes_occupancy_write("home")
+            if _bank_write is None:
                 with self._mode_change_context("restore"):
                     await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
             # The comfort-edge selector may have written the OTHER family than the band's active edge (a mild day
@@ -17446,7 +17489,20 @@ class AutomationEngine:
             # occupant is home, CA is back in control), but a write that failed / was dry-run / was superseded is
             # rendered "NOT sent" instead of reading as a setpoint the thermostat received.
             _w = self._last_mode_write
-            if self._emit_event_callback:
+            if self._emit_event_callback and _bank_write is not None:
+                # Issue #1409: the change wrote the home bank, not the comfort band: record what was sent.
+                self._emit_event_callback(
+                    "occupancy_comfort_restored",
+                    {
+                        "mode": _bank_write.mode,
+                        "target_f": _bank_write.target_f,
+                        "indoor_f": decision.indoor_temp_f,
+                        "outcome": hvac_outcome_label(_bank_write.result),
+                        "tou_bank": True,
+                        "note": "a time-of-use bank owns the setpoint; the comfort band applies after it",
+                    },
+                )
+            elif self._emit_event_callback:
                 if _w.held_reason is None and _w.target_f is not None:
                     self._emit_event_callback(
                         "occupancy_comfort_restored",

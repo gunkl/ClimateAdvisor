@@ -1824,6 +1824,11 @@ def _render_occupancy_setback(p: dict, unit: str) -> tuple[str, str]:
     occ = p.get("occupancy") or p.get("mode", "")
     label = f"Occupancy setback ({occ})" if occ else "Occupancy setback"
     settings = _format_band_setpoint(p.get("floor"), p.get("ceiling"), None, unit)
+    if p.get("tou_bank") and p.get("target_f") is not None:
+        # Issue #1409: the change wrote the time-of-use bank, not the band: say what the thermostat was told.
+        with contextlib.suppress(TypeError, ValueError):
+            sent = f"{p.get('hvac_mode', '')} {format_temp(float(p['target_f']), unit)}".strip()
+            settings = f"sent {sent} (time-of-use bank owns the setpoint; band {settings} after it)"
     return label, settings
 
 
@@ -1839,6 +1844,8 @@ def _render_occupancy_comfort_restored(p: dict, unit: str) -> tuple[str, str]:
     if target is not None:
         with contextlib.suppress(TypeError, ValueError):
             settings = f"setpoint: {format_temp(float(target), unit)}"
+    if p.get("tou_bank") and settings:
+        settings += " (time-of-use bank owns the setpoint; comfort band after it)"  # Issue #1409
     return label, settings
 
 

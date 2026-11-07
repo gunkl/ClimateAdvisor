@@ -513,7 +513,8 @@ class TestFrontend:
         assert "chartData.commanded_setpoint_history" in html
         assert "const _hasCommanded = commandedPts.some(p => p.y != null);" in html and "if (_hasCommanded) {" in html
         assert "label: 'Thermostat set'" in html
-        assert "d.label === 'Thermostat set'" in html  # the Target toggle drives it too
+        # the Target toggle drives it too: both datasets carry the 'ov:target' id, and toggleSeries flips every one
+        assert "caId: 'ov:target', label: 'Thermostat set'" in html and "if (d.caId !== id) return;" in html
 
 
 # ---------------------------------------------------------------------------

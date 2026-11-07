@@ -249,14 +249,13 @@ def test_the_thermostat_set_series_has_a_legend_item_shown_only_with_the_series(
     assert 'id="legend-thermostat-set" style="display:none"' in html, "legend item missing or shown by default"
     assert "<span>Thermostat set</span>" in html
     assert "_cmdLegend.style.display = _hasCommanded ? '' : 'none'" in html
-    assert "if (_hasCommanded) {\n      datasets.push({\n        label: 'Thermostat set'," in html
+    assert "if (_hasCommanded) {\n      datasets.push({\n        caId: 'ov:target', label: 'Thermostat set'," in html
 
 
 def test_the_hover_panel_shows_the_thermostat_set_value():
+    """Chart v2 (#1230 R2): the readout's Overlays row reads the chart datasets, skipping hidden ones and gaps."""
     html = _index_html()
-    assert "function _commandedHoverItem(chart, xVal)" in html
-    assert "}).join('') + _commandedHoverItem(chart, xVal);" in html
-    body = html.split("function _commandedHoverItem(chart, xVal)", 1)[1].split("\n    }\n", 1)[0]
+    body = html.split("function _renderReadout(ms)", 1)[1].split("\n  function clearChartPin", 1)[0]
+    assert "['Humidity %', 'Feels-like', 'Target', 'Thermostat set'].includes(ds.label)" in body
     assert "ds.hidden" in body, "a hidden (toggled-off) series must not show a hover value"
-    assert "last.y == null" in body, "no value across a gap (null rows outside offset stretches)"
-    assert "Thermostat set: <strong>" in body
+    assert "if (v == null) return;" in body, "no value across a gap (null rows outside offset stretches)"

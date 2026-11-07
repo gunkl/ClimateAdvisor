@@ -57,8 +57,9 @@ test.describe('Temperature Forecast Chart', () => {
 
     const panel = page.locator('#chart-hover-panel');
     const html = await panel.innerHTML();
-    expect(html).toContain('P-Indoor');
-    expect(html).toContain('P-Outdoor');
+    // Chart v2 (#1230 R2): the readout is grouped Indoor / Predicted / Outdoor
+    expect(html).toContain('Predicted');
+    expect(html).toContain('Outdoor');
     expect(html).toMatch(/Indoor/);
     expect(html).toMatch(/Outdoor/);
   });
@@ -93,7 +94,7 @@ test.describe('Temperature Forecast Chart', () => {
     }
   });
 
-  test('range button 6h centers x-axis on now (±3h)', async ({ page }) => {
+  test('range button 6h shows 6h of past and 24h ahead', async ({ page }) => {
     await page.click('button[data-range="6h"]');
     await page.waitForTimeout(500);
 
@@ -104,10 +105,10 @@ test.describe('Temperature Forecast Chart', () => {
     });
 
     const now = Date.now();
-    // 6h range centered: min ≈ now-3h, max ≈ now+3h (allow 2 min tolerance)
+    // Chart v2: Past 6h + Ahead 24h (default): min ≈ now-6h, max ≈ now+24h (allow 2 min tolerance)
     expect(axisMin).not.toBeNull();
-    expect(Math.abs(axisMin - (now - 3 * 3600000))).toBeLessThan(2 * 60 * 1000);
-    expect(Math.abs(axisMax - (now + 3 * 3600000))).toBeLessThan(2 * 60 * 1000);
+    expect(Math.abs(axisMin - (now - 6 * 3600000))).toBeLessThan(2 * 60 * 1000);
+    expect(Math.abs(axisMax - (now + 24 * 3600000))).toBeLessThan(2 * 60 * 1000);
   });
 
   test('hover panel clears when mouse leaves chart', async ({ page }) => {
@@ -278,12 +279,12 @@ test.describe('Temperature Forecast Chart', () => {
 
   test('predicted outdoor dataset contains points from state_log (historical predicted)', async ({ page }) => {
     // The fixture state_log has 48 entries with pred_outdoor set. After drawChart(),
-    // the 'Predicted Outdoor' dataset must include points sourced from those stored values.
+    // the 'Service forecast' dataset must include points sourced from those stored values.
     const predOutdoorCount = await page.evaluate(() => {
-      const canvas = document.getElementById('temp-chart');
+      const canvas = document.getElementById('out-chart');
       const chart = Chart.getChart(canvas);
       if (!chart) return 0;
-      const ds = chart.data.datasets.find(d => d.label === 'Predicted Outdoor');
+      const ds = chart.data.datasets.find(d => d.label === 'Service forecast');
       return ds ? ds.data.length : 0;
     });
     // 48 fixture state_log entries all have pred_outdoor; plus today's remaining forecast hours
@@ -297,7 +298,7 @@ test.describe('Temperature Forecast Chart', () => {
       const canvas = document.getElementById('temp-chart');
       const chart = Chart.getChart(canvas);
       if (!chart) return false;
-      const ds = chart.data.datasets.find(d => d.label === 'Predicted Outdoor');
+      const ds = chart.data.datasets.find(d => d.label === 'Service forecast');
       if (!ds || !ds.data.length) return false;
       const todayMidnight = new Date();
       todayMidnight.setHours(0, 0, 0, 0);
@@ -308,17 +309,17 @@ test.describe('Temperature Forecast Chart', () => {
 
   // ── Navigation / windowing tests (TDD — written before implementation) ──────
 
-  test('24h default view is centered on now — max ≈ now+12h', async ({ page }) => {
+  test('24h default view: past 24h and 24h ahead — max ≈ now+24h', async ({ page }) => {
     const axisMax = await page.evaluate(() => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));
       return chart ? chart.scales.x.max : null;
     });
     expect(axisMax).not.toBeNull();
     // 24h centered: max = now + 12h (allow 2 min tolerance)
-    expect(Math.abs(axisMax - (Date.now() + 12 * 3600000))).toBeLessThan(2 * 60 * 1000);
+    expect(Math.abs(axisMax - (Date.now() + 24 * 3600000))).toBeLessThan(2 * 60 * 1000);
   });
 
-  test('forward nav button shifts 24h window forward by 4h', async ({ page }) => {
+  test('forward nav button shifts the window forward by half a view (24h)', async ({ page }) => {
     const maxBefore = await page.evaluate(() => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));
       return chart ? chart.scales.x.max : null;
@@ -329,11 +330,11 @@ test.describe('Temperature Forecast Chart', () => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));
       return chart ? chart.scales.x.max : null;
     });
-    // Step for 24h = 4h
-    expect(Math.abs((maxAfter - maxBefore) - 4 * 3600000)).toBeLessThan(60 * 1000);
+    // half of a 48h view
+    expect(Math.abs((maxAfter - maxBefore) - 24 * 3600000)).toBeLessThan(60 * 1000);
   });
 
-  test('back nav button shifts 24h window backward by 4h', async ({ page }) => {
+  test('back nav button shifts the window backward by half a view (24h)', async ({ page }) => {
     const minBefore = await page.evaluate(() => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));
       return chart ? chart.scales.x.min : null;
@@ -344,8 +345,8 @@ test.describe('Temperature Forecast Chart', () => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));
       return chart ? chart.scales.x.min : null;
     });
-    // min should decrease by 4h
-    expect(Math.abs((minBefore - minAfter) - 4 * 3600000)).toBeLessThan(60 * 1000);
+    // min should decrease by half a view
+    expect(Math.abs((minBefore - minAfter) - 24 * 3600000)).toBeLessThan(60 * 1000);
   });
 
   test('switching range resets pan offset — 12h window midpoint ≈ now', async ({ page }) => {
@@ -367,10 +368,10 @@ test.describe('Temperature Forecast Chart', () => {
     await page.waitForTimeout(500);
 
     const maxX = await page.evaluate(() => {
-      const canvas = document.getElementById('temp-chart');
+      const canvas = document.getElementById('out-chart');
       const chart = Chart.getChart(canvas);
       if (!chart) return null;
-      const ds = chart.data.datasets.find(d => d.label === 'Predicted Outdoor');
+      const ds = chart.data.datasets.find(d => d.label === 'Service forecast');
       if (!ds || !ds.data.length) return null;
       return Math.max(...ds.data.map(p => p.x));
     });

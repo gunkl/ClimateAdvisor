@@ -391,6 +391,33 @@ def test_confidence_none_predicts_nothing_and_archives_nothing(fake: FakePredict
     assert coord._v4_archive.data == {} and coord._v4_last_cycle["predicted"] is False
 
 
+def test_cycle_keeps_the_future_lines_for_the_status_chart(fake: FakePredictor) -> None:
+    """Issue #1230 R2: the newest 24 h lines, corrected outdoor forecast and no-plan baseline are kept (display)."""
+    coord, fake_hass, scheduler = _build()
+    coord._v4_store.v4_model = _fake_model_dict(coord)
+    _seed_cycle_inputs(coord, scheduler)
+    assert coord._v4_last_future is None
+    _cycle(coord, scheduler)
+    future = coord._v4_last_future
+    assert future is not None and future["at"] == scheduler.now().isoformat()
+    climate = coord.config["climate_entity"]
+    assert len(future["predictions"][climate]) == 96
+    # corrected: the raw forecast plus the (fake) learned bias, on the same grid
+    assert len(future["corrected"]) == 96
+    assert future["corrected"][0][1] == pytest.approx(fake.predict_calls[0]["inputs"][0].outdoor_f + 1.5)
+    # baseline: a second predict over the same plan with no thermostat setpoints (the house with no HVAC)
+    base_call = fake.predict_calls[-1]
+    assert all(i.heat_sp_f is None and i.cool_sp_f is None for i in base_call["inputs"])
+    assert len(fake.predict_calls) == 2 and len(future["baseline"][climate]) == 96
+    # a cycle with nothing to predict from drops the stale lines instead of drawing yesterday's future
+    coord._hourly_forecast_temps = []
+    _tick(scheduler, 1800)
+    _seed_cycle_inputs(coord, scheduler)
+    coord._hourly_forecast_temps = []
+    _cycle(coord, scheduler)
+    assert coord._v4_last_future is None
+
+
 def test_cycle_error_is_swallowed_and_warned_once(fake: FakePredictor, caplog: pytest.LogCaptureFixture) -> None:
     coord, fake_hass, scheduler = _build()
     coord._v4_store.v4_model = _fake_model_dict(coord)

@@ -17,6 +17,7 @@ instead of breaking setup.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import time
@@ -207,6 +208,95 @@ def run_cycle(
         forecast_now_f=forecast_now_f,
     )
     return predictions, mass
+
+
+def corrected_forecast(
+    *,
+    model_dict: Mapping[str, Any],
+    times: Sequence[datetime],
+    raw_f: Sequence[float],
+    tz: tzinfo,
+    now: datetime | None = None,
+    outdoor_now_f: float | None = None,
+    forecast_now_f: float | None = None,
+) -> list[tuple[datetime, float]]:
+    """``(time, degrees F)`` of the weather service's outdoor values after v4's learned correction (display only).
+
+    Used by the Status chart's "corrected forecast" line (Issue #1230 R2). ``now`` given -> a future line (the current
+    miss decays over the nowcast time); omitted -> a past line (hourly bias only). Pure CPU, no I/O.
+    """
+    if not times:
+        return []
+    p = _predictor()
+    model = p.from_dict(dict(model_dict))
+    if model is None:
+        raise ValueError("stored v4 model is not readable (unknown schema or malformed)")
+    vals = p.corrected_forecast(
+        model,
+        times=list(times),
+        raw_f=list(raw_f),
+        tz=tz,
+        now=now,
+        outdoor_now_f=outdoor_now_f,
+        forecast_now_f=forecast_now_f,
+    )
+    return [(t, v) for t, v in zip(times, vals, strict=True) if math.isfinite(v)]
+
+
+def chart_extras(
+    *,
+    model_dict: Mapping[str, Any],
+    now: datetime,
+    tz: tzinfo,
+    readings: Mapping[str, float | None],
+    mass_f: float | None,
+    inputs: Sequence[Any],
+    outdoor_now_f: float | None = None,
+    forecast_now_f: float | None = None,
+) -> tuple[list[tuple[datetime, float]], dict[str, list[tuple[datetime, float]]]]:
+    """The two extra future lines the Status chart draws: ``(corrected_outdoor, baseline_by_sensor)`` (Issue #1230 R2).
+
+    * corrected outdoor: the service's hourly outdoor values after v4's learned correction;
+    * baseline: the same predict with no thermostat setpoints ("the house with no HVAC"), windows as planned.
+
+    Display only. Each half fails on its own into an empty result, so one broken line never hides the other. Blocking
+    CPU (about 1 ms): run via the executor.
+    """
+    corrected: list[tuple[datetime, float]] = []
+    baseline: dict[str, list[tuple[datetime, float]]] = {}
+    if not inputs:
+        return corrected, baseline
+    try:
+        corrected = corrected_forecast(
+            model_dict=model_dict,
+            times=[i.ts for i in inputs],
+            raw_f=[i.outdoor_f for i in inputs],
+            tz=tz,
+            now=now,
+            outdoor_now_f=outdoor_now_f,
+            forecast_now_f=forecast_now_f,
+        )
+    except Exception:  # noqa: BLE001 - optional line
+        _LOGGER.debug("v4 chart extras: corrected forecast failed", exc_info=True)
+    try:
+        p = _predictor()
+        model = p.from_dict(dict(model_dict))
+        if model is not None:
+            plain = [dataclasses.replace(i, heat_sp_f=None, cool_sp_f=None) for i in inputs]
+            out = p.predict(
+                model,
+                now=now,
+                readings=dict(readings),
+                mass_f=mass_f,
+                inputs=plain,
+                tz=tz,
+                outdoor_now_f=outdoor_now_f,
+                forecast_now_f=forecast_now_f,
+            )
+            baseline = {sid: list(pts) for sid, pts in (out or {}).items()}
+    except Exception:  # noqa: BLE001 - optional line
+        _LOGGER.debug("v4 chart extras: baseline failed", exc_info=True)
+    return corrected, baseline
 
 
 # ---------------------------------------------------------------------------

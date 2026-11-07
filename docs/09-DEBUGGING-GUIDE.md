@@ -528,7 +528,10 @@ accumulating.
 **Step 3 — Check current active observations (live system):**
 ```bash
 python3 tools/thermal_health.py   # requires HA_URL + HA_TOKEN in .env or environment
+python3 tools/thermal_health.py --entry-id <id>   # several zones: required (the tool lists the ids if omitted)
 ```
+
+With several zones, every REST-reading tool (`thermal_health.py`, `learning_db.py`'s live section, `simulation_loop.py`, `build_historical_scenario.py`) sends `--entry-id` as `?zone=`. Without it they stop and list the zones instead of reporting the first one (Issue #1418). A hand-written `curl` must add `?zone=<entry_id>` too. Otherwise a GET answers for the first zone and raises the "Ambiguous zone selection" Repairs card. See [REST API — Choosing a zone](rest-api.md#choosing-a-zone-zone).
 
 **Step 3 — Check thermal log activity:**
 ```bash

@@ -19,6 +19,9 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _zone_storage import ZoneSelectionRequired, format_zone_choices, resolve_api_zone, with_zone  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = REPO_ROOT / "tools" / "simulations" / "results"
 PROCESSED_PATH = RESULTS_DIR / "processed_incidents.json"
@@ -72,9 +75,9 @@ def load_config() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def fetch_event_log(ha_url: str, ha_token: str, hours: int) -> list[dict]:
-    """GET /api/climate_advisor/event_log?hours=N and return entries list."""
-    url = f"{ha_url.rstrip('/')}/api/climate_advisor/event_log?hours={hours}"
+def fetch_event_log(ha_url: str, ha_token: str, hours: int, entry_id: str | None = None) -> list[dict]:
+    """GET /api/climate_advisor/event_log?hours=N for ``entry_id``'s zone and return entries list."""
+    url = with_zone(f"{ha_url.rstrip('/')}/api/climate_advisor/event_log?hours={hours}", entry_id)
     req = urllib.request.Request(
         url,
         headers={"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"},
@@ -391,7 +394,7 @@ def _bootstrap_pending_bspecs(stats: dict) -> int:
     return count
 
 
-def run_once(config: dict, hours: int, dry_run: bool) -> int:
+def run_once(config: dict, hours: int, dry_run: bool, entry_id: str | None = None) -> int:
     """Single pass: bootstrap authored BSpecs, then fetch and process new incidents."""
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     stats: dict = _read_json(STATS_PATH, {})
@@ -412,8 +415,9 @@ def run_once(config: dict, hours: int, dry_run: bool) -> int:
 
     # Phase 2: Incident polling — process new production incidents from HA.
     print(f"Fetching event_log (last {hours}h) from {ha_url}...", file=sys.stderr)
+    zone = resolve_api_zone(ha_url, ha_token, entry_id)  # ZoneSelectionRequired propagates to main() (#1418)
     try:
-        entries = fetch_event_log(ha_url, ha_token, hours)
+        entries = fetch_event_log(ha_url, ha_token, hours, zone)
     except Exception as exc:
         print(f"ERROR: Failed to fetch event_log: {exc}", file=sys.stderr)
         return bootstrap_count
@@ -524,6 +528,11 @@ def main() -> int:
         help="Event log lookback window in hours (default: 2)",
     )
     parser.add_argument(
+        "--entry-id",
+        default=None,
+        help="Zone config entry_id (required when several zones are loaded).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         dest="dry_run",
@@ -532,7 +541,12 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config()
-    processed = run_once(config, args.hours, args.dry_run)
+    try:
+        processed = run_once(config, args.hours, args.dry_run, args.entry_id)
+    except ZoneSelectionRequired as exc:
+        print("ERROR: several Climate Advisor zones are loaded — pass --entry-id, one of:", file=sys.stderr)
+        print(format_zone_choices(exc.zones), file=sys.stderr)
+        return 1
     if not args.dry_run:
         print(f"\nDone. {processed} new incident(s) processed.")
     return 0

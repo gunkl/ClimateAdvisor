@@ -401,9 +401,13 @@ class TestZoneResolutionAmbiguousIssue:
         calls = _zone_resolution_ambiguous_calls(mock_delete)
         assert len(calls) == 1, f"expected the stale zone_resolution_ambiguous issue to be cleared, got {calls}"
 
-    def test_not_raised_twice_for_same_outcome(self):
-        """Repeated calls resolving to the SAME fallback zone must not re-raise
-        the issue — matches the WARNING log line's throttle (same token)."""
+    def test_raised_on_every_unscoped_call(self):
+        """Issue #1418 (owner: "it still needs to be flagged the same way when it
+        happens"): every unscoped request raises the issue, including repeats of
+        the same caller. Only the WARNING log line keeps its throttle (it guards
+        the AI Investigator's log buffer); the Repairs flag no longer shares it,
+        since sharing it let a repeat offender (a tool, an agent, a stuck tab)
+        go unflagged after its first request."""
         from custom_components.climate_advisor import zone_registry
         from tools.sim_harness.build_coordinator import build_headless_multi_zone
 
@@ -414,7 +418,7 @@ class TestZoneResolutionAmbiguousIssue:
             zone_registry.get_default_coordinator(fake_hass)
             zone_registry.get_default_coordinator(fake_hass)
 
-        assert len(_zone_resolution_ambiguous_calls(mock_create)) == 1
+        assert len(_zone_resolution_ambiguous_calls(mock_create)) == 3
 
     def test_cleared_when_unloaded_back_to_one_zone(self):
         from custom_components.climate_advisor import async_unload_entry

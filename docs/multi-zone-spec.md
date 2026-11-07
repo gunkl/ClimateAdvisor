@@ -746,6 +746,8 @@ duplicated onto the Repairs card. This mirrors the existing split between
 `_LOGGER.warning()` detail and the shorter `weather_entity_not_found` card
 text already in this codebase.
 
+**Superseded (Issue #1418):** that copy named no cause and no remedy. The owner saw it on a 7-zone install and could not tell what to change. The card now carries `{request}` (method, path, caller) and `{outcome}` ("answered with the data of zone \"Zone 1\"" or "refused, and nothing was changed") placeholders, and tells the owner to add `?zone=<entry_id>`. Every view now reads `zone` as well as `entry_id`, via `api._zone_param()`. The owner also ruled that the card is raised on **every** unscoped request, on every endpoint (including the `status` bootstrap) and from every caller. It no longer shares the WARNING throttle, and a dismissed card comes back (`zone_registry._raise_ambiguous_issue`, `flag_unscoped_request`). See [REST API — Choosing a zone](rest-api.md#choosing-a-zone-zone).
+
 **Structural closure:** PR9 should ship in the same release batch as PR7
 wherever practically possible, narrowing the window between merge and every
 existing dashboard caller actually loading updated code. A `config_flow`

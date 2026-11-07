@@ -26,7 +26,15 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _zone_storage import LEARNING_DB_FILE, resolve_remote_path_with_discovery  # noqa: E402
+from _zone_storage import (  # noqa: E402
+    LEARNING_DB_FILE,
+    ZoneSelectionRequired,
+    entry_id_from_remote_path,
+    format_zone_choices,
+    resolve_api_zone,
+    resolve_remote_path_with_discovery,
+    with_zone,
+)
 from ha_logs import load_config, ssh_args, ssh_target  # noqa: E402
 
 # Kept for backward compatibility with anything importing this name directly;
@@ -76,12 +84,15 @@ def _load_dotenv() -> None:
 # ---------------------------------------------------------------------------
 
 
-def fetch_learning_db(config: dict[str, str], entry_id: str | None = None) -> dict:
+def fetch_learning_db(config: dict[str, str], entry_id: str | None = None, resolved: dict | None = None) -> dict:
     """SSH into HA and read the learning JSON file. Returns parsed dict.
 
     Since Issue #796, storage is entry-scoped in a multi-zone install. If
     entry_id isn't given, auto-discovers a single matching zone file, or
     falls back to the legacy unscoped path for single-zone installs.
+    ``resolved`` (optional) receives ``entry_id``: the zone whose file was read
+    (None for the legacy unscoped file), so the live REST section asks for the
+    same zone (Issue #1418).
     """
     remote_path = resolve_remote_path_with_discovery(
         config,
@@ -89,6 +100,8 @@ def fetch_learning_db(config: dict[str, str], entry_id: str | None = None) -> di
         entry_id,
         lambda cfg, remote_cmd: ssh_args(cfg) + [ssh_target(cfg), remote_cmd],
     )
+    if resolved is not None:
+        resolved["entry_id"] = entry_id or entry_id_from_remote_path(LEARNING_DB_FILE, remote_path)
     cmd = ssh_args(config) + [ssh_target(config), f"cat {remote_path}"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -122,12 +135,12 @@ def fetch_learning_db(config: dict[str, str], entry_id: str | None = None) -> di
 # ---------------------------------------------------------------------------
 
 
-def _fetch_live_pipeline(ha_url: str, ha_token: str) -> dict | None:
-    """Fetch live pipeline state from the debug API. Returns dict or None."""
+def _fetch_live_pipeline(ha_url: str, ha_token: str, entry_id: str | None = None) -> dict | None:
+    """Fetch live pipeline state from the debug API for ``entry_id``'s zone. Returns dict or None."""
     import urllib.error
     import urllib.request
 
-    url = f"{ha_url}{DEBUG_STATE_URL_PATH}"
+    url = with_zone(f"{ha_url}{DEBUG_STATE_URL_PATH}", entry_id)
     req = urllib.request.Request(
         url,
         headers={
@@ -1171,7 +1184,8 @@ def main() -> None:
     config = load_config()
 
     print(f"Reading {LEARNING_DB_FILE} from {config['HA_HOST']} ...")
-    db = fetch_learning_db(config, entry_id=getattr(args, "entry_id", None))
+    resolved: dict = {}
+    db = fetch_learning_db(config, entry_id=getattr(args, "entry_id", None), resolved=resolved)
     print()
 
     if show_check_587:
@@ -1205,7 +1219,14 @@ def main() -> None:
     ha_token = os.environ.get("HA_TOKEN", "")
 
     if ha_url and ha_token:
-        live_data = _fetch_live_pipeline(ha_url, ha_token)
+        # Issue #1418: the live section must describe the same zone as the file above, never the first zone.
+        try:
+            live_zone = resolve_api_zone(ha_url, ha_token, resolved.get("entry_id"))
+        except ZoneSelectionRequired as exc:
+            print("(live pending observations skipped: several zones are loaded — pass --entry-id, one of:)")
+            print(format_zone_choices(exc.zones))
+            return
+        live_data = _fetch_live_pipeline(ha_url, ha_token, live_zone)
         if live_data is not None:
             _print_live_pipeline(live_data["thermal_pipeline"])
         else:

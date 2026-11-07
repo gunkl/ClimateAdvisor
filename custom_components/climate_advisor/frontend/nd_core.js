@@ -128,7 +128,7 @@
   };
   async function request(path, opts, parse) {
     opts = opts || {};
-    path = ND.withZone(path);
+    if (!opts.noZone) path = ND.withZone(path); // noZone: only loadStatus()'s stale-zone retry (Issue #1418)
     var token = await getToken();
     var headers = Object.assign({}, opts.headers || {});
     if (token) headers.Authorization = 'Bearer ' + token;
@@ -168,11 +168,13 @@
     }
     var sig = zones.map(function (z) { return z.entry_id; }).join(',');
     var changed = false;
+    // Issue #1418: re-pick even when the zone list is unchanged, so a missing or unlisted ND.zone is always corrected
+    // (left null, every later request went out unscoped and came back with the first zone's data).
+    if (!ND.zone || !zones.some(function (z) { return z.entry_id === ND.zone; })) {
+      ND.zone = zones[0].entry_id; ND.ls.set(ZONE_KEY, ND.zone); changed = true;
+    }
     if (sig !== zoneSig) {
       zoneSig = sig;
-      if (!ND.zone || !zones.some(function (z) { return z.entry_id === ND.zone; })) {
-        ND.zone = zones[0].entry_id; ND.ls.set(ZONE_KEY, ND.zone); changed = true;
-      }
       sel.innerHTML = zones.map(function (z) {
         return '<option value="' + ND.esc(z.entry_id) + '">' + ND.esc(z.title || z.entry_id) + '</option>';
       }).join('');
@@ -184,10 +186,10 @@
 
   // ---------- status, health, banners ----------
   var MAX_RETRY = 3;
-  ND.loadStatus = async function (depth) {
+  ND.loadStatus = async function (depth, noZone) {
     depth = depth || 0;
     try {
-      var data = await ND.api('status');
+      var data = await ND.api('status', noZone ? { noZone: true } : undefined);
       if (data.zone_selection_required) {
         renderZones(data.zones, data.zone_count);
         if (depth < MAX_RETRY) return ND.loadStatus(depth + 1);
@@ -201,10 +203,10 @@
       ND.emit('status', data);
       return data;
     } catch (e) {
-      if (depth < MAX_RETRY && ND.zone && e.message === 'HTTP 503') { // stale stored zone: clear and retry unscoped
-        ND.zone = null; ND.ls.del(ZONE_KEY);
-        return ND.loadStatus(depth + 1);
-      }
+      // Stale or reloading zone: keep ND.zone and send only this retry unscoped; renderZones() keeps it if it is
+      // listed again, else picks the first (Issue #1418: clearing it let requests fired meanwhile go unscoped and
+      // come back with the first zone's data).
+      if (depth < MAX_RETRY && ND.zone && e.message === 'HTTP 503' && !noZone) return ND.loadStatus(depth + 1, true);
       ND.status = null;
       ND.$('health-text').textContent = 'Could not load status: ' + e.message;
       ND.$('health').className = 'health bad';

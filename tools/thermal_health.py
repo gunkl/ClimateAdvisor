@@ -8,6 +8,7 @@ Usage:
     export HA_URL=http://homeassistant.local:8123
     export HA_TOKEN=<your-long-lived-access-token>
     python3 tools/thermal_health.py
+    python3 tools/thermal_health.py --entry-id <zone entry_id>   # multi-zone installs (required there)
 
     # Or create .env at the repo root (template: tools/.env.example):
     # HA_URL=http://homeassistant.local:8123
@@ -21,12 +22,17 @@ Exit codes:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _zone_storage import ZoneSelectionRequired, format_zone_choices, resolve_api_zone, with_zone  # noqa: E402
 
 
 def _load_dotenv() -> None:
@@ -69,9 +75,49 @@ def _pad(text: str, width: int) -> str:
     return str(text).ljust(width)
 
 
-def _fetch_sensor(ha_url: str, ha_token: str) -> dict:
+def _zone_sensor_template(entry_id: str) -> str:
+    """HA template listing the zone's Climate Advisor sensor that carries ``thermal_learning_health``."""
+    return (
+        "{% for e in integration_entities('climate_advisor') %}"
+        f"{{% if e.startswith('sensor.') and config_entry_id(e) == '{entry_id}'"
+        " and state_attr(e, 'thermal_learning_health') is not none %}{{ e }} {% endif %}"
+        "{% endfor %}"
+    )
+
+
+def _resolve_sensor_entity(ha_url: str, ha_token: str, entry_id: str | None) -> str:
+    """The zone's comfort-score sensor entity id (Issue #1418).
+
+    Each zone has its own sensor (unique id ``<entry_id>_comfort_score``), so a fixed entity id reads the first
+    zone's. With no ``entry_id`` (single-zone install) the historical default is kept.
+    """
+    if not entry_id:
+        return SENSOR_ENTITY_ID
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", entry_id):
+        print(f"Error: --entry-id {entry_id!r} is not a config entry id.")
+        sys.exit(1)
+    body = json.dumps({"template": _zone_sensor_template(entry_id)}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{ha_url}/api/template",
+        data=body,
+        headers={"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            found = resp.read().decode("utf-8").split()
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"Error: could not look up zone {entry_id}'s sensor: {exc}")
+        sys.exit(1)
+    if not found:
+        print(f"Error: no Climate Advisor sensor with thermal_learning_health found for zone {entry_id}.")
+        sys.exit(2)
+    return found[0]
+
+
+def _fetch_sensor(ha_url: str, ha_token: str, entity_id: str = SENSOR_ENTITY_ID) -> dict:
     """Fetch the compliance sensor state from HA REST API."""
-    url = f"{ha_url}/api/states/{SENSOR_ENTITY_ID}"
+    url = f"{ha_url}/api/states/{entity_id}"
     req = urllib.request.Request(
         url,
         headers={
@@ -121,9 +167,9 @@ COL_PL_OUTDOOR = 11
 COL_PL_DELTA = 7
 
 
-def _fetch_debug_state(ha_url: str, ha_token: str) -> dict | None:
-    """Fetch the debug-state API and return the parsed JSON dict, or None on any failure."""
-    url = f"{ha_url}{DEBUG_STATE_URL_PATH}"
+def _fetch_debug_state(ha_url: str, ha_token: str, entry_id: str | None = None) -> dict | None:
+    """Fetch the debug-state API for ``entry_id``'s zone and return the parsed JSON dict, or None on any failure."""
+    url = with_zone(f"{ha_url}{DEBUG_STATE_URL_PATH}", entry_id)
     req = urllib.request.Request(
         url,
         headers={
@@ -267,7 +313,14 @@ def _print_report(health: dict) -> None:
         print()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Climate Advisor thermal learning health report")
+    parser.add_argument(
+        "--entry-id",
+        default=None,
+        help="Zone config entry_id (required when several zones are loaded; listed when omitted there).",
+    )
+    args = parser.parse_args(argv)
     _load_dotenv()
     ha_url = os.environ.get("HA_URL", "").rstrip("/")
     ha_token = os.environ.get("HA_TOKEN", "")
@@ -279,8 +332,16 @@ def main() -> None:
         print("  export HA_TOKEN=<your-long-lived-access-token>")
         sys.exit(1)
 
-    print(f"Fetching {SENSOR_ENTITY_ID} from {ha_url} ...")
-    sensor_data = _fetch_sensor(ha_url, ha_token)
+    # Issue #1418: with several zones, an unscoped report silently describes the first zone.
+    try:
+        entry_id = resolve_api_zone(ha_url, ha_token, args.entry_id)
+    except ZoneSelectionRequired as exc:
+        print("Error: several Climate Advisor zones are loaded — pass --entry-id, one of:")
+        print(format_zone_choices(exc.zones))
+        sys.exit(1)
+    entity_id = _resolve_sensor_entity(ha_url, ha_token, entry_id)
+    print(f"Fetching {entity_id} from {ha_url} ...")
+    sensor_data = _fetch_sensor(ha_url, ha_token, entity_id)
 
     attributes = sensor_data.get("attributes")
     if not isinstance(attributes, dict):
@@ -303,7 +364,7 @@ def main() -> None:
 
     _print_report(health)
 
-    debug_data = _fetch_debug_state(ha_url, ha_token)
+    debug_data = _fetch_debug_state(ha_url, ha_token, entry_id)
     if debug_data is not None:
         _print_pipeline_section(debug_data["thermal_pipeline"])
 

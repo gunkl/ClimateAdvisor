@@ -15,6 +15,7 @@
 | How does a caller know an `event_log`/`activity_record` response doesn't cover the full requested window? | Both endpoints return `is_truncated` (bool) and `oldest_available` (ISO timestamp or null) alongside their normal payload, computed by comparing the oldest stored event against the requested window's cutoff. | [Event Log Truncation Signal](#event-log-truncation-signal) |
 | What is `hvac_control_issues` in the status response? | A list of `{issue, detail}` entries (same shape as `invariant_violations`) present only while the thermostat is not following Climate Advisor: `mode_not_obeyed` (requested mode vs live mode, minutes), `command_failing` (last attempted mode, minutes; since Issue #1121 shown only once the failure episode is at least `HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN` = 5 min old, and hidden — like `mode_not_obeyed` — while the user owns the thermostat (manual override or its pending confirmation) or the thermostat already reports the failed mode) or, since Issue #1050, `output_stall` (house outside the comfort band for hours with no heating/cooling running; diagnostic text in the user's unit; hidden while a `mode_not_obeyed` entry is open). Empty list when fine; Status-tab only (Issues #1049, #1050). | [Endpoints](#endpoints) |
 | What does `GET /api/climate_advisor/prediction_accuracy` return and where does its data come from? | Prediction engine v4's archived predictions scored against what the room then read, beside v3 and a "no change" baseline, for the "Prediction accuracy (preview)" page. Live v4 archive first, the published backtest file for older history; read-only, information only (its DP-8 rows switch nothing), no decision reads it. | [Prediction accuracy endpoint](#get-apiclimate_advisorprediction_accuracy-issue-1230-r1) |
+| How does a request choose a zone, and what happens without one? | Every view takes `?zone=<entry_id>` (`?entry_id=` is the same thing; both naming different zones -> 400). With several zones and none given: `status` returns the zone list, POST actions and `prediction_accuracy`/`timeline`/`night_strategy` refuse with 400, other GETs answer for the first zone and raise the "Ambiguous zone selection" Repairs card (Issue #1418). | [Choosing a zone](#choosing-a-zone-zone) |
 | Where does the v4 model show up for debugging? | `GET /api/climate_advisor/engines` carries a `v4` key and `get_debug_state()` (`automation_state` endpoint) a `v4_model` key: confidence, fit time, span, training MAE, last fit/cycle, archive slot counts. | [Engines and debug keys](#engines-and-debug-keys-for-v4) |
 
 ## Scope
@@ -36,6 +37,22 @@
 ## Authentication
 
 All 25 view classes set `requires_auth = True`. HA handles token validation before the view handler is invoked. No endpoint is reachable without a valid HA long-lived access token. There is no per-endpoint permission model beyond HA authentication.
+
+## Choosing a zone (`zone`)
+
+Each view answers for one zone (one config entry). Name it with the query parameter **`zone=<entry_id>`**. `entry_id=<entry_id>` is accepted as a synonym on every view; this is what the dashboards send. `GET /api/climate_advisor/status` with no zone lists the zones (`{zone_selection_required: true, zones: [{entry_id, title}], zone_count}`) when there are several. All parameter handling goes through `api._zone_param()` and `_resolve_request_zone()` → `zone_registry.resolve_zone()`.
+
+| Request | One zone loaded | Several zones loaded |
+|---|---|---|
+| `zone` (or `entry_id`) names a loaded zone | that zone | that zone |
+| names a zone that is not loaded | 503 `{"error": "Climate Advisor not loaded"}` | same (the dashboards then clear their stored zone and re-pick from `/status`) |
+| `zone` and `entry_id` both given, different | 400 (refused, nothing done) | 400 (refused, nothing done) |
+| no zone, `GET /status` | the zone's status | the zone list (no guess); Repairs card raised |
+| no zone, POST action | the only zone | 400 `{message, zone_selection_required: true, zones, zone_count}`, nothing changed; Repairs card raised |
+| no zone, `prediction_accuracy` / `timeline` / `night_strategy` | the only zone | 400, same body; Repairs card raised |
+| no zone, any other GET | the only zone | **the first zone's data** (config-entry order), a WARNING naming the request and the zone used, and the `zone_resolution_ambiguous` Repairs card |
+
+The Repairs card ("Ambiguous zone selection") names the request (method, path, caller address) and whether it was answered with a named zone's data or refused. It tells the owner to add `?zone=<entry_id>`. It is raised on **every** request that names no zone, on every endpoint (`status` included) and from every caller: dashboards, tools, scripts and agents. Each raise updates the card to the latest such request, and a card the owner dismissed comes back. That is the owner's rule; only the WARNING log line is throttled, to once per distinct request, to protect the AI Investigator's log buffer. The card clears whenever a zone is set up (restart or reload) and when the zone count drops to one. A dashboard opened on a device for the first time (no stored zone) therefore raises it once with its `status` bootstrap. **Before Issue #1418** the 18 views behind `_get_coordinator()` read only `entry_id`, so `chart_data?zone=<id>` silently answered for the first zone. The repo tools (`thermal_health.py`, `learning_db.py`'s live section, `simulation_loop.py`, `build_historical_scenario.py`) also sent no zone. They now take `--entry-id`, send it as `zone`, and stop with the zone list when several zones are loaded and none is given.
 
 ## Endpoints
 
@@ -118,7 +135,7 @@ Sample (trimmed; full fixture `tests/fixtures/prediction_accuracy_sample.json`):
  "gate_summary": null}
 ```
 
-Errors: 400 several zones loaded and no `zone`/`entry_id` given (body `{message, zone_selection_required: true, zones, zone_count}`, the zone-resolution Repairs issue is raised once); 503 Climate Advisor not loaded or an unknown `zone`. The payload is built in the executor (it reads the backtest file and walks the chart log); the view itself only calls `coordinator.v4_accuracy_inputs()` on the loop.
+Errors: 400 several zones loaded and no `zone`/`entry_id` given (body `{message, zone_selection_required: true, zones, zone_count}`, the zone-resolution Repairs issue is raised on every such request); 503 Climate Advisor not loaded or an unknown `zone`. The payload is built in the executor (it reads the backtest file and walks the chart log); the view itself only calls `coordinator.v4_accuracy_inputs()` on the loop.
 
 ### Engines and debug keys for v4
 

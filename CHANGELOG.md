@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [Unreleased]
+
+- Fix #1418: with several zones, a request that named its zone with `?zone=` was answered with the first zone's data on 18 of the 21 dashboard endpoints (only `entry_id` was read), and raised an "Ambiguous zone selection" card that didn't say what caused it. Every endpoint now takes `zone` (or `entry_id`). Both dashboards no longer drop their zone after a zone reloads (for example after saving its options); before, they kept polling without one and showed the first zone. The diagnostic tools (`thermal_health.py`, `learning_db.py`, `simulation_loop.py`, `build_historical_scenario.py`) take `--entry-id` and stop with the zone list instead of reporting the first zone. The Repairs card now names the request and says to add `?zone=<entry_id>`. It is raised on every request that names no zone, on every endpoint and from every caller (dashboards, tools, scripts, agents), and comes back if dismissed. Only the log line stays throttled.
+
 ## [0.9.5] — 2026-11-07
 
 - Includes fix 0.8.72 from `main` (#1397: a thermostat that reports Climate Advisor's setpoint a little off, for example 18.0 °C then 17.9 °C, is no longer read as you changing it).

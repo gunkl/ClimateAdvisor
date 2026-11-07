@@ -211,17 +211,40 @@ def fan_entity_owned_by_other_zone(hass: HomeAssistant, fan_entity: str | None, 
     return False
 
 
-def _raise_ambiguous_issue(hass: HomeAssistant) -> None:
+ZONE_PARAM_HINT = "add ?zone=<entry_id> to the request (GET /api/climate_advisor/status lists each zone's entry_id)"
+
+
+def _zone_title(hass: HomeAssistant, entry_id: str) -> str:
+    """The zone's config entry title, or its entry_id when there is none (display only)."""
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if entry.entry_id == entry_id:
+            return str(getattr(entry, "title", None) or entry_id)
+    return entry_id
+
+
+def _raise_ambiguous_issue(hass: HomeAssistant, *, request: str | None, outcome: str) -> None:
     """Raise the ``zone_resolution_ambiguous`` Repairs issue.
 
     Shared by both the guess path in ``get_default_coordinator()`` below and
     the refuse path in ``resolve_zone()`` — same underlying condition (an
     unscoped caller hit a multi-zone install), same issue key. Factored out
-    so the five-argument ``ir.async_create_issue()`` call exists in exactly
-    one place rather than being duplicated between the two call sites.
-    is_fixable=False: nothing to configure, purely informational. Cleared by
-    __init__.py's async_unload_entry() once zone count drops to <= 1.
+    so the ``ir.async_create_issue()`` call exists in exactly one place.
+    is_fixable=False: nothing to configure in Climate Advisor — the fix is in
+    whatever sent the request. Issue #1418: the card names that request and
+    what happened to it (``request``/``outcome`` placeholders) and says how
+    to fix it, instead of only "may resolve to the wrong one". Cleared at
+    every zone setup (``__init__.py``) and when zone count drops to <= 1.
+
+    Called on EVERY unscoped request on a multi-zone install, from any caller
+    (owner's rule, Issue #1418: "it still needs to be flagged the same way
+    when it happens") — never behind the WARNING log's throttle. Re-creating
+    an existing issue only refreshes its placeholders to the latest request.
+    A card the owner dismissed is brought back: a dismissed issue stays hidden
+    through ``async_create_issue()``, so it is deleted and created again.
     """
+    existing = ir.async_get(hass).async_get_issue(DOMAIN, "zone_resolution_ambiguous")
+    if existing is not None and existing.dismissed_version is not None:
+        ir.async_delete_issue(hass, DOMAIN, "zone_resolution_ambiguous")
     ir.async_create_issue(
         hass,
         DOMAIN,
@@ -230,7 +253,26 @@ def _raise_ambiguous_issue(hass: HomeAssistant) -> None:
         is_persistent=True,
         severity=ir.IssueSeverity.WARNING,
         translation_key="zone_resolution_ambiguous",
+        translation_placeholders={"request": request or "a request", "outcome": outcome},
     )
+
+
+def flag_unscoped_request(hass: HomeAssistant, *, request: str, outcome: str) -> None:
+    """Flag a request that named no zone on a multi-zone install even though nothing was guessed (Issue #1418).
+
+    Used by ``GET /status``'s bootstrap answer (the zone list): the owner's rule is that every unscoped request is
+    flagged, whichever endpoint and caller. Same throttled WARNING idiom and the same Repairs card as the guess and
+    refuse paths.
+    """
+    _warn_once(
+        hass,
+        f"unscoped:{request}",
+        "Climate Advisor: %s named no zone and several zones are loaded — %s. To fix it, %s.",
+        request,
+        outcome,
+        ZONE_PARAM_HINT,
+    )
+    _raise_ambiguous_issue(hass, request=request, outcome=outcome)
 
 
 def get_default_coordinator(hass: HomeAssistant, *, context: str | None = None) -> ClimateAdvisorCoordinator | None:
@@ -288,26 +330,32 @@ def get_default_coordinator(hass: HomeAssistant, *, context: str | None = None) 
             "normally happen; please file a bug report if it persists.",
             len(entries),
         )
-        return sorted(entries.items(), key=lambda kv: kv[0])[0][1]
+        chosen_id, chosen = sorted(entries.items(), key=lambda kv: kv[0])[0]
+        _raise_ambiguous_issue(hass, request=context, outcome=f'answered with the data of zone "{chosen_id}"')
+        return chosen
 
     for entry in ordered_entries:
         coordinator = entries.get(entry.entry_id)
         if coordinator is not None:
-            if _warn_once(
+            _warn_once(
                 hass,
                 f"ambiguous:{entry.entry_id}:{context}",
                 "Multiple Climate Advisor zones are loaded and this request%s did not "
-                "specify a zone — defaulting to zone entry_id=%s. Pass an explicit "
-                "entry_id to target a specific zone. See Settings > Repairs for details.",
+                "specify a zone — answered with zone %r (entry_id=%s), which may not be "
+                "the zone the caller wanted. To fix it, %s.",
                 f" ({context})" if context else "",
+                _zone_title(hass, entry.entry_id),
                 entry.entry_id,
-            ):
-                # Issue #813: raised here — at the moment an ambiguous
-                # fallback is actually taken — instead of unconditionally at
-                # zone setup (the old __init__.py behavior, which showed this
-                # card on every multi-zone install regardless of whether
-                # anything ever actually hit this fallback).
-                _raise_ambiguous_issue(hass)
+                ZONE_PARAM_HINT,
+            )
+            # Issue #813: raised here — at the moment an ambiguous fallback is
+            # actually taken — not unconditionally at zone setup. Issue #1418:
+            # on every such request (only the log line above is throttled).
+            _raise_ambiguous_issue(
+                hass,
+                request=context,
+                outcome=f'answered with the data of zone "{_zone_title(hass, entry.entry_id)}"',
+            )
             return coordinator
 
     # Every ordered entry is unloaded/missing from hass.data — fall back to a
@@ -322,7 +370,9 @@ def get_default_coordinator(hass: HomeAssistant, *, context: str | None = None) 
         "please file a bug report if it persists.",
         len(ordered_entries),
     )
-    return sorted(entries.items(), key=lambda kv: kv[0])[0][1]
+    chosen_id, chosen = sorted(entries.items(), key=lambda kv: kv[0])[0]
+    _raise_ambiguous_issue(hass, request=context, outcome=f'answered with the data of zone "{chosen_id}"')
+    return chosen
 
 
 def resolve_zone(
@@ -357,16 +407,16 @@ def resolve_zone(
     if len(entries) <= 1:
         return get_default_coordinator(hass), False
     if not allow_guess:
-        if _warn_once(
+        _warn_once(
             hass,
             f"explicit_required:{context}",
             "Climate Advisor: %s requires an explicit zone but none was given "
             "and %d zones are loaded — refusing to guess (no action taken). "
-            "Pass entry_id to target a specific zone. See Settings > Repairs "
-            "for details.",
+            "To fix it, %s.",
             context,
             len(entries),
-        ):
-            _raise_ambiguous_issue(hass)
+            ZONE_PARAM_HINT,
+        )
+        _raise_ambiguous_issue(hass, request=context, outcome="refused, and nothing was changed")
         return None, True
     return get_default_coordinator(hass, context=context), False

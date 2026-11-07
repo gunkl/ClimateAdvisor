@@ -508,3 +508,54 @@ class TestResolveZoneDisplayName:
         hass = MagicMock()
         assert zone_registry.resolve_zone_display_name(hass, None) is None
         assert zone_registry.resolve_zone_display_name(hass, "") == ""
+
+
+class TestAmbiguousCardSaysWhatAndWhy:
+    """Issue #1418: the Repairs card and WARNING name the request, the outcome and the fix (``?zone=``)."""
+
+    def _hass(self):
+        coord_a, coord_b = MagicMock(), MagicMock()
+        hass = _make_hass({"entry_a": coord_a, "entry_b": coord_b}, ordered_entry_ids=["entry_a", "entry_b"])
+        for entry, title in zip(hass.config_entries.async_entries.return_value, ("Zone 1", "Upstairs"), strict=True):
+            entry.title = title
+        return hass, coord_a
+
+    def test_guess_names_request_and_zone_used(self, caplog):
+        from unittest.mock import patch
+
+        hass, coord_a = self._hass()
+        with (
+            patch("custom_components.climate_advisor.zone_registry.ir.async_create_issue") as mock_create,
+            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.zone_registry"),
+        ):
+            got, refused = zone_registry.resolve_zone(
+                hass, None, context="GET /api/climate_advisor/chart_data from 1.2.3.4"
+            )
+        assert (got, refused) == (coord_a, False)
+        placeholders = mock_create.call_args.kwargs["translation_placeholders"]
+        assert placeholders["request"] == "GET /api/climate_advisor/chart_data from 1.2.3.4"
+        assert placeholders["outcome"] == 'answered with the data of zone "Zone 1"'
+        message = next(r.message for r in caplog.records if "Multiple Climate Advisor zones" in r.message)
+        assert "'Zone 1'" in message and "?zone=<entry_id>" in message
+
+    def test_refusal_says_nothing_changed(self):
+        from unittest.mock import patch
+
+        hass, _ = self._hass()
+        with patch("custom_components.climate_advisor.zone_registry.ir.async_create_issue") as mock_create:
+            zone_registry.resolve_zone(hass, None, context="POST /x from 1.1.1.1", allow_guess=False)
+        assert mock_create.call_args.kwargs["translation_placeholders"] == {
+            "request": "POST /x from 1.1.1.1",
+            "outcome": "refused, and nothing was changed",
+        }
+
+    def test_card_text_uses_both_placeholders_and_says_how_to_fix(self):
+        import json
+        from pathlib import Path
+
+        root = Path(zone_registry.__file__).parent
+        for name in ("strings.json", "translations/en.json"):
+            issue = json.loads((root / name).read_text(encoding="utf-8"))["issues"]["zone_resolution_ambiguous"]
+            text = issue["description"]
+            assert "{request}" in text and "{outcome}" in text and "?zone=<entry_id>" in text, name
+            assert "/api/climate_advisor/status" in text, name

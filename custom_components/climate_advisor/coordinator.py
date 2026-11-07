@@ -417,6 +417,7 @@ from .thermal_confidence import physics_eligibility
 from .time_utils import instant_after
 from .timeline_surfaces import (
     CardLive,
+    apply_direction_veto,
     next_automation_candidates,
     operations_lines,
     timeline_api_payload,
@@ -6102,8 +6103,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("night_strategy_payload failed", exc_info=True)
             return None, "error"
 
-    def _surface_timeline(self) -> Any:
+    def _surface_timeline(self, *, live: bool = True) -> Any:
         """The timeline the occupant-facing surfaces read (Issue #1230 R3b), or None in a degraded coordinator.
+
+        ``live`` (default) marks the window step the live direction rule vetoes right now as held, so the plan list, the
+        briefing and the REST body say what the Next Action card says (``timeline_surfaces.apply_direction_veto``);
+        ``live=False`` is the plan as latched (the card applies the veto itself with the readings it was handed).
 
         The cycle generates it once before the surfaces are computed. A standalone read (the REST endpoint, a harness
         capture, a surface asked between cycles) refreshes it when the last run is older than two minutes or belongs
@@ -6123,10 +6128,42 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if stale:
                 self._timeline_shadow_run("surface")
                 tl = latch.timeline
+            if live and tl is not None:
+                tl = self._apply_live_direction_veto(tl)
             return tl
         except Exception:  # noqa: BLE001 - a surface falls back to its degraded path rather than fail
             _LOGGER.debug("surface timeline unavailable", exc_info=True)
             return None
+
+    def _apply_live_direction_veto(self, tl: Any) -> Any:
+        """``tl`` with the window step the live direction rule vetoes marked held (never raises, never stores)."""
+        c = self._current_classification
+        if c is None:
+            return tl
+        try:
+            indoor = self._get_indoor_temp()
+            outdoor = self._last_outdoor_temp
+            ae = self.automation_engine
+            armed = ae._resolved_comfort_band(c) if ae is not None else None
+            if armed is None:
+                armed = resolve_active_band(c, self.config, occupancy_mode=self._occupancy_mode, now=dt_util.now())
+            return apply_direction_veto(
+                tl,
+                dt_util.now(),
+                CardLive(
+                    unit=self.config.get("temp_unit", "fahrenheit"),
+                    indoor=indoor,
+                    outdoor=outdoor,
+                    windows_open=bool(self._any_sensor_open()),
+                    direction_ok=bool(self._outdoor_direction_ok(outdoor, indoor, armed.floor, armed.ceiling)),
+                    heat_side_veto=outdoor is not None and indoor is not None and outdoor < indoor,
+                    armed_heat=armed.floor,
+                    armed_cool=armed.ceiling,
+                ),
+            )
+        except Exception:  # noqa: BLE001 - a surface keeps the plan as latched rather than fail
+            _LOGGER.debug("live direction veto unavailable", exc_info=True)
+            return tl
 
     def timeline_payload(self) -> dict[str, Any] | None:
         """The REST body for ``GET /api/climate_advisor/timeline``: contract dict in the display unit + ``detail``."""
@@ -13241,7 +13278,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Without a window step the plan has no window advice today, so no branch below may invite the occupant to
         # open up. No timeline at all (a partially built coordinator, the first moments before a classification):
         # the previous computation stays as the degraded path.
-        _tl = self._surface_timeline()
+        _tl = self._surface_timeline(live=False)
         timeline_mode = _tl is not None
         if _tl is not None:
             _got = window_card_text(
@@ -13388,11 +13425,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     indoor=indoor_temp,
                 )
             if direction_ok and timeline_mode:
-                # Issue #1230 R3b: air that would help right now, but the plan holds no window period: say so rather
-                # than invite a window the plan (and the briefing) never mentions.
+                # Issue #1230 R3b (owner redesign 2026-11-06): air that would help right now, but the plan holds no
+                # window period. Say what the occupant can do AND that it is unplanned, never an invitation phrased as
+                # plan advice ("Open windows ..." is reserved for a window step the timeline holds; the plan and the
+                # briefing still say no window period today). What the AC does next is the Status and Next Automation
+                # cards' job.
                 return _decide(
-                    f"Outdoor ({format_temp(outdoor_temp, unit)}) is cooler than indoor"
-                    f" ({format_temp(indoor_temp, unit)}), but today's plan has no window period.",
+                    f"Opening windows would help now \u2014 outdoor ({format_temp(outdoor_temp, unit)}) is cooler than"
+                    f" indoor ({format_temp(indoor_temp, unit)}). Climate Advisor didn't plan a window period today,"
+                    " so this one is your call.",
                     outdoor=outdoor_temp,
                     indoor=indoor_temp,
                 )

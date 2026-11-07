@@ -1,11 +1,12 @@
 {
   "name": "r3b_warm_whf_cooling_needed_plan_has_no_window",
-  "description": "Issue #1276 family (mirror): the house is above its ceiling and outdoor is cooler, but the engine does not recommend windows today: the card says the plan has no window period instead of inviting one.",
+  "description": "Issue #1276 family (mirror, D4): the house is above its ceiling and outdoor is cooler, but the engine does not recommend windows today: the card says opening windows would help and that Climate Advisor did not plan a window period, instead of inviting one as plan advice or only stating the problem.",
   "source": "synthetic",
   "issue": 1230,
   "notes": [
     "Issue #1230 R3b Tier A golden candidate (pending: owner approves, DP-11). The scenario sets capture_next_action, so the harness records the occupant surfaces at the end of the run (engine_state._next_action: Next Action text, Next Automation, the operation timeline's steps, the briefing Windows row). Every assertion below reads that capture through the existing field_equals assertion: outcomes.py is unchanged.",
-    "Tier A has no learned thermal model and no forecast: the engine's window recommendation therefore stands unvalidated (confidence low), and the timeline carries only what the classification event states."
+    "Tier A has no learned thermal model and no forecast: the engine's window recommendation therefore stands unvalidated (confidence low), and the timeline carries only what the classification event states.",
+    "R3b redesign (owner decision 2026-11-06): before, the card read 'Outdoor (70F) is cooler than indoor (76F), but today's plan has no window period.' (a problem with nothing to do). The AC is already cooling in this run (engine arms cool at the ceiling breach); what the AC does is the Status and Next Automation cards' job, not this card's."
   ],
   "use_coordinator": true,
   "skip_startup_coalesce": true,
@@ -63,9 +64,9 @@
       "at": "2026-07-15T14:30:00",
       "expect": "field_equals",
       "field": "engine_state._next_action.text",
-      "value": "Outdoor (70\u00b0F) is cooler than indoor (76\u00b0F), but today's plan has no window period.",
+      "value": "Opening windows would help now \u2014 outdoor (70\u00b0F) is cooler than indoor (76\u00b0F). Climate Advisor didn't plan a window period today, so this one is your call.",
       "track": "logic",
-      "reason": "the Next Action card text the occupant reads"
+      "reason": "the card tells the occupant what they can do now AND that it is unplanned (never 'Open windows ...', which is reserved for a window step the plan holds)"
     },
     {
       "at": "2026-07-15T14:30:00",

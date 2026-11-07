@@ -141,6 +141,7 @@ from tools.sim_harness.scenario_model import (  # noqa: E402
     scenario_start_time,
     snapshot_engine_state,
     sorted_events,
+    sync_coordinator_occupancy,
 )
 from tools.sim_harness.session import drive_scenario  # noqa: E402
 
@@ -606,23 +607,6 @@ class FakeHassSession:
 # ---------------------------------------------------------------------------
 
 
-def _sync_coordinator_occupancy(coordinator: Any, mode: str) -> None:
-    """Production's occupancy toggle writes the COORDINATOR's mode, hands it to the engine, then regenerates the
-    operation timeline (``coordinator._async_occupancy_toggle_changed``). The Tier A event driver only reached the
-    engine, so a surface the coordinator computes (Next Action, the timeline, the briefing) kept reading ``home``.
-    Semantic justification (Issue #1230 R3b, test-infrastructure rule): the previous driver modelled one half of a
-    two-part production step; scenarios that read coordinator surfaces after an occupancy event were therefore
-    exercising a state production cannot reach (engine away, coordinator home). Could this let a real failure pass
-    silently? No: it only makes the coordinator's mode equal the engine's, as production does; every engine decision
-    is unchanged (the engine call above is untouched) and the timeline run is the same call production makes.
-    """
-    if coordinator is None or not hasattr(coordinator, "_occupancy_mode"):
-        return
-    coordinator._occupancy_mode = mode
-    if hasattr(coordinator, "_timeline_shadow_run"):
-        coordinator._timeline_shadow_run("occupancy")
-
-
 def run_production_scenario(
     scenario: dict,
     *,
@@ -794,23 +778,23 @@ def _dispatch_event(
 
     elif etype == "occupancy_away":
         engine.set_occupancy_mode("away")
-        _sync_coordinator_occupancy(coordinator, "away")
+        sync_coordinator_occupancy(coordinator, "away")
         run_coro(engine.handle_occupancy_away())
 
     elif etype == "occupancy_home":
         engine.set_occupancy_mode("home")
-        _sync_coordinator_occupancy(coordinator, "home")
+        sync_coordinator_occupancy(coordinator, "home")
         run_coro(engine.handle_occupancy_home())
 
     elif etype == "occupancy_vacation":
         engine.set_occupancy_mode("vacation")
-        _sync_coordinator_occupancy(coordinator, "vacation")
+        sync_coordinator_occupancy(coordinator, "vacation")
         run_coro(engine.handle_occupancy_vacation())
 
     elif etype == "occupancy_change":
         mode = event.get("mode", "home")
         engine.set_occupancy_mode(mode)
-        _sync_coordinator_occupancy(coordinator, mode)
+        sync_coordinator_occupancy(coordinator, mode)
         if mode == "away":
             run_coro(engine.handle_occupancy_away())
         elif mode == "vacation":
@@ -823,7 +807,7 @@ def _dispatch_event(
         engine._manual_override_active = True
         mode = event.get("mode", "home")
         engine.set_occupancy_mode(mode)
-        _sync_coordinator_occupancy(coordinator, mode)
+        sync_coordinator_occupancy(coordinator, mode)
         if mode == "away":
             run_coro(engine.handle_occupancy_away())
         elif mode == "vacation":

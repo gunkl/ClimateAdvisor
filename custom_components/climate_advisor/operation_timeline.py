@@ -442,6 +442,24 @@ SENTENCES: dict[str, Sentence] = dict(
             "the end time is the engine's own",
         ),
         _s(
+            "held.direction_veto.heat",
+            "Keep windows closed to hold heat — outdoor ({outdoor}) would cool the house below its {floor} floor.",
+            {"outdoor": "temp", "floor": "temp"},
+            "live outdoor/indoor readings + the band the thermostat is armed with (R3b surface layer)",
+            "a window period is running, the windows are shut, and the live direction rule vetoes opening them "
+            "with outdoor cooler than indoor",
+            "applied by timeline_surfaces.apply_direction_veto on every read; never stored in the latched plan",
+        ),
+        _s(
+            "held.direction_veto.warm",
+            "Keep windows closed for now — outdoor ({outdoor}) isn't cooler than indoor ({indoor}) yet.",
+            {"outdoor": "temp", "indoor": "temp"},
+            "live outdoor/indoor readings (R3b surface layer)",
+            "a window period is running, the windows are shut, and the live direction rule vetoes opening them "
+            "with outdoor not cooler than indoor",
+            "applied by timeline_surfaces.apply_direction_veto on every read; never stored in the latched plan",
+        ),
+        _s(
             "held.pause",
             "{base} It applies when the door or window closes.",
             {"base": "text"},

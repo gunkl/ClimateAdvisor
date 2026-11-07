@@ -1359,18 +1359,19 @@
 
   function _planRowHtml(s, now) {
     const you = s.actor === 'you', low = s.confidence === 'low';
+    const held = !!(s.meta && s.meta.status === 'held');   // a held step (a hold or the live direction veto) is not a "may help" offer
     const sameDay = new Date(s._ms).toDateString() === new Date(now).toDateString();
     const day = sameDay ? '' : '<span class="plan-day">' + escapeHtml(new Date(s._ms).toLocaleDateString([], { weekday: 'short' })) + '</span> ';
     const lead = you && s.lead_minutes > 0 && s._ms - s.lead_minutes * 60000 > now
       ? '<span class="plan-note">Reminder at ' + escapeHtml(_clock(s._ms - s.lead_minutes * 60000)) + '</span>' : '';
-    return '<li class="plan-row ' + (you ? 'plan-you' : 'plan-ca') + (low ? ' plan-low' : '') + '" data-kind="' + escapeHtml(s.kind || '') + '" data-actor="' + escapeHtml(s.actor || '') + '">' +
+    return '<li class="plan-row ' + (you ? 'plan-you' : 'plan-ca') + (low ? ' plan-low' : '') + (held ? ' plan-held' : '') + '" data-kind="' + escapeHtml(s.kind || '') + '" data-actor="' + escapeHtml(s.actor || '') + '">' +
       '<span class="plan-time">' + day + escapeHtml(_clock(s._ms)) + '</span>' +
       '<span class="plan-actor" title="' + (you ? 'You do this' : 'Climate Advisor does this') + '">' +
         '<svg width="12" height="12" viewBox="-7 -7 14 14" aria-hidden="true">' + (you
           ? '<path d="M0 -6 L6 0 L0 6 L-6 0 Z" fill="' + (low ? 'none' : 'var(--c-target)') + '" stroke="var(--c-ink)" stroke-width="1.5"/>'
           : '<circle r="4.5" fill="' + (low ? 'none' : 'var(--c-plan)') + '" stroke="var(--c-plan)" stroke-width="1.5"/>') + '</svg>' +
         (you ? 'You' : 'CA') + '</span>' +
-      '<span class="plan-text">' + escapeHtml(s.text || '') + (low ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
+      '<span class="plan-text">' + escapeHtml(s.text || '') + (low && !held ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
   }
 
   // Render the "Next 24 hours" list into `el`. opts.extra() may return extra HTML for the foot (the page's own

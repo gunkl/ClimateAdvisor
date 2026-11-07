@@ -5,7 +5,8 @@
   "issue": 1230,
   "notes": [
     "Issue #1230 R3b Tier A golden candidate (pending: owner approves, DP-11). The scenario sets capture_next_action, so the harness records the occupant surfaces at the end of the run (engine_state._next_action: Next Action text, Next Automation, the operation timeline's steps, the briefing Windows row). Every assertion below reads that capture through the existing field_equals assertion: outcomes.py is unchanged.",
-    "Tier A has no learned thermal model and no forecast: the engine's window recommendation therefore stands unvalidated (confidence low), and the timeline carries only what the classification event states."
+    "Tier A has no learned thermal model and no forecast: the engine's window recommendation therefore stands unvalidated (confidence low), and the timeline carries only what the classification event states.",
+    "R3b redesign (owner decision 2026-11-06): the live direction veto is a property of the plan step (timeline_surfaces.apply_direction_veto), so the plan list, the REST timeline and the briefing agree with the card. Before: the list kept an unmarked 'open the windows' step and the briefing said 'Close by 9:00 PM'."
   ],
   "use_coordinator": true,
   "skip_startup_coalesce": true,
@@ -104,24 +105,25 @@
     {
       "at": "2026-11-02T18:11:00",
       "expect": "field_equals",
-      "field": "engine_state._next_action.window_step",
+      "field": "engine_state._next_action.window_step_state",
       "value": {
-        "kind": "windows_open",
-        "at": "18:11"
+        "status": "held",
+        "hold": "held.direction_veto.heat",
+        "text": "Keep windows closed to hold heat \u2014 outdoor (61\u00b0F) would cool the house below its 68\u00b0F floor."
       },
       "track": "logic",
-      "reason": "the timeline step the card came from (None when the plan holds no window step today)"
+      "reason": "the plan's open-windows step is HELD by the live direction veto and carries the same sentence as the card (one plan: the list never says 'open' beside 'keep closed', #1276)"
     },
     {
       "at": "2026-11-02T18:11:00",
       "expect": "field_equals",
-      "field": "engine_state._next_action.timeline.you_steps",
+      "field": "engine_state._next_action.timeline.you_step_states",
       "value": [
-        "18:11 windows_open",
-        "21:00 windows_close"
+        "18:11 windows_open held",
+        "21:00 windows_close planned"
       ],
       "track": "logic",
-      "reason": "the occupant steps the plan holds (today, then tomorrow's engine plan)"
+      "reason": "the occupant steps the plan holds and their state: the vetoed open is held, the close stays planned"
     },
     {
       "at": "2026-11-02T18:11:00",
@@ -137,9 +139,9 @@
       "at": "2026-11-02T18:11:00",
       "expect": "field_equals",
       "field": "engine_state._next_action.briefing_windows_row",
-      "value": "Windows: Close by 9:00 PM",
+      "value": "Windows: Closed for now \u2014 outdoor air would cool the house below its floor",
       "track": "logic",
-      "reason": "the briefing's Windows row reads the same window periods"
+      "reason": "the briefing's Windows row agrees with the card: closed for now, never 'Close by' (which implies the windows are open)"
     }
   ],
   "capture_next_action": true

@@ -18,6 +18,7 @@ coordinator calls on the Tier A scenarios); asserting on those pure functions he
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from datetime import datetime, time, timedelta
 
@@ -38,7 +39,9 @@ from custom_components.climate_advisor.timeline_surfaces import (
     NEXT_AUTOMATION_LABELS,
     CardLive,
     advises_opening,
+    apply_direction_veto,
     card_user_step,
+    is_direction_vetoed,
     next_automation,
     next_automation_candidates,
     timeline_api_payload,
@@ -90,18 +93,23 @@ def _briefing_windows_row(snap, tl, day_type: str) -> str | None:
 
 
 def _check_all(snap, day_type: str, *, windows_open: bool, direction_ok: bool) -> None:
-    tl = build_timeline(snap)
     now = snap.now
     today = now.date()
+    live = _live(snap, windows_open, direction_ok)
+    # every surface reads the plan with the live direction veto applied (what the coordinator's _surface_timeline does)
+    tl = apply_direction_veto(build_timeline(snap), now, live)
 
     # --- Next Action: the card is the timeline's window step, never a window the plan does not hold -------------
-    got = window_card_text(tl, now, _live(snap, windows_open, direction_ok))
+    got = window_card_text(tl, now, live)
     step = card_user_step(tl, now, windows_open=windows_open)
     assert (got is None) == (step is None)
     if got is not None:
         text, used = got
         assert used in tl.steps  # it IS a step of the timeline, not a recomputation
         assert used.actor == Actor.YOU and used.ts.date() == today
+        if is_direction_vetoed(used):
+            assert text == used.text and not advises_opening(text)  # one sentence on the card and in the plan list
+            assert used.status == "held" and used.meta["hold"].startswith("held.direction_veto.")
         if advises_opening(text):
             assert used.kind == StepKind.WINDOWS_OPEN
             # "Open windows at 10:00 AM" carries the step's own time; "now" cards sit inside the step's period
@@ -138,12 +146,17 @@ def _check_all(snap, day_type: str, *, windows_open: bool, direction_ok: bool) -
         assert not [
             p for p in periods if p[0] is not None
         ]  # no period is offered to an empty house (a window already open still gets its close)
-    if row is not None and "Close by" in row:
+    if row is not None and "lose by" in row:
         times = re.findall(r"\b\d{1,2}:\d{2} (?:AM|PM)\b", row)
         closes = {c.strftime("%-I:%M %p") for _o, c in periods}
-        assert times and times[0] in closes, (row, closes)
+        assert times and times[-1] in closes, (row, closes)  # the last time of the row is the close
+        if row.startswith("Windows: Open ") and " \u2013 close by " in row:  # both times while the open is ahead
+            opens = {o.strftime("%-I:%M %p") for o, _c in periods if o is not None and o > now}
+            assert times[0] in opens, (row, opens)
     if day_type in ("warm", "mild") and not periods:
-        assert row is None or "Closed all day" in row, row
+        assert row is None or "Closed all day" in row or "Closed for now" in row, row
+    if timeline_windows(tl, today).vetoed:
+        assert row is None or "lose by" not in row or periods, row  # a vetoed period is never "Close by"
 
     # --- endpoint: same steps, same order, units converted ---------------------------------------------------------
     for unit in ("fahrenheit", "celsius"):
@@ -220,7 +233,7 @@ def test_an_engine_recommended_window_day_is_on_every_surface_even_when_unvalida
     assert got is not None and got[0].startswith("Open windows at ")
     assert all(s.confidence == "low" for s in tl.steps if s.actor == Actor.YOU)
     row = _briefing_windows_row(snap, tl, "mild")
-    assert row is not None and "Close by" in row
+    assert row is not None and "lose by" in row  # "Open 8:00 AM \u2013 close by ..." while the open is still ahead
 
 
 def test_a_direction_veto_removes_the_period_from_every_surface_together() -> None:
@@ -245,3 +258,99 @@ def test_live_direction_turns_an_open_now_step_into_keep_closed_never_an_invitat
     bad = window_card_text(tl, now, _live(snap, False, False))
     assert bad is not None and not advises_opening(bad[0])
     assert time(0, 0) <= bad[1].ts.time() <= time(23, 59)
+
+
+# ---------------------------------------------------------------------------
+# The live direction veto is a property of the plan step (R3b redesign, owner decision 2026-11-06)
+# ---------------------------------------------------------------------------
+
+
+def _running_period():
+    """A mild-day timeline and a clock five minutes into its first window period (the windows still shut)."""
+    snap = make_snapshot("mild", now=datetime(2026, 11, 4, 8, 0, tzinfo=TZ), indoor=68.0)
+    tl = build_timeline(snap)
+    opened = next(s for s in tl.steps if s.kind == StepKind.WINDOWS_OPEN and s.ts.date() == snap.now.date())
+    return snap, tl, opened, opened.ts + timedelta(minutes=5)
+
+
+def _veto_live(snap, *, outdoor: float, indoor: float, direction_ok: bool = False) -> CardLive:
+    return CardLive(
+        unit=snap.unit,
+        indoor=indoor,
+        outdoor=outdoor,
+        windows_open=False,
+        direction_ok=direction_ok,
+        heat_side_veto=outdoor < indoor,
+        armed_heat=68.0,
+        armed_cool=74.0,
+    )
+
+
+def test_the_veto_holds_the_open_step_with_the_cards_sentence_in_the_plan_list_and_the_endpoint() -> None:
+    snap, tl, opened, now = _running_period()
+    live = _veto_live(snap, outdoor=60.6, indoor=68.0)
+    vetoed = apply_direction_veto(tl, now, live)
+    held = next(s for s in vetoed.steps if s.id == opened.id)
+    sentence = "Keep windows closed to hold heat — outdoor (61°F) would cool the house below its 68°F floor."
+    assert held.status == "held" and held.meta["hold"] == "held.direction_veto.heat" and held.text == sentence
+    assert is_direction_vetoed(held)
+    card, used = window_card_text(vetoed, now, live)
+    assert card == sentence and used.text == sentence  # the card and the list row are one sentence
+    payload = timeline_api_payload(to_dict(vetoed), detail_dict(vetoed), "fahrenheit", display_temp)
+    row = next(s for s in payload["steps"] if s["meta"]["id"] == opened.id)
+    assert row["text"] == sentence and row["meta"]["status"] == "held"
+    # the latched plan itself is untouched, and the veto is idempotent
+    assert next(s for s in tl.steps if s.id == opened.id).status == "planned"
+    assert apply_direction_veto(vetoed, now, live) is vetoed
+    # the unmarked timeline gives the card the same answer
+    assert window_card_text(tl, now, live)[0] == sentence
+
+
+def test_the_vetoed_period_is_not_close_by_in_the_briefing() -> None:
+    snap, tl, opened, now = _running_period()
+    vetoed = apply_direction_veto(tl, now, _veto_live(snap, outdoor=60.6, indoor=68.0))
+    windows = timeline_windows(vetoed, now.date())
+    assert windows.vetoed == "heat" and not [p for p in windows.periods if p[0] == opened.ts]
+    snap2 = make_snapshot("mild", now=now, indoor=68.0, outdoor=60.6)
+    row = _briefing_windows_row(snap2, vetoed, "mild")
+    assert row == "Windows: Closed for now — outdoor air would cool the house below its floor"
+
+
+def test_the_not_cooler_variant_is_held_with_its_own_sentence() -> None:
+    snap, tl, opened, now = _running_period()
+    live = _veto_live(snap, outdoor=69.0, indoor=68.0)  # outdoor warmer than indoor, no heat-side veto
+    vetoed = apply_direction_veto(tl, now, live)
+    held = next(s for s in vetoed.steps if s.id == opened.id)
+    assert held.meta["hold"] == "held.direction_veto.warm"
+    assert held.text == "Keep windows closed for now — outdoor (69°F) isn't cooler than indoor (68°F) yet."
+    assert timeline_windows(vetoed, now.date()).vetoed == "warm"
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["direction_ok_cooler", "unknown_outdoor", "period_not_started", "windows_already_open"],
+)
+def test_the_veto_leaves_the_plan_alone_when_nothing_is_vetoed(case: str) -> None:
+    snap, tl, opened, now = _running_period()
+    live = _veto_live(snap, outdoor=60.0, indoor=72.0, direction_ok=True)
+    if case == "unknown_outdoor":
+        live = CardLive("fahrenheit", 68.0, None, False, False, False, 68.0, 74.0)
+    if case == "period_not_started":
+        now = opened.ts - timedelta(minutes=30)
+        live = _veto_live(snap, outdoor=60.6, indoor=68.0)
+    if case == "windows_already_open":
+        live = CardLive("fahrenheit", 68.0, 60.6, True, False, True, 68.0, 74.0)
+    assert apply_direction_veto(tl, now, live) is tl
+
+
+def test_the_windows_row_gives_both_times_while_the_open_is_still_ahead_and_only_the_close_after() -> None:
+    """Occupant view: at 8 AM the card says "Open windows at T"; a reader of the briefing alone must be told to open."""
+    snap = make_snapshot("mild", now=datetime(2026, 11, 4, 8, 0, tzinfo=TZ), indoor=68.0)
+    tl = build_timeline(snap)
+    opened = next(s for s in tl.steps if s.kind == StepKind.WINDOWS_OPEN and s.ts.date() == snap.now.date())
+    closed = next(s for s in tl.steps if s.kind == StepKind.WINDOWS_CLOSE and s.ts > opened.ts)
+    o, c = opened.ts.strftime("%-I:%M %p"), closed.ts.strftime("%-I:%M %p")
+    assert opened.ts > snap.now
+    assert _briefing_windows_row(snap, tl, "mild") == f"Windows: Open {o} – close by {c}"
+    later = dataclasses.replace(snap, now=opened.ts + timedelta(minutes=10))  # same plan, the open now behind us
+    assert _briefing_windows_row(later, tl, "mild") == f"Windows: Close by {c}"

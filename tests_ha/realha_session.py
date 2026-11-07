@@ -76,6 +76,7 @@ from tools.sim_harness.scenario_model import (
     scenario_start_time,
     snapshot_engine_state,
     sorted_events,
+    sync_coordinator_occupancy,
 )
 
 __all__ = ["RealHASession", "async_drive_scenario"]
@@ -597,6 +598,8 @@ class RealHASession:
                 occ, engine.handle_occupancy_home
             )
             await handler()
+            # production's occupancy toggle writes the coordinator's mode and regenerates the timeline too
+            sync_coordinator_occupancy(coordinator, occ)
             return "direct-callback"
 
         if etype in ("bedtime", "wakeup"):

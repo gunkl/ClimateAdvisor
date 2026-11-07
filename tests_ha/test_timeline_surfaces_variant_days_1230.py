@@ -92,12 +92,12 @@ def _assert_surfaces_agree(house, *, day_label: str, seen: dict) -> None:
     _full, short = c._build_briefing_text(cls, suggestions=[])
     row = next((ln.strip() for ln in short.splitlines() if ln.strip().startswith("Windows:")), "")
     periods = [p for p in timeline_windows(tl, now.date()).periods if p[1] > now]
-    if "Close by" in row:
+    if "lose by" in row:  # "Close by T" or, while the open is ahead, "Open T \u2013 close by T"
         times = re.findall(r"\b\d{1,2}:\d{2} (?:AM|PM)\b", row)
-        assert times and times[0] in {_clock(e) for _o, e in periods}, (day_label, now, row, periods)
+        assert times and times[-1] in {_clock(e) for _o, e in periods}, (day_label, now, row, periods)
         seen["briefing_close"] += 1
     elif cls.day_type in ("warm", "mild") and not periods:
-        assert "Closed all day" in row or row == "", row
+        assert "Closed all day" in row or "Closed for now" in row or row == "", row
 
     # --- endpoint: the same plan, in the display unit --------------------------------------------------------------
     payload = c.timeline_payload()

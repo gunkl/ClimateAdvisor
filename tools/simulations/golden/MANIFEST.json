@@ -574,12 +574,12 @@
     "issue": 1230
   },
   "r6b_warm_off_day_no_redundant_guard_writes__v4": {
-    "sha256": "ca4d9e438b0b27b258e9b5d0ce1c72d411299d89fe647cbfc014e4e7464f698c",
+    "sha256": "aa1e72f13d064430b76fd7ca4f3b911eb3b0ee5847a04df439ff186181971bd4",
     "signed": "2026-11-06",
     "issue": 1230
   },
   "r6b_warm_off_day_no_redundant_guard_writes__v3": {
-    "sha256": "1af904e243481c206e6b9cde18b3b3adebba5d86e744f52979eb05c1b175a8ac",
+    "sha256": "98bec65386e84479d8b4dd6cb6cf49c954f5466a2cc52f12446564258c76d0a0",
     "signed": "2026-11-06",
     "issue": 1230
   },

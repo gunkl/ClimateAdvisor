@@ -139,14 +139,16 @@ def _arm_twice(engine, *, gap_s: float = 1.0, between=None):
     return [c for c in engine.hass.services.async_call.call_args_list if c.args[1] == "set_temperature"]
 
 
-def test_bedtime_band_then_the_same_half_hours_re_arm_is_one_write() -> None:
-    """22:30: bedtime arms the sleep band 72, the classification re-arm a second later is the identical write."""
+def test_bedtime_band_then_the_same_half_hours_re_arm_writes_twice() -> None:
+    """22:30: bedtime arms the sleep band 72 and the classification re-arm a second later writes it again. The
+    thermostat command is never deduped (owner-confirmed Issue #590 Finding D); a same-moment skip was tried in
+    #1230 R6 and reverted because it overrides that decision and broke the automation-on positive control."""
     writes = _arm_twice(_band_engine())
-    assert [w.args[2]["temperature"] for w in writes] == [72.0]
+    assert [w.args[2]["temperature"] for w in writes] == [72.0, 72.0]
 
 
 def test_the_same_band_a_cycle_later_is_still_re_asserted() -> None:
-    """The scheduled re-assertion is deliberate (Issue #590 Finding D): only a same-moment repeat is skipped."""
+    """The scheduled re-assertion is deliberate (Issue #590 Finding D)."""
     writes = _arm_twice(_band_engine(), gap_s=1800)
     assert len(writes) == 2
 

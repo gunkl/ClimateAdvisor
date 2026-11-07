@@ -578,10 +578,6 @@ NAT_VENT_START_ROUTINE_RECHECK = NatVentStartProfile(
 NAT_VENT_START_PREDICTION = NatVentStartProfile("prediction", grace_active=False, apply_reactivation_floor=True)
 
 
-# Issue #1230 R6: an identical comfort-band write that the thermostat still holds is not re-sent inside this window.
-BAND_WRITE_REPEAT_WINDOW_S = 60.0
-
-
 class HvacCommandResult(Enum):
     """Outcome of ``_set_hvac_mode()`` (Issue #1049, Part of #1048).
 
@@ -2370,8 +2366,6 @@ class AutomationEngine:
         # prediction-dependent decisions read (the primary prediction engine's; see ``_control_model``). None on a bare
         # engine: the decisions then read ``_thermal_model`` itself.
         self._control_model_provider: Callable[[dict | None], dict | None] | None = None
-        # Issue #1230 R6: (when, mode, setpoint, result) of the last comfort-band write; see _same_tick_band_duplicate.
-        self._last_band_write: tuple[datetime, str, float, HvacCommandResult] | None = None
 
         # Issue #899: away/vacation TOU pre-conditioning — live state pushed by the
         # coordinator each cycle (_resolve_tou_schedule_state()), read by
@@ -5175,46 +5169,6 @@ class AutomationEngine:
             and not self._manual_change_protected()
         )
 
-    def _remember_band_write(self, mode: str, value: float, result: HvacCommandResult | None) -> None:
-        """Remember the comfort-band write just sent (Issue #1230 R6) for ``_same_tick_band_duplicate``."""
-        if result in (HvacCommandResult.EXECUTED, HvacCommandResult.UNCONFIRMED):
-            self._last_band_write = (dt_util.now(), mode, float(value), result)
-        else:
-            self._last_band_write = None
-
-    def _same_tick_band_duplicate(self, mode: str, value: float) -> HvacCommandResult | None:
-        """The earlier result when the identical band write was sent moments ago and the thermostat still holds it.
-
-        Occupant view: at bedtime (and at wake-up) the bedtime/wake-up handler arms the sleep/wake band and the
-        classification re-arm of the same half hour arms the identical band a second later: two thermostat commands
-        (two cloud writes, two Activity rows) for one state. The scheduled re-arm is otherwise deliberately
-        unconditional (a re-assertion every cycle, Issue #590 Finding D); only a repeat of the SAME mode and setpoint
-        within ``BAND_WRITE_REPEAT_WINDOW_S`` of our own write, with the thermostat's reading not contradicting it
-        (a different mode or setpoint means someone or something changed it: write), is skipped. Returns ``None``
-        (write) otherwise."""
-        last = getattr(self, "_last_band_write", None)
-        if last is None or self.dry_run:
-            return None
-        when, last_mode, last_value, last_result = last
-        if last_mode != mode or abs(last_value - float(value)) > 0.05:
-            return None
-        if not 0 <= (dt_util.now() - when).total_seconds() < BAND_WRITE_REPEAT_WINDOW_S:
-            return None
-        state = self.hass.states.get(self.climate_entity)
-        if state is None or state.state != mode:
-            return None
-        raw = state.attributes.get("temperature")
-        if raw is not None:
-            try:
-                if abs(to_fahrenheit(raw, self._temp_unit) - float(value)) > 0.05:
-                    return None
-            except TypeError, ValueError:
-                return None
-        _LOGGER.debug(
-            "Comfort band: %s %.1f already sent %s ago and held -- not re-sent", mode, value, dt_util.now() - when
-        )
-        return last_result
-
     async def _apply_comfort_band(
         self, band: ComfortBand, *, reason: str, mode_reason: str = "selector"
     ) -> HvacCommandResult | None:
@@ -5331,11 +5285,8 @@ class AutomationEngine:
         _effective_active = {"cool": "ceiling", "heat": "floor"}.get(_resolved_mode, band.active)
 
         if _effective_active == "ceiling" and caps.supports_cool:
-            _write_result = self._same_tick_band_duplicate("cool", band.ceiling)
-            if _write_result is None:
-                with self._mode_change_context(mode_reason, band=band):
-                    _write_result = await self._set_temperature(band.ceiling, reason=reason, mode="cool")
-                self._remember_band_write("cool", band.ceiling, _write_result)
+            with self._mode_change_context(mode_reason, band=band):
+                _write_result = await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
             _target = band.ceiling
             # Issue #827: _resolve_comfort_family_via_fsm() above already armed
@@ -5346,11 +5297,8 @@ class AutomationEngine:
             # to preserve, unlike _set_temperature_for_mode()'s two equivalent
             # branches below.)
         elif _effective_active == "floor" and caps.supports_heat:
-            _write_result = self._same_tick_band_duplicate("heat", band.floor)
-            if _write_result is None:
-                with self._mode_change_context(mode_reason, band=band):
-                    _write_result = await self._set_temperature(band.floor, reason=reason, mode="heat")
-                self._remember_band_write("heat", band.floor, _write_result)
+            with self._mode_change_context(mode_reason, band=band):
+                _write_result = await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
             _target = band.floor
         else:
@@ -16897,10 +16845,10 @@ class AutomationEngine:
         # does. When the thermostat is already cooling at or BELOW the guard ceiling -- whoever set it (the comfort
         # band, the sleep band at 72 against an awake ceiling of 74, an occupant) -- there is nothing to defend: no mode
         # write, no setpoint write, no ceiling_guard_fired row. Before this rule the primary engine's no-AC forecast
-        # (v4) predicted the breach on every cycle, so every 2 hours the guard re-sent cool + the same setpoint and,
-        # from bedtime, each half hour the sleep band wrote 72 and the guard wrote 74 in the same second (the
-        # bedroom held at 74 instead of 72). An occupant change or a setpoint ABOVE the ceiling fails this test, so the
-        # guard still acts exactly as before (off / heat / cool above the ceiling). Observe-only keeps its would-do.
+        # (v4) predicted the breach on every cycle, so every 2 hours the guard re-sent cool + the same setpoint and, from
+        # bedtime, each half hour the sleep band wrote 72 and the guard wrote 74 in the same second (the bedroom held at
+        # 74 instead of 72). An occupant's mode change or a setpoint ABOVE the ceiling fails this test, so the guard
+        # still acts exactly as before (off / heat / cool above the ceiling). Observe-only keeps recording its would-do.
         if (
             not self.dry_run
             and _old_mode_cg == "cool"

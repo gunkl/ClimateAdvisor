@@ -567,9 +567,10 @@
       "values": [
         72.0,
         72.0,
+        72.0,
         72.0
       ],
-      "reason": "From bedtime the bedroom is held at the 72 F sleep ceiling and each write is a real one: 22:30 ONE write (the bedtime handler's sleep band; the same half hour's classification re-arm is the identical write a moment later and is not re-sent), then the deliberate 30-minute re-assertions at 23:00 and 23:30. Before the fix the guard wrote 74 right after the sleep band's 72 every cycle (the bedroom held at 74), and 22:30 wrote 72 twice."
+      "reason": "From bedtime the bedroom is held at the 72 F sleep ceiling, never 74: 22:30 the bedtime handler's sleep band and the same half hour's classification re-arm (the thermostat command is never deduped \u2014 owner-confirmed Issue #590 Finding D), then the deliberate 30-minute re-assertions at 23:00 and 23:30. Before the ceiling-guard fix the guard wrote 74 right after the sleep band's 72 every cycle (the bedroom held at 74)."
     },
     {
       "at": "2026-05-20T23:59:00",

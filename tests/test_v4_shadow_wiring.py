@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from custom_components.climate_advisor import v4_shadow
-from custom_components.climate_advisor.const import V4_FIT_HOUR, V4_FIT_MINUTE
+from custom_components.climate_advisor.const import V4_FIT_HOUR, V4_FIT_MINUTE, V4_FIT_STAGGER_S
 from custom_components.climate_advisor.learning import LearningEngine
 from custom_components.climate_advisor.v4_archive import V4ModelStore, slot_key
 from tests.v4_fake_predictor import FakePredictor, install, uninstall
@@ -121,13 +121,14 @@ def test_nightly_fit_registered_at_0315_and_gone_after_unload(fake: FakePredicto
         return [e for e in scheduler.live_callbacks() if "_v4_nightly_fit" in getattr(e.callback, "__qualname__", "")]
 
     # the daily job is armed for the next 03:15 local
+    # (03:15 plus this zone's stable offset of up to 30 minutes - zones must not all fit at 03:15:00)
+    off = v4_shadow.fit_offset_s(entry.entry_id, V4_FIT_STAGGER_S)
+    want = (V4_FIT_HOUR, V4_FIT_MINUTE + off // 60, off % 60)
     armed = [
-        fire_at
-        for (_t, fire_at, cb) in scheduler.armed_log
-        if fire_at.hour == V4_FIT_HOUR and fire_at.minute == V4_FIT_MINUTE
+        fire_at for (_t, fire_at, cb) in scheduler.armed_log if (fire_at.hour, fire_at.minute, fire_at.second) == want
     ]
-    assert armed, "no timer armed for 03:15"
-    assert any(e.fire_at.hour == V4_FIT_HOUR and e.fire_at.minute == V4_FIT_MINUTE for e in scheduler.live_callbacks())
+    assert armed, f"no timer armed for {want}"
+    assert any((e.fire_at.hour, e.fire_at.minute, e.fire_at.second) == want for e in scheduler.live_callbacks())
 
     with scheduler.installed():
         run_coro(async_unload_entry_like_ha(fake_hass, entry))
@@ -441,7 +442,7 @@ def test_archive_file_write_is_throttled_and_flushed_on_shutdown(fake: FakePredi
         run_coro(async_unload_entry_like_ha(fake_hass, entry))
     assert coord._v4_archive.dirty is False, "unload flushes what changed"
     on_disk = json.loads(path.read_text())
-    assert set(on_disk["sensors"]) == {"climate.zone_a", "_ca"}
+    assert set(on_disk["sensors"]) == {"climate.zone_a"}  # "_ca" is derived from the primary line
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +593,7 @@ def test_shutdown_flush_retries_once_then_warns_with_the_loss(
     fake: FakePredictor, caplog: pytest.LogCaptureFixture
 ) -> None:
     coord, fake_hass, scheduler = _build()
-    coord._v4_archive.data = {"_ca": {1: {"4h": 1.0}, 2: {"4h": 2.0}}}
+    coord._v4_archive.data = {"_ca": {1800: {"4h": 1.0}, 3600: {"4h": 2.0}}}
     coord._v4_archive.dirty = True
     coord._v4_store.dirty = True
     calls = {"archive": 0, "store": 0}

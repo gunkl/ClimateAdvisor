@@ -562,6 +562,7 @@ V4_ARCHIVE_LEADS: tuple[str, ...] = ("1h", "4h", "12h", "24h")
 V4_ARCHIVE_SAVE_MIN_INTERVAL_S = 3600  # the file is a few MB: rewrite at most hourly (and once on shutdown)
 V4_FIT_HOUR = 3  # nightly fit, local time, after midnight bookkeeping
 V4_FIT_MINUTE = 15
+V4_FIT_STAGGER_S = 30 * 60  # each zone fits at 03:15 + a stable per-entry offset in [0, this) (Issue #1230 R1b, M5)
 V4_FIT_RETRY_MIN_INTERVAL_S = 6 * 3600  # a first fit that failed is retried by the cycle at most this often
 V4_PREDICT_HORIZON_HOURS = 24
 V4_MASS_MAX_GAP_S = 7200  # a hidden-node state older than this is re-seeded from the reading instead of stepped

@@ -19,6 +19,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from custom_components.climate_advisor import predictor_v4 as real_v4
+
 _TOOLS = Path(__file__).parent.parent / "tools"
 sys.path.insert(0, str(_TOOLS))
 _spec = importlib.util.spec_from_file_location("predict_backtest", _TOOLS / "predict_backtest.py")
@@ -57,11 +59,24 @@ class FakePredictor:
         self.fit_calls: list[dict] = []
         self.predict_calls: list[dict] = []
 
-    def samples_from_chart_log(self, entries, *, tz, archive_snapshots=None):
+    CA_NODE = "_ca"
+    resolve_nodes = staticmethod(real_v4.resolve_nodes)  # the one node-selection rule, shared with the live shadow
+    _row_primary_value = staticmethod(real_v4._row_primary_value)
+
+    def run_state_at(self, samples, i):
+        return None
+
+    def samples_from_chart_log(
+        self, entries, *, tz, archive_snapshots=None, primary=None, primary_aliases=(), in_sleep=None
+    ):
         out = []
         for e in entries:
             ts = datetime.fromisoformat(e["ts"])
             readings = dict(e.get("indoor_sensors") or {})
+            if primary:
+                mapped = real_v4._row_primary_value(e, primary, tuple(primary_aliases), in_sleep, tz)
+                if mapped is not None:
+                    readings[primary] = mapped
             readings["_ca"] = e.get("indoor")
             out.append(SimpleNamespace(ts=ts, readings=readings))
         if self.grid15 and out:  # the real resampler: forward-filled 15-min grid
@@ -104,7 +119,7 @@ class FakePredictor:
         base = start.astimezone(UTC)
         return [(base + timedelta(minutes=15 * (k + 1))).astimezone(start.tzinfo) for k in range(count)]
 
-    def predict(self, model, *, now, readings, mass_f, inputs, tz, outdoor_now_f=None, forecast_now_f=None):
+    def predict(self, model, *, now, readings, mass_f, inputs, tz, outdoor_now_f=None, forecast_now_f=None, **_kw):
         self.predict_calls.append(
             {
                 "now": now,
@@ -219,8 +234,8 @@ def test_step_change_in_test_week_is_not_foreseen(fake):
 def test_leaky_resampler_output_is_dropped_and_counted(fake):
     real = fake.samples_from_chart_log
 
-    def leaky(entries, *, tz, archive_snapshots=None):
-        out = real(entries, tz=tz, archive_snapshots=archive_snapshots)
+    def leaky(entries, *, tz, archive_snapshots=None, **kw):
+        out = real(entries, tz=tz, archive_snapshots=archive_snapshots, **kw)
         if archive_snapshots is None and entries and out:
             pass
         late = SimpleNamespace(ts=out[-1].ts + timedelta(hours=3), readings={"_ca": 99.0})
@@ -784,11 +799,12 @@ def test_v3_off_without_learning_db(fake):
 
 
 def test_nodes_are_judged_on_the_training_rows_not_the_whole_log(fake):
-    """A log whose entity sensors only start late (pre-0.9.1 history): early weeks fit a single _ca node."""
+    """A log whose entity sensors only start late (pre-0.9.1 history): early weeks have the entity primary (older rows
+    are mapped onto it through ``indoor``, Issue #1230 R1b M1) but no extra node (no ``indoor_sensors`` yet)."""
     rows = make_rows(56, sensors=25 * 48)  # entity readings from day 25 on
     rep = run(rows, "--no-diagnostic", "--train-days", "20")
     by_week = {w["week_start"][:10]: w for w in rep["weeks"] if w.get("primary")}
-    assert by_week["2026-03-09"]["primary"] == "_ca" and by_week["2026-03-09"]["nodes"] == ["_ca"]
+    assert by_week["2026-03-09"]["primary"] == "climate.t" and by_week["2026-03-09"]["nodes"] == ["climate.t"]
     last = rep["weeks"][-1]
     assert last["primary"] == "climate.t" and "sensor.bed" in last["nodes"]
     assert rep["run"]["skipped"]["no_reading"] == 0
@@ -856,11 +872,87 @@ def test_low_confidence_still_predicts_and_is_scored(fake):
     assert rep["weeks"][-1]["confidence"] == "low"
 
 
-def test_v3_model_default_is_current_and_drift_is_reported():
-    assert pb.build_parser().parse_args([]).v3_model == "current"
+def test_v3_model_default_is_honest_and_drift_is_reported():
+    assert pb.build_parser().parse_args([]).v3_model == "honest"
     models = pb.V3Models(_db(), "current")
     assert models.for_week(datetime(2026, 3, 9, tzinfo=UTC))[1] == "current"
     note = models.drift_note()
     assert note and "apart" in note and "only cover" in note
     # production's own get_thermal_model supplies the model dict
     assert {"confidence", "confidence_k_passive", "k_passive", "solar_phase_offset_h"} <= set(models.current)
+
+
+# ---------------------------------------------------------------------------
+# v3 as it was (Issue #1230 R1b): the honest comparator
+# ---------------------------------------------------------------------------
+
+
+def test_honest_v3_rebuilds_the_model_as_of_the_anchor_day():
+    models = pb.V3Models(_db(), "honest", min_obs=30)
+    # 40 observations dated 2026-02-01..27: before 2026-02-20 fewer than 30 precede the anchor (cannot rebuild)
+    assert models.for_anchor(datetime(2026, 2, 10, 12, tzinfo=UTC)) is None
+    assert models.for_anchor(datetime(2026, 3, 1, 12, tzinfo=UTC))
+    # the obs dated after the anchor never enter the rebuild (the -0.5 outlier is dated 2026-04-15)
+    early = models.for_anchor(datetime(2026, 3, 1, 12, tzinfo=UTC))
+    late = models.for_anchor(datetime(2026, 5, 1, 12, tzinfo=UTC))
+    assert early["k_passive"] != late["k_passive"]
+    # an anchor before every retained observation is unavailable - never today's model
+    assert models.for_anchor(datetime(2025, 12, 1, tzinfo=UTC)) is None
+
+
+def test_honest_v3_unavailable_anchors_are_excluded_and_counted_not_scored():
+    def rec(v3, unavail, lead=1):
+        return {
+            "sensor": "_ca", "lead": lead, "season": "heating", "actual": 70.0, "flat": 69.0, "v4": 70.5, "v4a": None,
+            "v3": v3, "v3cur": 71.0, "v3_unavail": unavail, "logged": None,
+        }  # fmt: skip
+
+    recs = [rec(71.0, False)] * 3 + [rec(None, True)] * 5
+    st = pb.aggregate([{**r, "anchor": 0, "target": datetime(2026, 1, 1, tzinfo=UTC)} for r in recs], v3_enabled=True)
+    row = st["_ca"]["1h"]["heating"]
+    assert row["n"] == 3 and row["v3_unavailable_n"] == 5  # excluded from n and from the v3 comparison
+    assert row["v3_mae"] == pytest.approx(1.0) and row["v3_current_mae"] == pytest.approx(1.0)
+    gate = pb.gate_row("z", "_ca", "heating", 1, row, require_v3=True, min_n=4, min_cov=0.8)
+    assert gate["scored"] is False  # 3 comparable anchors < min_n: not scored, never passed on hindsight
+
+
+def test_report_shows_the_hindsight_column_and_exclusions():
+    assert "--v3-model" in pb.build_parser().format_help()
+    assert pb.build_parser().parse_args(["--v3-asof-min-obs", "50"]).v3_asof_min_obs == 50
+
+
+def test_honest_v3_uses_the_logged_line_at_4h_and_excludes_what_cannot_be_rebuilt(fake):
+    rows = make_rows(28)
+    args = pb.build_parser().parse_args(["--train-days", "30", "--max-weeks", "1", "--no-diagnostic"])
+    rep = pb.run_backtest(rows, args, tz=UTC, zone="z1", learning_db=_db(), archive_snapshots=None)
+    st = rep["stats"]["_ca"]
+    h4 = st["4h"]["heating"]
+    assert h4["v3_mae"] == pytest.approx(0.5, abs=0.01)  # exactly the logged pred_indoor (indoor + 0.5)
+    assert h4["v3_unavailable_n"] == 0
+    assert rep["run"]["v3"]["asof_min_obs"] == 30
+    assert rep["run"]["v3"]["model_mode"] == "honest"
+    # the hindsight replay is still reported beside it
+    assert h4["v3_current_mae"] is not None
+    # a DB with too few retained observations: 1 h / 12 h anchors are excluded, not replayed with today's model
+    thin = pb.build_parser().parse_args(["--train-days", "30", "--max-weeks", "1", "--no-diagnostic"])
+    rep2 = pb.run_backtest(rows, thin, tz=UTC, zone="z1", learning_db=_db(n_obs=5), archive_snapshots=None)
+    s2 = rep2["stats"]["_ca"]["1h"]["heating"]
+    assert s2["v3_unavailable_n"] > 0 and s2["n"] == 0
+    assert rep2["run"]["v3"]["asof_unavailable_anchors"] > 0
+
+
+def test_unknown_setpoint_anchors_leave_every_model(fake):
+    rows = make_rows(28)
+    for r in rows[: 14 * 48]:  # the first fortnight predates the band: no lower/upper, no setpoint
+        r["lower"] = r["upper"] = r["setpoint"] = None
+    on = run(rows, "--no-diagnostic")
+    off = run(rows, "--no-diagnostic", "--include-unknown-setpoint")
+    h = on["run"]["setpoint_hygiene"]
+    assert h["enabled"] and h["excluded_anchors"] > 100 and sum(h["by_season"].values()) == h["excluded_anchors"]
+    assert on["run"]["skipped"]["no_setpoint"] == h["excluded_anchors"]
+    n_on = on["stats"]["_ca"]["4h"]["all"]
+    n_off = off["stats"]["_ca"]["4h"]["all"]
+    assert n_off["n"] > n_on["n"]  # the diagnostic flag scores them
+    # the flat model sees exactly the same anchors as v4 - the exclusion is not v4-only
+    assert n_on["base_n"] == n_on["n"]
+    assert off["run"]["setpoint_hygiene"]["enabled"] is False

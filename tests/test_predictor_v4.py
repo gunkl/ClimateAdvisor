@@ -7,6 +7,7 @@ held-out days. Real-data reproduction lives in ``test_predictor_v4_real.py``.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import random
@@ -46,34 +47,40 @@ def _sun(hour: float, phase: float) -> float:
 class Plant:
     """Independent reference implementation of the house + thermostat (does not call the module)."""
 
-    def __init__(self, house, bed=None, *, on_below=1.0, on_above=1.0, burst=10.0, burst_c=20.0, rstep=0.0):
+    def __init__(
+        self, house, bed=None, *, on_below=1.0, on_above=1.0, off_above=0.5, off_below=0.5, burst=10.0, burst_c=20.0,
+        rstep=0.0,
+    ):  # fmt: skip
         self.hp, self.bp = house, bed
-        self.on_below, self.on_above, self.burst, self.burst_c, self.rstep = on_below, on_above, burst, burst_c, rstep
+        self.on_below, self.on_above, self.rstep = on_below, on_above, rstep
+        self.off_above, self.off_below, self.burst, self.burst_c = off_above, off_below, burst, burst_c
         self.h = self.m = 70.0
         self.b = 70.0
-        self.left = 0.0
+        self.run = 0.0
         self.mode = 0
 
     def step(self, ts, out, hsp, csp, win, fan):
+        """Hysteretic thermostat: starts at sp -/+ on, runs whole steps until the reading reaches sp +/- off (and the
+        minimum run ``burst`` / ``burst_c`` minutes has elapsed). Not the module's emulator: no partial last step."""
         hp = self.hp
-        if hsp is None and csp is None:
-            self.left, self.mode = 0.0, 0
-        elif self.left <= 0:
-            rd = self.h if self.rstep <= 0 else math.floor(self.h / self.rstep + 0.5) * self.rstep
+        rd = self.h if self.rstep <= 0 else math.floor(self.h / self.rstep + 0.5) * self.rstep
+        if self.mode == 1 and (hsp is None or (self.run >= self.burst and rd >= hsp + self.off_above - 1e-9)):
+            self.mode = 0
+        if self.mode == -1 and (csp is None or (self.run >= self.burst_c and rd <= csp - self.off_below + 1e-9)):
+            self.mode = 0
+        if self.mode == 0:
+            self.run = 0.0
             if hsp is not None and rd <= hsp - self.on_below + 1e-9:
-                self.left, self.mode = self.burst, 1
+                self.mode = 1
             elif csp is not None and rd >= csp + self.on_above - 1e-9:
-                self.left, self.mode = self.burst_c, -1
-            else:
-                self.mode = 0
+                self.mode = -1
         uh = uc = 0.0
-        if self.left > 0:
-            dur = min(self.left, 15.0)
-            self.left -= dur
+        if self.mode:
+            self.run += 15.0
             if self.mode == 1:
-                uh = dur / 15.0
-            elif self.mode == -1:
-                uc = dur / 15.0
+                uh = 1.0
+            else:
+                uc = 1.0
         lt = ts.astimezone(TZ)
         sun = _sun(lt.hour + lt.minute / 60.0, hp["phase"])
         leak = hp["a_o"] + hp["a_w"] * win + hp["a_f"] * fan
@@ -398,7 +405,9 @@ class TestThermostatLearning:
         th = p4.learn_thermostat(samples, primary=HALL)
         assert th.reading_step_f == 1.0
         assert th.on_below_f == pytest.approx(1.0, abs=0.01)
-        assert th.burst_minutes == pytest.approx(10.0, abs=1.0)
+        assert th.off_above_f == pytest.approx(1.0, abs=0.01)  # plant stops at the first whole reading >= sp + 0.5
+        assert th.burst_minutes >= 10.0  # median whole run (the plant keeps heating until satisfied)
+        assert th.min_run_heat_min == pytest.approx(15.0, abs=5.0)  # low quantile of the runs: the minimum run
 
     def test_fine_house_reports_fine_step(self):
         samples, _t, _ = simulate(T0, 8, noise=0.03)
@@ -417,7 +426,8 @@ class TestThermostatLearning:
     def test_too_few_starts_falls_back_to_defaults(self):
         samples, _t, _ = simulate(T0, 1, base=70.0, amp=1.0, heat_day=60.0)  # never heats
         th = p4.learn_thermostat(samples, primary=HALL)
-        assert (th.on_below_f, th.on_above_f, th.burst_minutes) == (1.0, 1.0, 10.0)
+        assert (th.on_below_f, th.on_above_f, th.burst_minutes) == (0.0, 0.0, 10.0)
+        assert (th.off_above_f, th.off_below_f) == (0.0, 0.0)
 
     def test_starts_right_after_setpoint_change_are_skipped(self):
         # a heating start right after a setpoint change is the occupant's, not the thermostat's own threshold
@@ -434,7 +444,7 @@ class TestThermostatLearning:
                          {HALL: 60.0}, heat_duty=0.67 if heating else 0.0, cool_duty=0.0)
             )  # fmt: skip
         th = p4.learn_thermostat(rows, primary=HALL)
-        assert th.on_below_f == 1.0  # default: every start was skipped, so nothing learned
+        assert th.on_below_f == 0.0  # default: every start was skipped, so nothing learned
 
     def test_burst_start_offset_uses_pre_start_reading(self):
         # reading 66 then start with sp 68 -> offset 2.0
@@ -474,25 +484,334 @@ class TestEmulation:
         assert self._roll(th, 67.4, 68.0).heat_duty[0] > 0
         assert self._roll(th, 67.6, 68.0).heat_duty[0] == 0
 
-    def test_burst_length_sets_duty(self):
-        th = V4Thermostat(0.0, 1.0, 10.0, 0.0)
-        r = self._roll(th, 60.0 - 0.0, 62.0)
-        assert r.heat_duty[0] == pytest.approx(1.0)  # far below -> stays on
-        r2 = self._roll(th, 61.9, 62.0)
-        assert r2.heat_duty[0] == pytest.approx(10.0 / 15.0)
+    def test_minimum_run_keeps_heating_past_the_stop_point(self):
+        th = V4Thermostat(0.0, 1.0, 10.0, 0.0, min_run_heat_min=45.0)
+        r = self._roll(th, 61.9, 62.0, out=62.0)  # starts (<= sp); reading is already past sp + 0 within a step
+        assert r.heat_duty[:3] == [pytest.approx(1.0)] * 3  # three full steps = the 45 min minimum run
+        assert r.heat_duty[3] < 1.0
+
+    def test_run_continues_until_the_stop_point_then_lands_on_it(self):
+        th = V4Thermostat(1.0, 1.0, 10.0, 0.0, off_above_f=0.5, min_run_heat_min=15.0)
+        r = self._roll(th, 60.0, 68.0, n=40, out=50.0)
+        first_off = next(k for k, u in enumerate(r.heat_duty) if u < 1.0)
+        assert first_off >= 4  # many full steps: it heats to the stop point, not for a fixed burst
+        # the partial last step puts the room at sp + off (68.5), up to the passive drift that follows
+        assert r.primary[first_off] == pytest.approx(68.5, abs=0.05)
+        # it does not restart straight away: the reading (68.5) is above sp - on (67)
+        assert r.heat_duty[first_off + 1] == 0
+
+    def test_no_stop_condition_regression_duty_matches_hysteresis(self):
+        # the pre-R1b emulator ran one burst and idled until sp - on again: ~1/3 of the duty of a thermostat that holds
+        th = V4Thermostat(1.0, 1.0, 10.0, 0.0, off_above_f=0.0, min_run_heat_min=15.0)
+        r = self._roll(th, 67.0, 68.0, n=96, out=40.0)
+        held = [x for x in r.primary[8:]]
+        assert min(held) > 66.5 and max(held) < 69.5  # holds the room around sp, never sags to sp - on - drift
+
+    def test_run_in_progress_at_the_anchor_is_honoured(self):
+        th = V4Thermostat(1.0, 1.0, 10.0, 0.0, off_above_f=0.0, min_run_heat_min=15.0)
+        # reading 68.2 is above the start threshold (67): without a running burst nothing starts
+        assert self._roll(th, 68.2, 68.0).heat_duty[0] == 0
+        r = p4.rollout(
+            [TRUE_HOUSE[k] for k in p4.HOUSE_KEYS], [], h0=68.2, m0=68.2, b0=[], out=[40.0] * 6, win=[0.0] * 6,
+            fan=[0.0] * 6, hours=[2.0] * 6, thermostat=th, heat_sp=[68.0] * 6, cool_sp=[None] * 6, init_run=(1, 0.0),
+        )  # fmt: skip
+        assert r.heat_duty[0] == pytest.approx(1.0)  # still inside its minimum run
+        r2 = p4.rollout(
+            [TRUE_HOUSE[k] for k in p4.HOUSE_KEYS], [], h0=68.2, m0=68.2, b0=[], out=[40.0] * 6, win=[0.0] * 6,
+            fan=[0.0] * 6, hours=[2.0] * 6, thermostat=th, heat_sp=[68.0] * 6, cool_sp=[None] * 6, init_run=(1, 60.0),
+        )  # fmt: skip
+        assert r2.heat_duty[0] == 0  # minimum run served and the reading is past the stop point: it ends
 
     def test_no_setpoint_no_heat(self):
         th = V4Thermostat(1.0, 1.0, 10.0, 0.0)
         r = self._roll(th, 50.0, None)
         assert sum(r.heat_duty) == 0 and sum(r.cool_duty) == 0
 
-    def test_longer_cool_burst_is_used(self):
-        th = V4Thermostat(1.0, 1.0, 10.0, 0.0, burst_cool_minutes=30.0)
+    def test_cooling_is_the_mirror(self):
+        th = V4Thermostat(1.0, 1.0, 10.0, 0.0, off_below_f=0.5, min_run_cool_min=30.0)
+        n = 40
         r = p4.rollout(
-            [TRUE_HOUSE[k] for k in p4.HOUSE_KEYS], [], h0=75.6, m0=75.6, b0=[], out=[90.0] * 6, win=[0.0] * 6,
-            fan=[0.0] * 6, hours=[2.0] * 6, thermostat=th, heat_sp=[None] * 6, cool_sp=[74.0] * 6,
+            [TRUE_HOUSE[k] for k in p4.HOUSE_KEYS], [], h0=77.0, m0=77.0, b0=[], out=[90.0] * n, win=[0.0] * n,
+            fan=[0.0] * n, hours=[2.0] * n, thermostat=th, heat_sp=[None] * n, cool_sp=[74.0] * n,
         )  # fmt: skip
-        assert r.cool_duty[0] == pytest.approx(1.0) and r.cool_duty[1] == pytest.approx(1.0)
+        first_off = next(k for k, u in enumerate(r.cool_duty) if u < 1.0)
+        assert first_off >= 2 and r.cool_duty[0] == pytest.approx(1.0) and r.cool_duty[1] == pytest.approx(1.0)
+        assert r.primary[first_off] == pytest.approx(73.5, abs=0.05)
+
+    def test_v1_thermostat_without_stop_fields_still_emulates(self):
+        th = V4Thermostat(1.0, 1.0, 10.0, 0.0, burst_cool_minutes=30.0)  # no off / min-run fields
+        r = self._roll(th, 60.0, 62.0)
+        assert r.heat_duty[0] == pytest.approx(1.0)
+        assert p4._min_run(th, heat=True) == 10.0 and p4._min_run(th, heat=False) == 15.0
+
+
+class TestCalibration:
+    def test_recovers_start_and_stop_offsets_of_a_synthetic_hysteretic_thermostat(self):
+        samples, _t, _ = simulate(
+            T0, 30, base=44.0, amp=7.0, noise=0.03, plant_kw={"on_below": 1.5, "off_above": 1.0, "burst": 15.0}
+        )
+        m = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts)
+        cal = m.fit["thermostat_calibration"]["heat"]
+        assert cal["calibrated"] is True and m.thermostat.calibrated is True
+        assert m.thermostat.on_below_f == pytest.approx(1.5, abs=0.5)
+        assert m.thermostat.off_above_f == pytest.approx(1.0, abs=0.5)
+        assert cal["rmse_f"] <= cal["rmse_default_f"] + 1e-9  # no worse than the "hold at the setpoint" default
+
+    def test_calibration_uses_the_emulator_not_the_replay(self):
+        samples, _t, _ = simulate(
+            T0, 30, base=44.0, amp=7.0, noise=0.03, plant_kw={"on_below": 1.5, "off_above": 1.0, "burst": 15.0}
+        )
+        m = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts)
+        prob = p4._Problem(samples, primary=HALL, extra=[], tz=TZ, horizon_steps=48, max_anchors=80)
+        house = tuple(m.house[k] for k in p4.HOUSE_KEYS)
+        mass = prob.mass_series(m.house["c_mh"])
+        emu = rec = 0.0
+        for a in prob.anchors:
+            ss = samples[a.i + 1 : a.i + 1 + a.length]
+            roll = p4.rollout(
+                house, [], h0=a.h0, m0=mass[a.i], b0=[], out=a.out, win=a.win, fan=a.fan, hours=a.hours,
+                thermostat=m.thermostat, heat_sp=[x.heat_sp_f for x in ss], cool_sp=[x.cool_sp_f for x in ss],
+                init_run=p4.run_state_at(samples, a.i),
+            )  # fmt: skip
+            emu += sum(roll.heat_duty)
+            rec += sum(a.uh)
+        assert 0.8 < emu / rec < 1.2  # emulated duty is within 20 % of the recorded duty (was 0.34-0.5x)
+
+    def test_unseen_mode_keeps_defaults(self):
+        samples, _t, _ = simulate(T0, 20, base=44.0, amp=7.0, noise=0.03)
+        m = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts)
+        assert "cool" not in m.fit["thermostat_calibration"]
+        assert (m.thermostat.on_above_f, m.thermostat.off_below_f) == (0.0, 0.0)
+
+    def test_too_few_accepted_starts_cap_confidence_and_use_defaults(self):
+        samples, _t, _ = simulate(
+            T0 + timedelta(days=90), 26, base=lambda d: 40.0 + 2.2 * d, amp=12.0, heat=True, cool=True,
+            heat_day=66.0, cool_sp=74.0, noise=0.03,
+        )  # fmt: skip
+        # the heating setpoint moves on every start sample: no heating start can be accepted
+        out, prev = [], False
+        for sm in samples:
+            heating = (sm.heat_duty or 0) > 0
+            if heating and not prev and sm.heat_sp_f is not None:
+                sm = dataclasses.replace(sm, heat_sp_f=sm.heat_sp_f + 0.5)
+            prev = heating
+            out.append(sm)
+        m = p4.fit(out, primary=HALL, sensors=[HALL], tz=TZ, now=out[-1].ts)
+        assert m.fit["heat_seen"] and m.fit["cool_seen"]
+        assert m.fit["starts_accepted"]["heat"] < p4.GATE_MIN_ACCEPTED_STARTS <= m.fit["starts_accepted"]["cool"]
+        assert m.fit["starts_total"]["heat"] >= 5
+        assert m.confidence == "low" and "accepted" in m.fit["reason"]
+        assert m.fit["thermostat_defaults_used"] is True
+        assert (m.thermostat.on_below_f, m.thermostat.off_above_f) == (0.0, 0.0)  # not the silent 1.0
+
+
+class TestOpennessPrior:
+    def _samples(self, days=30):
+        out = []
+        for k in range(days * 96):
+            ts = T0 + timedelta(minutes=15 * k)
+            hr = ts.astimezone(TZ).hour
+            out.append(
+                V4Sample(
+                    ts,
+                    60.0,
+                    None,
+                    "idle",
+                    hr in (1, 2) or hr == 14,
+                    hr in (23, 0),
+                    None,
+                    None,
+                    {HALL: 68.0},
+                    whf_running=hr in (1, 2),
+                )  # fmt: skip
+            )
+        return out
+
+    def test_hour_of_day_shares(self):
+        op = p4.learn_openness(self._samples(), tz=TZ)
+        # the step ENDING at 01:00 belongs to hour 0, so the shares are 0.75 / 1.0 at the edges of a window
+        assert op.window_by_hour[23] >= 0.7 and op.window_by_hour[0] >= 0.7 and op.window_by_hour[12] == 0.0
+        assert op.fan_by_hour[1] >= 0.7 and op.fan_by_hour[2] >= 0.7
+        assert op.fan_by_hour[14] == 0.0  # fan_running at 14:00 is the furnace blower (no whf flag): not counted
+
+    def test_needs_a_week_of_samples(self):
+        op = p4.learn_openness(self._samples(days=5), tz=TZ)
+        assert max(op.window_by_hour) == 0.0 and max(op.fan_by_hour) == 0.0
+
+    def test_only_the_last_28_days_count(self):
+        smp = self._samples(days=60)
+        smp = [
+            dataclasses.replace(x, windows_open=x.ts < T0 + timedelta(days=30))
+            for x in smp
+        ]  # fmt: skip
+        assert max(p4.learn_openness(smp, tz=TZ).window_by_hour) == 0.0
+
+    def test_predict_applies_the_prior_where_the_plan_says_closed(self, heat_fit):
+        model = heat_fit[0]
+        opn = p4.V4Openness(tuple([0.5] * 24), tuple([0.0] * 24), 28.0)
+        with_prior = dataclasses.replace(model, openness=opn)
+        now = datetime(2026, 1, 30, 20, 0, tzinfo=TZ)
+        ins = [V4Input(ts, 40.0, None, None) for ts in p4.grid_steps(now, 48)]
+        a = p4.predict(model, now=now, readings={HALL: 70.0}, mass_f=None, inputs=ins, tz=TZ)
+        b = p4.predict(with_prior, now=now, readings={HALL: 70.0}, mass_f=None, inputs=ins, tz=TZ)
+        c = p4.predict(with_prior, now=now, readings={HALL: 70.0}, mass_f=None, inputs=ins, tz=TZ, openness_prior=False)
+        assert b[HALL][-1][1] < a[HALL][-1][1] - 0.3  # a half-open house loses heat faster (outdoor 40 F)
+        assert c[HALL] == a[HALL]
+        # an explicitly planned window is fully open, not 0.5
+        planned = [V4Input(i.ts, i.outdoor_f, None, None, windows_open=True) for i in ins]
+        d = p4.predict(with_prior, now=now, readings={HALL: 70.0}, mass_f=None, inputs=planned, tz=TZ)
+        assert d[HALL][-1][1] < b[HALL][-1][1]
+
+
+class TestBackwardCompatibility:
+    def test_v1_model_dict_without_r1b_fields_loads_and_predicts(self, node_fit):
+        d = json.loads(json.dumps(p4.to_dict(node_fit[0])))
+        for key in ("off_above_f", "off_below_f", "min_run_heat_min", "min_run_cool_min", "calibrated"):
+            d["thermostat"].pop(key)
+        d.pop("openness")
+        back = p4.from_dict(d)
+        assert back is not None and back.openness is None
+        assert back.thermostat.off_above_f == 0.0 and back.thermostat.calibrated is False
+        model, samples, _t, split = node_fit
+        out = p4.predict(
+            back, now=samples[split].ts, readings=samples[split].readings, mass_f=None,
+            inputs=_inputs(samples, split, 16), tz=TZ,
+        )  # fmt: skip
+        assert out is not None and all(math.isfinite(v) for _, v in out[HALL])
+
+    def test_old_c_mh_below_the_new_bound_is_clamped_not_rejected(self, node_fit):
+        d = json.loads(json.dumps(p4.to_dict(node_fit[0])))
+        d["house"]["c_mh"] = 0.006
+        back = p4.from_dict(d)
+        assert back is not None and back.house["c_mh"] == p4.HOUSE_BOUNDS["c_mh"][0]
+
+    def test_new_fields_round_trip(self, node_fit):
+        model = dataclasses.replace(
+            node_fit[0],
+            openness=p4.V4Openness(tuple([0.1] * 24), tuple([0.2] * 24), 28.0),
+            thermostat=dataclasses.replace(
+                node_fit[0].thermostat, off_above_f=0.5, min_run_heat_min=20.0, calibrated=True
+            ),
+        )  # fmt: skip
+        back = p4.from_dict(json.loads(json.dumps(p4.to_dict(model))))
+        assert back is not None and back.openness == model.openness and back.thermostat == model.thermostat
+
+    def test_malformed_openness_is_rejected(self, node_fit):
+        model = dataclasses.replace(node_fit[0], openness=p4.V4Openness(tuple([0.1] * 24), tuple([0.2] * 24), 28.0))
+        d = json.loads(json.dumps(p4.to_dict(model)))
+        d["openness"]["window_by_hour"] = [2.0] * 24
+        assert p4.from_dict(d) is None
+
+
+class TestSamplesModeAssignment:
+    def _rows(self, with_band=True):
+        base = datetime(2026, 1, 10, 0, 0, tzinfo=TZ)
+        rows = []
+        for k in range(0, 96 * 3):
+            ts = base + timedelta(minutes=15 * k)
+            heating = k % 12 in (6, 7)
+            row = {
+                "ts": ts.isoformat(), "hvac": "heating" if heating else "idle", "fan": False,
+                "indoor": 66.0 + (k % 12) * 0.3,
+                "outdoor": 40.0, "pred_outdoor": 40.0,
+                # the logged setpoint is the OPPOSITE band edge on idle rows (what the sim zones log)
+                "setpoint": 68.0 if heating else 76.0,
+            }  # fmt: skip
+            if with_band:
+                row["lower"], row["upper"] = 68.0, 76.0
+            rows.append(row)
+        return rows
+
+    def test_idle_rows_take_the_active_modes_own_band_edge(self):
+        s = p4.samples_from_chart_log(self._rows(), tz=TZ)
+        idle_after_heat = [x for x in s if x.hvac_action == "idle" and x.heat_sp_f is not None]
+        assert idle_after_heat and all(x.heat_sp_f == 68.0 and x.cool_sp_f is None for x in idle_after_heat)
+        th, stats = p4.learn_thermostat_detail(s, primary="_ca")
+        assert stats.heat_starts >= 10 and stats.heat_accepted == stats.heat_starts  # was ~0 with the opposite edge
+
+    def test_without_a_band_idle_rows_keep_the_last_active_setpoint_of_the_mode(self):
+        s = p4.samples_from_chart_log(self._rows(with_band=False), tz=TZ)
+        idle = [x for x in s if x.hvac_action == "idle" and x.heat_sp_f is not None]
+        assert idle and all(x.heat_sp_f == 68.0 for x in idle)  # not the idle row's own 76.0
+        assert all(x.cool_sp_f is None for x in idle)
+        _th, stats = p4.learn_thermostat_detail(s, primary="_ca")
+        assert stats.heat_accepted == stats.heat_starts >= 10
+
+
+class TestPrimaryMappingAndNodes:
+    def _rows(self):
+        base = datetime(2026, 1, 10, 0, 0, tzinfo=TZ)
+        rows = []
+        for k in range(0, 96 * 4):
+            ts = base + timedelta(minutes=30 * k)
+            row = {"ts": ts.isoformat(), "hvac": "idle", "fan": False, "indoor": 70.0 + (k % 5) * 0.1, "outdoor": 50.0}
+            if k >= 200:  # newer rows carry the per-sensor map; the entity primary appears only here
+                row["indoor_sensors"] = {"sensor.fine": 70.5, "climate.t": 70.0, "sensor.bed": 66.0}
+            rows.append(row)
+        return rows
+
+    def test_old_rows_fill_the_entity_primary_from_indoor(self):
+        s = p4.samples_from_chart_log(self._rows(), tz=TZ, primary="sensor.fine", primary_aliases=("climate.t",))
+        assert s[0].readings["sensor.fine"] is not None  # a row with no indoor_sensors
+        assert s[-1].readings["sensor.fine"] == 70.5  # a new row keeps the entity's own reading
+        bare = p4.samples_from_chart_log(self._rows(), tz=TZ)
+        assert bare[0].readings.get("sensor.fine") is None
+
+    def test_sleep_window_rows_do_not_feed_the_primary_node(self):
+        def asleep(dt):
+            return dt.hour < 6
+
+        s = p4.samples_from_chart_log(self._rows(), tz=TZ, primary="sensor.fine", in_sleep=asleep)
+        night = [x for x in s[:80] if x.ts.astimezone(TZ).hour < 5]
+        day = [x for x in s[:80] if 8 <= x.ts.astimezone(TZ).hour < 12]
+        assert night and all(x.readings.get("sensor.fine") is None for x in night[:3])
+        assert day and all(x.readings.get("sensor.fine") is not None for x in day)
+
+    def test_resolve_nodes_keeps_the_entity_primary_when_old_rows_map_onto_it(self):
+        prim, nodes = p4.resolve_nodes(
+            self._rows(), primary="sensor.fine", sensors=["sensor.fine", "sensor.bed"], aliases=("climate.t",), tz=TZ
+        )
+        assert prim == "sensor.fine"  # coverage is 100 % through the mapping (it was ~50 % raw)
+        assert nodes[0] == "sensor.fine"
+        assert "sensor.bed" not in nodes  # bedroom covers only half the rows... 50 % is the bar
+        rows = self._rows()[:200]  # only old rows: still the entity
+        assert p4.resolve_nodes(rows, primary="sensor.fine", sensors=["sensor.fine"], tz=TZ)[0] == "sensor.fine"
+
+    def test_resolve_nodes_falls_back_to_ca_when_the_primary_cannot_read(self):
+        rows = self._rows()
+        for r in rows:
+            r["indoor"] = None
+        prim, nodes = p4.resolve_nodes(rows, primary="sensor.fine", sensors=["sensor.fine"], tz=TZ)
+        assert prim == p4.CA_NODE and nodes == [p4.CA_NODE]
+
+    def test_confidence_gate_counts_samples_with_a_primary_reading(self):
+        samples, _t, _ = simulate(T0, 8, noise=0.03)
+        blank = [dataclasses.replace(x, readings={HALL: None}) for x in samples[: 6 * 96]]
+        m = p4.fit([*blank, *samples[6 * 96 :]], primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts)
+        assert m.fit["primary_samples"] == len(samples) - 6 * 96
+        assert m.fit["sample_days"] == pytest.approx((len(samples) - 6 * 96) * 0.25 / 24, abs=0.01)
+        assert m.confidence == "none"  # 2 days of primary readings, not 8
+
+
+class TestCaLine:
+    def test_in_sleep_window_matches_the_automation_helper(self):
+        from custom_components.climate_advisor.automation import _in_sleep_window
+
+        for st, wk in (("22:30", "07:00"), ("01:00", "07:00"), ("07:00", "07:00"), ("", "07:00"), ("xx", "07:00")):
+            for hour in range(24):
+                for minute in (0, 29, 30, 59):
+                    dt = datetime(2026, 1, 10, hour, minute, tzinfo=TZ)
+                    assert p4.in_sleep_window(dt, st, wk) == _in_sleep_window(dt, {"sleep_time": st, "wake_time": wk})
+
+    def test_ca_line_takes_the_sleep_node_inside_the_window(self):
+        start = datetime(2026, 1, 10, 20, 0, tzinfo=TZ)
+        ts = p4.grid_steps(start, 24)  # 20:15 .. 02:00
+        preds = {HALL: [(t, 70.0) for t in ts], BED: [(t, 66.0) for t in ts]}
+        line = p4.ca_line(preds, primary=HALL, sleep_node=BED, sleep_time="22:30", wake_time="07:00", tz=TZ)
+        for (_t, v), (t0, _) in zip(line, preds[HALL], strict=True):
+            asleep = p4.in_sleep_window(t0.astimezone(TZ), "22:30", "07:00")
+            assert v == (66.0 if asleep else 70.0)
+        assert p4.ca_line(preds, primary=HALL, sleep_node=None, sleep_time=None, wake_time=None, tz=TZ) == preds[HALL]
 
 
 # ----------------------------------------------------------------------------------- forecast correction
@@ -849,3 +1168,76 @@ class TestPerformance:
             p4.predict(m, now=samples[100].ts, readings=samples[100].readings, mass_f=None, inputs=ins, tz=TZ)
         per_call = (time.perf_counter() - t1) / 20
         assert per_call < 0.05, f"predict took {per_call * 1000:.1f} ms"
+
+
+class TestQuantisedReadings:
+    """Whole-degree readings (Zone 1 is 68-74 % whole degrees): the start offset must not collapse to 0."""
+
+    def _world(self):
+        return simulate(
+            T0, 30, rstep=1.0, base=44.0, amp=7.0, plant_kw={"on_below": 1.0, "off_above": 0.5, "burst": 15.0}
+        )
+
+    def test_learned_and_calibrated_offsets_recover_the_true_start_offset(self):
+        samples, _t, _ = self._world()
+        th, stats = p4.learn_thermostat_detail(samples, primary=HALL)
+        assert th.reading_step_f == 1.0 and th.on_below_f == pytest.approx(1.0, abs=0.01)
+        assert stats.heat_accepted >= 0.8 * stats.heat_starts  # nearly every start is usable
+        m = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts)
+        assert m.thermostat.reading_step_f == 1.0 and m.thermostat.calibrated
+        assert m.thermostat.on_below_f == pytest.approx(1.0, abs=0.5)
+
+    def test_prediction_is_not_overheated_in_the_quantised_world(self):
+        samples, truth, _ = self._world()
+        split = 24 * 96
+        m = p4.fit(samples[:split], primary=HALL, sensors=[HALL], tz=TZ, now=samples[split].ts)
+        errs = []
+        mass = None
+        for j in range(split - 48, split):
+            mass = p4.step_mass(m, mass_f=mass, readings=samples[j].readings)
+        for i in range(split, len(samples) - 49, 4):
+            for j in range(max(split, i - 3), i + 1):
+                mass = p4.step_mass(m, mass_f=mass, readings=samples[j].readings)
+            pred = p4.predict(
+                m, now=samples[i].ts, readings=samples[i].readings, mass_f=mass, inputs=_inputs(samples, i), tz=TZ
+            )
+            errs.append(pred[HALL][15][1] - truth[samples[i + 16].ts][0])
+        assert abs(sum(errs) / len(errs)) < 0.5  # 4 h bias inside the gate's band (was +0.75 with on_below 0)
+
+
+class TestConvergence:
+    def test_fit_reports_convergence_and_restarts(self):
+        samples, _t, _ = simulate(T0, 20, base=44.0, amp=7.0, noise=0.03)
+        m = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts)
+        assert isinstance(m.fit["converged"], bool) and m.fit["restarts"] in (0, 1)
+        assert m.fit["iterations"] <= 100
+
+    def test_a_capped_fit_gets_a_second_start_and_keeps_the_better_optimum(self):
+        samples, _t, _ = simulate(T0, 20, base=44.0, amp=7.0, noise=0.03)
+        capped = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts, max_iterations=3)
+        assert capped.fit["converged"] is False and capped.fit["restarts"] == 1
+        full = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts)
+        assert full.fit["cost"] <= capped.fit["cost"] + 1e-9
+
+    def test_a_warm_started_fit_is_checked_against_the_defaults(self):
+        samples, _t, _ = simulate(T0, 20, base=44.0, amp=7.0, noise=0.03)
+        first = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts)
+        bad = dataclasses.replace(first, house={**first.house, "q_h": 39.0, "a_o": 0.45})  # a poor previous model
+        again = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts, warm_start=bad)
+        assert again.fit["restarts"] == 1
+        assert again.fit["cost"] <= first.fit["cost"] * 1.1  # not stuck in the bad basin
+
+
+class TestUnknownSetpointHygiene:
+    def test_calibration_ignores_windows_with_an_unknown_setpoint(self):
+        samples, _t, _ = simulate(
+            T0, 30, base=44.0, amp=7.0, noise=0.03, plant_kw={"on_below": 1.0, "off_above": 0.5, "burst": 15.0}
+        )
+        # the first half of the history has no setpoint at all (an old log): they must not teach "never heat"
+        blind = [
+            dataclasses.replace(x, heat_sp_f=None, cool_sp_f=None) if k < 15 * 96 else x for k, x in enumerate(samples)
+        ]
+        m = p4.fit(blind, primary=HALL, sensors=[HALL], tz=TZ, now=blind[-1].ts)
+        cal = m.fit["thermostat_calibration"]["heat"]
+        assert cal["calibrated"] and cal["anchors"] > 0
+        assert m.thermostat.on_below_f == pytest.approx(1.0, abs=0.5)

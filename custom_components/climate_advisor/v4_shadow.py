@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
@@ -68,11 +69,18 @@ def run_fit(
     primary: str,
     sensors: Sequence[str],
     previous_model: Mapping[str, Any] | None = None,
+    primary_aliases: Sequence[str] = (),
+    in_sleep: Callable[[datetime], bool] | None = None,
 ) -> tuple[dict, float, str]:
     """Fit a model from the retained history. Blocking and CPU-bound: run via the executor only.
 
     Returns ``(model_dict, seconds, summary_line)``. The previous stored model warm-starts the refit.
     Raises on any failure; the caller keeps the previous model.
+
+    The nodes are chosen by ``predictor_v4.resolve_nodes`` - the same rule the backtest uses (Issue #1230 R1b, M1):
+    the entity ``primary`` is kept when it reads on 80 % of the history (older rows are mapped onto it through
+    ``primary_aliases`` / ``indoor_primary`` / ``indoor`` outside the sleep window ``in_sleep``), else the model is
+    the ``_ca`` reading alone.
     """
     p = _predictor()
     t0 = time.perf_counter()
@@ -83,8 +91,22 @@ def run_fit(
         except Exception:  # noqa: BLE001 - a bad forecast archive degrades the fit to chart-log-only, not to no fit
             _LOGGER.warning("v4 fit: forecast archive unreadable; fitting from the chart log alone", exc_info=True)
             snapshots = []
-    samples = p.samples_from_chart_log(list(chart_entries), tz=tz, archive_snapshots=snapshots)
-    ordered = [primary, *(s for s in sensors if s != primary)]
+    entries = list(chart_entries)
+    if hasattr(p, "resolve_nodes"):
+        primary, ordered = p.resolve_nodes(
+            entries, primary=primary, sensors=list(sensors), aliases=tuple(primary_aliases), in_sleep=in_sleep, tz=tz
+        )
+        samples = p.samples_from_chart_log(
+            entries,
+            tz=tz,
+            archive_snapshots=snapshots,
+            primary=None if primary == getattr(p, "CA_NODE", "_ca") else primary,
+            primary_aliases=tuple(primary_aliases),
+            in_sleep=in_sleep,
+        )
+    else:
+        samples = p.samples_from_chart_log(entries, tz=tz, archive_snapshots=snapshots)
+        ordered = [primary, *(s for s in sensors if s != primary)]
     warm = p.from_dict(dict(previous_model)) if previous_model else None
     model = p.fit(samples, primary=primary, sensors=ordered, tz=tz, now=now, warm_start=warm)
     line = p.summary_line(model) if hasattr(p, "summary_line") else ""
@@ -111,6 +133,44 @@ def _interp(points: Sequence[tuple[float, float]], t: float) -> float:
             hi = mid
     (t0, v0), (t1, v1) = points[lo], points[hi]
     return v0 if t1 <= t0 else v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+
+
+def fit_offset_s(entry_id: str, span_s: int = 1800) -> int:
+    """Stable per-zone offset in ``[0, span_s)`` seconds added to the nightly fit time, so zones do not all fit at
+    03:15:00. A pure hash of the entry id: the same zone always fits at the same minute, restarts included."""
+    return zlib.crc32(str(entry_id).encode("utf-8")) % max(1, span_s)
+
+
+def run_state_from_rows(rows: Sequence[Mapping[str, Any]], now: datetime) -> tuple[str | None, float | None]:
+    """``(action, minutes)`` of the heating / cooling run in progress at ``now`` from the newest chart rows, else
+    ``(None, None)``. ``rows`` is time-ordered; the run is the trailing stretch of rows with the same active action
+    (a gap over 2 h ends it); its minutes are measured from the first such row (an estimate: the true start lies
+    between that row and the one before)."""
+    if not rows:
+        return None, None
+    action = str(rows[-1].get("hvac") or "").lower()
+    if action not in ("heating", "cooling"):
+        return None, None
+    first_ts = None
+    prev_ts = None
+    for r in reversed(rows):
+        if str(r.get("hvac") or "").lower() != action:
+            break
+        ts = _parse_row_ts(r.get("ts"))
+        if ts is None or (prev_ts is not None and (prev_ts - ts).total_seconds() > 7200):
+            break
+        first_ts, prev_ts = ts, ts
+    if first_ts is None:
+        return action, 0.0
+    return action, max(0.0, (now - first_ts).total_seconds() / 60.0)
+
+
+def _parse_row_ts(raw: Any) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(raw) if isinstance(raw, str) else None
+    except ValueError:
+        return None
+    return dt
 
 
 def build_inputs(
@@ -177,11 +237,18 @@ def run_cycle(
     inputs: Sequence[Any],
     outdoor_now_f: float | None = None,
     forecast_now_f: float | None = None,
+    hvac_action_now: str | None = None,
+    run_elapsed_min: float | None = None,
+    ca_sleep_node: str | None = None,
+    ca_sleep_time: str | None = None,
+    ca_wake_time: str | None = None,
 ) -> tuple[dict[str, list[tuple[datetime, float]]] | None, float | None]:
     """Advance the hidden node ``mass_steps`` grid steps, then predict. Blocking CPU: run via the executor.
 
     Returns ``(predictions, mass_f)``. ``predictions`` is ``None`` when the confidence is ``none`` or the primary
     reading is missing (the engine's own fallback signal); ``mass_f`` is then returned unchanged.
+    ``hvac_action_now`` / ``run_elapsed_min`` carry a heating or cooling run already in progress into the thermostat
+    emulation; ``ca_sleep_node`` (+ the sleep window) makes the result carry the ``_ca`` composite line.
     """
     p = _predictor()
     model = p.from_dict(dict(model_dict))
@@ -196,6 +263,11 @@ def run_cycle(
         mass = stepped if math.isfinite(stepped) else mass  # a missing reading leaves NaN: keep what we had
     if not inputs:
         return None, mass  # no forecast to predict from: nothing to compute (the node was still advanced)
+    extra: dict[str, Any] = {}
+    if hvac_action_now:
+        extra.update(hvac_action_now=hvac_action_now, run_elapsed_min=run_elapsed_min)
+    if ca_sleep_node:
+        extra.update(ca_sleep_node=ca_sleep_node, ca_sleep_time=ca_sleep_time, ca_wake_time=ca_wake_time)
     predictions = p.predict(
         model,
         now=now,
@@ -205,6 +277,7 @@ def run_cycle(
         tz=tz,
         outdoor_now_f=outdoor_now_f,
         forecast_now_f=forecast_now_f,
+        **extra,
     )
     return predictions, mass
 

@@ -5,17 +5,27 @@ what the house then did (the "Prediction accuracy" preview page, ``prediction_ac
 
 Same first-write-wins rule as the v3 ``_pred_archive`` (docs/chart-log-spec.md): the value kept for a 30-minute slot
 and look-ahead is the one written when the slot was exactly that far ahead, and a later prediction for the same slot
-never overwrites it. In memory::
+never overwrites it.
 
-    data: dict[str, dict[int, dict[str, float]]]    # sensor -> epoch_30min -> {"1h": v, "4h": v, "12h": v, "24h": v}
+In memory (R1b, M4) each sensor line is columnar: a base epoch plus one ``array('f')`` per look-ahead, indexed by
+``(epoch - base) / 30 min`` with NaN for "not written". A line costs 4 bytes per slot and look-ahead (a 400-day line
+is about 300 KB; the former dict-per-slot layout cost ~500 bytes a slot). The ``data`` property still presents the
+legacy shape ``sensor -> epoch_30min -> {"1h": v, ...}`` (a materialised copy) for tools and tests::
 
-``sensor`` is an indoor entity id, or ``"_ca"`` for the reading Climate Advisor itself uses. Temperatures are
-internal degrees F. ``epoch_30min`` is the slot's Unix time rounded to the nearest 30 minutes.
+    data: dict[str, dict[int, dict[str, float]]]
 
-On disk (``climate_advisor_v4_archive_<entry_id>.json``, compact: ~45 bytes a slot)::
+``sensor`` is an indoor entity id, or ``"_ca"`` for the reading Climate Advisor itself uses. ``"_ca"`` is NOT stored: it
+is derived on read from the node lines - the sleep-sensor node's value for a slot inside the sleep window when that
+node exists, else the primary node's - using the ``ca`` source the coordinator configures (``set_ca_source``).
+Temperatures are internal degrees F, rounded to 2 dp. ``epoch_30min`` is the slot's Unix time rounded to 30 minutes.
+
+On disk (``climate_advisor_v4_archive_<entry_id>.json``, compact: ~45 bytes a slot; the format is unchanged, a
+``"_ca"`` line from an older file is read and dropped once the source is known, the optional ``"ca"`` object records
+the derivation)::
 
     {"v": 1, "leads": ["1h", "4h", "12h", "24h"],
-     "sensors": {"_ca": {"1768000000": [68.1, 68.4, null, null]}}}
+     "sensors": {"sensor.hall": {"1768000000": [68.1, 68.4, null, null]}},
+     "ca": {"primary": "sensor.hall", "sleep": "sensor.bed", "sleep_time": "22:30", "wake_time": "07:00", "tz": "..."}}
 
 Persistence contract mirrors ``ForecastArchive`` / ``ChartStateLog``: ``load()`` / ``save()`` are blocking (callers
 MUST run them via the executor), ``save()`` is an atomic tempfile + ``os.replace`` with ``chmod 0o600`` on non-Windows,
@@ -31,8 +41,10 @@ import math
 import os
 import sys
 import tempfile
+from array import array
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .const import V4_ARCHIVE_FILE, V4_ARCHIVE_LEADS, V4_ARCHIVE_MAX_DAYS, V4_MODEL_FILE
 from .storage_paths import resolve_entry_scoped_path
@@ -41,11 +53,89 @@ _LOGGER = logging.getLogger(__name__)
 
 _SLOT_S = 1800
 _FORMAT_VERSION = 1
+_NAN = float("nan")
+CA_LINE = "_ca"
 
 
 def slot_key(dt: datetime) -> int:
     """Unix time of the 30-minute slot nearest to ``dt`` (a cycle that fires a few seconds early still lands right)."""
     return int(round(dt.timestamp() / _SLOT_S)) * _SLOT_S
+
+
+class _Line:
+    """One sensor's predictions: ``base`` epoch + a float32 column per look-ahead (NaN = never written)."""
+
+    __slots__ = ("base", "cols")
+
+    def __init__(self) -> None:
+        self.base: int | None = None
+        self.cols: dict[str, array] = {lead: array("f") for lead in V4_ARCHIVE_LEADS}
+
+    def __len__(self) -> int:
+        return len(next(iter(self.cols.values()))) if self.cols else 0
+
+    def _index(self, epoch: int, grow: bool) -> int | None:
+        if self.base is None:
+            if not grow:
+                return None
+            self.base = epoch
+        i = (epoch - self.base) // _SLOT_S
+        if i < 0:
+            if not grow:
+                return None
+            for col in self.cols.values():
+                col[:0] = array("f", [_NAN]) * (-i)
+            self.base = epoch
+            i = 0
+        n = len(self)
+        if i >= n:
+            if not grow:
+                return None
+            for col in self.cols.values():
+                col.extend(array("f", [_NAN]) * (i + 1 - n))
+        return i
+
+    def get(self, epoch: int, lead: str) -> float | None:
+        i = self._index(epoch, False)
+        col = self.cols.get(lead)
+        if i is None or col is None:
+            return None
+        v = col[i]
+        return None if v != v else round(float(v), 2)
+
+    def put_if_absent(self, epoch: int, lead: str, value: float) -> bool:
+        if lead not in self.cols:
+            return False
+        i = self._index(epoch, True)
+        assert i is not None
+        col = self.cols[lead]
+        if col[i] == col[i]:  # already written
+            return False
+        col[i] = value
+        return True
+
+    def slots(self) -> list[int]:
+        """Epochs with at least one value, ascending."""
+        if self.base is None:
+            return []
+        n = len(self)
+        cols = list(self.cols.values())
+        return [self.base + i * _SLOT_S for i in range(n) if any(c[i] == c[i] for c in cols)]
+
+    def drop_before(self, cutoff: float) -> int:
+        """Remove slots older than ``cutoff``; returns how many slot positions were dropped."""
+        if self.base is None:
+            return 0
+        k = min(len(self), max(0, int(math.ceil((cutoff - self.base) / _SLOT_S))))
+        if k <= 0:
+            return 0
+        for col in self.cols.values():
+            del col[:k]
+        self.base += k * _SLOT_S
+        return k
+
+    def nbytes(self) -> int:
+        return sum(c.buffer_info()[1] * c.itemsize for c in self.cols.values())
 
 
 class V4Archive:
@@ -61,9 +151,107 @@ class V4Archive:
         # Entry-scoped like the other zone files (Issue #796); a brand-new file, so no legacy file to migrate.
         self._path = resolve_entry_scoped_path(config_dir, V4_ARCHIVE_FILE, entry_id)
         self._max_days = max_days
-        self.data: dict[str, dict[int, dict[str, float]]] = {}
+        self._lines: dict[str, _Line] = {}
+        self.ca: dict[str, str | None] = {}  # how "_ca" is derived (see module docstring)
         self._last_prune: float | None = None
         self.dirty = False
+
+    # ------------------------------------------------------------------
+    # The "_ca" derivation
+    # ------------------------------------------------------------------
+
+    def set_ca_source(
+        self,
+        primary: str | None,
+        *,
+        sleep: str | None = None,
+        sleep_time: str | None = None,
+        wake_time: str | None = None,
+        tz: str | None = None,
+    ) -> None:
+        """Say which node lines make up ``"_ca"``; a line named ``"_ca"`` kept from an older file is then dropped."""
+        new = {"primary": primary, "sleep": sleep, "sleep_time": sleep_time, "wake_time": wake_time, "tz": tz}
+        if new != self.ca:
+            self.ca = new
+            self.dirty = True
+        if primary is not None and primary in self._lines and CA_LINE in self._lines and primary != CA_LINE:
+            del self._lines[CA_LINE]
+            self.dirty = True
+
+    def _ca_active(self) -> bool:
+        p = self.ca.get("primary")
+        return bool(p) and p != CA_LINE and p in self._lines
+
+    def _ca_value(self, epoch: int, lead: str) -> float | None:
+        primary = self.ca.get("primary")
+        sleep = self.ca.get("sleep")
+        if sleep and sleep in self._lines and self._in_sleep(epoch):
+            v = self._lines[sleep].get(epoch, lead)
+            if v is not None:
+                return v
+        line = self._lines.get(primary or "")
+        return line.get(epoch, lead) if line is not None else None
+
+    def _in_sleep(self, epoch: int) -> bool:
+        st, wt, tzname = self.ca.get("sleep_time"), self.ca.get("wake_time"), self.ca.get("tz")
+        if not st or not wt or not tzname:
+            return False
+        try:
+            local = datetime.fromtimestamp(epoch, ZoneInfo(tzname))
+        except Exception:  # noqa: BLE001 - an odd zone name just disables the composite
+            return False
+        try:
+            from . import predictor_v4  # noqa: PLC0415 - lazy: a broken engine must not break the archive
+
+            return predictor_v4.in_sleep_window(local, st, wt)
+        except Exception:  # noqa: BLE001
+            return False
+
+    # ------------------------------------------------------------------
+    # Legacy view
+    # ------------------------------------------------------------------
+
+    @property
+    def data(self) -> dict[str, dict[int, dict[str, float]]]:
+        """Materialised ``sensor -> epoch -> {lead: value}`` incl. derived ``"_ca"``; a slow copy for tools/tests."""
+        out: dict[str, dict[int, dict[str, float]]] = {}
+        for sensor, line in list(self._lines.items()):
+            rows = self._rows(sensor, line.slots())
+            if rows:
+                out[sensor] = rows
+        if self._ca_active():
+            rows = self._rows(CA_LINE, self._lines[str(self.ca["primary"])].slots())
+            if rows:
+                out[CA_LINE] = rows
+        return out
+
+    @data.setter
+    def data(self, value: dict[str, dict[int, dict[str, float]]]) -> None:
+        self._lines = {}
+        for sensor, rows in value.items():
+            line = self._lines.setdefault(sensor, _Line())
+            for epoch, vals in rows.items():
+                for lead, v in vals.items():
+                    line.put_if_absent(int(epoch), lead, float(v))
+
+    def put(self, sensor: str, epoch: int, lead: str, value: float) -> bool:
+        """Store one value (first write wins); True when new. For tools and tests (``record`` is the live path)."""
+        added = self._lines.setdefault(sensor, _Line()).put_if_absent(int(epoch), lead, float(value))
+        self.dirty = self.dirty or added
+        return added
+
+    def _rows(self, sensor: str, slots: list[int]) -> dict[int, dict[str, float]]:
+        rows: dict[int, dict[str, float]] = {}
+        for epoch in slots:
+            vals = {}
+            for lead in V4_ARCHIVE_LEADS:
+                derived = sensor == CA_LINE and self._ca_active()
+                v = self._ca_value(epoch, lead) if derived else self._lines[sensor].get(epoch, lead)
+                if v is not None:
+                    vals[lead] = v
+            if vals:
+                rows[epoch] = vals
+        return rows
 
     # ------------------------------------------------------------------
     # Persistence (blocking - run via the executor)
@@ -75,10 +263,10 @@ class V4Archive:
             self._load()
         except Exception:  # noqa: BLE001 - the archive must never break startup
             _LOGGER.warning("v4_archive: unexpected error loading archive, starting fresh", exc_info=True)
-            self.data = {}
+            self._lines = {}
 
     def _load(self) -> None:
-        self.data = {}
+        self._lines = {}
         self.dirty = False
         if not self._path.exists():
             _LOGGER.info("v4_archive: no archive file yet, starting empty")
@@ -93,12 +281,15 @@ class V4Archive:
         if not isinstance(sensors, dict) or not isinstance(leads, list):
             _LOGGER.warning("v4_archive: archive file has an unexpected shape, starting fresh")
             return
+        ca = raw.get("ca")
+        if isinstance(ca, dict):
+            self.ca = {k: (v if isinstance(v, str) else None) for k, v in ca.items()}
         cutoff = datetime.now().timestamp() - self._max_days * 86400
         slots = 0
         for sensor, rows in sensors.items():
             if not isinstance(sensor, str) or not isinstance(rows, dict):
                 continue
-            kept: dict[int, dict[str, float]] = {}
+            line = _Line()
             for key, vals in rows.items():
                 try:
                     epoch = int(key)
@@ -106,28 +297,29 @@ class V4Archive:
                     continue
                 if epoch < cutoff or not isinstance(vals, list):
                     continue
-                entry = {
-                    str(lead): float(v)
-                    for lead, v in zip(leads, vals, strict=False)
-                    if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
-                }
-                if entry:
-                    kept[epoch] = entry
-            if kept:
-                self.data[sensor] = kept
-                slots += len(kept)
-        _LOGGER.info("v4_archive: loaded %d slots across %d sensor lines", slots, len(self.data))
+                wrote = False
+                for lead, v in zip(leads, vals, strict=False):
+                    if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v):
+                        wrote |= line.put_if_absent(epoch, str(lead), float(v))
+                slots += 1 if wrote else 0
+            if len(line):
+                self._lines[sensor] = line
+        primary = self.ca.get("primary")
+        if primary and primary != CA_LINE and primary in self._lines:
+            self._lines.pop(CA_LINE, None)  # derivable now: do not hold the duplicate
+        _LOGGER.info("v4_archive: loaded %d slots across %d sensor lines", slots, len(self._lines))
 
     def save(self) -> bool:
         """Atomic write to disk (tempfile + os.replace), 0o600 on non-Windows. True on success. Never raises."""
         try:
             leads = list(V4_ARCHIVE_LEADS)
-            # list() copies: the executor thread must not iterate a dict the event loop is adding to.
-            sensors = {
-                sensor: {str(epoch): [vals.get(lead) for lead in leads] for epoch, vals in list(rows.items())}
-                for sensor, rows in list(self.data.items())
-            }
-            serialized = json.dumps({"v": _FORMAT_VERSION, "leads": leads, "sensors": sensors}, separators=(",", ":"))
+            sensors = {}
+            for sensor, line in list(self._lines.items()):
+                sensors[sensor] = {str(epoch): [line.get(epoch, lead) for lead in leads] for epoch in line.slots()}
+            payload: dict = {"v": _FORMAT_VERSION, "leads": leads, "sensors": sensors}
+            if self.ca:
+                payload["ca"] = dict(self.ca)
+            serialized = json.dumps(payload, separators=(",", ":"))
         except (TypeError, ValueError, RuntimeError) as err:
             _LOGGER.error("v4_archive: failed to serialize archive: %s", err)
             return False
@@ -160,8 +352,8 @@ class V4Archive:
         """Archive the 1/4/12/24 h values of one cycle's predictions, first write wins. Returns values newly added.
 
         ``predictions`` is ``predict()``'s result ``{sensor: [(ts, temp_f), ...]}``. For each look-ahead the
-        point nearest ``now + lead`` (within 10 minutes) is stored under the slot nearest its time. The line of
-        ``primary`` is also stored as ``"_ca"``, the reading Climate Advisor itself uses. Never raises.
+        point nearest ``now + lead`` (within 10 minutes) is stored under the slot nearest its time. ``"_ca"`` is not
+        stored (derived on read); ``primary`` seeds the ``"_ca"`` source when none was configured. Never raises.
         """
         try:
             return self._record(now, predictions, primary)
@@ -170,13 +362,12 @@ class V4Archive:
             return 0
 
     def _record(self, now: datetime, predictions: dict[str, list[tuple[datetime, float]]], primary: str | None) -> int:
-        lines = dict(predictions)
-        if primary is not None and primary in predictions:
-            lines["_ca"] = predictions[primary]
+        if primary is not None and not self.ca.get("primary"):
+            self.set_ca_source(primary)
         now_ts = now.timestamp()
         added = 0
-        for sensor, points in lines.items():
-            if not points:
+        for sensor, points in predictions.items():
+            if not points or sensor == CA_LINE:
                 continue
             for lead in V4_ARCHIVE_LEADS:
                 target = now_ts + _lead_seconds(lead)
@@ -189,10 +380,11 @@ class V4Archive:
                         best = (gap, ts, float(temp))
                 if best is None or best[0] > 600:
                     continue
-                slot = self.data.setdefault(sensor, {}).setdefault(slot_key(best[1]), {})
-                if lead not in slot:
-                    slot[lead] = round(best[2], 2)
+                line = self._lines.setdefault(sensor, _Line())
+                if line.put_if_absent(slot_key(best[1]), lead, round(best[2], 2)):
                     added += 1
+        if primary is not None and primary != self.ca.get("primary") and primary in self._lines:
+            self.set_ca_source(primary, **{k: v for k, v in self.ca.items() if k != "primary"})
         if added:
             self.dirty = True
             self._maybe_prune(now_ts)
@@ -205,36 +397,61 @@ class V4Archive:
         self._last_prune = now_ts
         cutoff = now_ts - self._max_days * 86400
         dropped = 0
-        for sensor in list(self.data):
-            rows = self.data[sensor]
-            old = [epoch for epoch in rows if epoch < cutoff]
-            for epoch in old:
-                del rows[epoch]
-            dropped += len(old)
-            if not rows:
-                del self.data[sensor]
+        for sensor in list(self._lines):
+            line = self._lines[sensor]
+            dropped += line.drop_before(cutoff)
+            if not line.slots():
+                del self._lines[sensor]
         if dropped:
             self.dirty = True
             _LOGGER.debug("v4_archive: pruned %d expired slots", dropped)
 
     def sensor_ids(self) -> list[str]:
-        """Sensor lines held (``"_ca"`` plus entity ids)."""
-        return list(self.data)
+        """Sensor lines held (``"_ca"`` first when derivable, then the node entity ids)."""
+        ids = [s for s in self._lines if s != CA_LINE or not self._ca_active()]
+        return ([CA_LINE] if self._ca_active() else []) + [s for s in ids if s != CA_LINE]
+
+    def memory_bytes(self) -> int:
+        """Bytes held by the sensor columns (not counting object overhead)."""
+        return sum(line.nbytes() for line in self._lines.values())
+
+    def slot_count(self) -> dict[str, int]:
+        """``{sensor: slots}`` (``"_ca"`` included when derivable) for the Debug tab."""
+        out = {s: len(line.slots()) for s, line in self._lines.items()}
+        if self._ca_active():
+            out[CA_LINE] = out[str(self.ca["primary"])]
+        return out
 
     def series(self, sensor: str, lead: str, start: float, end: float) -> dict[int, float]:
         """``{slot_epoch: value}`` for one sensor and look-ahead with ``start <= slot < end`` (Unix seconds).
 
-        Safe from an executor thread while the event loop records: it iterates a copy.
+        Safe from an executor thread while the event loop records: it reads fixed-size columns by index.
         """
-        rows = self.data.get(sensor) or {}
-        return {epoch: vals[lead] for epoch, vals in list(rows.items()) if start <= epoch < end and lead in vals}
+        if sensor == CA_LINE and self._ca_active():
+            src = self._lines.get(str(self.ca["primary"]))
+            if src is None:
+                return {}
+            out: dict[int, float] = {}
+            for epoch in src.slots():
+                if start <= epoch < end:
+                    v = self._ca_value(epoch, lead)
+                    if v is not None:
+                        out[epoch] = v
+            return out
+        line = self._lines.get(sensor)
+        if line is None:
+            return {}
+        out = {}
+        for epoch in line.slots():
+            if start <= epoch < end:
+                v = line.get(epoch, lead)
+                if v is not None:
+                    out[epoch] = v
+        return out
 
     def snapshot(self) -> dict[str, dict[int, dict[str, float]]]:
-        """A copy of the archive that is safe to read from another thread."""
-        return {
-            sensor: {epoch: dict(vals) for epoch, vals in list(rows.items())}
-            for sensor, rows in list(self.data.items())
-        }
+        """A copy of the archive in the legacy dict shape that is safe to read from another thread."""
+        return self.data
 
 
 def _lead_seconds(lead: str) -> float:

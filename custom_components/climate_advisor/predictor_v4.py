@@ -23,10 +23,11 @@ reading quantisation) and *replayed* (the recorded heating / cooling duty) when 
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import math
 import operator
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
@@ -40,7 +41,21 @@ _GAP_BREAK_S = 2 * 3600  # chart_log gaps longer than this break rollout continu
 _FORECAST_BIAS_LEAD_H = 6.0  # archive lead used to learn the forecast hour-of-day bias
 _COOL_HEAT_RATIO = 6.13 / 5.55  # production's learned cool/heat gain ratio; prior for the unseen mode
 _COOL_SEASON_OUTDOOR_F = 68.0  # idle with no recent action and no hint: mode guess from outdoor temperature
-_STAY_ON_MARGIN_F = 1.0  # thermostat stays on (no off gap) when this far beyond its start threshold
+_OPENNESS_DAYS = 28  # expected-openness prior: look-back of the hour-of-day window / whole-house-fan share
+_OPENNESS_MIN_DAYS = 7.0  # fewer days of samples than this -> no prior (all zeros)
+THERMOSTAT_DEFAULT_ON_F = 0.0  # calibrated defaults: "hold at the plan setpoint" (experiments, #1230 R1b)
+THERMOSTAT_DEFAULT_OFF_F = 0.0
+GATE_MIN_ACCEPTED_STARTS = 5  # accepted heating (cooling) starts needed to trust the learned thermostat of a mode
+_MIN_RUN_CAP_MIN = 30.0  # cap of the learned minimum-run length
+_MIN_RUN_DEFAULT_MIN = 15.0  # minimum run when the model does not carry one (v1 models)
+# closed-loop calibration grid (degrees F relative to the setpoint the predictor receives)
+_CAL_ON_GRID = (-0.5, 0.0, 0.5, 1.0, 1.5, 2.0)
+_CAL_OFF_GRID = (-0.5, 0.0, 0.5, 1.0, 1.5, 2.0)
+_CAL_MSE_TOLERANCE = 0.04  # squared-error slack within which calibration prefers the least biased candidate
+_CAL_MIN_POINTS = 50  # a mode needs this many scored (anchor, lead) points to be calibrated
+_CAL_MAX_ANCHORS = 100
+
+CA_NODE = "_ca"  # the reading Climate Advisor itself used (``indoor``): the fallback primary node
 
 HOUSE_KEYS = ("a_o", "a_w", "a_f", "c_hm", "c_mh", "s", "phase", "q_h", "q_c")
 NODE_KEYS = ("b_h", "b_o", "b_w", "s_b", "q_b")
@@ -52,7 +67,7 @@ HOUSE_BOUNDS: dict[str, tuple[float, float]] = {
     "a_w": (0.0, 1.0),
     "a_f": (0.0, 2.0),
     "c_hm": (0.0, 3.0),
-    "c_mh": (0.0, 1.0),
+    "c_mh": (0.02, 1.0),  # R1b: below ~0.02 the hidden mass is a constant "ambient level", not a mass (trace cause 3)
     "s": (0.0, 5.0),
     "phase": (0.0, 5.0),
     "q_h": (0.5, 40.0),
@@ -113,6 +128,8 @@ class V4Sample:
     readings: Mapping[str, float | None]
     heat_duty: float | None = None
     cool_duty: float | None = None
+    #: extension: the whole-house fan itself (``fan_running`` and the nat-vent flag), not the furnace blower.
+    whf_running: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,6 +152,24 @@ class V4Thermostat:
     reading_step_f: float
     #: extension: cooling runs are longer than heat bursts; ``None`` -> use ``burst_minutes``.
     burst_cool_minutes: float | None = None
+    #: R1b: the emulated thermostat is hysteretic. Heating starts at ``sp - on_below_f`` and runs until the
+    #: reading reaches ``sp + off_above_f``; cooling starts at ``sp + on_above_f`` and runs until ``sp - off_below_f``.
+    off_above_f: float = 0.0
+    off_below_f: float = 0.0
+    #: minimum run per mode in minutes; ``None`` -> ``min(burst, 15)`` (v1 models carry neither field).
+    min_run_heat_min: float | None = None
+    min_run_cool_min: float | None = None
+    #: True when on/off were chosen by closed-loop calibration (False: learned medians or the defaults).
+    calibrated: bool = False
+
+
+@dataclass(frozen=True)
+class V4Openness:
+    """Expected-openness prior: share of each local hour with windows open / the whole-house fan running."""
+
+    window_by_hour: tuple[float, ...]
+    fan_by_hour: tuple[float, ...]
+    days: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -155,6 +190,7 @@ class V4Model:
     forecast: V4ForecastCorrection
     fit: Mapping[str, Any]
     confidence: str
+    openness: V4Openness | None = None
 
 
 @dataclass
@@ -264,16 +300,18 @@ def rollout(
     thermostat: V4Thermostat | None = None,
     heat_sp: Sequence[float | None] | None = None,
     cool_sp: Sequence[float | None] | None = None,
+    init_run: tuple[int, float] | None = None,
 ) -> V4Roll:
     """Integrate the primary node, the hidden mass and every extra node over ``len(out)`` 15-min steps.
 
     ``out`` / ``win`` / ``fan`` / ``hours`` hold the inputs of the step *ending* at each point (``hours`` is
     the local clock hour used by the sun term). With ``thermostat=None`` the recorded ``heat_u`` /
     ``cool_u`` duties are replayed (fitting); otherwise the thermostat is emulated from ``heat_sp`` /
-    ``cool_sp`` (predicting). Cooling subtracts ``q_c``.
+    ``cool_sp`` (predicting) and ``init_run`` = (+1 heating / -1 cooling, minutes already run) carries a
+    run that is in progress at the anchor. Cooling subtracts ``q_c``.
     """
     hs, sun, uh, uc, mass_end = _roll_house(
-        tuple(house), h0, m0, out, win, fan, hours, heat_u, cool_u, thermostat, heat_sp, cool_sp
+        tuple(house), h0, m0, out, win, fan, hours, heat_u, cool_u, thermostat, heat_sp, cool_sp, init_run
     )
     q_h, q_c = house[7], house[8]
     ratio = q_c / q_h if q_h > 1e-9 else 1.0
@@ -294,6 +332,7 @@ def _roll_house(
     therm: V4Thermostat | None,
     hsp: Sequence[float | None] | None,
     csp: Sequence[float | None] | None,
+    init_run: tuple[int, float] | None = None,
 ) -> tuple[list[float], list[float], list[float], list[float], float]:
     a_o, a_w, a_f, c_hm, c_mh, s_h, ph, q_h, q_c = hp
     n = len(out)
@@ -308,13 +347,17 @@ def _roll_house(
         assert therm is not None  # for type checkers
         on_below = therm.on_below_f
         on_above = therm.on_above_f
-        burst_h = therm.burst_minutes
-        burst_c = therm.burst_cool_minutes if therm.burst_cool_minutes is not None else therm.burst_minutes
+        off_above = therm.off_above_f
+        off_below = therm.off_below_f
+        min_h = _min_run(therm, heat=True)
+        min_c = _min_run(therm, heat=False)
         rstep = therm.reading_step_f if therm.reading_step_f >= 0.05 else 0.0
         uh_l = [0.0] * n
         uc_l = [0.0] * n
-        left = 0.0
         mode = 0
+        elapsed = 0.0
+        if init_run is not None and init_run[0] in (1, -1):
+            mode, elapsed = init_run[0], max(0.0, float(init_run[1]))
         step_min = float(V4_STEP_MINUTES)
         floor = math.floor
     else:
@@ -324,46 +367,72 @@ def _roll_house(
         e = hours[k] - ph
         sol = sin((e - 8.0) * 0.3141592653589793) if 8.0 <= e < 18.0 else 0.0
         sun[k] = sol
+        leak = a_o + a_w * win[k] + a_f * fan[k]
+        base = leak * (out[k] - h) + c_hm * (m - h) + s_h * sol
+        u_h = uh_l[k]
+        u_c = uc_l[k]
         if emulate:
             sp_h = hsp[k] if hsp is not None else None
             sp_c = csp[k] if csp is not None else None
-            if sp_h is None and sp_c is None:
-                left = 0.0
-                mode = 0
-            elif left <= 0.0:
-                rd = h if rstep <= 0.0 else floor(h / rstep + 0.5) * rstep
-                if sp_h is not None and rd <= sp_h - on_below + 1e-6:
-                    left = burst_h
-                    mode = 1
-                    if (sp_h - on_below) - rd >= _STAY_ON_MARGIN_F and left < step_min:
-                        left = step_min
-                elif sp_c is not None and rd >= sp_c + on_above - 1e-6:
-                    left = burst_c
-                    mode = -1
-                    if rd - (sp_c + on_above) >= _STAY_ON_MARGIN_F and left < step_min:
-                        left = step_min
-                else:
+            rd = h if rstep <= 0.0 else floor(h / rstep + 0.5) * rstep
+            # a run ends when the reading reaches its stop point (after the minimum run) or its setpoint is gone
+            if mode == 1:
+                stop = sp_h is None
+                if not stop and elapsed >= min_h:
+                    stop = rd >= sp_h + off_above - 1e-6 or h >= sp_h + off_above - 1e-3
+                if stop:
                     mode = 0
-            if left > 0.0:
-                dur = left if left < step_min else step_min
-                left -= dur
-                u = dur / step_min
-                if mode == 1:
-                    uh_l[k] = u
-                elif mode == -1:
-                    uc_l[k] = u
-            u_h = uh_l[k]
-            u_c = uc_l[k]
-        else:
-            u_h = uh_l[k]
-            u_c = uc_l[k]
-        leak = a_o + a_w * win[k] + a_f * fan[k]
-        dh = leak * (out[k] - h) + c_hm * (m - h) + s_h * sol + q_h * u_h - q_c * u_c
+            elif mode == -1:
+                stop = sp_c is None
+                if not stop and elapsed >= min_c:
+                    stop = rd <= sp_c - off_below + 1e-6 or h <= sp_c - off_below + 1e-3
+                if stop:
+                    mode = 0
+            if mode == 0:
+                elapsed = 0.0
+                if sp_h is not None and rd <= sp_h - on_below + 1e-6:
+                    mode = 1
+                elif sp_c is not None and rd >= sp_c + on_above - 1e-6:
+                    mode = -1
+            if mode == 1:
+                assert sp_h is not None
+                u = 1.0
+                if elapsed >= min_h:  # past the minimum run: the last step is partial, landing on the stop point
+                    need = (sp_h + off_above - (h + dt * base)) / (q_h * dt)
+                    if need < 1.0:
+                        u = need if need > 0.0 else 0.0
+                        mode = 0
+                elapsed += step_min * u
+                u_h = u
+                uh_l[k] = u
+            elif mode == -1:
+                assert sp_c is not None
+                u = 1.0
+                if elapsed >= min_c:
+                    need = ((h + dt * base) - (sp_c - off_below)) / (q_c * dt)
+                    if need < 1.0:
+                        u = need if need > 0.0 else 0.0
+                        mode = 0
+                elapsed += step_min * u
+                u_c = u
+                uc_l[k] = u
+            else:
+                u_h = u_c = 0.0
+        dh = base + q_h * u_h - q_c * u_c
         dm = c_mh * (h - m)
         h += dh * dt
         m += dm * dt
         hs[k] = h
     return hs, sun, uh_l, uc_l, m
+
+
+def _min_run(th: V4Thermostat, *, heat: bool) -> float:
+    """Minimum run (minutes) of the emulated thermostat for one mode."""
+    own = th.min_run_heat_min if heat else th.min_run_cool_min
+    if own is not None:
+        return float(own)
+    burst = th.burst_minutes if (heat or th.burst_cool_minutes is None) else th.burst_cool_minutes
+    return min(float(burst), _MIN_RUN_DEFAULT_MIN)
 
 
 def _roll_node(
@@ -405,21 +474,46 @@ def _reading_step(values: Sequence[float]) -> float:
     return 0.0
 
 
+@dataclass(frozen=True)
+class _ThermostatStats:
+    """Start bookkeeping of :func:`learn_thermostat_detail` (accepted = usable for the start offset)."""
+
+    heat_starts: int
+    heat_accepted: int
+    cool_starts: int
+    cool_accepted: int
+
+
 def learn_thermostat(samples: Sequence[V4Sample], *, primary: str) -> V4Thermostat:
-    """Learn the thermostat's start offsets, burst length and reading quantisation from history.
+    """Learn the thermostat's start / stop offsets, run lengths and reading quantisation from history.
+
+    See :func:`learn_thermostat_detail`; this is the public wrapper that returns the thermostat only.
+    """
+    return learn_thermostat_detail(samples, primary=primary)[0]
+
+
+def learn_thermostat_detail(samples: Sequence[V4Sample], *, primary: str) -> tuple[V4Thermostat, _ThermostatStats]:
+    """Learn the thermostat from history and count the starts it could use.
 
     A *start* is a sample where heating (cooling) is active and the previous sample's was not. The
-    offset is ``setpoint - reading`` (``reading - setpoint``) taken on the lower (higher) of the two
+    start offset is ``setpoint - reading`` (``reading - setpoint``) on the lower (higher) of the two
     readings around the start, skipping starts within ~10 minutes of a setpoint change (the setpoint
-    in force differs between the previous two samples or the start sample). Burst length is the median
-    total active minutes of a run. Falls back to (1.0, 1.0, 10 min) with fewer than 5 starts.
+    in force differs between the previous two samples or the start sample). A run's *stop* offset is the
+    higher (lower) reading around the run's end minus the setpoint. Run length is the total active minutes of
+    a run: the median is ``burst_minutes`` (reported), a low quantile (capped at 30 min) is the minimum run
+    the emulator enforces. These are the uncalibrated estimates; ``fit`` refines on/off by closed loop.
+    With fewer than 5 accepted starts / run ends the offsets fall back to the defaults (0 F, 0 F, 10 min) -
+    the counts are returned so the caller can cap confidence.
     """
     reads = [s.readings.get(primary) for s in samples]
     step = _reading_step([r for r in reads if r is not None])
     h_starts: list[float] = []
     c_starts: list[float] = []
+    h_stops: list[float] = []
+    c_stops: list[float] = []
     h_runs: list[float] = []
     c_runs: list[float] = []
+    n_h_starts = n_c_starts = 0
     run_h = 0.0
     run_c = 0.0
     prev_h = False
@@ -431,57 +525,228 @@ def learn_thermostat(samples: Sequence[V4Sample], *, primary: str) -> V4Thermost
         if not cont:
             prev_h = prev_c = False
             run_h = run_c = 0.0
+        r_now = reads[k]
+        r_prev = reads[k - 1] if k > 0 else None
         if act_h:
             run_h += _heat_u(s) * V4_STEP_MINUTES
         elif prev_h and run_h > 0:
             h_runs.append(run_h)
             run_h = 0.0
+            p = samples[k - 1]
+            if r_now is not None and r_prev is not None and p.heat_sp_f is not None and s.heat_sp_f == p.heat_sp_f:
+                h_stops.append(max(r_now, r_prev) - p.heat_sp_f)
         if act_c:
             run_c += _cool_u(s) * V4_STEP_MINUTES
         elif prev_c and run_c > 0:
             c_runs.append(run_c)
             run_c = 0.0
-        if cont and (act_h or act_c):
             p = samples[k - 1]
-            r_now = reads[k]
-            r_prev = reads[k - 1]
-            if r_now is not None and r_prev is not None:
-                sp2_h = samples[k - 2].heat_sp_f if k >= 2 else None
-                sp2_c = samples[k - 2].cool_sp_f if k >= 2 else None
-                if (
-                    act_h
-                    and not prev_h
-                    and s.heat_sp_f is not None
-                    and s.heat_sp_f == p.heat_sp_f
-                    and (sp2_h is None or sp2_h == p.heat_sp_f)
-                ):
+            if r_now is not None and r_prev is not None and p.cool_sp_f is not None and s.cool_sp_f == p.cool_sp_f:
+                c_stops.append(p.cool_sp_f - min(r_now, r_prev))
+        if cont and (act_h or act_c) and r_now is not None and r_prev is not None:
+            p = samples[k - 1]
+            sp2_h = samples[k - 2].heat_sp_f if k >= 2 else None
+            sp2_c = samples[k - 2].cool_sp_f if k >= 2 else None
+            if act_h and not prev_h:
+                n_h_starts += 1
+                if s.heat_sp_f is not None and s.heat_sp_f == p.heat_sp_f and (sp2_h is None or sp2_h == p.heat_sp_f):
                     h_starts.append(s.heat_sp_f - min(r_now, r_prev))
-                if (
-                    act_c
-                    and not prev_c
-                    and s.cool_sp_f is not None
-                    and s.cool_sp_f == p.cool_sp_f
-                    and (sp2_c is None or sp2_c == p.cool_sp_f)
-                ):
+            if act_c and not prev_c:
+                n_c_starts += 1
+                if s.cool_sp_f is not None and s.cool_sp_f == p.cool_sp_f and (sp2_c is None or sp2_c == p.cool_sp_f):
                     c_starts.append(max(r_now, r_prev) - s.cool_sp_f)
         prev_h, prev_c = act_h, act_c
 
     def _med(vals: list[float], default: float, lo: float, hi: float) -> float:
-        return min(hi, max(lo, statistics.median(vals))) if len(vals) >= 5 else default
+        return min(hi, max(lo, statistics.median(vals))) if len(vals) >= GATE_MIN_ACCEPTED_STARTS else default
 
-    on_below = _med(h_starts, 1.0, 0.0, 4.0)
-    on_above = _med(c_starts, 1.0, 0.0, 4.0)
+    def _low_run(runs: list[float]) -> float | None:
+        if len(runs) < GATE_MIN_ACCEPTED_STARTS:
+            return None
+        srt = sorted(runs)
+        return round(min(_MIN_RUN_CAP_MIN, max(5.0, srt[int(0.2 * len(srt))])), 1)
+
+    on_below = _med(h_starts, THERMOSTAT_DEFAULT_ON_F, -2.0, 4.0)
+    on_above = _med(c_starts, THERMOSTAT_DEFAULT_ON_F, -2.0, 4.0)
+    off_above = _med(h_stops, THERMOSTAT_DEFAULT_OFF_F, -2.0, 4.0)
+    off_below = _med(c_stops, THERMOSTAT_DEFAULT_OFF_F, -2.0, 4.0)
     burst_h = _med(h_runs, 10.0, 5.0, 90.0)
-    burst_c = _med(c_runs, burst_h, 5.0, 120.0) if len(c_runs) >= 5 else None
-    if len(h_runs) < 5 and burst_c is not None:
+    burst_c = _med(c_runs, burst_h, 5.0, 120.0) if len(c_runs) >= GATE_MIN_ACCEPTED_STARTS else None
+    if len(h_runs) < GATE_MIN_ACCEPTED_STARTS and burst_c is not None:
         burst_h = burst_c
-    return V4Thermostat(
+    th = V4Thermostat(
         on_below_f=round(on_below, 2),
         on_above_f=round(on_above, 2),
         burst_minutes=round(burst_h, 1),
         reading_step_f=step,
         burst_cool_minutes=None if burst_c is None else round(burst_c, 1),
+        off_above_f=round(off_above, 2),
+        off_below_f=round(off_below, 2),
+        min_run_heat_min=_low_run(h_runs),
+        min_run_cool_min=_low_run(c_runs),
     )
+    return th, _ThermostatStats(n_h_starts, len(h_starts), n_c_starts, len(c_starts))
+
+
+def run_state_at(samples: Sequence[V4Sample], i: int) -> tuple[int, float] | None:
+    """(+1 / -1, minutes already run) when heating / cooling is active at sample ``i``, else ``None``."""
+    s = samples[i]
+    if _heat_u(s) > 0.0:
+        u_of, sign = _heat_u, 1
+    elif _cool_u(s) > 0.0:
+        u_of, sign = _cool_u, -1
+    else:
+        return None
+    minutes = 0.0
+    j = i
+    while j >= 0 and u_of(samples[j]) > 0.0 and minutes < 240.0:
+        minutes += u_of(samples[j]) * V4_STEP_MINUTES
+        if j == 0 or not _contiguous(samples[j - 1].ts, samples[j].ts):
+            break
+        j -= 1
+    return sign, minutes
+
+
+def _calibrate_thermostat(
+    prob: _Problem,
+    samples: Sequence[V4Sample],
+    house: Sequence[float],
+    th: V4Thermostat,
+    *,
+    heat: bool,
+    cool: bool,
+) -> tuple[V4Thermostat, dict[str, Any]]:
+    """Choose each requested mode's (on, off) offsets by closed-loop rollout error on the training anchors.
+
+    The emulator (not the replay) is rolled from every anchor with the setpoint the sample carries - the same
+    quantity ``predict`` receives - and the weighted squared error against the recorded primary readings is
+    minimised over a small grid. Candidates are visited nearest-to-default first and a challenger must beat
+    the incumbent by a hair, so a mode the anchors cannot tell apart keeps the defaults. A mode needs
+    ``_CAL_MIN_POINTS`` scored points, else it is left as it is.
+    """
+    mass = prob.mass_series(house[4])
+    anchors = prob.anchors
+    if len(anchors) > _CAL_MAX_ANCHORS:
+        stride = len(anchors) / _CAL_MAX_ANCHORS
+        anchors = [anchors[int(j * stride)] for j in range(_CAL_MAX_ANCHORS)]
+    prepared = []
+    for a in anchors:
+        sl = slice(a.i + 1, a.i + 1 + a.length)
+        ss = samples[sl]
+        prepared.append(
+            (a, [x.heat_sp_f for x in ss], [x.cool_sp_f for x in ss], mass[a.i], run_state_at(samples, a.i))
+        )
+    info: dict[str, Any] = {}
+    cur = th
+    for is_heat, wanted in ((True, heat), (False, cool)):
+        if not wanted:
+            continue
+        key = "heat" if is_heat else "cool"
+        # only windows whose setpoint is known at EVERY step: a step with no setpoint (unknown, or the system off)
+        # would be emulated as idle while the recording heated, and would bias the choice toward "heat harder".
+        rel = [p for p in prepared if all((v is not None) for v in (p[1] if is_heat else p[2]))]
+        if sum(len(p[0].targets[0]) for p in rel) < _CAL_MIN_POINTS:
+            info[key] = {"calibrated": False, "reason": "too few scored points"}
+            continue
+
+        def score(on: float, off: float, rel=rel, is_heat=is_heat, cur=cur) -> tuple[float, float]:
+            """(weighted mean squared error, weighted mean signed error) of the emulated rollouts."""
+            if is_heat:
+                t = dataclasses.replace(cur, on_below_f=on, off_above_f=off)
+            else:
+                t = dataclasses.replace(cur, on_above_f=on, off_below_f=off)
+            sse = 0.0
+            sbias = 0.0
+            wsum = 0.0
+            for a, hsp, csp, m0, run in rel:
+                init = run if (run is not None and run[0] == (1 if is_heat else -1)) else None
+                hs, _, _, _, _ = _roll_house(
+                    tuple(house),
+                    a.h0,
+                    m0,
+                    a.out,
+                    a.win,
+                    a.fan,
+                    a.hours,
+                    None,
+                    None,
+                    t,
+                    hsp if is_heat else None,
+                    None if is_heat else csp,
+                    init,
+                )
+                for k, v, w in a.targets[0]:
+                    d = hs[k] - v
+                    sse += w * d * d
+                    sbias += w * d
+                    wsum += w
+            if wsum <= 0:
+                return float("inf"), 0.0
+            return sse / wsum, sbias / wsum
+
+        d_on = THERMOSTAT_DEFAULT_ON_F
+        d_off = THERMOSTAT_DEFAULT_OFF_F
+        grid = sorted(
+            ((on, off) for on in _CAL_ON_GRID for off in _CAL_OFF_GRID),
+            key=lambda c: (abs(c[0] - d_on) + abs(c[1] - d_off), c),
+        )
+        scored = [(*score(on, off), on, off) for on, off in grid]
+        base_score = scored[0][0]
+        # Among the candidates within a hair of the lowest squared error (the grid cannot tell them apart), take the
+        # one whose emulated room is least biased: the emulator must hold the level the replayed fit assumed.
+        floor_mse = min(c[0] for c in scored)
+        near = [c for c in scored if c[0] <= floor_mse * (1.0 + _CAL_MSE_TOLERANCE) + 1e-9]
+        best = min(near, key=lambda c: abs(c[1]))
+        best = (best[0], best[2], best[3])
+        sc, on, off = best
+        if is_heat:
+            cur = dataclasses.replace(cur, on_below_f=on, off_above_f=off, calibrated=True)
+        else:
+            cur = dataclasses.replace(cur, on_above_f=on, off_below_f=off, calibrated=True)
+        info[key] = {
+            "calibrated": True,
+            "on_f": on,
+            "off_f": off,
+            "rmse_f": round(math.sqrt(sc), 3) if math.isfinite(sc) else None,
+            "rmse_default_f": None
+            if base_score is None or not math.isfinite(base_score)
+            else round(math.sqrt(base_score), 3),
+            "anchors": len(rel),
+        }
+    return cur, info
+
+
+# --------------------------------------------------------------------- expected-openness prior
+def learn_openness(samples: Sequence[V4Sample], *, tz: tzinfo) -> V4Openness:
+    """Hour-of-day share of ``windows_open`` and of the whole-house fan over the last 28 days of samples.
+
+    The whole house fan is ``V4Sample.whf_running`` (``fan_running`` with the nat-vent flag) - the furnace
+    blower also sets ``fan_running`` and must not count. Fewer than 7 days of samples -> all zeros.
+    """
+    if not samples:
+        return V4Openness((0.0,) * 24, (0.0,) * 24, 0.0)
+    end = samples[-1].ts.timestamp()
+    lo = end - _OPENNESS_DAYS * 86400
+    sw = [0] * 24
+    sf = [0] * 24
+    cnt = [0] * 24
+    used = 0
+    for s in reversed(samples):
+        if s.ts.timestamp() < lo:
+            break
+        hr = int((_local_hour(s.ts, tz) - 0.125) % 24.0)
+        cnt[hr] += 1
+        used += 1
+        if s.windows_open:
+            sw[hr] += 1
+        if s.whf_running:
+            sf[hr] += 1
+    days = used * _DT_H / 24.0
+    if days < _OPENNESS_MIN_DAYS:
+        return V4Openness((0.0,) * 24, (0.0,) * 24, round(days, 2))
+    win = tuple(round(sw[h] / cnt[h], 3) if cnt[h] else 0.0 for h in range(24))
+    fan = tuple(round(sf[h] / cnt[h], 3) if cnt[h] else 0.0 for h in range(24))
+    return V4Openness(win, fan, round(days, 2))
 
 
 # ------------------------------------------------------------------------- forecast correction
@@ -763,6 +1028,7 @@ def _default_model(
     thermostat: V4Thermostat,
     forecast: V4ForecastCorrection,
     fit_info: Mapping[str, Any],
+    openness: V4Openness | None = None,
 ) -> V4Model:
     return V4Model(
         schema_version=V4_SCHEMA_VERSION,
@@ -775,6 +1041,7 @@ def _default_model(
         forecast=forecast,
         fit=dict(fit_info),
         confidence="none",
+        openness=openness,
     )
 
 
@@ -786,7 +1053,7 @@ def fit(
     tz: tzinfo,
     now: datetime,
     horizon_h: int = 12,
-    max_iterations: int = 60,
+    max_iterations: int = 100,
     max_anchors: int = 160,
     warm_start: V4Model | None = None,
 ) -> V4Model:
@@ -802,15 +1069,20 @@ def fit(
     sensor_list = [primary, *[s for s in sensors if s != primary]]
     extra = sensor_list[1:]
     fitted_at = now.isoformat()
-    thermostat = learn_thermostat(samples, primary=primary)
+    thermostat, tstats = learn_thermostat_detail(samples, primary=primary)
     forecast = learn_forecast_correction(samples, tz=tz)
+    openness = learn_openness(samples, tz=tz)
     n_samples = len(samples)
     span_days = (samples[-1].ts.timestamp() - samples[0].ts.timestamp()) / 86400.0 if n_samples >= 2 else 0.0
-    sample_days = n_samples * _DT_H / 24.0
+    # Confidence gates count samples that actually carry a primary reading (R1b, M2): grid points whose primary node
+    # is empty (a log older than the entity primary) say nothing about how long the model has been learning.
+    n_primary = sum(1 for sm in samples if _finite(sm.readings.get(primary)))
+    sample_days = n_primary * _DT_H / 24.0
     info: dict[str, Any] = {
         "n_anchors": 0,
         "span_days": round(span_days, 2),
         "sample_days": round(sample_days, 2),
+        "primary_samples": n_primary,
         "mae_by_lead": {},
         "flat_mae_by_lead": {},
         "per_sensor": {},
@@ -820,8 +1092,12 @@ def fit(
         "cool_seen": False,
         "frozen": [],
         "reason": "",
+        "starts_accepted": {"heat": tstats.heat_accepted, "cool": tstats.cool_accepted},
+        "starts_total": {"heat": tstats.heat_starts, "cool": tstats.cool_starts},
+        "thermostat_calibration": {},
+        "openness_days": openness.days,
     }
-    base = _default_model(primary, sensor_list, fitted_at, thermostat, forecast, info)
+    base = _default_model(primary, sensor_list, fitted_at, thermostat, forecast, info, openness)
     horizon_steps = max(4, int(horizon_h * 60 / V4_STEP_MINUTES))
     if n_samples < 16:
         base.fit["reason"] = "too few samples"  # ``base`` holds a copy of ``info``: record the reason on the model
@@ -835,7 +1111,18 @@ def fit(
             base.fit["reason"] = "too few anchors"
             return base
         return _fit_problem(
-            prob, base, sensor_list, thermostat, forecast, info, sample_days, max_iterations, warm_start
+            prob,
+            base,
+            sensor_list,
+            thermostat,
+            forecast,
+            info,
+            sample_days,
+            max_iterations,
+            warm_start,
+            samples=samples,
+            tstats=tstats,
+            openness=openness,
         )
     except (ArithmeticError, ValueError, TypeError, IndexError, OverflowError) as exc:  # pragma: no cover
         base.fit["reason"] = f"fit failed: {type(exc).__name__}"
@@ -852,6 +1139,10 @@ def _fit_problem(
     sample_days: float,
     max_iterations: int,
     warm_start: V4Model | None,
+    *,
+    samples: Sequence[V4Sample],
+    tstats: _ThermostatStats,
+    openness: V4Openness,
 ) -> V4Model:
     extra = sensor_list[1:]
     heat_seen = prob.heat_steps >= GATE_MIN_MODE_STEPS
@@ -862,11 +1153,13 @@ def _fit_problem(
 
     hp0 = dict(HOUSE_START)
     nd0 = [dict(NODE_START) for _ in extra]
+    warm_applied = False
     if (
         warm_start is not None
         and warm_start.schema_version == V4_SCHEMA_VERSION
         and warm_start.primary == sensor_list[0]
     ):
+        warm_applied = True
         hp0.update({k: float(v) for k, v in warm_start.house.items() if k in HOUSE_BOUNDS})
         for j, sid in enumerate(extra):
             if sid in warm_start.nodes:
@@ -933,73 +1226,124 @@ def _fit_problem(
             hd["q_h"] = min(hi_h, max(lo_h, hd["q_c"] / _COOL_HEAT_RATIO))
         return [hd[k] for k in HOUSE_KEYS], [[d[k] for k in NODE_KEYS] for d in ndd]
 
-    z = to_z()
-    hp, nodes = apply_z(z)
-    r, passes = prob.all_residuals(hp, nodes)
-    cost = 0.5 * sum(x * x for x in r)
-    if not math.isfinite(cost):
+    def run_lm(max_it: int):
+        z = to_z()
+        hp, nodes = apply_z(z)
+        r, passes = prob.all_residuals(hp, nodes)
+        cost = 0.5 * sum(x * x for x in r)
+        if not math.isfinite(cost):
+            return None
+        lam = 1e-2
+        n_free = len(free)
+        iterations = 0
+        delta_z = 1e-3
+        stale = 0
+        converged = False
+        for iterations in range(1, max_it + 1):  # noqa: B007
+            ratio = hp[8] / hp[7] if hp[7] > 1e-9 else 1.0
+            n_prim = len(prob.primary_residuals(passes))
+            slices: dict[int, tuple[int, int]] = {}
+            off = n_prim
+            for j in range(len(extra)):
+                cnt = sum(len(a.targets[j + 1]) for a in prob.anchors if a.b0[j] is not None)
+                slices[j] = (off, cnt)
+                off += cnt
+            cols: list[tuple[int, list[float]]] = []
+            for idx, p in enumerate(free):
+                step = delta_z if z[idx] + delta_z <= 1.0 else -delta_z
+                zz = list(z)
+                zz[idx] = z[idx] + step
+                hp_p, nodes_p = apply_z(zz)
+                if p[0] == "h":
+                    r_p, _ = prob.all_residuals(hp_p, nodes_p)
+                    cols.append((0, [(a - b) / step for a, b in zip(r_p, r, strict=True)]))
+                else:
+                    j = p[1]
+                    o, cnt = slices[j]
+                    r_p_node = prob.node_residuals(j, nodes_p[j], passes, ratio)
+                    cols.append((o, [(a - b) / step for a, b in zip(r_p_node, r[o : o + cnt], strict=True)]))
+            jtj = [[0.0] * n_free for _ in range(n_free)]
+            for a in range(n_free):
+                for b in range(a, n_free):
+                    jtj[a][b] = jtj[b][a] = _dot(cols[a], cols[b])
+            jtr = [_dot(cols[a], (0, r)) for a in range(n_free)]
+            accepted = False
+            for _ in range(8):
+                mat = [row[:] for row in jtj]
+                for d in range(n_free):
+                    mat[d][d] += lam * (jtj[d][d] + 1e-9) + 1e-12
+                step_z = _solve(mat, [-g for g in jtr])
+                if step_z is None:
+                    lam *= 10.0
+                    continue
+                zn = [min(1.0, max(0.0, zi + si)) for zi, si in zip(z, step_z, strict=True)]
+                hp_n, nodes_n = apply_z(zn)
+                r_n, passes_n = prob.all_residuals(hp_n, nodes_n)
+                cost_n = 0.5 * sum(x * x for x in r_n)
+                if math.isfinite(cost_n) and cost_n < cost:
+                    rel = (cost - cost_n) / max(cost, 1e-12)
+                    moved = max(abs(a - b) for a, b in zip(zn, z, strict=True))
+                    z, hp, nodes, r, passes, cost = zn, hp_n, nodes_n, r_n, passes_n, cost_n
+                    lam = max(lam / 3.0, 1e-7)
+                    accepted = True
+                    stale = stale + 1 if rel < 1e-4 else 0
+                    if moved < 1e-5:
+                        stale = 2
+                    break
+                lam *= 4.0
+            if not accepted or stale >= 2:
+                converged = True
+                break
+        return z, hp, nodes, r, passes, cost, iterations, converged
+
+    def set_start(house: Mapping[str, float], node_params: Sequence[Mapping[str, float]]) -> None:
+        hp0.update(house)
+        for d, src in zip(nd0, node_params, strict=True):
+            d.update(src)
+        if not cool_seen:
+            hp0["q_c"] = min(HOUSE_BOUNDS["q_c"][1], hp0["q_h"] * _COOL_HEAT_RATIO)
+        clamp_all()
+
+    warm_started = warm_applied
+    start_a = (dict(hp0), [dict(d) for d in nd0])
+    best = run_lm(max_iterations)
+    if best is None:
         info["reason"] = "non-finite initial cost"
         return base
-    lam = 1e-2
-    n_free = len(free)
-    iterations = 0
-    delta_z = 1e-3
-    stale = 0
-    for iterations in range(1, max_iterations + 1):  # noqa: B007
-        ratio = hp[8] / hp[7] if hp[7] > 1e-9 else 1.0
-        n_prim = len(prob.primary_residuals(passes))
-        slices: dict[int, tuple[int, int]] = {}
-        off = n_prim
-        for j in range(len(extra)):
-            cnt = sum(len(a.targets[j + 1]) for a in prob.anchors if a.b0[j] is not None)
-            slices[j] = (off, cnt)
-            off += cnt
-        cols: list[tuple[int, list[float]]] = []
-        for idx, p in enumerate(free):
-            step = delta_z if z[idx] + delta_z <= 1.0 else -delta_z
-            zz = list(z)
-            zz[idx] = z[idx] + step
-            hp_p, nodes_p = apply_z(zz)
-            if p[0] == "h":
-                r_p, _ = prob.all_residuals(hp_p, nodes_p)
-                cols.append((0, [(a - b) / step for a, b in zip(r_p, r, strict=True)]))
-            else:
-                j = p[1]
-                o, cnt = slices[j]
-                r_p_node = prob.node_residuals(j, nodes_p[j], passes, ratio)
-                cols.append((o, [(a - b) / step for a, b in zip(r_p_node, r[o : o + cnt], strict=True)]))
-        jtj = [[0.0] * n_free for _ in range(n_free)]
-        for a in range(n_free):
-            for b in range(a, n_free):
-                jtj[a][b] = jtj[b][a] = _dot(cols[a], cols[b])
-        jtr = [_dot(cols[a], (0, r)) for a in range(n_free)]
-        accepted = False
-        for _ in range(8):
-            mat = [row[:] for row in jtj]
-            for d in range(n_free):
-                mat[d][d] += lam * (jtj[d][d] + 1e-9) + 1e-12
-            step_z = _solve(mat, [-g for g in jtr])
-            if step_z is None:
-                lam *= 10.0
-                continue
-            zn = [min(1.0, max(0.0, zi + si)) for zi, si in zip(z, step_z, strict=True)]
-            hp_n, nodes_n = apply_z(zn)
-            r_n, passes_n = prob.all_residuals(hp_n, nodes_n)
-            cost_n = 0.5 * sum(x * x for x in r_n)
-            if math.isfinite(cost_n) and cost_n < cost:
-                rel = (cost - cost_n) / max(cost, 1e-12)
-                moved = max(abs(a - b) for a, b in zip(zn, z, strict=True))
-                z, hp, nodes, r, passes, cost = zn, hp_n, nodes_n, r_n, passes_n, cost_n
-                lam = max(lam / 3.0, 1e-7)
-                accepted = True
-                stale = stale + 1 if rel < 1e-4 else 0
-                if moved < 1e-5:
-                    stale = 2
-                break
-            lam *= 4.0
-        if not accepted or stale >= 2:
-            break
+    restarts = 0
+    # A fit that ran out of iterations, or one that started from the previous night's model, gets a second chance from
+    # a different start; the lower-cost optimum is kept (R1b: 7 of 10 backtest fits hit the 60-iteration cap and two
+    # landed in poor minima). The extra start is the cold defaults (warm-started) or a "light house" variant.
+    if not best[7] or warm_started:
+        alt_house = dict(HOUSE_START)
+        if not warm_started:
+            alt_house.update(a_o=0.08, c_hm=0.25, c_mh=0.1, q_h=12.0, q_c=12.0 * _COOL_HEAT_RATIO)
+        set_start(alt_house, [dict(NODE_START) for _ in extra])
+        cand = run_lm(max_iterations)
+        restarts = 1
+        if cand is not None and cand[5] < best[5]:
+            best = cand
+            info["restart_won"] = True
+    set_start(*start_a)  # leave the start dictionaries as the caller passed them
+    z, hp, nodes, r, passes, cost, iterations, converged = best
     info["iterations"] = iterations
+    info["converged"] = converged
+    info["restarts"] = restarts
+
+    # Closed-loop thermostat calibration (R1b): choose the start / stop offsets of each mode that the training data
+    # shows (enough accepted starts) by rolling the EMULATOR, not the replay, from the training anchors.
+    heat_ok = heat_seen and tstats.heat_accepted >= GATE_MIN_ACCEPTED_STARTS
+    cool_ok = cool_seen and tstats.cool_accepted >= GATE_MIN_ACCEPTED_STARTS
+    if not heat_ok:
+        thermostat = dataclasses.replace(
+            thermostat, on_below_f=THERMOSTAT_DEFAULT_ON_F, off_above_f=THERMOSTAT_DEFAULT_OFF_F
+        )
+    if not cool_ok:
+        thermostat = dataclasses.replace(
+            thermostat, on_above_f=THERMOSTAT_DEFAULT_ON_F, off_below_f=THERMOSTAT_DEFAULT_OFF_F
+        )
+    thermostat, cal_info = _calibrate_thermostat(prob, samples, hp, thermostat, heat=heat_ok, cool=cool_ok)
+    info["thermostat_calibration"] = cal_info
 
     # commit the optimum into the dictionaries
     house = dict(zip(HOUSE_KEYS, hp, strict=True))
@@ -1037,6 +1381,7 @@ def _fit_problem(
     skill_ok = ref is not None and flat_by[ref] > 0 and mae_by[ref] <= (1.0 - GATE_MIN_SKILL) * flat_by[ref]
     if ref is not None:
         info["skill_vs_flat"] = round(1.0 - mae_by[ref] / flat_by[ref], 3) if flat_by[ref] > 0 else 0.0
+    info["thermostat_defaults_used"] = (heat_seen and not heat_ok) or (cool_seen and not cool_ok)
     if sample_days < GATE_MIN_DAYS_NONE:
         confidence, info["reason"] = "none", "under 3 days of samples"
     elif not values_ok or not math.isfinite(cost):
@@ -1047,6 +1392,8 @@ def _fit_problem(
         confidence, info["reason"] = "low", "under 10 days of samples"
     elif not (heat_seen and cool_seen):
         confidence, info["reason"] = "low", "heating or cooling not yet observed"
+    elif not (heat_ok and cool_ok):
+        confidence, info["reason"] = "low", "too few accepted thermostat starts in a used mode"
     else:
         confidence, info["reason"] = "ok", ""
     return V4Model(
@@ -1060,6 +1407,7 @@ def _fit_problem(
         forecast=forecast,
         fit=info,
         confidence=confidence,
+        openness=openness,
     )
 
 
@@ -1092,6 +1440,12 @@ def predict(
     tz: tzinfo,
     outdoor_now_f: float | None = None,
     forecast_now_f: float | None = None,
+    hvac_action_now: str | None = None,
+    run_elapsed_min: float | None = None,
+    openness_prior: bool = True,
+    ca_sleep_node: str | None = None,
+    ca_sleep_time: str | None = None,
+    ca_wake_time: str | None = None,
 ) -> dict[str, list[tuple[datetime, float]]] | None:
     """Predict every model sensor at each ``inputs[k].ts`` (consecutive 15-minute grid points after ``now``).
 
@@ -1099,7 +1453,12 @@ def predict(
     whose own reading is missing are left out of the result. ``outdoor_now_f`` / ``forecast_now_f``
     (extension to the contract, optional) are today's observed outdoor temperature and what the raw
     forecast says for now; with both the nowcast term (current miss decaying over ``nowcast_tau_h``)
-    is applied, otherwise only the hourly bias.
+    is applied, otherwise only the hourly bias. ``hvac_action_now`` ("heating" / "cooling") and
+    ``run_elapsed_min`` (optional) carry a run that is already in progress: it is not restarted and its minimum
+    run is counted from ``run_elapsed_min`` (unknown -> 0). ``openness_prior`` applies the model's expected-openness
+    prior (fractional windows / whole-house fan by hour of day) wherever the plan says closed / off.
+    With ``ca_sleep_node`` (a model sensor) the result also carries ``"_ca"`` = :func:`ca_line` (the sleep node
+    inside the sleep window, else the primary); without it ``_ca`` is the primary and callers derive it.
     """
     if model.confidence == "none" or not inputs:
         return None
@@ -1131,6 +1490,20 @@ def predict(
         outdoor_now=outdoor_now_f,
         forecast_now=forecast_now_f,
     )
+    op = model.openness if openness_prior else None
+    win = [1.0 if i.windows_open else 0.0 for i in inputs]
+    fan = [1.0 if i.fan_running else 0.0 for i in inputs]
+    if op is not None:
+        for k in range(len(inputs)):
+            hr = int((hours[k] - 0.125) % 24.0)
+            if win[k] < 1.0:
+                win[k] = op.window_by_hour[hr]
+            if fan[k] < 1.0:
+                fan[k] = op.fan_by_hour[hr]
+    init_run: tuple[int, float] | None = None
+    act = (hvac_action_now or "").lower()
+    if act in (_ACTIVE_HEAT, _ACTIVE_COOL):
+        init_run = (1 if act == _ACTIVE_HEAT else -1, float(run_elapsed_min) if run_elapsed_min is not None else 0.0)
     roll = rollout(
         house,
         node_params,
@@ -1138,18 +1511,28 @@ def predict(
         m0=float(m0),
         b0=b0,
         out=out,
-        win=[1.0 if i.windows_open else 0.0 for i in inputs],
-        fan=[1.0 if i.fan_running else 0.0 for i in inputs],
+        win=win,
+        fan=fan,
         hours=hours,
         thermostat=model.thermostat,
         heat_sp=[i.heat_sp_f for i in inputs],
         cool_sp=[i.cool_sp_f for i in inputs],
+        init_run=init_run,
     )
     res: dict[str, list[tuple[datetime, float]]] = {
         model.primary: [(inp.ts, roll.primary[k]) for k, inp in enumerate(inputs)]
     }
     for j, sid in enumerate(node_ids):
         res[sid] = [(inp.ts, roll.nodes[j][k]) for k, inp in enumerate(inputs)]
+    if ca_sleep_node and ca_sleep_node in res and ca_sleep_node != model.primary:
+        res[CA_NODE] = ca_line(
+            res,
+            primary=model.primary,
+            sleep_node=ca_sleep_node,
+            sleep_time=ca_sleep_time,
+            wake_time=ca_wake_time,
+            tz=tz,
+        )
     return res
 
 
@@ -1169,7 +1552,21 @@ def to_dict(model: V4Model) -> dict[str, Any]:
             "burst_minutes": th.burst_minutes,
             "reading_step_f": th.reading_step_f,
             "burst_cool_minutes": th.burst_cool_minutes,
+            "off_above_f": th.off_above_f,
+            "off_below_f": th.off_below_f,
+            "min_run_heat_min": th.min_run_heat_min,
+            "min_run_cool_min": th.min_run_cool_min,
+            "calibrated": th.calibrated,
         },
+        "openness": (
+            None
+            if model.openness is None
+            else {
+                "window_by_hour": [float(v) for v in model.openness.window_by_hour],
+                "fan_by_hour": [float(v) for v in model.openness.fan_by_hour],
+                "days": float(model.openness.days),
+            }
+        ),
         "forecast": {
             "hourly_bias_f": [float(v) for v in model.forecast.hourly_bias_f],
             "nowcast_tau_h": float(model.forecast.nowcast_tau_h),
@@ -1209,6 +1606,8 @@ def from_dict(d: Any) -> V4Model | None:
         vals = [*house.values(), *(v for nd in nodes.values() for v in nd.values())]
         if not all(_finite(v) for v in vals):
             return None
+        # a model fitted before R1b may carry c_mh below the new lower bound: clamp it (everything else is checked)
+        house["c_mh"] = max(HOUSE_BOUNDS["c_mh"][0], house["c_mh"])
         for k, (lo, hi) in HOUSE_BOUNDS.items():
             if not lo - 1e-9 <= house[k] <= hi + 1e-9:
                 return None
@@ -1224,10 +1623,27 @@ def from_dict(d: Any) -> V4Model | None:
             burst_minutes=float(th["burst_minutes"]),
             reading_step_f=float(th["reading_step_f"]),
             burst_cool_minutes=None if bc is None else float(bc),
+            off_above_f=float(th.get("off_above_f", 0.0)),
+            off_below_f=float(th.get("off_below_f", 0.0)),
+            min_run_heat_min=None if th.get("min_run_heat_min") is None else float(th["min_run_heat_min"]),
+            min_run_cool_min=None if th.get("min_run_cool_min") is None else float(th["min_run_cool_min"]),
+            calibrated=bool(th.get("calibrated", False)),
         )
         if not all(
-            _finite(v) for v in (thermostat.on_below_f, thermostat.on_above_f, thermostat.burst_minutes)
+            _finite(v)
+            for v in (
+                thermostat.on_below_f,
+                thermostat.on_above_f,
+                thermostat.burst_minutes,
+                thermostat.off_above_f,
+                thermostat.off_below_f,
+            )
         ) or not _finite(thermostat.reading_step_f):
+            return None
+        if any(
+            v is not None and (not _finite(v) or v <= 0)
+            for v in (thermostat.min_run_heat_min, thermostat.min_run_cool_min)
+        ):
             return None
         if thermostat.burst_minutes <= 0 or (
             thermostat.burst_cool_minutes is not None and thermostat.burst_cool_minutes <= 0
@@ -1247,6 +1663,14 @@ def from_dict(d: Any) -> V4Model | None:
         fitted_at = d["fitted_at"]
         if not isinstance(fitted_at, str):
             return None
+        openness: V4Openness | None = None
+        op_raw = d.get("openness")
+        if op_raw is not None:  # absent in models written before R1b: no prior
+            wbh = tuple(float(v) for v in op_raw["window_by_hour"])
+            fbh = tuple(float(v) for v in op_raw["fan_by_hour"])
+            if len(wbh) != 24 or len(fbh) != 24 or not all(math.isfinite(v) and 0.0 <= v <= 1.0 for v in (*wbh, *fbh)):
+                return None
+            openness = V4Openness(wbh, fbh, float(op_raw.get("days", 0.0)))
         return V4Model(
             schema_version=V4_SCHEMA_VERSION,
             fitted_at=fitted_at,
@@ -1258,6 +1682,7 @@ def from_dict(d: Any) -> V4Model | None:
             forecast=V4ForecastCorrection(hourly_bias_f=bias, nowcast_tau_h=tau),
             fit=dict(fit_info),
             confidence=conf,
+            openness=openness,
         )
     except KeyError, TypeError, ValueError, AttributeError, IndexError:
         return None
@@ -1276,6 +1701,58 @@ def summary_line(model: V4Model) -> str:
     )
 
 
+# --------------------------------------------------------------------------- the "_ca" line
+def in_sleep_window(local: datetime, sleep_time: str | None, wake_time: str | None) -> bool:
+    """True when ``local`` is inside the ``sleep_time`` -> ``wake_time`` ("HH:MM") window.
+
+    Same semantics as ``automation._in_sleep_window`` (this module may not import it: it is hass-free): the window
+    wraps midnight when bedtime is after wake time, does not wrap when bedtime is after midnight, equal or
+    malformed times are an empty window. A test pins the two together.
+    """
+    if not sleep_time or not wake_time:
+        return False
+    try:
+        sh, sm = (int(x) for x in str(sleep_time).split(":")[:2])
+        wh, wm = (int(x) for x in str(wake_time).split(":")[:2])
+        now_m = local.hour * 60 + local.minute
+    except ValueError, AttributeError:
+        return False
+    s_m, w_m = sh * 60 + sm, wh * 60 + wm
+    if s_m == w_m:
+        return False
+    if s_m < w_m:
+        return s_m <= now_m < w_m
+    return now_m >= s_m or now_m < w_m
+
+
+def ca_line(
+    preds: Mapping[str, Sequence[tuple[datetime, float]]],
+    *,
+    primary: str,
+    sleep_node: str | None,
+    sleep_time: str | None,
+    wake_time: str | None,
+    tz: tzinfo,
+) -> list[tuple[datetime, float]]:
+    """The ``_ca`` line: the reading Climate Advisor itself uses (R1b, M3).
+
+    During the sleep window ``indoor`` is the sleep sensor's reading, so a step inside the window takes the sleep
+    node's prediction when that node was predicted; every other step takes the primary node's.
+    """
+    base = preds.get(primary) or []
+    sleep = preds.get(sleep_node) if sleep_node else None
+    if not sleep:
+        return list(base)
+    by_ts = {t.timestamp(): v for t, v in sleep}
+    out = []
+    for t, v in base:
+        if t.timestamp() in by_ts and in_sleep_window(t.astimezone(tz), sleep_time, wake_time):
+            out.append((t, by_ts[t.timestamp()]))
+        else:
+            out.append((t, v))
+    return out
+
+
 # ------------------------------------------------------------------------- chart_log -> samples
 def _parse_ts(raw: Any, tz: tzinfo) -> datetime | None:
     if not isinstance(raw, str):
@@ -1292,6 +1769,9 @@ def samples_from_chart_log(
     *,
     tz: tzinfo,
     archive_snapshots: Sequence[Mapping[str, Any]] | None = None,
+    primary: str | None = None,
+    primary_aliases: Sequence[str] = (),
+    in_sleep: Callable[[datetime], bool] | None = None,
 ) -> list[V4Sample]:
     """Resample raw chart_log rows to the 15-minute grid (aligned to the hour, any timezone).
 
@@ -1299,9 +1779,16 @@ def samples_from_chart_log(
     grid point with no row in the previous 2 hours is dropped, so a gap breaks continuity (consumers
     check consecutive timestamps). ``readings`` come from each row's ``indoor_sensors`` map, and
     ``"_ca"`` from ``indoor``. ``hvac_action`` is the row's ``hvac`` string; the heat / cool duty of
-    each step is integrated from the row timeline (action-change rows make it exact). ``setpoint`` is
-    assigned to heat or cool by the action (idle: the last active action within 12 h, else by outdoor
-    temperature). Forecast: with ``archive_snapshots`` (ForecastArchive read shape) the value the
+    each step is integrated from the row timeline (action-change rows make it exact). The setpoint the
+    predictor will receive - the plan's target band - is assigned to the mode: only ACTIVE rows set the
+    mode (heating -> heat, cooling -> cool); an idle row keeps the last active mode within 12 h (else a guess
+    from the outdoor temperature) and takes that mode's own band edge (``lower`` for heat, ``upper`` for
+    cool), never the opposite edge. Rows without a band fall back to the row ``setpoint`` on active rows and
+    to the last active row's setpoint of that mode on idle rows. ``primary`` (an entity id) names the node
+    the live fit uses: rows lacking it in ``indoor_sensors`` (older logs, or the climate-attribute era before
+    the finer sensor) fill it from ``primary_aliases`` readings, else ``indoor_primary``, else ``indoor`` unless
+    the row is inside the sleep window (``in_sleep``, when a sleep sensor is configured: ``indoor`` was then
+    the bedroom). Forecast: with ``archive_snapshots`` (ForecastArchive read shape) the value the
     snapshot issued ~6 h earlier gave for the hour, else the row's ``pred_outdoor``.
     """
     rows: list[tuple[float, Mapping[str, Any]]] = []
@@ -1326,6 +1813,7 @@ def samples_from_chart_log(
     sensor_state: dict[str, tuple[float, float]] = {}
     hvac_tl: list[tuple[float, str]] = []  # (epoch, hvac) of every row
     last_active: tuple[float, str] | None = None
+    last_active_sp: dict[str, tuple[float, float]] = {}
     ri = 0
     g = first
     while g <= last:
@@ -1336,7 +1824,10 @@ def samples_from_chart_log(
                 hvac_tl.append((ep, hv.lower()))
                 if hv.lower() in (_ACTIVE_HEAT, _ACTIVE_COOL):
                     last_active = (ep, hv.lower())
-            for key in ("indoor", "outdoor", "pred_outdoor", "setpoint"):
+                    sp_row = _num(e.get("setpoint"))
+                    if sp_row is not None:
+                        last_active_sp["heat" if hv.lower() == _ACTIVE_HEAT else "cool"] = (ep, sp_row)
+            for key in ("indoor", "outdoor", "pred_outdoor", "setpoint", "lower", "upper"):
                 v = _num(e.get(key))
                 if v is not None:
                     state[key] = (ep, v)
@@ -1346,12 +1837,17 @@ def samples_from_chart_log(
             fr = e.get("fan_running", e.get("fan"))
             if isinstance(fr, bool):
                 state["fan"] = (ep, fr)
+                state["whf"] = (ep, bool(fr) and e.get("nat_vent_active") is True)
             sens = e.get("indoor_sensors")
             if isinstance(sens, Mapping):
                 for sid, val in sens.items():
                     v = _num(val)
                     if v is not None:
                         sensor_state[str(sid)] = (ep, v)
+            if primary:
+                pv = _row_primary_value(e, primary, primary_aliases, in_sleep, tz)
+                if pv is not None:
+                    sensor_state[primary] = (ep, pv)
             ri += 1
         row_ep = epochs[ri - 1] if ri else None
         if row_ep is None or g - row_ep > _GAP_BREAK_S:
@@ -1368,11 +1864,18 @@ def samples_from_chart_log(
         readings["_ca"] = fresh("indoor")
         outdoor = fresh("outdoor")
         hv_now = _hvac_at(hvac_tl, g)
-        sp = fresh("setpoint")
         heat_sp = cool_sp = None
-        if sp is not None and hv_now not in (None, "off", ""):
+        if hv_now not in (None, "off", ""):
             mode = _mode_for(hv_now, last_active, g, outdoor)
-            heat_sp, cool_sp = (sp, None) if mode == "heat" else (None, sp)
+            sp = fresh("lower" if mode == "heat" else "upper")
+            if sp is None:
+                if hv_now in (_ACTIVE_HEAT, _ACTIVE_COOL):
+                    sp = fresh("setpoint")
+                else:
+                    kept = last_active_sp.get(mode)
+                    sp = kept[1] if kept is not None and g - kept[0] <= 12 * 3600 else None
+            if sp is not None:
+                heat_sp, cool_sp = (sp, None) if mode == "heat" else (None, sp)
         heat_d, cool_d = _duty(hvac_tl, g)
         forecast = _archive_forecast(arch_issued, arch_hours, g, tz)
         if forecast is None:
@@ -1390,10 +1893,75 @@ def samples_from_chart_log(
                 readings=readings,
                 heat_duty=heat_d,
                 cool_duty=cool_d,
+                whf_running=bool(fresh("whf")),
             )
         )
         g += _STEP_S
     return out
+
+
+def _row_primary_value(
+    row: Mapping[str, Any],
+    primary: str,
+    aliases: Sequence[str],
+    in_sleep: Callable[[datetime], bool] | None,
+    tz: tzinfo,
+) -> float | None:
+    """The primary node's reading on one chart_log row, or ``None`` (see :func:`samples_from_chart_log`)."""
+    sens = row.get("indoor_sensors")
+    if isinstance(sens, Mapping):
+        if primary in sens:
+            return _num(sens[primary])
+        for alias in aliases:
+            if alias in sens:
+                return _num(sens[alias])
+    v = _num(row.get("indoor_primary"))
+    if v is not None:
+        return v
+    if in_sleep is not None:
+        ts = _parse_ts(row.get("ts"), tz)
+        if ts is None or in_sleep(ts.astimezone(tz)):
+            return None
+    return _num(row.get("indoor"))
+
+
+def resolve_nodes(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    primary: str,
+    sensors: Sequence[str],
+    aliases: Sequence[str] = (),
+    in_sleep: Callable[[datetime], bool] | None = None,
+    tz: tzinfo,
+    forced: bool = False,
+    min_primary_cov: float = 0.8,
+    min_extra_cov: float = 0.5,
+) -> tuple[str, list[str]]:
+    """Primary node + extra nodes for a fit on ``entries``: the ONE rule the live shadow and the backtest share.
+
+    The primary entity is used when it reads (directly, through ``aliases``, ``indoor_primary`` or an ``indoor``
+    row outside the sleep window) on at least ``min_primary_cov`` of the rows, else the model is the ``_ca``
+    reading alone; ``forced`` skips that check. Extra entities in ``sensors`` need ``min_extra_cov`` coverage in
+    ``indoor_sensors``. Judged on the rows given, i.e. the training rows only.
+    """
+    n = len(entries) or 1
+    pcov = sum(1 for r in entries if _row_primary_value(r, primary, aliases, in_sleep, tz) is not None) / n
+    prim = primary if (forced or pcov >= min_primary_cov) else CA_NODE
+    extras: list[str] = []
+    for sid in sensors:
+        if sid in (prim, primary, CA_NODE) or sid in extras:
+            continue
+        cov = (
+            sum(
+                1
+                for r in entries
+                if isinstance(r.get("indoor_sensors"), Mapping) and _num(r["indoor_sensors"].get(sid)) is not None
+            )
+            / n
+        )
+        if cov >= min_extra_cov:
+            extras.append(sid)
+    return prim, [prim, *extras]
 
 
 def _hvac_at(tl: list[tuple[float, str]], g: float) -> str | None:
@@ -1491,7 +2059,14 @@ def _archive_forecast(issued: list[float], tables: list[dict[int, float]], g: fl
 
 # ------------------------------------------------------------------------------ misc exports
 def thermostat_default() -> V4Thermostat:
-    return V4Thermostat(on_below_f=1.0, on_above_f=1.0, burst_minutes=10.0, reading_step_f=0.0)
+    return V4Thermostat(
+        on_below_f=THERMOSTAT_DEFAULT_ON_F,
+        on_above_f=THERMOSTAT_DEFAULT_ON_F,
+        burst_minutes=10.0,
+        reading_step_f=0.0,
+        off_above_f=THERMOSTAT_DEFAULT_OFF_F,
+        off_below_f=THERMOSTAT_DEFAULT_OFF_F,
+    )
 
 
 def grid_steps(start: datetime, count: int) -> list[datetime]:

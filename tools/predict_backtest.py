@@ -615,6 +615,9 @@ class V3Models:
         )
 
 
+TOMORROW_PLAN_KNOWN_HOUR = 18.0  # local hour from which the next day's record counts as the plan known at the anchor
+
+
 def windows_plan(idx: ChartIndex, anchor: datetime, plan_hours: float) -> bool:
     row = idx.row_at(anchor.timestamp())
     return bool(row and row.get("windows_recommended") and plan_hours > 0)
@@ -638,6 +641,30 @@ def window_records(learning_db: dict | None) -> dict[str, tuple[dtime, dtime]]:
         except KeyError, TypeError, ValueError:
             continue
     return out
+
+
+def tomorrow_window_plan(
+    anchor: datetime,
+    args: argparse.Namespace,
+    records: dict[str, tuple[dtime, dtime]],
+    tz: Any,
+) -> tuple[bool, dtime | None, dtime | None] | None:
+    """Tomorrow's planned window times as KNOWN at ``anchor`` (Issue #1391), else ``None`` (unknown -> closed).
+
+    No hindsight: the day record is written at day end, so the next day's record is used only for anchors at or after
+    ``--tomorrow-plan-hour`` local (default 18, after the day's forecast refresh has classified tomorrow; 24 = never)
+    and only with ``--window-plan-source record`` and a record holding both planned times (the engine sets them only
+    when it recommended windows). Anchors earlier in the day, a missing record or the fallback source: tomorrow closed.
+    """
+    if getattr(args, "window_plan_source", "record") != "record":
+        return None
+    local = anchor.astimezone(tz)
+    if local.hour + local.minute / 60.0 < getattr(args, "tomorrow_plan_hour", TOMORROW_PLAN_KNOWN_HOUR):
+        return None
+    open_t, close_t = records.get((local.date() + timedelta(days=1)).isoformat(), (None, None))
+    if open_t is None or close_t is None:
+        return None
+    return (True, open_t, close_t)
 
 
 def window_plan_span(
@@ -1011,11 +1038,23 @@ def run_backtest(
                 continue
             src_counts[src] += 1
             plan_span = window_plan_span(idx, A, args, win_records)
+            tomorrow_plan = tomorrow_window_plan(A, args, win_records, tz)
+            # v4's window input: today's span plus tomorrow's when known at A (Issue #1391); v3 keeps today's only.
+            v4_spans = tuple(
+                sp
+                for sp in (
+                    plan_span,
+                    _shadow_module().planned_window_span(A.astimezone(tz), *tomorrow_plan, day_offset=1)
+                    if tomorrow_plan
+                    else None,
+                )
+                if sp is not None
+            )
 
             def band_fn(anchor_ep: float, t_ep: float) -> tuple[float | None, float | None]:
                 return idx.band_at(anchor_ep if args.setpoints == "hold" else t_ep, commanded)
 
-            def build_inputs(actual: bool, A=A, hourly=hourly, plan_span=plan_span):
+            def build_inputs(actual: bool, A=A, hourly=hourly, plan_span=v4_spans):
                 out = []
                 last_lo = last_hi = None
                 steps = grid_steps(A, HORIZON_H * 3600 // STEP_S)
@@ -1573,6 +1612,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="record (default, same rule as the live shadow): the windows are open over the times the engine planned "
         "that day (learning DB daily record window_open_time/window_close_time); fallback: always the first "
         "--window-plan-hours from the anchor (the pre-R6 backtest rule)",
+    )
+    p.add_argument(
+        "--tomorrow-plan-hour",
+        type=float,
+        default=TOMORROW_PLAN_KNOWN_HOUR,
+        help="local hour from which the NEXT day's planned window times (its learning DB record) count as known at the "
+        "anchor and open v4's windows over tomorrow's hours (Issue #1391); earlier anchors keep tomorrow closed "
+        "(no hindsight). 24 = never",
     )
     p.add_argument(
         "--v3-model",

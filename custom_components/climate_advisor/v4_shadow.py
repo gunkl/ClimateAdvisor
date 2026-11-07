@@ -238,6 +238,7 @@ def planned_window_span(
     close_t: dtime | None,
     *,
     fallback_hours: float = WINDOW_PLAN_FALLBACK_HOURS,
+    day_offset: int = 0,
 ) -> tuple[datetime, datetime] | None:
     """The one window assumption v4 predicts under, live AND in the backtest (Issue #1230 R6 task 3).
 
@@ -249,24 +250,52 @@ def planned_window_span(
     classification live; the day's record ``window_open_time`` / ``window_close_time`` in the backtest) -> that span on
     the ANCHOR's local day (a close at or before the open runs past midnight); a span already over at the anchor is
     ``None``. Recommended without planned times -> the documented fallback, ``fallback_hours`` from the anchor.
-    The span covers one plan day only: a recommendation is today's, it is never repeated at the same clock time
-    tomorrow.
+    The span covers one plan day only: a recommendation is never repeated at the same clock time on another day.
+    ``day_offset=1`` (Issue #1391) is TOMORROW's own plan (the timeline's ``plan_days[1]`` live, the next day's
+    record in the backtest): the planned times on the anchor's next local day. Tomorrow's plan has no "from the
+    anchor" fallback (nothing says when tomorrow's period starts): recommended without both times -> ``None``.
+    Callers pass ``None`` / not-recommended when tomorrow's plan is unknown, so unknown means windows closed.
     """
     if not recommended:
         return None
     if open_t is not None and close_t is not None:
-        day = anchor.date()
+        day = anchor.date() + timedelta(days=day_offset)
         start = datetime.combine(day, open_t, tzinfo=anchor.tzinfo)
         end = datetime.combine(day, close_t, tzinfo=anchor.tzinfo)
         if end <= start:
             end += timedelta(days=1)
         return (start, end) if end > anchor else None
+    if day_offset != 0:
+        return None
     return (anchor, anchor + timedelta(hours=fallback_hours)) if fallback_hours > 0 else None
 
 
-def window_open_at(span: tuple[datetime, datetime] | None, ts: datetime) -> bool:
-    """True when ``ts`` is inside the planned window span (``[start, end)``)."""
-    return span is not None and span[0] <= ts < span[1]
+def planned_window_spans(
+    anchor: datetime,
+    today: tuple[bool, dtime | None, dtime | None],
+    tomorrow: tuple[bool, dtime | None, dtime | None] | None = None,
+    *,
+    fallback_hours: float = WINDOW_PLAN_FALLBACK_HOURS,
+) -> tuple[tuple[datetime, datetime], ...]:
+    """Today's span (``planned_window_span``) plus tomorrow's (``day_offset=1``) when its plan is known (Issue #1391).
+
+    Occupant view: tomorrow morning's planned window period (free cooling) is in the 24 h line after midnight, not
+    just today's. ``tomorrow=None`` (plan unknown) -> tomorrow's hours stay windows-closed. Used by the live
+    ``build_inputs`` and the backtest, so both read one rule.
+    """
+    spans = [planned_window_span(anchor, *today, fallback_hours=fallback_hours)]
+    if tomorrow is not None:
+        spans.append(planned_window_span(anchor, *tomorrow, day_offset=1))
+    return tuple(sp for sp in spans if sp is not None)
+
+
+def window_open_at(span: Any, ts: datetime) -> bool:
+    """True when ``ts`` is inside the planned window span (``[start, end)``) or any of several (a tuple of spans)."""
+    if not span:
+        return False
+    if isinstance(span[0], datetime):
+        return span[0] <= ts < span[1]
+    return any(a <= ts < b for a, b in span)
 
 
 def build_inputs(
@@ -276,6 +305,7 @@ def build_inputs(
     band: Sequence[tuple[datetime, float | None, float | None]],
     day_modes: Mapping[Any, str] | None = None,
     windows: tuple[bool, Any, Any] = (False, None, None),
+    tomorrow_windows: tuple[bool, Any, Any] | None = None,
     horizon_hours: int = V4_PREDICT_HORIZON_HOURS,
     step_min: int = DEFAULT_STEP_MINUTES,
 ) -> list[Any]:
@@ -285,7 +315,8 @@ def build_inputs(
     the target-band schedule for setpoints (BOTH edges at every step, whatever the day's mode: heat setpoint = band
     floor, cool setpoint = band ceiling - exactly the backtest's inputs, ``predictor_v4.plan_setpoints``; the emulated
     thermostat starts whichever side the room crosses), windows open inside the classification's window span when
-    windows are recommended (``planned_window_span``: the same rule the backtest uses),
+    windows are recommended (``planned_window_span``: the same rule the backtest uses) and, for tomorrow's hours,
+    inside tomorrow's own planned span when ``tomorrow_windows`` is given (Issue #1391; ``None`` = unknown = closed),
     fan off (v3 has no forecast fan schedule). The forecast is not extrapolated: the list stops half an hour after the
     last forecast hour. Returns [] when there is not enough forecast to predict from.
     """
@@ -296,7 +327,7 @@ def build_inputs(
     band_pts_lower = sorted((dt.timestamp(), float(lo)) for dt, lo, _hi in band if lo is not None)
     band_pts_upper = sorted((dt.timestamp(), float(hi)) for dt, _lo, hi in band if hi is not None)
     recommended, open_t, close_t = windows
-    span = planned_window_span(now, bool(recommended), open_t, close_t)
+    span = planned_window_spans(now, (bool(recommended), open_t, close_t), tomorrow_windows)
     last_fc = pts[-1][0] + 1800
     inputs: list[Any] = []
     _plan_setpoints = getattr(p, "plan_setpoints", None) or _plan_setpoints_fallback

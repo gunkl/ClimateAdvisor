@@ -6419,12 +6419,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             getattr(c, "window_open_time", None) if c else None,
             getattr(c, "window_close_time", None) if c else None,
         )
+        # Tomorrow's own planned window period (the timeline's plan_days[1]) for tomorrow's hours (Issue #1391);
+        # unknown -> None -> closed. The plan and control (baseline) cycles share these inputs.
+        tomorrow_windows: tuple[bool, Any, Any] | None = None
+        try:
+            tm = self._tomorrow_classification_plan()
+            if tm is not None:
+                tomorrow_windows = (
+                    bool(tm["windows_recommended"]),
+                    _parse_time(tm["window_open_time"]) if tm["window_open_time"] else None,
+                    _parse_time(tm["window_close_time"]) if tm["window_close_time"] else None,
+                )
+        except Exception:  # noqa: BLE001 - optional context: tomorrow stays windows-closed
+            tomorrow_windows = None
         inputs = v4_shadow.build_inputs(
             now=now,
             hourly=hourly,
             band=band,
             day_modes=_compute_day_hvac_modes(self._hourly_forecast_temps, now, c),
             windows=windows,
+            tomorrow_windows=tomorrow_windows,
             step_min=v4_shadow.step_minutes(),
         )
 

@@ -633,7 +633,7 @@ class TestChart:
             and isinstance(n.func.value, ast.Attribute)
             and n.func.value.attr == "_chart_log"
         ]
-        assert len(calls) == 4
+        assert len(calls) == 5  # Issue #1425: the occupancy row
         for call in calls:
             assert "comfort_target" in {k.arg for k in call.keywords}, f"chart_log.append at line {call.lineno}"
 

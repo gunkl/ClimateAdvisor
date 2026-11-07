@@ -92,6 +92,9 @@ def _engine(sensor_open: bool = False) -> tuple[AutomationEngine, list, AsyncMoc
     eng._emit_event_callback = lambda e, d: events.append((e, d))
     eng._notify = AsyncMock()
     eng.set_occupancy_mode("away")
+    # The #1050 premise: the away setback reached the thermostat while the house was empty (Issue #1425: a deferred
+    # restore is a "still on the setback" hold only then; a skipped setback is tests/test_away_band_chart_1425.py).
+    eng._away_setback_sent = True
     hass.services.async_call.reset_mock()
     return eng, events, hass.services.async_call
 

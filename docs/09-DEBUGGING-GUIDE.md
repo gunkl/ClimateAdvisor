@@ -351,7 +351,7 @@ This shows every chart log write with its event type and resolved `hvac` value.
 | Windows bars drop on HVAC events | An append site missing `windows_open`/`windows_recommended` | Audit all 4 append call sites in coordinator.py for completeness |
 | Heating shown but wrong color (green instead of red) | `hvac_action="fan"` with `fan_mode=auto` not being remapped | Check #109 remap logic in `_read_chart_hvac_action()` |
 
-See `docs/08-COMPUTATION-REFERENCE.md` §19 for the full invariant table governing all four append sites.
+See `docs/08-COMPUTATION-REFERENCE.md` §19 for the full invariant table governing all five append sites.
 
 ---
 

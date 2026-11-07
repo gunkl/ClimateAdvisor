@@ -498,6 +498,19 @@
     return a.y + ((ms - a.x) / (b.x - a.x)) * (b.y - a.y);
   }
 
+  // A past band row is the band in effect from its time until the next row: hold it flat and change at the next
+  // row, never a slope between rows (a 30-minute Away recorded on one row drew a triangle, not a block).
+  function _stepHeld(pts) {
+    const sorted = pts.slice().sort((a, b) => a.x - b.x);
+    const out = [];
+    sorted.forEach((p, i) => {
+      const prev = sorted[i - 1];
+      if (prev && prev.y !== p.y) out.push({ x: p.x, y: prev.y });
+      out.push(p);
+    });
+    return out;
+  }
+
   function _fmt(v, digits) { return v == null ? '—' : v.toFixed(digits == null ? 1 : digits); }
   function _fmtSigned(v) { return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(1); }
   function _unitSym() { return unitSymbol(_lastChartData ? _lastChartData.unit : (_lastStatus ? _lastStatus.unit : null)); }
@@ -931,8 +944,8 @@
     const histBandLower = log.map(e => ({ x: _parseTs(e.ts), y: _histHold(e) ? e.hold_lower : e.lower })).filter(p => p.y != null && p.x <= nowMs);
     const futBandUpper = (chartData.target_band || []).map(e => ({ x: _parseTs(e.ts), y: e.upper })).filter(p => p.x > nowMs);
     const futBandLower = (chartData.target_band || []).map(e => ({ x: _parseTs(e.ts), y: e.lower })).filter(p => p.x > nowMs);
-    const bandUpper = [...histBandUpper, ...futBandUpper].sort((a, b) => a.x - b.x);
-    const bandLower = [...histBandLower, ...futBandLower].sort((a, b) => a.x - b.x);
+    const bandUpper = [..._stepHeld(histBandUpper), ...futBandUpper].sort((a, b) => a.x - b.x);
+    const bandLower = [..._stepHeld(histBandLower), ...futBandLower].sort((a, b) => a.x - b.x);
     if (bandUpper.length > 0 || bandLower.length > 0) {
       datasets.push({ caId: 'ov:band', label: 'Target Band', type: 'line', data: bandUpper, borderColor: _cssVar('--c-bandline'), borderWidth: 1,
         borderDash: [3, 3], backgroundColor: _cssVar('--c-band'), fill: '+1', pointRadius: 0, tension: 0, yAxisID: 'y', hidden: !bandOn, order: 5 });
@@ -1109,7 +1122,10 @@
         const ts = _parseTs(e.ts);
         const prev = i > 0 ? _parseTs(log[i - 1].ts) : ts - 1800000;
         const next = i < log.length - 1 ? _parseTs(log[i + 1].ts) : ts + 1800000;
-        push((ts + prev) / 2, (ts + next) / 2, false);
+        // Away / Vacation: a row is written when occupancy changes, so the mode holds from its row to the next
+        // (the bar starts when you left and ends when you came home, never centred on a 30-minute poll).
+        if (r.id === 'away') push(ts, i < log.length - 1 ? next : Math.max(ts, Math.min(next, Date.now())), false);
+        else push((ts + prev) / 2, (ts + next) / 2, false);
       });
       pred.forEach((p, i) => {
         if (!ftests[r.id](p)) return;

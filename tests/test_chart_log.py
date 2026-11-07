@@ -1019,4 +1019,4 @@ class TestRowContextFields:
             encoding="utf-8"
         )
         sites = re.findall(r"self\._chart_log\.append\(", src)
-        assert len(sites) == 4 and src.count("**self._read_chart_context()") == 4
+        assert len(sites) == 5 and src.count("**self._read_chart_context()") == 5  # Issue #1425: occupancy rows

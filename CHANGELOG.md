@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.7] — 2026-11-07
+
+- Fix #1425: a short Away now appears on the Status chart as one flat Away block, from when you left to when you came home. Before, the target band jumped to the away setback (for example 63–79 °F) and straight back as tall spikes, once even while you were home, and the purple Away bar could be off by up to 15 minutes. What the thermostat is told is unchanged. Each past reading's band is drawn flat until the next one, a chart reading is recorded when you leave, when the away setback is applied or skipped, and when you come home, and the band shows the home band during the 15 minutes before the setback is applied. Coming home with a window open no longer shows the away setback as still held when that setback was never sent (the open window had skipped it).
+
 ## [0.9.6] — 2026-11-07
 
 - Fix #1415: with two or more zones, running an AI investigation in one zone no longer erases another zone's reports from History, and each zone's History shows only its own reports. The history is now one file per zone (`climate_advisor_investigation_reports_<entry_id>.json`, deleted with the zone); on the first start the old shared file is copied to every zone (its reports carry no zone tag) and removed.

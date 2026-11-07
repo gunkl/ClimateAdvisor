@@ -274,6 +274,20 @@ The pre-heat start time is computed from the thermal model heating rate and the 
 
 The temperature delta is `comfort_heat − bedtime_setpoint`. The safety margin of 1.3× ensures the house reaches comfort even on colder-than-average mornings.
 
+### 5b-i. Which prediction engine feeds each decision (Issue #1230 R6b)
+
+The "thermal model" and "predicted indoor curve" every decision in §3, §5a, §5b, §6c and the nat-vent plan read are the PRIMARY prediction engine's (Settings -> Prediction engine, default v4), handed over by the coordinator (`control_thermal_model()`, `control_predicted_indoor()`); no decision code names an engine. With v3 as the primary they are exactly v3's model and curve, as before. With v4:
+
+| Decision | v4 supplies | Computation (unchanged formula, v4 inputs) |
+|---|---|---|
+| ODE ceiling guard (§6c) | the baseline (no-AC) path of the `_ca` line on the hourly + 30-min grid; `k_passive = -a_o`; `k_active_cool` = one-hour net cooling gain; `confidence` (`low`->`low`, `ok`->`medium`) | breach scan on the path against the armed ceiling; lead = `delta/|k_active_cool| * 60 * 1.3` clamped `[30, 240]` min (fallback 120 min without a rate); fire when `hours_to_breach <= lead`. Once it has switched the thermostat to cool at that ceiling (within 2 h, still there) the next cycles send nothing new. |
+| Nat-vent plan (§7, `compute_nat_vent_plan`) | the same path | cutoff = first hourly forecast time with `outdoor >= indoor - 1`; floor crossing; `ceiling_breach_time`; `evening_open_time`. `_nat_vent_cutoff` ends the planned window period (`_is_within_planned_window_period`). |
+| Nat-vent start veto | `k_passive`, `confidence` | floor-imminent: `time_to_floor = (indoor - floor) / (|k_passive| * (indoor - outdoor))` against `MIN_VIABLE_NAT_VENT_HOURS` |
+| TOU bank lead (§Time-of-use) | `k_active_heat` / `k_active_cool` (and `k_passive`, `confidence` for the away/vacation depth) | `lead = delta_t / |rate| * 60 * 1.3` clamped `[30, 240]`; `default_tou_lead_minutes` without a rate |
+| Adaptive setback depth (§5a) | `heating_rate_f_per_hour` / `cooling_rate_f_per_hour`, `confidence` | `depth = min(rate * available_h, max_depth)`; default depth when `confidence == "none"` |
+
+**v4 rates** (`predictor_v4.control_rates`): the gain of one hour of continuous heat (cool) measured by rolling the model's own integrator from a settled room with no leak and no sun, i.e. including the hidden-mass lag (about 0.8 of the heater gain `q_h` on the fitted Zone 1 house); `k_passive = -a_o`. **No usable primary fit** (confidence `none`, no model, or an engine without control support): the rate keys read `None` / confidence `none` (`CONTROL_BLANK_MODEL`) and the path is `_build_predicted_indoor_future(..., thermal_model={})`: every row above then follows its own "no model" line, and the log says so once per episode. The comparison (shadow) engine is never read. Full design: [Prediction Engines Spec](prediction-engines-spec.md#control-feed-r6b).
+
 ### 5c. Predicted Temperature Graph — Physics Path
 
 From Issue #114, when the thermal model has confidence ≥ `"low"` and `k_passive < 0`, the dashboard temperature forecast uses the ODE analytical solution to simulate future indoor temperatures instead of simple ramp interpolation:

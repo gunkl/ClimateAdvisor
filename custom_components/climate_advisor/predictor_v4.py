@@ -2119,3 +2119,61 @@ def grid_steps(start: datetime, count: int) -> list[datetime]:
     DST transition neither repeats nor skips a grid point (wall-clock ``+ timedelta`` would)."""
     base = start.astimezone(UTC)
     return [(base + timedelta(minutes=V4_STEP_MINUTES * (k + 1))).astimezone(start.tzinfo) for k in range(count)]
+
+
+# --------------------------------------------------------------------------- decision rates (Issue #1230 R6b)
+CONTROL_RATE_STEPS = 4  # the rate decisions size a one-hour run (pre-heat lead, TOU bank, setback recovery)
+CONTROL_CONFIDENCE = {"low": "low", "ok": "medium"}  # v4's grades in the grades the decisions' thermal-model reads use
+
+
+def control_rates(model: V4Model) -> dict[str, Any]:
+    """The thermal-model scalars the rate decisions read, derived from a fitted v4 model.
+
+    Occupant view: pre-heat, the time-of-use bank, the setback depth and the ceiling guard's lead time ask "how many
+    degrees per hour does my heating (cooling) deliver?" and "how fast does the house drift to the outdoor
+    temperature?". When v4 is the primary engine those answers come from v4's own fit, in the same keys the v3 thermal
+    model uses, so no decision code names an engine.
+
+    * ``k_active_heat`` / ``heating_rate_f_per_hour``: the net gain of ONE HOUR of continuous heating, measured by
+      rolling this model's own integrator for ``CONTROL_RATE_STEPS`` steps from a settled room with no leak and no sun
+      (so it is the gross heater gain the way v3's ``k_active`` is, but it includes the hidden-mass lag: the first hour
+      of heat does not raise the air by the full ``q_h``). Cooling is the mirror: ``k_active_cool`` is negative,
+      ``cooling_rate_f_per_hour`` its magnitude.
+    * ``k_passive``: ``-a_o``, the envelope leak toward the outdoor temperature (v3's ``k_passive`` is negative by the
+      same convention; ``a_o`` is bounded to ``[0.001, 0.5]``, v3's own bounds).
+    * ``confidence`` / ``confidence_k_passive``: v4 ``low`` -> ``low``, ``ok`` -> ``medium`` ("none" never gets here).
+    """
+    if model.confidence == "none":
+        return {}
+    house = [float(model.house[k]) for k in HOUSE_KEYS]
+    leakless = list(house)
+    leakless[0] = 0.0  # a_o: the gross heater gain, not net of the leak back to a (here: equal) outdoor
+    n = CONTROL_RATE_STEPS
+    h0 = 68.0
+    zeros = [0.0] * n
+    common: dict[str, Any] = {
+        "h0": h0,
+        "m0": h0,
+        "b0": [],
+        "out": [h0] * n,
+        "win": zeros,
+        "fan": zeros,
+        "hours": zeros,  # local midnight: no sun term
+    }
+    heat = rollout(leakless, [], heat_u=[1.0] * n, cool_u=zeros, **common)
+    cool = rollout(leakless, [], heat_u=zeros, cool_u=[1.0] * n, **common)
+    hours = n * _DT_H
+    k_heat = max(0.0, (heat.primary[-1] - h0) / hours)
+    k_cool = min(0.0, (cool.primary[-1] - h0) / hours)
+    grade = CONTROL_CONFIDENCE.get(model.confidence, "low")
+    a_o = min(max(float(model.house["a_o"]), 0.001), 0.5)
+    return {
+        "k_active_heat": k_heat,
+        "k_active_cool": k_cool,
+        "heating_rate_f_per_hour": round(k_heat, 2),
+        "cooling_rate_f_per_hour": round(abs(k_cool), 2),
+        "k_passive": -a_o,
+        "k_passive_via_bridge": False,
+        "confidence": grade,
+        "confidence_k_passive": grade,
+    }

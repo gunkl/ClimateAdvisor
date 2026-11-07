@@ -536,7 +536,7 @@
       const show = !!eng.fallback && !!eng.text;
       note.hidden = !show;
       if (show) {
-        note.textContent = eng.text;
+        note.textContent = eng.text + (eng.control && eng.control.text ? ' ' + eng.control.text : '');
         note.setAttribute('data-engine-state', eng.fitting ? 'fitting' : 'learning');
       }
     }

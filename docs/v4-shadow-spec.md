@@ -105,7 +105,9 @@ Written by `tools/predict_backtest.py --publish` over SSH ([Debugging Guide](09-
 
 ## Nothing on a decision path reads v4
 
-**The invariant.** No classification, setpoint, fan, window, nat-vent, briefing, notification, Status sensor or chart line may read a v4 value, a v4 attribute, or call into the v4 modules. A bad v4 fit must be unable to change how the house is run.
+> **Superseded by Issue #1230 R6b for the PRIMARY engine.** When v4 is the primary engine the decisions read its baseline path and rates through the coordinator's control feed ([Prediction Engines Spec: Control feed](prediction-engines-spec.md#control-feed-r6b)); the shadow cycle described in this spec is unchanged (it still runs after the decisions and reads the chart row), a v4 that is only the comparison engine still never acts, and no decision MODULE names v4 or the registry (structural tests below).
+
+**The invariant (R1 shadow, still true of the shadow cycle and of a comparison engine).** No classification, setpoint, fan, window, nat-vent, briefing, notification, Status sensor or chart line may read a v4 value, a v4 attribute, or call into the v4 modules. A bad v4 fit must be unable to change how the house is run.
 
 **Structural test.** `tests/test_v4_shadow_structural.py` checks the source, not behaviour, so a future edit that wires v4 into a decision fails before it ships:
 

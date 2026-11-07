@@ -1742,6 +1742,7 @@ ATTR_FORECAST_BIAS_CONFIDENCE = "forecast_bias_confidence"
 # Config keys
 CONF_AI_ENABLED = "ai_enabled"
 CONF_AI_API_KEY = "ai_api_key"
+CONF_AI_PROVIDER = "ai_provider"
 CONF_AI_MODEL = "ai_model"
 CONF_AI_REASONING_EFFORT = "ai_reasoning_effort"
 CONF_AI_MAX_TOKENS = "ai_max_tokens"
@@ -1757,6 +1758,7 @@ CONF_AI_INVESTIGATOR_RPD = "ai_investigator_requests_per_day"
 
 # Defaults
 DEFAULT_AI_ENABLED = False
+DEFAULT_AI_PROVIDER = "anthropic"
 DEFAULT_AI_MODEL = "claude-sonnet-5"
 DEFAULT_AI_REASONING_EFFORT = "low"
 DEFAULT_AI_MAX_TOKENS = 4096

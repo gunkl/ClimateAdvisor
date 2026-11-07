@@ -23,6 +23,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
+from .ai_backend import PROVIDERS
 from .const import CONFIG_METADATA, DOMAIN, REDACTED_CONFIG_KEYS, VERSION
 from .diagnostic_snapshot import build_diagnostic_snapshot, recent_hvac_events
 
@@ -39,6 +40,11 @@ _LOGGER = logging.getLogger(__name__)
 # once. `async_redact_data(payload, TO_REDACT)` below remains the second layer for
 # config secrets.
 TO_REDACT = set(REDACTED_CONFIG_KEYS) | {key for key, meta in CONFIG_METADATA.items() if meta.get("sensitive")}
+
+
+def _redaction_keys() -> set[str]:
+    """``TO_REDACT`` plus each registered provider's own API-key setting (not in CONFIG_METADATA)."""
+    return TO_REDACT | {spec.credential_setting for spec in PROVIDERS.values() if spec.credential_setting}
 
 
 def _chart_data_summary(coordinator: Any) -> dict[str, Any]:
@@ -122,7 +128,7 @@ async def async_get_diagnostics_payload(hass: HomeAssistant, entry: ConfigEntry)
             }
         )
 
-    return async_redact_data(payload, TO_REDACT)
+    return async_redact_data(payload, _redaction_keys())
 
 
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     pass
 
 from . import log_capture, zone_registry
+from .ai_backend import get_provider
 from .const import (
     ATTR_AUTOMATION_STATUS,
     ATTR_CONTACT_STATUS,
@@ -43,6 +44,7 @@ from .const import (
     ATTR_OCCUPANCY_MODE,
     ATTR_TREND,
     COMFORT_DEVIATION_FLOOR_F,
+    DEFAULT_AI_PROVIDER,
     FAN_MODE_BOTH,
     FAN_MODE_WHOLE_HOUSE,
     MAX_WEATHER_BIAS_APPLY_F,
@@ -1260,7 +1262,10 @@ async def build_config_context(hass: Any, coordinator: Any, **kwargs: Any) -> st
     """Build CONFIGURATION section (sensitive keys stripped)."""
     try:
         cfg: dict[str, Any] = dict(coordinator.config or {})
+        spec = get_provider(cfg.get("ai_provider", DEFAULT_AI_PROVIDER))
         cfg.pop("ai_api_key", None)
+        if spec is not None and spec.credential_setting:
+            cfg.pop(spec.credential_setting, None)
 
         # Issue #1048: config temperatures are internal degF; show them in the user's unit.
         _cfg_unit = cfg.get("temp_unit", "fahrenheit")
@@ -1290,7 +1295,7 @@ async def build_config_context(hass: Any, coordinator: Any, **kwargs: Any) -> st
             f"  sleep_time:      {cfg.get('sleep_time', 'unknown')}",
             f"  briefing_time:   {cfg.get('briefing_time', 'unknown')}",
             f"  ai_enabled:      {cfg.get('ai_enabled', 'unknown')}",
-            f"  ai_model:        {cfg.get('ai_model', 'unknown')}",
+            f"  ai_model:        {cfg.get(spec.model_setting if spec else 'ai_model', 'unknown')}",
             f"  learning_enabled:{cfg.get('learning_enabled', 'unknown')}",
             "",
         ]

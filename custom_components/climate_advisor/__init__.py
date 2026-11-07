@@ -23,6 +23,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.start import async_at_started
 
 from . import log_capture, zone_registry
+from .ai_providers import async_ensure_providers_registered
 from .api import API_VIEWS
 from .const import (
     CONF_AI_API_KEY,
@@ -574,6 +575,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # or once on EVENT_HOMEASSISTANT_STARTED (first boot). Its cancel goes to the entry's
     # on_unload, so a STARTED listener can no longer outlive an unload of this entry.
     entry.async_on_unload(async_at_started(hass, _validate_weather_entity))
+
+    # Register the built-in AI providers (ai_backend imports none) before the coordinator's AI gate
+    # and the options flow look them up; first-time imports run in the executor.
+    try:
+        await async_ensure_providers_registered(hass)
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("AI providers could not be loaded; continuing without AI")
 
     coordinator = ClimateAdvisorCoordinator(hass, dict(entry.data), entry_id=entry.entry_id)
 

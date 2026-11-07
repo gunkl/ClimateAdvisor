@@ -8,7 +8,9 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .const import CONF_AI_MODEL, DEFAULT_AI_MODEL
+from . import claude_api as _claude_api  # noqa: F401  (registers the built-in "anthropic" provider)
+from .ai_backend import USER_NOT_CHECKED, AIUserNotAllowedError, ProviderSpec, get_provider
+from .const import CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -62,6 +64,8 @@ class AISkillRegistry:
         hass: HomeAssistant,
         coordinator: Any,  # ClimateAdvisorCoordinator (avoid circular import)
         claude_client: ClaudeAPIClient,
+        *,
+        requester_id: Any = USER_NOT_CHECKED,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Execute a skill by name.
@@ -79,6 +83,9 @@ class AISkillRegistry:
            - error: str or None
            - input_context: the context string sent to Claude (for report persistence)
            - raw_response: the raw Claude response text (for report persistence)
+
+        ``requester_id`` is handed to the client, which checks it at dispatch; a refusal
+        raises ``AIUserNotAllowedError`` here, before any fallback.
         """
         skill = self._skills.get(name)
         if skill is None:
@@ -103,10 +110,10 @@ class AISkillRegistry:
 
         # Resolve per-skill config overrides from coordinator.config (if configured)
         cfg: dict[str, Any] = getattr(coordinator, "config", {}) or {}
-        override_model = cfg.get(skill.config_key_model) if skill.config_key_model else None
-        override_max_tokens_raw = cfg.get(skill.config_key_max_tokens) if skill.config_key_max_tokens else None
-        override_max_tokens = int(override_max_tokens_raw) if override_max_tokens_raw is not None else None
-        override_reasoning = cfg.get(skill.config_key_reasoning) if skill.config_key_reasoning else None
+        spec, options = _resolve_skill_options(skill, cfg)
+        override_model = options.get("model")
+        override_max_tokens = options.get("max_tokens")
+        override_reasoning = options.get("reasoning_effort")
 
         # Call Claude
         response = await claude_client.async_request(
@@ -116,10 +123,17 @@ class AISkillRegistry:
             model=override_model,
             max_tokens=override_max_tokens,
             reasoning_effort=override_reasoning,
+            requester_id=requester_id,
         )
 
         if response.success:
-            await _maybe_persist_model_fallback(coordinator, override_model, cfg, response)
+            # A substitution belongs to the provider it was made on: skip it if the zone has switched since.
+            if (
+                spec is not None
+                and spec.supports_tier_fallback
+                and cfg.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER) == spec.id
+            ):
+                await _maybe_persist_model_fallback(coordinator, override_model, cfg, response)
             try:
                 parsed = skill.response_parser(response.content)
                 return {
@@ -142,6 +156,8 @@ class AISkillRegistry:
             name,
             response.error or "parse error",
         )
+        if response.no_answer:  # the model was reached and declined: say so, no stand-in report
+            return _error_result(response.error, input_context=context)
         if skill.fallback:
             return _run_fallback(skill, coordinator, context=context, **kwargs)
 
@@ -156,6 +172,8 @@ class AISkillRegistry:
         hass: HomeAssistant,
         coordinator: Any,
         claude_client: ClaudeAPIClient,
+        *,
+        requester_id: Any = USER_NOT_CHECKED,
         **kwargs: Any,
     ) -> AsyncIterator[dict[str, Any]]:
         """Execute a skill by name, streaming results as SSE-ready dicts.
@@ -170,6 +188,7 @@ class AISkillRegistry:
             hass: Home Assistant instance.
             coordinator: ClimateAdvisorCoordinator.
             claude_client: Initialized ClaudeAPIClient.
+            requester_id: As in ``async_execute``; a refusal is a terminal error event with ``status`` 403.
             **kwargs: Forwarded to the skill's context_builder.
 
         """
@@ -207,13 +226,15 @@ class AISkillRegistry:
             yield {"type": "error", "message": "Context builder failed"}
             return
 
-        yield {"type": "status", "text": "Sending context to Claude AI…"}
-
         cfg: dict[str, Any] = getattr(coordinator, "config", {}) or {}
-        override_model = cfg.get(skill.config_key_model) if skill.config_key_model else None
-        override_max_tokens_raw = cfg.get(skill.config_key_max_tokens) if skill.config_key_max_tokens else None
-        override_max_tokens = int(override_max_tokens_raw) if override_max_tokens_raw is not None else None
-        override_reasoning = cfg.get(skill.config_key_reasoning) if skill.config_key_reasoning else None
+        label_spec = get_provider(cfg.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER))
+        provider_name = "the AI provider" if label_spec is None else label_spec.display_name
+        yield {"type": "status", "text": f"Sending context to {provider_name}…"}
+
+        _, options = _resolve_skill_options(skill, cfg)
+        override_model = options.get("model")
+        override_max_tokens = options.get("max_tokens")
+        override_reasoning = options.get("reasoning_effort")
 
         full_text = ""
         stop_reason: str | None = None
@@ -226,6 +247,7 @@ class AISkillRegistry:
                 model=override_model,
                 max_tokens=override_max_tokens,
                 reasoning_effort=override_reasoning,
+                requester_id=requester_id,
             ):
                 event_type = event.get("type")
                 event_text = event.get("text", "")
@@ -237,6 +259,9 @@ class AISkillRegistry:
                 elif event_type == "stop":
                     stop_reason = event.get("stop_reason")
                     truncated_empty = event.get("truncated_empty", False)
+        except AIUserNotAllowedError as exc:
+            yield {"type": "error", "message": str(exc), "status": 403}
+            return
         except Exception as exc:
             _LOGGER.error("Streaming request failed for skill '%s': %s", name, exc)
             yield {"type": "error", "message": str(exc)}
@@ -261,6 +286,25 @@ class AISkillRegistry:
         }
 
 
+def _resolve_skill_options(skill: AISkillDefinition, cfg: dict[str, Any]) -> tuple[ProviderSpec | None, dict[str, Any]]:
+    """Resolve a skill's per-request options through the active provider spec.
+
+    The skill's per-skill config keys supply the raw overrides; the provider decides
+    which of them apply (e.g. a provider may ignore Claude model overrides). An unknown
+    provider id yields the raw overrides and no spec (the client reports the error).
+    """
+    max_tokens_raw = cfg.get(skill.config_key_max_tokens) if skill.config_key_max_tokens else None
+    overrides: dict[str, Any] = {
+        "model": cfg.get(skill.config_key_model) if skill.config_key_model else None,
+        "max_tokens": int(max_tokens_raw) if max_tokens_raw is not None else None,
+        "reasoning_effort": cfg.get(skill.config_key_reasoning) if skill.config_key_reasoning else None,
+    }
+    spec = get_provider(cfg.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER))
+    if spec is None:
+        return None, overrides
+    return spec, spec.resolve_request_options(cfg, overrides)
+
+
 async def _maybe_persist_model_fallback(
     coordinator: Any,
     override_model: str | None,
@@ -273,10 +317,13 @@ async def _maybe_persist_model_fallback(
     a fallback (async_request_streaming() never retries — see its docstring), so this
     is only called from async_execute(), not async_execute_streaming(). Compares the
     model that was actually requested (mirroring claude_api.py's own resolution:
-    override, else the configured CONF_AI_MODEL, else DEFAULT_AI_MODEL) against
+    override, else the provider's configured model, else its default) against
     response.resolved_model — they differ only when a fallback occurred.
     """
-    requested_model = override_model or cfg.get(CONF_AI_MODEL, DEFAULT_AI_MODEL)
+    spec = get_provider(cfg.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER))
+    model_key = spec.model_setting
+    default_model = spec.default_model
+    requested_model = override_model or cfg.get(model_key, default_model)
     resolved_model = getattr(response, "resolved_model", "") or requested_model
     if resolved_model != requested_model:
         persist = getattr(coordinator, "async_persist_model_fallback", None)

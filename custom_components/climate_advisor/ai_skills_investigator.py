@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 
+from .ai_backend import get_provider
 from .ai_skills import AISkillDefinition, AISkillRegistry
 from .ai_skills_context import (
     _AUTOMATION_INTERVALS_SECONDS,
@@ -22,6 +23,7 @@ from .ai_skills_context import (
 from .ai_skills_context import (
     build_version_context as _build_version_context_async,
 )
+from .const import CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER
 from .temperature import UNIT_SYMBOL, display_temp
 
 _LOGGER = logging.getLogger(__name__)
@@ -368,6 +370,13 @@ def parse_investigation_response(raw_text: str) -> dict[str, Any]:
     return sections
 
 
+def _analysis_provider(coordinator: Any) -> str:
+    """How the fallback report names the service that does cross-source analysis in this zone."""
+    config = getattr(coordinator, "config", None) or {}
+    spec = get_provider(config.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER))
+    return "Claude" if spec is not None and spec.uses_claude_wording else "the AI provider"
+
+
 def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
     """Return a lightweight investigation dict from coordinator data without AI.
 
@@ -626,7 +635,9 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
         "errors_warnings": (
             "\n".join(errors_parts) if errors_parts else "No errors or warnings in the supplied window."
         ),
-        "hypotheses": "AI unavailable — hypotheses require cross-source analysis by Claude.",
+        "hypotheses": (
+            f"AI unavailable — hypotheses require cross-source analysis by {_analysis_provider(coordinator)}."
+        ),
         "recommended_actions": "Restore AI connectivity and re-run the full investigator skill.",
         "assumptions": "Fallback only scans deterministic patterns; deep inference was not performed.",
         "full_text": "",

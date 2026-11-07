@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import inspect
 import logging
 import sys
@@ -442,3 +443,23 @@ class TestEveryStateKeyIsClassified:
             assert f'"{key}"' in before, f"{key} is not read above the date gate"
         for key in SAME_DAY_KEYS:  # the behaviour tests above prove they are NOT restored across days
             assert f'"{key}"' in after, f"{key} is not restored at all"
+
+
+class TestAiInitLogging:
+    def _restore_with_ai(self, caplog, *, fails: bool):
+        coord = _coord(_base(_TODAY))
+        coord._ai_client_config = {"ai_provider": "fake", "fake_model": "m1"}
+        if fails:
+            coord._executor_job = AsyncMock(side_effect=RuntimeError("boom"))
+        with (
+            caplog.at_level(logging.INFO, logger=_COORD_LOGGER),
+            patch(f"{_COORD_LOGGER}.dt_util.now", return_value=_NOW),
+            contextlib.suppress(RuntimeError),
+        ):
+            asyncio.run(coord.async_restore_state())
+        return caplog.text
+
+    def test_initialized_is_not_logged_after_a_failed_init(self, caplog):
+        text = self._restore_with_ai(caplog, fails=True)
+        assert "could not be initialized" in text
+        assert "AI subsystem initialized" not in text

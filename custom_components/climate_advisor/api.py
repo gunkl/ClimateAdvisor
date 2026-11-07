@@ -38,6 +38,7 @@ from .const import (
     API_SEND_BRIEFING,
     API_STATUS,
     API_SUBMIT_GITHUB_ISSUE,
+    API_TIMELINE,
     API_TOGGLE_AUTOMATION,
     ATTR_AUTOMATION_STATUS,
     ATTR_COMPLIANCE_SCORE,
@@ -1433,6 +1434,38 @@ class ClimateAdvisorPredictionAccuracyView(HomeAssistantView):
             return self.json(await hass.async_add_executor_job(log_capture.bind_zone_for_executor(_build)))
 
 
+class ClimateAdvisorTimelineView(HomeAssistantView):
+    """GET /api/climate_advisor/timeline - the operation timeline every occupant-facing surface reads (Issue #1230 R3b).
+
+    Query: ``zone`` (entry id; ``entry_id`` also accepted). With several zones and no ``zone`` the answer is 400 (the
+    same refusal as ``prediction_accuracy``): a plan silently shown for another zone would mislead. The body is the
+    frozen contract dict (``operation_timeline.to_dict``) with temperatures in the display unit, ``unit`` added, and
+    the builder's working data under ``detail``. 503 when the zone has no timeline yet (before its first
+    classification).
+    """
+
+    url = API_TIMELINE
+    name = "api:climate_advisor:timeline"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        query = request.rel_url.query
+        zone = query.get("zone") or query.get("entry_id")
+        coordinator, ambiguous_refused = zone_registry.resolve_zone(
+            hass, zone, context=f"{request.method} {request.path} from {request.remote}", allow_guess=False
+        )
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+        with log_capture.zone_scope(coordinator.zone_label):
+            payload = coordinator.timeline_payload()
+            if payload is None:
+                return self.json({"error": "timeline_not_ready"}, status_code=503)
+            return self.json(payload)
+
+
 class ClimateAdvisorDeleteReportView(HomeAssistantView):
     """POST /api/climate_advisor/delete_report — delete a report by type + timestamp."""
 
@@ -1563,4 +1596,5 @@ API_VIEWS = [
     ClimateAdvisorEventLogView,
     ClimateAdvisorEnginesView,
     ClimateAdvisorPredictionAccuracyView,
+    ClimateAdvisorTimelineView,
 ]

@@ -121,6 +121,10 @@ class StepKind(StrEnum):
     NIGHT_STRATEGY = "night_strategy"
     # --- appended by R3a ---
     RESUME_SCHEDULE = "resume_schedule"  # grace expiry: CA resumes the schedule after the occupant's change
+    # --- appended by R3b (contract additive change): the two automation-executed actions Next Automation lists that
+    # no earlier kind covers ---
+    BRIEFING_SEND = "briefing_send"  # the scheduled daily briefing (a notify service call)
+    CEILING_GUARD = "ceiling_guard"  # the ODE ceiling guard switches the AC on ahead of a predicted ceiling breach
 
 
 STEP_SOURCE: dict[StepKind, str] = {
@@ -133,12 +137,14 @@ STEP_SOURCE: dict[StepKind, str] = {
     StepKind.NAT_VENT_START: "automation.check_natural_vent_conditions",
     StepKind.NAT_VENT_STOP: "automation.check_natural_vent_conditions",
     StepKind.RESUME_SCHEDULE: "automation._apply_current_scheduled_state",
+    StepKind.SETPOINT_CHANGE: "automation.handle_occupancy_away/vacation (tou_expansion_f, Issue #899)",
+    StepKind.BRIEFING_SEND: "coordinator._send_briefing",
+    StepKind.CEILING_GUARD: "automation._apply_ode_ceiling_guard_decision",
     StepKind.WINDOWS_OPEN: "operation_timeline.evaluate_windows",
     StepKind.WINDOWS_CLOSE: "operation_timeline.evaluate_windows",
 }
 NOT_EMITTED_BY_R3A = frozenset(
     {
-        StepKind.SETPOINT_CHANGE,
         StepKind.FAN_ON,
         StepKind.FAN_OFF,
         StepKind.SETBACK_END,
@@ -282,11 +288,52 @@ SENTENCES: dict[str, Sentence] = dict(
             "the end time is the engine's own grace_end_time",
         ),
         _s(
+            "setpoint_change.tou_expansion_start",
+            "{t}: high-cost period, CA widens the {occupancy} band to {edge} until {end}.",
+            {"t": "time", "occupancy": "text", "edge": "temp", "end": "time"},
+            "away/vacation TOU window (scheduler resolution) + the day's direction",
+            "only while away or on vacation, with a future window and a non-zero expansion",
+            "the widening is select_comfort_band(tou_expansion_f), the same call the engine makes at the window start",
+        ),
+        _s(
+            "setpoint_change.tou_expansion_end",
+            "{t}: the high-cost period ends, CA returns to the {occupancy} band, {floor} to {ceiling}.",
+            {"t": "time", "occupancy": "text", "floor": "temp", "ceiling": "temp"},
+            "away/vacation TOU window end + the held band",
+            "paired with the widening step",
+            "the end is the schedule's own window end",
+        ),
+        _s(
+            "briefing_send.default",
+            "{t}: CA sends the daily briefing.",
+            {"t": "time"},
+            "configured briefing time",
+            "one per briefing_time in the horizon",
+            "the time is the scheduler's own (config briefing_time)",
+        ),
+        _s(
+            "ceiling_guard.default",
+            "{t}: CA switches the AC on to hold the {ceiling} ceiling.",
+            {"t": "time", "ceiling": "temp"},
+            "nat_vent_plan ceiling_breach_time + armed ceiling",
+            "only on a windows day whose plan predicts a ceiling breach in the future",
+            "the breach time is the plan's own; the switch is the ODE ceiling guard's mode write",
+        ),
+        _s(
+            "natvent_start.predicted",
+            "{t}: CA starts the {fan} (a window is open and outdoor air is cooler).",
+            {"t": "time", "fan": "text"},
+            "the engine's nat-vent start prediction (decide_nat_vent_gate on the forecast) + fan mode",
+            "only with a fan configured and a window already open",
+            "the start is the engine's own gate answer as of that hour, never promised without an open window",
+        ),
+        _s(
             "windows_open.free_cooling",
             "{t}: open the windows. Outdoor is {delta} cooler than the house{until}.",
             {"t": "time", "delta": "delta", "until": "text"},
             "window candidate (free cooling) with simulated benefit",
-            "house predicted above the ceiling, outdoor >= 2 F cooler, saves >= 10 min HVAC or >= 0.5 F-h",
+            "house predicted above the ceiling, outdoor at least FREE_COOL_MIN_DELTA_F cooler, saves >= 10 min "
+            "HVAC or >= 0.5 F-h",
             "direction rule is the live Next Action rule; window effect must be validated",
         ),
         _s(
@@ -294,7 +341,8 @@ SENTENCES: dict[str, Sentence] = dict(
             "{t}: open the windows. Outdoor is {delta} warmer than the house{until}.",
             {"t": "time", "delta": "delta", "until": "text"},
             "window candidate (free heating) with simulated benefit",
-            "daytime, outdoor >= 1.5 F warmer, house in the lower half of the band, same benefit gate",
+            "daytime, outdoor at least FREE_HEAT_MIN_DELTA_F warmer, house in the lower half of the band, same "
+            "benefit gate",
             "direction rule is the live Next Action rule; window effect must be validated",
         ),
         _s(
@@ -387,7 +435,7 @@ SENTENCES: dict[str, Sentence] = dict(
         ),
         _s(
             "held.suffix",
-            "{base} CA is hands-off until {until}, so this waits.",
+            "{base} It applies when CA resumes the schedule at {until}.",
             {"base": "text", "until": "time"},
             "manual override / grace end time",
             "step falls inside an active override or grace",
@@ -395,7 +443,7 @@ SENTENCES: dict[str, Sentence] = dict(
         ),
         _s(
             "held.pause",
-            "{base} It waits while a door or window is open.",
+            "{base} It applies when the door or window closes.",
             {"base": "text"},
             "door/window pause state",
             "step falls while the engine is paused by a door or window",
@@ -412,6 +460,9 @@ STEP_SENTENCE_PREFIX: dict[StepKind, str] = {
     StepKind.PREHEAT_START: "pre_heat_start",
     StepKind.NAT_VENT_START: "natvent_start",
     StepKind.NAT_VENT_STOP: "natvent_stop",
+    StepKind.BRIEFING_SEND: "briefing_send",
+    StepKind.CEILING_GUARD: "ceiling_guard",
+    StepKind.SETPOINT_CHANGE: "setpoint_change",
 }
 
 
@@ -501,6 +552,7 @@ class TimelineSnapshot:
     window_open_time: time | None = None
     window_close_time: time | None = None  # classifier's static close (the plan's cutoff, if any, overrides it)
     nat_vent_cutoff: datetime | None = None  # nat_vent_plan: ODE-adjusted close for today
+    evening_open_time: datetime | None = None  # R3b: nat_vent_plan's forecast-derived reopening (warm/mild/hot evening)
     opportunity_spans: Sequence[tuple[time, time]] = ()  # hot-day morning/evening window opportunities
     pre_cool_trigger: datetime | None = None
     pre_cool_target: float | None = None
@@ -508,6 +560,20 @@ class TimelineSnapshot:
     tou_schedule_start: datetime | None = None
     tou_target: float | None = None
     tou_mode: str | None = None
+    briefing_time: time | None = None  # R3b: the scheduled daily briefing
+    # R3b: the away/vacation TOU window (Issue #899): CA widens the held band by ``expansion`` on the day's side for the
+    # window and returns to it after. The only setpoint change that has no step of its own kind: a named cause.
+    tou_av_start: datetime | None = None
+    tou_av_end: datetime | None = None
+    tou_av_expansion_f: float | None = None
+    ceiling_breach: datetime | None = (
+        None  # R3b: nat_vent_plan ceiling_breach_time (AC switches on to hold the ceiling)
+    )
+    nat_vent_predicted_start: datetime | None = None  # R3b: the engine's own nat-vent start prediction (Issue #528)
+    # R3b: the classification facts per local day (today, tomorrow), the one place the Analysis "Tomorrow (plan)" column
+    # and the window plan for tomorrow come from. Each: date, day_type, hvac_mode, trend_direction, windows_recommended,
+    # window_open_time, window_close_time, pre_condition, expected_high, expected_low (internal degrees F).
+    plan_days: Sequence[Mapping[str, Any]] = ()
     # readings
     indoor: float | None = None  # what CA reads now (sleep sensor while asleep)
     indoor_primary: float | None = None  # the thermostat's own room; the simulation seed
@@ -680,6 +746,7 @@ class DetailedTimeline(Timeline):
     hvac_hourly: tuple[tuple[datetime, float], ...] = ()  # (hour start, predicted equipment minutes that hour)
     generation: int = 1
     regenerated_for: tuple[str, ...] = ()
+    days: tuple[Mapping[str, Any], ...] = ()  # R3b: per-day classification facts the plan was built from (plan_days)
 
 
 def _step_to_dict(s: TimelineStep) -> dict[str, Any]:
@@ -728,6 +795,7 @@ def detail_dict(t: DetailedTimeline) -> dict[str, Any]:
         "summary": list(t.summary),
         "hvac_minutes": None if t.hvac_minutes is None else round(t.hvac_minutes, 1),
         "dropped": list(t.dropped),
+        "days": [{k: (v.isoformat() if isinstance(v, (date, time)) else v) for k, v in day.items()} for day in t.days],
     }
 
 
@@ -1114,10 +1182,45 @@ def _planned_spans(snap: TimelineSnapshot, end: datetime) -> list[tuple[str, dat
             close_dt = datetime.combine(today, snap.window_close_time, tzinfo=tz)
         if close_dt is not None and close_dt > open_dt:
             spans.append(("planned", open_dt, close_dt))
+    cutoff = snap.nat_vent_cutoff if snap.nat_vent_cutoff is not None and snap.nat_vent_cutoff.date() == today else None
+    evening_open = (
+        snap.evening_open_time
+        if snap.evening_open_time is not None and snap.evening_open_time.date() == today
+        else None
+    )
     for a, b in snap.opportunity_spans:
         s, e = datetime.combine(today, a, tzinfo=tz), datetime.combine(today, b, tzinfo=tz)
+        # the same dynamic values the briefing and the card used (nat_vent_plan): the ODE-adjusted morning close and
+        # the forecast-derived evening reopening replace the static opportunity hours when they fall inside the span
+        if a < time(12, 0) and cutoff is not None and s < cutoff < e:
+            e = cutoff
+        elif a >= time(15, 0) and evening_open is not None and s <= evening_open < e:
+            s = evening_open
         if e > s:
             spans.append(("planned", s, e))
+    if (
+        snap.windows_recommended
+        and snap.window_open_time is not None
+        and evening_open is not None
+        and not any(k == "planned" and a <= evening_open < b for k, a, b in spans)
+    ):
+        # warm / mild windows day: the plan's forecast-derived reopening tonight (the briefing's "reopen windows
+        # around")
+        spans.append(("planned", evening_open, datetime.combine(today + timedelta(days=1), time(0, 0), tzinfo=tz)))
+    tomorrow = today + timedelta(days=1)
+    for day in snap.plan_days:  # tomorrow's engine plan (the Analysis "Tomorrow (plan)" column reads these steps)
+        o, c = day.get("window_open_time"), day.get("window_close_time")
+        if (
+            day.get("date") == tomorrow
+            and day.get("windows_recommended")
+            and isinstance(o, time)
+            and isinstance(c, time)
+        ):
+            s, e = datetime.combine(tomorrow, o, tzinfo=tz), datetime.combine(tomorrow, c, tzinfo=tz)
+            if e > s:
+                spans.append(("planned", s, e))
+    # nobody is home to open a window (away today, vacation every day)
+    spans = [(k, a, b) for k, a, b in spans if _occupancy_for(snap, a) in ("home", "guest")]
     return [(k, max(a, snap.now), min(b, end)) for k, a, b in spans if min(b, end) > max(a, snap.now)]
 
 
@@ -1211,6 +1314,74 @@ def _refine_span(
     return first, last, end_reason
 
 
+def _clip_to_awake(snap: TimelineSnapshot, a: datetime, b: datetime) -> tuple[datetime, datetime, str] | None:
+    """A window period never runs into the sleep window (nobody is awake to close it): end it at bedtime."""
+    if snap.sleep_time is None:
+        return a, b, "planned_end"
+    if asleep_at(a, snap.wake_time, snap.sleep_time):
+        wake = _next_wake(snap, a)  # a span that starts before the occupant is up starts when they are
+        if wake is None or wake >= b:
+            return None
+        a = wake
+    bed = datetime.combine(a.date(), snap.sleep_time, tzinfo=a.tzinfo)
+    if bed <= a:
+        bed += timedelta(days=1)
+    if b > bed:
+        return (a, bed, "bedtime") if bed - a >= timedelta(minutes=WINDOW_MIN_SPAN_MIN) else None
+    return a, b, "planned_end"
+
+
+def _trim_engine_span(
+    snap: TimelineSnapshot, base: Sim | None, rates: ModelRates | None, a: datetime, b: datetime
+) -> tuple[datetime, datetime, str] | None:
+    """D1: the engine's recommended span for an unvalidated window effect.
+
+    Clipped at bedtime; where a baseline path and the learned swings exist, trimmed to the contiguous hours where the
+    live direction rule (the one the Next Action card applies) holds on the house as the thermostat has it. Nothing
+    else removes it: the engine recommended it and the occupant acts on it today.
+    """
+    clipped = _clip_to_awake(snap, a, b)
+    if clipped is None:
+        return None
+    a, b, why = clipped
+    if base is None or rates is None:
+        return a, b, why
+    first: datetime | None = None
+    last: datetime | None = None
+    for st in base.steps:
+        t0 = st.ts - timedelta(minutes=SIM_STEP_MINUTES)
+        if t0 < a or st.ts > b:
+            continue
+        ok = not st.seg.asleep and _direction_ok(snap, st.seg, st.out, st.temp, rates)
+        if ok:
+            if first is None:
+                first = t0
+            last = st.ts
+        elif first is not None:
+            why = "outdoor_rise" if st.out >= st.temp else "comfort_edge"
+            break
+    if first is None or last is None or last - first < timedelta(minutes=WINDOW_MIN_SPAN_MIN):
+        return None
+    return first, last, why
+
+
+def engine_only_windows(snap: TimelineSnapshot, end: datetime) -> tuple[list[WindowCandidate], list[Span]]:
+    """No usable simulation (no learned envelope rate, no seed temperature, no forecast): the engine's recommended
+    periods stand, unvalidated (confidence low), clipped at bedtime. The live card applies the direction rule on the
+    reading when it shows them."""
+    results: list[WindowCandidate] = []
+    accepted: list[Span] = []
+    for kind, a, b in _planned_spans(snap, end):
+        clipped = _clip_to_awake(snap, a, b)
+        if clipped is None or any(clipped[0] < y and x < clipped[1] for x, y in accepted):
+            results.append(WindowCandidate(kind, a, b, False, "too_short", None, None, None, "planned_end", "low"))
+            continue
+        ca, cb, why = clipped
+        accepted.append((ca, cb))
+        results.append(WindowCandidate(kind, ca, cb, True, "engine_unvalidated", None, None, None, why, "low"))
+    return results, sorted(accepted)
+
+
 def evaluate_windows(
     snap: TimelineSnapshot, sim: _Simulator, base: Sim, rates: ModelRates, end: datetime
 ) -> tuple[list[WindowCandidate], list[Span]]:
@@ -1231,7 +1402,60 @@ def evaluate_windows(
         # A window is open right now: no gate on starting it (the occupant already did); the question is only when
         # it should close, judged by the same direction rule and edge-drift simulation.
         open_now = _refine_span(snap, sim.run, base, rates, "open_now", snap.now, end)
+    planned_adopted: list[tuple[datetime, datetime, WindowCandidate]] = []
     for kind, a, b in merged:
+        if kind == "planned":
+            # D1 (R3b): the engine's current recommendation is the source. Unvalidated window effect: keep the
+            # engine's times (trimmed only by the direction rule on the baseline house, clipped at bedtime),
+            # confidence low. Validated: the simulation may ADJUST the timing; it never removes the advice.
+            if grade in ("none", "low"):
+                trimmed = _trim_engine_span(snap, base, rates, a, b)
+                if trimmed is None:
+                    results.append(
+                        WindowCandidate(kind, a, b, False, "direction", None, None, None, "planned_end", "low")
+                    )
+                else:
+                    ta, tb, why = trimmed
+                    planned_adopted.append(
+                        (
+                            ta,
+                            tb,
+                            WindowCandidate(kind, ta, tb, True, "engine_unvalidated", None, None, None, why, "low"),
+                        )
+                    )
+                continue
+            refined = _refine_span(snap, sim.run, base, rates, kind, a, b)
+            if refined is None:
+                results.append(WindowCandidate(kind, a, b, False, "direction", None, None, None, "planned_end", grade))
+                continue
+            ra, rb, why = refined
+            trial = sim.run([(ra, rb)])
+            assert trial is not None
+            saved_min = base.hvac_minutes - trial.hvac_minutes
+            saved_fh = base.discomfort_fh - trial.discomfort_fh
+            delta = max((abs(s.out - s.free) for s in trial.steps if s.window_open), default=0.0)
+            beneficial = (saved_min >= WINDOW_MIN_HVAC_SAVED_MIN or saved_fh >= WINDOW_MIN_DISCOMFORT_SAVED_FH) and (
+                base.score() - trial.score() > 0
+            )
+            planned_adopted.append(
+                (
+                    ra,
+                    rb,
+                    WindowCandidate(
+                        kind,
+                        ra,
+                        rb,
+                        True,
+                        "accepted" if beneficial else "engine_no_benefit",
+                        saved_min,
+                        saved_fh,
+                        delta,
+                        why,
+                        grade,
+                    ),
+                )
+            )
+            continue
         if grade in ("none", "low"):
             results.append(
                 WindowCandidate(kind, a, b, False, "unvalidated", None, None, None, "planned_end", "low"),
@@ -1254,6 +1478,12 @@ def evaluate_windows(
         ra, rb, why = open_now
         accepted.append((snap.now, rb))
         results.append(WindowCandidate("open_now", snap.now, rb, True, "accepted", None, None, None, why, grade))
+    for pa, pb, cand in planned_adopted:  # the engine's own periods are in before any scanned one competes
+        if any(pa < b and a < pb for a, b in accepted):
+            results.append(replace(cand, accepted=False, reason="overlaps"))
+            continue
+        accepted.append((pa, pb))
+        results.append(cand)
     for _gain, kind, ra, rb, why, _m, _f, delta in sorted(pending, key=lambda p: -p[0]):
         if any(ra < b and a < rb for a, b in accepted):
             results.append(WindowCandidate(kind, ra, rb, False, "overlaps", None, None, delta, why, grade))
@@ -1368,6 +1598,9 @@ def build_timeline(
     accepted: list[Span] = []
     if sim_obj is not None and base is not None and rates is not None:
         candidates, accepted = evaluate_windows(snap, sim_obj, base, rates, end)
+    else:
+        # D1 (R3b): without a usable simulation the engine's own recommendation still stands, unvalidated (low).
+        candidates, accepted = engine_only_windows(snap, end)
     final = sim_obj.run(accepted) if sim_obj is not None else None
 
     dropped: list[str] = []
@@ -1502,7 +1735,15 @@ def build_timeline(
         add(now, StepKind.SETBACK_START, key, "high", {"t": now, "floor": seg.floor, "ceiling": seg.ceiling})
 
     # pre-cool / TOU
-    if snap.pre_cool_trigger is not None and snap.pre_cool_target is not None and snap.pre_cool_trigger > now:
+    # The weather pre-cool is a home-band action: an empty house (away today, vacation always) is held at its setback by
+    # the engine's occupancy gate, so promising "CA pre-cools" there would be a step CA never performs. (TOU banking has
+    # its own away/vacation path, apply_tou_away_vacation_precondition, so it stays.)
+    if (
+        snap.pre_cool_trigger is not None
+        and snap.pre_cool_target is not None
+        and snap.pre_cool_trigger > now
+        and _occupancy_for(snap, snap.pre_cool_trigger) in ("home", "guest")
+    ):
         add(
             snap.pre_cool_trigger,
             StepKind.PRECOOL_START,
@@ -1533,8 +1774,73 @@ def build_timeline(
             },
         )
 
-    # window periods (you) and the fan session they allow (ca)
+    # R3b: the three automation-executed actions Next Automation lists that earlier kinds do not cover.
     fan = {"whole_house_fan": "whole-house fan", "hvac_fan": "HVAC fan"}.get(snap.fan_mode)
+    if (
+        snap.occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+        and snap.tou_av_start is not None
+        and snap.tou_av_end is not None
+        and snap.tou_av_expansion_f
+        and snap.tou_av_end > snap.tou_av_start
+        and snap.tou_av_start > now
+    ):
+        aseg = index.at(snap.tou_av_start)
+        if aseg is not None:
+            day_mode = snap.day_modes.get(snap.tou_av_start.date(), aseg.mode)
+            widen_ceiling = day_mode != "heat"
+            edge = aseg.ceiling + snap.tou_av_expansion_f if widen_ceiling else aseg.floor - snap.tou_av_expansion_f
+            label = "vacation" if snap.occupancy_mode == OCCUPANCY_VACATION else "away"
+            add(
+                snap.tou_av_start,
+                StepKind.SETPOINT_CHANGE,
+                "setpoint_change.tou_expansion_start",
+                "medium",
+                {
+                    "t": snap.tou_av_start,
+                    "occupancy": label,
+                    "edge": edge,
+                    "end": snap.tou_av_end,
+                    "side": "ceiling" if widen_ceiling else "floor",
+                },
+                target_f=edge,
+                mode=day_mode,
+            )
+            add(
+                snap.tou_av_end,
+                StepKind.SETPOINT_CHANGE,
+                "setpoint_change.tou_expansion_end",
+                "medium",
+                {"t": snap.tou_av_end, "occupancy": label, "floor": aseg.floor, "ceiling": aseg.ceiling},
+                target_f=aseg.ceiling if widen_ceiling else aseg.floor,
+                mode=day_mode,
+            )
+    if snap.briefing_time is not None:
+        for offset in (0, 1):
+            at = datetime.combine(now.date() + timedelta(days=offset), snap.briefing_time, tzinfo=now.tzinfo)
+            if now < at < end:
+                add(at, StepKind.BRIEFING_SEND, "briefing_send.default", "high", {"t": at})
+    if snap.ceiling_breach is not None and snap.ceiling_breach > now:
+        cseg = index.at(snap.ceiling_breach)
+        if cseg is not None:
+            add(
+                snap.ceiling_breach,
+                StepKind.CEILING_GUARD,
+                "ceiling_guard.default",
+                "medium",
+                {"t": snap.ceiling_breach, "ceiling": cseg.ceiling},
+                target_f=cseg.ceiling,
+                mode="cool",
+            )
+    if fan and snap.nat_vent_predicted_start is not None and snap.nat_vent_predicted_start > now:
+        add(
+            snap.nat_vent_predicted_start,
+            StepKind.NAT_VENT_START,
+            "natvent_start.predicted",
+            "medium",
+            {"t": snap.nat_vent_predicted_start, "fan": fan, "cause": "engine_prediction"},
+        )
+
+    # window periods (you) and the fan session they allow (ca)
     for cand in candidates:
         if not cand.accepted:
             continue
@@ -1640,6 +1946,7 @@ def build_timeline(
         hvac_hourly=tuple(sorted(hourly_min.items())),
         generation=generation,
         regenerated_for=tuple(regenerated_for),
+        days=tuple(dict(d) for d in snap.plan_days),
     )
 
 
@@ -1699,7 +2006,11 @@ def _choose_path(
     snap: TimelineSnapshot, accepted: Sequence[Span], final: Sim | None
 ) -> tuple[list[tuple[datetime, float]], str]:
     planned = [(a, b) for _k, a, b in _planned_spans(snap, snap.now + timedelta(hours=TIMELINE_HORIZON_HOURS))]
-    same_as_v3 = sorted(accepted) == sorted(planned)
+    # the v3 path models today's window plan only: tomorrow's period (R3b) does not make it a different plan
+    today = snap.now.date()
+    same_as_v3 = sorted(sp for sp in accepted if sp[0].date() == today) == sorted(
+        sp for sp in planned if sp[0].date() == today
+    )
     if snap.path_fn is not None:
         try:
             pts = snap.path_fn(list(accepted))
@@ -1942,6 +2253,17 @@ class TimelineLatch:
         return LatchOutcome(kept, False, ())
 
 
+# Steps whose time is the engine's live answer each cycle (a rescheduled pre-cool, the plan's ceiling breach, the
+# nat-vent start prediction, the grace end): the latch takes the fresh ones, as every surface did before R3b.
+LIVE_KINDS = frozenset(
+    {StepKind.PRECOOL_START, StepKind.PREHEAT_START, StepKind.CEILING_GUARD, StepKind.RESUME_SCHEDULE}
+)
+
+
+def _is_live(step: TimelineStep) -> bool:
+    return step.kind in LIVE_KINDS or step.reason == "natvent_start.predicted"
+
+
 def _merge_latched(latched: DetailedTimeline, fresh: DetailedTimeline, now: datetime) -> DetailedTimeline:
     """Latched steps kept as promised (past ones marked done); a window close may only move EARLIER.
 
@@ -1950,6 +2272,8 @@ def _merge_latched(latched: DetailedTimeline, fresh: DetailedTimeline, now: date
     fresh_closes = [f for f in fresh.steps if f.kind == StepKind.WINDOWS_CLOSE and f.ts >= now]
     steps: list[TimelineStep] = []
     for s in latched.steps:
+        if _is_live(s) and s.ts >= now:
+            continue  # replaced below by the fresh answer
         if s.kind == StepKind.WINDOWS_CLOSE and s.ts >= now:
             earlier = [f for f in fresh_closes if f.ts < s.ts and s.ts - f.ts <= timedelta(hours=12)]
             repl = min(earlier, key=lambda f: s.ts - f.ts, default=None)  # the nearest earlier close
@@ -1958,6 +2282,7 @@ def _merge_latched(latched: DetailedTimeline, fresh: DetailedTimeline, now: date
         if s.ts < now and s.status == "planned":
             s = replace(s, meta={**s.meta, "status": "done"})
         steps.append(s)
+    steps.extend(f for f in fresh.steps if _is_live(f) and f.ts >= now)
     steps.sort(key=lambda s: (s.ts, 0 if s.actor == Actor.CA else 1, s.kind.value))
     return replace(
         fresh,

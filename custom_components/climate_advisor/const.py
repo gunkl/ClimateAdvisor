@@ -730,6 +730,7 @@ API_TOGGLE_AUTOMATION = f"{API_BASE}/toggle_automation"
 API_EVENT_LOG = f"{API_BASE}/event_log"
 API_ENGINES = f"{API_BASE}/engines"
 API_PREDICTION_ACCURACY = f"{API_BASE}/prediction_accuracy"
+API_TIMELINE = f"{API_BASE}/timeline"  # Issue #1230 R3b: the operation timeline, read-only
 
 # Panel
 PANEL_URL = "/climate_advisor/frontend"

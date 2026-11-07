@@ -53,6 +53,7 @@ All 22 view classes set `requires_auth = True`. HA handles token validation befo
 | `/api/climate_advisor/investigation_reports` | AI investigator report history | Direct return from `coordinator.get_investigation_report_history()` |
 | `/api/climate_advisor/event_log` | Internal event log | `events`, `total`, `hours` — `hours` param silently clamped if out of range. `is_truncated`, `oldest_available` (Issue #432) — see [Event Log Truncation Signal](#event-log-truncation-signal) |
 | `/api/climate_advisor/engines` | Prediction engine status | `get_engine_status()` of the learning engine plus `unit` and (Issue #1230 R1) `v4` - see [Engines and debug keys](#engines-and-debug-keys-for-v4) |
+| `/api/climate_advisor/timeline` | The operation timeline: ordered steps (CA and occupant), predicted path, detail (Issue #1230 R3b, read-only) | contract dict + `unit` + `detail`; `zone` required with several zones (400 otherwise) - see [Operation Timeline Spec](operation-timeline-spec.md) |
 | `/api/climate_advisor/prediction_accuracy` | v4 vs v3 vs "no change" prediction scoring (Issue #1230 R1, read-only) | `points`, `heat_runs`, `stats`, `model`, `gate`, `gate_summary` - see [below](#get-apiclimate_advisorprediction_accuracy-issue-1230-r1) |
 | `/api/climate_advisor/activity_record` | Deterministic event timeline table (no AI required) | `table` (from `build_event_timeline_table()`), `hours`, `generated_at`, `is_truncated`, `oldest_available` (Issue #432) — see [Event Log Truncation Signal](#event-log-truncation-signal) |
 

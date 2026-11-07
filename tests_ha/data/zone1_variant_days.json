@@ -1,0 +1,425 @@
+{
+ "source": "Zone 1 chart_log + learning record, inputs only (temperatures, occupant window edges); no entity ids",
+ "days": [
+  {
+   "date": "2026-10-15",
+   "label": "warm windows day, occupant opened the windows",
+   "day_type": "warm",
+   "forecast_high_f": 82.0,
+   "forecast_low_f": 57.0,
+   "engine_windows": [
+    "06:00:00",
+    "10:00:00"
+   ],
+   "hourly": [
+    {
+     "h": 0,
+     "indoor": 67.0,
+     "outdoor": 59.4
+    },
+    {
+     "h": 1,
+     "indoor": 67.2,
+     "outdoor": 57.8
+    },
+    {
+     "h": 2,
+     "indoor": 66.8,
+     "outdoor": 56.7
+    },
+    {
+     "h": 3,
+     "indoor": 66.7,
+     "outdoor": 55.3
+    },
+    {
+     "h": 4,
+     "indoor": 66.1,
+     "outdoor": 54.3
+    },
+    {
+     "h": 5,
+     "indoor": 65.8,
+     "outdoor": 53.2
+    },
+    {
+     "h": 6,
+     "indoor": 66.0,
+     "outdoor": 52.1
+    },
+    {
+     "h": 7,
+     "indoor": 67.0,
+     "outdoor": 51.1
+    },
+    {
+     "h": 8,
+     "indoor": 67.0,
+     "outdoor": 51.4
+    },
+    {
+     "h": 9,
+     "indoor": 66.9,
+     "outdoor": 53.6
+    },
+    {
+     "h": 10,
+     "indoor": 67.0,
+     "outdoor": 58.9
+    },
+    {
+     "h": 11,
+     "indoor": 67.0,
+     "outdoor": 63.5
+    },
+    {
+     "h": 12,
+     "indoor": 67.0,
+     "outdoor": 68.1
+    },
+    {
+     "h": 13,
+     "indoor": 67.5,
+     "outdoor": 74.9
+    },
+    {
+     "h": 14,
+     "indoor": 68.0,
+     "outdoor": 82.8
+    },
+    {
+     "h": 15,
+     "indoor": 68.6,
+     "outdoor": 86.0
+    },
+    {
+     "h": 16,
+     "indoor": 69.3,
+     "outdoor": 85.5
+    },
+    {
+     "h": 17,
+     "indoor": 70.5,
+     "outdoor": 83.2
+    },
+    {
+     "h": 18,
+     "indoor": 71.0,
+     "outdoor": 77.4
+    },
+    {
+     "h": 19,
+     "indoor": 71.0,
+     "outdoor": 73.2
+    },
+    {
+     "h": 20,
+     "indoor": 70.8,
+     "outdoor": 70.3
+    },
+    {
+     "h": 21,
+     "indoor": 70.5,
+     "outdoor": 68.0
+    },
+    {
+     "h": 22,
+     "indoor": 68.1,
+     "outdoor": 67.7
+    },
+    {
+     "h": 23,
+     "indoor": 65.9,
+     "outdoor": 65.1
+    }
+   ],
+   "occupant_window_edges": [
+    [
+     "00:23",
+     "open"
+    ],
+    [
+     "06:20",
+     "close"
+    ]
+   ]
+  },
+  {
+   "date": "2026-11-01",
+   "label": "mild windows day, occupant opened the windows",
+   "day_type": "mild",
+   "forecast_high_f": 64.0,
+   "forecast_low_f": 49.0,
+   "engine_windows": [
+    "10:00:00",
+    "17:00:00"
+   ],
+   "hourly": [
+    {
+     "h": 0,
+     "indoor": 65.4,
+     "outdoor": 53.7
+    },
+    {
+     "h": 1,
+     "indoor": 65.1,
+     "outdoor": 52.2
+    },
+    {
+     "h": 2,
+     "indoor": 64.7,
+     "outdoor": 52.0
+    },
+    {
+     "h": 3,
+     "indoor": 64.6,
+     "outdoor": 52.4
+    },
+    {
+     "h": 4,
+     "indoor": 64.4,
+     "outdoor": 52.0
+    },
+    {
+     "h": 5,
+     "indoor": 64.2,
+     "outdoor": 51.8
+    },
+    {
+     "h": 6,
+     "indoor": 67.6,
+     "outdoor": 50.8
+    },
+    {
+     "h": 7,
+     "indoor": 68.2,
+     "outdoor": 50.6
+    },
+    {
+     "h": 8,
+     "indoor": 68.5,
+     "outdoor": 50.7
+    },
+    {
+     "h": 9,
+     "indoor": 67.1,
+     "outdoor": 53.6
+    },
+    {
+     "h": 10,
+     "indoor": 67.1,
+     "outdoor": 55.4
+    },
+    {
+     "h": 11,
+     "indoor": 68.0,
+     "outdoor": 56.9
+    },
+    {
+     "h": 12,
+     "indoor": 68.3,
+     "outdoor": 59.9
+    },
+    {
+     "h": 13,
+     "indoor": 68.4,
+     "outdoor": 66.9
+    },
+    {
+     "h": 14,
+     "indoor": 68.3,
+     "outdoor": 68.7
+    },
+    {
+     "h": 15,
+     "indoor": 68.2,
+     "outdoor": 68.7
+    },
+    {
+     "h": 16,
+     "indoor": 69.0,
+     "outdoor": 64.4
+    },
+    {
+     "h": 17,
+     "indoor": 68.7,
+     "outdoor": 63.3
+    },
+    {
+     "h": 18,
+     "indoor": 68.5,
+     "outdoor": 60.2
+    },
+    {
+     "h": 19,
+     "indoor": 68.8,
+     "outdoor": 57.7
+    },
+    {
+     "h": 20,
+     "indoor": 66.7,
+     "outdoor": 55.1
+    },
+    {
+     "h": 21,
+     "indoor": 65.1,
+     "outdoor": 53.6
+    },
+    {
+     "h": 22,
+     "indoor": 65.0,
+     "outdoor": 52.3
+    },
+    {
+     "h": 23,
+     "indoor": 64.7,
+     "outdoor": 50.7
+    }
+   ],
+   "occupant_window_edges": [
+    [
+     "09:17",
+     "open"
+    ],
+    [
+     "09:56",
+     "close"
+    ]
+   ]
+  },
+  {
+   "date": "2026-10-03",
+   "label": "hot day, no window advice",
+   "day_type": "hot",
+   "forecast_high_f": 98.0,
+   "forecast_low_f": 62.0,
+   "engine_windows": [
+    null,
+    null
+   ],
+   "hourly": [
+    {
+     "h": 0,
+     "indoor": 72.2,
+     "outdoor": 66.3
+    },
+    {
+     "h": 1,
+     "indoor": 71.9,
+     "outdoor": 64.6
+    },
+    {
+     "h": 2,
+     "indoor": 71.7,
+     "outdoor": 63.3
+    },
+    {
+     "h": 3,
+     "indoor": 71.4,
+     "outdoor": 62.4
+    },
+    {
+     "h": 4,
+     "indoor": 71.1,
+     "outdoor": 62.0
+    },
+    {
+     "h": 5,
+     "indoor": 70.8,
+     "outdoor": 62.0
+    },
+    {
+     "h": 6,
+     "indoor": 71.3,
+     "outdoor": 61.5
+    },
+    {
+     "h": 7,
+     "indoor": 72.0,
+     "outdoor": 61.5
+    },
+    {
+     "h": 8,
+     "indoor": 72.0,
+     "outdoor": 64.1
+    },
+    {
+     "h": 9,
+     "indoor": 71.8,
+     "outdoor": 69.0
+    },
+    {
+     "h": 10,
+     "indoor": 72.0,
+     "outdoor": 75.6
+    },
+    {
+     "h": 11,
+     "indoor": 72.0,
+     "outdoor": 81.9
+    },
+    {
+     "h": 12,
+     "indoor": 72.0,
+     "outdoor": 87.3
+    },
+    {
+     "h": 13,
+     "indoor": 72.3,
+     "outdoor": 90.9
+    },
+    {
+     "h": 14,
+     "indoor": 73.2,
+     "outdoor": 94.0
+    },
+    {
+     "h": 15,
+     "indoor": 74.0,
+     "outdoor": 95.0
+    },
+    {
+     "h": 16,
+     "indoor": 75.0,
+     "outdoor": 94.2
+    },
+    {
+     "h": 17,
+     "indoor": 76.0,
+     "outdoor": 91.3
+    },
+    {
+     "h": 18,
+     "indoor": 76.5,
+     "outdoor": 84.8
+    },
+    {
+     "h": 19,
+     "indoor": 77.0,
+     "outdoor": 81.0
+    },
+    {
+     "h": 20,
+     "indoor": 76.5,
+     "outdoor": 78.9
+    },
+    {
+     "h": 21,
+     "indoor": 76.2,
+     "outdoor": 77.1
+    },
+    {
+     "h": 22,
+     "indoor": 76.1,
+     "outdoor": 75.5
+    },
+    {
+     "h": 23,
+     "indoor": 75.9,
+     "outdoor": 74.1
+    }
+   ],
+   "occupant_window_edges": []
+  }
+ ]
+}

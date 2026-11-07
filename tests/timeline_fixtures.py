@@ -142,6 +142,33 @@ def make_snapshot(
             )
             if span is not None and span[0] is not None and span[1] is not None
         ),
+        briefing_time=time(6, 0),
+        plan_days=(
+            {
+                "date": today,
+                "day_type": c.day_type,
+                "hvac_mode": c.hvac_mode,
+                "trend_direction": c.trend_direction,
+                "windows_recommended": c.windows_recommended,
+                "window_open_time": c.window_open_time,
+                "window_close_time": c.window_close_time,
+                "pre_condition": c.pre_condition,
+                "expected_high": h1,
+                "expected_low": l1,
+            },
+            {
+                "date": today + timedelta(days=1),
+                "day_type": c_tom.day_type,
+                "hvac_mode": c_tom.hvac_mode,
+                "trend_direction": c_tom.trend_direction,
+                "windows_recommended": c_tom.windows_recommended,
+                "window_open_time": c_tom.window_open_time,
+                "window_close_time": c_tom.window_close_time,
+                "pre_condition": c_tom.pre_condition,
+                "expected_high": h2,
+                "expected_low": l2,
+            },
+        ),
         indoor=start_indoor,
         indoor_primary=start_indoor,
         outdoor=outdoor,

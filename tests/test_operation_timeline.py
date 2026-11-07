@@ -65,7 +65,9 @@ def test_every_day_type_fan_mode_and_occupancy_builds_a_valid_timeline(day_type,
     if occupancy in ("away", "vacation"):
         assert "setback_start" in ca
         assert "wake_band" not in ca or occupancy == "away"  # away is today only: tomorrow's schedule is normal
-        assert not [s for s in tl.steps if s.actor == "you"], "nobody home to open a window"
+        today = snap.now.date()
+        # nobody home to open a window today (away is today only: tomorrow's engine plan may offer one, vacation never)
+        assert not [s for s in tl.steps if s.actor == "you" and (occupancy == "vacation" or s.ts.date() == today)]
     else:
         assert ca.count("wake_band") == 2 and ca.count("sleep_band") >= 1
         assert "setback_start" not in ca
@@ -143,7 +145,7 @@ def test_an_override_holds_the_band_steps_until_the_engine_resumes() -> None:
     resume = next(s for s in tl.steps if s.kind == "resume_schedule")
     assert resume.ts == grace_end and resume.actor == "ca"
     sleep = next(s for s in tl.steps if s.kind == "sleep_band")  # 20:30 falls inside the hands-off period
-    assert sleep.status == "held" and "hands-off until 10:33 PM" in sleep.text
+    assert sleep.status == "held" and "applies when CA resumes the schedule at 10:33 PM" in sleep.text
     wake = next(s for s in tl.steps if s.kind == "wake_band")
     assert wake.status == "planned"  # after the hold: back on schedule
 
@@ -152,7 +154,7 @@ def test_a_door_pause_marks_the_imminent_band_step_as_waiting() -> None:
     now = datetime(2026, 11, 4, 20, 10, tzinfo=TZ)
     tl = build_timeline(make_snapshot("mild", now=now, paused_by_door=True))
     sleep = next(s for s in tl.steps if s.kind == "sleep_band")
-    assert sleep.status == "held" and "waits while a door or window is open" in sleep.text
+    assert sleep.status == "held" and "applies when the door or window closes" in sleep.text
 
 
 # ---------------------------------------------------------------------------
@@ -205,22 +207,45 @@ def test_without_a_fan_the_windows_are_offered_but_no_fan_session_is_planned() -
 def test_a_window_period_is_omitted_when_the_window_effect_is_not_validated() -> None:
     model = dict(MODEL, observation_count_vent_window=12)  # fewer than 50 ventilated observations
     tl = build_timeline(_evening_cooling(thermal_model=model))
-    assert not [s for s in tl.steps if s.actor == "you"]
-    assert tl.candidates and all(c.reason == "unvalidated" and not c.accepted for c in tl.candidates)
+    # D1 (R3b): only the engine's own recommendation can be offered, and then with low confidence; a scanned period
+    # (free cooling / heating) needs a validated window effect and is never offered without one
+    assert all(s.confidence == "low" for s in tl.steps if s.actor == "you")
+    assert tl.candidates and all(
+        (c.reason == "unvalidated" and not c.accepted) or c.reason == "engine_unvalidated" for c in tl.candidates
+    )
 
 
 def test_a_window_effect_that_is_not_distinguishable_from_the_envelope_is_not_validated() -> None:
     model = dict(MODEL, k_vent_window=-0.04)  # barely more than k_passive (-0.0315): ratio < 1.5
     tl = build_timeline(_evening_cooling(thermal_model=model))
-    assert not [s for s in tl.steps if s.actor == "you"]
+    assert all(
+        s.confidence == "low" for s in tl.steps if s.actor == "you"
+    )  # D1: only the engine's own advice, unvalidated
 
 
-def test_a_period_that_saves_nothing_is_rejected_with_the_numbers() -> None:
+def test_an_engine_recommended_period_that_saves_nothing_is_kept_with_the_numbers() -> None:
+    """D1 (R3b): the engine's own recommendation is the source, so a period the simulation finds worthless is
+    kept (the occupant gets it today) and the numbers say so; only the direction rule removes it."""
     now = datetime(2026, 11, 4, 11, 0, tzinfo=TZ)
     snap = make_snapshot("mild", now=now, indoor=70.0)
     tl = build_timeline(snap)
-    assert [c for c in tl.candidates if not c.accepted and c.reason in ("no_benefit", "direction")]
-    assert "Keep windows closed" in " ".join(tl.summary)
+    planned = [c for c in tl.candidates if c.kind == "planned"]
+    assert planned
+    for cand in planned:
+        assert cand.accepted == (cand.reason in ("accepted", "engine_no_benefit", "engine_unvalidated"))
+        assert cand.accepted or cand.reason in ("direction", "overlaps", "too_short")
+
+
+def test_the_engine_recommendation_stands_unvalidated_with_low_confidence_when_the_window_effect_is_unlearned() -> None:
+    """D1 (R3b): Zone 1 was told to open windows on 62 of 89 days; an unvalidated model must not silently remove it."""
+    model = dict(MODEL, observation_count_vent_window=12)
+    now = datetime(2026, 11, 4, 8, 0, tzinfo=TZ)
+    snap = make_snapshot("mild", now=now, indoor=70.0, model=model)
+    tl = build_timeline(snap)
+    you = [s for s in tl.steps if s.actor == "you"]
+    assert you, "the engine's window advice was dropped"
+    assert all(s.confidence == "low" for s in you)
+    assert any(c.kind == "planned" and c.reason == "engine_unvalidated" for c in tl.candidates)
 
 
 def test_windows_already_open_get_a_close_time_and_the_fan_stop() -> None:
@@ -592,7 +617,8 @@ _CONTRACT_KINDS = {
 def test_the_step_enum_keeps_every_contract_member_and_only_appends() -> None:
     values = [k.value for k in StepKind]
     assert set(values) >= _CONTRACT_KINDS
-    assert set(values) - _CONTRACT_KINDS == {"resume_schedule"}  # appended by R3a (reported to the coordinator)
+    # appended by R3a (resume_schedule) and R3b (briefing_send, ceiling_guard); reported to the coordinator
+    assert set(values) - _CONTRACT_KINDS == {"resume_schedule", "briefing_send", "ceiling_guard"}
     assert [a.value for a in ot.Actor] == ["ca", "you"]
     # every member is either emitted (has a sentence + a code path) or listed as not emitted, with no gap
     assert set(StepKind) == set(ot.STEP_SENTENCE_PREFIX) | ot.NOT_EMITTED_BY_R3A

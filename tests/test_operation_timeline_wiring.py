@@ -53,7 +53,7 @@ def test_a_run_fills_the_debug_payload_with_the_contract_dict_and_the_cost() -> 
     with scheduler.installed():
         coord._timeline_shadow_run("cycle")
         debug = coord.get_debug_state()["operation_timeline"]
-    assert debug["shadow"] is True and debug["schema_version"] == 1 and debug["steps"]
+    assert debug["shadow"] is False and debug["schema_version"] == 1 and debug["steps"]
     assert json.loads(json.dumps(debug))["zone"] == coord._entry_id
     assert debug["last_run"]["regenerated"] is True and debug["last_run"]["ms"] < 1000
     assert ot.from_dict(debug) is not None
@@ -74,7 +74,7 @@ def test_no_classification_yet_means_no_timeline_and_no_error() -> None:
     with scheduler.installed():
         coord._timeline_shadow_run("cycle")
         debug = coord.timeline_debug()
-    assert debug["shadow"] is True and "steps" not in debug
+    assert debug["shadow"] is False and "steps" not in debug
 
 
 def test_an_engine_event_marks_the_plan_stale_and_the_tick_regenerates_it() -> None:

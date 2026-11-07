@@ -150,6 +150,8 @@ widens to 79°F for the window's duration — the house drifts 73°F→79°F wit
 during the expensive period. Symmetric for a heating day (preheat above the setback floor,
 floor lowers for the window).
 
+**Whole steps, frozen per window (Issue #1410, decision C23).** The split above is not used raw: `quantize_split_delta()` snaps the precool/preheat target and the widened edge to the thermostat's own step in its unit (`own_write_echo.resolve_step(target_temp_step, temp_unit)`: 1 °F / 0.5 °C when none is advertised), and `expansion_f` is the snapped widened edge minus the setback edge; the lead time uses the snapped depth. The coordinator freezes the first resolution inside `[precondition_start, window_end)` (`_tou_av_frozen`) and passes it back as `frozen`; while its `split_key` (schedule, window, mode, occupancy, setback edge, step, unit) matches, the target, widening and `precondition_start` are reused rather than re-derived from the live indoor reading. It is dropped at the period end, on an occupancy or schedule/setback/step change; not persisted, so the first cycle after a restart re-derives it once. So the empty house is told, e.g., cool 77 for the whole bank and cool 83 for the whole period, not 77.3875 then 82.6125 creeping cycle to cycle. Home/Guest (`resolve_tou_phase()`) is unchanged. See [08 Computation Reference](08-COMPUTATION-REFERENCE.md).
+
 **The precise stop-at-window-start guard.** `apply_classification()` unconditionally
 re-commands the plain away/vacation setback edge every cycle (Issue #505) — left unaddressed,
 this would both (a) let an in-progress precool/preheat keep running up to 30 minutes into the

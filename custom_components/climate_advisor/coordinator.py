@@ -859,6 +859,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1066 (review fix 1): sticky key of the TOU precondition window last pushed to the engine
         # (schedule_id, schedule_start, mode, away/vacation class). Not persisted: cleared on restart.
         self._tou_precondition_sticky: tuple[Any, ...] | None = None
+        # Issue #1410 (C23): the Away/Vacation split resolved when its bank window opened, reused (same target and
+        # widening) until the period ends or the occupancy, schedule, setback edge or thermostat step changes. Not
+        # persisted (no TOU state is): the first cycle after a restart re-derives it once and freezes that.
+        self._tou_av_frozen: Any = None
         self._tou_active_cost_resolution: Any = None
         # Phase 3d (Investigation D): dedup guard for the tou_schedule_window_active
         # Activity Record event — True while a resolved high-cost schedule window
@@ -3186,7 +3190,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.automation_engine._get_fan_runtime_minutes() if self.automation_engine else 0.0
             )
             self._tou_av_cycle_schedule_id = resolution.schedule_id if resolution else None
-            self._tou_av_cycle_capped_delta = 2.0 * (resolution.expansion_f or 0.0) if resolution else None
+            self._tou_av_cycle_capped_delta = self._tou_av_split_delta(resolution)
         elif not window_active and _was_active:
             self._flush_hvac_runtime()
             _end_hvac = self._today_record.hvac_runtime_minutes if self._today_record else 0.0
@@ -8100,6 +8104,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         raw_schedules = self.config.get("schedules") or []
         if not raw_schedules or self._current_classification is None:
             self._tou_phase_resolution = None
+            self._tou_av_frozen = None
             self._tou_active_cost_resolution = None
             self._tou_active_window_notified = False
             self._sync_tou_away_vacation_state()
@@ -8115,6 +8120,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
             # Issue #899: split-delta precool/preheat + temporary band expansion, instead
             # of resolve_tou_phase()'s Home/Guest "bank to the comfort-band edge" behavior.
+            # Issue #1410 (C23): on the thermostat's step, frozen for the window.
             self._tou_phase_resolution = resolve_tou_away_vacation_phase(
                 schedules,
                 now,
@@ -8124,8 +8130,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 thermal_model,
                 self.config,
                 self._occupancy_mode,
+                target_temp_step=self._thermostat_target_temp_step(),
+                frozen=getattr(self, "_tou_av_frozen", None),
             )
+            self._freeze_tou_av_split(self._tou_phase_resolution, now)
         else:
+            self._tou_av_frozen = None  # Issue #1410: an occupancy change ends the frozen Away/Vacation split
             self._tou_phase_resolution = resolve_tou_phase(
                 schedules,
                 now,
@@ -8136,6 +8146,58 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         self._sync_tou_away_vacation_state()
         self._maybe_emit_tou_active_window_event()
+
+    def _thermostat_target_temp_step(self) -> Any:
+        """The thermostat's advertised ``target_temp_step`` (raw; None when it advertises none or is unreadable)."""
+        try:
+            cs = self.hass.states.get(self.config.get("climate_entity", ""))
+        except Exception:  # noqa: BLE001 - an unreadable state means "unknown step" (whole degree)
+            return None
+        attrs = getattr(cs, "attributes", None)
+        return attrs.get("target_temp_step") if isinstance(attrs, dict) else None
+
+    @staticmethod
+    def _tou_av_split_delta(res: Any) -> float | None:
+        """The split the thermostat is told, depth + widening (Issue #1410: both on the step, so no longer exactly
+        2 x ``expansion_f``); the setback edge is ``split_key[5]``. Falls back to 2 x ``expansion_f``."""
+        if res is None:
+            return None
+        key = getattr(res, "split_key", None)
+        if isinstance(key, tuple) and res.target is not None:
+            return round(abs(float(res.target) - float(key[5])) + float(res.expansion_f or 0.0), 4)
+        return 2.0 * (res.expansion_f or 0.0)
+
+    def _freeze_tou_av_split(self, res: Any, now: datetime) -> None:
+        """Keep the Away/Vacation split once its bank window opens (Issue #1410, decision C23).
+
+        Occupant view: the empty house is told one bank value for the whole pre-cool/pre-heat and one widened edge
+        for the whole high-cost period, not a value that creeps every cycle as the indoor reading moves. Freezes the
+        first resolution with ``precondition_start <= now < window_end``; ``resolve_tou_away_vacation_phase()``
+        reuses it while its ``split_key`` matches (same schedule, window, mode, occupancy, setback edge, step and
+        unit). Outside a window, or when the key changes, the freeze is dropped and the next window re-derives.
+        """
+        key = getattr(res, "split_key", None)
+        if res is None or not isinstance(key, tuple) or res.precondition_start is None or res.window_end is None:
+            self._tou_av_frozen = None
+            return
+        try:
+            in_window = res.precondition_start <= now < res.window_end
+        except TypeError:  # naive vs aware mix: do not freeze
+            in_window = False
+        if not in_window:
+            self._tou_av_frozen = None
+            return
+        if res.frozen is True:
+            return
+        self._tou_av_frozen = res
+        _LOGGER.info(
+            "Away/vacation TOU split frozen for window (schedule=%s, mode=%s): target %s, widening %s until %s",
+            res.schedule_id,
+            res.mode,
+            res.target,
+            res.expansion_f,
+            res.window_end,
+        )
 
     def _maybe_emit_tou_active_window_event(self) -> None:
         """Investigation D / Phase 3d: a configured TOU schedule can silently do nothing

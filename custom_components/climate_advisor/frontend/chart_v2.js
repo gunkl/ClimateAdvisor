@@ -133,7 +133,7 @@
   function _prefsKey() { return CHART_PREFS_KEY + ':' + (_host.zone() || 'default'); }
 
   function _readPrefs() {
-    const prefs = { on: {}, range: '24h', ahead: '24h', lead: '4h', table: false, model: null };
+    const prefs = { on: {}, range: '24h', ahead: '24h', lead: '4h', table: false, keyOpen: false };
     try {
       const raw = window.localStorage.getItem(_prefsKey());
       if (!raw) return prefs;
@@ -147,7 +147,8 @@
         else if (p.ahead !== undefined) prefs.migrated = true; // e.g. a stored '12h': 24h, re-saved on load
         if (CHART_LEADS.includes(p.lead)) prefs.lead = p.lead;
         prefs.table = p.table === true;
-        if (typeof p.model === 'string') prefs.model = p.model;
+        prefs.keyOpen = p.keyOpen === true;
+        _migrateEnginePrefs(prefs.on, p.model);
       }
     } catch (_e) { /* storage blocked or corrupt: start from the defaults */ }
     return prefs;
@@ -172,10 +173,11 @@
     _chartZoomed = false;
     _syncRangeButtons();
     _syncTableToggle();
+    _syncKeyOpen();
   }
 
-  // The baseline ("no plan") and the two optional overlays start off (DP-1); the CA-reading line starts off once the
-  // per-sensor lines exist (it follows whichever sensor CA reads, so it jumps when that swaps).
+  // The baseline ("no plan") and the two optional overlays start off (DP-1). Of the indoor readings only the CA reading
+  // starts on (it follows whichever sensor CA reads); every chip choice is remembered per browser, per zone.
   // Prediction engines (Settings -> Prediction engine): the PRIMARY engine's line is the main prediction, the optional
   // SHADOW engine's line is drawn for comparison, and any other engine's lines start off but stay in the key. While
   // the primary has no usable fit the main line is the plain schedule estimate (never the other engine).
@@ -191,22 +193,42 @@
     if (id.startsWith('v4:') || id === 'out:corrected') return _shown('v4') && _v4HasData();
     if (id.startsWith('base:')) return false;
     if (id === 'ov:humidity' || id === 'ov:feelslike') return false;
-    if (id === 'ind:_ca') return !((_lastChartData && _lastChartData.indoor_sensors) || []).length;
+    if (id === 'ind:_ca') return true;
+    // Each sensor's own line starts off: the CA reading is the one indoor line until you pick others (unless it has no data).
+    if (id.startsWith('ind:')) return !((_lastChartData && _lastChartData.actual_indoor) || []).length;
     return true;
   }
 
-  // Choices made under another primary/shadow pairing must not pin the lines: forget the engine-dependent ones.
-  function _syncEnginePrefs() {
-    const e = _engines();
-    const key = e.primary + '+' + e.shadow;
-    if (!_chartPrefs || _chartPrefs.model === key) return;
-    Object.keys(_chartPrefs.on).forEach(k => { if (k === 'v3' || k === 'schedule' || k === 'out:corrected' || k.startsWith('v4:')) delete _chartPrefs.on[k]; });
-    _chartPrefs.model = key;
-    _writePrefs();
+  // Engine lines are remembered by ROLE (primary / shadow / other), not by engine, so switching engines in Settings
+  // keeps the viewer's choices: "the main line off" stays off whichever engine is the main one. Stored keys are
+  // 'role:<role>:<line>' with <line> = '_ca' for the CA-reading line (v3's only line), the sensor id for a v4 sensor
+  // line, or 'out:corrected'. A v4 sensor line with no choice of its own follows its role's '_ca' choice.
+  function _engineOf(id) { return id === 'v3' ? 'v3' : (id.startsWith('v4:') || id === 'out:corrected') ? 'v4' : null; }
+  function _roleOf(engine, e) { return e.primary === engine ? 'primary' : e.shadow === engine ? 'shadow' : 'other'; }
+  function _roleLine(id) { return id === 'v3' ? '_ca' : id === 'out:corrected' ? id : id.slice(3); }
+  function _prefId(id, e) {
+    const engine = _engineOf(id);
+    return engine ? 'role:' + _roleOf(engine, e || _engines()) + ':' + _roleLine(id) : id;
+  }
+  // Older stores kept engine ids ('v3', 'v4:<sensor>', 'out:corrected') plus the pairing they were made under
+  // ('model': '<primary>+<shadow>'): move them to their role then; without a pairing they cannot be placed, so drop them.
+  function _migrateEnginePrefs(on, model) {
+    const m = typeof model === 'string' ? model.split('+') : null;
+    Object.keys(on).forEach(k => {
+      if (!_engineOf(k)) return;
+      if (m && m.length === 2) {
+        const nk = _prefId(k, { primary: m[0], shadow: m[1] });
+        if (typeof on[nk] !== 'boolean') on[nk] = on[k];
+      }
+      delete on[k];
+    });
   }
 
   function _isOn(id) {
-    const v = _chartPrefs ? _chartPrefs.on[id] : undefined;
+    const on = _chartPrefs ? _chartPrefs.on : {};
+    const k = _prefId(id);
+    let v = on[k];
+    if (typeof v !== 'boolean' && id.startsWith('v4:')) v = on['role:' + _roleOf('v4', _engines()) + ':_ca'];
     return typeof v === 'boolean' ? v : _defaultOn(id);
   }
 
@@ -352,7 +374,6 @@
     const metas = cd.indoor_sensors || [];
     const v4 = cd.v4 || {};
     const v4Ready = v4.ready === true;
-    _syncEnginePrefs();
     const state = cd.state_log || [];
     // Every line that follows the reading CA uses (actual, v3, v4) is broken at its sensor swaps (Issue #1400).
     const caBreaks = (cd.ca_swaps || ((v4.breaks || {})._ca) || []).map(_parseTs); // top-level: any engine (older: v4's)
@@ -533,15 +554,34 @@
     const shadowTxt = eng.shadow && eng.shadow !== 'none' ? 'Comparison: ' + eng.shadow : 'No comparison engine';
     let predHtml = '<div class="key-row" id="chart-main-model"><span class="key-sub">Main</span><span>' +
       escapeHtml('Main prediction: ' + eng.primary + ' \u00b7 ' + shadowTxt) + ' \u2014 change it in <a href="new_dashboard.html#settings">Settings \u2192 Prediction engine</a>.' +
-      (eng.text ? ' ' + escapeHtml(eng.text) + '.' : '') + ' <a href="prediction_accuracy.html">How each engine has scored</a>.</span></div>' +
+      (eng.text ? ' ' + escapeHtml(eng.text) + '.' : '') + ' <a href="prediction_accuracy.html' + (/new_dashboard\.html$/.test(location.pathname) ? '' : '?from=classic') + // classic: its Back returns to index.html
+      '">How each engine has scored</a>.</span></div>' +
       '<div class="key-row"><span class="key-sub">Today</span>' + chipFor(v3) + (hasLines(S.find(s => s.id === 'schedule')) ? chipFor(S.find(s => s.id === 'schedule')) : '') + '</div>';
     if (plan.length) {
       predHtml += '<div class="key-row"><span class="key-sub">v4 with plan</span>' + plan.map(chipFor).join('') + '</div>';
       predHtml += '<div class="key-row"><span class="key-sub">v4 no plan</span>' + base.map(chipFor).join('') + '</div>';
       const ready = !!(v4 && v4.ready);
-      predHtml += '<div class="key-row"><span class="key-sub">Made</span><div class="seg" role="group" aria-label="How long before each moment the v4 prediction was made">' +
-        CHART_LEADS.map(l => '<button type="button" class="seg-btn' + (l === _chartLead ? ' on' : '') + '" data-lead="' + l +
-          '" aria-pressed="' + (l === _chartLead ? 'true' : 'false') + '"' + (ready ? '' : ' disabled') + '>' + l + ' ahead</button>').join('') + '</div></div>';
+      // v4's look-ahead choice: which archived v4 forecast is drawn LEFT of NOW (its track record); from NOW on is unchanged.
+      const leadHas = l => ready && Object.values(v4.past || {}).some(byLead => ((byLead || {})[l] || []).length > 0);
+      const anyPast = CHART_LEADS.some(leadHas);
+      const leadTxt = l => l.replace('h', ' h');
+      const leadHelp = 'Left of Now, each v4 line shows what v4 predicted that many hours earlier for each moment, so you can ' +
+        'see how well it called it. This changes only the past part of the v4 lines; from Now on they stay the same.';
+      predHtml += '<div class="key-row" id="chart-lead-row" title="' + escapeHtml(leadHelp) + '">' +
+        '<span class="key-sub" id="chart-lead-label">Past v4 lines: predicted</span>' +
+        (anyPast
+          ? '<div class="seg" role="group" aria-labelledby="chart-lead-label" aria-describedby="chart-lead-help">' +
+            CHART_LEADS.map(l => {
+              const has = leadHas(l);
+              return '<button type="button" class="seg-btn' + (l === _chartLead ? ' on' : '') + '" data-lead="' + l +
+                '" aria-pressed="' + (l === _chartLead ? 'true' : 'false') + '"' + (has ? '' : ' disabled') +
+                ' title="' + (has ? 'Left of Now, show what v4 predicted ' + leadTxt(l) + ' earlier for each moment'
+                  : 'v4 has no predictions made ' + leadTxt(l) + ' earlier to show yet') + '">' +
+                leadTxt(l) + ' earlier' + (has ? '' : ' (none yet)') + '</button>';
+            }).join('') +
+            '</div><span class="key-sub" id="chart-lead-help">how far ahead v4 looked; changes only the v4 lines left of Now</span>'
+          : '<span class="key-sub" id="chart-lead-help" data-lead-empty="1">v4 has no past predictions to show yet</span>') +
+        '</div>';
     }
     const outHtml = S.filter(s => s.group === 'outdoor').map(chipFor).join('');
     const hum = (cd.state_log || []).some(e => e.humidity != null);
@@ -576,11 +616,23 @@
         note.setAttribute('data-engine-state', eng.fitting ? 'fitting' : 'learning');
       }
     }
-    const count = document.getElementById('chart-key-count');
-    if (count) {
-      const shown = S.filter(s => _isOn(s.id) && !s.disabledReason && hasLines(s)).length;
-      count.textContent = '(' + shown + ' shown)';
-    }
+    // The one-line summary of what is drawn (shown while the key is folded): the lines on, then the overlays on.
+    _keyShown = S.filter(s => _isOn(s.id) && !s.disabledReason && hasLines(s)).map(s => s.short)
+      .concat([...body.querySelectorAll('[data-series^="ov:"][aria-pressed="true"]:not(.no-data)')].map(b => b.textContent.trim()));
+    _renderKeySummary();
+  }
+
+  let _keyShown = [];
+  function _renderKeySummary() {
+    const key = document.getElementById('chart-key');
+    const sum = key && key.querySelector('summary');
+    if (!sum) return;
+    const n = _keyShown.length;
+    const text = key.open ? 'Lines' : 'Showing: ' + (n ? _keyShown.join(' · ') : 'nothing');
+    sum.setAttribute('aria-expanded', key.open ? 'true' : 'false');
+    sum.title = key.open ? 'Hide the lines and sensors key' : 'Choose which lines and sensors the chart shows';
+    sum.innerHTML = '<span class="key-sum-text">' + escapeHtml(text) + '</span> <span id="chart-key-count">(' + n + (key.open ? ' shown' : '') + ')</span>' +
+      '<span class="key-sum-act" aria-hidden="true">' + (key.open ? '▾ Hide' : '▸ Edit') + '</span>';
   }
 
   // ---- drawing ----
@@ -1151,6 +1203,7 @@
         const lead = e.target.closest('[data-lead]');
         if (lead && !lead.disabled) setChartLead(lead.dataset.lead);
       });
+      key.addEventListener('toggle', _onKeyToggle);
     }
     window.addEventListener('resize', () => {
       clearTimeout(_initChartInteraction._t);
@@ -1163,19 +1216,29 @@
     _syncKeyOpen();
   }
 
-  // The key folds into a "Lines" sheet on a phone and stays open beside the chart on a wide screen.
+  // The key folds into a one-line "Showing: ..." summary at every width: folded on a first visit, then open or folded
+  // as the person left it (remembered with the line choices). It sits above the chart's box, so the chart keeps its size.
   function _syncKeyOpen() {
     const key = document.getElementById('chart-key');
     if (!key) return;
-    const phone = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
-    if (!phone) key.open = true;
-    else if (key.dataset.phoneInit !== '1') { key.open = false; key.dataset.phoneInit = '1'; }
+    const open = !!(_chartPrefs && _chartPrefs.keyOpen);
+    if (key.open !== open) key.open = open;
+    _renderKeySummary();
+  }
+  function _onKeyToggle() {
+    const key = document.getElementById('chart-key');
+    _renderKeySummary();
+    if (!key) return;
+    _ensurePrefs();
+    if (_chartPrefs.keyOpen === key.open) return;
+    _chartPrefs.keyOpen = key.open;
+    _writePrefs();
   }
 
   // ---- toggles and controls ----
   function toggleSeries(id) {
     _ensurePrefs();
-    _chartPrefs.on[id] = !_isOn(id);
+    _chartPrefs.on[_prefId(id)] = !_isOn(id);
     _writePrefs();
     if (id.startsWith('strip:')) {
       drawStrips();

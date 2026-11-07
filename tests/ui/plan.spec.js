@@ -77,6 +77,7 @@ test.describe('Next 24 hours and the plan overlay (classic Status)', () => {
     await page.goto('/');
     await waitForChart(page);
     await waitForPlan(page);
+    await page.locator('#chart-key > summary').click(); // the key starts folded (and stays open across the reload)
     await page.locator('#chart-key-body [data-series="ov:plan"]').click();
     await expect(page.locator('#chart-key-body [data-series="ov:plan"]')).toHaveAttribute('aria-pressed', 'false');
     expect((await planDatasets(page))[0].hidden).toBe(true);

@@ -48,6 +48,7 @@ test.describe('New dashboard: Status tab', () => {
     await expect(page.locator('#chart-key-body .key-group[aria-label="Overlays"] [data-series="ov:plan"]')).toHaveAttribute('aria-pressed', 'true');
     await page.locator('.range-btn[data-range="3d"]').click();
     await expect(page.locator('.range-btn[data-range="3d"]')).toHaveAttribute('aria-pressed', 'true');
+    await page.locator('#chart-key > summary').click(); // the key starts folded
     await page.locator('#chart-key-body [data-series="ov:plan"]').click();
     const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:default')));
     expect(stored.on['ov:plan']).toBe(false);

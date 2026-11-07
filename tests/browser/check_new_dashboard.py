@@ -325,6 +325,16 @@ def run_matrix(browser):
                 pg.goto(f"{BASE}#{tab}")
                 pg.reload()
                 pg.wait_for_timeout(1200)
+                if tab == "status":
+                    # The chart key starts folded at every width: open it (as a person would) so its chips get clicked too.
+                    summ = pg.locator("#chart-key > summary")
+                    if not summ.is_visible():
+                        problems.append(f"{label}/status: the chart key's fold control is not visible")
+                    elif pg.evaluate("document.getElementById('chart-key').open") is False:
+                        summ.click()
+                        pg.wait_for_timeout(150)
+                        if summ.get_attribute("aria-expanded") != "true":
+                            problems.append(f"{label}/status: the chart key did not open (aria-expanded)")
                 n = click_everything(pg, f"{label}/{tab}")
                 print(f"{label}/{tab}: clicked {n} controls")
                 check_layout(pg, f"{label}/{tab}/after-clicks")

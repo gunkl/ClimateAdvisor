@@ -135,7 +135,8 @@ def test_v4_is_drawn_whenever_it_has_data_no_accuracy_gate():
     assert "'v4 has no data for this zone yet (it is still learning this house)'" in ser
     assert "accuracy check" not in ser
     key = _func("renderKey")
-    assert 'href="prediction_accuracy.html"' in key and "How each engine has scored" in key
+    assert '<a href="prediction_accuracy.html' in key and "How each engine has scored" in key
+    assert "'?from=classic'" in key  # classic's link brings the scoring page back to classic
     assert "disabled: !!s.disabledReason" in key
     assert "accuracy check" not in key
     assert "chart-v4-note" in INDEX
@@ -207,10 +208,15 @@ def test_touch_tap_pins_the_readout_and_a_second_tap_lets_go():
     assert "ArrowLeft" in init and "Escape" in init
 
 
-def test_key_folds_into_a_lines_sheet_on_phones():
+def test_key_folds_at_every_width_and_remembers_it():
     assert "<summary>Lines " in INDEX
-    assert "@media (max-width: 640px)" in INDEX and ".chart-key > summary { display: list-item; }" in INDEX
-    assert "(max-width: 640px)" in _func("_syncKeyOpen")
+    assert ".chart-key > summary { display: none; }" not in INDEX  # the fold control shows at every width
+    assert '<details class="chart-key" id="chart-key">' in INDEX  # folded on a first visit
+    s = _func("_syncKeyOpen")
+    assert "_chartPrefs.keyOpen" in s and "max-width" not in s
+    assert "_chartPrefs.keyOpen = key.open" in _func("_onKeyToggle")
+    r = _func("_renderKeySummary")
+    assert "aria-expanded" in r and "'Showing: '" in r
     assert "min-height: 36px" in INDEX  # touch targets
 
 

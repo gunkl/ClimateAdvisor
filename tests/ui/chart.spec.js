@@ -141,12 +141,13 @@ test.describe('Temperature Forecast Chart', () => {
     expect(html.trim()).toBe('');
   });
 
-  test('activity timeline renders with 4 rows', async ({ page }) => {
+  test('activity timeline renders at least one strip row below the chart', async ({ page }) => {
     const canvas = page.locator('#activity-chart');
     await expect(canvas).toBeVisible();
     const box = await canvas.boundingBox();
-    // H should be ~86px for 4 rows (rowH=14, gap=10 between rows)
-    expect(box.height).toBeGreaterThan(70);
+    // The base spec expected 4 rows (~86px) but the page has drawn 3 since the Vent row merge (66px), so it failed on
+    // 0.9.x. Chart v2 draws one 12px row per strip that has activity: at least one row must be drawn.
+    expect(box.height).toBeGreaterThanOrEqual(12);
     // Timeline should appear BELOW the temp chart
     const chartBox = await page.locator('#temp-chart').boundingBox();
     expect(box.y).toBeGreaterThan(chartBox.y + chartBox.height - 5);
@@ -295,7 +296,7 @@ test.describe('Temperature Forecast Chart', () => {
     // If predicted series were today-only (hourToDate based), all x values would be >= todayMidnight.
     // With historical storage, at least some points must be before today midnight.
     const hasPastPoints = await page.evaluate(() => {
-      const canvas = document.getElementById('temp-chart');
+      const canvas = document.getElementById('out-chart');
       const chart = Chart.getChart(canvas);
       if (!chart) return false;
       const ds = chart.data.datasets.find(d => d.label === 'Service forecast');
@@ -349,7 +350,7 @@ test.describe('Temperature Forecast Chart', () => {
     expect(Math.abs((minBefore - minAfter) - 24 * 3600000)).toBeLessThan(60 * 1000);
   });
 
-  test('switching range resets pan offset — 12h window midpoint ≈ now', async ({ page }) => {
+  test('switching range resets pan offset — 12h past window starts at now-12h', async ({ page }) => {
     // After switching to any range the window should be re-centered on now (offset = 0)
     await page.click('button[data-range="12h"]');
     await page.waitForTimeout(500);
@@ -358,8 +359,10 @@ test.describe('Temperature Forecast Chart', () => {
       return chart ? { xMin: chart.scales.x.min, xMax: chart.scales.x.max } : {};
     });
     const midpoint = (xMin + xMax) / 2;
-    // Midpoint of a 0-offset 12h window must be ≈ now (allow 5 min)
-    expect(Math.abs(midpoint - Date.now())).toBeLessThan(5 * 60 * 1000);
+    // Chart v2 (#1230 R2): the window is Past 12h + Ahead 24h (default), so with offset 0 the left edge is now-12h
+    // and the right edge now+24h (the midpoint is no longer now).
+    expect(Math.abs(xMin - (Date.now() - 12 * 3600000))).toBeLessThan(5 * 60 * 1000);
+    expect(Math.abs(xMax - (Date.now() + 24 * 3600000))).toBeLessThan(5 * 60 * 1000);
   });
 
   test('3d view: predicted outdoor curve extends beyond 24h', async ({ page }) => {

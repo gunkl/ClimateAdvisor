@@ -251,3 +251,17 @@ def test_accessibility_names_on_canvases_and_controls():
     assert 'role="group" aria-label="Past: how much history to show"' in INDEX
     assert 'role="group" aria-label="Ahead: how much forecast to show"' in INDEX
     assert ".key-chip:focus-visible" in INDEX
+
+
+def test_away_and_override_strips_read_the_chart_log_context_and_forecast_draws_nothing():
+    assert "id: 'away'" in INDEX and "id: 'override'" in INDEX
+    seg = _func("_stripSegments")
+    assert "e.occupancy === 'away' || e.occupancy === 'vacation'" in seg and "e.override === true" in seg
+    assert "away: () => false" in seg and "override: () => false" in seg
+
+
+def test_band_is_labelled_with_the_sensor_it_applies_to_in_key_and_hover():
+    assert "function _bandLabelInView()" in INDEX and "'Band (' + names.join(' / ') + ')'" in INDEX
+    assert "e.band_sensor" in _func("_bandLabelAt") and "bedroom sensor" in _func("_sensorLabel")
+    assert "_bandLabelInView()" in _func("renderKey")
+    assert "_bandLabelAt(ms)" in _func("_renderReadout")

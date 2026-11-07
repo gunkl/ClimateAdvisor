@@ -4002,6 +4002,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         upper=_band_upper_cc,
                         nat_vent_target=self._nat_vent_target_now(),
                         indoor_sensors=self._read_chart_indoor_sensors(),
+                        **self._read_chart_context(),
                     )
 
             # Issue #968/#1018: validate the thermostat's reported unit (latched, once checkable).
@@ -4688,6 +4689,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_poll,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
+                    **self._read_chart_context(),
                 )
                 await self._executor_job(self._chart_log.save)
                 _LOGGER.debug(
@@ -8247,6 +8249,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_ov,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
+                    **self._read_chart_context(),
                 )
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
@@ -8388,6 +8391,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_hac,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
+                    **self._read_chart_context(),
                 )
                 await self._executor_job(self._chart_log.save)
 
@@ -13599,6 +13603,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("chart_hvac_action: remapping fan→cooling (fan_mode=%s)", fan_mode or "empty")
                 return "cooling"
         return hvac_action
+
+    def _read_chart_context(self) -> dict[str, Any]:
+        """Per-row context for chart_log (Issue #1230 R2): occupancy mode, override/grace flag, the comfort sensor.
+
+        ``occupancy`` draws the Away / Vacation strip, ``override`` the Override / grace strip, ``band_sensor`` names
+        the sensor the Target Band applied to on that row. Read only; never raises into a chart row.
+        """
+        out: dict[str, Any] = {}
+        try:
+            mode = getattr(self, "_occupancy_mode", None)
+            if isinstance(mode, str) and mode:
+                out["occupancy"] = mode
+            engine = self.automation_engine
+            if engine is not None and (bool(engine._manual_override_active) or bool(engine._grace_active)):
+                out["override"] = True
+            source = self._get_indoor_temp_with_provenance().source_entity
+            if isinstance(source, str) and source:
+                out["band_sensor"] = source
+        except Exception:  # noqa: BLE001 - a chart row must never fail on context
+            _LOGGER.debug("chart_log: could not read row context", exc_info=True)
+        return out
 
     def _read_chart_comfort_target(self) -> float | None:
         """The room's comfort target (internal F) while the remote-sensor outer loop holds an offset, else None.

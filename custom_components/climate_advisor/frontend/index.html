@@ -591,7 +591,7 @@
   .chart-stack .chart-container-out { height: 130px; }
   .chart-cursor { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--text-secondary); pointer-events: none; opacity: 0.8; z-index: 2; }
   .chart-cursor.pinned { border-left: 2px solid var(--primary); opacity: 1; }
-  .chart-hover-panel { height: auto; min-height: 64px; max-height: 120px; overflow: auto; display: block; padding: 2px 0 6px; }
+  .chart-hover-panel { height: 104px; overflow: auto; display: block; padding: 2px 0 6px; }
   .chart-hover-panel .chp-time { display: flex; gap: 10px; align-items: center; color: var(--text-secondary); margin-bottom: 2px; font-weight: 600; }
   .chart-hover-panel .chp-row { display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: center; min-height: 20px; }
   .chart-hover-panel .chp-row-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; width: 5.2em; flex: 0 0 5.2em; }
@@ -1804,9 +1804,39 @@
     { id: 'natvent', label: 'Nat-vent', short: 'Nat-vent', color: 'rgba(102,187,106,0.85)' },
     { id: 'windows', label: 'Windows open', short: 'Windows', color: 'rgba(56,142,60,0.85)' },
     { id: 'windowsplan', label: 'Windows plan', short: 'Win plan', color: 'rgba(156,204,101,0.9)' },
+    // Chart-log context fields (Issue #1230 R2): rows without them draw nothing.
+    { id: 'away', label: 'Away / Vacation', short: 'Away', color: 'rgba(171,71,188,0.85)' },
+    { id: 'override', label: 'Override / grace', short: 'Override', color: 'rgba(255,112,67,0.9)' },
   ];
 
   function _stripOn(id) { return _isOn('strip:' + id); }
+
+  // The comfort band applies to whichever sensor Climate Advisor was reading (chart_log band_sensor): say which.
+  function _sensorLabel(sid) {
+    const m = ((_lastChartData || {}).indoor_sensors || []).find(x => x.id === sid);
+    return m ? m.name + (m.role === 'bedroom sensor' ? ', sleep' : '') : null;
+  }
+
+  function _bandLabelAt(ms) {
+    const log = ((_lastChartData || {}).state_log || []).filter(e => e.band_sensor);
+    if (!log.length) return null;
+    let best = null, bestD = Infinity;
+    log.forEach(e => { const d = Math.abs(_parseTs(e.ts) - Math.min(ms, Date.now())); if (d < bestD) { bestD = d; best = e; } });
+    return best && bestD < 3 * 3600000 ? _sensorLabel(best.band_sensor) : null;
+  }
+
+  function _bandLabelInView() {
+    const w = _viewWindow();
+    const names = [];
+    ((_lastChartData || {}).state_log || []).forEach(e => {
+      if (!e.band_sensor) return;
+      const t = _parseTs(e.ts);
+      if (t < w.min || t > w.max) return;
+      const n = _sensorLabel(e.band_sensor);
+      if (n && !names.includes(n)) names.push(n);
+    });
+    return names.length ? 'Band (' + names.join(' / ') + ')' : 'Target band';
+  }
 
   function renderKey(cd, S) {
     const body = document.getElementById('chart-key-body');
@@ -1839,7 +1869,7 @@
     const bandHas = (cd.target_band || []).length > 0 || (cd.state_log || []).some(e => e.lower != null || e.upper != null);
     const ovSw = (color, dash, w) => '<svg class="key-sw" width="30" height="10" aria-hidden="true"><line x1="2" y1="5" x2="28" y2="5" stroke="' + color + '" stroke-width="' + w + '"' + (dash ? ' stroke-dasharray="' + dash + '"' : '') + ' stroke-linecap="round"/></svg>';
     const overlays =
-      _chip('ov:band', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><rect x="2" y="1" width="26" height="8" rx="2" fill="var(--c-band)" stroke="var(--c-bandline)" stroke-dasharray="3 2"/></svg><span>Target band</span>', { noData: !bandHas }) +
+      _chip('ov:band', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><rect x="2" y="1" width="26" height="8" rx="2" fill="var(--c-band)" stroke="var(--c-bandline)" stroke-dasharray="3 2"/></svg><span>' + escapeHtml(_bandLabelInView()) + '</span>', { noData: !bandHas }) +
       _chip('ov:target', ovSw('var(--c-target)', '', 3) + '<span>Target</span>', { noData: !targetHas }) +
       _chip('ov:humidity', ovSw('var(--c-hum)', '', 1.5) + '<span>Humidity</span>', { noData: !hum }) +
       _chip('ov:feelslike', ovSw('var(--c-feels)', '3 3', 1.5) + '<span>Feels-like</span>', { noData: !fl });
@@ -2155,6 +2185,8 @@
       natvent: e => !!e.nat_vent_active,
       windows: e => !!e.windows_open,
       windowsplan: e => !!e.windows_recommended,
+      away: e => e.occupancy === 'away' || e.occupancy === 'vacation',
+      override: e => e.override === true,
     };
     const ftests = {
       heating: p => _normalizeTargetMode(p.hvac_mode) === 'heat',
@@ -2163,6 +2195,8 @@
       natvent: p => !!(p.fan_running || p.nat_vent_active || p.fan_active),
       windows: () => false,
       windowsplan: p => !!p.windows_recommended,
+      away: () => false,        // a forecast says nothing about who will be home
+      override: () => false,
     };
     const out = {};
     STRIP_ROWS.forEach(r => {
@@ -2316,6 +2350,16 @@
         overlay += _chpItem(col, escapeHtml(ds.label === 'Humidity %' ? 'Humidity' : ds.label) + ': <strong>' + Math.round(v) + (ds.label === 'Humidity %' ? '%' : sym) + '</strong>');
       });
     }
+    if (_tempChart && _isOn('ov:band')) {
+      const up = _tempChart.data.datasets.find(d => d.label === 'Target Band');
+      const lo = _tempChart.data.datasets.find(d => d.label === '_target_band_lower');
+      const hi = up ? _valueAt({ data: up.data, tol: 90 * 60000 }, ms) : null;
+      const lw = lo ? _valueAt({ data: lo.data, tol: 90 * 60000 }, ms) : null;
+      if (hi != null && lw != null) {
+        const who = _bandLabelAt(ms);
+        overlay += _chpItem('var(--c-bandline)', 'Band' + (who ? ' (' + escapeHtml(who) + ')' : '') + ': <strong>' + Math.round(lw) + '\u2013' + Math.round(hi) + sym + '</strong>');
+      }
+    }
     let closest = null, minDiff = Infinity;
     log.forEach(e => {
       const diff = Math.abs(_parseTs(e.ts) - ms);
@@ -2367,7 +2411,9 @@
       if (ms == null) { _clearCursor(); return; }
       _setCursor(ms, false);
     });
-    stack.addEventListener('mouseleave', () => { if (!_cursorPinned) _clearCursor(); });
+    const leave = () => { if (!_cursorPinned) _clearCursor(); };
+    stack.addEventListener('mouseleave', leave);
+    ['temp-chart', 'out-chart', 'activity-chart'].forEach(id => { const c = document.getElementById(id); if (c) c.addEventListener('mouseleave', leave); });
     stack.addEventListener('touchstart', e => {
       _multiTouch = e.touches.length > 1;
       if (e.touches.length === 1) {

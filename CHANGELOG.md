@@ -3,7 +3,7 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.9.6] — unreleased
+## [0.9.6] — 2026-11-07
 
 - Fix #1415: with two or more zones, running an AI investigation in one zone no longer erases another zone's reports from History, and each zone's History shows only its own reports. The history is now one file per zone (`climate_advisor_investigation_reports_<entry_id>.json`, deleted with the zone); on the first start the old shared file is copied to every zone (its reports carry no zone tag) and removed.
 - Fix #1417: the same fix for the overnight pre-cool. On a thermostat that does not report `hvac_action`, a hot morning after a pre-cool written while cool was already armed no longer gets the furnace armed at wake-up (heat at the comfort minimum, just under the house temperature); cool stays armed and the AC idles. The ceiling guard's cool written in the mode already armed now counts the same way.

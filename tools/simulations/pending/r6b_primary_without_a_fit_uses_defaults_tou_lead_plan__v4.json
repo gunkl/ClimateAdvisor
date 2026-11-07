@@ -1,0 +1,116 @@
+{
+  "name": "r6b_primary_without_a_fit_uses_defaults_tou_lead_plan__v4",
+  "description": "Surface twin of r6b_primary_without_a_fit_uses_defaults_tou_lead__v4, stopped at 15:20 (ten minutes before the default window opens): the plan list names the 15:30 pre-cool start, the same time the thermostat is told 68 F in the thermostat twin; nothing is banked yet.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v4",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ],
+    "shadow_engine": "v3"
+  },
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 14:00 plan cycle."
+    },
+    {
+      "time": "2026-07-13T15:20:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0,
+      "note": "End of run, ten minutes before the window."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T15:20:00",
+      "expect": "tou_precondition_not_applied",
+      "reason": "Not yet."
+    },
+    {
+      "at": "2026-07-13T15:20:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.tou_window.start",
+      "value": "15:30",
+      "reason": "The window start."
+    },
+    {
+      "at": "2026-07-13T15:20:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.next_automation",
+      "value": {
+        "action": "Pre-cool for TOU schedule (68\u00b0F)",
+        "time": "3:30 PM"
+      },
+      "reason": "The Next Automation card names the same 15:30 pre-cool (it used to skip the time-of-use step and say Bedtime 10:30 PM: the step carried no target)."
+    },
+    {
+      "at": "2026-07-13T15:20:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.ca_steps",
+      "value": [
+        "15:30 precool_start",
+        "22:30 sleep_band",
+        "02:30 precool_start",
+        "06:00 briefing_send",
+        "06:30 wake_band",
+        "22:30 sleep_band",
+        "06:30 mode_change",
+        "06:30 wake_band"
+      ],
+      "reason": "The plan list names the 15:30 start (the default 45-minute lead) that the thermostat twin acts on."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "With no fit the plan names the default 15:30 bank start",
+    "observed_behavior": "15:30 precool_start in the plan list.",
+    "expected_behavior": "One time on every surface."
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions), redesigned per the independent review; DP-11 pending, unsigned",
+  "issue": 1230,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true
+}

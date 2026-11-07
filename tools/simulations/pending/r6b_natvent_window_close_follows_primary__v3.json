@@ -1,16 +1,17 @@
 {
   "name": "r6b_natvent_window_close_follows_primary__v3",
-  "description": "Warm day, windows recommended 06:00-17:00, primary engine v3. The house starts the morning hot (78F) and 71F outside. v3's curve for the day stays flat at 78F, so outdoor air never gets within a degree of it and v3 plans no early close. v4's own forecast of the house with the windows open cools it toward the outdoor air, meeting the climbing outdoor temperature in the late morning: v4 plans the windows to close then (the moment open windows stop helping). The planned window period, and so when an open window starts pausing the HVAC, follows the primary engine.",
+  "description": "Same morning, house, models and events as the v4 twin; primary engine v3, v4 is the live comparison engine. v3's flat curve plans no early close (no engine cutoff); the list, the open step and the briefing close the windows at 10:16 AM, judged on v3's own rates (the plan's static 17:00 close is not what the list says either: the plan's simulation closes the period when outdoor air stops helping).",
   "config": {
     "comfort_heat": 68,
-    "comfort_cool": 82,
+    "comfort_cool": 76,
     "setback_heat": 62,
-    "setback_cool": 86,
-    "sleep_heat": 64,
-    "sleep_cool": 80,
+    "setback_cool": 82,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
     "sleep_time": "22:30",
     "wake_time": "06:30",
-    "primary_engine": "v3"
+    "primary_engine": "v3",
+    "shadow_engine": "v4"
   },
   "thermal_model": {
     "confidence": "high",
@@ -22,7 +23,7 @@
   "v4_model": {
     "confidence": "ok",
     "house": {
-      "a_o": 0.05,
+      "a_o": 0.03,
       "a_w": 0.5,
       "q_c": 9.0,
       "q_h": 9.0,
@@ -323,17 +324,44 @@
       "expect": "field_equals",
       "field": "engine_state._nat_vent_cutoff",
       "value": null,
-      "reason": "The primary engine (v3) sees open-window air still helping all day, so it plans no early close: the static 17:00 close applies."
+      "reason": "v3's flat curve plans no early close; with v3 chosen the engine has no ODE cutoff (the v4 twin has 11:00)."
+    },
+    {
+      "at": "2026-05-20T08:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.briefing_windows_row",
+      "value": "Windows: Close by 10:16 AM",
+      "reason": "On v3's rates the list closes at 10:16 AM (v4's rates: 11:00 AM)."
+    },
+    {
+      "at": "2026-05-20T08:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.you_steps",
+      "value": [
+        "07:01 windows_open",
+        "10:16 windows_close",
+        "06:31 windows_open",
+        "09:45 windows_close"
+      ],
+      "reason": "The v3 list differs from the v4 twin's on the same day."
+    },
+    {
+      "at": "2026-05-20T08:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.window_step_state.text",
+      "value": "7:01 AM: open the windows. Outdoor air helps the house until about 10:16 AM.",
+      "reason": "The open step and the close step agree."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "The nat-vent plan's close time follows the primary engine (v3)",
-    "observed_behavior": "The engine's nat_vent_cutoff is unset.",
-    "expected_behavior": "The window period the engine honours (when an open window stops being 'as planned' and pauses the HVAC) matches the engine the occupant chose."
+    "summary": "With v3 chosen the window plan is v3's, as before",
+    "observed_behavior": "No engine cutoff; list, open sentence and briefing close at 10:16 AM.",
+    "expected_behavior": "Choosing v3 in Settings keeps v3 deciding, and the shadow v4 (running, fitted) changes nothing the occupant reads."
   },
-  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions); DP-11 pending, unsigned",
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions), redesigned per the independent review; DP-11 pending, unsigned",
   "issue": 1230,
   "use_coordinator": true,
-  "skip_startup_coalesce": true
+  "skip_startup_coalesce": true,
+  "capture_next_action": true
 }

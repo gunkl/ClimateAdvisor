@@ -1,12 +1,13 @@
 {
   "name": "r6b_primary_without_a_fit_uses_defaults_ceiling_guard__v4",
-  "description": "Warm afternoon, windows shut, nothing armed, primary engine v4 which has NOT finished learning (no fitted model). v3 has a good model and a curve that climbs past 74F within the half hour, so v3 alone would switch the AC on. The owner's rule: while the primary has no usable fit the house runs on the 'learning not finished' defaults, never on the other engine. The ceiling guard therefore stays quiet.",
+  "description": "Warm afternoon, primary engine v4 which has NOT finished learning (no fitted model); v3 (the live comparison engine) has a good model and a curve that climbs past 74 F within the half hour. While the primary has no usable fit the house runs on the 'learning not finished' defaults, never on the other engine: no ceiling-guard firing and the occupant-facing note says so. (In this band architecture the comfort band has already armed cool 74 F, so the guard cannot be the sole writer: the thermostat write cannot discriminate here; the unit tests in tests/test_control_feed_r6_cards.py pin the guard decision itself.)",
   "config": {
     "comfort_heat": 70,
     "comfort_cool": 74,
     "setback_heat": 62,
     "setback_cool": 80,
-    "primary_engine": "v4"
+    "primary_engine": "v4",
+    "shadow_engine": "v3"
   },
   "thermal_model": {
     "confidence": "high",
@@ -213,7 +214,7 @@
     {
       "time": "2026-05-20T06:00:00",
       "type": "temp_update",
-      "indoor_f": 71.0,
+      "indoor_f": 72.0,
       "outdoor_f": 62.0,
       "note": "Early morning, cool outside."
     },
@@ -230,13 +231,13 @@
     {
       "time": "2026-05-20T12:30:00",
       "type": "temp_update",
-      "indoor_f": 73.8,
+      "indoor_f": 72.0,
       "outdoor_f": 87.0,
       "plan_cycle": true,
       "predicted_indoor": [
         {
           "ts": "2026-05-20T12:30:00+00:00",
-          "temp": 73.8
+          "temp": 72.0
         },
         {
           "ts": "2026-05-20T12:55:00+00:00",
@@ -254,7 +255,7 @@
     {
       "at": "2026-05-20T12:30:00",
       "expect": "ceiling_guard_dormant",
-      "reason": "v4 has no fit: the ceiling guard reads no learned rates (the defaults), so it does not act on v3's curve or v3's model."
+      "reason": "v4 has no fit: the guard reads no learned rates and the schedule-estimate path, not v3's curve."
     }
   ],
   "verdict": {
@@ -263,8 +264,9 @@
     "observed_behavior": "No AC switch-on despite v3's hot curve.",
     "expected_behavior": "Owner decision O3: the fallback is today's 'learning not finished' behaviour, never another engine."
   },
-  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions); DP-11 pending, unsigned",
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions), redesigned per the independent review; DP-11 pending, unsigned",
   "issue": 1230,
   "use_coordinator": true,
-  "skip_startup_coalesce": true
+  "skip_startup_coalesce": true,
+  "capture_next_action": true
 }

@@ -1389,6 +1389,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         )
 
+        # Issue #1230 X7: the time-of-use bank opens when its window starts (5-minute check), not at the next
+        # 30-minute cycle, so the time the plan shows is the time the thermostat is told.
+        self._unsub_listeners.append(
+            async_track_time_interval(
+                self.hass,
+                self._zone_scoped(self._async_tou_bank_tick),
+                timedelta(minutes=5),
+            )
+        )
+
         # Issue #1144: cheap always-on WHF safety tick (rule 1 within 30 s). Returns immediately unless the
         # whole-house fan is physically on, so it costs two state reads per 15 s on every other install.
         self._whf_safety_started_at = dt_util.utcnow()
@@ -5841,7 +5851,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         tou = getattr(self, "_tou_phase_resolution", None)
         tou_ok = tou is not None and getattr(tou, "precondition_start", None) is not None
         reading = self._get_indoor_temp_with_provenance()
-        model = dict(getattr(ae, "_thermal_model", None) or {})
+        # Issue #1230 R6 (X6): the plan list's window periods are judged on the PRIMARY engine's rates, exactly as the
+        # decisions (nat-vent plan, TOU bank, ceiling guard) read them: v3 primary = v3's own model, a usable v4 =
+        # v4's scalars over it, a v4 still learning = blanked (the engine's own recommendation stands, unvalidated).
+        # It never reads v3's learned rates behind a v4 primary's back (O3), so every surface tells one story.
+        model = dict(self.control_thermal_model(dict(getattr(ae, "_thermal_model", None) or {})) or {})
         band_schedule = self._target_band_schedule
         tou_window = self._tou_precondition_window_tuple()
         config = self.config
@@ -7840,6 +7854,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 await self.automation_engine.apply_tou_precondition(
                     self._current_classification, resolution.target, resolution.schedule_id
                 )
+
+    async def _async_tou_bank_tick(self, _now: Any) -> None:
+        """Open the time-of-use bank on the 5-minute check after its window starts (Issue #1230 X7).
+
+        Occupant view: the plan says "pre-cool starts 2:48 PM"; the thermostat is told 68 F within five minutes of
+        that, not at the next half-hour cycle (up to 30 minutes late, so the house is not banked when the peak
+        arrives). Only the bank is touched: no classification re-apply, so the comfort setpoint is not written first
+        (the 76-then-68 flicker of the cycle path). Cheap no-op unless a window has just opened: the cached
+        resolution says banking has not started yet and the window start has passed."""
+        resolution = getattr(self, "_tou_phase_resolution", None)
+        if resolution is None or resolution.schedule_id is None or resolution.phase == TOUPhase.PRECONDITIONING:
+            return
+        start, end = resolution.precondition_start, resolution.schedule_start
+        now = dt_util.now()
+        if start is None or end is None or not (start <= now < end) or self._current_classification is None:
+            return
+        if self._suppress_during_startup_coalescing("time-of-use bank check"):
+            return
+        self._resolve_tou_schedule_state()
+        await self._apply_tou_schedule()
 
     def _tou_precondition_window_tuple(self) -> tuple[datetime, datetime, float, str] | None:
         """Build the ``tou_precondition_window`` tuple ``_compute_target_band_schedule()``

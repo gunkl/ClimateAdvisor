@@ -371,6 +371,16 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
         out["agrees"] = (not out["advises_opening_windows"]) or any(
             s.kind.value == "windows_open" and s.ts.date() == now.date() and s.status != "done" for s in you
         )
+    # Issue #1230 R6 (X7): the time-of-use bank window the plan shows (the coordinator's resolved window), as HH:MM, so
+    # a scenario can pin the exact start the surfaces quote against the time the thermostat is first told (additive).
+    _tw = (
+        coordinator._tou_precondition_window_tuple() if hasattr(coordinator, "_tou_precondition_window_tuple") else None
+    )
+    out["tou_window"] = (
+        None
+        if _tw is None
+        else {"start": f"{_tw[0]:%H:%M}", "end": f"{_tw[1]:%H:%M}", "target": _tw[2], "mode": _tw[3]}
+    )
     classification = coordinator._current_classification
     if classification is not None:
         _full, short = coordinator._build_briefing_text(classification, suggestions=[])

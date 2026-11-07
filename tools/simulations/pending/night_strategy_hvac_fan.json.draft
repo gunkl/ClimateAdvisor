@@ -1,0 +1,215 @@
+{
+  "name": "night_strategy_hvac_fan",
+  "status": "DRAFT - unsigned, not promoted. NOT run by tools/simulate.py (the engine has no night-strategy decision yet: R4 is advise-only, DP-7); asserted at unit level by tests/test_night_strategy.py::test_draft_scenario_matches_the_engine",
+  "description": "HVAC-fan home (no whole-house fan), warm evening (bedroom 74F), outdoor 62 -> 56F: options are closed / windows 2 h / windows all night / blower; windows for two hours is recommended, the blower is offered but costs AC minutes.",
+  "issue": 1230,
+  "release": "R4",
+  "config": {
+    "fan_mode": "hvac_fan",
+    "sleep_floor_f": 66.0,
+    "sleep_ceiling_f": 72.0,
+    "door_window_sensors": [
+      "binary_sensor.bedroom_window"
+    ]
+  },
+  "model": {
+    "confidence": "ok",
+    "frozen": [],
+    "house": {
+      "a_o": 0.04,
+      "a_w": 0.15,
+      "a_f": 0.6,
+      "c_hm": 0.4,
+      "c_mh": 0.2,
+      "s": 0.5,
+      "phase": 3.0,
+      "q_h": 9.0,
+      "q_c": 10.0
+    },
+    "node": {
+      "b_h": 0.2,
+      "b_o": 0.06,
+      "b_w": 0.1,
+      "s_b": 0.0,
+      "q_b": 6.0
+    },
+    "thermostat": {
+      "on_below_f": 1.0,
+      "on_above_f": 1.0,
+      "burst_minutes": 10.0,
+      "reading_step_f": 0.0
+    },
+    "note": "SYNTHETIC house with known parameters (same as tests/test_night_strategy.py); not a fit of any real zone"
+  },
+  "evidence": {
+    "window_open_hours": 300,
+    "fan_hours": 200,
+    "heat_hours": 120,
+    "cool_hours": 80,
+    "sensor_hours": {
+      "_ca": 5000,
+      "sensor.bedroom": 900
+    }
+  },
+  "validation": {
+    "schema_version": 1,
+    "provisional": false,
+    "generated": "",
+    "classes": {
+      "closed": {
+        "n_nights": 20,
+        "mae_f": 0.9,
+        "flat_mae_f": 2.0,
+        "bias_f": 0.1
+      },
+      "windows": {
+        "n_nights": 15,
+        "mae_f": 1.1,
+        "flat_mae_f": 2.0,
+        "bias_f": 0.1
+      },
+      "fan": {
+        "n_nights": 40,
+        "mae_f": 1.2,
+        "flat_mae_f": 2.5,
+        "bias_f": 0.2
+      },
+      "blower": {
+        "n_nights": 5,
+        "mae_f": 1.2,
+        "flat_mae_f": 2.0,
+        "bias_f": 0.0
+      }
+    }
+  },
+  "night": {
+    "start": "2026-11-06T22:00:00-08:00",
+    "end": "2026-11-07T06:30:00-08:00",
+    "readings": {
+      "_ca": 75.0,
+      "sensor.bedroom": 74.0
+    },
+    "outdoor_start_f": 62,
+    "outdoor_end_f": 56,
+    "note": "state at bedtime; outdoor falls linearly across the night (the corrected forecast)"
+  },
+  "verdict": {
+    "type": "positive",
+    "summary": "Two hours of open windows takes the bedroom into the band with no AC; the blower alone does not bring in outdoor air so it is worse; no whole-house-fan options exist in this mode.",
+    "observed_behavior": "Open the bedroom windows until 12:00 AM, then close up; CA keeps the heat for the bedroom at 66\u00b0F.",
+    "expected_behavior": "windows_2h recommended; no fan_* option offered or hidden"
+  },
+  "owner_card": {
+    "question_for_the_owner": "Is this what you would want Climate Advisor to tell the person in the house tonight?",
+    "evening": "Bedtime 10 PM, bedroom 74F, hallway 75F, outdoor 62F falling to 56F; sleep band 66-72F; HVAC fan only.",
+    "recommendation_shown": "Open the bedroom windows until 12:00 AM, then close up; CA keeps the heat for the bedroom at 66\u00b0F.",
+    "options_shown": [
+      {
+        "option": "Open the bedroom windows for 2 h at bedtime, then close them",
+        "bedroom": "69.0-73.6F",
+        "wake": "69.0F",
+        "heat_min": 0,
+        "ac_min": 0,
+        "f_hours_outside": 0.02,
+        "score": 0.02,
+        "actions_for_you": 2,
+        "tag": "recommended"
+      },
+      {
+        "option": "Leave the bedroom windows open all night",
+        "bedroom": "64.1-73.6F",
+        "wake": "64.1F",
+        "heat_min": 0,
+        "ac_min": 0,
+        "f_hours_outside": 0.17,
+        "score": 0.17,
+        "actions_for_you": 1,
+        "tag": ""
+      },
+      {
+        "option": "Run the HVAC fan for 2 h at bedtime",
+        "bedroom": "67.2-72.2F",
+        "wake": "67.2F",
+        "heat_min": 0,
+        "ac_min": 15,
+        "f_hours_outside": 0.0,
+        "score": 0.25,
+        "actions_for_you": 2,
+        "tag": ""
+      },
+      {
+        "option": "Keep the windows closed; CA heats or cools the bedroom as needed",
+        "bedroom": "68.7-72.2F",
+        "wake": "68.7F",
+        "heat_min": 0,
+        "ac_min": 30,
+        "f_hours_outside": 0.0,
+        "score": 0.5,
+        "actions_for_you": 0,
+        "tag": ""
+      }
+    ],
+    "hidden_from_the_occupant_debug_only": [],
+    "tradeoffs_shown": [
+      "Leave the bedroom windows open all night: 0.2 more F-hours outside your sleep band, 1 fewer thing(s) for you to do",
+      "Run the HVAC fan for 2 h at bedtime: 15 more minutes of heat or AC",
+      "Keep the windows closed; CA heats or cools the bedroom as needed: would not do anything tonight"
+    ],
+    "what_ca_does": "Nothing new: R4 only advises. CA never starts the fan for a strategy; it keeps holding the sleep band (heat at the floor, AC at the ceiling) around whatever the occupant does.",
+    "approve_when": "The occupant sees only the options their house can do (no whole-house fan) and the cheapest comfortable one first."
+  },
+  "three_exercises": {
+    "a_scenario_effectiveness": "Would this fail if the fan-mode option table were wrong? Yes: offering fan_2h/fan_until_target in hvac_fan (or dropping blower_2h) changes the offered set.",
+    "b_two_way_alignment": "docs/night-strategy-spec.md (options per fan mode, score, gate thresholds) matches night_strategy.py; the simulator IS production for R4 (no second engine). Docs vs production re-checked when the spec was written.",
+    "c_user_outcome": "If a whole-house-fan option leaked into an HVAC-fan home the occupant would be told to run a fan they do not have."
+  },
+  "events": [
+    {
+      "time": "2026-11-06T22:00:00-08:00",
+      "type": "night_strategy_request",
+      "note": "bedtime state {\"_ca\": 75.0, \"sensor.bedroom\": 74.0}; outdoor 62 -> 56 F; sleep band 66-72 F"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-11-06T22:00:00-08:00",
+      "expect": "recommended",
+      "value": "windows_2h",
+      "reason": "windows_2h scores 0.02; windows_all_night 0.17; blower_2h 0.25; closed 0.50 (30 min of AC)"
+    },
+    {
+      "at": "2026-11-06T22:00:00-08:00",
+      "expect": "offered",
+      "value": [
+        "blower_2h",
+        "closed",
+        "windows_2h",
+        "windows_all_night"
+      ],
+      "reason": "hvac_fan: closed, windows 2 h, windows all night, blower; never a whole-house-fan option"
+    },
+    {
+      "at": "2026-11-06T22:00:00-08:00",
+      "expect": "hidden",
+      "value": [],
+      "reason": "nothing is hidden when every rate is at medium confidence or better"
+    },
+    {
+      "at": "2026-11-06T22:00:00-08:00",
+      "expect": "show_numbers",
+      "value": true,
+      "reason": "figures are shown only when the bedroom model is trusted"
+    },
+    {
+      "at": "2026-11-06T22:00:00-08:00",
+      "expect": "score_order",
+      "value": [
+        "windows_2h",
+        "windows_all_night",
+        "blower_2h",
+        "closed"
+      ],
+      "reason": "order by score"
+    }
+  ]
+}

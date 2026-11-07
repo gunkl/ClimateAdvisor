@@ -4850,6 +4850,7 @@ class AutomationEngine:
         indoor_temp: float | None = None,
         nat_vent_cutoff: datetime | None = None,
         nat_vent_cutoff_already_reached: bool = False,
+        tou_bank_owns_setpoint: bool = False,
     ) -> None:
         """Apply a new day classification — adjust HVAC behavior accordingly.
 
@@ -4878,6 +4879,12 @@ class AutomationEngine:
                 crossing already behind us, so ``nat_vent_cutoff`` is only the next grid point after "now").
                 When True the planned window period is over. Callers that pass no cutoff reset both to
                 None/False.
+            tou_bank_owns_setpoint: Issue #1393 -- the coordinator's resolved time-of-use phase this cycle is
+                ``PRECONDITIONING`` (Home/Guest) and ``_apply_tou_schedule()`` runs right after this call and writes
+                the bank target. The comfort band edge is then NOT written here (it would be contradicted in the same
+                second: cool 76 then 68, heat 68 then 76); every other path of this method is unchanged. Honoured only
+                when the shared gate is ``PROCEED`` and no door/window or blower hold applies -- exactly the cases in
+                which ``apply_tou_precondition()`` is guaranteed to write.
         """
         async with self._decision_pass("apply_classification"):
             self._current_classification = classification
@@ -4965,6 +4972,16 @@ class AutomationEngine:
             # override (or anything else) has moved the thermostat off the setback value.
             # Issue #1363: the reapply writes the setpoint, and that write schedules a 5-minute revisit; cancel it
             # like the normal path does below, or Away/Vacation re-sends the same setpoint every 5 minutes.
+            if _gate == ScheduledBandGate.DEFER_OCCUPANCY and self._tou_bank_skips_band_write(tou_bank_owns_setpoint):
+                # Issue #1395 (the Away/Vacation mirror of #1393): the split-delta bank write follows this pass, so the
+                # setback band (cool 82/85, heat mirror) is not written first.
+                _LOGGER.info(
+                    "apply_classification: time-of-use bank owns the setpoint this cycle (%s) -- setback band not "
+                    "written (the bank target is written once by the TOU step)",
+                    self._occupancy_mode,
+                )
+                self._cancel_classification_revisit()
+                return
             if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
                 if self._occupancy_mode == OCCUPANCY_VACATION:
                     _LOGGER.info("Vacation mode — reapplying deep setback instead of comfort temps")
@@ -5120,7 +5137,17 @@ class AutomationEngine:
             )
             # Issue #1371: an overnight pre-cool in force is kept, not overwritten by the plain sleep band.
             _held = self._hold_pre_cool_band(_band)
-            if _held is not _band:
+            if _gate == ScheduledBandGate.PROCEED and self._tou_bank_skips_band_write(tou_bank_owns_setpoint):
+                # Issue #1393: the time-of-use bank owns the setpoint this cycle -- _apply_tou_schedule() writes the
+                # bank target once, right after this pass. Keep the cached intended band (the reactive comfort check
+                # reads it) but do not write the edge the bank target would immediately contradict.
+                self._last_comfort_band = _held
+                _LOGGER.info(
+                    "apply_classification: time-of-use bank owns the setpoint this cycle -- comfort band edge not "
+                    "written (the bank target is written once by the TOU step); day_type=%s",
+                    classification.day_type,
+                )
+            elif _held is not _band:
                 await self._apply_comfort_band(_held, reason=cls_reason + " (pre-cool held)", mode_reason="pre_cool")
             else:
                 await self._apply_comfort_band(_band, reason=cls_reason)
@@ -5142,6 +5169,39 @@ class AutomationEngine:
             await self._apply_ode_ceiling_guard_decision(classification, predicted_indoor, _cls_decision)
 
             self._cancel_classification_revisit()
+
+    def _tou_gate_ignoring_occupancy(self) -> ScheduledBandGate:
+        """The shared scheduled-band gate with the occupancy check taken out (Issue #1395).
+
+        The occupancy answer (``DEFER_OCCUPANCY``) comes first in ``decide_scheduled_band_gate()`` and hides the holds
+        below it. A time-of-use bank (Home/Guest or Away/Vacation) cares only about those: a manual override, a
+        door/window pause, nat-vent or whole-house-fan ownership.
+        """
+        return decide_scheduled_band_gate(
+            occupancy_mode=OCCUPANCY_HOME,
+            manual_override_active=self._manual_override_active,
+            paused_by_door=self._paused_by_door,
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+        )
+
+    def _tou_bank_skips_band_write(self, tou_bank_owns_setpoint: bool) -> bool:
+        """Issue #1393/#1395: True when this pass must not write a band because the time-of-use bank write follows it.
+
+        Only when the coordinator says the bank owns the setpoint AND nothing that would make the band pass pause or
+        hold the thermostat applies (a paused door/window, a settled-open sensor, a blower session): in those cases the
+        band pass keeps its own behaviour, exactly as before the skip existed.
+        """
+        return bool(
+            tou_bank_owns_setpoint
+            and self._tou_gate_ignoring_occupancy() == ScheduledBandGate.PROCEED
+            and not decide_open_sensor_hold(
+                natural_vent_active=self._natural_vent_active,
+                whf_owns_hvac=self._whf_owns_hvac(),
+                any_sensor_settled_open=self._any_monitored_sensor_settled_open(),
+            )
+            and not self._blower_session_holds_hvac_off()
+        )
 
     def _cancel_classification_revisit(self) -> None:
         """Cancel the 5-minute follow-up that this classification pass's own writes scheduled.
@@ -7514,6 +7574,11 @@ class AutomationEngine:
                 target_override=target,
                 skip_setpoint_sanity_check=True,
             )
+        # Issue #1395: the bank write schedules a 5-minute follow-up, which re-runs the whole cycle and so re-writes the
+        # same bank target (and schedules the next follow-up): a write every 5 minutes for the whole bank. The 30-minute
+        # cycle re-asserts and the 5-minute bank check re-banks from the thermostat's state, so cancel it (same rule as
+        # apply_classification(), #96 Root Cause E / #1363).
+        self._cancel_classification_revisit()
 
         # Emit only when the write above actually banked toward `target` — not when
         # _set_temperature_for_mode() redirected to away/vacation setback (Issue #85),
@@ -7573,13 +7638,10 @@ class AutomationEngine:
             return
 
         await self._sync_paused_by_door_with_live_sensors()
-        _gate = decide_scheduled_band_gate(
-            occupancy_mode=self._occupancy_mode,
-            manual_override_active=self._manual_override_active,
-            paused_by_door=self._paused_by_door,
-            natural_vent_active=self._natural_vent_active,
-            whf_owns_hvac=self._whf_owns_hvac(),
-        )
+        # Issue #1395: the shared gate answers DEFER_OCCUPANCY first for Away/Vacation, which hid every hold below it
+        # (override, door/window pause, nat-vent/WHF) from this bank. Ask it with the occupancy check taken out, so the
+        # Away/Vacation bank respects exactly the holds the Home/Guest bank respects.
+        _gate = self._tou_gate_ignoring_occupancy()
         if _gate in (
             ScheduledBandGate.DEFER_OVERRIDE,
             ScheduledBandGate.DEFER_PAUSED,
@@ -7605,6 +7667,7 @@ class AutomationEngine:
                 mode=mode,
                 skip_setpoint_sanity_check=True,
             )
+        self._cancel_classification_revisit()  # Issue #1395: see apply_tou_precondition()
 
         _tou_av_outcome = hvac_outcome_label(_tou_av_result)
         _signature = (schedule_id, mode, round(target, 2), _tou_av_outcome)
@@ -16845,10 +16908,11 @@ class AutomationEngine:
         # does. When the thermostat is already cooling at or BELOW the guard ceiling -- whoever set it (the comfort
         # band, the sleep band at 72 against an awake ceiling of 74, an occupant) -- there is nothing to defend: no mode
         # write, no setpoint write, no ceiling_guard_fired row. Before this rule the primary engine's no-AC forecast
-        # (v4) predicted the breach on every cycle, so every 2 hours the guard re-sent cool + the same setpoint and, from
-        # bedtime, each half hour the sleep band wrote 72 and the guard wrote 74 in the same second (the bedroom held at
-        # 74 instead of 72). An occupant's mode change or a setpoint ABOVE the ceiling fails this test, so the guard
-        # still acts exactly as before (off / heat / cool above the ceiling). Observe-only keeps recording its would-do.
+        # (v4) predicted the breach on every cycle, so every 2 hours the guard re-sent cool + the same setpoint and,
+        # from bedtime, each half hour the sleep band wrote 72 and the guard wrote 74 in the same second (the bedroom
+        # held at 74 instead of 72). An occupant's mode change or a setpoint ABOVE the ceiling fails this test, so the
+        # guard still acts exactly as before (off / heat / cool above the ceiling). Observe-only keeps recording its
+        # would-do.
         if (
             not self.dry_run
             and _old_mode_cg == "cool"

@@ -770,15 +770,19 @@ def _dispatch_event(
             # which this harness never fires unless a scenario explicitly seeds
             # weather), silently blocking setpoint-only override detection.
             coordinator._ensure_today_record(classification)
-        run_coro(engine.apply_classification(classification, indoor_temp=_cls_indoor_f))
-        # Issue #786: TOU scheduler — mirrors real production's per-cycle sequence
-        # (coordinator.py's _async_update_data_impl(): apply_classification() then
-        # _resolve_tou_schedule_state() then _apply_tou_schedule()). Purely additive: every
-        # existing scenario has no "schedules" key in its config, and
-        # _resolve_tou_schedule_state() no-ops immediately when config.get("schedules") is
-        # empty — so this changes nothing for any scenario that doesn't opt in.
+        # Issue #786/#1393: mirrors real production's per-cycle sequence (coordinator.py's
+        # _async_update_data_impl(): _resolve_tou_schedule_state() EARLY, then apply_classification(), then
+        # _apply_tou_schedule()). Purely additive for every scenario without a "schedules" config key
+        # (_resolve_tou_schedule_state() no-ops and the flag is False). With a bank window open the cycle's
+        # apply_classification() is told the bank owns the setpoint, exactly as the coordinator tells it.
+        _tou_owns = False
         if coordinator is not None:
             coordinator._resolve_tou_schedule_state()
+            _tou_owns = coordinator._tou_bank_owns_setpoint()
+        run_coro(
+            engine.apply_classification(classification, indoor_temp=_cls_indoor_f, tou_bank_owns_setpoint=_tou_owns)
+        )
+        if coordinator is not None:
             run_coro(coordinator._apply_tou_schedule())
 
     elif etype == "occupancy_away":

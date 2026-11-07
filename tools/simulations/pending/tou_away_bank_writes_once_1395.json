@@ -1,0 +1,97 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ]
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "name": "tou_away_bank_writes_once_1395",
+  "description": "Issue #1395 (the Away mirror of #1393): the house is Away on a hot day with a 16:15 peak. A cycle inside the pre-cool window used to tell the thermostat the 82 F setback band and then the split-delta bank target in the same second; it now tells it the bank target once.",
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T13:00:01",
+      "type": "occupancy_away"
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T14:00:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T13:59:59",
+      "values": [
+        77.0
+      ],
+      "reason": "First cycle inside the Away pre-cool window: the bank target once, no setback band first (issue #1395)."
+    },
+    {
+      "at": "2026-07-13T14:29:59",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T14:00:00",
+      "values": [],
+      "reason": "Between cycles nothing is written: the bank write no longer schedules a 5-minute follow-up that re-sends it (issue #1395)."
+    },
+    {
+      "at": "2026-07-13T14:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T14:29:59",
+      "values": [
+        77.0
+      ],
+      "reason": "A later cycle inside the window re-asserts the bank target once (issue #1395)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "While pre-cooling an Away house for a peak, each cycle tells the thermostat the bank target once",
+    "observed_behavior": "One set_temperature per cycle (the split-delta target); before the fix the 82 F setback band came first in the same second.",
+    "expected_behavior": "Occupant view: no brief flick to the setback value, and one cloud write per check instead of two."
+  },
+  "source": "synthetic: Issue #1395",
+  "issue": 1395
+}

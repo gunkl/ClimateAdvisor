@@ -77,6 +77,15 @@
       "reason": "Nothing is written between the 13:30 cycle and the window start."
     },
     {
+      "at": "2026-01-13T14:00:30",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T13:59:59",
+      "values": [
+        76.0
+      ],
+      "reason": "The 14:00 cycle inside the open bank re-asserts the 76 F bank setpoint once, without the 68 F comfort setpoint first (issue #1393; the heating mirror)."
+    },
+    {
       "at": "2026-01-13T14:03:00",
       "expect": "field_equals",
       "field": "engine_state._next_action.tou_window.start",

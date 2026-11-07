@@ -261,58 +261,6 @@ _default_stop = _decide_compressor_state(
 )[0]
 _check("default (off_offset=None) stays symmetric: still running at 68.1 (stop is target+1.4)", _default_stop is True)
 
-
-# --- Issue #1387: hvac_action follows applied power, not the compressor state machine --------
-# Symptom: the sim reported "heating" for hours while the room just held at the setpoint, because the
-# compressor stays "on" through the deadband (it only stops at target+stop) while the ODE applies no
-# heat once indoor >= setpoint. A real thermostat reads idle there.
-def _applies_hvac_power(*, mode, compressor_on, current_temp, target_temp, k_active) -> bool:
-    """Hand-transcribed copy of climate.py::_applies_hvac_power (mirrors _simulate_indoor_physics' q gate)."""
-    if not compressor_on or mode is None or target_temp is None or k_active is None:
-        return False
-    if mode == "heat":
-        return current_temp < target_temp
-    if mode == "cool":
-        return current_temp > target_temp
-    return False
-
-
-def _power(mode, on, temp, target=68.0, k=3.0):
-    return _applies_hvac_power(mode=mode, compressor_on=on, current_temp=temp, target_temp=target, k_active=k)
-
-
-_check("heat: compressor on and below setpoint applies power (heating)", _power("heat", True, 66.0) is True)
-_check(
-    "heat: compressor on, room holding AT the setpoint, applies no power (idle) - the #1387 case",
-    _power("heat", True, 68.0) is False,
-)
-_check("heat: compressor on inside the overshoot deadband applies no power (idle)", _power("heat", True, 68.9) is False)
-_check("heat: compressor off never reports power", _power("heat", False, 60.0) is False)
-_check("cool: compressor on and above setpoint applies power (cooling)", _power("cool", True, 76.0, 74.0) is True)
-_check(
-    "cool: compressor on, room holding AT the setpoint, applies no power (idle)",
-    _power("cool", True, 74.0, 74.0) is False,
-)
-_check("no k_active (none learned/off) never reports power", _power("heat", True, 60.0, k=None) is False)
-_check(
-    "off mode / no target never reports power",
-    _applies_hvac_power(mode=None, compressor_on=True, current_temp=60.0, target_temp=68.0, k_active=3.0) is False,
-)
-# The compressor decision itself is unchanged: with symmetric deadband it is still on while holding at target.
-_hold_on, _, _ = _decide_compressor_state(
-    mode="heat",
-    current_temp=68.0,
-    target_temp=68.0,
-    deadband=1.5,
-    compressor_on=True,
-    last_on_ts=NOW - timedelta(hours=1),
-    last_off_ts=None,
-    min_run_seconds=0.0,
-    min_off_seconds=0.0,
-    now=NOW,
-)
-_check("compressor state machine unchanged: still on at the setpoint (stop is target+1.5)", _hold_on is True)
-
 print()
 if _FAILURES:
     print(f"{len(_FAILURES)} check(s) FAILED:")

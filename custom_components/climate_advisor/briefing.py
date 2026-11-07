@@ -566,7 +566,7 @@ def generate_briefing(
         awake_edges=(awake_heat, awake_cool),
         windows=timeline_windows(timeline, (now or dt_util.now()).date()) if timeline is not None else None,
     )
-    if current_hold is not None and getattr(current_hold, "bank", None) is not None:
+    if current_hold is not None and hasattr(current_hold, "band"):
         facts = replace(facts, current_hold=current_hold)
     tldr_lines = _generate_tldr_table(c, config, temp_unit=temp_unit, facts=facts)
 
@@ -778,7 +778,17 @@ def _generate_tldr_table(
     # A morning snapshot: the TOU away/vacation widening is not threaded in. Issue #1091: the band reflects the
     # real Prefer savings flag, so the row quotes the awake band the thermostat is armed with.
     _band = facts.band
-    _bank = getattr(facts.current_hold, "bank", None)
+    _hold = facts.current_hold
+    _bank = getattr(_hold, "bank", None)
+    # Issue #1404 (mirrors): with the live hold, an empty house quotes the band in force (the Away/Vacation band
+    # widened for a high-cost period: the thermostat is told cool 83, not 80), and an occupied, awake home quotes the
+    # family the thermostat is armed in (after a cool bank: "Heat at 68", not "Cool at 76").
+    _day_mode = c.hvac_mode
+    if _hold is not None and _bank is None:
+        if facts.unoccupied:
+            _band = _hold.band
+        elif c.hvac_mode in ("heat", "cool") and getattr(_hold, "family", None) in ("heat", "cool"):
+            _day_mode = _hold.family
     if _bank is not None:
         # Issue #1404: a time-of-use bank owns the thermostat: the row quotes what it is told and what follows.
         _verb = "Cool" if _bank.mode == "cool" else "Heat"
@@ -788,18 +798,18 @@ def _generate_tldr_table(
             f"then {hold_after_text(facts.current_hold, temp_unit)}"
         )
     elif facts.unoccupied:
-        if c.hvac_mode == "cool":
+        if _day_mode == "cool":
             hvac_val = f"Cool at {format_temp(_band.ceiling, temp_unit)}"
-        elif c.hvac_mode == "heat":
+        elif _day_mode == "heat":
             hvac_val = f"Heat at {format_temp(_band.floor, temp_unit)}"
         else:
             # Issue #1253 (mirror of #1211): hvac_mode "off" on a warm/mild day is NOT "nothing runs" -- the
             # away/vacation band is armed (heat below its floor, cool above its ceiling). Name the held band.
             _label = "Vacation" if occupancy_mode == "vacation" else "Away"
             hvac_val = f"{_label} band {_band_text(_band.floor, _band.ceiling, temp_unit)}"
-    elif c.hvac_mode == "cool":
+    elif _day_mode == "cool":
         hvac_val = f"Cool at {format_temp(_band.ceiling, temp_unit)}"
-    elif c.hvac_mode == "heat":
+    elif _day_mode == "heat":
         hvac_val = f"Heat at {format_temp(_band.floor, temp_unit)}"
     else:
         # Issue #1211: hvac_mode "off" on a warm/mild day is NOT "off": the comfort band is armed (heat below

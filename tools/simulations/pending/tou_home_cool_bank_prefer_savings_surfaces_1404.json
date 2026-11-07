@@ -160,7 +160,7 @@
     "summary": "While a home pre-cools for a peak, every surface says it is held to the bank target and when the comfort band returns",
     "observed_behavior": "The thermostat is told 68°F once per cycle; Status, the thresholds, the briefing, the chart band, Next Action, Next Automation and the plan list all quote 68°F and the band that follows.",
     "expected_behavior": "Occupant view: the person can read on any surface what the house is held to during the bank and when it goes back.",
-    "effectiveness": "Fails on 6ebdb16 (before #1404): the thresholds/briefing/Status quote the schedule band and the chart draws the #786 shape. Deleting the display resolver (current_hold) fails every field_equals here; the setpoint_writes rows pin that the thermostat writes did not change.",
+    "effectiveness": "Fails on 6ebdb16 (before #1404): Next Action and Next Automation differ by value; the hold.* rows fail because 6ebdb16 has no current_hold (its thresholds quoted the schedule band, e.g. 66/78, and the chart drew the #786 shape). Deleting the display resolver (current_hold) fails every field_equals here; the setpoint_writes rows pin that the thermostat writes did not change.",
     "alignment": "docs/08-COMPUTATION-REFERENCE.md (time-of-use bank, Issue #1404 paragraph) and docs/scheduler-spec.md describe the same hold sentence and band.",
     "user_outcome": "If this regressed, the person would read a band the thermostat is not told (e.g. 'Climate Advisor wants 78 F' while it cools to 68 F) and could not tell what the house is held to or when it goes back."
   },

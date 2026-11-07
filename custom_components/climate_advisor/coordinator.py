@@ -2981,7 +2981,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._tou_home_end_timer_cancel = None
             self._tou_home_end_timer_key = None
             _LOGGER.info("TOU window starting for schedule=%s — ending the home pre-conditioning bank on time", key[0])
-            self.hass.async_create_task(self._fire_tou_home_bank_end(key))
+            # Issue #1113: a config-entry background task, cancelled with the entry on unload.
+            self._spawn(self._fire_tou_home_bank_end(key), background=True)
 
         self._tou_home_end_timer_cancel = async_call_later(self.hass, delay, self._zone_scoped_sync(_tou_home_bank_end))
         self._tou_home_end_timer_key = key
@@ -8196,7 +8197,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             schedule = ae._resolved_comfort_band(c)
             bank = self._active_tou_bank(now)
             if bank is None:
-                return CurrentHold(band=schedule, schedule_band=schedule, occupancy_mode=occ)
+                return CurrentHold(
+                    band=schedule, schedule_band=schedule, occupancy_mode=occ, family=self._armed_family(now)
+                )
             res = self._tou_phase_resolution
             away = occ in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
             after = resolve_active_band(
@@ -8212,10 +8215,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 bank=bank,
                 after_band=after,
                 occupancy_mode=occ,
+                family=bank.mode,
             )
         except Exception:  # noqa: BLE001 - a display read must never break a surface
             _LOGGER.debug("current hold unavailable", exc_info=True)
             return None
+
+    def _armed_family(self, now: datetime) -> str | None:
+        """The family the comfort-edge selector armed ("heat"/"cool"), for an occupied, awake home; else None.
+
+        Issue #1404 (end-of-bank mirror): at a cool bank's end the band write can arm HEAT at the floor (the house sits
+        there), so a surface keyed on the day's mode ("Cool at 76") contradicts the thermostat (heat 68). Read-only;
+        None while asleep (the morning briefing is sent then and describes the day), away/vacation (the setback edge
+        follows the day's mode) or when the selector has not resolved since the last non-selector mode change.
+        """
+        if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION) or _in_sleep_window(now, self.config):
+            return None
+        fam = getattr(self.automation_engine, "_last_resolved_family", None)
+        return {"heating": "heat", "cooling": "cool"}.get(fam) if isinstance(fam, str) else None
 
     def current_hold_payload(self, now: datetime | None = None) -> dict[str, Any] | None:
         """The ``current_hold`` field of the status and timeline REST bodies (Issue #1404), display unit; None when
@@ -8451,6 +8468,60 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         if raw_band is None:
             raw_band = self._build_target_band_for(now, thermal_model, hourly_forecast_override)
+        return self._chart_widened_band(
+            self._chart_bank_band(now, thermal_model, hourly_forecast_override, raw_band), now
+        )
+
+    def _chart_widened_band(self, band: list[dict], now: datetime) -> list[dict]:
+        """Away/Vacation: the high-cost period's hours drawn widened (Issue #1404 mirror).
+
+        Occupant view: during the period the thermostat is told the widened edge (cool 83 F for an Away band
+        60-80 F with a 3 F expansion), which ``select_comfort_band(tou_expansion_f)`` arms and the thresholds quote;
+        the band schedule never carried it (Issue #899 "scoped gap"), so the chart drew 80. Same rule as the selector:
+        a cool day widens the ceiling, a heat day lowers the floor, for ``[schedule_start, window_end)`` only, and only
+        while the house is away/vacation (the chart's away band applies to today). Display only.
+        """
+        res = getattr(self, "_tou_phase_resolution", None)
+        c = getattr(self, "_current_classification", None)
+        if (
+            res is None
+            or c is None
+            or self._occupancy_mode not in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+            or not res.expansion_f
+            or res.schedule_start is None
+            or res.window_end is None
+            or c.hvac_mode not in ("cool", "heat")
+        ):
+            return band
+        exp = float(res.expansion_f)
+        try:
+            out = []
+            for e in band:
+                ts = datetime.fromisoformat(str(e.get("ts")))
+                at = now if ts <= now < ts + timedelta(hours=1) else ts  # the hour in force now follows now
+                if (
+                    res.schedule_start <= at < res.window_end
+                    and e.get("lower") is not None
+                    and e.get("upper") is not None
+                ):
+                    if c.hvac_mode == "cool":
+                        e = {**e, "upper": round(float(e["upper"]) + exp, 1)}
+                    else:
+                        e = {**e, "lower": round(float(e["lower"]) - exp, 1)}
+                out.append(e)
+            return out
+        except TypeError, ValueError:
+            _LOGGER.debug("chart widened band unavailable", exc_info=True)
+            return band
+
+    def _chart_bank_band(
+        self,
+        now: datetime,
+        thermal_model: dict | None,
+        hourly_forecast_override: list[dict] | None,
+        raw_band: list[dict],
+    ) -> list[dict]:
+        """``_chart_display_band``'s bank layer: bank hours drawn as the hold (see there)."""
         window = self._tou_precondition_window_tuple()
         if window is None:
             return raw_band
@@ -8470,11 +8541,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             for e in raw_band:
                 b = base.get(e.get("ts"))
                 ts = datetime.fromisoformat(str(e.get("ts")))
-                if b is None or not start <= ts < end or b.get("lower") is None or b.get("upper") is None:
+                if b is None or b.get("lower") is None or b.get("upper") is None:
                     out.append(e)
                     continue
-                if ts <= now < ts + timedelta(hours=1) and not owns_now:
-                    out.append(b)  # this hour's bank is deferred: the schedule band is in force
+                if ts <= now < ts + timedelta(hours=1):
+                    # The hour in force now follows the live hold: the bank while it owns the thermostat (also in the
+                    # bucket the bank opened or ends in), the schedule band when deferred or over.
+                    if not owns_now:
+                        out.append(b)
+                        continue
+                elif not start <= ts < end:
+                    out.append(e)
                     continue
                 band = tou_bank_band(
                     ComfortBand(floor=float(b["lower"]), ceiling=float(b["upper"]), active="", reason="chart"),

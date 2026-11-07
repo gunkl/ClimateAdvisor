@@ -703,7 +703,9 @@ class TestCoordinatorPassesAlreadyReached_1231:
                 if "nat_vent_cutoff" in kws:
                     sites += 1
                     assert "nat_vent_cutoff_already_reached" in kws, f"line {node.lineno}: cutoff without the flag"
-        assert sites == 4, f"expected 4 coordinator sites, found {sites}"
+        # 5 since Issue #1405: the Home/Guest bank-end timer (_fire_tou_home_bank_end) runs the regular cycle's own
+        # pass at the cost window's start, so it passes the same cutoff AND flag (checked above).
+        assert sites == 5, f"expected 5 coordinator sites, found {sites}"
 
 
 class TestExitEdgeFiresOnceWhenPeriodEndsViaAlreadyReached_1231:

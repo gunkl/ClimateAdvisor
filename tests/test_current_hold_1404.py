@@ -292,6 +292,7 @@ DISPLAY_NAMES = {
     "tou_bank_holds_setpoint",
     "_active_tou_bank",
     "_chart_display_band",
+    "_chart_bank_band",
 }
 # The functions allowed to read the display resolver (all display: cards, payloads, briefing, chart, the bank-refresh).
 DISPLAY_CALLERS = {
@@ -306,6 +307,7 @@ DISPLAY_CALLERS = {
     "_maybe_regenerate_briefing_for_drift",  # text only: regenerates the shown briefing, never a setpoint
     "timeline_payload",
     "_chart_display_band",
+    "_chart_bank_band",
     "get_chart_data",
     "active_thresholds_for",
     "_current_hold_payload",
@@ -373,7 +375,7 @@ def test_chart_draws_the_bank_hours_as_the_hold() -> None:
     shown = {e["ts"][11:16]: (e["lower"], e["upper"]) for e in coord._chart_display_band(NOW, None, raw_band=raw)}
     assert shown["11:00"] == (60.0, 80.0)  # before the window: untouched
     assert shown["13:00"] == shown["14:00"] == shown["15:00"] == shown["16:00"] == (60.0, 77.0)
-    assert shown["17:00"] == (60.0, 80.0)  # the high-cost period: untouched
+    assert shown["17:00"] == (60.0, 83.0)  # the high-cost period: the Away band widened by its 3 F expansion
     # the band the prediction, chart_log and the comfort score read keeps its #786 shape
     assert {e["ts"][11:16]: e["lower"] for e in raw}["14:00"] == 77.0
 
@@ -392,3 +394,40 @@ def test_next_automation_label_for_the_bank_end_is_ontology_clean() -> None:
         tou_bank_end_label("back to the Away band 60–80°F") == "High-cost period starts — back to the Away band 60–80°F"
     )
     assert "tou_bank_end" in NEXT_AUTOMATION_LABELS
+
+
+# ── review mirrors: the family after a bank, the widened Away/Vacation period ──────────────────────────────────────
+def test_armed_family_follows_the_selector_for_an_awake_home_only() -> None:
+    coord = _coordinator(occupancy=OCCUPANCY_HOME, phase=TOUPhase.NONE)
+    coord.automation_engine._last_resolved_family = "heating"
+    assert coord._armed_family(NOW) == "heat"
+    assert coord.current_hold(NOW).family == "heat"
+    coord.config.update({"sleep_time": "13:00", "wake_time": "15:00"})  # asleep at 14:00: the day's mode stands
+    assert coord._armed_family(NOW) is None
+    away = _coordinator(phase=TOUPhase.NONE)
+    away.automation_engine._last_resolved_family = "heating"
+    assert away._armed_family(NOW) is None
+    assert _coordinator().current_hold(NOW).family == "cool"  # a bank: its own mode
+
+
+def test_chart_draws_the_widened_away_period() -> None:
+    coord = _coordinator()
+    coord._tou_phase_resolution = TOUPhaseResolution(
+        phase=TOUPhase.NONE,
+        target=77.0,
+        mode="cool",
+        schedule_id="peak1",
+        schedule_start=PEAK,
+        precondition_start=OPEN,
+        expansion_f=3.0,
+        window_end=PEAK_END,
+    )
+    band = [
+        {"ts": datetime(2026, 7, 13, h, 0, tzinfo=UTC).isoformat(), "lower": 60.0, "upper": 80.0}
+        for h in (15, 16, 17, 21)
+    ]
+    at = datetime(2026, 7, 13, 16, 20, tzinfo=UTC)
+    got = {e["ts"][11:16]: e["upper"] for e in coord._chart_widened_band(band, at)}
+    assert got == {"15:00": 80.0, "16:00": 83.0, "17:00": 83.0, "21:00": 80.0}  # 16:00 holds now (16:20)
+    coord._occupancy_mode = OCCUPANCY_HOME
+    assert coord._chart_widened_band(band, at) == band

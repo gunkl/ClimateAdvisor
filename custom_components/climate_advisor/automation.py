@@ -1256,6 +1256,10 @@ class CurrentHold:
     bank: TouBankHold | None = None
     after_band: ComfortBand | None = None
     occupancy_mode: str = "home"
+    # The family the thermostat is armed in now ("heat" / "cool"), when known: the bank's mode while banking, else
+    # (occupied and awake) the comfort-edge selector's last resolved family, which can differ from the day's mode
+    # (e.g. heat 68 F at the floor right after a cool bank ends). None = use the day's mode.
+    family: str | None = None
 
 
 def tou_bank_band(schedule: ComfortBand, target: float, mode: str) -> ComfortBand:
@@ -1304,7 +1308,9 @@ def _hold_clock(at: datetime) -> str:
 
 
 def hold_after_text(hold: CurrentHold, unit: str) -> str:
-    """What follows the bank, e.g. 'back to the Away band 60–80°F' (pure). '' without a bank."""
+    """What follows the bank (pure): 'the Away band widened to 60–83°F until 9:00 PM' with a high-cost widening (the
+    Away/Vacation default), 'back to the Away band 60–80°F' without one, 'back to the comfort band 68–76°F' at home.
+    '' without a bank."""
     if hold.bank is None:
         return ""
     after = hold.after_band or hold.schedule_band
@@ -1318,7 +1324,8 @@ def hold_after_text(hold: CurrentHold, unit: str) -> str:
 def hold_sentence(hold: CurrentHold | None, unit: str) -> str | None:
     """The one bank sentence every surface quotes (pure), or None when no bank owns the thermostat.
 
-    'Pre-cooling to 77°F until the 4:15 PM high-cost period, then back to the Away band 60–80°F'.
+    'Pre-cooling to 77°F until the 4:15 PM high-cost period, then the Away band widened to 60–83°F until 9:00 PM'
+    (home: '..., then back to the comfort band 68–76°F').
     """
     if hold is None or hold.bank is None:
         return None

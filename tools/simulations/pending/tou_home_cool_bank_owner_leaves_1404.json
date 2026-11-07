@@ -1,0 +1,144 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ]
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "name": "tou_home_cool_bank_owner_leaves_1404",
+  "description": "Issue #1404 review: the owner leaves at 15:40 during a home pre-cool; the Away bank takes over and the Away band is widened to 83 F for the 16:15-21:00 period, which every surface now quotes.",
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T15:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T15:40:00",
+      "type": "occupancy_away"
+    },
+    {
+      "time": "2026-07-13T15:45:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T16:20:00",
+      "type": "temp_update",
+      "indoor_f": 72.5,
+      "outdoor_f": 90.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T15:45:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T15:39:59",
+      "values": [
+        80.0,
+        77.0
+      ],
+      "reason": "Leaving at 15:40 mid home pre-cool: the Away setback (cool 80 F) at once, then the 5-minute check opens the Away bank (cool 77 F) at 15:44:59 (accepted pair, occupancy-triggered)."
+    },
+    {
+      "at": "2026-07-13T16:15:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T16:14:59",
+      "values": [
+        83.0
+      ],
+      "reason": "At 16:15 only the Away period-start timer writes (the widened setback, cool 83 F): the home bank-end timer was cancelled by the occupancy change."
+    },
+    {
+      "at": "2026-07-13T16:20:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.thresholds",
+      "value": [
+        60.0,
+        83.0
+      ],
+      "reason": "During the widened period the thresholds quote the widened band."
+    },
+    {
+      "at": "2026-07-13T16:20:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.briefing_hvac_row",
+      "value": "HVAC Mode: Cool at 83°F",
+      "reason": "The briefing quotes the widened edge the thermostat is told (was 80 F)."
+    },
+    {
+      "at": "2026-07-13T16:20:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.chart_band_now",
+      "value": [
+        60.0,
+        83.0
+      ],
+      "reason": "The chart draws the widened band (was 60-80 F)."
+    },
+    {
+      "at": "2026-07-13T16:20:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.next_automation",
+      "value": {
+        "action": "High-cost period ends — setback back to 80°F",
+        "time": "9:00 PM"
+      },
+      "reason": "Next Automation names the end of the widening (was 'Pre-cool ceiling (70°F)' at 2:30 AM)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Leaving mid-bank: the Away bank takes over, and the widened period is quoted everywhere",
+    "observed_behavior": "Issue #1404 review: the owner leaves at 15:40 during a home pre-cool; the Away bank takes over and the Away band is widened to 83 F for the 16:15-21:00 period, which every surface now quotes.",
+    "expected_behavior": "Occupant view: the thermostat and every surface follow the occupancy change mid-bank.",
+    "effectiveness": "Fails on 6ebdb16: the briefing says Cool at 80, the chart 60-80, Next Automation 'Pre-cool ceiling', and the hold block is missing. Removing the chart/briefing widening fails those rows.",
+    "alignment": "docs/08-COMPUTATION-REFERENCE.md time-of-use bank (Issues #1404/#1405).",
+    "user_outcome": "If this regressed, the person would read 80 F while the empty house is held to 83 F during the expensive period."
+  },
+  "source": "synthetic: Issue #1404 review",
+  "issue": 1404
+}

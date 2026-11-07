@@ -1820,29 +1820,32 @@ def build_timeline(
         and snap.tou_av_end is not None
         and snap.tou_av_expansion_f
         and snap.tou_av_end > snap.tou_av_start
-        and snap.tou_av_start > now
+        and snap.tou_av_end > now
     ):
-        aseg = index.at(snap.tou_av_start)
+        # Issue #1404 (mirror): inside the widened period the start is behind but the return at its end is still ahead,
+        # so the plan keeps that step (it used to drop both once the period began).
+        aseg = index.at(max(snap.tou_av_start, now))
         if aseg is not None:
             day_mode = snap.day_modes.get(snap.tou_av_start.date(), aseg.mode)
             widen_ceiling = day_mode != "heat"
             edge = aseg.ceiling + snap.tou_av_expansion_f if widen_ceiling else aseg.floor - snap.tou_av_expansion_f
             label = "vacation" if snap.occupancy_mode == OCCUPANCY_VACATION else "away"
-            add(
-                snap.tou_av_start,
-                StepKind.SETPOINT_CHANGE,
-                "setpoint_change.tou_expansion_start",
-                "medium",
-                {
-                    "t": snap.tou_av_start,
-                    "occupancy": label,
-                    "edge": edge,
-                    "end": snap.tou_av_end,
-                    "side": "ceiling" if widen_ceiling else "floor",
-                },
-                target_f=edge,
-                mode=day_mode,
-            )
+            if snap.tou_av_start > now:
+                add(
+                    snap.tou_av_start,
+                    StepKind.SETPOINT_CHANGE,
+                    "setpoint_change.tou_expansion_start",
+                    "medium",
+                    {
+                        "t": snap.tou_av_start,
+                        "occupancy": label,
+                        "edge": edge,
+                        "end": snap.tou_av_end,
+                        "side": "ceiling" if widen_ceiling else "floor",
+                    },
+                    target_f=edge,
+                    mode=day_mode,
+                )
             add(
                 snap.tou_av_end,
                 StepKind.SETPOINT_CHANGE,
@@ -2311,8 +2314,15 @@ LIVE_KINDS = frozenset(
 )
 
 
+# Issue #1404 (mirror): the away/vacation high-cost widening follows the live TOU resolution, which can appear after the
+# plan was latched (an occupancy change regenerates the plan before the next resolution names the window).
+_LIVE_REASONS = frozenset(
+    {"natvent_start.predicted", "setpoint_change.tou_expansion_start", "setpoint_change.tou_expansion_end"}
+)
+
+
 def _is_live(step: TimelineStep) -> bool:
-    return step.kind in LIVE_KINDS or step.reason == "natvent_start.predicted"
+    return step.kind in LIVE_KINDS or step.reason in _LIVE_REASONS
 
 
 def _refresh_open_until(steps: list[TimelineStep], now: datetime, unit: str) -> list[TimelineStep]:

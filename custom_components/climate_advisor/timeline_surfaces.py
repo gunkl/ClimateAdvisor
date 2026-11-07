@@ -54,6 +54,9 @@ NEXT_AUTOMATION_LABELS: dict[str, str] = {
     # Issue #1404: the end of a time-of-use bank (its high-cost period starts). ``{after}`` is what follows, from the
     # shared hold resolver: "back to the Away band 60–80°F" / "the Away band widened to 60–83°F until 9:00 PM".
     "tou_bank_end": "High-cost period starts — {after}",
+    # Issue #1404 (mirror): the away/vacation widening for the high-cost period, and its end.
+    "tou_expansion_start": "High-cost period starts — setback widens to {temp}",
+    "tou_expansion_end": "High-cost period ends — setback back to {temp}",
 }
 
 # Kinds a Next Automation candidate may come from that are listed even when they fall on another local day (the
@@ -271,6 +274,10 @@ def _label_key(step: TimelineStep) -> str | None:
         )  # the planned one follows the occupant's window
     if k == StepKind.CEILING_GUARD:
         return "ceiling_guard"
+    if k == StepKind.SETPOINT_CHANGE and step.reason == "setpoint_change.tou_expansion_start":
+        return "tou_expansion_start"
+    if k == StepKind.SETPOINT_CHANGE and step.reason == "setpoint_change.tou_expansion_end":
+        return "tou_expansion_end"
     return None
 
 

@@ -76,6 +76,13 @@
   "assertions": [
     {
       "at": "2026-01-13T16:14:59",
+      "expect": "hvac_mode_writes",
+      "since": "2026-01-13T14:00:00",
+      "values": [],
+      "reason": "The thermostat stays in the bank's heat mode until the period starts."
+    },
+    {
+      "at": "2026-01-13T16:14:59",
       "expect": "setpoint_writes",
       "since": "2026-01-13T15:30:00",
       "values": [],
@@ -89,6 +96,15 @@
         76.0
       ],
       "reason": "At the high-cost period's start (16:15) the bank ends and the comfort band is written once (the nearer edge, cool 76 F), the same write the 16:30 cycle made before #1405."
+    },
+    {
+      "at": "2026-01-13T16:15:00",
+      "expect": "hvac_mode_writes",
+      "since": "2026-01-13T16:14:59",
+      "values": [
+        "cool"
+      ],
+      "reason": "The band write at 16:15 leaves the bank's heat mode (indoor 75.5 F at the comfort ceiling: cool 76 F, so the furnace stops). The setpoint number equals the bank target (76), so only the mode tells the band write from a bank re-assert."
     },
     {
       "at": "2026-01-13T16:29:59",
@@ -107,15 +123,29 @@
       "reason": "The regular cycle re-asserts the band as it always does."
     },
     {
+      "at": "2026-01-13T16:30:00",
+      "expect": "hvac_mode_writes",
+      "since": "2026-01-13T16:15:00",
+      "values": [],
+      "reason": "The mode changed at 16:15, not at the 16:30 cycle (before #1405 it changed at 16:30)."
+    },
+    {
       "at": "2026-01-13T16:35:00",
       "expect": "field_equals",
       "field": "engine_state._next_action.hold.text",
       "value": null,
       "reason": "After the bank no surface claims one (issue #1404)."
+    },
+    {
+      "at": "2026-01-13T16:35:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.briefing_hvac_row",
+      "value": "HVAC Mode: Cool at 76°F",
+      "reason": "After the bank the briefing quotes the band write actually made at the period start (the family the thermostat is armed in), not the day's mode (Issue #1404 end-of-bank mirror; it said the opposite mode before)."
     }
   ],
   "name": "tou_home_heat_bank_ends_on_time_1405",
-  "description": "Issue #1405: a home pre-heated to 76 F (the comfort ceiling) for a 16:15 high-cost period. At the period's start the bank ends; before the fix the thermostat kept the bank setpoint until the next 30-minute cycle (here 16:30) wrote the comfort band. Now the Home/Guest bank-end timer (the mirror of the Away/Vacation T_start timer) writes the same band write at 16:15.",
+  "description": "Issue #1405: a home pre-heated to 76 F (the comfort ceiling) for a 16:15 high-cost period. At the period's start the bank ends; before the fix the thermostat kept the bank setpoint until the next 30-minute cycle (here 16:30) wrote the comfort band. Now the Home/Guest bank-end timer (the mirror of the Away/Vacation T_start timer) writes the same band write at 16:15. The band write is cool 76 F: the same number as the bank target, so the mode is what changes (the furnace stops at 16:15).",
   "verdict": {
     "type": "positive",
     "summary": "A home bank ends at the high-cost period's start, not up to 30 minutes later",

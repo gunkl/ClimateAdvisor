@@ -1,0 +1,125 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ]
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "name": "tou_away_heat_bank_home_return_1404",
+  "description": "Issue #1404 review: an Away pre-heat bank (63 F) is cut short when the owner comes home at 15:40; the home bank takes over and ends on time at 16:15.",
+  "events": [
+    {
+      "time": "2026-01-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 64.0,
+      "outdoor_f": 30.0
+    },
+    {
+      "time": "2026-01-13T13:00:01",
+      "type": "occupancy_away"
+    },
+    {
+      "time": "2026-01-13T14:00:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T14:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T15:40:00",
+      "type": "occupancy_home"
+    },
+    {
+      "time": "2026-01-13T15:45:00",
+      "type": "temp_update",
+      "indoor_f": 64.0,
+      "outdoor_f": 30.0
+    },
+    {
+      "time": "2026-01-13T16:20:00",
+      "type": "temp_update",
+      "indoor_f": 64.5,
+      "outdoor_f": 30.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-13T15:45:00",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T15:39:59",
+      "values": [
+        68.0,
+        76.0
+      ],
+      "reason": "Home at 15:40 inside the Away pre-heat: the comfort band (heat 68 F) at once, then the 5-minute bank check opens the home bank (heat 76 F) at 15:44:59. Two writes five minutes apart, triggered by the occupancy change (accepted: outside #1393's one-write-per-cycle scope)."
+    },
+    {
+      "at": "2026-01-13T16:14:59",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T15:45:00",
+      "values": [],
+      "reason": "Nothing between the home bank opening and the period start."
+    },
+    {
+      "at": "2026-01-13T16:15:00",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T16:14:59",
+      "values": [
+        68.0
+      ],
+      "reason": "At 16:15 the home bank ends on time (#1405: the home bank-end timer armed from the bank check, not a cycle) and the band is written."
+    },
+    {
+      "at": "2026-01-13T16:20:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.text",
+      "value": null,
+      "reason": "After the bank no surface claims one."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Coming home mid-bank switches to the home bank, which ends at the high-cost period's start",
+    "observed_behavior": "Issue #1404 review: an Away pre-heat bank (63 F) is cut short when the owner comes home at 15:40; the home bank takes over and ends on time at 16:15.",
+    "expected_behavior": "Occupant view: the thermostat and every surface follow the occupancy change mid-bank.",
+    "effectiveness": "Fails on 6ebdb16: no write at 16:15 (the home bank kept 76 F until the next cycle). Deleting the home bank-end timer fails the 16:15 row.",
+    "alignment": "docs/08-COMPUTATION-REFERENCE.md time-of-use bank (Issues #1404/#1405).",
+    "user_outcome": "If this regressed, a person who came home during an Away pre-heat would have the furnace heating to 76 F well into the expensive period."
+  },
+  "source": "synthetic: Issue #1404 review",
+  "issue": 1404
+}

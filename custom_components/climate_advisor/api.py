@@ -139,13 +139,29 @@ def _temp_source_display(coordinator: Any, key: str, raw_source: str, label: str
     return detail
 
 
+def _zone_param(request: web.Request) -> tuple[str | None, bool]:
+    """The zone a request names, from ``?zone=`` or ``?entry_id=`` (both mean the config entry id).
+
+    Issue #1418: the views added in 0.9.4 (prediction_accuracy, timeline, night_strategy) documented ``zone`` while
+    the other 18 read only ``entry_id``, so ``chart_data?zone=<id>`` silently answered for the first zone. Every view
+    now reads both through here. Returns ``(zone_id, conflict)``; ``conflict`` is True when both are given and name
+    different zones — the caller must refuse rather than pick one.
+    """
+    query = request.query
+    zone = str(query.get("zone") or "").strip() or None
+    entry_id = str(query.get("entry_id") or "").strip() or None
+    if zone and entry_id and zone != entry_id:
+        return None, True
+    return zone or entry_id, False
+
+
 def _get_coordinator(hass: HomeAssistant, request: web.Request):
     """Resolve the zone coordinator this request targets.
 
     Issue #796 Gap 4: previously always returned ``next(iter(entries.values()))``
     — an arbitrary "first" entry — regardless of how many zones were
     configured, meaning the entire REST/dashboard surface was blind to any
-    zone beyond the first. Now reads an optional ``entry_id`` query parameter
+    zone beyond the first. Now reads an optional ``zone`` (or ``entry_id``) query parameter
     and resolves it via ``zone_registry.resolve_zone()``, which centralizes
     ambiguous-zone handling (Issue #885) for every one of this module's 21
     call sites: an explicit ``entry_id`` always resolves that zone; when
@@ -161,9 +177,26 @@ def _get_coordinator(hass: HomeAssistant, request: web.Request):
     treating a ``None`` coordinator as "not loaded" — the two ``None`` causes
     require different responses.
     """
-    entry_id = request.query.get("entry_id")
+    return _resolve_request_zone(hass, request, allow_guess=(request.method != "POST"))
+
+
+def _resolve_request_zone(hass: HomeAssistant, request: web.Request, *, allow_guess: bool):
+    """``zone_registry.resolve_zone()`` for this request's ``zone``/``entry_id`` (see ``_zone_param()``).
+
+    Conflicting ``zone`` and ``entry_id`` values are refused (``(None, True)``) like an ambiguous request: answering
+    for either one could be the wrong zone.
+    """
+    zone_id, conflict = _zone_param(request)
     context = f"{request.method} {request.path} from {request.remote}"
-    return zone_registry.resolve_zone(hass, entry_id, context=context, allow_guess=(request.method != "POST"))
+    if conflict:
+        _LOGGER.warning(
+            "Climate Advisor: %s named two different zones (zone=%s, entry_id=%s) — refused. Send only one.",
+            context,
+            request.query.get("zone"),
+            request.query.get("entry_id"),
+        )
+        return None, True
+    return zone_registry.resolve_zone(hass, zone_id, context=context, allow_guess=allow_guess)
 
 
 def _ambiguous_zone_payload(hass: HomeAssistant) -> dict[str, Any]:
@@ -179,7 +212,10 @@ def _ambiguous_zone_payload(hass: HomeAssistant) -> dict[str, Any]:
     """
     zones = zone_registry.list_zones(hass)
     return {
-        "message": "Multiple Climate Advisor zones are configured — pass entry_id to target a specific zone.",
+        "message": (
+            "Multiple Climate Advisor zones are configured — add ?zone=<entry_id> (one of the entry_id values in "
+            "'zones') so the request names exactly one zone."
+        ),
         "zone_selection_required": True,
         "zones": zones,
         "zone_count": len(zones),
@@ -230,9 +266,16 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         # get_default_coordinator()'s own arbitrary-pick fallback is
         # untouched and still exists for defensive/edge-case callers — this
         # just ensures the dashboard's own bootstrap path never reaches it.
-        if not request.query.get("entry_id"):
+        if _zone_param(request) == (None, False):
             _bootstrap_zones = zone_registry.list_zones(hass)
             if len(_bootstrap_zones) > 1:
+                # Issue #1418: no zone's data is guessed here, but the request still named no zone, and the owner's
+                # rule is that every such request is flagged (dashboards on a device's first visit included).
+                zone_registry.flag_unscoped_request(
+                    hass,
+                    request=f"{request.method} {request.path} from {request.remote}",
+                    outcome="answered with the list of zones only",
+                )
                 return self.json(
                     {
                         "zone_selection_required": True,
@@ -1405,13 +1448,10 @@ class ClimateAdvisorPredictionAccuracyView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
         query = request.rel_url.query
-        zone = query.get("zone") or query.get("entry_id")
         # No guess with several zones and no ``zone`` (unlike the other GET views): a scorecard silently showing
         # another zone's numbers would mislead the owner's per-zone v4 decision. The preview page always sends
         # ``zone`` once ``/status`` has listed the zones; a single-zone install still resolves its only zone.
-        coordinator, ambiguous_refused = zone_registry.resolve_zone(
-            hass, zone, context=f"{request.method} {request.path} from {request.remote}", allow_guess=False
-        )
+        coordinator, ambiguous_refused = _resolve_request_zone(hass, request, allow_guess=False)
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
@@ -1466,11 +1506,7 @@ class ClimateAdvisorTimelineView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        query = request.rel_url.query
-        zone = query.get("zone") or query.get("entry_id")
-        coordinator, ambiguous_refused = zone_registry.resolve_zone(
-            hass, zone, context=f"{request.method} {request.path} from {request.remote}", allow_guess=False
-        )
+        coordinator, ambiguous_refused = _resolve_request_zone(hass, request, allow_guess=False)
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
@@ -1501,11 +1537,7 @@ class ClimateAdvisorNightStrategyView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass = request.app["hass"]
-        query = request.rel_url.query
-        zone = query.get("zone") or query.get("entry_id")
-        coordinator, ambiguous_refused = zone_registry.resolve_zone(
-            hass, zone, context=f"{request.method} {request.path} from {request.remote}", allow_guess=False
-        )
+        coordinator, ambiguous_refused = _resolve_request_zone(hass, request, allow_guess=False)
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:

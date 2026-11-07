@@ -827,7 +827,8 @@
   }
 
   async function apiFetch(path, opts = {}) {
-    path = _withZoneParam(path);
+    // opts.noZone: send this one request without entry_id (only loadStatus()'s stale-zone retry, Issue #1418).
+    if (!opts.noZone) path = _withZoneParam(path);
     const token = await getAuthToken();
     const headers = { ...(opts.headers || {}) };
     if (token) {
@@ -943,6 +944,15 @@
       return;
     }
 
+    // Issue #1418: re-pick BEFORE the unchanged-list early return below, so a
+    // selection that is missing or not listed is always corrected; returning
+    // early with it null sent every later poll without entry_id (answered with
+    // the first zone's data under this tab).
+    if (!_selectedEntryId || !zones.some(z => z.entry_id === _selectedEntryId)) {
+      _selectedEntryId = zones[0].entry_id;
+      _storeSelectedZone(_selectedEntryId);
+    }
+
     const signature = zones.map(z => z.entry_id).join(',');
     if (signature === _zoneSelectorSignature) {
       row.querySelectorAll('.zone-tab-btn').forEach(btn => {
@@ -1003,10 +1013,10 @@
   let _lastStatus = null;         // last /status payload (the reading cards read it)
   const MAX_STATUS_RETRIES = 3;
 
-  async function loadStatus(_retryDepth) {
+  async function loadStatus(_retryDepth, _noZone) {
     const depth = _retryDepth || 0;
     try {
-      const data = await apiFetch('status');
+      const data = await apiFetch('status', _noZone ? { noZone: true } : {});
       // Issue #813: on a genuine first-ever visit (no stored zone), the
       // backend now refuses to guess a zone for this bootstrap call — it
       // returns zone_selection_required + the zone list instead of full
@@ -1058,16 +1068,22 @@
       // today's single-zone behavior). Guarded to retry at most once so a
       // genuine "Climate Advisor not loaded at all" 503 still surfaces as a
       // real error instead of looping forever.
-      if (depth < MAX_STATUS_RETRIES && _selectedEntryId && e.message === 'HTTP 503') {
-        _selectedEntryId = null;
-        _storeSelectedZone(null);
+      if (depth < MAX_STATUS_RETRIES && _selectedEntryId && e.message === 'HTTP 503' && !_noZone) {
+        // Issue #1418: keep the selection and send ONLY this retry without a
+        // zone (the zone list comes back; renderZoneSelector() keeps the
+        // selection if that zone is listed again, else picks the first).
+        // Clearing _selectedEntryId here, as #812 did, let every request fired
+        // meanwhile (the chart's plan reload, the 60s poll, the 7 re-fired
+        // loads) go out with no entry_id and be answered with the first
+        // zone's data, under this zone's tab.
+        const result = await loadStatus(depth + 1, true);
         // The other 7 loadAll() calls fired in parallel with the same stale
         // entry_id and failed the same way — re-fire them now that the
         // selection is corrected instead of leaving them broken until the
         // next poll cycle (60s), or longer for loadChart (5min poll) /
         // loadSettings & loadAIData (next tab click).
         _loadNonStatus();
-        return loadStatus(depth + 1);
+        return result;
       }
       document.getElementById('status-loading').textContent = 'Failed to load status: ' + e.message;
     }

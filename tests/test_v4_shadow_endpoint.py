@@ -295,7 +295,7 @@ def _request(coordinator, query: dict | None = None):
     req = MagicMock()
     req.app = {"hass": hass}
     req.method, req.path, req.remote = "GET", API_PREDICTION_ACCURACY, "127.0.0.1"
-    req.rel_url.query = query or {}
+    req.query = req.rel_url.query = query or {}
     return req, ran_in_executor
 
 

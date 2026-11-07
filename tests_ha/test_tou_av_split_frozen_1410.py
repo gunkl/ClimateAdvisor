@@ -1,10 +1,10 @@
-"""Real-HA run of the Issue #1410 pending golden: the Away bank target and widened edge are whole steps, frozen.
+"""Real-HA run of the Issue #1410 golden: the Away bank target and widened edge are whole steps, frozen.
 
 Occupant story: an empty house pre-cooling for a 4:15 PM high-cost period was told cool 77.3875 F, then 77.15 F as
 the house cooled, and 82.6125 F creeping to 82.1375 F during the period as it drifted back up. Now it is told cool 77
-for the whole bank and cool 83 for the whole period (decision C23). The scenario is still pending (unsigned), so the
-all-goldens real-HA file does not pick it up; this file drives the same scenario through real Home Assistant and
-requires every assertion to pass, with no logged exception and no timer left armed.
+for the whole bank and cool 83 for the whole period (decision C23). The all-goldens real-HA file also runs this
+golden; this file adds the stricter checks: only 77/83 are ever written, the freeze is logged, no logged exception and
+no timer left armed.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from tests_ha.realha_session import RealHASession, async_drive_scenario
 from tools.sim_harness import divergence
 
 NAME = "tou_away_cool_bank_frozen_for_window_1410"
-PATH = divergence.REPO / "tools" / "simulations" / "pending" / f"{NAME}.json"
+PATH = divergence.REPO / "tools" / "simulations" / "golden" / f"{NAME}.json"
 
 
 async def test_frozen_away_bank_on_real_ha(hass, freezer, tmp_path, caplog) -> None:

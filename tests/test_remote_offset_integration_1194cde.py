@@ -261,7 +261,7 @@ def test_the_thermostat_set_series_has_a_legend_item_shown_only_with_the_series(
 def test_the_hover_panel_shows_the_thermostat_set_value():
     """Chart v2 (#1230 R2): the readout's Overlays row reads the chart datasets, skipping hidden ones and gaps."""
     html = _index_html()
-    body = html.split("function _renderReadout(ms)", 1)[1].split("\n  function clearChartPin", 1)[0]
+    body = html.split("function _renderReadout(", 1)[1].split("\n  function clearChartPin", 1)[0]
     assert "['Humidity %', 'Feels-like', 'Target', 'Thermostat set'].includes(ds.label)" in body
     assert "ds.hidden" in body, "a hidden (toggled-off) series must not show a hover value"
     assert "if (v == null) return;" in body, "no value across a gap (null rows outside offset stretches)"

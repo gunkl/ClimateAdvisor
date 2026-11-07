@@ -11622,7 +11622,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         The engine's mode (what the setpoint-writing handlers use; the coordinator sets it first), else the
         coordinator's own; None when neither is known.
         """
-        mode = getattr(self.automation_engine, "_occupancy_mode", None)
+        mode = getattr(getattr(self, "automation_engine", None), "_occupancy_mode", None)
         if not isinstance(mode, str):
             mode = getattr(self, "_occupancy_mode", None)
         return mode if isinstance(mode, str) and mode else None

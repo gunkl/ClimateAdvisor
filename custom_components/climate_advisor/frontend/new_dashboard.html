@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Climate Advisor - new dashboard (preview)</title>
+<!-- Issue #1230 R5: the opt-in new dashboard. Classic (index.html) stays the default; every call below is an
+     existing read endpoint or the same POST classic makes. Scripts are plain files in this folder (no CDN). -->
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --ink: #0b0b0b; --ink2: #52514e; --muted: #6b6a66;
+    --rule: #e4e3df; --chip: #f1f0ec; --s1: #1a64ba; --on-s1: #ffffff; --s2: #b3461a; --heat: #c93a39;
+    --warn: #8a4600; --warnbg: #fff4e5; --ok: #17703f; --okbg: #e8f5ec; --bad: #a8261e; --badbg: #fdecea;
+    --infobg: #eaf2fc; --band: #2a78d614;
+    --c1: #1a64ba; --c2: #b3461a; --c3: #17703f; --c4: #8a6500; --c5: #b03a6b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      --bg: #141413; --panel: #1f1f1d; --ink: #f0efec; --ink2: #c3c2b7; --muted: #a3a29b;
+      --rule: #3a3936; --chip: #2c2c2a; --s1: #5aa0f0; --on-s1: #08121f; --s2: #f08a5d; --heat: #e66767;
+      --warn: #f0a63c; --warnbg: #3a2a12; --ok: #4cc38a; --okbg: #14301f; --bad: #f2867f; --badbg: #3a1a18;
+      --infobg: #14263d; --band: #3987e51f;
+      --c1: #5aa0f0; --c2: #f08a5d; --c3: #4cc38a; --c4: #e0b030; --c5: #e57fa8;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141413; --panel: #1f1f1d; --ink: #f0efec; --ink2: #c3c2b7; --muted: #a3a29b;
+    --rule: #3a3936; --chip: #2c2c2a; --s1: #5aa0f0; --on-s1: #08121f; --s2: #f08a5d; --heat: #e66767;
+    --warn: #f0a63c; --warnbg: #3a2a12; --ok: #4cc38a; --okbg: #14301f; --bad: #f2867f; --badbg: #3a1a18;
+    --infobg: #14263d; --band: #3987e51f;
+    --c1: #5aa0f0; --c2: #f08a5d; --c3: #4cc38a; --c4: #e0b030; --c5: #e57fa8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 14px;
+    padding: 0 0 40px; overflow-x: hidden;
+  }
+  a { color: var(--s1); }
+  a:hover { color: var(--ink); }
+  h1, h2, h3 { margin: 0; }
+  h2 { font-size: 16px; }
+  h3 { font-size: 14px; }
+  button, select, input, textarea { font: inherit; color: var(--ink); }
+  button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible,
+  summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  [hidden] { display: none !important; }
+
+  header.top { background: var(--panel); border-bottom: 1px solid var(--rule); }
+  .top-in { max-width: 1240px; margin: 0 auto; padding: 10px 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+  .brand { font-size: 17px; font-weight: 700; }
+  .zone-lab { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink2); }
+  .ctl, .btn {
+    min-height: 36px; border-radius: 8px; border: 1px solid var(--rule); background: var(--panel);
+    padding: 0 10px; cursor: pointer;
+  }
+  .btn { padding: 0 14px; font-size: 13px; }
+  .btn.primary { background: var(--s1); color: var(--on-s1); border-color: var(--s1); }
+  .btn.small { min-height: 30px; padding: 0 10px; font-size: 12px; }
+  .btn.danger { border-color: var(--bad); color: var(--bad); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  nav.tabs { display: flex; gap: 2px; flex-wrap: wrap; }
+  nav.tabs button {
+    min-height: 40px; padding: 0 14px; border-radius: 8px; border: 0; background: transparent;
+    font-size: 14px; color: var(--ink2); cursor: pointer;
+  }
+  nav.tabs button[aria-selected="true"] { background: var(--chip); color: var(--ink); font-weight: 600; }
+  .spacer { flex: 1 1 0; }
+  .health { font-size: 12px; color: var(--muted); }
+  .health .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; background: var(--muted); }
+  .health.ok .dot { background: var(--ok); }
+  .health.bad .dot { background: var(--bad); }
+  .menu-wrap { position: relative; }
+  .menu {
+    position: absolute; right: 0; top: 40px; z-index: 20; min-width: 230px; background: var(--panel);
+    border: 1px solid var(--rule); border-radius: 10px; padding: 4px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
+  }
+  .menu button {
+    display: block; width: 100%; text-align: left; min-height: 38px; padding: 0 12px; border: 0;
+    background: transparent; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .menu button:hover, .menu button:focus-visible { background: var(--chip); }
+  .menu .sep { height: 1px; background: var(--rule); margin: 4px 0; }
+
+  #banners { max-width: 1240px; margin: 12px auto 0; padding: 0 16px; display: flex; flex-direction: column; gap: 8px; }
+  .banner {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 9px 12px; border-radius: 10px;
+    border: 1px solid var(--rule); background: var(--infobg); font-size: 13px; line-height: 1.4;
+  }
+  .banner.warn { background: var(--warnbg); border-color: var(--warn); }
+  .banner.bad { background: var(--badbg); border-color: var(--bad); }
+  .banner .b-text { flex: 1 1 240px; min-width: 0; }
+  .banner .b-text strong { font-weight: 650; }
+
+  main { max-width: 1240px; margin: 0 auto; padding: 12px 16px 0; display: flex; flex-direction: column; gap: 12px; }
+  .panel-tab { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  section.card, .card {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 10px; min-width: 0;
+  }
+  .card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px 12px; }
+  .sub { font-size: 12px; color: var(--muted); }
+  .small { font-size: 12px; color: var(--ink2); }
+  .note { font-size: 13px; color: var(--ink2); }
+  .scroll-x { overflow-x: auto; }
+  .empty { color: var(--muted); font-size: 13px; padding: 4px 0; }
+  .err { color: var(--bad); font-size: 13px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+  .tile { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 10px 12px; }
+  .tile .l { font-size: 12px; color: var(--muted); }
+  .tile .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .tile .n { font-size: 12px; color: var(--ink2); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  td, th { padding: 6px 8px; border-top: 1px solid var(--rule); text-align: left; vertical-align: top; }
+  th { font-weight: 500; color: var(--muted); border-top: 0; }
+  td.k { color: var(--ink2); }
+  .num { font-variant-numeric: tabular-nums; }
+  .cols { columns: 380px; column-gap: 10px; }
+  .cols > section { break-inside: avoid; margin: 0 0 10px; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr)); gap: 12px; }
+  .kv { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 7px 0; border-top: 1px solid var(--rule); }
+  .kv .raw { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+  .kv .conf { font-size: 12px; color: var(--muted); text-align: right; }
+  .mono { font-family: ui-monospace, Menlo, monospace; word-break: break-word; }
+  .field-table { table-layout: fixed; font-size: 12px; }
+  .field-table td.k { width: 44%; word-break: break-word; }
+  .field-table .hint { display: block; color: var(--muted); font-size: 11px; }
+  input[type="search"], input[type="text"], input[type="date"], select, textarea.ctl {
+    min-height: 36px; border-radius: 8px; border: 1px solid var(--rule); background: var(--panel); padding: 0 10px;
+  }
+  textarea { border-radius: 8px; border: 1px solid var(--rule); background: var(--panel); padding: 8px 10px; width: 100%; }
+  .pill {
+    min-height: 30px; padding: 0 10px; border-radius: 15px; border: 1px solid var(--ink2); background: var(--panel);
+    font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .pill[aria-pressed="false"] { border: 1px dashed var(--muted); background: transparent; color: var(--ink2); font-weight: 400; }
+  .pill[aria-pressed="true"] { font-weight: 600; }
+  .pill .n { color: var(--muted); }
+  .chip-link {
+    min-height: 30px; display: inline-flex; align-items: center; padding: 0 10px; border-radius: 15px;
+    border: 1px solid var(--rule); color: var(--ink); text-decoration: none; font-size: 12px;
+  }
+  .chip-link .n { color: var(--muted); margin-left: 4px; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--chip); color: var(--ink2); }
+  .badge.changed { background: var(--warnbg); color: var(--warn); border: 1px solid var(--warn); }
+  .badge.ok { background: var(--okbg); color: var(--ok); }
+  .badge.sample { background: var(--warnbg); color: var(--warn); border: 1px solid var(--warn); }
+  .slot { border: 1px dashed var(--rule); border-radius: 12px; padding: 14px; color: var(--muted); font-size: 13px; }
+  .report-md table { font-size: 12px; }
+  .report-md th { color: var(--ink); }
+  details > summary { cursor: pointer; font-size: 13px; color: var(--ink2); }
+  .event-box { max-height: 420px; overflow: auto; border: 1px solid var(--rule); border-radius: 8px; }
+  .event-box thead th { position: sticky; top: 0; background: var(--panel); }
+  .hist-row { display: flex; gap: 8px; align-items: flex-start; border-top: 1px solid var(--rule); padding: 8px 0; }
+  .hist-row .body { flex: 1 1 0; min-width: 0; }
+  .hist-row .acts { display: flex; gap: 4px; flex-wrap: wrap; }
+  iframe.pa { width: 100%; border: 1px solid var(--rule); border-radius: 12px; background: var(--bg); min-height: 900px; }
+  dialog { background: var(--panel); color: var(--ink); border: 1px solid var(--rule); border-radius: 12px; padding: 16px; width: min(560px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+  dialog label { display: block; font-size: 12px; margin: 8px 0 3px; color: var(--ink2); }
+  dialog input[type="text"] { width: 100%; }
+  #toast {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 50; max-width: calc(100vw - 32px);
+    background: var(--ink); color: var(--bg); padding: 9px 14px; border-radius: 10px; font-size: 13px;
+  }
+  .night svg { display: block; }
+  .night .note-box { background: var(--warnbg); border: 1px solid var(--warn); border-radius: 12px; padding: 10px 14px; font-size: 13px; line-height: 1.5; }
+  .night .rec { background: var(--chip); border-radius: 10px; padding: 10px 12px; }
+  @media (max-width: 520px) {
+    .top-in { padding: 8px 12px; }
+    main, #banners { padding-left: 12px; padding-right: 12px; }
+    nav.tabs { width: 100%; }
+    nav.tabs button { flex: 1 1 0; padding: 0 6px; }
+    .cols { columns: 1; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <h1 class="brand">Climate Advisor</h1>
+    <label class="zone-lab" id="zone-wrap" hidden>Zone
+      <select id="zone-select" class="ctl" aria-label="Zone"></select>
+    </label>
+    <nav class="tabs" role="tablist" aria-label="Dashboard sections">
+      <button type="button" role="tab" id="tab-btn-status" data-tab="status" aria-controls="panel-status" aria-selected="true" tabindex="0">Status</button>
+      <button type="button" role="tab" id="tab-btn-analysis" data-tab="analysis" aria-controls="panel-analysis" aria-selected="false" tabindex="-1">Analysis</button>
+      <button type="button" role="tab" id="tab-btn-debug" data-tab="debug" aria-controls="panel-debug" aria-selected="false" tabindex="-1">Debug</button>
+      <button type="button" role="tab" id="tab-btn-settings" data-tab="settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1">Settings</button>
+    </nav>
+    <span class="spacer"></span>
+    <span class="health" id="health" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="health-text">Loading...</span></span>
+    <div class="menu-wrap">
+      <button type="button" class="btn" id="actions-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="actions-menu">Actions &#9662;</button>
+      <div class="menu" id="actions-menu" role="menu" aria-labelledby="actions-btn" hidden>
+        <button type="button" role="menuitem" data-action="force_reclassify">Re-plan (reclassify now)</button>
+        <button type="button" role="menuitem" data-action="send_briefing">Send briefing</button>
+        <button type="button" role="menuitem" data-action="refresh">Refresh</button>
+        <div class="sep" role="separator"></div>
+        <button type="button" role="menuitem" data-action="toggle_automation" id="menu-toggle-automation">Pause all automation</button>
+      </div>
+    </div>
+    <a class="btn" id="back-classic" href="index.html" style="display:inline-flex;align-items:center;text-decoration:none;color:var(--ink)">Back to classic</a>
+  </div>
+</header>
+
+<div id="banners" aria-label="Alerts"></div>
+
+<main>
+  <!-- ============ Status (assembled later from the R2 chart, R3 timeline and R4 night card) ============ -->
+  <div id="panel-status" class="panel-tab" role="tabpanel" aria-labelledby="tab-btn-status" tabindex="0">
+    <section class="card" aria-labelledby="status-title">
+      <div class="card-head"><h2 id="status-title">Status</h2><a href="index.html" id="status-classic-link">Open the classic Status tab</a></div>
+      <div class="note">The new Status tab is being assembled. Until the new chart and plan list land, today&#8217;s readings, chart and briefing stay on the classic Status tab. Alerts, health and actions above already work here.</div>
+    </section>
+    <div id="status-slot-chart" class="slot" data-slot="chart" aria-label="Temperature chart (coming)">Temperature chart: arrives with the new chart.</div>
+    <div id="status-slot-plan" class="slot" data-slot="plan" aria-label="Next 24 hours (coming)">Next 24 hours plan list: arrives with the operation timeline.</div>
+    <section class="card night" id="status-slot-night" data-slot="night" aria-labelledby="night-title">
+      <div class="card-head"><h2 id="night-title">Tonight in the bedroom</h2><span class="badge sample" id="night-sample-badge">Sample data, not your house</span></div>
+      <div id="night-card"></div>
+    </section>
+  </div>
+
+  <!-- ============ Analysis ============ -->
+  <div id="panel-analysis" class="panel-tab" role="tabpanel" aria-labelledby="tab-btn-analysis" tabindex="0" hidden>
+    <div class="sub">How well it is working, and what to improve</div>
+    <div class="tiles" id="an-kpis" aria-label="Headline numbers"></div>
+
+    <section class="card" aria-labelledby="an-days-h">
+      <div class="card-head"><h2 id="an-days-h">Days</h2><span class="sub" id="an-days-sub"></span></div>
+      <div class="scroll-x" id="an-days"><div class="empty">Loading...</div></div>
+      <div id="an-compliance" class="small"></div>
+    </section>
+
+    <div class="grid2">
+      <section class="card" aria-labelledby="an-model-h">
+        <div class="card-head"><h2 id="an-model-h">Your house, as CA has learned it</h2><span class="sub" id="an-model-status"></span></div>
+        <div id="an-model"><div class="empty">Loading...</div></div>
+      </section>
+      <section class="card" aria-labelledby="an-cq-h">
+        <h2 id="an-cq-h">Last 24 hours of control</h2>
+        <div id="an-cq"><div class="empty">Loading...</div></div>
+        <h3>Prediction error by look-ahead</h3>
+        <div id="an-pe"></div>
+        <h3>Household promises missed</h3>
+        <div id="an-promises"></div>
+      </section>
+    </div>
+
+    <section class="card" aria-labelledby="an-sug-h">
+      <h2 id="an-sug-h">Suggestions</h2>
+      <div id="an-suggestions"><div class="empty">Loading...</div></div>
+    </section>
+
+    <section class="card" aria-labelledby="an-rep-h">
+      <div class="card-head"><h2 id="an-rep-h">Reports</h2><span class="sub" id="an-ai-line" role="status"></span></div>
+      <div class="row">
+        <label class="small">Type <select id="report-type" class="ctl"><option value="activity_record">Activity record (no AI)</option><option value="investigation">AI investigation</option></select></label>
+        <label class="small">Window <select id="report-time-window" class="ctl"></select></label>
+        <button type="button" class="btn primary" id="run-report-btn">Generate</button>
+        <span class="small" id="report-status" role="status"></span>
+      </div>
+      <div id="investigation-focus-controls" hidden>
+        <label class="small" for="investigation-focus">What should it look into? (optional)</label>
+        <textarea id="investigation-focus" rows="2" placeholder="e.g. why is window compliance 0%"></textarea>
+        <label class="small"><input type="checkbox" id="investigation-deep"> Deep investigation (also include config, known fixes, version history, GitHub issues)</label>
+      </div>
+      <div id="ai-disabled-notice" class="note" hidden>AI features are not configured. Enable them in Settings &#8594; AI.</div>
+      <div id="report-loading" class="small" hidden>Generating...</div>
+      <div id="report-content" class="report-md scroll-x" aria-live="polite"><div class="empty">Choose a report type and press Generate.</div></div>
+      <div id="report-actions" class="row" hidden>
+        <button type="button" class="btn small" id="rep-copy">Copy</button>
+        <button type="button" class="btn small" id="rep-download">Download .md</button>
+        <button type="button" class="btn small" id="rep-fulllogs">Download full logs</button>
+        <button type="button" class="btn small" id="rep-issue">Submit GitHub issue</button>
+      </div>
+      <h3>Report history</h3>
+      <div class="row">
+        <span class="row" role="group" aria-label="Report type filter">
+          <button type="button" class="pill" id="hist-filter-all" aria-pressed="true">All</button>
+          <button type="button" class="pill" id="hist-filter-investigation" aria-pressed="false">Investigation</button>
+        </span>
+        <label class="small">From <input type="date" id="hist-from-date"></label>
+        <label class="small">to <input type="date" id="hist-to-date"></label>
+        <button type="button" class="btn small" id="hist-clear" aria-label="Clear date range">Clear dates</button>
+      </div>
+      <div id="unified-history-list"><div class="empty">Loading history...</div></div>
+    </section>
+
+    <section class="card" aria-labelledby="an-pa-h">
+      <div class="card-head"><h2 id="an-pa-h">Prediction accuracy</h2><a id="prediction-accuracy-link" href="prediction_accuracy.html" target="_blank" rel="noopener">Open on its own page</a></div>
+      <div class="sub">Each model&#8217;s past predictions next to what the sensor read. Preview: v4 runs in shadow and changes nothing Climate Advisor does.</div>
+      <iframe class="pa" id="pa-frame" title="Prediction accuracy" loading="lazy"></iframe>
+    </section>
+  </div>
+
+  <!-- ============ Debug ============ -->
+  <div id="panel-debug" class="panel-tab" role="tabpanel" aria-labelledby="tab-btn-debug" tabindex="0" hidden>
+    <div class="row">
+      <input type="search" id="dbg-search" aria-label="Filter fields" placeholder="Filter every field by name or value..." style="flex:1 1 240px">
+      <span class="sub" id="dbg-count" role="status"></span>
+      <button type="button" class="btn" id="dbg-dl-logs">Download logs</button>
+      <button type="button" class="btn" id="dbg-dl-diag">Download diagnostics</button>
+    </div>
+    <div id="dbg-groups" class="cols"><div class="empty">Loading...</div></div>
+
+    <section class="card" aria-labelledby="dbg-ev-h">
+      <div class="card-head">
+        <h2 id="dbg-ev-h">Event log <span class="sub" id="dbg-ev-count"></span></h2>
+        <span class="row">
+          <label class="small">Window <select id="dbg-ev-hours" class="ctl"><option value="2">2 h</option><option value="6">6 h</option><option value="24" selected>24 h</option><option value="72">3 days</option><option value="168">7 days</option></select></label>
+          <button type="button" class="btn small" id="dbg-ev-all">All</button>
+          <button type="button" class="btn small" id="dbg-ev-none">None</button>
+        </span>
+      </div>
+      <div class="row" id="dbg-ev-types" role="group" aria-label="Event types"></div>
+      <div class="event-box" tabindex="0" aria-label="Events"><table><thead><tr><th style="width:90px">Time</th><th style="width:200px">Event</th><th>Details</th></tr></thead><tbody id="dbg-ev-rows"></tbody></table></div>
+    </section>
+
+    <section class="card" aria-labelledby="dbg-bt-h">
+      <div class="card-head"><h2 id="dbg-bt-h">Backtest lab</h2><a href="prediction_accuracy.html" id="dbg-bt-link" target="_blank" rel="noopener">Open the full accuracy view</a></div>
+      <div id="dbg-bt"><div class="empty">Loading...</div></div>
+    </section>
+    <div class="sub">Every automation-state field is listed exactly once. Fields not yet placed in a group appear under Other, so new fields never go missing. Daily records and promises moved to Analysis.</div>
+  </div>
+
+  <!-- ============ Settings ============ -->
+  <div id="panel-settings" class="panel-tab" role="tabpanel" aria-labelledby="tab-btn-settings" tabindex="0" hidden>
+    <div class="row">
+      <input type="search" id="set-search" aria-label="Search settings" placeholder="Search settings..." style="flex:1 1 240px">
+      <label class="small"><input type="checkbox" id="set-desc"> Show descriptions</label>
+      <label class="small"><input type="checkbox" id="set-changed"> Only changed from default</label>
+      <span class="sub" id="set-count" role="status"></span>
+      <a class="btn primary" id="set-ha" href="/config/integrations/integration/climate_advisor" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;text-decoration:none">Change in Home Assistant</a>
+    </div>
+    <div class="row" id="set-jump" aria-label="Jump to a group"></div>
+    <div id="set-groups" class="cols"><div class="empty">Loading settings...</div></div>
+    <section class="card" id="set-tou" aria-labelledby="set-tou-h" hidden>
+      <h2 id="set-tou-h">Time-of-use schedules</h2>
+      <div id="set-tou-body"></div>
+    </section>
+    <section class="card" id="set-integrations" aria-labelledby="set-int-h">
+      <h2 id="set-int-h">GitHub and AI status</h2>
+      <div id="set-int-body"><div class="empty">Loading...</div></div>
+    </section>
+    <div class="sub" id="set-foot">These are the current settings. They are read-only here; use Change in Home Assistant to edit them.</div>
+  </div>
+</main>
+
+<dialog id="gh-modal" aria-labelledby="gh-title">
+  <h2 id="gh-title">Submit GitHub issue</h2>
+  <div id="github-modal-not-configured" class="err" hidden>GitHub integration is not configured. Add your token and repository in Home Assistant, Settings, Devices &amp; services, Climate Advisor, Configure, GitHub integration.</div>
+  <label for="github-issue-title">Title</label>
+  <input type="text" id="github-issue-title">
+  <label for="github-issue-body">Body</label>
+  <textarea id="github-issue-body" rows="8" class="mono"></textarea>
+  <label for="github-issue-labels">Labels (comma-separated)</label>
+  <input type="text" id="github-issue-labels" value="bug">
+  <div id="github-issue-status" class="small" role="status" style="margin:8px 0"></div>
+  <div class="row" style="justify-content:flex-end">
+    <button type="button" class="btn" id="gh-cancel">Cancel</button>
+    <button type="button" class="btn primary" id="github-submit-btn">Submit issue</button>
+  </div>
+</dialog>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="nd_core.js"></script>
+<script src="nd_night_card.js"></script>
+<script src="nd_status.js"></script>
+<script src="nd_analysis.js"></script>
+<script src="nd_debug.js"></script>
+<script src="nd_settings.js"></script>
+<script>ND.start();</script>
+</body>
+</html>

@@ -1,0 +1,520 @@
+/* Issue #1230 R5: Analysis tab - is it working, and what can improve?
+   Reads only existing endpoints: learning, engines, event_log (diagnostics.control_quality), chart_data
+   (thermal_model), ai_status, investigation_reports. Writes only what classic writes: respond_suggestion,
+   activity_record / ai_investigate (report generation), delete_report, submit_github_issue. */
+(function () {
+  'use strict';
+  var $ = ND.$, esc = ND.esc;
+  var D = {};              // last loaded payloads
+  var currentReport = null, activityTable = null;
+  var allHistory = [], filtered = [], histFilter = 'all', histShowing = 5, aiDisabled = false;
+  var loaded = false, loadSeq = 0;
+
+  var REASONS = {
+    indoor_unavailable: 'Indoor sensor was unavailable', insufficient_samples: 'Window ended before enough samples collected',
+    window_elapsed_too_few_samples: 'Window closed before enough samples collected', insufficient_decay: "Temperature didn't move enough to measure",
+    ols_bad_fit: 'Reading was too noisy to trust', poor_fit: 'Reading was too noisy to trust', state_changed: 'HVAC, fan, or window state changed mid-window',
+    outlier: 'Result was an outlier vs prior measurements', abandoned: 'Measurement interrupted'
+  };
+  var OBS = {
+    passive_decay: 'Passive windows', vent_window_decay: 'Window ventilation', vent_fan_decay: 'Fan/WHF ventilation', solar_gain: 'Solar readings',
+    hvac_heat: 'Heating cycles', hvac_cool: 'Cooling cycles', fan_only_decay: 'Fan-only windows (legacy)', ventilated_decay: 'Ventilated windows (legacy)'
+  };
+  var SECTIONS = [
+    { key: 'activity_summary', label: 'Activity summary' }, { key: 'incongruities', label: 'Incongruities found' },
+    { key: 'data_quality', label: 'Data quality issues' }, { key: 'errors_warnings', label: 'System errors / warnings' },
+    { key: 'hypotheses', label: 'Hypotheses' }, { key: 'recommended_actions', label: 'Recommended actions' },
+    { key: 'assumptions', label: 'Assumptions & confidence' }
+  ];
+  var HEADER_MAP = {
+    'ACTIVITY SUMMARY': 'activity_summary', 'INCONGRUITIES FOUND': 'incongruities', 'DATA QUALITY ISSUES': 'data_quality',
+    'SYSTEM ERRORS / WARNINGS': 'errors_warnings', 'HYPOTHESES': 'hypotheses', 'RECOMMENDED ACTIONS': 'recommended_actions',
+    'ASSUMPTIONS & CONFIDENCE': 'assumptions'
+  };
+
+  function pct(v) { return v == null ? '—' : Math.round(v * 100) + '%'; }
+  function hm(s) { return s ? String(s).slice(0, 5).replace(/^0/, '') : '—'; }
+  function yn(v) { return v ? 'yes' : 'no'; }
+  function span(a, b) { return a ? ND.fmtTime(a) + '–' + ND.fmtTime(b) : '—'; }
+  function r0(v) { return v == null ? '—' : String(Math.round(v)); }
+  function tdisp(f, d) { return f == null ? '—' : ND.num(ND.fToDisp(f), d == null ? 0 : d); }
+  function err(el, msg) { el.innerHTML = '<div class="err">Failed to load: ' + esc(msg) + '</div>'; }
+
+  // ---------- load ----------
+  async function load() {
+    var seq = ++loadSeq;
+    var calls = await Promise.allSettled([
+      ND.api('learning'), ND.api('engines'), ND.api('event_log?hours=2'), ND.api('chart_data?range=6h'),
+      ND.api('ai_status'), ND.api('investigation_reports')
+    ]);
+    if (seq !== loadSeq) return; // a newer load (zone switch) owns the screen
+    var v = function (i) { return calls[i].status === 'fulfilled' ? calls[i].value : null; };
+    var e = function (i) { return calls[i].status === 'rejected' ? calls[i].reason.message : null; };
+    D.learning = v(0); D.engines = v(1); D.events = v(2); D.chart = v(3); D.ai = v(4); D.reports = v(5);
+    D.errs = [e(0), e(1), e(2), e(3), e(4), e(5)];
+    loaded = true;
+    renderAll();
+  }
+
+  function renderAll() {
+    renderKpis(); renderDays(); renderModel(); renderControl(); renderSuggestions(); renderAiLine(); loadHistory();
+  }
+
+  // ---------- headline numbers ----------
+  function cq24() {
+    var cq = D.events && D.events.diagnostics && D.events.diagnostics.control_quality;
+    return cq && cq.windows && cq.windows['24h'] ? cq.windows['24h'] : null;
+  }
+  function renderKpis() {
+    var L = D.learning, host = $('an-kpis');
+    if (!L) { host.innerHTML = '<div class="tile"><div class="l">Headline numbers</div><div class="err">' + esc(D.errs[0] || 'No data') + '</div></div>'; return; }
+    var c = L.compliance || {}, active = c.status === 'active', q = cq24(), pe = q && q.prediction_error && q.prediction_error.archive_lead;
+    var ps = ND.status && ND.status.promise_summary;
+    var today = L.today_record ? L.today_record.manual_overrides || 0 : 0;
+    var tiles = [
+      { l: 'Comfort score', v: active ? pct(c.comfort_score) : '—', n: (c.days_recorded || 0) + ' days recorded',
+        t: '% of time the indoor temperature stayed within the target range in effect, averaged over the last 14 days' },
+      { l: 'Window advice followed', v: active ? pct(c.window_compliance) : '—', n: c.window_compliance_denominator != null ? 'of ' + c.window_compliance_denominator + ' days with advice' : '' },
+      { l: 'Runtime per day', v: active ? Math.round(c.avg_daily_hvac_runtime_minutes || 0) + ' min' : '—', n: 'average HVAC' +
+        (active && c.avg_daily_thermostat_fan_only_runtime_minutes ? ', fan-only ' + Math.round(c.avg_daily_thermostat_fan_only_runtime_minutes) + ' min' : '') },
+      { l: 'Manual changes', v: active ? String(c.total_manual_overrides || 0) : '—', n: 'total · ' + today + ' today' },
+      { l: 'Promises missed', v: ps ? String(ps.total_hits || 0) : '—', n: 'last 24 h' },
+      { l: 'Prediction error, 4 h', v: pe ? ND.num(ND.dFToDisp(pe.mean_abs_f), 1) + '°' : '—',
+        n: pe ? 'runs ' + (pe.mean_signed_f > 0 ? '+' : '') + ND.num(ND.dFToDisp(pe.mean_signed_f), 1) + '° ' + (pe.mean_signed_f > 0 ? 'warm' : 'cool') : 'not enough data yet' }
+    ];
+    host.innerHTML = tiles.map(function (t) {
+      return '<div class="tile"' + (t.t ? ' title="' + esc(t.t) + '"' : '') + '><div class="l">' + esc(t.l) + '</div><div class="v">' + esc(t.v) + '</div><div class="n">' + esc(t.n) + '</div></div>';
+    }).join('');
+  }
+
+  // ---------- days table: yesterday / today / tomorrow (plan) ----------
+  function renderDays() {
+    var L = D.learning, host = $('an-days');
+    if (!L) { err(host, D.errs[0] || 'no data'); return; }
+    var y = L.yesterday_record, t = L.today_record, n = L.tomorrow_plan, u = ND.sym(L.unit || ND.unit);
+    var lo = L.comfort_range_low, hi = L.comfort_range_high;
+    var tip = 'Time the indoor temperature was outside the target range in effect at the time (your comfort range' +
+      (lo != null && hi != null ? ' ' + lo + '–' + hi + u : '') + ' while awake; your sleep/away range during planned setbacks)';
+    function pair(rec, a, b) { return tdisp(rec[a]) + '→' + tdisp(rec[b]); }
+    function hl(rec) { return pair(rec, 'forecast_high_f', 'observed_high_f') + ' / ' + pair(rec, 'forecast_low_f', 'observed_low_f'); }
+    function rec(fn) { return function (r) { return r ? fn(r) : '—'; }; }
+    var rows = [
+      ['Day type · trend', rec(function (r) { return (r.day_type || '—') + ' · ' + (r.trend_direction || '—'); }),
+        function (p) { return p ? (p.day_type || '—') : ''; }],
+      ['HVAC mode', rec(function (r) { return r.hvac_mode_recommended || '—'; }), function (p) { return p ? (p.hvac_mode || '—') : ''; }],
+      ['High / low (forecast → observed)', rec(hl),
+        function (p) { return p && (p.expected_high != null || p.expected_low != null) ? 'expected ' + ND.num(p.expected_high, 0) + u + ' / ' + ND.num(p.expected_low, 0) + u : ''; }],
+      ['Windows advised', rec(function (r) { return yn(r.windows_recommended) + (r.windows_recommended ? ' · ' + hm(r.window_open_time) + '–' + hm(r.window_close_time) : ''); }),
+        function (p) { return p ? yn(p.windows_recommended) + (p.windows_recommended ? ' · ' + hm(p.window_open_time) + '–' + hm(p.window_close_time) : '') : ''; }],
+      ['Windows actually open', rec(function (r) { return yn(r.windows_opened) + (r.window_physical_open_time ? ' · ' + span(r.window_physical_open_time, r.window_physical_close_time) : ''); }), function () { return ''; }],
+      ['HVAC runtime', rec(function (r) { return r0(r.hvac_runtime_minutes) + ' min'; }), function () { return ''; }],
+      ['Fan-only runtime', rec(function (r) { return r0(r.thermostat_fan_only_runtime_minutes) + ' min'; }), function () { return ''; }],
+      ['Avg indoor · minutes outside comfort', rec(function (r) {
+        var m = r.comfort_violations_minutes || 0;
+        return (r.avg_indoor_temp != null ? tdisp(r.avg_indoor_temp, 1) + u : '—') + ' · ' + Math.round(m) + ' min (' + (m / 1440 * 100).toFixed(0) + '% of day)';
+      }), function () { return ''; }, tip],
+      ['Night setback', rec(function (r) { return r.setback_depth_f ? ND.num(ND.dFToDisp(r.setback_depth_f), 1) + u + (r.setback_was_adaptive ? ' (adaptive)' : '') : (r.setback_skipped_reason || 'none'); }), function () { return ''; }],
+      ['Pre-conditioning', function (r) { return r && r.pre_condition != null ? yn(r.pre_condition) : '—'; }, function (p) { return p ? yn(p.pre_condition) : ''; }],
+      ['Manual changes · door/window pauses', rec(function (r) { return (r.manual_overrides || 0) + ' · ' + (r.door_window_pause_events || 0); }), function () { return ''; }],
+      ['Away minutes', rec(function (r) { return r0(r.occupancy_away_minutes); }), function () { return ''; }],
+      ['Estimated cost', rec(function (r) { return r.estimated_cost != null ? '$' + Number(r.estimated_cost).toFixed(2) : '—'; }), function () { return ''; }]
+    ];
+    var dt = function (r, p) { return r && r.date ? ' ' + String(r.date).slice(5) : p || ''; };
+    var h = '<table style="min-width:640px"><thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Yesterday' + esc(dt(y)) +
+      '</th><th scope="col">Today' + esc(dt(t)) + '</th><th scope="col">Tomorrow (plan)' + esc(dt(n)) + '</th></tr></thead><tbody>';
+    rows.forEach(function (r) {
+      h += '<tr><th scope="row" class="k" style="font-weight:400"' + (r[3] ? ' title="' + esc(r[3]) + '"' : '') + '>' + esc(r[0]) + '</th><td class="num">' + esc(r[1](y)) +
+        '</td><td class="num">' + esc(r[1](t) === '—' && !t ? 'No record yet today' : r[1](t)) + '</td><td class="num">' + esc(r[2](n)) + '</td></tr>';
+    });
+    host.innerHTML = h + '</tbody></table>';
+    $('an-days-sub').textContent = 'Tomorrow shows what the plan knows today; blank cells fill in as the plan grows.';
+    var c = L.compliance || {};
+    $('an-compliance').textContent = c.status === 'active' ? 'Over ' + c.days_recorded + ' recorded days: window compliance ' + pct(c.window_compliance) +
+      ', average HVAC runtime ' + Math.round(c.avg_daily_hvac_runtime_minutes || 0) + ' min/day, average fan-only ' + Math.round(c.avg_daily_thermostat_fan_only_runtime_minutes || 0) +
+      ' min/day, comfort score ' + pct(c.comfort_score) + ', ' + (c.total_manual_overrides || 0) + ' manual overrides in total.' : 'Compliance summary appears once a few days are recorded.';
+  }
+
+  // ---------- the house model in plain language ----------
+  function renderModel() {
+    var E = D.engines, tm = D.chart && D.chart.thermal_model, host = $('an-model');
+    if (!E && !tm) { err(host, D.errs[1] || 'no data'); return; }
+    var rows = [], eu = E ? ND.sym(E.unit) : ND.sym(ND.unit);
+    function row(plain, raw, conf) { rows.push('<div class="kv"><div>' + esc(plain) + '</div><div class="conf">' + esc(conf || '') + '</div><div class="raw">' + esc(raw) + '</div></div>'); }
+    if (E) {
+      var kp = E.k_passive && E.k_passive.active ? E.k_passive : null, hv = E.k_active_hvac && E.k_active_hvac.active ? E.k_active_hvac : null;
+      var ks = E.k_solar && E.k_solar.active ? E.k_solar : null, kw = E.k_vent_window && E.k_vent_window.active ? E.k_vent_window : null, kf = E.k_vent_fan && E.k_vent_fan.active ? E.k_vent_fan : null;
+      if (kp) row('Holds heat ' + (Math.abs(kp.value) < 0.05 ? 'well' : 'moderately') + ': it closes half the indoor–outdoor gap in about ' + Math.round(Math.log(2) / Math.abs(kp.value)) + ' hours',
+        'k_passive ' + Number(kp.value).toFixed(4) + ' /h · time constant ' + Math.round(1 / Math.abs(kp.value)) + ' h', 'calibration: ' + (kp.confidence || 'n/a'));
+      if (hv && hv.value) row('Heating adds about ' + Number(hv.value.heat).toFixed(1) + eu + ' an hour; cooling removes ' + Math.abs(hv.value.cool).toFixed(1) + eu,
+        'k_active heat ' + Number(hv.value.heat).toFixed(2) + ' · cool ' + Number(hv.value.cool).toFixed(2) + ' ' + eu + '/h', 'calibration: ' + (hv.confidence || 'n/a'));
+      if (ks) {
+        var ph = E.solar_phase_offset_h && E.solar_phase_offset_h.active ? E.solar_phase_offset_h.value : 0;
+        var peak = new Date(2000, 0, 1, 13 + Math.floor(ph), Math.round((ph % 1) * 60)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        row('Sun adds up to ' + Number(ks.value).toFixed(1) + eu + ' an hour, strongest around ' + peak, 'k_solar ' + Number(ks.value).toFixed(3) + ' · phase +' + Number(ph).toFixed(2) + ' h', 'calibration: ' + (ks.confidence || 'n/a'));
+      }
+      if (kp && kw && kf) row('Open windows move it toward outdoors ' + (kw.value / kp.value).toFixed(1) + '× faster; with the fan, ' + (kf.value / kp.value).toFixed(1) + '× faster',
+        'k_vent_window ' + Number(kw.value).toFixed(3) + ' · k_vent_fan ' + Number(kf.value).toFixed(3) + ' /h', '');
+      var s = $('an-model-status');
+      s.textContent = E.physics_eligible ? 'Predictions use the physics model' : 'Predictions use the schedule fallback';
+    }
+    if (tm) {
+      var sh = tm.swing_heat != null ? tm.swing_heat : null, sc = tm.swing_cool != null ? tm.swing_cool : null;
+      if (sh != null || sc != null) row('Thermostat swing: heat starts ' + ND.num(sh != null ? sh : 1.5, 1) + ' below the setpoint, cooling ' + ND.num(sc != null ? sc : 1.5, 1) + ' above' +
+        (tm.swing_heat_measured && tm.swing_cool_measured ? '' : ' (partly estimated)'), 'swing_heat ' + ND.num(sh, 2) + ' · swing_cool ' + ND.num(sc, 2) + ' ' + ND.sym(tm.unit || ND.unit), '');
+      var envN = (tm.observation_count_passive || 0) + (tm.observation_count_vent_window || 0) + (tm.observation_count_vent_fan || 0) + (tm.observation_count_solar || 0);
+      var hvN = (tm.observation_count_heat || 0) + (tm.observation_count_cool || 0);
+      row('Measurements kept: ' + envN + ' for the house, ' + hvN + ' for the heating and cooling', 'calibration: house ' + (tm.confidence_k_passive || 'none') + ' · HVAC ' + (tm.confidence || 'none'),
+        tm.last_observation_date ? 'last: ' + new Date(tm.last_observation_date).toLocaleDateString() : 'none yet');
+    }
+    if (!rows.length) rows.push('<div class="empty">Nothing learned yet. It needs a few hours of HVAC-off time with a clear indoor-outdoor difference.</div>');
+    var health = tm && tm.learning_health, html = rows.join('');
+    if (health) {
+      var tot = 0, lines = [];
+      Object.keys(OBS).forEach(function (k) {
+        var h = health[k]; if (!h || !h.attempts) return;
+        var rej = Object.keys(h.rejections || {}).reduce(function (a, c) { return a + h.rejections[c]; }, 0); tot += rej;
+        var last = h.last_rejection && h.last_rejection.reason_code ? ' · last: ' + (REASONS[h.last_rejection.reason_code] || h.last_rejection.reason_code) : '';
+        lines.push('<div style="display:flex;justify-content:space-between;gap:8px"><span>' + esc(OBS[k]) + '</span><span>' + h.committed + ' kept, ' + rej + ' skipped' + esc(last) + '</span></div>');
+      });
+      if (lines.length) html += '<details><summary>Measurements skipped by type (' + tot + ')</summary><div class="small" style="display:grid;gap:4px;margin-top:6px">' + lines.join('') + '</div></details>';
+    }
+    host.innerHTML = html;
+  }
+
+  // ---------- control quality, prediction error, promises ----------
+  function renderControl() {
+    var q = cq24(), host = $('an-cq'), pe = $('an-pe');
+    if (!q) {
+      host.innerHTML = '<div class="empty">' + (D.errs[2] ? esc(D.errs[2]) : 'Not enough history yet.') + '</div>'; pe.innerHTML = '<div class="empty">Not available yet.</div>';
+    } else {
+      var hr = q.runtime.heating, cl = q.runtime.cooling;
+      var items = [
+        ['Heating', Math.round(hr.minutes) + ' min in ' + hr.runs + ' runs'], ['Median run · short runs', (hr.median_run_minutes != null ? hr.median_run_minutes : '—') + ' min · ' + hr.short_runs_lt_10m],
+        ['Cooling', Math.round(cl.minutes) + ' min'], ['Mode changes', String(q.mode_changes.count)], ['Wrong edge armed', q.misarmed.minutes + ' min'],
+        ['Heat while house was losing heat', Math.round(q.run_context.heating_minutes_house_losing_heat) + ' min'], ['Could have deferred', q.would_have_deferred.heating_minutes + ' min heat'],
+        ['Settling-guard holds', String(q.settling_guard.hold_episodes)]
+      ];
+      host.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:6px 16px;font-size:13px">' + items.map(function (i) {
+        return '<div style="display:flex;justify-content:space-between;gap:8px;border-top:1px solid var(--rule);padding-top:5px"><span style="color:var(--ink2)">' + esc(i[0]) + '</span><span class="num">' + esc(i[1]) + '</span></div>';
+      }).join('') + '</div>';
+      var H = q.prediction_error.horizons, rowsPe = [['30 min', H['30m']], ['60 min', H['60m']], ['2 h', H['120m']], ['4 h', q.prediction_error.archive_lead]].filter(function (r) { return r[1]; });
+      var mx = Math.max.apply(null, rowsPe.map(function (r) { return r[1].mean_abs_f; }).concat([1]));
+      pe.innerHTML = rowsPe.map(function (r) {
+        var v = r[1];
+        return '<div style="display:grid;grid-template-columns:70px minmax(0,1fr) 110px;gap:8px;align-items:center;font-size:12px;margin-bottom:4px"><span style="color:var(--ink2)">' + r[0] +
+          '</span><div style="height:10px;background:var(--chip);border-radius:3px"><div style="height:10px;border-radius:3px;background:var(--s2);width:' + Math.min(100, v.mean_abs_f / mx * 100) + '%"></div></div><span class="num">' +
+          ND.num(ND.dFToDisp(v.mean_abs_f), 1) + '° (' + (v.mean_signed_f > 0 ? '+' : '') + ND.num(ND.dFToDisp(v.mean_signed_f), 1) + ')</span></div>';
+      }).join('');
+    }
+    var ps = ND.status && ND.status.promise_summary, pr = $('an-promises');
+    pr.innerHTML = ps && ps.promises && ps.promises.length ? ps.promises.map(function (p) {
+      return '<div style="font-size:13px;display:flex;justify-content:space-between;gap:8px;border-top:1px solid var(--rule);padding-top:5px;margin-bottom:5px"><span>' +
+        esc(String(p.label || p.promise).replace(/^(\d+): /, '#$1 ')) + '</span><span style="color:var(--ink2)">×' + p.hits + (p.last_hit ? ' · last ' + esc(ND.fmtDateTime(p.last_hit)) : '') + '</span></div>';
+    }).join('') : '<div class="empty">None in the last 24 h.</div>';
+  }
+
+  // ---------- suggestions (respond_suggestion, exactly as classic) ----------
+  function renderSuggestions() {
+    var host = $('an-suggestions'), L = D.learning;
+    if (!L) { err(host, D.errs[0] || 'no data'); return; }
+    var list = L.suggestions || [];
+    if (!list.length) { host.innerHTML = '<div class="empty">No suggestions right now. CA proposes setting changes here when a pattern repeats (for example, comfort misses on 5+ days).</div>'; return; }
+    host.innerHTML = list.map(function (s) {
+      var k = esc(s.key);
+      return '<div class="kv" id="sug-' + k + '" style="grid-template-columns:1fr"><div>' + esc(s.text) + '</div><div class="row" id="sug-actions-' + k + '">' +
+        '<button type="button" class="btn small primary" data-sug="' + k + '" data-act="accept">Accept</button>' +
+        '<button type="button" class="btn small" data-sug="' + k + '" data-act="dismiss">Dismiss</button></div></div>';
+    }).join('');
+  }
+  async function respond(key, action) {
+    var box = $('sug-actions-' + key);
+    try {
+      await ND.api('respond_suggestion', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: action, suggestion_key: key }) });
+      if (box) box.innerHTML = '<span class="badge ok">' + (action === 'accept' ? 'Accepted' : 'Dismissed') + '</span> <span class="small">Was this diagnosis accurate?</span> ' +
+        '<button type="button" class="btn small" data-sug="' + esc(key) + '" data-fb="correct">Correct</button> <button type="button" class="btn small" data-sug="' + esc(key) + '" data-fb="incorrect">Incorrect</button>';
+      setTimeout(function () { if (D.learning) { D.learning.suggestions = (D.learning.suggestions || []).filter(function (s) { return s.key !== key; }); renderSuggestions(); } }, 8000);
+    } catch (e) { ND.toast(e.message, 'err'); }
+  }
+  async function feedback(key, verdict) {
+    var box = $('sug-actions-' + key);
+    try {
+      await ND.api('respond_suggestion', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: verdict, suggestion_key: key }) });
+      if (box) box.innerHTML = '<span class="badge ok">Feedback recorded</span>';
+      setTimeout(function () { if (D.learning) { D.learning.suggestions = (D.learning.suggestions || []).filter(function (s) { return s.key !== key; }); renderSuggestions(); } }, 1500);
+    } catch (e) { ND.toast(e.message, 'err'); }
+  }
+
+  // ---------- AI status line ----------
+  function renderAiLine() {
+    var a = D.ai && D.ai.status, el = $('an-ai-line');
+    if (!a) { el.textContent = D.errs[4] ? 'AI status unavailable: ' + D.errs[4] : ''; return; }
+    aiDisabled = a.status === 'disabled' || !a.status;
+    el.textContent = 'AI ' + (a.status || 'unknown') + (a.model ? ' · ' + a.model : '') + (a.investigator_requests_limit != null ? ' · investigations today ' + (a.investigator_requests_today || 0) + '/' + a.investigator_requests_limit : '') +
+      ' · $' + (a.monthly_cost_estimate || 0).toFixed(2) + ' this month · ' + (a.error_count || 0) + ' errors' + (a.circuit_breaker_state && a.circuit_breaker_state !== 'closed' ? ' · circuit ' + a.circuit_breaker_state : '');
+    applyAiState();
+  }
+  function applyAiState() {
+    var isAi = $('report-type').value !== 'activity_record';
+    $('ai-disabled-notice').hidden = !(isAi && aiDisabled);
+    $('run-report-btn').disabled = isAi && aiDisabled;
+  }
+
+  // ---------- reports ----------
+  function updateReportType() {
+    var type = $('report-type').value, tw = $('report-time-window');
+    if (type === 'activity_record') {
+      tw.innerHTML = '<option value="6">Last 6 hours</option><option value="12" selected>Last 12 hours</option><option value="24">Last 24 hours</option><option value="48">Last 48 hours</option><option value="168">Last 7 days</option>';
+      $('investigation-focus-controls').hidden = true; $('run-report-btn').textContent = 'Generate';
+    } else {
+      tw.innerHTML = '<option value="24" selected>Last 1 day</option><option value="168">Last 7 days</option><option value="720">Last 30 days</option>';
+      $('investigation-focus-controls').hidden = false; $('run-report-btn').textContent = 'Investigate';
+    }
+    applyAiState();
+  }
+  function reset(label) { var b = $('run-report-btn'); b.disabled = false; b.textContent = label; $('report-loading').textContent = 'Generating...'; $('report-loading').hidden = true; applyAiState(); }
+  async function runActivity() {
+    var hours = parseInt($('report-time-window').value, 10) || 12, btn = $('run-report-btn');
+    btn.disabled = true; btn.textContent = 'Generating...'; $('report-loading').hidden = false; $('report-status').textContent = '';
+    try {
+      var resp = await ND.api('activity_record?hours=' + hours);
+      activityTable = resp.table || '';
+      $('report-content').innerHTML = activityTable ? '<div>' + ND.md(activityTable) + '</div>' : '<div class="empty">No events in the selected window.</div>';
+      $('report-actions').hidden = false;
+    } catch (e) { $('report-status').textContent = 'Error: ' + e.message; } finally { reset('Generate'); }
+  }
+  function parseSections(text) {
+    var sections = {}, order = [], key = null, lines = [];
+    function flush() { if (key !== null) sections[key] = lines.join('\n').trim(); }
+    text.split('\n').forEach(function (line) {
+      var s = line.trim();
+      if (s.indexOf('## ') === 0) { flush(); lines = []; key = HEADER_MAP[s.slice(3).trim().toUpperCase()] || null; if (key && order.indexOf(key) < 0) order.push(key); }
+      else if (key !== null) lines.push(line);
+    });
+    flush();
+    return { sections: sections, order: order, active: key };
+  }
+  function renderProgress(content, acc) {
+    var p = parseSections(acc);
+    if (!p.order.length) { content.innerHTML = '<div class="empty">Writing investigation...</div>'; return; }
+    content.innerHTML = p.order.map(function (k) {
+      var def = SECTIONS.filter(function (d) { return d.key === k; })[0]; if (!def) return '';
+      return '<details open><summary><strong>' + esc(def.label) + '</strong>' + (k === p.active ? ' <span class="sub">writing...</span>' : '') + '</summary><div class="note">' + ND.md(p.sections[k] || '') + '</div></details>';
+    }).join('');
+  }
+  async function runInvestigation() {
+    var btn = $('run-report-btn'), loading = $('report-loading'), status = $('report-status'), content = $('report-content');
+    var focus = $('investigation-focus').value.trim(), hours = parseInt($('report-time-window').value, 10) || 24, deep = $('investigation-deep').checked;
+    btn.disabled = true; btn.textContent = 'Running...'; loading.hidden = false; loading.textContent = 'Connecting...'; status.textContent = ''; content.innerHTML = ''; $('report-actions').hidden = true;
+    var acc = '';
+    try {
+      var body = { hours: hours }; if (focus) body.focus = focus; if (deep) body.deep = true;
+      var resp = await ND.stream('ai_investigate', body), reader = resp.body.getReader(), dec = new TextDecoder(), buf = '';
+      for (;;) {
+        var r = await reader.read(); if (r.done) break;
+        buf += dec.decode(r.value, { stream: true });
+        var evs = buf.split('\n\n'); buf = evs.pop();
+        for (var i = 0; i < evs.length; i++) {
+          if (evs[i].indexOf('data: ') !== 0) continue;
+          var ev; try { ev = JSON.parse(evs[i].slice(6)); } catch (e) { continue; }
+          if (ev.type === 'thinking') loading.textContent = 'Thinking... ' + ev.text.replace(/[\n]+/g, ' ').trim().slice(-180);
+          else if (ev.type === 'status') loading.textContent = ev.text;
+          else if (ev.type === 'chunk') { var first = !acc.length; acc += ev.text; renderProgress(content, acc); if (first) loading.hidden = true; status.textContent = 'Receiving response... (' + acc.length + ' chars)'; }
+          else if (ev.type === 'done') {
+            var result = { success: ev.success !== false, source: ev.source || 'ai', data: ev.data || {}, error: ev.error || null, raw_response: ev.raw_response || acc, input_context: ev.input_context || '', truncated: !!ev.truncated, truncated_empty: !!ev.truncated_empty };
+            currentReport = { reportType: 'investigation', timestamp: new Date().toISOString(), result: result, focus: focus };
+            renderReport(currentReport);
+            status.textContent = result.truncated_empty ? 'The model produced no visible output despite using the full response budget. Try a different reasoning effort or model.'
+              : result.truncated ? 'Report truncated: it hit the max response length. Increase "Investigator Max Response Length" in AI settings and re-run.'
+              : 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + result.source + ')';
+            loadHistory();
+          } else if (ev.type === 'error') throw new Error(ev.message || 'Investigation failed');
+        }
+      }
+      if (!currentReport && acc) { content.innerHTML = '<pre style="white-space:pre-wrap;font-size:12px">' + esc(acc) + '</pre>'; status.textContent = 'Stream ended (no structured response)'; }
+    } catch (e) {
+      status.textContent = 'Error: ' + e.message + (e.message.toLowerCase().indexOf('not enabled') >= 0 ? ' - enable it in Home Assistant, Settings, Integrations, Climate Advisor, Configure, AI settings' : '');
+      content.innerHTML = '';
+    } finally { reset('Investigate'); }
+  }
+  function renderReport(entry) {
+    var content = $('report-content'), res = entry.result || {}, ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '';
+    if (!res.success) { content.innerHTML = '<div class="err">Report failed (' + esc(res.source || 'error') + '): ' + esc(res.error || 'Unknown error') + '</div>'; $('report-actions').hidden = true; return; }
+    var data = res.data || {}, h = (ts ? '<div class="sub">' + esc(ts) + (res.is_refined ? ' <span class="badge">refined</span>' : '') + '</div>' : '');
+    if (res.truncated_empty) h += '<div class="banner warn">The model produced no visible output despite using the full response budget.</div>';
+    else if (res.truncated) h += '<div class="banner warn">Report truncated: it hit the max response length.</div>';
+    h += '<div class="small">' + (res.source === 'fallback' ? 'Fallback (AI unavailable)' : 'AI-generated') + '</div>';
+    var any = false;
+    SECTIONS.forEach(function (d) { var tx = data[d.key] || ''; if (!tx) return; any = true; h += '<details open><summary><strong>' + esc(d.label) + '</strong></summary><div class="note">' + ND.md(tx) + '</div></details>'; });
+    if (!any && res.raw_response) h += '<div class="note">' + ND.md(res.raw_response) + '</div>';
+    content.innerHTML = h; $('report-actions').hidden = false;
+  }
+  function formatReport() {
+    if (!currentReport) return '';
+    var ts = currentReport.timestamp ? new Date(currentReport.timestamp).toLocaleString() : 'Unknown time', res = currentReport.result || {}, data = res.data || {};
+    var out = '# Climate Advisor — Investigation Report\n\n| Field | Value |\n|---|---|\n| **Date** | ' + ts + ' |\n| **Source** | ' + (res.source || 'unknown') + ' |\n';
+    if (currentReport.focus) out += '| **Focus** | ' + currentReport.focus + ' |\n';
+    if (res.truncated_empty) out += '| **Truncated** | Yes — zero visible output despite using the full response budget |\n'; else if (res.truncated) out += '| **Truncated** | Yes — hit max response length |\n';
+    out += '\n---\n\n';
+    SECTIONS.forEach(function (d) { var c = (data[d.key] || '').trim(); if (c) out += '## ' + d.label + '\n\n' + c + '\n\n'; });
+    if (res.raw_response && !data.incongruities) out += '## Raw Response\n\n```\n' + res.raw_response + '\n```\n\n';
+    return out + '---\n\n*Generated by Climate Advisor — Home Assistant Integration*\n';
+  }
+  function repText() { return $('report-type').value === 'activity_record' ? activityTable : formatReport(); }
+  async function downloadFullLogs() {
+    var r = await Promise.allSettled([ND.api('event_log?hours=168'), ND.api('investigation_reports')]);
+    var bundle = r[0].status === 'fulfilled' ? r[0].value : {};
+    if (r[1].status === 'fulfilled') bundle.investigation_reports = r[1].value;
+    ND.download(JSON.stringify(bundle, null, 2), 'climate-advisor-logs-' + new Date().toISOString().slice(0, 10) + '.json', 'application/json');
+  }
+  ND.downloadFullLogs = downloadFullLogs;
+
+  // ---------- GitHub issue modal (submit_github_issue, as classic) ----------
+  function openIssue(prefill) {
+    var m = $('gh-modal');
+    if (prefill) { $('github-issue-title').value = prefill.title; $('github-issue-body').value = prefill.body; $('github-issue-labels').value = 'bug'; }
+    $('github-issue-status').textContent = ''; $('github-modal-not-configured').hidden = true; $('github-submit-btn').disabled = false;
+    if (m.showModal) m.showModal(); else m.setAttribute('open', '');
+    $('github-issue-title').focus();
+  }
+  function closeIssue() { var m = $('gh-modal'); if (m.close) m.close(); else m.removeAttribute('open'); }
+  function issueFromReport(entry) {
+    var saved = currentReport; currentReport = entry || currentReport;
+    if (!currentReport) { currentReport = saved; return; }
+    var ts = currentReport.timestamp ? new Date(currentReport.timestamp).toLocaleDateString() : new Date().toLocaleDateString();
+    openIssue({ title: 'AI Investigative Analysis - ' + ts, body: formatReport() });
+  }
+  async function appendIncident(body) {
+    try {
+      var ev = await ND.api('event_log?hours=2'), inc = (ev.events || []).filter(function (e) { return e.type === 'incident_detected'; });
+      if (inc.length) body += '\n\n## Incident Package\n<details>\n<summary>Diagnostic data for scenario reproduction</summary>\n\n```json\n' + JSON.stringify(inc[inc.length - 1], null, 2) + '\n```\n</details>';
+    } catch (e) { /* non-fatal */ }
+    return body;
+  }
+  async function submitIssue() {
+    var st = $('github-issue-status'), btn = $('github-submit-btn'), title = $('github-issue-title').value.trim();
+    var body = $('github-issue-body').value.trim(), labels = $('github-issue-labels').value.split(',').map(function (l) { return l.trim(); }).filter(Boolean);
+    if (!title) { st.textContent = 'Title is required.'; return; }
+    st.textContent = 'Submitting...'; btn.disabled = true;
+    body = await appendIncident(body);
+    var token = await ND.getToken();
+    try {
+      var resp = await fetch('/api/climate_advisor/' + ND.withZone('submit_github_issue'), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify({ title: title, body: body, labels: labels }) });
+      var data = await resp.json();
+      if (data.success) { st.innerHTML = 'Issue created: <a href="' + esc(data.issue_url) + '" target="_blank" rel="noopener">#' + esc(data.issue_number) + '</a>'; $('gh-cancel').textContent = 'Close'; }
+      else if (data.error === 'not_configured') { $('github-modal-not-configured').hidden = false; st.textContent = ''; btn.disabled = false; }
+      else { st.textContent = 'Failed: ' + (data.error || 'unknown error'); btn.disabled = false; }
+    } catch (e) { st.textContent = 'Network error: ' + e.message; btn.disabled = false; }
+  }
+
+  // ---------- history ----------
+  async function loadHistory() {
+    var host = $('unified-history-list');
+    try {
+      var d = D.reports || await ND.api('investigation_reports');
+      allHistory = (Array.isArray(d) ? d : []).map(function (e) { return Object.assign({}, e, { report_type: e.report_type || 'investigation' }); })
+        .sort(function (a, b) { return new Date(b.timestamp) - new Date(a.timestamp); });
+      D.reports = null; // later calls refetch
+      renderHistory();
+    } catch (e) { host.innerHTML = '<div class="empty">Failed to load history.</div>'; }
+  }
+  function renderHistory() {
+    var host = $('unified-history-list'), f = $('hist-from-date').value, t = $('hist-to-date').value;
+    var from = f ? new Date(f) : null, to = t ? new Date(t + 'T23:59:59') : null;
+    filtered = allHistory.filter(function (e) {
+      if (histFilter !== 'all' && (e.report_type || 'activity') !== histFilter) return false;
+      var ts = new Date(e.timestamp); return !(from && ts < from) && !(to && ts > to);
+    });
+    if (!filtered.length) { host.innerHTML = '<div class="empty">' + (allHistory.length ? 'No reports match the current filter.' : 'No reports yet.') + '</div>'; return; }
+    var shown = Math.min(histShowing, filtered.length);
+    host.innerHTML = filtered.slice(0, shown).map(function (e, i) {
+      var res = e.result || {}, sum = res.data && res.data.activity_summary ? res.data.activity_summary.replace(/\s+/g, ' ').trim() : '';
+      if (sum.length > 110) sum = sum.slice(0, 110) + '...';
+      return '<div class="hist-row"><div class="body"><div class="row" style="gap:6px"><strong style="font-size:13px">' + esc(e.timestamp ? new Date(e.timestamp).toLocaleString() : 'Unknown time') + '</strong>' +
+        '<span class="badge">' + esc(e.report_type === 'investigation' ? 'Investigation' : 'Activity') + '</span>' + (res.truncated_empty ? '<span class="badge changed">no output</span>' : res.truncated ? '<span class="badge changed">truncated</span>' : '') +
+        '<span class="sub">' + esc(res.source || 'unknown') + '</span></div>' + (sum ? '<div class="small">' + esc(sum) + '</div>' : '') + '</div>' +
+        '<div class="acts"><button type="button" class="btn small" data-h="open" data-i="' + i + '">Open</button><button type="button" class="btn small" data-h="copy" data-i="' + i + '">Copy</button>' +
+        '<button type="button" class="btn small" data-h="issue" data-i="' + i + '">Issue</button><button type="button" class="btn small danger" data-h="del" data-i="' + i + '" aria-label="Delete report">Delete</button></div></div>';
+    }).join('') + (filtered.length > shown ? '<button type="button" class="btn small" id="hist-more" style="margin-top:8px">Show more (' + (filtered.length - shown) + ' remaining)</button>' : '');
+  }
+  function asCurrent(e) { return { reportType: e.report_type || 'activity', timestamp: e.timestamp, result: e.result, focus: e.focus }; }
+  async function histClick(btn) {
+    var e = filtered[+btn.getAttribute('data-i')]; if (!e) return;
+    var what = btn.getAttribute('data-h');
+    if (what === 'open') { currentReport = asCurrent(e); renderReport(currentReport); $('report-content').scrollIntoView({ behavior: 'smooth' }); }
+    else if (what === 'copy') { var s = currentReport; currentReport = asCurrent(e); var tx = formatReport(); currentReport = s; ND.copy(tx); }
+    else if (what === 'issue') issueFromReport(asCurrent(e));
+    else if (what === 'del') {
+      try {
+        await ND.api('delete_report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ report_type: e.report_type || 'activity', timestamp: e.timestamp }) });
+        if (currentReport && currentReport.timestamp === e.timestamp) { currentReport = null; $('report-content').innerHTML = '<div class="empty">Report deleted.</div>'; $('report-actions').hidden = true; }
+        D.reports = null; await loadHistory();
+      } catch (er) { ND.toast('Failed to delete report: ' + er.message, 'err'); }
+    }
+  }
+
+  // ---------- prediction accuracy (R1's page, embedded) ----------
+  function loadAccuracy() {
+    var fr = $('pa-frame'), url = 'prediction_accuracy.html' + (ND.zone ? '?zone=' + encodeURIComponent(ND.zone) : '');
+    $('prediction-accuracy-link').href = url;
+    if (fr.getAttribute('data-src') === url) return;
+    fr.setAttribute('data-src', url);
+    fr.addEventListener('load', function fit() {
+      try { // same origin: hide the page's own header and size the frame to its content
+        var doc = fr.contentDocument, top = doc.querySelector('header.top'); if (top) top.style.display = 'none';
+        var resize = function () { fr.style.height = Math.max(600, doc.documentElement.scrollHeight + 4) + 'px'; };
+        resize(); if (window.ResizeObserver) new ResizeObserver(resize).observe(doc.body);
+      } catch (e) { fr.style.height = '1100px'; }
+    });
+    fr.src = url;
+  }
+
+  // ---------- wiring ----------
+  function init() {
+    $('report-type').addEventListener('change', updateReportType);
+    $('run-report-btn').addEventListener('click', function () { return $('report-type').value === 'activity_record' ? runActivity() : runInvestigation(); });
+    $('rep-copy').addEventListener('click', function () { var t = repText(); if (t) ND.copy(t); });
+    $('rep-download').addEventListener('click', function () {
+      var act = $('report-type').value === 'activity_record', t = repText(); if (!t) return;
+      var date = (act ? new Date() : new Date(currentReport.timestamp)).toISOString().slice(0, 10);
+      ND.download(t, 'climate-advisor-' + (act ? 'activity-record' : 'investigation') + '-' + date + '.md', 'text/markdown');
+    });
+    $('rep-fulllogs').addEventListener('click', downloadFullLogs);
+    $('rep-issue').addEventListener('click', function () {
+      if ($('report-type').value === 'activity_record') {
+        if (!activityTable) return;
+        openIssue({ title: 'Activity Record — ' + new Date().toLocaleDateString(), body: '## Activity Record\n\n' + activityTable + '\n\n---\n*Generated by Climate Advisor*' });
+      } else issueFromReport();
+    });
+    $('github-submit-btn').addEventListener('click', submitIssue);
+    $('gh-cancel').addEventListener('click', closeIssue);
+    $('gh-modal').addEventListener('click', function (e) { if (e.target === this) closeIssue(); });
+    function setFilter(t) {
+      histFilter = t; histShowing = 5;
+      ['all', 'investigation'].forEach(function (k) { $('hist-filter-' + k).setAttribute('aria-pressed', k === t ? 'true' : 'false'); });
+      renderHistory();
+    }
+    $('hist-filter-all').addEventListener('click', function () { setFilter('all'); });
+    $('hist-filter-investigation').addEventListener('click', function () { setFilter('investigation'); });
+    ['hist-from-date', 'hist-to-date'].forEach(function (id) { $(id).addEventListener('input', renderHistory); $(id).addEventListener('change', renderHistory); });
+    $('hist-clear').addEventListener('click', function () { $('hist-from-date').value = ''; $('hist-to-date').value = ''; renderHistory(); });
+    $('unified-history-list').addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b) return;
+      if (b.id === 'hist-more') { histShowing = 20; renderHistory(); } else if (b.getAttribute('data-h')) histClick(b);
+    });
+    $('an-suggestions').addEventListener('click', function (e) {
+      var b = e.target.closest('button[data-sug]'); if (!b) return;
+      if (b.getAttribute('data-fb')) feedback(b.getAttribute('data-sug'), b.getAttribute('data-fb')); else respond(b.getAttribute('data-sug'), b.getAttribute('data-act'));
+    });
+    updateReportType();
+  }
+
+  ND.register('analysis', {
+    show: function () { if (!loaded || ND._anZone !== ND.zone) { ND._anZone = ND.zone; load(); } loadAccuracy(); },
+    refresh: load
+  });
+  ND.on('init', init);
+  ND.on('zone', function () { if (ND.active === 'analysis') { ND._anZone = ND.zone; load(); loadAccuracy(); } else loaded = false; });
+  ND.on('refresh', function () { if (ND.active === 'analysis') load(); });
+  ND.on('state-changed', function () { if (ND.active === 'analysis') load(); });
+  ND.on('status', function () { if (loaded) { renderKpis(); renderControl(); } });
+})();

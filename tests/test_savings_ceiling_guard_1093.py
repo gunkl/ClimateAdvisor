@@ -414,7 +414,13 @@ class TestCoordinatorPlanCacheReadsTheArmedCeiling:
         base = datetime(2026, 6, 1, 0, 0, 0)
         temps = [72.0] * 8 + [76.0] * 4 + [78.0] * 12
         coord = _make_full_chart_coord(daily_forecast_full=None)
-        coord.config = {**coord.config, "comfort_heat": 70, "comfort_cool": 75, "aggressive_savings": savings}
+        coord.config = {
+            **coord.config,
+            "comfort_heat": 70,
+            "comfort_cool": 75,
+            "aggressive_savings": savings,
+            "primary_engine": "v3",
+        }
         coord._current_classification = _fc_classification(hvac_mode="off")
         coord._last_predicted_indoor = [
             {"ts": (base + timedelta(hours=i)).isoformat(), "temp": t} for i, t in enumerate(temps)

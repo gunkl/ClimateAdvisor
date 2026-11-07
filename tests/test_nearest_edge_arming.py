@@ -437,7 +437,8 @@ class TestOdeCeilingWriteGate:
         with patch(f"{_AUTOMATION}.dt_util.now", side_effect=_Clock(now)):
             _run(engine.apply_classification(_classification("warm", "off"), predicted_indoor=self._curve()))
 
-        assert "ceiling_guard_fired" in events
+        # Issue #1230 R6 (X1): at 73.5 the band arms cool at the ceiling itself; the guard has nothing left to write
+        assert "ceiling_guard_fired" not in events
         assert _thermostat_mode(engine) == "cool"
 
 

@@ -101,8 +101,45 @@ def _check(since: str, at: str, values: list[str]):
 def test_hvac_mode_writes_is_an_exact_ordered_comparison_of_real_mode_calls() -> None:
     assert _check("2026-05-20T00:00:00", "2026-05-20T23:59:00", ["cool", "heat", "cool"]) == "hvac_mode_writes"
     assert _check("2026-05-20T00:00:00", "2026-05-20T23:59:00", ["cool", "heat"]) is False  # an extra real write
-    assert _check("2026-05-20T00:00:00", "2026-05-20T23:59:00", ["cool", "cool", "heat", "cool"]) is False  # a missing one
+    assert (
+        _check("2026-05-20T00:00:00", "2026-05-20T23:59:00", ["cool", "cool", "heat", "cool"]) is False
+    )  # a missing one
     assert _check("2026-05-20T00:00:00", "2026-05-20T23:59:00", ["heat", "cool", "cool"]) is False  # wrong order
     assert _check("2026-05-20T06:01:00", "2026-05-20T12:29:00", []) == "hvac_mode_writes"  # since is exclusive
     assert _check("2026-05-20T06:00:59", "2026-05-20T12:29:00", []) is False
     assert _check("2026-05-20T12:30:00", "2026-05-20T14:30:00", ["cool"]) == "hvac_mode_writes"  # at is inclusive
+
+
+# ----------------------------------------------- chart-log pred_indoor is null when v3 is neither primary nor shadow
+def test_null_pred_indoor_breaks_no_consumer(tmp_path) -> None:
+    """With v4 primary and no v3 comparison, v3's 4 h archive is not written, so chart-log ``pred_indoor`` is null.
+
+    Occupant view: nothing they see changes except that the (hidden) v3 line has no data. The Prediction accuracy
+    page, the control-quality report, the chart-log hourly aggregation and the chart's past-prediction series all
+    treat null as "no value"."""
+    from custom_components.climate_advisor import prediction_accuracy as pa
+    from custom_components.climate_advisor.control_quality import build_control_quality
+    from tests.test_v4_shadow_endpoint import _NOW, _archive, _rows
+
+    rows = [{**r, "pred_indoor": None} for r in _rows(days=3)]
+    out = pa.build_prediction_accuracy(
+        zone="zoneA",
+        sensor="_ca",
+        lead="4h",
+        range_str="24h",
+        before=None,
+        now=_NOW,
+        unit="fahrenheit",
+        chart_rows=rows,
+        archive=_archive(tmp_path),
+        backtest=None,
+        model={"has_model": True, "confidence": "ok", "fitted_at": "2026-11-06T03:15:00+00:00", "span_days": 3.0},
+        sensors_meta=[{"id": "_ca", "name": "Climate Advisor reading", "role": "the reading Climate Advisor uses"}],
+    )
+    assert out["points"]  # v4's live archive still draws
+    assert all(p.get("v3") is None for p in out["points"])
+
+    cq = build_control_quality(now=_NOW, mode_changes=[], chart_entries=rows)
+    for window in cq["windows"].values():
+        lead = window["prediction_error"]["archive_lead"]
+        assert lead["n"] == 0 and lead["mean_abs_f"] is None

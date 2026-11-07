@@ -4,14 +4,14 @@ Occupant view: on a warm "off" day the thermostat is already cooling at 74 F (th
 primary engine's no-AC forecast (v4) the breach is predicted on every cycle, and the guard used to re-send "cool" plus
 the same setpoint every two hours and, from bedtime, write 74 F under the 72 F sleep band each half hour (the bedroom
 held at 74). The guard now acts only when the thermostat is off, in heat, or cooling ABOVE the ceiling; one rule for v3
-and v4. These are the unit-level twins of ``r6b_warm_off_day_no_redundant_guard_writes__v3/__v4`` (golden drafts) and the
+and v4. These are the unit-level twins of ``r6b_warm_off_day_no_redundant_guard_writes__v3/__v4`` (golden drafts) and
 demoted cards 1-5 (the guard can never be the writer of the 12:30 cool when the band already arms it).
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -100,7 +100,10 @@ def test_observe_only_still_records_what_it_would_have_done_for_an_off_thermosta
     assert fired == [] and not engine.hass.services.async_call.call_args_list  # nothing sent, nothing recorded
 
 
-@pytest.mark.parametrize(("curve", "outcome"), [(_BREACH, OdeCeilingGuardOutcome.ESCALATE), (_CALM, OdeCeilingGuardOutcome.NO_BREACH_PREDICTED)])
+@pytest.mark.parametrize(
+    ("curve", "outcome"),
+    [(_BREACH, OdeCeilingGuardOutcome.ESCALATE), (_CALM, OdeCeilingGuardOutcome.NO_BREACH_PREDICTED)],
+)
 def test_the_guard_reads_whichever_curve_the_decisions_are_handed(curve, outcome) -> None:
     """Primary dependency (demoted cards 1-4): the curve is the only thing that differs between v3 and v4 primary."""
     engine = _make_cg_engine(comfort_cool=74.0, indoor_temp=73.0)
@@ -113,3 +116,45 @@ def test_the_guard_reads_whichever_curve_the_decisions_are_handed(curve, outcome
             predicted_indoor=_make_predicted_indoor(start_hour_utc=10, temps=curve),
         )
     assert decision.ceiling_decision.outcome is outcome
+
+
+# ---------------------------------------------------------------- the duplicate comfort-band write (same tick)
+def _band_engine(mode: str = "cool", setpoint: float = 72.0):
+    engine = _make_cg_engine(comfort_cool=74.0, indoor_temp=73.0)
+    engine.hass.states.get.return_value.state = mode
+    engine.hass.states.get.return_value.attributes["temperature"] = setpoint
+    return engine
+
+
+def _arm_twice(engine, *, gap_s: float = 1.0, between=None):
+    from custom_components.climate_advisor.automation import ComfortBand
+
+    band = ComfortBand(floor=66.0, ceiling=72.0, active="ceiling", reason="sleep band", context="sleep")
+    for i in range(2):
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = _NOW.replace(second=0) + (timedelta(seconds=gap_s) * i)
+            asyncio.run(engine._apply_comfort_band(band, reason="bedtime" if i == 0 else "daily classification"))
+        if i == 0 and between:
+            between()
+    return [c for c in engine.hass.services.async_call.call_args_list if c.args[1] == "set_temperature"]
+
+
+def test_bedtime_band_then_the_same_half_hours_re_arm_is_one_write() -> None:
+    """22:30: bedtime arms the sleep band 72, the classification re-arm a second later is the identical write."""
+    writes = _arm_twice(_band_engine())
+    assert [w.args[2]["temperature"] for w in writes] == [72.0]
+
+
+def test_the_same_band_a_cycle_later_is_still_re_asserted() -> None:
+    """The scheduled re-assertion is deliberate (Issue #590 Finding D): only a same-moment repeat is skipped."""
+    writes = _arm_twice(_band_engine(), gap_s=1800)
+    assert len(writes) == 2
+
+
+def test_a_thermostat_that_no_longer_holds_the_band_is_written_again() -> None:
+    engine = _band_engine()
+
+    def occupant_changes():
+        engine.hass.states.get.return_value.attributes["temperature"] = 75.0
+
+    assert len(_arm_twice(engine, between=occupant_changes)) == 2

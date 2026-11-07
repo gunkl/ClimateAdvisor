@@ -4124,7 +4124,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Offloaded to executor — ODE integration + OLS math blocks the event loop otherwise.
             # Issue #1230 R6 (X5): v3's modelled curve (and its archive below) exist only while v3 is the primary or
             # the shadow; with v4 primary and no v3 comparison nothing reads it and nothing may act on it.
-            if self.engine_running("v3"):
+            if self._v3_curve_wanted():
                 self._last_predicted_indoor = await self._executor_job(
                     functools.partial(
                         _build_predicted_indoor_future,
@@ -6757,7 +6757,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             raise
         except Exception:  # noqa: BLE001 - never crash the cycle
             _LOGGER.warning("Primary prediction for decisions failed; using the schedule estimate", exc_info=True)
-            # Issue #1230 R6 (X2): the decisions never borrow the other engine. With v4 primary a failure anywhere in this
+            # Issue #1230 R6 (X2): the decisions never borrow the other engine. With v4 primary a failure in this
             # step leaves the schedule estimate as the cycle's curve (and no curve at all if even that fails), never
             # v3's modelled curve. ``None`` is v3's own curve and is only ever right while v3 is the primary.
             try:
@@ -6821,6 +6821,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return prediction_engines.is_running(self.config, engine_id)
         except Exception:  # noqa: BLE001 - display/orchestration only
             return engine_id in ("v3", "v4")
+
+    def _v3_curve_wanted(self) -> bool:
+        """Whether v3's modelled curve and 4 h archive are built this cycle: only while v3 is the primary or the shadow
+        (Issue #1230 R6, X5). v3's learning observations are collected regardless. Orchestration only."""
+        return self.engine_running("v3")
 
     def prediction_engines_payload(self) -> dict[str, Any]:
         """The chart payload's engine block: primary/shadow, per-engine status, and the learning/fallback state.
@@ -7638,7 +7643,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Update cached ODE prediction for ceiling guard.
             # thermal_model is already computed from self.learning.get_thermal_model() above.
             # Offloaded to executor — ODE integration + OLS math blocks the event loop otherwise.
-            if self.engine_running("v3"):  # Issue #1230 R6 (X5): see the main cycle's build
+            if self._v3_curve_wanted():  # Issue #1230 R6 (X5): see the main cycle's build
                 self._last_predicted_indoor = await self._executor_job(
                     functools.partial(
                         _build_predicted_indoor_future,

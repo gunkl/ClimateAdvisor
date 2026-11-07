@@ -336,7 +336,9 @@ _SELECTION_COORDINATOR_METHODS = {
     "engine_running",
     "prediction_engines_payload",
     "control_thermal_model",
+    "control_predicted_indoor",
     "_refresh_control_prediction",
+    "_v3_curve_wanted",
 }
 # The control feed: the only coordinator methods that decide which engine's numbers the decisions read.
 _CONTROL_FEED_METHODS = {"control_thermal_model", "control_predicted_indoor", "_refresh_control_prediction"}

@@ -622,5 +622,60 @@
     "sha256": "0376b7a312471b0908f2bb1217061dbef8af99a4980f6a8bc3f9507960c9b3ec",
     "signed": "2026-11-07",
     "issue": 1395
+  },
+  "tou_home_cool_bank_prefer_savings_surfaces_1404": {
+    "sha256": "0645043a024e79d5166acabfa4dead79969f00d4039077c100a0ea1ccd0e1f7e",
+    "signed": "2026-11-07",
+    "issue": 1404
+  },
+  "tou_home_heat_bank_prefer_savings_surfaces_1404": {
+    "sha256": "7cfe4b702e4c252292ae0335c4ebfaaff666951a363853245c44ede1f2a64308",
+    "signed": "2026-11-07",
+    "issue": 1404
+  },
+  "tou_away_heat_bank_surfaces_1404": {
+    "sha256": "cd0471f95ddb8f21f61e05d94b58a059e4500c2a4ad70b2f5466483e776aa68a",
+    "signed": "2026-11-07",
+    "issue": 1404
+  },
+  "tou_vacation_cool_bank_surfaces_1404": {
+    "sha256": "02b34b8bf72087f58a95b5f05ba97f104ff1d3b8ed95d09f0282618e5bd7ba7d",
+    "signed": "2026-11-07",
+    "issue": 1404
+  },
+  "tou_home_cool_bank_ends_on_time_1405": {
+    "sha256": "10c0a81cd6df53124ffbf629f6855ae685bd7c2d13ae558c753c8ed3a39a27a6",
+    "signed": "2026-11-07",
+    "issue": 1405
+  },
+  "tou_home_heat_bank_ends_on_time_1405": {
+    "sha256": "9be7de31068a2076eec6792a62628811b1c890483779df9702fb0ab5a551a34f",
+    "signed": "2026-11-07",
+    "issue": 1405
+  },
+  "tou_away_heat_bank_home_return_1404": {
+    "sha256": "9c287db920afbb7324839e2b9bcf48a701d84c54326480949e4fea47775300af",
+    "signed": "2026-11-07",
+    "issue": 1404
+  },
+  "tou_away_heat_bank_home_return_surfaces_1404": {
+    "sha256": "e8e7b4c60a370f965701a0f75ee3d37e88c2d188efbe016b28639c2f9a3ae014",
+    "signed": "2026-11-07",
+    "issue": 1404
+  },
+  "tou_home_cool_bank_owner_leaves_1404": {
+    "sha256": "fb2eeb23b5edc7a09d5d74c757a3782dc9942ea57c157a8a4e8c025d4609aec3",
+    "signed": "2026-11-07",
+    "issue": 1404
+  },
+  "tou_away_cool_bank_range_thermostat_1404": {
+    "sha256": "e75e9826f09ce5533540844ed26dfc24f81f659e0f371a3fc883a581df0a276d",
+    "signed": "2026-11-07",
+    "issue": 1404
+  },
+  "tou_away_cool_widened_period_steady_1404": {
+    "sha256": "da47dad92f3ae897708c009aa1c125a1e218bd03cd104a45ca6a24552b1447c5",
+    "signed": "2026-11-07",
+    "issue": 1404
   }
 }

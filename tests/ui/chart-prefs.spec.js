@@ -162,8 +162,8 @@ test.describe('Status chart: the "Past v4 lines" row', () => {
     await expect(b4).toHaveText('4 h earlier');
     await expect(b4).toHaveAttribute('title', /4 h earlier/);
     await expect(b4).toBeEnabled();
-    // a look-back with no archived predictions says so in words
-    await expect(row.locator('[data-lead="12h"]')).toHaveText('12 h earlier (none yet)');
+    // a look-back with no archived predictions in the view says so in words (0.9.6 Lane F: "in view", not "yet")
+    await expect(row.locator('[data-lead="12h"]')).toHaveText('12 h earlier (none in view)');
     await expect(row.locator('[data-lead="12h"]')).toBeDisabled();
     await row.locator('[data-lead="1h"]').click();
     await expect(row.locator('[data-lead="1h"]')).toHaveAttribute('aria-pressed', 'true');
@@ -176,9 +176,11 @@ test.describe('Status chart: the "Past v4 lines" row', () => {
     await expect(row.locator('[data-lead]')).toHaveCount(0);
   });
 
-  test('v4 not ready: the row says there is nothing to show yet', async ({ page }) => {
+  test('v4 not ready: no v4 chips and no row; one line says v4 is still learning the sensors', async ({ page }) => {
     await open(page, { ready: false });
-    await expect(page.locator('#chart-lead-row #chart-lead-help')).toHaveText('v4 has no past predictions to show yet');
+    await expect(page.locator('#chart-lead-row')).toHaveCount(0);
+    await expect(page.locator('#chart-key-body [data-series^="v4:"]')).toHaveCount(0);
+    await expect(page.locator('#chart-v4-learning')).toHaveText('v4 is still learning: Living room, Bedroom');
   });
 });
 

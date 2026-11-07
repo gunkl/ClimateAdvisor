@@ -15,6 +15,7 @@ import hashlib
 import logging
 import math
 import statistics
+import threading
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -391,6 +392,7 @@ from .scheduler import (
 )
 from .setpoint_combinations import vacation_edges
 from .state import StatePersistence
+from .storage_paths import resolve_entry_scoped_path, split_shared_list_file
 from .swing import (
     build_swing_audit_record,
     coast_feed,
@@ -449,6 +451,9 @@ from .whf_safety_decision import (
 
 _LOGGER = logging.getLogger(__name__)
 _V4_FIT_LOCK_KEY = "climate_advisor_v4_fit_lock"  # hass.data key of the domain-wide v4 fit lock (Issue #1230 R1b, M5)
+# Issue #1415: the one-time split of the old shared investigation-reports file runs in executor threads; two zones
+# starting at once must not split it twice (each would copy, one would remove it under the other).
+_INVESTIGATION_MIGRATION_LOCK = threading.Lock()
 
 # Issue #1020: (role label, entity config key, source config key or None). A role with a
 # source key is only checked when that source reads the entity's state (sensor/input_number).
@@ -521,6 +526,8 @@ _ONTOLOGY_TIME_EXCEPTIONS: Final[set[str]] = set()
 # ``indoor_primary`` (Issue #1234, hvac_action_change rows only): no frontend or post-conversion
 # reader uses it (tools/thermal_replay.py reads the raw file), so it is converted like any
 # display-facing temperature and a Celsius state_log never carries a stray F value.
+# ``hold_lower``/``hold_upper`` (Issue #1406): the past band the frontend draws straight from state_log during a
+# time-of-use bank, so converted like ``lower``/``upper``.
 _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
     "pred_outdoor",
     "pred_indoor",
@@ -528,6 +535,8 @@ _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
     "pred_indoor_avg",
     "lower",
     "upper",
+    "hold_lower",
+    "hold_upper",
     "indoor_primary",
 )
 # Issue #1230 R0: chart-log keys that get_chart_data() deliberately REMOVES from ``state_log``. ``indoor_sensors`` is a
@@ -854,6 +863,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1066 (review fix 1): sticky key of the TOU precondition window last pushed to the engine
         # (schedule_id, schedule_start, mode, away/vacation class). Not persisted: cleared on restart.
         self._tou_precondition_sticky: tuple[Any, ...] | None = None
+        # Issue #1410 (C23): the Away/Vacation split resolved when its bank window opened, reused (same target and
+        # widening) until the period ends or the occupancy, schedule, setback edge or thermostat step changes. Not
+        # persisted (no TOU state is): the first cycle after a restart re-derives it once and freezes that.
+        self._tou_av_frozen: Any = None
         self._tou_active_cost_resolution: Any = None
         # Phase 3d (Investigation D): dedup guard for the tou_schedule_window_active
         # Activity Record event — True while a resolved high-cost schedule window
@@ -2124,7 +2137,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1356: investigation reports are their own file, not part of the state file, so they load on
         # every restore -- including the one with no state file at all (before the `if not state` return).
         if self.claude_client:
-            await self._executor_job(self._load_investigation_reports)
+            await self.async_load_investigation_reports()
 
         if not state:
             _LOGGER.debug("No persisted state found — starting fresh")
@@ -2671,13 +2684,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ]
         return len(self._investigation_report_history) < before
 
+    def _investigation_reports_path(self) -> Path:
+        """This zone's own investigation-history file (Issue #1415; the unscoped name only with no entry id)."""
+        return resolve_entry_scoped_path(Path(self.hass.config.config_dir), INVESTIGATION_REPORTS_FILE, self._entry_id)
+
     def _save_investigation_reports(self) -> None:
-        """Save investigation report history to disk (atomic write)."""
+        """Save this zone's investigation report history to its own file (atomic write).
+
+        Issue #1415: per zone, so one zone's save can never erase another zone's reports.
+        """
         import json
         import os
         import sys
 
-        filepath = self.hass.config.path(INVESTIGATION_REPORTS_FILE)
+        filepath = str(self._investigation_reports_path())
         tmp_path = filepath + ".tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -2692,11 +2712,45 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             with contextlib.suppress(OSError):
                 os.remove(tmp_path)
 
-    def _load_investigation_reports(self) -> None:
-        """Load investigation report history from disk."""
+    def _all_zone_entry_ids(self) -> tuple[list[str], bool]:
+        """Every configured zone's entry id (this one first) and whether that list is complete.
+
+        Event-loop only (reads the config-entries registry). Used to split the old shared reports file.
+        """
+        own = self._entry_id
+        try:
+            others = [e.entry_id for e in self.hass.config_entries.async_entries(DOMAIN)]
+        except Exception:  # noqa: BLE001 - registry unavailable: migrate this zone only, keep the shared file
+            _LOGGER.debug("Zone list unavailable; investigation reports migrate for this zone only")
+            return [own], False
+        ids = [own] + [e for e in others if isinstance(e, str) and e and e != own]
+        return ids, True
+
+    async def async_load_investigation_reports(self) -> None:
+        """Load this zone's investigation history, splitting the old shared file first if it is still there."""
+        zone_ids, complete = self._all_zone_entry_ids() if self._entry_id else ([], False)
+        await self._executor_job(self._load_investigation_reports, zone_ids, complete)
+
+    def _load_investigation_reports(self, zone_ids: list[str] | None = None, all_zones_known: bool = False) -> None:
+        """Load this zone's investigation report history from disk (blocking).
+
+        Issue #1415: with an entry id, the pre-fix shared file is first split into every zone's own file (one
+        time, under a process-wide lock; see ``storage_paths.split_shared_list_file``).
+        """
         import json
 
-        filepath = self.hass.config.path(INVESTIGATION_REPORTS_FILE)
+        if self._entry_id:
+            try:
+                with _INVESTIGATION_MIGRATION_LOCK:
+                    split_shared_list_file(
+                        Path(self.hass.config.config_dir),
+                        INVESTIGATION_REPORTS_FILE,
+                        list(zone_ids or [self._entry_id]),
+                        all_zones_known=all_zones_known,
+                    )
+            except Exception:  # noqa: BLE001 - a failed split must not stop this zone loading its own file
+                _LOGGER.exception("Failed to split the shared investigation reports file")
+        filepath = self._investigation_reports_path()
         try:
             with open(filepath, encoding="utf-8") as f:
                 data = json.load(f)
@@ -3140,7 +3194,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.automation_engine._get_fan_runtime_minutes() if self.automation_engine else 0.0
             )
             self._tou_av_cycle_schedule_id = resolution.schedule_id if resolution else None
-            self._tou_av_cycle_capped_delta = 2.0 * (resolution.expansion_f or 0.0) if resolution else None
+            self._tou_av_cycle_capped_delta = self._tou_av_split_delta(resolution)
         elif not window_active and _was_active:
             self._flush_hvac_runtime()
             _end_hvac = self._today_record.hvac_runtime_minutes if self._today_record else 0.0
@@ -3700,15 +3754,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #1107: judged against the target range in effect (sleep/away
             # setbacks included), not the static awake comfort range.
             if self._today_record:
-                comfort_low, comfort_high = self._comfort_score_band_now()
                 now = dt_util.now()
+                # Issue #1407 (C22): in a bank, outside BOTH the hold and the schedule band; else the band in effect.
+                bands = self._comfort_score_bank_bands(now) or (self._comfort_score_band_now(),)
                 if self._last_violation_check is not None:
                     elapsed_minutes = min((now - self._last_violation_check).total_seconds() / 60, 30.0)
                 else:
                     elapsed_minutes = 30.0
                 self._last_violation_check = now
-                if (indoor < comfort_low or indoor > comfort_high) and not self._is_tolerated_comfort_deviation(
-                    indoor, comfort_low, comfort_high
+                if all(
+                    (indoor < low or indoor > high) and not self._is_tolerated_comfort_deviation(indoor, low, high)
+                    for low, high in bands
                 ):
                     self._today_record.comfort_violations_minutes += elapsed_minutes
 
@@ -8054,6 +8110,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         raw_schedules = self.config.get("schedules") or []
         if not raw_schedules or self._current_classification is None:
             self._tou_phase_resolution = None
+            self._tou_av_frozen = None
             self._tou_active_cost_resolution = None
             self._tou_active_window_notified = False
             self._sync_tou_away_vacation_state()
@@ -8069,6 +8126,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
             # Issue #899: split-delta precool/preheat + temporary band expansion, instead
             # of resolve_tou_phase()'s Home/Guest "bank to the comfort-band edge" behavior.
+            # Issue #1410 (C23): on the thermostat's step, frozen for the window.
             self._tou_phase_resolution = resolve_tou_away_vacation_phase(
                 schedules,
                 now,
@@ -8078,8 +8136,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 thermal_model,
                 self.config,
                 self._occupancy_mode,
+                target_temp_step=self._thermostat_target_temp_step(),
+                frozen=getattr(self, "_tou_av_frozen", None),
             )
+            self._freeze_tou_av_split(self._tou_phase_resolution, now)
         else:
+            self._tou_av_frozen = None  # Issue #1410: an occupancy change ends the frozen Away/Vacation split
             self._tou_phase_resolution = resolve_tou_phase(
                 schedules,
                 now,
@@ -8090,6 +8152,58 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         self._sync_tou_away_vacation_state()
         self._maybe_emit_tou_active_window_event()
+
+    def _thermostat_target_temp_step(self) -> Any:
+        """The thermostat's advertised ``target_temp_step`` (raw; None when it advertises none or is unreadable)."""
+        try:
+            cs = self.hass.states.get(self.config.get("climate_entity", ""))
+        except Exception:  # noqa: BLE001 - an unreadable state means "unknown step" (whole degree)
+            return None
+        attrs = getattr(cs, "attributes", None)
+        return attrs.get("target_temp_step") if isinstance(attrs, dict) else None
+
+    @staticmethod
+    def _tou_av_split_delta(res: Any) -> float | None:
+        """The split the thermostat is told, depth + widening (Issue #1410: both on the step, so no longer exactly
+        2 x ``expansion_f``); the setback edge is ``split_key[5]``. Falls back to 2 x ``expansion_f``."""
+        if res is None:
+            return None
+        key = getattr(res, "split_key", None)
+        if isinstance(key, tuple) and res.target is not None:
+            return round(abs(float(res.target) - float(key[5])) + float(res.expansion_f or 0.0), 4)
+        return 2.0 * (res.expansion_f or 0.0)
+
+    def _freeze_tou_av_split(self, res: Any, now: datetime) -> None:
+        """Keep the Away/Vacation split once its bank window opens (Issue #1410, decision C23).
+
+        Occupant view: the empty house is told one bank value for the whole pre-cool/pre-heat and one widened edge
+        for the whole high-cost period, not a value that creeps every cycle as the indoor reading moves. Freezes the
+        first resolution with ``precondition_start <= now < window_end``; ``resolve_tou_away_vacation_phase()``
+        reuses it while its ``split_key`` matches (same schedule, window, mode, occupancy, setback edge, step and
+        unit). Outside a window, or when the key changes, the freeze is dropped and the next window re-derives.
+        """
+        key = getattr(res, "split_key", None)
+        if res is None or not isinstance(key, tuple) or res.precondition_start is None or res.window_end is None:
+            self._tou_av_frozen = None
+            return
+        try:
+            in_window = res.precondition_start <= now < res.window_end
+        except TypeError:  # naive vs aware mix: do not freeze
+            in_window = False
+        if not in_window:
+            self._tou_av_frozen = None
+            return
+        if res.frozen is True:
+            return
+        self._tou_av_frozen = res
+        _LOGGER.info(
+            "Away/vacation TOU split frozen for window (schedule=%s, mode=%s): target %s, widening %s until %s",
+            res.schedule_id,
+            res.mode,
+            res.target,
+            res.expansion_f,
+            res.window_end,
+        )
 
     def _maybe_emit_tou_active_window_event(self) -> None:
         """Investigation D / Phase 3d: a configured TOU schedule can silently do nothing
@@ -8863,21 +8977,52 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         schedule = getattr(self, "_target_band_schedule", None)
         if not schedule:
             return None, None
-        now = dt_util.now()
-        best: tuple[datetime, dict] | None = None
-        for entry in schedule:
-            ts_str = entry.get("ts")
-            if not ts_str:
-                continue
-            try:
-                ts_dt = datetime.fromisoformat(ts_str)
-                ts_dt = dt_util.as_local(ts_dt) if ts_dt.tzinfo else ts_dt
-            except ValueError, TypeError:
-                continue
-            if ts_dt <= now and (best is None or ts_dt > best[0]):
-                best = (ts_dt, entry)
-        chosen = best[1] if best is not None else schedule[0]
+        chosen = _band_entry_at(schedule, dt_util.now())
         return chosen.get("lower"), chosen.get("upper")
+
+    def _chart_hold_lower_upper_now(self) -> tuple[float | None, float | None]:
+        """The band the chart DRAWS for the current instant (Issue #1406), internal F, or ``(None, None)``.
+
+        Occupant view: during an Away cool bank to 77 F in a 60-80 F band the live chart draws 60-77 (what the
+        thermostat holds), while ``_target_band_lower_upper_now()`` (the band SCHEDULE that chart_log's
+        ``lower``/``upper`` persist for the replay tools, the prediction and the comfort score) keeps 77-80. This is the
+        live chart's own function, ``_chart_display_band()``, run on this cycle's cached schedule
+        (``_target_band_schedule``) with the same thermal model the cycle built it with, and read at the same bucket
+        (``_band_entry_at``) as ``_target_band_lower_upper_now()``, so a row's hold is what the live chart drew for
+        it: the bank as the hold while it owns the thermostat, the schedule band while it is deferred, the
+        Away/Vacation period widened. DISPLAY ONLY: no decision reads it. Never raises (a chart row must never fail).
+        """
+        schedule = getattr(self, "_target_band_schedule", None)
+        if not schedule:
+            return None, None
+        try:
+            now = dt_util.now()
+            engine = getattr(self, "automation_engine", None)
+            thermal_model = self.control_thermal_model(engine._thermal_model if engine else None)
+            display = self._chart_display_band(now, thermal_model, raw_band=list(schedule))
+            if not display:
+                return None, None
+            chosen = _band_entry_at(display, now)
+            return chosen.get("lower"), chosen.get("upper")
+        except Exception:  # noqa: BLE001 - a display read must never break a chart row
+            _LOGGER.debug("chart_log: hold band unavailable", exc_info=True)
+            return None, None
+
+    def _read_chart_hold(self) -> dict[str, float]:
+        """chart_log's ``hold_lower``/``hold_upper`` for this row (Issue #1406), or {} when the chart draws the band
+        schedule itself (``lower``/``upper``), so ordinary rows stay as small as before. See
+        ``_chart_hold_lower_upper_now()``. Equal within 0.05 F (the display band rounds a bank hour to 1 dp) counts as
+        the same band; the pair is stored to 2 dp (at most ~42 bytes a row, the chart-log size budget)."""
+        lower, upper = self._target_band_lower_upper_now()
+        hold_lower, hold_upper = self._chart_hold_lower_upper_now()
+        if lower is None or upper is None or hold_lower is None or hold_upper is None:
+            return {}
+        try:
+            if abs(float(hold_lower) - float(lower)) < 0.05 and abs(float(hold_upper) - float(upper)) < 0.05:
+                return {}
+            return {"hold_lower": round(float(hold_lower), 2), "hold_upper": round(float(hold_upper), 2)}
+        except TypeError, ValueError:
+            return {}
 
     def _fan_cycling_target_now(self) -> float:
         """This cycle's real nat-vent-style thermostatic cycling target — the same
@@ -11468,7 +11613,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             fan_on=self._get_fan_physical_state(),
             contacts_open=contacts,
             automation_enabled=bool(self._automation_enabled),
+            occupancy=self._promise_occupancy(),
         )
+
+    def _promise_occupancy(self) -> str | None:
+        """The occupancy mode Climate Advisor acts on now, for the comfort-kept promise (Issues #1411/#1412).
+
+        The engine's mode (what the setpoint-writing handlers use; the coordinator sets it first), else the
+        coordinator's own; None when neither is known.
+        """
+        mode = getattr(getattr(self, "automation_engine", None), "_occupancy_mode", None)
+        if not isinstance(mode, str):
+            mode = getattr(self, "_occupancy_mode", None)
+        return mode if isinstance(mode, str) and mode else None
 
     def _record_promise_reading(self) -> None:
         try:
@@ -14849,6 +15006,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         return float(lower), float(upper)
 
+    def _comfort_score_bank_bands(self, now: datetime | None = None) -> tuple[tuple[float, float], ...] | None:
+        """The ranges the Comfort Score judges against while a time-of-use bank owns the thermostat (Issue #1407).
+
+        Decision C22 (reversible): ``(hold, schedule band)``, and a minute counts only when indoor is outside BOTH
+        (and past the thermostat's swing for each). The hold is what the thermostat is told (``tou_bank_band()``:
+        pre-cool [min(floor, target), target], pre-heat [target, max(ceiling, target)]); the schedule band is the
+        home / sleep / Away / Vacation band (``AutomationEngine._resolved_comfort_band()``). Occupant: a pre-cool
+        pulling the house from 74 F toward 68 F is inside the 68-76 F comfort range, so the person is comfortable and
+        those minutes must not feed the ``comfort_violations`` suggestion; a house outside both is a real miss. The
+        cached chart band keeps the #786 shape for a bank (the target on the opposite edge: an Away pre-heat to 63 F
+        reads 60-63), which counted a house above an Away pre-heat target as uncomfortable.
+
+        Reads the CONTROL source ``_tou_bank_in_force()`` (never the display resolver). None outside a bank (a
+        deferred bank included) or on any fault: the caller keeps ``_comfort_score_band_now()``. Score only.
+        """
+        try:
+            res = self._tou_bank_in_force(now if now is not None else dt_util.now())
+            c = getattr(self, "_current_classification", None)
+            ae = self.automation_engine
+            if res is None or c is None or ae is None:
+                return None
+            schedule = ae._resolved_comfort_band(c)
+            hold = tou_bank_band(schedule, float(res.target), str(res.mode))
+            return (float(hold.floor), float(hold.ceiling)), (float(schedule.floor), float(schedule.ceiling))
+        except Exception:  # noqa: BLE001 - a score read must never break the update cycle
+            _LOGGER.debug("Comfort Score bank bands unavailable; using the cached band", exc_info=True)
+            return None
+
     def _is_nat_vent_tolerated_deviation(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
         """True if this comfort-band deviation is expected nat-vent cycling tolerance, not a violation.
 
@@ -15332,12 +15517,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return hvac_action
 
     def _read_chart_context(self) -> dict[str, Any]:
-        """Per-row context for chart_log (Issue #1230 R2): occupancy mode, override/grace flag, the comfort sensor.
+        """Per-row context for chart_log (Issue #1230 R2): occupancy mode, override/grace flag, the comfort sensor, and
+        (Issue #1406) the drawn hold ``hold_lower``/``hold_upper`` when it differs from the band schedule.
 
         ``occupancy`` draws the Away / Vacation strip, ``override`` the Override / grace strip, ``band_sensor`` names
         the sensor the Target Band applied to on that row. Read only; never raises into a chart row.
         """
         out: dict[str, Any] = {}
+        # Issue #1406: the band the chart drew on this row, when it differs from the band schedule (lower/upper).
+        out.update(self._read_chart_hold())
         try:
             mode = getattr(self, "_occupancy_mode", None)
             if isinstance(mode, str) and mode:
@@ -18982,6 +19170,28 @@ def _extract_historical_setpoint(log_entries: list[dict]) -> list[dict]:
     return result
 
 
+def _band_entry_at(schedule: list[dict], now: datetime) -> dict:
+    """The band-schedule entry in force at ``now``: the latest ``ts`` at or before ``now``, else the first entry.
+
+    Shared by ``_target_band_lower_upper_now()`` (chart_log ``lower``/``upper``) and
+    ``_chart_hold_lower_upper_now()`` (``hold_lower``/``hold_upper``, Issue #1406) so both read the same bucket.
+    ``schedule`` must be non-empty.
+    """
+    best: tuple[datetime, dict] | None = None
+    for entry in schedule:
+        ts_str = entry.get("ts")
+        if not ts_str:
+            continue
+        try:
+            ts_dt = datetime.fromisoformat(ts_str)
+            ts_dt = dt_util.as_local(ts_dt) if ts_dt.tzinfo else ts_dt
+        except ValueError, TypeError:
+            continue
+        if ts_dt <= now and (best is None or ts_dt > best[0]):
+            best = (ts_dt, entry)
+    return best[1] if best is not None else schedule[0]
+
+
 def _extract_historical_target_band(log_entries: list[dict]) -> list[dict]:
     """Extract {ts, lower, upper} pairs from state_log entries (Issue #514).
 
@@ -18991,13 +19201,20 @@ def _extract_historical_target_band(log_entries: list[dict]) -> list[dict]:
     keys at all (old ``chart_log`` schema); ``.get()`` returns ``None`` for those the
     same way it already does for setpoint on entries predating that field, requiring
     no separate "is this an old entry" branch.
+
+    Issue #1406: a row (raw or bucketed) that carries ``hold_lower``/``hold_upper`` is drawn as that hold, the band
+    the live chart drew at that time (a time-of-use bank as what the thermostat held); rows without the pair (every
+    row before 0.9.6, and every row where the chart drew the band schedule) keep ``lower``/``upper``.
     """
     result = []
     for e in log_entries:
         ts = e.get("ts")
         if not ts:
             continue
-        result.append({"ts": ts, "lower": e.get("lower"), "upper": e.get("upper")})
+        if e.get("hold_lower") is not None and e.get("hold_upper") is not None:
+            result.append({"ts": ts, "lower": e["hold_lower"], "upper": e["hold_upper"]})
+        else:
+            result.append({"ts": ts, "lower": e.get("lower"), "upper": e.get("upper")})
     return result
 
 

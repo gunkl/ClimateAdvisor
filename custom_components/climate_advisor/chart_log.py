@@ -78,6 +78,29 @@ def _bucket_indoor_sensors(group: list[dict[str, Any]]) -> dict[str, float | Non
     return {k: (round(sum(v) / len(v), 2) if v else None) for k, v in vals.items()}
 
 
+def _bucket_hold(group: list[dict[str, Any]]) -> dict[str, float]:
+    """The bucket's ``hold_lower``/``hold_upper`` (Issue #1406), or {} when no row in it carried them.
+
+    Same rule as ``lower``/``upper`` (the mean of the rows, 1 dp), with each row contributing the band the chart drew
+    for it: its hold when it has one, else its ``lower``/``upper`` (on those rows the hold IS the band schedule). So an
+    hour or a day that is part bank and part not averages the drawn band, never the hold rows alone. Buckets without
+    any hold row get no keys (the ``comfort_target`` precedent), and the chart draws their ``lower``/``upper``.
+    """
+    if not any(e.get("hold_lower") is not None and e.get("hold_upper") is not None for e in group):
+        return {}
+    out: dict[str, float] = {}
+    for key, base in (("hold_lower", "lower"), ("hold_upper", "upper")):
+        vals = []
+        for e in group:
+            has_hold = e.get("hold_lower") is not None and e.get("hold_upper") is not None
+            v = e.get(key) if has_hold else e.get(base)
+            if v is not None:
+                vals.append(v)
+        if vals:
+            out[key] = round(sum(vals) / len(vals), 1)
+    return out if len(out) == 2 else {}
+
+
 def _bucket_context(group: list[dict[str, Any]]) -> dict[str, Any]:
     """Bucket the Issue #1230 R2 context fields: dominant occupancy and band_sensor, override if any row had it.
 
@@ -203,6 +226,8 @@ class ChartStateLog:
         occupancy: str | None = None,
         override: bool | None = None,
         band_sensor: str | None = None,
+        hold_lower: float | None = None,
+        hold_upper: float | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
 
@@ -238,6 +263,12 @@ class ChartStateLog:
             when True, so ordinary rows stay as small as before; absent means "no override".
         band_sensor: entity id of the sensor Climate Advisor was reading for comfort on this row, i.e. the sensor the
             Target Band applied to (the bedroom sensor in the sleep window; Issue #1230 R2). Written when known.
+        hold_lower/hold_upper: the band the chart DREW at this instant when it differs from ``lower``/``upper``
+            (Issue #1406): a time-of-use bank drawn as the hold the thermostat is told (an Away cool bank to 77 F in a
+            60-80 F band: 60-77, where ``lower``/``upper`` keep the band schedule's 77-80), the schedule band while a
+            bank is deferred, the Away/Vacation period widened. Display only; the caller passes the pair only when it
+            differs, and it is written only as a pair, so ordinary rows and older logs are unchanged and
+            ``lower``/``upper`` keep their meaning for the replay tools.
         nat_vent_target: the real thermostatic target the nat-vent fan was cycling
             around this cycle (Phase 3a), computed via
             ``nat_vent_cycling.compute_nat_vent_target()`` — only meaningful (non-None)
@@ -279,6 +310,9 @@ class ChartStateLog:
             entry["override"] = True
         if band_sensor is not None:
             entry["band_sensor"] = band_sensor
+        if hold_lower is not None and hold_upper is not None:
+            entry["hold_lower"] = hold_lower
+            entry["hold_upper"] = hold_upper
 
         self._entries.append(entry)
         self._maybe_prune()
@@ -439,6 +473,7 @@ class ChartStateLog:
                 summary["comfort_target"] = comfort_target
             if indoor_sensors is not None:
                 summary["indoor_sensors"] = indoor_sensors
+            summary.update(_bucket_hold(group))
             summary.update(_bucket_context(group))
             if events:
                 summary["event"] = events
@@ -504,6 +539,7 @@ class ChartStateLog:
                 summary["comfort_target"] = comfort_target
             if indoor_sensors is not None:
                 summary["indoor_sensors"] = indoor_sensors
+            summary.update(_bucket_hold(group))
             summary.update(_bucket_context(group))
             if events:
                 summary["events"] = events

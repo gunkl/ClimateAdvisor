@@ -9,16 +9,6 @@
     },
     "issue_882_sealed_house_whf_override": {
       "blind_fan_continue": 1
-    },
-    "tou_away_heat_bank_home_return_1404": {
-      "comfort_kept": 1
-    },
-    "tou_away_heat_bank_home_return_surfaces_1404": {
-      "comfort_kept": 1
     }
-  },
-  "_reasons": {
-    "tou_away_heat_bank_home_return_1404": "P7 false positive (#1411, #1412): the Away hours are judged against the home floor because the run's journal carries no occupancy_setback mark (Away set before the first classification), plus a second cause not yet found; the recovery after arrival is excluded as heating; identical on 6ebdb16. Owner, 0.9.5: \"file a separate ticket and push the release out with the known issue, ignore it for now\". REMOVE these rows when #1411 and #1412 are fixed.",
-    "tou_away_heat_bank_home_return_surfaces_1404": "P7 false positive (#1411, #1412): the Away hours are judged against the home floor because the run's journal carries no occupancy_setback mark (Away set before the first classification), plus a second cause not yet found; the recovery after arrival is excluded as heating; identical on 6ebdb16. Owner, 0.9.5: \"file a separate ticket and push the release out with the known issue, ignore it for now\". REMOVE these rows when #1411 and #1412 are fixed."
   }
 }

@@ -111,7 +111,7 @@ test.describe('Temperature Forecast Chart', () => {
     expect(Math.abs(axisMax - (now + 24 * 3600000))).toBeLessThan(2 * 60 * 1000);
   });
 
-  test('hover panel clears when mouse leaves chart', async ({ page }) => {
+  test('hover panel returns to NOW when mouse leaves chart', async ({ page }) => {
     const canvas = page.locator('#temp-chart');
     const box = await canvas.boundingBox();
 
@@ -136,9 +136,11 @@ test.describe('Temperature Forecast Chart', () => {
     });
     await page.waitForTimeout(300);
 
+    // Issue #1408: off the chart the readout is not blank; it shows the values at NOW.
     const panel = page.locator('#chart-hover-panel');
-    const html = await panel.innerHTML();
-    expect(html.trim()).toBe('');
+    await expect(panel).toHaveAttribute('data-mode', 'rest');
+    await expect(panel.locator('.chp-time')).toHaveText(/^Now · /);
+    expect(await panel.innerHTML()).toContain('Indoor');
   });
 
   test('activity timeline renders at least one strip row below the chart', async ({ page }) => {

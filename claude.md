@@ -107,15 +107,21 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 
 **Allowed scope:**
 - Files inside `custom_components/climate_advisor/` (the integration itself)
-- HA service calls to `climate` domain (set_hvac_mode, set_temperature) — these are the integration's core purpose
-- HA service calls to `notify` domain — user-configured notification service
-- One data file: `climate_advisor_learning.json` in the HA config root (learning engine state)
+- HA service calls to the `climate` domain on each zone's configured thermostat: `set_hvac_mode`, `set_temperature`, `set_fan_mode` — these are the integration's core purpose
+- HA service calls to the `notify` domain — the user-configured notification service, plus `notify.send_email` for the email briefing
+- `turn_on` / `turn_off` on each zone's configured whole-house fan entity (`CONF_FAN_ENTITY`: the `fan.*` or `switch.*` entity chosen in setup) — no other service on it, and no other fan or switch entity
+- `weather.get_forecasts` (read-only) on each zone's configured weather entity
+- Data files in the HA config root, and only these:
+  - the per-zone files whose base names are listed in `const.py` `ENTRY_SCOPED_FILES`, the single source of truth (today: state, chart log, learning DB, forecast archive, v4 archive, v4 backtest, v4 model, AI investigation history). Each is stored per zone as `<stem>_<entry_id>.json` and deleted when the zone is deleted; `tests/test_zone_removal_cleanup.py` fails if the package writes a per-zone file that is not listed. The v4 backtest file is read-only to the integration (`tools/predict_backtest.py --publish` writes it)
+  - the old one-per-install `climate_advisor_investigation_reports.json` (`INVESTIGATION_REPORTS_FILE`), only until it is split once into every zone's own copy and removed (Issue #1415)
+  - the short-lived temp files the atomic writes of those files create and rename into place
+- Approved exceptions logged in `docs/HA-BOUNDARY-EXCEPTIONS.md` (today: the dev-only test integrations, which Climate Advisor's own code never touches)
 
 **Everything else is OUT OF SCOPE.** This includes but is not limited to:
 - Modifying other integrations or their config
 - Writing to `configuration.yaml`, `automations.yaml`, `scripts.yaml`, or any other HA config file
-- Calling HA services outside `climate` and `notify` (e.g., `homeassistant.restart`, `input_boolean.turn_on`)
-- Creating files outside the integration directory (except the learning DB above)
+- Calling any HA service not listed above (e.g., `homeassistant.restart`, `input_boolean.turn_on`), or any service on an entity other than the configured thermostat, fan and weather entities
+- Creating files outside the integration directory other than the data files listed above. A new per-zone data file is added to `ENTRY_SCOPED_FILES`; any other new file in the config root is a boundary change and goes through the violation protocol below
 - Modifying HA add-on configurations
 - Deploying files outside `/config/custom_components/climate_advisor/` on the remote server
 

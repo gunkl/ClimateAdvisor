@@ -1,17 +1,17 @@
-"""No surface or decision reads the operation timeline in R3a (Issue #1230, structural guard).
+"""Who may read the operation timeline, and what the code that builds it may touch (Issue #1230, structural guard).
 
-Occupant view: R3a builds the timeline and proves it against history, but the house is still run, and the Status card,
-Next Action, briefing and chart still computed, by the code that exists today. If any of those started reading the
-shadow timeline before R3b's replay-backed switch-over, a plan nobody has accepted yet would reach the occupant. This is
-checked on the source (AST), like ``test_v4_shadow_structural``, so an edit that wires it in fails here first.
+Occupant view: since R3b the card that says "Open windows at 10:00 AM", the Next Automation card, the briefing's steps
+and the Analysis tomorrow column all read ONE timeline; in R3a (shadow) none of them did. The guard changed with the
+job. It is checked on the source (AST), like ``test_v4_shadow_structural``:
 
-Allowed to mention the timeline:
-
-* ``operation_timeline.py`` itself, which imports only the pure rule modules it must agree with (never the engine,
-  classifier, briefing, coordinator or Home Assistant);
-* ``coordinator.py``, only in the ``_timeline_*`` shadow methods, ``timeline_debug``, and five fixed wiring points that
-  call in as a discarded statement: the constructor, the update cycle, the occupancy-change handler, the 5-minute tick,
-  ``_emit_event`` (marks the plan stale) and the debug payload (one output-only key).
+* the timeline is READ only by the pure modules ``operation_timeline.py`` (builder) and ``timeline_surfaces.py`` (the
+  surfaces' rules), and wired by ``coordinator.py`` (build + the surface readers), ``briefing.py`` (a ``timeline``
+  argument, through ``timeline_surfaces`` only) and ``api.py`` (the REST view, through
+  ``coordinator.timeline_payload``);
+  no other module mentions it, so no decision (automation, classifier, learning) can start depending on it;
+* the pure modules import no engine, classifier, briefing, coordinator or Home Assistant code;
+* the coordinator methods that BUILD the timeline write only ``self._timeline_*`` and command nothing;
+* the same-snapshot agreement of the surfaces is the invariant test (``tests/test_timeline_surface_invariants.py``).
 """
 
 from __future__ import annotations
@@ -38,7 +38,16 @@ _WIRING = {
     "get_debug_state": "debug",
 }
 
-_ALLOWED_IMPORTS_OF_TIMELINE = {"operation_timeline"}
+# night_strategy.py is the contract's pure advisory transformer (apply_night_strategy -> Timeline, R4); it imports no
+# engine, coordinator, api or HA code (test_advisory_modules_command_nothing) and commands nothing.
+_READERS = {
+    "operation_timeline.py",
+    "timeline_surfaces.py",
+    "coordinator.py",
+    "briefing.py",
+    "api.py",
+    "night_strategy.py",
+}
 _FORBIDDEN_IMPORTS = {
     "automation",
     "classifier",
@@ -132,41 +141,71 @@ def _method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
 def test_no_other_module_mentions_the_timeline() -> None:
     offenders = []
     for path in sorted(_PKG.glob("*.py")):
-        # night_strategy.py is the contract's pure advisory transformer (apply_night_strategy -> Timeline, R4): it
-        # imports no engine, coordinator, api or HA code (test_advisory_modules_command_nothing); commands nothing.
-        if path.name in {"operation_timeline.py", "coordinator.py", "night_strategy.py"}:
+        if path.name in _READERS:
             continue
         for node, name, where in _references(_tree(path)):
             offenders.append(f"{path.name}:{getattr(node, 'lineno', '?')} {name} in {'.'.join(where) or '<module>'}")
-    assert offenders == [], "a module outside the shadow wiring references the operation timeline:\n" + "\n".join(
+    assert offenders == [], "a module outside the timeline's readers references the operation timeline:\n" + "\n".join(
         offenders
     )
 
 
-def test_the_timeline_module_imports_only_pure_rule_modules() -> None:
+def test_the_timeline_modules_import_only_pure_rule_modules() -> None:
     offenders = []
-    for node in ast.walk(_tree(_PKG / "operation_timeline.py")):
-        if isinstance(node, ast.ImportFrom):
-            if node.level == 0 and (node.module or "").split(".")[0] == "homeassistant":
-                offenders.append(f"homeassistant import: {node.module}")
-            if node.level == 1:
-                mods = {node.module} if node.module else {a.name for a in node.names}
-                offenders += [f"from .{m} import ..." for m in mods if m in _FORBIDDEN_IMPORTS]
-        elif isinstance(node, ast.Import):
-            offenders += [f"import {a.name}" for a in node.names if a.name.split(".")[0] == "homeassistant"]
+    for name in ("operation_timeline.py", "timeline_surfaces.py"):
+        for node in ast.walk(_tree(_PKG / name)):
+            if isinstance(node, ast.ImportFrom):
+                if node.level == 0 and (node.module or "").split(".")[0] == "homeassistant":
+                    offenders.append(f"{name}: homeassistant import: {node.module}")
+                if node.level == 1:
+                    mods = {node.module} if node.module else {a.name for a in node.names}
+                    offenders += [f"{name}: from .{m} import ..." for m in mods if m in _FORBIDDEN_IMPORTS]
+            elif isinstance(node, ast.Import):
+                offenders += [f"{name}: import {a.name}" for a in node.names if a.name.split(".")[0] == "homeassistant"]
     assert offenders == [], offenders
 
 
-def test_coordinator_mentions_the_timeline_only_in_the_shadow_methods_and_fixed_wiring_points() -> None:
+def test_briefing_and_api_reach_the_timeline_only_through_the_surface_module_or_the_coordinator() -> None:
+    brief = _tree(_PKG / "briefing.py")
+    imported = {
+        (n.module or "")
+        for n in ast.walk(brief)
+        if isinstance(n, ast.ImportFrom) and n.level == 1 and "timeline" in (n.module or "")
+    }
+    assert imported == {"timeline_surfaces"}, imported
+    api = _tree(_PKG / "api.py")
+    assert not [n for n in ast.walk(api) if isinstance(n, ast.ImportFrom) and "timeline" in (n.module or "")]
+    assert not [n for n in ast.walk(_tree(_PKG / "timeline_surfaces.py")) if isinstance(n, ast.AsyncFunctionDef)]
+
+
+_SURFACE_READERS = {
+    "_compute_next_action",
+    "_compute_next_automation_action",
+    "tomorrow_plan",
+    "_build_briefing_text",
+    "timeline_payload",
+    "timeline_operations_lines",
+    "_surface_timeline",
+}
+
+
+def test_coordinator_mentions_the_timeline_only_in_its_build_wiring_and_surface_readers() -> None:
     stray = []
     for node, name, where in _references(_tree(_PKG / "coordinator.py")):
         if not where:
             continue  # module-level import
         method = where[1] if where[0] == "ClimateAdvisorCoordinator" and len(where) > 1 else where[0]
-        if method.startswith("_timeline_") or method == "timeline_debug" or method in _WIRING:
+        if (
+            method.startswith("_timeline_")
+            or method == "timeline_debug"
+            or method in _WIRING
+            or method in _SURFACE_READERS
+        ):
             continue
         stray.append(f"line {getattr(node, 'lineno', '?')} {name} in {'.'.join(where)}")
-    assert stray == [], "coordinator code outside the timeline wiring references it:\n" + "\n".join(stray)
+    assert stray == [], "coordinator code outside the timeline wiring and surface readers references it:\n" + "\n".join(
+        stray
+    )
 
 
 def test_each_wiring_point_is_one_discarded_call_and_nothing_uses_the_result() -> None:
@@ -226,6 +265,9 @@ def test_the_shadow_methods_write_only_timeline_state_and_never_command_anything
         "_timeline_shadow_run_impl",
         "_timeline_snapshot",
         "timeline_debug",
+        "timeline_payload",
+        "_surface_timeline",
+        "timeline_operations_lines",
     ):
         method = _method(name)
         for node in ast.walk(method):

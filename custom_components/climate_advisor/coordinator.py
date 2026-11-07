@@ -415,6 +415,14 @@ from .temperature import (
 )
 from .thermal_confidence import physics_eligibility
 from .time_utils import instant_after
+from .timeline_surfaces import (
+    CardLive,
+    next_automation_candidates,
+    operations_lines,
+    timeline_api_payload,
+    timeline_windows,
+    window_card_text,
+)
 from .v4_archive import V4Archive, V4ModelStore
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
@@ -4588,6 +4596,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Schedule overnight pre-cool if a warming trend is active (idempotent — runs once per day)
         self._maybe_schedule_pre_cool()
 
+        # Issue #1230 R3b: the operation timeline is generated ONCE per cycle, here, before any surface is computed:
+        # Next Action, Next Automation, the briefing and the REST endpoint all read this one result.
+        self._timeline_shadow_run("cycle")
+
         next_auto = self._compute_next_automation_action(c)
         fan_running = self.automation_engine._fan_active
 
@@ -4760,9 +4772,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # chart row (it reads that row, so it sees exactly what the fit trains on). Result unused, errors swallowed
         # inside: v3 still drives every decision and the Status chart.
         await self._v4_shadow_cycle()
-
-        # Issue #1230 R3a: the operation timeline, in shadow. Result unused, errors swallowed inside.
-        self._timeline_shadow_run("cycle")
 
         # Detect and emit post-cycle incidents
         self._detect_and_emit_incidents()
@@ -5746,6 +5755,55 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if ts is not None and entry.get("temp") is not None:
                 v3_pts.append((ts, float(entry["temp"])))
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
+        ceiling_breach = plan.get("ceiling_breach_time") if c.windows_recommended else None
+        today_plan = {
+            "date": now.date(),
+            "day_type": c.day_type,
+            "hvac_mode": c.hvac_mode,
+            "trend_direction": c.trend_direction,
+            "windows_recommended": bool(c.windows_recommended),
+            "window_open_time": c.window_open_time,
+            "window_close_time": c.window_close_time,
+            "pre_condition": bool(c.pre_condition),
+            "expected_high": c.today_high,
+            "expected_low": c.today_low,
+        }
+        plan_days: list[dict[str, Any]] = [today_plan]
+        try:
+            tm = self._tomorrow_classification_plan()
+        except Exception:  # noqa: BLE001 - tomorrow's plan is optional context, never a reason to lose today's timeline
+            tm = None
+        if tm is not None:
+            plan_days.append(
+                {
+                    "date": (now + timedelta(days=1)).date(),
+                    "day_type": tm["day_type"],
+                    "hvac_mode": tm["hvac_mode"],
+                    "trend_direction": tm["trend_direction"],
+                    "windows_recommended": bool(tm["windows_recommended"]),
+                    "window_open_time": _parse_time(tm["window_open_time"]) if tm["window_open_time"] else None,
+                    "window_close_time": _parse_time(tm["window_close_time"]) if tm["window_close_time"] else None,
+                    "pre_condition": bool(tm["pre_condition"]),
+                    "expected_high": tm["expected_high"],
+                    "expected_low": tm["expected_low"],
+                }
+            )
+        # The away/vacation TOU window (Issue #899) the engine widens the held band for.
+        _tou_av: tuple[Any, Any, Any] = (None, None, None)
+        if (
+            self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+            and tou is not None
+            and getattr(tou, "schedule_start", None) is not None
+            and getattr(tou, "window_end", None) is not None
+            and getattr(tou, "expansion_f", None)
+        ):
+            _tou_av = (tou.schedule_start, tou.window_end, tou.expansion_f)
+        # Today's mode is the live classification's (also when no forecast is parseable yet: the surfaces quote it);
+        # tomorrow's falls back to its own classification when the forecast does not reach it.
+        day_modes = dict(_compute_day_hvac_modes(self._hourly_forecast_temps, now, c))
+        day_modes[now.date()] = c.hvac_mode
+        for _pd in plan_days[1:]:
+            day_modes.setdefault(_pd["date"], _pd["hvac_mode"])
         return TimelineSnapshot(
             now=now,
             zone=self._entry_id,
@@ -5757,12 +5815,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             primary_sensor_label="thermostat",
             band_at=band_resolver_for(c, self.config),
             occupancy_mode=self._occupancy_mode,
-            day_modes=_compute_day_hvac_modes(self._hourly_forecast_temps, now, c),
+            day_modes=day_modes,
             day_type=c.day_type,
             windows_recommended=bool(c.windows_recommended),
             window_open_time=c.window_open_time,
             window_close_time=c.window_close_time,
             nat_vent_cutoff=cutoff if isinstance(cutoff, datetime) else None,
+            evening_open_time=plan.get("evening_open_time")
+            if isinstance(plan.get("evening_open_time"), datetime)
+            else None,
             opportunity_spans=tuple(opportunity),
             pre_cool_trigger=self._pre_cool_trigger_dt,
             pre_cool_target=self._pre_cool_target,
@@ -5770,6 +5831,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             tou_schedule_start=getattr(tou, "schedule_start", None) if tou_ok else None,
             tou_target=getattr(tou, "target", None) if tou_ok else None,
             tou_mode=getattr(tou, "mode", None) if tou_ok else None,
+            briefing_time=_parse_time(self.config.get("briefing_time", "06:00")),
+            tou_av_start=_tou_av[0],
+            tou_av_end=_tou_av[1],
+            tou_av_expansion_f=_tou_av[2],
+            ceiling_breach=ceiling_breach if isinstance(ceiling_breach, datetime) else None,
+            nat_vent_predicted_start=self._predict_nat_vent_start(now, c),
+            plan_days=plan_days,
             indoor=reading.value,
             indoor_primary=reading.primary_value,
             outdoor=getattr(self, "_last_outdoor_temp", None),
@@ -5787,13 +5855,52 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             nat_vent_active=bool(ae._natural_vent_active),
         )
 
+    def _surface_timeline(self) -> Any:
+        """The timeline the occupant-facing surfaces read (Issue #1230 R3b), or None in a degraded coordinator.
+
+        The cycle generates it once before the surfaces are computed. A standalone read (the REST endpoint, a harness
+        capture, a surface asked between cycles) refreshes it when the last run is older than two minutes or belongs
+        to another local day, so a surface never reads yesterday's plan. Never raises.
+        """
+        latch = getattr(self, "_timeline_latch", None)
+        if latch is None or getattr(self, "_shut_down", False) is True or self._current_classification is None:
+            return None
+        try:
+            tl = latch.timeline
+            last = (getattr(self, "_timeline_last", None) or {}).get("at")
+            now = dt_util.now()
+            stale = tl is None or tl.day != now.date()
+            if not stale and last:
+                at = dt_util.parse_datetime(last)
+                stale = at is None or abs((now - at).total_seconds()) > 120.0
+            if stale:
+                self._timeline_shadow_run("surface")
+                tl = latch.timeline
+            return tl
+        except Exception:  # noqa: BLE001 - a surface falls back to its degraded path rather than fail
+            _LOGGER.debug("surface timeline unavailable", exc_info=True)
+            return None
+
+    def timeline_payload(self) -> dict[str, Any] | None:
+        """The REST body for ``GET /api/climate_advisor/timeline``: contract dict in the display unit + ``detail``."""
+        tl = self._surface_timeline()
+        if tl is None:
+            return None
+        unit = self.config.get("temp_unit", "fahrenheit")
+        return timeline_api_payload(timeline_to_dict(tl), timeline_detail_dict(tl), unit, display_temp)
+
+    def timeline_operations_lines(self) -> list[str]:
+        """The briefing's operations section (read from the timeline), or [] without one."""
+        tl = self._surface_timeline()
+        return operations_lines(tl, dt_util.now()) if tl is not None else []
+
     def timeline_debug(self) -> dict[str, Any]:
-        """The shadow timeline for the debug payload: steps, path, runs, window candidates, the last run's cost."""
+        """The timeline for the debug payload: steps, path, runs, window candidates, the last run's cost."""
         try:
             latch = getattr(self, "_timeline_latch", None)
             tl = latch.timeline if latch is not None else None
             out: dict[str, Any] = {
-                "shadow": True,
+                "shadow": False,  # Issue #1230 R3b: authoritative - the surfaces read this
                 "unit": self.config.get("temp_unit", "fahrenheit"),
                 "last_run": dict(getattr(self, "_timeline_last", {})),
             }
@@ -6754,6 +6861,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 or self.automation_engine._manual_override_active
                 or self.automation_engine.is_paused_by_door
             ),
+            # Issue #1230 R3b: the operation timeline is where the briefing reads the day's window times and its
+            # list of steps from (None in a degraded coordinator: the briefing then keeps its own facts).
+            timeline=self._surface_timeline(),
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 
@@ -12846,10 +12956,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _plan.get("nat_vent_cutoff") if _plan else None, c.window_close_time
         )
 
+        # Issue #1230 R3b: the operation timeline is the plan. A window step it holds for today IS the card (its time is
+        # the step's; the live direction rule only turns "open now" into "keep closed" when the reading disagrees).
+        # Without a window step the plan has no window advice today, so no branch below may invite the occupant to
+        # open up. No timeline at all (a partially built coordinator, the first moments before a classification):
+        # the previous computation stays as the degraded path.
+        _tl = self._surface_timeline()
+        timeline_mode = _tl is not None
+        if _tl is not None:
+            _got = window_card_text(
+                _tl,
+                dt_util.now(),
+                CardLive(
+                    unit=unit,
+                    indoor=indoor_temp,
+                    outdoor=outdoor_temp,
+                    windows_open=bool(windows_physically_open),
+                    direction_ok=bool(direction_ok),
+                    heat_side_veto=bool(heat_side_veto),
+                    armed_heat=_armed_heat,
+                    armed_cool=_armed_cool,
+                ),
+            )
+            if _got is not None:
+                return _decide(_got[0], step=_got[1].id)
+
         if c.windows_recommended:
-            if c.window_open_time and now < c.window_open_time:
+            if not timeline_mode and c.window_open_time and now < c.window_open_time:
                 return _decide(f"Open windows at {c.window_open_time.strftime('%I:%M %p').lstrip('0')}")
-            elif _effective_close_time and now < _effective_close_time:
+            elif not timeline_mode and _effective_close_time and now < _effective_close_time:
                 return _decide(f"Close windows by {_effective_close_time.strftime('%I:%M %p').lstrip('0')}")
             elif now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
                 if windows_physically_open:
@@ -12868,7 +13003,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         )
                     return _decide("Windows open — you're all set.")
                 if outdoor_temp is not None and indoor_temp is not None:
-                    if direction_ok and outdoor_temp < indoor_temp:
+                    if direction_ok and outdoor_temp < indoor_temp and not timeline_mode:
                         return _decide(
                             f"Open windows — outdoor's cooler now ({format_temp(outdoor_temp, unit)} vs"
                             f" {format_temp(indoor_temp, unit)}).",
@@ -12888,7 +13023,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         outdoor=outdoor_temp,
                         indoor=indoor_temp,
                     )
-                return _decide("Open windows — outdoor air may be cooler now.")
+                if not timeline_mode:
+                    return _decide("Open windows — outdoor air may be cooler now.")
 
         if c.day_type == DAY_TYPE_HOT:
             # Issue #876: threshold formula and morning-close/evening-open times now
@@ -12923,10 +13059,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # indoor hours earlier (the real, unrecoverable morning crossing). Treat an
             # already-reached cutoff as already past, regardless of the literal comparison.
             _already = _close_dt is not None and bool(_hot_plan and _hot_plan.get("nat_vent_cutoff_already_reached"))
-            if c.window_opportunity_morning and _close_time is not None and now < _close_time and not _already:
+            if (
+                not timeline_mode
+                and c.window_opportunity_morning
+                and _close_time is not None
+                and now < _close_time
+                and not _already
+            ):
                 end_t = _close_time.strftime("%I:%M %p").lstrip("0")
                 return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)} (until {end_t})")
-            elif c.window_opportunity_evening and _evening_open_time is not None and now >= _evening_open_time:
+            elif (
+                not timeline_mode
+                and c.window_opportunity_evening
+                and _evening_open_time is not None
+                and now >= _evening_open_time
+            ):
                 start_t = _evening_open_time.strftime("%I:%M %p").lstrip("0")
                 return _decide(f"Open windows once outdoor cools back below indoor (from {start_t})")
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
@@ -12960,6 +13107,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     f"Indoor is {format_temp(indoor_temp, unit)} — no outdoor reading available.",
                     indoor=indoor_temp,
                 )
+            if direction_ok and timeline_mode:
+                # Issue #1230 R3b: air that would help right now, but the plan holds no window period: say so rather
+                # than invite a window the plan (and the briefing) never mentions.
+                return _decide(
+                    f"Outdoor ({format_temp(outdoor_temp, unit)}) is cooler than indoor"
+                    f" ({format_temp(indoor_temp, unit)}), but today's plan has no window period.",
+                    outdoor=outdoor_temp,
+                    indoor=indoor_temp,
+                )
             if direction_ok:
                 fan_clause = " or turn on the fan" if fan_enabled else ""
                 return _decide(
@@ -12978,7 +13134,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if heating_needed:
             if windows_physically_open:
                 return _decide("Close windows to enable the heater.")
-            if outdoor_temp is not None and direction_ok:
+            if outdoor_temp is not None and direction_ok and not timeline_mode:
                 return _decide(
                     f"Open windows briefly — outdoor's warmer ({format_temp(outdoor_temp, unit)} vs"
                     f" {format_temp(indoor_temp, unit)}).",
@@ -14471,6 +14627,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._startup_coalesce_active,
         )
 
+        # Issue #1230 R3b: the operation timeline holds every automation-executed step (wake/bedtime band, briefing,
+        # pre-cool / TOU, ceiling-guard AC start, the nat-vent start prediction). The card is its earliest one still
+        # ahead; the label wording and the ontology guard live in timeline_surfaces. No timeline (a partially built
+        # coordinator, before the first classification): the previous computation below stays as the degraded path.
+        _tl = self._surface_timeline()
+        if _tl is not None:
+            candidates: list[tuple[datetime, str]] = []
+            _unit_na = self.config.get("temp_unit", "fahrenheit")
+            for _step_dt, _step_label, _step in next_automation_candidates(_tl, now, _unit_na):
+                candidates.append((_step_dt, _step_label))
+            if not candidates:
+                _LOGGER.info("Next-automation: No more actions today")
+                return ("No more actions today", "")
+            _next_dt, _next_desc = candidates[0]
+            _next_time = dt_util.as_local(_next_dt).strftime("%I:%M %p").lstrip("0")
+            _LOGGER.info("Next-automation (timeline): %s at %s", _next_desc, _next_time)
+            return (_next_desc, _next_time)
+
         # Build list of upcoming scheduled events as (datetime, description).
         # Using full datetimes (not time objects) so cross-midnight events like
         # pre-cool (e.g. 2:30 AM tomorrow) compare correctly against now.
@@ -14568,6 +14742,57 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # mechanism state is "deferred, not different"; the grace itself is on the Status
         # card. If the end time is unknowable the candidate is withheld. `is True`: tests stub
         # the engine as a bare MagicMock whose unset attributes are truthy.
+        _nat_vent_dt = self._predict_nat_vent_start(now, c)
+        if _nat_vent_dt:
+            candidates.append((_nat_vent_dt, "Natural ventilation"))
+
+        # Phase 3e (Issue #786 follow-up): TOU pre-conditioning start. Per CLAUDE.md's
+        # Status Card Ontology, "Next Automation" answers "what will the automation do
+        # next" — TOU pre-conditioning is exactly that shape and was previously entirely
+        # absent here (confirmed zero references). Guarded the same way the existing
+        # pre-cool-ceiling candidate is (precondition_start is not None and
+        # precondition_start > now) — this alone correctly excludes the case where
+        # pre-conditioning has already started (once phase == PRECONDITIONING,
+        # precondition_start <= now by the resolver's own definition), so no separate
+        # phase check is needed. Pure consumer of Phase 2's already-cached
+        # self._tou_phase_resolution — zero new resolution logic, same DRY shape as the
+        # Status-card wiring above.
+        _tou_next = getattr(self, "_tou_phase_resolution", None)
+        if (
+            _tou_next is not None
+            and _tou_next.precondition_start is not None
+            and _tou_next.precondition_start > now
+            and _tou_next.target is not None
+        ):
+            _tou_unit = self.config.get("temp_unit", "fahrenheit")
+            _tou_action = "Pre-cool" if _tou_next.mode == "cool" else "Pre-heat"
+            candidates.append(
+                (
+                    _tou_next.precondition_start,
+                    f"{_tou_action} for TOU schedule ({format_temp(_tou_next.target, _tou_unit)})",
+                )
+            )
+
+        if not candidates:
+            _LOGGER.info("Next-automation: No more actions today")
+            return ("No more actions today", "")
+
+        candidates.sort(key=lambda e: e[0])
+        next_dt, next_desc = candidates[0]
+        time_str = dt_util.as_local(next_dt).strftime("%I:%M %p").lstrip("0")
+        _LOGGER.info("Next-automation: %s at %s", next_desc, time_str)
+        return (next_desc, time_str)
+
+    def _predict_nat_vent_start(self, now: datetime, c: DayClassification | None) -> datetime | None:
+        """The engine's own prediction of when a nat-vent / whole-house-fan session would start (Issue #528).
+
+        Extracted unchanged from ``_compute_next_automation_action`` (Issue #1230 R3b): the operation timeline carries
+        this start as a ``NAT_VENT_START`` step so the Next Automation card reads it from the timeline, and the legacy
+        degraded path below calls the same helper. Uses the real activation gate (``_nat_vent_start_decision``) on the
+        forecast temperatures; withheld unless a sensor reads open (nat-vent cannot start with everything closed).
+        """
+        ae = self.automation_engine
+        _predicted_indoor = getattr(self, "_last_predicted_indoor", None)
         _nv_after = now
         _nv_grace_known = True
         if ae._grace_active is True:
@@ -14613,45 +14838,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _nat_vent_dt = find_temperature_crossing(
                 _predicted_indoor, _nat_vent_outdoor_curve, _nat_vent_gate_comparator, after=_nv_after
             )
-            if _nat_vent_dt:
-                candidates.append((_nat_vent_dt, "Natural ventilation"))
-
-        # Phase 3e (Issue #786 follow-up): TOU pre-conditioning start. Per CLAUDE.md's
-        # Status Card Ontology, "Next Automation" answers "what will the automation do
-        # next" — TOU pre-conditioning is exactly that shape and was previously entirely
-        # absent here (confirmed zero references). Guarded the same way the existing
-        # pre-cool-ceiling candidate is (precondition_start is not None and
-        # precondition_start > now) — this alone correctly excludes the case where
-        # pre-conditioning has already started (once phase == PRECONDITIONING,
-        # precondition_start <= now by the resolver's own definition), so no separate
-        # phase check is needed. Pure consumer of Phase 2's already-cached
-        # self._tou_phase_resolution — zero new resolution logic, same DRY shape as the
-        # Status-card wiring above.
-        _tou_next = getattr(self, "_tou_phase_resolution", None)
-        if (
-            _tou_next is not None
-            and _tou_next.precondition_start is not None
-            and _tou_next.precondition_start > now
-            and _tou_next.target is not None
-        ):
-            _tou_unit = self.config.get("temp_unit", "fahrenheit")
-            _tou_action = "Pre-cool" if _tou_next.mode == "cool" else "Pre-heat"
-            candidates.append(
-                (
-                    _tou_next.precondition_start,
-                    f"{_tou_action} for TOU schedule ({format_temp(_tou_next.target, _tou_unit)})",
-                )
-            )
-
-        if not candidates:
-            _LOGGER.info("Next-automation: No more actions today")
-            return ("No more actions today", "")
-
-        candidates.sort(key=lambda e: e[0])
-        next_dt, next_desc = candidates[0]
-        time_str = dt_util.as_local(next_dt).strftime("%I:%M %p").lstrip("0")
-        _LOGGER.info("Next-automation: %s at %s", next_desc, time_str)
-        return (next_desc, time_str)
+            return _nat_vent_dt
+        return None
 
     @property
     def current_classification(self) -> DayClassification | None:
@@ -14695,7 +14883,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     @property
     def tomorrow_plan(self) -> dict | None:
-        """Return a projected plan for tomorrow based on current classification."""
+        """Tomorrow's plan for the Analysis "Tomorrow (plan)" column (Issue #1230 R3b: read from the timeline).
+
+        Day type, trend, mode, pre-condition and the expected range are the classification facts the timeline was built
+        from (``detail.days``); the window times are the timeline's own window steps for tomorrow, so the column shows
+        exactly the periods the plan holds (none when the plan rejected them). Without a timeline the previous
+        classification-only projection answers.
+        """
+        base = self._tomorrow_classification_plan()
+        if base is None:
+            return None
+        tl = self._surface_timeline()
+        if tl is None:
+            return base
+        tomorrow = (dt_util.now() + timedelta(days=1)).date()
+        day = next((d for d in getattr(tl, "days", ()) if d.get("date") == tomorrow), None)
+        periods = [p for p in timeline_windows(tl, tomorrow).periods if p[0] is not None]
+        out = dict(base)
+        if day is not None:
+            for key in ("day_type", "trend_direction", "hvac_mode", "pre_condition", "expected_high", "expected_low"):
+                if key in day:
+                    out[key] = day[key]
+        out["windows_recommended"] = bool(periods)
+        out["window_open_time"] = periods[0][0].time().isoformat() if periods else None
+        out["window_close_time"] = periods[-1][1].time().isoformat() if periods else None
+        return out
+
+    def _tomorrow_classification_plan(self) -> dict | None:
+        """Return a projected plan for tomorrow based on current classification (the timeline's input)."""
         c = self._current_classification
         if not c:
             return None

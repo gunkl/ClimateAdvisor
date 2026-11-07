@@ -16,6 +16,7 @@ import platform
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, time
+from typing import Any
 
 from homeassistant.util import dt as dt_util
 
@@ -54,6 +55,7 @@ from .nat_vent_plan import (
     resolve_with_fallback,
 )
 from .temperature import FAHRENHEIT, format_temp, format_temp_delta, free_cooling_direction_ok
+from .timeline_surfaces import TimelineWindows, operations_lines, timeline_windows
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -189,6 +191,7 @@ def _gather_briefing_facts(
     runtime_config: dict | None = None,
     now: datetime | None = None,
     awake_edges: tuple[float, float] | None = None,
+    windows: TimelineWindows | None = None,
 ) -> _BriefingFacts:
     """Gather the briefing's facts once (Issue #1231). ``config`` is the TLDR-shape dict built by
     ``generate_briefing()`` (comfort/setback/sleep_time/wake_time/aggressive_savings)."""
@@ -224,6 +227,10 @@ def _gather_briefing_facts(
         bedtime_target = adaptive if adaptive is not None else normal_bedtime
 
     windows_advice = _gives_window_advice(c, occupancy_mode)
+    if windows is not None and not windows.periods and c.day_type in (DAY_TYPE_WARM, DAY_TYPE_MILD):
+        # Issue #1230 R3b: the operation timeline is the plan; when it holds no window period today (the direction
+        # rule or bedtime removed it) the briefing does not talk about opening windows either.
+        windows_advice = False
     near_miss = _is_mild_near_miss(c, config["comfort_heat"], unoccupied=unoccupied, advice=windows_advice)
 
     close: _CloseFact | None = None
@@ -264,6 +271,26 @@ def _gather_briefing_facts(
             hot_evening = hot_evening_open is not None
         elif hot_evening:
             hot_evening_open = resolve_with_fallback(evening_dt, c.window_opportunity_evening_start)
+
+    if windows is not None and not unoccupied:
+        # Issue #1230 R3b: the window times the briefing states are the timeline's, never its own re-derivation.
+        periods = [(o, e) for o, e in windows.periods if e > now]
+        if c.day_type in (DAY_TYPE_WARM, DAY_TYPE_MILD) and windows_advice:
+            if periods:
+                close = _CloseFact(at=_local(periods[0][1], now), dynamic=True, already=False)
+                later = [o for o, _e in periods[1:] if o is not None]
+                evening_open = _local(later[0], now) if later else None
+            else:
+                close = None
+                evening_open = None
+        elif c.day_type == DAY_TYPE_HOT:
+            morning = [p for p in periods if p[0] is None or p[0].hour < 12]
+            evening = [p for p in periods if p[0] is not None and p[0].hour >= 15]
+            hot_morning = bool(morning)
+            hot_evening = bool(evening)
+            close = _CloseFact(at=_local(morning[0][1], now), dynamic=True, already=False) if morning else None
+            hot_evening_open = _local(evening[0][0], now).time() if evening and evening[0][0] is not None else None
+            hot_evening = hot_evening_open is not None
 
     # Overnight pre-cool: only when it is actually expected to run tonight and someone is home to be promised it.
     pre_cool_target = None if unoccupied else bedtime_setback_cool
@@ -326,8 +353,13 @@ def generate_briefing(
     overnight_heat_engaged: bool = False,
     automation_overridden: bool = False,
     now: datetime | None = None,
+    timeline: Any | None = None,
 ) -> str:
     """Generate the daily climate briefing message.
+
+    ``timeline`` (Issue #1230 R3b): the zone's operation timeline. When given, the briefing's window times are the
+    timeline's window steps and a "Today's steps" section lists the timeline's step sentences; without it (direct
+    calls, tests, a degraded coordinator) the briefing computes its facts as before.
 
     Args:
         classification: Today's day classification and recommendations.
@@ -513,6 +545,7 @@ def generate_briefing(
         runtime_config=runtime_config,
         now=now,
         awake_edges=(awake_heat, awake_cool),
+        windows=timeline_windows(timeline, (now or dt_util.now()).date()) if timeline is not None else None,
     )
     tldr_lines = _generate_tldr_table(c, config, temp_unit=temp_unit, facts=facts)
 
@@ -596,6 +629,14 @@ def generate_briefing(
         lines.append("")
         lines.extend(grace_lines)
         _LOGGER.debug("Grace section included — source=%s", grace_source)
+
+    if timeline is not None:
+        ops = operations_lines(timeline, now or dt_util.now())
+        if ops:
+            lines.append("")
+            lines.append("\U0001f4cb Today's Steps")
+            lines.append("-" * 40)
+            lines.extend(ops)
 
     lines.append("")
     lines.extend(

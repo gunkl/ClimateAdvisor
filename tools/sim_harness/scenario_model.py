@@ -243,7 +243,7 @@ def snapshot_engine_state(engine: Any) -> dict[str, Any]:
 
 
 def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[str, Any]:
-    """Issue #1276: the real ``_compute_next_action`` card text for the run's final state.
+    """The surfaces an occupant reads, for the run's final state (Issue #1276; extended by Issue #1230 R3b).
 
     Shared by both adapters (FakeHass Tier A and real-HA Tier B) so a scenario that sets
     ``"capture_next_action": true`` is judged the same way on both. Same arguments production passes in
@@ -251,13 +251,60 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
     outdoor is the scenario's last ``temp_update`` ``outdoor_f`` (Tier A runs no weather entity, so this
     keeps the two tiers on one input). ``advises_opening_windows`` lets a scenario assert the card's
     direction with the existing ``field_equals`` assertion, so ``outcomes.py`` is unchanged.
+
+    R3b additions (all read-only, same call, same clock): ``source`` ("timeline" when the card/automation read the
+    operation timeline, "legacy" for the degraded path), ``window_step`` (the timeline step the card came from, or
+    None), ``next_automation`` (the Next Automation card's action and time), ``timeline`` (the occupant steps and the
+    CA step kinds the plan holds, as ``HH:MM`` strings), ``briefing_windows_row`` (the briefing TLDR "Windows" row),
+    ``agrees`` (the card never invites a window the timeline does not hold), and inside ``timeline``: ``held_ca_steps``,
+    ``sensor_swap`` and ``has_resume_step``. Existing keys are unchanged.
     """
     updates = [e for e in sorted_events(scenario) if e.get("type") == "temp_update" and "outdoor_f" in e]
+    windows_open = coordinator._any_sensor_open()
     text = coordinator._compute_next_action(
         coordinator._current_classification,
         indoor_temp=coordinator._get_indoor_temp(),
         outdoor_temp=float(updates[-1]["outdoor_f"]) if updates else None,
-        windows_physically_open=coordinator._any_sensor_open(),
+        windows_physically_open=windows_open,
         ae=engine,
     )
-    return {"text": text, "advises_opening_windows": str(text).startswith("Open windows")}
+    out: dict[str, Any] = {"text": text, "advises_opening_windows": str(text).startswith("Open windows")}
+    tl = coordinator._surface_timeline() if hasattr(coordinator, "_surface_timeline") else None
+    out["source"] = "timeline" if tl is not None else "legacy"
+    action, at = coordinator._compute_next_automation_action(coordinator._current_classification)
+    out["next_automation"] = {"action": action, "time": at}
+    if tl is not None:
+        from homeassistant.util import dt as _dt  # noqa: PLC0415
+
+        from custom_components.climate_advisor.timeline_surfaces import card_user_step  # noqa: PLC0415
+
+        now = _dt.now()
+        step = card_user_step(tl, now, windows_open=windows_open)
+        you = [s for s in tl.steps if s.actor.value == "you"]
+        out["window_step"] = None if step is None else {"kind": step.kind.value, "at": step.ts.strftime("%H:%M")}
+        out["timeline"] = {
+            "you_steps": [f"{s.ts:%H:%M} {s.kind.value}" for s in you],
+            "ca_kinds": sorted({s.kind.value for s in tl.steps if s.actor.value == "ca"}),
+            "ca_steps": [f"{s.ts:%H:%M} {s.kind.value}" for s in tl.steps if s.actor.value == "ca"],
+            "window_confidence": sorted({s.confidence for s in you}),
+            # steps CA words as a held step (an override/grace or a door pause is in force) and the sensor swap
+            # sentences
+            "held_ca_steps": [
+                f"{s.ts:%H:%M} {s.kind.value}" for s in tl.steps if s.actor.value == "ca" and s.status == "held"
+            ],
+            "sensor_swap": {
+                "wake": any(s.reason == "wake_band.sensor_swap" for s in tl.steps),
+                "sleep": any(s.reason == "sleep_band.sensor_swap" for s in tl.steps),
+            },
+            "has_resume_step": any(s.kind.value == "resume_schedule" for s in tl.steps),
+        }
+        # the card may only invite a window the plan holds (a period open now, or ahead today)
+        out["agrees"] = (not out["advises_opening_windows"]) or any(
+            s.kind.value == "windows_open" and s.ts.date() == now.date() and s.status != "done" for s in you
+        )
+    classification = coordinator._current_classification
+    if classification is not None:
+        _full, short = coordinator._build_briefing_text(classification, suggestions=[])
+        row = next((ln.strip() for ln in short.splitlines() if ln.strip().startswith("Windows:")), None)
+        out["briefing_windows_row"] = row
+    return out

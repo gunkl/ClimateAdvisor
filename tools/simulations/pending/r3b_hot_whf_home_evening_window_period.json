@@ -1,0 +1,163 @@
+{
+  "name": "r3b_hot_whf_home_evening_window_period",
+  "description": "Hot day, fan mode whf, home, 19:30: the evening window period is open and outdoor air has cooled below the house.",
+  "source": "synthetic",
+  "issue": 1230,
+  "notes": [
+    "Issue #1230 R3b Tier A golden candidate (pending: owner approves, DP-11). The scenario sets capture_next_action, so the harness records the occupant surfaces at the end of the run (engine_state._next_action: Next Action text, Next Automation, the operation timeline's steps, the briefing Windows row). Every assertion below reads that capture through the existing field_equals assertion: outcomes.py is unchanged.",
+    "Tier A has no learned thermal model and no forecast: the engine's window recommendation therefore stands unvalidated (confidence low), and the timeline carries only what the classification event states."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house",
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ]
+  },
+  "events": [
+    {
+      "time": "2026-07-15T06:00:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.living_window"
+    },
+    {
+      "time": "2026-07-15T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 85.0
+    },
+    {
+      "time": "2026-07-15T18:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "today_high": 98,
+      "today_low": 64,
+      "window_opportunity_morning": false,
+      "window_opportunity_evening": true,
+      "window_opportunity_evening_start": "19:00",
+      "window_opportunity_evening_end": "22:30"
+    },
+    {
+      "time": "2026-07-15T19:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 74.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.source",
+      "value": "timeline",
+      "track": "logic",
+      "reason": "the Next Action and Next Automation cards read the operation timeline (not the degraded legacy path)"
+    },
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.text",
+      "value": "Open windows \u2014 outdoor's cooler now (74\u00b0F vs 77\u00b0F).",
+      "track": "logic",
+      "reason": "the Next Action card text the occupant reads"
+    },
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.advises_opening_windows",
+      "value": true,
+      "track": "logic",
+      "reason": "whether the card tells the occupant to open windows"
+    },
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.agrees",
+      "value": true,
+      "track": "logic",
+      "reason": "the card never invites a window the timeline does not hold"
+    },
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.next_automation.action",
+      "value": "Bedtime \u2014 cool setback to 72\u00b0F",
+      "track": "logic",
+      "reason": "the Next Automation card's action is the earliest automation-executed timeline step still ahead"
+    },
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.next_automation.time",
+      "value": "10:30 PM",
+      "track": "logic",
+      "reason": "the Next Automation card's time is that step's time"
+    },
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.window_step",
+      "value": {
+        "kind": "windows_open",
+        "at": "19:30"
+      },
+      "track": "logic",
+      "reason": "the timeline step the card came from (None when the plan holds no window step today)"
+    },
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.you_steps",
+      "value": [
+        "19:30 windows_open",
+        "22:30 windows_close"
+      ],
+      "track": "logic",
+      "reason": "the occupant steps the plan holds (today, then tomorrow's engine plan)"
+    },
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.window_confidence",
+      "value": [
+        "low"
+      ],
+      "track": "logic",
+      "reason": "D1: the engine's own recommendation is unvalidated in Tier A (no learned window effect), so low"
+    },
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.briefing_windows_row",
+      "value": "Windows: Open 7:30 PM onward",
+      "track": "logic",
+      "reason": "the briefing's Windows row reads the same window periods"
+    },
+    {
+      "at": "2026-07-15T19:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.ca_kinds",
+      "value": [
+        "briefing_send",
+        "mode_change",
+        "nat_vent_start",
+        "nat_vent_stop",
+        "sleep_band",
+        "wake_band"
+      ],
+      "track": "logic",
+      "reason": "the CA step kinds the plan holds (fan modes and occupancy decide which)"
+    }
+  ],
+  "capture_next_action": true
+}

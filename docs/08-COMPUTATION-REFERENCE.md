@@ -4801,3 +4801,7 @@ Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This k
 ---
 
 _Last Updated: 2026-06-12_
+
+## Next Action and Next Automation read the operation timeline (Issue #1230 R3b)
+
+**Next Action:** the window advice is the timeline's window step for today (`timeline_surfaces.card_user_step` / `window_card_text`); the occupancy, direction-rule (#1276), windows-physically-open, cold/hot-day guards are applied on top with the live reading, and no branch may invite a window the timeline does not hold. **Next Automation:** the card is the earliest automation-executed timeline step ahead (`next_automation_candidates`): briefing send, wake/bedtime band, pre-cool / TOU, the ceiling-guard AC start (`ceiling_guard`, from the nat-vent plan's `ceiling_breach_time`) and the nat-vent start prediction (`_predict_nat_vent_start`, the extracted #528/#1142 scan, carried into the timeline as `natvent_start.predicted`). Window steps never appear (CA has no window actuator, #849); the ontology test scans `NEXT_AUTOMATION_LABELS`. An empty house gets no wake/bedtime candidates (the engine does not write them). Full table, decisions D1-D4 and the degraded path: [Operation Timeline Spec](operation-timeline-spec.md#authoritative-surfaces-r3b).

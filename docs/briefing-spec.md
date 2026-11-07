@@ -183,6 +183,10 @@ in play, so a cutoff reason is stated only then. The warm-day ceiling-breach sen
 the breach is dated another day. Out of scope (Issue #1230): the per-day latch, drift-proof live recompute and
 regenerate-on-change.
 
+## Timeline-read windows and "Today's Steps" (Issue #1230 R3b)
+
+`generate_briefing(timeline=...)` (the coordinator passes `_surface_timeline()`): the window close/open times in the TLDR "Windows" row and the conversational body are the operation timeline's window steps for today (`timeline_surfaces.timeline_windows`), not a re-derivation; on a warm/mild day with no window period the briefing gives no window advice; a "Today's Steps" section lists the timeline's step sentences up to midnight (the daily briefing send itself excluded). Without a timeline (direct calls, tests, a degraded coordinator) every fact is gathered as before. See [Operation Timeline Spec](operation-timeline-spec.md#authoritative-surfaces-r3b).
+
 ## Coherence Validation (Issue #518)
 
 `tools/briefing_review.py` renders `generate_briefing()` across a `day_type` x `hvac_mode` x

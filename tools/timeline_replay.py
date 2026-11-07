@@ -546,6 +546,7 @@ def compare_day(tl: Any, act: Actual, rec: dict, day: date, zone: ZoneData, zone
             note(s, "not_observable_in_chart_log")
 
     ca_only: list[dict] = []
+    rec_overrides = _record_overrides(rec, day, zone.tz)
     for i, (ts, a, b) in enumerate(act.setpoint_changes):
         if i in used_sp or not (start <= ts < end):
             continue
@@ -554,12 +555,45 @@ def compare_day(tl: Any, act: Actual, rec: dict, day: date, zone: ZoneData, zone
         row = _row_at(zone, ts)
         if _near(ts, act.overrides, 20):
             cls = "occupant_override"
+        elif _near(ts, rec_overrides, 20):
+            # R3b: the learning record logged this as the occupant's own thermostat change (override_details). The
+            # staged
+            # summer AC steps (79 -> 75 -> 74, 82 -> 78) are occupants lowering a setback ceiling after arriving home:
+            # there is no CA code path behind them, so there is nothing for the timeline to predict.
+            cls = "occupant_override_after_setback" if a > b and a in edges else "occupant_override"
         elif _near(ts, [t for t, _v in act.nat_vent_edges], 15):
             cls = "nat_vent_edge"
         elif _near(ts, act.reclass, 20):
             cls = "reclassification"
         elif row is not None and row.lower is not None and {a, b} == {row.lower, row.upper}:
             cls = "edge_switch_nearest_edge_arming"  # floor <-> ceiling as the room moves: reactive, not planned
+        elif any(
+            o.get("old_temp") == b and o.get("time") and _hm(o["time"]) * 60 < ts.hour * 60 + ts.minute
+            for o in rec.get("override_details") or []
+        ):
+            cls = "ca_restores_after_occupant_change"  # grace over: CA writes back the value the occupant had changed
+        elif (
+            row is not None
+            and row.lower is not None
+            and row.upper is not None
+            and row.upper - row.lower >= 12.0
+            and abs(b - a) >= 4.0
+            and _recurs_daily(zone, ts, a, b)
+        ):
+            # R3b: the away/vacation TOU window (Issue #899). At the window start CA widens the held band on the day's
+            # side (select_comfort_band tou_expansion_f) and returns to it at the window end. The replay has no
+            # schedule input, so it cannot predict these; the builder emits them (setpoint_change.tou_expansion_*) when
+            # the snapshot carries the window.
+            cls = "tou_window_expansion"
+        elif (
+            row is not None
+            and row.lower is not None
+            and row.upper is not None
+            and row.upper - row.lower >= 12.0
+            and (b in (row.lower, row.upper) or a in (row.lower, row.upper))
+        ):
+            cls = "occupancy_setback_edge"  # R3b: CA arming or leaving the wide away or vacation band
+            # (departure or arrival)
         elif a in edges and b in edges:
             cls = "band_edge_change"  # setback / restore / sleep edge reached by a path the timeline has no step for
         elif abs(b - a) <= 2.0 and a not in edges and b in edges:
@@ -592,9 +626,20 @@ def compare_day(tl: Any, act: Actual, rec: dict, day: date, zone: ZoneData, zone
                 s.kind.value == "nat_vent_start" and abs((s.ts - t).total_seconds()) < EVENT_TOL_MIN * 60 for s in steps
             )
             if not planned:
-                kind = (
-                    "nat_vent_session_asleep_night_strategy" if asleep(t) else "nat_vent_session_awake_not_in_timeline"
-                )
+                if asleep(t):
+                    # R3b: CA does not SCHEDULE these. nat-vent is reactive to a window the occupant left open (or
+                    # opened);
+                    # the timeline predicts a start only behind a window step it asked for, so these are classed,
+                    # not predicted.
+                    since = _window_open_since(zone, t)
+                    if since is not None and not asleep(since):
+                        kind = "nat_vent_session_window_left_open_past_bedtime"
+                    elif since is not None:
+                        kind = "nat_vent_session_window_opened_while_asleep"
+                    else:
+                        kind = "nat_vent_session_no_open_window_reading"
+                else:
+                    kind = "nat_vent_session_awake_not_in_timeline"
                 ca_only.append({"ts": t.isoformat(), "class": kind})
         if v:
             last_on = t
@@ -662,6 +707,49 @@ def _row_at(zone: ZoneData, ts: datetime) -> Row | None:
         else:
             break
     return best
+
+
+def _recurs_daily(zone: ZoneData, ts: datetime, a: float, b: float, min_days: int = 4) -> bool:
+    """The same setpoint change (a -> b) at the same time of day (+-10 min) on at least ``min_days`` days: a
+    schedule."""
+    cached = getattr(zone, "_sp_changes", None)
+    if cached is None:
+        cached = []
+        last = None
+        for r in zone.rows:
+            if r.setpoint is not None:
+                if last is not None and abs(r.setpoint - last) >= 0.5:
+                    cached.append((r.ts, last, r.setpoint))
+                last = r.setpoint
+        zone._sp_changes = cached  # type: ignore[attr-defined]
+    minute = ts.hour * 60 + ts.minute
+    days = {t.date() for t, x, y in cached if x == a and y == b and abs((t.hour * 60 + t.minute) - minute) <= 10}
+    return len(days) >= min_days
+
+
+def _window_open_since(zone: ZoneData, ts: datetime) -> datetime | None:
+    """When the physical window state that is open at ``ts`` began (None when it is not open); scans back <= 2 days."""
+    rows = zone.by_day.get(ts.date(), [])
+    prev = zone.by_day.get(ts.date() - timedelta(days=1), [])
+    seq = [r for r in prev + rows if r.ts <= ts]
+    if not seq or not seq[-1].windows_open:
+        return None
+    since = seq[-1].ts
+    for r in reversed(seq):
+        if not r.windows_open:
+            break
+        since = r.ts
+    return since
+
+
+def _record_overrides(rec: dict, day: date, tz: tzinfo) -> list[datetime]:
+    """The occupant's thermostat changes the learning record kept for the day (``override_details`` ``HH:MM``)."""
+    out = []
+    for o in rec.get("override_details") or []:
+        with contextlib.suppress(KeyError, ValueError, TypeError):
+            hh, mm = str(o["time"]).split(":")[:2]
+            out.append(datetime.combine(day, time(int(hh), int(mm)), tzinfo=tz))
+    return out
 
 
 def _edge_values(zone: ZoneData) -> set[float]:

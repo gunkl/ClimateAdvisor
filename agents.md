@@ -84,7 +84,7 @@ See [docs/SSH-SETUP.md](docs/SSH-SETUP.md) for initial SSH configuration.
 
 ### Development Roadmap
 
-The original v0.1–v0.4 roadmap is historical; the project is at 0.8.5x (`VERSION` in `const.py`, history in `CHANGELOG.md`). Planned work is tracked in GitHub issues and epics.
+The original v0.1–v0.4 roadmap is historical; the current version is `VERSION` in `const.py` (0.8.x on `main`, 0.9.x on the `0.9.x` branch), history in `CHANGELOG.md`. Planned work is tracked in GitHub issues and epics.
 
 When implementing features, always check which issue or epic they belong to and ensure prerequisites are met.
 
@@ -149,6 +149,7 @@ The suite exists in two tiers: `tests/` (stub tier; Home Assistant is stubbed by
 
 ### Documentation Hierarchy
 - **[README.md](README.md)**: User-facing documentation (installation, configuration, usage)
+- **[CONTRIBUTING.md](CONTRIBUTING.md)**: How to contribute (branches, tests, goldens, issues, PR checklist)
 - **[docs/](docs/)**: Design specifications, reference material, and setup guides
 - **[agents.md](agents.md)** (this file): Agent development guidance
 - **[claude.md](claude.md)**: Claude-specific workflow and conventions

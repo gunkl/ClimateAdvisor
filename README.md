@@ -4,6 +4,7 @@ A Home Assistant integration that runs your thermostat from the weather forecast
 
 [![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=released&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)
 [![Development Version](https://img.shields.io/github/manifest-json/v/gunkl/ClimateAdvisor?filename=custom_components%2Fclimate_advisor%2Fmanifest.json&label=development&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/main/custom_components/climate_advisor/manifest.json)
+[![0.9.x Version](https://img.shields.io/github/manifest-json/v/gunkl/ClimateAdvisor/0.9.x?filename=custom_components%2Fclimate_advisor%2Fmanifest.json&label=0.9.x&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/0.9.x/custom_components/climate_advisor/manifest.json)
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=gunkl&repository=ClimateAdvisor&category=integration)
 
 [![Test coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Fcoverage.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/badges.yml)
@@ -34,10 +35,30 @@ A Home Assistant integration that runs your thermostat from the weather forecast
   - a bedroom sensor at night (see below);
   - away / vacation / guest occupancy toggles;
   - time-of-use pre-conditioning ahead of high-cost periods;
+  - a daily energy cost estimate: enter your energy rate and the heating and cooling power, and each day's record gets an estimated cost (left blank, nothing is assumed and the cost shows "—");
   - an optional Claude-powered AI Investigator.
-- **Learns.** A physics-based thermal model learns your home's heating, cooling, insulation, ventilation and solar response. It also learns your thermostat's own swing, and after two weeks of data it starts offering suggestions.
+- **Learns your house, then plans with it.** A prediction engine learns how fast your home heats, cools, leaks heat and warms in the sun, and forecasts the indoor temperature ahead. The engine you choose (v4 by default) times pre-heating and pre-cooling, the ceiling guard, setbacks and the window close time; see [Prediction engines](#prediction-engines). Climate Advisor also learns your thermostat's own swing, and after two weeks of data it starts offering suggestions.
+- **One plan behind everything you read.** The "Next 24 hours" list, Your Next Action, Next Automation, the briefing (including its "Today's Steps") and the Analysis tab's plan for tomorrow all read the same plan, so they never disagree about when to open or close the windows or what Climate Advisor does next.
+- **Tonight in the bedroom (advice only).** Each evening it compares keeping the windows closed, opening them for a while, or running the whole-house or HVAC fan, and recommends one. It never opens a window or starts a fan for this advice. Predicted bedroom temperatures appear only once the v4 bedroom model is confident; until then the advice is in words.
 - **Watches itself.** It warns you when the thermostat, weather source or a sensor stops responding. It also checks its own behaviour against a set of household promises (for example, "never undo your manual change early"); any misses show in the Analysis tab and in the diagnostics.
 - **Observe-only mode.** Turn the automation switch off and Climate Advisor keeps planning and reporting but sends no commands.
+
+### Prediction engines
+
+Climate Advisor ships two prediction engines and picks the one you choose, per zone, under **Configure → Learning & Behavior**:
+
+- **Prediction engine** (default **v4**). Its forecast is the main prediction line on the Status chart and drives the "Next 24 hours" path. It also runs the house: it decides when the ceiling guard switches the AC on ahead of a warm afternoon, when the time-of-use pre-cool or pre-heat starts, how deep the bedtime setback is sized and when the window period closes.
+- **Comparison engine** (default **none**). An optional second engine, drawn as a comparison line next to the main one. It never acts on the house. It must be different from the prediction engine.
+
+Only the engines you pick run (v3's basic learning, such as your thermostat's swing, is always collected).
+
+v4 fits a model of your house every night between 3:15 and 3:45 (a "thermal mass" for the walls and furniture, a line per room sensor, your thermostat's own on/off pattern and a correction for how far your weather forecast is usually off). v3 is the older engine, kept as an option.
+
+**While the chosen engine is still learning** (the first days after switching, or no usable fit yet), Climate Advisor behaves exactly like a fresh install: default lead times and setbacks, and no early AC switch-on. It never borrows the other engine. The chart shows the plain schedule estimate with "Prediction: learning — showing the schedule estimate", and the note says Climate Advisor is using its default plan until the engine has learned your home. The log says so once, and again when the engine takes over.
+
+**Prediction accuracy** (linked from the Analysis tab) shows how each engine has scored against what really happened, by sensor, how far ahead and over a range from 6 hours to a year. It is information only: nothing is hidden or switched on because of a score.
+
+Details: [prediction-engines-spec](docs/prediction-engines-spec.md), [predictor-v4-spec](docs/predictor-v4-spec.md).
 
 ### Household rules
 
@@ -78,6 +99,14 @@ Set a **Sleep Indoor Temp Sensor** to keep the bedroom, not the hallway, on targ
 
 **Manual:** copy `custom_components/climate_advisor` into `config/custom_components/`, restart, then add the integration as above.
 
+HACS installs published releases (see the "released" badge above). The 0.9 line (new prediction engine, one plan behind every card, the new dashboard) is built on the [`0.9.x`](https://github.com/gunkl/ClimateAdvisor/tree/0.9.x) branch; until a 0.9 release is published, install it manually from that branch.
+
+### Upgrading to 0.9.4
+
+- **The prediction engine becomes v4** on every zone (no migration step; you can switch back to v3 in Configure → Learning & Behavior). If a zone has no v4 model yet, its first fit starts from your recorded history within minutes of the restart, as soon as Climate Advisor's startup window (about 5 minutes) has ended. Until it lands the zone runs on the default plan described above, and v4 takes over at the next 30-minute cycle after the fit. A fit that finds too little usable history is retried, at most every 6 hours, and the nightly fit keeps going.
+- **The new dashboard opens by default.** See [Dashboard](#dashboard).
+- **Rolling back to 0.9.3** is safe: the learning file is untouched (and now ignores fields it does not recognise), and the new per-zone files are simply left on disk and ignored. The one loss: rolling back on the same day loses that day's in-progress daily record.
+
 ## Setup
 
 The setup wizard asks for:
@@ -97,7 +126,9 @@ The setup wizard asks for:
 Everything is editable afterwards under **Configure**. The options there also cover:
 - time-of-use schedules;
 - notifications;
-- advanced options, such as **Prefer Savings Over Comfort** and the natural-ventilation soft start;
+- **Temperature Sources:** **Thermostat Finer Sensor** (Auto by default). Many thermostats show whole degrees but also have a finer sensor on the same device; once it proves to be the same reading, Climate Advisor uses it (68.54°F instead of 69°F) and falls back to the thermostat's own reading if it goes missing or disagrees;
+- **Learning & Behavior:** the prediction and comparison engines, **Prefer Savings Over Comfort**, adaptive pre-heat and setback, and the optional energy rate, heating power and cooling power for the cost estimate;
+- **Sensors & Fan:** door/window sensors, the fan and the natural-ventilation soft start;
 - day-type thresholds;
 - AI settings (needs a Claude API key);
 - GitHub settings, for submitting reports as issues.
@@ -156,12 +187,18 @@ Every service takes a **Zone** (`entry_id`), which you pick from the dropdown in
 
 ## Dashboard
 
-A sidebar panel with four tabs:
+The **Climate Advisor** sidebar panel opens the **new dashboard** by default. **Back to classic** is one click away and is remembered in this browser; the classic dashboard stays fully working and offers **Try the new dashboard** in its header. `?classic=1` (or a bookmark of the classic page) opens classic for that visit, and links such as `#analysis` or `#settings/...` still land on the right tab.
 
-- **Status:** today's strategy, the temperature forecast chart, current conditions, HVAC, fan and door/window state, and quick actions.
-- **Analysis:** the Activity Record (deterministic, no AI), the optional AI Investigator, classification details, the compliance summary and learning suggestions. You can copy a report, download it or submit it as a GitHub issue.
-- **Settings:** a read-only view of the configuration.
-- **Debug:** automation state, the prediction engines, tomorrow's plan, the daily record and manual actions (reclassify, resend the briefing, diagnostics).
+Both dashboards share the same chart: indoor and outdoor as two charts on one time axis, a line per room sensor, the main and comparison prediction lines, a **Plan** overlay marking each step, grouped toggles remembered per browser and zone, history from 6 hours to a year, scroll, zoom and a table view.
+
+The new dashboard has four tabs:
+
+- **Status:** what Climate Advisor will do next and what you can do, a card for every reading (each room sensor, outdoor against the weather service, today, doors and windows with the fan, occupancy with comfort), the chart, the **Next 24 hours** list (CA steps and your steps, with a reminder 30 minutes ahead of a step you need to do), **Tonight in the bedroom** and the briefing.
+- **Analysis:** headline numbers, yesterday / today / tomorrow (with the estimated cost when set up), your house in plain language, control quality, suggestions, reports (copy, download or submit as a GitHub issue) and prediction accuracy.
+- **Debug:** every internal field in searchable groups, with an event log.
+- **Settings:** a read-only, searchable view of the configuration, with "changed from default" markers. Changes are made in Home Assistant under **Configure**.
+
+The classic dashboard keeps its Status, Analysis (Activity Record, optional AI Investigator, compliance summary, suggestions), Settings and Debug tabs.
 
 The panel is backed by a REST API; see [rest-api](docs/rest-api.md).
 
@@ -174,13 +211,17 @@ The panel is backed by a REST API; see [rest-api](docs/rest-api.md).
 | Architecture | [02-ARCHITECTURE-REFERENCE](docs/02-ARCHITECTURE-REFERENCE.md) |
 | How decisions are computed | [08-COMPUTATION-REFERENCE](docs/08-COMPUTATION-REFERENCE.md) |
 | Troubleshooting | [09-DEBUGGING-GUIDE](docs/09-DEBUGGING-GUIDE.md) |
-| Thermal model | [thermal-model-v3-spec](docs/thermal-model-v3-spec.md) |
+| Prediction engines (choice, fallback, what they control) | [prediction-engines-spec](docs/prediction-engines-spec.md) |
+| Prediction engine v4 | [predictor-v4-spec](docs/predictor-v4-spec.md) |
+| Thermal model v3 | [thermal-model-v3-spec](docs/thermal-model-v3-spec.md) |
+| The plan behind Next 24 hours, Next Action and the briefing | [operation-timeline-spec](docs/operation-timeline-spec.md) |
+| Tonight in the bedroom | [night-strategy-spec](docs/night-strategy-spec.md) |
 | AI features | [ai-integration](docs/ai-integration.md) |
 | Release history | [CHANGELOG](CHANGELOG.md) |
 
 ## Contributing
 
-Fork the repository, create a branch and open a pull request. [DEVELOPMENT.md](docs/DEVELOPMENT.md) covers the environment, the unit and real-Home-Assistant test tiers (`python scripts/test.py unit` / `ha`) and the simulator. The roadmap is tracked in [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the branch model (`0.9.x` and `main`), setting up with `uv`, the test tiers, golden scenarios, how to write an issue and what a pull request needs. [DEVELOPMENT.md](docs/DEVELOPMENT.md) has the environment and test-tier details. The roadmap is tracked in [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11).
 
 ## License
 

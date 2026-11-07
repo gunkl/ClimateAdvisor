@@ -43,7 +43,7 @@
   function fromStrategy(p) {
     var celsius = /c/i.test((p && p.unit) || '');
     function F(v) { return v == null ? null : (celsius ? v * 9 / 5 + 32 : v); }   // card values are internal degF
-    function dF(v) { return v == null ? 0 : (celsius ? v * 9 / 5 : v); }
+    function dF(v) { return v == null ? null : (celsius ? v * 9 / 5 : v); }
     var opts = (p && p.options) || [], grid = [];
     opts.some(function (o) { if (o.path && o.path.length) { grid = o.path.map(function (pt) { return pt[0]; }); return true; } return false; });
     var rows = opts.map(function (o) {
@@ -52,15 +52,15 @@
       if (o.runs === false) tags.push('would not run tonight');
       tags.push(o.confidence === 'low' ? 'may help' : (o.confidence || 'medium') + ' confidence');
       return {
-        key: o.key, label: o.label, bed: grid.length ? resample(o.path, grid).map(F) : [],
+        key: o.key, label: o.label, bed: grid.length ? resample(o.path, grid).map(F) : [], // figures are null while the gate has not passed: never 0
         bed_min: F(o.bedroom_low_f), bed_max: F(o.bedroom_high_f), bed_wake: F(o.bedroom_wake_f),
-        miss_dh: dF(o.discomfort_fh), heat_min: o.heat_min || 0, cool_min: o.cool_min || 0, cost: o.score,
+        miss_dh: dF(o.discomfort_fh), heat_min: o.heat_min, cool_min: o.cool_min, cost: o.score,
         tags: tags.join(' · '), best: o.key === p.recommended, actions: o.actions || [], confidence: o.confidence, note: o.note || ''
       };
     });
     if (rows.length && !rows.some(function (r) { return r.best; })) rows[0].best = true;
     return {
-      live: true, show_numbers: !p || p.show_numbers !== false, unit: p && p.unit,
+      live: true, show_numbers: !p || p.show_numbers !== false, unit: p && p.unit, headline: p && p.headline, tradeoffs: (p && p.tradeoffs) || [],
       nights: rows.length ? [{ title: 'Tonight', t: grid, out: null, floor: F(p.floor_f), ceiling: F(p.ceiling_f), start: p.start, end: p.end, rows: rows }] : []
     };
   }
@@ -98,9 +98,10 @@
       if (state.ni >= nights.length) state.ni = 0;
       var N = nights[state.ni], rows = N.rows || [];
       var best = rows.filter(function (r) { return r.best; })[0] || rows[0];
-      if (data.show_numbers === false || !(N.t && N.t.length > 1)) { // plan only: no predicted figures (decision C11)
+      if (data.show_numbers === false || !(N.t && N.t.length > 1) || best.bed_min == null) { // plan only: no predicted figures (decision C11)
         el.innerHTML = '<div class="rec"><div class="sub">RECOMMENDED FOR ' + esc(String(N.title || 'TONIGHT').toUpperCase()) + '</div>' +
-          '<div style="font-size:20px;font-weight:650;margin-top:2px">' + esc(best.label) + '</div></div>' + stepsHtml(best) +
+          '<div style="font-size:20px;font-weight:650;margin-top:2px">' + esc(best.label) + '</div>' +
+          (data.headline ? '<div class="note" id="night-headline" style="margin-top:4px">' + esc(data.headline) + '</div>' : '') + '</div>' + stepsHtml(best) +
           '<div class="sub" id="night-nonumbers">Predicted bedroom temperatures are not shown yet. Climate Advisor shows them once it has checked how well it predicts your bedroom.</div>';
         return;
       }
@@ -125,7 +126,8 @@
         h += '<div class="rec"><div class="sub">RECOMMENDED FOR ' + esc(String(N.title || 'TONIGHT').toUpperCase()) + '</div>' +
           '<div style="font-size:20px;font-weight:650;margin-top:2px">' + esc(best.label) + '</div>' +
           '<div class="note" style="margin-top:4px">Bedroom ' + d1(best.bed_min) + '–' + d1(best.bed_max) + '° against a ' +
-          D(N.floor).toFixed(0) + '–' + D(N.ceiling).toFixed(0) + '° sleep band; ' + ((best.heat_min || 0) + (best.cool_min || 0)) + ' min of HVAC.</div></div>' + stepsHtml(best);
+          D(N.floor).toFixed(0) + '–' + D(N.ceiling).toFixed(0) + '° sleep band; ' + ((best.heat_min || 0) + (best.cool_min || 0)) + ' min of HVAC.</div>' +
+          (data.headline ? '<div class="note" id="night-headline" style="margin-top:4px">' + esc(data.headline) + '</div>' : '') + '</div>' + stepsHtml(best);
       }
       h += '<div class="row"><span class="sub">Bedroom under each option:</span>' + rows.map(function (r, i) {
         return '<button type="button" class="pill" data-opt="' + esc(r.key) + '" aria-pressed="' + (!off[r.key]) + '">' +
@@ -167,6 +169,9 @@
             '<td class="num">' + Number(r.cost).toFixed(2) + '</td><td style="color:var(--ink2)">' + esc(r.tags || '') + '</td></tr>';
         }).join('') + '</tbody></table></div>' +
         '<div class="sub">Score = degree-hours outside the sleep band beyond the thermostat swing + hours of HVAC. Lowest wins; ties go to fewer things for you to do.</div>';
+      if (data.tradeoffs && data.tradeoffs.length) {
+        h += '<ul class="note" id="night-tradeoffs" aria-label="Compared with the recommendation" style="margin:0;padding-left:18px">' + data.tradeoffs.map(function (t) { return '<li>' + esc(t.text) + '</li>'; }).join('') + '</ul>';
+      }
       if (data.note) h += '<div class="note-box"><strong>Not validated yet.</strong> ' + esc(String(data.note).replace(/^Not validated yet\.\s*/, '')) + '</div>';
       el.innerHTML = h;
     }

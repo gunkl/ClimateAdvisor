@@ -113,7 +113,7 @@ def live_timeline() -> dict:
     }
 
 
-def live_night(show_numbers: bool = True) -> dict:
+def _live_night(show_numbers: bool = True) -> dict:
     """GET night_strategy as NightStrategy.to_dict() (R4) with the display unit added."""
     now = dt.datetime.now(dt.UTC).astimezone()
 
@@ -164,6 +164,33 @@ def live_night(show_numbers: bool = True) -> dict:
             opt("windows_2h", "Windows open 2 h", 66.5, 2, [wo, wc], score=0.9, heat_min=30, confidence="medium"),
         ],
     }
+
+
+def live_night(show_numbers: bool = True) -> dict:
+    """As the endpoint answers: with the v4 gate closed every figure is null and the path empty (never 0)."""
+    d = _live_night(show_numbers)
+    d["v4_gate_ready"] = show_numbers
+    d["headline"] = "Keep the windows closed tonight; CA keeps the heat for the bedroom at 66°F."
+    d["tradeoffs"] = (
+        [{"key": "windows_2h", "label": "Windows open 2 h", "text": "Windows open 2 h: 10 more minutes of heat or AC"}]
+        if show_numbers
+        else []
+    )
+    if not show_numbers:
+        for o in d["options"]:
+            for k in (
+                "bedroom_low_f",
+                "bedroom_high_f",
+                "bedroom_wake_f",
+                "discomfort_fh",
+                "heat_min",
+                "cool_min",
+                "hvac_minutes",
+                "score",
+            ):
+                o[k] = None
+            o["path"] = []
+    return d
 
 
 def route_factory(overrides: dict):

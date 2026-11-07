@@ -13,6 +13,10 @@ const strategy = (numbers) => async (route) => {
   const resp = await route.fetch();
   const body = await resp.json();
   body.show_numbers = numbers;
+  if (!numbers) {
+    body.tradeoffs = [];
+    body.options = body.options.map(o => Object.assign({}, o, { bedroom_low_f: null, bedroom_high_f: null, bedroom_wake_f: null, discomfort_fh: null, heat_min: null, cool_min: null, hvac_minutes: null, score: null, path: [] }));
+  }
   await route.fulfill({ response: resp, body: JSON.stringify(body) });
 };
 
@@ -68,6 +72,7 @@ test.describe('New dashboard: Status tab', () => {
     await expect(page.locator('#night-card .rec')).toContainText('Keep closed');
     await expect(page.locator('#night-card svg[role="img"]')).toHaveCount(1);
     await expect(page.locator('#night-card table')).toBeVisible();
+    await expect(page.locator('#night-tradeoffs')).toContainText('more thing');
     // the option with steps lists them with the actor
     await expect(page.locator('#night-steps')).toBeAttached();
   });
@@ -77,9 +82,11 @@ test.describe('New dashboard: Status tab', () => {
     await open(page);
     await expect(page.locator('#night-card .rec')).toContainText('Keep closed');
     await expect(page.locator('#night-nonumbers')).toContainText('not shown yet');
+    await expect(page.locator('#night-headline')).toContainText('Keep the windows closed tonight');
     await expect(page.locator('#night-card svg[role="img"]')).toHaveCount(0);
     await expect(page.locator('#night-card table')).toHaveCount(0);
-    const text = await page.locator('#night-card').innerText();
+    // the headline names the sleep band the plan holds (a setting, not a prediction); every predicted figure is absent
+    const text = (await page.locator('#night-card').innerText()).replace(await page.locator('#night-headline').innerText(), '');
     expect(text).not.toMatch(/\d+(\.\d)?\s?°/);
     await expect(page.locator('#night-sample-badge')).toBeHidden();
   });
@@ -88,6 +95,12 @@ test.describe('New dashboard: Status tab', () => {
     await page.route('**/api/climate_advisor/night_strategy**', (r) => r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"night_strategy_not_ready"}' }));
     await open(page);
     await expect(page.locator('#night-empty')).toContainText('No night plan yet');
+  });
+
+  test('in daytime the empty state says when the plan appears (reason no_night_in_view)', async ({ page }) => {
+    await page.route('**/api/climate_advisor/night_strategy**', (r) => r.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"night_strategy_not_ready","reason":"no_night_in_view"}' }));
+    await open(page);
+    await expect(page.locator('#night-empty')).toHaveText("Tonight's plan appears 6 hours before bedtime.");
     await expect(page.locator('#night-sample-badge')).toBeHidden();
   });
 

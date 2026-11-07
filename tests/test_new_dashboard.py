@@ -923,7 +923,7 @@ def test_status_tab_reads_the_live_night_plan_and_gates_its_figures():
     assert 'id="night-sample-badge"' in HTML and "hidden" in re.search(r'id="night-sample-badge"[^>]*', HTML).group(0)
     # show_numbers false: the plan and its steps, no predicted figures (decision C11)
     assert "if (data.show_numbers === false ||" in card and "night-nonumbers" in card
-    plan_only = card[card.index("if (data.show_numbers === false ||") : card.index("var W = 1000")]
+    plan_only = card[card.index("// plan only: no predicted figures") : card.index("var W = 1000")]
     for figure in ("bed_min", "bed_max", "bed_wake", "d1(", "heat_min", "<svg", "<table"):
         assert figure not in plan_only, f"plan-only view must not show {figure}"
     # low-confidence steps keep the qualifier (decision C13)

@@ -140,6 +140,8 @@
 
   // ---------- night card ----------
   var NO_NIGHT = 'No night plan yet. It appears once Climate Advisor has classified today.';
+  var NO_NIGHT_DAY = "Tonight's plan appears 6 hours before bedtime.";
+  function noNight(e) { return e && e.body && e.body.reason === 'no_night_in_view' ? NO_NIGHT_DAY : NO_NIGHT; }
   function setNight(mode, data, msg) { // mode: live | sample | empty | error
     var host = ND.$('night-card');
     ND.$('night-sample-badge').hidden = mode !== 'sample';
@@ -158,7 +160,7 @@
       if (!data || !data.nights.length) setNight('empty', null, NO_NIGHT);
       else setNight('live', data);
     }).catch(function (e) {
-      if (e.status === 503 || e.message === 'HTTP 503') { setNight('empty', null, NO_NIGHT); return; }
+      if (e.status === 503 || e.message === 'HTTP 503') { setNight('empty', null, noNight(e)); return; }
       if (e.status === 404 || e.message === 'HTTP 404') { // an install without the endpoint: the approved mock, labelled as a sample
         return fetch('nd_night_sample.json').then(function (r) { return r.json(); }).then(function (d) { setNight('sample', d); })
           .catch(function () { setNight('error', null, 'The night plan could not be loaded.'); });

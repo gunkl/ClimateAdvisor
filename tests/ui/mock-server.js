@@ -90,9 +90,13 @@ function makeNightFixture(showNumbers) {
     discomfort_fh: 0, heat_min: 20, cool_min: 0, hvac_minutes: 20, score: 0.5, confidence: 'high',
     n_actions: actions.length, runs: true, note: '', actions, path: path(base, amp),
   }, extra || {});
-  return {
+  const gate = (o) => showNumbers ? o : Object.assign({}, o, { bedroom_low_f: null, bedroom_high_f: null, bedroom_wake_f: null, discomfort_fh: null, heat_min: null, cool_min: null, hvac_minutes: null, score: null, path: [] });
+  const res = {
     schema_version: 1, unit: 'fahrenheit', start: at(30), end: at(8 * 60), floor_f: 66, ceiling_f: 72,
     target_sensor: 'sensor.bedroom', fan_mode: 'whole_house_fan', recommended: 'closed', show_numbers: showNumbers,
+    v4_gate_ready: showNumbers,
+    headline: 'Keep the windows closed tonight; CA keeps the heat for the bedroom at 66°F.',
+    tradeoffs: showNumbers ? [{ key: 'windows_2h', label: 'Windows open 2 h', score_delta: 0.4, hvac_minutes_delta: 10, discomfort_fh_delta: 0, text: 'Windows open 2 h: 10 more minutes of heat or AC, 2 more thing(s) for you to do' }] : [],
     options: [
       opt('closed', 'Keep closed', 'closed', 67, 1.5, []),
       opt('windows_2h', 'Windows open 2 h', 'windows', 66.5, 2, [
@@ -101,6 +105,8 @@ function makeNightFixture(showNumbers) {
       ], { score: 0.9, heat_min: 30, hvac_minutes: 30 }),
     ],
   };
+  res.options = res.options.map(gate);
+  return res;
 }
 
 const server = http.createServer((req, res) => {

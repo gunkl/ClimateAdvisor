@@ -480,6 +480,9 @@ class FakeHassPromiseSource:
             coord = s.coordinator
             started = getattr(coord, "_whf_safety_started_at", None) if coord is not None else None
             since_start = max(0.0, (ts - started).total_seconds()) if isinstance(started, datetime) else None
+            # Issue #1389: the grace waits for Home Assistant to finish starting, as in the coordinator's reading.
+            readable_fn = getattr(coord, "_whf_sensor_readable_for_s", None) if coord is not None else None
+            readable_for = readable_fn(ts) if callable(readable_fn) else None
             readings = []
             for e in self._contacts:
                 cs = states.get(e)
@@ -491,6 +494,7 @@ class FakeHassPromiseSource:
                         is_open=cs is not None and str(cs.state).lower() == open_state,
                         age_s=age,
                         since_start_s=since_start,
+                        readable_for_s=readable_for,
                     )
                 )
             contacts_open = not house_is_sealed(tuple(readings))

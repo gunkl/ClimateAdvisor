@@ -367,7 +367,8 @@ def test_boot_validation_hook_is_owned_by_the_entry():
     from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
     coord, entry, fake_hass, scheduler = _build()
-    assert len(fake_hass.bus._listeners.get(EVENT_HOMEASSISTANT_STARTED, [])) == 1
+    # The weather check and (Issue #1389) the coordinator's door/window-grace start; both belong to the entry.
+    assert len(fake_hass.bus._listeners.get(EVENT_HOMEASSISTANT_STARTED, [])) == 2
 
     with scheduler.installed():
         run_coro(async_unload_entry_like_ha(fake_hass, entry))

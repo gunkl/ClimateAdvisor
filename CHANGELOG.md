@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.8.71] — 2026-11-06
+
+- Fix #1389: a Home Assistant restart no longer turns off the whole-house fan that is cooling the house through open windows. A door/window sensor reads "unavailable" from the shutdown until it loads on the next start (a group helper waits for its members, about 1.5 minutes on the production install). Climate Advisor counted it as closed after 60 s, while Home Assistant was still starting, so it called the house sealed, sent the fan off and e-mailed "door/window sensor unavailable". The 60 s now starts once Home Assistant has finished starting. A sensor that is still dark a minute after that is still counted closed, as before, so a fan on a really sealed house is still stopped.
+- Fix #1390: when the 5-minute fan on/off limit delays a fan-off decided at start-up, Climate Advisor now sends it once the limit allows. Before, nothing asked again: the fan kept running with Climate Advisor no longer managing it (no bedtime or warm-outdoor stop), and the heating stayed held off until the fan was turned off by hand.
+
 ## [0.8.70] — 2026-11-06
 
 - Fix #1378 (follow-up): the overnight pre-cool planned in the evening is now checked again against the latest forecast when it is due (around 2:30 AM). If the hot day it was planned for has been revised down overnight, so it is no longer hot and no longer much warmer than the day before, the AC does not run. Before, the evening's plan ran regardless.

@@ -7,11 +7,10 @@ so this simulator can never drift from production thermal-model behavior
 (DRY rule, CLAUDE.md). That function lives in
 custom_components/climate_advisor/coordinator.py as a pure, module-level
 function with no instance-state dependency, so it can be imported directly.
-This simulator passes the optional `clamp_bound` kwarg (Issue #887) so
-overshoot/undershoot can swing to the configured deadband edge instead of
-being clamped to the bare setpoint — the production forecast caller
-(_build_predicted_indoor_future) omits it and keeps the original
-clamp-to-setpoint behavior.
+While the compressor runs, this simulator asks that step for full capacity
+(an unbounded drive target, Issue #1387), and its own deadband state machine
+decides when the compressor stops — like a real thermostat, whose equipment
+heats or cools at full power until the thermostat cuts it.
 
 NOTE ON HA VERSION: ClimateEntity/RestoreEntity's API shape used here
 (hvac_modes, target_temperature, current_temperature, async_get_last_state,
@@ -25,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -58,6 +58,8 @@ from .const import (
     DEFAULT_DEADBAND_HEAT_F,
     DEFAULT_MIN_OFF_SECONDS,
     DEFAULT_MIN_RUN_SECONDS,
+    DEFAULT_OFF_OFFSET_COOL_F,
+    DEFAULT_OFF_OFFSET_HEAT_F,
     DOMAIN,
 )
 
@@ -201,10 +203,9 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         # unmodified until reconfigured.
         self._deadband_heat_f: float = float(data.get(CONF_DEADBAND_HEAT_F, DEFAULT_DEADBAND_HEAT_F))
         self._deadband_cool_f: float = float(data.get(CONF_DEADBAND_COOL_F, DEFAULT_DEADBAND_COOL_F))
-        _off_heat = data.get(CONF_OFF_OFFSET_HEAT_F)
-        _off_cool = data.get(CONF_OFF_OFFSET_COOL_F)
-        self._off_offset_heat_f: float | None = None if _off_heat is None else float(_off_heat)
-        self._off_offset_cool_f: float | None = None if _off_cool is None else float(_off_cool)
+        # Unset falls back to the measured real-thermostat stop point (Issue #1387), not the symmetric far edge.
+        self._off_offset_heat_f: float = float(data.get(CONF_OFF_OFFSET_HEAT_F, DEFAULT_OFF_OFFSET_HEAT_F))
+        self._off_offset_cool_f: float = float(data.get(CONF_OFF_OFFSET_COOL_F, DEFAULT_OFF_OFFSET_COOL_F))
         self._min_run_seconds: float = float(data.get(CONF_MIN_RUN_SECONDS, DEFAULT_MIN_RUN_SECONDS))
         self._min_off_seconds: float = float(data.get(CONF_MIN_OFF_SECONDS, DEFAULT_MIN_OFF_SECONDS))
 
@@ -556,13 +557,12 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._actively_driving = self._compressor_on
         k_active = (self._k_active_heat if mode == "heat" else self._k_active_cool) if self._compressor_on else None
 
-        # Allow indoor temp to actually swing to the deadband edge instead of
-        # clamping to the bare setpoint (which would make wants_off's deadband
-        # comparison above unreachable — see Issue #887).
-        clamp_bound = None
-        if mode is not None and self._target_temp is not None and deadband is not None:
-            _stop = deadband if off_offset is None else off_offset
-            clamp_bound = self._target_temp + _stop if mode == "heat" else self._target_temp - _stop
+        # Issue #1387: a running compressor delivers full capacity until the state machine above stops it. The
+        # ODE step only applies capacity while the room is short of the setpoint it is given, and clamps there; the
+        # target used to be passed, so with a stop point past the target (the old symmetric default, target+1.5)
+        # the room pinned at the target, reporting "heating" with no heat, for hours. An unbounded drive target
+        # removes both limits; the room passes the stop point by at most one tick before the compressor stops.
+        drive_to = (math.inf if mode == "heat" else -math.inf) if self._compressor_on else self._target_temp
 
         self._current_temp = _simulate_indoor_physics(
             self._current_temp,
@@ -570,11 +570,10 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             self._k_passive,
             k_active,
             dt_hours,
-            self._target_temp,
+            drive_to,
             comfort_heat=self._comfort_heat,
             comfort_cool=self._comfort_cool,
             hvac_mode=mode,
-            clamp_bound=clamp_bound,
         )
         self._last_update_ts = now
         self.async_write_ha_state()

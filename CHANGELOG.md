@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.6] — unreleased
+
+- Docs #1401: the Home Assistant Boundary Rule (`claude.md`, `CONTRIBUTING.md`, `docs/HA-BOUNDARY-EXCEPTIONS.md`) now names everything the integration has always done: control of the configured whole-house fan (`turn_on`/`turn_off` on its `fan` or `switch` entity), `climate.set_fan_mode`, `notify.send_email`, the read-only weather forecast call, and the per-zone data files, with `const.py` `ENTRY_SCOPED_FILES` as the single list. No code or behavior change.
+
 ## [0.9.5] — 2026-11-07
 
 - Includes fix 0.8.72 from `main` (#1397: a thermostat that reports Climate Advisor's setpoint a little off, for example 18.0 °C then 17.9 °C, is no longer read as you changing it).

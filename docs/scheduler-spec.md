@@ -50,7 +50,7 @@ GitHub issue #786, following a request on the project roadmap issue (#11) from a
 
 No temperature field exists anywhere in this shape — this is deliberate, not an oversight (see [Origin](#origin)).
 
-**Storage**: `config_entry.data["schedules"]`, a plain list of `Schedule`-shaped dicts. No new file — per `docs/HA-BOUNDARY-EXCEPTIONS.md`, the only approved non-config-entry data file is the learning engine's, and schedule data doesn't meet that bar. `CONFIG_METADATA` (`const.py`) is a flat per-field scalar dict with no list-of-records precedent, so `"schedules"` deliberately bypasses it rather than being forced into that shape.
+**Storage**: `config_entry.data["schedules"]`, a plain list of `Schedule`-shaped dicts. No new file — per `docs/HA-BOUNDARY-EXCEPTIONS.md` §1, the config-root data files are a fixed set (`ENTRY_SCOPED_FILES` plus the investigation reports file), and schedule data doesn't meet the bar for a new one. `CONFIG_METADATA` (`const.py`) is a flat per-field scalar dict with no list-of-records precedent, so `"schedules"` deliberately bypasses it rather than being forced into that shape.
 
 **Cap**: `MAX_SCHEDULES = 5`, enforced by `config_flow.py` (the "+ Add" option is omitted from the scheduler list step once 5 exist, and `async_step_scheduler_edit()` defensively ignores an add attempted past the cap). `scheduler.py`'s resolver functions do **not** enforce this themselves — an arbitrary-length list is accepted, keeping the boundary a config-flow-layer concern only (see `tests/test_scheduler.py::TestFiveScheduleCapIsAConfigFlowConcern`).
 

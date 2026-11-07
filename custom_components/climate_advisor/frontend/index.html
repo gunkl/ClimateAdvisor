@@ -475,7 +475,6 @@
       </div>
       <div class="ctl-group" role="group" aria-label="Ahead: how much forecast to show">
         <span class="ctl-label">Ahead</span>
-        <button type="button" class="ahead-btn" data-ahead="12h" aria-pressed="false" onclick="setChartAhead('12h')">12h</button>
         <button type="button" class="ahead-btn active" data-ahead="24h" aria-pressed="true" onclick="setChartAhead('24h')">24h</button>
         <button type="button" class="ahead-btn" data-ahead="48h" aria-pressed="false" onclick="setChartAhead('48h')">48h</button>
         <button type="button" class="ahead-btn" data-ahead="5d" aria-pressed="false" onclick="setChartAhead('5d')">5d</button>
@@ -486,13 +485,12 @@
         <button type="button" class="chart-nav-btn" id="chart-nav-fwd" title="Scroll forward" aria-label="Scroll forward half a view" onclick="shiftChartWindow(1)">&#8250;</button>
       </div>
     </div>
-    <details class="chart-key" id="chart-key" open>
+    <details class="chart-key" id="chart-key">
       <summary>Lines <span id="chart-key-count"></span></summary>
       <div id="chart-key-body"></div>
       <div class="cl-item key-extra" id="legend-thermostat-set" style="display:none"><span class="cl-swatch" style="border-top:2px dashed rgba(255,193,7,0.95)"></span><span>Thermostat set</span></div>
     </details>
     <p class="chart-note" id="chart-v4-note" hidden></p>
-    <div id="chart-hover-panel" class="chart-hover-panel" aria-live="off"></div>
     <div class="chart-stack" id="chart-stack" tabindex="0" aria-label="Temperature chart. Left and right arrows move a readout along the time axis; Escape clears it. Table view lists the same values.">
       <div class="chart-container">
         <canvas id="temp-chart" role="img" aria-label="Indoor temperature by sensor with predictions"></canvas>
@@ -505,6 +503,7 @@
       </div>
       <div class="chart-cursor" id="chart-cursor" hidden></div>
     </div>
+    <div id="chart-hover-panel" class="chart-hover-panel" aria-live="off"></div>
     <p class="chart-note" id="chart-empty" hidden>No chart data yet. The chart fills in as Climate Advisor logs readings.</p>
     <div class="chart-table-wrap" id="chart-table-wrap" hidden>
       <div class="chart-table-actions"><button type="button" class="chart-tool-btn" id="chart-table-copy" onclick="copyChartTable()">Copy table</button></div>
@@ -610,7 +609,7 @@
 
   <!-- Prediction accuracy preview (Issue #1230 R1) -->
   <div class="card">
-    <a href="prediction_accuracy.html" id="prediction-accuracy-link">Prediction accuracy (preview)</a>
+    <a href="prediction_accuracy.html?from=classic" id="prediction-accuracy-link">Prediction accuracy (preview)</a>
   </div>
 
   <!-- Learning Suggestions Card -->
@@ -1076,51 +1075,83 @@
 
   // The thermostat's setpoint line(s) for the thermostat reading card (Issue #266 / #402 / #1194 d). Moved verbatim
   // from the old HVAC grid item; the comparisons are unchanged.
-  function _hvacTempsHtml(data, unitSym) {
-    let hvacTemps = '';
-      // Issue #266: show the thermostat's setpoint(s) under the mode. The heat_cool band exposes
-      // target_temp_low/high (dual); cool/heat expose the single current_setpoint.
-      if (data.hvac_mode === 'heat_cool' && (data.target_temp_low != null || data.target_temp_high != null)) {
-        const lo = data.target_temp_low != null ? Math.round(data.target_temp_low) + unitSym : '—';
-        const hi = data.target_temp_high != null ? Math.round(data.target_temp_high) + unitSym : '—';
-        const caTargetHeat = data.ca_target_heat;
-        const caTargetCool = data.ca_target_cool;
-        const diverged = caTargetHeat != null && caTargetCool != null
-            && data.target_temp_low != null && data.target_temp_high != null
-            && (Math.abs(data.target_temp_low - caTargetHeat) > 1
-                || Math.abs(data.target_temp_high - caTargetCool) > 1);
-        if (diverged) {
-          const caLo = Math.round(caTargetHeat) + unitSym;
-          const caHi = Math.round(caTargetCool) + unitSym;
-          hvacTemps = `Heat ${lo} · Cool ${hi} <span style="color:#888;font-size:0.85em">(CA: ${caLo}/${caHi})</span>`;
-        } else {
-          hvacTemps = `Heat ${lo} · Cool ${hi}`;
-        }
-      } else if (data.current_setpoint != null) {
-        // Issue #402: single-setpoint mode previously had no divergence check at all, unlike
-        // heat_cool mode above — so a thermostat write suppressed by an active whole-house-fan
-        // session (or any other reason the real setpoint stops tracking CA's intent) showed no
-        // indication of staleness. Mirror the same (CA: X) annotation here.
-        // Issue #1194 (d): while the remote-sensor outer loop holds an offset the thermostat is DELIBERATELY at
-        // target + offset, so the band edge is the wrong thing to compare against (it read "70 (CA: 66)" all night).
-        // The thermostat is compared with what CA commanded; the offset itself is explained on its own line below.
-        // A real mismatch (the thermostat reporting something other than the commanded value) still shows (CA: X).
-        const ro = data.remote_offset;
-        const caTargetSingle = (ro && ro.expected_setpoint != null && ro.mode === data.hvac_mode) ? ro.expected_setpoint
-          : data.hvac_mode === 'cool' ? data.ca_target_cool
-          : data.hvac_mode === 'heat' ? data.ca_target_heat
-          : null;
-        const divergedSingle = caTargetSingle != null && Math.abs(data.current_setpoint - caTargetSingle) > 1;
-        if (divergedSingle) {
-          const caValSingle = Math.round(caTargetSingle) + unitSym;
-          hvacTemps = `${data.current_setpoint}${unitSym} <span style="color:#888;font-size:0.85em">(CA: ${caValSingle})</span>`;
-        } else {
-          hvacTemps = data.current_setpoint + unitSym;
-        }
-      }
-
-    return hvacTemps;
+  // Plain words for the reading cards (Issue #1399): every line says what it is, with no bare state tokens
+  // ("active", "idle", "inactive") and no signed gap shown with a unit as if it were a reading. The new dashboard's
+  // nd_status.js words the same things the same way (ND.statusWords).
+  function _cap(s) { s = String(s == null ? '' : s); return s.charAt(0).toUpperCase() + s.slice(1); }
+  // Two readings, worded as a difference: "The weather service says 54.0°, 6.2° warmer than your outdoor sensor". Both values
+  // are already in the display unit, so the gap needs no conversion (a gap never takes the −32 offset). Under half a
+  // degree it "matches".
+  function _saysVs(who, theirs, yours, u, yourName) {
+    const gap = Math.round((theirs - yours) * 10) / 10, mag = Math.abs(gap);
+    return `${who} says ${theirs.toFixed(1)}${u}, ` +
+      (mag < 0.5 ? `matches ${yourName}` : `${mag.toFixed(1)}° ${gap > 0 ? 'warmer' : 'cooler'} than ${yourName}`);
   }
+  // Tomorrow against today (the classifier's trend: a gap, never a reading).
+  function _trendWords(dir, mag) {
+    const m = (Math.round(Math.abs(mag || 0) * 10) / 10).toFixed(1);
+    if (dir === 'warming') return `↑ Tomorrow ${m}° warmer than today`;
+    if (dir === 'cooling') return `↓ Tomorrow ${m}° cooler than today`;
+    return '→ Tomorrow about the same as today';
+  }
+  // automation_status as a phrase: "following today's plan", "cooling with outside air (nat-vent)", or the status's
+  // own phrase ("paused — door/window open", "grace period (manual) — 20 min ...").
+  function _automationPhrase(s) {
+    s = String(s == null ? '' : s).trim();
+    const m = /^active(?: \((away|vacation|guest)\))?(.*)$/.exec(s);
+    if (m) return 'following ' + (m[1] ? `the ${m[1]} plan` : 'today’s plan') + m[2];
+    if (s === 'disabled') return 'paused, not changing the thermostat';
+    if (!s || s === 'unknown') return 'status not known yet';
+    if (/^nat-vent/.test(s)) return `cooling with outside air (${s})`;
+    return s;
+  }
+  // A fan status as a sentence: "Whole-house fan is off", "HVAC fan is running (manual override)".
+  const _FAN_STATE = { inactive: 'is off', off: 'is off', active: 'is running', running: 'is running', disabled: 'is not managed by Climate Advisor' };
+  function _fanSentence(name, s) {
+    s = String(s == null ? '' : s).trim();
+    if (s === 'active (unconfirmed)') return `${name} should be running (not confirmed yet)`;
+    const idle = /^nat-vent \(session active, fan idle\)/;
+    if (idle.test(s)) return `${name} is resting between outside-air runs${s.replace(idle, '')}`;
+    const m = /^(inactive|active|running|off|disabled)\b(.*)$/.exec(s);
+    return m ? `${name} ${_FAN_STATE[m[1]]}${m[2]}` : `${name}: ${s || 'status not known'}`;
+  }
+  // What the thermostat is doing, in one line: "Heating to 68° · idle now", "Keeping between 66° and 74°", with
+  // "(Climate Advisor wants 70°)" when the thermostat disagrees with CA. Issue #266: the heat_cool band exposes
+  // target_temp_low/high, cool/heat the single current_setpoint. Issue #402: both shapes flag a setpoint that stopped
+  // tracking CA (e.g. a write suppressed by a whole-house-fan session). Issue #1194 (d): while the remote-sensor outer
+  // loop holds an offset the thermostat is DELIBERATELY at target + offset, so it is compared with what CA commanded
+  // (the offset is explained on its own line); a thermostat reporting something else still shows the disagreement.
+  const _ACTION_WORDS = { heating: 'heating now', cooling: 'cooling now', idle: 'idle now', fan: 'fan running now', drying: 'drying now', preheating: 'preheating now', defrosting: 'defrosting now' };
+  function _hvacSentence(data, unitSym) {
+    const mode = data.hvac_mode, sp = data.current_setpoint;
+    let set, want = '';
+    if (mode === 'heat_cool' && (data.target_temp_low != null || data.target_temp_high != null)) {
+      const lo = data.target_temp_low != null ? Math.round(data.target_temp_low) + unitSym : '—';
+      const hi = data.target_temp_high != null ? Math.round(data.target_temp_high) + unitSym : '—';
+      set = `Keeping between ${lo} and ${hi}`;
+      if (data.ca_target_heat != null && data.ca_target_cool != null && data.target_temp_low != null && data.target_temp_high != null
+          && (Math.abs(data.target_temp_low - data.ca_target_heat) > 1 || Math.abs(data.target_temp_high - data.ca_target_cool) > 1)) {
+        want = Math.round(data.ca_target_heat) + unitSym + '–' + Math.round(data.ca_target_cool) + unitSym;
+      }
+    } else if (mode === 'off') {
+      set = 'Thermostat is off';
+    } else {
+      const spText = sp != null ? sp + unitSym : null;
+      set = mode === 'heat' && spText ? `Heating to ${spText}` : mode === 'cool' && spText ? `Cooling to ${spText}`
+        : mode === 'fan_only' ? 'Fan only' : mode === 'dry' ? 'Drying' : spText ? `Set to ${spText}`
+        : `Thermostat mode ${mode || 'not known'}`;
+      if (sp != null) {
+        const ro = data.remote_offset;
+        const ca = (ro && ro.expected_setpoint != null && ro.mode === data.hvac_mode) ? ro.expected_setpoint
+          : mode === 'cool' ? data.ca_target_cool : mode === 'heat' ? data.ca_target_heat : null;
+        if (ca != null && Math.abs(sp - ca) > 1) want = Math.round(ca) + unitSym;
+      }
+    }
+    const act = _ACTION_WORDS[data.hvac_action] || (data.hvac_action && data.hvac_action !== 'off' ? data.hvac_action + ' now' : '');
+    return escapeHtml(set) + (act ? ' · ' + escapeHtml(act) : '') +
+      (want ? ` <span style="color:#888;font-size:0.85em">(Climate Advisor wants ${escapeHtml(want)})</span>` : '');
+  }
+  window.CAStatusWords = { saysVs: _saysVs, trendWords: _trendWords, automationPhrase: _automationPhrase, fanSentence: _fanSentence, hvacSentence: _hvacSentence };
 
   function _latestSensorReading(sid) {
     const arr = ((CAChartV2.data() || {}).actual_indoor_sensors || {})[sid];
@@ -1143,12 +1174,12 @@
 
   function _fanLines(data) {
     const timer = data.fan_remote_timer_hours != null
-      ? `<div class="note">remote timer: ${data.fan_remote_timer_hours}h${data.fan_remote_timer_ends ? ' (ends ' + new Date(data.fan_remote_timer_ends).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) + ')' : ''}</div>` : '';
-    const speed = data.fan_remote_speed != null ? `<div class="note">remote speed: ${escapeHtml(String(data.fan_remote_speed))}</div>` : '';
+      ? `<div class="note">Fan timer from the remote: ${data.fan_remote_timer_hours} h${data.fan_remote_timer_ends ? ', ends ' + new Date(data.fan_remote_timer_ends).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : ''}</div>` : '';
+    const speed = data.fan_remote_speed != null ? `<div class="note">The remote set the fan speed to ${escapeHtml(String(data.fan_remote_speed))}</div>` : '';
     let out = '';
-    if (data.whf_status != null) out += `<div class="note">Fan (WHF): ${escapeHtml(String(data.whf_status))}</div>`;
-    if (data.hvac_fan_status != null) out += `<div class="note">Fan (HVAC): ${escapeHtml(String(data.hvac_fan_status))}</div>`;
-    if (data.whf_status == null && data.hvac_fan_status == null) out += `<div class="note">Fan: ${escapeHtml(data.fan_status || 'disabled')}</div>`;
+    if (data.whf_status != null) out += `<div class="note">${escapeHtml(_fanSentence('Whole-house fan', data.whf_status))}</div>`;
+    if (data.hvac_fan_status != null) out += `<div class="note">${escapeHtml(_fanSentence('HVAC fan', data.hvac_fan_status))}</div>`;
+    if (data.whf_status == null && data.hvac_fan_status == null) out += `<div class="note">${escapeHtml(_fanSentence('Fan', data.fan_status || 'disabled'))}</div>`;
     return out + timer + speed;
   }
 
@@ -1161,15 +1192,11 @@
     if (!data || !grid) return;
     const unitSym = unitSymbol(data.unit);
     const dayType = data.day_type || 'unknown';
-    const trendArrow = data.trend_direction === 'warming' ? '↑' : data.trend_direction === 'cooling' ? '↓' : '→';
-    const trendLabel = data.trend_direction === 'warming' ? 'warming' : data.trend_direction === 'cooling' ? 'cooling' : 'stable';
     const score = Math.round((data.compliance_score || 0) * 100);
-    const hvacTemps = _hvacTempsHtml(data, unitSym);
     const outdoorDisplay = data.outdoor_temp != null ? data.outdoor_temp.toFixed(1) + unitSym : '—';
     const indoorDisplay = data.indoor_temp != null ? data.indoor_temp.toFixed(1) + unitSym : '—';
     const fmtTime = iso => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    const hvacNote = `<div class="note">HVAC ${escapeHtml(data.hvac_mode || 'unknown')}${data.hvac_action ? ' · ' + escapeHtml(String(data.hvac_action)) : ''}</div>` +
-      (hvacTemps ? `<div class="note">${hvacTemps}</div>` : '') +
+    const hvacNote = `<div class="note">${_hvacSentence(data, unitSym)}</div>` +
       (data.remote_offset && data.remote_offset.text ? `<div class="note remote-offset-line">${escapeHtml(data.remote_offset.text)}</div>` : '');
     const cards = [];
 
@@ -1177,7 +1204,7 @@
     const metas = ((CAChartV2.data() || {}).indoor_sensors || []).filter(m => _latestSensorReading(m.id));
     if (metas.length === 0) {
       cards.push(`<div class="status-item"><div class="label">Indoor · HVAC</div><div class="value">${indoorDisplay}</div>${hvacNote}` +
-        (data.sleep_indoor_sensor_active ? '<div class="note">using sleep sensor</div>' : '') + '</div>');
+        (data.sleep_indoor_sensor_active ? '<div class="note">Climate Advisor reads the bedroom sensor (sleep window)</div>' : '') + '</div>');
     } else {
       const holder = metas.find(m => m.role === 'thermostat') || metas.find(m => m.primary) || metas[0];
       metas.forEach(m => {
@@ -1198,29 +1225,28 @@
     const corrNow = v4.ready && v4.corrected_outdoor && v4.corrected_outdoor.future && v4.corrected_outdoor.future.length ? v4.corrected_outdoor.future[0].temp : null;
     let outNote = '';
     if (svc != null && data.outdoor_temp != null) {
-      const diff = data.outdoor_temp - svc;
-      outNote += `<div class="note">service says ${svc.toFixed(1)}${unitSym} (sensor ${diff >= 0 ? '+' : '−'}${Math.abs(diff).toFixed(1)}${unitSym})</div>`;
+      outNote += `<div class="note" title="The weather service’s figure for this hour against what your outdoor sensor reads now: a gap between two readings, not a temperature.">${escapeHtml(_saysVs('The weather service', svc, data.outdoor_temp, unitSym, 'your outdoor sensor'))}</div>`;
     }
-    if (corrNow != null) outNote += `<div class="note">CA-corrected forecast ${corrNow.toFixed(1)}${unitSym}</div>`;
+    if (corrNow != null) outNote += `<div class="note" title="The weather service’s forecast as Climate Advisor corrects it: it starts from your outdoor sensor’s reading and lets this gap fade over the next few hours (plus what it has learned about the service’s usual miss at each hour).">Climate Advisor’s corrected forecast ${corrNow.toFixed(1)}${unitSym}</div>`;
     cards.push(`<div class="status-item"><div class="label">Outdoor sensor</div><div class="value">${outdoorDisplay}</div>${outNote}</div>`);
 
     // Today: day type, trend, how long the system ran.
-    cards.push(`<div class="status-item"><div class="label">Today</div><div class="value"><span class="badge ${dayType}">${dayType}</span></div>` +
-      `<div class="note"><span class="trend-arrow">${trendArrow}</span> ${trendLabel} ${(data.trend_magnitude || 0).toFixed(1)}${unitSym}</div>` +
-      (data.hvac_runtime_today != null ? `<div class="note">system ran ${Math.round(data.hvac_runtime_today)} min today</div>` : '') + '</div>');
+    cards.push(`<div class="status-item"><div class="label">Today</div><div class="value">${escapeHtml(_cap(dayType))}</div>` +
+      `<div class="note">${_trendWords(data.trend_direction, data.trend_magnitude)}</div>` +
+      (data.hvac_runtime_today != null ? `<div class="note">System ran ${Math.round(data.hvac_runtime_today)} min today</div>` : '') + '</div>');
 
     // Doors, windows and the fan.
     const hasContacts = data.contact_sensors && data.contact_sensors.length > 0;
     cards.push(`<div class="status-item"><div class="label">Doors/Windows · Fan</div>` +
-      (hasContacts ? `<div class="value" style="color: ${data.contact_status === 'all closed' ? 'var(--success, #4caf50)' : 'var(--warning, #ff9800)'}">${data.contact_status || 'unknown'}</div>` +
+      (hasContacts ? `<div class="value" style="color: ${data.contact_status === 'all closed' ? 'var(--success, #4caf50)' : 'var(--warning, #ff9800)'}">${escapeHtml(_cap(data.contact_status || 'unknown'))}</div>` +
         data.contact_sensors.filter(c => c.unreadable).map(c => `<div class="note">${escapeHtml(c.friendly_name)} not responding — last read ${escapeHtml(c.last_reading || 'never')}, treated as ${escapeHtml(c.treated_as)}</div>`).join('')
-        : '<div class="value">no sensors</div>') + _fanLines(data) + '</div>');
+        : '<div class="value">No sensors</div>') + _fanLines(data) + '</div>');
 
     // Occupancy with the comfort score.
-    cards.push(`<div class="status-item"><div class="label">Occupancy · Comfort</div><div class="value">${data.occupancy_mode || 'home'}</div><div class="note">comfort score ${score}%</div></div>`);
+    cards.push(`<div class="status-item"><div class="label">Occupancy · Comfort</div><div class="value">${escapeHtml(_cap(data.occupancy_mode || 'home'))}</div><div class="note">Comfort score ${score}%</div></div>`);
 
     // Automation status (what is happening now, and why): the only card where mechanism state belongs.
-    cards.push(`<div class="status-item"><div class="label">Status</div><div class="value">${data.automation_status || 'unknown'}</div>` +
+    cards.push(`<div class="status-item"><div class="label">Status</div><div class="value">${escapeHtml(_cap(_automationPhrase(data.automation_status)))}</div>` +
       (data.coordinator_healthy === false ? `<div class="status-alert">⚠ Climate Advisor unavailable since ${data.stale_since ? new Date(data.stale_since).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : 'unknown'} — ${escapeHtml(data.last_error || 'unknown error')}</div>` : '') +
       (data.invariant_violations || []).map(v => `<div class="status-alert">⚠ ${escapeHtml(v.detail)}</div>`).join('') +
       (data.hvac_control_issues || []).map(v => `<div class="status-alert">⚠ ${escapeHtml(v.detail)}</div>`).join('') +
@@ -1659,7 +1685,7 @@
             <table class="kv-table">
               <tr><td>Day Type</td><td>${data.classification.day_type || 'N/A'}<span class="kv-desc">Drives HVAC strategy</span></td></tr>
               <tr><td>HVAC Mode</td><td>${data.classification.hvac_mode || 'N/A'}</td></tr>
-              <tr><td>Trend</td><td>${data.classification.trend_direction || 'N/A'} (${(data.classification.trend_magnitude || 0).toFixed(1)}${unitSym})</td></tr>
+              <tr><td>Trend</td><td>${data.classification.trend_direction ? _trendWords(data.classification.trend_direction, data.classification.trend_magnitude) : 'N/A'}</td></tr>
               <tr><td>Windows Recommended</td><td>${data.classification.windows_recommended ? 'Yes' : 'No'}<span class="kv-desc">Open windows instead of HVAC</span></td></tr>
               ${(() => {
                 const dt = (data.classification.day_type || '').toLowerCase();

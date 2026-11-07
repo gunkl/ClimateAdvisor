@@ -133,7 +133,10 @@ async def test_prediction_accuracy_needs_a_login_and_serves_a_logged_in_client(
     assert resp.status == 200
     body = await resp.json()
     assert body["zone"] == entry.entry_id and body["range"] == "6h" and body["lead"] == "1h"
-    assert body["points"] == [] and body["model"]["confidence"] == "none"  # a fresh zone: an empty state, not an error
+    # a fresh zone: an empty state, not an error. Since Issue #1400 the chart log's own rows are points too (the actual
+    # line, v3 and "no change" are scored on their own), so only the predictions are absent.
+    assert all("v4" not in p for p in body["points"]) and body["model"]["confidence"] == "none"
+    assert body["stats"]["n"] == 0 and body["stats"]["v4_mae"] is None
     assert body["sensors"][0]["id"] == "_ca"
 
     assert await hass.config_entries.async_unload(entry.entry_id)
@@ -191,6 +194,66 @@ async def test_chart_data_carries_the_status_chart_v2_keys_and_the_engine_block(
     assert body["v4"]["scores"] == {"v4_best_rows": 6, "scored_rows": 6, "rows": 6}
     assert body["v4"]["ready"] is False and body["v4"]["reason"] == "no_model"  # still no model: nothing invented
     assert body["v4"]["corrected_outdoor"] == {"past": [], "future": []}  # no model yet: nothing invented
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+async def test_a_ca_only_model_is_visible_on_the_chart_and_the_accuracy_page(
+    hass: HomeAssistant, tmp_path, hass_client, monkeypatch
+) -> None:
+    """Issue #1400 on real HA: the live 0.9.4 shape (primary "_ca", sensors ["_ca"], empty archive, no backtest).
+
+    Occupant view: the engine making Zone 1's decisions must show a line on Status, and the accuracy page must score
+    today's prediction (v3) and "no change" even before v4 has archived anything.
+    """
+    _install(monkeypatch)
+    entry = await _setup_zone(hass, tmp_path)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    now = dt_util.now()
+    for k in range(16, 0, -1):
+        coordinator._chart_log.append(
+            hvac="idle",
+            fan=False,
+            indoor=68.0 + 0.1 * (k % 4),
+            outdoor=50.0,
+            pred_indoor=69.0,
+            ts=(now - timedelta(minutes=30 * k)).isoformat(),
+        )
+    coordinator._v4_store.v4_model = {
+        "schema_version": 1,
+        "fitted_at": now.isoformat(),
+        "primary": "_ca",
+        "sensors": ["_ca"],
+        "confidence": "ok",
+        "fit": {"n_anchors": 50, "span_days": 1.0, "mae_by_lead": {"4h": 0.7}},
+    }
+    future = [(now + timedelta(minutes=15 * (k + 1)), 68.5) for k in range(96)]
+    coordinator._v4_last_future = {
+        "at": now.isoformat(),
+        "predictions": {"_ca": future},
+        "corrected": [],
+        "baseline": {"_ca": future},
+    }
+    client = await hass_client()
+
+    resp = await client.get("/api/climate_advisor/chart_data", params={"entry_id": entry.entry_id, "range": "24h"})
+    assert resp.status == 200
+    v4 = (await resp.json())["v4"]
+    assert v4["ready"] is True and v4["sensors"] == ["_ca"]
+    assert v4["future"]["_ca"] and v4["baseline"]["_ca"] and "_ca" in v4["breaks"]
+
+    # the archive is empty: the page still scores v3 and "no change", and lists "_ca" once
+    resp = await client.get(
+        "/api/climate_advisor/prediction_accuracy", params={"zone": entry.entry_id, "range": "24h", "lead": "4h"}
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert [s["id"] for s in body["sensors"]].count("_ca") == 1
+    stats = body["stats"]
+    assert stats["n"] == 0 and stats["v4_mae"] is None
+    assert stats["n_v3"] > 0 and stats["v3_mae"] is not None and stats["flat_mae"] is not None
+    assert body["points"]
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

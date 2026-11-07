@@ -341,7 +341,7 @@ test.describe('Zone selector (Issue #796 PR9)', () => {
       await expect(buttons.nth(0)).toHaveClass(/active/);
       // The status grid must reflect the real (second-request) data, not be
       // stuck on the bootstrap response's absence of status fields.
-      await expect(page.locator('#status-grid')).toContainText('active');
+      await expect(page.locator('#status-grid')).toContainText('Following today’s plan');
       const stored = await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'));
       expect(stored).toBe('zone-bedroom');
     });
@@ -402,7 +402,7 @@ test.describe('Zone selector (Issue #796 PR9)', () => {
       const buttons = page.locator('#zone-selector-row .zone-tab-btn');
       await expect(buttons).toHaveCount(2);
       await expect(buttons.nth(0)).toHaveClass(/active/);
-      await expect(page.locator('#status-grid')).toContainText('active');
+      await expect(page.locator('#status-grid')).toContainText('Following today’s plan');
       const stored = await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'));
       expect(stored).toBe('zone-bedroom');
     });

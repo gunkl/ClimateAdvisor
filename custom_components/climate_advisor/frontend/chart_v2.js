@@ -89,7 +89,10 @@
   }
 
   const CHART_RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y'];
-  const CHART_AHEADS = ['12h', '24h', '48h', '5d'];
+  // Ahead: the forecast right of NOW. Never under a day, so the "now" view shows at least 24 h of future on every
+  // range; a remembered shorter choice (the old '12h' button) reads back as 24h.
+  const CHART_AHEADS = ['24h', '48h', '5d'];
+  const MIN_AHEAD_H = 24;
   const CHART_LEADS = ['1h', '4h', '12h', '24h'];
   const CHART_HOURS = { '6h': 6, '12h': 12, '24h': 24, '48h': 48, '3d': 72, '5d': 120, '7d': 168, '30d': 720, '1y': 8760 };
   const CHART_PREFS_KEY = 'ca_chart_v2';
@@ -119,6 +122,8 @@
   let _chartPrefs = null;
   let _chartPrefsZone = '\u0000';
   let _cursorMs = null;           // hover / pinned readout time (ms)
+  let _readoutHeld = 0;           // tallest readout height (px) while the pointer is over the chart; 0 = not held
+  let _downX = null, _downY = null; // mousedown point: a click pins, a drag (zoom) does not
   let _cursorPinned = false;
   let _series = [];               // the catalog of the last draw
   let _tableView = false;
@@ -130,7 +135,7 @@
   function _prefsKey() { return CHART_PREFS_KEY + ':' + (_host.zone() || 'default'); }
 
   function _readPrefs() {
-    const prefs = { on: {}, range: '24h', ahead: '24h', lead: '4h', table: false, model: null };
+    const prefs = { on: {}, range: '24h', ahead: '24h', lead: '4h', table: false, keyOpen: false };
     try {
       const raw = window.localStorage.getItem(_prefsKey());
       if (!raw) return prefs;
@@ -141,9 +146,11 @@
         }
         if (CHART_RANGES.includes(p.range)) prefs.range = p.range;
         if (CHART_AHEADS.includes(p.ahead)) prefs.ahead = p.ahead;
+        else if (p.ahead !== undefined) prefs.migrated = true; // e.g. a stored '12h': 24h, re-saved on load
         if (CHART_LEADS.includes(p.lead)) prefs.lead = p.lead;
         prefs.table = p.table === true;
-        if (typeof p.model === 'string') prefs.model = p.model;
+        prefs.keyOpen = p.keyOpen === true;
+        _migrateEnginePrefs(prefs.on, p.model);
       }
     } catch (_e) { /* storage blocked or corrupt: start from the defaults */ }
     return prefs;
@@ -158,6 +165,7 @@
     if (_chartPrefs !== null && _chartPrefsZone === zone) return;
     _chartPrefs = _readPrefs();
     _chartPrefsZone = zone;
+    if (_chartPrefs.migrated) { delete _chartPrefs.migrated; _writePrefs(); }
     _chartRange = _chartPrefs.range;
     _chartAhead = _chartPrefs.ahead;
     _chartLead = _chartPrefs.lead;
@@ -167,10 +175,11 @@
     _chartZoomed = false;
     _syncRangeButtons();
     _syncTableToggle();
+    _syncKeyOpen();
   }
 
-  // The baseline ("no plan") and the two optional overlays start off (DP-1); the CA-reading line starts off once the
-  // per-sensor lines exist (it follows whichever sensor CA reads, so it jumps when that swaps).
+  // The baseline ("no plan") and the two optional overlays start off (DP-1). Of the indoor readings only the CA reading
+  // starts on (it follows whichever sensor CA reads); every chip choice is remembered per browser, per zone.
   // Prediction engines (Settings -> Prediction engine): the PRIMARY engine's line is the main prediction, the optional
   // SHADOW engine's line is drawn for comparison, and any other engine's lines start off but stay in the key. While
   // the primary has no usable fit the main line is the plain schedule estimate (never the other engine).
@@ -186,22 +195,42 @@
     if (id.startsWith('v4:') || id === 'out:corrected') return _shown('v4') && _v4HasData();
     if (id.startsWith('base:')) return false;
     if (id === 'ov:humidity' || id === 'ov:feelslike') return false;
-    if (id === 'ind:_ca') return !((_lastChartData && _lastChartData.indoor_sensors) || []).length;
+    if (id === 'ind:_ca') return true;
+    // Each sensor's own line starts off: the CA reading is the one indoor line until you pick others (unless it has no data).
+    if (id.startsWith('ind:')) return !((_lastChartData && _lastChartData.actual_indoor) || []).length;
     return true;
   }
 
-  // Choices made under another primary/shadow pairing must not pin the lines: forget the engine-dependent ones.
-  function _syncEnginePrefs() {
-    const e = _engines();
-    const key = e.primary + '+' + e.shadow;
-    if (!_chartPrefs || _chartPrefs.model === key) return;
-    Object.keys(_chartPrefs.on).forEach(k => { if (k === 'v3' || k === 'schedule' || k === 'out:corrected' || k.startsWith('v4:')) delete _chartPrefs.on[k]; });
-    _chartPrefs.model = key;
-    _writePrefs();
+  // Engine lines are remembered by ROLE (primary / shadow / other), not by engine, so switching engines in Settings
+  // keeps the viewer's choices: "the main line off" stays off whichever engine is the main one. Stored keys are
+  // 'role:<role>:<line>' with <line> = '_ca' for the CA-reading line (v3's only line), the sensor id for a v4 sensor
+  // line, or 'out:corrected'. A v4 sensor line with no choice of its own follows its role's '_ca' choice.
+  function _engineOf(id) { return id === 'v3' ? 'v3' : (id.startsWith('v4:') || id === 'out:corrected') ? 'v4' : null; }
+  function _roleOf(engine, e) { return e.primary === engine ? 'primary' : e.shadow === engine ? 'shadow' : 'other'; }
+  function _roleLine(id) { return id === 'v3' ? '_ca' : id === 'out:corrected' ? id : id.slice(3); }
+  function _prefId(id, e) {
+    const engine = _engineOf(id);
+    return engine ? 'role:' + _roleOf(engine, e || _engines()) + ':' + _roleLine(id) : id;
+  }
+  // Older stores kept engine ids ('v3', 'v4:<sensor>', 'out:corrected') plus the pairing they were made under
+  // ('model': '<primary>+<shadow>'): move them to their role then; without a pairing they cannot be placed, so drop them.
+  function _migrateEnginePrefs(on, model) {
+    const m = typeof model === 'string' ? model.split('+') : null;
+    Object.keys(on).forEach(k => {
+      if (!_engineOf(k)) return;
+      if (m && m.length === 2) {
+        const nk = _prefId(k, { primary: m[0], shadow: m[1] });
+        if (typeof on[nk] !== 'boolean') on[nk] = on[k];
+      }
+      delete on[k];
+    });
   }
 
   function _isOn(id) {
-    const v = _chartPrefs ? _chartPrefs.on[id] : undefined;
+    const on = _chartPrefs ? _chartPrefs.on : {};
+    const k = _prefId(id);
+    let v = on[k];
+    if (typeof v !== 'boolean' && id.startsWith('v4:')) v = on['role:' + _roleOf('v4', _engines()) + ':_ca'];
     return typeof v === 'boolean' ? v : _defaultOn(id);
   }
 
@@ -212,7 +241,8 @@
   // ---- time window ----
   function _baseWindow() {
     const centre = Date.now() + _windowOffset;
-    return { min: centre - _hoursOf(_chartRange) * 3600000, max: centre + _hoursOf(_chartAhead) * 3600000 };
+    const aheadH = Math.max(MIN_AHEAD_H, _hoursOf(_chartAhead));
+    return { min: centre - _hoursOf(_chartRange) * 3600000, max: centre + aheadH * 3600000 };
   }
   function _viewWindow() { return _zoomWin || _baseWindow(); }
   // Scroll by half a view (the visible span, so a zoomed view scrolls in proportion).
@@ -317,12 +347,27 @@
     return out;
   }
 
+  // A break (ms) ends the line just before that moment: the next point starts a new segment (Issue #1400: the CA
+  // reading swaps sensor at bedtime / wake-up, and no segment may cross a swap).
+  function _withBreaks(data, breaks) {
+    if (!breaks || !breaks.length || data.length < 2) return data;
+    const marks = breaks.filter(b => !isNaN(b) && b > data[0].x && b <= data[data.length - 1].x).sort((a, b) => a - b);
+    if (!marks.length) return data;
+    const out = [];
+    let k = 0;
+    for (const p of data) {
+      while (k < marks.length && marks[k] <= p.x) { out.push({ x: marks[k] - 1, y: null }); k++; }
+      out.push(p);
+    }
+    return out;
+  }
+
   function _mkSeries(def, pts) {
     const sorted = pts.filter(p => p.y != null && !isNaN(p.x)).sort((a, b) => a.x - b.x);
     const step = _medianStep(sorted);
     return Object.assign({
       width: 2, dash: [], chart: 'in', kind: 'line', disabledReason: '',
-    }, def, { raw: sorted, data: _withGaps(sorted, step), tol: Math.max(45 * 60000, 1.5 * step) });
+    }, def, { raw: sorted, data: _withBreaks(_withGaps(sorted, step), def.breaks), tol: Math.max(45 * 60000, 1.5 * step) });
   }
 
   function _buildSeries(cd) {
@@ -331,8 +376,9 @@
     const metas = cd.indoor_sensors || [];
     const v4 = cd.v4 || {};
     const v4Ready = v4.ready === true;
-    _syncEnginePrefs();
     const state = cd.state_log || [];
+    // Every line that follows the reading CA uses (actual, v3, v4) is broken at its sensor swaps (Issue #1400).
+    const caBreaks = (cd.ca_swaps || ((v4.breaks || {})._ca) || []).map(_parseTs); // top-level: any engine (older: v4's)
 
     // Indoor: one actual line per sensor, then the CA reading (follows the sensor CA reads).
     metas.forEach((m, i) => {
@@ -342,14 +388,14 @@
     });
     const caPts = (cd.actual_indoor || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
     S.push(_mkSeries({ id: 'ind:_ca', group: 'indoor', short: 'CA reading', label: 'CA reading',
-      role: 'the reading Climate Advisor uses', color: 'ink', dash: [1, 3], width: 1.5, sensor: '_ca', kind: 'actual' }, caPts));
+      role: 'the reading Climate Advisor uses', color: 'ink', dash: [1, 3], width: 1.5, sensor: '_ca', kind: 'actual', breaks: caBreaks }, caPts));
 
     // Predicted: today's prediction (v3): the 4 h-ahead snapshots logged earlier, then the live forecast.
     const histPredIndoor = state.map(e => ({ x: _parseTs(e.ts), y: e.pred_indoor != null ? e.pred_indoor : e.pred_indoor_avg != null ? e.pred_indoor_avg : null }))
       .filter(p => p.y != null && p.x <= nowMs);
     const futPredIndoor = (cd.predicted_indoor || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
     S.push(_mkSeries({ id: 'v3', group: 'predicted', short: 'v3', label: "Today's prediction (v3)", role: 'made 4 h ahead on the left of NOW',
-      color: 'v3', dash: [7, 4], width: 2, missVs: 'ind:_ca', kind: 'pred' }, [...histPredIndoor, ...futPredIndoor]));
+      color: 'v3', dash: [7, 4], width: 2, missVs: 'ind:_ca', kind: 'pred', breaks: caBreaks }, [...histPredIndoor, ...futPredIndoor]));
 
     // The schedule estimate: the main line while the primary engine is still learning.
     const sched = (cd.schedule_estimate || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
@@ -370,6 +416,19 @@
       S.push(_mkSeries({ id: 'base:' + m.id, group: 'predicted', sub: 'base', short: 'No plan ' + m.name, label: m.name, color: 'base', dash,
         width: 2, sensor: m.id, kind: 'pred', disabledReason: why }, v4Ready ? base : []));
     });
+
+    // v4's line for the reading Climate Advisor uses (Issue #1400): the only line of a _ca-only model, and the one to
+    // compare with today's (v3) line. It follows the sensor CA reads, so it is broken at every swap (v4.breaks._ca).
+    if ((v4.sensors || []).includes('_ca')) {
+      const caName = 'Climate Advisor reading';
+      const past = (((v4.past || {})._ca || {})[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+      const fut = ((v4.future || {})._ca || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+      S.push(_mkSeries({ id: 'v4:_ca', group: 'predicted', sub: 'plan', short: 'v4 ' + caName, label: caName, color: 'plan', dash: [],
+        width: 2.5, sensor: '_ca', missVs: 'ind:_ca', kind: 'pred', disabledReason: why, breaks: caBreaks }, v4Ready ? [...past, ...fut] : []));
+      const base = ((v4.baseline || {})._ca || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+      S.push(_mkSeries({ id: 'base:_ca', group: 'predicted', sub: 'base', short: 'No plan ' + caName, label: caName, color: 'base', dash: [],
+        width: 2, sensor: '_ca', kind: 'pred', disabledReason: why, breaks: caBreaks }, v4Ready ? base : []));
+    }
 
     // Outdoor chart: the sensor, the weather service, and v4's corrected forecast.
     const outPts = (cd.actual_outdoor || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
@@ -497,15 +556,34 @@
     const shadowTxt = eng.shadow && eng.shadow !== 'none' ? 'Comparison: ' + eng.shadow : 'No comparison engine';
     let predHtml = '<div class="key-row" id="chart-main-model"><span class="key-sub">Main</span><span>' +
       escapeHtml('Main prediction: ' + eng.primary + ' \u00b7 ' + shadowTxt) + ' \u2014 change it in <a href="new_dashboard.html#settings">Settings \u2192 Prediction engine</a>.' +
-      (eng.text ? ' ' + escapeHtml(eng.text) + '.' : '') + ' <a href="prediction_accuracy.html">How each engine has scored</a>.</span></div>' +
+      (eng.text ? ' ' + escapeHtml(eng.text) + '.' : '') + ' <a href="prediction_accuracy.html' + (/new_dashboard\.html$/.test(location.pathname) ? '' : '?from=classic') + // classic: its Back returns to index.html
+      '">How each engine has scored</a>.</span></div>' +
       '<div class="key-row"><span class="key-sub">Today</span>' + chipFor(v3) + (hasLines(S.find(s => s.id === 'schedule')) ? chipFor(S.find(s => s.id === 'schedule')) : '') + '</div>';
     if (plan.length) {
       predHtml += '<div class="key-row"><span class="key-sub">v4 with plan</span>' + plan.map(chipFor).join('') + '</div>';
       predHtml += '<div class="key-row"><span class="key-sub">v4 no plan</span>' + base.map(chipFor).join('') + '</div>';
       const ready = !!(v4 && v4.ready);
-      predHtml += '<div class="key-row"><span class="key-sub">Made</span><div class="seg" role="group" aria-label="How long before each moment the v4 prediction was made">' +
-        CHART_LEADS.map(l => '<button type="button" class="seg-btn' + (l === _chartLead ? ' on' : '') + '" data-lead="' + l +
-          '" aria-pressed="' + (l === _chartLead ? 'true' : 'false') + '"' + (ready ? '' : ' disabled') + '>' + l + ' ahead</button>').join('') + '</div></div>';
+      // v4's look-ahead choice: which archived v4 forecast is drawn LEFT of NOW (its track record); from NOW on is unchanged.
+      const leadHas = l => ready && Object.values(v4.past || {}).some(byLead => ((byLead || {})[l] || []).length > 0);
+      const anyPast = CHART_LEADS.some(leadHas);
+      const leadTxt = l => l.replace('h', ' h');
+      const leadHelp = 'Left of Now, each v4 line shows what v4 predicted that many hours earlier for each moment, so you can ' +
+        'see how well it called it. This changes only the past part of the v4 lines; from Now on they stay the same.';
+      predHtml += '<div class="key-row" id="chart-lead-row" title="' + escapeHtml(leadHelp) + '">' +
+        '<span class="key-sub" id="chart-lead-label">Past v4 lines: predicted</span>' +
+        (anyPast
+          ? '<div class="seg" role="group" aria-labelledby="chart-lead-label" aria-describedby="chart-lead-help">' +
+            CHART_LEADS.map(l => {
+              const has = leadHas(l);
+              return '<button type="button" class="seg-btn' + (l === _chartLead ? ' on' : '') + '" data-lead="' + l +
+                '" aria-pressed="' + (l === _chartLead ? 'true' : 'false') + '"' + (has ? '' : ' disabled') +
+                ' title="' + (has ? 'Left of Now, show what v4 predicted ' + leadTxt(l) + ' earlier for each moment'
+                  : 'v4 has no predictions made ' + leadTxt(l) + ' earlier to show yet') + '">' +
+                leadTxt(l) + ' earlier' + (has ? '' : ' (none yet)') + '</button>';
+            }).join('') +
+            '</div><span class="key-sub" id="chart-lead-help">how far ahead v4 looked; changes only the v4 lines left of Now</span>'
+          : '<span class="key-sub" id="chart-lead-help" data-lead-empty="1">v4 has no past predictions to show yet</span>') +
+        '</div>';
     }
     const outHtml = S.filter(s => s.group === 'outdoor').map(chipFor).join('');
     const hum = (cd.state_log || []).some(e => e.humidity != null);
@@ -540,11 +618,23 @@
         note.setAttribute('data-engine-state', eng.fitting ? 'fitting' : 'learning');
       }
     }
-    const count = document.getElementById('chart-key-count');
-    if (count) {
-      const shown = S.filter(s => _isOn(s.id) && !s.disabledReason && hasLines(s)).length;
-      count.textContent = '(' + shown + ' shown)';
-    }
+    // The one-line summary of what is drawn (shown while the key is folded): the lines on, then the overlays on.
+    _keyShown = S.filter(s => _isOn(s.id) && !s.disabledReason && hasLines(s)).map(s => s.short)
+      .concat([...body.querySelectorAll('[data-series^="ov:"][aria-pressed="true"]:not(.no-data)')].map(b => b.textContent.trim()));
+    _renderKeySummary();
+  }
+
+  let _keyShown = [];
+  function _renderKeySummary() {
+    const key = document.getElementById('chart-key');
+    const sum = key && key.querySelector('summary');
+    if (!sum) return;
+    const n = _keyShown.length;
+    const text = key.open ? 'Lines' : 'Showing: ' + (n ? _keyShown.join(' · ') : 'nothing');
+    sum.setAttribute('aria-expanded', key.open ? 'true' : 'false');
+    sum.title = key.open ? 'Hide the lines and sensors key' : 'Choose which lines and sensors the chart shows';
+    sum.innerHTML = '<span class="key-sum-text">' + escapeHtml(text) + '</span> <span id="chart-key-count">(' + n + (key.open ? ' shown' : '') + ')</span>' +
+      '<span class="key-sum-act" aria-hidden="true">' + (key.open ? '▾ Hide' : '▸ Edit') + '</span>';
   }
 
   // ---- drawing ----
@@ -955,7 +1045,10 @@
     _renderReadout(ms);
   }
 
-  function _clearCursor() {
+  // keepHeight: the pointer is still over the chart (between canvases, in an axis gutter), so the readout keeps the
+  // height it has reached; otherwise (pointer left, unpinned, Esc) it shrinks back to its content.
+  function _clearCursor(keepHeight) {
+    if (!keepHeight) _releaseReadoutHeight();
     _cursorMs = null;
     _cursorPinned = false;
     window.__test_cursorPx = null;
@@ -963,6 +1056,19 @@
     if (line) line.hidden = true;
     const panel = document.getElementById('chart-hover-panel');
     if (panel) panel.innerHTML = '';
+  }
+
+  function _releaseReadoutHeight() {
+    _readoutHeld = 0;
+    const panel = document.getElementById('chart-hover-panel');
+    if (panel) panel.style.minHeight = '';
+  }
+
+  // Hold the readout at the tallest height it has reached, so moving between points with fewer rows does not make the
+  // content below the chart jump up and down. Released by _clearCursor().
+  function _holdReadoutHeight(panel) {
+    const h = panel.offsetHeight;
+    if (h > _readoutHeld) { _readoutHeld = h; panel.style.minHeight = h + 'px'; }
   }
 
   function _chpItem(color, text) {
@@ -1018,7 +1124,7 @@
     }
     const planStep = ms > Date.now() ? _planNear(ms) : null;
     if (planStep) overlay += _chpItem(planStep.actor === 'you' ? 'var(--c-target)' : 'var(--c-plan)',
-      escapeHtml(planStep.actor === 'you' ? 'You' : 'CA') + ' ' + escapeHtml(_clock(planStep._ms)) + ': <strong>' + escapeHtml(planStep.text || '') + '</strong>');
+      escapeHtml(planStep.actor === 'you' ? 'You' : 'CA') + ' ' + escapeHtml(_clock(planStep._ms)) + ': <strong>' + escapeHtml(planStep.text_short || planStep.text || '') + '</strong>');
     let closest = null, minDiff = Infinity;
     log.forEach(e => {
       const diff = Math.abs(_parseTs(e.ts) - ms);
@@ -1034,10 +1140,12 @@
       if (closest.event) stateHtml += '<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">' + escapeHtml(String(closest.event).replace(/_/g, ' ')) + '</div>';
     }
     const when = new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const pin = _cursorPinned ? '<button type="button" class="chp-clear" onclick="clearChartPin()">Pinned · clear</button>' : '';
+    const touchOnly = window.matchMedia && window.matchMedia('(hover: none)').matches;
+    const pin = _cursorPinned ? '<button type="button" class="chp-clear" onclick="clearChartPin()">Pinned · ' + (touchOnly ? 'tap' : 'click') + ' to release</button>' : '';
     const body = _readoutRow('Indoor', lines.indoor) + _readoutRow('Predicted', lines.predicted) + _readoutRow('Outdoor', lines.outdoor) +
       _readoutRow('Overlays', overlay) + (stateHtml ? '<div class="chp-row">' + stateHtml + '</div>' : '');
-    panel.innerHTML = body ? '<div class="chp-time">' + when + pin + '</div>' + body : '';
+    panel.innerHTML = body ? '<div class="chp-time">' + when + pin + '</div><div class="chp-grid">' + body + '</div>' : '';
+    _holdReadoutHeight(panel);
   }
 
   function clearChartPin() { _clearCursor(); }
@@ -1067,12 +1175,26 @@
     stack.addEventListener('mousemove', e => {
       if (Date.now() - _lastTouchAt < 700 || _cursorPinned) return;   // a synthesised mouse event after a tap
       const ms = _msAtClientX(e.clientX);
-      if (ms == null) { _clearCursor(); return; }
+      if (ms == null) { _clearCursor(true); return; }
       _setCursor(ms, false);
     });
-    const leave = () => { if (!_cursorPinned) _clearCursor(); };
-    stack.addEventListener('mouseleave', leave);
-    ['temp-chart', 'out-chart', 'activity-chart'].forEach(id => { const c = document.getElementById(id); if (c) c.addEventListener('mouseleave', leave); });
+    stack.addEventListener('mouseleave', () => { if (!_cursorPinned) _clearCursor(); });
+    ['temp-chart', 'out-chart', 'activity-chart'].forEach(id => {
+      const c = document.getElementById(id);
+      if (c) c.addEventListener('mouseleave', () => { if (!_cursorPinned) _clearCursor(true); });
+    });
+    // Desktop pin: a click freezes the readout on that moment; the next click (or Esc) lets go. A drag (zoom select)
+    // is not a click, and the mouse events a browser synthesises after a tap are left to the touch pin below.
+    stack.addEventListener('mousedown', e => { _downX = e.clientX; _downY = e.clientY; });
+    stack.addEventListener('click', e => {
+      if (Date.now() - _lastTouchAt < 700) return;
+      const dragged = _downX != null && (Math.abs(e.clientX - _downX) > 5 || Math.abs(e.clientY - _downY) > 5);
+      _downX = _downY = null;
+      if (dragged) return;
+      if (_cursorPinned) { _clearCursor(); const ms = _msAtClientX(e.clientX); if (ms != null) _setCursor(ms, false); return; }
+      const ms = _msAtClientX(e.clientX);
+      if (ms != null) _setCursor(ms, true);
+    });
     stack.addEventListener('touchstart', e => {
       _multiTouch = e.touches.length > 1;
       if (e.touches.length === 1) {
@@ -1115,6 +1237,7 @@
         const lead = e.target.closest('[data-lead]');
         if (lead && !lead.disabled) setChartLead(lead.dataset.lead);
       });
+      key.addEventListener('toggle', _onKeyToggle);
     }
     window.addEventListener('resize', () => {
       clearTimeout(_initChartInteraction._t);
@@ -1127,19 +1250,29 @@
     _syncKeyOpen();
   }
 
-  // The key folds into a "Lines" sheet on a phone and stays open beside the chart on a wide screen.
+  // The key folds into a one-line "Showing: ..." summary at every width: folded on a first visit, then open or folded
+  // as the person left it (remembered with the line choices). It sits above the chart's box, so the chart keeps its size.
   function _syncKeyOpen() {
     const key = document.getElementById('chart-key');
     if (!key) return;
-    const phone = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
-    if (!phone) key.open = true;
-    else if (key.dataset.phoneInit !== '1') { key.open = false; key.dataset.phoneInit = '1'; }
+    const open = !!(_chartPrefs && _chartPrefs.keyOpen);
+    if (key.open !== open) key.open = open;
+    _renderKeySummary();
+  }
+  function _onKeyToggle() {
+    const key = document.getElementById('chart-key');
+    _renderKeySummary();
+    if (!key) return;
+    _ensurePrefs();
+    if (_chartPrefs.keyOpen === key.open) return;
+    _chartPrefs.keyOpen = key.open;
+    _writePrefs();
   }
 
   // ---- toggles and controls ----
   function toggleSeries(id) {
     _ensurePrefs();
-    _chartPrefs.on[id] = !_isOn(id);
+    _chartPrefs.on[_prefId(id)] = !_isOn(id);
     _writePrefs();
     if (id.startsWith('strip:')) {
       drawStrips();
@@ -1197,6 +1330,7 @@
   }
 
   function setChartAhead(ahead) {
+    if (!CHART_AHEADS.includes(ahead)) return;
     _ensurePrefs();
     _chartAhead = ahead;
     _chartPrefs.ahead = ahead;
@@ -1408,7 +1542,19 @@
           ? '<path d="M0 -6 L6 0 L0 6 L-6 0 Z" fill="' + (low ? 'none' : 'var(--c-target)') + '" stroke="var(--c-ink)" stroke-width="1.5"/>'
           : '<circle r="4.5" fill="' + (low ? 'none' : 'var(--c-plan)') + '" stroke="var(--c-plan)" stroke-width="1.5"/>') + '</svg>' +
         (you ? 'You' : 'CA') + '</span>' +
-      '<span class="plan-text">' + escapeHtml(s.text || '') + (low && !held ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
+      '<span class="plan-text">' + escapeHtml(s.text_short || s.text || '') + (low && !held ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
+  }
+
+  // Issue #1404: a time-of-use bank holding the house right now opens the list ("Now"), in the same words as the
+  // Status line, so the list says what the thermostat is told and when the band returns.
+  function _planHoldRowHtml() {
+    const h = _timeline && _timeline.current_hold;
+    if (!h || !h.text) return '';
+    return '<li class="plan-row plan-ca plan-now" data-kind="tou_bank" data-actor="ca">' +
+      '<span class="plan-time">Now</span>' +
+      '<span class="plan-actor" title="Climate Advisor does this">' +
+        '<svg width="12" height="12" viewBox="-7 -7 14 14" aria-hidden="true"><circle r="4.5" fill="var(--c-plan)" stroke="var(--c-plan)" stroke-width="1.5"/></svg>CA</span>' +
+      '<span class="plan-text">' + escapeHtml(h.text) + '</span></li>';
   }
 
   // Render the "Next 24 hours" list into `el`. opts.extra() may return extra HTML for the foot (the page's own
@@ -1427,7 +1573,8 @@
       body = '<li class="plan-empty">The plan could not be loaded. It will be retried.</li>';
     } else {
       const steps = _planSteps(PLAN_HORIZON_MS);
-      body = steps.length ? steps.map(s => _planRowHtml(s, now)).join('')
+      const hold = _planHoldRowHtml();
+      body = (steps.length || hold) ? hold + steps.map(s => _planRowHtml(s, now)).join('')
         : '<li class="plan-empty">Nothing is planned for the next 24 hours.</li>';
     }
     el.innerHTML = body;

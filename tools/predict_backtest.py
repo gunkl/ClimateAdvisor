@@ -91,7 +91,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta, tzinfo
 from datetime import time as dtime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
@@ -1567,6 +1567,114 @@ def publish_remote(config: dict, entry_id: str, payload: dict) -> str:
     return dest
 
 
+# Batched SSH (Issue #1400): ``tools/deploy.py`` runs this tool right after a deploy, which already used 3 of the few
+# connections the HA SSH add-on allows in a short window (docs/SSH-SETUP.md). ``--batch-ssh`` reads every input in ONE
+# connection and publishes every zone's file in ONE more, instead of 2 + 3 per zone + 1 per zone.
+_BATCH_ZONE = "___CA_ZONE "
+_BATCH_FILE = "___CA_FILE "
+_BATCH_TZ = "___CA_TZ"
+_BATCH_KINDS = {"chart": CHART_LOG_FILE, "learning": LEARNING_DB_FILE, "archive": FORECAST_ARCHIVE_FILE}
+
+
+def batch_fetch_script(zone: str | None) -> str:
+    """One remote shell script that prints every zone's inputs (base64, marker lines) and the HA time zone.
+
+    Zones are the entry-scoped chart logs (``zone`` limits it to one); with none, the legacy unscoped files.
+    """
+
+    def files_for(entry_expr: str, scoped: bool) -> str:
+        parts = []
+        for kind, base in _BATCH_KINDS.items():
+            stem, ext = base.rsplit(".", 1)
+            p = f"/config/{stem}_{entry_expr}.{ext}" if scoped else f"/config/{base}"
+            parts.append(f'echo "{_BATCH_FILE}{kind}"; if [ -f "{p}" ]; then base64 < "{p}" | tr -d "\\n"; fi; echo')
+        return "; ".join(parts)
+
+    stem, ext = CHART_LOG_FILE.rsplit(".", 1)
+    pattern = f"/config/{stem}_{shlex.quote(zone)}.{ext}" if zone else f"/config/{stem}_*.{ext}"
+    return (
+        "found=0; "
+        f'for f in {pattern}; do [ -f "$f" ] || continue; found=1; '
+        f'e=${{f#/config/{stem}_}}; e=${{e%.{ext}}}; echo "{_BATCH_ZONE}$e"; {files_for("$e", True)}; done; '
+        f'if [ "$found" = 0 ] && [ -f /config/{CHART_LOG_FILE} ]; then '
+        f'echo "{_BATCH_ZONE}"; {files_for("", False)}; fi; '
+        f'echo "{_BATCH_TZ}"; if [ -f /config/.storage/core.config ]; then '
+        'base64 < /config/.storage/core.config | tr -d "\\n"; fi; echo'
+    )
+
+
+def parse_batch_output(text: str) -> tuple[str | None, dict[str, dict[str, Any]]]:
+    """``(tz_name, {zone: {"chart"|"learning"|"archive": parsed JSON or None}})`` from ``batch_fetch_script``."""
+    import base64  # noqa: PLC0415
+
+    zones: dict[str, dict[str, Any]] = {}
+    tz_name: str | None = None
+    zone: str | None = None
+    kind: str | None = None
+    in_tz = False
+
+    def decode(blob: str) -> Any:
+        blob = blob.strip()
+        if not blob:
+            return None
+        try:
+            return json.loads(base64.b64decode(blob))
+        except ValueError:
+            return None
+
+    for line in text.splitlines():
+        if line.startswith(_BATCH_ZONE) or line == _BATCH_ZONE.strip():
+            zone, kind, in_tz = line[len(_BATCH_ZONE) :].strip(), None, False
+            zones[zone] = {k: None for k in _BATCH_KINDS}
+        elif line.startswith(_BATCH_FILE):
+            kind = line[len(_BATCH_FILE) :].strip()
+        elif line == _BATCH_TZ:
+            in_tz, kind = True, None
+        elif in_tz:
+            cfg = decode(line)
+            tz_name = (cfg or {}).get("data", {}).get("time_zone") if isinstance(cfg, dict) else None
+            in_tz = False
+        elif zone is not None and kind in _BATCH_KINDS:
+            zones[zone][kind] = decode(line)
+            kind = None
+    return tz_name, zones
+
+
+def batch_fetch(config: dict, zone: str | None) -> tuple[str | None, dict[str, dict[str, Any]]]:
+    """Every zone's inputs and the HA time zone over ONE SSH connection."""
+    result = subprocess.run(ssh_cmd(config, batch_fetch_script(zone)), capture_output=True, timeout=600)
+    if result.returncode != 0:
+        raise RuntimeError(f"SSH batch read failed: {result.stderr.decode(errors='replace').strip()}")
+    return parse_batch_output(result.stdout.decode(errors="replace"))
+
+
+def publish_remote_batch(config: dict, payloads: dict[str, dict]) -> list[str]:
+    """Every zone's backtest file over ONE SSH connection: a tar on stdin, unpacked beside the targets, then each file
+    ``chmod 600`` and ``mv``-ed into place (same filesystem, so each replace is atomic). Returns the remote paths."""
+    import io  # noqa: PLC0415
+    import tarfile  # noqa: PLC0415
+
+    buf = io.BytesIO()
+    dests = []
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for entry_id, payload in payloads.items():
+            dest = remote_path(BACKTEST_FILE, entry_id)
+            dests.append(dest)
+            body = json.dumps(payload, separators=(",", ":"), default=str).encode()
+            info = tarfile.TarInfo(PurePosixPath(dest).name)
+            info.size, info.mode = len(body), 0o600
+            tar.addfile(info, io.BytesIO(body))
+    stage = "/config/.ca_backtest_publish"
+    cmd = (
+        f"umask 077 && rm -rf {stage} && mkdir -p {stage} && tar xf - -C {stage} && "
+        f'for f in {stage}/*.json; do chmod 600 "$f" && mv "$f" /config/; done && rmdir {stage}'
+    )
+    result = subprocess.run(ssh_cmd(config, cmd), input=buf.getvalue(), capture_output=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"SSH batch write failed: {result.stderr.decode(errors='replace').strip()}")
+    return dests
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1654,6 +1762,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", metavar="PATH", help="write the full report as JSON")
     p.add_argument("--json-points", action="store_true", help="include the point series in --json")
     p.add_argument("--publish", action="store_true", help="write climate_advisor_v4_backtest_<entry>.json over SSH")
+    p.add_argument(
+        "--batch-ssh",
+        action="store_true",
+        help="SSH mode: read all inputs in one connection and publish all zones in one more (deploy.py uses it)",
+    )
     p.add_argument("-q", "--quiet", action="store_true")
     return p
 
@@ -1688,6 +1801,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.forecast_archive and not args.no_archive:
             snaps = decode_archive(_load_local_json(args.forecast_archive))
         jobs.append((args.zone or "local", rows, db, snaps, None))
+    elif args.batch_ssh:
+        config = load_config()
+        tz_name, fetched = batch_fetch(config, args.zone)
+        if not args.zone and not args.all_zones and len(fetched) > 1:
+            print(f"ERROR: multiple zones found: {', '.join(fetched)}. Pass --zone or --all-zones.", file=sys.stderr)
+            return 2
+        for z, files in fetched.items():
+            data = files.get("chart")
+            if not isinstance(data, dict):
+                log(f"zone {z or 'default'}: no readable chart log; skipped")
+                continue
+            raw = None if args.no_archive else files.get("archive")
+            db = None if args.no_v3 else files.get("learning")
+            jobs.append((z, data.get("entries", []), db, decode_archive(raw) if raw else None, args.tz or tz_name))
     else:
         config = load_config()
         zones = [args.zone] if args.zone else discover_zones(config)
@@ -1711,6 +1838,7 @@ def main(argv: list[str] | None = None) -> int:
             jobs.append((z, rows, db, snaps, tz_name))
 
     reports: dict[str, dict] = {}
+    batched: dict[str, dict] = {}
     for z, rows, db, snaps, tz_name in jobs:
         first_ts = next((r.get("ts") for r in rows if isinstance(r, dict) and r.get("ts")), None)
         tz = resolve_tz(args.tz or tz_name, first_ts)
@@ -1718,10 +1846,15 @@ def main(argv: list[str] | None = None) -> int:
         rep = run_backtest(rows, args, tz=tz, zone=z, learning_db=db, archive_snapshots=snaps, log=log)
         reports[z] = rep
         print(format_report(rep))
-        if args.publish:
+        if args.publish and args.batch_ssh:
+            batched[z] = build_publish_payload(rep)
+        elif args.publish:
             if config is None:
                 config = load_config()
             dest = publish_remote(config, z, build_publish_payload(rep))
+            print(f"published {dest}")
+    if batched:
+        for dest in publish_remote_batch(config or load_config(), batched):
             print(f"published {dest}")
     if args.json:
         write_json(args.json, reports, args.json_points)

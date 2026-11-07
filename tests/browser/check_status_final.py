@@ -80,7 +80,16 @@ def timeline() -> dict:
     def at(m):
         return (now + dt.timedelta(minutes=m)).isoformat()
 
+    def clock(m):
+        # operation_timeline._fmt_time: the canonical sentence opens with the step's time ("Sun 6:15 AM" on another day)
+        when = now + dt.timedelta(minutes=m)
+        t = when.strftime("%I:%M %p").lstrip("0")
+        return t if when.date() == now.date() else f"{when.strftime('%a')} {t}"
+
     def st(m, actor, kind, text, **kw):
+        text = text.replace("{t}", clock(m)).replace("{wake}", clock(1700))
+        if "text_short" in kw:
+            kw["text_short"] = kw["text_short"].replace("{wake}", clock(1700))
         d = {
             "ts": at(m),
             "actor": actor,
@@ -114,12 +123,44 @@ def timeline() -> dict:
                 "A step that is already done.",
                 meta={"id": "p", "status": "done", "facts": {}},
             ),
-            st(45, "you", "windows_open", "Open windows. Outdoor air is cooler than the house."),
-            st(150, "ca", "precool_start", "Start cooling a little early to ride out the afternoon."),
-            st(240, "you", "windows_close", "Close windows before the evening cools off.", confidence="low"),
-            st(300, "ca", "briefing_send", "Send the daily briefing."),
-            st(600, "ca", "sleep_band", "Bedtime: comfort moves to the bedroom, 66 to 72."),
-            st(1700, "ca", "wake_band", "Tomorrow, wake: comfort moves back to the hallway."),
+            # canonical `text` opens with the time; `text_short` is timeline_surfaces.plan_list_text (Issue #1399)
+            st(
+                45,
+                "you",
+                "windows_open",
+                "{t}: open the windows. Outdoor is 6°F cooler than the house.",
+                text_short="Open the windows. Outdoor is 6°F cooler than the house.",
+            ),
+            st(
+                150,
+                "ca",
+                "precool_start",
+                "{t}: CA pre-cools the house to 70°F so tomorrow's heat starts from a cooler house.",
+                text_short="Pre-cools the house to 70°F so tomorrow's heat starts from a cooler house.",
+            ),
+            st(
+                240,
+                "you",
+                "windows_close",
+                "{t}: close the windows. Outdoor stops helping (it is warming past the house).",
+                confidence="low",
+                text_short="Close the windows. Outdoor stops helping (it is warming past the house).",
+            ),
+            st(300, "ca", "briefing_send", "{t}: CA sends the daily briefing.", text_short="Sends the daily briefing."),
+            st(
+                600,
+                "ca",
+                "sleep_band",
+                "{t}: bedtime, CA switches to the sleep band, 66°F to 72°F, and reads the bedroom sensor until {wake}.",
+                text_short="Bedtime: switches to the sleep band, 66°F to 72°F, and reads the bedroom sensor until {wake}.",
+            ),
+            st(
+                1700,
+                "ca",
+                "wake_band",
+                "{t}: CA switches to the daytime comfort band, 68°F to 74°F, and reads the thermostat again.",
+                text_short="Switches to the daytime comfort band, 68°F to 74°F, and reads the thermostat again.",
+            ),
         ],
         "path": [
             {"ts": at(i * 30), "temp_f": round(70 + 2.5 * math.sin(i / 5), 2), "sensor": "_ca", "model": "v3"}
@@ -302,6 +343,37 @@ def layout(pg, name, vp):
     check(f"{name}: no horizontal scroll", sw <= vp["width"] + 1, f"{sw}px > {vp['width']}px")
 
 
+READOUT_JS = """() => {
+  const r = id => document.getElementById(id).getBoundingClientRect();
+  const p = document.getElementById('chart-hover-panel');
+  return { stackBottom: r('chart-stack').bottom, top: r('chart-hover-panel').top, h: p.offsetHeight,
+           chartTop: r('temp-chart').top + window.scrollY, html: p.innerHTML };
+}"""
+
+
+def readout_checks(pg, name, label):
+    # The hover readout sits below the chart; idle it is one hint line, not a reserved empty block.
+    idle = pg.evaluate(READOUT_JS)
+    check(f"{name}: readout is below the chart", idle["top"] >= idle["stackBottom"] - 0.5, str(idle))
+    check(f"{name}: idle readout is compact", not idle["html"].strip() and idle["h"] <= 40, f"{idle['h']}px")
+    pg.evaluate(
+        "() => window.__triggerHoverAt(document.getElementById('temp-chart').getBoundingClientRect().width * 0.4)"
+    )
+    pg.wait_for_timeout(150)
+    hov = pg.evaluate(READOUT_JS)
+    check(f"{name}: hover fills the readout", "chp-row" in hov["html"] and hov["h"] > idle["h"], f"{hov['h']}px")
+    check(f"{name}: hover does not move the chart", abs(hov["chartTop"] - idle["chartTop"]) < 0.5)
+    y = pg.evaluate("window.scrollY") + pg.locator("#chart-stack").bounding_box()["y"]
+    h = pg.locator("#chart-stack").bounding_box()["height"]
+    pg.screenshot(
+        path=str(OUT / f"readout-{name.split('/')[0]}-{label}.png"),
+        full_page=True,
+        clip={"x": 0, "y": max(0, y - 60), "width": pg.viewport_size["width"], "height": h + 60 + hov["h"] + 40},
+    )
+    pg.evaluate("() => document.getElementById('chart-stack').dispatchEvent(new MouseEvent('mouseleave'))")
+    pg.wait_for_timeout(100)
+
+
 def click_every_status_control(pg, name):
     """Every visible Status button once (re-queried as the DOM redraws). Navigation links are skipped."""
     open_key(pg)
@@ -389,6 +461,29 @@ def plan_checks(pg, name, list_sel):
         f"{name}: no reminder on a CA step",
         "Reminder" not in pg.locator(f'{list_sel} .plan-row[data-kind="precool_start"]').inner_text(),
     )
+    # Issue #1399: the row's sentence does not repeat the time its own time column shows, starts with a capital, and a
+    # CA row does not open with "CA" beside the CA badge
+    cells = rows.evaluate_all(
+        "els => els.map(e => ({actor: e.dataset.actor, time: e.querySelector('.plan-time').innerText.trim(),"
+        " text: e.querySelector('.plan-text').innerText.trim()}))"
+    )
+    for c in cells:
+        clock = next((w for w in c["time"].split() if any(ch.isdigit() for ch in w)), c["time"])
+        check(
+            f"{name}: row text does not open with its own time",
+            not c["text"].startswith((c["time"], clock))
+            and not re.match(r"^(?:[A-Za-z]{2,4}\.? )?\d{1,2}:\d{2}", c["text"]),
+            f"{c['time']} | {c['text'][:60]}",
+        )
+        check(f"{name}: row text starts with a capital", c["text"][:1].isupper(), c["text"][:60])
+        if c["actor"] == "ca":
+            check(f"{name}: CA row text does not open with 'CA'", not re.match(r"^CA\b", c["text"]), c["text"][:60])
+    bed = pg.locator(f'{list_sel} .plan-row[data-kind="sleep_band"] .plan-text').inner_text()
+    check(
+        f"{name}: bedtime row reads 'Bedtime: switches to the sleep band, ...'",
+        bed.startswith("Bedtime: switches to the sleep band, 66°F to 72°F"),
+        bed[:80],
+    )
     text = pg.locator(list_sel).inner_text().lower()
     for word in ("waiting", "paused", "grace", "override"):
         check(f"{name}: plan list has no mechanism word {word!r}", word not in text)
@@ -442,7 +537,7 @@ def run_page(browser, page, label, vp, scheme):
             "service says",
             "Today",
             "Doors & windows",
-            "Fan (WHF)",
+            "Whole-house fan",
             "comfort score",
         ):
             check(f"{name}: readings show {needle!r}", needle.lower() in txt.lower(), txt[:200])
@@ -457,6 +552,7 @@ def run_page(browser, page, label, vp, scheme):
         )
     plan_checks(pg, name, "#status-plan-list" if new else "#plan-list")
     layout(pg, name, vp)
+    readout_checks(pg, name, label)
     if new:
         bad = pg.evaluate(CONTRAST_JS)
         check(f"{name}: Status text contrast", not bad, f"{len(bad)} low: {bad[:5]}")
@@ -595,8 +691,117 @@ def classic_celsius(browser):
     ctx.close()
 
 
+def v4_ca_only(browser):
+    """Issue #1400: the live 0.9.4 model is "_ca"-only. Both pages draw v4's "Climate Advisor reading" line, broken at
+    every bedtime / wake-up swap (no segment crosses one). Screenshots: final-<page>-v4-ca-<scheme>.png."""
+    ch = shift(CH["chart_data"], now_local() - dt.datetime.fromisoformat(CH["now"]))
+    v4 = ch["v4"]
+    hall = v4["sensors"][0]
+    swaps = []
+    now = now_local()
+    for day in (-1, 0, 1):
+        d = (now + dt.timedelta(days=day)).date()
+        for hh, mm in ((22, 30), (7, 0)):
+            t = dt.datetime(d.year, d.month, d.day, hh, mm, tzinfo=now.tzinfo)
+            if now - dt.timedelta(hours=24) < t < now + dt.timedelta(hours=24):
+                swaps.append(t.isoformat())
+    ca = {
+        **v4,
+        "sensors": ["_ca"],
+        "past": {"_ca": v4["past"][hall]},
+        "future": {"_ca": v4["future"][hall]},
+        "baseline": {"_ca": v4["baseline"][hall]},
+        "breaks": {"_ca": sorted(swaps)},
+    }
+    engines = {
+        "primary": "v4", "shadow": "none", "fallback": False, "fitting": False, "primary_state": "ready", "text": "",
+        "engines": [
+            {"id": "v3", "label": "v3", "running": False, "primary": False, "shadow": False, "usable": True},
+            {"id": "v4", "label": "v4", "running": True, "primary": True, "shadow": False, "usable": True},
+        ],
+    }  # fmt: skip
+    for page in ("index.html", "new_dashboard.html"):
+        for scheme in ("light", "dark"):
+            name = f"v4-ca:{page}:{scheme}"
+            ctx, pg = new_page(
+                browser,
+                {"width": 1280, "height": 1000},
+                scheme,
+                {"chart_data": {**ch, "v4": ca, "prediction_engines": engines}},
+                name=name,
+            )
+            pg.goto(f"http://127.0.0.1:{PORT}/{page}")
+            pg.wait_for_timeout(1500)
+            got = pg.evaluate(
+                """(swaps) => { const c = Chart.getChart(document.getElementById('temp-chart'));
+                const d = c && c.data.datasets.find(x => x.caId === 'v4:_ca'); if (!d) return null;
+                const pts = d.data, crossed = swaps.map(Date.parse).filter(s => {
+                  const i = pts.findIndex(p => p.x >= s); if (i <= 0) return false;
+                  let j = i - 1; while (j >= 0 && pts[j].y == null) j--; return j === i - 1; });
+                return { hidden: !!d.hidden, n: pts.filter(p => p.y != null).length, crossed: crossed.length }; }""",
+                swaps,
+            )
+            check(f"{name}: v4 _ca line drawn", bool(got) and not got["hidden"] and got["n"] > 10, str(got))
+            check(f"{name}: no segment crosses a sensor swap", bool(got) and got["crossed"] == 0, str(got))
+            open_key(pg)  # the key starts folded since #1399
+            check(
+                f"{name}: key names the line", "Climate Advisor reading" in pg.locator("#chart-key-body").inner_text()
+            )
+            pg.locator("#temp-chart").scroll_into_view_if_needed()
+            pg.screenshot(path=str(OUT / f"final-{page.split('.')[0]}-v4-ca-{scheme}.png"), full_page=False)
+            ctx.close()
+
+
+BANK_SENTENCE = "Pre-cooling to 77°F until the 4:15 PM high-cost period, then back to the Away band 60–80°F"
+
+
+def tou_bank(browser):
+    """Issue #1404: Away, pre-cooling to 77 F for a 4:15 PM high-cost period. Both pages, light / dark, 1280 / 390 px:
+    the Status line says the bank sentence, the hallway card's setpoint agrees with what CA wants (no "wants 80"), the
+    plan list opens with the same sentence ("Now"), nothing scrolls sideways. Screenshots final-<page>-tou-bank-*.png."""
+    ends = (now_local() + dt.timedelta(hours=2)).isoformat()
+    hold = {
+        "kind": "tou_bank", "mode": "cool", "target": 77, "ends": ends, "schedule_id": "peak1",
+        "heat": 60, "cool": 77, "schedule_heat": 60, "schedule_cool": 80, "after_heat": 60, "after_cool": 80,
+        "text": BANK_SENTENCE, "after_text": "back to the Away band 60–80°F",
+    }  # fmt: skip
+    line = BANK_SENTENCE[0].lower() + BANK_SENTENCE[1:]
+    st = dict(
+        FX["status"], zone_count=1, zones=[], manual_override_active=False, grace_active=False, nat_vent_active=False,
+        hvac_mode="cool", hvac_action="cooling", current_setpoint=77, ca_target_heat=60, ca_target_cool=77,
+        occupancy_mode="away", automation_status=line, next_action=f"Nothing needs you: {line}.",
+        next_automation_action="High-cost period starts — back to the Away band 60–80°F", next_automation_time="4:15 PM",
+        current_hold=hold,
+    )  # fmt: skip
+    tl = dict(timeline(), current_hold=hold)
+    for page, plan in (("index.html", "#plan-list"), ("new_dashboard.html", "#status-plan-list")):
+        for label, vp, scheme in (
+            ("light-1280", {"width": 1280, "height": 1000}, "light"),
+            ("dark-390", {"width": 390, "height": 900}, "dark"),
+        ):
+            name = f"tou-bank:{page}:{label}"
+            ctx, pg = new_page(browser, vp, scheme, {"status": st, "timeline": tl}, name=name)
+            pg.goto(f"http://127.0.0.1:{PORT}/{page}")
+            pg.wait_for_timeout(1500)
+            grid = pg.locator("#status-grid").inner_text()
+            check(f"{name}: Status says the bank sentence", BANK_SENTENCE.lower() in grid.lower(), grid[:200])
+            check(f"{name}: no 'Climate Advisor wants' against the bank target", "wants" not in grid, grid[:200])
+            first = pg.locator(f"{plan} .plan-row").first
+            check(
+                f"{name}: the plan list opens with the bank (Now)",
+                first.count() == 1
+                and first.get_attribute("data-kind") == "tou_bank"
+                and first.locator(".plan-text").inner_text() == BANK_SENTENCE,
+            )
+            layout(pg, name, vp)
+            pg.screenshot(path=str(OUT / f"final-{page.split('.')[0]}-tou-bank-{label}.png"), full_page=True)
+            ctx.close()
+
+
 with sync_playwright() as p:
     b = p.chromium.launch()
+    tou_bank(b)
+    v4_ca_only(b)
     for page in ("index.html", "new_dashboard.html"):
         for label, vp, scheme in [
             ("light-1280", {"width": 1280, "height": 1000}, "light"),

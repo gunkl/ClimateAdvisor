@@ -46,8 +46,12 @@ from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
     AutomationEngineCallbacks,
+    ComfortBand,
+    CurrentHold,
     HvacCommandResult,
+    OccupancyBankWrite,
     PreCoolDecision,
+    TouBankHold,
     _in_sleep_window,
     _refuse_if_shut_down,
     awake_comfort_edges,
@@ -55,12 +59,15 @@ from .automation import (
     compute_bedtime_setback,
     compute_pre_cool_target,
     fallback_edges_without_classification,
+    hold_after_text,
+    hold_sentence,
     hvac_outcome_label,
     pre_cool_sleep_window_config,
     pre_cool_waking_date,
     resolve_active_band,
     resolve_pre_cool_modifier,
     resolve_pre_cool_modifier_for_night,
+    tou_bank_band,
 )
 from .briefing import generate_briefing
 from .chart_log import ChartStateLog
@@ -283,6 +290,7 @@ from .const import (
     V4_FIT_STAGGER_S,
     V4_FIT_TRAIN_DAYS,
     V4_MASS_MAX_GAP_S,
+    V4_PREDICT_HORIZON_HOURS,
     VERSION,
     is_availability_recovery,
     is_unavailable_state,
@@ -359,7 +367,7 @@ from .operation_timeline import detail_dict as timeline_detail_dict
 from .operation_timeline import to_dict as timeline_to_dict
 from .override_confirm_split import ca_expected_mode
 from .prediction_accuracy import RANGES as CHART_RANGE_DAYS
-from .prediction_accuracy import build_chart_v4, load_backtest
+from .prediction_accuracy import build_chart_v4, ca_swap_epochs, load_backtest
 from .promise_journal import (
     Command as _PromiseCommand,
 )
@@ -425,6 +433,7 @@ from .timeline_surfaces import (
     operations_lines,
     timeline_api_payload,
     timeline_windows,
+    tou_bank_end_label,
     window_card_text,
 )
 from .v4_archive import V4Archive, V4ModelStore
@@ -1010,6 +1019,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_nat_vent_cutoff: datetime | None = None
         self._briefing_nat_vent_cutoff_reason: str | None = None
         self._briefing_evening_open_time: datetime | None = None
+        # Issue #1404: the time-of-use bank baked into the briefing text (drift trigger: the bank opened or ended).
+        self._briefing_tou_bank: tuple | None = None
         self._door_open_timers: dict[str, Any] = {}
         self._door_open_timer_expiry: dict[str, str] = {}
         # Issue #645: last_changed timestamps known to be a reconnect/availability blip
@@ -1220,6 +1231,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # to 30 minutes for the next regular cycle. See _sync_tou_away_vacation_state().
         self._tou_av_stop_timer_cancel: Any | None = None
         self._tou_av_stop_timer_schedule_start: datetime | None = None
+        # Issue #1405: the Home/Guest mirror of the T_start guard timer (the bank ends at the cost window's start).
+        self._tou_home_end_timer_cancel: Any | None = None
+        self._tou_home_end_timer_key: tuple | None = None
         # Issue #899: cycle-summary observability (snapshot-and-diff of the existing
         # hvac_runtime_minutes/fan-runtime counters across one TOU window's active span).
         self._tou_av_window_was_active: bool = False
@@ -2924,6 +2938,92 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._tou_av_stop_timer_cancel = None
         self._tou_av_stop_timer_schedule_start = None
 
+    def _cancel_tou_home_end_timer(self) -> None:
+        """Cancel any pending Home/Guest bank-end timer (Issue #1405; getattr: partially built coordinators)."""
+        if getattr(self, "_tou_home_end_timer_cancel", None):
+            self._tou_home_end_timer_cancel()
+            _LOGGER.debug("TOU home bank-end timer cancelled")
+        self._tou_home_end_timer_cancel = None
+        self._tou_home_end_timer_key = None
+
+    def _sync_tou_home_end_timer(self, resolution: Any, is_away_vacation: bool, now: datetime) -> None:
+        """Arm the Home/Guest bank-end timer for the instant the cost window starts (Issue #1405).
+
+        Occupant view: a home pre-cooled to 68 F for a 4:15 PM peak used to stay at 68 F until the next 30-minute
+        cycle wrote the comfort band (up to 4:45 PM); Away/Vacation already had a precise timer at the window start
+        (``_sync_tou_away_vacation_state`` Responsibility 2). Same mechanism: armed while the Home/Guest phase is
+        ``PRECONDITIONING``, keyed by (schedule, start, mode), cancelled when the phase is no longer a Home/Guest bank,
+        on an occupancy change and on unload. A restart loses it and the first cycle re-arms it from the fresh
+        resolution (or, past the start, writes the band as before). It only schedules; the band write at the start
+        is ``_fire_tou_home_bank_end``.
+        """
+        wants = (
+            not is_away_vacation
+            and resolution is not None
+            and resolution.phase == TOUPhase.PRECONDITIONING
+            and resolution.schedule_start is not None
+        )
+        if not wants:
+            self._cancel_tou_home_end_timer()
+            return
+        key = (resolution.schedule_id, resolution.schedule_start, resolution.mode)
+        if getattr(self, "_tou_home_end_timer_key", None) == key:
+            return  # already armed for this bank
+        self._cancel_tou_home_end_timer()
+        try:
+            delay = (resolution.schedule_start - now).total_seconds()
+        except TypeError:  # naive vs aware: leave it to the regular cycle
+            return
+        if delay <= 0:
+            return
+
+        @callback
+        def _tou_home_bank_end(_now: Any) -> None:
+            self._tou_home_end_timer_cancel = None
+            self._tou_home_end_timer_key = None
+            _LOGGER.info("TOU window starting for schedule=%s — ending the home pre-conditioning bank on time", key[0])
+            # Issue #1113: a config-entry background task, cancelled with the entry on unload.
+            self._spawn(self._fire_tou_home_bank_end(key), background=True)
+
+        self._tou_home_end_timer_cancel = async_call_later(self.hass, delay, self._zone_scoped_sync(_tou_home_bank_end))
+        self._tou_home_end_timer_key = key
+
+    async def _fire_tou_home_bank_end(self, key: tuple) -> None:
+        """The Home/Guest bank ends at the cost window's start: write the band now (Issue #1405).
+
+        Runs the regular cycle's own classification pass (``apply_classification`` with the bank no longer owning the
+        setpoint), the same write the next 30-minute cycle would make, only on time. Writes nothing when the bank is
+        not what the thermostat holds (deferred by an override, door/window, nat-vent or fan, or already replaced):
+        whatever holds it is left alone and the regular cycle decides, as before. Suppressed during start-up
+        coalescing and when occupancy is no longer Home/Guest.
+        """
+        engine = self.automation_engine
+        c = self._current_classification
+        if engine is None or c is None or self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
+            return
+        if self._suppress_during_startup_coalescing("time-of-use bank end"):
+            return
+        previous = getattr(self, "_tou_phase_resolution", None)
+        if previous is None or (previous.schedule_id, previous.schedule_start, previous.mode) != key:
+            return
+        if not self._thermostat_holds_tou_bank(previous):
+            _LOGGER.info(
+                "TOU home bank end: the thermostat does not hold the bank (schedule=%s), nothing written", key[0]
+            )
+            return
+        self._resolve_tou_schedule_state()  # the window has started: phase NONE, the engine's bank window lapses
+        await engine.apply_classification(
+            c,
+            predicted_indoor=self.control_predicted_indoor(),
+            indoor_temp=self._get_indoor_temp(),
+            tou_bank_owns_setpoint=self._tou_bank_owns_setpoint(),
+            nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
+            nat_vent_cutoff_already_reached=bool(
+                (getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff_already_reached", False)
+            ),
+        )
+        self._push_tou_bank_card_status()
+
     def _tou_precondition_push(
         self, resolution: Any, is_away_vacation: bool, now: datetime
     ) -> tuple[datetime | None, str | None]:
@@ -3075,6 +3175,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._tou_av_cycle_capped_delta = None
         self._tou_av_window_was_active = window_active
 
+        # Issue #1405: the Home/Guest bank's end gets the same precise timer.
+        self._sync_tou_home_end_timer(resolution, is_away_vacation, now)
+
         # --- Responsibility 2: the T_start guard timer ---
         wants_timer = (
             is_away_vacation
@@ -3127,6 +3230,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await self.automation_engine.handle_occupancy_vacation()
         else:
             await self.automation_engine.handle_occupancy_away()
+        self._push_tou_bank_card_status()
 
     async def _async_occupancy_toggle_changed(self, event: Event) -> None:
         """Handle an occupancy toggle state change."""
@@ -3172,10 +3276,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R3a: an occupancy change regenerates the timeline (shadow; never raises).
         self._timeline_shadow_run("occupancy")
 
+        # Issue #1405: a Home/Guest bank's end timer never fires into another occupancy.
+        self._cancel_tou_home_end_timer()
+
         # Call appropriate automation handler
         if new_mode == OCCUPANCY_VACATION:
             self._cancel_occupancy_away_timer()
-            await self.automation_engine.handle_occupancy_vacation()
+            await self._run_occupancy_handler(OCCUPANCY_VACATION)
         elif new_mode == OCCUPANCY_AWAY:
             delay_seconds = OCCUPANCY_SETBACK_MINUTES * 60
             _LOGGER.info(
@@ -3188,7 +3295,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             def _occupancy_away_timer_expired(_now: Any) -> None:
                 self._occupancy_away_timer_cancel = None
                 _LOGGER.info("Occupancy away timer expired — applying setback")
-                self.hass.async_create_task(self.automation_engine.handle_occupancy_away())
+                self.hass.async_create_task(self._run_occupancy_handler(OCCUPANCY_AWAY))
 
             self._occupancy_away_timer_cancel = async_call_later(
                 self.hass,
@@ -3201,7 +3308,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # guard timer rather than leaving it to fire later against a mode it no longer
             # applies to.
             self._cancel_tou_av_stop_timer()
-            await self.automation_engine.handle_occupancy_home()
+            await self._run_occupancy_handler(new_mode)
 
         await self._async_save_state()
 
@@ -3515,6 +3622,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.data[ATTR_WHF_STATUS] = self._append_indoor_blind_suffix(self._compute_whf_status(), card="whf")
         self.data[ATTR_HVAC_FAN_STATUS] = self._append_indoor_blind_suffix(self._compute_hvac_fan_status(), card="hvac")
         self.data[ATTR_FAN_OVERRIDE_SINCE] = self.automation_engine._fan_override_time
+        self.async_update_listeners()
+
+    def _push_tou_bank_card_status(self) -> None:
+        """Re-render the Status, Next Action and Next Automation fields after a time-of-use bank opens or ends between
+        cycles (the 5-minute bank check, the Away/Vacation period-start timer), Issue #1404.
+
+        Display only (the ``_push_override_card_status`` pattern): the thermostat was just told the bank target (or
+        the band), so the cached cards say so now instead of at the next 30-minute cycle. The shown briefing follows at
+        that cycle (its bank drift trigger, ``_maybe_regenerate_briefing_for_drift``). Never raises.
+        """
+        if not getattr(self, "data", None) or not self.automation_engine:
+            return
+        try:
+            c = self._current_classification
+            self.data[ATTR_AUTOMATION_STATUS] = self._compute_automation_status()
+            self.data[ATTR_NEXT_ACTION] = self._compute_next_action(
+                c,
+                indoor_temp=self._get_indoor_temp(),
+                outdoor_temp=self.data.get(ATTR_OUTDOOR_TEMP),
+                windows_physically_open=self._any_sensor_open(),
+                ae=self.automation_engine,
+            )
+            _action, _at = self._compute_next_automation_action(c)
+            self.data[ATTR_NEXT_AUTOMATION_ACTION] = _action
+            self.data[ATTR_NEXT_AUTOMATION_TIME] = _at
+        except Exception:  # noqa: BLE001 - a card refresh must never break the bank check
+            _LOGGER.debug("time-of-use bank card refresh failed", exc_info=True)
+            return
         self.async_update_listeners()
 
     def _apply_outdoor_temp(self, value: float | None, *, record_history: bool) -> None:
@@ -4852,9 +4987,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _archive_expire_cutoff = int((dt_util.now() - timedelta(days=7)).timestamp())
         self._pred_archive = {k: v for k, v in self._pred_archive.items() if k >= _archive_expire_cutoff}
 
-        # Issue #1230 R1: v4 predicts beside v3 and archives its values. Runs after the cycle's decisions and the
-        # chart row (it reads that row, so it sees exactly what the fit trains on). Result unused, errors swallowed
-        # inside: v3 still drives every decision and the Status chart.
+        # Issue #1230 R1: v4 predicts and archives its values. Runs after the cycle's decisions and the chart row (it
+        # reads that row, so it sees exactly what the fit trains on); errors are swallowed inside. Since R6b the primary
+        # engine's path feeds the decisions through the control feed, not through this call (Issue #1398).
         await self._v4_shadow_cycle()
 
         # Detect and emit post-cycle incidents
@@ -6280,7 +6415,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if tl is None:
             return None
         unit = self.config.get("temp_unit", "fahrenheit")
-        return timeline_api_payload(timeline_to_dict(tl), timeline_detail_dict(tl), unit, display_temp)
+        out = timeline_api_payload(timeline_to_dict(tl), timeline_detail_dict(tl), unit, display_temp)
+        # Issue #1404: the hold in force now (a time-of-use bank), for the plan list's "Now" row. A view field like
+        # text_short: the stored timeline contract and its steps are unchanged.
+        out["current_hold"] = self.current_hold_payload()
+        return out
 
     def timeline_operations_lines(self) -> list[str]:
         """The briefing's operations section (read from the timeline), or [] without one."""
@@ -6625,7 +6764,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         coordinator attribute is read off the loop. Read-only: nothing here changes zone state.
         """
         model = self._v4_store.v4_model
-        ids = [s for s in (model.get("sensors") or []) if isinstance(s, str)] if isinstance(model, dict) else []
+        # "_ca" has its own entry below; a _ca-only model also lists it among its sensors (Issue #1400: no duplicate).
+        ids = (
+            [s for s in (model.get("sensors") or []) if isinstance(s, str) and s != "_ca"]
+            if isinstance(model, dict)
+            else []
+        )
         for sid in self._read_chart_indoor_sensors():
             if sid not in ids:
                 ids.append(sid)
@@ -6689,10 +6833,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     ) -> dict[str, Any]:
         """The ``v4`` block of ``get_chart_data()`` (Issue #1230 R2). Runs in the chart-data executor job.
 
-        Occupant view: the Status chart may draw v4's lines next to today's prediction, but only for a zone whose
-        published backtest says v4 beat today's prediction on this house; otherwise it carries just the verdict so the
-        page can say "v4 shown after it passes its accuracy check". DISPLAY ONLY: no decision reads this, and it
-        never raises (a failure reads as "not ready").
+        Occupant view: while v4 is the primary or comparison engine the Status chart draws its lines whenever it has
+        anything to draw - there is no accuracy gate (a published backtest only adds descriptive ``scores``). That
+        includes v4's "Climate Advisor reading" (``_ca``) line, the only line of a ``_ca``-only model (Issue #1400),
+        broken at every bedtime / wake-up sensor swap (``breaks["_ca"]``, from ``ca_swap_epochs``: the chart log's
+        ``band_sensor`` changes, else the configured sleep window), plus one line per modelled sensor. DISPLAY ONLY:
+        no decision reads this, and it never raises (a failure reads as "not ready").
         """
         off: dict[str, Any] = {"ready": False, "reason": "shadow_off", "gate": None, "leads": [], "sensors": []}
         try:
@@ -6722,6 +6868,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             for sid in (model_dict.get("sensors") or []) if model_dict else []:
                 if isinstance(sid, str) and sid not in ids:
                     ids.append(sid)
+            # Issue #1400: the "_ca" line is broken wherever CA swaps the sensor it reads (bedtime / wake-up).
+            ca_swaps = self._chart_ca_swaps(
+                raw_log, start, end, now=now, historical=historical, ahead_s=(V4_PREDICT_HORIZON_HOURS + 1) * 3600.0
+            )
             return build_chart_v4(
                 now=now,
                 start=start,
@@ -6735,6 +6885,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 last_future=getattr(self, "_v4_last_future", None),
                 sensor_ids=ids,
                 corrected_past=corrected_past,
+                ca_swaps=ca_swaps,
             )
         except Exception:  # noqa: BLE001 - display only; a failure must never break chart_data
             _LOGGER.debug("v4 chart series failed", exc_info=True)
@@ -6931,8 +7082,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if not getattr(self, "_engine_fallback_logged", False):
                 self._engine_fallback_logged = True
                 _LOGGER.info(
-                    "Prediction engine %s has no usable fit yet: the display shows the schedule estimate "
-                    "(control is unaffected: it uses v3)",
+                    "Prediction engine %s has no usable fit yet: the display shows the schedule estimate, and "
+                    "pre-heat, the ceiling guard, the time-of-use bank and setback depth use their default "
+                    "behaviour until it has learned (Issue #1398)",
                     out["primary"],
                 )
         else:
@@ -6956,6 +7108,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             out["last_fit"] = dict(self._v4_last_fit)
             out["last_cycle"] = dict(self._v4_last_cycle)
             out["archive_slots"] = self._v4_archive.slot_count()
+            # Issue #1399: what the Debug tab needs to say it in words: when the archive starts, the modelled sensors'
+            # friendly names, and the primary/shadow engine status (the chart payload's block, display only). Cosmetic,
+            # so a failure here only drops these fields.
+            try:
+                out["prediction_engines"] = self.prediction_engines_payload()
+                oldest = self._v4_archive.oldest_slot()
+                out["archive_since"] = (
+                    datetime.fromtimestamp(oldest, tz=UTC).isoformat() if oldest is not None else None
+                )
+                ids = [s for s in out.get("sensors") or [] if s != "_ca"]
+                out["sensor_names"] = {m["id"]: m["name"] for m in self.v4_indoor_sensors_meta(ids)}
+            except Exception:  # noqa: BLE001 - cosmetic
+                _LOGGER.debug("v4_model_summary names/archive start failed", exc_info=True)
             return out
         except Exception:  # noqa: BLE001 - a debug field must never break the debug payload
             _LOGGER.debug("v4_model_summary failed", exc_info=True)
@@ -7358,6 +7523,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             from_kept_forecast=from_kept_forecast,
         )
 
+    def _briefing_tou_bank_key(self) -> tuple | None:
+        """The time-of-use bank the briefing text quotes (Issue #1404): (schedule, end, target, mode) or None."""
+        return _tou_bank_key(self.current_hold())
+
     def _maybe_regenerate_briefing_for_drift(self) -> bool:
         """Regenerate the briefing text in place if it's gone stale mid-day.
 
@@ -7444,6 +7613,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             elif briefing_evening_open != live_evening_open:
                 evening_open_drifted = True
 
+        # Issue #1404: a time-of-use bank opening or ending changes what the HVAC Mode row and Today's Steps say
+        # (the bank target, then the schedule band), so the shown briefing follows it like every other surface.
+        live_bank = _tou_bank_key(self.current_hold() if callable(getattr(self, "current_hold", None)) else None)
+        _baked_bank = getattr(self, "_briefing_tou_bank", None)
+        bank_changed = (_baked_bank if isinstance(_baked_bank, tuple) else None) != live_bank
+
         if not (
             day_type_changed
             or high_drifted
@@ -7451,14 +7626,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             or cutoff_drifted
             or reason_flipped
             or evening_open_drifted
+            or bank_changed
         ):
             return False
 
         _LOGGER.info(
-            "Regenerating briefing text — windows_recommended flipped=%s (%s → %s),"
+            "Regenerating briefing text — time-of-use bank changed=%s, windows_recommended flipped=%s (%s → %s),"
             " day_type %s → %s, today_high drift %.1f°F (%s → %s),"
             " nat_vent_cutoff %s → %s (drift %.1fmin), nat_vent_cutoff_reason %s → %s,"
             " evening_open_time %s → %s",
+            bank_changed,
             windows_flipped,
             briefing_windows,
             classification.forecast_windows_recommended,
@@ -7482,6 +7659,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_nat_vent_cutoff = live_cutoff
         self._briefing_nat_vent_cutoff_reason = live_cutoff_reason
         self._briefing_evening_open_time = live_evening_open
+        self._briefing_tou_bank = live_bank
         return True
 
     def _build_briefing_text(
@@ -7562,6 +7740,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #1230 R3b: the operation timeline is where the briefing reads the day's window times and its
             # list of steps from (None in a degraded coordinator: the briefing then keeps its own facts).
             timeline=self._surface_timeline(),
+            # Issue #1404: a time-of-use bank holding the house right now (the shared display resolver).
+            current_hold=self.current_hold(),
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 
@@ -7792,6 +7972,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._briefing_nat_vent_cutoff = _plan_at_generation.get("nat_vent_cutoff")
             self._briefing_nat_vent_cutoff_reason = _plan_at_generation.get("nat_vent_cutoff_reason")
             self._briefing_evening_open_time = _plan_at_generation.get("evening_open_time")
+            self._briefing_tou_bank = self._briefing_tou_bank_key()
 
             # In observe-only mode, skip sending the notification
             if not self._automation_enabled:
@@ -7957,6 +8138,178 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         resolution = getattr(self, "_tou_phase_resolution", None)
         return bool(resolution is not None and resolution.phase == TOUPhase.PRECONDITIONING)
 
+    def _tou_bank_in_force(self, now: datetime) -> Any | None:
+        """CONTROL (Issues #1404/#1409): this cycle's time-of-use resolution when its bank owns the thermostat at
+        ``now``, else None. Owns = the phase is ``PRECONDITIONING`` with a heat/cool target, ``now`` is inside
+        ``[precondition_start, schedule_start)``, and the bank gates pass (``AutomationEngine.tou_bank_gates_pass()``:
+        no unconfirmed or confirmed manual change, door/window pause, nat-vent or whole-house fan, settled-open sensor,
+        blower session). Read-only. The occupancy-change bank write (``_occupancy_bank_write``) and the display
+        resolver (``_active_tou_bank`` -> ``current_hold``) both read it; display reads control, never the reverse."""
+        res = getattr(self, "_tou_phase_resolution", None)
+        if (
+            res is None
+            or res.phase != TOUPhase.PRECONDITIONING
+            or res.target is None
+            or res.mode not in ("cool", "heat")
+            or res.schedule_start is None
+            or res.precondition_start is None
+        ):
+            return None
+        try:
+            if not res.precondition_start <= now < res.schedule_start:
+                return None
+        except TypeError:  # naive vs aware mix: do not guess
+            return None
+        ae = self.automation_engine
+        if ae is None or not ae.tou_bank_gates_pass():
+            return None
+        return res
+
+    def _active_tou_bank(self, now: datetime) -> TouBankHold | None:
+        """DISPLAY: the bank that owns the thermostat at ``now`` as a ``TouBankHold`` (Issue #1404), or None; read
+        from the control source ``_tou_bank_in_force()``."""
+        res = self._tou_bank_in_force(now)
+        if res is None:
+            return None
+        period_end = res.window_end if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION) else None
+        return TouBankHold(
+            target=float(res.target),
+            mode=str(res.mode),
+            ends=res.schedule_start,
+            schedule_id=res.schedule_id,
+            period_end=period_end,
+        )
+
+    def current_hold(self, now: datetime | None = None) -> CurrentHold | None:
+        """What the house is held to right now: the ONE display resolver every surface reads (Issue #1404).
+
+        Occupant view: while a time-of-use bank owns the thermostat the house is held to the bank target (what the
+        thermostat is told), not the schedule band; when the bank ends at the high-cost period's start the schedule
+        band returns. Returns the hold (``band``), the schedule band underneath (``schedule_band``: home, sleep, Away
+        or Vacation, i.e. ``AutomationEngine._resolved_comfort_band()``), the bank (target, mode, end) and the band in
+        force when it ends (``after_band``; Away/Vacation: the setback widened for the period). None before the first
+        classification or when it cannot be resolved (callers then keep their own path).
+
+        DISPLAY ONLY: no decision reads it. What the thermostat is told and when is decided by
+        ``apply_classification()`` / ``apply_tou_precondition()`` / ``apply_tou_away_vacation_precondition()`` exactly
+        as Issues #1393/#1395 left them; ``_resolved_comfort_band()`` (the decision band) is unchanged. Read-only, so
+        the executor-side chart builder may call it.
+        """
+        c = getattr(self, "_current_classification", None)
+        ae = getattr(self, "automation_engine", None)
+        if c is None or ae is None:
+            return None
+        try:
+            if now is None:
+                now = dt_util.now()
+            occ = self._occupancy_mode
+            schedule = ae._resolved_comfort_band(c)
+            bank = self._active_tou_bank(now)
+            if bank is None:
+                return CurrentHold(
+                    band=schedule, schedule_band=schedule, occupancy_mode=occ, family=self._armed_family(now)
+                )
+            res = self._tou_phase_resolution
+            away = occ in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+            after = resolve_active_band(
+                c,
+                self.config,
+                occupancy_mode=occ,
+                now=bank.ends,
+                tou_expansion_f=float(res.expansion_f or 0.0) if away else 0.0,
+            )
+            return CurrentHold(
+                band=tou_bank_band(schedule, bank.target, bank.mode),
+                schedule_band=schedule,
+                bank=bank,
+                after_band=after,
+                occupancy_mode=occ,
+                family=bank.mode,
+            )
+        except Exception:  # noqa: BLE001 - a display read must never break a surface
+            _LOGGER.debug("current hold unavailable", exc_info=True)
+            return None
+
+    def _armed_family(self, now: datetime) -> str | None:
+        """The family the comfort-edge selector armed ("heat"/"cool"), for an occupied, awake home; else None.
+
+        Issue #1404 (end-of-bank mirror): at a cool bank's end the band write can arm HEAT at the floor (the house sits
+        there), so a surface keyed on the day's mode ("Cool at 76") contradicts the thermostat (heat 68). Read-only;
+        None while asleep (the morning briefing is sent then and describes the day), away/vacation (the setback edge
+        follows the day's mode) or when the selector has not resolved since the last non-selector mode change.
+        """
+        if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION) or _in_sleep_window(now, self.config):
+            return None
+        fam = getattr(self.automation_engine, "_last_resolved_family", None)
+        return {"heating": "heat", "cooling": "cool"}.get(fam) if isinstance(fam, str) else None
+
+    def current_hold_payload(self, now: datetime | None = None) -> dict[str, Any] | None:
+        """The ``current_hold`` field of the status and timeline REST bodies (Issue #1404), display unit; None when
+        no bank owns the thermostat (the schedule band is already ``ca_target_heat``/``ca_target_cool``)."""
+        hold = self.current_hold(now)
+        if hold is None or hold.bank is None:
+            return None
+        unit = self.config.get("temp_unit", "fahrenheit")
+        after = hold.after_band or hold.schedule_band
+        return {
+            "kind": "tou_bank",
+            "mode": hold.bank.mode,
+            "target": display_temp(hold.bank.target, unit),
+            "ends": hold.bank.ends.isoformat(),
+            "schedule_id": hold.bank.schedule_id,
+            "heat": display_temp(hold.band.floor, unit),
+            "cool": display_temp(hold.band.ceiling, unit),
+            "schedule_heat": display_temp(hold.schedule_band.floor, unit),
+            "schedule_cool": display_temp(hold.schedule_band.ceiling, unit),
+            "after_heat": display_temp(after.floor, unit),
+            "after_cool": display_temp(after.ceiling, unit),
+            "text": hold_sentence(hold, unit),
+            "after_text": hold_after_text(hold, unit),
+        }
+
+    async def _occupancy_bank_write(self) -> OccupancyBankWrite | None:
+        """Write the new occupancy's time-of-use bank target in place of its band (Issue #1409); the write, or None.
+
+        Occupant view: leaving during a home pre-cool used to write the Away band (cool 80, AC off) and then the Away
+        bank (cool 77) five minutes later, which can stop and restart the AC; coming home during an Away pre-heat
+        wrote heat 68 then heat 76. Now the bank for the new occupancy is written once. Uses the bank's own gates:
+        nothing is claimed during start-up coalescing, outside the bank window, or when an override, door/window pause,
+        nat-vent or whole-house fan would defer the bank (``_tou_bank_in_force``: ``tou_bank_gates_pass``); the bank
+        write itself re-checks them (``_apply_tou_schedule``). A write counts only when the thermostat accepted it
+        (EXECUTED or UNCONFIRMED, the test ``_apply_tou_schedule`` uses for ``_tou_bank_written``); a failed or
+        rejected write returns None so the caller still writes the band, instead of leaving the old occupancy's bank
+        on until the bank check.
+        """
+        ae = self.automation_engine
+        if ae is None or self._current_classification is None or self._startup_coalesce_active:
+            return None
+        self._resolve_tou_schedule_state()  # the resolution for the NEW occupancy
+        res = self._tou_bank_in_force(dt_util.now())  # control source: the bank's own window and gates
+        if res is None:
+            return None
+        before = ae._hvac_write_record
+        await self._apply_tou_schedule()
+        record = ae._hvac_write_record
+        if record is before or getattr(record, "result", None) not in (
+            HvacCommandResult.EXECUTED,
+            HvacCommandResult.UNCONFIRMED,
+        ):
+            return None
+        return OccupancyBankWrite(target_f=float(res.target), mode=str(res.mode), result=record.result)
+
+    async def _run_occupancy_handler(self, mode: str) -> None:
+        """Run the engine's occupancy handler for an occupancy CHANGE (Issue #1409): inside an open bank window the
+        handler's band write becomes the new occupancy's bank write. The only entry the occupancy toggle (and its
+        delayed away timer) uses; the harness drives occupancy events through it too."""
+        ae = self.automation_engine
+        handler = {
+            OCCUPANCY_AWAY: ae.handle_occupancy_away,
+            OCCUPANCY_VACATION: ae.handle_occupancy_vacation,
+        }.get(mode, ae.handle_occupancy_home)
+        ae._occupancy_bank_write = self._occupancy_bank_write
+        with ae.occupancy_change():  # scoped to this task (a context variable), not engine-wide
+            await handler()
+
     async def _apply_tou_schedule(self) -> None:
         """Act on ``self._tou_phase_resolution`` (resolved earlier this cycle by
         ``_resolve_tou_schedule_state()``) — drives the banking setpoint if a
@@ -8038,6 +8391,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         self._resolve_tou_schedule_state()
         await self._apply_tou_schedule()
+        self._push_tou_bank_card_status()
 
     def _tou_precondition_window_tuple(self) -> tuple[datetime, datetime, float, str] | None:
         """Build the ``tou_precondition_window`` tuple ``_compute_target_band_schedule()``
@@ -8091,6 +8445,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now: datetime,
         thermal_model: dict | None,
         hourly_forecast_override: list[dict] | None = None,
+        *,
+        with_tou_window: bool = True,
     ) -> list[dict]:
         """Compute the target-band schedule for *now* — the single shared implementation
         behind both ``get_chart_data()``'s own on-demand computation (which supplies its
@@ -8139,10 +8495,126 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 classification=self._current_classification,
                 pre_cool_trigger_h=_pc_trigger_h,
                 pre_cool_target=_pc_target,
-                tou_precondition_window=self._tou_precondition_window_tuple(),
+                tou_precondition_window=self._tou_precondition_window_tuple() if with_tou_window else None,
                 restore_hold=self._occupancy_restore_held_cache,
             )
         )
+
+    def _chart_display_band(
+        self,
+        now: datetime,
+        thermal_model: dict | None,
+        hourly_forecast_override: list[dict] | None = None,
+        *,
+        raw_band: list[dict] | None = None,
+    ) -> list[dict]:
+        """The target band the CHART DRAWS (internal °F), Issue #1404: the band schedule with each time-of-use bank
+        hour drawn as the hold the thermostat is told (``automation.tou_bank_band``: pre-cool ceiling = target,
+        pre-heat floor = target), the same band Status, the briefing and the thresholds quote.
+
+        DISPLAY ONLY. ``_build_target_band_for()`` (``raw_band``) is unchanged and still feeds the prediction curve,
+        chart_log, the comfort score and the v4 plan: its bank hours keep the #786 shape (the bank target on the
+        opposite edge), so no decision input moves. The hour bucket holding ``now`` follows ``current_hold()``: a bank
+        something defers right now is drawn as the schedule band, the band the thermostat is actually on. On any
+        parse problem the raw band is returned.
+        """
+        if raw_band is None:
+            raw_band = self._build_target_band_for(now, thermal_model, hourly_forecast_override)
+        return self._chart_widened_band(
+            self._chart_bank_band(now, thermal_model, hourly_forecast_override, raw_band), now
+        )
+
+    def _chart_widened_band(self, band: list[dict], now: datetime) -> list[dict]:
+        """Away/Vacation: the high-cost period's hours drawn widened (Issue #1404 mirror).
+
+        Occupant view: during the period the thermostat is told the widened edge (cool 83 F for an Away band
+        60-80 F with a 3 F expansion), which ``select_comfort_band(tou_expansion_f)`` arms and the thresholds quote;
+        the band schedule never carried it (Issue #899 "scoped gap"), so the chart drew 80. Same rule as the selector:
+        a cool day widens the ceiling, a heat day lowers the floor, for ``[schedule_start, window_end)`` only, and only
+        while the house is away/vacation (the chart's away band applies to today). Display only.
+        """
+        res = getattr(self, "_tou_phase_resolution", None)
+        c = getattr(self, "_current_classification", None)
+        if (
+            res is None
+            or c is None
+            or self._occupancy_mode not in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+            or not res.expansion_f
+            or res.schedule_start is None
+            or res.window_end is None
+            or c.hvac_mode not in ("cool", "heat")
+        ):
+            return band
+        exp = float(res.expansion_f)
+        try:
+            out = []
+            for e in band:
+                ts = datetime.fromisoformat(str(e.get("ts")))
+                at = now if ts <= now < ts + timedelta(hours=1) else ts  # the hour in force now follows now
+                if (
+                    res.schedule_start <= at < res.window_end
+                    and e.get("lower") is not None
+                    and e.get("upper") is not None
+                ):
+                    if c.hvac_mode == "cool":
+                        e = {**e, "upper": round(float(e["upper"]) + exp, 1)}
+                    else:
+                        e = {**e, "lower": round(float(e["lower"]) - exp, 1)}
+                out.append(e)
+            return out
+        except TypeError, ValueError:
+            _LOGGER.debug("chart widened band unavailable", exc_info=True)
+            return band
+
+    def _chart_bank_band(
+        self,
+        now: datetime,
+        thermal_model: dict | None,
+        hourly_forecast_override: list[dict] | None,
+        raw_band: list[dict],
+    ) -> list[dict]:
+        """``_chart_display_band``'s bank layer: bank hours drawn as the hold (see there)."""
+        window = self._tou_precondition_window_tuple()
+        if window is None:
+            return raw_band
+        start, end, target, mode = window
+        if start is None or end is None or target is None or mode not in ("cool", "heat"):
+            return raw_band
+        try:
+            base = {
+                e["ts"]: e
+                for e in self._build_target_band_for(
+                    now, thermal_model, hourly_forecast_override, with_tou_window=False
+                )
+            }
+            hold = self.current_hold(now)
+            owns_now = hold is not None and hold.bank is not None
+            out: list[dict] = []
+            for e in raw_band:
+                b = base.get(e.get("ts"))
+                ts = datetime.fromisoformat(str(e.get("ts")))
+                if b is None or b.get("lower") is None or b.get("upper") is None:
+                    out.append(e)
+                    continue
+                if ts <= now < ts + timedelta(hours=1):
+                    # The hour in force now follows the live hold: the bank while it owns the thermostat (also in the
+                    # bucket the bank opened or ends in), the schedule band when deferred or over.
+                    if not owns_now:
+                        out.append(b)
+                        continue
+                elif not start <= ts < end:
+                    out.append(e)
+                    continue
+                band = tou_bank_band(
+                    ComfortBand(floor=float(b["lower"]), ceiling=float(b["upper"]), active="", reason="chart"),
+                    float(target),
+                    mode,
+                )
+                out.append({**e, "lower": round(band.floor, 1), "upper": round(band.ceiling, 1)})
+            return out
+        except TypeError, ValueError:
+            _LOGGER.debug("chart bank band unavailable, drawing the band schedule", exc_info=True)
+            return raw_band
 
     def _occupancy_restore_held(self) -> bool:
         """True while the engine is holding a deferred arrival-home comfort restore (Issue #1050).
@@ -8683,6 +9155,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_nat_vent_cutoff = None
         self._briefing_nat_vent_cutoff_reason = None
         self._briefing_evening_open_time = None
+        self._briefing_tou_bank = None
         # Issue #1241: a session still running at 23:59 carries over. The flush above already credited
         # today's part and reset its timer to now, so the rest lands in tomorrow's record (and the live
         # getters keep counting). Clearing it here dropped every post-rollover minute. The clear was also
@@ -9666,6 +10139,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 is True
             )
+        # Issue #1397: a thermostat reporting a value within 0.5 F of the setpoint CA last wrote to it (a HomeKit
+        # thermostat answers 18.0 C, then 17.9 C a minute later) is holding CA's setpoint, not the occupant. No time
+        # window; the reference is dropped below once a change is counted as the occupant's.
+        _holds_own_setpoint = False
+        if _setpoint_changed and not _is_availability_recovery and not _own_setpoint_echo:
+            _ev_context = getattr(event, "context", None)
+            _holds_own_setpoint = (
+                self.automation_engine.holds_own_setpoint(
+                    {_a: new_state.attributes.get(_a) for _a in _sp_attrs},
+                    event_context_user_id=getattr(_ev_context, "user_id", None),
+                )
+                is True
+            )
 
         _setpoint_candidate = bool(
             _setpoint_changed
@@ -9680,6 +10166,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
             and not self._is_recent_temp_command(threshold_seconds=30.0)
             and not _own_setpoint_echo  # Issue #1232: CA's own write echoing back late (value/Context match)
+            and not _holds_own_setpoint  # Issue #1397: within 0.5 F of CA's own setpoint
             and not self._is_recent_fan_command(threshold_seconds=30.0)
             and not _fan_cancel_in_this_event  # Issue #359 Fix A: fan-off echo suppresses grace
         )
@@ -9743,6 +10230,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         "magnitude": abs(magnitude),
                     }
                 )
+                # Issue #1397: counted as the occupant's, so CA no longer holds this setpoint (dialling back to CA's
+                # value is the occupant again, until CA writes it).
+                self.automation_engine.forget_held_own_setpoint()
             except ValueError, TypeError:
                 # A missing PRIOR setpoint with a readable new one (Sensi reports temperature=null while Off)
                 # is a real occupant change and keeps its original override semantics (Issue #1049, pinned by
@@ -13685,6 +14175,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not c:
             return _decide("Waiting for forecast data...")
 
+        # Issue #1404: while a time-of-use bank owns the thermostat the house is being pre-cooled / pre-heated on
+        # purpose; the occupant's answer is "nothing", and the card says what the house is held to and until when
+        # (the same sentence as Status). Judging "too warm / too cold" against the schedule band here would contradict
+        # the thermostat. A bank something defers (door/window, override, nat-vent) is not claimed.
+        _bank_hold = self.current_hold()
+        _bank_text = hold_sentence(_bank_hold, unit) if _bank_hold is not None else None
+        if _bank_text is not None:
+            return _decide(f"Nothing needs you: {_bank_text[0].lower()}{_bank_text[1:]}.")
+
         # Occupancy guards (Issue #527): these answer "what should I do" with "nothing —
         # you're not here," which is legitimate comfort-relevant guidance, not automation
         # mechanism narration, so they stay ahead of the comfort-guidance branches below.
@@ -14729,9 +15228,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # duration (ends HH:MM)" shape _format_grace_remaining() already established.
         _tou = getattr(self, "_tou_phase_resolution", None)
         if _tou is not None and _tou.phase == TOUPhase.PRECONDITIONING:
-            _label = "pre-cooling" if _tou.mode == "cool" else "pre-heating"
-            _ends = self._format_tou_ends(_tou.schedule_start)
-            return f"{_label} — TOU high-cost period{_ends}"
+            # Issue #1404: the same sentence every surface quotes (current_hold()): what the house is pre-cooled /
+            # pre-heated to, until when, and the band it goes back to. A bank that something defers (an unconfirmed
+            # change, the whole-house fan) is not claimed: the branches below say what is in force. When the hold
+            # cannot be resolved the earlier short wording stays.
+            _hold = self.current_hold()
+            if _hold is not None:
+                _sentence = hold_sentence(_hold, self.config.get("temp_unit", "fahrenheit"))
+                if _sentence is not None:
+                    return _sentence[0].lower() + _sentence[1:]
+            else:
+                _label = "pre-cooling" if _tou.mode == "cool" else "pre-heating"
+                _ends = self._format_tou_ends(_tou.schedule_start)
+                return f"{_label} — TOU high-cost period{_ends}"
         # Investigation D / Phase 3d: the active cost_period window itself (not just the
         # PRECONDITIONING lead-time before it) — previously invisible on the Status card
         # entirely, including the case David actually hit (a configured schedule covering
@@ -15420,12 +15929,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # pre-cool / TOU, ceiling-guard AC start, the nat-vent start prediction). The card is its earliest one still
         # ahead; the label wording and the ontology guard live in timeline_surfaces. No timeline (a partially built
         # coordinator, before the first classification): the previous computation below stays as the degraded path.
+        # Issue #1404: while a time-of-use bank owns the thermostat, the next thing CA does is end it at the high-cost
+        # period's start and go back to the schedule band (current_hold(), the same answer as Status). Not a timeline
+        # step (the plan's step list is unchanged); a card candidate like the timeline's own.
+        _bank_cand: list[tuple[datetime, str]] = []
+        _bank_hold = self.current_hold(now)
+        if _bank_hold is not None and _bank_hold.bank is not None and _bank_hold.bank.ends > now:
+            _bank_cand.append(
+                (
+                    _bank_hold.bank.ends,
+                    tou_bank_end_label(hold_after_text(_bank_hold, self.config.get("temp_unit", "fahrenheit"))),
+                )
+            )
+
         _tl = self._surface_timeline()
         if _tl is not None:
-            candidates: list[tuple[datetime, str]] = []
+            candidates: list[tuple[datetime, str]] = list(_bank_cand)
             _unit_na = self.config.get("temp_unit", "fahrenheit")
             for _step_dt, _step_label, _step in next_automation_candidates(_tl, now, _unit_na):
                 candidates.append((_step_dt, _step_label))
+            candidates.sort(key=lambda e: e[0])
             if not candidates:
                 _LOGGER.info("Next-automation: No more actions today")
                 return ("No more actions today", "")
@@ -15448,7 +15971,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         def _to_dt(t: time) -> datetime:
             return datetime.combine(today, t, tzinfo=now.tzinfo)
 
-        candidates: list[tuple[datetime, str]] = []
+        candidates: list[tuple[datetime, str]] = list(_bank_cand)
 
         bt_dt = _to_dt(_parse_time(briefing_time))
         if bt_dt > now:
@@ -15736,6 +16259,39 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "expected_low": c.tomorrow_low,
         }
 
+    _CA_SWAPS_AHEAD_S = 6 * 86400.0  # the chart's longest look-ahead (5 d) plus a day
+
+    def _chart_ca_swaps(
+        self,
+        raw_log: Sequence[dict[str, Any]],
+        start: float,
+        end: float,
+        *,
+        now: datetime,
+        historical: bool,
+        ahead_s: float = _CA_SWAPS_AHEAD_S,
+    ) -> list[float]:
+        """Epochs at which the reading CA uses swaps sensor (bedtime / wake-up), for breaking the chart's CA lines.
+
+        Occupant view: the hallway and the bedroom read differently, so a line that follows "the reading Climate
+        Advisor uses" (the actual CA reading, today's prediction, v4's line) must not be drawn straight through the
+        swap. Engine-independent (Issue #1400 follow-up): the top-level ``ca_swaps`` key works with any engine
+        selection. ``prediction_accuracy.ca_swap_epochs`` holds the rule. Display only; never raises.
+        """
+        try:
+            return ca_swap_epochs(
+                raw_log,
+                start,
+                end if historical else max(end, now.timestamp()) + ahead_s,
+                tz=now.tzinfo or datetime.now().astimezone().tzinfo,
+                sleep_sensor=self.config.get("sleep_indoor_temp_entity"),
+                sleep_time=self.config.get("sleep_time"),
+                wake_time=self.config.get("wake_time"),
+            )
+        except Exception:  # noqa: BLE001 - display only: an unbroken line beats no line
+            _LOGGER.debug("chart: sensor swap times failed", exc_info=True)
+            return []
+
     def get_chart_data(self, range_str: str = "24h", before_ts: float | None = None) -> dict[str, Any]:
         """Build chart data for the dashboard panel.
 
@@ -15835,7 +16391,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _raw_band = self._build_target_band_for(
                 now, self.control_thermal_model(thermal_model), hourly_forecast_override=_extended_forecast
             )
-            _conv_band = [{"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])} for e in _raw_band]
+            # Issue #1404: the band DRAWN (and its setpoint and defense lines) is the display band, where a
+            # time-of-use bank hour shows what the thermostat is told; _raw_band still feeds the prediction below.
+            _display_band = self._chart_display_band(
+                now,
+                self.control_thermal_model(thermal_model),
+                hourly_forecast_override=_extended_forecast,
+                raw_band=_raw_band,
+            )
+            _conv_band = [
+                {"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])} for e in _display_band
+            ]
 
         # Historical views suppress forward-looking series (prediction + forecast).
         # They are meaningless for a window anchored in the past and would confuse
@@ -15921,6 +16487,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             sensor_ids=_shown_sensor_ids,
             raw_log=log_entries,
         )
+        # Issue #1400 follow-up: CA's sensor swaps for EVERY line that follows the reading CA uses, any engine
+        # (the v4 block's breaks only exist while v4 does). None at daily resolution: a daily mean is no one sensor's.
+        _ca_swaps: list[str] = []
+        if CHART_RANGE_DAYS.get(range_str, 1.0) <= 30.0:
+            _swap_tz = now.tzinfo or datetime.now().astimezone().tzinfo
+            _ca_swaps = [
+                datetime.fromtimestamp(t, _swap_tz).isoformat(timespec="seconds")
+                for t in self._chart_ca_swaps(
+                    log_entries,
+                    _window_end - CHART_RANGE_DAYS.get(range_str, 1.0) * 86400.0,
+                    _window_end,
+                    now=now,
+                    historical=is_historical,
+                )
+            ]
         _indoor_sensors_out = self.v4_indoor_sensors_meta(_shown_sensor_ids)
         _engines_block = self.prediction_engines_payload()
         # While the primary engine has no usable fit, the main line is the plain schedule estimate (the engine-agnostic
@@ -16100,6 +16681,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "indoor_sensors": _indoor_sensors_out,
             "actual_indoor_sensors": _actual_by_sensor,
             "v4": _v4_block,
+            # Issue #1400: [iso, ...] sensor swaps; v4.breaks._ca stays as the same times within v4's 24 h horizon.
+            "ca_swaps": _ca_swaps,
             "prediction_engines": _engines_block,
             "schedule_estimate": _schedule_estimate,
             "unit": unit,
@@ -16518,6 +17101,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._cancel_occupancy_away_timer()
             # Issue #899: cancel any pending TOU away/vacation T_start guard timer
             self._cancel_tou_av_stop_timer()
+            self._cancel_tou_home_end_timer()  # Issue #1405: the Home/Guest mirror
 
             # Cancel any pending debounce timers
             for cancel in self._door_open_timers.values():
@@ -17107,6 +17691,14 @@ def _compute_pre_cool_trigger_time_pure(
         pre_cool_target,
     )
     return trigger
+
+
+def _tou_bank_key(hold: Any) -> tuple | None:
+    """(schedule, end, target, mode) of the bank a ``CurrentHold`` carries, or None (Issue #1404, briefing drift)."""
+    bank = hold.bank if isinstance(hold, CurrentHold) else None
+    if bank is None:
+        return None
+    return (bank.schedule_id, bank.ends.isoformat(), round(bank.target, 1), bank.mode)
 
 
 def _compute_target_band_schedule(

@@ -186,6 +186,17 @@ def _ambiguous_zone_payload(hass: HomeAssistant) -> dict[str, Any]:
     }
 
 
+def _current_hold_payload(coordinator: Any) -> dict | None:
+    """``coordinator.current_hold_payload()`` (Issue #1404), or None when the coordinator has none (a dict only)."""
+    fn = getattr(coordinator, "current_hold_payload", None)
+    try:
+        out = fn() if callable(fn) else None
+    except Exception:  # noqa: BLE001 - a display field never breaks the status body
+        _LOGGER.debug("current_hold payload unavailable", exc_info=True)
+        return None
+    return out if isinstance(out, dict) else None
+
+
 class ClimateAdvisorStatusView(HomeAssistantView):
     """Return current system status."""
 
@@ -376,6 +387,10 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "outdoor_temp": outdoor_temp_display,
                 "unit": unit,
                 "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),
+                # Issue #1404: the time-of-use bank holding the house right now (target, mode, end, the band it
+                # goes back to, and the one sentence every surface quotes), live; null when no bank owns the
+                # thermostat. ca_target_heat/ca_target_cool already quote the bank band while it does.
+                "current_hold": _current_hold_payload(coordinator),
                 # Issue #749: hard-invariant watchdog violations (e.g. AC and WHF both
                 # physically on at once) — empty list when nothing is wrong. Surfaced on the
                 # Status card only, per this project's Status Card Ontology: it answers "what's

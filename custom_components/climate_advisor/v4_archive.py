@@ -14,10 +14,15 @@ legacy shape ``sensor -> epoch_30min -> {"1h": v, ...}`` (a materialised copy) f
 
     data: dict[str, dict[int, dict[str, float]]]
 
-``sensor`` is an indoor entity id, or ``"_ca"`` for the reading Climate Advisor itself uses. ``"_ca"`` is NOT stored: it
-is derived on read from the node lines - the sleep-sensor node's value for a slot inside the sleep window when that
-node exists, else the primary node's - using the ``ca`` source the coordinator configures (``set_ca_source``).
-Temperatures are internal degrees F, rounded to 2 dp. ``epoch_30min`` is the slot's Unix time rounded to 30 minutes.
+``sensor`` is an indoor entity id, or ``"_ca"`` for the reading Climate Advisor itself uses. While the model has a
+primary NODE line, ``"_ca"`` is NOT stored: it is derived on read from the node lines - the sleep-sensor node's value
+for a slot inside the sleep window when that node exists, else the primary node's - using the ``ca`` source the
+coordinator configures (``set_ca_source``). A ``_ca``-only model (``primary == "_ca"``, what the fit picks when no
+entity sensor has enough history; Issue #1400) has no node line to derive from, so its ``"_ca"`` predictions ARE
+stored as their own line - otherwise nothing would ever be archived for it. When a later model gains a primary node,
+the stored ``"_ca"`` slots the node line also covers are dropped (derivable again) and the older ones are kept, so the
+accuracy history is not lost. Temperatures are internal degrees F, rounded to 2 dp. ``epoch_30min`` is the slot's Unix
+time rounded to 30 minutes.
 
 On disk (``climate_advisor_v4_archive_<entry_id>.json``, compact: ~45 bytes a slot; the format is unchanged, a
 ``"_ca"`` line from an older file is read and dropped once the source is known, the optional ``"ca"`` object records
@@ -134,6 +139,20 @@ class _Line:
         self.base += k * _SLOT_S
         return k
 
+    def drop_from(self, cutoff: float) -> int:
+        """Remove slots at or after ``cutoff``; returns how many slot positions were dropped."""
+        if self.base is None:
+            return 0
+        n = len(self)
+        keep = min(n, max(0, int(math.ceil((cutoff - self.base) / _SLOT_S))))
+        if keep >= n:
+            return 0
+        for col in self.cols.values():
+            del col[keep:]
+        if keep == 0:
+            self.base = None
+        return n - keep
+
     def nbytes(self) -> int:
         return sum(c.buffer_info()[1] * c.itemsize for c in self.cols.values())
 
@@ -174,9 +193,25 @@ class V4Archive:
         if new != self.ca:
             self.ca = new
             self.dirty = True
-        if primary is not None and primary in self._lines and CA_LINE in self._lines and primary != CA_LINE:
-            del self._lines[CA_LINE]
+        if self._trim_stored_ca():
             self.dirty = True
+
+    def _trim_stored_ca(self) -> bool:
+        """Drop the stored ``"_ca"`` slots the primary node line also covers (derivable). True when anything changed.
+
+        Slots older than the node line (written while the model was ``_ca``-only, Issue #1400) are kept: deriving cannot
+        recreate them, and they are the live accuracy history of that time.
+        """
+        primary = self.ca.get("primary")
+        stored = self._lines.get(CA_LINE)
+        node = self._lines.get(primary or "")
+        if stored is None or node is None or primary == CA_LINE or node.base is None:
+            return False
+        dropped = stored.drop_from(node.base)
+        if not stored.slots():
+            del self._lines[CA_LINE]
+            return True
+        return dropped > 0
 
     def _ca_active(self) -> bool:
         p = self.ca.get("primary")
@@ -190,7 +225,17 @@ class V4Archive:
             if v is not None:
                 return v
         line = self._lines.get(primary or "")
-        return line.get(epoch, lead) if line is not None else None
+        v = line.get(epoch, lead) if line is not None else None
+        if v is None and CA_LINE in self._lines:  # a slot from a _ca-only model (Issue #1400)
+            v = self._lines[CA_LINE].get(epoch, lead)
+        return v
+
+    def _ca_slots(self) -> list[int]:
+        """Slots the derived ``"_ca"`` can answer: the primary node's plus any stored ``"_ca"`` line's (ascending)."""
+        slots = set(self._lines[str(self.ca["primary"])].slots())
+        if CA_LINE in self._lines:
+            slots.update(self._lines[CA_LINE].slots())
+        return sorted(slots)
 
     def _in_sleep(self, epoch: int) -> bool:
         st, wt, tzname = self.ca.get("sleep_time"), self.ca.get("wake_time"), self.ca.get("tz")
@@ -220,7 +265,8 @@ class V4Archive:
             if rows:
                 out[sensor] = rows
         if self._ca_active():
-            rows = self._rows(CA_LINE, self._lines[str(self.ca["primary"])].slots())
+            out.pop(CA_LINE, None)
+            rows = self._rows(CA_LINE, self._ca_slots())
             if rows:
                 out[CA_LINE] = rows
         return out
@@ -304,9 +350,7 @@ class V4Archive:
                 slots += 1 if wrote else 0
             if len(line):
                 self._lines[sensor] = line
-        primary = self.ca.get("primary")
-        if primary and primary != CA_LINE and primary in self._lines:
-            self._lines.pop(CA_LINE, None)  # derivable now: do not hold the duplicate
+        self._trim_stored_ca()  # derivable slots: do not hold the duplicate (older _ca-only slots stay)
         _LOGGER.info("v4_archive: loaded %d slots across %d sensor lines", slots, len(self._lines))
 
     def save(self) -> bool:
@@ -353,7 +397,9 @@ class V4Archive:
 
         ``predictions`` is ``predict()``'s result ``{sensor: [(ts, temp_f), ...]}``. For each look-ahead the
         point nearest ``now + lead`` (within 10 minutes) is stored under the slot nearest its time. ``"_ca"`` is not
-        stored (derived on read); ``primary`` seeds the ``"_ca"`` source when none was configured. Never raises.
+        stored while it is derivable (``primary`` is a node this cycle predicted); for a ``_ca``-only model
+        (``primary == "_ca"``, or no primary node line predicted) it is stored as its own line (Issue #1400).
+        ``primary`` seeds the ``"_ca"`` source when none was configured. Never raises.
         """
         try:
             return self._record(now, predictions, primary)
@@ -366,8 +412,10 @@ class V4Archive:
             self.set_ca_source(primary)
         now_ts = now.timestamp()
         added = 0
+        # "_ca" is derivable only from a primary NODE line this cycle also predicts; otherwise store it (Issue #1400).
+        ca_derivable = bool(primary) and primary != CA_LINE and bool(predictions.get(primary or ""))
         for sensor, points in predictions.items():
-            if not points or sensor == CA_LINE:
+            if not points or (sensor == CA_LINE and ca_derivable):
                 continue
             for lead in V4_ARCHIVE_LEADS:
                 target = now_ts + _lead_seconds(lead)
@@ -408,8 +456,8 @@ class V4Archive:
 
     def sensor_ids(self) -> list[str]:
         """Sensor lines held (``"_ca"`` first when derivable, then the node entity ids)."""
-        ids = [s for s in self._lines if s != CA_LINE or not self._ca_active()]
-        return ([CA_LINE] if self._ca_active() else []) + [s for s in ids if s != CA_LINE]
+        has_ca = self._ca_active() or CA_LINE in self._lines  # derived, or stored by a _ca-only model (Issue #1400)
+        return ([CA_LINE] if has_ca else []) + [s for s in self._lines if s != CA_LINE]
 
     def memory_bytes(self) -> int:
         """Bytes held by the sensor columns (not counting object overhead)."""
@@ -419,8 +467,13 @@ class V4Archive:
         """``{sensor: slots}`` (``"_ca"`` included when derivable) for the Debug tab."""
         out = {s: len(line.slots()) for s, line in self._lines.items()}
         if self._ca_active():
-            out[CA_LINE] = out[str(self.ca["primary"])]
+            out[CA_LINE] = len(self._ca_slots())
         return out
+
+    def oldest_slot(self) -> int | None:
+        """The earliest archived slot (Unix seconds) across every sensor, or None while the archive is empty."""
+        firsts = [slots[0] for slots in (line.slots() for line in self._lines.values()) if slots]
+        return min(firsts) if firsts else None
 
     def series(self, sensor: str, lead: str, start: float, end: float) -> dict[int, float]:
         """``{slot_epoch: value}`` for one sensor and look-ahead with ``start <= slot < end`` (Unix seconds).
@@ -428,11 +481,8 @@ class V4Archive:
         Safe from an executor thread while the event loop records: it reads fixed-size columns by index.
         """
         if sensor == CA_LINE and self._ca_active():
-            src = self._lines.get(str(self.ca["primary"]))
-            if src is None:
-                return {}
             out: dict[int, float] = {}
-            for epoch in src.slots():
+            for epoch in self._ca_slots():
                 if start <= epoch < end:
                     v = self._ca_value(epoch, lead)
                     if v is not None:

@@ -691,6 +691,16 @@ def test_debug_summary_without_a_model(fake: FakePredictor) -> None:
     assert s["has_model"] is False and s["confidence"] == "none"
 
 
+def test_debug_summary_carries_what_the_debug_tab_says_in_words(fake: FakePredictor) -> None:
+    """Issue #1399: engine status, archive start and sensor names, so the Debug tab never shows a raw object."""
+    coord, fake_hass, scheduler = _build()
+    coord._v4_store.v4_model = _fake_model_dict(coord)
+    s = coord.v4_model_summary()
+    assert s["prediction_engines"]["primary"] in {"v3", "v4"} and isinstance(s["prediction_engines"]["engines"], list)
+    assert s["archive_since"] is None  # empty archive
+    assert set(s["sensor_names"]) == {x for x in s["sensors"] if x != "_ca"}
+
+
 def test_summary_of_a_garbage_model_never_raises() -> None:
     assert v4_shadow.model_summary("garbage")["has_model"] is False  # type: ignore[arg-type]
     assert v4_shadow.model_summary({"fit": 5})["has_model"] is True

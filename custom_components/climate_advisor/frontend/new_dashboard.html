@@ -117,6 +117,10 @@
   .tile .l { font-size: 12px; color: var(--muted); }
   .tile .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .tile .n { font-size: 12px; color: var(--ink2); }
+  /* Issue #1399: the Status reading cards' big values share one line per row: every header takes exactly two lines
+     (longer names end in an ellipsis; the full name is the header's tooltip). */
+  #status-grid .tile .l { line-height: 16px; height: 32px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
+  #status-grid .tile .v { line-height: 28px; }
   table { border-collapse: collapse; width: 100%; font-size: 13px; }
   td, th { padding: 6px 8px; border-top: 1px solid var(--rule); text-align: left; vertical-align: top; }
   th { font-weight: 500; color: var(--muted); border-top: 0; }
@@ -255,7 +259,6 @@
         </div>
         <div class="ctl-group" role="group" aria-label="Ahead: how much forecast to show">
           <span class="ctl-label">Ahead</span>
-          <button type="button" class="ahead-btn" data-ahead="12h" aria-pressed="false" onclick="setChartAhead('12h')">12h</button>
           <button type="button" class="ahead-btn active" data-ahead="24h" aria-pressed="true" onclick="setChartAhead('24h')">24h</button>
           <button type="button" class="ahead-btn" data-ahead="48h" aria-pressed="false" onclick="setChartAhead('48h')">48h</button>
           <button type="button" class="ahead-btn" data-ahead="5d" aria-pressed="false" onclick="setChartAhead('5d')">5d</button>
@@ -266,13 +269,12 @@
           <button type="button" class="chart-nav-btn" id="chart-nav-fwd" title="Scroll forward" aria-label="Scroll forward half a view" onclick="shiftChartWindow(1)">&#8250;</button>
         </div>
       </div>
-      <details class="chart-key" id="chart-key" open>
+      <details class="chart-key" id="chart-key">
         <summary>Lines <span id="chart-key-count"></span></summary>
         <div id="chart-key-body"></div>
         <div class="cl-item key-extra" id="legend-thermostat-set" style="display:none"><span class="cl-swatch" style="border-top:2px dashed rgba(255,193,7,0.95)"></span><span>Thermostat set</span></div>
       </details>
       <p class="chart-note" id="chart-v4-note" hidden></p>
-      <div id="chart-hover-panel" class="chart-hover-panel" aria-live="off"></div>
       <div class="chart-stack" id="chart-stack" tabindex="0" aria-label="Temperature chart. Left and right arrows move a readout along the time axis; Escape clears it. Table view lists the same values.">
         <div class="chart-container">
           <canvas id="temp-chart" role="img" aria-label="Indoor temperature by sensor with predictions"></canvas>
@@ -285,6 +287,7 @@
         </div>
         <div class="chart-cursor" id="chart-cursor" hidden></div>
       </div>
+      <div id="chart-hover-panel" class="chart-hover-panel" aria-live="off"></div>
       <p class="chart-note" id="chart-empty" hidden>No chart data yet. The chart fills in as Climate Advisor logs readings.</p>
       <div class="chart-table-wrap" id="chart-table-wrap" hidden>
         <div class="chart-table-actions"><button type="button" class="chart-tool-btn" id="chart-table-copy" onclick="copyChartTable()">Copy table</button></div>
@@ -415,7 +418,7 @@
       <div class="card-head"><h2 id="dbg-bt-h">Backtest lab</h2><a href="prediction_accuracy.html" id="dbg-bt-link" target="_blank" rel="noopener">Open the full accuracy view</a></div>
       <div id="dbg-bt"><div class="empty">Loading...</div></div>
     </section>
-    <div class="sub">Every automation-state field is listed exactly once. Fields not yet placed in a group appear under Other, so new fields never go missing. Daily records and promises moved to Analysis.</div>
+    <div class="sub">Every automation-state field is listed once, in its group. Download diagnostics has the full raw data. Daily records and promises moved to Analysis.</div>
   </div>
 
   <!-- ============ Settings ============ -->

@@ -1,0 +1,169 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ],
+    "aggressive_savings": true
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "name": "tou_home_cool_bank_prefer_savings_surfaces_1404",
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:40:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T14:00:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T13:59:59",
+      "values": [
+        68.0
+      ],
+      "reason": "First classified cycle inside the bank window: the thermostat is told the bank target 68°F once (Issues #1393/#1395 unchanged by #1404)."
+    },
+    {
+      "at": "2026-07-13T14:29:59",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T14:00:00",
+      "values": [],
+      "reason": "Nothing is written between cycles (the bank write cancels the 5-minute follow-up; the bank check sees the thermostat holds it)."
+    },
+    {
+      "at": "2026-07-13T14:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T14:29:59",
+      "values": [
+        68.0
+      ],
+      "reason": "The next cycle re-asserts the bank target once."
+    },
+    {
+      "at": "2026-07-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.thresholds",
+      "value": [
+        66.0,
+        68.0
+      ],
+      "reason": "The heat/cool thresholds (ca_target_heat/cool, the Heat/Cool Threshold sensors, the reading card's 'Climate Advisor wants') quote the bank: the cool edge is 68°F, what the thermostat is told (issue #1404)."
+    },
+    {
+      "at": "2026-07-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.threshold_context",
+      "value": "tou_bank",
+      "reason": "The threshold sensors' context names the time-of-use bank."
+    },
+    {
+      "at": "2026-07-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.chart_band_now",
+      "value": [
+        66.0,
+        68.0
+      ],
+      "reason": "The chart draws the same band the thresholds quote (issue #1404)."
+    },
+    {
+      "at": "2026-07-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.status",
+      "value": "pre-cooling to 68°F until the 4:15 PM high-cost period, then back to the comfort band 66–78°F",
+      "reason": "Status says what the house is held to, until when, and the band that follows."
+    },
+    {
+      "at": "2026-07-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.briefing_hvac_row",
+      "value": "HVAC Mode: Cool at 68°F until the 4:15 PM high-cost period, then back to the comfort band 66–78°F",
+      "reason": "The briefing's HVAC Mode row quotes the bank target, not the schedule band edge."
+    },
+    {
+      "at": "2026-07-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.plan_now",
+      "value": "Pre-cooling to 68°F until the 4:15 PM high-cost period, then back to the comfort band 66–78°F",
+      "reason": "The Next 24 hours list opens with the same sentence ('Now')."
+    },
+    {
+      "at": "2026-07-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.text",
+      "value": "Nothing needs you: pre-cooling to 68°F until the 4:15 PM high-cost period, then back to the comfort band 66–78°F.",
+      "reason": "Next Action (For you) tells the same story and asks nothing of the occupant."
+    },
+    {
+      "at": "2026-07-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.next_automation",
+      "value": {
+        "action": "High-cost period starts — back to the comfort band 66–78°F",
+        "time": "4:15 PM"
+      },
+      "reason": "Next Automation names the bank's end and the band that follows."
+    }
+  ],
+  "description": "Issue #1404: a home on a hot day with Prefer savings on (awake band 66-78 F) and a 16:15 peak. The time-of-use bank tells the thermostat cool 68 F (the plain comfort floor, which here is NOT the band's 66 F edge). Before the fix the thermostat was told 68 F while Status, the thresholds and the briefing quoted the schedule band (cool 78 F) and the chart drew 68-78 F, so the reading card said 'Climate Advisor wants 78 F' while CA cooled to 68 F.",
+  "verdict": {
+    "type": "positive",
+    "summary": "While a home pre-cools for a peak, every surface says it is held to the bank target and when the comfort band returns",
+    "observed_behavior": "The thermostat is told 68°F once per cycle; Status, the thresholds, the briefing, the chart band, Next Action, Next Automation and the plan list all quote 68°F and the band that follows.",
+    "expected_behavior": "Occupant view: the person can read on any surface what the house is held to during the bank and when it goes back.",
+    "effectiveness": "Fails on 6ebdb16 (before #1404): Next Action and Next Automation differ by value; the hold.* rows fail because 6ebdb16 has no current_hold (its thresholds quoted the schedule band, e.g. 66/78, and the chart drew the #786 shape). Deleting the display resolver (current_hold) fails every field_equals here; the setpoint_writes rows pin that the thermostat writes did not change.",
+    "alignment": "docs/08-COMPUTATION-REFERENCE.md (time-of-use bank, Issue #1404 paragraph) and docs/scheduler-spec.md describe the same hold sentence and band.",
+    "user_outcome": "If this regressed, the person would read a band the thermostat is not told (e.g. 'Climate Advisor wants 78 F' while it cools to 68 F) and could not tell what the house is held to or when it goes back."
+  },
+  "source": "synthetic: Issue #1404",
+  "issue": 1404
+}

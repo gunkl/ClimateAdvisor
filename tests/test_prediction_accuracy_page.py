@@ -65,7 +65,8 @@ def test_ranges_leads_and_scroll():
 
 def test_sensor_group_is_ca_reading_plus_response_sensors():
     sl = _func("sensorList")
-    assert "'CA reading'" in sl
+    assert "'Climate Advisor reading'" in sl  # Issue #1400: the name the payload gives "_ca", once
+    assert "s.id !== CA_SENSOR" in sl
     assert "S.sensors" in sl
     assert "S.sensors = d.sensors" in PAGE
     assert "var CA_SENSOR = '_ca'" in PAGE
@@ -223,7 +224,8 @@ def test_text_contrast_at_least_4_5():
 
 
 def test_index_links_to_page_in_analysis_tab():
-    assert 'href="prediction_accuracy.html"' in INDEX
+    # classic's own link says where it came from, so the page's "Back to dashboard" returns to classic
+    assert 'href="prediction_accuracy.html?from=classic" id="prediction-accuracy-link"' in INDEX
     assert "Prediction accuracy (preview)" in INDEX
     start = INDEX.index('id="tab-ai"')
     assert "prediction_accuracy.html" in INDEX[start : start + 3000]

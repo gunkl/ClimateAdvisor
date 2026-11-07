@@ -44,6 +44,14 @@
   .grp button:disabled { opacity: 0.4; cursor: not-allowed; }
   .grp button.nav { min-width: 36px; font-size: 16px; padding: 0 8px; }
   .reset, .retry { padding: 0 12px; border-radius: 8px; border: 1px solid var(--rule); background: transparent; cursor: pointer; }
+  /* Same look as the new dashboard's .btn ("Back to classic" in new_dashboard.html) */
+  .btn {
+    display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border-radius: 8px;
+    border: 1px solid var(--rule); background: var(--panel); color: var(--ink); font-size: 13px;
+    text-decoration: none; cursor: pointer; white-space: nowrap;
+  }
+  a.btn:hover { color: var(--ink); }
+  a.btn:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
   .zone-sel { border-radius: 8px; border: 1px solid var(--rule); background: var(--panel); padding: 0 8px; }
   button:focus-visible, select:focus-visible, canvas:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
   .grow { flex: 1 1 0; }
@@ -86,7 +94,9 @@
     <label class="row small" for="zone-select" id="zone-wrap" hidden>Zone
       <select id="zone-select" class="zone-sel"></select>
     </label>
-    <a href="index.html" id="back-link">&#8592; Back to dashboard</a>
+    <!-- Back to whichever dashboard this browser uses: entry.html applies the remembered
+         'climate_advisor_dashboard' choice (classic -> index.html, otherwise new_dashboard.html). -->
+    <a class="btn" href="entry.html" id="back-link">Back to dashboard</a>
     <div class="grow"></div>
     <span class="sub">Preview page</span>
   </div>
@@ -148,7 +158,7 @@
     </div>
     <div class="small" id="seasons-note">Seasons are scored apart by what the HVAC was doing: heating days, and summer days (cooling or the whole-house fan); days with neither are reported separately.</div>
   </section>
-  <div class="sub">Preview. v4 runs beside today&#8217;s prediction (v3). Choose which one the Status chart shows under Settings, Prediction engine; Climate Advisor makes every heating, cooling and ventilation decision with v3 either way. At 7 d and longer, lines are hourly averages, and at 1 y daily averages, as on today&#8217;s chart.</div>
+  <div class="sub">How well each prediction engine has forecast this house. The engine you choose under Settings, Prediction engine, times Climate Advisor&#8217;s decisions and draws the main line on the Status chart; these scores are information only. At 7 d and longer, lines are hourly averages, and at 1 y daily averages, as on today&#8217;s chart.</div>
 </main>
 
 <script>
@@ -266,7 +276,7 @@
     var out = [];
     S.data.points.forEach(function (p) {
       var ms = toMs(p.t);
-      if (ms != null) out.push({ ms: ms, a: p.actual == null ? null : p.actual, v4: p.v4 == null ? null : p.v4, v3: p.v3 == null ? null : p.v3 });
+      if (ms != null) out.push({ ms: ms, a: p.actual == null ? null : p.actual, v4: p.v4 == null ? null : p.v4, v3: p.v3 == null ? null : p.v3, f: p.flat == null ? null : p.flat });
     });
     out.sort(function (a, b) { return a.ms - b.ms; });
     return out;
@@ -289,18 +299,20 @@
     var w = viewWindow();
     if (!S.zoom && S.data && S.data.stats) {
       var st = S.data.stats;
-      return { n: st.n, v4_mae: st.v4_mae, v3_mae: st.v3_mae, flat_mae: st.flat_mae, v4_bias: st.v4_bias, v3_bias: st.v3_bias, local: false };
+      return { n: st.n, n_v3: st.n_v3, n_flat: st.n_flat, v4_mae: st.v4_mae, v3_mae: st.v3_mae, flat_mae: st.flat_mae, v4_bias: st.v4_bias, v3_bias: st.v3_bias, local: false };
     }
-    var inView = pts().filter(function (p) { return p.ms >= w[0] && p.ms <= w[1] && p.a != null && p.v4 != null; });
+    // Each engine is scored on its own points (Issue #1400): v3 and "no change" score even where v4 has none.
+    var inView = pts().filter(function (p) { return p.ms >= w[0] && p.ms <= w[1] && p.a != null; });
+    function own(k) { return inView.filter(function (p) { return p[k] != null; }); }
     function mae(k) {
-      var g = inView.filter(function (p) { return p[k] != null; });
+      var g = own(k);
       return g.length ? g.reduce(function (s, p) { return s + Math.abs(p[k] - p.a); }, 0) / g.length : null;
     }
     function bias(k) {
-      var g = inView.filter(function (p) { return p[k] != null; });
+      var g = own(k);
       return g.length ? g.reduce(function (s, p) { return s + (p[k] - p.a); }, 0) / g.length : null;
     }
-    return { n: inView.length, v4_mae: mae('v4'), v3_mae: mae('v3'), flat_mae: null, v4_bias: bias('v4'), v3_bias: bias('v3'), local: true };
+    return { n: own('v4').length, n_v3: own('v3').length, n_flat: own('f').length, v4_mae: mae('v4'), v3_mae: mae('v3'), flat_mae: mae('f'), v4_bias: bias('v4'), v3_bias: bias('v3'), local: true };
   }
 
   // ---------- controls ----------
@@ -317,7 +329,8 @@
     return b;
   }
   function sensorList() {
-    var list = [{ id: CA_SENSOR, name: 'CA reading' }];
+    var ca = (S.sensors || []).filter(function (s) { return s && s.id === CA_SENSOR; })[0];
+    var list = [{ id: CA_SENSOR, name: (ca && ca.name) || 'Climate Advisor reading', role: ca && ca.role }];
     (S.sensors || []).forEach(function (s) {
       if (s && s.id && s.id !== CA_SENSOR) list.push({ id: s.id, name: s.name || s.id, role: s.role });
     });
@@ -622,13 +635,18 @@
   function renderTiles() {
     var sc = scoreInView(), v3 = hasV3(), box = $('tiles');
     var selected = (S.data && S.data.primary_engine) === 'v3' ? 'v3' : 'v4'; // the primary engine chosen in Settings leads; the comparison engine follows
-    var v4Miss = { l: 'v4 average miss', v: fmiss(sc.v4_mae), n: (sc.n || 0) + ' predictions in view' };
-    var v3Miss = { l: 'v3 average miss', v: v3 ? fmiss(sc.v3_mae) : '—', n: v3 ? 'today’s line' : 'v3 predicts only the reading CA uses' };
+    var v4Miss = { l: 'v4 average miss', v: fmiss(sc.v4_mae), n: sc.n ? sc.n + ' predictions in view' : 'no v4 predictions scored here yet' };
+    var v3Running = !S.data || S.data.primary_engine === 'v3' || S.data.shadow_engine === 'v3';
+    var v3Why = S.sensor !== CA_SENSOR ? 'v3 predicts only the reading CA uses'
+      : S.lead !== '4h' ? 'v3 is logged 4 h ahead only'
+      : v3Running ? 'no v3 prediction logged in this window'
+      : 'v3 is not running (Settings, Prediction engine); scroll back for its history';
+    var v3Miss = { l: 'v3 average miss', v: v3 ? fmiss(sc.v3_mae) : '—', n: v3 ? 'today’s line' + (sc.n_v3 ? ', ' + sc.n_v3 + ' predictions in view' : '') : v3Why };
     var v4Bias = { l: 'v4 runs warm or cold', v: fbias(sc.v4_bias), n: v3 ? 'v3 ' + fbias(sc.v3_bias) : 'in view' };
     var v3Bias = { l: 'v3 runs warm or cold', v: v3 ? fbias(sc.v3_bias) : '—', n: 'v4 ' + fbias(sc.v4_bias) };
     var tiles = selected === 'v3' ? [v3Miss, v4Miss, v3Bias] : [v4Miss, v3Miss, v4Bias];
     tiles[0].n += ' · main prediction on Status' + (S.data && S.data.shadow_engine && S.data.shadow_engine !== 'none' ? ' (comparison: ' + S.data.shadow_engine + ')' : '');
-    if (!sc.local && sc.flat_mae != null) tiles.push({ l: '“No change” guess', v: fmiss(sc.flat_mae), n: 'if the temperature just stayed put' });
+    if (sc.flat_mae != null) tiles.push({ l: '“No change” guess', v: fmiss(sc.flat_mae), n: 'if the temperature just stayed put' + (sc.n_flat ? ', ' + sc.n_flat + ' points' : '') });
     box.innerHTML = tiles.map(function (t) {
       return '<div class="tile"><div class="l">' + esc(t.l) + '</div><div class="v">' + esc(t.v) + '</div><div class="n">' + esc(t.n) + '</div></div>';
     }).join('');
@@ -692,6 +710,16 @@
       var qz = new URLSearchParams(location.search).get('zone');
       if (qz) S.zone = qz;
     } catch (e) { /* ignore */ }
+    // Opened from classic (?from=classic): go back to classic even if nothing is remembered (classic may have been
+    // opened for one visit with ?classic=1). The rest of the query is kept; otherwise entry.html picks the dashboard.
+    try {
+      var bq = new URLSearchParams(location.search);
+      if (bq.get('from') === 'classic') {
+        bq.delete('from');
+        var rest = bq.toString();
+        $('back-link').setAttribute('href', 'index.html' + (rest ? '?' + rest : ''));
+      }
+    } catch (e) { /* keep entry.html */ }
     $('reset-zoom').addEventListener('click', resetZoom);
     $('zone-select').addEventListener('change', function (ev) {
       S.zone = ev.target.value; S.before = null; S.zoom = null; S.sensors = []; S.sensor = CA_SENSOR;

@@ -1,0 +1,135 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ]
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "name": "tou_away_heat_bank_home_return_surfaces_1404",
+  "description": "Issue #1404 review (surface twin of tou_away_heat_bank_home_return_1404): at 16:05, after the owner came home at 15:40, every surface quotes the home bank. Since Issue #1409 the change writes the home bank once (heat 76 F at 15:40).",
+  "events": [
+    {
+      "time": "2026-01-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 64.0,
+      "outdoor_f": 30.0
+    },
+    {
+      "time": "2026-01-13T13:00:01",
+      "type": "occupancy_away"
+    },
+    {
+      "time": "2026-01-13T14:00:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T14:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T15:40:00",
+      "type": "occupancy_home"
+    },
+    {
+      "time": "2026-01-13T15:45:00",
+      "type": "temp_update",
+      "indoor_f": 64.0,
+      "outdoor_f": 30.0
+    },
+    {
+      "time": "2026-01-13T16:05:00",
+      "type": "temp_update",
+      "indoor_f": 66.0,
+      "outdoor_f": 30.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-13T15:45:00",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T15:39:59",
+      "values": [
+        76.0
+      ],
+      "reason": "Home at 15:40 inside the bank window: the home bank target (heat 76 F) is written once, at the change, with no comfort band (heat 68 F) first (Issue #1409: one write, no band-then-bank pair)."
+    },
+    {
+      "at": "2026-01-13T16:05:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.status",
+      "value": "pre-heating to 76°F until the 4:15 PM high-cost period, then back to the comfort band 68–76°F",
+      "reason": "Status names the home bank now, not the Away bank."
+    },
+    {
+      "at": "2026-01-13T16:05:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.thresholds",
+      "value": [
+        76.0,
+        76.0
+      ],
+      "reason": "The thresholds quote the home bank (heat 76 F, a heat bank to the comfort ceiling)."
+    },
+    {
+      "at": "2026-01-13T16:05:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.threshold_context",
+      "value": "tou_bank",
+      "reason": "Still a bank."
+    },
+    {
+      "at": "2026-01-13T16:05:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.chart_band_now",
+      "value": [
+        76.0,
+        76.0
+      ],
+      "reason": "The chart draws the same."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "After coming home mid-bank every surface quotes the home bank",
+    "observed_behavior": "Issue #1404 review (surface twin of tou_away_heat_bank_home_return_1404): at 16:05, after the owner came home at 15:40, every surface quotes the home bank.",
+    "expected_behavior": "Occupant view: the thermostat and every surface follow the occupancy change mid-bank.",
+    "effectiveness": "Fails on 6ebdb16 (no current_hold; thresholds 68/76). Deleting the display resolver fails every field_equals row.",
+    "alignment": "docs/08-COMPUTATION-REFERENCE.md time-of-use bank (Issues #1404/#1405).",
+    "user_outcome": "If this regressed, the person would read the comfort band while the furnace pre-heats to 76 F."
+  },
+  "source": "synthetic: Issue #1404 review",
+  "issue": 1404
+}

@@ -121,7 +121,9 @@ class TestTouAwayVacationTimer:
         _, delay, _callback = mock_call_later.call_args[0]
         assert delay == 1800.0  # 30 minutes
 
-    def test_no_timer_for_home_occupancy(self) -> None:
+    def test_no_away_vacation_timer_for_home_occupancy(self) -> None:
+        """Home never arms the away/vacation T_start timer. Since Issue #1405 it arms its own bank-end timer for the
+        same instant instead (the only call), which ends the Home/Guest bank on time."""
         coord = _build_coordinator("home")
         now = datetime(2026, 1, 5, 15, 30)
 
@@ -131,7 +133,12 @@ class TestTouAwayVacationTimer:
         ):
             coord._resolve_tou_schedule_state()
 
-        mock_call_later.assert_not_called()
+        assert getattr(coord, "_tou_av_stop_timer_schedule_start", None) is None
+        if coord._tou_phase_resolution is not None and coord._tou_phase_resolution.phase.name == "PRECONDITIONING":
+            assert mock_call_later.call_count == 1
+            assert mock_call_later.call_args[0][2].__name__ == "_tou_home_bank_end"
+        else:
+            mock_call_later.assert_not_called()
 
     def test_repeated_resolution_does_not_reschedule_same_instant(self) -> None:
         """Dedup: two cycles resolving to the SAME schedule_start must only arm one

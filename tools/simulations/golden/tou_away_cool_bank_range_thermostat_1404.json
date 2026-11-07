@@ -1,0 +1,132 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ],
+    "thermostat_hvac_modes": [
+      "off",
+      "heat",
+      "cool",
+      "heat_cool"
+    ],
+    "thermostat_supported_features": 2,
+    "initial_thermostat_mode": "heat_cool"
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "name": "tou_away_cool_bank_range_thermostat_1404",
+  "description": "Issue #1404 (range thermostats): the #1395 Away cool bank on a thermostat that offers heat_cool with a temperature range and starts in heat_cool. The bank and every surface behave as on a single-setpoint device. CA switches the device out of heat_cool to cool and writes a single setpoint (77 F), so the range-only hold check (target_temp_low/high without a temperature attribute) is not exercised here; that path is covered by tests/test_current_hold_1404.py.",
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T13:00:01",
+      "type": "occupancy_away"
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:40:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T14:00:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T13:59:59",
+      "values": [
+        77.0
+      ],
+      "reason": "A heat/cool-range thermostat in heat_cool: the bank still writes cool 77 F once."
+    },
+    {
+      "at": "2026-07-13T14:29:59",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T14:00:00",
+      "values": [],
+      "reason": "No re-send between cycles: the 5-minute check reads the range device as holding the bank."
+    },
+    {
+      "at": "2026-07-13T14:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T14:29:59",
+      "values": [
+        77.0
+      ],
+      "reason": "The next cycle re-asserts once."
+    },
+    {
+      "at": "2026-07-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.thresholds",
+      "value": [
+        60.0,
+        77.0
+      ],
+      "reason": "The thresholds quote the bank on a range thermostat too."
+    },
+    {
+      "at": "2026-07-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.status",
+      "value": "pre-cooling to 77°F until the 4:15 PM high-cost period, then the Away band widened to 60–83°F until 9:00 PM",
+      "reason": "Same sentence as a single-setpoint thermostat."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A heat/cool-range thermostat gets the same bank and the same story",
+    "observed_behavior": "Issue #1404 (range thermostats): the #1395 Away cool bank on a thermostat that offers heat_cool with a temperature range and starts in heat_cool. The bank and every surface behave as on a single-setpoint device.",
+    "expected_behavior": "Occupant view: on a thermostat that offers a heat/cool range, every surface quotes the bank target the thermostat is told, exactly as on a single-setpoint device.",
+    "effectiveness": "Fails on 6ebdb16: thresholds 60/80 and no hold block. Deleting the display resolver fails both field_equals rows.",
+    "alignment": "docs/08-COMPUTATION-REFERENCE.md time-of-use bank (Issues #1404/#1405).",
+    "user_outcome": "If this regressed, a range-thermostat owner would read 'Climate Advisor wants 80 F' while it cools to 77 F."
+  },
+  "source": "synthetic: Issue #1404 review",
+  "issue": 1404
+}

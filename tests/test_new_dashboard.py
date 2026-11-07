@@ -159,9 +159,9 @@ PARITY = [
     ),
     (
         [],
-        "Fan (WHF)",
+        "Whole-house fan",
         "Doors & windows card fan note; fan override banner",
-        ["status-card-doors", "Fan (WHF)"],
+        ["status-card-doors", "Whole-house fan"],
         "placed",
         "",
     ),
@@ -209,6 +209,9 @@ PARITY = [
             "chart-key",
             "chart-key-body",
             "chart-key-count",
+            "chart-lead-help",
+            "chart-lead-label",
+            "chart-lead-row",
             "chart-nav-now",
             "chart-stack",
             "chart-table-copy",
@@ -352,8 +355,8 @@ PARITY = [
     (
         ["automation-state"],
         "automation-state",
-        "Debug groups (every automation_state field exactly once; Other catches the rest)",
-        ['id="dbg-groups"', "'Other'"],
+        "Debug groups (every automation_state field once, in a named group; no catch-all, a test guards new keys)",
+        ['id="dbg-groups"', "DOWNLOAD_ONLY"],
         "placed",
         "",
     ),
@@ -788,7 +791,6 @@ def test_debug_data_calls_and_features():
         "investigation_reports",
     }
     for frag in (
-        "Other",
         "dbg-search",
         "dbg-ev-types",
         "dbg-ev-all",
@@ -803,14 +805,68 @@ def test_debug_data_calls_and_features():
     assert "ND.post" not in js and "method:" not in js  # Debug is read-only
 
 
+def _debug_lists() -> tuple[set[str], set[str], set[str], set[str]]:
+    """(placed in a named GROUPS list, NESTED, MOVED, DOWNLOAD_ONLY) as written in nd_debug.js."""
+    js = JS["nd_debug.js"]
+    block = js[js.index("var GROUPS = [") : js.index("var NESTED")]
+
+    def _keys(name: str) -> set[str]:
+        m = re.search(r"var " + name + r" = ([\[{][^;]*);", js)
+        assert m, f"nd_debug.js has no {name}"
+        body = m.group(1)
+        if body.startswith("["):  # a list of quoted keys
+            return set(re.findall(r"'([a-z_0-9]+)'", body))
+        return set(re.findall(r"([a-z_0-9]+)\s*:", body))  # an object: its keys
+
+    return set(re.findall(r"'([a-z_0-9]+)'", block)), _keys("NESTED"), _keys("MOVED"), _keys("DOWNLOAD_ONLY")
+
+
+def _get_debug_state_keys() -> set[str]:
+    """Every top-level key of coordinator.get_debug_state()'s returned dict, read from the source (no HA needed)."""
+    import ast
+
+    src = (ROOT / "custom_components" / "climate_advisor" / "coordinator.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef) and n.name == "get_debug_state")
+    ret = [n for n in ast.walk(fn) if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)][-1]
+    keys = {k.value for k in ret.value.keys if isinstance(k, ast.Constant)}
+    assert len(keys) == len(ret.value.keys), "get_debug_state() returns a non-literal key"
+    return keys
+
+
+def test_every_debug_state_key_is_in_a_named_group_or_download_only():
+    """Issue #1399: the Debug tab has no on-screen catch-all ("Other"). Instead every key get_debug_state() returns is
+    placed in a named Debug group (or expanded/moved), or listed in DOWNLOAD_ONLY (kept only in Download diagnostics).
+    A key added to the backend that is in none of these lists fails here, so a field can never silently vanish."""
+    placed, nested, moved, download_only = _debug_lists()
+    assert nested == {"classification", "thermal_pipeline"} and moved == {"promise_summary"}
+    keys = _get_debug_state_keys()
+    missing = sorted(keys - (placed | nested | moved | download_only))
+    assert not missing, f"get_debug_state() keys in no Debug group and not in DOWNLOAD_ONLY: {missing}"
+    assert not download_only & (placed | nested | moved), "a key is both shown and download-only"
+    stale = sorted((placed | download_only) - keys)
+    assert not stale, f"nd_debug.js names keys get_debug_state() no longer returns: {stale}"
+
+
+def test_debug_tab_has_no_other_group_and_no_raw_json():
+    js = JS["nd_debug.js"]
+    assert "'Other'" not in js and "title: 'Other'" not in js
+    i = HTML.index('id="panel-debug"')
+    panel = HTML[i : HTML.index('id="panel-settings"')]
+    assert "Other" not in panel and "Download diagnostics" in panel
+    # JSON.stringify only builds the download files and the event search haystack, never a displayed value
+    for line in (ln for ln in js.splitlines() if "JSON.stringify" in ln):
+        assert "ND.download(" in line or "indexOf(q)" in line, line.strip()
+    # the Debug download saves the whole automation_state payload, so every key (download-only included) is in it
+    dl = js[js.index("async function downloadDiagnostics") : js.index("// ---------- backtest lab")]
+    assert "automation_state: A" in dl
+
+
 def test_debug_groups_cover_a_real_automation_state():
     js = JS["nd_debug.js"]
     block = js[js.index("var GROUPS = [") : js.index("var NESTED")]
-    placed = set(re.findall(r"'([a-z_0-9]+)'", block))
-    nested = {"classification", "thermal_pipeline"}
-    moved = {"promise_summary"}
+    placed, nested, moved, download_only = _debug_lists()
     for key in FIX["automation_state"]:
-        assert key in placed | nested | moved, f"{key} would land in Other (add it to a Debug group)"
+        assert key in placed | nested | moved | download_only, f"{key} is in no Debug group (add it to one)"
     # a key is placed in at most one group
     seen = []
     for m in re.finditer(r"\['[^']+', \[([^\]]*)\]\]", block):
@@ -943,8 +999,9 @@ def test_status_places_the_same_actors_as_the_timeline():
     # "you" and "CA" are named in words and by shape (never colour alone), low confidence says "may help"
     assert "'You'" in mod and "'CA'" in mod and "may help" in mod
     assert "s.confidence === 'low'" in mod
-    # nothing in the list invents wording: the step's own text is what is shown
-    assert "escapeHtml(s.text || '')" in mod
+    # nothing in the list invents wording: the step's own server-side text is what is shown (its plan-list row form
+    # text_short, Issue #1399, built by timeline_surfaces.plan_list_text; else the canonical text)
+    assert "escapeHtml(s.text_short || s.text || '')" in mod
 
 
 # ---------------------------------------------------------------------------------------------

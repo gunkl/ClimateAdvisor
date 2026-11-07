@@ -386,7 +386,52 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
         _full, short = coordinator._build_briefing_text(classification, suggestions=[])
         row = next((ln.strip() for ln in short.splitlines() if ln.strip().startswith("Windows:")), None)
         out["briefing_windows_row"] = row
+    # Issue #1404 (additive): what each surface says the house is held to, so a time-of-use bank scenario can pin that
+    # Status, the thresholds (ca_target_heat/cool, the reading cards), the briefing's HVAC Mode row, the chart band now,
+    # Next Automation and the plan list's "Now" row tell the same story as the thermostat writes.
+    out["hold"] = _capture_hold(coordinator, engine)
     return out
+
+
+def _capture_hold(coordinator: Any, engine: Any) -> dict[str, Any]:
+    """The hold every surface quotes, read from the real production functions (Issue #1404). Read-only."""
+    from datetime import timedelta  # noqa: PLC0415
+
+    from homeassistant.util import dt as _dt  # noqa: PLC0415
+
+    from custom_components.climate_advisor.automation import active_thresholds_for  # noqa: PLC0415
+
+    th = active_thresholds_for(coordinator)
+    payload_fn = getattr(coordinator, "current_hold_payload", None)
+    payload = payload_fn() if callable(payload_fn) else None
+    classification = coordinator._current_classification
+    hvac_row = None
+    if classification is not None:
+        _full, short = coordinator._build_briefing_text(classification, suggestions=[])
+        hvac_row = next((ln.strip() for ln in short.splitlines() if ln.strip().startswith("HVAC Mode:")), None)
+    # The chart band in force now: the band the chart draws (the display band where production has one), fed the same
+    # synthetic hourly forecast the P8 chart reader uses (Tier A runs no weather entity).
+    now = _dt.now()
+    hour0 = now.replace(minute=0, second=0, microsecond=0)
+    hourly = [{"datetime": (hour0 + timedelta(hours=h)).isoformat(), "temperature": 60.0} for h in range(-24, 49)]
+    builder = getattr(coordinator, "_chart_display_band", None) or coordinator._build_target_band_for
+    band = builder(now, engine._thermal_model, hourly_forecast_override=hourly)
+    current = [e for e in band if _dt.parse_datetime(str(e["ts"])) <= now]
+    chart_now = None
+    if current:
+        last = max(current, key=lambda e: str(e["ts"]))
+        chart_now = [last.get("lower"), last.get("upper")]
+    tl = coordinator.timeline_payload() if hasattr(coordinator, "timeline_payload") else None
+    plan_now = ((tl or {}).get("current_hold") or {}).get("text")
+    return {
+        "status": coordinator._compute_automation_status(),
+        "thresholds": [th.get("heat"), th.get("cool")],
+        "threshold_context": th.get("context"),
+        "briefing_hvac_row": hvac_row,
+        "chart_band_now": chart_now,
+        "plan_now": plan_now,
+        "text": (payload or {}).get("text"),
+    }
 
 
 def sync_coordinator_occupancy(coordinator: Any, mode: str) -> None:

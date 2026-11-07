@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.4"
+VERSION = "0.9.5"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -496,6 +496,12 @@ SETPOINT_ECHO_MEMORY_MAX = 16
 # ``target_temp_step`` (Celsius thermostats commonly round to 0.5, Fahrenheit ones to 1).
 SETPOINT_ECHO_DEFAULT_STEP_C = 0.5
 SETPOINT_ECHO_DEFAULT_STEP_F = 1.0
+
+# Issue #1397: a thermostat reporting a setpoint within this many degrees F of the value Climate Advisor last wrote
+# to it (0.28 C on a Celsius install) is holding Climate Advisor's setpoint, not the occupant changing it (a HomeKit
+# thermostat reports 18.0 C, then 17.9 C a minute later). Owner decision 2026-11-07: 0.5 F. Every one-step
+# occupant change (1 F, 0.5 C = 0.9 F) is larger. See own_write_echo.holds_own_setpoint.
+SETPOINT_HOLD_TOLERANCE_F = 0.5
 
 # Issue #1073 (S7): cap on the persisted settling-guard hold-episode log
 # (AutomationEngine.comfort_holds), read by the control-quality report.
@@ -1140,10 +1146,11 @@ CONFIG_METADATA = {
     "primary_engine": {
         "label": "Prediction engine",
         "description": (
-            "Which prediction engine the Status chart, the Next 24 hours plan and the preview pages show as the main"
-            " prediction: v4 (default, a per-sensor model learned from your house) or v3 (the established model)."
-            " Display only for now: Climate Advisor still makes every heating, cooling and ventilation decision"
-            " with v3. While the chosen engine is still learning, the schedule estimate is shown."
+            "Which prediction engine Climate Advisor uses: v4 (default, a per-sensor model learned from your house)"
+            " or v3 (the established model). It times pre-heat and pre-cool, the ceiling guard, the window-close time"
+            " and setback depth, and it is the main line on the Status chart and the Next 24 hours plan. While it is"
+            " still learning, those decisions use their default behaviour (never the other engine) and the chart"
+            " shows the schedule estimate."
         ),
         "category": "advanced",
         "default": DEFAULT_PRIMARY_ENGINE,

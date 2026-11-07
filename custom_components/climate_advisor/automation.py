@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
@@ -129,6 +130,7 @@ from .const import (
     REMOTE_OFFSET_EXIT_GRACE_S,
     REMOTE_OFFSET_LATENCY_EWMA_ALPHA,
     REVISIT_DELAY_SECONDS,
+    SETPOINT_HOLD_TOLERANCE_F,
     SETPOINT_RETRY_DELAY_S,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     THERMAL_SWING_DEFAULT_F,
@@ -162,6 +164,8 @@ from .own_write_echo import (
     context_id_matches,
     decide_mode_echo,
     decide_setpoint_echo,
+    hold_tolerance,
+    holds_own_setpoint,
     outstanding_own_write,
     prune_own_writes,
     resolve_step,
@@ -802,6 +806,20 @@ def _band_num(value_f: float, unit: str) -> str:
     return f"{display_temp(value_f, unit, 0):.0f}"
 
 
+# Issue #1409: the engine whose occupancy CHANGE is running in THIS task (a context variable, so a concurrent coroutine
+# -- a cycle's away/vacation reapply, a timer -- that calls the same handler while this one awaits never sees it).
+_OCCUPANCY_CHANGE: contextvars.ContextVar[Any] = contextvars.ContextVar("ca_occupancy_change", default=None)
+
+
+@dataclass(frozen=True)
+class OccupancyBankWrite:
+    """The time-of-use bank write an occupancy change made instead of its band (Issue #1409)."""
+
+    target_f: float
+    mode: str
+    result: Any = None  # HvacCommandResult of the write
+
+
 # Issue #1345: values of ``ComfortBand.context`` -- the band in force, exposed as the ``context``
 # attribute of the Heat/Cool Threshold sensors. "tou_expansion" is an away/vacation band widened
 # for a time-of-use high-cost window; "prefer_savings" is the awake comfort band widened by
@@ -1183,6 +1201,13 @@ def active_thresholds_for(coordinator: Any, now: datetime | None = None) -> dict
     config = coordinator.config
     classification = coordinator.current_classification
     if classification is not None:
+        # Issue #1404: while a time-of-use bank owns the setpoint the thermostat is told the bank target, so the
+        # thresholds quote it (the shared display resolver, coordinator.current_hold()). No bank: unchanged below.
+        _hold_fn = getattr(coordinator, "current_hold", None)
+        _current = _hold_fn(now) if callable(_hold_fn) else None
+        if isinstance(_current, CurrentHold) and _current.bank is not None:
+            _b = _current.band
+            return {"heat": _b.floor, "cool": _b.ceiling, "context": _b.context, "provisional": False}
         ae = coordinator.automation_engine
         band = resolve_active_band(
             classification,
@@ -1206,6 +1231,124 @@ def active_thresholds_for(coordinator: Any, now: datetime | None = None) -> dict
         "context": BAND_CONTEXT_SLEEP if _in_sleep_window(now, config) else BAND_CONTEXT_COMFORT,
         "provisional": True,
     }
+
+
+# ── Issue #1404: the hold every surface quotes ──────────────────────────────────────────────────────────────────────
+# Occupant view: while the house pre-cools or pre-heats for a time-of-use high-cost period (a "bank"), the thermostat
+# is told the bank target, not the schedule band. Status, the briefing, Next Action, Next Automation, Next 24 hours,
+# the reading cards and the chart all quote ONE answer, built here (pure) and assembled live by
+# ``ClimateAdvisorCoordinator.current_hold()``. DISPLAY ONLY: no decision path reads it; ``_resolved_comfort_band()``
+# stays the schedule band every restore, adoption and offset cap resolves against.
+
+# Not in BAND_CONTEXTS (the select_comfort_band() contexts): a bank is laid over the schedule band by the display
+# resolver, never chosen by the band selector.
+BAND_CONTEXT_TOU_BANK = "tou_bank"
+DISPLAY_BAND_CONTEXTS: tuple[str, ...] = (*BAND_CONTEXTS, BAND_CONTEXT_TOU_BANK)
+
+
+@dataclass(frozen=True)
+class TouBankHold:
+    """A time-of-use bank that owns the thermostat right now (internal °F)."""
+
+    target: float  # what the thermostat is told
+    mode: str  # "cool" (pre-cool) | "heat" (pre-heat)
+    ends: datetime  # the high-cost period's start: the bank ends and the schedule band returns
+    schedule_id: str | None = None
+    period_end: datetime | None = None  # the high-cost period's own end (away/vacation widening), when known
+
+
+@dataclass(frozen=True)
+class CurrentHold:
+    """What the house is held to now (Issue #1404).
+
+    ``band`` is the hold (the bank band while banking, else the schedule band); ``schedule_band`` the home / sleep /
+    Away / Vacation band underneath; ``after_band`` the band in force when the bank ends (``bank.ends``), which for
+    Away/Vacation is the setback band widened for the high-cost period.
+    """
+
+    band: ComfortBand
+    schedule_band: ComfortBand
+    bank: TouBankHold | None = None
+    after_band: ComfortBand | None = None
+    occupancy_mode: str = "home"
+    # The family the thermostat is armed in now ("heat" / "cool"), when known: the bank's mode while banking, else
+    # (occupied and awake) the comfort-edge selector's last resolved family, which can differ from the day's mode
+    # (e.g. heat 68 F at the floor right after a cool bank ends). None = use the day's mode.
+    family: str | None = None
+
+
+def tou_bank_band(schedule: ComfortBand, target: float, mode: str) -> ComfortBand:
+    """The band a bank holds (pure): the edge for the bank's mode IS the target the thermostat is told.
+
+    Pre-cool: ceiling = target (the AC runs above it); pre-heat: floor = target. The other edge stays the schedule's,
+    moved only as far as needed to keep floor <= ceiling (a sleep-destination bank can aim past it).
+    """
+    target = float(target)
+    if mode == "cool":
+        return ComfortBand(
+            floor=min(schedule.floor, target),
+            ceiling=target,
+            active="ceiling",
+            reason=f"time-of-use pre-cool to {target:.1f}F",
+            context=BAND_CONTEXT_TOU_BANK,
+        )
+    return ComfortBand(
+        floor=target,
+        ceiling=max(schedule.ceiling, target),
+        active="floor",
+        reason=f"time-of-use pre-heat to {target:.1f}F",
+        context=BAND_CONTEXT_TOU_BANK,
+    )
+
+
+def hold_band_label(band: ComfortBand, occupancy_mode: str) -> str:
+    """'comfort band' / 'sleep band' / 'Away band' / 'Vacation band' for a schedule band (pure)."""
+    ctx = getattr(band, "context", "")
+    if ctx == BAND_CONTEXT_VACATION or (ctx == BAND_CONTEXT_TOU_EXPANSION and occupancy_mode == OCCUPANCY_VACATION):
+        return "Vacation band"
+    if ctx in (BAND_CONTEXT_AWAY, BAND_CONTEXT_TOU_EXPANSION):
+        return "Away band"
+    if ctx == BAND_CONTEXT_SLEEP:
+        return "sleep band"
+    return "comfort band"
+
+
+def _hold_band_text(band: ComfortBand, unit: str) -> str:
+    """'60–80°F' (display unit, whole degrees)."""
+    return f"{format_temp(band.floor, unit)[:-2]}–{format_temp(band.ceiling, unit)}"
+
+
+def _hold_clock(at: datetime) -> str:
+    return dt_util.as_local(at).strftime("%I:%M %p").lstrip("0")
+
+
+def hold_after_text(hold: CurrentHold, unit: str) -> str:
+    """What follows the bank (pure): 'the Away band widened to 60–83°F until 9:00 PM' with a high-cost widening (the
+    Away/Vacation default), 'back to the Away band 60–80°F' without one, 'back to the comfort band 68–76°F' at home.
+    '' without a bank."""
+    if hold.bank is None:
+        return ""
+    after = hold.after_band or hold.schedule_band
+    label = hold_band_label(after, hold.occupancy_mode)
+    if getattr(after, "context", "") == BAND_CONTEXT_TOU_EXPANSION:
+        until = f" until {_hold_clock(hold.bank.period_end)}" if hold.bank.period_end is not None else ""
+        return f"the {label} widened to {_hold_band_text(after, unit)}{until}"
+    return f"back to the {label} {_hold_band_text(after, unit)}"
+
+
+def hold_sentence(hold: CurrentHold | None, unit: str) -> str | None:
+    """The one bank sentence every surface quotes (pure), or None when no bank owns the thermostat.
+
+    'Pre-cooling to 77°F until the 4:15 PM high-cost period, then the Away band widened to 60–83°F until 9:00 PM'
+    (home: '..., then back to the comfort band 68–76°F').
+    """
+    if hold is None or hold.bank is None:
+        return None
+    verb = "Pre-cooling" if hold.bank.mode == "cool" else "Pre-heating"
+    return (
+        f"{verb} to {format_temp(hold.bank.target, unit)} until the {_hold_clock(hold.bank.ends)} high-cost period, "
+        f"then {hold_after_text(hold, unit)}"
+    )
 
 
 def pre_cool_sleep_window_config(config: dict) -> dict:
@@ -1981,6 +2124,11 @@ class AutomationEngine:
         # cloud thermostat echoing a write 30-120 s late is recognised by value/Context and not read as the occupant.
         # Transient (a 180 s memory is meaningless across a restart); see own_write_echo.py.
         self._own_setpoint_writes: list[OwnSetpointWrite] = []
+        # Issue #1397: per thermostat, the setpoint CA wrote once the thermostat has shown it (its echo recognised, or
+        # the read-back confirmed it), thermostat unit. A thermostat then reporting 17.9 C for a written 18.0 C is
+        # holding CA's setpoint, not the occupant. No window; dropped on CA's next write and when a setpoint change is
+        # counted as the occupant's. Transient (CA rewrites after a restart).
+        self._held_own_setpoints: dict[str, dict[str, float]] = {}
         # Issue #1246: the same memory for CA's own HVAC MODE writes (a door-close restore then a family flip is two
         # writes inside the echo window; ``_last_commanded_hvac_mode`` keeps only the last). Transient too.
         self._own_mode_writes: list[OwnModeWrite] = []
@@ -2102,6 +2250,10 @@ class AutomationEngine:
         # family, for the reactive-retry rate limit and the once-per-realised-switch event.
         self._last_selector_write_attempt: tuple[str, datetime] | None = None
         self._last_resolved_family: str | None = None
+        # Issue #1409: the coordinator's occupancy-change bank writer (returns the write it made, or None). Asked only
+        # inside ``occupancy_change()`` (this task's OCCUPANCY CHANGE); every other caller of the occupancy handlers
+        # (cycle, timers, redirects) is unaffected.
+        self._occupancy_bank_write: Callable[[], Awaitable[OccupancyBankWrite | None]] | None = None
 
         # Nat-vent soft-start sub-mode (Issue #540, scoped from #533): qualifies WHY an
         # active nat-vent session was entered — True when entered via the parity/
@@ -5185,6 +5337,20 @@ class AutomationEngine:
             whf_owns_hvac=self._whf_owns_hvac(),
         )
 
+    def tou_bank_gates_pass(self) -> bool:
+        """CONTROL (Issues #1404/#1409): nothing defers a time-of-use bank right now, so its write would land.
+
+        The bank writes skip on an unconfirmed manual change, then on the same holds ``_tou_bank_skips_band_write()``
+        checks (a manual override, a door/window pause, nat-vent or whole-house-fan ownership, a settled-open sensor,
+        a blower session). Reads state only. The control source the coordinator's ``_tou_bank_in_force()`` uses; the
+        display resolver reads it through there (display reads control, never the reverse).
+        """
+        return bool(not self._override_confirm_pending and self._tou_bank_skips_band_write(True))
+
+    def tou_bank_holds_setpoint(self) -> bool:
+        """DISPLAY alias of ``tou_bank_gates_pass()`` (Issue #1404), kept for display callers and tests."""
+        return self.tou_bank_gates_pass()
+
     def _tou_bank_skips_band_write(self, tou_bank_owns_setpoint: bool) -> bool:
         """Issue #1393/#1395: True when this pass must not write a band because the time-of-use bank write follows it.
 
@@ -6706,6 +6872,9 @@ class AutomationEngine:
                 self._rearm_timer("_setpoint_retry_cancel", SETPOINT_RETRY_DELAY_S, _schedule_retry)
             else:
                 self._setpoint_reject_streak = 0
+                with contextlib.suppress(TypeError, ValueError):
+                    # Issue #1397: the thermostat shows CA's setpoint; hold the value CA sent (thermostat unit).
+                    self._hold_own_setpoint(self.climate_entity, {"temperature": float(service_temp)})
                 _LOGGER.info(
                     "Setpoint confirmed by thermostat: temperature=%.1f (%s mode)",
                     reported,
@@ -11879,6 +12048,38 @@ class AutomationEngine:
                 nat_vent_cutoff_already_reached=self._nat_vent_cutoff_already_reached,
             )
 
+    @contextlib.contextmanager
+    def occupancy_change(self) -> Iterator[None]:
+        """Mark this task as running an occupancy CHANGE for this engine (Issue #1409), for the ``with`` body only."""
+        token = _OCCUPANCY_CHANGE.set(self)
+        try:
+            yield
+        finally:
+            _OCCUPANCY_CHANGE.reset(token)
+
+    async def _bank_takes_occupancy_write(self, mode: str) -> OccupancyBankWrite | None:
+        """Issue #1409: on an occupancy change inside an open time-of-use bank window, write the new occupancy's bank
+        target instead of its band. Returns the write when the bank was written and accepted (the caller then writes
+        no band and records the bank); None keeps the band write exactly as before (not inside this task's occupancy
+        change, no bank window, a gate defers the bank, start-up coalescing, a failed or rejected write, a fault)."""
+        if _OCCUPANCY_CHANGE.get() is not self or self._occupancy_bank_write is None:
+            return None
+        try:
+            wrote = await self._occupancy_bank_write()
+        except Exception:  # noqa: BLE001 - never lose the band write to a bank fault
+            _LOGGER.warning("Occupancy %s: time-of-use bank write failed, writing the band", mode, exc_info=True)
+            return None
+        if not isinstance(wrote, OccupancyBankWrite):
+            return None
+        _LOGGER.info(
+            "Occupancy %s inside a time-of-use bank window: the bank target %s %.1f F was written instead of the band "
+            "(one write, no band-then-bank pair)",
+            mode,
+            wrote.mode,
+            wrote.target_f,
+        )
+        return wrote
+
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""
         self._occupancy_mode = OCCUPANCY_AWAY
@@ -16913,11 +17114,43 @@ class AutomationEngine:
         # held at 74 instead of 72). An occupant's mode change or a setpoint ABOVE the ceiling fails this test, so the
         # guard still acts exactly as before (off / heat / cool above the ceiling). Observe-only keeps recording its
         # would-do.
+        # Issue #1403: a thermostat that reports CA's own write a fraction ABOVE what was sent (a write of 23.3 C under
+        # a 74 F ceiling reported as 23.5 C) is still holding CA's setpoint (#1397 tolerance), so the guard must not
+        # read it as "cooling above the ceiling" and re-send every cycle. CA's own setpoint is the held one (shown by
+        # the thermostat) or one still in the echo window (the band re-sends it earlier in this same cycle, which
+        # clears the held record until the echo). Only CA's own write counts: an occupant's setpoint above the
+        # ceiling still gets the guard.
+        _own_temps_cg: list[float] = []
+        _held_temp_cg = ((getattr(self, "_held_own_setpoints", None) or {}).get(self.climate_entity) or {}).get(
+            "temperature"
+        )
+        if isinstance(_held_temp_cg, (int, float)):
+            _own_temps_cg.append(float(_held_temp_cg))
+        for _w_cg in getattr(self, "_own_setpoint_writes", None) or ():
+            if (
+                getattr(_w_cg, "entity_id", None) == self.climate_entity
+                and getattr(_w_cg, "attribute", "") == "temperature"
+            ):
+                _own_temps_cg.append(float(_w_cg.value))
+        _holds_own_at_ceiling_cg = False
+        if _old_setpoint_raw_cg is not None:
+            try:
+                _holds_own_at_ceiling_cg = any(
+                    to_fahrenheit(_own, _unit) <= _ceiling_cg + 0.05
+                    and holds_own_setpoint(
+                        held={"temperature": _own},
+                        observed={"temperature": _old_setpoint_raw_cg},
+                        tolerance=hold_tolerance(_unit),
+                    )
+                    for _own in _own_temps_cg
+                )
+            except TypeError, ValueError:
+                _holds_own_at_ceiling_cg = False
         if (
             not self.dry_run
             and _old_mode_cg == "cool"
             and _old_setpoint_f_cg is not None
-            and _old_setpoint_f_cg <= _ceiling_cg + 0.05
+            and (_old_setpoint_f_cg <= _ceiling_cg + 0.05 or _holds_own_at_ceiling_cg)
         ):
             _LOGGER.debug(
                 "ODE ceiling guard: thermostat already cooling at %.1f (<= ceiling %.1f) -- nothing to send",
@@ -17093,21 +17326,36 @@ class AutomationEngine:
                         _band.ceiling,
                     )
 
+        # Issue #1409: inside an open time-of-use bank window the change writes the bank instead (decided first, so the
+        # record below states what the thermostat was actually sent).
+        _bank_write = await self._bank_takes_occupancy_write(mode)
         # Issue #591: WINDOWED dedup — see handle_occupancy_away()'s original comment for
         # the full rationale (repeated bands are often intentional re-confirmations, but
         # an unguarded site reopens the #584 double-emit shape within seconds).
         _sig = (mode, round(_band.floor, 2), round(_band.ceiling, 2))
+        if _bank_write is not None:
+            _sig = (mode, "tou_bank", _bank_write.mode, round(_bank_write.target_f, 2))
         if self._emit_event_callback and not self._recent_duplicate("occupancy_setback", _sig, window_seconds=600):
-            self._emit_event_callback(
-                "occupancy_setback",
-                {
-                    "mode": mode,
-                    "floor": _band.floor,
-                    "ceiling": _band.ceiling,
-                    "occupancy": mode,
-                    "indoor_f": self._get_indoor_temp_f(),
-                },
-            )
+            _payload: dict[str, Any] = {
+                "mode": mode,
+                "floor": _band.floor,
+                "ceiling": _band.ceiling,
+                "occupancy": mode,
+                "indoor_f": self._get_indoor_temp_f(),
+            }
+            if _bank_write is not None:
+                _payload.update(
+                    {
+                        "tou_bank": True,
+                        "target_f": _bank_write.target_f,
+                        "hvac_mode": _bank_write.mode,
+                        "outcome": hvac_outcome_label(_bank_write.result),
+                        "note": "a time-of-use bank owns the setpoint; the band applies after it",
+                    }
+                )
+            self._emit_event_callback("occupancy_setback", _payload)
+        if _bank_write is not None:
+            return
         await self._apply_comfort_band(_band, reason=f"occupancy {mode} — setback band")
 
     def _resolve_occupancy_home_fsm_state(self) -> HomeDecision:
@@ -17228,8 +17476,10 @@ class AutomationEngine:
                 )
         if decision.restore:
             self._occupancy_restore_deferred_pending = False
-            with self._mode_change_context("restore"):
-                await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
+            _bank_write = await self._bank_takes_occupancy_write("home")
+            if _bank_write is None:
+                with self._mode_change_context("restore"):
+                    await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
             # The comfort-edge selector may have written the OTHER family than the band's active edge (a mild day
             # next to its floor arms heat); report the family it actually armed.
             # Issue #1245: report what ``_set_temperature_for_mode()`` actually did -- the resolved band edge for the
@@ -17239,7 +17489,20 @@ class AutomationEngine:
             # occupant is home, CA is back in control), but a write that failed / was dry-run / was superseded is
             # rendered "NOT sent" instead of reading as a setpoint the thermostat received.
             _w = self._last_mode_write
-            if self._emit_event_callback:
+            if self._emit_event_callback and _bank_write is not None:
+                # Issue #1409: the change wrote the home bank, not the comfort band: record what was sent.
+                self._emit_event_callback(
+                    "occupancy_comfort_restored",
+                    {
+                        "mode": _bank_write.mode,
+                        "target_f": _bank_write.target_f,
+                        "indoor_f": decision.indoor_temp_f,
+                        "outcome": hvac_outcome_label(_bank_write.result),
+                        "tou_bank": True,
+                        "note": "a time-of-use bank owns the setpoint; the comfort band applies after it",
+                    },
+                )
+            elif self._emit_event_callback:
                 if _w.held_reason is None and _w.target_f is not None:
                     self._emit_event_callback(
                         "occupancy_comfort_restored",
@@ -18149,6 +18412,7 @@ class AutomationEngine:
             new.append(OwnSetpointWrite(entity_id, attribute, value, now, context_id))
         if not new:
             return
+        self.forget_held_own_setpoint(entity_id)  # Issue #1397: held again once the thermostat shows this write
         try:
             kept = prune_own_writes(getattr(self, "_own_setpoint_writes", []), now)
             self._own_setpoint_writes = list(prune_own_writes([*kept, *new], now))
@@ -18206,6 +18470,47 @@ class AutomationEngine:
         now = dt_util.now()
         self._own_setpoint_writes = [replace(w, written_at=now) if w.context_id == context_id else w for w in writes]
 
+    def _hold_own_setpoint(self, entity_id: str, held: dict[str, float]) -> None:
+        """The thermostat has shown the setpoint CA wrote (Issue #1397): hold it as the reference (thermostat unit)."""
+        if held and isinstance(getattr(self, "_held_own_setpoints", None), dict):
+            # One write may be echoed edge by edge (a band): merge, the send cleared the old one.
+            self._held_own_setpoints.setdefault(entity_id, {}).update(held)
+
+    def forget_held_own_setpoint(self, entity_id: str | None = None) -> None:
+        """CA no longer holds this thermostat's setpoint (#1397): it sent a new one, or the occupant changed it."""
+        held = getattr(self, "_held_own_setpoints", None)
+        if isinstance(held, dict):
+            held.pop(entity_id or self.climate_entity, None)
+
+    def holds_own_setpoint(self, observed: dict[str, Any], *, event_context_user_id: str | None = None) -> bool:
+        """True when this thermostat setpoint change is within 0.5 F of CA's last write to it (Issue #1397).
+
+        The thermostat is holding Climate Advisor's setpoint (it reports 17.9 C for a written 18.0 C), not the
+        occupant turning the dial. The one rule is ``own_write_echo.holds_own_setpoint``.
+        """
+        held_all = getattr(self, "_held_own_setpoints", None)
+        held = held_all.get(self.climate_entity) if isinstance(held_all, dict) else None
+        if not held:
+            return False
+        config = getattr(self, "config", None)
+        unit = config.get("temp_unit") if isinstance(config, dict) else None
+        holding = holds_own_setpoint(
+            held=held,
+            observed=observed,
+            tolerance=hold_tolerance(unit),
+            event_context_user_id=event_context_user_id if isinstance(event_context_user_id, str) else None,
+        )
+        if holding:
+            _LOGGER.info(
+                "Setpoint change within %.1f°F of Climate Advisor's own setpoint, not a manual change: "
+                "observed=%s written=%s role=%s",
+                SETPOINT_HOLD_TOLERANCE_F,
+                observed,
+                held,
+                self.role,
+            )
+        return holding
+
     def recognise_own_setpoint_echo(
         self,
         observed: dict[str, Any],
@@ -18239,6 +18544,7 @@ class AutomationEngine:
                 event_context_id=event_context_id if isinstance(event_context_id, str) else None,
                 event_context_parent_id=event_context_parent_id if isinstance(event_context_parent_id, str) else None,
                 event_context_user_id=event_context_user_id if isinstance(event_context_user_id, str) else None,
+                hold_tolerance=hold_tolerance(unit),
             )
         except TypeError:  # naive/aware (or stubbed) clock mix: no memory, so evaluate as before
             return False
@@ -18251,6 +18557,8 @@ class AutomationEngine:
         consumed = set(verdict.consumed) | set(verdict.superseded)
         self._own_setpoint_writes = [w for w in live if w not in consumed]
         if verdict.recognised:
+            # Issue #1397: the thermostat has shown CA's newest answered write; hold it as the reference.
+            self._hold_own_setpoint(self.climate_entity, {w.attribute: w.value for w in verdict.consumed})
             _LOGGER.info(
                 "Setpoint change recognised as Climate Advisor's own write echoing back (%s): observed=%s "
                 "age_s=%s role=%s",

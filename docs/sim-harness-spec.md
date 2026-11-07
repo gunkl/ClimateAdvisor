@@ -6,7 +6,7 @@
 
 | Question | Short answer | → Full answer |
 |---|---|---|
-| How does `FakeHass` prevent stale thermostat read-backs? | `_FakeServices._apply_state_feedback()` reflects every `climate`, `fan`, and `switch` command into `_FakeStates` immediately after recording it in `action_log`, before the engine's next read; for a thermostat that reports `hvac_action`, CA's mode changes also update it the way a real thermostat would (idle past the setpoint, Issue #1310). | [FakeHass — State-Feedback Loop](#fakehass--state-feedback-loop) |
+| How does `FakeHass` prevent stale thermostat read-backs? | `_FakeServices._apply_state_feedback()` reflects every `climate`, `fan`, and `switch` command into `_FakeStates` immediately after recording it in `action_log`, before the engine's next read; for a thermostat that reports `hvac_action`, CA's mode changes also update it the way a real thermostat would (idle past the setpoint, Issue #1310). | [FakeHass — State-Feedback Loop](#fakehass--service-bus-interception) |
 | How does the virtual clock fire grace-period timers and fan-cycle chains? | `FakeScheduler.advance_to(target)` pops due callbacks from a min-heap, fires each, drains `async_create_task` coroutines, then loops — so self-recursive grace→convergence chains complete without manual intervention. | [FakeScheduler — Virtual Clock](#fakescheduler--virtual-clock) |
 | What symbols does `FakeScheduler.installed()` patch, and in which module? | `async_call_later`, `callback` (identity), `dt_util.now`, `dt_util.utcnow`, `dt_util.as_local` (HA-faithful: naive input = clock's local zone, result always aware; Issue #1117) — patched on `custom_components.climate_advisor.automation` (and the same set plus timer helpers and `parse_datetime` on `coordinator`), not the originating HA module. | [FakeScheduler — Patching Contract](#fakescheduler--patching-contract) |
 | What does `run_production_scenario()` do with `thermal_model` and `hourly_forecast`? | If present as top-level keys in the scenario dict, they are injected directly onto the engine instance (`engine._thermal_model`, `engine._hourly_forecast_temps`) before event dispatch begins. | [run_production — ODE Inputs](#run_production--ode-inputs) |
@@ -105,6 +105,10 @@ Goldens are LOCKED; a divergence is recorded in a ledger, never by editing a sce
 **Real-HA ledger history.** The ledger started on 2026-10-30 (#1125) with 8 entries: 5 class T (trigger divergence: the scenario models fewer inputs than real HA delivers) and 3 class P (real production bugs the first real-HA replay exposed: `wakeup_preserves_whf_manual_override`, `restart_whf_ac_mutex_backstop_race`, `ceiling_guard_fires_when_outdoor_stays_below_indoor`). Each P entry was removed by its fix (`ceiling_guard_fires_when_outdoor_stays_below_indoor` by #1144; the other two by #1130); the class-T `window_close_stops_whole_house_fan` was retired by #1144 and `warm_day_planned_window_no_pause` by #1211, which also added `2026-03-28-overnight`. Four class-T entries remain (2026-11-03): `733_restart_reconcile_clobbers_fresh_nat_vent` (FakeHass `seed:true` is a silent state write, real HA always notifies listeners), `cool_all_day_heat_all_day` and `2026-03-28-overnight` (engine-only goldens that omit the daily wake/bedtime schedule real HA runs), `issue-392-natvent-ceiling-oscillation` (an atomic two-reading update has no real-HA equivalent). All four are marked "awaiting human review"; none is a known occupant-impacting defect except the half-updated-pair exit in issue-392, which is an open design question.
 
 **Excused time (Issue #1260).** Time a promise did not count under a named exception (today only P7's thermostat deadband, `excused_by=thermostat_deadband`) is not a hit and is in none of the ledgers above. It is reported beside hits: `PromiseReport.excused` per run and `excused_by_promise` (runs and minutes) in the nightly batch summary and the `replay` line, so a rise is visible. Minutes are counted from the excused intervals past a per-series `counted_until` (Issue #1262), so a stretch longer than the 3 h journal window is reported in full.
+
+**Occupancy events go through the coordinator's occupancy-change entry (Issue #1409, test-infrastructure change).** `run_production`'s `occupancy_away/home/vacation/change` events used to call the engine handlers directly. Production now runs every occupancy change through `coordinator._run_occupancy_handler()` (the toggle and its delayed away timer), which lets an open time-of-use bank take the change's write; the direct call modelled a path production no longer takes, so a #1409 regression could not be seen. With a coordinator the event now calls that entry (`_occupancy_handler` in `run_production.py`); engine-only sessions keep the direct call. Could it hide a failure? No: the engine handler is the same call, the wrapper only sets the flag production sets, and all 120 goldens are unchanged.
+
+**P8 armed reference during a time-of-use bank (Issue #1404, test-infrastructure change).** `surfaces.read_armed()` used to be `engine._resolved_comfort_band(c)` alone, the schedule band. That meaning was WRONG during a bank: since #1393/#1395 the bank owns the setpoint, the cycle does not write the schedule band at all and the thermostat is told the bank target (cool 77 °F while the Away band is 60–80 °F), so "armed" named a band the engine does not arm then, and `tou_away_bank_writes_once_1395` reported the chart (which drew the bank) as the divergent surface. `read_armed()` now reads the production display resolver `coordinator.current_hold().band`, which IS `_resolved_comfort_band(c)` whenever no bank owns the thermostat (outside the window, a deferred bank, no schedule) and the bank band while one does; it is never re-derived in the harness (a coordinator-less session keeps the engine band). The chart reader reads `coordinator._chart_display_band()`, the function `get_chart_data()` draws from (falling back to `_build_target_band_for()` on a pre-#1404 tree). Nothing was removed from the check and no ratchet row was added. *Could this let a real future failure pass silently?* Only if `current_hold()` itself claimed a bank the thermostat is not told, and every surface then agreed with that wrong claim. Three things stop that: `current_hold()` claims a bank only when the bank write's own deferral checks pass (`tou_bank_holds_setpoint()`, unit-tested per deferral), the `thermostat_hold` reader and the goldens' `setpoint_writes` rows compare against the real service calls, and the #1404 goldens assert both the writes and the quoted band; outside a bank the reference is byte-for-byte the old one, so every non-bank sample is judged exactly as before. `capture_next_action()` (additive) also records `hold` (Status, thresholds and their context, the briefing HVAC Mode row, the chart band now, the plan list's Now text) so a scenario can pin what each surface says.
 
 **Code reference:** `tools/sim_harness/session.py`, `tools/sim_harness/generator.py` (`run_batch`, `run_day`, `replay_scenario`), `tools/sim_harness/surfaces.py` (`cli_surfaces`).
 
@@ -230,7 +234,7 @@ HeadlessTarry (a proposed Docker harness) is not in this repository; Tier B is t
 
 **`voluptuous` handling:** If the real `voluptuous` package is importable it is used; otherwise a MagicMock is injected. This prevents schema-validation code from failing at import time in environments without `voluptuous`.
 
-**Code reference:** `tools/sim_harness/ha_stubs.py#L124` (`install_ha_stubs`)
+**Code reference:** `tools/sim_harness/ha_stubs.py` (`install_ha_stubs`)
 
 ---
 
@@ -280,7 +284,7 @@ Only a thermostat that reports an `hvac_action` is derived: an entity without th
 
 Without this, production code that reads the thermostat back (e.g. `handle_occupancy_away` checking the actual HVAC mode before selecting setback_heat vs setback_cool) would see the stale initial state and diverge for the wrong reason — reproducing neither the real HA behavior nor the legacy `SimState` mutation pattern.
 
-**Code reference:** `tools/sim_harness/fake_hass.py#L29` (`_FakeServices`), `#L118` (`FakeHass`)
+**Code reference:** `tools/sim_harness/fake_hass.py` (`_FakeServices`), `#L118` (`FakeHass`)
 
 ---
 
@@ -329,7 +333,7 @@ The virtual clock `start` must be timezone-aware (`FakeScheduler.__init__` raise
 
 **Why `automation` namespace, not `homeassistant.util.dt`?** `automation.py` does `from homeassistant.util import dt as dt_util`, binding the name in its own namespace. Patching the originating module would not affect the already-resolved name in `automation`. The `patch(...)` targets must be on the module that imported the symbol.
 
-**Code reference:** `tools/sim_harness/fake_scheduler.py#L57` (`FakeScheduler`), `#L185` (`installed`)
+**Code reference:** `tools/sim_harness/fake_scheduler.py` (`FakeScheduler`), `#L185` (`installed`)
 
 ---
 
@@ -364,7 +368,7 @@ The virtual clock `start` must be timezone-aware (`FakeScheduler.__init__` raise
 
 **Why `nat_vent_hysteresis_f = 1.0`?** The production constant `NAT_VENT_HYSTERESIS_F` is 1.0°F. The old harness default was 2.0°F — a hardcoded departure that silently suppressed nat-vent activation for marginal temperature gaps, making scenarios behave unlike any real home. The harness must mirror the exact production constants.
 
-**Code reference:** `tools/sim_harness/build_engine.py#L79` (`build_headless_engine`), `#L46` (`_DEFAULT_CONFIG`)
+**Code reference:** `tools/sim_harness/build_engine.py` (`build_headless_engine`), `#L46` (`_DEFAULT_CONFIG`)
 
 ---
 
@@ -458,7 +462,7 @@ These event types have no clean production entry point and are silently skipped 
 | `grace_start` | Production grace starts automatically from sensor events; no external `start_grace()` method |
 | `grace_end` | Same; grace expiry fires via scheduler timer driven by `advance_to()` |
 
-**Code reference:** `tools/sim_harness/run_production.py#L239` (`run_production_scenario`), `#L325` (`_dispatch_event`)
+**Code reference:** `tools/sim_harness/run_production.py` (`run_production_scenario`), `#L325` (`_dispatch_event`)
 
 ---
 
@@ -527,7 +531,7 @@ Assertions are evaluated by reading three sources:
 | `comfort_band_armed` | At least one `comfort_band_applied` event at or before `at` **whose `outcome` is `sent`** (or that has no `outcome` field -- legacy pre-#1049 events). Changed in Issue #1049 | A band that was blocked (WHF owns the thermostat), dry-run, failed or superseded is not an armed band. Rule-8 justification: the old form counted any `comfort_band_applied`, which was emitted even when nothing reached the thermostat -- exactly how a week of "band applied" with a cold house went unnoticed; the new form is strictly stricter |
 | `event_emitted` | Payload: `{"event": "<type>", "payload_subset": {...}, "at": ...}`. An event of that type exists in `result.event_log` at or before `at` and its payload contains every key/value of `payload_subset` (omitted = any payload). New in Issue #1049 | Asserts observational events that are deliberately unmapped to decisions (`grace_cancelled`, `occupancy_restore_deferred`, `hvac_mode_not_applied`, ...). Purely additive: it cannot pass without the event having been emitted, and no existing scenario uses it |
 
-**Code reference:** `tools/sim_harness/outcomes.py#L143` (`production_decisions`), `#L346` (`check_assertion`)
+**Code reference:** `tools/sim_harness/outcomes.py` (`production_decisions`), `#L346` (`check_assertion`)
 
 ---
 
@@ -543,7 +547,7 @@ Assertions are evaluated by reading three sources:
 
 There is no `--engine` flag. The only engine is production.
 
-**Code reference:** `tools/simulate.py#L71` (`run_scenario_production`)
+**Code reference:** `tools/simulate.py` (`run_scenario_production`)
 
 ---
 
@@ -556,7 +560,7 @@ There is no `--engine` flag. The only engine is production.
 
 `test_all_goldens_discovered` guards against an empty parametrization silently passing: asserts `len(golden_files) >= 20`.
 
-**Code reference:** `tests/test_production_harness.py#L32` (`test_golden_passes_production_engine`)
+**Code reference:** `tests/test_production_harness.py` (`test_golden_passes_production_engine`)
 
 ---
 
@@ -587,18 +591,18 @@ There is no `--engine` flag. The only engine is production.
 
 ## Code Reference
 
-- [`install_ha_stubs`](../tools/sim_harness/ha_stubs.py#L124) — idempotent HA stub installer
-- [`FakeHass`](../tools/sim_harness/fake_hass.py#L118) — minimal HA stand-in
-- [`_FakeServices._apply_state_feedback`](../tools/sim_harness/fake_hass.py#L70) — state-feedback loop
-- [`FakeScheduler`](../tools/sim_harness/fake_scheduler.py#L57) — virtual clock + priority-queue timer driver
-- [`FakeScheduler.installed`](../tools/sim_harness/fake_scheduler.py#L185) — patching context manager
+- [`install_ha_stubs`](../tools/sim_harness/ha_stubs.py#L632) — idempotent HA stub installer
+- [`FakeHass`](../tools/sim_harness/fake_hass.py#L685) — minimal HA stand-in
+- [`_FakeServices._apply_state_feedback`](../tools/sim_harness/fake_hass.py#L384) — state-feedback loop
+- [`FakeScheduler`](../tools/sim_harness/fake_scheduler.py#L69) — virtual clock + priority-queue timer driver
+- [`FakeScheduler.installed`](../tools/sim_harness/fake_scheduler.py#L301) — patching context manager
 - [`build_headless_engine`](../tools/sim_harness/build_engine.py#L79) — engine assembly
 - [`_DEFAULT_CONFIG`](../tools/sim_harness/build_engine.py#L46) — harness default config
-- [`run_production_scenario`](../tools/sim_harness/run_production.py#L239) — top-level scenario adapter
-- [`_dispatch_event`](../tools/sim_harness/run_production.py#L325) — event-type → engine method dispatch
-- [`_handle_temp_update`](../tools/sim_harness/run_production.py#L441) — temp_update + predicted_indoor re-classification
-- [`production_decisions`](../tools/sim_harness/outcomes.py#L143) — event_log → legacy outcome vocab
+- [`run_production_scenario`](../tools/sim_harness/run_production.py#L615) — top-level scenario adapter
+- [`_dispatch_event`](../tools/sim_harness/run_production.py#L662) — event-type → engine method dispatch
+- [`_handle_temp_update`](../tools/sim_harness/run_production.py#L1187) — temp_update + predicted_indoor re-classification
+- [`production_decisions`](../tools/sim_harness/outcomes.py#L306) — event_log → legacy outcome vocab
 - [`check_assertion`](../tools/sim_harness/outcomes.py#L346) — custom assertion types
-- [`UNMAPPED_PRODUCTION_EVENTS`](../tools/sim_harness/outcomes.py#L89) — production-only events with no legacy outcome
+- [`UNMAPPED_PRODUCTION_EVENTS`](../tools/sim_harness/outcomes.py#L123) — production-only events with no legacy outcome
 - [`run_scenario_production`](../tools/simulate.py#L71) — CLI shell entry point
 - [`test_golden_passes_production_engine`](../tests/test_production_harness.py#L32) — Tier A parametrized golden test

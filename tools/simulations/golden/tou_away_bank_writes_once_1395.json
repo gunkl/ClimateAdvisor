@@ -32,7 +32,7 @@
   "use_coordinator": true,
   "skip_startup_coalesce": true,
   "name": "tou_away_bank_writes_once_1395",
-  "description": "Issue #1395 (the Away mirror of #1393): the house is Away on a hot day with a 16:15 peak. A cycle inside the pre-cool window used to tell the thermostat the 82 F setback band and then the split-delta bank target in the same second; it now tells it the bank target once.",
+  "description": "Issue #1395 (the Away mirror of #1393): the house is Away on a hot day with a 16:15 peak (bank window opens 12:21). Before the fix, each cycle in the window told the thermostat the 80 F Away setback and then the 77 F split-delta bank target in the same second, and re-sent 77 F every 5 minutes; now each cycle tells it 77 F once and nothing is sent between cycles.",
   "events": [
     {
       "time": "2026-07-13T13:00:00",
@@ -67,14 +67,14 @@
       "values": [
         77.0
       ],
-      "reason": "First cycle inside the Away pre-cool window: the bank target once, no setback band first (issue #1395)."
+      "reason": "First classified cycle inside the Away pre-cool window (opened 12:21; no classification existed before 14:00): the bank target 77 F once, no 80 F setback band first (issue #1395)."
     },
     {
       "at": "2026-07-13T14:29:59",
       "expect": "setpoint_writes",
       "since": "2026-07-13T14:00:00",
       "values": [],
-      "reason": "Between cycles nothing is written: the bank write no longer schedules a 5-minute follow-up that re-sends it (issue #1395)."
+      "reason": "Between cycles nothing is written: the bank write cancels the 5-minute follow-up, and the 5-minute bank check leaves a thermostat that already holds 77 F in cool alone (issue #1395)."
     },
     {
       "at": "2026-07-13T14:30:00",
@@ -89,7 +89,7 @@
   "verdict": {
     "type": "positive",
     "summary": "While pre-cooling an Away house for a peak, each cycle tells the thermostat the bank target once",
-    "observed_behavior": "One set_temperature per cycle (the split-delta target); before the fix the 82 F setback band came first in the same second.",
+    "observed_behavior": "One set_temperature (77 F) per cycle and none between cycles; before the fix each cycle wrote 80 F then 77 F in the same second and 77 F was re-sent every 5 minutes.",
     "expected_behavior": "Occupant view: no brief flick to the setback value, and one cloud write per check instead of two."
   },
   "source": "synthetic: Issue #1395",

@@ -1,4 +1,4 @@
-<!-- Nav: ← [Automation Flowchart](07-AUTOMATION-FLOWCHART.md) | → [automation.py#L1082](../custom_components/climate_advisor/automation.py#L1082) [coordinator.py#L2662](../custom_components/climate_advisor/coordinator.py#L2662) | ↔ [Grace Periods](grace-periods-spec.md) [Thermal Model v3](thermal-model-v3-spec.md) [State Persistence](state-persistence.md) -->
+<!-- Nav: ← [Automation Flowchart](07-AUTOMATION-FLOWCHART.md) | → [automation.py](../custom_components/climate_advisor/automation.py) [coordinator.py](../custom_components/climate_advisor/coordinator.py) | ↔ [Grace Periods](grace-periods-spec.md) [Thermal Model v3](thermal-model-v3-spec.md) [State Persistence](state-persistence.md) -->
 
 # Occupancy Dispatch — Territory Spec (Tier 3)
 
@@ -280,19 +280,19 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 
 ## Code Reference
 
-- [`set_occupancy_mode`](../custom_components/climate_advisor/automation.py#L1126) — validates and sets engine's occupancy mode
-- [`apply_classification` (occupancy guards)](../custom_components/climate_advisor/automation.py#L2476) — override-first, then override-confirm-pending, then `decide_scheduled_band_gate()`'s `DEFER_OCCUPANCY` branch
-- [`_set_temperature_for_mode`](../custom_components/climate_advisor/automation.py#L3362) — comfort-application safety net
-- [`handle_occupancy_away`](../custom_components/climate_advisor/automation.py#L6712) — away setback handler
-- [`handle_occupancy_home`](../custom_components/climate_advisor/automation.py#L6794) — home/guest comfort restore + notification
-- [`handle_occupancy_vacation`](../custom_components/climate_advisor/automation.py#L6851) — deep vacation setback handler
-- [`handle_bedtime` (occupancy guard)](../custom_components/climate_advisor/automation.py#L6916) — skips sleep setback when away/vacation (DEFER_OCCUPANCY guard)
-- [`handle_morning_wakeup` (occupancy guard)](../custom_components/climate_advisor/automation.py#L7271) — skips comfort restore when not home/guest (DEFER_OCCUPANCY guard)
-- [`_is_toggle_on`](../custom_components/climate_advisor/coordinator.py#L2892) — reads toggle entity state with unavailable=OFF and XOR invert
-- [`_compute_occupancy_mode`](../custom_components/climate_advisor/coordinator.py#L2906) — resolves toggle booleans, delegates priority to `occupancy_priority.decide_occupancy_priority()` (Issue #744)
-- [`_cancel_occupancy_away_timer`](../custom_components/climate_advisor/coordinator.py#L2951) — safe timer cancellation
-- [`_async_occupancy_toggle_changed`](../custom_components/climate_advisor/coordinator.py#L2958) — toggle event listener and dispatch orchestrator
-- [`OCCUPANCY_HOME/AWAY/VACATION/GUEST`](../custom_components/climate_advisor/const.py#L8490) — mode constants
+- [`set_occupancy_mode`](../custom_components/climate_advisor/automation.py#L2562) — validates and sets engine's occupancy mode
+- [`apply_classification` (occupancy guards)](../custom_components/climate_advisor/automation.py#L4846) — override-first, then override-confirm-pending, then `decide_scheduled_band_gate()`'s `DEFER_OCCUPANCY` branch
+- [`_set_temperature_for_mode`](../custom_components/climate_advisor/automation.py#L7363) — comfort-application safety net
+- [`handle_occupancy_away`](../custom_components/climate_advisor/automation.py#L11882) — away setback handler
+- [`handle_occupancy_home`](../custom_components/climate_advisor/automation.py#L11892) — home/guest comfort restore + notification
+- [`handle_occupancy_vacation`](../custom_components/climate_advisor/automation.py#L11899) — deep vacation setback handler
+- [`handle_bedtime` (occupancy guard)](../custom_components/climate_advisor/automation.py#L11906) — skips sleep setback when away/vacation (DEFER_OCCUPANCY guard)
+- [`handle_morning_wakeup` (occupancy guard)](../custom_components/climate_advisor/automation.py#L12328) — skips comfort restore when not home/guest (DEFER_OCCUPANCY guard)
+- [`_is_toggle_on`](../custom_components/climate_advisor/coordinator.py#L2848) — reads toggle entity state with unavailable=OFF and XOR invert
+- [`_compute_occupancy_mode`](../custom_components/climate_advisor/coordinator.py#L2862) — resolves toggle booleans, delegates priority to `occupancy_priority.decide_occupancy_priority()` (Issue #744)
+- [`_cancel_occupancy_away_timer`](../custom_components/climate_advisor/coordinator.py#L2907) — safe timer cancellation
+- [`_async_occupancy_toggle_changed`](../custom_components/climate_advisor/coordinator.py#L3131) — toggle event listener and dispatch orchestrator
+- [`OCCUPANCY_HOME/AWAY/VACATION/GUEST`](../custom_components/climate_advisor/const.py#L255) — mode constants
 - [`occupancy_priority.decide_occupancy_priority`](../custom_components/climate_advisor/occupancy_priority.py) — pure priority-resolution leaf, extracted Issue #744 (not flag-gated — see module docstring)
 - [`occupancy_fsm.decide_away_vacation_dispatch`, `decide_home_dispatch`](../custom_components/climate_advisor/occupancy_fsm.py) — stateless dispatch FSM, Issue #744; unconditionally authoritative since Phase 6 Step 6 (Issue #757) removed the `AutomationEngine._occupancy_fsm_authoritative` cutover flag
 - [`AutomationEngine._resolve_occupancy_away_vacation_fsm_state`, `_apply_occupancy_away_vacation_decision`, `_resolve_occupancy_home_fsm_state`, `_apply_occupancy_home_decision`](../custom_components/climate_advisor/automation.py) — the resolver/apply-shell wiring, Issue #744

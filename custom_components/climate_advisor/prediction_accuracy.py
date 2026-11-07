@@ -18,6 +18,10 @@ Sources, merged with live data preferred:
 
 v3 exists only for look-ahead 4 h of the reading Climate Advisor uses (``_ca``): its first-write-wins archive is
 written 4 h ahead and stored as chart-log ``pred_indoor``.
+
+Each engine is scored on its own points (Issue #1400): v3 from its logged ``pred_indoor``, the "no change" baseline
+from the chart log's own readings, v4 from its archive and the backtest. A zone whose v4 archive is still empty
+therefore still shows v3's and "no change"'s scores, and the actual line.
 """
 
 from __future__ import annotations
@@ -152,7 +156,7 @@ def _bucket(points: list[dict[str, Any]], mode: str, tz: tzinfo) -> list[dict[st
     for key in sorted(groups):
         member = groups[key]
         row: dict[str, Any] = {"t": key.isoformat(timespec="seconds"), "_t": key.timestamp()}
-        for field in ("actual", "v4", "v3"):
+        for field in ("actual", "v4", "v3", "flat"):
             avg = _mean([m[field] for m in member if m.get(field) is not None])
             if avg is not None:
                 row[field] = avg
@@ -161,6 +165,7 @@ def _bucket(points: list[dict[str, Any]], mode: str, tz: tzinfo) -> list[dict[st
 
 
 def _stats(points: list[dict[str, Any]], flat: dict[float, float]) -> dict[str, Any]:
+    """Each engine over its OWN points (Issue #1400): ``n`` / ``n_v3`` / ``n_flat`` say how many each was scored on."""
     v4_err = [p["v4"] - p["actual"] for p in points if p.get("v4") is not None and p.get("actual") is not None]
     v3_err = [p["v3"] - p["actual"] for p in points if p.get("v3") is not None and p.get("actual") is not None]
     flat_err = [flat[p["_t"]] - p["actual"] for p in points if p["_t"] in flat and p.get("actual") is not None]
@@ -170,6 +175,8 @@ def _stats(points: list[dict[str, Any]], flat: dict[float, float]) -> dict[str, 
 
     return {
         "n": len(v4_err),
+        "n_v3": len(v3_err),
+        "n_flat": len(flat_err),
         "v4_mae": mae(v4_err),
         "v3_mae": mae(v3_err),
         "flat_mae": mae(flat_err),
@@ -219,11 +226,20 @@ def build_prediction_accuracy(
     has_v3 = sensor == CA_SENSOR and lead == DEFAULT_LEAD
     v3_series = _row_series(chart_rows, lambda r: r.get("pred_indoor"), start, end) if has_v3 else None
 
+    # One point per 30-minute slot. Every chart row in the window gives one (its actual, v3's logged value, the "no
+    # change" value), so v3 and the baseline are scored even while v4 has nothing (Issue #1400); v4 joins its slots.
+    points: dict[float, dict[str, Any]] = {}
+    for row in chart_rows:
+        t = _epoch(row.get("ts"))
+        if t is None or not (start <= t < end) or row.get("event") is not None:
+            continue
+        if _num(actual_of(row)) is None and not (has_v3 and _num(row.get("pred_indoor")) is not None):
+            continue
+        points.setdefault(float(slot_key(datetime.fromtimestamp(t, tz))), {})
     # v4: live archive first, then backtest points for slots the live archive does not cover.
     live = archive.series(sensor, lead, start, end)
-    points: dict[float, dict[str, Any]] = {}
     for slot, v4 in live.items():
-        points[float(slot)] = {"v4": v4}
+        points.setdefault(float(slot), {})["v4"] = v4
     live_slots = set(live)
     bt_rows = []
     if isinstance(backtest, Mapping):
@@ -238,8 +254,10 @@ def build_prediction_accuracy(
         v4 = _num(item.get("v4"))
         if t is None or v4 is None or not (start <= t < end):
             continue
-        if slot_key(datetime.fromtimestamp(t, tz)) in live_slots:
+        key = float(slot_key(datetime.fromtimestamp(t, tz)))
+        if key in live_slots:
             continue
+        points.pop(key, None)  # the backtest's own (hourly) time replaces the chart-row slot it falls on
         points[t] = {
             "v4": v4,
             "_bt_actual": _num(item.get("actual")),
@@ -254,7 +272,9 @@ def build_prediction_accuracy(
         a = actual.nearest(t)
         if a is None:
             a = p.get("_bt_actual")
-        row: dict[str, Any] = {"t": _iso(t, tz), "_t": t, "v4": p["v4"]}
+        row: dict[str, Any] = {"t": _iso(t, tz), "_t": t}
+        if p.get("v4") is not None:
+            row["v4"] = p["v4"]
         if a is not None:
             row["actual"] = a
         if has_v3:
@@ -268,7 +288,9 @@ def build_prediction_accuracy(
             f = p.get("_bt_flat")  # the backtest tool's no-change value where the chart log no longer has the row
         if f is not None:
             flat[t] = f
-        raw.append(row)
+            row["flat"] = f
+        if len(row) > 2:
+            raw.append(row)
 
     stats = _stats(raw, flat)
 
@@ -284,13 +306,15 @@ def build_prediction_accuracy(
 
     def out_point(p: dict[str, Any]) -> dict[str, Any]:
         o: dict[str, Any] = {"t": p["t"]}
-        for field in ("actual", "v4", "v3"):
+        for field in ("actual", "v4", "v3", "flat"):
             if p.get(field) is not None:
                 o[field] = display_temp(p[field], unit, 1)
         return o
 
     out_stats = {
         "n": stats["n"],
+        "n_v3": stats["n_v3"],
+        "n_flat": stats["n_flat"],
         "v4_mae": display_delta(stats["v4_mae"], unit, 2),
         "v3_mae": display_delta(stats["v3_mae"], unit, 2),
         "flat_mae": display_delta(stats["flat_mae"], unit, 2),
@@ -298,8 +322,13 @@ def build_prediction_accuracy(
         "v3_bias": display_delta(stats["v3_bias"], unit, 2),
     }
 
-    known = {str(s.get("id")) for s in sensors_meta}
-    sensors_out = [dict(s) for s in sensors_meta]
+    known: set[str] = set()
+    sensors_out: list[dict[str, Any]] = []
+    for s in sensors_meta:  # one entry per id: a _ca-only model also lists "_ca" among its sensors (Issue #1400)
+        sid = str(s.get("id"))
+        if sid not in known:
+            known.add(sid)
+            sensors_out.append(dict(s))
     bt_points = backtest.get("points") if isinstance(backtest, Mapping) else None
     for extra in [*archive.sensor_ids(), *(bt_points if isinstance(bt_points, Mapping) else {})]:
         if isinstance(extra, str) and extra not in known:
@@ -389,6 +418,77 @@ def _out_pairs(pairs: Sequence[tuple[float, float]], tz: tzinfo, unit: str) -> l
     return [{"ts": _iso(t, tz), "temp": display_temp(v, unit, 1)} for t, v in pairs]
 
 
+def _hhmm(value: Any) -> tuple[int, int] | None:
+    try:
+        h, m = (int(x) for x in str(value).split(":")[:2])
+    except TypeError, ValueError:
+        return None
+    return (h, m) if 0 <= h < 24 and 0 <= m < 60 else None
+
+
+def _sleep_boundaries(lo: float, hi: float, tz: tzinfo, sleep_time: Any, wake_time: Any) -> list[float]:
+    """Epochs of every bedtime and wake time in ``[lo, hi]`` (local clock; an empty window has none)."""
+    st, wt = _hhmm(sleep_time), _hhmm(wake_time)
+    if st is None or wt is None or st == wt:
+        return []
+    out: list[float] = []
+    day = datetime.fromtimestamp(lo, tz).date()
+    last = datetime.fromtimestamp(hi, tz).date()
+    while day <= last:
+        for h, m in (st, wt):
+            t = datetime(day.year, day.month, day.day, h, m, tzinfo=tz).timestamp()
+            if lo <= t <= hi:
+                out.append(t)
+        day = day.fromordinal(day.toordinal() + 1)
+    return sorted(out)
+
+
+def ca_swap_epochs(
+    rows: Sequence[Mapping[str, Any]],
+    lo: float,
+    hi: float,
+    *,
+    tz: tzinfo,
+    sleep_sensor: str | None,
+    sleep_time: Any = None,
+    wake_time: Any = None,
+) -> list[float]:
+    """When the reading Climate Advisor uses (``_ca``) changed sensor in ``[lo, hi]`` (epochs, ascending; Issue #1400).
+
+    Occupant view: the hallway and the bedroom read differently, so a ``_ca`` line drawn straight through bedtime or
+    wake-up would show a jump that never happened in either room. The chart breaks the line at these times instead.
+
+    * Recorded rows: wherever the chart log's ``band_sensor`` (the sensor CA read on that row) changes from one row to
+      the next - the configured bedtime/wake time between the two rows when there is one (the exact moment), else
+      the first row on the new sensor. This also catches an unplanned fall-back (a stale bedroom sensor).
+    * Outside the span those rows cover (the future, and rows written before ``band_sensor`` existed): every bedtime
+      and wake time while a sleep sensor is configured (``sleep_indoor_temp_entity``); none without one.
+    """
+    swaps: list[float] = []
+    prev: tuple[float, str] | None = None
+    first: float | None = None
+    last: float | None = None
+    timed = sorted(
+        ((t, r.get("band_sensor")) for r in rows if (t := _epoch(r.get("ts"))) is not None),
+        key=lambda x: x[0],
+    )
+    boundaries = _sleep_boundaries(lo - 86400, hi + 86400, tz, sleep_time, wake_time) if sleep_sensor else []
+    for t, sid in timed:
+        if not isinstance(sid, str) or not sid:
+            continue
+        first = t if first is None else first
+        last = t
+        if prev is not None and sid != prev[1]:
+            between = [b for b in boundaries if prev[0] < b <= t]
+            swaps.append(between[-1] if between else t)
+        prev = (t, sid)
+    for b in boundaries:
+        if first is not None and last is not None and first <= b <= last:
+            continue  # the recorded rows know better for this span
+        swaps.append(b)
+    return sorted({s for s in swaps if lo <= s <= hi})
+
+
 def build_chart_v4(
     *,
     now: datetime,
@@ -403,6 +503,7 @@ def build_chart_v4(
     last_future: Mapping[str, Any] | None,
     sensor_ids: Sequence[str],
     corrected_past: Sequence[tuple[datetime, float]] = (),
+    ca_swaps: Sequence[float] = (),
 ) -> dict[str, Any]:
     """The ``v4`` block of ``get_chart_data()``: availability, per-sensor past (archived) and future lines.
 
@@ -411,8 +512,11 @@ def build_chart_v4(
     for every look-ahead; the page picks one. There is no accuracy gate: the lines are always supplied when v4 has
     anything to say (the coordinator does not call this while v4 is neither primary nor shadow), and the page draws
     them as the main prediction when v4 is the primary engine, as the comparison line when it is the shadow.
-    ``_ca`` is not drawn: it follows the sensor
-    Climate Advisor happens to use and jumps when that swaps (the owner's no-swap rule); each real sensor has its line.
+    ``_ca`` (the reading Climate Advisor uses) is drawn too (Issue #1400) - for a ``_ca``-only model it is v4's only
+    line. It follows the sensor Climate Advisor reads, so it jumps when that swaps; the owner's no-swap rule is kept by
+    ``breaks["_ca"]``: the swap times (``ca_swaps``, epochs, see ``ca_swap_epochs``) at which the page breaks every
+    ``_ca`` line (past, future and baseline), so no single segment crosses a swap. Per-sensor lines draw as before.
+    A model without a ``_ca`` future (a node model with no sleep node) gets it from its primary node's line.
     """
     tz = now.tzinfo or datetime.now().astimezone().tzinfo
     assert tz is not None
@@ -430,12 +534,14 @@ def build_chart_v4(
         "future_at": None,
         "baseline": {},
         "past": {},
+        "breaks": {},
         "corrected_outdoor": {"past": [], "future": []},
     }
     has_model = bool(isinstance(model, Mapping) and model.get("has_model"))
     range_days = RANGES.get(range_str, 1.0)
     bt_points = backtest.get("points") if isinstance(backtest, Mapping) else None
-    ids = [s for s in sensor_ids if s != CA_SENSOR]
+    ids = [CA_SENSOR, *(s for s in dict.fromkeys(sensor_ids) if s != CA_SENSOR)]
+    model_primary = model.get("primary") if isinstance(model, Mapping) else None
     for sid in ids:
         per_lead: dict[str, list[dict[str, Any]]] = {}
         for lead in CHART_LEADS:
@@ -459,19 +565,25 @@ def build_chart_v4(
         if per_lead:
             out["past"][sid] = per_lead
 
+    def _line(lines: Any, sid: str) -> Sequence[tuple[datetime, float]]:
+        if not isinstance(lines, Mapping):
+            return []
+        got = lines.get(sid)
+        if not got and sid == CA_SENSOR and isinstance(model_primary, str):
+            got = lines.get(model_primary)  # no sleep node: "_ca" is the primary node's line (v4_archive rule)
+        return got or []
+
     future = last_future.get("predictions") if isinstance(last_future, Mapping) else None
     if not historical and isinstance(future, Mapping):
         now_ts = now.timestamp()
         for sid in ids:
-            pts = [(t.timestamp(), v) for t, v in future.get(sid, []) if t.timestamp() > now_ts and math.isfinite(v)]
+            pts = [(t.timestamp(), v) for t, v in _line(future, sid) if t.timestamp() > now_ts and math.isfinite(v)]
             if pts:
                 out["future"][sid] = _out_pairs(pts, tz, unit)
         out["future_at"] = last_future.get("at")
         base = last_future.get("baseline")
         for sid in ids:
-            pts = [
-                (t.timestamp(), v) for t, v in (base or {}).get(sid, []) if t.timestamp() > now_ts and math.isfinite(v)
-            ]
+            pts = [(t.timestamp(), v) for t, v in _line(base, sid) if t.timestamp() > now_ts and math.isfinite(v)]
             if pts:
                 out["baseline"][sid] = _out_pairs(pts, tz, unit)
         corrected = last_future.get("corrected") if isinstance(last_future, Mapping) else None
@@ -483,6 +595,8 @@ def build_chart_v4(
         _downsample_pairs([(t.timestamp(), v) for t, v in corrected_past], range_days, tz), tz, unit
     )
     out["sensors"] = sorted(set(out["past"]) | set(out["future"]) | set(out["baseline"]), key=ids.index)
+    if CA_SENSOR in out["sensors"] and range_days <= _HOURLY_MAX_DAYS:  # a daily mean is no one sensor's reading
+        out["breaks"][CA_SENSOR] = [_iso(t, tz) for t in sorted(set(ca_swaps))]
     out["ready"] = has_model or bool(out["sensors"])  # "has something to draw"; not an accuracy verdict
     out["reason"] = "ok" if out["ready"] else "no_model"
     return out

@@ -99,11 +99,11 @@ def test_response_shape_matches_the_contract(tmp_path: Path) -> None:
         "name": "Climate Advisor reading",
         "role": "the reading Climate Advisor uses",
     }
-    assert set(out["stats"]) == {"n", "v4_mae", "v3_mae", "flat_mae", "v4_bias", "v3_bias"}
+    assert set(out["stats"]) == {"n", "n_v3", "n_flat", "v4_mae", "v3_mae", "flat_mae", "v4_bias", "v3_bias"}
     assert out["model"] == {"confidence": "ok", "fitted_at": "2026-11-06T03:15:00+00:00", "span_days": 30.0}
     assert out["gate"] == []
     p = out["points"][-1]
-    assert set(p) == {"t", "actual", "v4", "v3"}
+    assert set(p) == {"t", "actual", "v4", "v3", "flat"}
     datetime.fromisoformat(out["start"]), datetime.fromisoformat(out["end"]), datetime.fromisoformat(p["t"])
     json.dumps(out)  # serialisable
 
@@ -225,9 +225,9 @@ def test_backtest_fills_history_and_live_is_preferred(tmp_path: Path) -> None:
     by_t = {p["t"]: p for p in out["points"]}
     hist = [p for p in out["points"] if datetime.fromisoformat(p["t"]).date() == old_slot.date()]
     assert hist and any(
-        p["v4"] == 66.5 for p in hist
+        p.get("v4") == 66.5 for p in hist
     )  # backtest value (its own actual 66.0 used: no chart row there? chart has rows)
-    assert not any(p["v4"] >= 90 for p in out["points"]), "a backtest point overrode the live archive"
+    assert not any(p.get("v4", 0) >= 90 for p in out["points"]), "a backtest point overrode the live archive"
     assert len(by_t) == len(out["points"])
     # the gate is passed through, errors converted
     assert out["gate"][0]["season"] == "heating" and out["gate"][0]["pass"] is True and out["gate"][0]["v4"] == 0.5
@@ -250,7 +250,10 @@ def test_backtest_actual_is_used_when_the_chart_log_has_no_row(tmp_path: Path) -
 def test_no_data_at_all_is_an_empty_state_not_an_error(tmp_path: Path) -> None:
     out = _build(tmp_path, archive=V4Archive(tmp_path, entry_id="zoneA"), chart_rows=[], model=None)
     assert out["points"] == [] and out["heat_runs"] == [] and out["gate"] == []
-    assert out["stats"] == {"n": 0, "v4_mae": None, "v3_mae": None, "flat_mae": None, "v4_bias": None, "v3_bias": None}
+    assert out["stats"] == {
+        "n": 0, "n_v3": 0, "n_flat": 0, "v4_mae": None, "v3_mae": None, "flat_mae": None, "v4_bias": None,
+        "v3_bias": None,
+    }  # fmt: skip
     assert out["model"] == {"confidence": "none", "fitted_at": None, "span_days": None}
 
 

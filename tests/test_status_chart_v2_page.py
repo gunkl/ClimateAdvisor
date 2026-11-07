@@ -40,8 +40,12 @@ def test_two_charts_one_strip_canvas_and_a_cursor():
 def test_time_controls_past_ahead_scroll_now():
     for r in ("6h", "12h", "24h", "3d", "7d", "30d", "1y"):
         assert f'data-range="{r}"' in INDEX and f"setChartRange('{r}', this)" in INDEX
-    for a in ("12h", "24h", "48h", "5d"):
+    for a in ("24h", "48h", "5d"):
         assert f'data-ahead="{a}"' in INDEX and f"setChartAhead('{a}')" in INDEX
+    # the "now" view always shows at least a day ahead, on both pages (no 12h Ahead button; a stored '12h' migrates)
+    new_page = (_FE / "new_dashboard.html").read_text(encoding="utf-8")
+    assert 'data-ahead="12h"' not in INDEX and 'data-ahead="12h"' not in new_page
+    assert "const CHART_AHEADS = ['24h', '48h', '5d']" in INDEX and "const MIN_AHEAD_H = 24" in INDEX
     assert 'onclick="shiftChartWindow(-1)"' in INDEX and 'onclick="shiftChartWindow(1)"' in INDEX
     assert 'onclick="chartGoNow()"' in INDEX
     assert "const CHART_RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y']" in INDEX
@@ -131,7 +135,8 @@ def test_v4_is_drawn_whenever_it_has_data_no_accuracy_gate():
     assert "'v4 has no data for this zone yet (it is still learning this house)'" in ser
     assert "accuracy check" not in ser
     key = _func("renderKey")
-    assert 'href="prediction_accuracy.html"' in key and "How each engine has scored" in key
+    assert '<a href="prediction_accuracy.html' in key and "How each engine has scored" in key
+    assert "'?from=classic'" in key  # classic's link brings the scoring page back to classic
     assert "disabled: !!s.disabledReason" in key
     assert "accuracy check" not in key
     assert "chart-v4-note" in INDEX
@@ -203,10 +208,15 @@ def test_touch_tap_pins_the_readout_and_a_second_tap_lets_go():
     assert "ArrowLeft" in init and "Escape" in init
 
 
-def test_key_folds_into_a_lines_sheet_on_phones():
+def test_key_folds_at_every_width_and_remembers_it():
     assert "<summary>Lines " in INDEX
-    assert "@media (max-width: 640px)" in INDEX and ".chart-key > summary { display: list-item; }" in INDEX
-    assert "(max-width: 640px)" in _func("_syncKeyOpen")
+    assert ".chart-key > summary { display: none; }" not in INDEX  # the fold control shows at every width
+    assert '<details class="chart-key" id="chart-key">' in INDEX  # folded on a first visit
+    s = _func("_syncKeyOpen")
+    assert "_chartPrefs.keyOpen" in s and "max-width" not in s
+    assert "_chartPrefs.keyOpen = key.open" in _func("_onKeyToggle")
+    r = _func("_renderKeySummary")
+    assert "aria-expanded" in r and "'Showing: '" in r
     assert "min-height: 36px" in INDEX  # touch targets
 
 
@@ -249,14 +259,14 @@ def test_reading_cards_keep_every_old_reading():
     cards = _func("renderReadingCards")
     for needle in (
         "Outdoor sensor",
-        "service says",
+        "_saysVs('The weather service'",
         "Today",
-        "trend-arrow",
+        "_trendWords(data.trend_direction",
         "Doors/Windows",
         "c.unreadable",
         "_fanLines(data)",
         "Occupancy",
-        "comfort score",
+        "Comfort score",
         "data.automation_status",
         "data.coordinator_healthy === false",
         "data.invariant_violations",
@@ -277,8 +287,9 @@ def test_reading_cards_keep_every_old_reading():
     for needle in ("whf_status", "hvac_fan_status", "fan_status", "fan_remote_timer_hours", "fan_remote_speed"):
         assert needle in fans, needle
     assert "contact_sensors" in cards
-    # the thermostat card is the one that carries "HVAC" (the older browser specs find it by that word)
-    assert "HVAC ${escapeHtml(data.hvac_mode" in cards
+    # the thermostat card is the one that carries "HVAC" (the older browser specs find it by that word), and its
+    # line is the plain sentence (Issue #1399: "Heating to 68°F · idle now", not "HVAC heat · idle / 68°F")
+    assert "Indoor · HVAC" in cards and "_hvacSentence(data, unitSym)" in cards
     assert 'id="status-next"' in INDEX and 'id="status-grid"' in INDEX
 
 

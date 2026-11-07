@@ -243,9 +243,15 @@ class TestCoordinatorWiring:
         sites = _apply_classification_sites()
         assert sites[(file, func)] == []
 
+    def test_the_home_bank_end_timer_runs_the_cycle_pass(self):
+        """Issue #1405: the Home/Guest bank-end timer runs the regular cycle's pass, flag included (False once the
+        re-resolve at the period's start has ended the bank)."""
+        sites = _apply_classification_sites()
+        assert sites[("coordinator.py", "_fire_tou_home_bank_end")] == ["self._tou_bank_owns_setpoint()"]
+
     def test_every_call_site_is_accounted_for(self):
-        """A new apply_classification() call site must be added to the two lists above on purpose."""
-        assert len(_apply_classification_sites()) == 8
+        """A new apply_classification() call site must be added to the lists above on purpose."""
+        assert len(_apply_classification_sites()) == 9
 
 
 class TestBankWriteDoesNotScheduleAFiveMinuteLoop:

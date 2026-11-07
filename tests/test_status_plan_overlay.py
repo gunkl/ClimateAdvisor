@@ -114,7 +114,8 @@ def test_plan_overlay_is_one_toggle_in_the_overlays_group_remembered_with_the_ot
     overlays = MOD[MOD.index("const overlays =") : MOD.index("const stripChips")]
     assert "_chip('ov:plan'" in overlays and "<span>Plan</span>" in overlays
     # it goes through the same toggle and storage path as every other chip (try/catch storage, per zone)
-    assert "if (id.startsWith('strip:'))" in MOD and "_chartPrefs.on[id] = !_isOn(id)" in MOD
+    # the stored key is per role since #1399 (_prefId), so an engine switch keeps the choice
+    assert "if (id.startsWith('strip:'))" in MOD and "_chartPrefs.on[_prefId(id)] = !_isOn(id)" in MOD
     assert "plan: 'ov:plan'" in MOD  # also reachable through toggleOverlay('plan')
     # on by default: it is the plan the occupant came to read (only baseline, humidity, feels-like, CA line start off)
     default_on = MOD[MOD.index("function _defaultOn(id)") : MOD.index("function _isOn(id)")]

@@ -47,6 +47,13 @@ SECRET_PATTERNS = [
     re.compile(r"""https?://[^'"\s]+:[^'"\s@]+@[^'"\s]+""", re.IGNORECASE),
 ]
 
+# Literal credential values (not just names): ChatGPT-account JWTs and OAuth tokens, API keys.
+TOKEN_VALUE_PATTERNS = [
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"""(?:access|refresh|id)_token['"]?\s*[:=]\s*['"][A-Za-z0-9._~+/-]{20,}['"]""", re.IGNORECASE),
+]
+
 verbose = "--verbose" in sys.argv
 
 
@@ -211,6 +218,10 @@ def check_secrets(component_dir):
             stripped = line.strip()
             if stripped.startswith("#") or stripped.startswith("import ") or stripped.startswith("from "):
                 continue
+
+            for pattern in TOKEN_VALUE_PATTERNS:
+                if pattern.search(line):
+                    result.error(f"{filename}:{line_num}: literal token/credential value")
 
             for pattern in SECRET_PATTERNS:
                 matches = pattern.findall(line)

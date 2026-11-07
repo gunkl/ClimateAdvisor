@@ -20,7 +20,13 @@ CONF_GITHUB_REPO = "github_repo"
 # or dump_diagnostics log). Not CONFIG_METADATA "sensitive" flags: that dict also drives the
 # Settings tab and the suggestion-accept write allowlist, which a secret must not join.
 # ai_api_key is covered by its CONFIG_METADATA "sensitive" flag; diagnostics.TO_REDACT unions both.
-REDACTED_CONFIG_KEYS = frozenset({"notify_service", CONF_GITHUB_TOKEN})
+# The ChatGPT account tokens live in the account manager's Store, never in entry data; the token
+# key names are listed so a stray copy in any dumped config or status dict is still redacted.
+CHATGPT_ACCOUNT_TOKEN_KEYS = frozenset({"access_token", "refresh_token", "id_token"})
+REDACTED_CONFIG_KEYS = frozenset({"notify_service", CONF_GITHUB_TOKEN}) | CHATGPT_ACCOUNT_TOKEN_KEYS
+# hass.data key of the shared ChatGPT account manager. Deliberately NOT under hass.data[DOMAIN],
+# which must hold only coordinators.
+CHATGPT_ACCOUNT_HASS_KEY = "climate_advisor_chatgpt_account"
 API_SUBMIT_GITHUB_ISSUE = "/api/climate_advisor/submit_github_issue"
 
 # Default setpoints (°F) — reformatted to match a real, tuned installation's own

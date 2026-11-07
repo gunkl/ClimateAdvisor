@@ -174,6 +174,11 @@ _BARE_TASK_PERMANENT = {
     # wired (production), and falls back to a plain hass task only for an engine with no coordinator
     # (bare tests, the shadow engine).
     ("automation.py", "_spawn_whf_task"): 1,
+    # The ChatGPT account is instance-level and outlives any one zone. A rotated token has a single
+    # holder, so its refresh and save must finish even while the zone that started them unloads, and HA
+    # shutdown must wait for them (a background task would be cancelled). No entry can own these.
+    ("chatgpt_account.py", "_run_exclusive"): 1,
+    ("chatgpt_account.py", "_schedule_save"): 1,
 }
 
 # Ratchet: groups B-D of Issue #1113 (engine/timer dispatch, refresh requests,

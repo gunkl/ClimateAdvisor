@@ -263,6 +263,8 @@ The dashboard's "AI Investigative Analysis" report (`/api/climate_advisor/ai_inv
 python3 tools/ha_logs.py --history --entity sensor.climate_advisor_ai_status --hours 24
 ```
 
+**ChatGPT provider logs:** INFO `Investigation requested: provider=... model=... entry_id=...` names the zone's provider and resolved model; INFO `ChatGPT sign-in completed` and `ChatGPT account disconnected|removed (revocation: confirmed|unconfirmed|not_needed)` track the account; at DEBUG, `ChatGPT stream ended: terminal=... status=... request_id=...`, `ChatGPT request|stream failed: category=... code=...` and `ChatGPT token refresh succeeded` show the last exchange. `category=rate_limit` is a 429 that failed that one request; only WARNING `ChatGPT usage limit reached ...` (`category=quota`) marks the one-hour pause of every zone. No tokens, email, user id, prompts or response text are logged.
+
 ### AI Report Persistence
 
 Investigation reports are stored at `climate_advisor_investigation_reports.json` in the HA config root directory, capped at `INVESTIGATION_REPORT_HISTORY_CAP` entries. Request history is capped at 50 entries (`AI_REQUEST_HISTORY_CAP`). (The separate `climate_advisor_ai_reports.json` file from the retired AI Activity Report feature — Issue #578 — is no longer read or written; it may still exist on disk from before the upgrade and can be safely deleted.)

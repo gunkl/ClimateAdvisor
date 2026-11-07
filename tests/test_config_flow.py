@@ -2215,7 +2215,7 @@ class TestOptionsFlowMenu:
             "notifications",
             "advanced",
             "classification_thresholds",
-            "ai_settings",
+            "ai_provider",
             "github_settings",
         ]
         assert expected == OPTIONS_MENU_OPTIONS

@@ -3,8 +3,10 @@
 # AI Integration — Architecture Brief (Tier 2)
 
 **Issue #563 (this pass):** the former `"activity_report"` and `"investigator"` skills have
-been merged into one `"investigator"` skill with two entry modes — silent/scheduled
-narration (no `focus`) and on-demand investigation (`focus` supplied). The old
+been merged into one `"investigator"` skill. It is **manual-only**: the sole caller is the
+dashboard's Investigate button (`ClimateAdvisorInvestigateView`) and nothing schedules it. A
+call without `focus` (the retired activity-report shape) is still accepted, but no live path
+makes one. The old
 `ai_skills_activity.py` module is deleted; its genuinely non-redundant context (state
 cross-validation, override/fan-ownership details, historical daily summaries) now lives as
 context providers in `ai_skills_context.py`, registered in the same `ContextProviderRegistry`
@@ -19,7 +21,7 @@ for the full audit of what was ported vs. retired as redundant.
 | How are auto and manual AI requests counted separately, and what resets them? | `auto_requests_today` and `manual_requests_today` are distinct daily counters; `_reset_daily_counters_if_needed()` zeroes both at the top of every `async_request()` call when the date has changed. | [Rate Limiting](#rate-limiting) |
 | What happens when a monthly budget is set and the cap is reached? | `_check_budget()` returns `ClaudeResponse(success=False, budget_exceeded=True)` and the API call is never made; the cap resets at calendar month boundary. Value `0` means no cap. | [Monthly Budget](#monthly-budget) |
 | What is the fixed return shape from every skill execution, regardless of success or fallback? | Every `async_execute()` call returns a 6-key dict: `{success, source, data, error, input_context, raw_response}`. Source is `"ai"`, `"fallback"`, or `"error"`. | [Return Contract](#return-contract) |
-| Is there still a separate "activity report" skill? | No (Issue #563) — it was merged into `"investigator"`. The dashboard's silent/scheduled report and the on-demand focus-driven investigation are now two entry modes of the same skill, same prompt, same context-provider registry. | [investigator](#investigator) |
+| Is there still a separate "activity report" skill? | No (Issue #563) — it was merged into `"investigator"`. Its no-`focus` shape is the same skill with an empty focus (no live path uses it). The investigator is manual-only, never scheduled. | [investigator](#investigator) |
 | Does the investigator still have its own model/token/reasoning config overrides? | No (Issue #563) — it shares the single `ai_model`/`ai_reasoning_effort`/`ai_max_tokens` config used everywhere else. `CONF_AI_INVESTIGATOR_MODEL`/`_MAX_TOKENS`/`_REASONING` constants remain defined (unused) only so the historical v13→v14 config migration doesn't break old installs. | [investigator](#investigator) |
 | Why did the KNOWN-FIXED ISSUES context section used to grow without bound? | `_fix_is_relevant()`'s escape-hatch rule matched any entry with a non-empty `scope_not_covered` field, which was mandatory on every entry — so all 169 entries always passed regardless of the intended version-scoping. Fixed by removing the field entirely and bounding by recency count instead. | [Known Fixes Context](#known-fixes-context) |
 | What are the full pre/post/invariant contracts for `ClaudeAPIClient.async_request()` and the circuit breaker? | The Tier 3 spec covers the 5-row circuit breaker transition table, guard sequence for `async_request()`, `ClaudeResponse` mutual-exclusivity invariants, budget reset trigger, and all four retried exception types. | [Claude API Client — Territory Spec](claude-api-spec.md) |
@@ -30,7 +32,7 @@ for the full audit of what was ported vs. retired as redundant.
 ## Scope
 
 **Owns:**
-- All Anthropic API communication (`ClaudeAPIClient` in `claude_api.py`)
+- All AI provider communication: the shared `ClaudeAPIClient` wrapper and `AnthropicBackend` (`claude_api.py`), the provider seam (`ai_backend.py`, `ai_providers.py`) and the ChatGPT-plan provider (`chatgpt_backend.py`, `chatgpt_account.py`)
 - Circuit breaker state machine, rate-limit counters, monthly budget accumulator, and retry logic
 - Cost estimation per model and per request
 - Persistence of stats (counters, monthly cost) across HA restarts
@@ -54,7 +56,7 @@ for the full audit of what was ported vs. retired as redundant.
 - Authenticate with the Anthropic API using the HA config-entry API key; recreate the client when the key changes via `update_config()`
 - Enforce a circuit breaker: count consecutive failures, open the breaker on threshold, block calls while open, probe with one request in half-open state
 - Enforce daily rate limits independently for auto-triggered and manual-triggered requests
-- Enforce a separate investigator rate limit gated also on `CONF_AI_INVESTIGATOR_ENABLED` — this now gates only the on-demand/focus-driven call path (`ClimateAdvisorInvestigateView`), not skill registration itself, so the silent/narration mode stays available to anyone with AI enabled (Issue #563)
+- Enforce a separate investigator rate limit gated also on `CONF_AI_INVESTIGATOR_ENABLED` — this now gates only the on-demand/focus-driven call path (`ClimateAdvisorInvestigateView`), not skill registration itself, so skill registration does not depend on that toggle (Issue #563)
 - Enforce a monthly cost cap; accumulate `estimated_cost` on every successful call; reset at calendar month boundary
 - Retry failed API calls with exponential backoff (`AI_MAX_RETRIES` attempts); skip backoff after the final attempt
 - Estimate cost per request from a model-prefix lookup table (`_MODEL_COSTS`)
@@ -73,7 +75,10 @@ for the full audit of what was ported vs. retired as redundant.
 
 | Module | Role |
 |---|---|
-| `claude_api.py` | `ClaudeAPIClient`: all Anthropic API access, circuit breaker, rate limits, budget, retry, cost estimation, persistence |
+| `claude_api.py` | `ClaudeAPIClient` (provider-neutral wrapper: circuit breaker, rate limits, budget, retry, cost estimation, persistence) and `AnthropicBackend` |
+| `ai_backend.py` / `ai_providers.py` | `AIBackend` Protocol, `AIBackendError`, `ProviderSpec`, `PROVIDERS`; provider registration |
+| `chatgpt_backend.py` | `ChatGPTBackend`: ChatGPT-plan transport (Responses API, SSE) |
+| `chatgpt_account.py` | `ChatGPTAccountManager`: shared tokens, owner, state, quota cooldown, keepalive |
 | `ai_skills.py` | `AISkillRegistry` + `AISkillDefinition`: skill registration, lookup, execution pipeline, return contract enforcement |
 | `ai_skills_investigator.py` | The merged `"investigator"` skill: system prompt, response parser, deterministic fallback, thin context-assembly orchestrator |
 | `ai_skills_context.py` | `ContextProviderRegistry` + every individual context provider (15, as of Issue #563) the investigator's context is assembled from, including the render/timeline functions and the state-cross-validation/override-details/daily-summaries providers ported from the retired `ai_skills_activity.py` |
@@ -136,7 +141,7 @@ Match is by substring of the model name; unrecognized models default to Sonnet r
 - `APIError`
 - any other `Exception`
 
-Backoff formula: `AI_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))`. The sleep is skipped after the final attempt. A successful attempt returns immediately; consecutive failure increments the circuit breaker counter.
+Backoff formula: `AI_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))`. The sleep is skipped after the final attempt. A successful attempt returns immediately; consecutive failure increments the circuit breaker counter. If the zone's backend has been replaced since the request started (`async_apply_ai_settings()`), no further attempt or tier fallback is sent, on either provider: the request ends with a `no_retry` error, outside the breaker.
 
 ### Extended Thinking
 
@@ -144,7 +149,7 @@ When `reasoning_effort == AI_REASONING_HIGH`, `async_request()` injects a thinki
 
 ### Authentication
 
-The API key is read from `config.get(CONF_AI_API_KEY, "")` at client construction. The key is static — no token refresh. When `update_config()` detects a key change (by comparing old vs. new values), it tears down and recreates the `AsyncAnthropic` client. The key is never written to request history, log statements, or API responses.
+(Anthropic provider.) The API key is read from `config.get(CONF_AI_API_KEY, "")` at client construction. The ChatGPT provider has no key: it reads tokens from the shared account manager (see [AI Providers](#ai-providers)). The key is static — no token refresh. When `update_config()` detects a key change (by comparing old vs. new values), it tears down and recreates the `AsyncAnthropic` client. The key is never written to request history, log statements, or API responses.
 
 ### Persistence
 
@@ -153,6 +158,68 @@ The API key is read from `config.get(CONF_AI_API_KEY, "")` at client constructio
 Request history is a `deque` capped at `AI_REQUEST_HISTORY_CAP`. Each entry records: timestamp, skill name, input tokens, output tokens, cost, latency, success, error. No raw prompt content. No API key fragments.
 
 ---
+
+## AI Providers
+
+`CONF_AI_PROVIDER` (per zone, default `anthropic`) selects the provider. Existing installs have no such key and behave exactly as before. Contracts, specs and wrapper behaviour: [claude-api-spec.md § Provider Seam](claude-api-spec.md#provider-seam). `ClaudeAPIClient` and `ClaudeResponse` are provider-neutral and keep their historical names.
+
+| Provider | Credential | Notes |
+|---|---|---|
+| `anthropic` (default) | API key in the zone's config entry | Cost tracking, monthly budget, tuning (temperature, max tokens, reasoning), tier fallback |
+| `chatgpt` | One shared ChatGPT account for the whole HA instance | No cost tracking or tuning; manual-only and connected-owner-only; account-wide quota cooldown |
+
+Adding a provider needs one backend module, one `ProviderSpec` in `PROVIDERS`, one entry in `ai_providers._PROVIDER_MODULES` (imported separately, so a broken provider module is logged and the others still register), and strings (labels for its own key and model fields, if it has them). The spec's `credential_setting` and `model_setting` name those config keys, and the options flow, settings rows, coordinator gate, diagnostics redaction and model fallback all read them from the spec. The wrapper, `chatgpt_account.py` and callers do not change (`tests/test_ai_backend.py` proves this with a fake API-key provider).
+
+### Shared ChatGPT account (`chatgpt_account.py`)
+
+Climate Advisor runs one config entry (and one AI client) per zone, but a refresh token rotates and has exactly one holder, so the tokens live once per HA instance in `ChatGPTAccountManager`:
+
+- **Location:** `hass.data["climate_advisor_chatgpt_account"]`, never `hass.data[DOMAIN]` (coordinators only). `async_setup_entry` creates it and awaits its load on the event loop before the coordinator restores state; the loaded manager is handed to each zone's client by reference and read on every request, so connecting needs no reload.
+- **Persistence:** `Store(hass, 1, "climate_advisor.chatgpt_account", private=True, atomic_writes=True)`. Created on the first sign-in, so a Claude-only install has no such file. Holds tokens, a stable host ID (never overwritten), `owner_user_id`, account display fields, state (`disconnected`, `connected`, `reauth_required`), the quota cooldown and its probe lease. A save is immediate and is read back to prove it ([HA-BOUNDARY-EXCEPTIONS §3](HA-BOUNDARY-EXCEPTIONS.md#3-chatgpt-account-store)). If a sign-in's read-back fails, `status()` reports `save_uncertain` (never stored) until the next sign-in or token request re-reads the store: tokens found there are adopted, keeping any newer quota cooldown; otherwise they are revoked.
+- **Tokens:** `async_get_access_token()` uses one lock shared by connect, refresh, disconnect and keepalive, refreshes only when needed (5-minute skew, honouring `earliest_refresh_at`), saves the rotated token and only then releases it. A failed refresh keeps the credentials, and a rotated token it received, and is `no_retry`, as is a 401 after a refresh, so one request sends at most one refresh grant (see Known limits). A 401 for a token another zone has since replaced retries once with the saved token, with no grant. A terminal refresh error (`invalid_grant`, `refresh_token_expired`/`invalidated`/`reused`, ...) moves the account to `reauth_required` and raises the repair issue `chatgpt_account_reauth_required`. There is no reauth flow and these failures never raise `ConfigEntryAuthFailed` or `ConfigEntryNotReady`, so HVAC automation keeps running.
+- **Setup:** runtime and SDK failures, and a failure in `chatgpt_backend.py` or `chatgpt_account.py`, do not fail setup. An import failure of `claude_api.py`, with AI on, gives `SETUP_ERROR`, as it did before providers existed. An exception from the `ClaudeAPIClient` or `AnthropicBackend` constructor is caught and the zone loads with no client; before providers existed it failed setup.
+- **Keepalive:** an hourly timer that refreshes only if the last refresh is over 7 days old (refresh tokens last 30 days and the investigator may go unused). It exists only while connected and while at least one entry is loaded. It is an auth call, not an inference request.
+- **Unload is not removal:** unload (which also runs on reload) only cancels the timer when the last loaded entry goes. `async_remove_entry` on the final entry revokes the token and deletes the store. If the delete fails the store is blanked instead, so a later setup starts disconnected with a new host ID. If that also fails, an error asks for `.storage/climate_advisor.chatgpt_account` to be deleted by hand, because re-adding the integration would load the old account. Tokens in a store that cannot be read cannot be revoked, and removal reports that as unconfirmed.
+- **Redaction:** token key names are in `REDACTED_CONFIG_KEYS`; `tools/validate.py` scans for literal token values. Tokens never reach logs, exception text, `status()`, the REST status view or diagnostics.
+
+### Setting up the ChatGPT provider
+
+Sign-in runs entirely inside Home Assistant's options flow. There is no SSH, no file copy and no token copying, and no laptop script. It needs a Home Assistant **administrator** using the HA web interface (the flow takes the connecting user from the HTTP request; that was proven on HA 2026.10.4 only, not on 2026.8.3).
+
+1. **Settings → Devices & services → Climate Advisor → Configure** (on any zone) **→ AI Settings**. The first screen asks only for the provider: choose the ChatGPT subscription. The next screen shows that provider's options (nothing is saved until you submit it): enable AI and save. Saving leads to the **ChatGPT Account** menu. Each zone picks its provider separately, but the account is shared by all zones, so you sign in once. (The provider is a separate screen because the form cannot change its fields as you pick; live conditional fields via `data_entry_flow` `visible` could replace it once the HA minimum reaches the release that adds them.)
+2. Choose **Sign in with ChatGPT**.
+3. The screen says that requests send this home's climate data to OpenAI under the connected ChatGPT plan, and shows a **Sign in with ChatGPT** link. Open it in the same browser and sign in. When you finish, the browser is sent to `http://127.0.0.1:54321/auth/callback?...`. **That page fails to load; this is expected.** Copy the full address from the address bar and paste it into the flow.
+4. Home Assistant parses the pasted address (it is never fetched), checks it against the sign-in it started, and exchanges the code with OpenAI itself. It saves the account, records you as the **owner**, and checks the account with `GET /v1/models` (not an inference request). The last screen says you are signed in and shows the outcome of that check. A temporary 429/5xx there is reported as "not ready" and the sign-in is kept.
+   If this zone has no model yet, the flow then shows the model list from your account and saves your choice (nothing is saved or reloaded before sign-in finishes). If the list cannot be loaded, the sign-in is kept and the last screen says to pick a model in AI Settings later.
+
+   Your choice takes effect straight away, with no reload: the flow hands this zone's saved `ai_*` settings to the running coordinator and client (`async_apply_ai_settings`), also when the model is picked later in AI Settings. The last screen says AI is ready only if this zone can run a request now; otherwise it says what is missing (a model, AI turned off, or a reload). Saving a zone away from the ChatGPT subscription applies the same way, so it stops using the account at once. The zone stops starting requests before the build begins. The new provider is built against a copy of the settings, then the zone's settings and client change together and the stop lifts. If the build fails, the settings stay saved, the flow says so, and the zone starts no new AI requests until a reload applies them: it never keeps starting requests on the provider it was saved away from, though one already in an HTTP call or queued on the account lock can finish there. While AI is on and the zone has a client, the panel shows why; otherwise the flow's failure message and the repair notice are what explain it. A save on a zone already on an API-key provider still waits for a reload like every other setting.
+
+If the pasted address is wrong or belongs to another attempt, the screen asks again (the attempt is kept). Each flow cancels only its own attempt (`pending_login_id`), so abandoning one flow never cancels another's sign-in. Any other failure, or an expired attempt (15 minutes), uses the attempt up and the retry shows a fresh link. Abandoning the flow drops an unfinished attempt. Errors show fixed messages only.
+
+**This paste route is not documented by OpenAI and could break.** OpenAI documents a `127.0.0.1` callback and transferring credentials to a remote machine; pasting the failed redirect into Home Assistant is neither documented nor, as far as we know, forbidden. There is no fallback sign-in route: if OpenAI rejects this, sign-in will not work until a different route is built.
+
+**Security and privacy facts**
+
+- **Backups:** the saved tokens are in `.storage` and therefore in Home Assistant backups, which may be copied off the box. Treat backups as sensitive. Restoring an old backup restores a rotated-out refresh token: the next refresh is rejected, a repair issue appears and you sign in again.
+- **Owner-only triggering:** only the connected owner can start an investigation (HTTP 403 for anyone else, on both the streaming and non-streaming paths), only by clicking Investigate. The investigator has no scheduled or automatic mode.
+- The panel shows "Using ChatGPT plan", a "Manage usage" link and a "What is sent" notice at the Investigate control, and points to the flow for signing in; it does not sign in itself.
+
+**Disconnect.** **Configure → AI Settings → ChatGPT Account → Disconnect ChatGPT** (confirm with the switch; offered when connected or when a new sign-in is needed), or the Disconnect button in the panel's ChatGPT Account card on the Settings tab. While an account is saved, signing in with a different one is refused with `different_account` and its new tokens are revoked: disconnect first. Any administrator may disconnect, so a departed owner cannot strand the install. It revokes the refresh token with OpenAI, then clears the account for every zone. If revocation cannot be confirmed (network failure, no revocation endpoint, non-200 answer after retries) the account is still cleared locally and Home Assistant says to also disconnect the app in ChatGPT Settings. The host ID is kept. Removing the last Climate Advisor entry also revokes and deletes the store.
+
+**If the account stops working:** a `reauth_required` state raises the repair issue "ChatGPT sign-in needed" (it points to Configure, AI Settings, Sign in with ChatGPT) and AI features are paused; HVAC automation is unaffected. Sign in again from the same menu. Only the plan usage-limit error (`subscription_sharing_usage_limit_exceeded`, as a 429 or in the stream) pauses every zone for one hour; "Manage usage" is the action then. Any other 429 fails that one request as a temporary rate limit: other zones keep working, and the message gives the `Retry-After` seconds when OpenAI sends them. Run it again later; it is never retried automatically.
+
+### Known limits
+
+- Built on OpenAI's Sign in with ChatGPT access, which is documented as a preview; the API, error codes and limits may change.
+- A refresh whose answer is lost (timeout, connection error, 5xx, unreadable 200) cannot be told apart from one the server never processed. The request stops after that one POST and the saved token is kept. The next user of that token sends it again, because it is the only one there is: a later request, another zone's request queued behind the lock, the model list on the AI Settings form, or the hourly keepalive tick once the last refresh is a week old. If the server had not rotated, that works. If it had, the new token died with the lost answer, the refresh is refused, and the account moves to `reauth_required` for every zone. There is no recovery short of a new sign-in.
+- Output length cannot be capped (no output-limit parameter is sent), and `truncated` is never reported for this provider.
+- Not exercised against the live service: a real plan usage-limit (429) response, a first install with no saved model, and a token scan of a real diagnostics download.
+- Values that are **our own choices, not documented by OpenAI**: the 1-hour quota cooldown (`QUOTA_COOLDOWN_SECONDS`), the 15-minute probe lease (`QUOTA_PROBE_LEASE_SECONDS`), the 503 retries (2, after 1 s and 3 s), the weekly keepalive threshold and the 5-minute refresh skew. No reset time is inferred from a 429.
+- The sign-in callback port (`54321`) is our own choice; the pasted-URL route depends on OpenAI accepting a `127.0.0.1` redirect that no process is listening on.
+- Unconfirmed assumptions: the `earliest_refresh_at` format, `response.incomplete` reason values, revocation endpoint behaviour, and whether a second host ID can be registered on one account.
+- The shared wrapper keys on `AIBackendError.no_retry` only (no provider or category check). A `no_retry` failure is returned or raised at once (never retried), still counts in `error_count` and request history, but does not touch `consecutive_failures` or the breaker state, on both the non-streaming and streaming paths. The ChatGPT backend sets it for every 429-class failure (`quota` and `rate_limit`, HTTP or stream code, including a 429 on token refresh), the early refusal under active cooldown, and `auth` with `reauth_required`. The account manager sets it on every refresh failure and the backend on a 401 after a refresh, so such failures do not open the breaker. Anthropic never sets it, so its 402 (`quota`) is still retried and counted.
+- Whether household members may view output generated on the owner's plan, and whether backups containing tokens are acceptable to the provider, are open questions with the provider. This page makes no claim about the provider's terms.
+- Requires an eligible ChatGPT plan; eligibility is decided by OpenAI. A 403 (`subscription_sharing_user_not_eligible` and similar) is surfaced and not retried.
 
 ## AISkillRegistry
 
@@ -217,13 +284,11 @@ the single `ai_model`/`ai_reasoning_effort`/`ai_max_tokens` config used everywhe
 
 This is the only skill in the registry. It replaces the former `"activity_report"` and
 `"investigator"` skills, which duplicated prompts, config, context assembly, and frontend
-streaming code. Two entry modes share one prompt, one context-provider registry, one parser,
-one fallback:
-
-- **Silent / scheduled narration** — no `focus` kwarg. Reads as an occupant-facing activity
-  readout (what happened, why, anything worth knowing).
-- **On-demand investigation** — `focus` kwarg carries the user's described problem. The
-  `focus` text is prepended to the assembled context as a user-directed investigation target.
+streaming code. It is **manual-only**: started from the dashboard's Investigate button, with no
+scheduled or automatic mode. The optional `focus` kwarg carries the user's described problem and
+is prepended to the assembled context as a user-directed investigation target; with no `focus`
+the same prompt, context-provider registry, parser and fallback run on the default provider
+subset.
 
 #### Context Sources
 
@@ -382,3 +447,7 @@ class AISkillDefinition:
 ← Tier 2 parent: [02-ARCHITECTURE-REFERENCE.md](02-ARCHITECTURE-REFERENCE.md)
 → Tier 3: [Claude API Client spec](claude-api-spec.md) · [AI Skills Framework spec](ai-skills-spec.md)
 ↔ Siblings: [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md) · [Computation Reference](08-COMPUTATION-REFERENCE.md) · [State Persistence](state-persistence.md)
+
+## Provider-aware settings rows and status card
+
+`GET /config` builds the AI SETTINGS rows per zone from the zone's `ProviderSpec`: API key shown only for `credential_kind == api_key`, under the spec's `credential_setting` and only ever as "configured" or "not set"; reasoning effort, max tokens and temperature only with `supports_tuning`; budget only with `tracks_cost`; Auto Requests Per Day hidden when `plan_restricted`. Specs with `uses_claude_wording=True` (Anthropic) keep the original `CONFIG_METADATA` text unchanged; any other spec gets neutral wording and an "AI Provider" row (label plus account state). A spec whose `model_setting` is not `ai_model` shows that setting (value is what is sent). `get_status()["model"]` comes from `configured_model()` (the spec's resolver); an empty model shows "not set" and investigations are refused with a 400 until one is chosen.

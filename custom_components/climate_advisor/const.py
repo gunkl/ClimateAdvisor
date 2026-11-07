@@ -27,6 +27,10 @@ REDACTED_CONFIG_KEYS = frozenset({"notify_service", CONF_GITHUB_TOKEN}) | CHATGP
 # hass.data key of the shared ChatGPT account manager. Deliberately NOT under hass.data[DOMAIN],
 # which must hold only coordinators.
 CHATGPT_ACCOUNT_HASS_KEY = "climate_advisor_chatgpt_account"
+# Shown wherever a disconnect could not confirm the revocation (the options flow and the REST view).
+CHATGPT_REVOCATION_UNCONFIRMED_TEXT = (
+    "Climate Advisor could not confirm that access was revoked. Also disconnect this app in ChatGPT Settings."
+)
 API_SUBMIT_GITHUB_ISSUE = "/api/climate_advisor/submit_github_issue"
 
 # Default setpoints (°F) — reformatted to match a real, tuned installation's own
@@ -1875,3 +1879,5 @@ API_AI_STATUS = f"{API_BASE}/ai_status"
 API_AI_INVESTIGATE = f"{API_BASE}/ai_investigate"
 API_INVESTIGATION_REPORTS = f"{API_BASE}/investigation_reports"
 API_DELETE_REPORT = f"{API_BASE}/delete_report"
+API_CHATGPT_ACCOUNT_STATUS = f"{API_BASE}/chatgpt_account/status"
+API_CHATGPT_ACCOUNT_DISCONNECT = f"{API_BASE}/chatgpt_account/disconnect"

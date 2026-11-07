@@ -15,7 +15,7 @@ import hashlib
 import logging
 import math
 import statistics
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -110,6 +110,7 @@ from .const import (
     BRIEFING_NAT_VENT_CUTOFF_DRIFT_THRESHOLD_MINUTES,
     BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F,
     CHART_LOG_MAX_DAYS,
+    CHATGPT_ACCOUNT_HASS_KEY,
     COMFORT_DEVIATION_FLOOR_F,
     COMFORT_STALL_MARGIN_F,
     COMFORT_STALL_REMINDER_SECONDS,
@@ -398,6 +399,11 @@ from .whf_safety_decision import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_AI_NOT_APPLIED_MESSAGE = (
+    "Your saved AI settings could not be applied to this zone, so it is not starting new AI requests "
+    "(one already running may finish). To apply them, reload Climate Advisor."
+)
 
 # Issue #1020: (role label, entity config key, source config key or None). A role with a
 # source key is only checked when that source reads the entity's state (sensor/input_number).
@@ -1938,6 +1944,70 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return True
         return spec.credential_kind == CREDENTIAL_ACCOUNT or bool(config.get(spec.credential_setting))
 
+    def _ai_client_arg(self, config: dict[str, Any]) -> Any:
+        """The client object the provider's backend is built with.
+
+        For an account provider (ChatGPT) that is the shared account manager from ``hass.data``
+        (None until the manager exists); for an API-key provider it is None, so the backend
+        creates its own SDK client.
+        """
+        spec = get_provider(config.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER))
+        return (
+            self.hass.data.get(CHATGPT_ACCOUNT_HASS_KEY)
+            if spec and spec.credential_kind == CREDENTIAL_ACCOUNT
+            else None
+        )
+
+    async def async_apply_ai_settings(self, data: Mapping[str, Any]) -> None:
+        """Apply this zone's saved ``ai_*`` settings to the running coordinator and client, without a reload.
+
+        The account-provider steps of the options flow call this: signing in and choosing a model is
+        finished only when an investigation can use it, and saving a zone away from an account provider
+        must stop it being used. Every other setting waits for a reload (Issue #573).
+
+        Blocking work runs against a candidate copy; ``self.config`` and the client then change together
+        on the loop. ``self.config`` is updated in place because the client holds the same dict, the way
+        ``async_persist_model_fallback`` reaches it.
+
+        Raises whatever stopped the new settings being built. They are already saved, so the zone must
+        not go on with the old ones: its config stays as it was and its client starts no new request
+        until a later apply or a reload works. A request already in progress can finish on the old provider.
+        """
+        updates = {key: value for key, value in data.items() if key.startswith("ai_")}
+        candidate = {**self.config, **updates}
+        if not candidate.get(CONF_AI_ENABLED) or not self._ai_credentials_present(candidate):
+            self.config.update(updates)
+            return
+        client = self.claude_client
+        # Before the first await, so a request arriving during the build can't reach the provider saved
+        # away from. A failed build leaves this in place; the commit below lifts it.
+        if client is not None:
+            client.stop_dispatch(_AI_NOT_APPLIED_MESSAGE)
+        new_client = backend = None
+        client_arg = self._ai_client_arg(candidate)
+        if self.ai_skills is None:
+            from .ai_skills import AISkillRegistry as _AISkillRegistry
+            from .ai_skills_investigator import register_investigator_skill
+
+            self.ai_skills = _AISkillRegistry()
+            register_investigator_skill(self.ai_skills)
+        # Building may do blocking I/O (see __init__), so it runs in the executor.
+        if client is None:
+            from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
+
+            new_client = await self._executor_job(functools.partial(_ClaudeAPIClient, candidate, client_arg))
+        else:
+            spec = get_provider(candidate.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER))
+            if spec is not None:
+                backend = await self._executor_job(functools.partial(spec.build_backend, candidate, client_arg))
+        # No await from here: a request being dispatched sees the old settings or the new ones.
+        self.config.update(updates)
+        if new_client is not None:
+            new_client.update_config(self.config)
+            self.claude_client = new_client
+        else:
+            client.update_config(self.config, client_arg, backend=backend)
+
     async def async_restore_state(self) -> None:
         """Restore operational state from disk after startup."""
         _LOGGER.info("Climate Advisor v%s starting up", VERSION)
@@ -1945,9 +2015,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if ai_client_config is not None:
             from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
 
+            # Account providers get the already-loaded shared manager by plain reference (read here on
+            # the event loop; the executor only constructs). API-key providers keep client=None.
             spec = get_provider(ai_client_config.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER))
+            manager = self._ai_client_arg(ai_client_config)
             try:
-                self.claude_client = await self._executor_job(functools.partial(_ClaudeAPIClient, ai_client_config))
+                self.claude_client = await self._executor_job(
+                    functools.partial(_ClaudeAPIClient, ai_client_config, manager)
+                )
             except Exception:  # noqa: BLE001 - a client that cannot be built must not fail setup (HVAC keeps running)
                 _LOGGER.exception("AI subsystem could not be initialized; continuing without AI")
                 self.claude_client = None

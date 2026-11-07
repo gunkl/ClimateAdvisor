@@ -11,6 +11,7 @@ This file tracks approved exceptions where Climate Advisor interacts with Home A
 | What is the resolution plan for the learning DB file exception? | Not urgent — current file-based persistence is already atomic/race-safe (Issue #493). Migration to HA's `Store` API is tracked as a future evaluation, not a fix for a known defect. See [Issue #779](https://github.com/gunkl/ClimateAdvisor/issues/779). | [§1. Learning Engine Database File](HA-BOUNDARY-EXCEPTIONS.md#1-learning-engine-database-file) |
 | How often should active exceptions be reviewed? | Quarterly or before each minor version release. For each exception: is it still necessary, has HA added a better-supported alternative, can it move inside the integration's scope, what is the current risk level? | [§Review Schedule](HA-BOUNDARY-EXCEPTIONS.md#review-schedule) |
 | What is the dev-only sim integrations exception? | Two never-shipped test integrations (`ca_dev_thermostat_sim`, `ca_dev_weather_proxy`, Issue #809) were installed into `config/custom_components/` on the user's live HA instance via SSH, at explicit user request, for manual multi-zone testing. | [§2. Dev-Only Test Integrations](HA-BOUNDARY-EXCEPTIONS.md#2-dev-only-test-integrations) |
+| What is the shared ChatGPT account storage exception? | The ChatGPT-plan provider keeps one rotating OAuth token set in HA's `Store` (`.storage/climate_advisor.chatgpt_account`, `private=True`, `atomic_writes=True`), the repo's first `Store` use. | [§3. ChatGPT Account Store](HA-BOUNDARY-EXCEPTIONS.md#3-chatgpt-account-store) |
 
 ## Active Exceptions
 
@@ -31,6 +32,19 @@ This file tracks approved exceptions where Climate Advisor interacts with Home A
 - **Risk**: Low-medium. Neither integration is deployed by `tools/deploy.py` (confirmed out of its scope) or touched by any Climate Advisor code. They add two new `climate.*`/`weather.*` entities and their own config entries — reversible by removing the integrations via Settings → Devices & Services and deleting the two folders. No interaction with any existing HA config, entity, or integration.
 - **Resolution plan**: Not applicable — these are intentionally temporary dev/test tooling, not a production dependency. Remove both integrations (UI removal + folder deletion) once manual multi-zone testing is complete; no code change required in Climate Advisor itself.
 - **Status**: Active — installed for ongoing multi-zone manual testing; safe to remove any time
+
+### 3. ChatGPT Account Store
+
+- **Date**: 2026-11-07
+- **What**: `chatgpt_account.py` persists the shared ChatGPT account (tokens, stable host ID, owner HA user ID, quota cooldown and probe lease) with `Store(hass, 1, "climate_advisor.chatgpt_account", private=True, atomic_writes=True)`, i.e. `.storage/climate_advisor.chatgpt_account`. This is the repo's first `Store` use. Nothing is written to the config root or anywhere else outside the integration.
+- **Why**: A refresh token rotates and has exactly one holder, but the integration runs one config entry (and one AI client) per zone, so the tokens cannot live in per-entry data. Entry data is also exposed to diagnostics, and a rotated token must be saved immediately, not after the learning DB's debounce. `Store` gives a single shared, HA-managed, atomically written file.
+- **Behaviour to know**:
+  - `Store.async_save` logs and swallows write errors, so a returned call proves nothing. `ChatGPTAccountManager._persist` therefore saves, reads the data back with `async_load` and compares; a mismatch marks the account dirty and raises. A rotated token is released for use only after this check passes.
+  - Tokens in `.storage` are included in HA backups, which may be copied off the box. HA's backup exclusions are a fixed list and are not worked around. Restoring an old backup restores a rotated-out refresh token: the next refresh is rejected, a repair issue appears and the user signs in again.
+  - Unload (which also runs on reload) never touches the store. Only `async_remove_entry` on the final entry revokes the token and removes the store, or blanks it if the delete fails.
+- **Risk**: Medium for confidentiality (live credentials at rest in `.storage`), low for HA stability (no other integration or HA file is modified; failures are contained to the AI feature). The store is created with `private=True` (file mode `0600`).
+- **Resolution plan**: None needed for the `Store` itself; it is HA's recommended mechanism. Whether encrypted off-box backups containing tokens are acceptable to the provider is an open question with the provider.
+- **Status**: Active
 
 ---
 

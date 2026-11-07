@@ -336,6 +336,8 @@
     color: #fff;
     background: var(--primary);
   }
+  /* Default link blue is unreadable on the dark card background; use the theme accent. */
+  #chatgpt-account-content a, #ai-plan-indicator a:not(.btn), #ai-plan-limit a:not(.btn) { color: var(--primary); }
   .btn:hover { opacity: 0.85; }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn.secondary { background: #78909c; }
@@ -684,6 +686,10 @@
       <div class="loading">Loading settings...</div>
     </div>
   </div>
+  <div class="card" id="chatgpt-account-card" style="display:none">
+    <h2>ChatGPT Account</h2>
+    <div id="chatgpt-account-content"></div>
+  </div>
   <button class="btn secondary"
           onclick="window.open('/config/integrations/integration/climate_advisor', '_blank')"
           style="margin-bottom:16px">
@@ -737,6 +743,19 @@
         <input type="checkbox" id="investigation-deep">
         Deep investigation (also include config, known fixes, version history, GitHub issues)
       </label>
+    </div>
+    <div id="ai-plan-indicator" style="display:none;margin-bottom:10px;font-size:0.85rem;padding:8px;background:var(--bg);border-radius:4px;">
+      <div id="ai-plan-limit" style="display:none;margin-bottom:8px;"></div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <strong>Using ChatGPT plan</strong>
+        <a id="ai-plan-manage" href="#" target="_blank" rel="noopener noreferrer">Manage usage</a>
+        <a href="#" onclick="toggleAIPrivacy(event)">What is sent</a>
+      </div>
+      <div id="ai-plan-privacy" style="display:none;margin-top:8px;color:var(--text-secondary);">
+        Running an investigation sends your home's recent event log, settings summary and sensor history to OpenAI,
+        using your ChatGPT plan, and the usage counts against that plan. Requests ask OpenAI not to store them.
+        Only the Home Assistant user who connected the account can start one, and only by clicking Investigate.
+      </div>
     </div>
     <div id="ai-disabled-notice" style="display:none;color:var(--text-secondary);font-size:0.85rem;margin-bottom:10px;padding:8px;background:var(--bg);border-radius:4px;">
       AI features are not configured. Enable in Settings &#x2192; AI Configuration.
@@ -2899,7 +2918,7 @@
       CATEGORY_ORDER.forEach(cat => {
         const items = grouped[cat];
         if (!items || items.length === 0) return;
-        const catLabel = CATEGORY_LABELS[cat] || cat;
+        const catLabel = cat === 'ai_settings' && items.some(s => s.key === 'ai_provider') ? 'AI Settings' : (CATEGORY_LABELS[cat] || cat);
         html += `<div class="settings-group"><h3>${catLabel}</h3>`;
         items.forEach(s => {
           const displayValue = s.value == null ? '<span style="color:var(--text-secondary)">not set</span>'
@@ -2917,6 +2936,7 @@
       });
 
       el.innerHTML = html;
+      loadChatGPTAccount();
     } catch (e) {
       document.getElementById('settings-content').innerHTML =
         '<p style="color:var(--danger)">Failed to load settings: ' + e.message + '</p>';
@@ -2953,37 +2973,188 @@
         circuit_open: 'var(--warning)',
         budget_exceeded: 'var(--warning)',
         inactive: 'var(--text-secondary)',
+        not_connected: 'var(--warning)',
+        reauth_required: 'var(--warning)',
       }[s.status] || 'var(--text-secondary)';
+      const statusValue = String(s.status || 'unknown');
 
       grid.innerHTML = `
-        <div class="status-item"><div class="label">Status</div><div class="value" style="color:${statusColor}">${(s.status || 'unknown').toUpperCase()}</div></div>
-        <div class="status-item"><div class="label">Model</div><div class="value">${s.model || 'n/a'}</div></div>
+        ${(s.provider_label && s.claude_wording !== true) ? `<div class="status-item"><div class="label">Provider</div><div class="value">${escapeHtml(String(s.provider_label))}</div></div>` : ''}
+        <div class="status-item"><div class="label">Status</div><div class="value" style="color:${statusColor}">${escapeHtml((s.claude_wording === true ? statusValue : statusValue.replace(/_/g, ' ')).toUpperCase())}</div></div>
+        <div class="status-item"><div class="label">Model</div><div class="value">${escapeHtml(s.model === '' ? 'not set' : String(s.model || 'n/a'))}</div></div>
         <div class="status-item"><div class="label">Total Requests</div><div class="value">${s.total_requests || 0}</div></div>
         <div class="status-item"><div class="label">Errors</div><div class="value" style="color:${(s.error_count || 0) > 0 ? 'var(--danger)' : 'inherit'}">${s.error_count || 0}</div></div>
-        <div class="status-item"><div class="label">Monthly Cost</div><div class="value">$${(s.monthly_cost_estimate || 0).toFixed(4)}</div></div>
+        ${s.tracks_cost === false ? '' : `<div class="status-item"><div class="label">Monthly Cost</div><div class="value">$${(s.monthly_cost_estimate || 0).toFixed(4)}</div></div>`}
         <div class="status-item"><div class="label">Circuit Breaker</div><div class="value">${s.circuit_breaker_state || 'closed'}</div></div>
-        <div class="status-item"><div class="label">Auto Today</div><div class="value">${s.auto_requests_today || 0}</div></div>
+        ${s.plan_restricted === true ? '' : `<div class="status-item"><div class="label">Auto Today</div><div class="value">${s.auto_requests_today || 0}</div></div>`}
         <div class="status-item"><div class="label">Manual Today</div><div class="value">${s.manual_requests_today || 0}</div></div>
       `;
       _aiDisabled = s.status === 'disabled' || !s.status;
+      _aiStatus = s;
+      await loadChatGPTAccount(s);
       _applyAIDisabledState();
     } catch (e) {
       document.getElementById('ai-status-loading').textContent = 'Failed to load AI status: ' + e.message;
     }
   }
 
+  // ---- ChatGPT account card in Settings ----
+
+  const CHATGPT_ACCOUNT_WELCOME_KEY = 'ca_chatgpt_account_welcome_dismissed';
+  function _welcomeDismissed() {
+    try { return localStorage.getItem(CHATGPT_ACCOUNT_WELCOME_KEY) === '1'; } catch (_) { return false; }
+  }
+  function dismissAIWelcome() {
+    try { localStorage.setItem(CHATGPT_ACCOUNT_WELCOME_KEY, '1'); } catch (_) { /* unavailable */ }
+    loadChatGPTAccount();
+  }
+
+  // Draws the card only for providers that sign in with an account (account_state is set on the
+  // zone's AI status). `aiStatus` is optional: fetched when absent. Never throws.
+  async function loadChatGPTAccount(aiStatus) {
+    const card = document.getElementById('chatgpt-account-card');
+    const el = document.getElementById('chatgpt-account-content');
+    try {
+      if (!aiStatus) aiStatus = ((await apiFetch('ai_status')) || {}).status || {};
+      _aiStatus = aiStatus;
+      if (aiStatus.account_state == null) { _chatgptAccount = null; if (card) card.style.display = 'none'; return; }
+      _chatgptAccount = await apiFetch('chatgpt_account/status');
+      if (card && el) { card.style.display = 'block'; el.innerHTML = _renderChatGPTAccount(_chatgptAccount, aiStatus); }
+    } catch (e) {
+      // Only a zone known to be on an account provider: a Claude zone must never see this card.
+      const onAccount = aiStatus && aiStatus.account_state != null;
+      if (card) card.style.display = onAccount ? 'block' : 'none';
+      if (onAccount && el) el.innerHTML = '<p style="color:var(--danger)">Failed to load ChatGPT account: ' + escapeHtml(e.message) + '</p>';
+    }
+  }
+
+  function _renderChatGPTAccount(a, s) {
+    const label = escapeHtml(String(s.provider_label || 'ChatGPT subscription'));
+    const href = _safeUsageUrl(s.usage_url);
+    const manage = href ? ' <a target="_blank" rel="noopener noreferrer" href="' + escapeHtml(href).replace(/"/g, '&quot;') + '">Manage usage</a>' : '';
+    const admin = a.is_admin === true;
+    const state = String(a.state || 'disconnected');
+    let html = '<p style="font-size:0.85rem;margin-bottom:8px;"><strong>' + label + '</strong>: ' + escapeHtml(state.replace(/_/g, ' '))
+      + (a.email ? ' (' + escapeHtml(String(a.email)) + ')' : '') + manage + '</p>';
+    html += '<p style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:8px;">This uses your ChatGPT plan, not an API key. It is separate from any charges by this app.</p>';
+
+    if (state === 'connected' && a.is_owner && !_welcomeDismissed()) {
+      html += '<div style="padding:8px;background:var(--bg);border-radius:4px;margin-bottom:8px;font-size:0.85rem;">'
+        + '<strong>You\'re using your ChatGPT plan</strong><br>Eligible AI requests from Climate Advisor use your ChatGPT plan, and you manage that usage in ChatGPT settings.'
+        + ' <button class="btn secondary" style="padding:2px 8px;font-size:0.8em;" onclick="dismissAIWelcome()">Got it</button></div>';
+    }
+    if (state === 'connected' && a.persist_pending) {
+      html += '<p style="font-size:0.8rem;color:var(--warning);">A refreshed sign-in has not been saved yet; it will retry automatically.</p>';
+    }
+    if (state === 'reauth_required') {
+      html += '<p style="color:var(--warning);font-size:0.85rem;">The sign-in expired or was revoked, so AI features are paused. Sign in again from the zone\'s Configure, AI Settings (see below).</p>';
+    }
+
+    html += '<p style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:8px;"><strong>Privacy:</strong> investigations send your home\'s recent event log, settings summary and sensor history to OpenAI using your plan. Only the connecting user can start one, by clicking Investigate. Disconnect any time.</p>';
+    html += '<p style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:8px;"><strong>Backups:</strong> the saved sign-in is included in Home Assistant backups. Treat backups as sensitive; restoring an old one will ask you to sign in again.</p>';
+
+    if (!admin) {
+      html += '<p style="font-size:0.8rem;color:var(--text-secondary);">Only a Home Assistant administrator can connect or disconnect the account.</p>';
+      return html;
+    }
+    if (state !== 'connected') {
+      html += '<p style="font-size:0.85rem;margin-bottom:8px;">To sign in, open this zone\'s <strong>Configure</strong>, choose <strong>AI Settings</strong>, then <strong>Sign in with ChatGPT</strong> and follow the steps. Signing in once covers every zone. '
+        + '<a target="_blank" rel="noopener noreferrer" href="/config/integrations/integration/climate_advisor">Open the integration page</a></p>';
+    }
+    if (state !== 'disconnected') {
+      html += ' <button class="btn danger" id="chatgpt-account-disconnect" onclick="chatgptAccountDisconnect()">Disconnect</button>';
+    }
+    html += '<div id="chatgpt-account-msg" style="font-size:0.82rem;margin-top:8px;"></div>';
+    return html;
+  }
+
+  function _chatgptAccountMsg(text, isError) {
+    const el = document.getElementById('chatgpt-account-msg');
+    if (el) { el.style.color = isError ? 'var(--danger)' : 'var(--text-secondary)'; el.textContent = text; }
+  }
+
+  async function chatgptAccountDisconnect() {
+    if (!confirm('Disconnect the ChatGPT account from Climate Advisor?')) return;
+    const btn = document.getElementById('chatgpt-account-disconnect');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await apiPost('chatgpt_account/disconnect');
+      await loadChatGPTAccount();
+      _chatgptAccountMsg(r.revocation_unconfirmed ? (r.message || 'Also disconnect this app in ChatGPT Settings.') : 'Disconnected.', !!r.revocation_unconfirmed);
+    } catch (e) {
+      _chatgptAccountMsg(e.message, true);
+      if (btn) btn.disabled = false;
+    }
+  }
+
   // ---- Report type UI ----
 
   let _aiDisabled = false;
+  let _aiStatus = {};
+  let _chatgptAccount = null;
   let _activityRecordTable = null;
+
+  // Why the AI report cannot run for this viewer right now (null = it can). Plan providers
+  // (account_state is set) need a connected account, and only its owner may start a request.
+  function _aiBlockedReason() {
+    if (_aiDisabled) return 'AI features are not configured. Enable in Settings \u2192 AI Configuration.';
+    if (_aiStatus.stop_reason) return _aiStatus.stop_reason;
+    if (_aiStatus.model === '') return 'No AI model is selected. Choose one in the zone\'s Configure, AI Settings.';
+    if (_aiStatus.account_state == null) return null;
+    const label = _aiStatus.provider_label || 'the AI provider';
+    if (_aiStatus.account_state === 'disconnected') return label + ' is not connected. An administrator can sign in from the zone\'s Configure, AI Settings.';
+    if (_aiStatus.account_state === 'reauth_required') return label + ' needs to be reconnected. An administrator can do this from the zone\'s Configure, AI Settings.';
+    if (_chatgptAccount && _chatgptAccount.is_owner === false) return 'Only the user who connected ' + label + ' can run investigations.';
+    return null;
+  }
+
+  function _safeUsageUrl(url) {
+    try {
+      const u = new URL(url);
+      return u.protocol === 'https:' ? u.href : null;
+    } catch (_) { return null; }
+  }
+
+  function toggleAIPrivacy(ev) {
+    if (ev) ev.preventDefault();
+    const el = document.getElementById('ai-plan-privacy');
+    if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  }
+
+  function _renderPlanIndicator() {
+    const box = document.getElementById('ai-plan-indicator');
+    if (!box) return;
+    const type = (document.getElementById('report-type') || {}).value || 'activity_record';
+    const isPlan = _aiStatus.account_state != null && _aiStatus.tracks_cost === false;
+    box.style.display = (isPlan && type !== 'activity_record') ? 'block' : 'none';
+    const href = _safeUsageUrl(_aiStatus.usage_url);
+    const link = document.getElementById('ai-plan-manage');
+    if (link) { if (href) link.setAttribute('href', href); link.style.display = href ? '' : 'none'; }
+    _renderUsageLimit(_chatgptAccount && _chatgptAccount.quota_cooldown_active);
+  }
+
+  // Usage-limit state: Manage usage is the primary action (OpenAI UI guidelines).
+  function _renderUsageLimit(active) {
+    const el = document.getElementById('ai-plan-limit');
+    if (!el) return;
+    const href = _safeUsageUrl(_aiStatus.usage_url);
+    if (!active) { el.style.display = 'none'; el.innerHTML = ''; return; }
+    el.style.display = 'block';
+    el.innerHTML = '<strong>Usage limit reached.</strong> Review your ChatGPT plan or this app\'s limit in ChatGPT settings. '
+      + (href ? '<a class="btn" style="display:inline-block;text-decoration:none;margin-top:6px;" target="_blank" rel="noopener noreferrer" href="'
+        + escapeHtml(href).replace(/"/g, '&quot;') + '">Manage usage</a>' : '');
+  }
 
   function _applyAIDisabledState() {
     const type = (document.getElementById('report-type') || {}).value || 'activity_record';
     const isAiType = type !== 'activity_record';
     const notice = document.getElementById('ai-disabled-notice');
     const btn = document.getElementById('run-report-btn');
-    if (notice) notice.style.display = (isAiType && _aiDisabled) ? 'block' : 'none';
-    if (btn) { btn.disabled = isAiType && _aiDisabled; btn.style.opacity = (isAiType && _aiDisabled) ? '0.45' : ''; }
+    const reason = _aiBlockedReason();
+    const blocked = isAiType && reason !== null;
+    if (notice) { notice.style.display = blocked ? 'block' : 'none'; if (reason) notice.textContent = reason; }
+    if (btn) { btn.disabled = blocked; btn.style.opacity = blocked ? '0.45' : ''; }
+    _renderPlanIndicator();
   }
 
   function updateReportTypeUI() {
@@ -3177,7 +3348,7 @@
           try { event = JSON.parse(raw.slice(6)); } catch (_) { continue; }
 
           if (event.type === 'thinking') {
-            // Show tail of Claude's reasoning chain so user sees it's actively working
+            // Show tail of the model's reasoning chain so user sees it's actively working
             const tail = event.text.replace(/[\n]+/g, ' ').trim().slice(-180);
             loading.textContent = 'Thinking… ' + tail;
 
@@ -3244,6 +3415,8 @@
         : '';
       status.textContent = 'Error: ' + err.message + hint;
       if (content) content.innerHTML = '';
+      // A usage-limit failure shows the plan's limit state, with Manage usage as the primary action.
+      loadChatGPTAccount().then(_applyAIDisabledState).catch(() => {});
     } finally {
       _resetReportControls(btn, loading, 'Investigate');
     }

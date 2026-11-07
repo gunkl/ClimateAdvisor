@@ -169,7 +169,7 @@
           "notifications": "Notifications",
           "advanced": "Learning & Behavior",
           "classification_thresholds": "Day-Type Thresholds",
-          "ai_settings": "Claude AI Settings",
+          "ai_provider": "AI Settings",
           "github_settings": "GitHub Integration"
         }
       },
@@ -427,13 +427,24 @@
           "threshold_cool": "Days with a forecast high at or above this temperature are classified as Cool (heating light). Below this is Cold (full heating). Default: 45°F / 7°C."
         }
       },
+      "ai_provider": {
+        "title": "AI Provider",
+        "description": "Choose which service runs the AI features. The next screen shows that provider's options. Nothing is saved until you submit them, and your other provider's settings are kept.",
+        "data": {
+          "ai_provider": "AI Provider"
+        },
+        "data_description": {
+          "ai_provider": "Which service runs the AI features for this zone."
+        }
+      },
       "ai_settings": {
         "title": "AI Settings",
-        "description": "Configure Claude AI integration for intelligent analysis and reporting.\nAPI Key Status: {key_status}",
+        "description": "Configure {display_name} integration for intelligent analysis and reporting.\n{status_lines}",
         "data": {
           "ai_enabled": "Enable AI Features",
           "ai_api_key": "Claude API Key",
           "ai_model": "AI Model",
+          "ai_chatgpt_model": "ChatGPT Model",
           "ai_reasoning_effort": "Reasoning Effort",
           "ai_max_tokens": "Maximum Response Length",
           "ai_temperature": "Creativity",
@@ -447,6 +458,7 @@
           "ai_enabled": "Master switch for all AI-powered features. When disabled, Climate Advisor uses only its built-in coded logic.",
           "ai_api_key": "Your Anthropic API key. Get one at console.anthropic.com. Leave blank to keep existing key.",
           "ai_model": "Which Claude model to use. Sonnet is recommended for cost/quality balance.",
+          "ai_chatgpt_model": "Which model your ChatGPT plan runs. The list comes from your connected account; it is empty until you connect.",
           "ai_reasoning_effort": "How much reasoning effort Claude uses. Higher = better analysis but more cost.",
           "ai_max_tokens": "Maximum length of AI responses in tokens (256-16384).",
           "ai_temperature": "Controls randomness. 0 = deterministic, 1.0 = most creative. 0.3 recommended.",
@@ -454,7 +466,7 @@
           "ai_auto_requests_per_day": "Maximum automated AI requests per day (resets at midnight).",
           "ai_manual_requests_per_day": "Maximum user-triggered AI requests per day (resets at midnight).",
           "ai_investigator_enabled": "Enable the investigative agent (requires AI to be enabled). Performs deep cross-source analysis to find incongruities and data issues.",
-          "ai_investigator_requests_per_day": "Maximum investigative analysis runs per day. Each investigation uses extended thinking. Resets at midnight."
+          "ai_investigator_requests_per_day": "Maximum investigative analysis runs per day. {investigator_note}Resets at midnight."
         }
       },
       "github_settings": {
@@ -468,6 +480,57 @@
           "github_token": "Token with issues:write scope. Leave blank to keep existing token.",
           "github_repo": "Repository to submit issues to, in owner/repo format, e.g. gunkl/ClimateAdvisor."
         }
+      },
+      "ai_apply_failed": {
+        "title": "AI Settings saved, but not applied",
+        "description": "Your AI Settings are saved, but this zone could not start using them, so it will not start new AI requests for now (one already running may finish). Reload Climate Advisor to apply them. The details are in the Home Assistant log."
+      },
+      "chatgpt_account": {
+        "title": "ChatGPT Account",
+        "description": "{account_summary}\n\nThe ChatGPT account is shared by every zone. Signing in here covers all zones, so you only do it once, from any zone's AI Settings.",
+        "menu_options": {
+          "chatgpt_account_signin": "Sign in with ChatGPT",
+          "chatgpt_account_disconnect": "Disconnect ChatGPT",
+          "init": "Back to the options menu"
+        }
+      },
+      "chatgpt_account_signin": {
+        "title": "Sign in with ChatGPT",
+        "description": "1. Open the [Sign in with ChatGPT]({login_url}) link and sign in. Use the same browser you are using now.\n2. When you finish, the browser opens a page at an address starting with `{redirect_host}`. That page will fail to load. This is expected: nothing is wrong.\n3. Copy the full address from the browser's address bar and paste it below.\n\nThe account is shared by every zone, so this signs in all of them. Requests send this home's climate data to OpenAI under the connected ChatGPT plan.",
+        "data": {
+          "chatgpt_account_redirect_url": "Address of the failed page"
+        },
+        "data_description": {
+          "chatgpt_account_redirect_url": "Paste the full address from the page that failed to load. It starts with the address shown in step 2."
+        }
+      },
+      "chatgpt_account_model": {
+        "title": "Choose a model",
+        "description": "You are signed in. Choose the model {provider_label} runs for this zone. The list comes from your connected account. You can change it later in AI Settings.",
+        "data": {
+          "ai_chatgpt_model": "ChatGPT Model"
+        },
+        "data_description": {
+          "ai_chatgpt_model": "Which model your ChatGPT plan runs for this zone. AI features need a model before they can run."
+        }
+      },
+      "chatgpt_account_done": {
+        "title": "Signed in with ChatGPT",
+        "description": "**You're signed in with your ChatGPT plan.** Eligible AI requests from Climate Advisor use your ChatGPT plan, and you manage that usage in ChatGPT settings.\n\nZones set to ChatGPT in their AI Settings use this account; other zones keep their own provider. Only you can start investigations with it.\n\n{readiness}"
+      },
+      "chatgpt_account_disconnect": {
+        "title": "Disconnect ChatGPT",
+        "description": "This signs Climate Advisor out of ChatGPT for every zone, and AI features that use your plan stop until someone signs in again.",
+        "data": {
+          "chatgpt_account_consent": "Yes, disconnect"
+        },
+        "data_description": {
+          "chatgpt_account_consent": "Turn on to confirm. Leave off to go back."
+        }
+      },
+      "chatgpt_account_disconnected": {
+        "title": "ChatGPT disconnected",
+        "description": "ChatGPT is disconnected. {revocation}"
       }
     },
     "error": {
@@ -479,7 +542,7 @@
       "schedule_start_end_equal": "Start and end time must be different",
       "preheat_min_exceeds_max": "Minimum pre-heat time must not exceed maximum pre-heat time",
       "preheat_default_exceeds_max": "Default pre-heat time must not exceed maximum pre-heat time",
-      "ai_connection_failed": "Could not connect to Claude API. Check your API key and try again.",
+      "ai_connection_failed": "Could not connect to {api_name}. Check your API key and try again.",
       "ai_key_required": "API key is required when AI features are enabled.",
       "ai_temperature_out_of_range": "Temperature must be between 0.0 and 1.0.",
       "ai_max_tokens_out_of_range": "Max tokens value is out of the allowed range for this field.",
@@ -498,10 +561,28 @@
       "sleep_cool_above_away_warning": "Sleep cooling is warmer than away cooling, so overnight the house is allowed to get warmer than when nobody is home. Submit again to keep this.",
       "vacation_heat_above_away_warning": "Vacation heating is warmer than away heating, so a vacation uses more energy than a normal day out. Submit again to keep this.",
       "vacation_cool_below_away_warning": "Vacation cooling is cooler than away cooling, so a vacation uses more energy than a normal day out. Submit again to keep this.",
-      "vacation_freeze_warning": "With this setting, vacation heating ends up below 45 °F (7 °C). Pipes can freeze during a long trip. Submit again to keep this."
+      "vacation_freeze_warning": "With this setting, vacation heating ends up below 45 °F (7 °C). Pipes can freeze during a long trip. Submit again to keep this.",
+      "already_connected": "A ChatGPT account is already connected. Disconnect it first.",
+      "owner_required": "Climate Advisor could not tell which Home Assistant user you are. Open this from the Home Assistant web interface as an administrator.",
+      "no_pending_login": "There is no sign-in in progress. Use the new link above and try again.",
+      "login_expired": "The sign-in took too long. Use the new link above and try again.",
+      "bad_url": "That is not the address of the failed page. Copy the whole address from the address bar; it starts with the address in step 2.",
+      "state_mismatch": "That address belongs to a different sign-in. Open the sign-in link above and paste the address it leads to.",
+      "consent_denied": "The sign-in was cancelled in ChatGPT. Use the new link above and try again.",
+      "exchange_failed": "ChatGPT did not accept the sign-in. Use the new link above and try again.",
+      "login_checks_failed": "The sign-in did not pass Climate Advisor's safety checks. Try again.",
+      "missing_scope": "This ChatGPT sign-in does not allow plan use. Try again and approve all requested access.",
+      "bad_identity": "The signed-in ChatGPT account could not be verified. Try again.",
+      "different_account": "You signed in with a different ChatGPT account from the one connected here, so signing in again with it will not work. To change accounts, disconnect first: close this form, open Configure, AI Settings again to reach the ChatGPT Account menu, and choose Disconnect ChatGPT, then sign in with the new account. The Disconnect button in the ChatGPT Account card on the Climate Advisor panel's Settings tab also works while AI is on for this zone. To keep the connected account, sign in with that one instead.",
+      "save_failed": "The change could not be saved. Try again.",
+      "login_failed": "The sign-in did not work. Try again."
     }
   },
   "issues": {
+    "chatgpt_account_reauth_required": {
+      "title": "ChatGPT sign-in needed",
+      "description": "Climate Advisor lost access to your ChatGPT account, so AI features are paused. As an administrator, open Settings, Devices & services, Climate Advisor, Configure on any zone, AI Settings, then Sign in with ChatGPT."
+    },
     "weather_entity_not_found": {
       "title": "Weather entity not found",
       "fix_flow": {

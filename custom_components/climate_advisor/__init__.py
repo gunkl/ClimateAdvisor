@@ -26,6 +26,7 @@ from . import log_capture, zone_registry
 from .ai_providers import async_ensure_providers_registered
 from .api import API_VIEWS
 from .const import (
+    CHATGPT_ACCOUNT_HASS_KEY,
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
     CONF_AI_ENABLED,
@@ -576,10 +577,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # on_unload, so a STARTED listener can no longer outlive an unload of this entry.
     entry.async_on_unload(async_at_started(hass, _validate_weather_entity))
 
-    # Register the built-in AI providers (ai_backend imports none) before the coordinator's AI gate
-    # and the options flow look them up; first-time imports run in the executor.
+    # Register the built-in AI providers before the coordinator's AI gate and the options flow look
+    # them up (ai_backend imports none; first-time imports run in the executor). Then create and load
+    # the shared ChatGPT account manager, kept at hass.data[CHATGPT_ACCOUNT_HASS_KEY], before the
+    # coordinator restores state and hands it to its AI client. A failure in the ChatGPT modules must
+    # not fail setup, so HVAC automation keeps running.
     try:
         await async_ensure_providers_registered(hass)
+
+        from .chatgpt_account import async_get_account_manager  # noqa: PLC0415
+
+        await async_get_account_manager(hass)
     except Exception:  # noqa: BLE001
         _LOGGER.exception("AI providers could not be loaded; continuing without AI")
 
@@ -860,5 +868,23 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # instance.
         hass.data.pop(_PANEL_HASS_DATA_KEY, None)
 
+    # Unload also runs on reload: only stop the account manager's runtime timer (shared by all zones,
+    # so only when the last one goes). Credentials are never touched here -- see async_remove_entry.
+    if not hass.data[DOMAIN] and (manager := hass.data.get(CHATGPT_ACCOUNT_HASS_KEY)) is not None:
+        manager.async_cancel_runtime_tasks()
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Entry deleted (not merely unloaded): on the FINAL entry, revoke and delete the ChatGPT account."""
+    others = [e for e in hass.config_entries.async_entries(DOMAIN) if e.entry_id != entry.entry_id]
+    if others:
+        return
+    try:
+        from .chatgpt_account import async_remove_account  # noqa: PLC0415
+
+        await async_remove_account(hass)
+    except Exception:  # noqa: BLE001 - removal must never fail on AI cleanup
+        _LOGGER.exception("ChatGPT account cleanup failed during entry removal")

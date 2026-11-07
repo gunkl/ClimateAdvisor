@@ -56,6 +56,26 @@ _HELPER_BUILT_KEYS = {
         "setpoints": {"comfort_heat", "comfort_cool", "setback_heat", "setback_cool", "sleep_heat", "sleep_cool"},
     },
 }
+
+
+def _provider_model_keys(account_only: bool = False) -> set[str]:
+    """Each registered provider's own model key: the AI model fields are named by ``spec.model_setting``."""
+    from custom_components.climate_advisor.ai_backend import PROVIDERS
+    from custom_components.climate_advisor.ai_providers import ensure_providers_registered
+
+    ensure_providers_registered()
+    return {spec.model_setting for spec in PROVIDERS.values() if not account_only or spec.credential_kind != "api_key"}
+
+
+def _provider_credential_keys() -> set[str]:
+    """Each API-key provider's own key field: named by ``spec.credential_setting``."""
+    from custom_components.climate_advisor.ai_backend import PROVIDERS
+    from custom_components.climate_advisor.ai_providers import ensure_providers_registered
+
+    ensure_providers_registered()
+    return {spec.credential_setting for spec in PROVIDERS.values() if spec.credential_kind == "api_key"}
+
+
 # Steps whose strings block exists for HA but whose handler builds no schema of its own.
 _MENU_STEPS = {"options": {"init"}}
 
@@ -63,6 +83,17 @@ _MENU_STEPS = {"options": {"init"}}
 def _const_value(name: str):
     const = importlib.import_module("custom_components.climate_advisor.const")
     return getattr(const, name, None)
+
+
+def _helper_built_keys(flow: str, step: str) -> set[str]:
+    keys = set(_HELPER_BUILT_KEYS.get(flow, {}).get(step, set()))
+    if flow == "options" and step in ("ai_settings", "chatgpt_account_model"):
+        keys |= _provider_model_keys(
+            account_only=step == "chatgpt_account_model"
+        )  # the field key is spec.model_setting, a variable at the call site
+    if flow == "options" and step == "ai_settings":
+        keys |= _provider_credential_keys()  # the field key is spec.credential_setting, likewise
+    return keys
 
 
 def _load_strings() -> dict:
@@ -137,7 +168,7 @@ def test_every_schema_key_has_label_and_description(flow):
     steps = _load_strings()[flow]["step"]
     problems = []
     for step, details in _handler_info()[flow].items():
-        keys = set(details["keys"]) | _HELPER_BUILT_KEYS.get(flow, {}).get(step, set())
+        keys = set(details["keys"]) | _helper_built_keys(flow, step)
         block = steps.get(step, {})
         data, desc = block.get("data", {}), block.get("data_description", {})
         for key in sorted(keys):

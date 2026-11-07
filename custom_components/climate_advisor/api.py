@@ -15,6 +15,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_call_later
 
 from . import log_capture, zone_registry
+from .ai_backend import (
+    CREDENTIAL_ACCOUNT,
+    CREDENTIAL_API_KEY,
+    USER_NOT_ALLOWED_MESSAGE,
+    AIBackendError,
+    AIUserNotAllowedError,
+    get_provider,
+)
+from .ai_providers import ensure_providers_registered
 from .ai_skills_context import OUTDOOR_SENSOR_REASON_LABELS, build_event_timeline_table
 from .const import (
     API_AI_INVESTIGATE,
@@ -24,6 +33,8 @@ from .const import (
     API_CANCEL_FAN_OVERRIDE,
     API_CANCEL_OVERRIDE,
     API_CHART_DATA,
+    API_CHATGPT_ACCOUNT_DISCONNECT,
+    API_CHATGPT_ACCOUNT_STATUS,
     API_CONFIG,
     API_DELETE_REPORT,
     API_ENGINES,
@@ -53,6 +64,8 @@ from .const import (
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     ATTR_WHF_STATUS,
+    CHATGPT_ACCOUNT_HASS_KEY,
+    CHATGPT_REVOCATION_UNCONFIRMED_TEXT,
     CONF_AI_ENABLED,
     CONF_AI_INVESTIGATOR_ENABLED,
     CONF_GITHUB_REPO,
@@ -60,6 +73,7 @@ from .const import (
     CONFIG_METADATA,
     DEFAULT_AI_ENABLED,
     DEFAULT_AI_INVESTIGATOR_ENABLED,
+    DEFAULT_AI_PROVIDER,
     DOMAIN,
     EVENT_LOG_CAP,
     TEMP_SOURCE_CLIMATE_FALLBACK,
@@ -737,6 +751,98 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
                 return self.json({"status": "ok"})
 
 
+def _ai_provider_spec(config: dict[str, Any]) -> Any:
+    """The zone's ProviderSpec, or None when it is unknown (rows are then left as-is)."""
+    ensure_providers_registered()
+    return get_provider(config.get("ai_provider", DEFAULT_AI_PROVIDER))
+
+
+def _account_state_for(spec: Any, hass: HomeAssistant) -> str | None:
+    """The shared account's state for an account provider's settings rows; None for any other provider."""
+    if spec is None or spec.credential_kind != CREDENTIAL_ACCOUNT:
+        return None
+    manager = _account_manager(hass)
+    return manager.state if manager is not None else "disconnected"
+
+
+# Neutral wording for a provider whose spec does not keep the Claude text (keys not listed keep CONFIG_METADATA's).
+_NEUTRAL_AI_TEXT: dict[str, tuple[str, str]] = {
+    "ai_api_key": (
+        "API Key",
+        "Your provider API key. Stored securely in Home Assistant's config entry."
+        " Never logged or exposed in sensor attributes.",
+    ),
+    "ai_model": ("AI Model", "Which model to use."),
+    "ai_reasoning_effort": (
+        "Reasoning Effort",
+        "How much reasoning effort the model uses."
+        " Higher effort produces better analysis but uses more tokens and costs more.",
+    ),
+    "ai_investigator_requests_per_day": (
+        "Investigator Requests Per Day",
+        "Maximum investigative analysis runs per day. Resets at midnight.",
+    ),
+}
+
+
+def _provider_ai_rows(
+    spec: Any, key: str, meta: dict[str, Any], config: dict[str, Any], account_state: str | None
+) -> list[dict[str, Any]] | None:
+    """Rows for one AI setting under ``spec``'s capabilities; None means "render it as usual"."""
+    hidden = (
+        (key == "ai_api_key" and spec.credential_kind != CREDENTIAL_API_KEY)
+        or (key in ("ai_reasoning_effort", "ai_max_tokens", "ai_temperature") and not spec.supports_tuning)
+        or (key == "ai_monthly_budget" and not spec.tracks_cost)
+        or (key == "ai_auto_requests_per_day" and spec.plan_restricted)
+    )
+    if hidden:
+        return []
+    if key == "ai_api_key" and spec.credential_setting != "ai_api_key":
+        # The provider's own key setting replaces Claude's; only ever "configured" or "not set".
+        label, description = _NEUTRAL_AI_TEXT[key]
+        return [
+            {
+                "key": spec.credential_setting,
+                "value": "configured" if config.get(spec.credential_setting) else "not set",
+                "label": label,
+                "description": description,
+                "category": meta["category"],
+            }
+        ]
+    if key == "ai_model" and spec.model_setting != "ai_model":
+        # The provider's own model setting replaces Claude's; show the value the request really uses.
+        return [
+            {
+                "key": spec.model_setting,
+                "value": config.get(spec.model_setting) or None,
+                "label": "AI Model",
+                "description": f"Which model {spec.label} runs. Change it in Configure, AI Settings.",
+                "category": meta["category"],
+            }
+        ]
+    if spec.uses_claude_wording:
+        return None
+    value = config.get(key)
+    if value is None:
+        value = meta.get("default")
+    if meta.get("sensitive"):
+        value = "configured" if value else "not set"
+    label, description = _NEUTRAL_AI_TEXT.get(key, (meta["label"], meta["description"]))
+    rows = [{"key": key, "value": value, "label": label, "description": description, "category": meta["category"]}]
+    if key == "ai_enabled":
+        provider_value = spec.label + (f" ({account_state.replace('_', ' ')})" if account_state else "")
+        rows.append(
+            {
+                "key": "ai_provider",
+                "value": provider_value,
+                "label": "AI Provider",
+                "description": "Which service runs the AI features. Change it in Configure, AI Settings.",
+                "category": meta["category"],
+            }
+        )
+    return rows
+
+
 class ClimateAdvisorConfigView(HomeAssistantView):
     """Return current configuration settings with metadata."""
 
@@ -756,7 +862,15 @@ class ClimateAdvisorConfigView(HomeAssistantView):
             config = coordinator.config
             settings = []
 
+            spec = _ai_provider_spec(config)
+            account_state = _account_state_for(spec, hass)
+
             for key, meta in CONFIG_METADATA.items():
+                if spec is not None and meta["category"] == "ai_settings":
+                    ai_rows = _provider_ai_rows(spec, key, meta, config, account_state)
+                    if ai_rows is not None:
+                        settings.extend(ai_rows)
+                        continue
                 value = config.get(key)
                 # Fall back to the metadata default so the UI shows the effective value,
                 # not "not set", when a key was added after the config entry was created.
@@ -1149,12 +1263,28 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
             if coordinator.claude_client is None:
                 return self.json_message("AI client not available", status_code=503)
 
+            # Plan-restricted providers (ChatGPT plan) run only for the connected owner. Checked before
+            # the rate counters, the context gathering and both the streaming and non-streaming paths.
+            # Checked again by the client at dispatch: the zone can switch provider during context gathering.
+            requester_id = getattr(request.get("hass_user"), "id", None)
+            if not coordinator.claude_client.check_user_allowed(requester_id):
+                return self.json_message(USER_NOT_ALLOWED_MESSAGE, status_code=403)
+
+            chosen_model = coordinator.claude_client.configured_model()
+            if not chosen_model.strip():
+                return self.json_message(
+                    "No AI model is selected. Choose one in this zone's Configure, AI Settings.", status_code=400
+                )
+
             allowed, reason = coordinator.claude_client.check_investigator_rate_limit()
             if not allowed:
                 return self.json_message(reason, status_code=429)
 
             _LOGGER.info(
-                "Investigation requested: focus_len=%d hours=%d",
+                "Investigation requested: provider=%s model=%s entry_id=%s focus_len=%d hours=%d",
+                coordinator.config.get("ai_provider", DEFAULT_AI_PROVIDER),
+                chosen_model,
+                getattr(coordinator, "_entry_id", "") or "?",
                 len(focus),
                 hours,
             )
@@ -1178,6 +1308,7 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                     hass,
                     coordinator,
                     coordinator.claude_client,
+                    requester_id=requester_id,
                     focus=focus,
                     hours=hours,
                     deep=deep,
@@ -1234,15 +1365,19 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 await stream_resp.write_eof()
                 return stream_resp
 
-            result = await coordinator.ai_skills.async_execute(
-                "investigator",
-                hass,
-                coordinator,
-                coordinator.claude_client,
-                focus=focus,
-                hours=hours,
-                deep=deep,
-            )
+            try:
+                result = await coordinator.ai_skills.async_execute(
+                    "investigator",
+                    hass,
+                    coordinator,
+                    coordinator.claude_client,
+                    requester_id=requester_id,
+                    focus=focus,
+                    hours=hours,
+                    deep=deep,
+                )
+            except AIUserNotAllowedError as err:
+                return self.json_message(str(err), status_code=403)
 
             if result.get("success") or result.get("source") == "fallback":
                 # Issue #925: activity_summary already arrives populated in result["data"]
@@ -1468,6 +1603,72 @@ class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
             return self.json({"success": False, "error": f"github_api_{resp.status}"})
 
 
+def _request_user(request: web.Request) -> Any:
+    return request.get("hass_user")
+
+
+def _is_admin(user: Any) -> bool:
+    return bool(user is not None and getattr(user, "is_admin", False))
+
+
+def _account_manager(hass: HomeAssistant) -> Any:
+    """The shared ChatGPT account manager, or None. Never ``hass.data[DOMAIN]`` (that holds coordinators only)."""
+    return hass.data.get(CHATGPT_ACCOUNT_HASS_KEY)
+
+
+class ClimateAdvisorChatGPTAccountStatusView(HomeAssistantView):
+    """GET /api/climate_advisor/chatgpt_account/status: account state and non-secret fields."""
+
+    url = API_CHATGPT_ACCOUNT_STATUS
+    name = "api:climate_advisor:chatgpt_account_status"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        user = _request_user(request)
+        admin = _is_admin(user)
+        manager = _account_manager(hass)
+        info: dict[str, Any] = dict(manager.status()) if manager is not None else {"state": "disconnected"}
+        owner_id = info.pop("owner_user_id", None)
+        is_owner = bool(owner_id and getattr(user, "id", None) == owner_id)
+        email = info.pop("email", None)
+        info["is_admin"] = admin
+        info["is_owner"] = is_owner
+        if admin or is_owner:  # identity only for admins and the connected owner
+            info["email"] = email
+            info["owner_user_id"] = owner_id
+        return self.json(info)
+
+
+class ClimateAdvisorChatGPTAccountDisconnectView(HomeAssistantView):
+    """POST /api/climate_advisor/chatgpt_account/disconnect: revoke then clear. Any admin may do this."""
+
+    url = API_CHATGPT_ACCOUNT_DISCONNECT
+    name = "api:climate_advisor:chatgpt_account_disconnect"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        if not _is_admin(_request_user(request)):
+            return self.json_message(
+                "Only Home Assistant administrators can disconnect a ChatGPT account", status_code=403
+            )
+        manager = _account_manager(hass)
+        if manager is None:
+            return self.json({"state": "disconnected", "revocation": "not_needed", "revocation_unconfirmed": False})
+        try:
+            outcome = await manager.async_disconnect()
+        except AIBackendError:
+            _LOGGER.warning("ChatGPT account disconnect failed: could not save the account")
+            return self.json_message("The change could not be saved. Try again.", status_code=503)
+        unconfirmed = outcome == "unconfirmed"
+        _LOGGER.info("ChatGPT account disconnected: revocation=%s", outcome)
+        body: dict[str, Any] = {"state": "disconnected", "revocation": outcome, "revocation_unconfirmed": unconfirmed}
+        if unconfirmed:
+            body["message"] = CHATGPT_REVOCATION_UNCONFIRMED_TEXT
+        return self.json(body)
+
+
 # All views to register
 API_VIEWS = [
     ClimateAdvisorStatusView,
@@ -1491,4 +1692,6 @@ API_VIEWS = [
     ClimateAdvisorSubmitGithubIssueView,
     ClimateAdvisorEventLogView,
     ClimateAdvisorEnginesView,
+    ClimateAdvisorChatGPTAccountStatusView,
+    ClimateAdvisorChatGPTAccountDisconnectView,
 ]

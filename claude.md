@@ -110,6 +110,7 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 - HA service calls to `climate` domain (set_hvac_mode, set_temperature) — these are the integration's core purpose
 - HA service calls to `notify` domain — user-configured notification service
 - One data file: `climate_advisor_learning.json` in the HA config root (learning engine state)
+- The shared ChatGPT account's `Store` (`.storage/climate_advisor.chatgpt_account`); see `docs/HA-BOUNDARY-EXCEPTIONS.md` §3
 
 **Everything else is OUT OF SCOPE.** This includes but is not limited to:
 - Modifying other integrations or their config
@@ -1008,6 +1009,24 @@ The dashboard is a single-file HTML/CSS/JS panel. When adding new status grid ca
 #### API-Frontend Contract
 
 When adding new REST API endpoints or modifying response shapes, verify that the frontend JavaScript reads the exact same key names. Search `index.html` for the endpoint path and check every property access. Common failure: backend returns `monthly_cost_estimate` but frontend reads `monthly_cost`.
+
+### AI Providers
+
+Provider seam: `ai_backend.py` (contracts, `PROVIDERS`), `claude_api.py` (`ClaudeAPIClient` wrapper + `AnthropicBackend`), `chatgpt_backend.py`, `chatgpt_account.py`. Specs: `docs/claude-api-spec.md`, `docs/ai-integration.md`.
+
+- **Adding a provider** = one backend module + one `ProviderSpec` registered in `PROVIDERS`, one entry in `ai_providers._PROVIDER_MODULES` (each module is imported on its own; a failing import is logged and only that provider is lost), and strings. Its config keys are named only by `ProviderSpec.credential_setting` and `model_setting`; never read `ai_api_key` or `ai_model` for "the zone's provider" outside the Anthropic backend. A user-started request passes `requester_id` to the client, so the owner check runs at dispatch (the provider can switch live while context is gathered). No edits to the wrapper, `chatgpt_account.py`, or callers. Behaviour differences come from `ProviderSpec` capability flags and its `resolve_request_options` / `list_models` / `validate_credentials`, never from `if provider == ...` in `ClaudeAPIClient` or its callers. An unknown provider id means status `error` and no AI, never a setup failure.
+- An API-key provider needs nothing more. A second account-kind provider also needs its own manager: `coordinator._ai_client_arg` hands out the ChatGPT one.
+- `ClaudeAPIClient` / `ClaudeResponse` keep their names for every provider (historical; do not rename piecemeal).
+- The shared account manager lives at `hass.data["climate_advisor_chatgpt_account"]` (`CHATGPT_ACCOUNT_HASS_KEY`) and NEVER in `hass.data[DOMAIN]`, which holds only coordinators. Clients get it by reference and read it per request.
+- Tokens never appear in logs, exception text, `status()`, the REST status view, diagnostics or config entry data. Errors carry an HTTP status and a vetted short code only.
+- Every refresh failure, and a 401 after a refresh, is `no_retry`: one request sends at most one refresh grant, and nothing may send the same refresh token twice within one request, because the server may already have rotated it. A 401 for a token another zone has since replaced retries once with the saved token, with no grant.
+- `async_apply_ai_settings` builds against a candidate and then commits config and backend together on the loop. `stop_dispatch` is set before the build's first await and lifted only by the commit, so if the build fails the zone starts no new request until an apply or reload works, and the flow says so. It never keeps starting requests on the provider the zone was saved away from; one already in an HTTP call or queued on the account lock may finish. A running request sends no further attempt or tier fallback once its backend is no longer the zone's (compared with the backend it was taken from, because `for_request()` may return a copy); resends inside one attempt are not covered: the ChatGPT backend's 503 backoff and its resend after a 401 token refresh.
+- Unload never touches credentials (unload also runs on reload). Only `async_remove_entry` on the final entry revokes and deletes the store.
+- Only a `response.completed` event with non-blank text and no refusal is success for the ChatGPT stream; failed, incomplete, interrupted, refused or blank streams raise before the final `stop` event so no partial report is stored.
+- AI runtime failures never raise `ConfigEntryAuthFailed` or `ConfigEntryNotReady`; HVAC automation must keep running. A re-sign-in need is a repair issue, not a reauth flow. Runtime and SDK failures, a failure in the ChatGPT modules, and an exception from the `ClaudeAPIClient` or `AnthropicBackend` constructor (the zone loads with no client) do not fail setup; an import failure of `claude_api.py`, with AI on, gives `SETUP_ERROR` as it always has.
+- `ChatGPTAccountManager.quota_cooldown_active()` is NOT a pure read: after the cooldown it grants one caller the probe lease and mutates state. Use `status()` for read-only display.
+- Account sign-in happens in the options flow (`chatgpt_account*` steps), never via a REST connect view or a file/token hand-off: the connecting user's id (the owner) comes from `http.current_request` `hass_user`, since flow context has no user id. The pasted 127.0.0.1 callback address is parsed, never fetched. Disconnect is allowed to any admin.
+- `plan_restricted` providers are manual-only and connected-owner-only (`check_user_allowed`); never add a scheduled or automatic caller for them.
 
 ### Home Assistant Patterns
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
 import math
 import re
@@ -17,18 +16,20 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector
 
 from . import zone_registry
+from .ai_backend import CREDENTIAL_API_KEY, PROVIDERS, AIBackendError, get_provider
+from .ai_providers import ensure_providers_registered
 from .const import (
-    AI_MODELS,
     AI_REASONING_OPTIONS,
-    CONF_AI_API_KEY,
+    CHATGPT_ACCOUNT_HASS_KEY,
+    CHATGPT_REVOCATION_UNCONFIRMED_TEXT,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
     CONF_AI_ENABLED,
     CONF_AI_INVESTIGATOR_ENABLED,
     CONF_AI_INVESTIGATOR_RPD,
     CONF_AI_MANUAL_REQUESTS_PER_DAY,
     CONF_AI_MAX_TOKENS,
-    CONF_AI_MODEL,
     CONF_AI_MONTHLY_BUDGET,
+    CONF_AI_PROVIDER,
     CONF_AI_REASONING_EFFORT,
     CONF_AI_TEMPERATURE,
     CONF_AUTOMATION_GRACE_NOTIFY,
@@ -79,8 +80,8 @@ from .const import (
     DEFAULT_AI_INVESTIGATOR_RPD,
     DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
     DEFAULT_AI_MAX_TOKENS,
-    DEFAULT_AI_MODEL,
     DEFAULT_AI_MONTHLY_BUDGET,
+    DEFAULT_AI_PROVIDER,
     DEFAULT_AI_REASONING_EFFORT,
     DEFAULT_AI_TEMPERATURE,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
@@ -176,9 +177,82 @@ OPTIONS_MENU_OPTIONS = [
     "notifications",
     "advanced",
     "classification_thresholds",
-    "ai_settings",
+    "ai_provider",  # labelled "AI Settings"; leads on to the ai_settings step
     "github_settings",
 ]
+
+# ChatGPT sign-in (options flow). Field keys, and the AccountLoginError.reason codes the paste step maps
+# to strings under options.error (a test checks each exists). Unknown reasons show "login_failed".
+CONF_CHATGPT_ACCOUNT_CONSENT = "chatgpt_account_consent"
+CONF_CHATGPT_ACCOUNT_URL = "chatgpt_account_redirect_url"
+ACCOUNT_LOGIN_ERROR_REASONS = (
+    "already_connected",
+    "owner_required",
+    "no_pending_login",
+    "login_expired",
+    "bad_url",
+    "state_mismatch",
+    "consent_denied",
+    "exchange_failed",
+    "login_checks_failed",
+    "missing_scope",
+    "bad_identity",
+    "different_account",
+    "save_failed",
+)
+# After these the pending login is still usable (a mistyped paste) or nothing can be retried; after any other
+# error the manager has used the attempt up, so a fresh sign-in link is fetched for the retry.
+_ACCOUNT_LOGIN_KEEP_REASONS = frozenset({"bad_url", "state_mismatch", "owner_required", "already_connected"})
+_MODEL_LATER_TEXT = "No model is set yet. Your sign-in is kept; pick a model in AI Settings later."
+_READINESS_NOT_LIVE_TEXT = (
+    "ChatGPT answered a check, but this zone could not start using it. Reload Climate Advisor to apply your choice."
+)
+_READINESS_NOT_APPLIED_TEXT = (
+    "Your sign-in is saved, but this zone could not start using it, and it starts no new AI requests until it "
+    "does (one already running may finish). Reload Climate Advisor to apply your choice."
+)
+_READINESS_AI_OFF_TEXT = (
+    "ChatGPT answered a check, but AI features are turned off for this zone. Turn them on in AI Settings."
+)
+_READINESS_TEXT = {
+    "ready": "ChatGPT answered a check, so AI features are ready.",
+    "not_ready": "ChatGPT is not ready right now. Your sign-in is kept; try an investigation later.",
+    "check_failed": (
+        "The check against ChatGPT failed. Your sign-in is kept; try an investigation, or disconnect and sign in again."
+    ),
+}
+
+
+def _current_user_id() -> str | None:
+    """The id of the Home Assistant user whose HTTP request is driving this flow step, or None.
+
+    Flow context carries no user id, so read it from the request (set by HA's http auth middleware as
+    ``request["hass_user"]``). Only the options-flow REST views (admin only) provide it.
+    """
+    from homeassistant.helpers.http import current_request  # noqa: PLC0415
+
+    request = current_request.get()
+    user = request.get("hass_user") if request is not None else None
+    user_id = getattr(user, "id", None)
+    return user_id if isinstance(user_id, str) and user_id else None
+
+
+async def _check_account_readiness(hass: HomeAssistant, manager: Any) -> str:
+    """Probe ``GET /v1/models`` (never inference). Returns ``ready`` / ``not_ready`` / ``check_failed``.
+
+    ``not_ready`` is a temporary failure (429/5xx/network): credentials are kept. Never raises.
+    """
+    try:
+        from .chatgpt_backend import CHATGPT_SPEC  # noqa: PLC0415
+
+        backend = CHATGPT_SPEC.build_backend({}, manager)
+        await backend.async_fetch_models()
+    except AIBackendError as err:
+        return "not_ready" if err.category in ("transient", "quota", "rate_limit") else "check_failed"
+    except Exception:  # noqa: BLE001 - a readiness probe must never fail the sign-in
+        return "not_ready"
+    return "ready"
+
 
 TEMP_UNIT_OPTIONS = [
     {"value": FAHRENHEIT, "label": "Fahrenheit (°F)"},
@@ -880,6 +954,8 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     # Class-level default so a flow built without __init__ (tests) still works; only ever re-assigned.
     _whf_acknowledged: dict[str, str] = {}
     _setpoints_acknowledged: dict[str, Any] = {}
+    # The provider picked in the ai_provider step, held here (not in the entry) until ai_settings is saved.
+    _pending_ai_provider: str | None = None
 
     def __init__(self) -> None:
         """Initialize the options flow."""
@@ -897,6 +973,13 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         # Which schedule (by id) async_step_scheduler_edit() is editing, set by
         # async_step_scheduler() before navigating in; None means "add new" (Issue #786).
         self._editing_schedule_id: str | None = None
+        # ChatGPT sign-in state: the authorize link shown, and whether a login is pending with no result yet.
+        self._login_url: str = ""
+        self._login_open: bool = False
+        self._login_id: str | None = None
+        self._readiness: str = ""
+        self._model_note: str = ""
+        self._model_choices: list[str] = []
 
     def _apply_step_input(self, user_input: dict[str, Any], clearable_keys: tuple[str, ...]) -> None:
         """Merge a step's input; treat any omitted clearable optional-entity key as an explicit clear.
@@ -1924,43 +2007,85 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
 
     # ---- AI Settings ----
 
+    async def async_step_ai_provider(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
+        """AI Settings, part 1: choose the provider, which decides the fields on the next form.
+
+        Nothing is saved here; the choice is held in ``_pending_ai_provider`` until ai_settings is saved.
+        Once the HA minimum reaches the release with ``data_entry_flow`` ``visible`` conditions, live
+        conditional fields could replace this extra step.
+        """
+        ensure_providers_registered()
+        if user_input is not None:
+            chosen = user_input.get(CONF_AI_PROVIDER)
+            self._pending_ai_provider = chosen if chosen in PROVIDERS else None
+            return await self.async_step_ai_settings()
+
+        saved = self.config_entry.data.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER)
+        default = self._pending_ai_provider or saved
+        if default not in PROVIDERS:
+            default = DEFAULT_AI_PROVIDER
+        return self.async_show_form(
+            step_id="ai_provider",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_AI_PROVIDER, default=default): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[{"value": p.id, "label": p.label} for p in PROVIDERS.values()],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+        )
+
     async def async_step_ai_settings(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
-        """AI Settings — Claude API configuration."""
+        """AI Settings, part 2: the chosen provider's options, driven by its capabilities."""
+        from .claude_api import ANTHROPIC_SPEC  # noqa: PLC0415
+
+        # Already imported (in the executor) by async_setup_entry; this is a cached no-op then.
+        ensure_providers_registered()
         errors: dict[str, str] = {}
         current = self.config_entry.data
+        # The pending choice (not yet saved) wins over the saved provider.
+        current_pid = self._pending_ai_provider or current.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER)
+        spec = get_provider(current_pid) or ANTHROPIC_SPEC
+        uses_key = spec.credential_kind == CREDENTIAL_API_KEY
+        saved_spec = get_provider(current.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER))
+        # Saving onto or away from an account provider applies at once: a zone switched away must stop using it.
+        account_involved = not uses_key or (saved_spec is not None and saved_spec.credential_kind != CREDENTIAL_API_KEY)
+        model_key = spec.model_setting
+        key_field = spec.credential_setting
 
         if user_input is not None:
             ai_enabled = user_input.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED)
-            new_key = user_input.get(CONF_AI_API_KEY, "")
-            existing_key = current.get(CONF_AI_API_KEY, "")
+            new_key = user_input.get(key_field, "") if uses_key else ""
+            existing_key = current.get(key_field, "")
 
             # If AI enabled but no key provided and no existing key, require one
-            if ai_enabled and not new_key and not existing_key:
-                errors[CONF_AI_API_KEY] = "ai_key_required"
+            if uses_key and ai_enabled and not new_key and not existing_key:
+                errors[key_field] = "ai_key_required"
 
-            # Validate temperature range
-            ai_temp = user_input.get(CONF_AI_TEMPERATURE, DEFAULT_AI_TEMPERATURE)
-            if not (0.0 <= float(ai_temp) <= 1.0):
-                errors[CONF_AI_TEMPERATURE] = "ai_temperature_out_of_range"
+            if spec.supports_tuning:
+                # Validate temperature range
+                ai_temp = user_input.get(CONF_AI_TEMPERATURE, DEFAULT_AI_TEMPERATURE)
+                if not (0.0 <= float(ai_temp) <= 1.0):
+                    errors[CONF_AI_TEMPERATURE] = "ai_temperature_out_of_range"
 
-            # Validate max_tokens range. Ceiling raised 8192 -> 16384 (Issue #563
-            # follow-on): claude-sonnet-5 was observed consuming the full 8192-token
-            # budget with zero visible output, and 8192 was already the old ceiling —
-            # there was no way for a user to try more headroom without this change.
-            ai_max_tokens = int(user_input.get(CONF_AI_MAX_TOKENS, DEFAULT_AI_MAX_TOKENS))
-            if not (256 <= ai_max_tokens <= 16384):
-                errors[CONF_AI_MAX_TOKENS] = "ai_max_tokens_out_of_range"
+                # Validate max_tokens range. Ceiling raised 8192 -> 16384 (Issue #563
+                # follow-on): claude-sonnet-5 was observed consuming the full 8192-token
+                # budget with zero visible output, and 8192 was already the old ceiling —
+                # there was no way for a user to try more headroom without this change.
+                ai_max_tokens = int(user_input.get(CONF_AI_MAX_TOKENS, DEFAULT_AI_MAX_TOKENS))
+                if not (256 <= ai_max_tokens <= 16384):
+                    errors[CONF_AI_MAX_TOKENS] = "ai_max_tokens_out_of_range"
 
             if not errors and new_key and new_key != existing_key and ai_enabled:
                 try:
-                    from .claude_api import ClaudeAPIClient
-
                     test_config = {**current, **user_input}
-                    # ClaudeAPIClient's constructor does blocking I/O (AsyncAnthropic
-                    # reads a local config file and loads the TLS cert bundle) —
-                    # offload it instead of running that inline in this async step.
-                    client = await self.hass.async_add_executor_job(functools.partial(ClaudeAPIClient, test_config))
-                    success, _message = await client.async_test_connection(hass=self.hass)
+                    # The provider's validate_credentials builds its backend in the
+                    # executor (AsyncAnthropic reads a local config file and loads the
+                    # TLS cert bundle — blocking I/O).
+                    success, _message = await spec.validate_credentials(test_config, self.hass)
                     if not success:
                         errors["base"] = "ai_connection_failed"
                 except Exception:  # noqa: BLE001
@@ -1968,12 +2093,13 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
 
             if not errors:
                 # If the user left the key field blank, preserve the existing key
-                merged = {**user_input}
-                if not new_key:
+                # The provider is committed only now; the other provider's settings stay in the entry.
+                merged = {**user_input, CONF_AI_PROVIDER: spec.id}
+                if uses_key and not new_key:
                     if existing_key:
-                        merged[CONF_AI_API_KEY] = existing_key
+                        merged[key_field] = existing_key
                     else:
-                        merged.pop(CONF_AI_API_KEY, None)
+                        merged.pop(key_field, None)
 
                 # Apply int() conversion for number fields
                 for key in (
@@ -1987,119 +2113,405 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         merged[key] = int(merged[key])
 
                 await self._commit_section(merged)
+                self._pending_ai_provider = None
+                if account_involved and not await self._apply_ai_to_running_zone():
+                    return await self.async_step_ai_apply_failed()
+                if not uses_key:
+                    return await self.async_step_chatgpt_account()
                 return await self.async_step_init()
 
         # Build masked key status placeholder for description
-        existing_key = current.get(CONF_AI_API_KEY, "")
-        if existing_key:
-            key_status = "••••" + existing_key[-4:] if len(existing_key) > 4 else "••••"
+        existing_key = current.get(key_field, "")
+        if not uses_key:
+            status_lines = (
+                f"Provider: {spec.label}\n"
+                f"After you save, you can sign in with {spec.display_name} (or disconnect) on the next screen."
+            )
+        elif existing_key:
+            status_lines = "API Key Status: " + ("••••" + existing_key[-4:] if len(existing_key) > 4 else "••••")
         else:
-            key_status = "Not configured"
+            status_lines = "API Key Status: Not configured"
 
-        # Issue #563: populate the dropdown from Anthropic's live model registry
-        # instead of the hardcoded AI_MODELS list, so newly released models appear
-        # without a CA code change. fetch_available_models() never raises — it
-        # falls back to AI_MODELS on any failure (no key yet, network error, an
-        # unsupported SDK version) — but a config-flow render must never hang on a
-        # slow network either, hence the wrapping timeout here.
-        from .claude_api import fetch_available_models  # noqa: PLC0415
-
+        # Issue #563: populate the dropdown from the provider's live model registry
+        # instead of a hardcoded list, so newly released models appear without a CA code
+        # change. list_models never raises — it falls back on any failure (no key yet,
+        # network error, an unsupported SDK version) — but a config-flow render must never
+        # hang on a slow network either, hence the wrapping timeout here.
         try:
-            model_options = await asyncio.wait_for(fetch_available_models(existing_key, hass=self.hass), timeout=5.0)
+            model_options = await asyncio.wait_for(spec.list_models(current, self.hass), timeout=5.0)
         except Exception:  # noqa: BLE001 — includes asyncio.TimeoutError; must never block config flow render
-            model_options = AI_MODELS
+            model_options = []
+        if not model_options:
+            model_options = list(spec.fallback_models)
 
-        schema = vol.Schema(
-            {
-                vol.Optional(
-                    CONF_AI_ENABLED,
-                    default=current.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED),
-                ): selector.BooleanSelector(),
-                vol.Optional(CONF_AI_API_KEY, default=""): selector.TextSelector(
-                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
-                ),
-                vol.Optional(
-                    CONF_AI_MODEL,
-                    default=current.get(CONF_AI_MODEL, DEFAULT_AI_MODEL),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[{"value": m, "label": m} for m in model_options],
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
+        fields: dict[Any, Any] = {
+            vol.Optional(
+                CONF_AI_ENABLED,
+                default=current.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED),
+            ): selector.BooleanSelector(),
+        }
+        if uses_key:
+            fields[vol.Optional(key_field, default="")] = selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+            )
+        if model_options:
+            # A provider with no built-in default model needs the user to choose one: required, preselected.
+            model_marker = vol.Optional if spec.default_model else vol.Required
+            model_default = current.get(model_key, spec.default_model or model_options[0])
+            fields[model_marker(model_key, default=model_default)] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[{"value": m, "label": m} for m in model_options],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+        if spec.supports_tuning:
+            fields[
                 vol.Optional(
                     CONF_AI_REASONING_EFFORT,
                     default=current.get(CONF_AI_REASONING_EFFORT, DEFAULT_AI_REASONING_EFFORT),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[{"value": r, "label": r.capitalize()} for r in AI_REASONING_OPTIONS],
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
+                )
+            ] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[{"value": r, "label": r.capitalize()} for r in AI_REASONING_OPTIONS],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+            fields[
                 vol.Optional(
                     CONF_AI_MAX_TOKENS,
                     default=current.get(CONF_AI_MAX_TOKENS, DEFAULT_AI_MAX_TOKENS),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=256,
-                        max=16384,
-                        step=256,
-                        unit_of_measurement="tokens",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
+                )
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=256,
+                    max=16384,
+                    step=256,
+                    unit_of_measurement="tokens",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+            fields[
                 vol.Optional(
                     CONF_AI_TEMPERATURE,
                     default=current.get(CONF_AI_TEMPERATURE, DEFAULT_AI_TEMPERATURE),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0.0, max=1.0, step=0.1, mode=selector.NumberSelectorMode.SLIDER)
-                ),
+                )
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0.0, max=1.0, step=0.1, mode=selector.NumberSelectorMode.SLIDER)
+            )
+        if spec.tracks_cost:
+            fields[
                 vol.Optional(
                     CONF_AI_MONTHLY_BUDGET,
                     default=current.get(CONF_AI_MONTHLY_BUDGET, DEFAULT_AI_MONTHLY_BUDGET),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0,
-                        max=100,
-                        step=1,
-                        unit_of_measurement="USD",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
+                )
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=100,
+                    step=1,
+                    unit_of_measurement="USD",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+        if not spec.plan_restricted:
+            fields[
                 vol.Optional(
                     CONF_AI_AUTO_REQUESTS_PER_DAY,
                     default=current.get(CONF_AI_AUTO_REQUESTS_PER_DAY, DEFAULT_AI_AUTO_REQUESTS_PER_DAY),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=1, max=50, step=1, mode=selector.NumberSelectorMode.BOX)
-                ),
-                vol.Optional(
-                    CONF_AI_MANUAL_REQUESTS_PER_DAY,
-                    default=current.get(CONF_AI_MANUAL_REQUESTS_PER_DAY, DEFAULT_AI_MANUAL_REQUESTS_PER_DAY),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=1, max=100, step=1, mode=selector.NumberSelectorMode.BOX)
-                ),
-                vol.Optional(
-                    CONF_AI_INVESTIGATOR_ENABLED,
-                    default=current.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED),
-                ): selector.BooleanSelector(),
-                # Issue #563: investigator-specific model/reasoning/max_tokens fields removed —
-                # the investigator now shares the single AI Model/Reasoning/Max Tokens fields
-                # above instead of a separate persistent config block.
-                vol.Optional(
-                    CONF_AI_INVESTIGATOR_RPD,
-                    default=current.get(CONF_AI_INVESTIGATOR_RPD, DEFAULT_AI_INVESTIGATOR_RPD),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=1, max=20, mode=selector.NumberSelectorMode.BOX)
-                ),
-            }
+                )
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(min=1, max=50, step=1, mode=selector.NumberSelectorMode.BOX)
+            )
+        fields[
+            vol.Optional(
+                CONF_AI_MANUAL_REQUESTS_PER_DAY,
+                default=current.get(CONF_AI_MANUAL_REQUESTS_PER_DAY, DEFAULT_AI_MANUAL_REQUESTS_PER_DAY),
+            )
+        ] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=1, max=100, step=1, mode=selector.NumberSelectorMode.BOX)
         )
+        fields[
+            vol.Optional(
+                CONF_AI_INVESTIGATOR_ENABLED,
+                default=current.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED),
+            )
+        ] = selector.BooleanSelector()
+        # Issue #563: investigator-specific model/reasoning/max_tokens fields removed —
+        # the investigator now shares the single AI Model/Reasoning/Max Tokens fields
+        # above instead of a separate persistent config block.
+        fields[
+            vol.Optional(
+                CONF_AI_INVESTIGATOR_RPD,
+                default=current.get(CONF_AI_INVESTIGATOR_RPD, DEFAULT_AI_INVESTIGATOR_RPD),
+            )
+        ] = selector.NumberSelector(selector.NumberSelectorConfig(min=1, max=20, mode=selector.NumberSelectorMode.BOX))
 
         return self.async_show_form(
             step_id="ai_settings",
-            data_schema=schema,
+            data_schema=vol.Schema(fields),
             errors=errors,
-            description_placeholders={"key_status": key_status},
+            description_placeholders={
+                "display_name": spec.display_name,
+                "api_name": spec.api_name,
+                "status_lines": status_lines,
+                "investigator_note": "Each investigation uses extended thinking. " if spec.uses_claude_wording else "",
+            },
         )
+
+    async def async_step_ai_apply_failed(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """The settings are saved but the running zone could not take them, so it sends nothing for now."""
+        if user_input is not None:
+            return await self.async_step_init()
+        return self.async_show_form(step_id="ai_apply_failed", data_schema=vol.Schema({}))
+
+    # ---- ChatGPT account sign-in ----
+    # No commit happens in these steps: async_create_entry could reload the entry, and connecting needs no
+    # reload (the clients read the shared account manager per request).
+
+    @callback
+    def async_remove(self) -> None:
+        """Flow abandoned: drop a login that was started but never finished."""
+        if self._login_open:
+            self._login_open = False
+            manager = self.hass.data.get(CHATGPT_ACCOUNT_HASS_KEY)
+            if manager is not None:
+                # Only this flow's own attempt: another flow may have replaced it with its own.
+                manager.async_cancel_login(self._login_id)  # a sync @callback on the manager
+
+    async def _account_manager(self) -> Any:
+        from .chatgpt_account import async_get_account_manager  # noqa: PLC0415
+
+        return await async_get_account_manager(self.hass)
+
+    @staticmethod
+    def _login_error_key(reason: Any) -> str:
+        return reason if reason in ACCOUNT_LOGIN_ERROR_REASONS else "login_failed"
+
+    async def async_step_chatgpt_account(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Account menu: sign in (or sign in again) when not connected, disconnect when connected."""
+        manager = await self._account_manager()
+        info = manager.status()
+        state = info.get("state")
+        from .chatgpt_backend import CHATGPT_SPEC  # noqa: PLC0415
+
+        name = CHATGPT_SPEC.display_name
+        if state == "connected":
+            who = f" as {info['email']}" if info.get("email") else ""
+            summary = f"Connected to {name}{who}."
+            options = ["chatgpt_account_disconnect", "init"]
+        else:
+            summary = (
+                f"Your {name} sign-in expired or was revoked, so AI features are paused."
+                if state == "reauth_required"
+                else "The last sign-in could not be confirmed as saved. Signing in again checks it first."
+                if state == "save_uncertain"
+                else f"No {name} account is connected."
+            )
+            # Refused sign-ins for a different account can only be resolved by disconnecting this one.
+            options = (
+                ["chatgpt_account_signin", "chatgpt_account_disconnect", "init"]
+                if state == "reauth_required"
+                else ["chatgpt_account_signin", "init"]
+            )
+        return self.async_show_menu(
+            step_id="chatgpt_account", menu_options=options, description_placeholders={"account_summary": summary}
+        )
+
+    async def async_step_chatgpt_account_signin(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Show the sign-in link and take the pasted address of the page the browser lands on."""
+        from .chatgpt_account import AccountLoginError  # noqa: PLC0415
+
+        errors: dict[str, str] = {}
+        manager = await self._account_manager()
+        if user_input is None or not self._login_open:
+            # Opening the step, or submitting after a link could not be made: make one now.
+            self._login_url = ""
+            if _current_user_id() is None:
+                errors["base"] = "owner_required"
+            else:
+                try:
+                    self._login_url = await manager.async_begin_login()
+                    self._login_id = manager.pending_login_id  # read before any await: it is ours
+                    self._login_open = True
+                except AccountLoginError as err:
+                    errors["base"] = self._login_error_key(err.reason)
+                except AIBackendError:
+                    errors["base"] = "login_failed"
+        else:
+            owner = _current_user_id()
+            reason: str | None = None
+            if owner is None:
+                reason = "owner_required"
+            else:
+                try:
+                    await manager.async_complete_login(str(user_input.get(CONF_CHATGPT_ACCOUNT_URL, "")).strip(), owner)
+                except AccountLoginError as err:
+                    reason = self._login_error_key(err.reason)
+                except AIBackendError:
+                    reason = "login_failed"
+            if reason is None:
+                self._login_open = False
+                # A temporary ChatGPT error never fails the sign-in; the outcome is shown on the next screen.
+                self._readiness = await _check_account_readiness(self.hass, manager)
+                return await self._after_sign_in()
+            errors[CONF_CHATGPT_ACCOUNT_URL] = reason
+            if reason not in _ACCOUNT_LOGIN_KEEP_REASONS:
+                try:
+                    self._login_url = await manager.async_begin_login()
+                    self._login_id = manager.pending_login_id
+                except AccountLoginError, AIBackendError:
+                    self._login_open = False
+        return self.async_show_form(
+            step_id="chatgpt_account_signin",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_CHATGPT_ACCOUNT_URL, default=""): selector.TextSelector(
+                        selector.TextSelectorConfig()
+                    )
+                }
+            ),
+            errors=errors,
+            description_placeholders={"login_url": self._login_url, "redirect_host": "http://127.0.0.1"},
+        )
+
+    async def _apply_ai_to_running_zone(self) -> bool:
+        """Hand this zone's saved AI settings to its running coordinator, if it has one.
+
+        Never raises: a failed apply must not lose the sign-in. False tells the caller to report it.
+        """
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        if coordinator is None:
+            return True  # not loaded: its next setup reads the saved settings
+        try:
+            await coordinator.async_apply_ai_settings(self.config_entry.data)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Could not apply the AI settings to the running zone")
+            return False
+        return True
+
+    def _readiness_summary(self) -> str:
+        """The account check's outcome, saying "ready" only when this zone can really run a request."""
+        if self._readiness != "ready":
+            return _READINESS_TEXT.get(self._readiness, "")
+        spec, merged = self._zone_provider()
+        model = merged.get(spec.model_setting) if spec is not None else ""
+        if not model:
+            return ""  # _model_note says what is missing
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        if coordinator is not None:
+            if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
+                return _READINESS_AI_OFF_TEXT
+            client = coordinator.claude_client
+            if client is None or client.ready_model() != model:
+                return _READINESS_NOT_LIVE_TEXT
+        return _READINESS_TEXT["ready"]
+
+    def _zone_provider(self) -> Any:
+        """This zone's saved provider spec (None when unknown)."""
+        merged = {**self.config_entry.data, **self._updates}
+        return get_provider(merged.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER)), merged
+
+    async def _after_sign_in(self) -> config_entries.ConfigFlowResult:
+        """Sign-in is finished (nothing committed yet). Ask for a model when this zone has none."""
+        self._model_note = ""
+        self._model_choices = []
+        spec, merged = self._zone_provider()
+        if spec is not None and not merged.get(spec.model_setting):
+            try:
+                choices = await asyncio.wait_for(spec.list_models(merged, self.hass), timeout=5.0)
+            except Exception:  # noqa: BLE001 - a temporary failure never loses the sign-in
+                choices = []
+            if choices:
+                self._model_choices = list(choices)
+                return await self.async_step_chatgpt_account_model()
+            self._model_note = _MODEL_LATER_TEXT
+        return await self.async_step_chatgpt_account_done()
+
+    async def async_step_chatgpt_account_model(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """After sign-in: choose this zone's model from the connected account's list, then save it."""
+        spec, _merged = self._zone_provider()
+        if spec is None or not self._model_choices:
+            return await self.async_step_chatgpt_account_done()
+        key = spec.model_setting
+        if user_input is not None and user_input.get(key) in self._model_choices:
+            await self._commit_section({key: user_input[key]})
+            return await self.async_step_chatgpt_account_done()
+        return self.async_show_form(
+            step_id="chatgpt_account_model",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(key, default=self._model_choices[0]): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[{"value": m, "label": m} for m in self._model_choices],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+            description_placeholders={"provider_label": spec.label},
+        )
+
+    async def async_step_chatgpt_account_done(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Signed in: welcome and the readiness outcome."""
+        if user_input is not None:
+            return await self.async_step_init()
+        applied = await self._apply_ai_to_running_zone()
+        parts = (self._readiness_summary() if applied else _READINESS_NOT_APPLIED_TEXT, self._model_note)
+        return self.async_show_form(
+            step_id="chatgpt_account_done",
+            data_schema=vol.Schema({}),
+            description_placeholders={"readiness": "\n\n".join(part for part in parts if part)},
+        )
+
+    async def async_step_chatgpt_account_disconnect(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Confirm, then revoke and forget the shared account (any admin may)."""
+        errors: dict[str, str] = {}
+        manager = await self._account_manager()
+        if user_input is not None:
+            if not user_input.get(CONF_CHATGPT_ACCOUNT_CONSENT):
+                return await self.async_step_chatgpt_account()
+            try:
+                outcome = await manager.async_disconnect()
+            except AIBackendError:
+                errors["base"] = "save_failed"
+            else:
+                self._readiness = ""
+                return self.async_show_form(
+                    step_id="chatgpt_account_disconnected",
+                    data_schema=vol.Schema({}),
+                    description_placeholders={
+                        "revocation": CHATGPT_REVOCATION_UNCONFIRMED_TEXT
+                        if outcome == "unconfirmed"
+                        else "Access was revoked."
+                        if outcome == "confirmed"
+                        else ""
+                    },
+                )
+        return self.async_show_form(
+            step_id="chatgpt_account_disconnect",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_CHATGPT_ACCOUNT_CONSENT, default=False): selector.BooleanSelector()}
+            ),
+            errors=errors,
+        )
+
+    async def async_step_chatgpt_account_disconnected(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Disconnected: acknowledge and return to the menu."""
+        return await self.async_step_init()
 
     # ---- GitHub Integration ----
 

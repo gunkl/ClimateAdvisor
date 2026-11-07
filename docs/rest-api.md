@@ -7,7 +7,7 @@
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What does api.py own and what does it explicitly not own? | It owns the HTTP view layer — routing, auth enforcement, input validation, and response serialisation. It does NOT own business logic; every action delegates to the coordinator or automation engine. | [Scope](#scope) |
-| How does authentication work and are there any unauthenticated endpoints? | All 21 views set `requires_auth = True`. A HA long-lived access token is required for every endpoint; no unauthenticated endpoints exist. | [Authentication](#authentication) |
+| How does authentication work and are there any unauthenticated endpoints? | All 23 views set `requires_auth = True`. A HA long-lived access token is required for every endpoint; no unauthenticated endpoints exist. The `chatgpt_account/*` views additionally check the user's role, and `ai_investigate` checks the requester against the connected ChatGPT account owner for plan-restricted providers. | [Authentication](#authentication) |
 | Which config values are ever redacted and why? | Two fields are redacted: `ai_api_key` (via `"sensitive": True` in CONFIG_METADATA) and `notify_service` (hard-coded name check). Both return `"configured"` or `"not set"` — never the raw value. (`github_token` is not in `CONFIG_METADATA`, so it never appears in this view at all; diagnostics redacts it separately, Issue #1062.) | [Sensitive Field Redaction](#sensitive-field-redaction) |
 | What HTTP status codes does the API return and when? | 400 bad input, 403 feature disabled, 429 rate limit, 500 investigation failure, 503 coordinator/AI unavailable. Out-of-range numerics are silently clamped, not rejected. | [Error Handling](#error-handling) |
 | How does api.py read coordinator state and why does it sometimes bypass the coordinator cache? | Primary reads use `coordinator.data.get(...)` with safe defaults. Live HVAC state is read via `hass.states.get(climate_entity_id)` to guarantee freshness past the 30-minute update cycle. | [Coordinator Access Pattern](#coordinator-access-pattern) |
@@ -18,7 +18,7 @@
 ## Scope
 
 **Owns:**
-- HTTP view registration for all 21 Climate Advisor REST endpoints
+- HTTP view registration for all 23 Climate Advisor REST endpoints
 - Auth enforcement (`requires_auth = True` on every view)
 - Input validation and HTTP error responses (400, 403, 429, 500, 503)
 - Response serialisation: field selection, display transforms, sensitive-field redaction
@@ -33,7 +33,10 @@
 
 ## Authentication
 
-All 21 view classes set `requires_auth = True`. HA handles token validation before the view handler is invoked. No endpoint is reachable without a valid HA long-lived access token. There is no per-endpoint permission model beyond HA authentication.
+All 23 view classes set `requires_auth = True`. HA handles token validation before the view handler is invoked. No endpoint is reachable without a valid HA long-lived access token. `requires_auth` only establishes that the caller is logged in; there is no general per-endpoint permission model, with these exceptions that check `request["hass_user"]` explicitly:
+
+- `POST chatgpt_account/disconnect`: Home Assistant administrators only (403 otherwise). There is deliberately no REST connect: ChatGPT sign-in is an options-flow step (see [ai-integration.md](ai-integration.md#setting-up-the-chatgpt-provider)), which is how the connecting user's ID is recorded as the owner.
+- `POST ai_investigate`: when the zone's provider is `plan_restricted` (ChatGPT), only the connected account's owner (403 otherwise). Checked before the rate counters and context gathering, for both streaming and non-streaming requests. Providers that are not plan-restricted accept any logged-in user, as before. Also 400 ("No AI model is selected") when the zone's saved model is blank, before anything is sent.
 
 ## Endpoints
 
@@ -47,7 +50,8 @@ All 21 view classes set `requires_auth = True`. HA handles token validation befo
 | `/api/climate_advisor/automation_state` | Full automation engine debug state | Delegated to `coordinator.get_debug_state()` |
 | `/api/climate_advisor/learning` | Learning engine summary | `today_record`, `yesterday_record`, `tomorrow_plan`, `suggestions`, `compliance`, `comfort_range_low`, `comfort_range_high`, `unit` **Units (Issue #1049):** `tomorrow_plan.expected_high` / `expected_low` are converted at this boundary into the configured `unit` (via `temperature.display_temp()`, on a copy; `coordinator.tomorrow_plan` stays internal °F), matching `comfort_range_*`; the frontend appends the unit symbol and does no conversion. |
 | `/api/climate_advisor/config` | Integration configuration | `settings` list of `{key, value, label, description, category[, unit]}` — sensitive values redacted; temperature settings carry `unit` and are converted to the user's unit (see [Config Display Transforms](#config-display-transforms)) |
-| `/api/climate_advisor/ai_status` | AI client health and budget | `status` (api_key removed), `recent_requests` (last 10) |
+| `/api/climate_advisor/ai_status` | AI client health and budget | `status` (api_key removed), `recent_requests` (last 10). `status` also carries `provider`, `provider_label`, `usage_url`, `tracks_cost`, `plan_restricted`, `claude_wording`, `account_state` (`null` for API-key providers) and `stop_reason` (`null` unless saved settings could not be applied, when the zone starts no new request until a reload and its state is `inactive`); its top-level state can be `not_connected` |
+| `/api/climate_advisor/chatgpt_account/status` | Shared ChatGPT account state (domain-level, no `entry_id`; any logged-in user) | `state` (`disconnected`/`connected`/`reauth_required`/`save_uncertain`), `plan_usage_enabled`, `connected_at`, `last_refreshed_at`, `quota_cooldown_active`, `quota_next_probe_at`, `persist_pending`, `login_pending`, `is_admin`, `is_owner`. `email` and `owner_user_id` only for administrators and the owner. Never tokens or the host ID |
 | `/api/climate_advisor/investigation_reports` | AI investigator report history | Direct return from `coordinator.get_investigation_report_history()` |
 | `/api/climate_advisor/event_log` | Internal event log | `events`, `total`, `hours` — `hours` param silently clamped if out of range. `is_truncated`, `oldest_available` (Issue #432) — see [Event Log Truncation Signal](#event-log-truncation-signal) |
 | `/api/climate_advisor/activity_record` | Deterministic event timeline table (no AI required) | `table` (from `build_event_timeline_table()`), `hours`, `generated_at`, `is_truncated`, `oldest_available` (Issue #432) — see [Event Log Truncation Signal](#event-log-truncation-signal) |
@@ -65,7 +69,8 @@ All 21 view classes set `requires_auth = True`. HA handles token validation befo
 | `/api/climate_advisor/resume_from_pause` | Resume automation from door/window pause | `status`, `message`, `restored_mode` |
 | `/api/climate_advisor/cancel_fan_override` | Cancel active fan override | `status`, `message` |
 | `/api/climate_advisor/toggle_automation` | Enable or disable automation engine | `status`, `automation_enabled`, `message` |
-| `/api/climate_advisor/ai_investigate` | Run AI Investigator skill | Delegated — returns `coordinator.ai_skills.async_execute(...)` result dict |
+| `/api/climate_advisor/ai_investigate` | Run AI Investigator skill | Delegated — returns `coordinator.ai_skills.async_execute(...)` result dict. 403 if the provider is plan-restricted and the requester is not the connected owner |
+| `/api/climate_advisor/chatgpt_account/disconnect` | Revoke, then clear the account (any administrator) | `state`, `revocation` (`confirmed`/`unconfirmed`/`not_needed`), `revocation_unconfirmed`, and `message` telling the user to also disconnect the app in ChatGPT Settings when unconfirmed. 503 if the change could not be saved |
 
 ## Sensitive Field Redaction
 
@@ -99,8 +104,8 @@ Before returning config values, `ClimateAdvisorConfigView` applies these transfo
 | Code | When issued |
 |---|---|
 | 400 | Invalid parameter, missing or invalid JSON field, JSON parse failure |
-| 403 | AI feature disabled in config, or investigator feature not enabled |
-| 429 | Claude API rate limit exceeded |
+| 403 | AI feature disabled in config, investigator feature not enabled, a non-administrator calling `chatgpt_account/disconnect`, or a non-owner calling `ai_investigate` on a plan-restricted provider |
+| 429 | AI investigator rate limit exceeded |
 | 500 | AI investigation skill returned a failure result |
 | 503 | Coordinator not yet loaded, or AI client unavailable |
 
@@ -125,6 +130,7 @@ Before returning config values, `ClimateAdvisorConfigView` applies these transfo
 
 ## Security Notes
 
+- **ChatGPT account views**: responses contain fixed messages and vetted codes only; tokens and exception text never reach a client or a log. The manager is read from `hass.data["climate_advisor_chatgpt_account"]`, never `hass.data[DOMAIN]`.
 - **AI status endpoint**: `status.pop("api_key", None)` is called explicitly before serialising the AI client status dict, regardless of whether the key is present.
 - **Suggestion accept**: When a suggestion is accepted, only keys that appear in `CONFIG_METADATA.keys()` are persisted to the HA config entry. Unknown keys are applied to the in-memory config only and are not written to HA storage.
 - **Config endpoint**: See [Sensitive Field Redaction](#sensitive-field-redaction) — no raw sensitive value is ever returned.

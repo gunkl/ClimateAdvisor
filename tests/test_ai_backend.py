@@ -8,6 +8,7 @@ the shared ``ClaudeAPIClient`` wrapper.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import sys
 from collections.abc import AsyncIterator
@@ -345,6 +346,69 @@ class TestNoRetryFlag:
         assert client._circuit_breaker.consecutive_failures == 1
 
 
+class TestStopBetweenRetries:
+    """stop_dispatch ends a request's further attempts; a call already in progress may finish."""
+
+    @staticmethod
+    def _failing_client(*, stop_when: str | None):
+        client = _fake_client()
+        backend = client._backend
+
+        async def fail(**kwargs: Any) -> ClaudeResponse:
+            backend.calls.append(kwargs)
+            if stop_when == "attempt":
+                client.stop_dispatch("stopped for this test")
+            raise AIBackendError("down", "transient")
+
+        backend.async_request = fail
+        return client, backend
+
+    def test_stop_during_an_attempt_ends_the_retries(self, fake_provider):
+        client, backend = self._failing_client(stop_when="attempt")
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            response = asyncio.run(client.async_request("System.", "User."))
+        assert len(backend.calls) == 1
+        assert response.success is False and response.error == "stopped for this test"
+        assert client._circuit_breaker.consecutive_failures == 0
+
+    def test_stop_during_the_backoff_ends_the_retries(self, fake_provider):
+        client, backend = self._failing_client(stop_when=None)
+
+        async def stop_while_waiting(_delay):
+            client.stop_dispatch("stopped for this test")
+
+        with patch("asyncio.sleep", stop_while_waiting):
+            response = asyncio.run(client.async_request("System.", "User."))
+        assert len(backend.calls) == 1 and response.error == "stopped for this test"
+
+    def test_without_a_stop_every_attempt_runs(self, fake_provider):
+        client, backend = self._failing_client(stop_when=None)
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            response = asyncio.run(client.async_request("System.", "User."))
+        assert len(backend.calls) == AI_MAX_RETRIES and "down" in response.error
+        assert client._circuit_breaker.consecutive_failures == 1
+
+    def test_stop_prevents_a_tier_fallback_call(self, monkeypatch):
+        monkeypatch.setitem(PROVIDERS, "fake", dataclasses.replace(FAKE_SPEC, supports_tier_fallback=True))
+        client = _fake_client(fake_model="claude-sonnet-old")
+        backend = client._backend
+
+        async def not_found(**kwargs: Any) -> ClaudeResponse:
+            backend.calls.append(kwargs)
+            client.stop_dispatch("stopped for this test")
+            raise AIBackendError("gone", "permanent", model_not_found=True)
+
+        async def live_models() -> list[str]:
+            return ["claude-sonnet-new"]
+
+        backend.async_request = not_found
+        backend.async_list_models = live_models
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            response = asyncio.run(client.async_request("System.", "User."))
+        assert [call["model"] for call in backend.calls] == ["claude-sonnet-old"]
+        assert response.error == "stopped for this test"
+
+
 class TestUnknownProvider:
     def test_unknown_provider_reports_error_and_never_raises(self):
         client = ClaudeAPIClient({"ai_enabled": True, CONF_AI_PROVIDER: "does-not-exist"})
@@ -551,13 +615,145 @@ class TestProviderPinnedPerRequest:
         assert client._spec.id == "plan"
         assert client._budget.monthly_cost == 0.5
 
-    def test_a_retry_stays_on_the_provider_it_started_on(self, switching):
+    def test_a_switch_during_an_attempt_ends_the_request_on_neither_provider(self, switching):
         client, started_on, plan = switching
         started_on.errors = [AIBackendError("busy", "transient")]
         with patch.object(claude_api.asyncio, "sleep", AsyncMock()):
+            response = asyncio.run(client.async_request("S", "U"))
+        assert not response.success and response.no_retry
+        assert response.error == claude_api._BACKEND_REPLACED_MESSAGE
+        assert len(started_on.calls) == 1 and plan.calls == []
+        assert client._budget.monthly_cost == 0
+        assert client._circuit_breaker.consecutive_failures == 0
+
+
+class _BoundBackend(FakeBackend):
+    """Hands each request a copy, as ChatGPTBackend does; the copy shares ``calls`` and ``errors``."""
+
+    def for_request(self) -> _BoundBackend:
+        return copy.copy(self)
+
+
+class TestBackendReplacedDuringRetries:
+    """A request stays on the backend it started on, and ends once that is no longer the zone's backend."""
+
+    @pytest.fixture
+    def providers(self, monkeypatch):
+        """Two providers, one whose requests hold the backend itself and one that holds a copy of it."""
+        built = {"direct": FakeBackend({"fake_key": "k"}), "bound": _BoundBackend({"fake_key": "k"})}
+        for provider_id, backend in built.items():
+            monkeypatch.setitem(
+                PROVIDERS,
+                provider_id,
+                dataclasses.replace(
+                    FAKE_SPEC,
+                    id=provider_id,
+                    supports_tier_fallback=True,
+                    build_backend=lambda config, client=None, b=backend: b,
+                ),
+            )
+        return built
+
+    @staticmethod
+    def _client(provider_id: str) -> ClaudeAPIClient:
+        return ClaudeAPIClient({"ai_enabled": True, CONF_AI_PROVIDER: provider_id, "fake_key": "k"})
+
+    @staticmethod
+    def _config(provider_id: str) -> dict[str, Any]:
+        return {"ai_enabled": True, CONF_AI_PROVIDER: provider_id, "fake_key": "k"}
+
+    @pytest.mark.parametrize(("old_id", "new_id"), [("direct", "bound"), ("bound", "direct")])
+    def test_a_switch_during_the_backoff_sends_nothing_further(self, providers, old_id, new_id):
+        client = self._client(old_id)
+        old, new = providers[old_id], providers[new_id]
+        old.errors = [AIBackendError("busy", "transient") for _ in range(AI_MAX_RETRIES)]
+
+        async def switch_while_waiting(_delay):
+            client.update_config(self._config(new_id))
+
+        with patch.object(claude_api.asyncio, "sleep", switch_while_waiting):
+            response = asyncio.run(client.async_request("S", "U"))
+        assert len(old.calls) == 1 and new.calls == []
+        assert not response.success and response.no_retry
+        assert response.error == claude_api._BACKEND_REPLACED_MESSAGE
+        assert client._circuit_breaker.consecutive_failures == 0
+
+    @pytest.mark.parametrize("provider_id", ["direct", "bound"])
+    def test_with_no_switch_every_attempt_runs(self, providers, provider_id):
+        client = self._client(provider_id)
+        backend = providers[provider_id]
+        backend.errors = [AIBackendError("busy", "transient") for _ in range(AI_MAX_RETRIES)]
+        with patch.object(claude_api.asyncio, "sleep", AsyncMock()):
+            response = asyncio.run(client.async_request("S", "U"))
+        assert len(backend.calls) == AI_MAX_RETRIES and "busy" in response.error
+        assert client._circuit_breaker.consecutive_failures == 1
+
+    def test_a_config_update_keeping_the_backend_does_not_end_the_retries(self, providers):
+        client = self._client("direct")
+        backend = providers["direct"]
+        backend.errors = [AIBackendError("busy", "transient")]
+
+        async def update_while_waiting(_delay):
+            client.update_config(self._config("direct"))
+
+        with patch.object(claude_api.asyncio, "sleep", update_while_waiting):
             assert asyncio.run(client.async_request("S", "U")).success
-        assert len(started_on.calls) == 2 and plan.calls == []
-        assert client._budget.monthly_cost == 0.5
+        assert len(backend.calls) == 2
+
+    def test_a_same_provider_rebuild_ends_the_retries(self, providers):
+        client = self._client("direct")
+        backend = providers["direct"]
+        rebuilt = FakeBackend({"fake_key": "k"})
+        backend.errors = [AIBackendError("busy", "transient")]
+
+        async def rebuild_while_waiting(_delay):
+            client.update_config(self._config("direct"), backend=rebuilt)
+
+        with patch.object(claude_api.asyncio, "sleep", rebuild_while_waiting):
+            response = asyncio.run(client.async_request("S", "U"))
+        assert len(backend.calls) == 1 and rebuilt.calls == []
+        assert response.no_retry and response.error == claude_api._BACKEND_REPLACED_MESSAGE
+
+    @pytest.mark.parametrize("switch_during", ["attempt", "model_list"])
+    def test_a_switch_prevents_a_tier_fallback_call(self, providers, switch_during):
+        client = self._client("direct")
+        client._config["fake_model"] = "claude-sonnet-old"
+        old, new = providers["direct"], providers["bound"]
+
+        def switch():
+            client.update_config(self._config("bound"))
+
+        async def not_found(**kwargs: Any) -> ClaudeResponse:
+            old.calls.append(kwargs)
+            if switch_during == "attempt":
+                switch()
+            raise AIBackendError("gone", "permanent", model_not_found=True)
+
+        async def live_models() -> list[str]:
+            if switch_during == "model_list":
+                switch()
+            return ["claude-sonnet-new"]
+
+        old.async_request = not_found
+        old.async_list_models = live_models
+        with patch.object(claude_api.asyncio, "sleep", AsyncMock()):
+            response = asyncio.run(client.async_request("S", "U"))
+        assert [call["model"] for call in old.calls] == ["claude-sonnet-old"] and new.calls == []
+        assert response.no_retry and response.error == claude_api._BACKEND_REPLACED_MESSAGE
+        assert client._circuit_breaker.consecutive_failures == 0
+
+    def test_requests_after_the_switch_use_the_new_provider(self, providers):
+        client = self._client("direct")
+        old, new = providers["direct"], providers["bound"]
+        old.errors = [AIBackendError("busy", "transient")]
+
+        async def switch_while_waiting(_delay):
+            client.update_config(self._config("bound"))
+
+        with patch.object(claude_api.asyncio, "sleep", switch_while_waiting):
+            asyncio.run(client.async_request("S", "U"))
+        assert asyncio.run(client.async_request("S", "U")).success
+        assert len(old.calls) == 1 and len(new.calls) == 1
 
 
 class TestRequesterCheckedAtDispatch:

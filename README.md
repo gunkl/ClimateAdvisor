@@ -99,8 +99,17 @@ Everything is editable afterwards under **Configure**. The options there also co
 - notifications;
 - advanced options, such as **Prefer Savings Over Comfort** and the natural-ventilation soft start;
 - day-type thresholds;
-- AI settings (needs a Claude API key);
+- AI settings (the optional AI Investigator needs a Claude API key, or a ChatGPT sign-in; see [AI features](#ai-features));
 - GitHub settings, for submitting reports as issues.
+
+### AI features
+
+The AI Investigator is optional and manual: it runs only when someone clicks Investigate in the panel. It sends your home's recent event log, settings summary and sensor history to the provider you choose per zone (Configure → AI Settings):
+
+- **Anthropic Claude (default):** paste an API key. Usage is billed by Anthropic; a monthly budget can be set.
+- **ChatGPT subscription:** uses your ChatGPT plan instead of an API key, with no SSH or file copying. Choose it on the first AI Settings screen, then enable AI and save on the next, then pick **Sign in with ChatGPT** in the ChatGPT Account menu, and open the sign-in link. When you finish, the browser lands on an `http://127.0.0.1:...` page that **fails to load; that is expected**. Copy its full address and paste it into the flow. One sign-in covers every zone, only a Home Assistant administrator can sign in or disconnect, and only the user who signed in can run investigations.
+
+  Be aware: this paste-the-address sign-in is not documented by OpenAI and could stop working, and there is no fallback route. The access it relies on is a preview that may change. The saved sign-in is stored in Home Assistant's `.storage` and is included in backups; restoring an old backup asks you to sign in again. If revocation cannot be confirmed on disconnect, also disconnect the app in ChatGPT Settings. Details and limits: [ai-integration](docs/ai-integration.md#ai-providers).
 
 ### Thermostat requirements
 

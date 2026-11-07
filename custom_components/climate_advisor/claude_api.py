@@ -103,6 +103,8 @@ _CB_CLOSED = "closed"
 _CB_OPEN = "open"
 _CB_HALF_OPEN = "half_open"
 
+_BACKEND_REPLACED_MESSAGE = "This zone's AI settings changed while this request was running, so it was ended"
+
 
 @dataclass
 class ClaudeResponse:
@@ -773,8 +775,9 @@ class ClaudeAPIClient:
             triggered_by: "manual" (user-initiated) or "auto" (scheduled/automated).
             requester_id: The HA user behind this request, checked against the provider
                 the zone is on right now. There is no await between this check and the
-                backend call, and the request then finishes on that provider's backend and
-                accounting even if the zone switches meanwhile.
+                backend call. The request then stays on that provider's backend and accounting:
+                if the zone's backend is replaced meanwhile, an attempt already sent can finish,
+                and nothing further is sent.
 
         Returns:
             ClaudeResponse with result or failure metadata.
@@ -858,11 +861,13 @@ class ClaudeAPIClient:
                 error=inactive_reason,
             )
 
-        spec, backend = self._spec, self._backend.for_request()
+        started_on = self._backend
+        spec, backend = self._spec, started_on.for_request()
         options = self._resolve_options(max_tokens, temperature, model, reasoning_effort)
         response = await self._async_call_with_retry(
             spec=spec,
             backend=backend,
+            started_on=started_on,
             system_prompt=system_prompt,
             user_message=user_message,
             **options,
@@ -1228,7 +1233,8 @@ class ClaudeAPIClient:
         """Apply updated config entry data.
 
         The backend recreates its transport when credentials change; a changed
-        provider id rebuilds the backend. Lifts ``stop_dispatch``.
+        provider id rebuilds the backend. Lifts ``stop_dispatch``. A request running on a
+        backend replaced here sends nothing further.
 
         Args:
             config: New config entry data dict.
@@ -1258,7 +1264,8 @@ class ClaudeAPIClient:
         """Refuse every new request with ``reason`` until ``update_config`` succeeds.
 
         For a zone whose saved settings could not be applied: the provider it would otherwise
-        keep using is no longer the one the user chose. A request already running finishes.
+        keep using is no longer the one the user chose. A request's retries stop too, but one already
+        in an HTTP call or queued on the account manager's lock may still finish on the old provider.
         """
         self._stop_reason = reason
 
@@ -1474,6 +1481,7 @@ class ClaudeAPIClient:
         self,
         *,
         backend: Any,
+        started_on: Any,
         original_model: str,
         system_prompt: str,
         user_message: str,
@@ -1516,6 +1524,8 @@ class ClaudeAPIClient:
             new_model,
             tier,
         )
+        if self._stop_reason is not None or self._backend is not started_on:
+            return None
         try:
             return await self._single_api_call(
                 backend=backend,
@@ -1536,6 +1546,7 @@ class ClaudeAPIClient:
         *,
         spec: ProviderSpec,
         backend: Any,
+        started_on: Any,
         system_prompt: str,
         user_message: str,
         model: str,
@@ -1548,6 +1559,8 @@ class ClaudeAPIClient:
         Args:
             spec: The provider spec the request runs on.
             backend: The backend taken for this request, kept through its retries.
+            started_on: The zone's backend it was taken from (``for_request`` may return a
+                copy). Once that is no longer the zone's backend, nothing further is sent.
             system_prompt: System instructions.
             user_message: User turn content.
             model: Model identifier.
@@ -1563,6 +1576,17 @@ class ClaudeAPIClient:
         start_time = time.monotonic()
 
         for attempt in range(1, AI_MAX_RETRIES + 1):
+            if attempt > 1 and (self._stop_reason is not None or self._backend is not started_on):
+                return ClaudeResponse(
+                    success=False,
+                    content="",
+                    input_tokens=0,
+                    output_tokens=0,
+                    estimated_cost=0.0,
+                    latency_ms=(time.monotonic() - start_time) * 1000.0,
+                    error=self._stop_reason or _BACKEND_REPLACED_MESSAGE,
+                    no_retry=True,  # the zone stopped it; not a failure the breaker should count
+                )
             try:
                 response = await self._single_api_call(
                     backend=backend,
@@ -1629,6 +1653,7 @@ class ClaudeAPIClient:
                     if spec.supports_tier_fallback and exc.model_not_found:
                         fallback = await self._try_tier_fallback(
                             backend=backend,
+                            started_on=started_on,
                             original_model=model,
                             system_prompt=system_prompt,
                             user_message=user_message,

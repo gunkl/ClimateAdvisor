@@ -129,7 +129,7 @@ class TestAPIViewList:
     """Test the API_VIEWS registry."""
 
     def test_correct_count(self):
-        assert len(API_VIEWS) == 21
+        assert len(API_VIEWS) == 23  # 21 zone views + 2 domain-level chatgpt_account views (status, disconnect)
 
     def test_all_are_callable(self):
         for view_cls in API_VIEWS:

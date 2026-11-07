@@ -1135,3 +1135,32 @@ class TestRequestBoundToItsAccount:
         with patch.object(cb, "_get_session", return_value=session), pytest.raises(AIBackendError):
             asyncio.run(go())
         assert len(session.calls) == 1
+
+    def test_client_retries_with_no_switch(self):
+        """The request holds a copy of the zone's backend; that alone must not look like a switch."""
+        from custom_components.climate_advisor.claude_api import ClaudeAPIClient
+
+        client = ClaudeAPIClient({"ai_enabled": True, "ai_provider": "chatgpt", "ai_chatgpt_model": "m"}, FakeManager())
+        session = FakeSession(FakeResp(500), FakeResp(lines=sse(delta("x"), completed())))
+        with patch.object(cb, "_get_session", return_value=session):
+            assert asyncio.run(client.async_request("S", "U")).success
+        assert len(session.calls) == 2
+
+    def test_client_retry_ends_when_the_zone_moves_to_another_provider(self):
+        from custom_components.climate_advisor.claude_api import ClaudeAPIClient
+
+        client = ClaudeAPIClient({"ai_enabled": True, "ai_provider": "chatgpt", "ai_chatgpt_model": "m"}, FakeManager())
+        session = FakeSession(FakeResp(500), FakeResp(lines=sse(delta("x"), completed())))
+        new_backend = MagicMock()
+
+        async def switch_while_waiting(_delay):
+            client.update_config({"ai_enabled": True, "ai_provider": "anthropic"}, backend=new_backend)
+
+        with (
+            patch.object(cb, "_get_session", return_value=session),
+            patch.object(cb.asyncio, "sleep", switch_while_waiting),
+        ):
+            response = asyncio.run(client.async_request("S", "U"))
+        assert not response.success and response.no_retry
+        assert len(session.calls) == 1 and not new_backend.async_request.called
+        assert client._circuit_breaker.consecutive_failures == 0

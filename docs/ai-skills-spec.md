@@ -4,8 +4,9 @@
 
 **Issue #563 (this pass):** the former `"activity_report"` skill (`ai_skills_activity.py`) is
 retired — deleted entirely. The registry now holds exactly one skill, `"investigator"`, serving
-both the silent/scheduled narration use case (formerly `activity_report`, no `focus` kwarg) and
-the on-demand investigation use case (`focus` kwarg supplied). Its context is assembled from 16
+the investigation use case, which is manual-only (the dashboard's Investigate button; nothing is
+scheduled). A call without a `focus` kwarg (the retired `activity_report` shape) is still
+accepted but no live path makes one. Its context is assembled from 16
 providers registered in `ai_skills_context.py`'s `ContextProviderRegistry` — including three
 ported from the retired activity context (state cross-validation, override/fan-ownership
 details, historical daily summaries) and three new deterministic pre-computed sections that
@@ -22,7 +23,7 @@ audit.
 | What happens when `register()` is called with a name that already exists? | A WARNING is logged and the existing entry is silently overwritten. No exception is raised. | [Registration — duplicate handling](#registration) |
 | What does `registry.get()` return for an unknown skill name? | It returns `None`. The caller is responsible for handling the `None` case; `async_execute()` handles it by returning a standard error dict. | [Lookup contract](#lookup-contract) |
 | What six keys does `async_execute()` always return, and what does each hold on the error path? | `success=False`, `source="error"`, `data={}`, `error="<message>"`, `input_context=""` (or the assembled context if available), `raw_response=""`. All six keys are always present regardless of which code path is taken. | [Return contract](#return-contract) |
-| Is there still a separate `activity_report` skill? | No (Issue #563). It's retired; `ai_skills_activity.py` is deleted. The merged `investigator` skill's silent/no-`focus` call is its functional replacement. | [investigator Skill](#investigator-skill) |
+| Is there still a separate `activity_report` skill? | No (Issue #563). It's retired; `ai_skills_activity.py` is deleted. The merged `investigator` skill (manual-only; its no-`focus` call has no live caller) replaces it. | [investigator Skill](#investigator-skill) |
 | Why did the KNOWN-FIXED ISSUES context section grow without bound before Issue #563? | `_fix_is_relevant()`'s first rule matched any entry with a non-empty `scope_not_covered` field, which was mandatory on every entry per the release checklist — so all 169 entries always passed regardless of the intended version-scoping. Fixed by removing the field and bounding by recency count (`_select_relevant_fixes()`, 15 most recent + any not-yet-deployed). | [Known Fixes Context](#known-fixes-context) |
 | What is the Issue #205 override false-positive pattern, and how is it detected now? | An `override_detected` event within 60 seconds of an automation-initiated event is a known code-path false positive, not a real user override. `_build_known_override_false_positives()` computes this deterministically and hands the model the result — the prompt no longer asks the model to re-derive it from raw timestamps. | [Event Log Provider](#event-log-provider) |
 | What sensitive config key does `investigator` strip before including config in context? | `ai_api_key` is removed via `.pop()` on a copy of `coordinator.config` before the config block is serialised into the context string. The config block itself is a curated ~11-field subset, not a full dump. | [Config Provider](#config-provider) |
@@ -117,9 +118,10 @@ No type enforcement is performed on callable signatures at registration time.
 2. **Context build:** `await skill.context_builder(hass, coordinator, **kwargs)`. If an exception is raised:
    - If `skill.fallback` is defined → call `_run_fallback(skill, coordinator, **kwargs)` and return.
    - Else → return `_error_result(f"Context builder failed for {name}")`.
-3. **Per-skill config override resolution:** Read `coordinator.config` for `config_key_model`, `config_key_max_tokens`, `config_key_reasoning` if those keys are set on the skill definition. `max_tokens` is cast to `int` if the config value is not `None`. Missing config keys produce `None` overrides (which `async_request()` treats as "use global defaults").
+3. **Per-skill config override resolution:** Read `coordinator.config` for `config_key_model`, `config_key_max_tokens`, `config_key_reasoning` if those keys are set on the skill definition (`max_tokens` is cast to `int` if not `None`), then pass them through `_resolve_skill_options()`, which calls the active provider's `ProviderSpec.resolve_request_options(config, overrides)` (`CONF_AI_PROVIDER`, default `anthropic`). Anthropic returns the overrides as before; ChatGPT ignores them and uses `ai_chatgpt_model`. An unknown provider id yields the raw overrides and the client then reports status `error`. Missing config keys produce `None` overrides (which `async_request()` treats as "use global defaults").
 4. **Claude call:** `await claude_client.async_request(system_prompt=skill.system_prompt, user_message=context, triggered_by=skill.triggered_by, model=..., max_tokens=..., reasoning_effort=...)`.
 5. **Success path:** If `response.success=True`:
+   - Model-tier fallback persistence (`_maybe_persist_model_fallback`) runs only when the provider's `supports_tier_fallback` is true (Anthropic).
    - Call `skill.response_parser(response.content)`. If the parser raises, fall through to step 6.
    - Return `{success: True, source: "ai", data: parsed, error: None, input_context: context, raw_response: response.content, truncated: response.truncated}`.
    - `response.truncated` (and `response.stop_reason`) come from the Anthropic API's `stop_reason` field, which `ClaudeAPIClient` now inspects on every request (both `async_request` and `async_request_streaming`). `truncated=True` iff `stop_reason == "max_tokens"` — the model was cut off before finishing, not because it chose to stop. This is always logged (DEBUG for any stop_reason, WARNING when truncated) so a cut-off report is diagnosable instead of silently indistinguishable from a complete one (Issue #420).
@@ -167,6 +169,16 @@ The first six keys are always present. `truncated` is only present on the AI suc
 
 ---
 
+## Provider Notes
+
+The pipeline is provider-neutral; `claude_client` is a `ClaudeAPIClient` whichever provider is configured (the class and `ClaudeResponse` keep their historical names).
+
+- **Options:** per-request model/tokens/reasoning come from `ProviderSpec.resolve_request_options` (see step 3 above), not from reading Anthropic config directly.
+- **Streaming status text:** the first SSE `status` event names the provider (`Sending context to <provider label>…`), falling back to "the AI provider" for an unknown id.
+- **Partial reports:** a ChatGPT stream that fails, is incomplete, unreadable, refused, empty or interrupted raises before the final `stop` event, so the streaming path in `api.py` never stores a partial or blank report. Only a `response.completed` event with text is success. A refusal or empty answer also gets no fallback report on the non-streaming path.
+- **`truncated`:** the ChatGPT backend always reports `stop_reason="end_turn"`, so `truncated` is never `True` for it. Its output length cannot be capped from our side (no output-limit parameter is sent), so a cut-off cannot be distinguished by this field.
+- **Who may run it:** for a `plan_restricted` provider (ChatGPT), `ClimateAdvisorInvestigateView` returns 403 unless the requester is the connected account's owner, checked before rate counters and context gathering on both the streaming and non-streaming paths; the client also refuses any `triggered_by` other than `"manual"`.
+
 ## Caching
 
 The registry has no response cache. No memoisation, no TTL, no invalidation path. Every `async_execute()` call:
@@ -182,11 +194,9 @@ Response persistence (history storage, timestamps) is the responsibility of `coo
 
 **Registered name:** `"investigator"` · **triggered_by:** `"manual"` · **No per-skill config overrides** (Issue #563 — shares the global `ai_model`/`ai_reasoning_effort`/`ai_max_tokens` config; `CONF_AI_INVESTIGATOR_MODEL`/`_MAX_TOKENS`/`_REASONING` constants remain defined only so the historical v13→v14 config migration doesn't break old installs — nothing reads them)
 
-This is the sole skill in the registry — the former `activity_report` skill is retired. Two
-entry modes share this one definition:
-- **Silent / scheduled narration** — no `focus` kwarg (functional replacement for the retired
-  `activity_report`)
-- **On-demand investigation** — `focus` kwarg carries the user's described problem
+This is the sole skill in the registry — the former `activity_report` skill is retired. It is
+manual-only; there is no scheduled or automatic mode. The `focus` kwarg carries the user's
+described problem; an empty `focus` runs the default provider subset (no live path does).
 
 ### Context Builder
 

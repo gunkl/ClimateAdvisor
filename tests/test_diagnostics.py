@@ -188,6 +188,9 @@ class TestRedaction:
         import ast
         from pathlib import Path
 
+        from custom_components.climate_advisor.ai_backend import PROVIDERS
+        from custom_components.climate_advisor.ai_providers import ensure_providers_registered
+
         src = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "config_flow.py"
         const_mod = __import__("custom_components.climate_advisor.const", fromlist=["x"])
         password_keys = set()
@@ -201,7 +204,10 @@ class TestRedaction:
             if "PASSWORD" not in ast.dump(val_node) or not isinstance(key_node, ast.Call):
                 continue
             arg = key_node.args[0]
-            if isinstance(arg, ast.Name):
+            if isinstance(arg, ast.Name) and arg.id == "key_field":  # spec.credential_setting, per provider
+                ensure_providers_registered()
+                password_keys |= {spec.credential_setting for spec in PROVIDERS.values() if spec.credential_setting}
+            elif isinstance(arg, ast.Name):
                 password_keys.add(getattr(const_mod, arg.id))
             elif isinstance(arg, ast.Attribute):
                 password_keys.add(getattr(const_mod, arg.attr))

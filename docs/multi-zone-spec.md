@@ -1460,6 +1460,19 @@ persistence layer genuinely entry-scoped" as the real, larger body of work — n
 small patch bolted onto an already-correct design, and not a free win over the
 alternative on Gap 5 either.
 
+## Shared ChatGPT Account Across Zones
+
+Everything in this spec is per-zone (a config entry) except one thing: the ChatGPT-plan AI provider's account. A refresh token rotates and has one holder, so N zones cannot each keep a copy; the account is **instance-level**.
+
+- **One manager per HA instance** at `hass.data["climate_advisor_chatgpt_account"]`, never in `hass.data[DOMAIN]` (which `zone_registry` and every `iter_coordinators()` caller assume holds only coordinators). `async_setup_entry` of any zone creates and loads it; each zone's AI client holds it by reference.
+- **Provider is per zone** (`ai_provider` in each entry; default `anthropic`); the ChatGPT account is shared by every zone that selects it. A zone that selects ChatGPT before an account is connected gets a client reporting `not_connected`; connecting needs no reload, and neither does the model chosen afterwards (the flow applies the zone's `ai_*` settings to its own running coordinator only). Saving a zone away from ChatGPT applies the same way, so that zone stops using the account at once; if applying fails, that zone sends no AI requests until a reload.
+- **Sign-in and disconnect are options-flow steps** (Configure, AI Settings, ChatGPT Account on any zone; sign-in is by pasting the failed `127.0.0.1` redirect, see [ai-integration.md](ai-integration.md#setting-up-the-chatgpt-provider)). The account menu is the same from every zone. `chatgpt_account/status` and `chatgpt_account/disconnect` are domain-level REST views, with no `entry_id` and no zone resolution; there is no REST connect.
+- **Quota cooldown is account-level:** a plan usage-limit error from one zone pauses every zone's ChatGPT client. Any other 429 fails only that request.
+- **Unload vs removal:** unloading or reloading one zone never touches credentials; the keepalive timer stops only when the last loaded entry unloads. Removing the **final** entry revokes and deletes the account; removing one of several does nothing to it.
+- **Owner-only:** the investigate view returns 403 for a user other than the connected owner, in whichever zone is investigated.
+
+See [ai-integration.md](ai-integration.md#ai-providers).
+
 ## Resolved Questions
 
 Resolved via five-whys / reuse-of-existing-pattern reasoning.
@@ -2593,7 +2606,7 @@ current-tense guidance.** As actually followed:
 - `tests/test_api.py:43-60` — existing hand-built `hass.data = {DOMAIN: {"entry_1": coord}}` `MagicMock()` precedent for the shape `build_headless_multi_zone()` now produces via the real setup path instead
 - [`dump_diagnostics` fields](../custom_components/climate_advisor/__init__.py#L554) (`__init__.py:554-570`, was `:479-497` pre-Phase-B, PR1 **DONE** — now redirected through `diagnostics.py`'s shared helper, see the "(as built, PR1)" note under [Fix: implement HA's native diagnostics hook](#fix-implement-has-native-diagnostics-hook)) — original log-only diagnostics payload, superseded (not replaced) by the new `diagnostics.py` hook
 - [`diagnostics.py`](../custom_components/climate_advisor/diagnostics.py) (new, PR1 **DONE**) — `async_get_config_entry_diagnostics()` / `async_get_diagnostics_payload()`, HA's native Download Diagnostics hook; see [Diagnostics and Field Feedback](#diagnostics-and-field-feedback)
-- `docs/HA-BOUNDARY-EXCEPTIONS.md` — one active exception (learning-DB file); no new entry needed for `diagnostics.py`
+- `docs/HA-BOUNDARY-EXCEPTIONS.md` — the active exceptions (learning-DB file, dev-only sim integrations, ChatGPT account store); no new entry needed for `diagnostics.py`
 - [HA Developer Docs — Implements diagnostics](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/diagnostics/) — official signature/pattern for `async_get_config_entry_diagnostics`, `TO_REDACT`, and `async_redact_data()`
 - [HA Developer Docs — Config Flow](https://developers.home-assistant.io/docs/core/integration/config_flow/) — config-entry title/naming guidance. `title_placeholders` governs the flow's own display title during setup/discovery, not a config entry's persisted `title`; Gap 7's actual fix (PR8, **DONE**) is the existing `async_create_entry(title=...)` call site (now `config_flow.py:602`, `title=zone_name or "Climate Advisor"`) taking a real value instead of the pre-PR8 hardcoded string — a mechanism this codebase already used. The page does not cover cross-entry selection or repeatable-item options-flow patterns, so the Zone Influence config-surface sketch and PR8's naming flow both remain this document's own design, not a documented HA pattern.
 - Home Assistant developer-docs and community search results on `notify.persistent_notification` — confirms it is a fixed built-in notify target, not a user-configured notification service; the basis for keeping the Transitional Safety Window's mechanism on `issue_registry`/`repairs.py` rather than a notification call.

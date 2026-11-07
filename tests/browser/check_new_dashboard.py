@@ -582,7 +582,13 @@ def behaviour(browser):
     )
     pg.goto(BASE)
     pg.wait_for_timeout(1200)
-    if pg.locator("#night-card svg[role=img]").count() or "°" in pg.locator("#night-card").inner_text():
+    # The headline may name the CONFIGURED sleep-band setpoint CA holds ("keeps the heat for the bedroom at 66°F", built
+    # server-side by night_strategy.headline from the band, not from v4); C11 hides PREDICTED figures, so only the rest
+    # of the card must be free of temperatures.
+    card_text = pg.locator("#night-card").inner_text()
+    if pg.locator("#night-headline").count():
+        card_text = card_text.replace(pg.locator("#night-headline").inner_text(), "")
+    if pg.locator("#night-card svg[role=img]").count() or "°" in card_text:
         problems.append("night card shows figures although show_numbers is false")
     if not pg.locator("#night-nonumbers").count():
         problems.append("night card without figures lacks its explanation")

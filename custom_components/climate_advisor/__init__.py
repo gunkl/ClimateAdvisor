@@ -108,6 +108,7 @@ from .const import (
     VERSION,
 )
 from .coordinator import ClimateAdvisorCoordinator
+from .dashboard_api import DASHBOARD_VIEWS
 from .storage_paths import remove_entry_scoped_files
 
 _LOGGER = logging.getLogger(__name__)
@@ -758,7 +759,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         with log_capture.zone_scope(coordinator.zone_label):
             try:
                 # Register REST API views for the dashboard panel
-                for view_cls in API_VIEWS:
+                for view_cls in (*API_VIEWS, *DASHBOARD_VIEWS):
                     hass.http.register_view(view_cls())
 
                 # Register dashboard panel (iframe serving frontend/index.html)

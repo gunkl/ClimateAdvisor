@@ -132,7 +132,9 @@ def _method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
 def test_no_other_module_mentions_the_timeline() -> None:
     offenders = []
     for path in sorted(_PKG.glob("*.py")):
-        if path.name in {"operation_timeline.py", "coordinator.py"}:
+        # night_strategy.py is the contract's pure advisory transformer (apply_night_strategy -> Timeline, R4): it
+        # imports no engine, coordinator, api or HA code (test_advisory_modules_command_nothing); commands nothing.
+        if path.name in {"operation_timeline.py", "coordinator.py", "night_strategy.py"}:
             continue
         for node, name, where in _references(_tree(path)):
             offenders.append(f"{path.name}:{getattr(node, 'lineno', '?')} {name} in {'.'.join(where) or '<module>'}")

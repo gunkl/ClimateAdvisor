@@ -743,6 +743,7 @@ def v4_ca_only(browser):
             )
             check(f"{name}: v4 _ca line drawn", bool(got) and not got["hidden"] and got["n"] > 10, str(got))
             check(f"{name}: no segment crosses a sensor swap", bool(got) and got["crossed"] == 0, str(got))
+            open_key(pg)  # the key starts folded since #1399
             check(
                 f"{name}: key names the line", "Climate Advisor reading" in pg.locator("#chart-key-body").inner_text()
             )

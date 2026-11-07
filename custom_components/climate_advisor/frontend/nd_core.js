@@ -401,7 +401,7 @@
     });
   }
   function initSwitch() {
-    ND.ls.set(PREF_KEY, 'new'); // opting in: remembered; classic stays the default for anyone who never opted in
+    ND.ls.set(PREF_KEY, 'new'); // remembered per browser; entry.html (the panel's entry) opens classic only when this is 'classic'
     ND.$('back-classic').addEventListener('click', function () { ND.ls.set(PREF_KEY, 'classic'); });
   }
 

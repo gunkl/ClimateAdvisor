@@ -660,13 +660,12 @@ def test_no_external_resources_and_no_chart_library():
         assert (FE / name).exists(), name
 
 
-def test_classic_has_exactly_one_new_link_beside_prediction_accuracy():
-    """One "Try the new dashboard" link beside Prediction accuracy; any other reference is a Settings deep link
-    (the chart key's "change it in Settings" link added with the prediction-engine registry)."""
+def test_classic_has_exactly_one_new_link_in_its_header():
+    """R6a: one "Try the new dashboard" link, visible on every classic tab (above the tab bar). Any other
+    reference is a Settings deep link (the chart key's "change it in Settings" link from the engine registry)."""
     try_links = INDEX.count('href="new_dashboard.html"')
     assert try_links == 1
-    link_at = INDEX.index('href="new_dashboard.html"')
-    assert abs(link_at - INDEX.index('id="prediction-accuracy-link"')) < 600
+    assert INDEX.index('href="new_dashboard.html"') < INDEX.index('<div class="tabs">')
     others = INDEX.count("new_dashboard.html") - try_links
     assert others == INDEX.count("new_dashboard.html#settings")
 

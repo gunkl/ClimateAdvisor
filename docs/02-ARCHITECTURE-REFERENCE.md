@@ -131,7 +131,7 @@ custom_components/climate_advisor/
 ├── diagnostics.py         # Native HA diagnostics download hook (async_get_diagnostics_payload()).
 ├── diagnostic_snapshot.py # Shared redacted diagnostic snapshot: build_diagnostic_snapshot() (thermostat live attributes + parsed capabilities + last_command block), recent_hvac_events(), redact_sensitive(). Consumed by diagnostics.py, the api.py log downloads and the AI investigator (Issue #1049).
 ├── incident_payload.py    # Shared `incident_detected` payload builder (build_incident_payload) and climate-error classifier (is_climate_validation_error) used by both the coordinator and the engine emitters (Issue #1049). Tier 2: incident-payload-brief.md.
-└── frontend/            # Dashboard panel (iframe): index.html (classic) + new_dashboard.html (nd_*.js, opt-in) + the shared chart_v2.js/.css + locally bundled Chart.js v4 + zoom plugin + HammerJS
+└── frontend/            # Dashboard panel (iframe): index.html (classic) + new_dashboard.html (nd_*.js, the default) + entry.html (the panel entry) + the shared chart_v2.js/.css + locally bundled Chart.js v4 + zoom plugin + HammerJS
 ```
 
 ## Data Flow
@@ -442,6 +442,13 @@ Occupant view: an owner who wants to know "is the new prediction any good?" open
 - **Gate table (DP-8):** one row per zone x season (Heating / Summer) x look-ahead from the response's `gate`; checks "Beats v3", "Beats no change", "Bias within +-0.5 F" (+-0.28 C), 1/4/12 h gate the verdict and 24 h is information only. The server's per-row `pass` is authoritative. The verdict reads "Ready: every gate row passes" only when no row fails or is unscored and both seasons are scored (or `gate_summary.ready` is true), else "Not yet: <reasons>". Seasons are by HVAC mode (heating day / cooling-or-fan day / shoulder).
 - **States:** *loading* (overlay "Loading..." until the first response); *error* (alert box with the message and a Retry button, e.g. HTTP 503 when Climate Advisor is not loaded); *empty model* (no points and model confidence `none`/absent: "v4 has not been fitted yet; it fits nightly at 3:15. This page fills in after the first fit, or after the backtest results are published."); *no data in window* (overlay "No predictions in this window"); *no gate rows* ("No scored results yet." and verdict "Not yet: nothing scored").
 - **Invariant:** the page is a pure reader of the endpoint; no decision code reads it or v4 (see [v4 Shadow Spec](v4-shadow-spec.md#nothing-on-a-decision-path-reads-v4)).
+
+## Panel Entry and Default Dashboard (Issue #1230 R6a)
+
+- **Entry:** the sidebar panel (`__init__.py`, an iframe over the whole `frontend/` static path) loads `frontend/entry.html?v=<hash of entry + classic + new>`. `entry.html` renders nothing but a placeholder and calls `location.replace` to `new_dashboard.html` (default) or `index.html` (classic), carrying `location.search` and `location.hash` so deep links (`#analysis`, `#settings/...`) land. Both dashboards stay served and directly addressable; a bookmark of `index.html` opens classic.
+- **Choice:** `localStorage['climate_advisor_dashboard']` (per browser): `classic` opens classic; unset, `new`, any other value, or storage that throws opens new. `?classic=1` opens classic for that visit only. The new dashboard writes `new` on load and its "Back to classic" link writes `classic` on click; classic's "Try the new dashboard" link sits in the page header above the tab bar (every tab), and loading the new dashboard re-remembers `new`.
+- **Not done:** an install-wide `default_dashboard` setting. It would need a new options-flow write path and a `/status` field; per-browser memory covers the occupant case. Classic is not removed (removal is R7).
+- **Tests:** `tests/test_panel_entry.py`, `tests/test_new_dashboard.py` (parity table, 0 pending), Playwright `tests/ui/entry.spec.js` (decision table, hash, storage throwing, remembered back-and-forth). `MOCK_PORT` runs the UI specs on another port when 7531 is taken.
 
 ## Status Tab: Shared Chart Module, Plan List and Plan Overlay (Issue #1230 R2, R3, R5, R6fe)
 

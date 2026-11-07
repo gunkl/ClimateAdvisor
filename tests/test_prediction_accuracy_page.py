@@ -65,7 +65,8 @@ def test_ranges_leads_and_scroll():
 
 def test_sensor_group_is_ca_reading_plus_response_sensors():
     sl = _func("sensorList")
-    assert "'CA reading'" in sl
+    assert "'Climate Advisor reading'" in sl  # Issue #1400: the name the payload gives "_ca", once
+    assert "s.id !== CA_SENSOR" in sl
     assert "S.sensors" in sl
     assert "S.sensors = d.sensors" in PAGE
     assert "var CA_SENSOR = '_ca'" in PAGE

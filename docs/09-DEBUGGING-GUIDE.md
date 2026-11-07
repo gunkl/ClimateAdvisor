@@ -477,9 +477,12 @@ SSH mode needs `tools/.deploy.env` (never printed) and discovers files like `the
 | `--min-n N` / `--min-coverage F` | 72 / 0.8 | Gate sample-size and v4-coverage floors |
 | `--json PATH` / `--json-points` | off | Write the full report(s) (`{"zones": {...}}`), optionally with the point series |
 | `--publish` | off | Write `/config/climate_advisor_v4_backtest_<entry_id>.json` on the HA host (temp file, `chmod 600`, `mv`) |
+| `--batch-ssh` | off | SSH mode: read every input in one connection and publish every zone's file in one more (Issue #1400; `deploy.py` uses it, the SSH add-on blocks a burst of connections) |
 | `-q` | off | No progress lines on stderr |
 
 **Output.** A text table per zone (`=== Zone ... ===` header, forecast source note, v3 replay note, skipped-anchor counts, then one line per sensor x season x lead with n, flat/v3/v4 MAE, v4 bias, v4-with-actual-inputs MAE, logged MAE and PASS/FAIL/n/s for gate rows). The published file (`schema_version` 1, `resolution: "hourly"`, internal degrees F) holds `zone`, `generated_at`, `range`, `sensors`, `model` (`confidence`, `fitted_at`, `span_days`, `weeks_fitted`), `points` (sensor -> `"1h"|"4h"|"12h"|"24h"` -> `[{t, actual, flat, v4?, v3?}]`), `stats`, `gate`, `gate_sensors`, `gate_summary` (`ready`, `passed`, `scored`, `total`, `other_sensors_failing`). The endpoint ignores `schema_version`, `resolution`, `stats` and `gate_sensors` and merges `points`/`gate`/`gate_summary` as described in [REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1).
+
+**Run by every deploy (Issue #1400).** `tools/deploy.py` runs `predict_backtest.py --all-zones --publish --batch-ssh -q` after a successful deploy, so the Prediction accuracy page's history, gate rows and `gate_summary` are on the install without a manual step; `--no-backtest` skips it, and a failure (for example the SSH add-on's rate limit) only warns and prints the command to run later. The decision and why it is not run by the integration itself: [v4 Shadow Spec: backtest file](v4-shadow-spec.md#climate_advisor_v4_backtest_entry_idjson-read-only-here).
 
 **Cost.** Each test week refits v4 (5-8 s on a Pi-class CPU, less on a laptop); a year of history is about 50 weeks per zone, so run it on a workstation, not on the HA host (the tool only SSHes in to fetch inputs and publish).
 

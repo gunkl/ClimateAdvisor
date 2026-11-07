@@ -598,8 +598,36 @@ def behaviour(browser):
     ctx.close()
 
 
+def accuracy_without_v4(browser):
+    """Issue #1400: with an empty v4 archive the accuracy page still scores v3 and "no change" and lists "_ca" once.
+    Screenshots: pa-no-v4-<scheme>-<width>.png."""
+    d = json.loads(PA)
+    d["points"] = [{k: v for k, v in p.items() if k != "v4"} for p in d["points"]]
+    d["stats"] = {**d["stats"], "n": 0, "v4_mae": None, "v4_bias": None}
+    d["sensors"] = [d["sensors"][0], {"id": "_ca", "name": "_ca", "role": "room sensor"}, *d["sensors"][1:]]
+    for scheme, vp in (("light", {"width": 1280, "height": 1000}), ("dark", {"width": 390, "height": 900})):
+        name = f"pa-no-v4:{scheme}:{vp['width']}"
+        ctx, pg = new_page(browser, vp, scheme, {"prediction_accuracy": d}, name=name)
+        pg.goto(f"http://127.0.0.1:{PORT}/prediction_accuracy.html")
+        pg.wait_for_timeout(1200)
+        tiles = pg.locator("#tiles").inner_text()
+        for want in ("v3 average miss", f"{d['stats']['v3_mae']:.2f}", "No change", f"{d['stats']['flat_mae']:.2f}"):
+            if want not in tiles:
+                problems.append(f"{name}: tiles lack {want!r}: {tiles!r}")
+        if "no v4 predictions scored here yet" not in tiles:
+            problems.append(f"{name}: v4 tile does not say it has nothing yet")
+        names = pg.locator("#grp-sensor button").all_inner_texts()
+        if names.count("Climate Advisor reading") != 1 or "_ca" in names:
+            problems.append(f"{name}: sensor list {names}")
+        if pg.evaluate("document.documentElement.scrollWidth") > vp["width"]:
+            problems.append(f"{name}: horizontal scroll")
+        pg.screenshot(path=str(OUT / f"pa-no-v4-{scheme}-{vp['width']}.png"), full_page=True)
+        ctx.close()
+
+
 with sync_playwright() as p:
     b = p.chromium.launch()
+    accuracy_without_v4(b)
     run_matrix(b)
     banner_cases(b)
     behaviour(b)

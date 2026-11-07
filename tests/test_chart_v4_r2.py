@@ -213,7 +213,8 @@ class TestV4Block:
         coord = _coord(tmp_path, model=_model(), archive=_archive_with(tmp_path), last_future=_future())
         v4 = _chart(coord)["v4"]
         assert v4["ready"] is True and v4["reason"] == "ok" and v4["scores"] is None
-        assert set(v4["past"]) == {HALL, BED, FINE} and set(v4["future"]) == {HALL, BED}
+        # Issue #1400: the "_ca" line is drawn too (broken at every sensor swap), next to the per-sensor lines
+        assert set(v4["past"]) == {"_ca", HALL, BED, FINE} and set(v4["future"]) == {"_ca", HALL, BED}
         assert v4["corrected_outdoor"]["future"]
 
     def test_a_backtest_that_scores_badly_no_longer_withholds_any_line(self, tmp_path):
@@ -317,10 +318,10 @@ class TestV4Block:
         coord = _coord(tmp_path, model=_model(), archive=_archive_with(tmp_path), last_future=_future(), backtest=READY)
         v4 = _chart(coord)["v4"]
         assert v4["ready"] is True and v4["reason"] == "ok" and v4["leads"] == ["1h", "4h", "12h", "24h"]
-        assert set(v4["past"]) == {HALL, BED, FINE}  # "_ca" follows the sensor swap: never drawn
+        assert set(v4["past"]) == {"_ca", HALL, BED, FINE}  # "_ca" is drawn, broken at the swaps (Issue #1400)
         assert set(v4["past"][BED]) == {"1h", "4h", "12h", "24h"}
         assert len(v4["past"][BED]["4h"]) == 8 and v4["past"][BED]["4h"][0]["temp"] == 66.4
-        assert set(v4["future"]) == {HALL, BED}  # FINE has no future prediction this cycle
+        assert set(v4["future"]) == {"_ca", HALL, BED}  # FINE has no future prediction this cycle
         assert v4["future"][HALL][0]["temp"] == 66.0 and len(v4["future"][HALL]) == 8
         assert v4["future_at"] == _NOW.isoformat()
         assert v4["model"]["confidence"] == "ok"

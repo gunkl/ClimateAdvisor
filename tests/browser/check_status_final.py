@@ -659,8 +659,69 @@ def classic_celsius(browser):
     ctx.close()
 
 
+def v4_ca_only(browser):
+    """Issue #1400: the live 0.9.4 model is "_ca"-only. Both pages draw v4's "Climate Advisor reading" line, broken at
+    every bedtime / wake-up swap (no segment crosses one). Screenshots: final-<page>-v4-ca-<scheme>.png."""
+    ch = shift(CH["chart_data"], now_local() - dt.datetime.fromisoformat(CH["now"]))
+    v4 = ch["v4"]
+    hall = v4["sensors"][0]
+    swaps = []
+    now = now_local()
+    for day in (-1, 0, 1):
+        d = (now + dt.timedelta(days=day)).date()
+        for hh, mm in ((22, 30), (7, 0)):
+            t = dt.datetime(d.year, d.month, d.day, hh, mm, tzinfo=now.tzinfo)
+            if now - dt.timedelta(hours=24) < t < now + dt.timedelta(hours=24):
+                swaps.append(t.isoformat())
+    ca = {
+        **v4,
+        "sensors": ["_ca"],
+        "past": {"_ca": v4["past"][hall]},
+        "future": {"_ca": v4["future"][hall]},
+        "baseline": {"_ca": v4["baseline"][hall]},
+        "breaks": {"_ca": sorted(swaps)},
+    }
+    engines = {
+        "primary": "v4", "shadow": "none", "fallback": False, "fitting": False, "primary_state": "ready", "text": "",
+        "engines": [
+            {"id": "v3", "label": "v3", "running": False, "primary": False, "shadow": False, "usable": True},
+            {"id": "v4", "label": "v4", "running": True, "primary": True, "shadow": False, "usable": True},
+        ],
+    }  # fmt: skip
+    for page in ("index.html", "new_dashboard.html"):
+        for scheme in ("light", "dark"):
+            name = f"v4-ca:{page}:{scheme}"
+            ctx, pg = new_page(
+                browser,
+                {"width": 1280, "height": 1000},
+                scheme,
+                {"chart_data": {**ch, "v4": ca, "prediction_engines": engines}},
+                name=name,
+            )
+            pg.goto(f"http://127.0.0.1:{PORT}/{page}")
+            pg.wait_for_timeout(1500)
+            got = pg.evaluate(
+                """(swaps) => { const c = Chart.getChart(document.getElementById('temp-chart'));
+                const d = c && c.data.datasets.find(x => x.caId === 'v4:_ca'); if (!d) return null;
+                const pts = d.data, crossed = swaps.map(Date.parse).filter(s => {
+                  const i = pts.findIndex(p => p.x >= s); if (i <= 0) return false;
+                  let j = i - 1; while (j >= 0 && pts[j].y == null) j--; return j === i - 1; });
+                return { hidden: !!d.hidden, n: pts.filter(p => p.y != null).length, crossed: crossed.length }; }""",
+                swaps,
+            )
+            check(f"{name}: v4 _ca line drawn", bool(got) and not got["hidden"] and got["n"] > 10, str(got))
+            check(f"{name}: no segment crosses a sensor swap", bool(got) and got["crossed"] == 0, str(got))
+            check(
+                f"{name}: key names the line", "Climate Advisor reading" in pg.locator("#chart-key-body").inner_text()
+            )
+            pg.locator("#temp-chart").scroll_into_view_if_needed()
+            pg.screenshot(path=str(OUT / f"final-{page.split('.')[0]}-v4-ca-{scheme}.png"), full_page=False)
+            ctx.close()
+
+
 with sync_playwright() as p:
     b = p.chromium.launch()
+    v4_ca_only(b)
     for page in ("index.html", "new_dashboard.html"):
         for label, vp, scheme in [
             ("light-1280", {"width": 1280, "height": 1000}, "light"),

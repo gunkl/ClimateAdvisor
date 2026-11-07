@@ -283,6 +283,7 @@ from .const import (
     V4_FIT_STAGGER_S,
     V4_FIT_TRAIN_DAYS,
     V4_MASS_MAX_GAP_S,
+    V4_PREDICT_HORIZON_HOURS,
     VERSION,
     is_availability_recovery,
     is_unavailable_state,
@@ -359,7 +360,7 @@ from .operation_timeline import detail_dict as timeline_detail_dict
 from .operation_timeline import to_dict as timeline_to_dict
 from .override_confirm_split import ca_expected_mode
 from .prediction_accuracy import RANGES as CHART_RANGE_DAYS
-from .prediction_accuracy import build_chart_v4, load_backtest
+from .prediction_accuracy import build_chart_v4, ca_swap_epochs, load_backtest
 from .promise_journal import (
     Command as _PromiseCommand,
 )
@@ -6625,7 +6626,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         coordinator attribute is read off the loop. Read-only: nothing here changes zone state.
         """
         model = self._v4_store.v4_model
-        ids = [s for s in (model.get("sensors") or []) if isinstance(s, str)] if isinstance(model, dict) else []
+        # "_ca" has its own entry below; a _ca-only model also lists it among its sensors (Issue #1400: no duplicate).
+        ids = (
+            [s for s in (model.get("sensors") or []) if isinstance(s, str) and s != "_ca"]
+            if isinstance(model, dict)
+            else []
+        )
         for sid in self._read_chart_indoor_sensors():
             if sid not in ids:
                 ids.append(sid)
@@ -6689,10 +6695,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     ) -> dict[str, Any]:
         """The ``v4`` block of ``get_chart_data()`` (Issue #1230 R2). Runs in the chart-data executor job.
 
-        Occupant view: the Status chart may draw v4's lines next to today's prediction, but only for a zone whose
-        published backtest says v4 beat today's prediction on this house; otherwise it carries just the verdict so the
-        page can say "v4 shown after it passes its accuracy check". DISPLAY ONLY: no decision reads this, and it
-        never raises (a failure reads as "not ready").
+        Occupant view: while v4 is the primary or comparison engine the Status chart draws its lines whenever it has
+        anything to draw - there is no accuracy gate (a published backtest only adds descriptive ``scores``). That
+        includes v4's "Climate Advisor reading" (``_ca``) line, the only line of a ``_ca``-only model (Issue #1400),
+        broken at every bedtime / wake-up sensor swap (``breaks["_ca"]``, from ``ca_swap_epochs``: the chart log's
+        ``band_sensor`` changes, else the configured sleep window), plus one line per modelled sensor. DISPLAY ONLY:
+        no decision reads this, and it never raises (a failure reads as "not ready").
         """
         off: dict[str, Any] = {"ready": False, "reason": "shadow_off", "gate": None, "leads": [], "sensors": []}
         try:
@@ -6722,6 +6730,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             for sid in (model_dict.get("sensors") or []) if model_dict else []:
                 if isinstance(sid, str) and sid not in ids:
                     ids.append(sid)
+            # Issue #1400: the "_ca" line is broken wherever CA swaps the sensor it reads (bedtime / wake-up).
+            try:
+                ca_swaps = ca_swap_epochs(
+                    raw_log,
+                    start,
+                    end if historical else max(end, now.timestamp()) + (V4_PREDICT_HORIZON_HOURS + 1) * 3600.0,
+                    tz=now.tzinfo or datetime.now().astimezone().tzinfo,
+                    sleep_sensor=self.config.get("sleep_indoor_temp_entity"),
+                    sleep_time=self.config.get("sleep_time"),
+                    wake_time=self.config.get("wake_time"),
+                )
+            except Exception:  # noqa: BLE001 - display only: an unbroken line beats no line
+                _LOGGER.debug("v4 chart: sensor swap times failed", exc_info=True)
+                ca_swaps = []
             return build_chart_v4(
                 now=now,
                 start=start,
@@ -6735,6 +6757,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 last_future=getattr(self, "_v4_last_future", None),
                 sensor_ids=ids,
                 corrected_past=corrected_past,
+                ca_swaps=ca_swaps,
             )
         except Exception:  # noqa: BLE001 - display only; a failure must never break chart_data
             _LOGGER.debug("v4 chart series failed", exc_info=True)

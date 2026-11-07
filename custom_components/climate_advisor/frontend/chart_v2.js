@@ -323,12 +323,27 @@
     return out;
   }
 
+  // A break (ms) ends the line just before that moment: the next point starts a new segment (Issue #1400: the CA
+  // reading swaps sensor at bedtime / wake-up, and no segment may cross a swap).
+  function _withBreaks(data, breaks) {
+    if (!breaks || !breaks.length || data.length < 2) return data;
+    const marks = breaks.filter(b => !isNaN(b) && b > data[0].x && b <= data[data.length - 1].x).sort((a, b) => a - b);
+    if (!marks.length) return data;
+    const out = [];
+    let k = 0;
+    for (const p of data) {
+      while (k < marks.length && marks[k] <= p.x) { out.push({ x: marks[k] - 1, y: null }); k++; }
+      out.push(p);
+    }
+    return out;
+  }
+
   function _mkSeries(def, pts) {
     const sorted = pts.filter(p => p.y != null && !isNaN(p.x)).sort((a, b) => a.x - b.x);
     const step = _medianStep(sorted);
     return Object.assign({
       width: 2, dash: [], chart: 'in', kind: 'line', disabledReason: '',
-    }, def, { raw: sorted, data: _withGaps(sorted, step), tol: Math.max(45 * 60000, 1.5 * step) });
+    }, def, { raw: sorted, data: _withBreaks(_withGaps(sorted, step), def.breaks), tol: Math.max(45 * 60000, 1.5 * step) });
   }
 
   function _buildSeries(cd) {
@@ -339,6 +354,8 @@
     const v4Ready = v4.ready === true;
     _syncEnginePrefs();
     const state = cd.state_log || [];
+    // Every line that follows the reading CA uses (actual, v3, v4) is broken at its sensor swaps (Issue #1400).
+    const caBreaks = (((v4.breaks || {})._ca) || []).map(_parseTs);
 
     // Indoor: one actual line per sensor, then the CA reading (follows the sensor CA reads).
     metas.forEach((m, i) => {
@@ -348,14 +365,14 @@
     });
     const caPts = (cd.actual_indoor || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
     S.push(_mkSeries({ id: 'ind:_ca', group: 'indoor', short: 'CA reading', label: 'CA reading',
-      role: 'the reading Climate Advisor uses', color: 'ink', dash: [1, 3], width: 1.5, sensor: '_ca', kind: 'actual' }, caPts));
+      role: 'the reading Climate Advisor uses', color: 'ink', dash: [1, 3], width: 1.5, sensor: '_ca', kind: 'actual', breaks: caBreaks }, caPts));
 
     // Predicted: today's prediction (v3): the 4 h-ahead snapshots logged earlier, then the live forecast.
     const histPredIndoor = state.map(e => ({ x: _parseTs(e.ts), y: e.pred_indoor != null ? e.pred_indoor : e.pred_indoor_avg != null ? e.pred_indoor_avg : null }))
       .filter(p => p.y != null && p.x <= nowMs);
     const futPredIndoor = (cd.predicted_indoor || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
     S.push(_mkSeries({ id: 'v3', group: 'predicted', short: 'v3', label: "Today's prediction (v3)", role: 'made 4 h ahead on the left of NOW',
-      color: 'v3', dash: [7, 4], width: 2, missVs: 'ind:_ca', kind: 'pred' }, [...histPredIndoor, ...futPredIndoor]));
+      color: 'v3', dash: [7, 4], width: 2, missVs: 'ind:_ca', kind: 'pred', breaks: caBreaks }, [...histPredIndoor, ...futPredIndoor]));
 
     // The schedule estimate: the main line while the primary engine is still learning.
     const sched = (cd.schedule_estimate || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
@@ -376,6 +393,19 @@
       S.push(_mkSeries({ id: 'base:' + m.id, group: 'predicted', sub: 'base', short: 'No plan ' + m.name, label: m.name, color: 'base', dash,
         width: 2, sensor: m.id, kind: 'pred', disabledReason: why }, v4Ready ? base : []));
     });
+
+    // v4's line for the reading Climate Advisor uses (Issue #1400): the only line of a _ca-only model, and the one to
+    // compare with today's (v3) line. It follows the sensor CA reads, so it is broken at every swap (v4.breaks._ca).
+    if ((v4.sensors || []).includes('_ca')) {
+      const caName = 'Climate Advisor reading';
+      const past = (((v4.past || {})._ca || {})[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+      const fut = ((v4.future || {})._ca || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+      S.push(_mkSeries({ id: 'v4:_ca', group: 'predicted', sub: 'plan', short: 'v4 ' + caName, label: caName, color: 'plan', dash: [],
+        width: 2.5, sensor: '_ca', missVs: 'ind:_ca', kind: 'pred', disabledReason: why, breaks: caBreaks }, v4Ready ? [...past, ...fut] : []));
+      const base = ((v4.baseline || {})._ca || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+      S.push(_mkSeries({ id: 'base:_ca', group: 'predicted', sub: 'base', short: 'No plan ' + caName, label: caName, color: 'base', dash: [],
+        width: 2, sensor: '_ca', kind: 'pred', disabledReason: why, breaks: caBreaks }, v4Ready ? base : []));
+    }
 
     // Outdoor chart: the sensor, the weather service, and v4's corrected forecast.
     const outPts = (cd.actual_outdoor || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));

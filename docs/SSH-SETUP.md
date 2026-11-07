@@ -123,7 +123,7 @@ keeps its connection count low (#553):
 
 | Command | SSH connections |
 |---|---|
-| `deploy.py` | 3: back up and prepare (`ssh`), download the backup (`scp`, skipped on a fresh install), then transfer, extract, verify, restart and fetch logs (one `ssh` with a tar stream on stdin) |
+| `deploy.py` | 3: back up and prepare (`ssh`), download the backup (`scp`, skipped on a fresh install), then transfer, extract, verify, restart and fetch logs (one `ssh` with a tar stream on stdin); then 2 more for the v4 backtest (Issue #1400: one batched read, one batched write, minutes apart; skipped with `--no-backtest`; a block here only warns, the deploy is already complete) |
 | `deploy.py --skip-restart` | 3, minus the restart and the log fetch |
 | `deploy.py --rollback` | 1 |
 

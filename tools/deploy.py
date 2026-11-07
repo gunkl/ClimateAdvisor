@@ -9,6 +9,11 @@ Usage:
     python tools/deploy.py --dry-run        # Validate only, show what would deploy
     python tools/deploy.py --skip-restart   # Deploy without restarting HA
     python tools/deploy.py --rollback       # Restore most recent backup
+    python tools/deploy.py --no-backtest    # Deploy without publishing the v4 backtest afterwards
+
+After a successful deploy the v4 backtest (tools/predict_backtest.py) is run on THIS machine and its per-zone results
+file is published to the host (Issue #1400), so the Prediction accuracy page has its history and scorecard. It costs
+two more SSH connections (one read, one write) and a few minutes; a failure only warns.
 """
 
 import argparse
@@ -535,6 +540,56 @@ def deploy_files(config: dict[str, str], skip_restart: bool) -> tuple[bool, str]
     return True, sections["LOGS"]
 
 
+BACKTEST_TIMEOUT_S = 45 * 60
+
+
+def backtest_command() -> list[str]:
+    """The backtest run after a deploy: every zone, batched SSH (one read, one write), quiet."""
+    return [
+        sys.executable,
+        str(REPO_ROOT / "tools" / "predict_backtest.py"),
+        "--all-zones",
+        "--publish",
+        "--batch-ssh",
+        "-q",
+    ]
+
+
+def publish_backtest(run=subprocess.run) -> bool:
+    """Issue #1400: refresh the v4 backtest file on the host after a deploy. Never fails the deploy.
+
+    Occupant view: the Prediction accuracy page reads its history, gate rows and ``gate_summary`` from this file; the
+    integration only reads it (the backtest replays production v3 with HA stubbed and refits v4 once per test week,
+    minutes of CPU that must not run on the HA host). Reversal: ``--no-backtest``, or drop this step.
+    """
+    step("Publishing the v4 backtest (Prediction accuracy page history)")
+    cmd = backtest_command()
+    try:
+        result = run(cmd, capture_output=True, text=True, timeout=BACKTEST_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        fail(f"Backtest did not finish within {BACKTEST_TIMEOUT_S // 60} min; the deploy itself is complete")
+        info("Run it later: " + " ".join(shlex.quote(c) for c in cmd[1:]))
+        return False
+    except OSError as err:
+        fail(f"Backtest could not start ({err}); the deploy itself is complete")
+        return False
+    published = [ln for ln in (result.stdout or "").splitlines() if ln.startswith("published ")]
+    _log.info("backtest rc=%s stdout=%r stderr=%r", result.returncode, result.stdout, result.stderr)
+    if result.returncode != 0 or not published:
+        fail("Backtest was not published; the deploy itself is complete")
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
+        for line in tail:
+            gray(line)
+        info(
+            "If the SSH add-on's rate limit blocked it, wait for its cooldown and run: "
+            + " ".join(shlex.quote(c) for c in cmd[1:])
+        )
+        return False
+    for line in published:
+        ok(line)
+    return True
+
+
 def check_logs(log_output: str) -> None:
     """Report on an already-captured HA log tail (Issue #553: log fetching now happens
     server-side as part of deploy_files()'s/do_rollback()'s single connection, not a
@@ -649,6 +704,11 @@ def main() -> None:
         action="store_true",
         help=f"Deploy a long-lived branch ({', '.join(LONG_LIVED_BRANCHES)}) even if origin/main is not merged into it",
     )
+    parser.add_argument(
+        "--no-backtest",
+        action="store_true",
+        help="Skip publishing the v4 backtest after the deploy (Issue #1400)",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -718,6 +778,10 @@ def main() -> None:
     # Step 4: Verify
     if not args.skip_restart:
         check_logs(log_output)
+
+    # Step 5: the v4 backtest file the Prediction accuracy page reads (Issue #1400); never fails the deploy
+    if not args.no_backtest:
+        publish_backtest()
 
     print(f"\n{Color.GREEN}============================================{Color.RESET}")
     print(f"{Color.GREEN}  Deployment complete!{Color.RESET}")

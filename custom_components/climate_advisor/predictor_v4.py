@@ -2100,6 +2100,20 @@ def thermostat_default() -> V4Thermostat:
     )
 
 
+def plan_setpoints(
+    lo: float | None,
+    hi: float | None,
+    last: tuple[float | None, float | None] = (None, None),
+) -> tuple[float | None, float | None]:
+    """The plan's setpoints for one future step: BOTH band edges, whatever the day's mode.
+
+    ``lo`` / ``hi`` are the target band's floor / ceiling at that step; an edge the band does not give is carried
+    over from the previous step (``last``). The one rule the live shadow (``v4_shadow.build_inputs``) and the backtest
+    (``predict_backtest.build_inputs``) share, so the gate scores the inputs that run live (Issue #1230 R1b).
+    """
+    return (lo if lo is not None else last[0], hi if hi is not None else last[1])
+
+
 def grid_steps(start: datetime, count: int) -> list[datetime]:
     """``count`` consecutive 15-minute grid timestamps after ``start``, stepped in absolute (UTC) time so a
     DST transition neither repeats nor skips a grid point (wall-clock ``+ timedelta`` would)."""

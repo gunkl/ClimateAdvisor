@@ -185,7 +185,8 @@ def _archive_with(tmp_path: Path, sensors=(BED, FINE, HALL, "_ca")) -> V4Archive
         ts = _NOW - timedelta(minutes=30 * k)
         slot = slot_key(ts)
         for sid in sensors:
-            arch.data.setdefault(sid, {})[slot] = {"1h": 66.1, "4h": 66.4, "12h": 66.9, "24h": 67.0}
+            for lead, v in (("1h", 66.1), ("4h", 66.4), ("12h", 66.9), ("24h", 67.0)):
+                arch.put(sid, slot, lead, v)  # the archive is columnar since R1b: write through its API
     return arch
 
 
@@ -268,7 +269,7 @@ class TestV4Block:
     def test_long_ranges_are_downsampled_like_the_chart_log(self, tmp_path):
         arch = V4Archive(tmp_path, entry_id=ENTRY)
         for k in range(1, 48 * 6):
-            arch.data.setdefault(BED, {})[slot_key(_NOW - timedelta(minutes=30 * k))] = {"4h": 66.0}
+            arch.put(BED, slot_key(_NOW - timedelta(minutes=30 * k)), "4h", 66.0)
         coord = _coord(tmp_path, model=_model(), archive=arch, last_future=None, backtest=READY)
         raw = _chart(coord, "3d")["v4"]["past"][BED]["4h"]
         hourly = _chart(coord, "7d")["v4"]["past"][BED]["4h"]

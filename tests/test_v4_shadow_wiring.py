@@ -338,7 +338,7 @@ def _expected_outdoor(now: datetime, ts: datetime) -> float:
     raise AssertionError("ts outside the forecast")
 
 
-def test_setpoints_follow_the_day_mode_like_v3(fake: FakePredictor) -> None:
+def test_live_setpoints_are_both_band_edges_like_the_backtest(fake: FakePredictor) -> None:
     coord, fake_hass, scheduler = _build()
     coord._v4_store.v4_model = _fake_model_dict(coord)
     _seed_cycle_inputs(coord, scheduler)
@@ -357,8 +357,9 @@ def test_setpoints_follow_the_day_mode_like_v3(fake: FakePredictor) -> None:
     today = scheduler.now().date()
     todays = [i for i in inputs if i.ts.date() == today]
     tomorrows = [i for i in inputs if i.ts.date() == today + timedelta(days=1)]
-    assert todays and all(i.heat_sp_f == 68.0 and i.cool_sp_f is None for i in todays)
-    assert tomorrows and all(i.cool_sp_f == 76.0 and i.heat_sp_f is None for i in tomorrows)
+    # whatever the day's mode the plan hands the predictor BOTH band edges (the backtest does the same)
+    assert todays and all(i.heat_sp_f == 68.0 and i.cool_sp_f == 76.0 for i in todays)
+    assert tomorrows and all(i.heat_sp_f == 68.0 and i.cool_sp_f == 76.0 for i in tomorrows)
 
 
 def test_hidden_node_is_stepped_and_reseeded_after_a_long_gap(fake: FakePredictor) -> None:

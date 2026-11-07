@@ -260,3 +260,37 @@ def test_run_fit_trains_on_the_bounded_window_like_the_backtest():
     )
     assert full["fit"]["primary_samples"] > 35 * 96
     assert 19 * 96 <= last20["fit"]["primary_samples"] <= 21 * 96
+
+
+# ------------------------------------------------------------------ live inputs == backtest inputs (both band edges)
+def test_plan_setpoints_carries_a_missing_edge_over_the_last_step():
+    assert p4.plan_setpoints(68.0, 76.0) == (68.0, 76.0)
+    assert p4.plan_setpoints(None, 76.0, (67.0, 75.0)) == (67.0, 76.0)
+    assert p4.plan_setpoints(None, None) == (None, None)
+
+
+def test_live_build_inputs_match_the_backtest_rule_on_a_cold_day(monkeypatch):
+    """A heat-mode day still gets the cool edge, and a band edge missing at a step is carried: same as the backtest."""
+    import inspect
+
+    from tools import predict_backtest as pb
+
+    src = inspect.getsource(pb.run_backtest)
+    assert "plan_setpoints" in src  # the backtest builds its setpoints with the shared rule
+    p = p4
+    monkeypatch.setattr(v4_shadow, "_predictor", lambda: p)
+    now = datetime(2026, 1, 10, 6, 0, tzinfo=TZ)
+    hourly = [(now + timedelta(hours=h), 40.0 + h) for h in range(0, 30)]
+    band = [(now, 68.0, 76.0), (now + timedelta(hours=5), 66.0, None), (now + timedelta(hours=20), 66.0, 78.0)]
+    live = v4_shadow.build_inputs(
+        now=now, hourly=hourly, band=band, day_modes={now.date(): "heat"}, windows=(False, None, None)
+    )
+    assert live and all(i.heat_sp_f is not None and i.cool_sp_f is not None for i in live)
+    # the same band through the backtest's per-step rule
+    last = (None, None)
+    for i in live:
+        t = i.ts.timestamp()
+        lo = v4_shadow._interp([(b[0].timestamp(), b[1]) for b in band if b[1] is not None], t)
+        hi = v4_shadow._interp([(b[0].timestamp(), b[2]) for b in band if b[2] is not None], t)
+        last = p4.plan_setpoints(lo, hi, last)
+        assert (i.heat_sp_f, i.cool_sp_f) == last

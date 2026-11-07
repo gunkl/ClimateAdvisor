@@ -197,21 +197,28 @@ def _parse_row_ts(raw: Any) -> datetime | None:
     return dt
 
 
+def _plan_setpoints_fallback(lo: float | None, hi: float | None, last: tuple[float | None, float | None]):
+    """Used only when the engine module lacks ``plan_setpoints`` (a fake in tests): same rule."""
+    return (lo if lo is not None else last[0], hi if hi is not None else last[1])
+
+
 def build_inputs(
     *,
     now: datetime,
     hourly: Sequence[tuple[datetime, float]],
     band: Sequence[tuple[datetime, float | None, float | None]],
-    day_modes: Mapping[Any, str],
-    windows: tuple[bool, Any, Any],
+    day_modes: Mapping[Any, str] | None = None,
+    windows: tuple[bool, Any, Any] = (False, None, None),
     horizon_hours: int = V4_PREDICT_HORIZON_HOURS,
     step_min: int = DEFAULT_STEP_MINUTES,
 ) -> list[Any]:
     """The planned future on the model grid: one ``V4Input`` every ``step_min`` minutes after ``now``.
 
     Same plan v3 follows (``_build_predicted_indoor_future``): the RAW hourly forecast (the engine corrects it itself),
-    the target-band schedule for setpoints (heat setpoint = band floor on a heat day, cool setpoint = band ceiling on a
-    cool day, none on an off day), windows open inside the classification's window span when windows are recommended,
+    the target-band schedule for setpoints (BOTH edges at every step, whatever the day's mode: heat setpoint = band
+    floor, cool setpoint = band ceiling - exactly the backtest's inputs, ``predictor_v4.plan_setpoints``; the emulated
+    thermostat starts whichever side the room crosses), windows open inside the classification's window span when
+    windows are recommended,
     fan off (v3 has no forecast fan schedule). The forecast is not extrapolated: the list stops half an hour after the
     last forecast hour. Returns [] when there is not enough forecast to predict from.
     """
@@ -224,15 +231,20 @@ def build_inputs(
     recommended, open_t, close_t = windows
     last_fc = pts[-1][0] + 1800
     inputs: list[Any] = []
+    _plan_setpoints = getattr(p, "plan_setpoints", None) or _plan_setpoints_fallback
+    last_sp: tuple[float | None, float | None] = (None, None)
     for k in range(1, int(horizon_hours * 60 / step_min) + 1):
         # Absolute (UTC) stepping: wall-clock "+ timedelta" on a local datetime repeats or skips a point across DST.
         ts = (now.astimezone(UTC) + timedelta(minutes=step_min * k)).astimezone(now.tzinfo)
         t = ts.timestamp()
         if t > last_fc:
             break
-        mode = day_modes.get(ts.date(), "off")
-        heat_sp = _interp(band_pts_lower, t) if mode == "heat" and band_pts_lower else None
-        cool_sp = _interp(band_pts_upper, t) if mode == "cool" and band_pts_upper else None
+        heat_sp, cool_sp = _plan_setpoints(
+            _interp(band_pts_lower, t) if band_pts_lower else None,
+            _interp(band_pts_upper, t) if band_pts_upper else None,
+            last_sp,
+        )
+        last_sp = (heat_sp, cool_sp)
         windows_open = bool(
             recommended and open_t is not None and close_t is not None and open_t <= ts.time() < close_t
         )

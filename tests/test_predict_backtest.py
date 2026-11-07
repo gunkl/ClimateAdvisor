@@ -60,6 +60,7 @@ class FakePredictor:
         self.predict_calls: list[dict] = []
 
     CA_NODE = "_ca"
+    plan_setpoints = staticmethod(real_v4.plan_setpoints)
     resolve_nodes = staticmethod(real_v4.resolve_nodes)  # the one node-selection rule, shared with the live shadow
     _row_primary_value = staticmethod(real_v4._row_primary_value)
 

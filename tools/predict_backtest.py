@@ -979,8 +979,7 @@ def run_backtest(
                 steps = grid_steps(A, HORIZON_H * 3600 // STEP_S)
                 for k, t in enumerate(steps, start=1):
                     lo, hi = band_fn(A.timestamp(), t.timestamp())
-                    lo = lo if lo is not None else last_lo
-                    hi = hi if hi is not None else last_hi
+                    lo, hi = pred.plan_setpoints(lo, hi, (last_lo, last_hi))  # the rule the live shadow shares
                     last_lo, last_hi = lo, hi
                     if actual:
                         row = idx.row_at(t.timestamp(), 1800) or {}

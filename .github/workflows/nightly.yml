@@ -59,10 +59,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install test dependencies
         run: uv sync --locked --only-group test
@@ -82,7 +82,7 @@ jobs:
 
       - name: Upload failing scenarios
         if: failure()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: generated-failures
           path: tools/simulations/generated/failures/
@@ -98,10 +98,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install test dependencies
         run: uv sync --locked --only-group test
@@ -120,10 +120,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Run real-HA lifecycle tests
         run: python3 scripts/test.py ha  # uv run --locked --only-group test-ha (own venv)

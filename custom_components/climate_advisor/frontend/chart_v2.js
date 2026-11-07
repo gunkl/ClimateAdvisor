@@ -99,7 +99,10 @@
   // One line pattern per sensor (solid, dash-dot, dotted, long dash, short dash): identity is never colour alone.
   const SENSOR_DASH = [[], [8, 3, 2, 3], [2, 3], [10, 4], [4, 4]];
   const OUT_PX = 44;                  // fixed left axis width so the indoor and outdoor plot areas line up
-  const RIGHT_PX = 40;                // fixed right gutter (humidity axis on the indoor chart)
+  const RIGHT_PX = 40;                // fixed right gutter (kept for the humidity axis, Issue #1414)
+  // Humidity and feels-like: no reading has ever been logged for them (chart_log has no humidity / feelslike), so
+  // their chips are hidden on both dashboards until Issue #1414 wires them up; stored choices are dropped on read.
+  const HIDDEN_OVERLAYS = ['ov:humidity', 'ov:feelslike'];
 
   let _tempChart = null;          // Chart.js instance: indoor chart (canvas #temp-chart)
   let _outChart = null;           // Chart.js instance: outdoor chart (canvas #out-chart)
@@ -121,11 +124,14 @@
   let _lastTouchAt = 0;           // mouse events synthesised after a tap are ignored
   let _chartPrefs = null;
   let _chartPrefsZone = '\u0000';
-  let _cursorMs = null;           // hover / pinned readout time (ms)
-  let _readoutHeld = 0;           // tallest readout height (px) while the pointer is over the chart; 0 = not held
+  let _cursorMs = null;           // hover / pinned readout time (ms); null = the readout rests on NOW (Issue #1408)
+  let _readoutHeld = 0;           // tallest readout height (px) reached (NOW, hover or pin); 0 = not held
+  let _readoutFresh = false;      // the hold was just released: size to the new content, not the old one
+  let _readoutHeldW = 0;          // the readout's width when the height was held (a width change re-flows the grid)
   let _downX = null, _downY = null; // mousedown point: a click pins, a drag (zoom) does not
   let _cursorPinned = false;
   let _series = [];               // the catalog of the last draw
+  let _v4Learning = [];           // indoor sensors v4 has nothing for yet (named on one muted line in the key)
   let _tableView = false;
 
   function _hoursOf(preset) { return CHART_HOURS[preset] || 24; }
@@ -143,6 +149,8 @@
       if (p && typeof p === 'object') {
         if (p.on && typeof p.on === 'object') {
           Object.keys(p.on).forEach(k => { if (typeof p.on[k] === 'boolean') prefs.on[k] = p.on[k]; });
+          // Humidity and feels-like are hidden until they are wired up (Issue #1414): drop their stored choices.
+          HIDDEN_OVERLAYS.forEach(k => { if (k in prefs.on) { delete prefs.on[k]; prefs.migrated = true; } });
         }
         if (CHART_RANGES.includes(p.range)) prefs.range = p.range;
         if (CHART_AHEADS.includes(p.ahead)) prefs.ahead = p.ahead;
@@ -227,6 +235,7 @@
   }
 
   function _isOn(id) {
+    if (HIDDEN_OVERLAYS.includes(id)) return false;   // Issue #1414: not offered until wired up
     const on = _chartPrefs ? _chartPrefs.on : {};
     const k = _prefId(id);
     let v = on[k];
@@ -406,15 +415,34 @@
     // v4: drawn whenever it has data; there is no accuracy gate (which model is the main line is the occupant's setting).
     const why = v4Ready ? '' : (_engines().engines || []).some(x => x.id === 'v4' && !x.running)
       ? 'v4 is switched off (Settings, Prediction engine)' : 'v4 has no data for this zone yet (it is still learning this house)';
+    // 0.9.6 Lane F: a v4 chip only for a sensor v4 has something for (past, forecast or no-plan line); the sensors v4
+    // has not learned yet are named on one muted line instead (_v4Learning). A sensor with past predictions only (the
+    // backtest) and no forecast is labelled "history only" on both its chips.
+    _v4Learning = [];
+    // v4.past only covers the fetched window; past_span.sensors lists every line with a past prediction anywhere, so a
+    // short or scrolled view does not take a sensor's chips away (they are disabled "not in this view" instead).
+    const spanSensors = (v4.past_span && v4.past_span.sensors) || [];
     metas.forEach((m, i) => {
       const dash = SENSOR_DASH[i % SENSOR_DASH.length];
-      const past = (((v4.past || {})[m.id] || {})[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
-      const fut = ((v4.future || {})[m.id] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
-      S.push(_mkSeries({ id: 'v4:' + m.id, group: 'predicted', sub: 'plan', short: 'v4 ' + m.name, label: m.name, color: 'plan', dash,
-        width: 2.5, sensor: m.id, missVs: 'ind:' + m.id, kind: 'pred', disabledReason: why }, v4Ready ? [...past, ...fut] : []));
-      const base = ((v4.baseline || {})[m.id] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
-      S.push(_mkSeries({ id: 'base:' + m.id, group: 'predicted', sub: 'base', short: 'No plan ' + m.name, label: m.name, color: 'base', dash,
-        width: 2, sensor: m.id, kind: 'pred', disabledReason: why }, v4Ready ? base : []));
+      const byLead = (v4.past || {})[m.id] || {};
+      const pastAny = CHART_LEADS.some(l => (byLead[l] || []).length > 0);
+      const futRaw = (v4.future || {})[m.id] || [];
+      const baseRaw = (v4.baseline || {})[m.id] || [];
+      const pastElsewhere = spanSensors.includes(m.id);
+      if (!v4Ready || (!pastAny && !pastElsewhere && !futRaw.length && !baseRaw.length)) { _v4Learning.push(m); return; }
+      const histOnly = !futRaw.length && !baseRaw.length;
+      const label = m.name + (histOnly ? ' (history only)' : '');
+      const past = (byLead[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+      const fut = futRaw.map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+      S.push(_mkSeries({ id: 'v4:' + m.id, group: 'predicted', sub: 'plan', short: 'v4 ' + m.name, label, color: 'plan', dash,
+        width: 2.5, sensor: m.id, missVs: 'ind:' + m.id, kind: 'pred', disabledReason: why, histOnly, pastElsewhere,
+        role: histOnly ? 'past v4 predictions only (from its backtest); v4 does not forecast ' + m.name + ' yet' : '' }, v4Ready ? [...past, ...fut] : []));
+      const base = baseRaw.map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+      S.push(_mkSeries({ id: 'base:' + m.id, group: 'predicted', sub: 'base', short: 'No plan ' + m.name, label, color: 'base', dash,
+        width: 2, sensor: m.id, kind: 'pred', histOnly,
+        disabledReason: why || (base.length ? '' : histOnly
+          ? 'No forecast for ' + m.name + ' yet: v4 has only its past predictions, and the no-plan line is a forecast'
+          : 'v4 has no no-plan line for ' + m.name + ' yet') }, v4Ready ? base : []));
     });
 
     // v4's line for the reading Climate Advisor uses (Issue #1400): the only line of a _ca-only model, and the one to
@@ -537,71 +565,181 @@
     return names.length ? 'Band (' + names.join(' / ') + ')' : 'Target band';
   }
 
+  // ---- what a chip would draw (0.9.6 Lane F: every chip that cannot draw anything is disabled and says why) ----
+  //
+  // Occupant view: switching a line on that has nothing to draw used to do nothing at all. Now a chip is switched off
+  // and disabled when its line has no point in the current view, with the reason on hover (title) and for screen
+  // readers (aria-label): no data at all, or data only at other times ("scroll or change the range"). The test reads
+  // the datasets actually handed to Chart.js, so it is the same data that would be drawn.
+  function _ptsDraw(pts, win) {
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      if (p.y == null || isNaN(p.x)) continue;
+      if (p.x >= win.min && p.x <= win.max) return true;
+      const q = pts[i + 1];
+      if (q && q.y != null && p.x < win.min && q.x > win.max) return true;   // one segment spans the whole view
+    }
+    return false;
+  }
+  function _ptsAny(pts) { return pts.some(p => p.y != null && !isNaN(p.x)); }
+  function _chipDatasets(id) {
+    const out = [];
+    [_tempChart, _outChart].forEach(ch => { if (ch) ch.data.datasets.forEach(d => { if (d.caId === id) out.push(d); }); });
+    return out;
+  }
+  const _NOT_IN_VIEW = 'Nothing to draw in this view (it has data at other times): scroll or change the range';
+  // '' = draws something in this view; else the reason it cannot. null = not known yet (no chart drawn yet).
+  function _chipBlock(id, s) {
+    if (s && s.disabledReason) return s.disabledReason;
+    const win = _viewWindow();
+    if (id.startsWith('strip:')) {
+      const r = id.slice(6);
+      if (r === 'events') {
+        const ev = ((_lastChartData || {}).state_log || []).filter(e => e.event === 'override' || e.event === 'classification_change')
+          .map(e => _parseTs(e.ts));
+        if (ev.some(t => t >= win.min && t <= win.max)) return '';
+        return ev.length ? _NOT_IN_VIEW : 'No overrides or re-classifications recorded in the loaded time';
+      }
+      const segs = _stripSegs[r] || [];
+      if (segs.some(g => g.b > win.min && g.a < win.max)) return '';
+      const row = STRIP_ROWS.find(x => x.id === r);
+      return segs.length ? _NOT_IN_VIEW : 'No ' + (row ? row.label.toLowerCase() : r) + ' recorded or planned in the loaded time';
+    }
+    if (id === 'ov:plan') {
+      const steps = _planSteps(5 * 86400000).filter(p => p._ms > Date.now());
+      const path = _planPath();
+      if (steps.some(p => p._ms >= win.min && p._ms <= win.max) || _ptsDraw(path, win)) return '';
+      return steps.length || path.length ? 'The plan covers Now and the next days: not in this view'
+        : (_timelineState === 'none' ? 'No plan yet' : 'No plan steps to show');
+    }
+    if (!_tempChart && !_outChart) return null;
+    const dss = _chipDatasets(id);
+    if (dss.some(d => _ptsDraw(d.data || [], win))) return '';
+    if (s && s.sub === 'plan') {
+      // a v4 line whose past exists only for other look-aheads in this view
+      const byLead = (((_lastChartData || {}).v4 || {}).past || {})[s.sensor] || {};
+      const others = CHART_LEADS.filter(l => l !== _chartLead &&
+        _ptsDraw((byLead[l] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })), win));
+      if (others.length) return 'No v4 predictions made ' + _chartLead.replace('h', ' h') + ' earlier in this view: choose ' +
+        others.map(l => l.replace('h', ' h')).join(' or ') + ' under "Past v4 lines"';
+    }
+    if (dss.some(d => _ptsAny(d.data || [])) || (s && s.pastElsewhere)) return _NOT_IN_VIEW;
+    if (id === 'ov:band') return 'No target band recorded or scheduled in the loaded time';
+    if (id === 'ov:target') return 'No target recorded or scheduled in the loaded time';
+    if (s && s.kind === 'actual') return 'No readings from ' + s.label + ' in the loaded time';
+    return 'No data for this line in the loaded time';
+  }
+
+  // The past-lead row: the look-ahead buttons, or one line saying why there is nothing to choose (Issue #1230 R2;
+  // 0.9.6 Lane F: "none in this view" vs "none yet"). The payload's v4.past only holds the fetched window; v4.past_span
+  // (every past prediction this zone has) tells the two apart. An older backend without it: "yet" only for a live view.
+  function _leadRowHtml(v4, ready) {
+    const win = _viewWindow();
+    const pastPts = l => Object.values((v4 && v4.past) || {}).flatMap(byLead => ((byLead || {})[l] || []))
+      .map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+    const leadInView = l => ready && _ptsDraw(pastPts(l), win);
+    const anyInView = CHART_LEADS.some(leadInView);
+    const leadTxt = l => l.replace('h', ' h');
+    const leadHelp = 'Left of Now, each v4 line shows what v4 predicted that many hours earlier for each moment, so you can ' +
+      'see how well it called it. This changes only the past part of the v4 lines; from Now on they stay the same.';
+    let inner;
+    if (anyInView) {
+      inner = '<div class="seg" role="group" aria-labelledby="chart-lead-label" aria-describedby="chart-lead-help">' +
+        CHART_LEADS.map(l => {
+          const has = leadInView(l);
+          return '<button type="button" class="seg-btn' + (l === _chartLead ? ' on' : '') + '" data-lead="' + l +
+            '" aria-pressed="' + (l === _chartLead ? 'true' : 'false') + '"' + (has ? '' : ' disabled') +
+            ' title="' + (has ? 'Left of Now, show what v4 predicted ' + leadTxt(l) + ' earlier for each moment'
+              : 'No predictions v4 made ' + leadTxt(l) + ' earlier in this view') + '">' +
+            leadTxt(l) + ' earlier' + (has ? '' : ' (none in view)') + '</button>';
+        }).join('') +
+        '</div><span class="key-sub" id="chart-lead-help">how far ahead v4 looked; changes only the v4 lines left of Now</span>';
+    } else {
+      const span = v4 && v4.past_span;
+      const loaded = ready && CHART_LEADS.some(l => pastPts(l).length > 0);
+      const fmtDay = iso => new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      let msg, state;
+      if (span && span.first && span.last) {
+        msg = 'No past v4 predictions in this view; v4 has them from ' + fmtDay(span.first) + ' to ' + fmtDay(span.last);
+        state = 'view';
+      } else if (loaded || (v4 && !('past_span' in v4) && _isHistoricalView)) {
+        msg = 'No past v4 predictions in this view';
+        state = 'view';
+      } else {
+        msg = 'v4 has no past predictions to show yet';
+        state = 'yet';
+      }
+      inner = '<span class="key-sub" id="chart-lead-help" data-lead-empty="' + state + '">' + escapeHtml(msg) + '</span>';
+    }
+    return '<div class="key-row" id="chart-lead-row" title="' + escapeHtml(leadHelp) + '">' +
+      '<span class="key-sub" id="chart-lead-label">Past v4 lines: predicted</span>' + inner + '</div>';
+  }
+
   function renderKey(cd, S) {
     const body = document.getElementById('chart-key-body');
     if (!body) return;
     const v4 = cd.v4 || null;
-    const hasLines = s => s.raw.length > 0;
+    const block = {};
+    const blockOf = (id, s) => { if (!(id in block)) block[id] = _chipBlock(id, s); return block[id]; };
     const sw = s => _swatch(s);
-    const chipFor = s => _chip(s.id, sw(s) + '<span>' + escapeHtml(s.label) + '</span>', {
-      noData: !hasLines(s), disabled: !!s.disabledReason, title: s.disabledReason || s.role || '',
-      aria: s.label + (s.sub === 'plan' ? ' with plan, v4' : s.sub === 'base' ? ' with no plan, v4' : ''),
-    });
-    const ind = S.filter(s => s.group === 'indoor' && (s.id !== 'ind:_ca' || true));
-    const indoorHtml = ind.filter(s => s.id !== 'ind:_ca' || hasLines(s)).map(chipFor).join('');
+    const chipFor = s => {
+      const why = blockOf(s.id, s);
+      return _chip(s.id, sw(s) + '<span>' + escapeHtml(s.label) + '</span>', {
+        noData: why == null ? s.raw.length === 0 : !!why, disabled: !!why, title: why || s.role || '',
+        aria: s.label + (s.sub === 'plan' ? ' with plan, v4' : s.sub === 'base' ? ' with no plan, v4' : '') + (why ? ': ' + why : ''),
+      });
+    };
+    // an overlay or strip chip: the same rule, with the reason on hover and in its accessible name
+    const ovChip = (id, inner, label, title) => {
+      const why = blockOf(id, null);
+      return _chip(id, inner, { noData: !!why, disabled: !!why, title: why || title || '', aria: why ? label + ': ' + why : '' });
+    };
+    const ind = S.filter(s => s.group === 'indoor');
+    const indoorHtml = ind.filter(s => s.id !== 'ind:_ca' || s.raw.length > 0).map(chipFor).join('');
     const v3 = S.find(s => s.id === 'v3');
+    const sched = S.find(s => s.id === 'schedule');
     const plan = S.filter(s => s.sub === 'plan');
     const base = S.filter(s => s.sub === 'base');
     const eng = _engines();
     const shadowTxt = eng.shadow && eng.shadow !== 'none' ? 'Comparison: ' + eng.shadow : 'No comparison engine';
     let predHtml = '<div class="key-row" id="chart-main-model"><span class="key-sub">Main</span><span>' +
-      escapeHtml('Main prediction: ' + eng.primary + ' \u00b7 ' + shadowTxt) + ' \u2014 change it in <a href="new_dashboard.html#settings">Settings \u2192 Prediction engine</a>.' +
+      escapeHtml('Main prediction: ' + eng.primary + ' · ' + shadowTxt) + ' — change it in <a href="new_dashboard.html#settings">Settings → Prediction engine</a>.' +
       (eng.text ? ' ' + escapeHtml(eng.text) + '.' : '') + ' <a href="prediction_accuracy.html' + (/new_dashboard\.html$/.test(location.pathname) ? '' : '?from=classic') + // classic: its Back returns to index.html
       '">How each engine has scored</a>.</span></div>' +
-      '<div class="key-row"><span class="key-sub">Today</span>' + chipFor(v3) + (hasLines(S.find(s => s.id === 'schedule')) ? chipFor(S.find(s => s.id === 'schedule')) : '') + '</div>';
+      '<div class="key-row"><span class="key-sub">Today</span>' + chipFor(v3) + (sched && sched.raw.length > 0 ? chipFor(sched) : '') + '</div>';
+    const ready = !!(v4 && v4.ready);
     if (plan.length) {
       predHtml += '<div class="key-row"><span class="key-sub">v4 with plan</span>' + plan.map(chipFor).join('') + '</div>';
       predHtml += '<div class="key-row"><span class="key-sub">v4 no plan</span>' + base.map(chipFor).join('') + '</div>';
-      const ready = !!(v4 && v4.ready);
-      // v4's look-ahead choice: which archived v4 forecast is drawn LEFT of NOW (its track record); from NOW on is unchanged.
-      const leadHas = l => ready && Object.values(v4.past || {}).some(byLead => ((byLead || {})[l] || []).length > 0);
-      const anyPast = CHART_LEADS.some(leadHas);
-      const leadTxt = l => l.replace('h', ' h');
-      const leadHelp = 'Left of Now, each v4 line shows what v4 predicted that many hours earlier for each moment, so you can ' +
-        'see how well it called it. This changes only the past part of the v4 lines; from Now on they stay the same.';
-      predHtml += '<div class="key-row" id="chart-lead-row" title="' + escapeHtml(leadHelp) + '">' +
-        '<span class="key-sub" id="chart-lead-label">Past v4 lines: predicted</span>' +
-        (anyPast
-          ? '<div class="seg" role="group" aria-labelledby="chart-lead-label" aria-describedby="chart-lead-help">' +
-            CHART_LEADS.map(l => {
-              const has = leadHas(l);
-              return '<button type="button" class="seg-btn' + (l === _chartLead ? ' on' : '') + '" data-lead="' + l +
-                '" aria-pressed="' + (l === _chartLead ? 'true' : 'false') + '"' + (has ? '' : ' disabled') +
-                ' title="' + (has ? 'Left of Now, show what v4 predicted ' + leadTxt(l) + ' earlier for each moment'
-                  : 'v4 has no predictions made ' + leadTxt(l) + ' earlier to show yet') + '">' +
-                leadTxt(l) + ' earlier' + (has ? '' : ' (none yet)') + '</button>';
-            }).join('') +
-            '</div><span class="key-sub" id="chart-lead-help">how far ahead v4 looked; changes only the v4 lines left of Now</span>'
-          : '<span class="key-sub" id="chart-lead-help" data-lead-empty="1">v4 has no past predictions to show yet</span>') +
-        '</div>';
+      predHtml += _leadRowHtml(v4, ready);
+    }
+    // One muted line for the sensors v4 has nothing for yet (no chips for them: they would draw nothing).
+    const v4Off = (eng.engines || []).some(x => x.id === 'v4' && !x.running);
+    if (_v4Learning.length || (!ready && _shown('v4'))) {
+      // the sensor's role when it says which one ("thermostat", "bedroom sensor"), else its name
+      const KNOWN = ['thermostat', 'bedroom sensor', "thermostat's finer sensor"];
+      const names = [...new Set(_v4Learning.map(m => KNOWN.includes(m.role) ? m.role : m.name))];
+      // v4.reason says why there is nothing at all: switched off, a failed read (back on the next refresh), or learning
+      const reason = (v4 && v4.reason) || '';
+      const text = !ready && (v4Off || reason === 'not_running') ? 'v4 is switched off (Settings, Prediction engine)'
+        : !ready && reason === 'error' ? "v4's lines could not be read this time; they come back on the next refresh"
+        : 'v4 is still learning' + (names.length ? ': ' + names.join(', ') : ' this house');
+      const title = _v4Learning.map(m => m.name + (m.role ? ' (' + m.role + ')' : '')).join(', ');
+      predHtml += '<div class="key-row key-learning" id="chart-v4-learning"' + (title ? ' title="' + escapeHtml('No v4 lines yet for: ' + title) + '"' : '') +
+        '><span class="key-sub">' + escapeHtml(text) + '</span></div>';
     }
     const outHtml = S.filter(s => s.group === 'outdoor').map(chipFor).join('');
-    const hum = (cd.state_log || []).some(e => e.humidity != null);
-    const fl = (cd.state_log || []).some(e => e.feelslike != null);
-    const targetHas = (cd.effective_target_history || []).some(e => e.target != null) || (cd.effective_target_forecast || []).some(e => e.target != null);
-    const bandHas = (cd.target_band || []).length > 0 || (cd.state_log || []).some(e => e.lower != null || e.upper != null);
     const ovSw = (color, dash, w) => '<svg class="key-sw" width="30" height="10" aria-hidden="true"><line x1="2" y1="5" x2="28" y2="5" stroke="' + color + '" stroke-width="' + w + '"' + (dash ? ' stroke-dasharray="' + dash + '"' : '') + ' stroke-linecap="round"/></svg>';
+    // Humidity and feels-like are not offered until they are wired up (Issue #1414; HIDDEN_OVERLAYS).
+    const bandLabel = _bandLabelInView();
     const overlays =
-      _chip('ov:band', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><rect x="2" y="1" width="26" height="8" rx="2" fill="var(--c-band)" stroke="var(--c-bandline)" stroke-dasharray="3 2"/></svg><span>' + escapeHtml(_bandLabelInView()) + '</span>', { noData: !bandHas }) +
-      _chip('ov:target', ovSw('var(--c-target)', '', 3) + '<span>Target</span>', { noData: !targetHas }) +
-      _chip('ov:humidity', ovSw('var(--c-hum)', '', 1.5) + '<span>Humidity</span>', { noData: !hum }) +
-      _chip('ov:feelslike', ovSw('var(--c-feels)', '3 3', 1.5) + '<span>Feels-like</span>', { noData: !fl }) +
-      _chip('ov:plan', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><circle cx="8" cy="5" r="3.5" fill="var(--c-plan)"/><path d="M22 0 L27 5 L22 10 L17 5 Z" fill="var(--c-target)" stroke="var(--c-ink)" stroke-width="1"/></svg><span>Plan</span>',
-        { noData: !_planHas(), title: 'What Climate Advisor will do (circles) and what you are asked to do (diamonds), from the plan' });
-    const stripChips = STRIP_ROWS.map(r => _chip('strip:' + r.id,
-      '<svg class="key-sw" width="14" height="10" aria-hidden="true"><rect x="1" y="1" width="12" height="8" rx="2" fill="' + r.color + '"/></svg><span>' + r.label + '</span>',
-      { noData: !(_stripHasData[r.id]) })).join('') +
-      _chip('strip:events', '<svg class="key-sw" width="14" height="10" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="10" stroke="#f44336" stroke-width="1.5" stroke-dasharray="3 2"/></svg><span>Events</span>', {});
+      ovChip('ov:band', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><rect x="2" y="1" width="26" height="8" rx="2" fill="var(--c-band)" stroke="var(--c-bandline)" stroke-dasharray="3 2"/></svg><span>' + escapeHtml(bandLabel) + '</span>', bandLabel) +
+      ovChip('ov:target', ovSw('var(--c-target)', '', 3) + '<span>Target</span>', 'Target') +
+      ovChip('ov:plan', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><circle cx="8" cy="5" r="3.5" fill="var(--c-plan)"/><path d="M22 0 L27 5 L22 10 L17 5 Z" fill="var(--c-target)" stroke="var(--c-ink)" stroke-width="1"/></svg><span>Plan</span>',
+        'Plan', 'What Climate Advisor will do (circles) and what you are asked to do (diamonds), from the plan');
+    const stripChips = STRIP_ROWS.map(r => ovChip('strip:' + r.id,
+      '<svg class="key-sw" width="14" height="10" aria-hidden="true"><rect x="1" y="1" width="12" height="8" rx="2" fill="' + r.color + '"/></svg><span>' + r.label + '</span>', r.label)).join('') +
+      ovChip('strip:events', '<svg class="key-sw" width="14" height="10" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="10" stroke="#f44336" stroke-width="1.5" stroke-dasharray="3 2"/></svg><span>Events</span>', 'Events');
     body.innerHTML =
       _group('Indoor', 'Indoor lines', indoorHtml) +
       _group('Predicted', 'Prediction lines', predHtml) +
@@ -619,7 +757,7 @@
       }
     }
     // The one-line summary of what is drawn (shown while the key is folded): the lines on, then the overlays on.
-    _keyShown = S.filter(s => _isOn(s.id) && !s.disabledReason && hasLines(s)).map(s => s.short)
+    _keyShown = S.filter(s => _isOn(s.id) && !blockOf(s.id, s) && s.raw.length > 0).map(s => s.short)
       .concat([...body.querySelectorAll('[data-series^="ov:"][aria-pressed="true"]:not(.no-data)')].map(b => b.textContent.trim()));
     _renderKeySummary();
   }
@@ -735,6 +873,13 @@
     };
   }
 
+  function _isolated(pts, i) {
+    const p = pts && pts[i];
+    if (!p || p.y == null) return false;
+    const a = pts[i - 1], b = pts[i + 1];
+    return (!a || a.y == null) && (!b || b.y == null);
+  }
+
   function _dsFor(s) {
     const color = _cssVar('--c-' + s.color);
     return {
@@ -743,7 +888,9 @@
       type: 'line', data: s.data,
       borderColor: color, backgroundColor: 'transparent',
       borderWidth: s.width, borderDash: s.dash, borderCapStyle: s.dash.length && s.dash[0] <= 2 ? 'round' : 'butt',
-      pointRadius: 0, pointStyle: 'line', tension: 0.2, spanGaps: false, yAxisID: 'y',
+      // a lone point between gaps (e.g. one daily mean in view) has no segment: draw it as a dot so it is visible
+      pointRadius: c => _isolated(c.dataset.data, c.dataIndex) ? 2.5 : 0, pointStyle: 'circle', pointBackgroundColor: color,
+      pointBorderWidth: 0, tension: 0.2, spanGaps: false, yAxisID: 'y',
       hidden: !_isOn(s.id) || !!s.disabledReason || s.raw.length === 0,
       order: s.kind === 'actual' ? 3 : 2,
     };
@@ -885,8 +1032,9 @@
     const empty = document.getElementById('chart-empty');
     if (empty) empty.hidden = hasAnything;
     drawStrips();
+    renderKey(chartData, S);   // again, now that the datasets exist: a chip with nothing to draw in view is disabled
     _applyTableView();
-    if (_cursorMs != null) _setCursor(_cursorMs, _cursorPinned);
+    _refreshReadout();
   }
 
   // Both charts always show the same time span.
@@ -899,8 +1047,9 @@
       ch.update('none');
     });
     drawStrips();
+    if (_lastChartData) renderKey(_lastChartData, _series);   // which chips can draw depends on the view
     _applyTableView();
-    if (_cursorMs != null) _setCursor(_cursorMs, _cursorPinned);
+    _refreshReadout();
   }
 
   function _onZoomed(chart) {
@@ -1048,29 +1197,55 @@
     _renderReadout(ms);
   }
 
-  // keepHeight: the pointer is still over the chart (between canvases, in an axis gutter), so the readout keeps the
-  // height it has reached; otherwise (pointer left, unpinned, Esc) it shrinks back to its content.
-  function _clearCursor(keepHeight) {
-    if (!keepHeight) _releaseReadoutHeight();
+  // The pointer left the chart (or a pin was released, or Esc): the readout goes back to resting on NOW. Its height is
+  // kept (the tallest it has reached), so entering and leaving the chart never makes the content below it jump.
+  function _clearCursor() {
     _cursorMs = null;
     _cursorPinned = false;
     window.__test_cursorPx = null;
     const line = document.getElementById('chart-cursor');
     if (line) line.hidden = true;
-    const panel = document.getElementById('chart-hover-panel');
-    if (panel) panel.innerHTML = '';
+    _renderRest();
+  }
+
+  // Re-render whatever the readout shows (a hover/pin, or NOW) after the chart data, the window or the lines changed.
+  function _refreshReadout() {
+    if (_cursorMs != null) _setCursor(_cursorMs, _cursorPinned);
+    else _renderRest();
+  }
+
+  // Issue #1408: with the pointer off the chart the readout is not blank; it shows what a hover at NOW would. When NOW
+  // is outside the visible range (scrolled into history, or zoomed elsewhere) it shows the right edge of the view.
+  function _restPoint() {
+    const now = Date.now();
+    const win = _viewWindow();
+    if (now >= win.min && now <= win.max) return { ms: now, label: 'Now \u00b7 ' + _clock(now) };
+    const ms = win.max;
+    const day = Math.abs(ms - now) < 6 * 86400000
+      ? new Date(ms).toLocaleDateString([], { weekday: 'short' })
+      : new Date(ms).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ',';
+    return { ms: ms, label: day + ' ' + _clock(ms) + ' (end of view)' };
+  }
+
+  function _renderRest() {
+    const r = _restPoint();
+    _renderReadout(r.ms, r.label);
   }
 
   function _releaseReadoutHeight() {
     _readoutHeld = 0;
+    _readoutFresh = true;
     const panel = document.getElementById('chart-hover-panel');
     if (panel) panel.style.minHeight = '';
   }
 
-  // Hold the readout at the tallest height it has reached, so moving between points with fewer rows does not make the
-  // content below the chart jump up and down. Released by _clearCursor().
-  function _holdReadoutHeight(panel) {
-    const h = panel.offsetHeight;
+  // Hold the readout at the tallest height it has reached, so moving between points with fewer rows, or between a
+  // hover and NOW, does not make the content below the chart jump up and down. Released when the lines shown change
+  // (a key toggle) or the readout's width changes, then re-held at the new content's height. prevH is the height of
+  // what was on screen just before this render (it may have been rendered while the panel could not be measured).
+  function _holdReadoutHeight(panel, prevH) {
+    const h = Math.max(panel.offsetHeight, prevH || 0);
+    _readoutHeldW = panel.offsetWidth;
     if (h > _readoutHeld) { _readoutHeld = h; panel.style.minHeight = h + 'px'; }
   }
 
@@ -1082,7 +1257,9 @@
     return items ? '<div class="chp-row"><span class="chp-row-label">' + label + '</span>' + items + '</div>' : '';
   }
 
-  function _renderReadout(ms) {
+  // restLabel: the readout is resting (pointer off the chart, nothing pinned) at NOW or the view's right edge; the
+  // label replaces the hovered time and a short hint keeps hover and pin discoverable. Same rows as a hover.
+  function _renderReadout(ms, restLabel) {
     const panel = document.getElementById('chart-hover-panel');
     if (!panel) return;
     const sym = '°';
@@ -1125,7 +1302,7 @@
         overlay += _chpItem('var(--c-bandline)', 'Band' + (who ? ' (' + escapeHtml(who) + ')' : '') + ': <strong>' + Math.round(lw) + '\u2013' + Math.round(hi) + sym + '</strong>');
       }
     }
-    const planStep = ms > Date.now() ? _planNear(ms) : null;
+    const planStep = ms >= Date.now() - 60000 ? _planNear(ms) : null;   // NOW itself (a minute's slack) counts as ahead
     if (planStep) overlay += _chpItem(planStep.actor === 'you' ? 'var(--c-target)' : 'var(--c-plan)',
       escapeHtml(planStep.actor === 'you' ? 'You' : 'CA') + ' ' + escapeHtml(_clock(planStep._ms)) + ': <strong>' + escapeHtml(planStep.text_short || planStep.text || '') + '</strong>');
     let closest = null, minDiff = Infinity;
@@ -1142,13 +1319,21 @@
       if (closest.fan && hv !== 'fan') stateHtml += '<div class="chp-item"><span class="chp-state" style="background:#66bb6a">Sched fan</span></div>';
       if (closest.event) stateHtml += '<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">' + escapeHtml(String(closest.event).replace(/_/g, ' ')) + '</div>';
     }
-    const when = new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const when = restLabel ? escapeHtml(restLabel)
+      : new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     const touchOnly = window.matchMedia && window.matchMedia('(hover: none)').matches;
-    const pin = _cursorPinned ? '<button type="button" class="chp-clear" onclick="clearChartPin()">Pinned · ' + (touchOnly ? 'tap' : 'click') + ' to release</button>' : '';
+    const pin = restLabel
+      ? '<span class="chp-hint">' + (touchOnly ? 'Tap the chart to pin a time' : 'Hover the chart for any time; click to pin') + '</span>'
+      : _cursorPinned ? '<button type="button" class="chp-clear" onclick="clearChartPin()">Pinned · ' + (touchOnly ? 'tap' : 'click') + ' to release</button>' : '';
     const body = _readoutRow('Indoor', lines.indoor) + _readoutRow('Predicted', lines.predicted) + _readoutRow('Outdoor', lines.outdoor) +
       _readoutRow('Overlays', overlay) + (stateHtml ? '<div class="chp-row">' + stateHtml + '</div>' : '');
-    panel.innerHTML = body ? '<div class="chp-time">' + when + pin + '</div><div class="chp-grid">' + body + '</div>' : '';
-    _holdReadoutHeight(panel);
+    const prevH = _readoutFresh ? 0 : panel.offsetHeight;
+    _readoutFresh = false;
+    panel.dataset.mode = restLabel ? 'rest' : (_cursorPinned ? 'pinned' : 'hover');
+    // Resting on a moment with nothing to read (a stretch with no data in view) still says which moment it is.
+    const grid = body || (restLabel && _lastChartData ? '<div class="chp-row chp-none">No readings at this time.</div>' : '');
+    panel.innerHTML = grid ? '<div class="chp-time">' + when + pin + '</div><div class="chp-grid">' + grid + '</div>' : '';
+    _holdReadoutHeight(panel, prevH);
   }
 
   function clearChartPin() { _clearCursor(); }
@@ -1178,13 +1363,13 @@
     stack.addEventListener('mousemove', e => {
       if (Date.now() - _lastTouchAt < 700 || _cursorPinned) return;   // a synthesised mouse event after a tap
       const ms = _msAtClientX(e.clientX);
-      if (ms == null) { _clearCursor(true); return; }
+      if (ms == null) { if (_cursorMs != null) _clearCursor(); return; }   // an axis gutter: back to NOW
       _setCursor(ms, false);
     });
     stack.addEventListener('mouseleave', () => { if (!_cursorPinned) _clearCursor(); });
     ['temp-chart', 'out-chart', 'activity-chart'].forEach(id => {
       const c = document.getElementById(id);
-      if (c) c.addEventListener('mouseleave', () => { if (!_cursorPinned) _clearCursor(true); });
+      if (c) c.addEventListener('mouseleave', () => { if (!_cursorPinned && _cursorMs != null) _clearCursor(); });
     });
     // Desktop pin: a click freezes the readout on that moment; the next click (or Esc) lets go. A drag (zoom select)
     // is not a click, and the mouse events a browser synthesises after a tap are left to the touch pin below.
@@ -1244,7 +1429,13 @@
     }
     window.addEventListener('resize', () => {
       clearTimeout(_initChartInteraction._t);
-      _initChartInteraction._t = setTimeout(() => { _syncKeyOpen(); if (_lastChartData) drawChart(_lastChartData); }, 150);
+      _initChartInteraction._t = setTimeout(() => {
+        _syncKeyOpen();
+        // Only a width change re-flows the readout's grid; a height-only resize (a phone's address bar) keeps the hold.
+        const hp = document.getElementById('chart-hover-panel');
+        if (hp && hp.offsetWidth !== _readoutHeldW) _releaseReadoutHeight();
+        if (_lastChartData) drawChart(_lastChartData);
+      }, 150);
     });
     if (window.matchMedia) {
       const mq = window.matchMedia('(prefers-color-scheme: dark)');
@@ -1297,11 +1488,12 @@
     });
     renderKey(_lastChartData, _series);
     _applyTableView();
-    if (_cursorMs != null) _setCursor(_cursorMs, _cursorPinned);
+    _releaseReadoutHeight();   // the rows changed: size to the new content, then hold that
+    _refreshReadout();
   }
 
   function toggleOverlay(name) {
-    const map = { comfort_band: 'ov:band', humidity: 'ov:humidity', feelslike: 'ov:feelslike', setpoint: 'ov:target', plan: 'ov:plan' };
+    const map = { comfort_band: 'ov:band', setpoint: 'ov:target', plan: 'ov:plan' };   // humidity / feels-like: Issue #1414
     if (map[name]) toggleSeries(map[name]);
   }
 

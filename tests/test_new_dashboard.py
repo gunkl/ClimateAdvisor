@@ -277,9 +277,17 @@ PARITY = [
         "",
     ),
     (
+        ["chart-v4-learning"],
+        "chart-v4-learning",
+        "Chart key: the sensors v4 has not learned yet, on one muted line (0.9.6 Lane F; shared chart_v2.js)",
+        ['id="chart-key"', "chart-v4-learning"],
+        "placed",
+        "",
+    ),
+    (
         [],
         "_group('Overlays', 'Overlays', overlays)",
-        "Chart overlays (target band, humidity, feels-like, target)",
+        "Chart overlays (target band, target, plan; humidity and feels-like hidden until Issue #1414)",
         ["_group('Overlays', 'Overlays', overlays)", "ov:plan"],
         "placed",
         "",

@@ -517,6 +517,8 @@ def build_chart_v4(
     ``breaks["_ca"]``: the swap times (``ca_swaps``, epochs, see ``ca_swap_epochs``) at which the page breaks every
     ``_ca`` line (past, future and baseline), so no single segment crosses a swap. Per-sensor lines draw as before.
     A model without a ``_ca`` future (a node model with no sleep node) gets it from its primary node's line.
+    ``past_span`` (``{first, last}`` or None) spans every past prediction of those lines, in or out of the window, so
+    the page can tell "none in this view" from "none yet" (0.9.6).
     """
     tz = now.tzinfo or datetime.now().astimezone().tzinfo
     assert tz is not None
@@ -534,6 +536,7 @@ def build_chart_v4(
         "future_at": None,
         "baseline": {},
         "past": {},
+        "past_span": None,  # {"first", "last", "sensors"}: every past v4 prediction, in or out of this window
         "breaks": {},
         "corrected_outdoor": {"past": [], "future": []},
     }
@@ -542,10 +545,29 @@ def build_chart_v4(
     bt_points = backtest.get("points") if isinstance(backtest, Mapping) else None
     ids = [CA_SENSOR, *(s for s in dict.fromkeys(sensor_ids) if s != CA_SENSOR)]
     model_primary = model.get("primary") if isinstance(model, Mapping) else None
+    # 0.9.6 Lane F: the span of EVERY past v4 prediction (any of these sensors, any look-ahead, live archive or
+    # backtest), not just this window's, so the page can say "none in this view" instead of "none yet". It rides the
+    # loops below (series() already walks every slot of a line), so it costs no extra pass.
+    span: list[float] = []
+    span_sensors: list[str] = []
+
+    def _seen(t: float) -> None:
+        if not span:
+            span.extend((t, t))
+        elif t < span[0]:
+            span[0] = t
+        elif t > span[1]:
+            span[1] = t
+
     for sid in ids:
         per_lead: dict[str, list[dict[str, Any]]] = {}
         for lead in CHART_LEADS:
-            live = archive.series(sid, lead, start, end) if archive is not None else {}
+            every = archive.series(sid, lead, float("-inf"), float("inf")) if archive is not None else {}
+            for slot in every:
+                _seen(float(slot))
+            if every and sid not in span_sensors:
+                span_sensors.append(sid)
+            live = {slot: v for slot, v in every.items() if start <= slot < end}
             pairs: list[tuple[float, float]] = [(float(slot), v) for slot, v in live.items()]
             live_slots = set(live)
             by_sensor = bt_points.get(sid) if isinstance(bt_points, Mapping) else None
@@ -555,7 +577,12 @@ def build_chart_v4(
                     continue
                 t = _epoch(item.get("t"))
                 v4 = _num(item.get("v4"))
-                if t is None or v4 is None or not (start <= t < end):
+                if t is None or v4 is None:
+                    continue
+                _seen(t)
+                if sid not in span_sensors:
+                    span_sensors.append(sid)
+                if not (start <= t < end):
                     continue
                 if slot_key(datetime.fromtimestamp(t, tz)) in live_slots:
                     continue
@@ -564,6 +591,12 @@ def build_chart_v4(
                 per_lead[lead] = _out_pairs(_downsample_pairs(pairs, range_days, tz), tz, unit)
         if per_lead:
             out["past"][sid] = per_lead
+    if span and span[0] <= now.timestamp():
+        out["past_span"] = {
+            "first": _iso(span[0], tz),
+            "last": _iso(min(span[1], now.timestamp()), tz),
+            "sensors": span_sensors,  # the lines with any past prediction, so a chip is not taken away by the window
+        }
 
     def _line(lines: Any, sid: str) -> Sequence[tuple[datetime, float]]:
         if not isinstance(lines, Mapping):

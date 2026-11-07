@@ -79,9 +79,15 @@ def test_every_toggle_group_is_in_the_key():
     key = _func("renderKey")
     for group in ("Indoor", "Predicted", "Outdoor", "Overlays", "Activity"):
         assert f"_group('{group}'" in key, group
-    for sid in ("ov:band", "ov:target", "ov:humidity", "ov:feelslike", "strip:events"):
+    for sid in ("ov:band", "ov:target", "ov:plan", "strip:events"):
         assert f"'{sid}'" in key, sid
-    assert "STRIP_ROWS.map(r => _chip('strip:' + r.id" in key
+    # 0.9.6 Lane F: humidity / feels-like were never logged, so they are not offered until Issue #1414 wires them up
+    for sid in ("ov:humidity", "ov:feelslike"):
+        assert f"'{sid}'" not in key, sid
+    assert "const HIDDEN_OVERLAYS = ['ov:humidity', 'ov:feelslike']" in INDEX
+    assert "HIDDEN_OVERLAYS.includes(id)) return false" in _func("_isOn")
+    assert "HIDDEN_OVERLAYS.forEach" in _func("_readPrefs")  # stored choices dropped (and re-saved) on read
+    assert "STRIP_ROWS.map(r => ovChip('strip:' + r.id" in key
     for row in ("heating", "cooling", "fan", "natvent", "windows", "windowsplan"):
         assert f"id: '{row}'" in INDEX, row
     ser = _func("_buildSeries")
@@ -137,7 +143,9 @@ def test_v4_is_drawn_whenever_it_has_data_no_accuracy_gate():
     key = _func("renderKey")
     assert '<a href="prediction_accuracy.html' in key and "How each engine has scored" in key
     assert "'?from=classic'" in key  # classic's link brings the scoring page back to classic
-    assert "disabled: !!s.disabledReason" in key
+    # a chip with nothing to draw in the view is disabled with its reason (0.9.6 Lane F); v4's own reasons come first
+    assert "disabled: !!why" in key and "blockOf(s.id, s)" in key
+    assert "if (s && s.disabledReason) return s.disabledReason" in _func("_chipBlock")
     assert "accuracy check" not in key
     assert "chart-v4-note" in INDEX
 
@@ -176,7 +184,8 @@ def test_the_servers_v4_ready_is_has_data_not_an_accuracy_verdict():
 def test_backtest_lead_is_selectable_and_defaults_to_four_hours():
     assert "let _chartLead = '4h'" in INDEX
     assert "[_chartLead]" in _func("_buildSeries")  # past v4 lines read the chosen lead
-    assert "data-lead" in _func("renderKey") and "CHART_LEADS.map" in _func("renderKey")
+    assert "_leadRowHtml(v4, ready)" in _func("renderKey")
+    assert "data-lead" in _func("_leadRowHtml") and "CHART_LEADS.map" in _func("_leadRowHtml")
     assert "_chartPrefs.lead = lead" in _func("setChartLead")
 
 

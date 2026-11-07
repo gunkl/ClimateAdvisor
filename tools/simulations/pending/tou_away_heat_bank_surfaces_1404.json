@@ -1,0 +1,172 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ]
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "name": "tou_away_heat_bank_surfaces_1404",
+  "events": [
+    {
+      "time": "2026-01-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 64.0,
+      "outdoor_f": 30.0
+    },
+    {
+      "time": "2026-01-13T13:00:01",
+      "type": "occupancy_away"
+    },
+    {
+      "time": "2026-01-13T14:00:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T14:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T14:40:00",
+      "type": "temp_update",
+      "indoor_f": 64.0,
+      "outdoor_f": 30.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-13T14:00:00",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T13:59:59",
+      "values": [
+        63.0
+      ],
+      "reason": "First classified cycle inside the bank window: the thermostat is told the bank target 63°F once (Issues #1393/#1395 unchanged by #1404)."
+    },
+    {
+      "at": "2026-01-13T14:29:59",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T14:00:00",
+      "values": [],
+      "reason": "Nothing is written between cycles (the bank write cancels the 5-minute follow-up; the bank check sees the thermostat holds it)."
+    },
+    {
+      "at": "2026-01-13T14:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T14:29:59",
+      "values": [
+        63.0
+      ],
+      "reason": "The next cycle re-asserts the bank target once."
+    },
+    {
+      "at": "2026-01-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.thresholds",
+      "value": [
+        63.0,
+        80.0
+      ],
+      "reason": "The heat/cool thresholds (ca_target_heat/cool, the Heat/Cool Threshold sensors, the reading card's 'Climate Advisor wants') quote the bank: the heat edge is 63°F, what the thermostat is told (issue #1404)."
+    },
+    {
+      "at": "2026-01-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.threshold_context",
+      "value": "tou_bank",
+      "reason": "The threshold sensors' context names the time-of-use bank."
+    },
+    {
+      "at": "2026-01-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.chart_band_now",
+      "value": [
+        63.0,
+        80.0
+      ],
+      "reason": "The chart draws the same band the thresholds quote (issue #1404)."
+    },
+    {
+      "at": "2026-01-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.status",
+      "value": "pre-heating to 63°F until the 4:15 PM high-cost period, then the Away band widened to 57–80°F until 9:00 PM",
+      "reason": "Status says what the house is held to, until when, and the band that follows."
+    },
+    {
+      "at": "2026-01-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.briefing_hvac_row",
+      "value": "HVAC Mode: Heat at 63°F until the 4:15 PM high-cost period, then the Away band widened to 57–80°F until 9:00 PM",
+      "reason": "The briefing's HVAC Mode row quotes the bank target, not the schedule band edge."
+    },
+    {
+      "at": "2026-01-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.plan_now",
+      "value": "Pre-heating to 63°F until the 4:15 PM high-cost period, then the Away band widened to 57–80°F until 9:00 PM",
+      "reason": "The Next 24 hours list opens with the same sentence ('Now')."
+    },
+    {
+      "at": "2026-01-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.text",
+      "value": "Nothing needs you: pre-heating to 63°F until the 4:15 PM high-cost period, then the Away band widened to 57–80°F until 9:00 PM.",
+      "reason": "Next Action (For you) tells the same story and asks nothing of the occupant."
+    },
+    {
+      "at": "2026-01-13T14:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.next_automation",
+      "value": {
+        "action": "High-cost period starts — the Away band widened to 57–80°F until 9:00 PM",
+        "time": "4:15 PM"
+      },
+      "reason": "Next Automation names the bank's end and the band that follows."
+    }
+  ],
+  "description": "Issue #1404 (Away heat): an empty house on a cold day with a 16:15-21:00 peak (Away band 60-80 F). The split-delta bank tells the thermostat heat 63 F. Before the fix Status, the thresholds and the briefing quoted heat 60 F, the chart drew 60-63 F, Next Automation said 'No more actions today' and the plan list called the band 'the away band'.",
+  "verdict": {
+    "type": "positive",
+    "summary": "While an empty house pre-heats for a peak, every surface says it is held to 63 F and when the widened Away band takes over",
+    "observed_behavior": "The thermostat is told 63°F once per cycle; Status, the thresholds, the briefing, the chart band, Next Action, Next Automation and the plan list all quote 63°F and the band that follows.",
+    "expected_behavior": "Occupant view: the person can read on any surface what the house is held to during the bank and when it goes back.",
+    "effectiveness": "Fails on 6ebdb16 (before #1404): the thresholds/briefing/Status quote the schedule band and the chart draws the #786 shape. Deleting the display resolver (current_hold) fails every field_equals here; the setpoint_writes rows pin that the thermostat writes did not change.",
+    "alignment": "docs/08-COMPUTATION-REFERENCE.md (time-of-use bank, Issue #1404 paragraph) and docs/scheduler-spec.md describe the same hold sentence and band.",
+    "user_outcome": "If this regressed, the person would read a band the thermostat is not told (e.g. 'Climate Advisor wants 78 F' while it cools to 68 F) and could not tell what the house is held to or when it goes back."
+  },
+  "source": "synthetic: Issue #1404",
+  "issue": 1404
+}

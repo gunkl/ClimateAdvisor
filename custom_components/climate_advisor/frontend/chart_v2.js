@@ -1545,6 +1545,18 @@
       '<span class="plan-text">' + escapeHtml(s.text_short || s.text || '') + (low && !held ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
   }
 
+  // Issue #1404: a time-of-use bank holding the house right now opens the list ("Now"), in the same words as the
+  // Status line, so the list says what the thermostat is told and when the band returns.
+  function _planHoldRowHtml() {
+    const h = _timeline && _timeline.current_hold;
+    if (!h || !h.text) return '';
+    return '<li class="plan-row plan-ca plan-now" data-kind="tou_bank" data-actor="ca">' +
+      '<span class="plan-time">Now</span>' +
+      '<span class="plan-actor" title="Climate Advisor does this">' +
+        '<svg width="12" height="12" viewBox="-7 -7 14 14" aria-hidden="true"><circle r="4.5" fill="var(--c-plan)" stroke="var(--c-plan)" stroke-width="1.5"/></svg>CA</span>' +
+      '<span class="plan-text">' + escapeHtml(h.text) + '</span></li>';
+  }
+
   // Render the "Next 24 hours" list into `el`. opts.extra() may return extra HTML for the foot (the page's own
   // facts, for example the nat-vent cycling range); it is escaped by the caller.
   function renderPlanList(el, opts) {
@@ -1561,7 +1573,8 @@
       body = '<li class="plan-empty">The plan could not be loaded. It will be retried.</li>';
     } else {
       const steps = _planSteps(PLAN_HORIZON_MS);
-      body = steps.length ? steps.map(s => _planRowHtml(s, now)).join('')
+      const hold = _planHoldRowHtml();
+      body = (steps.length || hold) ? hold + steps.map(s => _planRowHtml(s, now)).join('')
         : '<li class="plan-empty">Nothing is planned for the next 24 hours.</li>';
     }
     el.innerHTML = body;

@@ -1754,7 +1754,21 @@ def build_timeline(
     if segments and segments[0].occupancy in ("away", "vacation"):
         seg = segments[0]
         key = "occupancy_setback.vacation" if seg.occupancy == OCCUPANCY_VACATION else "occupancy_setback.away"
-        add(now, StepKind.SETBACK_START, key, "high", {"t": now, "floor": seg.floor, "ceiling": seg.ceiling})
+        # Issue #1404: the step names the away/vacation band itself. A time-of-use bank laid over this segment
+        # (overlay tou_cool / tou_heat) is what the house is held to until the high-cost period starts, and the plan
+        # list's "Now" row says so; calling the bank edge (e.g. 60-77 F) "the away band" contradicted it.
+        _tou = seg.overlay in ("tou_cool", "tou_heat")
+        add(
+            now,
+            StepKind.SETBACK_START,
+            key,
+            "high",
+            {
+                "t": now,
+                "floor": seg.base_floor if _tou else seg.floor,
+                "ceiling": seg.base_ceiling if _tou else seg.ceiling,
+            },
+        )
 
     # pre-cool / TOU
     # The weather pre-cool is a home-band action: an empty house (away today, vacation always) is held at its setback by

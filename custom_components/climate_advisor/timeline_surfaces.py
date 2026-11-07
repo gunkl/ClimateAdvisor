@@ -51,6 +51,9 @@ NEXT_AUTOMATION_LABELS: dict[str, str] = {
     "preheat_start.tou": "Pre-heat for TOU schedule ({temp})",
     "natvent_start.predicted": "Natural ventilation",
     "ceiling_guard": "AC turns on to hold the ceiling",
+    # Issue #1404: the end of a time-of-use bank (its high-cost period starts). ``{after}`` is what follows, from the
+    # shared hold resolver: "back to the Away band 60–80°F" / "the Away band widened to 60–83°F until 9:00 PM".
+    "tou_bank_end": "High-cost period starts — {after}",
 }
 
 # Kinds a Next Automation candidate may come from that are listed even when they fall on another local day (the
@@ -289,6 +292,12 @@ def next_automation_label(step: TimelineStep, unit: str) -> str | None:
     if temp is None:
         return None
     return template.format(temp=format_temp(float(temp), unit))
+
+
+def tou_bank_end_label(after: str) -> str:
+    """The Next Automation label for the end of a time-of-use bank (Issue #1404); ``after`` is the band text that
+    follows it (``automation.hold_after_text()``), so the card says the same as Status and the plan list."""
+    return NEXT_AUTOMATION_LABELS["tou_bank_end"].format(after=after)
 
 
 def next_automation_candidates(tl: Timeline, now: datetime, unit: str) -> list[tuple[datetime, str, TimelineStep]]:

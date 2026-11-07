@@ -1186,6 +1186,13 @@ def active_thresholds_for(coordinator: Any, now: datetime | None = None) -> dict
     config = coordinator.config
     classification = coordinator.current_classification
     if classification is not None:
+        # Issue #1404: while a time-of-use bank owns the setpoint the thermostat is told the bank target, so the
+        # thresholds quote it (the shared display resolver, coordinator.current_hold()). No bank: unchanged below.
+        _hold_fn = getattr(coordinator, "current_hold", None)
+        _current = _hold_fn(now) if callable(_hold_fn) else None
+        if isinstance(_current, CurrentHold) and _current.bank is not None:
+            _b = _current.band
+            return {"heat": _b.floor, "cool": _b.ceiling, "context": _b.context, "provisional": False}
         ae = coordinator.automation_engine
         band = resolve_active_band(
             classification,
@@ -1209,6 +1216,117 @@ def active_thresholds_for(coordinator: Any, now: datetime | None = None) -> dict
         "context": BAND_CONTEXT_SLEEP if _in_sleep_window(now, config) else BAND_CONTEXT_COMFORT,
         "provisional": True,
     }
+
+
+# ── Issue #1404: the hold every surface quotes ──────────────────────────────────────────────────────────────────────
+# Occupant view: while the house pre-cools or pre-heats for a time-of-use high-cost period (a "bank"), the thermostat
+# is told the bank target, not the schedule band. Status, the briefing, Next Action, Next Automation, Next 24 hours,
+# the reading cards and the chart all quote ONE answer, built here (pure) and assembled live by
+# ``ClimateAdvisorCoordinator.current_hold()``. DISPLAY ONLY: no decision path reads it; ``_resolved_comfort_band()``
+# stays the schedule band every restore, adoption and offset cap resolves against.
+
+# Not in BAND_CONTEXTS (the select_comfort_band() contexts): a bank is laid over the schedule band by the display
+# resolver, never chosen by the band selector.
+BAND_CONTEXT_TOU_BANK = "tou_bank"
+DISPLAY_BAND_CONTEXTS: tuple[str, ...] = (*BAND_CONTEXTS, BAND_CONTEXT_TOU_BANK)
+
+
+@dataclass(frozen=True)
+class TouBankHold:
+    """A time-of-use bank that owns the thermostat right now (internal °F)."""
+
+    target: float  # what the thermostat is told
+    mode: str  # "cool" (pre-cool) | "heat" (pre-heat)
+    ends: datetime  # the high-cost period's start: the bank ends and the schedule band returns
+    schedule_id: str | None = None
+    period_end: datetime | None = None  # the high-cost period's own end (away/vacation widening), when known
+
+
+@dataclass(frozen=True)
+class CurrentHold:
+    """What the house is held to now (Issue #1404).
+
+    ``band`` is the hold (the bank band while banking, else the schedule band); ``schedule_band`` the home / sleep /
+    Away / Vacation band underneath; ``after_band`` the band in force when the bank ends (``bank.ends``), which for
+    Away/Vacation is the setback band widened for the high-cost period.
+    """
+
+    band: ComfortBand
+    schedule_band: ComfortBand
+    bank: TouBankHold | None = None
+    after_band: ComfortBand | None = None
+    occupancy_mode: str = "home"
+
+
+def tou_bank_band(schedule: ComfortBand, target: float, mode: str) -> ComfortBand:
+    """The band a bank holds (pure): the edge for the bank's mode IS the target the thermostat is told.
+
+    Pre-cool: ceiling = target (the AC runs above it); pre-heat: floor = target. The other edge stays the schedule's,
+    moved only as far as needed to keep floor <= ceiling (a sleep-destination bank can aim past it).
+    """
+    target = float(target)
+    if mode == "cool":
+        return ComfortBand(
+            floor=min(schedule.floor, target),
+            ceiling=target,
+            active="ceiling",
+            reason=f"time-of-use pre-cool to {target:.1f}F",
+            context=BAND_CONTEXT_TOU_BANK,
+        )
+    return ComfortBand(
+        floor=target,
+        ceiling=max(schedule.ceiling, target),
+        active="floor",
+        reason=f"time-of-use pre-heat to {target:.1f}F",
+        context=BAND_CONTEXT_TOU_BANK,
+    )
+
+
+def hold_band_label(band: ComfortBand, occupancy_mode: str) -> str:
+    """'comfort band' / 'sleep band' / 'Away band' / 'Vacation band' for a schedule band (pure)."""
+    ctx = getattr(band, "context", "")
+    if ctx == BAND_CONTEXT_VACATION or (ctx == BAND_CONTEXT_TOU_EXPANSION and occupancy_mode == OCCUPANCY_VACATION):
+        return "Vacation band"
+    if ctx in (BAND_CONTEXT_AWAY, BAND_CONTEXT_TOU_EXPANSION):
+        return "Away band"
+    if ctx == BAND_CONTEXT_SLEEP:
+        return "sleep band"
+    return "comfort band"
+
+
+def _hold_band_text(band: ComfortBand, unit: str) -> str:
+    """'60–80°F' (display unit, whole degrees)."""
+    return f"{format_temp(band.floor, unit)[:-2]}–{format_temp(band.ceiling, unit)}"
+
+
+def _hold_clock(at: datetime) -> str:
+    return dt_util.as_local(at).strftime("%I:%M %p").lstrip("0")
+
+
+def hold_after_text(hold: CurrentHold, unit: str) -> str:
+    """What follows the bank, e.g. 'back to the Away band 60–80°F' (pure). '' without a bank."""
+    if hold.bank is None:
+        return ""
+    after = hold.after_band or hold.schedule_band
+    label = hold_band_label(after, hold.occupancy_mode)
+    if getattr(after, "context", "") == BAND_CONTEXT_TOU_EXPANSION:
+        until = f" until {_hold_clock(hold.bank.period_end)}" if hold.bank.period_end is not None else ""
+        return f"the {label} widened to {_hold_band_text(after, unit)}{until}"
+    return f"back to the {label} {_hold_band_text(after, unit)}"
+
+
+def hold_sentence(hold: CurrentHold | None, unit: str) -> str | None:
+    """The one bank sentence every surface quotes (pure), or None when no bank owns the thermostat.
+
+    'Pre-cooling to 77°F until the 4:15 PM high-cost period, then back to the Away band 60–80°F'.
+    """
+    if hold is None or hold.bank is None:
+        return None
+    verb = "Pre-cooling" if hold.bank.mode == "cool" else "Pre-heating"
+    return (
+        f"{verb} to {format_temp(hold.bank.target, unit)} until the {_hold_clock(hold.bank.ends)} high-cost period, "
+        f"then {hold_after_text(hold, unit)}"
+    )
 
 
 def pre_cool_sleep_window_config(config: dict) -> dict:
@@ -5192,6 +5310,16 @@ class AutomationEngine:
             natural_vent_active=self._natural_vent_active,
             whf_owns_hvac=self._whf_owns_hvac(),
         )
+
+    def tou_bank_holds_setpoint(self) -> bool:
+        """DISPLAY read (Issue #1404): nothing defers a time-of-use bank right now, so its write lands.
+
+        The bank writes skip on an unconfirmed manual change, then on the same holds ``_tou_bank_skips_band_write()``
+        checks (a manual override, a door/window pause, nat-vent or whole-house-fan ownership, a settled-open sensor,
+        a blower session). Asked by ``ClimateAdvisorCoordinator.current_hold()`` only; it reads state and changes
+        nothing, and no decision path calls it.
+        """
+        return bool(not self._override_confirm_pending and self._tou_bank_skips_band_write(True))
 
     def _tou_bank_skips_band_write(self, tou_bank_owns_setpoint: bool) -> bool:
         """Issue #1393/#1395: True when this pass must not write a band because the time-of-use bank write follows it.

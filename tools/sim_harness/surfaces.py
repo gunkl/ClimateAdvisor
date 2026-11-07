@@ -10,8 +10,10 @@ the range you quote equal the range the engine is armed with right now?".
 DOCTRINE (design section 8): the READERS call the real production functions on the live FakeHass
 coordinator session; this module never re-derives a band.
 
-* armed reference ........ ``engine._resolved_comfort_band(classification)`` (what the thermostat gets)
-* chart band ............. ``coordinator._build_target_band_for(...)`` + ``_target_band_lower_upper_now()``
+* armed reference ........ ``coordinator.current_hold().band`` (what the thermostat gets: the schedule band
+  ``engine._resolved_comfort_band(classification)``, or a time-of-use bank's band while the bank owns it, #1404)
+* chart band ............. ``coordinator._chart_display_band(...)`` (what the chart draws) +
+  ``_target_band_lower_upper_now()``
 * Status API ............. the real ``ClimateAdvisorStatusView.get()`` (``ca_target_heat/cool``)
 * briefing ............... the real ``coordinator._build_briefing_text()`` HVAC Mode row
 * Next Action ............ the real ``coordinator._compute_next_action()``, boundary-probed
@@ -271,11 +273,23 @@ def household_schedule_complete(config: dict) -> bool:
 
 
 def read_armed(session: Any) -> Armed | None:
-    """The engine's own resolved band for the current classification (None before one exists)."""
+    """The band the thermostat is armed with now (None before a classification exists).
+
+    Issue #1404 (test-infrastructure change, semantic justification): this used to be
+    ``engine._resolved_comfort_band(c)`` alone, the SCHEDULE band. That was wrong during a time-of-use bank: since
+    #1393/#1395 the bank owns the setpoint, the cycle does not write the schedule band at all and the thermostat is
+    told the bank target (e.g. cool 77 F while the Away band is 60-80 F), so "armed" named a band the engine does not
+    arm then. It now reads the coordinator's shared display resolver ``current_hold()`` -- the production function
+    every surface quotes -- whose band IS ``_resolved_comfort_band(c)`` whenever no bank owns the thermostat
+    (deferred, outside the window, no schedule), and the bank band (pre-cool ceiling / pre-heat floor = the target)
+    while one does. The resolver is never re-derived here. A coordinator-less session keeps the engine band.
+    """
     c = session.engine._current_classification
     if c is None:
         return None
-    band = session.engine._resolved_comfort_band(c)
+    coord = getattr(session, "coordinator", None)
+    hold = coord.current_hold() if coord is not None and hasattr(coord, "current_hold") else None
+    band = hold.band if hold is not None else session.engine._resolved_comfort_band(c)
     return Armed(floor=float(band.floor), ceiling=float(band.ceiling), active=str(band.active))
 
 
@@ -301,7 +315,10 @@ def read_chart_band(session: Any) -> Shown | None:
     held = coord._occupancy_restore_held()
     if held:
         return None
-    sched = coord._build_target_band_for(now, engine._thermal_model, hourly_forecast_override=hourly)
+    # Issue #1404: the band the chart DRAWS (the display band: a time-of-use bank hour shows the target the
+    # thermostat is told), the same function get_chart_data() draws from.
+    builder = getattr(coord, "_chart_display_band", None) or coord._build_target_band_for  # pre-#1404 trees
+    sched = builder(now, engine._thermal_model, hourly_forecast_override=hourly)
     previous = getattr(coord, "_target_band_schedule", None)
     coord._target_band_schedule = sched
     try:

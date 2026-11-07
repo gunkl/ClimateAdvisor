@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import platform
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time
 from typing import Any
 
@@ -25,6 +25,8 @@ from .automation import (
     _in_sleep_window,
     awake_comfort_edges,
     compute_pre_cool_target,
+    hold_after_text,
+    hold_sentence,
     resolve_pre_cool_modifier,
     select_comfort_band,
 )
@@ -118,6 +120,8 @@ class _BriefingFacts:
     # and the live direction veto ("heat" or "warm") on a period that is running, so the row says "closed for now".
     open_at: datetime | None = None
     window_veto: str | None = None
+    # Issue #1404: the time-of-use bank holding the house right now (``automation.CurrentHold`` with a bank), or None.
+    current_hold: Any = None
 
 
 def _local(moment: datetime, now: datetime) -> datetime:
@@ -364,8 +368,13 @@ def generate_briefing(
     automation_overridden: bool = False,
     now: datetime | None = None,
     timeline: Any | None = None,
+    current_hold: Any | None = None,
 ) -> str:
     """Generate the daily climate briefing message.
+
+    ``current_hold`` (Issue #1404): the coordinator's ``current_hold()``. While a time-of-use bank owns the
+    thermostat the HVAC Mode row quotes the bank target and when the schedule band returns, and Today's Steps opens
+    with the same sentence Status shows; otherwise (None, or no bank) the briefing is unchanged.
 
     ``timeline`` (Issue #1230 R3b): the zone's operation timeline. When given, the briefing's window times are the
     timeline's window steps and a "Today's steps" section lists the timeline's step sentences; without it (direct
@@ -557,6 +566,8 @@ def generate_briefing(
         awake_edges=(awake_heat, awake_cool),
         windows=timeline_windows(timeline, (now or dt_util.now()).date()) if timeline is not None else None,
     )
+    if current_hold is not None and getattr(current_hold, "bank", None) is not None:
+        facts = replace(facts, current_hold=current_hold)
     tldr_lines = _generate_tldr_table(c, config, temp_unit=temp_unit, facts=facts)
 
     if verbosity == "tldr_only":
@@ -640,8 +651,11 @@ def generate_briefing(
         lines.extend(grace_lines)
         _LOGGER.debug("Grace section included — source=%s", grace_source)
 
-    if timeline is not None:
-        ops = operations_lines(timeline, now or dt_util.now())
+    _bank_line = hold_sentence(facts.current_hold, temp_unit) if facts.current_hold is not None else None
+    if timeline is not None or _bank_line is not None:
+        ops = operations_lines(timeline, now or dt_util.now()) if timeline is not None else []
+        if _bank_line is not None:
+            ops = [f"  • Now: {_bank_line}.", *ops]
         if ops:
             lines.append("")
             lines.append("\U0001f4cb Today's Steps")
@@ -764,7 +778,16 @@ def _generate_tldr_table(
     # A morning snapshot: the TOU away/vacation widening is not threaded in. Issue #1091: the band reflects the
     # real Prefer savings flag, so the row quotes the awake band the thermostat is armed with.
     _band = facts.band
-    if facts.unoccupied:
+    _bank = getattr(facts.current_hold, "bank", None)
+    if _bank is not None:
+        # Issue #1404: a time-of-use bank owns the thermostat: the row quotes what it is told and what follows.
+        _verb = "Cool" if _bank.mode == "cool" else "Heat"
+        _until = dt_util.as_local(_bank.ends).strftime(_FMT_HOUR)
+        hvac_val = (
+            f"{_verb} at {format_temp(_bank.target, temp_unit)} until the {_until} high-cost period, "
+            f"then {hold_after_text(facts.current_hold, temp_unit)}"
+        )
+    elif facts.unoccupied:
         if c.hvac_mode == "cool":
             hvac_val = f"Cool at {format_temp(_band.ceiling, temp_unit)}"
         elif c.hvac_mode == "heat":

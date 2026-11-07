@@ -1,0 +1,130 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ]
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T15:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T16:00:00",
+      "type": "temp_update",
+      "indoor_f": 68.5,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T16:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T16:35:00",
+      "type": "temp_update",
+      "indoor_f": 68.5,
+      "outdoor_f": 90.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T16:14:59",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T15:30:00",
+      "values": [],
+      "reason": "Nothing is written between the 15:30 cycle (which re-asserted the bank) and the period's start."
+    },
+    {
+      "at": "2026-07-13T16:15:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T16:14:59",
+      "values": [
+        68.0
+      ],
+      "reason": "At the high-cost period's start (16:15) the bank ends and the comfort band is written once (the nearer edge, heat 68 F), the same write the 16:30 cycle made before #1405."
+    },
+    {
+      "at": "2026-07-13T16:29:59",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T16:15:00",
+      "values": [],
+      "reason": "No re-send between the bank end and the next cycle."
+    },
+    {
+      "at": "2026-07-13T16:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T16:29:59",
+      "values": [
+        68.0
+      ],
+      "reason": "The regular cycle re-asserts the band as it always does."
+    },
+    {
+      "at": "2026-07-13T16:35:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.text",
+      "value": null,
+      "reason": "After the bank no surface claims one (issue #1404)."
+    }
+  ],
+  "name": "tou_home_cool_bank_ends_on_time_1405",
+  "description": "Issue #1405: a home pre-cooled to 68 F (the comfort floor) for a 16:15 high-cost period. At the period's start the bank ends; before the fix the thermostat kept the bank setpoint until the next 30-minute cycle (here 16:30) wrote the comfort band. Now the Home/Guest bank-end timer (the mirror of the Away/Vacation T_start timer) writes the same band write at 16:15.",
+  "verdict": {
+    "type": "positive",
+    "summary": "A home bank ends at the high-cost period's start, not up to 30 minutes later",
+    "observed_behavior": "The band write (heat 68 F) lands at 16:15; before the fix the first band write after the bank was the 16:30 cycle's.",
+    "expected_behavior": "Occupant view: during the expensive period the thermostat holds the comfort band, not the pre-conditioning setpoint.",
+    "effectiveness": "Fails on 6ebdb16 (no write at 16:15, the band lands at 16:30). Deleting the bank-end timer (_sync_tou_home_end_timer) fails the 16:15 row.",
+    "alignment": "docs/scheduler-spec.md and docs/08-COMPUTATION-REFERENCE.md (Issue #1405) describe the Home/Guest bank-end timer.",
+    "user_outcome": "If this regressed, a pre-cooled home would keep cooling to the floor (or a pre-heated one heating to the ceiling) for up to 30 minutes into the expensive period."
+  },
+  "source": "synthetic: Issue #1405",
+  "issue": 1405
+}

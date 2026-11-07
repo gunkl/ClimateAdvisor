@@ -752,8 +752,55 @@ def v4_ca_only(browser):
             ctx.close()
 
 
+BANK_SENTENCE = "Pre-cooling to 77°F until the 4:15 PM high-cost period, then back to the Away band 60–80°F"
+
+
+def tou_bank(browser):
+    """Issue #1404: Away, pre-cooling to 77 F for a 4:15 PM high-cost period. Both pages, light / dark, 1280 / 390 px:
+    the Status line says the bank sentence, the hallway card's setpoint agrees with what CA wants (no "wants 80"), the
+    plan list opens with the same sentence ("Now"), nothing scrolls sideways. Screenshots final-<page>-tou-bank-*.png."""
+    ends = (now_local() + dt.timedelta(hours=2)).isoformat()
+    hold = {
+        "kind": "tou_bank", "mode": "cool", "target": 77, "ends": ends, "schedule_id": "peak1",
+        "heat": 60, "cool": 77, "schedule_heat": 60, "schedule_cool": 80, "after_heat": 60, "after_cool": 80,
+        "text": BANK_SENTENCE, "after_text": "back to the Away band 60–80°F",
+    }  # fmt: skip
+    line = BANK_SENTENCE[0].lower() + BANK_SENTENCE[1:]
+    st = dict(
+        FX["status"], zone_count=1, zones=[], manual_override_active=False, grace_active=False, nat_vent_active=False,
+        hvac_mode="cool", hvac_action="cooling", current_setpoint=77, ca_target_heat=60, ca_target_cool=77,
+        occupancy_mode="away", automation_status=line, next_action=f"Nothing needs you: {line}.",
+        next_automation_action="High-cost period starts — back to the Away band 60–80°F", next_automation_time="4:15 PM",
+        current_hold=hold,
+    )  # fmt: skip
+    tl = dict(timeline(), current_hold=hold)
+    for page, plan in (("index.html", "#plan-list"), ("new_dashboard.html", "#status-plan-list")):
+        for label, vp, scheme in (
+            ("light-1280", {"width": 1280, "height": 1000}, "light"),
+            ("dark-390", {"width": 390, "height": 900}, "dark"),
+        ):
+            name = f"tou-bank:{page}:{label}"
+            ctx, pg = new_page(browser, vp, scheme, {"status": st, "timeline": tl}, name=name)
+            pg.goto(f"http://127.0.0.1:{PORT}/{page}")
+            pg.wait_for_timeout(1500)
+            grid = pg.locator("#status-grid").inner_text()
+            check(f"{name}: Status says the bank sentence", BANK_SENTENCE.lower() in grid.lower(), grid[:200])
+            check(f"{name}: no 'Climate Advisor wants' against the bank target", "wants" not in grid, grid[:200])
+            first = pg.locator(f"{plan} .plan-row").first
+            check(
+                f"{name}: the plan list opens with the bank (Now)",
+                first.count() == 1
+                and first.get_attribute("data-kind") == "tou_bank"
+                and first.locator(".plan-text").inner_text() == BANK_SENTENCE,
+            )
+            layout(pg, name, vp)
+            pg.screenshot(path=str(OUT / f"final-{page.split('.')[0]}-tou-bank-{label}.png"), full_page=True)
+            ctx.close()
+
+
 with sync_playwright() as p:
     b = p.chromium.launch()
+    tou_bank(b)
     v4_ca_only(b)
     for page in ("index.html", "new_dashboard.html"):
         for label, vp, scheme in [

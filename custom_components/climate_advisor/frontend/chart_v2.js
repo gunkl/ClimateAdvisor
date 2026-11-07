@@ -89,7 +89,10 @@
   }
 
   const CHART_RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y'];
-  const CHART_AHEADS = ['12h', '24h', '48h', '5d'];
+  // Ahead: the forecast right of NOW. Never under a day, so the "now" view shows at least 24 h of future on every
+  // range; a remembered shorter choice (the old '12h' button) reads back as 24h.
+  const CHART_AHEADS = ['24h', '48h', '5d'];
+  const MIN_AHEAD_H = 24;
   const CHART_LEADS = ['1h', '4h', '12h', '24h'];
   const CHART_HOURS = { '6h': 6, '12h': 12, '24h': 24, '48h': 48, '3d': 72, '5d': 120, '7d': 168, '30d': 720, '1y': 8760 };
   const CHART_PREFS_KEY = 'ca_chart_v2';
@@ -141,6 +144,7 @@
         }
         if (CHART_RANGES.includes(p.range)) prefs.range = p.range;
         if (CHART_AHEADS.includes(p.ahead)) prefs.ahead = p.ahead;
+        else if (p.ahead !== undefined) prefs.migrated = true; // e.g. a stored '12h': 24h, re-saved on load
         if (CHART_LEADS.includes(p.lead)) prefs.lead = p.lead;
         prefs.table = p.table === true;
         if (typeof p.model === 'string') prefs.model = p.model;
@@ -158,6 +162,7 @@
     if (_chartPrefs !== null && _chartPrefsZone === zone) return;
     _chartPrefs = _readPrefs();
     _chartPrefsZone = zone;
+    if (_chartPrefs.migrated) { delete _chartPrefs.migrated; _writePrefs(); }
     _chartRange = _chartPrefs.range;
     _chartAhead = _chartPrefs.ahead;
     _chartLead = _chartPrefs.lead;
@@ -212,7 +217,8 @@
   // ---- time window ----
   function _baseWindow() {
     const centre = Date.now() + _windowOffset;
-    return { min: centre - _hoursOf(_chartRange) * 3600000, max: centre + _hoursOf(_chartAhead) * 3600000 };
+    const aheadH = Math.max(MIN_AHEAD_H, _hoursOf(_chartAhead));
+    return { min: centre - _hoursOf(_chartRange) * 3600000, max: centre + aheadH * 3600000 };
   }
   function _viewWindow() { return _zoomWin || _baseWindow(); }
   // Scroll by half a view (the visible span, so a zoomed view scrolls in proportion).
@@ -1197,6 +1203,7 @@
   }
 
   function setChartAhead(ahead) {
+    if (!CHART_AHEADS.includes(ahead)) return;
     _ensurePrefs();
     _chartAhead = ahead;
     _chartPrefs.ahead = ahead;

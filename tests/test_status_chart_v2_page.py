@@ -40,8 +40,12 @@ def test_two_charts_one_strip_canvas_and_a_cursor():
 def test_time_controls_past_ahead_scroll_now():
     for r in ("6h", "12h", "24h", "3d", "7d", "30d", "1y"):
         assert f'data-range="{r}"' in INDEX and f"setChartRange('{r}', this)" in INDEX
-    for a in ("12h", "24h", "48h", "5d"):
+    for a in ("24h", "48h", "5d"):
         assert f'data-ahead="{a}"' in INDEX and f"setChartAhead('{a}')" in INDEX
+    # the "now" view always shows at least a day ahead, on both pages (no 12h Ahead button; a stored '12h' migrates)
+    new_page = (_FE / "new_dashboard.html").read_text(encoding="utf-8")
+    assert 'data-ahead="12h"' not in INDEX and 'data-ahead="12h"' not in new_page
+    assert "const CHART_AHEADS = ['24h', '48h', '5d']" in INDEX and "const MIN_AHEAD_H = 24" in INDEX
     assert 'onclick="shiftChartWindow(-1)"' in INDEX and 'onclick="shiftChartWindow(1)"' in INDEX
     assert 'onclick="chartGoNow()"' in INDEX
     assert "const CHART_RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y']" in INDEX

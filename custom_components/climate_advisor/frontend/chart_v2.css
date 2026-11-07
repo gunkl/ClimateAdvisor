@@ -175,6 +175,10 @@
   .key-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
   .key-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; width: 100%; }
   .key-sub { font-size: 0.7rem; color: var(--text-secondary); min-width: 4.2em; }
+  /* Issue #1430: the Predicted rows grouped by engine role (Main, then Comparison, then any engine not selected) */
+  .key-role { display: flex; flex-direction: column; gap: 3px; width: 100%; padding-left: 6px; border-left: 2px solid var(--border); }
+  .key-role-label { font-size: 0.72rem; font-weight: 600; color: var(--text); }
+  #chart-role-main { border-left-color: var(--text-secondary); }
   .key-chip, .seg-btn { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; font-size: 0.74rem; border: 1px solid var(--border); border-radius: 8px;
     background: transparent; color: var(--text-secondary); cursor: pointer; min-height: 28px; }
   .key-chip.on, .seg-btn.on { color: var(--text); border-color: var(--text-secondary); background: var(--bg); font-weight: 600; }

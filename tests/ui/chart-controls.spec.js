@@ -5,7 +5,7 @@ const path = require('path');
 // 0.9.6 Lane F: the Status chart's controls, against the live 0.9.5 Zone 1 shape (tests/fixtures/chart_v2_zone1_live_095.json):
 // v4 model "_ca"-only; v4 future/baseline for "_ca" only; v4 past for "_ca" and the thermostat's finer sensor (from the
 // backtest); nothing from v4 for the thermostat or the bedroom sensor; no humidity / feels-like ever logged.
-//  1. v4 chips only for the sensors v4 has data for; the rest on one "v4 is still learning" line; "history only".
+//  1. v4 chips only for the sensors v4 has data for; the rest on one "v4 is still learning" line; a history-only sensor has one chip (#1430).
 //  2. Humidity and Feels-like are hidden (Issue #1414) and their stored choices dropped.
 //  4. The owner's "v4 has no past predictions to show yet" while v4 had days of them: scrolled into history the fetched
 //     window has none, so the row said "yet". It now says "none in this view" (and when v4 has them, from v4.past_span).
@@ -72,22 +72,21 @@ const chip = (page, id) => page.locator('#chart-key-body [data-series="' + id + 
 
 for (const url of ['/', '/new_dashboard.html']) {
   test.describe(`chart controls on the live 0.9.5 shape (${url})`, () => {
-    test('v4 chips only for sensors v4 has data for; the rest on one muted line; history only', async ({ page }) => {
+    test('v4 chips only for sensors v4 has data for; the rest on one muted line; history only has one chip', async ({ page }) => {
       await open(page, url);
       const v4 = await page.locator('#chart-key-body [data-series^="v4:"], #chart-key-body [data-series^="base:"]')
         .evaluateAll(bs => bs.map(b => b.dataset.series + '=' + b.textContent.trim()).sort());
+      // Issue #1430: the finer sensor (past predictions only) has one chip, on the "Past predictions only" row
       expect(v4).toEqual([
         'base:_ca=Climate Advisor reading',
-        `base:${FINER}=Santa Maria thermostat My ecobee Current Temperature (history only)`,
         'v4:_ca=Climate Advisor reading',
-        `v4:${FINER}=Santa Maria thermostat My ecobee Current Temperature (history only)`,
+        `v4:${FINER}=Santa Maria thermostat My ecobee Current Temperature`,
       ].sort());
       await expect(page.locator('#chart-v4-learning')).toHaveText('v4 is still learning: thermostat, bedroom sensor');
       await expect(page.locator('#chart-v4-learning')).toHaveAttribute('title', /Santa Maria thermostat My ecobee \(thermostat\), Primary Bedroom Sensor Temperature \(bedroom sensor\)/);
-      // the finer sensor: its past (backtest) line can be drawn; its no-plan line is a forecast it does not have
+      // the finer sensor: its past (backtest) line can be drawn; it has no no-plan chip (that line is a forecast)
       await expect(chip(page, 'v4:' + FINER)).toBeEnabled();
-      await expect(chip(page, 'base:' + FINER)).toBeDisabled();
-      await expect(chip(page, 'base:' + FINER)).toHaveAttribute('title', /No forecast for Santa Maria thermostat My ecobee Current Temperature yet/);
+      await expect(chip(page, 'base:' + FINER)).toHaveCount(0);
       if ((await chip(page, 'v4:' + FINER).getAttribute('aria-pressed')) !== 'true') await chip(page, 'v4:' + FINER).click();
       await expect(chip(page, 'v4:' + FINER)).toHaveAttribute('aria-pressed', 'true');
       const n = await page.evaluate((id) => {

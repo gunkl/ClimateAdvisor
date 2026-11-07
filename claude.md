@@ -471,6 +471,8 @@ Single source of truth for how config-flow and options-flow fields are built.
 - **HA facts vs unknowns**: HA docs say `data` = field labels and `data_description` = text under the field, and labels should be succinct. The docs say nothing about label size or placement, so never claim to control label font size from the integration. The integration cannot and must not style HA's frontend or theme (HA Boundary Rule).
 - **Out of scope**: CONFIG_METADATA labels (dashboard Settings tab) intentionally keep units in their labels because that UI has no selector suffix.
 - **Checklist — adding a field**: add `data` + `data_description` to `strings.json` and `en.json`, unit via selector, label <=5 words, then run `tests/test_config_flow_strings.py`.
+- **Defaults registry (#1230 R5c (DP-10))**: every key an options-flow step can write has its default in `CONFIG_METADATA` (`"default": <value>`), or `"no_default": True` when none is meaningful (entity pickers, optional overrides such as `vacation_heat`, optional energy settings). `tests/test_config_metadata.py` fails on a new options-flow key with neither. The default must equal the options form's actual `default=` / `current.get(key, X)` value. Never add a second defaults table (the dashboard's changed-from-default markers read this).
+- **Optional numeric settings** (`energy_rate`, `heat_power_kw`, `cool_power_kw`): no default, `suggested_value` in the form, listed in the step's `clearable_keys`, read with `config.get(KEY)` and treated as "not set" when `None`. No migration. Derived numbers (e.g. `estimated_cost`) stay `None` when an input is missing; never invent a figure.
 
 ### Automation Logic Table (CRITICAL)
 

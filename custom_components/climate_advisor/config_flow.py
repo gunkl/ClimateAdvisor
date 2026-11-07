@@ -36,12 +36,14 @@ from .const import (
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_BRIEFING_NOTIFICATIONS_ENABLED,
+    CONF_COOL_POWER_KW,
     CONF_EMAIL_BRIEFING,
     CONF_EMAIL_DOOR_WINDOW_PAUSE,
     CONF_EMAIL_ENTITY_HEALTH,
     CONF_EMAIL_GRACE_EXPIRED,
     CONF_EMAIL_GRACE_REPAUSE,
     CONF_EMAIL_OCCUPANCY_HOME,
+    CONF_ENERGY_RATE,
     CONF_FAN_ENTITY,
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
@@ -52,6 +54,7 @@ from .const import (
     CONF_GITHUB_TOKEN,
     CONF_GUEST_TOGGLE,
     CONF_GUEST_TOGGLE_INVERT,
+    CONF_HEAT_POWER_KW,
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
     CONF_HVAC_FAN_RESTRICT_MODE,
@@ -885,6 +888,10 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return ClimateAdvisorOptionsFlow()
 
 
+# #1230 R5c: optional energy inputs (no defaults); blank = cleared = "not set".
+_ENERGY_KEYS = (CONF_ENERGY_RATE, CONF_HEAT_POWER_KW, CONF_COOL_POWER_KW)
+
+
 class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     """Handle options for Climate Advisor — menu-based navigation (Issue #50)."""
 
@@ -1707,7 +1714,8 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 await self._commit_section(
                     delta_fields_to_fahrenheit(
                         user_input, self.config_entry.data, self.config_entry.data.get(CONF_TEMP_UNIT, FAHRENHEIT)
-                    )
+                    ),
+                    clearable_keys=_ENERGY_KEYS,
                 )
                 return await self.async_step_init()
 
@@ -1850,6 +1858,41 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                             max=360.0,
                             step=15.0,
                             unit_of_measurement="minutes",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    # #1230 R5c (DP-10): optional energy inputs for the daily cost estimate. No
+                    # default (suggested_value only) so a blank field really clears the stored value.
+                    vol.Optional(
+                        CONF_ENERGY_RATE, description={"suggested_value": current.get(CONF_ENERGY_RATE)}
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.0001,
+                            max=10.0,
+                            step="any",
+                            unit_of_measurement="per kWh",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_HEAT_POWER_KW, description={"suggested_value": current.get(CONF_HEAT_POWER_KW)}
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.1,
+                            max=50.0,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_COOL_POWER_KW, description={"suggested_value": current.get(CONF_COOL_POWER_KW)}
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.1,
+                            max=50.0,
+                            step=0.1,
+                            unit_of_measurement="kW",
                             mode=selector.NumberSelectorMode.BOX,
                         )
                     ),

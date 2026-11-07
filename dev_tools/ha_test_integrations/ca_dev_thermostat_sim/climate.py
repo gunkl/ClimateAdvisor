@@ -118,6 +118,30 @@ def _decide_compressor_state(
     return compressor_on, last_on_ts, last_off_ts
 
 
+def _applies_hvac_power(
+    *,
+    mode: str | None,
+    compressor_on: bool,
+    current_temp: float,
+    target_temp: float | None,
+    k_active: float | None,
+) -> bool:
+    """Whether this step's physics applies HVAC power (Issue #1387).
+
+    Mirrors the gate in ``_simulate_indoor_physics`` (``q`` is non-zero only while heat is below the setpoint or
+    cool above it, with a ``k_active`` supplied). The compressor state machine can stay "on" through the deadband
+    after the room reaches the setpoint, where the ODE applies nothing and the room just holds; a real thermostat
+    reports idle there, so ``hvac_action`` follows this, not ``compressor_on`` alone.
+    """
+    if not compressor_on or mode is None or target_temp is None or k_active is None:
+        return False
+    if mode == "heat":
+        return current_temp < target_temp
+    if mode == "cool":
+        return current_temp > target_temp
+    return False
+
+
 try:
     # The real Climate Advisor ODE step — imported, not reimplemented, so this
     # simulator tracks production physics automatically. See module docstring.
@@ -267,8 +291,13 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             if restored_fan_mode in self._attr_fan_modes:
                 self._fan_mode = restored_fan_mode
 
-            restored_hvac_action = last_state.attributes.get("hvac_action")
-            self._compressor_on = restored_hvac_action in ("heating", "cooling")
+            # Issue #1387: hvac_action no longer implies the compressor state (it reads idle while the compressor
+            # holds through the deadband), so prefer the explicit attribute; older states fall back to the action.
+            restored_compressor = last_state.attributes.get("compressor_on")
+            if isinstance(restored_compressor, bool):
+                self._compressor_on = restored_compressor
+            else:
+                self._compressor_on = last_state.attributes.get("hvac_action") in ("heating", "cooling")
         else:
             _LOGGER.debug(
                 "No prior state for %s — starting from configured initial_temp_f=%.1f",
@@ -327,8 +356,9 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         (thermal-observation gating, restart-cause classification, fan-expectation
         checks, etc.) — the base ClimateEntity default (None/absent) silently defeated
         all of them for this fixture. HEATING/COOLING only while actively driving
-        toward setpoint (see _actively_driving); once setpoint is reached the mode
-        stays HEAT/COOL but the real appliance goes idle, matching a real thermostat.
+        toward setpoint (see _actively_driving: power applied in the last step, Issue #1387);
+        once setpoint is reached the mode stays HEAT/COOL but the real appliance goes idle,
+        matching a real thermostat, even while the compressor state machine is still "on".
         """
         if self._hvac_mode == HVACMode.HEAT:
             return HVACAction.HEATING if self._actively_driving else HVACAction.IDLE
@@ -553,8 +583,16 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
                 self._target_temp,
             )
 
-        self._actively_driving = self._compressor_on
         k_active = (self._k_active_heat if mode == "heat" else self._k_active_cool) if self._compressor_on else None
+        # Issue #1387: report heating/cooling only for a step that really applies power (the compressor can stay
+        # on through the deadband while the room holds at the setpoint; that is idle on a real thermostat).
+        self._actively_driving = _applies_hvac_power(
+            mode=mode,
+            compressor_on=self._compressor_on,
+            current_temp=self._current_temp,
+            target_temp=self._target_temp,
+            k_active=k_active,
+        )
 
         # Allow indoor temp to actually swing to the deadband edge instead of
         # clamping to the bare setpoint (which would make wants_off's deadband

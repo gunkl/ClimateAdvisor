@@ -19,39 +19,21 @@ from typing import Any
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 
-from . import const, log_capture
+from . import log_capture
 from .api import _ambiguous_zone_payload, _get_coordinator
 from .const import CONF_GITHUB_REPO, CONF_GITHUB_TOKEN, CONFIG_METADATA, DOMAIN
 from .temperature import FAHRENHEIT, UNIT_SYMBOL, display_delta, display_temp
 
 API_SETTINGS_EXTRA = "/api/climate_advisor/settings_extra"
 
-# Defaults that live in config_flow.py / coordinator.py as literals rather than as a DEFAULT_* constant
-# or a CONFIG_METADATA "default". Only values read straight from the options-flow schema are listed;
-# a key with no known default simply never gets a "changed" marker.
-_LITERAL_DEFAULTS: dict[str, Any] = {
-    "learning_enabled": True,
-    "adaptive_preheat_enabled": True,
-    "adaptive_setback_enabled": True,
-    "weather_bias_enabled": True,
-    "min_preheat_minutes": 30,
-    "max_preheat_minutes": 240,
-    "default_preheat_minutes": 120,
-    "preheat_safety_margin": 1.3,
-    "comfort_mode_switch_min_interval_s": 600,
-    "aggressive_savings": False,
-    "home_toggle_invert": False,
-    "briefing_time": "06:00:00",
-}
-
 
 def default_for(key: str, meta: dict[str, Any]) -> Any:
-    """The shipped default for ``key`` (internal units), or None when none is known."""
-    if "default" in meta:
-        return meta["default"]
-    if key in _LITERAL_DEFAULTS:
-        return _LITERAL_DEFAULTS[key]
-    return getattr(const, "DEFAULT_" + key.upper(), None)
+    """The shipped default for ``key`` (internal units), or None when it has none.
+
+    The only source is ``CONFIG_METADATA[key]["default"]`` (#1230 R5c: one registry; keys with no
+    meaningful default carry ``no_default``). ``tests/test_config_metadata.py`` guards completeness.
+    """
+    return meta.get("default")
 
 
 def _same(a: Any, b: Any) -> bool:

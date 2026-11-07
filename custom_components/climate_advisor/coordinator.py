@@ -121,6 +121,8 @@ from .const import (
     CONF_AI_ENABLED,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_BRIEFING_NOTIFICATIONS_ENABLED,
+    CONF_COOL_POWER_KW,
+    CONF_ENERGY_RATE,
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
     CONF_FAN_REMOTE_ENTITY,
@@ -128,6 +130,7 @@ from .const import (
     CONF_FAN_STATE_FEEDBACK,
     CONF_GUEST_TOGGLE,
     CONF_GUEST_TOGGLE_INVERT,
+    CONF_HEAT_POWER_KW,
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
     CONF_MANUAL_GRACE_PERIOD,
@@ -334,6 +337,7 @@ from .learning import (
     LearningEngine,
     compute_k_passive_blocks,
     compute_k_passive_endpoint,
+    estimate_daily_cost,
 )
 from .nat_vent_cycling import compute_nat_vent_target
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
@@ -743,6 +747,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         "cool": ("_hvac_on_since", "hvac_runtime_minutes"),
         "fan_only": ("_thermostat_fan_only_on_since", "thermostat_fan_only_runtime_minutes"),
     }
+
+    # #1230 R5c: heat/cool also accumulate into a per-mode field so the optional daily cost estimate can use
+    # each mode's own power rating. hvac_runtime_minutes stays the combined total.
+    _RUNTIME_MODE_FIELD: dict[str, str] = {
+        "heat": "hvac_heat_runtime_minutes",
+        "cool": "hvac_cool_runtime_minutes",
+    }
+
+    def _apply_estimated_cost(self, record: DailyRecord) -> None:
+        """Fill ``record.estimated_cost`` from the optional energy settings (None when any input is missing)."""
+        cfg = self.config
+        record.estimated_cost = estimate_daily_cost(
+            record.hvac_heat_runtime_minutes,
+            record.hvac_cool_runtime_minutes,
+            record.hvac_runtime_minutes,
+            cfg.get(CONF_ENERGY_RATE),
+            cfg.get(CONF_HEAT_POWER_KW),
+            cfg.get(CONF_COOL_POWER_KW),
+        )
 
     # Issue #1048 change 9: comfort stall alert state. Class-level defaults (immutable or
     # lazily created) so coordinators built via object.__new__ in tests still work. Not
@@ -2026,6 +2049,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 elif isinstance(sent, str):
                     rec_data["suggestion_sent"] = [sent]
                 recovered = DailyRecord(**rec_data)
+                self._apply_estimated_cost(recovered)
                 self.learning.record_day(recovered)
                 await self._executor_job(self.learning.save_state)
                 _LOGGER.info("Recovered yesterday's record during startup")
@@ -2622,6 +2646,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             now = dt_util.now()
             elapsed = (now - on_since).total_seconds() / 60.0
             setattr(self._today_record, field, getattr(self._today_record, field) + elapsed)
+            split_field = self._RUNTIME_MODE_FIELD.get(mode)
+            if split_field:
+                setattr(self._today_record, split_field, getattr(self._today_record, split_field) + elapsed)
             setattr(self, on_since_attr, now)  # Reset to now for continued tracking
 
     def _runtime_today_for_mode(self, mode: str) -> float:
@@ -6762,6 +6789,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ),
             hvac_mode_recommended=classification.hvac_mode,
             hvac_runtime_minutes=_prev.hvac_runtime_minutes if _prev else 0.0,
+            hvac_heat_runtime_minutes=_prev.hvac_heat_runtime_minutes if _prev else 0.0,
+            hvac_cool_runtime_minutes=_prev.hvac_cool_runtime_minutes if _prev else 0.0,
             thermostat_fan_only_runtime_minutes=(_prev.thermostat_fan_only_runtime_minutes if _prev else 0.0),
             comfort_violations_minutes=_prev.comfort_violations_minutes if _prev else 0.0,
             manual_overrides=_prev.manual_overrides if _prev else 0,
@@ -7755,6 +7784,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         "thermal_session_count": self._today_record.thermal_session_count,
                     },
                 )
+            self._apply_estimated_cost(self._today_record)
             self.learning.record_day(self._today_record)
             await self._executor_job(self.learning.save_state)
             _LOGGER.info("Day record saved for learning")

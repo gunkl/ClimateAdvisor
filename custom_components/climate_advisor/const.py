@@ -117,6 +117,12 @@ CONF_MAX_SETBACK_DEPTH = "max_setback_depth_f"
 # the default/fallback value within that range.
 CONF_DEFAULT_TOU_LEAD_MINUTES = "default_tou_lead_minutes"
 
+# #1230 R5c (DP-10): optional energy inputs for the daily cost estimate. No defaults, no migration:
+# unset means "unknown", and estimated_cost then stays None.
+CONF_ENERGY_RATE = "energy_rate"  # currency per kWh
+CONF_HEAT_POWER_KW = "heat_power_kw"  # electrical draw while heating runs
+CONF_COOL_POWER_KW = "cool_power_kw"  # electrical draw while cooling runs
+
 # Debounce and grace period config keys
 CONF_SENSOR_DEBOUNCE = "sensor_debounce_seconds"
 CONF_MANUAL_GRACE_PERIOD = "manual_grace_seconds"
@@ -1166,6 +1172,33 @@ CONFIG_METADATA = {
         ),
         "category": "advanced",
     },
+    "energy_rate": {
+        "label": "Energy Rate (per kWh)",
+        "description": (
+            "What a kilowatt-hour costs you, in your own currency. Optional: with the heating and cooling"
+            " power below it lets the Analysis tab estimate each day's cost. Left blank, no cost is shown."
+        ),
+        "category": "advanced",
+        "no_default": True,
+    },
+    "heat_power_kw": {
+        "label": "Heating Power (kW)",
+        "description": (
+            "Average electrical power your heating draws while it runs (check the nameplate or a smart plug)."
+            " Optional: used with the energy rate to estimate daily cost. Left blank, no cost is shown."
+        ),
+        "category": "advanced",
+        "no_default": True,
+    },
+    "cool_power_kw": {
+        "label": "Cooling Power (kW)",
+        "description": (
+            "Average electrical power your cooling draws while it runs (check the nameplate or a smart plug)."
+            " Optional: used with the energy rate to estimate daily cost. Left blank, no cost is shown."
+        ),
+        "category": "advanced",
+        "no_default": True,
+    },
     "preheat_safety_margin": {
         "label": "Pre-heat Safety Margin",
         "description": ("Multiplier applied to model-computed pre-heat time as a buffer (e.g. 1.2 = 20% extra)."),
@@ -1928,3 +1961,100 @@ API_AI_STATUS = f"{API_BASE}/ai_status"
 API_AI_INVESTIGATE = f"{API_BASE}/ai_investigate"
 API_INVESTIGATION_REPORTS = f"{API_BASE}/investigation_reports"
 API_DELETE_REPORT = f"{API_BASE}/delete_report"
+
+
+# ---------------------------------------------------------------------------------------------
+# Defaults registry (#1230 R5c (DP-10)). ONE source of truth for "what is this setting's shipped
+# default": CONFIG_METADATA[key]["default"], or CONFIG_METADATA[key]["no_default"] = True when none is
+# meaningful (entity pickers, optional overrides, optional energy inputs). Each value below equals what the
+# options form actually offers (config_flow.py ``default=`` / ``current.get(key, X)``); the dashboard's
+# changed-from-default markers read only this. tests/test_config_metadata.py guards completeness.
+# Keys whose literal CONFIG_METADATA entry already carries a "default" keep it.
+# ---------------------------------------------------------------------------------------------
+_METADATA_DEFAULTS: dict[str, Any] = {
+    "comfort_heat": DEFAULT_COMFORT_HEAT,
+    "comfort_cool": DEFAULT_COMFORT_COOL,
+    "setback_heat": DEFAULT_SETBACK_HEAT,
+    "setback_cool": DEFAULT_SETBACK_COOL,
+    "sleep_heat": DEFAULT_SLEEP_HEAT,
+    "sleep_cool": DEFAULT_SLEEP_COOL,
+    "temp_unit": DEFAULT_TEMP_UNIT,
+    "outdoor_temp_source": TEMP_SOURCE_WEATHER_SERVICE,
+    "indoor_temp_source": TEMP_SOURCE_CLIMATE_FALLBACK,
+    "sensor_polarity_inverted": False,
+    "manual_grace_notify": False,
+    "automation_grace_notify": True,
+    "fan_mode": DEFAULT_FAN_MODE,
+    "nat_vent_soft_start_enabled": DEFAULT_NAT_VENT_SOFT_START_ENABLED,
+    "home_toggle_invert": False,
+    "vacation_toggle_invert": False,
+    "guest_toggle_invert": False,
+    "wake_time": "06:30:00",
+    "sleep_time": "22:30:00",
+    "briefing_time": "06:00:00",
+    "learning_enabled": True,
+    "adaptive_preheat_enabled": True,
+    "adaptive_setback_enabled": True,
+    "weather_bias_enabled": True,
+    "min_preheat_minutes": 30,
+    "max_preheat_minutes": 240,
+    "default_preheat_minutes": 120,
+    "default_tou_lead_minutes": DEFAULT_TOU_LEAD_MINUTES,
+    "preheat_safety_margin": 1.3,
+    "max_setback_depth_f": 8.0,  # config_flow._DELTA_FIELDS_F (a degF delta; guarded by a test)
+    "aggressive_savings": False,
+    "comfort_mode_switch_min_interval_s": 600,
+    "comfort_deadband_hot_f": DEFAULT_COMFORT_DEADBAND_HOT_F,
+    "comfort_deadband_warm_f": DEFAULT_COMFORT_DEADBAND_WARM_F,
+    "comfort_deadband_mild_f": DEFAULT_COMFORT_DEADBAND_MILD_F,
+    "comfort_deadband_cool_f": DEFAULT_COMFORT_DEADBAND_COOL_F,
+    "comfort_deadband_cold_f": DEFAULT_COMFORT_DEADBAND_COLD_F,
+    "comfort_family_recency_window_min": DEFAULT_COMFORT_FAMILY_RECENCY_WINDOW_MIN,
+    "threshold_hot": DEFAULT_THRESHOLD_HOT,
+    "threshold_warm": DEFAULT_THRESHOLD_WARM,
+    "threshold_mild": DEFAULT_THRESHOLD_MILD,
+    "threshold_cool": DEFAULT_THRESHOLD_COOL,
+    "push_briefing": True,
+    "push_door_window_pause": True,
+    "push_occupancy_home": True,
+    "push_entity_health": True,
+    "email_briefing": True,
+    "email_door_window_pause": True,
+    "email_grace_expired": True,
+    "email_grace_repause": True,
+    "email_occupancy_home": True,
+    "email_entity_health": True,
+    "ai_enabled": DEFAULT_AI_ENABLED,
+    "ai_model": DEFAULT_AI_MODEL,
+    "ai_reasoning_effort": DEFAULT_AI_REASONING_EFFORT,
+    "ai_max_tokens": DEFAULT_AI_MAX_TOKENS,
+    "ai_temperature": DEFAULT_AI_TEMPERATURE,
+    "ai_monthly_budget": DEFAULT_AI_MONTHLY_BUDGET,
+    "ai_auto_requests_per_day": DEFAULT_AI_AUTO_REQUESTS_PER_DAY,
+    "ai_manual_requests_per_day": DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
+    "ai_investigator_enabled": DEFAULT_AI_INVESTIGATOR_ENABLED,
+    "ai_investigator_requests_per_day": DEFAULT_AI_INVESTIGATOR_RPD,
+}
+_METADATA_NO_DEFAULT: frozenset[str] = frozenset(
+    {
+        "weather_entity",
+        "climate_entity",
+        "vacation_heat",
+        "vacation_cool",
+        "notify_service",
+        "sleep_indoor_temp_entity",
+        "door_window_sensors",
+        "fan_entity",
+        "fan_remote_entity",
+        "fan_state_entity",
+        "home_toggle_entity",
+        "vacation_toggle_entity",
+        "guest_toggle_entity",
+        "ai_api_key",
+    }
+)
+for _key, _default in _METADATA_DEFAULTS.items():
+    CONFIG_METADATA[_key].setdefault("default", _default)
+for _key in _METADATA_NO_DEFAULT:
+    CONFIG_METADATA[_key]["no_default"] = True
+del _key, _default

@@ -2868,6 +2868,10 @@ class TestOptionsFlowClearing:
         ("async_step_sensors", "fan_state_entity"),
         ("async_step_temperature_sources", "outdoor_temp_entity"),
         ("async_step_temperature_sources", "indoor_temp_entity"),
+        # #1230 R5c: optional energy inputs (no default; blank means not set).
+        ("async_step_advanced", "energy_rate"),
+        ("async_step_advanced", "heat_power_kw"),
+        ("async_step_advanced", "cool_power_kw"),
     ]
 
     @pytest.mark.parametrize("step,key", CLEARABLE)

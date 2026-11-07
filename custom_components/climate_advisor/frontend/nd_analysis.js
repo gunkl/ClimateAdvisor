@@ -117,7 +117,10 @@
       ['Pre-conditioning', function (r) { return r && r.pre_condition != null ? yn(r.pre_condition) : '—'; }, function (p) { return p ? yn(p.pre_condition) : ''; }],
       ['Manual changes · door/window pauses', rec(function (r) { return (r.manual_overrides || 0) + ' · ' + (r.door_window_pause_events || 0); }), function () { return ''; }],
       ['Away minutes', rec(function (r) { return r0(r.occupancy_away_minutes); }), function () { return ''; }],
-      ['Estimated cost', rec(function (r) { return r.estimated_cost != null ? '$' + Number(r.estimated_cost).toFixed(2) : '—'; }), function () { return ''; }]
+      // Filled at end of day from the optional Settings > Advanced energy rate and heating/cooling power (#1230 R5c);
+      // blank ("—") when any is unset. Tomorrow stays blank: the plan carries no predicted HVAC minutes yet.
+      ['Estimated cost', rec(function (r) { return r.estimated_cost != null ? Number(r.estimated_cost).toFixed(2) : '—'; }), function () { return ''; },
+        'Energy cost of the heating and cooling that ran, from your energy rate and heating/cooling power settings. Shown after the day ends, and only when those are set.']
     ];
     var dt = function (r, p) { return r && r.date ? ' ' + String(r.date).slice(5) : p || ''; };
     var h = '<table style="min-width:640px"><thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Yesterday' + esc(dt(y)) +

@@ -313,16 +313,21 @@ def shadow_id(config: Mapping[str, Any] | None) -> str:
 
 
 def running_ids(config: Mapping[str, Any] | None) -> list[str]:
-    """The engines that run for this zone: the primary, the shadow, and v3 (its observations and curve always run)."""
+    """The engines that RUN for this zone: the primary and the optional shadow, never more than two (Issue #1230 O3).
+
+    v3's OBSERVATIONS (the learning database's samples, which v4's control model also lays its scalars over) are
+    inputs, not an engine, and always keep being collected (``observations_running()``); v3's modelled curve and its
+    4 h archive are built only when v3 is the primary or the shadow."""
     ids = [primary_id(config)]
     shadow = shadow_id(config)
     if shadow != ENGINE_NONE:
         ids.append(shadow)
-    if ENGINE_V3 in ENGINES and ENGINE_V3 not in ids:
-        ids.append(
-            ENGINE_V3
-        )  # v3 keeps learning and keeps its own curve/archive; it drives control only as the primary
     return ids
+
+
+def observations_running() -> bool:
+    """v3's learning observations are collected whatever the engine choice (inputs, not an engine)."""
+    return True
 
 
 def is_running(config: Mapping[str, Any] | None, engine_id: str) -> bool:

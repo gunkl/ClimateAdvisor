@@ -280,7 +280,7 @@ The "thermal model" and "predicted indoor curve" every decision in §3, §5a, §
 
 | Decision | v4 supplies | Computation (unchanged formula, v4 inputs) |
 |---|---|---|
-| ODE ceiling guard (§6c) | the baseline (no-AC) path of the `_ca` line on the hourly + 30-min grid; `k_passive = -a_o`; `k_active_cool` = one-hour net cooling gain; `confidence` (`low`->`low`, `ok`->`medium`) | breach scan on the path against the armed ceiling; lead = `delta/|k_active_cool| * 60 * 1.3` clamped `[30, 240]` min (fallback 120 min without a rate); fire when `hours_to_breach <= lead`. Once it has switched the thermostat to cool at that ceiling (within 2 h, still there) the next cycles send nothing new. |
+| ODE ceiling guard (§6c) | the baseline (no-AC) path of the `_ca` line on the hourly + 30-min grid; `k_passive = -a_o`; `k_active_cool` = one-hour net cooling gain; `confidence` (`low`->`low`, `ok`->`medium`) | breach scan on the path against the armed ceiling; lead = `delta/|k_active_cool| * 60 * 1.3` clamped `[30, 240]` min (fallback 120 min without a rate); fire when `hours_to_breach <= lead`. The guard writes only when the thermostat is NOT already cooling at or below that ceiling (see §6c, "Already cooling at or below the ceiling"): the primary's baseline keeps predicting the breach after the AC it switched on, so without that state test every cycle would re-send. |
 | Nat-vent plan (§7, `compute_nat_vent_plan`) | the same path | cutoff = first hourly forecast time with `outdoor >= indoor - 1`; floor crossing; `ceiling_breach_time`; `evening_open_time`. `_nat_vent_cutoff` ends the planned window period (`_is_within_planned_window_period`). |
 | Nat-vent start veto | `k_passive`, `confidence` | floor-imminent: `time_to_floor = (indoor - floor) / (|k_passive| * (indoor - outdoor))` against `MIN_VIABLE_NAT_VENT_HOURS` |
 | TOU bank lead (§Time-of-use) | `k_active_heat` / `k_active_cool` (and `k_passive`, `confidence` for the away/vacation depth) | `lead = delta_t / |rate| * 60 * 1.3` clamped `[30, 240]`; `default_tou_lead_minutes` without a rate |
@@ -1115,13 +1115,21 @@ if hours_to_breach <= lead_time_min / 60:
 
 HVAC is set to `cool` at `comfort_cool` (not below — this is ceiling defense, not pre-cooling below comfort). The target deliberately avoids the `-2°F` offset used for hot-day pre-conditioning (§4).
 
+#### Already cooling at or below the ceiling: the guard sends nothing (Issue #1230 R6, X1)
+
+Occupant view: on a warm "off" day the thermostat is already cooling at 74 F because the comfort band armed it. The guard used to re-send `cool` and the same setpoint every 2 hours (and write an Activity row "ODE ceiling guard fired ... setpoint 74 -> 74"), and from bedtime, when the house was still at or above 74 F, every 30-minute cycle the sleep band wrote 72 and the guard wrote 74 in the same second, so the bedroom was held at 74 F instead of the 72 F sleep ceiling, with 2-3 extra thermostat commands per half hour (a counted write on a cloud thermostat).
+
+Rule (one rule, v3 and v4 alike), evaluated after the breach is confirmed and the lead time reached, and after any nat-vent end: **if the thermostat mode is `cool` and its setpoint is `<=` the guard ceiling (+0.05 F), whoever set it (the comfort band, the sleep band, an occupant), the guard writes no mode, no setpoint and records no `ceiling_guard_fired`; it only arms the cooling family and returns.** The guard never raises a cool setpoint. It still acts exactly as before when the thermostat is `off` (a lapsed band: HA restart, thermostat reconnect), in `heat` (subject to the selector-preview gate, Issue #1066) or `cool` above the ceiling. Observe-only (Issue #1304) is unchanged (the skip needs real writes). There is no timer and no stored state: the R6b `_ceiling_guard_fired` record and its 2-hour window were removed; the test reads the thermostat's own state, so an occupant's change is respected automatically.
+
+Origin: an original design gap since Issue #1093 (0.8.8: the guard defends the awake ceiling and never read the sleep band), exposed by R6b because v4's no-AC baseline predicts the breach on every warm cycle (v3's curve rarely does; 0.9.3 with a v3 curve that predicted a breach gave 23 mode writes on the synthetic day). It is not a heat/cool alternation: `mode_flips` were equal for v3 and v4 on every recorded day. Mirror (activate/deactivate): the guard has no exit writer, once cool is armed at the ceiling the comfort-edge selector owns the thermostat and the selector-preview gate stops the guard writing cool while the selector guards the floor; there is no predictive HEAT writer (§6f), so there is no heat-side mirror to fix. Tests: `tests/test_ceiling_guard_state_skip_r6.py`; golden drafts `tools/simulations/pending/r6b_warm_off_day_no_redundant_guard_writes__v3.json` / `__v4.json` (exact mode and setpoint writes over a warm off day); the signed golden `warm_day_ceiling_breach_ac_defense` now asserts the thermostat state at 12:30 instead of a redundant firing.
+
 #### Weather-change resilience (stateless design)
 
 The guard is fully stateless — no `_ceiling_precool_scheduled` flag. On each 30-min cycle, `apply_classification()` recomputes the ODE curve from fresh forecast data and re-scans for breach. Consequences:
 
 - **Forecast improves** (cold front arrives, outdoor temperature drops): `_find_ceiling_breach_time()` returns `None` → guard goes dormant automatically on the next cycle, no cancellation logic needed.
 - **Forecast worsens** (heat dome arrives): breach crosses into the lead time window → guard fires on the cycle when it first qualifies.
-- **HVAC already cooling** (guard fired on a prior cycle): warm-day classification (`hvac_mode="off"`) will naturally stop cooling on the next cycle once indoor drops below `comfort_cool`, because the comfort-floor guard (§6b) will not re-heat at that point.
+- **HVAC already cooling** (guard or band put it there): the guard sends nothing while the thermostat cools at or below the guard ceiling (above). Warm-day classification (`hvac_mode="off"`) will naturally stop cooling on the next cycle once indoor drops below `comfort_cool`, because the comfort-floor guard (§6b) will not re-heat at that point.
 
 #### Bridge home behavior
 

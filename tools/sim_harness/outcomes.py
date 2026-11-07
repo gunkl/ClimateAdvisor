@@ -1348,6 +1348,33 @@ def check_assertion(
             return expect
         return False
 
+    # --- hvac_mode_writes (Issue #1230 R6, X1) ---
+    # The mode analogue of ``setpoint_writes``: the exact ordered list of modes the engine really told the thermostat
+    # (``climate.set_hvac_mode`` calls in ``result.action_log``) in ``(since, at]``.  Payload:
+    #   hvac_mode_writes: {"values": ["cool", ...], "since": <ISO>?}   ([] asserts NO mode write)
+    # Rule-8 justification (test-infrastructure change): purely ADDITIVE -- a new ``expect`` string no existing
+    # scenario uses, so no existing result can change.  The previous semantics were not wrong, they could not say this:
+    # ``hvac_mode_never_commanded`` only forbids one mode and ``setpoint_writes`` ignores mode calls, so a guard that
+    # re-sent "cool" every two hours (cool -> cool, nothing the occupant could see change except a cloud write and an
+    # Activity row) passed every existing assertion.  Could it let a real failure pass silently?  No: it is an exact
+    # comparison against the service calls actually issued (a missing, extra or wrong mode write fails), and it is not
+    # evaluated unless a scenario names it.
+    if expect == "hvac_mode_writes":
+        at_str = assertion["at"]
+        since = assertion.get("since", "")
+        got_modes = [
+            e["data"]["hvac_mode"]
+            for e in result.action_log
+            if e.get("domain") == "climate"
+            and e.get("service") == "set_hvac_mode"
+            and e.get("ts") is not None
+            and "hvac_mode" in e.get("data", {})
+            and since < _naive_iso(e["ts"]) <= at_str
+        ]
+        if got_modes == [str(v) for v in assertion.get("values", [])]:
+            return expect
+        return False
+
     # --- field_equals (Issue #587, Part 3.6 groundwork) ---
     # Single-zone dotted-path field check — reuses the multi-zone
     # resolve_dotted_field() mechanism (tools/sim_harness/multi_zone_assertions.py)

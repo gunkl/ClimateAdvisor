@@ -127,8 +127,8 @@ def test_unknown_values_fall_back_with_a_log_line(caplog: pytest.LogCaptureFixtu
     )
 
 
-def test_at_most_two_engines_run_and_v3_runs_while_it_drives_control() -> None:
-    assert pe.running_ids({}) == ["v4", "v3"]  # v4 primary; v3 for control
+def test_at_most_two_engines_run_and_v3_observations_are_not_an_engine() -> None:
+    assert pe.running_ids({}) == ["v4"]  # v4 primary; v3 is neither primary nor shadow (observations still collected)
     assert pe.running_ids({"primary_engine": "v3"}) == ["v3"]  # v4 is off: not fitted, predicted or archived
     assert pe.is_running({"primary_engine": "v3"}, "v4") is False
     cfg = {"primary_engine": "v3", "shadow_engine": "v4"}
@@ -184,9 +184,9 @@ def test_a_registered_v5_is_picked_up_by_settings_dashboard_and_archive(v5) -> N
     flow, captured = _make_options_flow(dict(FULL_CONFIG))
     asyncio.run(flow.async_step_advanced({**_advanced_input(), "primary_engine": "v5", "shadow_engine": "none"}))
     assert captured["data"]["primary_engine"] == "v5"
-    # still at most two (plus v3 for control): v4 is off when v5 is primary and nothing else is chosen
+    # still at most two: v4 is off when v5 is primary and nothing else is chosen
     cfg = {"primary_engine": "v5", "shadow_engine": "v4"}
-    assert pe.running_ids(cfg) == ["v5", "v4", "v3"] and pe.is_running({"primary_engine": "v5"}, "v4") is False
+    assert pe.running_ids(cfg) == ["v5", "v4"] and pe.is_running({"primary_engine": "v5"}, "v4") is False
     # dashboard: the engine block lists it, flags it primary, and reports its state
     src = SimpleNamespace(_v5_state={"confidence": "high"}, _v4_fit_running=False)
     block = pe.engine_state(src, {"primary_engine": "v5", "shadow_engine": "v3"})

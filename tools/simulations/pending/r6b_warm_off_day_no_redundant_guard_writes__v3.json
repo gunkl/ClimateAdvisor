@@ -1,0 +1,632 @@
+{
+  "name": "r6b_warm_off_day_no_redundant_guard_writes__v3",
+  "description": "Issue #1230 R6 (X1). A warm 'off' day, house at 73.8-75.5 F, primary engine v3. The thermostat is already cooling at the 74 F ceiling (the comfort band armed it at 12:30) and, from 22:30, at the 72 F sleep ceiling. The ceiling guard must add nothing: exactly the band's own writes, no 'cool' re-sent every two hours, no 74 F written under the 72 F sleep band at night. Same assertions for v3 and v4 (one rule).",
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "primary_engine": "v3",
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "shadow_engine": "v4"
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.15,
+    "k_active_cool": -2.0,
+    "k_active_heat": 2.0
+  },
+  "v4_model": {
+    "confidence": "ok",
+    "house": {
+      "a_o": 0.08,
+      "q_c": 9.0,
+      "q_h": 9.0,
+      "s": 0.7
+    }
+  },
+  "hourly_forecast": [
+    {
+      "datetime": "2026-05-20T00:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-20T01:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-20T02:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-20T03:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-20T04:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-20T05:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-20T06:00:00+00:00",
+      "temperature": 70.0
+    },
+    {
+      "datetime": "2026-05-20T07:00:00+00:00",
+      "temperature": 74.7
+    },
+    {
+      "datetime": "2026-05-20T08:00:00+00:00",
+      "temperature": 79.0
+    },
+    {
+      "datetime": "2026-05-20T09:00:00+00:00",
+      "temperature": 82.7
+    },
+    {
+      "datetime": "2026-05-20T10:00:00+00:00",
+      "temperature": 85.6
+    },
+    {
+      "datetime": "2026-05-20T11:00:00+00:00",
+      "temperature": 87.4
+    },
+    {
+      "datetime": "2026-05-20T12:00:00+00:00",
+      "temperature": 88.0
+    },
+    {
+      "datetime": "2026-05-20T13:00:00+00:00",
+      "temperature": 87.4
+    },
+    {
+      "datetime": "2026-05-20T14:00:00+00:00",
+      "temperature": 85.6
+    },
+    {
+      "datetime": "2026-05-20T15:00:00+00:00",
+      "temperature": 82.7
+    },
+    {
+      "datetime": "2026-05-20T16:00:00+00:00",
+      "temperature": 79.0
+    },
+    {
+      "datetime": "2026-05-20T17:00:00+00:00",
+      "temperature": 74.7
+    },
+    {
+      "datetime": "2026-05-20T18:00:00+00:00",
+      "temperature": 70.0
+    },
+    {
+      "datetime": "2026-05-20T19:00:00+00:00",
+      "temperature": 66
+    },
+    {
+      "datetime": "2026-05-20T20:00:00+00:00",
+      "temperature": 66
+    },
+    {
+      "datetime": "2026-05-20T21:00:00+00:00",
+      "temperature": 66
+    },
+    {
+      "datetime": "2026-05-20T22:00:00+00:00",
+      "temperature": 66
+    },
+    {
+      "datetime": "2026-05-20T23:00:00+00:00",
+      "temperature": 66
+    },
+    {
+      "datetime": "2026-05-21T00:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-21T01:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-21T02:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-21T03:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-21T04:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-21T05:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-05-21T06:00:00+00:00",
+      "temperature": 70.0
+    },
+    {
+      "datetime": "2026-05-21T07:00:00+00:00",
+      "temperature": 74.7
+    },
+    {
+      "datetime": "2026-05-21T08:00:00+00:00",
+      "temperature": 79.0
+    },
+    {
+      "datetime": "2026-05-21T09:00:00+00:00",
+      "temperature": 82.7
+    },
+    {
+      "datetime": "2026-05-21T10:00:00+00:00",
+      "temperature": 85.6
+    },
+    {
+      "datetime": "2026-05-21T11:00:00+00:00",
+      "temperature": 87.4
+    },
+    {
+      "datetime": "2026-05-21T12:00:00+00:00",
+      "temperature": 88.0
+    },
+    {
+      "datetime": "2026-05-21T13:00:00+00:00",
+      "temperature": 87.4
+    },
+    {
+      "datetime": "2026-05-21T14:00:00+00:00",
+      "temperature": 85.6
+    },
+    {
+      "datetime": "2026-05-21T15:00:00+00:00",
+      "temperature": 82.7
+    },
+    {
+      "datetime": "2026-05-21T16:00:00+00:00",
+      "temperature": 79.0
+    },
+    {
+      "datetime": "2026-05-21T17:00:00+00:00",
+      "temperature": 74.7
+    },
+    {
+      "datetime": "2026-05-21T18:00:00+00:00",
+      "temperature": 70.0
+    },
+    {
+      "datetime": "2026-05-21T19:00:00+00:00",
+      "temperature": 66
+    },
+    {
+      "datetime": "2026-05-21T20:00:00+00:00",
+      "temperature": 66
+    },
+    {
+      "datetime": "2026-05-21T21:00:00+00:00",
+      "temperature": 66
+    },
+    {
+      "datetime": "2026-05-21T22:00:00+00:00",
+      "temperature": 66
+    },
+    {
+      "datetime": "2026-05-21T23:00:00+00:00",
+      "temperature": 66
+    }
+  ],
+  "events": [
+    {
+      "time": "2026-05-20T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 62.0,
+      "note": "Early morning, cool outside."
+    },
+    {
+      "time": "2026-05-20T06:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 62,
+      "note": "Warm day, nothing armed; windows stay shut (no window plan)."
+    },
+    {
+      "time": "2026-05-20T12:30:00",
+      "type": "temp_update",
+      "indoor_f": 73.8,
+      "outdoor_f": 88.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T12:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.8,
+      "outdoor_f": 87.4,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T13:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T13:30:00",
+      "type": "temp_update",
+      "indoor_f": 73.8,
+      "outdoor_f": 87.4,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T13:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 85.6,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T14:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 85.6,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T14:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T15:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 82.7,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T15:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T15:30:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 82.7,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T15:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T16:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 79.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T16:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T16:30:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 79.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T16:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T17:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 74.7,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T17:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T17:30:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 74.7,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T17:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 70.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T18:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T18:30:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 70.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T18:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T19:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 66.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T19:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T19:30:00",
+      "type": "temp_update",
+      "indoor_f": 74.4,
+      "outdoor_f": 66.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T19:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 66.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T20:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T20:30:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 66.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T20:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T21:00:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 66.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T21:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T21:30:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 66.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T21:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T22:00:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 66.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T22:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T22:30:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 66.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T22:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T23:00:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 66.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T23:00:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    },
+    {
+      "time": "2026-05-20T23:30:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 66.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T23:30:00+00:00",
+          "temp": 72.0
+        }
+      ]
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-20T23:59:00",
+      "expect": "hvac_mode_writes",
+      "since": "2026-05-20T00:00:00",
+      "values": [
+        "cool",
+        "heat",
+        "cool"
+      ],
+      "reason": "EXACT mode changes over the whole warm off day: 06:01 cool (night band), 06:30 heat (wake, cold morning), 12:30 cool (band arms the ceiling). Nothing else -- the guard re-sends no 'cool' at 14:30/16:30/18:30/20:30/22:30. Before the fix v4 sent 8 mode writes (v3: 1 in the afternoon), 0.9.3 with a v3 curve that predicted a breach sent 23."
+    },
+    {
+      "at": "2026-05-20T23:59:00",
+      "expect": "hvac_mode_writes",
+      "since": "2026-05-20T12:31:00",
+      "values": [],
+      "reason": "After the band's 12:30 arming no mode is written for the rest of the afternoon and night."
+    },
+    {
+      "at": "2026-05-20T23:59:00",
+      "expect": "setpoint_writes",
+      "since": "2026-05-20T22:29:00",
+      "values": [
+        72.0,
+        72.0,
+        72.0,
+        72.0
+      ],
+      "reason": "From bedtime the bedroom is held at the 72 F sleep ceiling: only the sleep band writes (22:30 twice, 23:00, 23:30). Before the fix the guard wrote 74 right after the sleep band's 72 every cycle (the bedroom held at 74)."
+    },
+    {
+      "at": "2026-05-20T23:59:00",
+      "expect": "commanded_setpoint_at",
+      "value": 72.0,
+      "reason": "The last thing the thermostat was told is the sleep ceiling, not the awake 74 F ceiling."
+    },
+    {
+      "at": "2026-05-20T12:30:00",
+      "expect": "ceiling_guard_dormant",
+      "reason": "The thermostat already cools at or below the guard ceiling: no 'ceiling_guard_fired' row (no Activity entry claiming an action that did not happen)."
+    },
+    {
+      "at": "2026-05-20T14:30:00",
+      "expect": "ceiling_guard_dormant",
+      "reason": "The thermostat already cools at or below the guard ceiling: no 'ceiling_guard_fired' row (no Activity entry claiming an action that did not happen)."
+    },
+    {
+      "at": "2026-05-20T16:30:00",
+      "expect": "ceiling_guard_dormant",
+      "reason": "The thermostat already cools at or below the guard ceiling: no 'ceiling_guard_fired' row (no Activity entry claiming an action that did not happen)."
+    },
+    {
+      "at": "2026-05-20T18:30:00",
+      "expect": "ceiling_guard_dormant",
+      "reason": "The thermostat already cools at or below the guard ceiling: no 'ceiling_guard_fired' row (no Activity entry claiming an action that did not happen)."
+    },
+    {
+      "at": "2026-05-20T20:30:00",
+      "expect": "ceiling_guard_dormant",
+      "reason": "The thermostat already cools at or below the guard ceiling: no 'ceiling_guard_fired' row (no Activity entry claiming an action that did not happen)."
+    },
+    {
+      "at": "2026-05-20T22:30:00",
+      "expect": "ceiling_guard_dormant",
+      "reason": "The thermostat already cools at or below the guard ceiling: no 'ceiling_guard_fired' row (no Activity entry claiming an action that did not happen)."
+    },
+    {
+      "at": "2026-05-20T23:00:00",
+      "expect": "ceiling_guard_dormant",
+      "reason": "The thermostat already cools at or below the guard ceiling: no 'ceiling_guard_fired' row (no Activity entry claiming an action that did not happen)."
+    },
+    {
+      "at": "2026-05-20T23:30:00",
+      "expect": "ceiling_guard_dormant",
+      "reason": "The thermostat already cools at or below the guard ceiling: no 'ceiling_guard_fired' row (no Activity entry claiming an action that did not happen)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "The ceiling guard does not re-send what it already holds",
+    "observed_behavior": "One AC switch-on; no repeat mode switch on the next cycle while the forecast still shows the breach.",
+    "expected_behavior": "A cloud thermostat is not sent the same mode switch every half hour, and the Activity report says 'AC turned on' once."
+  },
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions); DP-11 pending, unsigned",
+  "issue": 1230,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

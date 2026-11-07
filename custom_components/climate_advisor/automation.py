@@ -2360,8 +2360,6 @@ class AutomationEngine:
         # prediction-dependent decisions read (the primary prediction engine's; see ``_control_model``). None on a bare
         # engine: the decisions then read ``_thermal_model`` itself.
         self._control_model_provider: Callable[[dict | None], dict | None] | None = None
-        # Issue #1230 R6b: (when, ceiling) of the ODE ceiling guard's last real cool write; see its ESCALATE branch.
-        self._ceiling_guard_fired: tuple[datetime, float] | None = None
 
         # Issue #899: away/vacation TOU pre-conditioning — live state pushed by the
         # coordinator each cycle (_resolve_tou_schedule_state()), read by
@@ -16794,28 +16792,26 @@ class AutomationEngine:
         # thermostat to cool (explicit mode switch, change 1) -- do not send a second
         # identical set_hvac_mode moments later.
         _mode_result_cg: HvacCommandResult | None = None  # None: mode call skipped (already cool this cycle)
-        # Issue #1230 R6b: with the primary engine's no-AC forecast a hot afternoon predicts the breach on every cycle,
-        # and the AC the guard switched on does not change that forecast. When the guard itself already put the
-        # thermostat on cool at this ceiling within the last two hours and it is still there, switching the mode again
-        # (and a second "AC turned on" row) every 30 minutes is noise, and a cloud thermostat counts every write. An
-        # occupant's change (mode or setpoint) fails this test, so the guard re-asserts exactly as before.
-        _last_fire = getattr(self, "_ceiling_guard_fired", None)
-        _now_cg = dt_util.now()
+        # Issue #1230 R6 (X1): the guard never raises a cool setpoint and never re-sends what the thermostat already
+        # does. When the thermostat is already cooling at or BELOW the guard ceiling -- whoever set it (the comfort
+        # band, the sleep band at 72 against an awake ceiling of 74, an occupant) -- there is nothing to defend: no mode
+        # write, no setpoint write, no ceiling_guard_fired row. Before this rule the primary engine's no-AC forecast
+        # (v4) predicted the breach on every cycle, so every 2 hours the guard re-sent cool + the same setpoint and, from
+        # bedtime, each half hour the sleep band wrote 72 and the guard wrote 74 in the same second (the bedroom held at
+        # 74 instead of 72). An occupant's mode change or a setpoint ABOVE the ceiling fails this test, so the guard
+        # still acts exactly as before (off / heat / cool above the ceiling). Observe-only keeps recording its would-do.
         if (
             not self.dry_run
-            and _last_fire is not None
             and _old_mode_cg == "cool"
             and _old_setpoint_f_cg is not None
-            and abs(_old_setpoint_f_cg - _ceiling_cg) < 0.05
-            and abs(_last_fire[1] - _ceiling_cg) < 0.05
-            and 0 <= (_now_cg - _last_fire[0]).total_seconds() < 7200
+            and _old_setpoint_f_cg <= _ceiling_cg + 0.05
         ):
             _LOGGER.debug(
-                "ODE ceiling guard: thermostat still cooling to the ceiling (%.1f) since %s -- nothing to re-send",
+                "ODE ceiling guard: thermostat already cooling at %.1f (<= ceiling %.1f) -- nothing to send",
+                _old_setpoint_f_cg,
                 _ceiling_cg,
-                _last_fire[0].strftime("%H:%M"),
             )
-            self._arm_comfort_family("cooling", _now_cg)
+            self._arm_comfort_family("cooling", dt_util.now())
             return
         with self._mode_change_context("ode_guard"):
             if self._mode_switch_marker_recent("cool"):
@@ -16854,7 +16850,6 @@ class AutomationEngine:
                 self.role,
             )
             return
-        self._ceiling_guard_fired = (dt_util.now(), _ceiling_cg)
         if self._emit_event_callback:
             self._emit_event_callback(
                 "ceiling_guard_fired",

@@ -4122,20 +4122,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             # Compute and cache ODE prediction for ceiling guard + chart reuse.
             # Offloaded to executor — ODE integration + OLS math blocks the event loop otherwise.
-            self._last_predicted_indoor = await self._executor_job(
-                functools.partial(
-                    _build_predicted_indoor_future,
-                    self._hourly_forecast_temps,
-                    self.config,
-                    dt_util.now(),
-                    current_indoor_temp=self._get_indoor_temp(),
-                    thermal_model=self.automation_engine._thermal_model if self.automation_engine else {},
-                    occupancy_mode=self._occupancy_mode,
-                    classification=self._current_classification,
-                    band_schedule=self._target_band_schedule,
-                    tou_precondition_window=self._tou_precondition_window_tuple(),
+            # Issue #1230 R6 (X5): v3's modelled curve (and its archive below) exist only while v3 is the primary or
+            # the shadow; with v4 primary and no v3 comparison nothing reads it and nothing may act on it.
+            if self.engine_running("v3"):
+                self._last_predicted_indoor = await self._executor_job(
+                    functools.partial(
+                        _build_predicted_indoor_future,
+                        self._hourly_forecast_temps,
+                        self.config,
+                        dt_util.now(),
+                        current_indoor_temp=self._get_indoor_temp(),
+                        thermal_model=self.automation_engine._thermal_model if self.automation_engine else {},
+                        occupancy_mode=self._occupancy_mode,
+                        classification=self._current_classification,
+                        band_schedule=self._target_band_schedule,
+                        tou_precondition_window=self._tou_precondition_window_tuple(),
+                    )
                 )
-            )
+            else:
+                self._last_predicted_indoor = []
             _LOGGER.debug(
                 "Caching predicted indoor curve: %d points, [0]=%s",
                 len(self._last_predicted_indoor),
@@ -6667,11 +6672,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def control_predicted_indoor(self) -> list[dict] | None:
         """The predicted indoor curve every decision reads (``predicted_indoor=``): the primary engine's, this cycle's.
 
-        ``_control_path`` is ``None`` while v3 is the primary (or before the first cycle): v3's own curve,
-        ``_last_predicted_indoor``, read live. Otherwise it is the primary's path (resampled to v3's hourly + 30-minute
-        grid, in degrees F) or, while the primary has no usable fit, the engine-agnostic no-model schedule estimate."""
+        ``_control_path`` is ``None`` while v3 is the primary: v3's own curve, ``_last_predicted_indoor``, read live.
+        Otherwise it is the primary's path (resampled to v3's hourly + 30-minute grid, in degrees F) or, while the
+        primary has no usable fit, the engine-agnostic no-model schedule estimate. Before the first refresh with another
+        engine primary there is no curve (``None``: the ceiling guard has nothing to judge) -- never v3's (Issue #1230
+        R6, X2)."""
         path = getattr(self, "_control_path", None)
-        return getattr(self, "_last_predicted_indoor", None) if path is None else path
+        if path is not None:
+            return path
+        try:
+            primary_is_v3 = prediction_engines.primary_id(self.config) == ENGINE_V3
+        except Exception:  # noqa: BLE001
+            primary_is_v3 = True
+        return getattr(self, "_last_predicted_indoor", None) if primary_is_v3 else None
 
     def _control_grid(self) -> list[datetime]:
         """The timestamps a decision's curve is read on: the hourly forecast times plus each pair's midpoint (v3's)."""
@@ -6742,9 +6755,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._note_control_mode(engine_id, "" if ready else "no usable fit")
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - the decisions fall back to v3's curve, never crash the cycle
+        except Exception:  # noqa: BLE001 - never crash the cycle
             _LOGGER.warning("Primary prediction for decisions failed; using the schedule estimate", exc_info=True)
-            self._control_path = None
+            # Issue #1230 R6 (X2): the decisions never borrow the other engine. With v4 primary a failure anywhere in this
+            # step leaves the schedule estimate as the cycle's curve (and no curve at all if even that fails), never
+            # v3's modelled curve. ``None`` is v3's own curve and is only ever right while v3 is the primary.
+            try:
+                primary_is_v3 = prediction_engines.primary_id(self.config) == ENGINE_V3
+            except Exception:  # noqa: BLE001
+                primary_is_v3 = False
+            if primary_is_v3:
+                self._control_path = None
+            else:
+                try:
+                    self._control_path = await self._build_no_model_path()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug("schedule estimate for decisions failed; no curve this cycle", exc_info=True)
+                    self._control_path = []
 
     def _note_control_mode(self, engine_id: str, reason: str) -> None:
         """One INFO line per episode: decisions run on the primary engine, or on the learning-not-finished defaults."""
@@ -6783,9 +6812,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return "none"
 
     def engine_running(self, engine_id: str) -> bool:
-        """True when ``engine_id`` is the primary, the shadow, or v3 (which drives control in 0.9.4).
+        """True when ``engine_id`` is the primary or the shadow (at most two engines run, Issue #1230 O3).
 
-        An engine that is neither primary nor shadow is not fitted, predicted or archived. Orchestration only: the
+        An engine that is neither primary nor shadow is not fitted, predicted or archived (v3's learning observations
+        are inputs and always collected: ``prediction_engines.observations_running()``). Orchestration only: the
         answer never reaches a decision. A broken config reads as "running" for v3 and the default for v4."""
         try:
             return prediction_engines.is_running(self.config, engine_id)
@@ -7608,20 +7638,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Update cached ODE prediction for ceiling guard.
             # thermal_model is already computed from self.learning.get_thermal_model() above.
             # Offloaded to executor — ODE integration + OLS math blocks the event loop otherwise.
-            self._last_predicted_indoor = await self._executor_job(
-                functools.partial(
-                    _build_predicted_indoor_future,
-                    self._hourly_forecast_temps,
-                    self.config,
-                    dt_util.now(),
-                    current_indoor_temp=self._get_indoor_temp(),
-                    thermal_model=thermal_model,
-                    occupancy_mode=self._occupancy_mode,
-                    band_schedule=self._target_band_schedule,
-                    classification=classification,
-                    tou_precondition_window=self._tou_precondition_window_tuple(),
+            if self.engine_running("v3"):  # Issue #1230 R6 (X5): see the main cycle's build
+                self._last_predicted_indoor = await self._executor_job(
+                    functools.partial(
+                        _build_predicted_indoor_future,
+                        self._hourly_forecast_temps,
+                        self.config,
+                        dt_util.now(),
+                        current_indoor_temp=self._get_indoor_temp(),
+                        thermal_model=thermal_model,
+                        occupancy_mode=self._occupancy_mode,
+                        band_schedule=self._target_band_schedule,
+                        classification=classification,
+                        tou_precondition_window=self._tou_precondition_window_tuple(),
+                    )
                 )
-            )
+            else:
+                self._last_predicted_indoor = []
             _LOGGER.debug(
                 "Caching predicted indoor curve (briefing): %d points",
                 len(self._last_predicted_indoor),

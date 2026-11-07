@@ -11,6 +11,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **Evidence first:** v4 appears on Status only for a zone that passes the backtest over all its recorded history (beats today's line and "no change" at 1, 4 and 12 hours, heating and summer days scored apart, no more than 0.5 °F warm or cold on average). No zone passes yet, so Status is unchanged.
   - **Safe to roll back:** v4 keeps its state in its own files per zone; the learning file is unchanged, and it now ignores fields it doesn't recognise instead of starting over.
 - Developer tool: `tools/predict_backtest.py` replays recorded history to score v4 against v3 and "no change" for every zone.
+- Feat #1230 (R4: night-strategy engine, advise only, not yet shown): a pure planner that, for tonight, compares keeping the windows closed, opening them for two hours or all night, the whole-house fan (or the HVAC fan) with the bedroom's predicted temperature, heat/AC minutes and what you would have to do, and offers only the options the house's own history supports. Nothing changes in how Climate Advisor runs the house; it never starts a fan for a strategy. Developer tool: `tools/night_strategy_replay.py` replays recorded fan and window nights to validate the options.
 
 ## [0.9.3] — 2026-11-06
 

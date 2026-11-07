@@ -7,6 +7,9 @@ so a future edit that wires v4 into a decision fails here before it can reach a 
 Allowed to mention v4 (anything named ``v4``/``predictor_v4``):
 
 * the shadow modules: ``v4_shadow.py``, ``v4_archive.py``, ``prediction_accuracy.py`` (and ``predictor_v4.py``);
+* the ADVISORY module ``night_strategy.py`` (Issue #1230 R4): it reads v4 to rank bedroom options for the occupant
+  to read, never to command anything; ``test_advisory_modules_command_nothing`` pins that it imports nothing that
+  decides or calls a service;
 * ``const.py`` (``V4_*`` constants), ``api.py`` (the read-only endpoint
   and the Debug ``engines`` field);
 * ``coordinator.py``, only in ``_v4*``/``v4_*`` methods and in six fixed wiring points that never feed v4 back: the
@@ -26,6 +29,7 @@ _PKG = Path(__file__).resolve().parent.parent / "custom_components" / "climate_a
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _SHADOW_MODULES = {"v4_shadow.py", "v4_archive.py", "prediction_accuracy.py", "predictor_v4.py"}
+_ADVISORY_MODULES = {"night_strategy.py"}  # advise only (DP-7): see test_advisory_modules_command_nothing
 _DATA_MODULES = {"const.py", "api.py"}  # fields/constants/endpoint only; checked below
 _COORDINATOR_WIRING = {
     "__init__",
@@ -109,7 +113,7 @@ def _tree(path: Path) -> ast.AST:
 def test_no_module_outside_the_shadow_wiring_mentions_v4() -> None:
     offenders = []
     for path in sorted(_PKG.glob("*.py")):
-        if path.name in _SHADOW_MODULES | _DATA_MODULES | {"coordinator.py"}:
+        if path.name in _SHADOW_MODULES | _ADVISORY_MODULES | _DATA_MODULES | {"coordinator.py"}:
             continue
         for node, name, where in _references(_tree(path)):
             offenders.append(f"{path.name}:{getattr(node, 'lineno', '?')} {name} in {'.'.join(where) or '<module>'}")
@@ -126,6 +130,24 @@ def test_shadow_modules_import_nothing_that_decides() -> None:
             if isinstance(node, ast.ImportFrom) and node.level == 1:
                 mods = {node.module} if node.module else {a.name for a in node.names}
                 offenders += [f"{name}: from .{m} import ..." for m in mods if m in forbidden]
+    assert offenders == []
+
+
+def test_advisory_modules_command_nothing() -> None:
+    """R4 night strategy reads v4 but only advises: no engine/coordinator/api import, no service call, no hass."""
+    forbidden = {"automation", "classifier", "briefing", "desired_state", "swing", "nat_vent_fsm", "fan_fsm"}
+    forbidden |= {"coordinator", "api"}
+    offenders = []
+    for name in sorted(_ADVISORY_MODULES):
+        tree = _tree(_PKG / name)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 1:
+                mods = {node.module} if node.module else {a.name for a in node.names}
+                offenders += [f"{name}: from .{m} import ..." for m in mods if m in forbidden]
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("homeassistant"):
+                offenders.append(f"{name}: imports Home Assistant ({node.module})")
+            if isinstance(node, ast.Attribute) and node.attr in {"async_call", "async_create_task", "services"}:
+                offenders.append(f"{name}:{node.lineno} .{node.attr}")
     assert offenders == []
 
 

@@ -22,6 +22,7 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 | The house has been cold/hot for hours and the equipment never ran -- where do I look? | The stall alert (Issue #1050): an `hvac_output_stall` Activity Log row, a push (no email), and an `output_stall` line in Status `hvac_control_issues`. | [Debugging a house-off-target stall alert](#debugging-a-house-off-target-stall-alert-issue-1050) |
 | A whole-house-fan switch ignores CA's on-command and the AC stays suppressed -- how do I confirm it? | `fan_cancel` with `readback: true` in the Activity Log, then a single WARNING `Fan command ignored twice`. | [Debugging a fan switch that ignores the on-command](#debugging-a-fan-switch-that-ignores-the-on-command-issue-1050) |
 | How do I check whether prediction engine v4 is good enough to show, and where does the preview page's history come from? | Run `python3 tools/predict_backtest.py --zone <entry_id> --publish`: walk-forward (fit only on data before each test week), v3 replayed with production code, "no change" baseline, seasons by what the HVAC did that day, DP-8 gate at 1/4/12 h. `--publish` writes `climate_advisor_v4_backtest_<entry_id>.json`, which the Prediction accuracy page merges with the live v4 archive. | [Prediction backtest](#prediction-backtest-toolspredict_backtestpy-issue-1230-r1) |
+| How do I check whether the night-strategy options (windows, whole-house fan, blower) are validated for a house, and what does tonight's recommendation look like? | `python tools/night_strategy_replay.py --chart-log chart.json --json replay.json` replays every recorded night (fit before each week, predict under the windows/fan that happened, compare with the recorded hallway) and prints MAE per option class; `--tonight --forecast-archive fa.json --validation replay.json` prints tonight's ranked options and the hidden ones with reasons. | [Night-strategy replay](#night-strategy-replay-toolsnight_strategy_replaypy-issue-1230-r4) |
 
 ## Primary Debugging Data Sources
 
@@ -476,6 +477,20 @@ SSH mode needs `tools/.deploy.env` (never printed) and discovers files like `the
 **Cost.** Each test week refits v4 (5-8 s on a Pi-class CPU, less on a laptop); a year of history is about 50 weeks per zone, so run it on a workstation, not on the HA host (the tool only SSHes in to fetch inputs and publish).
 
 **Reading a failure.** "v4 not better than v3" in one season with "no anchors in this season" in the other is normal for a home that has not run the other mode yet: that row stays unscored and the verdict stays "Not yet". `--setpoint-source commanded` re-runs the same weeks with the thermostat's logged setpoint instead of the plan's band edge, to see how much a gate miss depends on that input. Specs: [Predictor v4](predictor-v4-spec.md), [v4 Shadow](v4-shadow-spec.md).
+
+## Night-Strategy Replay (`tools/night_strategy_replay.py`, Issue #1230 R4)
+
+Occupant view: before Climate Advisor suggests "open the bedroom windows until 1 AM" or "run the whole-house fan", this tool answers "does the model predict the nights this house actually had, when the windows were open or the fan ran?". An option class (closed / windows / fan / blower) that fails here is hidden from the occupant.
+
+**Replay.** For every recorded night (local 20:30 to 06:30, unbroken readings) it fits v4 on rows before that week's Monday, predicts the night from the bedtime reading with the recorded outdoor, windows, fan and heat/cool duty, and compares with the recorded hallway at every 15 minutes. Output: nights, mean absolute error, "nothing changes" error and bias per class and sub-type (fan short / long / then AC, windows all night, closed idle / heat / AC), plus a closed-loop variant that uses the planner's own controller from the recorded setpoints. A class is validated at >= 3 nights, MAE <= 1.5 F and better than "nothing changes". `--train-days 30` limits each fit to the last 30 days (Zone 1: fan class 1.79 F with the full history, 1.30 F with 30 days).
+
+```
+python tools/night_strategy_replay.py --chart-log chart.json --json replay.json
+python tools/night_strategy_replay.py --chart-log chart.json --forecast-archive fa.json --tonight \
+    --validation replay.json --bedroom-sensor sensor.primary_bedroom_temperature_temperature
+```
+
+Reading `--tonight`: `RECOMMENDED` is the one sentence the occupant would get; the table lists offered options (best first); `HIDDEN (debug only)` lines give the reason an option was withheld (rate frozen in the fit, effect not resolved, too few hours of bedroom readings, class not validated). Limits: hallway only (no bedroom history before 2026-11-06), recorded outdoor instead of forecast, provisional until R1b's model fix lands. Spec: [Night Strategy](night-strategy-spec.md).
 
 ## Debugging Thermal Model Learning
 

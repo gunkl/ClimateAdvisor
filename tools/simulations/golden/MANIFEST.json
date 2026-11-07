@@ -644,12 +644,12 @@
     "issue": 1404
   },
   "tou_home_cool_bank_ends_on_time_1405": {
-    "sha256": "10c0a81cd6df53124ffbf629f6855ae685bd7c2d13ae558c753c8ed3a39a27a6",
+    "sha256": "fd517a14b23440ebb8ad6fa03b547dcfe8c23338215fb9d20a01e8893c0d1971",
     "signed": "2026-11-07",
     "issue": 1405
   },
   "tou_home_heat_bank_ends_on_time_1405": {
-    "sha256": "9be7de31068a2076eec6792a62628811b1c890483779df9702fb0ab5a551a34f",
+    "sha256": "e610a8d7fa79138f2dbf44652c2de1f3d1cfcf454634f7f5af0278ecf6b6e68f",
     "signed": "2026-11-07",
     "issue": 1405
   },

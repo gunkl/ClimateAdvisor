@@ -126,7 +126,7 @@
       "expect": "hvac_mode_writes",
       "since": "2026-07-13T16:15:00",
       "values": [],
-      "reason": "The mode changed at 16:15, not at the 16:30 cycle (before #1405 it changed at 16:30)."
+      "reason": "No mode change at the 16:30 cycle either: it re-asserts cool 76 F in the mode the bank ran (before #1405 this cycle made the first band write)."
     },
     {
       "at": "2026-07-13T16:35:00",

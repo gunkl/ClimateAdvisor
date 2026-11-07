@@ -41,7 +41,7 @@
   "skip_startup_coalesce": true,
   "capture_next_action": true,
   "name": "tou_away_cool_bank_range_thermostat_1404",
-  "description": "Issue #1404 (range thermostats): the #1395 Away cool bank on a thermostat that offers heat_cool with a temperature range and starts in heat_cool. The bank and every surface behave as on a single-setpoint device.",
+  "description": "Issue #1404 (range thermostats): the #1395 Away cool bank on a thermostat that offers heat_cool with a temperature range and starts in heat_cool. The bank and every surface behave as on a single-setpoint device. CA switches the device out of heat_cool to cool and writes a single setpoint (77 F), so the range-only hold check (target_temp_low/high without a temperature attribute) is not exercised here; that path is covered by tests/test_current_hold_1404.py.",
   "events": [
     {
       "time": "2026-07-13T13:00:00",
@@ -122,7 +122,7 @@
     "type": "positive",
     "summary": "A heat/cool-range thermostat gets the same bank and the same story",
     "observed_behavior": "Issue #1404 (range thermostats): the #1395 Away cool bank on a thermostat that offers heat_cool with a temperature range and starts in heat_cool. The bank and every surface behave as on a single-setpoint device.",
-    "expected_behavior": "Occupant view: the thermostat and every surface follow the occupancy change mid-bank.",
+    "expected_behavior": "Occupant view: on a thermostat that offers a heat/cool range, every surface quotes the bank target the thermostat is told, exactly as on a single-setpoint device.",
     "effectiveness": "Fails on 6ebdb16: thresholds 60/80 and no hold block. Deleting the display resolver fails both field_equals rows.",
     "alignment": "docs/08-COMPUTATION-REFERENCE.md time-of-use bank (Issues #1404/#1405).",
     "user_outcome": "If this regressed, a range-thermostat owner would read 'Climate Advisor wants 80 F' while it cools to 77 F."

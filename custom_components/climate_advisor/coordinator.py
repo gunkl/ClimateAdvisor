@@ -3281,7 +3281,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Call appropriate automation handler
         if new_mode == OCCUPANCY_VACATION:
             self._cancel_occupancy_away_timer()
-            await self.automation_engine.handle_occupancy_vacation()
+            await self._run_occupancy_handler(OCCUPANCY_VACATION)
         elif new_mode == OCCUPANCY_AWAY:
             delay_seconds = OCCUPANCY_SETBACK_MINUTES * 60
             _LOGGER.info(
@@ -3294,7 +3294,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             def _occupancy_away_timer_expired(_now: Any) -> None:
                 self._occupancy_away_timer_cancel = None
                 _LOGGER.info("Occupancy away timer expired — applying setback")
-                self.hass.async_create_task(self.automation_engine.handle_occupancy_away())
+                self.hass.async_create_task(self._run_occupancy_handler(OCCUPANCY_AWAY))
 
             self._occupancy_away_timer_cancel = async_call_later(
                 self.hass,
@@ -3307,7 +3307,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # guard timer rather than leaving it to fire later against a mode it no longer
             # applies to.
             self._cancel_tou_av_stop_timer()
-            await self.automation_engine.handle_occupancy_home()
+            await self._run_occupancy_handler(new_mode)
 
         await self._async_save_state()
 
@@ -8257,6 +8257,42 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "text": hold_sentence(hold, unit),
             "after_text": hold_after_text(hold, unit),
         }
+
+    async def _occupancy_bank_write(self) -> bool:
+        """Write the new occupancy's time-of-use bank target in place of its band (Issue #1409); True when written.
+
+        Occupant view: leaving during a home pre-cool used to write the Away band (cool 80, AC off) and then the Away
+        bank (cool 77) five minutes later, which can stop and restart the AC; coming home during an Away pre-heat
+        wrote heat 68 then heat 76. Now the bank for the new occupancy is written once. Uses the bank's own gates:
+        nothing is claimed during start-up coalescing, outside the bank window, or when an override, door/window pause,
+        nat-vent or whole-house fan would defer the bank (``tou_bank_holds_setpoint``); the bank write itself
+        re-checks them (``_apply_tou_schedule``). When it writes nothing the caller writes the band as before.
+        """
+        ae = self.automation_engine
+        if ae is None or self._current_classification is None or self._startup_coalesce_active:
+            return False
+        self._resolve_tou_schedule_state()  # the resolution for the NEW occupancy
+        if self._active_tou_bank(dt_util.now()) is None:
+            return False
+        before = ae._hvac_write_record
+        await self._apply_tou_schedule()
+        return ae._hvac_write_record is not before
+
+    async def _run_occupancy_handler(self, mode: str) -> None:
+        """Run the engine's occupancy handler for an occupancy CHANGE (Issue #1409): inside an open bank window the
+        handler's band write becomes the new occupancy's bank write. The only entry the occupancy toggle (and its
+        delayed away timer) uses; the harness drives occupancy events through it too."""
+        ae = self.automation_engine
+        handler = {
+            OCCUPANCY_AWAY: ae.handle_occupancy_away,
+            OCCUPANCY_VACATION: ae.handle_occupancy_vacation,
+        }.get(mode, ae.handle_occupancy_home)
+        ae._occupancy_bank_write = self._occupancy_bank_write
+        ae._occupancy_change_in_progress = True
+        try:
+            await handler()
+        finally:
+            ae._occupancy_change_in_progress = False
 
     async def _apply_tou_schedule(self) -> None:
         """Act on ``self._tou_phase_resolution`` (resolved earlier this cycle by

@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import logging
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
@@ -2235,6 +2235,12 @@ class AutomationEngine:
         # family, for the reactive-retry rate limit and the once-per-realised-switch event.
         self._last_selector_write_attempt: tuple[str, datetime] | None = None
         self._last_resolved_family: str | None = None
+        # Issue #1409: set by the coordinator only around an OCCUPANCY CHANGE's handler call. While a time-of-use bank
+        # window is open, the handler's band write is replaced by the new occupancy's bank write (one write, no
+        # band-then-bank short cycle). ``_occupancy_bank_write`` is the coordinator's writer (returns True when it
+        # wrote the bank). Every other caller of the occupancy handlers (cycle, timers, redirects) is unaffected.
+        self._occupancy_change_in_progress: bool = False
+        self._occupancy_bank_write: Callable[[], Awaitable[bool]] | None = None
 
         # Nat-vent soft-start sub-mode (Issue #540, scoped from #533): qualifies WHY an
         # active nat-vent session was entered — True when entered via the parity/
@@ -12025,6 +12031,26 @@ class AutomationEngine:
                 nat_vent_cutoff_already_reached=self._nat_vent_cutoff_already_reached,
             )
 
+    async def _bank_takes_occupancy_write(self, mode: str) -> bool:
+        """Issue #1409: on an occupancy change inside an open time-of-use bank window, write the new occupancy's bank
+        target instead of its band. True when the bank was written (the caller then writes no band); False keeps the
+        band write exactly as before (no occupancy change in progress, no bank window, a gate defers the bank, start-up
+        coalescing, or the bank write did not happen)."""
+        if not self._occupancy_change_in_progress or self._occupancy_bank_write is None:
+            return False
+        try:
+            wrote = bool(await self._occupancy_bank_write())
+        except Exception:  # noqa: BLE001 - never lose the band write to a bank fault
+            _LOGGER.warning("Occupancy %s: time-of-use bank write failed, writing the band", mode, exc_info=True)
+            return False
+        if wrote:
+            _LOGGER.info(
+                "Occupancy %s inside a time-of-use bank window: the bank target was written instead of the band "
+                "(one write, no band-then-bank pair)",
+                mode,
+            )
+        return wrote
+
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""
         self._occupancy_mode = OCCUPANCY_AWAY
@@ -17286,6 +17312,8 @@ class AutomationEngine:
                     "indoor_f": self._get_indoor_temp_f(),
                 },
             )
+        if await self._bank_takes_occupancy_write(mode):
+            return
         await self._apply_comfort_band(_band, reason=f"occupancy {mode} — setback band")
 
     def _resolve_occupancy_home_fsm_state(self) -> HomeDecision:
@@ -17406,8 +17434,9 @@ class AutomationEngine:
                 )
         if decision.restore:
             self._occupancy_restore_deferred_pending = False
-            with self._mode_change_context("restore"):
-                await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
+            if not await self._bank_takes_occupancy_write("home"):
+                with self._mode_change_context("restore"):
+                    await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
             # The comfort-edge selector may have written the OTHER family than the band's active edge (a mild day
             # next to its floor arms heat); report the family it actually armed.
             # Issue #1245: report what ``_set_temperature_for_mode()`` actually did -- the resolved band edge for the

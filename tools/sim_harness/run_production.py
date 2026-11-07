@@ -162,6 +162,25 @@ __all__ = ["FakeHassSession", "ProductionRunResult", "run_production_scenario"]
 # ---------------------------------------------------------------------------
 
 
+async def _occupancy_handler(engine: Any, coordinator: Any, mode: str) -> None:
+    """An occupancy event's handler, through the coordinator's occupancy-change entry when there is one.
+
+    Issue #1409 (test-infrastructure change): production runs every occupancy CHANGE through
+    ``ClimateAdvisorCoordinator._run_occupancy_handler`` (the toggle and its delayed away timer), which lets an open
+    time-of-use bank take the change's write. Calling the engine handler directly modelled a path production no longer
+    takes. Could it hide a failure? No: the engine handler is the same call; the wrapper only sets the flag production
+    sets. Engine-only sessions keep the direct call.
+    """
+    if coordinator is not None and hasattr(coordinator, "_run_occupancy_handler"):
+        await coordinator._run_occupancy_handler(mode)
+    elif mode == "away":
+        await engine.handle_occupancy_away()
+    elif mode == "vacation":
+        await engine.handle_occupancy_vacation()
+    else:
+        await engine.handle_occupancy_home()
+
+
 def _inject_indoor_temp(
     fake_hass: FakeHass, climate_entity: str, indoor_f: float | None, *, dispatch: bool = False
 ) -> None:
@@ -785,31 +804,17 @@ def _dispatch_event(
         if coordinator is not None:
             run_coro(coordinator._apply_tou_schedule())
 
-    elif etype == "occupancy_away":
-        engine.set_occupancy_mode("away")
-        sync_coordinator_occupancy(coordinator, "away")
-        run_coro(engine.handle_occupancy_away())
-
-    elif etype == "occupancy_home":
-        engine.set_occupancy_mode("home")
-        sync_coordinator_occupancy(coordinator, "home")
-        run_coro(engine.handle_occupancy_home())
-
-    elif etype == "occupancy_vacation":
-        engine.set_occupancy_mode("vacation")
-        sync_coordinator_occupancy(coordinator, "vacation")
-        run_coro(engine.handle_occupancy_vacation())
+    elif etype in ("occupancy_away", "occupancy_home", "occupancy_vacation"):
+        mode = etype.split("_", 1)[1]
+        engine.set_occupancy_mode(mode)
+        sync_coordinator_occupancy(coordinator, mode)
+        run_coro(_occupancy_handler(engine, coordinator, mode))
 
     elif etype == "occupancy_change":
         mode = event.get("mode", "home")
         engine.set_occupancy_mode(mode)
         sync_coordinator_occupancy(coordinator, mode)
-        if mode == "away":
-            run_coro(engine.handle_occupancy_away())
-        elif mode == "vacation":
-            run_coro(engine.handle_occupancy_vacation())
-        else:
-            run_coro(engine.handle_occupancy_home())
+        run_coro(_occupancy_handler(engine, coordinator, mode))
 
     elif etype == "occupancy_change_with_override":
         # Mirrors simulate.py: set override active, then dispatch occupancy

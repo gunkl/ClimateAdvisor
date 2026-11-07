@@ -167,6 +167,8 @@ before the window started (INFO) or the window began early and the precondition 
 (WARNING, naming TOU as the reason) — see `docs/08-COMPUTATION-REFERENCE.md`'s Observability
 Requirements.
 
+**Occupancy change inside a bank window (Issue #1409).** The change writes the new occupancy's bank target once instead of its band then the bank five minutes later (which could short-cycle the AC or furnace); the bank's gates apply, and when the new bank would defer the band is written as before. See [08 Computation Reference](08-COMPUTATION-REFERENCE.md).
+
 **Home/Guest bank end (Issue #1405).** The Home/Guest bank gets the same precise timer at the window start (`_sync_tou_home_end_timer` / `_fire_tou_home_bank_end`): if the thermostat still holds the bank, the regular cycle's `apply_classification()` pass runs at that instant (the band write the next 30-minute cycle used to make, up to 30 minutes late). The write can switch the mode: after a cool bank that left the house at the floor it is heat at the floor (the AC stops), after a heat bank at the ceiling cool at the ceiling (the furnace stops). A deferred or replaced bank is left alone; the timer is cancelled on an occupancy change, when the phase stops being a Home/Guest bank, and on unload, and the first cycle after a restart re-arms it. See [08 Computation Reference](08-COMPUTATION-REFERENCE.md).
 
 **Observability**: a `tou_precondition_cycle_summary` event fires at window-end, diffing the

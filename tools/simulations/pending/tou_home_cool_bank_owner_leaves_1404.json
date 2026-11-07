@@ -33,7 +33,7 @@
   "skip_startup_coalesce": true,
   "capture_next_action": true,
   "name": "tou_home_cool_bank_owner_leaves_1404",
-  "description": "Issue #1404 review: the owner leaves at 15:40 during a home pre-cool; the Away bank takes over and the Away band is widened to 83 F for the 16:15-21:00 period, which every surface now quotes.",
+  "description": "Issue #1404 review: the owner leaves at 15:40 during a home pre-cool; the Away bank takes over and the Away band is widened to 83 F for the 16:15-21:00 period, which every surface now quotes. Since Issue #1409 the change writes the Away bank once (cool 77 F at 15:40), not the setback then the bank.",
   "events": [
     {
       "time": "2026-07-13T13:00:00",
@@ -78,10 +78,16 @@
       "expect": "setpoint_writes",
       "since": "2026-07-13T15:39:59",
       "values": [
-        80.0,
         77.0
       ],
-      "reason": "Leaving at 15:40 mid home pre-cool: the Away setback (cool 80 F) at once, then the 5-minute check opens the Away bank (cool 77 F) at 15:44:59 (accepted pair, occupancy-triggered)."
+      "reason": "Leaving at 15:40 inside the bank window: the Away bank target (cool 77 F) is written once, at the change, with no Away setback (cool 80 F) first (Issue #1409: that pair could stop the AC and restart it five minutes later). The review's S3 row (commanded 77 F by 15:45, the pair unpinned) is tightened to this now that #1409 is fixed."
+    },
+    {
+      "at": "2026-07-13T16:14:59",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T15:45:00",
+      "values": [],
+      "reason": "Nothing is written between the Away bank and the high-cost period's start."
     },
     {
       "at": "2026-07-13T16:15:00",

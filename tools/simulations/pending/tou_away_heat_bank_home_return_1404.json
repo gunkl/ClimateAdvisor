@@ -33,7 +33,7 @@
   "skip_startup_coalesce": true,
   "capture_next_action": true,
   "name": "tou_away_heat_bank_home_return_1404",
-  "description": "Issue #1404 review: an Away pre-heat bank (63 F) is cut short when the owner comes home at 15:40; the home bank takes over and ends on time at 16:15.",
+  "description": "Issue #1404 review: an Away pre-heat bank (63 F) is cut short when the owner comes home at 15:40; the home bank takes over and ends on time at 16:15. Since Issue #1409 the change writes the home bank once (heat 76 F at 15:40).",
   "events": [
     {
       "time": "2026-01-13T13:00:00",
@@ -82,10 +82,9 @@
       "expect": "setpoint_writes",
       "since": "2026-01-13T15:39:59",
       "values": [
-        68.0,
         76.0
       ],
-      "reason": "Home at 15:40 inside the Away pre-heat: the comfort band (heat 68 F) at once, then the 5-minute bank check opens the home bank (heat 76 F) at 15:44:59. Two writes five minutes apart, triggered by the occupancy change (accepted: outside #1393's one-write-per-cycle scope)."
+      "reason": "Home at 15:40 inside the bank window: the home bank target (heat 76 F) is written once, at the change, with no comfort band (heat 68 F) first (Issue #1409: one write, no band-then-bank pair)."
     },
     {
       "at": "2026-01-13T16:14:59",

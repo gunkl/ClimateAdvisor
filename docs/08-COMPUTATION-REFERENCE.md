@@ -4531,6 +4531,13 @@ check comparing the thermostat with the band edge), which reads like a disagreem
 | remote reading stale | `66°F` | `Bedroom sensor not reporting - offset not in use` |
 | no offset in force | `66°F` | `66°F` (no extra line) |
 | thermostat reports 74 F while 70 F was commanded | `74°F (CA: 66°F)` | `74°F (CA: 70°F)` |
+
+*Issue #1399 wording (supersedes the strings above):* the offset and the cap are gaps, so `remote_offset_text()` writes
+them as unsigned plain degrees with the side of the target (`_gap_text()` / `_delta_text()` in `remote_offset.py`):
+`Bedroom 66°F target - thermostat set 70°F (4° above the target, clamped at the 4° cap)`; in Celsius the gap is scaled
+only (3.6 F -> `2°`, never -32). The thermostat line on both Status pages is one sentence, e.g. `Heating to 68°F · idle
+now`, and the #402 disagreement reads `(Climate Advisor wants 70°F)` instead of `(CA: 70°F)`.
+
 **Simulation coverage (Issue #1194, increment e).** *Occupant outcome:* the claim "the bedroom reaches the sleep
 temperature through a hallway thermostat that cannot see it" is proven in simulation, in both fan modes, heat and
 cool, before it is trusted overnight. The harness bedroom (`tools/sim_harness/world.py` `BedroomNode`, optional and

@@ -159,9 +159,9 @@ PARITY = [
     ),
     (
         [],
-        "Fan (WHF)",
+        "Whole-house fan",
         "Doors & windows card fan note; fan override banner",
-        ["status-card-doors", "Fan (WHF)"],
+        ["status-card-doors", "Whole-house fan"],
         "placed",
         "",
     ),

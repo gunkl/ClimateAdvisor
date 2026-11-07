@@ -253,14 +253,14 @@ def test_reading_cards_keep_every_old_reading():
     cards = _func("renderReadingCards")
     for needle in (
         "Outdoor sensor",
-        "service says",
+        "_saysVs('The weather service'",
         "Today",
-        "trend-arrow",
+        "_trendWords(data.trend_direction",
         "Doors/Windows",
         "c.unreadable",
         "_fanLines(data)",
         "Occupancy",
-        "comfort score",
+        "Comfort score",
         "data.automation_status",
         "data.coordinator_healthy === false",
         "data.invariant_violations",
@@ -281,8 +281,9 @@ def test_reading_cards_keep_every_old_reading():
     for needle in ("whf_status", "hvac_fan_status", "fan_status", "fan_remote_timer_hours", "fan_remote_speed"):
         assert needle in fans, needle
     assert "contact_sensors" in cards
-    # the thermostat card is the one that carries "HVAC" (the older browser specs find it by that word)
-    assert "HVAC ${escapeHtml(data.hvac_mode" in cards
+    # the thermostat card is the one that carries "HVAC" (the older browser specs find it by that word), and its
+    # line is the plain sentence (Issue #1399: "Heating to 68°F · idle now", not "HVAC heat · idle / 68°F")
+    assert "Indoor · HVAC" in cards and "_hvacSentence(data, unitSym)" in cards
     assert 'id="status-next"' in INDEX and 'id="status-grid"' in INDEX
 
 

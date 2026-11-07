@@ -36,7 +36,7 @@ test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
     const hvacItem = page.locator('.status-item', { hasText: 'HVAC' });
     const html = await hvacItem.innerHTML();
     expect(html).toContain('74');
-    expect(html).toContain('(CA: 72');
+    expect(html).toContain('(Climate Advisor wants 72');
   });
 
   test('shows no annotation when real setpoint matches CA target', async ({ page }) => {
@@ -66,7 +66,7 @@ test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
     const hvacItem = page.locator('.status-item', { hasText: 'HVAC' });
     const html = await hvacItem.innerHTML();
     expect(html).toContain('72');
-    expect(html).not.toContain('(CA:');
+    expect(html).not.toContain('Climate Advisor wants');
   });
 
 });

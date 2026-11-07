@@ -290,18 +290,26 @@ def _temp_text(value_f: float, unit: str) -> str:
     return f"{round(from_fahrenheit(value_f, unit))}{UNIT_SYMBOL.get(unit, '°F')}"
 
 
-def _delta_text(delta_f: float, unit: str) -> str:
+def _gap_text(delta_f: float, unit: str) -> str:
+    """A temperature gap as plain degrees, unsigned and without the unit letter: "4°", "2.2°" (Issue #1399).
+
+    A gap is never written like a reading ("+4°F", "-2°C"): scale-only conversion, no -32 offset, no sign.
+    """
     shown = round(convert_delta(abs(delta_f), unit), 1)
-    number = f"{shown:.0f}" if shown == int(shown) else f"{shown:.1f}"
-    return f"{'+' if delta_f >= 0 else '-'}{number}{UNIT_SYMBOL.get(unit, '°F')}"
+    return f"{shown:.0f}°" if shown == int(shown) else f"{shown:.1f}°"
+
+
+def _delta_text(delta_f: float, unit: str) -> str:
+    """The offset as a gap from the room's target: "4° above the target" / "1° below the target"."""
+    return f"{_gap_text(delta_f, unit)} {'above' if delta_f >= 0 else 'below'} the target"
 
 
 def remote_offset_text(st: RemoteOffsetState, unit: str) -> str | None:
     """The one occupant-facing sentence for the loop, or None when there is nothing worth saying.
 
-    Example: "Bedroom 66°F target - thermostat set 70°F (+4°F, clamped at the +4°F cap)". The comfort target is the
-    room's target; the thermostat's number is only what the loop commands to get there. It is never a comfort-band
-    change and never the #402 "CA:" disagreement wording.
+    Example: "Bedroom 66°F target - thermostat set 70°F (4° above the target, clamped at the 4° cap)". The comfort
+    target is the room's target; the thermostat's number is only what the loop commands to get there. It is never a
+    comfort-band change and never the #402 disagreement wording.
     """
     label = context_label(st.context)
     if st.state is RemoteLoopState.INACTIVE:
@@ -336,7 +344,7 @@ def remote_offset_text(st: RemoteOffsetState, unit: str) -> str | None:
             edge = "ceiling" if st.mode == "heat" else "floor"
             note = f"clamped at the comfort band {edge}"
         else:
-            note = f"clamped at the {_delta_text(st.cap_limit_f, unit)} cap"
+            note = f"clamped at the {_gap_text(st.cap_limit_f, unit)} cap"
     elif st.state is RemoteLoopState.ACTIVE:
         note = _ACTIVE_NOTE.get(st.last_reason or "", "adjusting")
     else:

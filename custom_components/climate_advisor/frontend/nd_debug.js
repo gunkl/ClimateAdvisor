@@ -163,7 +163,7 @@
     if (A && A.thermal_pipeline) {
       var tp = A.thermal_pipeline;
       groups.push({ title: 'Learning pipeline', rows: (tp.pending || []).map(function (p) {
-        return row('pending ' + p.obs_type, p.status + ' · ' + p.elapsed_minutes + ' min · ' + p.sample_count + ' samples · indoor Δ' + p.indoor_delta_f + '° · outdoor ' + p.outdoor_f + '°');
+        return row('pending ' + p.obs_type, p.status + ' · ' + p.elapsed_minutes + ' min · ' + p.sample_count + ' samples · indoor Δ' + ND.num(ND.dFToDisp(p.indoor_delta_f), 2) + '° · outdoor ' + ND.num(ND.fToDisp(p.outdoor_f), 1) + ND.sym(ND.unit));
       }).concat(Object.keys(tp.rejection_log_counts || {}).map(function (k) { return row('skipped ' + k, String(tp.rejection_log_counts[k])); })) });
     }
     var lc = EV && EV.diagnostics && EV.diagnostics.last_command;

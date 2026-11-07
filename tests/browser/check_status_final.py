@@ -506,7 +506,7 @@ def run_page(browser, page, label, vp, scheme):
             "service says",
             "Today",
             "Doors & windows",
-            "Fan (WHF)",
+            "Whole-house fan",
             "comfort score",
         ):
             check(f"{name}: readings show {needle!r}", needle.lower() in txt.lower(), txt[:200])

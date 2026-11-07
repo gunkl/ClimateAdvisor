@@ -36,10 +36,10 @@ test.describe('New dashboard: Status tab', () => {
   test('the reading cards and the For you / CA next lines come from the status payload', async ({ page }) => {
     await open(page);
     await expect(page.locator('#status-card-hallway')).toBeVisible();
-    await expect(page.locator('#status-card-today')).toContainText('mild');
+    await expect(page.locator('#status-card-today')).toContainText('Mild');
     await expect(page.locator('#status-card-outdoor')).toContainText('65.0');
     await expect(page.locator('#status-card-doors')).toBeVisible();
-    await expect(page.locator('#status-card-occupancy')).toContainText('home');
+    await expect(page.locator('#status-card-occupancy')).toContainText('Home');
     await expect(page.locator('#status-for-you')).toHaveText('None');
   });
 

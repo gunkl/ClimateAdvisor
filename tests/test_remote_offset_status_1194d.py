@@ -3,8 +3,8 @@
 Occupant outcome: on an offset night the hallway thermostat is DELIBERATELY set up to 4 F above the bedroom's sleep
 target so the furnace starts. The Status card used to show "70F (CA: 66F)", which reads like the thermostat and
 Climate Advisor disagree (or something is broken), and the chart drew the commanded 70 F as if the sleep band had
-moved. Now Status says "Bedroom 66F target - thermostat set 70F (+4F, clamped at the +4F cap)" and the chart draws the
-room's target and the thermostat's command as two lines.
+moved. Now Status says "Bedroom 66F target - thermostat set 70F (4° above the target, clamped at the 4° cap)" and
+the chart draws the room's target and the thermostat's command as two lines.
 
 Everything is read from ONE description of the loop (``AutomationEngine.remote_offset_state``): the engine stores the
 loop's last decision reason, and Status, the chart log, the AI context and the diagnostic snapshot only describe it.
@@ -115,13 +115,13 @@ class TestClassify:
 class TestText:
     def test_active(self):
         t = remote_offset_text(_st(), "fahrenheit")
-        assert t == "Bedroom 66°F target - thermostat set 70°F (+4°F, raising)"
+        assert t == "Bedroom 66°F target - thermostat set 70°F (4° above the target, raising)"
 
     def test_holding_with_offset(self):
         t = remote_offset_text(
             _st(state=RemoteLoopState.HOLDING, last_reason="in_band", offset_f=2.0, commanded_f=68.0), "fahrenheit"
         )
-        assert t == "Bedroom 66°F target - thermostat set 68°F (+2°F, holding)"
+        assert t == "Bedroom 66°F target - thermostat set 68°F (2° above the target, holding)"
 
     def test_holding_without_offset_says_nothing(self):
         assert (
@@ -135,14 +135,17 @@ class TestText:
         t = remote_offset_text(
             _st(state=RemoteLoopState.CLAMPED, clamp_limit=ClampLimit.CAP, last_reason="at_cap"), "fahrenheit"
         )
-        assert t == "Bedroom 66°F target - thermostat set 70°F (+4°F, clamped at the +4°F cap)"
+        assert t == "Bedroom 66°F target - thermostat set 70°F (4° above the target, clamped at the 4° cap)"
 
     def test_clamped_at_opposite_band_edge_heat_and_cool(self):
         heat = remote_offset_text(
             _st(state=RemoteLoopState.CLAMPED, clamp_limit=ClampLimit.BAND_EDGE, offset_f=1.0, commanded_f=67.0),
             "fahrenheit",
         )
-        assert heat == "Bedroom 66°F target - thermostat set 67°F (+1°F, clamped at the comfort band ceiling)"
+        assert (
+            heat
+            == "Bedroom 66°F target - thermostat set 67°F (1° above the target, clamped at the comfort band ceiling)"
+        )
         cool = remote_offset_text(
             _st(
                 state=RemoteLoopState.CLAMPED,
@@ -154,7 +157,38 @@ class TestText:
             ),
             "fahrenheit",
         )
-        assert cool == "Bedroom 72°F target - thermostat set 71°F (-1°F, clamped at the comfort band floor)"
+        assert (
+            cool == "Bedroom 72°F target - thermostat set 71°F (1° below the target, clamped at the comfort band floor)"
+        )
+
+    @pytest.mark.parametrize(
+        ("unit", "offset_f", "mode", "want"),
+        [
+            ("fahrenheit", 4.0, "heat", "4° above the target"),
+            ("fahrenheit", -2.0, "cool", "2° below the target"),
+            ("celsius", 3.6, "heat", "2° above the target"),  # 3.6 F gap -> 2 C (x5/9, never -32)
+            ("celsius", -4.0, "cool", "2.2° below the target"),
+        ],
+    )
+    def test_offset_is_an_unsigned_gap_not_a_reading(self, unit, offset_f, mode, want):
+        """Issue #1399: the occupant read "+4°F" / "-2°C" beside a thermostat setpoint as a temperature. The offset
+        is a gap: plain degrees, no sign, no unit letter, scale-only in Celsius, with which side of the target."""
+        import re
+
+        t = remote_offset_text(
+            _st(
+                state=RemoteLoopState.CLAMPED,
+                clamp_limit=ClampLimit.CAP,
+                mode=mode,
+                offset_f=offset_f,
+                commanded_f=66.0 + offset_f,
+                cap_limit_f=abs(offset_f),
+            ),
+            unit,
+        )
+        assert want in t
+        assert not re.search(r"[+\-−]\s*\d+(\.\d+)?\s*°", t), t
+        assert not re.search(r"\d°[FC] cap", t), t
 
     def test_clamped_with_no_room_at_all_still_explains(self):
         t = remote_offset_text(
@@ -165,7 +199,10 @@ class TestText:
 
     def test_frozen_gated_stale_each_get_a_short_reason(self):
         frozen = remote_offset_text(_st(state=RemoteLoopState.FROZEN, gate_reason="debounce"), "fahrenheit")
-        assert frozen == "Bedroom 66°F target - thermostat set 70°F (+4°F, held, window or door just opened)"
+        assert (
+            frozen
+            == "Bedroom 66°F target - thermostat set 70°F (4° above the target, held, window or door just opened)"
+        )
         gated = remote_offset_text(
             _st(state=RemoteLoopState.GATED, gate_reason="door_window_pause", offset_f=None, commanded_f=None),
             "fahrenheit",
@@ -210,7 +247,7 @@ class TestViewUnits:
             ),
             "celsius",
         )
-        assert text == "Bedroom 19°C target - thermostat set 21°C (+2°C, clamped at the +2°C cap)"
+        assert text == "Bedroom 19°C target - thermostat set 21°C (2° above the target, clamped at the 2° cap)"
 
     def test_cool_offset_is_negative(self):
         v = remote_offset_view(_st(mode="cool", comfort_target_f=72.0, commanded_f=68.0, offset_f=-4.0), "fahrenheit")
@@ -260,7 +297,10 @@ class TestEngineState:
         assert st.comfort_target_f == 66.0 and st.commanded_f == 68.0 and st.offset_f == 2.0
         assert st.last_reason == "raised"
         assert st.remote_value_f == 64.0 and st.remote_age_s is not None and st.remote_age_s >= 0
-        assert remote_offset_text(st, "fahrenheit") == "Bedroom 66°F target - thermostat set 68°F (+2°F, raising)"
+        assert (
+            remote_offset_text(st, "fahrenheit")
+            == "Bedroom 66°F target - thermostat set 68°F (2° above the target, raising)"
+        )
 
     def test_awaiting_startup_is_active_with_its_reason(self):
         env = Env(bedroom_f=58.0)
@@ -288,7 +328,7 @@ class TestEngineState:
         assert st.state is RemoteLoopState.CLAMPED and st.clamp_limit is ClampLimit.CAP
         assert st.last_reason == "at_cap" and st.offset_f == 4.0 and st.commanded_f == 70.0
         assert remote_offset_text(st, "fahrenheit") == (
-            "Bedroom 66°F target - thermostat set 70°F (+4°F, clamped at the +4°F cap)"
+            "Bedroom 66°F target - thermostat set 70°F (4° above the target, clamped at the 4° cap)"
         )
 
     def test_clamped_at_the_opposite_band_edge(self):
@@ -360,7 +400,7 @@ class TestEngineState:
         assert st.state is RemoteLoopState.FROZEN and st.gate_reason == "debounce"
         assert st.offset_f == 2.0 and st.commanded_f == 68.0
         assert remote_offset_text(st, "fahrenheit") == (
-            "Bedroom 66°F target - thermostat set 68°F (+2°F, held, window or door just opened)"
+            "Bedroom 66°F target - thermostat set 68°F (2° above the target, held, window or door just opened)"
         )
 
     def test_window_open_past_the_debounce_is_gated(self):
@@ -447,7 +487,7 @@ class TestStatusPayload:
         assert ro["context"] == "sleep" and ro["context_label"] == "Bedroom"
         assert ro["remote_reading"] == 58.0 and ro["remote_reading_age_s"] is not None
         assert ro["last_decision_reason"] == "at_cap"
-        assert ro["text"] == "Bedroom 66°F target - thermostat set 70°F (+4°F, clamped at the +4°F cap)"
+        assert ro["text"] == "Bedroom 66°F target - thermostat set 70°F (4° above the target, clamped at the 4° cap)"
 
     def test_402_comparison_is_against_the_commanded_value_not_the_band_edge(self):
         """The frontend compares the thermostat with ``expected_setpoint`` when it is set: the commanded 70, not 66."""
@@ -510,7 +550,8 @@ class TestFrontend:
         assert "data.remote_offset && data.remote_offset.text ?" in html
         assert "ro.expected_setpoint" in html
         assert "remote-offset-line" in html
-        assert "(CA: ${caValSingle})" in html  # the #402 comparison is kept for a real disagreement
+        # the #402 comparison is kept for a real disagreement
+        assert "(Climate Advisor wants ${escapeHtml(want)})" in html
 
     def test_chart_draws_the_commanded_setpoint_as_its_own_series(self):
         html = self._html()

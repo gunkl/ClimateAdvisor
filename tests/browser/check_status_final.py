@@ -356,7 +356,9 @@ def readout_checks(pg, name, label):
     idle = pg.evaluate(READOUT_JS)
     check(f"{name}: readout is below the chart", idle["top"] >= idle["stackBottom"] - 0.5, str(idle))
     check(f"{name}: idle readout is compact", not idle["html"].strip() and idle["h"] <= 40, f"{idle['h']}px")
-    pg.evaluate("() => window.__triggerHoverAt(document.getElementById('temp-chart').getBoundingClientRect().width * 0.4)")
+    pg.evaluate(
+        "() => window.__triggerHoverAt(document.getElementById('temp-chart').getBoundingClientRect().width * 0.4)"
+    )
     pg.wait_for_timeout(150)
     hov = pg.evaluate(READOUT_JS)
     check(f"{name}: hover fills the readout", "chp-row" in hov["html"] and hov["h"] > idle["h"], f"{hov['h']}px")

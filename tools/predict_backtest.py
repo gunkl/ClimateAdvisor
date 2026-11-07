@@ -695,6 +695,7 @@ def v3_curve(
     model: dict,
     band_fn,
     span: tuple[datetime, datetime] | None,
+    tomorrow_plan: tuple[bool, dtime | None, dtime | None] | None = None,
 ) -> dict[int, float]:
     """The production v3 predicted-indoor curve at ``anchor`` -> {epoch: temp_f} (hourly + :30 points)."""
     tz = idx.tz
@@ -741,6 +742,7 @@ def v3_curve(
         thermal_model=model,
         classification=classification,
         band_schedule=band_schedule,
+        tomorrow_window=tomorrow_plan,  # known at the anchor only (tomorrow_window_plan), the rule v4 shares (#1391)
     )
     out: dict[int, float] = {}
     for p in result:
@@ -1039,7 +1041,8 @@ def run_backtest(
             src_counts[src] += 1
             plan_span = window_plan_span(idx, A, args, win_records)
             tomorrow_plan = tomorrow_window_plan(A, args, win_records, tz)
-            # v4's window input: today's span plus tomorrow's when known at A (Issue #1391); v3 keeps today's only.
+            # v4's window input: today's span plus tomorrow's when known at A (Issue #1391); v3 gets the same
+            # tomorrow plan through v3_curve(tomorrow_plan=...).
             v4_spans = tuple(
                 sp
                 for sp in (
@@ -1141,6 +1144,7 @@ def run_backtest(
                         model=asof_model,
                         band_fn=band_fn,
                         span=plan_span,
+                        tomorrow_plan=tomorrow_plan,
                     )
                 except Exception:  # noqa: BLE001
                     skipped["v3_error"] += 1
@@ -1154,6 +1158,7 @@ def run_backtest(
                         model=v3_model,
                         band_fn=band_fn,
                         span=plan_span,
+                        tomorrow_plan=tomorrow_plan,
                     )
                 except Exception:  # noqa: BLE001
                     skipped["v3_error"] += 1

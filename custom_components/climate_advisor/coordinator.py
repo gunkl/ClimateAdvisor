@@ -41,7 +41,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import log_capture, prediction_engines, v4_shadow
+from . import log_capture, prediction_engines, v4_shadow, window_span
 from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
@@ -5916,13 +5916,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         def _path_fn(spans: Any) -> list[tuple[datetime, float]] | None:
             """Today's v3 predicted path with these window periods (v3 takes one span: the longest)."""
-            if spans:
-                a, b = max(spans, key=lambda ab: ab[1] - ab[0])
+            # v3 takes one period per day (the longest): today's on today's date, tomorrow's on tomorrow's (#1391).
+            day0 = now.date()
+            today_sp = [ab for ab in spans if ab[0].date() == day0]
+            tomorrow_sp = [ab for ab in spans if ab[0].date() == day0 + timedelta(days=1)]
+            if today_sp:
+                a, b = max(today_sp, key=lambda ab: ab[1] - ab[0])
                 c2 = dataclasses.replace(
                     c, windows_recommended=True, window_open_time=a.time(), window_close_time=b.time()
                 )
             else:
                 c2 = dataclasses.replace(c, windows_recommended=False)
+            tomorrow_w = None
+            if tomorrow_sp:
+                a, b = max(tomorrow_sp, key=lambda ab: ab[1] - ab[0])
+                tomorrow_w = (True, a.time(), b.time())
             out = _build_predicted_indoor_future(
                 self._hourly_forecast_temps,
                 config,
@@ -5933,6 +5941,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 classification=c2,
                 band_schedule=band_schedule,
                 tou_precondition_window=tou_window,
+                tomorrow_window=tomorrow_w,
             )
             pts = []
             for entry in out:
@@ -6365,6 +6374,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             (_perf_counter() - started) * 1000.0,
         )
 
+    def _tomorrow_window_plan(self) -> tuple[bool, Any, Any] | None:
+        """Tomorrow's planned window period ``(recommended, open, close)`` for the prediction engines' inputs (Issue
+        #1391: ``plan_days[1]``'s source, ``_tomorrow_classification_plan``), or None when unknown (windows closed)."""
+        try:
+            tm = self._tomorrow_classification_plan()
+            if tm is None:
+                return None
+            return (
+                bool(tm["windows_recommended"]),
+                _parse_time(tm["window_open_time"]) if tm["window_open_time"] else None,
+                _parse_time(tm["window_close_time"]) if tm["window_close_time"] else None,
+            )
+        except Exception:  # noqa: BLE001 - optional context: tomorrow stays windows-closed
+            return None
+
     def _v4_sleep_node(self, model_dict: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
         """``(sleep sensor id, sleep_time, wake_time)`` when the configured sleep sensor is a node of the model."""
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
@@ -6421,17 +6445,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         # Tomorrow's own planned window period (the timeline's plan_days[1]) for tomorrow's hours (Issue #1391);
         # unknown -> None -> closed. The plan and control (baseline) cycles share these inputs.
-        tomorrow_windows: tuple[bool, Any, Any] | None = None
-        try:
-            tm = self._tomorrow_classification_plan()
-            if tm is not None:
-                tomorrow_windows = (
-                    bool(tm["windows_recommended"]),
-                    _parse_time(tm["window_open_time"]) if tm["window_open_time"] else None,
-                    _parse_time(tm["window_close_time"]) if tm["window_close_time"] else None,
-                )
-        except Exception:  # noqa: BLE001 - optional context: tomorrow stays windows-closed
-            tomorrow_windows = None
+        tomorrow_windows = self._tomorrow_window_plan()
         inputs = v4_shadow.build_inputs(
             now=now,
             hourly=hourly,
@@ -15805,6 +15819,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 occupancy_mode=self._occupancy_mode,
                 classification=self._current_classification,
                 band_schedule=_raw_band,
+                tomorrow_window=self._tomorrow_window_plan(),
             )
             predicted_indoor = [{"ts": p["ts"], "temp": _conv(p["temp"])} for p in _raw_predicted_indoor]
             _fallback_inputs = (_extended_forecast, now, _raw_band)
@@ -15873,6 +15888,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         occupancy_mode=self._occupancy_mode,
                         classification=self._current_classification,
                         band_schedule=_fallback_inputs[2],
+                        tomorrow_window=self._tomorrow_window_plan(),
                     )
                 ]
             except Exception:  # noqa: BLE001 - optional line
@@ -17309,8 +17325,13 @@ def _build_predicted_indoor_future(
     classification: Any | None = None,
     band_schedule: list[dict] | None = None,
     tou_precondition_window: tuple[datetime, datetime, float, str] | None = None,
+    tomorrow_window: tuple[bool, Any, Any] | None = None,
 ) -> list[dict]:
     """Build future predicted indoor temps from the automation plan.
+
+    Window-open hours (k_vent_window substitution) follow ``window_span.planned_window_spans``, the one rule v4 uses
+    (Issue #1391): today's planned span on today's date and, when known, ``tomorrow_window`` (recommended, open, close)
+    on tomorrow's. The clock times are never repeated on another day; ``None`` (tomorrow unknown) = closed.
 
     When thermal_model has "low" confidence or above, uses the physics ODE:
       T(t+dt) = T_outdoor + (T - T_outdoor)*exp(k_p*dt) + (Q/k_p)*(exp(k_p*dt) - 1)
@@ -17533,6 +17554,12 @@ def _build_predicted_indoor_future(
     _windows_recommended = bool(classification.windows_recommended) if classification else False
     _window_open_time = getattr(classification, "window_open_time", None) if classification else None
     _window_close_time = getattr(classification, "window_close_time", None) if classification else None
+    _window_spans = window_span.planned_window_spans(
+        now,
+        (_windows_recommended, _window_open_time, _window_close_time),
+        tomorrow_window,
+        fallback_hours=0,  # v3 never invented a span without planned times
+    )
 
     result = []
     skipped_past = 0
@@ -17560,13 +17587,7 @@ def _build_predicted_indoor_future(
         # Per-hour window-open check (computed before bridge guard so both can reference it).
         # Guard: skip substitution when gate bridge already used k_vent_window as
         # k_passive for all hours (_k_passive_via_bridge=True).
-        _hour_windows_open = (
-            _windows_recommended
-            and _k_vent_window is not None
-            and _window_open_time is not None
-            and _window_close_time is not None
-            and _window_open_time <= local_ts.time() < _window_close_time
-        )
+        _hour_windows_open = _k_vent_window is not None and window_span.window_open_at(_window_spans, local_ts)
 
         # Bridge guard: k_vent_window is measured during open-window conditions
         # (envelope k + ventilation k).  Applying it to window-closed hours overpredicts

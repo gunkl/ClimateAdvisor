@@ -146,3 +146,67 @@ def test_backtest_uses_tomorrows_record_only_when_known_at_the_anchor() -> None:
         )
         is None
     )
+
+
+# ------------------------------------------------------------------ v3 (the other primary engine) follows the same rule
+def _v3_curve(today, tomorrow):
+    from custom_components.climate_advisor.coordinator import _build_predicted_indoor_future
+
+    now = datetime(2026, 11, 6, 8, 0)
+    forecast = [{"datetime": (now + timedelta(hours=h)).isoformat(), "temperature": 50.0} for h in range(1, 49)]
+    cls = SimpleNamespace(
+        hvac_mode="off", windows_recommended=today[0], window_open_time=today[1], window_close_time=today[2]
+    )
+    model = {
+        "confidence": "solid",
+        "confidence_k_passive": "solid",
+        "k_passive": -0.01,
+        "k_vent_window": -0.6,
+        "k_active_heat": 6.0,
+        "k_active_cool": -3.0,
+    }
+    out = _build_predicted_indoor_future(
+        forecast,
+        {"comfort_heat": 40, "comfort_cool": 95, "wake_time": "06:30", "sleep_time": "22:30"},
+        now,
+        current_indoor_temp=75.0,
+        thermal_model=model,
+        classification=cls,
+        band_schedule=[],
+        tomorrow_window=tomorrow,
+    )
+    return {e["ts"]: e["temp"] for e in out}
+
+
+def test_v3_today_plus_tomorrow_window_hours() -> None:
+    today = (True, time(10, 0), time(12, 0))
+    base = _v3_curve(today, None)
+    both = _v3_curve(today, (True, time(8, 0), time(11, 0)))
+    start = datetime(2026, 11, 7, 7, 0).isoformat()  # the :30 point before 08:00 already steps into it
+    before = [k for k in base if k <= start]
+    # the same clock time is NOT repeated on tomorrow by today's span (the old v3 rule did): identical until
+    # tomorrow's own period, colder (windows open) after it
+    assert [base[k] for k in before] == [both[k] for k in before]
+    after = [k for k in base if k > datetime(2026, 11, 7, 9, 0).isoformat()]
+    assert after and all(both[k] < base[k] for k in after)
+    # today's period itself is in the curve
+    assert (
+        base[datetime(2026, 11, 6, 11, 0).isoformat()]
+        < _v3_curve((False, None, None), None)[datetime(2026, 11, 6, 11, 0).isoformat()]
+    )
+
+
+def test_v3_unknown_tomorrow_is_closed_and_tomorrow_only_works() -> None:
+    none = _v3_curve((False, None, None), None)
+    unknown = _v3_curve((False, None, None), (False, None, None))
+    assert none == unknown
+    only_tomorrow = _v3_curve((False, None, None), (True, time(8, 0), time(11, 0)))
+    first_diff = next(k for k in sorted(none) if only_tomorrow[k] != none[k])
+    assert first_diff > datetime(2026, 11, 7, 7, 0).isoformat()  # nothing opens before tomorrow's period
+
+
+def test_v3_backtest_curve_is_handed_the_known_tomorrow_plan() -> None:
+    pb = _backtest_module()
+    import inspect
+
+    assert "tomorrow_plan" in inspect.signature(pb.v3_curve).parameters

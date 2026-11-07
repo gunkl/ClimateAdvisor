@@ -10,6 +10,7 @@ Uses a fake ``predictor_v4`` (the real fit's maths are tested elsewhere); this t
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from datetime import timedelta
 
@@ -75,6 +76,14 @@ async def test_nightly_timer_fits_the_zone_and_unload_leaves_nothing(
         fire += timedelta(days=1)
     async_fire_time_changed(hass, fire + timedelta(seconds=1))
     await hass.async_block_till_done()
+    # The fit runs as a BACKGROUND task (HA cancels it on unload), which async_block_till_done does not wait for:
+    # under load the assertions below used to run before the executor fit had started. Wait for its completion
+    # (bounded, event-driven), then assert exactly what this test always proved.
+    for _ in range(400):
+        if engine.fit_calls and not coordinator._v4_fit_running:
+            break
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
     assert engine.fit_calls == 1
     assert coordinator._v4_store.v4_model["confidence"] == "ok"
     assert coordinator._v4_fit_running is False

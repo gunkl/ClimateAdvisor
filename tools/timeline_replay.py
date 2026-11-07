@@ -365,11 +365,18 @@ def build_snapshot(zone: ZoneData, day: date, cfg: dict[str, Any], mods: tuple[A
         ]
 
         def _path_fn(spans):
-            if spans:
-                a, b = max(spans, key=lambda ab: ab[1] - ab[0])
+            day0 = now.date()
+            today_sp = [ab for ab in spans if ab[0].date() == day0]
+            tomorrow_sp = [ab for ab in spans if ab[0].date() == day0 + timedelta(days=1)]
+            if today_sp:
+                a, b = max(today_sp, key=lambda ab: ab[1] - ab[0])
                 c2 = replace(c, windows_recommended=True, window_open_time=a.time(), window_close_time=b.time())
             else:
                 c2 = replace(c, windows_recommended=False)
+            tomorrow_w = None
+            if tomorrow_sp:
+                a, b = max(tomorrow_sp, key=lambda ab: ab[1] - ab[0])
+                tomorrow_w = (True, a.time(), b.time())
             out = coord._build_predicted_indoor_future(
                 entries,
                 cfg,
@@ -378,6 +385,7 @@ def build_snapshot(zone: ZoneData, day: date, cfg: dict[str, Any], mods: tuple[A
                 thermal_model=tcache,
                 classification=c2,
                 band_schedule=band_sched,
+                tomorrow_window=tomorrow_w,
             )
             return [(datetime.fromisoformat(e["ts"]), float(e["temp"])) for e in out]
 

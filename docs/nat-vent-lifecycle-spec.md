@@ -280,6 +280,8 @@ The FSM path now tracks `_fan_rate_limited_direction` alongside
 last time" — the single change that fixes both duplicate-report mechanisms above,
 since both funnel through this one decision.
 
+**A deferred reconcile turn-off is re-run (Issue #1390).** `reconcile_fan_on_startup()` runs once per trigger and leaves no live session behind it, so when its turn-off branch's `_exit_nat_vent()` is deferred by the floor (RATE_LIMITED_NEW/DUP, sensor still open) nothing else asks again -- 2026-11-06 the fan ran on unmanaged with the HVAC restore held behind it. The branch now rolls back the #446 correction-cooldown stamp (nothing was sent, and the cooldown would refuse the retry) and `_arm_deferred_reconcile_retry()` sets one timer at `applies_at` + 1 s; it calls the `deferred_reconcile` callback, i.e. the coordinator's `_async_post_grace_fan_reconcile(trigger="deferred_retry")`, which re-reads the fan, sensors and temperatures and decides again (adopt, turn off, or nothing). `cleanup()` cancels it. Every other `_exit_nat_vent()` caller runs inside a live session (re-asked by the slow loop / temperature check) or has its own retry (#1195 closed-window exit, the indoor blind stop's backstop tick).
+
 **Who clears the record (Issue #1212).** A deferral that is abandoned must not linger: the card kept
 "(on/off pending ...)" and a later unrelated start/stop logged "applying deferred ..." hours later. One helper,
 `_clear_fan_deferral_record(direction | None, reason)`, clears it (INFO `Fan toggle deferral record cleared`),

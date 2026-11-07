@@ -35,6 +35,7 @@ from homeassistant.helpers.event import (
     async_track_time_change,
     async_track_time_interval,
 )
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
@@ -1020,6 +1021,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._whf_unknown_sensor_cancel: Callable[[], None] | None = None
         self._whf_release_reclassify_cancel: Callable[[], None] | None = None  # Issue #1215
         self._whf_safety_started_at: datetime | None = None
+        # Issue #1389: set up during Home Assistant's own start (not a reload) -- an unreadable door/window
+        # sensor's 60 s grace waits for HA to finish starting (_whf_sensors_readable_at), since a group helper
+        # or a slow integration reads unavailable until then.
+        self._whf_ha_starting: bool = False
+        self._whf_sensors_readable_at: datetime | None = None
         # Issue #1288: when the fan (physically on) and the compressor (heating/cooling) were first seen on together.
         self._whf_overlap_since: datetime | None = None
         # Issue #1178: when the whole-house-fan entity last woke from unavailable/unknown (a reconnect, not a press).
@@ -1141,6 +1147,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #359: post-grace fan check callback — called by engine when any
             # grace period expires.
             post_grace_fan_check=self._on_post_grace_fan_check,
+            # Issue #1390: re-run the reconcile once its deferred turn-off can land.
+            deferred_reconcile=self._on_deferred_reconcile,
             # Issue #423: physical fan ground-truth callbacks for
             # _reconcile_fan_physical_drift().
             get_fan_physical_state=self._get_fan_physical_state,
@@ -1275,6 +1283,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 timedelta(seconds=15),
             )
         )
+        # Issue #1389: on HA's own start the door/window sensors are not readable yet (unavailable until their
+        # integration loads); the unreadable-sensor grace starts once HA has started. A reload (HA running) is
+        # unchanged: the sensors are already loaded, so their own ages are the truth.
+        if getattr(self.hass, "is_running", True) is False:
+            self._whf_ha_starting = True
+            self._unsub_listeners.append(async_at_started(self.hass, self._zone_scoped_sync(self._on_whf_ha_started)))
 
         # Listeners: door/window sensors (resolve groups into individual sensors)
         self._resolved_sensors = self._resolve_monitored_sensors()
@@ -1608,6 +1622,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now = dt_util.utcnow()
         started = getattr(self, "_whf_safety_started_at", None)
         since_start = max(0.0, (now - started).total_seconds()) if isinstance(started, datetime) else None
+        readable_for = self._whf_sensor_readable_for_s(now)
         readings: list[SensorReading] = []
         stale: list[str] = []
         for sensor_id in getattr(self, "_resolved_sensors", []) or []:
@@ -1619,11 +1634,43 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 is_open=self._state_is_open(state),
                 age_s=age,
                 since_start_s=since_start,
+                readable_for_s=readable_for,
             )
             readings.append(reading)
             if reading.unknown_for_s is not None and reading.unknown_for_s > WHF_SENSOR_UNKNOWN_GRACE_S:
                 stale.append(sensor_id)
         return tuple(readings), stale
+
+    def _whf_sensor_readable_for_s(self, now: datetime) -> float | None:
+        """Seconds the door/window sensors have been readable, for the unreadable-sensor grace (Issue #1389).
+
+        0.0 while Home Assistant is still starting (a sensor reading unavailable then is still loading, not
+        dead), the seconds since HA started once it has, and None when this integration was set up with HA
+        already running (a reload: no clamp, the sensors' own ages decide as before).
+        """
+        if getattr(self, "_whf_ha_starting", False):
+            return 0.0
+        readable_at = getattr(self, "_whf_sensors_readable_at", None)
+        if isinstance(readable_at, datetime):
+            return max(0.0, (now - readable_at).total_seconds())
+        return None
+
+    @callback
+    def _on_whf_ha_started(self, _hass: Any = None) -> None:
+        """Home Assistant finished starting: the unreadable-sensor grace starts now (Issue #1389).
+
+        A sensor still unreadable gets its 60 s from here, and the safety check re-runs when it ends so a
+        genuinely dead sensor on a sealed house is still acted on (seconds later than before, not never).
+        """
+        self._whf_ha_starting = False
+        self._whf_sensors_readable_at = dt_util.utcnow()
+        readings, _stale = self._whf_sensor_readings()
+        if any(r.unknown_for_s is not None for r in readings):
+            _LOGGER.info(
+                "WHF safety: Home Assistant started with a door/window sensor still unreadable — its 60 s grace"
+                " starts now (Issue #1389)"
+            )
+            self._arm_whf_unknown_sensor_check()
 
     def _build_whf_safety_snapshot(self) -> WhfSafetySnapshot:
         """Ground truth for the WHF safety enforcer (Issue #1144): fan state and age, sensor readings.
@@ -8803,8 +8850,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         self.hass.async_create_task(self._async_post_grace_fan_reconcile())
 
-    async def _async_post_grace_fan_reconcile(self) -> None:
-        """After grace expires, check if fan is still running and reconcile if needed (Issue #359 Fix D)."""
+    @callback
+    def _on_deferred_reconcile(self) -> None:
+        """Called by the engine when a reconcile turn-off the 5-minute floor deferred can land (Issue #1390)."""
+        self._spawn(self._async_post_grace_fan_reconcile(trigger="deferred_retry"))
+
+    async def _async_post_grace_fan_reconcile(self, trigger: str = "post_grace_expiry") -> None:
+        """Check if the fan is still running and reconcile if needed (Issue #359 Fix D).
+
+        After a grace period expires (``post_grace_expiry``), or when a reconcile turn-off deferred by the
+        5-minute toggle floor can land (``deferred_retry``, Issue #1390).
+        """
         # Issue #361: command-only mode — no physical-state entity to read.
         # Reset last_commanded so the next _async_update_data() cycle re-asserts the desired state.
         if not self._fan_state_feedback_enabled():
@@ -8854,7 +8910,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 outdoor=self._last_outdoor_temp,
                 thermostat_fan_running=archetype_fan_running,
                 any_sensor_open=self._any_sensor_open(),
-                trigger="post_grace_expiry",
+                trigger=trigger,
             )
 
     def _fan_state_feedback_enabled(self) -> bool:

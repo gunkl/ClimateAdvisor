@@ -282,8 +282,16 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
         step = card_user_step(tl, now, windows_open=windows_open)
         you = [s for s in tl.steps if s.actor.value == "you"]
         out["window_step"] = None if step is None else {"kind": step.kind.value, "at": step.ts.strftime("%H:%M")}
+        # the card step's state (R3b redesign): "held" with the veto rule id when the live direction rule vetoes it, and
+        # the sentence the plan list shows for it
+        out["window_step_state"] = (
+            None if step is None else {"status": step.status, "hold": step.meta.get("hold"), "text": step.text}
+        )
+        _resume = next((s for s in tl.steps if s.kind.value == "resume_schedule"), None)
         out["timeline"] = {
             "you_steps": [f"{s.ts:%H:%M} {s.kind.value}" for s in you],
+            "you_step_states": [f"{s.ts:%H:%M} {s.kind.value} {s.status}" for s in you],
+            "resume_step": None if _resume is None else {"at": f"{_resume.ts:%H:%M}", "text": _resume.text},
             "ca_kinds": sorted({s.kind.value for s in tl.steps if s.actor.value == "ca"}),
             "ca_steps": [f"{s.ts:%H:%M} {s.kind.value}" for s in tl.steps if s.actor.value == "ca"],
             "window_confidence": sorted({s.confidence for s in you}),
@@ -308,3 +316,21 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
         row = next((ln.strip() for ln in short.splitlines() if ln.strip().startswith("Windows:")), None)
         out["briefing_windows_row"] = row
     return out
+
+
+def sync_coordinator_occupancy(coordinator: Any, mode: str) -> None:
+    """Production's occupancy toggle writes the COORDINATOR's mode, hands it to the engine, then regenerates the
+    operation timeline (``coordinator._async_occupancy_toggle_changed``). The Tier A event driver only reached the
+    engine, so a surface the coordinator computes (Next Action, the timeline, the briefing) kept reading ``home``.
+    Shared by the FakeHass and real-HA adapters.
+    Semantic justification (Issue #1230 R3b, test-infrastructure rule): the previous driver modelled one half of a
+    two-part production step; scenarios that read coordinator surfaces after an occupancy event were therefore
+    exercising a state production cannot reach (engine away, coordinator home). Could this let a real failure pass
+    silently? No: it only makes the coordinator's mode equal the engine's, as production does; every engine decision
+    is unchanged (the engine call above is untouched) and the timeline run is the same call production makes.
+    """
+    if coordinator is None or not hasattr(coordinator, "_occupancy_mode"):
+        return
+    coordinator._occupancy_mode = mode
+    if hasattr(coordinator, "_timeline_shadow_run"):
+        coordinator._timeline_shadow_run("occupancy")

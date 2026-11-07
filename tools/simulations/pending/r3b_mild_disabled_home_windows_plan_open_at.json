@@ -5,7 +5,8 @@
   "issue": 1230,
   "notes": [
     "Issue #1230 R3b Tier A golden candidate (pending: owner approves, DP-11). The scenario sets capture_next_action, so the harness records the occupant surfaces at the end of the run (engine_state._next_action: Next Action text, Next Automation, the operation timeline's steps, the briefing Windows row). Every assertion below reads that capture through the existing field_equals assertion: outcomes.py is unchanged.",
-    "Tier A has no learned thermal model and no forecast: the engine's window recommendation therefore stands unvalidated (confidence low), and the timeline carries only what the classification event states."
+    "Tier A has no learned thermal model and no forecast: the engine's window recommendation therefore stands unvalidated (confidence low), and the timeline carries only what the classification event states.",
+    "R3b redesign (owner decision 2026-11-06): before, the briefing row said only 'Close by 5:00 PM' at 8 AM while the card said 'Open windows at 10:00 AM'; the row now gives both times whenever the open is still ahead."
   ],
   "use_coordinator": true,
   "skip_startup_coalesce": true,
@@ -138,9 +139,9 @@
       "at": "2026-11-02T08:00:00",
       "expect": "field_equals",
       "field": "engine_state._next_action.briefing_windows_row",
-      "value": "Windows: Close by 5:00 PM",
+      "value": "Windows: Open 10:00 AM \u2013 close by 5:00 PM",
       "track": "logic",
-      "reason": "the briefing's Windows row reads the same window periods"
+      "reason": "the briefing row names BOTH times while the open is still ahead (the card says 'Open windows at 10:00 AM'; a reader of the briefing alone must know to open)"
     }
   ],
   "capture_next_action": true

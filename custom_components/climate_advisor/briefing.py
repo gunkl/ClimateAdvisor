@@ -114,6 +114,10 @@ class _BriefingFacts:
     # Issue #1369: vacation band deeper than away on the edge that matters (heat day: floor, cool day: ceiling,
     # otherwise both edges). False when not on vacation. Separate vacation setpoints (#1347) may be equal/milder.
     vacation_deeper: bool = False
+    # Issue #1230 R3b: the planned open still ahead today (warm/mild), so the Windows row names BOTH times;
+    # and the live direction veto ("heat" or "warm") on a period that is running, so the row says "closed for now".
+    open_at: datetime | None = None
+    window_veto: str | None = None
 
 
 def _local(moment: datetime, now: datetime) -> datetime:
@@ -272,12 +276,16 @@ def _gather_briefing_facts(
         elif hot_evening:
             hot_evening_open = resolve_with_fallback(evening_dt, c.window_opportunity_evening_start)
 
+    open_at: datetime | None = None
+    window_veto = windows.vetoed if windows is not None and not unoccupied else None
     if windows is not None and not unoccupied:
         # Issue #1230 R3b: the window times the briefing states are the timeline's, never its own re-derivation.
         periods = [(o, e) for o, e in windows.periods if e > now]
         if c.day_type in (DAY_TYPE_WARM, DAY_TYPE_MILD) and windows_advice:
             if periods:
                 close = _CloseFact(at=_local(periods[0][1], now), dynamic=True, already=False)
+                _o = periods[0][0]
+                open_at = _local(_o, now) if _o is not None and _local(_o, now) > now else None
                 later = [o for o, _e in periods[1:] if o is not None]
                 evening_open = _local(later[0], now) if later else None
             else:
@@ -320,6 +328,8 @@ def _gather_briefing_facts(
         hot_pre_cool_target=hot_pre_cool_target,
         economizer_threshold=config["comfort_cool"] + ECONOMIZER_TEMP_DELTA,
         vacation_deeper=vacation_deeper,
+        open_at=open_at,
+        window_veto=window_veto,
     )
 
 
@@ -782,7 +792,10 @@ def _generate_tldr_table(
     if c.day_type != DAY_TYPE_HOT and facts.windows_advice and c.window_open_time and facts.close is not None:
         # Issue #876: the morning OPEN time is intentionally dropped from this row -- it carries no useful
         # information -- so the row shows only the close time, matching the conversational body.
-        windows_val = f"Close by {facts.close.text}"
+        if facts.open_at is not None:
+            windows_val = f"Open {facts.open_at.strftime(_FMT_HOUR)} – close by {facts.close.text}"
+        else:
+            windows_val = f"Close by {facts.close.text}"
     elif facts.hot_morning and facts.hot_evening and facts.close is not None:
         # Issue #878: close/open resolved TOGETHER (see resolve_window_pair()) -- the incident (Close by 6:00 PM /
         # Open 5:00 PM+) is prevented when the facts were gathered.
@@ -792,6 +805,10 @@ def _generate_tldr_table(
         windows_val = f"Close by {facts.close.text} (<{format_temp(threshold, temp_unit)})"
     elif facts.hot_evening and facts.hot_evening_open is not None:
         windows_val = f"Open {facts.hot_evening_open.strftime(_FMT_HOUR)} onward"
+    elif facts.window_veto == "heat":
+        windows_val = "Closed for now — outdoor air would cool the house below its floor"
+    elif facts.window_veto == "warm":
+        windows_val = "Closed for now — outdoor air isn't cooler than indoor yet"
     else:
         windows_val = "Closed all day"
 

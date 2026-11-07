@@ -5,7 +5,8 @@
   "issue": 1230,
   "notes": [
     "Issue #1230 R3b Tier A golden candidate (pending: owner approves, DP-11). The scenario sets capture_next_action, so the harness records the occupant surfaces at the end of the run (engine_state._next_action: Next Action text, Next Automation, the operation timeline's steps, the briefing Windows row). Every assertion below reads that capture through the existing field_equals assertion: outcomes.py is unchanged.",
-    "Tier A has no learned thermal model and no forecast: the engine's window recommendation therefore stands unvalidated (confidence low), and the timeline carries only what the classification event states."
+    "Tier A has no learned thermal model and no forecast: the engine's window recommendation therefore stands unvalidated (confidence low), and the timeline carries only what the classification event states.",
+    "R3b redesign (owner decision 2026-11-06): before, only has_resume_step was asserted (a wrong resume time would still pass). The resume step's time and sentence are now asserted exactly. Mutation check: moving the plan's grace end by +30 minutes fails this assertion."
   ],
   "use_coordinator": true,
   "skip_startup_coalesce": true,
@@ -145,6 +146,17 @@
       "value": true,
       "track": "logic",
       "reason": "an active override ends with a resume_schedule step"
+    },
+    {
+      "at": "2026-11-02T14:05:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.resume_step",
+      "value": {
+        "at": "14:15",
+        "text": "2:15 PM: your change ends and CA resumes the schedule (68\u00b0F to 74\u00b0F)."
+      },
+      "track": "logic",
+      "reason": "the exact resume time (override at 14:00 + the 15 minute grace) and the exact sentence the occupant reads: a resume time that is off by even 30 minutes fails"
     }
   ],
   "capture_next_action": true

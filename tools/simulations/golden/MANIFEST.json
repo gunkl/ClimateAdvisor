@@ -497,5 +497,55 @@
     "sha256": "2057a4ca3ffddbb268dcd55e786c650ba17ed0d9f83a196e5d724d5a9b64149b",
     "signed": "2026-11-06",
     "issue": 1276
+  },
+  "r3b_hot_whf_home_morning_window_period": {
+    "sha256": "fae9b07960c85e02ecaf896552d6ce79b7e6d0f9785363dc1aa0136125c7372a",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_warm_hvac_fan_home_windows_day_close_by": {
+    "sha256": "e14a1551a3ced7c312b2337175912a31470ea07a25948c22c8d91ee9bcf5b5bd",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_cool_whf_home_no_window_plan": {
+    "sha256": "f01aa24124392e50c54bb34bf48b5b987fb773c927faf9f72e762eb3e3548a56",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_cold_hvac_fan_home_doors_closed": {
+    "sha256": "d29a35f12fbdb62af2d12d9ce0724b69a97e598c18fa7467d2b2333259ebacd5",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_warm_whf_away_no_window_advice": {
+    "sha256": "5e2fbf63f4ca24ae0141d5522f0ef7d903e824672e6814c991ee92581e6d76ad",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_hot_hvac_fan_vacation_no_window_advice": {
+    "sha256": "7e7c5b24a70539a42cd2587ec0a555432b69b87f59582c869a50759a34498cb0",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_mild_hvac_fan_sleep_sensor_swap": {
+    "sha256": "af1205e7e95d98bd39bca5bc63e767a1123504362ec7f2de9a4e74cf6532ed92",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_hot_whf_home_evening_window_period": {
+    "sha256": "44882d76bd5feca6f651364a86a1f9fb763d3833144d0ec3ec35f25f30e60cf8",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_hot_hvac_fan_home_evening_window_period": {
+    "sha256": "763ac19be218184ffdee70b0aa97d1fff612fcfcb1ea0b5e9137dcf987ddeb29",
+    "signed": "2026-11-06",
+    "issue": 1230
+  },
+  "r3b_hot_disabled_home_evening_window_period": {
+    "sha256": "52ec47cdd52a26e2b135d0fe5c68548c72c1708561e35e5496564c1473198a5e",
+    "signed": "2026-11-06",
+    "issue": 1230
   }
 }

@@ -16,15 +16,17 @@ advises something the timeline does not hold.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from typing import Any
 
 from .operation_timeline import (
     Actor,
+    MissingFact,
     StepKind,
     Timeline,
     TimelineStep,
+    say,
 )
 from .temperature import format_temp
 
@@ -123,12 +125,74 @@ class CardLive:
     armed_cool: float
 
 
+DIRECTION_VETO = "direction_veto"  # ``meta["hold_kind"]`` of a window step the live direction rule vetoes
+
+
+def is_direction_vetoed(step: TimelineStep) -> bool:
+    """Whether a window step is marked held by the live direction rule (status ``held``)."""
+    return step.status == "held" and step.meta.get("hold_kind") == DIRECTION_VETO
+
+
+def _live_open_ok(step: TimelineStep, live: CardLive) -> bool:
+    """Whether the live direction rule lets the occupant open the windows for this (already-started) open step."""
+    o, i = live.outdoor, live.indoor
+    if o is None or i is None:
+        return True  # unknown readings never veto
+    if live.direction_ok:
+        if step.reason == "windows_open.free_heating" and o > i:
+            return True
+        if o < i:
+            return True
+    return False
+
+
+def apply_direction_veto(tl: Timeline, now: datetime, live: CardLive) -> Timeline:
+    """Mark the window-open step the live direction rule vetoes right now (Issue #1276, every surface).
+
+    A planned window period can be running while the live reading says opening would work against the house (outdoor
+    cooler than a house the heat is holding at its floor, or outdoor not cooler than indoor). The Next Action card
+    already said "keep windows closed"; the plan list and the briefing still carried the open step, so the occupant read
+    "Open windows" beside "Keep windows closed". This returns a copy of the timeline whose current open step is
+    ``held`` (``hold_kind`` ``direction_veto``) and worded with the same sentence as the card. Pure and idempotent; the
+    latched plan is never written. Only the step the card is about is touched: a later period stays a plan.
+    """
+    step = card_user_step(tl, now, windows_open=live.windows_open)
+    if (
+        step is None
+        or step.kind != StepKind.WINDOWS_OPEN
+        or step.ts > now
+        or is_direction_vetoed(step)
+        or _live_open_ok(step, live)
+    ):
+        return tl
+    o, i = live.outdoor, live.indoor
+    assert o is not None
+    assert i is not None
+    try:
+        if live.heat_side_veto:
+            key = "held.direction_veto.heat"
+            text = say(key, live.unit, outdoor=o, floor=live.armed_heat)
+        else:
+            key = "held.direction_veto.warm"
+            text = say(key, live.unit, outdoor=o, indoor=i)
+    except MissingFact:  # unreachable (readings are known above); a surface never fails on a wording
+        return tl
+    held = replace(
+        step,
+        text=text,
+        meta={**step.meta, "status": "held", "hold": key, "hold_kind": DIRECTION_VETO},
+    )
+    return replace(tl, steps=tuple(held if s is step else s for s in tl.steps))
+
+
 def window_card_text(tl: Timeline, now: datetime, live: CardLive) -> tuple[str, TimelineStep] | None:
     """The Next Action card's window text and the step it came from, or None when the plan has no window step today.
 
     The timing comes from the timeline step; the direction rule is applied to the live reading (a plan hour that the
-    reading now contradicts becomes "keep closed", never an invitation).
+    reading now contradicts becomes "keep closed", never an invitation). The veto is a property of the step
+    (``apply_direction_veto``), so the card, the plan list and the briefing say the same sentence.
     """
+    tl = apply_direction_veto(tl, now, live)
     step = card_user_step(tl, now, windows_open=live.windows_open)
     if step is None:
         return None
@@ -138,29 +202,18 @@ def window_card_text(tl: Timeline, now: datetime, live: CardLive) -> tuple[str, 
     if step.kind == StepKind.WINDOWS_OPEN:
         if step.ts > now:
             return f"Open windows at {_clock(step.ts)}", step
+        if is_direction_vetoed(step):
+            return step.text, step
         if known:
             assert o is not None
             assert i is not None
-            if live.direction_ok:
-                if step.reason == "windows_open.free_heating" and o > i:
-                    return (
-                        f"Open windows briefly — outdoor's warmer ({format_temp(o, unit)} vs {format_temp(i, unit)}).",
-                        step,
-                    )
-                if o < i:
-                    return (
-                        f"Open windows — outdoor's cooler now ({format_temp(o, unit)} vs {format_temp(i, unit)}).",
-                        step,
-                    )
-            if live.heat_side_veto:
+            if step.reason == "windows_open.free_heating" and o > i:
                 return (
-                    f"Keep windows closed to hold heat — outdoor ({format_temp(o, unit)}) would cool the house below"
-                    f" its {format_temp(live.armed_heat, unit)} floor.",
+                    f"Open windows briefly — outdoor's warmer ({format_temp(o, unit)} vs {format_temp(i, unit)}).",
                     step,
                 )
             return (
-                f"Keep windows closed for now — outdoor ({format_temp(o, unit)}) isn't cooler than indoor"
-                f" ({format_temp(i, unit)}) yet.",
+                f"Open windows — outdoor's cooler now ({format_temp(o, unit)} vs {format_temp(i, unit)}).",
                 step,
             )
         return "Open windows — outdoor air may be cooler now.", step
@@ -295,10 +348,20 @@ class TimelineWindows:
     """Today's window periods as the timeline holds them (the briefing's close/open facts read this)."""
 
     periods: tuple[tuple[datetime | None, datetime], ...]
+    # The period the live direction rule vetoes right now (its open step is held): the briefing says "closed for now"
+    # instead of "close by", and does not promise the open. None, "heat" or "warm" (which sentence the step carries).
+    vetoed: str | None = None
 
 
 def timeline_windows(tl: Timeline, day: Any) -> TimelineWindows:
-    return TimelineWindows(tuple((o.ts if o else None, c.ts) for o, c in window_periods(tl, day)))
+    live: list[tuple[datetime | None, datetime]] = []
+    vetoed: str | None = None
+    for o, c in window_periods(tl, day):
+        if o is not None and is_direction_vetoed(o):
+            vetoed = "heat" if o.meta.get("hold") == "held.direction_veto.heat" else "warm"
+            continue
+        live.append((o.ts if o else None, c.ts))
+    return TimelineWindows(tuple(live), vetoed)
 
 
 # ---------------------------------------------------------------------------

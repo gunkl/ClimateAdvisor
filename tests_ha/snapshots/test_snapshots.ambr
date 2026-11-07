@@ -55,7 +55,7 @@
       
         Day Type: Warm (29°C)
         HVAC Mode: Comfort band 21–24°C (windows day)
-        Windows: Close by 9:00 AM
+        Windows: Open 6:30 AM – close by 9:00 AM
         Bedtime Setback: No setback
         Tomorrow: Stable (29°C)
       
@@ -82,7 +82,7 @@
     'briefing_tldr': '''
         Day Type: Warm (29°C)
         HVAC Mode: Comfort band 21–24°C (windows day)
-        Windows: Close by 9:00 AM
+        Windows: Open 6:30 AM – close by 9:00 AM
         Bedtime Setback: No setback
         Tomorrow: Stable (29°C)
     ''',
@@ -94,7 +94,7 @@
         'message': '''
             Day Type: Warm (29°C)
             HVAC Mode: Comfort band 21–24°C (windows day)
-            Windows: Close by 9:00 AM
+            Windows: Open 6:30 AM – close by 9:00 AM
             Bedtime Setback: No setback
             Tomorrow: Stable (29°C)
         ''',
@@ -112,7 +112,7 @@
       
         Day Type: Mild (72°F)
         HVAC Mode: Comfort band 70–75°F (windows day)
-        Windows: Close by 12:00 PM
+        Windows: Open 10:00 AM – close by 12:00 PM
         Bedtime Setback: No setback
         Tomorrow: Stable (72°F)
       
@@ -140,7 +140,7 @@
     'briefing_tldr': '''
         Day Type: Mild (72°F)
         HVAC Mode: Comfort band 70–75°F (windows day)
-        Windows: Close by 12:00 PM
+        Windows: Open 10:00 AM – close by 12:00 PM
         Bedtime Setback: No setback
         Tomorrow: Stable (72°F)
     ''',
@@ -316,7 +316,7 @@
       
         Day Type: Mild (72°F)
         HVAC Mode: Comfort band 70–75°F (windows day)
-        Windows: Close by 12:00 PM
+        Windows: Open 10:00 AM – close by 12:00 PM
         Bedtime Setback: No setback
         Tomorrow: Stable (72°F)
       
@@ -342,7 +342,7 @@
     'briefing_tldr': '''
         Day Type: Mild (72°F)
         HVAC Mode: Comfort band 70–75°F (windows day)
-        Windows: Close by 12:00 PM
+        Windows: Open 10:00 AM – close by 12:00 PM
         Bedtime Setback: No setback
         Tomorrow: Stable (72°F)
     ''',
@@ -354,7 +354,7 @@
         'message': '''
             Day Type: Mild (72°F)
             HVAC Mode: Comfort band 70–75°F (windows day)
-            Windows: Close by 12:00 PM
+            Windows: Open 10:00 AM – close by 12:00 PM
             Bedtime Setback: No setback
             Tomorrow: Stable (72°F)
         ''',
@@ -372,7 +372,7 @@
       
         Day Type: Warm (84°F)
         HVAC Mode: Comfort band 70–75°F (windows day)
-        Windows: Close by 9:00 AM
+        Windows: Open 6:30 AM – close by 9:00 AM
         Bedtime Setback: No setback
         Tomorrow: Stable (84°F)
       
@@ -399,7 +399,7 @@
     'briefing_tldr': '''
         Day Type: Warm (84°F)
         HVAC Mode: Comfort band 70–75°F (windows day)
-        Windows: Close by 9:00 AM
+        Windows: Open 6:30 AM – close by 9:00 AM
         Bedtime Setback: No setback
         Tomorrow: Stable (84°F)
     ''',
@@ -411,7 +411,7 @@
         'message': '''
             Day Type: Warm (84°F)
             HVAC Mode: Comfort band 70–75°F (windows day)
-            Windows: Close by 9:00 AM
+            Windows: Open 6:30 AM – close by 9:00 AM
             Bedtime Setback: No setback
             Tomorrow: Stable (84°F)
         ''',
@@ -430,7 +430,7 @@
         
           Day Type: Warm (84°F)
           HVAC Mode: Comfort band 70–75°F (windows day)
-          Windows: Close by 9:00 AM
+          Windows: Open 6:30 AM – close by 9:00 AM
           Bedtime Setback: No setback
           Tomorrow: Stable (84°F)
         
@@ -457,7 +457,7 @@
       'briefing_tldr': '''
           Day Type: Warm (84°F)
           HVAC Mode: Comfort band 70–75°F (windows day)
-          Windows: Close by 9:00 AM
+          Windows: Open 6:30 AM – close by 9:00 AM
           Bedtime Setback: No setback
           Tomorrow: Stable (84°F)
       ''',

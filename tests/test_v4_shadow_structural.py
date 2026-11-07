@@ -15,6 +15,13 @@ Allowed to mention v4 (anything named ``v4``/``predictor_v4``):
 * ``coordinator.py``, only in ``_v4*``/``v4_*`` methods and in six fixed wiring points that never feed v4 back: the
   constructor, ``async_setup`` (nightly timer), ``async_restore_state`` (archive load), ``async_shutdown``,
   the per-cycle call and the Debug payload.
+
+Issue #1230 R6b: the PRIMARY engine now drives the prediction-dependent decisions, through the coordinator's control
+feed (``control_thermal_model``, ``control_predicted_indoor``, ``_refresh_control_prediction``, and the
+``_v4_control_cycle`` orchestration). The guards that remain: no decision MODULE names v4, the registry or the
+settings; every ``predicted_indoor=`` handed to a decision is ``control_predicted_indoor()``; the shadow engine is never
+read by a decision path (``test_every_predicted_indoor_handed_to_control_comes_from_the_registry_primary_path``,
+``test_the_shadow_is_never_read_by_a_decision_path``).
 """
 
 from __future__ import annotations
@@ -300,7 +307,8 @@ def test_get_chart_data_only_displays_v4() -> None:
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# Issue #1230: the primary/shadow engine SETTINGS are display (and v4 orchestration) only. Control uses v3 in 0.9.4.
+# Issue #1230: the primary/shadow engine SETTINGS. Display, v4 orchestration and (R6b) the CONTROL FEED read the
+# primary through the registry; the shadow is never read by a decision path.
 # ---------------------------------------------------------------------------------------------------------------
 
 _SELECTION_NAMES = {
@@ -316,8 +324,9 @@ _SELECTION_NAMES = {
 }
 # Modules that may name the selection: the registry itself, the setting's definition and form, nothing else.
 _SELECTION_MODULES = {"prediction_engines.py", "prediction_accuracy.py", "const.py", "config_flow.py", "coordinator.py"}
-# Coordinator methods that may read it. Display (chart payloads, the accuracy tiles' input, the Next 24 hours path) and
-# orchestration of v4 itself (is v4 the primary or shadow? then fit/predict/archive it). NEVER a control method.
+# Coordinator methods that may read it. Display (chart payloads, the accuracy tiles' input, the Next 24 hours path),
+# orchestration of v4 itself (is v4 the primary or shadow? then fit/predict/archive it), and (Issue #1230 R6b) the
+# two CONTROL FEED methods that hand the PRIMARY's prediction and rates to the decisions as plain values.
 _SELECTION_COORDINATOR_METHODS = {
     "_timeline_snapshot",
     "_timeline_night_apply",
@@ -326,7 +335,12 @@ _SELECTION_COORDINATOR_METHODS = {
     "shadow_engine_id",
     "engine_running",
     "prediction_engines_payload",
+    "control_thermal_model",
+    "_refresh_control_prediction",
 }
+# The control feed: the only coordinator methods that decide which engine's numbers the decisions read.
+_CONTROL_FEED_METHODS = {"control_thermal_model", "control_predicted_indoor", "_refresh_control_prediction"}
+_SHADOW_NAMES = {"shadow_id", "shadow_engine_id", "shadow_engine", "CONF_SHADOW_ENGINE", "DEFAULT_SHADOW_ENGINE"}
 
 
 def _selection_refs(tree: ast.AST) -> list[tuple[int, str, list[str]]]:
@@ -371,7 +385,7 @@ def _selection_refs(tree: ast.AST) -> list[tuple[int, str, list[str]]]:
 
 
 def test_no_decision_path_reads_the_primary_or_shadow_engine_setting_or_the_registry() -> None:
-    """Control stays v3-only in 0.9.4: only the registry, the setting's definition/form and display code name it."""
+    """No decision MODULE names the engines or the registry: the coordinator hands them plain values (R6b)."""
     offenders = []
     for path in sorted(_PKG.glob("*.py")):
         if path.name in _SELECTION_MODULES:
@@ -392,9 +406,14 @@ def test_the_coordinator_reads_the_engine_setting_only_in_display_and_v4_orchest
     assert stray == [], "coordinator code outside the display methods reads the selection:\n" + "\n".join(stray)
 
 
-def test_control_calls_still_receive_the_v3_curve() -> None:
-    """Every ``predicted_indoor=`` handed to the engine or the nat-vent plan is v3's ``_last_predicted_indoor``."""
+def test_every_predicted_indoor_handed_to_control_comes_from_the_registry_primary_path() -> None:
+    """Issue #1230 R6b: every ``predicted_indoor=`` handed to a decision is ``control_predicted_indoor()``.
+
+    That method reads either v3's own curve (v3 primary) or the control path ``_refresh_control_prediction`` built from
+    the registry (``prediction_engines.control_path`` -> ``primary_path``), never a v4/shadow name directly.
+    """
     tree = _tree(_PKG / "coordinator.py")
+    seen = 0
     bad = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -403,9 +422,59 @@ def test_control_calls_still_receive_the_v3_curve() -> None:
             if kw.arg != "predicted_indoor":
                 continue
             src = ast.unparse(kw.value)
-            if any(w in src for w in ("selected", "prediction_engines", "primary_engine", "v4", "primary_path")):
+            seen += 1
+            # ``_remaining_predicted_indoor`` is ``_walk_forward_regime``'s own slice of the curve it was handed (the
+            # chart's walk; get_chart_data gives it the control path when the primary is not v3).
+            if src not in ("self.control_predicted_indoor()", "_remaining_predicted_indoor"):
                 bad.append(f"line {node.lineno}: predicted_indoor={src}")
-    assert bad == []
+    assert seen >= 6, "the control call sites disappeared"
+    assert bad == [], "a decision gets a curve that did not come through the control feed:\n" + "\n".join(bad)
+
+
+def test_the_shadow_is_never_read_by_a_decision_path() -> None:
+    """Issue #1230 R6b: the comparison (shadow) engine never feeds a decision.
+
+    (1) No decision module names it (``test_no_decision_path_reads_...``). (2) In the coordinator the shadow's id is
+    read only by the display/orchestration methods, never by a control-feed method; (3) the feed methods name no shadow
+    identifier at all; (4) the registry's control functions never call ``shadow_id``.
+    """
+    tree = _tree(_PKG / "coordinator.py")
+    in_feed = []
+    for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "ClimateAdvisorCoordinator"):
+        for fn in cls.body:
+            if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) and fn.name in _CONTROL_FEED_METHODS:
+                for n in ast.walk(fn):
+                    names = []
+                    if isinstance(n, ast.Name):
+                        names.append(n.id)
+                    if isinstance(n, ast.Attribute):
+                        names.append(n.attr)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                        names.append(n.value)
+                    in_feed += [f"{fn.name}:{n.lineno} {x}" for x in names if x in _SHADOW_NAMES]
+    assert in_feed == [], "the control feed reads the shadow engine:\n" + "\n".join(in_feed)
+    for line, name, where in _selection_refs(tree):
+        if name in _SHADOW_NAMES and where:
+            method = where[1] if where[0] == "ClimateAdvisorCoordinator" and len(where) > 1 else where[0]
+            assert method in {"shadow_engine_id", "prediction_engines_payload", "get_chart_data"} or method.startswith(
+                ("_v4", "v4_")
+            ), f"line {line}: shadow name {name} in {method}"
+    registry = ast.parse((_PKG / "prediction_engines.py").read_text(encoding="utf-8"))
+    for fn in (n for n in ast.walk(registry) if isinstance(n, ast.FunctionDef)):
+        if fn.name in {
+            "control_model",
+            "control_path",
+            "control_ready",
+            "control_capable",
+            "_control_engine",
+            "resample_path",
+        }:
+            called = {
+                (n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", ""))
+                for n in ast.walk(fn)
+                if isinstance(n, ast.Call)
+            }
+            assert not (called & {"shadow_id", "running_ids"}), f"{fn.name} reads the shadow ({called})"
 
 
 def test_the_registry_and_the_timeline_selection_are_display_inputs_only() -> None:

@@ -1,0 +1,118 @@
+{
+  "name": "r6b_tou_bank_lead_follows_primary__v4",
+  "description": "A time-of-use peak starts at 16:15. The house is at 76F and banking toward 68F means 8F of cooling. v3's learned rate is slow (1F per hour), v4's fitted AC is fast (about 7F per hour). Primary engine v4: the bank opens when v4 says it must (about 90 minutes before the peak, 14:49), not three to four hours early.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v4",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ]
+  },
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 14:00 plan cycle."
+    },
+    {
+      "time": "2026-07-13T15:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 15:00 plan cycle."
+    },
+    {
+      "time": "2026-07-13T15:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 15:30 plan cycle."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T14:00:00",
+      "expect": "tou_precondition_not_applied",
+      "reason": "v4's AC delivers about 7F per hour, so the 8F of banking needs about 90 minutes: the bank opens at about 14:49, not yet at 14:00."
+    },
+    {
+      "at": "2026-07-13T15:00:00",
+      "expect": "tou_precondition_applied",
+      "tou_precondition": {
+        "schedule_id": "peak1",
+        "target": 68.0,
+        "mode": "cool"
+      },
+      "reason": "The 90-minute bank window opened at about 14:49: at the 15:00 cycle the house is banked toward 68F ahead of the 16:15 peak (a 45-minute default would still wait until 15:30)."
+    },
+    {
+      "at": "2026-07-13T15:30:00",
+      "expect": "tou_precondition_applied",
+      "tou_precondition": {
+        "schedule_id": "peak1",
+        "target": 68.0,
+        "mode": "cool"
+      },
+      "reason": "Still banking at 15:30."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "The time-of-use bank opens by the primary engine (v4) rate",
+    "observed_behavior": "Not banking at 14:00; banking at 15:30.",
+    "expected_behavior": "The AC is not run for hours more than the house needs before a peak price period."
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "v4_model": {
+    "confidence": "ok",
+    "house": {
+      "a_o": 0.05,
+      "q_c": 9.0,
+      "q_h": 9.0
+    }
+  },
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions); DP-11 pending, unsigned",
+  "issue": 1230,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

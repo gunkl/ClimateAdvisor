@@ -15,7 +15,7 @@ import hashlib
 import logging
 import math
 import statistics
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -169,6 +169,7 @@ from .const import (
     DOMAIN,
     ECONOMIZER_EVENING_START_HOUR,
     ECONOMIZER_TEMP_DELTA,
+    ENGINE_V3,
     EVENT_LOG_CAP,
     EVENT_LOG_MAX_AGE_HOURS,
     FAN_MODE_BOTH,
@@ -877,6 +878,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_last_future: dict[str, Any] | None = None  # newest 24 h prediction, for the Status chart (R2)
         self._v4_cycle_failed_logged = False
         self._v4_last_archive_save: float | None = None
+        # Issue #1230 R6b: the primary engine drives the decisions. ``_control_path`` is what they read as the predicted
+        # indoor curve (None = v3's own ``_last_predicted_indoor``, read live); ``_v4_control_future`` is v4's
+        # prediction computed THIS cycle before the decisions; ``_control_cyclers`` maps an engine id to its
+        # pre-decision cycle.
+        self._v4_control_future: dict[str, Any] | None = None
+        self._control_path: list[dict] | None = None
+        self._control_mode: str | None = None  # last logged: "defaults" | "<engine id>"
+        self._control_cyclers: dict[str, Any] = {"v4": self._v4_control_cycle}
         # Issue #1230 R3a: the operation timeline in shadow. Computed beside the plan every cycle and on triggers,
         # shown only in the debug payload; nothing on a decision or display path reads it.
         self._timeline_latch = TimelineLatch()
@@ -912,6 +921,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             callbacks=self._build_production_automation_callbacks(),
             role="production",
         )
+        # Issue #1230 R6b: the engine reads the primary engine's thermal-model scalars through this live provider (it
+        # never names an engine); None on a bare engine (headless tools) = its own ``_thermal_model``.
+        self.automation_engine._control_model_provider = self.control_thermal_model
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -3753,7 +3765,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("[coalesce-diag] before apply_classification() [coalesce path]")
             await self.automation_engine.apply_classification(
                 c,
-                predicted_indoor=self._last_predicted_indoor,
+                predicted_indoor=self.control_predicted_indoor(),
                 indoor_temp=indoor_temp,
                 nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
                 nat_vent_cutoff_already_reached=bool(
@@ -4128,6 +4140,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 len(self._last_predicted_indoor),
                 f"{self._last_predicted_indoor[0]['temp']:.1f}°F" if self._last_predicted_indoor else "none",
             )
+            # Issue #1230 R6b: the primary engine's own prediction, computed now (before any decision this cycle).
+            await self._refresh_control_prediction()
             self._compute_and_cache_nat_vent_plan()
 
             # Populate first-write-wins prediction archive (PRED_ARCHIVE_HORIZON_HOURS lookahead).
@@ -4160,7 +4174,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("[coalesce-diag] before apply_classification() [regular cycle path]")
                 await self.automation_engine.apply_classification(
                     self._current_classification,
-                    predicted_indoor=self._last_predicted_indoor,
+                    predicted_indoor=self.control_predicted_indoor(),
                     indoor_temp=self._get_indoor_temp(),
                     nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
                     nat_vent_cutoff_already_reached=bool(
@@ -6199,55 +6213,75 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             else:
                 _LOGGER.debug("v4 shadow cycle failed again", exc_info=True)
 
-    async def _v4_shadow_cycle_impl(self) -> None:
-        if getattr(self, "_shut_down", False) is True:
-            return
+    def _v4_live_row(self, now: datetime) -> dict[str, Any]:
+        """The fields of a chart row from the live readings (what the 30-minute row will carry), without writing one."""
+        return {
+            "indoor_sensors": self._read_chart_indoor_sensors(),
+            "indoor": self._get_indoor_temp(),
+            "outdoor": self._last_outdoor_temp,
+            "pred_outdoor": _extract_current_hour_forecast_temp(self._hourly_forecast_temps, now),
+            "hvac": self._read_chart_hvac_action(),
+            "fan_running": bool(self._fan_physically_running()),
+            "windows_open": self._any_sensor_open(),
+            "setpoint": self._read_chart_setpoint(),
+        }
+
+    async def _v4_control_cycle(self) -> None:
+        """Before the decisions: predict 24 h with v4 from the live readings (Issue #1230 R6b).
+
+        The curve the decisions scan is the house's own drift under the plan's windows with NO thermostat acting (the
+        v4 baseline): the ceiling guard and the nat-vent plan ask "when does the house leave the band on its own?", and
+        the plan path (setpoints at both band edges) holds the room at the edge, so it could never show a breach.
+        The post-chart shadow cycle cannot feed decisions (it runs after them and reads the row they write), so the
+        primary engine predicts here, in the executor, from the same inputs (``_v4_cycle_kwargs``). It writes no mass
+        state, archive or chart extras: the shadow cycle still owns those, so nothing is advanced twice. A failure
+        leaves ``_v4_control_future`` unset, which the caller reads as "nothing computed this cycle"."""
+        self._v4_control_future = None
         state = getattr(self, "_v4_store", None)
-        if state is None or getattr(self, "_v4_archive", None) is None:
-            return  # a partially built coordinator (tests via __new__, headless tools): the shadow is simply off
-        model_dict = state.v4_model
-        has_model = isinstance(model_dict, dict)
-        if not has_model or model_dict.get("confidence", "none") == "none":
-            # First fit once startup coalescing is over (the chart log and forecast archive are loaded by then). A
-            # stored "none" model (too little history yet) counts as no model here: retried at most every 6 h instead
-            # of waiting for the 03:15 refit.
-            if getattr(self, "_startup_coalesce_active", False) is not True:
-                last = self._v4_last_fit_attempt
-                if last is None or _monotonic() - last >= V4_FIT_RETRY_MIN_INTERVAL_S:
-                    self._v4_start_fit("first" if not has_model else "retry")
-            if not has_model:
-                return
-        elif (
-            state.night_validation is None
-            and not self._v4_fit_running
-            and not getattr(self, "_v4_night_replay_running", False)
-            and getattr(self, "_startup_coalesce_active", False) is not True
-        ):
-            # Issue #1230 R6: a model without a night-strategy record (an upgrade; a failed replay) gets the replay
-            # now rather than at the next 03:15 fit, at most every 6 h.
-            last = self._v4_last_fit_attempt
-            if last is None or _monotonic() - last >= V4_FIT_RETRY_MIN_INTERVAL_S:
-                self._v4_start_night_replay("night_replay")
+        model_dict = state.v4_model if state is not None else None
+        if not isinstance(model_dict, dict) or model_dict.get("confidence", "none") == "none":
+            return
         started = _perf_counter()
-        now = dt_util.now()
-        run_action, run_minutes = v4_shadow.run_state_from_rows(self._chart_log.raw_entries()[-80:], now)
+        try:
+            now = dt_util.now()
+            cycle = self._v4_cycle_kwargs(now, self._v4_live_row(now), model_dict, state)
+            predictions, _mass = await self._executor_job(
+                functools.partial(v4_shadow.run_cycle, baseline=True, **cycle)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the decisions use the schedule estimate for this cycle
+            _LOGGER.warning("v4 prediction for the decisions failed; using the schedule estimate", exc_info=True)
+            return
+        if getattr(self, "_shut_down", False) is True or not predictions or not cycle["inputs"]:
+            return
+        self._v4_control_future = {"at": now.isoformat(), "predictions": predictions}
+        _LOGGER.debug(
+            "v4 control prediction: %d points per sensor, cost=%.1fms",
+            len(next(iter(predictions.values()), [])),
+            (_perf_counter() - started) * 1000.0,
+        )
+
+    def _v4_sleep_node(self, model_dict: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
+        """``(sleep sensor id, sleep_time, wake_time)`` when the configured sleep sensor is a node of the model."""
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
         sleep_node = sleep_entity if sleep_entity and sleep_entity in (model_dict.get("sensors") or []) else None
-        sleep_time = self.config.get("sleep_time") if sleep_node else None
-        wake_time = self.config.get("wake_time") if sleep_node else None
-        self._v4_archive.set_ca_source(
-            model_dict.get("primary"),
-            sleep=sleep_node,
-            sleep_time=sleep_time,
-            wake_time=wake_time,
-            tz=getattr(now.tzinfo, "key", None),
+        return (
+            sleep_node,
+            self.config.get("sleep_time") if sleep_node else None,
+            self.config.get("wake_time") if sleep_node else None,
         )
-        # The row this cycle just wrote: the fit trains on exactly these fields.
-        row = self._chart_log.last_entry()
-        row_ts = dt_util.parse_datetime(row.get("ts", "")) if row else None
-        if row is None or row.get("event") is not None or row_ts is None or abs((now - row_ts).total_seconds()) > 120:
-            _LOGGER.debug("v4 shadow: no chart row for this cycle; skipped")
-            return
+
+    def _v4_cycle_kwargs(
+        self, now: datetime, row: Mapping[str, Any], model_dict: Mapping[str, Any], state: Any
+    ) -> dict[str, Any]:
+        """Every input of one v4 prediction, as ``v4_shadow.run_cycle`` keywords (plus ``readings``/``inputs`` echoed).
+
+        Shared by the post-chart shadow cycle (``row`` = the chart row it just wrote) and the pre-decision control cycle
+        (``row`` = the live readings, ``_v4_live_row``), so the two cannot drift. Reads the stored hidden-mass state and
+        never writes it. Event loop only (reads entity states and the chart log)."""
+        run_action, run_minutes = v4_shadow.run_state_from_rows(self._chart_log.raw_entries()[-80:], now)
+        sleep_node, sleep_time, wake_time = self._v4_sleep_node(model_dict)
         readings: dict[str, float | None] = dict(row.get("indoor_sensors") or {})
         readings["_ca"] = row.get("indoor")
         climate = self.hass.states.get(self.config.get("climate_entity", ""))
@@ -6300,27 +6334,73 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             mass, mass_steps = None, 1
         else:
             mass_steps = max(1, round(gap / step_s))
+        return {
+            "model_dict": model_dict,
+            "now": now,
+            "tz": now.tzinfo,
+            "readings": readings,
+            "outdoor_now_f": row.get("outdoor"),
+            "forecast_now_f": row.get("pred_outdoor"),
+            "hvac_action_now": run_action,
+            "run_elapsed_min": run_minutes,
+            "ca_sleep_node": sleep_node,
+            "ca_sleep_time": sleep_time,
+            "ca_wake_time": wake_time,
+            "mass_f": mass,
+            "mass_steps": mass_steps,
+            "sample_fields": sample_fields,
+            "inputs": inputs,
+        }
 
-        predictions, new_mass = await self._executor_job(
-            functools.partial(
-                v4_shadow.run_cycle,
-                model_dict=model_dict,
-                now=now,
-                tz=now.tzinfo,
-                readings=readings,
-                outdoor_now_f=row.get("outdoor"),
-                forecast_now_f=row.get("pred_outdoor"),
-                hvac_action_now=run_action,
-                run_elapsed_min=run_minutes,
-                ca_sleep_node=sleep_node,
-                ca_sleep_time=sleep_time,
-                ca_wake_time=wake_time,
-                mass_f=mass,
-                mass_steps=mass_steps,
-                sample_fields=sample_fields,
-                inputs=inputs,
-            )
+    async def _v4_shadow_cycle_impl(self) -> None:
+        if getattr(self, "_shut_down", False) is True:
+            return
+        state = getattr(self, "_v4_store", None)
+        if state is None or getattr(self, "_v4_archive", None) is None:
+            return  # a partially built coordinator (tests via __new__, headless tools): the shadow is simply off
+        model_dict = state.v4_model
+        has_model = isinstance(model_dict, dict)
+        if not has_model or model_dict.get("confidence", "none") == "none":
+            # First fit once startup coalescing is over (the chart log and forecast archive are loaded by then). A
+            # stored "none" model (too little history yet) counts as no model here: retried at most every 6 h instead
+            # of waiting for the 03:15 refit.
+            if getattr(self, "_startup_coalesce_active", False) is not True:
+                last = self._v4_last_fit_attempt
+                if last is None or _monotonic() - last >= V4_FIT_RETRY_MIN_INTERVAL_S:
+                    self._v4_start_fit("first" if not has_model else "retry")
+            if not has_model:
+                return
+        elif (
+            state.night_validation is None
+            and not self._v4_fit_running
+            and not getattr(self, "_v4_night_replay_running", False)
+            and getattr(self, "_startup_coalesce_active", False) is not True
+        ):
+            # Issue #1230 R6: a model without a night-strategy record (an upgrade; a failed replay) gets the replay
+            # now rather than at the next 03:15 fit, at most every 6 h.
+            last = self._v4_last_fit_attempt
+            if last is None or _monotonic() - last >= V4_FIT_RETRY_MIN_INTERVAL_S:
+                self._v4_start_night_replay("night_replay")
+        started = _perf_counter()
+        now = dt_util.now()
+        sleep_node, sleep_time, wake_time = self._v4_sleep_node(model_dict)
+        self._v4_archive.set_ca_source(
+            model_dict.get("primary"),
+            sleep=sleep_node,
+            sleep_time=sleep_time,
+            wake_time=wake_time,
+            tz=getattr(now.tzinfo, "key", None),
         )
+        # The row this cycle just wrote: the fit trains on exactly these fields.
+        row = self._chart_log.last_entry()
+        row_ts = dt_util.parse_datetime(row.get("ts", "")) if row else None
+        if row is None or row.get("event") is not None or row_ts is None or abs((now - row_ts).total_seconds()) > 120:
+            _LOGGER.debug("v4 shadow: no chart row for this cycle; skipped")
+            return
+        cycle = self._v4_cycle_kwargs(now, row, model_dict, state)
+        readings = cycle["readings"]
+        inputs = cycle["inputs"]
+        predictions, new_mass = await self._executor_job(functools.partial(v4_shadow.run_cycle, **cycle))
         if getattr(self, "_shut_down", False) is True:
             return
         state.v4_mass_f = new_mass
@@ -6526,6 +6606,127 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:  # noqa: BLE001 - display only; a failure must never break chart_data
             _LOGGER.debug("v4 chart series failed", exc_info=True)
             return {**off, "reason": "error"}
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Issue #1230 R6b: the PRIMARY prediction engine drives the prediction-dependent decisions.
+    #
+    # Occupant view: pre-heat/setback timing, the time-of-use bank's lead time, the nat-vent plan's close time and
+    # the ceiling guard's "turn the AC on ahead of the heat" all read the prediction engine chosen in Settings (v4 by
+    # default). While that engine has not finished learning your home they behave exactly as they do on a fresh
+    # install; they never borrow the other engine. The optional comparison (shadow) engine is never read here.
+    # ------------------------------------------------------------------------------------------------------------
+    def control_thermal_model(self, base: dict | None) -> dict | None:
+        """The thermal-model dict the RATE decisions read (``base`` = the v3 model the learning engine holds).
+
+        v3 primary: ``base`` itself. A usable primary: ``base`` with that engine's rate/confidence scalars laid over it.
+        No usable fit: ``base`` with them blanked (a home that has not finished learning). Live, per call, so a fit that
+        lands between cycles takes effect at the next decision. Never raises: a failure reads as "not learned"."""
+        try:
+            return prediction_engines.control_model(self, self.config, base)  # type: ignore[return-value]
+        except Exception:  # noqa: BLE001 - a decision never crashes on the engine layer; defaults apply
+            _LOGGER.debug("control_thermal_model failed", exc_info=True)
+            return {**dict(base or {}), **prediction_engines.CONTROL_BLANK_MODEL}
+
+    def control_predicted_indoor(self) -> list[dict] | None:
+        """The predicted indoor curve every decision reads (``predicted_indoor=``): the primary engine's, this cycle's.
+
+        ``_control_path`` is ``None`` while v3 is the primary (or before the first cycle): v3's own curve,
+        ``_last_predicted_indoor``, read live. Otherwise it is the primary's path (resampled to v3's hourly + 30-minute
+        grid, in degrees F) or, while the primary has no usable fit, the engine-agnostic no-model schedule estimate."""
+        path = getattr(self, "_control_path", None)
+        return getattr(self, "_last_predicted_indoor", None) if path is None else path
+
+    def _control_grid(self) -> list[datetime]:
+        """The timestamps a decision's curve is read on: the hourly forecast times plus each pair's midpoint (v3's)."""
+        hourly: list[datetime] = []
+        for entry in _build_future_forecast_outdoor(self._hourly_forecast_temps, None):
+            try:
+                hourly.append(datetime.fromisoformat(entry["ts"]))
+            except KeyError, ValueError:
+                continue
+        grid: list[datetime] = []
+        for i, t in enumerate(hourly):
+            grid.append(t)
+            if i + 1 < len(hourly):
+                grid.append(t + (hourly[i + 1] - t) / 2)
+        return grid
+
+    async def _build_no_model_path(self) -> list[dict]:
+        """The plain schedule estimate: ``_build_predicted_indoor_future`` with no model (v3's no-model path)."""
+        return await self._executor_job(
+            functools.partial(
+                _build_predicted_indoor_future,
+                self._hourly_forecast_temps,
+                self.config,
+                dt_util.now(),
+                current_indoor_temp=self._get_indoor_temp(),
+                thermal_model={},
+                occupancy_mode=self._occupancy_mode,
+                classification=self._current_classification,
+                band_schedule=self._target_band_schedule,
+                tou_precondition_window=self._tou_precondition_window_tuple(),
+            )
+        )
+
+    async def _refresh_control_prediction(self) -> None:
+        """Before the decisions of a cycle: bring the primary engine's path up to date (never raises).
+
+        Order matters (decisions read the result): v3's curve and the target band are already built; this runs the
+        primary's own pre-decision prediction, resamples it to the grid the decisions expect and stores it as
+        ``_control_path``. While the primary has no usable fit the path is the schedule estimate and the rate decisions
+        read the blanked model (``control_thermal_model``): today's "learning not finished" behaviour, logged once per
+        episode, never the other engine."""
+        try:
+            engine_id = prediction_engines.primary_id(self.config)
+            now = dt_util.now()
+            if engine_id == ENGINE_V3:
+                self._control_path = None
+                self._note_control_mode(engine_id, "")
+                return
+            ready = prediction_engines.control_ready(self, self.config)
+            path: list[dict] | None = None
+            if ready:
+                cycler = self._control_cyclers.get(engine_id)
+                if cycler is not None:
+                    await cycler()
+                pts = prediction_engines.control_path(self, self.config, now)
+                grid = self._control_grid()
+                if pts and grid:
+                    reading = self._get_indoor_temp()
+                    anchor = (now, float(reading)) if reading is not None else None
+                    path = prediction_engines.resample_path(pts, grid, anchor)
+                elif not grid:
+                    path = []  # no forecast: no curve, exactly as the v3 curve is empty without one
+            if path is None:
+                # Not ready, or ready but nothing computed this cycle (reading missing, predict failed): the schedule
+                # estimate. With a usable model the rate decisions still read the engine's scalars.
+                path = await self._build_no_model_path()
+            self._control_path = path
+            self._note_control_mode(engine_id, "" if ready else "no usable fit")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the decisions fall back to v3's curve, never crash the cycle
+            _LOGGER.warning("Primary prediction for decisions failed; using the schedule estimate", exc_info=True)
+            self._control_path = None
+
+    def _note_control_mode(self, engine_id: str, reason: str) -> None:
+        """One INFO line per episode: decisions run on the primary engine, or on the learning-not-finished defaults."""
+        mode = engine_id if not reason else "defaults"
+        if mode == self._control_mode:
+            return
+        previous = self._control_mode
+        self._control_mode = mode
+        if mode == "defaults":
+            _LOGGER.info(
+                "Prediction engine %s has no usable fit yet (%s): pre-heat, the ceiling guard, the time-of-use bank "
+                "and setback depth use their default behaviour until it has learned",
+                engine_id,
+                reason,
+            )
+        elif previous is None and engine_id == ENGINE_V3:
+            _LOGGER.debug("Decisions use prediction engine %s", engine_id)
+        else:
+            _LOGGER.info("Decisions now use prediction engine %s (was: %s)", engine_id, previous or "startup")
 
     def primary_engine_id(self) -> str:
         """The engine whose line is the DISPLAY's main prediction (Settings -> Prediction engine; default v4).
@@ -7135,6 +7336,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         thermal_model = {}
         if self.config.get("learning_enabled", True):
             thermal_model = self.learning.get_thermal_model(learning_health=self._build_learning_health())
+        # Issue #1230 R6b: the setback depth is sized with the PRIMARY engine's rates (blanked while it is learning).
+        thermal_model = self.control_thermal_model(thermal_model) or {}
         adaptive_thermal_active = thermal_model.get("confidence", "none") != "none"
 
         bedtime_setback_heat: float | None = None
@@ -7386,10 +7589,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "Caching predicted indoor curve (briefing): %d points",
                 len(self._last_predicted_indoor),
             )
+            await self._refresh_control_prediction()
             self._compute_and_cache_nat_vent_plan()
             await self.automation_engine.apply_classification(
                 classification,
-                predicted_indoor=self._last_predicted_indoor,
+                predicted_indoor=self.control_predicted_indoor(),
                 indoor_temp=self._get_indoor_temp(),
                 nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
                 nat_vent_cutoff_already_reached=bool(
@@ -7511,7 +7715,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         schedules = [Schedule(**s) for s in raw_schedules]
         now = dt_util.now()
         self._tou_active_cost_resolution = resolve_active_schedules(schedules, now)
-        thermal_model = self.automation_engine._thermal_model if self.automation_engine else None
+        # Issue #1230 R6b: the bank's lead time (and the away/vacation depth) read the PRIMARY engine's rates.
+        thermal_model = self.control_thermal_model(
+            self.automation_engine._thermal_model if self.automation_engine else None
+        )
         if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
             # Issue #899: split-delta precool/preheat + temporary band expansion, instead
             # of resolve_tou_phase()'s Home/Guest "bank to the comfort-band edge" behavior.
@@ -7743,9 +7950,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         chart request arrives, not the last 30-min cycle's snapshot.
         """
         self._occupancy_restore_held()  # refresh the loop-side cache the executor path reads
+        # Issue #1230 R6b: the setback depth in the band is sized with the PRIMARY engine's rates.
         self._target_band_schedule = self._build_target_band_for(
             dt_util.now(),
-            self.automation_engine._thermal_model if self.automation_engine else None,
+            self.control_thermal_model(self.automation_engine._thermal_model if self.automation_engine else None),
         )
 
     def _compute_and_cache_nat_vent_plan(self) -> None:
@@ -7767,7 +7975,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         not a stale one).
         """
         c = self._current_classification
-        if c is None or not self._last_predicted_indoor:
+        _control_curve = self.control_predicted_indoor()
+        if c is None or not _control_curve:
             self._nat_vent_plan = None
             return
         _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
@@ -7783,7 +7992,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # what briefing.py's generate_briefing() computes standalone for HOT so this
             # cached value can be reused there without disagreeing.
             raw_plan = compute_nat_vent_plan(
-                predicted_indoor=self._last_predicted_indoor,
+                predicted_indoor=self.control_predicted_indoor(),
                 predicted_outdoor=_outdoor_curve,
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
                 ceiling=_armed_ceiling,
@@ -7793,7 +8002,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
             _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
             raw_plan = compute_nat_vent_plan(
-                predicted_indoor=self._last_predicted_indoor,
+                predicted_indoor=self.control_predicted_indoor(),
                 predicted_outdoor=_outdoor_curve,
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
                 ceiling=_armed_ceiling,
@@ -8521,7 +8730,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 trigger="tick",
             )
         await self.automation_engine.comfort_family_temperature_check(
-            indoor, predicted_indoor=self._last_predicted_indoor
+            indoor, predicted_indoor=self.control_predicted_indoor()
         )
 
     async def _on_sleep_indoor_temp_changed(self, event: Event) -> None:
@@ -10285,7 +10494,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return
             await self.automation_engine.apply_classification(
                 classification,
-                predicted_indoor=self._last_predicted_indoor,
+                predicted_indoor=self.control_predicted_indoor(),
                 indoor_temp=self._get_indoor_temp(),
                 nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
                 nat_vent_cutoff_already_reached=bool(
@@ -15036,7 +15245,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # rather than requiring every one of them to know about this new attribute.
         # Only needed by the nat-vent-start-prediction block below now (Issue #817
         # moved the WARM/MILD-day events block off this and onto self._nat_vent_plan).
-        _predicted_indoor = getattr(self, "_last_predicted_indoor", None)
+        _predicted_indoor = self.control_predicted_indoor()
 
         # WARM/MILD-day forecast-derived events (Issue #528) — the same nat_vent_plan
         # already computed for the briefing. Issue #817: this used to independently
@@ -15124,7 +15333,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         forecast temperatures; withheld unless a sensor reads open (nat-vent cannot start with everything closed).
         """
         ae = self.automation_engine
-        _predicted_indoor = getattr(self, "_last_predicted_indoor", None)
+        _predicted_indoor = self.control_predicted_indoor()
         _nv_after = now
         _nv_grace_known = True
         if ae._grace_active is True:
@@ -15374,7 +15583,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _extended_forecast = _build_extended_hourly_forecast(
                 self._hourly_forecast_temps, getattr(self, "_daily_forecast_full", None), now, unit
             )
-            _raw_band = self._build_target_band_for(now, thermal_model, hourly_forecast_override=_extended_forecast)
+            # Issue #1230 R6b: the band shown is the band the PRIMARY engine's rates arm (setback depth).
+            _raw_band = self._build_target_band_for(
+                now, self.control_thermal_model(thermal_model), hourly_forecast_override=_extended_forecast
+            )
             _conv_band = [{"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])} for e in _raw_band]
 
         # Historical views suppress forward-looking series (prediction + forecast).
@@ -15515,14 +15727,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # WHF-archetype defer). One predicate, one ceiling -- the chart never disagrees with the guard.
             _house_sealed = bool(_ae and _ae._whf_house_sealed_with_known_sensors())
             _ceiling_threshold = _ae._ceiling_threshold(_comfort_cool_raw, house_sealed=_house_sealed) if _ae else None
+            # Issue #1230 R6b: with a non-v3 primary the walk mirrors what the decisions read (the primary's path and
+            # rates), so the chart's "effective target" never promises a guard escalation the house will not make.
+            _control_path = getattr(self, "_control_path", None)
+            _walk_curve = _raw_predicted_indoor if _control_path is None else _control_path
             _regime_by_ts = _walk_forward_regime(
                 _day_modes,
-                _raw_predicted_indoor,
+                _walk_curve,
                 _raw_forecast_outdoor,
                 _raw_band or [],
                 self.config,
                 self._occupancy_mode,
-                thermal_model,
+                self.control_thermal_model(thermal_model) if _control_path is not None else thermal_model,
                 _ae._manual_override_active if _ae else False,
                 _ae._manual_override_mode if _ae else None,
                 _ceiling_threshold,
@@ -15903,6 +16119,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "thermal_pipeline": self._build_thermal_pipeline_summary(),
             # Issue #1230 R1: prediction engine v4 (shadow) - model confidence, fit time, span, training MAE.
             "v4_model": self.v4_model_summary(),
+            # Issue #1230 R6b: what runs the decisions this cycle (output only). "mode" is the engine id, or "defaults"
+            # while the primary has no usable fit; "path_points" is the length of the curve the decisions read.
+            "control_feed": {
+                "mode": getattr(self, "_control_mode", None),
+                "path_points": len(self.control_predicted_indoor() or []),
+                "own_path": getattr(self, "_control_path", None) is not None,
+            },
             # Issue #1230 R3a: the operation timeline (shadow, debug only: nothing reads it for a decision or display).
             "operation_timeline": self.timeline_debug(),
             "startup_coalesce_active": self._startup_coalesce_active,

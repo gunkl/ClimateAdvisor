@@ -1,0 +1,279 @@
+{
+  "name": "r6b_ceiling_guard_follows_primary_v4_calm_v3_curve_hot__v3",
+  "description": "Warm afternoon, windows shut, nothing armed, primary engine v3. The house is at 73.8F with the 74F ceiling a fraction away. v3's curve for this cycle climbs past 74F within the half hour, while v4's own no-AC forecast keeps the house flat just under 74F (a tight house, mild afternoon). Only the primary engine's reading may decide whether the AC is switched on early.",
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "primary_engine": "v3"
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.15,
+    "k_active_cool": -2.0,
+    "k_active_heat": 2.0
+  },
+  "v4_model": {
+    "confidence": "ok",
+    "house": {
+      "a_o": 0.01,
+      "q_c": 9.0,
+      "q_h": 9.0,
+      "s": 0.0
+    }
+  },
+  "hourly_forecast": [
+    {
+      "datetime": "2026-05-20T00:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-20T01:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-20T02:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-20T03:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-20T04:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-20T05:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-20T06:00:00+00:00",
+      "temperature": 66.0
+    },
+    {
+      "datetime": "2026-05-20T07:00:00+00:00",
+      "temperature": 68.6
+    },
+    {
+      "datetime": "2026-05-20T08:00:00+00:00",
+      "temperature": 71.0
+    },
+    {
+      "datetime": "2026-05-20T09:00:00+00:00",
+      "temperature": 73.1
+    },
+    {
+      "datetime": "2026-05-20T10:00:00+00:00",
+      "temperature": 74.7
+    },
+    {
+      "datetime": "2026-05-20T11:00:00+00:00",
+      "temperature": 75.7
+    },
+    {
+      "datetime": "2026-05-20T12:00:00+00:00",
+      "temperature": 76.0
+    },
+    {
+      "datetime": "2026-05-20T13:00:00+00:00",
+      "temperature": 75.7
+    },
+    {
+      "datetime": "2026-05-20T14:00:00+00:00",
+      "temperature": 74.7
+    },
+    {
+      "datetime": "2026-05-20T15:00:00+00:00",
+      "temperature": 73.1
+    },
+    {
+      "datetime": "2026-05-20T16:00:00+00:00",
+      "temperature": 71.0
+    },
+    {
+      "datetime": "2026-05-20T17:00:00+00:00",
+      "temperature": 68.6
+    },
+    {
+      "datetime": "2026-05-20T18:00:00+00:00",
+      "temperature": 66.0
+    },
+    {
+      "datetime": "2026-05-20T19:00:00+00:00",
+      "temperature": 63
+    },
+    {
+      "datetime": "2026-05-20T20:00:00+00:00",
+      "temperature": 63
+    },
+    {
+      "datetime": "2026-05-20T21:00:00+00:00",
+      "temperature": 63
+    },
+    {
+      "datetime": "2026-05-20T22:00:00+00:00",
+      "temperature": 63
+    },
+    {
+      "datetime": "2026-05-20T23:00:00+00:00",
+      "temperature": 63
+    },
+    {
+      "datetime": "2026-05-21T00:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-21T01:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-21T02:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-21T03:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-21T04:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-21T05:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-05-21T06:00:00+00:00",
+      "temperature": 66.0
+    },
+    {
+      "datetime": "2026-05-21T07:00:00+00:00",
+      "temperature": 68.6
+    },
+    {
+      "datetime": "2026-05-21T08:00:00+00:00",
+      "temperature": 71.0
+    },
+    {
+      "datetime": "2026-05-21T09:00:00+00:00",
+      "temperature": 73.1
+    },
+    {
+      "datetime": "2026-05-21T10:00:00+00:00",
+      "temperature": 74.7
+    },
+    {
+      "datetime": "2026-05-21T11:00:00+00:00",
+      "temperature": 75.7
+    },
+    {
+      "datetime": "2026-05-21T12:00:00+00:00",
+      "temperature": 76.0
+    },
+    {
+      "datetime": "2026-05-21T13:00:00+00:00",
+      "temperature": 75.7
+    },
+    {
+      "datetime": "2026-05-21T14:00:00+00:00",
+      "temperature": 74.7
+    },
+    {
+      "datetime": "2026-05-21T15:00:00+00:00",
+      "temperature": 73.1
+    },
+    {
+      "datetime": "2026-05-21T16:00:00+00:00",
+      "temperature": 71.0
+    },
+    {
+      "datetime": "2026-05-21T17:00:00+00:00",
+      "temperature": 68.6
+    },
+    {
+      "datetime": "2026-05-21T18:00:00+00:00",
+      "temperature": 66.0
+    },
+    {
+      "datetime": "2026-05-21T19:00:00+00:00",
+      "temperature": 63
+    },
+    {
+      "datetime": "2026-05-21T20:00:00+00:00",
+      "temperature": 63
+    },
+    {
+      "datetime": "2026-05-21T21:00:00+00:00",
+      "temperature": 63
+    },
+    {
+      "datetime": "2026-05-21T22:00:00+00:00",
+      "temperature": 63
+    },
+    {
+      "datetime": "2026-05-21T23:00:00+00:00",
+      "temperature": 63
+    }
+  ],
+  "events": [
+    {
+      "time": "2026-05-20T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 62.0,
+      "note": "Early morning, cool outside."
+    },
+    {
+      "time": "2026-05-20T06:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "today_high": 88,
+      "today_low": 62,
+      "note": "Warm day, nothing armed; windows stay shut (no window plan)."
+    },
+    {
+      "time": "2026-05-20T12:30:00",
+      "type": "temp_update",
+      "indoor_f": 73.8,
+      "outdoor_f": 87.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T12:30:00+00:00",
+          "temp": 73.8
+        },
+        {
+          "ts": "2026-05-20T12:55:00+00:00",
+          "temp": 74.6
+        },
+        {
+          "ts": "2026-05-20T13:30:00+00:00",
+          "temp": 75.4
+        }
+      ],
+      "note": "The 12:30 plan cycle. The predicted_indoor list is the v3 curve of this cycle; the primary engine decides which curve the ceiling guard reads."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-20T12:30:00",
+      "expect": "ceiling_guard_fires_cool",
+      "reason": "The primary engine (v3) sees the house reach the 74F ceiling within the guard's lead time, so the AC is switched on ahead of the heat."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Ceiling guard follows the primary engine (v3): fires",
+    "observed_behavior": "Same events, same v3 thermal model, same v4 model; only config.primary_engine differs between the two files of this pair.",
+    "expected_behavior": "The occupant's AC starts ahead of the heat according to the engine they chose."
+  },
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions); DP-11 pending, unsigned",
+  "issue": 1230,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

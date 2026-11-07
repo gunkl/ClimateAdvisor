@@ -9,15 +9,26 @@ Adding an engine (a v5) is ``register(MyEngine())``: the options form, the valid
 chart payload's engine catalogue and the archive lookups all read this registry (``tests/test_prediction_engines.py``
 proves it with a fake v5).
 
-CONTROL IS NOT HERE. In 0.9.4 every heating, cooling and ventilation decision still uses v3 only: no decision module
-imports this one or reads the settings (``tests/test_v4_shadow_structural.py`` guards it). v3 therefore always runs
-while it drives control, whatever the two settings say.
+CONTROL (Issue #1230 R6b). The PRIMARY engine drives every prediction-dependent decision (the ODE ceiling guard, the
+nat-vent plan's cutoff, the nat-vent start veto, the time-of-use bank's lead time, the adaptive setback depth). The
+coordinator asks this module for the two things those decisions read, and hands them to the engine/scheduler as plain
+values, so no decision module imports this one or names an engine (``tests/test_v4_shadow_structural.py`` guards it):
+
+* ``control_model(source, config, base)``: the v3-shaped thermal-model dict the rate reads use (``k_active_heat``,
+  ``k_active_cool``, ``k_passive``, ``confidence``, ...). v3 primary: ``base`` itself. A usable v4: ``base`` with the
+  v4-derived scalars laid over it (``predictor_v4.control_rates``). A primary with no usable fit: ``base`` with those
+  scalars blanked, which is exactly what the decisions already read while v3 itself has not finished learning.
+* ``control_path(source, config, now)``: the primary's forward path for the CA-read line (``None`` = none this cycle).
+
+The SHADOW engine never reaches this code: nothing below reads ``shadow_id``. When the primary has no usable fit the
+decisions use today's "learning not finished" defaults, never the other engine.
 
 An engine is read through a ``source`` (the coordinator, duck-typed), so this module needs no Home Assistant import.
 """
 
 from __future__ import annotations
 
+import bisect
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
@@ -38,9 +49,25 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 CA_LINE = "_ca"  # the line that follows the sensor Climate Advisor reads (the archive's and the chart's name for it)
-USABLE_CONFIDENCE = ("low", "medium", "high")  # "none" = still learning (v3's own ramp-fallback threshold is the same)
+# "none" = still learning (v3's own ramp-fallback threshold is the same). v4 grades its fit "none" | "low" | "ok";
+# v3 "none" | "low" | "medium" | "high". ("ok" was missing before R6b, so a fully fitted v4 read as still learning.)
+USABLE_CONFIDENCE = ("low", "ok", "medium", "high")
 
 Path = list[tuple[datetime, float]]  # [(timestamp, temp in degrees F)]
+
+CONTROL_PATH_MAX_AGE_S = 2700.0  # a control path older than 1.5 cycles is not this cycle's: treated as none
+# What the rate decisions read while the primary has no usable fit: exactly the v3 thermal model of a home that has not
+# finished learning (no rates, no passive coefficient, confidence "none"), so the decisions take their defaults.
+CONTROL_BLANK_MODEL: dict[str, Any] = {
+    "confidence": "none",
+    "confidence_k_passive": "none",
+    "k_passive": None,
+    "k_passive_via_bridge": False,
+    "k_active_heat": None,
+    "k_active_cool": None,
+    "heating_rate_f_per_hour": None,
+    "cooling_rate_f_per_hour": None,
+}
 
 
 @runtime_checkable
@@ -130,6 +157,13 @@ class V3Engine:
         pts = _parse(getattr(source, "_last_predicted_indoor", None))
         return {CA_LINE: pts} if pts else {}
 
+    def control_model(self, state: Any, base: Mapping[str, Any] | None) -> dict[str, Any]:
+        """v3's own model IS the decisions' model: handed back unchanged."""
+        return dict(base) if base is not None else dict(state or {})
+
+    def control_path(self, source: Any, now: datetime) -> dict[str, Path]:
+        return self.future_path(source)  # the cycle's own curve, rebuilt before the decisions
+
     def past(self, source: Any, sensor: str, lead: str, start: float, end: float) -> dict[int, float]:
         if sensor != CA_LINE or lead != "4h":  # v3 logs one line, made about 4 h ahead
             return {}
@@ -144,6 +178,7 @@ class V4Engine:
     label = "v4"
     state_file = V4_MODEL_FILE
     archive_file = V4_ARCHIVE_FILE
+    _rates_cache: tuple[Any, dict[str, Any]] | None = None
 
     def fit(self, history: Mapping[str, Any]) -> Any:
         from . import v4_shadow  # noqa: PLC0415
@@ -173,8 +208,7 @@ class V4Engine:
         model = getattr(store, "v4_model", None)
         return model if isinstance(model, Mapping) else None
 
-    def future_path(self, source: Any) -> dict[str, Path]:
-        future = getattr(source, "_v4_last_future", None)
+    def _paths(self, source: Any, future: Any) -> dict[str, Path]:
         preds = future.get("predictions") if isinstance(future, Mapping) else None
         if not isinstance(preds, Mapping):
             return {}
@@ -187,6 +221,43 @@ class V4Engine:
             if primary in out:
                 out[CA_LINE] = list(out[primary])
         return out
+
+    def future_path(self, source: Any) -> dict[str, Path]:
+        return self._paths(source, getattr(source, "_v4_last_future", None))
+
+    def control_model(self, state: Any, base: Mapping[str, Any] | None) -> dict[str, Any]:
+        """``base`` (the v3 thermal-model dict; swing, solar phase, ... stay v3's) with v4's rate scalars laid over."""
+        from . import predictor_v4  # noqa: PLC0415
+
+        out = dict(base or {})
+        if not isinstance(state, Mapping):
+            return out
+        key = (state.get("fitted_at"), state.get("confidence"), tuple(sorted((state.get("house") or {}).items())))
+        cached = self._rates_cache
+        if cached is None or cached[0] != key:
+            model = predictor_v4.from_dict(dict(state))
+            cached = (key, predictor_v4.control_rates(model) if model is not None else {})
+            self._rates_cache = cached
+        out.update(cached[1])
+        return out
+
+    def control_path(self, source: Any, now: datetime) -> dict[str, Path]:
+        """The forward prediction the coordinator computed THIS cycle before the decisions; none when stale."""
+        future = getattr(source, "_v4_control_future", None)
+        at = future.get("at") if isinstance(future, Mapping) else None
+        try:
+            stamp = datetime.fromisoformat(at) if isinstance(at, str) else None
+        except ValueError:
+            stamp = None
+        if stamp is None:
+            return {}
+        try:
+            age = (now - stamp).total_seconds()
+        except TypeError:  # naive vs aware: cannot order them, so do not trust it
+            return {}
+        if age < -60.0 or age > CONTROL_PATH_MAX_AGE_S:
+            return {}
+        return self._paths(source, future)
 
     def past(self, source: Any, sensor: str, lead: str, start: float, end: float) -> dict[int, float]:
         archive = getattr(source, "_v4_archive", None)
@@ -242,13 +313,15 @@ def shadow_id(config: Mapping[str, Any] | None) -> str:
 
 
 def running_ids(config: Mapping[str, Any] | None) -> list[str]:
-    """The engines that run for this zone: the primary, the shadow, and v3 while it drives control (0.9.4)."""
+    """The engines that run for this zone: the primary, the shadow, and v3 (its observations and curve always run)."""
     ids = [primary_id(config)]
     shadow = shadow_id(config)
     if shadow != ENGINE_NONE:
         ids.append(shadow)
     if ENGINE_V3 in ENGINES and ENGINE_V3 not in ids:
-        ids.append(ENGINE_V3)  # control reads v3; it is not a display choice yet
+        ids.append(
+            ENGINE_V3
+        )  # v3 keeps learning and keeps its own curve/archive; it drives control only as the primary
     return ids
 
 
@@ -309,6 +382,7 @@ def engine_state(source: Any, config: Mapping[str, Any] | None) -> dict[str, Any
         text = "Prediction: learning — showing the schedule estimate"
     else:
         text = ""
+    ready = (not fallback) and control_capable(ENGINES[primary])
     return {
         "primary": primary,
         "shadow": shadow,
@@ -317,6 +391,19 @@ def engine_state(source: Any, config: Mapping[str, Any] | None) -> dict[str, Any
         "fallback": fallback,
         "fitting": fitting,
         "text": text,
+        # Issue #1230 R6b: what runs the house. "defaults" = the primary has no usable fit, so pre-heat, the ceiling
+        # guard, the time-of-use bank and the setback depth use today's "learning not finished" behaviour.
+        "control": {
+            "engine": primary,
+            "source": primary if ready else "defaults",
+            "ready": ready,
+            "text": (
+                ""
+                if ready
+                else f"Climate Advisor is using its default plan for pre-heat, the ceiling guard and setbacks "
+                f"until {ENGINES[primary].label} has learned your home."
+            ),
+        },
     }
 
 
@@ -325,3 +412,84 @@ def primary_path(path_by_sensor: Mapping[str, Path]) -> Path:
     if CA_LINE in path_by_sensor:
         return list(path_by_sensor[CA_LINE])
     return list(next(iter(path_by_sensor.values()), []))
+
+
+# ----------------------------------------------------------------------------------------------------- control feed
+def _control_engine(config: Mapping[str, Any] | None) -> PredictionEngine:
+    return ENGINES[primary_id(config)]
+
+
+def control_capable(engine: PredictionEngine) -> bool:
+    """An engine can drive decisions when it answers both control questions (a v5 without them stays display-only)."""
+    return callable(getattr(engine, "control_model", None)) and callable(getattr(engine, "control_path", None))
+
+
+def control_ready(source: Any, config: Mapping[str, Any] | None) -> bool:
+    """True when the PRIMARY engine has a usable fit and can drive decisions; False = today's learning defaults."""
+    engine = _control_engine(config)
+    return control_capable(engine) and usable(engine, source)
+
+
+def control_model(source: Any, config: Mapping[str, Any] | None, base: Any) -> Any:
+    """The thermal-model dict the rate decisions read this moment (the primary's; never the shadow's).
+
+    ``base`` is the v3 model the learning engine holds. v3 primary: ``base`` unchanged. Usable primary: ``base`` with
+    the engine's scalars laid over it. Otherwise (still learning, failing, not control-capable): ``base`` with the
+    rate and confidence scalars blanked (``CONTROL_BLANK_MODEL``): what a home that has not finished learning reads.
+    """
+    engine = _control_engine(config)
+    if engine.id == ENGINE_V3:
+        return base  # v3's own model, the very object the learning engine holds (identity: nothing changes for v3)
+    if control_ready(source, config):
+        try:
+            return engine.control_model(engine.state_of(source), base)  # type: ignore[attr-defined,no-any-return]
+        except Exception:  # noqa: BLE001 - a broken engine reads as "not learned": the defaults, never a crash
+            _LOGGER.debug("prediction engine %s: control_model failed", engine.id, exc_info=True)
+    return {**dict(base or {}), **CONTROL_BLANK_MODEL}
+
+
+def control_path(source: Any, config: Mapping[str, Any] | None, now: datetime) -> Path | None:
+    """The primary's forward path for the CA-read line this cycle, or ``None`` (no usable fit / nothing computed)."""
+    engine = _control_engine(config)
+    if not control_ready(source, config):
+        return None
+    try:
+        pts = primary_path(engine.control_path(source, now))  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug("prediction engine %s: control_path failed", engine.id, exc_info=True)
+        return None
+    return pts or None
+
+
+def resample_path(
+    points: Sequence[tuple[datetime, float]],
+    grid: Sequence[datetime],
+    anchor: tuple[datetime, float] | None = None,
+) -> list[dict[str, Any]]:
+    """An engine's path on the grid a decision expects: ``[{"ts": iso, "temp": deg F}]`` (v3's hourly + 30-minute grid).
+
+    Linear interpolation between the engine's points (15-minute for v4). ``anchor`` = (now, the live CA reading) closes
+    the gap before the first point. A grid time outside ``[first, last]`` of the path is left out (no extrapolation: a
+    decision sees "no data" rather than an invented value), so v4's 24 h horizon ends the list.
+    """
+    pts = sorted(points, key=lambda p: p[0])
+    if anchor is not None and (not pts or anchor[0] < pts[0][0]):
+        pts.insert(0, anchor)
+    if not pts:
+        return []
+    tz = pts[0][0].tzinfo
+    xs = [p[0].timestamp() for p in pts]
+    out: list[dict[str, Any]] = []
+    for g in grid:
+        t = g if g.tzinfo is not None else g.replace(tzinfo=tz)
+        x = t.timestamp()
+        if x < xs[0] - 1e-6 or x > xs[-1] + 1e-6:
+            continue
+        if len(xs) == 1:
+            v = pts[0][1]
+        else:
+            j = min(max(bisect.bisect_right(xs, x) - 1, 0), len(xs) - 2)
+            x0, x1 = xs[j], xs[j + 1]
+            v = pts[j][1] if x1 <= x0 else pts[j][1] + (pts[j + 1][1] - pts[j][1]) * (x - x0) / (x1 - x0)
+        out.append({"ts": g.isoformat(), "temp": round(float(v), 1)})
+    return out

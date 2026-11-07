@@ -7,7 +7,7 @@
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What does v4 predict and for whom? | The temperature each configured room sensor will read 1-24 h ahead, learned from the home's own chart_log. On Zone 1 (real data) its 4 h MAE on the reading CA shows is about 0.6-0.8 F against 1.5 F for "nothing changes" and 1.6 F for v3. | [Model](#model-equations), `predictor_v4.py#L781` |
-| Does anything decide with v4? | No. R1 is shadow only: nothing on a decision path calls `predict()`; v3 still drives every decision and the Status chart. | [Scope](#scope), [v4 Shadow: invariant](v4-shadow-spec.md#nothing-on-a-decision-path-reads-v4) |
+| Does anything decide with v4? | Only when v4 is the PRIMARY engine (default, Issue #1230 R6b): the ceiling guard and nat-vent plan read its no-HVAC baseline path (`run_cycle(baseline=True)`), the rate decisions read `control_rates()`. As the comparison engine, or when its fit is `none`, nothing decides with it. | [Control feed](prediction-engines-spec.md#control-feed-r6b), [v4 Shadow: invariant](v4-shadow-spec.md#nothing-on-a-decision-path-reads-v4) |
 | What is the state, and what are the inputs? | Primary node `H` (the thermostat's room reading), hidden thermal mass `M`, one node `B_j` per extra sensor. Inputs per 15-min step: outdoor temperature, sun, windows open, fan running, heating duty, cooling duty. | [Model](#model-equations) |
 | How is the thermostat modelled? | Replayed from the recorded heating/cooling duty when fitting; emulated when predicting, from the plan's heat/cool setpoints with learned start offsets, burst length and reading quantisation. | [Thermostat](#thermostat-learning-and-emulation), `predictor_v4.py#L408` |
 | When is `predict()` allowed to answer? | Never when `confidence == "none"` (< 3 days of samples, diverged fit, or no 10 % skill over "no change" at 4 h on the training data). Callers then show/score v3 only. | [Confidence Gates](#confidence-gates), `predictor_v4.py#L82-L86` |
@@ -15,6 +15,10 @@
 | How long does a fit take? | Typically 0.2-6 s for 30-60 days of data on a laptop (100-iteration cap, 160 anchors, 2 sensors; a warm refit runs a second start). `predict()` is about 1 ms. | [Performance](#performance) |
 | Where does the fitted model live, who calls `fit()`/`predict()` and when? | `v4_shadow.py` and the coordinator call them: nightly fit 03:15, predict every 30-min cycle, model in `climate_advisor_v4_model_<id>.json`, predictions in `climate_advisor_v4_archive_<id>.json`. | [v4 Shadow Spec](v4-shadow-spec.md) |
 | How is v4 scored against v3 and "no change"? | `GET /api/climate_advisor/prediction_accuracy` (live archive) and `tools/predict_backtest.py` (walk-forward history; DP-8 gate). | [REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1), [Debugging Guide](09-DEBUGGING-GUIDE.md#prediction-backtest-toolspredict_backtestpy-issue-1230-r1) |
+
+## Decision rates (Issue #1230 R6b)
+
+`control_rates(model)` turns a fitted model into the thermal-model scalars the rate decisions read when v4 is the primary engine (`k_active_heat`, `k_active_cool`, `heating_rate_f_per_hour`, `cooling_rate_f_per_hour`, `k_passive`, `confidence`, `confidence_k_passive`): the net gain of one hour of continuous heat (cool) from a settled room, rolled through this module's own `rollout` with no leak and no sun (so the hidden-mass lag is included, about 0.8 x `q_h` for the fitted Zone 1 house); `k_passive = -a_o`; grade `low` -> `low`, `ok` -> `medium`. `v4_shadow.run_cycle(baseline=True)` predicts the house with no setpoints (planned windows only): the path the ceiling guard and the nat-vent plan scan. Design, sensor choice and fallback: [Prediction Engines Spec: Control feed](prediction-engines-spec.md#control-feed-r6b).
 
 ## Scope
 

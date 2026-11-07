@@ -73,6 +73,7 @@ from tools.sim_harness.scenario_model import (
     merged_scenario_config,
     parse_event_time,
     pin_scenario_thermal_model,
+    pin_scenario_v4_model,
     scenario_start_time,
     snapshot_engine_state,
     sorted_events,
@@ -413,6 +414,11 @@ class RealHASession:
             pin_scenario_thermal_model(self.coordinator, self.scenario["thermal_model"])
         if isinstance(self.scenario.get("hourly_forecast"), list):
             self.engine._hourly_forecast_temps = self.scenario["hourly_forecast"]
+        # Issue #1230 R6b: the zone's fitted v4 model + its forecast
+        if isinstance(self.scenario.get("v4_model"), dict):
+            pin_scenario_v4_model(self.coordinator, self.scenario["v4_model"])
+            if isinstance(self.scenario.get("hourly_forecast"), list):
+                self.coordinator._hourly_forecast_temps = self.scenario["hourly_forecast"]
 
     # ------------------------------------------------------------- Session API
     def now(self) -> datetime:
@@ -536,6 +542,21 @@ class RealHASession:
             # the periodic cycle's nat-vent re-evaluation: a real production trigger the scenario models per tick
             await engine.check_natural_vent_conditions()
             predicted = event.get("predicted_indoor")
+            if event.get("plan_cycle") and getattr(engine, "_current_classification", None) is not None:
+                # Issue #1230 R6b: the plan cycle (same sequence as run_production's ``plan_cycle``): the primary engine
+                # predicts, the nat-vent plan is computed from what the decisions read, the classification re-applied.
+                coordinator._last_predicted_indoor = predicted or []
+                await coordinator._refresh_control_prediction()
+                coordinator._compute_and_cache_nat_vent_plan()
+                plan = getattr(coordinator, "_nat_vent_plan", None) or {}
+                await engine.apply_classification(
+                    engine._current_classification,
+                    predicted_indoor=coordinator.control_predicted_indoor(),
+                    indoor_temp=float(indoor_f) if indoor_f is not None else None,
+                    nat_vent_cutoff=plan.get("nat_vent_cutoff"),
+                    nat_vent_cutoff_already_reached=bool(plan.get("nat_vent_cutoff_already_reached", False)),
+                )
+                return "direct-callback"
             if predicted:
                 # FakeHass hands the scenario's predicted curve to these two calls; the listener has no such curve
                 new_indoor = float(indoor_f) if indoor_f is not None else None

@@ -344,8 +344,13 @@ def run_cycle(
     ca_sleep_node: str | None = None,
     ca_sleep_time: str | None = None,
     ca_wake_time: str | None = None,
+    baseline: bool = False,
 ) -> tuple[dict[str, list[tuple[datetime, float]]] | None, float | None]:
     """Advance the hidden node ``mass_steps`` grid steps, then predict. Blocking CPU: run via the executor.
+
+    ``baseline=True`` (Issue #1230 R6b) predicts the house with NO thermostat setpoints (windows as planned): "when does
+    the house leave the band on its own?", the question the ceiling guard and the nat-vent plan ask. The plan path
+    (setpoints at both band edges) cannot answer it: its emulated thermostat holds the room at the edge.
 
     Returns ``(predictions, mass_f)``. ``predictions`` is ``None`` when the confidence is ``none`` or the primary
     reading is missing (the engine's own fallback signal); ``mass_f`` is then returned unchanged.
@@ -366,6 +371,9 @@ def run_cycle(
     if not inputs:
         return None, mass  # no forecast to predict from: nothing to compute (the node was still advanced)
     extra: dict[str, Any] = {}
+    if baseline:
+        inputs = [dataclasses.replace(i, heat_sp_f=None, cool_sp_f=None) for i in inputs]
+        hvac_action_now = None  # no HVAC in the baseline: nothing is running
     if hvac_action_now:
         extra.update(hvac_action_now=hvac_action_now, run_elapsed_min=run_elapsed_min)
     if ca_sleep_node:

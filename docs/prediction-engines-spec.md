@@ -7,11 +7,11 @@
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What does the occupant choose? | Settings -> Prediction engine (`primary_engine`, default **v4**) and an optional Comparison engine (`shadow_engine`, default **none**). The primary's line is the Status chart's main prediction, the shadow's is drawn for comparison, the Next 24 hours path and its text follow the primary. | [Settings](#settings) |
-| How many engines run? | At most two: the primary and the optional shadow. An engine that is neither is not fitted, not predicted and not archived. v3 is the 0.9.4 exception: it drives every control decision, so it always runs. | [Which engines run](#which-engines-run) |
+| How many engines run? | At most two: the primary and the optional shadow. An engine that is neither is not fitted, not predicted and not archived. v3 is the exception: its learned observations (swing, solar phase) and its own curve (chart-log `pred_indoor`, its accuracy archive) still run whatever the two settings say. | [Which engines run](#which-engines-run) |
 | What does an engine have to provide? | The `PredictionEngine` contract: `id`, `label`, `state_file`, `archive_file`, `fit(history)`, `predict(state, horizon_hours, plan_inputs)`, `confidence(state)`, `state_of(source)`, `future_path(source)`, `past(...)`. | [Contract](#contract) |
 | How do I add a v5? | `prediction_engines.register(V5Engine())`. The options form, validation, "at most two", the chart payload's engine catalogue and the archive lookups read the registry; `tests/test_prediction_engines.py` proves it with a fake v5. | [Adding an engine](#adding-an-engine) |
-| What shows while the primary is still learning? | The plain schedule estimate (the engine-agnostic no-model path of `_build_predicted_indoor_future`, called with no thermal model), labelled "Prediction: learning - showing the schedule estimate", or "Learning: v4 is fitting from your history" while a fit runs. Never the other engine. Logged once per episode. | [Fallback](#fallback-while-the-primary-is-learning) |
-| Does the choice change how the house runs? | No. In 0.9.4 every decision (pre-heat, ceiling guard, setback, nat-vent, fan) uses v3 only. R6 wires the primary into those with goldens per decision. | [Control boundary](#control-boundary) |
+| What shows while the primary is still learning? | The plain schedule estimate (the engine-agnostic no-model path of `_build_predicted_indoor_future`, called with no thermal model), labelled "Prediction: learning - showing the schedule estimate", or "Learning: v4 is fitting from your history" while a fit runs, plus (R6b) "Climate Advisor is using its default plan for pre-heat, the ceiling guard and setbacks until v4 has learned your home." Never the other engine. Logged once per episode. | [Fallback](#fallback-while-the-primary-is-learning) |
+| Does the choice change how the house runs? | Yes (R6b). The PRIMARY engine's path and rates drive the ceiling guard, the nat-vent plan's close time and start prediction, the nat-vent start veto, the time-of-use bank's lead time and the adaptive setback depth. The shadow never acts. With no usable primary fit they take today's "learning not finished" defaults, never the other engine. | [Control feed](#control-feed-r6b) |
 | Is DP-8 a gate? | No. The backtest and the preview page are information. Nothing is hidden or shown because of a pass mark. | [No gate](#no-gate) |
 
 ## Settings
@@ -25,7 +25,7 @@ Both live in `CONFIG_METADATA` (with defaults, so the dashboard Settings tab lis
 
 ## Which engines run
 
-`prediction_engines.running_ids(config)` = `[primary, shadow?, v3]`. `Coordinator.engine_running(id)` is what the v4 orchestration asks: `_v4_shadow_cycle`, `_v4_start_fit` (nightly and first fit), `_v4_start_night_replay`, `_timeline_night_apply` and `v4_chart_series` all return early while v4 is not running. Switching the primary to v4 while it was off: after the reload the cycle finds no model, starts the first fit from chart_log history (executor, under the domain-wide fit lock), and the display shows the learning state until the fit lands, then v4 takes over.
+`prediction_engines.running_ids(config)` = `[primary, shadow?, v3]` (v3 always: its learned observations and its own curve, the chart-log `pred_indoor` and accuracy archive, keep running; since R6b it no longer drives control unless it is the primary). `Coordinator.engine_running(id)` is what the v4 orchestration asks: `_v4_shadow_cycle`, `_v4_start_fit` (nightly and first fit), `_v4_start_night_replay`, `_timeline_night_apply` and `v4_chart_series` all return early while v4 is not running. Switching the primary to v4 while it was off: after the reload the cycle finds no model, starts the first fit from chart_log history (executor, under the domain-wide fit lock), and the display shows the learning state until the fit lands, then v4 takes over.
 
 ## Contract
 
@@ -54,11 +54,52 @@ past(source, sensor, lead, start, end)      {slot_epoch: temp_f} the engine said
 | Next 24 hours path and its text, briefing/Next Action sentences built from the timeline | `TimelineSnapshot.selected_path` (the primary's path) in `_choose_path` | `_timeline_snapshot`, `operation_timeline._choose_path` |
 | Night card | v4 only, labelled "from v4": figures when v4 runs (primary or shadow) and the bedroom model is at least medium confidence; v4 off -> 503 `reason: v4_off` and the card says so | `night_strategy.api_payload`, `_timeline_night_apply` |
 
-The briefing's own v3-curve computations (the nat-vent plan the engine consumes) stay v3: they are shared with control.
+The nat-vent plan (cached once per cycle, read by the briefing, the Next Automation card and the engine) is computed from the CONTROL path (the primary's, see [Control feed](#control-feed-r6b)), so the text and the house agree.
 
-## Control boundary
+## Control feed (R6b)
 
-`tests/test_v4_shadow_structural.py` (AST) asserts: no module outside the registry, `prediction_accuracy.py` (an echo), `const.py`, `config_flow.py` and `coordinator.py` names `prediction_engines`, `primary_engine` or `shadow_engine`; the coordinator reads them only in the display methods and the `_v4*`/`v4_*` orchestration; every `predicted_indoor=` handed to the engine or the nat-vent plan is v3's `_last_predicted_indoor`; the timeline's `selected_path` is read only by `_choose_path`.
+Occupant view: the prediction engine chosen in Settings (v4 by default) decides when the AC is switched on ahead of the heat, when the time-of-use bank starts, how deep the setback is sized and when the windows are planned to close. While it has not finished learning your house, all of that behaves as on a fresh install. The comparison engine only draws a line.
+
+**Design.** The coordinator asks the registry for the two things the decisions read and hands them over as plain values; no decision module imports the registry or names an engine.
+
+| Piece | Where | What it is |
+|---|---|---|
+| `prediction_engines.control_model(source, config, base)` | registry | The v3-shaped thermal-model dict the RATE reads use. v3 primary: `base` itself (the learning engine's object, identity). Usable primary: `base` with the engine's rate scalars laid over it (`k_active_heat`, `k_active_cool`, `heating_rate_f_per_hour`, `cooling_rate_f_per_hour`, `k_passive`, `confidence`, `confidence_k_passive`, `k_passive_via_bridge`); swing, solar phase and the vent rates stay v3's observations. No usable fit (or an engine without the control methods): `base` with those scalars blanked (`CONTROL_BLANK_MODEL`) = a home that has not finished learning. |
+| `prediction_engines.control_path(source, config, now)` | registry | The primary's forward path of the CA-read line this cycle (`primary_path(engine.control_path(...))`), or `None`. |
+| `resample_path(points, grid, anchor)` | registry | The engine's 15-minute points on the grid the decisions expect: the hourly forecast times plus each pair's midpoint (v3's grid), degrees F, `[{"ts", "temp"}]`, linear, no extrapolation (v4's 24 h horizon ends the list), anchored at (now, the live CA reading). |
+| `Coordinator.control_thermal_model(base)` / `control_predicted_indoor()` | coordinator | Live providers. `control_predicted_indoor()` is v3's `_last_predicted_indoor` (read live) while `_control_path` is `None` (v3 primary), else the control path. The engine reads the model through `engine._control_model()` (a provider the coordinator installs; a bare engine reads `_thermal_model`). |
+| `Coordinator._refresh_control_prediction()` | coordinator | Runs in the cycle right after v3's curve is rebuilt and BEFORE the nat-vent plan and every `apply_classification()` (main cycle and daily briefing). Calls the primary's pre-decision cycle (`_control_cyclers`, v4: `_v4_control_cycle`), resamples, stores `_control_path`, logs the episode. |
+| `_v4_control_cycle()` | coordinator | One v4 predict in the executor from the LIVE readings (`_v4_live_row`) and the same inputs as the shadow cycle (`_v4_cycle_kwargs`, shared). It writes no mass state, archive or chart extras (the post-chart shadow cycle still owns those). |
+
+**Which curve, and why the no-AC baseline.** The ceiling guard and the nat-vent plan ask "when does the house leave the band on its own?". The v4 PLAN path (setpoints at both band edges) holds the room at the edge, so it can never show a breach. The control path is therefore v4's baseline: the same predict with no setpoints and the planned windows (`v4_shadow.run_cycle(baseline=True)`), the house's own drift. v3's curve answers the same question on the days these decisions apply (an `off` day is passive in `_build_predicted_indoor_future`).
+
+**Which sensor.** The `_ca` line (the reading Climate Advisor itself uses: the thermostat room/companion reading, or the sleep sensor inside the sleep window), else the model's primary node (`primary_path`). Every path consumer compares it with `indoor` = `_get_indoor_temp_f()` and the ceiling/floor the band arms on that same reading, which is also what v3's curve started from. Awake with no sleep sensor `_ca` is the thermostat node.
+
+**Units and timing.** Degrees F internally (as v3). v3 gives hourly + 30-minute midpoints; v4 gives 15-minute points per sensor: resampled onto v3's grid so `find_temperature_crossing` still pairs timestamps with the hourly outdoor curve. The path is computed in the same cycle before the decision; a control path older than 45 minutes (`CONTROL_PATH_MAX_AGE_S`) is not trusted. Out-of-cycle callers (the 5-minute reactive tick, the setpoint re-assert, the startup coalesce) read the last cycle's path, as they always read the last cycle's v3 curve. Measured cost: 3.5 ms per cycle headless (one executor round trip plus the real predictor), well under the 50 ms budget; `predict()` itself is about 1 ms.
+
+**Rates from v4 (`predictor_v4.control_rates`).** `k_active_heat`/`k_active_cool` are the net gain of one hour of continuous heating/cooling measured by rolling v4's own integrator (four 15-minute steps, no leak, no sun) from a settled room, so the hidden-mass lag is included (about 0.8 x `q_h` for the fitted Zone 1 house); `k_passive` is `-a_o`; confidence maps `low` -> `low`, `ok` -> `medium`. v3's own `k_active_*` are observed gross rates, so the two are comparable but not equal: the lead times and the setback depth differ by that factor, bounded by the existing clamps (`[30, 240]` min lead, `MAX_SETBACK_DEPTH_F`).
+
+### Decision inventory
+
+| Decision | Reads | How often | Primary supplies | No usable primary fit (= today's "learning not finished") |
+|---|---|---|---|---|
+| ODE ceiling guard (`apply_classification` -> `classification_fsm` -> `decide_ode_ceiling_guard`) | path (breach scan), `k_passive`, `confidence_k_passive`, bridge flag, `k_active_cool` (lead) | every 30-min cycle, daily briefing, the 5-min reactive tick, setpoint re-assert, startup coalesce | the no-AC path of the `_ca` line; v4 rates | rates blank -> `MODEL_INELIGIBLE`: the guard stays quiet (the comfort-edge selector still reacts to a real breach) |
+| Nat-vent plan (`compute_nat_vent_plan` -> `nat_vent_cutoff`, `ceiling_breach_time`, `evening_open_time`) -> engine `_nat_vent_cutoff` (`_is_within_planned_window_period`) | path (and the outdoor curve) | every cycle + briefing | the same path | the schedule estimate (flat on an off day) -> no early close, the static window close applies |
+| Next Automation nat-vent start prediction (`_predict_nat_vent_start`, timeline `NAT_VENT_START`) | path + the real start gate | when the card/timeline is built | the same path (display of a control event) | schedule estimate |
+| Nat-vent start veto (`_build_nat_vent_start_veto_inputs`: forecast peak, floor imminent) | `confidence`, `k_passive` | each nat-vent start attempt | v4 `k_passive`, `confidence` | confidence `none` -> the floor-imminent guard is skipped, as on a fresh install |
+| Time-of-use bank lead time (`scheduler.resolve_tou_phase`, `resolve_tou_away_vacation_phase`) | `k_active_heat`/`k_active_cool`; away/vacation also `k_passive` + `confidence` | every cycle | v4 rates | `default_tou_lead_minutes` (45) |
+| Adaptive setback depth (`compute_bedtime_setback` in `_compute_target_band_schedule` and the briefing) | `heating_rate_f_per_hour`/`cooling_rate_f_per_hour`, `confidence` | every cycle, briefing, chart | v4 rates | default depth (`DEFAULT_SETBACK_DEPTH_*`) |
+| Chart "effective target" regime walk (display of the above) | path + model | on chart request | with a non-v3 primary: the control path and model | follows the same fallback |
+
+**Not decisions on a predicted path (unchanged, v3's observations):** the thermostat swing (`swing_*_f`), the solar phase offset, the vent-window/fan rates, the comfort-edge selector, the plan's band edges, the sleep setpoints (`select_comfort_band` arms the configured values; the adaptive setback depth only sizes the plan/briefing band, issue #1366).
+
+### Fallback, switching, observability
+
+* **No usable fit** = `usable(primary)` false (confidence `none`, no model, fit failed) or the engine lacks `control_model`/`control_path`. The rate reads see `CONTROL_BLANK_MODEL`; the path is the schedule estimate (`_build_predicted_indoor_future(..., thermal_model={})`). One INFO per episode: "Prediction engine v4 has no usable fit yet (no usable fit): pre-heat, ..."; the next cycle with a fit logs "Decisions now use prediction engine v4 (was: defaults)". The payload's `control` block carries `{engine, source: "<id>"|"defaults", ready, text}`; the Status chart note appends `control.text`.
+* **v3 -> v4 with no v4 model:** after the reload the cycle starts the first fit from chart-log history (`_v4_start_fit("first")`, startup coalescing over); decisions use the defaults until the fit lands, then v4 at the next 30-minute cycle. **v4 -> v3:** immediate (the next decision reads v3's curve and model).
+* **A failed pre-decision predict** (exception, reading missing) leaves the schedule estimate as the path for that cycle with a WARNING; the rates stay the primary's if its fit is usable.
+* **Structural guards** (`tests/test_v4_shadow_structural.py`): every `predicted_indoor=` handed to a decision is `self.control_predicted_indoor()`; the shadow is never read by a decision path (the control-feed methods name no shadow identifier; the registry's control functions never call `shadow_id`/`running_ids`); no decision module names the registry or the settings.
+* **Goldens** (pending, DP-11, unsigned): `tools/simulations/pending/r6b_*.json`, one pair (v4 primary / v3 twin) per decision plus the fallback and "guard holds" scenarios; owner cards in `ca-group-briefs/1230-r6-golden-cards.md`. Tier B: `tests_ha/test_primary_engine_r6b_realha.py`. A/B of recorded days: `tools/primary_engine_ab.py`.
 
 ## No gate
 

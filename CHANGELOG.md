@@ -5,6 +5,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.9.4] — 2026-11-06
 
+- Includes fix 0.8.71 from `main` (#1389, #1390: a restart no longer stops or strands the whole-house fan).
 - Feat #1230 (prediction engine choice). Prediction engine: v4 by default; you can switch to v3 or add the other as a comparison line (Settings → Learning & prediction → Prediction engine and Comparison engine, per zone). The chosen engine's line is the main prediction on the Status chart (both dashboards) and drives the "Next 24 hours" path; the comparison engine's line is drawn next to it. Only the two engines you pick run. While the chosen engine is still learning, the chart shows the plain schedule estimate and says "Prediction: learning — showing the schedule estimate" (or "Learning: v4 is fitting from your history"). Heating, cooling and ventilation decisions still use v3 only in this release. The accuracy backtest is now information only, not a gate: "Ready to show v4 on Status?" became "How each model has scored", and tonight's bedroom figures show whenever v4 is running and confident, labelled "from v4" (with v4 switched off the card says so). Adding a future engine is one registration.
 - Feat #1230 (R6a: the new dashboard opens by default). The new dashboard opens by default; 'Back to classic' is one click away and remembered in this browser, and the classic dashboard stays fully working (its header now offers 'Try the new dashboard' on every tab). Links to `#analysis` or `#settings/...` still land, and `?classic=1` or a bookmark of the classic page still opens classic.
 
@@ -80,6 +81,11 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ## [0.9.0] — 2026-11-06
 
 - Start of the 0.9 line (Issue #1230: new prediction engine, one operation timeline and the dashboard redesign). This release is 0.8.63 plus development tooling only, with no change to how Climate Advisor runs your home. 0.9 work lands on the `0.9.x` branch, which takes every 0.8.x fix from `main` before each deploy.
+
+## [0.8.71] — 2026-11-06
+
+- Fix #1389: a Home Assistant restart no longer turns off the whole-house fan that is cooling the house through open windows. A door/window sensor reads "unavailable" from the shutdown until it loads on the next start (a group helper waits for its members, about 1.5 minutes on the production install). Climate Advisor counted it as closed after 60 s, while Home Assistant was still starting, so it called the house sealed, sent the fan off and e-mailed "door/window sensor unavailable". The 60 s now starts once Home Assistant has finished starting. A sensor that is still dark a minute after that is still counted closed, as before, so a fan on a really sealed house is still stopped.
+- Fix #1390: when the 5-minute fan on/off limit delays a fan-off decided at start-up, Climate Advisor now sends it once the limit allows. Before, nothing asked again: the fan kept running with Climate Advisor no longer managing it (no bedtime or warm-outdoor stop), and the heating stayed held off until the fan was turned off by hand.
 
 ## [0.8.70] — 2026-11-06
 

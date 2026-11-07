@@ -203,7 +203,12 @@ class WhfSafetyDecision:
 
 
 def sensor_reading(
-    *, state: str | None, is_open: bool, age_s: float | None, since_start_s: float | None
+    *,
+    state: str | None,
+    is_open: bool,
+    age_s: float | None,
+    since_start_s: float | None,
+    readable_for_s: float | None = None,
 ) -> SensorReading:
     """One door/window sensor as every "is the house sealed" judge reads it (Issue #1177).
 
@@ -215,12 +220,21 @@ def sensor_reading(
     (rule 1 fails safe: an unreadable sensor of unknown age can never keep the fan running on a sealed house;
     "just now" would have counted it open forever). The coordinator's snapshot builder and the promise adapter
     both build their readings here, so they cannot disagree.
+
+    ``readable_for_s`` (Issue #1389) is seconds since the sensors could first be read: Home Assistant finished
+    starting with this integration already running (0.0 while it is still starting). A sensor reads
+    unavailable from the moment HA shuts down until its own integration (a group helper waits for its
+    members) has loaded on the next start, so its ``last_changed`` age includes the downtime and the boot:
+    the 60 s grace must not run before HA could deliver the reading. ``None`` (a reload, HA already running)
+    leaves the age as it was.
     """
     if state is None or state in ("unavailable", "unknown"):
         since = age_s if state is not None else None
         if since is None:
             since = since_start_s
         unknown_for = since if since is not None else math.inf
+        if readable_for_s is not None:
+            unknown_for = min(unknown_for, max(0.0, readable_for_s))
         return SensorReading(is_open=False, unknown_for_s=unknown_for, stable_for_s=unknown_for)
     return SensorReading(is_open=is_open, stable_for_s=age_s)
 

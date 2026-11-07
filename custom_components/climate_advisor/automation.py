@@ -1486,6 +1486,9 @@ class AutomationEngineCallbacks:
     # Issue #1264: display-only push of the override/grace cards (no automation cycle).
     push_card_status: Callable[[], None] | None = None
     post_grace_fan_check: Callable[[], None] | None = None
+    # Issue #1390: re-run the fan reconcile (fresh inputs) once a reconcile turn-off the 5-minute floor deferred
+    # can land. None (shadow engine, bare tests) -> the deferral is only retried by a later reconcile, as before.
+    deferred_reconcile: Callable[[], None] | None = None
     get_fan_physical_state: Callable[[], Any] | None = None
     is_recent_fan_command: Callable[[], bool] | None = None
     reclassify: Callable[..., None] | None = None
@@ -2311,6 +2314,9 @@ class AutomationEngine:
         # should be adopted from the current fan state (Issue #359).
         # Set by coordinator after construction.
         self._post_grace_fan_check_callback: Callable[[], None] | None = None
+        # Issue #1390: re-runs the reconcile when its deferred turn-off can land; the one-shot timer's cancel.
+        self._deferred_reconcile_callback: Callable[[], None] | None = None
+        self._deferred_reconcile_cancel: Callable[[], None] | None = None
 
         # Reclassify callback — called by _release_whf_and_reclassify() when a manual/remote
         # WHF session ends, so the coordinator re-runs apply_classification() with its own
@@ -2415,6 +2421,7 @@ class AutomationEngine:
         self._request_refresh_callback = callbacks.request_refresh
         self._push_card_status_callback = callbacks.push_card_status
         self._post_grace_fan_check_callback = callbacks.post_grace_fan_check
+        self._deferred_reconcile_callback = callbacks.deferred_reconcile
         self._get_fan_physical_state_callback = callbacks.get_fan_physical_state
         self._is_recent_fan_command_callback = callbacks.is_recent_fan_command
         self._reclassify_callback = callbacks.reclassify
@@ -10708,6 +10715,7 @@ class AutomationEngine:
                     _last_correction.isoformat(),
                 )
                 return
+            _prev_correction_at = _last_correction
             self._last_unwarranted_fan_correction_at = _now
 
             # Ensure flags are correct before deactivating — _exit_nat_vent()'s internal
@@ -10743,7 +10751,15 @@ class AutomationEngine:
             # fixed above, but 2 of this method's 4 triggers are event-driven and can
             # fire sub-minute. Without this, a turn-off issued from THIS call site left
             # no lockout timer for a subsequent reconcile call to check.
-            await self._exit_nat_vent(reason=_turn_off_reason, set_outdoor_exit_time=True)
+            _exit_result = await self._exit_nat_vent(reason=_turn_off_reason, set_outdoor_exit_time=True)
+            if _exit_result in (FanCommandResult.RATE_LIMITED_NEW, FanCommandResult.RATE_LIMITED_DUP):
+                # Issue #1390: the 5-minute toggle floor deferred the turn-off, and nothing else asks again --
+                # this reconcile runs once (no nat-vent session is left to retry its exit), so the fan was left
+                # running, unmanaged, with the HVAC restore held behind it. Nothing went out, so this is not a
+                # correction for the #446 cooldown (it would refuse the retry), and the reconcile re-runs when
+                # the floor lets the command land, deciding again on fresh readings.
+                self._last_unwarranted_fan_correction_at = _prev_correction_at
+                self._arm_deferred_reconcile_retry(trigger)
         else:
             # Issue #984: FAN_MODE_HVAC, not nat_vent_eligible, AND no monitored sensor
             # open — this is ordinary HVAC-fan circulation (fan_min_runtime_per_hour's
@@ -10780,6 +10796,39 @@ class AutomationEngine:
                 decision,
                 archetype,
             )
+
+    def _arm_deferred_reconcile_retry(self, trigger: str) -> None:
+        """Re-run the fan reconcile once its deferred turn-off can land (Issue #1390).
+
+        One timer at the deferral's ``applies_at`` (+1 s), replacing any earlier one. The coordinator re-reads
+        the fan, the sensors and the temperatures, so a fan that is warranted again by then is adopted, not
+        stopped. No callback (shadow engine, bare tests): the deferral waits for a later reconcile, as before.
+        """
+        if self._deferred_reconcile_callback is None:
+            return
+        if self._deferred_reconcile_cancel is not None:
+            self._deferred_reconcile_cancel()
+            self._deferred_reconcile_cancel = None
+        applies_at = self._fan_rate_limited_until
+        delay_s = (
+            max(0.0, (applies_at - dt_util.now()).total_seconds())
+            if isinstance(applies_at, datetime) and self._fan_rate_limited_direction == "deactivate"
+            else float(FAN_MIN_TOGGLE_INTERVAL_S)
+        ) + 1.0
+        _LOGGER.info(
+            "Fan reconcile (%s): turn-off deferred by the 5-minute floor — reconcile re-runs in %.0fs (Issue #1390)",
+            trigger,
+            delay_s,
+        )
+
+        @callback
+        def _fire(_now: Any) -> None:
+            self._deferred_reconcile_cancel = None
+            if self._shut_down or self._deferred_reconcile_callback is None:
+                return
+            self._deferred_reconcile_callback()
+
+        self._deferred_reconcile_cancel = async_call_later(self.hass, delay_s, _fire)
 
     def _discard_pause_record_for_manual_change(self) -> None:
         """Drop the door/window pause record because the occupant's own thermostat change replaces it.
@@ -20720,6 +20769,9 @@ class AutomationEngine:
         if self._revisit_cancel:
             self._revisit_cancel()
             self._revisit_cancel = None
+        if self._deferred_reconcile_cancel:  # Issue #1390
+            self._deferred_reconcile_cancel()
+            self._deferred_reconcile_cancel = None
         if self._override_confirm_cancel:
             self._override_confirm_cancel()
             self._override_confirm_cancel = None

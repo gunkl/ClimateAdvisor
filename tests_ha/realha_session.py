@@ -620,12 +620,22 @@ class RealHASession:
                 engine._manual_override_active = True
             occ = event.get("mode", "home") if "change" in etype else etype.split("_", 1)[1]
             engine.set_occupancy_mode(occ)
-            handler = {"away": engine.handle_occupancy_away, "vacation": engine.handle_occupancy_vacation}.get(
-                occ, engine.handle_occupancy_home
-            )
-            await handler()
-            # production's occupancy toggle writes the coordinator's mode and regenerates the timeline too
+            # Production's occupancy toggle writes the coordinator's mode (and regenerates the timeline) BEFORE the
+            # handler runs, then runs the handler through the coordinator's occupancy-change entry
+            # (``_run_occupancy_handler``, Issue #1409), which lets an open time-of-use bank take the change's write.
+            # Test-infrastructure change (Issue #1409, mirrors run_production._occupancy_handler): this adapter used to
+            # call the engine handler directly and sync the coordinator afterwards -- a path production does not take,
+            # so the #1409 single write could never be seen on Tier B. Could it hide a failure? No: the same engine
+            # handler runs; the entry only sets the flag production sets, and the coordinator mode is what production
+            # has at that moment.
             sync_coordinator_occupancy(coordinator, occ)
+            if coordinator is not None and hasattr(coordinator, "_run_occupancy_handler"):
+                await coordinator._run_occupancy_handler(occ)
+            else:
+                handler = {"away": engine.handle_occupancy_away, "vacation": engine.handle_occupancy_vacation}.get(
+                    occ, engine.handle_occupancy_home
+                )
+                await handler()
             return "direct-callback"
 
         if etype in ("bedtime", "wakeup"):

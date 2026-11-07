@@ -617,5 +617,10 @@
     "sha256": "8a66977357d62549c2831a684bc336922caaafe9bf03c403bf769330874227fb",
     "signed": "2026-11-06",
     "issue": 1230
+  },
+  "tou_away_bank_writes_once_1395": {
+    "sha256": "0376b7a312471b0908f2bb1217061dbef8af99a4980f6a8bc3f9507960c9b3ec",
+    "signed": "2026-11-07",
+    "issue": 1395
   }
 }

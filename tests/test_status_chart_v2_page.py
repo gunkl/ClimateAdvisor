@@ -118,17 +118,54 @@ def test_gaps_are_shown_as_gaps():
     assert "spanGaps: false" in _func("_dsFor")
 
 
-def test_v4_is_gated_by_the_server_verdict():
+def test_v4_is_drawn_whenever_it_has_data_no_accuracy_gate():
+    """Issue #1230 R6fe/X3 (owner decision O2: DP-8 is superseded, there is no accuracy gate).
+
+    The chart draws v4 whenever the server says it has something to draw (``ready`` = "has data", not a verdict).
+    The only two reasons a v4 line is greyed out are that v4 is switched off or that it has no data for this zone yet;
+    neither mentions an accuracy check. The accuracy page is a link for information only."""
     ser = _func("_buildSeries")
-    assert "v4.ready === true" in ser
+    assert "const v4Ready = v4.ready === true" in ser
     assert "v4Ready ? [...past, ...fut] : []" in ser and "v4Ready ? base : []" in ser and "v4Ready ? corr : []" in ser
-    assert "v4 is shown after it passes its accuracy check" in ser
+    assert "'v4 is switched off (Settings, Prediction engine)'" in ser
+    assert "'v4 has no data for this zone yet (it is still learning this house)'" in ser
+    assert "accuracy check" not in ser
     key = _func("renderKey")
-    assert "v4 shown after it passes its accuracy check" in key
-    assert 'href="prediction_accuracy.html"' in key
+    assert 'href="prediction_accuracy.html"' in key and "How each engine has scored" in key
     assert "disabled: !!s.disabledReason" in key
-    assert "(ready ? '' : ' disabled')" in key  # the lead buttons wait for the gate too
+    assert "accuracy check" not in key
     assert "chart-v4-note" in INDEX
+
+
+def test_the_servers_v4_ready_is_has_data_not_an_accuracy_verdict():
+    """The server half of the same rule: a fitted model whose published backtest scores badly is still ``ready``."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from custom_components.climate_advisor import prediction_accuracy as pa  # noqa: PLC0415
+
+    now = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
+
+    def _block(model, backtest):
+        return pa.build_chart_v4(
+            now=now,
+            start=now.timestamp() - 86400,
+            end=now.timestamp() + 86400,
+            range_str="24h",
+            unit="fahrenheit",
+            historical=False,
+            archive=None,
+            backtest=backtest,
+            model=model,
+            last_future=None,
+            sensor_ids=["climate.main"],
+        )
+
+    poor = {"gate_summary": {"passed": 0, "scored": 10, "total": 10}}  # v4 beat v3 on none of the rows
+    out = _block({"has_model": True, "confidence": "low", "fitted_at": "2026-11-05T03:15:00+00:00"}, poor)
+    assert out["ready"] is True and out["reason"] == "ok"
+    assert out["scores"] == {"v4_best_rows": 0, "scored_rows": 10, "rows": 10}  # information only
+    none = _block(None, None)
+    assert none["ready"] is False and none["reason"] == "no_model"  # nothing to draw is the only "not ready"
 
 
 def test_backtest_lead_is_selectable_and_defaults_to_four_hours():

@@ -1794,6 +1794,8 @@ def build_timeline(
                 "start": snap.tou_schedule_start,
                 "cause": "tou",
             },
+            target_f=snap.tou_target,
+            mode=snap.tou_mode,
         )
 
     # R3b: the three automation-executed actions Next Automation lists that earlier kinds do not cover.
@@ -2283,7 +2285,7 @@ class TimelineLatch:
             return LatchOutcome(tl, True, tuple(reasons))
         assert self._timeline is not None
         fresh = build_timeline(snap, generation=self._generation, regenerated_for=self._timeline.regenerated_for)
-        kept = _merge_latched(self._timeline, fresh, snap.now)
+        kept = _merge_latched(self._timeline, fresh, snap.now, snap.unit)
         self._timeline = kept
         return LatchOutcome(kept, False, ())
 
@@ -2299,7 +2301,34 @@ def _is_live(step: TimelineStep) -> bool:
     return step.kind in LIVE_KINDS or step.reason == "natvent_start.predicted"
 
 
-def _merge_latched(latched: DetailedTimeline, fresh: DetailedTimeline, now: datetime) -> DetailedTimeline:
+def _refresh_open_until(steps: list[TimelineStep], now: datetime, unit: str) -> list[TimelineStep]:
+    """A window-open step's "until about X" always names the CURRENT close of its period (Issue #1230 X6).
+
+    The latch keeps an open step as first promised (and marks it done once it is past), but a close may move earlier
+    afterwards (the plan's ODE cutoff arrives at a later cycle). Without this the done step still read "until about
+    4:46 PM" while the close step and the briefing said 11:00 AM: one list, two stories. Only the sentence and its
+    ``end`` fact change; the step's time, id and status are untouched."""
+    out: list[TimelineStep] = []
+    for i, s in enumerate(steps):
+        if s.kind == StepKind.WINDOWS_OPEN and "end" in s.facts and s.reason in SENTENCES:
+            close = next((c for c in steps[i + 1 :] if c.kind == StepKind.WINDOWS_CLOSE and c.ts > s.ts), None)
+            if close is not None and s.facts.get("end") != _jsonable(close.ts):
+                until = f" until about {_fmt_time(close.ts, now)}"
+                facts = {**s.facts, "t": s.ts, "end": close.ts, "until": until}
+                try:
+                    text = say(s.reason, unit, ref=now, **facts)
+                except MissingFact:
+                    text = s.text
+                s = replace(
+                    s, text=text, meta={**s.meta, "facts": {**s.facts, "end": _jsonable(close.ts), "until": until}}
+                )
+        out.append(s)
+    return out
+
+
+def _merge_latched(
+    latched: DetailedTimeline, fresh: DetailedTimeline, now: datetime, unit: str = "fahrenheit"
+) -> DetailedTimeline:
     """Latched steps kept as promised (past ones marked done); a window close may only move EARLIER.
 
     Path, runs, band, candidates and summary are always the fresh ones: only the step list is latched.
@@ -2337,6 +2366,7 @@ def _merge_latched(latched: DetailedTimeline, fresh: DetailedTimeline, now: date
         steps.append(s)
     steps.extend(f for f in fresh.steps if _is_live(f) and f.ts >= now)
     steps.sort(key=lambda s: (s.ts, 0 if s.actor == Actor.CA else 1, s.kind.value))
+    steps = _refresh_open_until(steps, now, unit)
     return replace(
         fresh,
         generated_at=latched.generated_at,

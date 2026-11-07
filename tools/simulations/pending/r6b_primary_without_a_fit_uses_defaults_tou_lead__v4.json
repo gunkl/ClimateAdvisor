@@ -1,6 +1,6 @@
 {
   "name": "r6b_primary_without_a_fit_uses_defaults_tou_lead__v4",
-  "description": "Same time-of-use peak as r6b_tou_bank_lead_follows_primary__v4, primary engine v4 with NO fitted model. v3 has a (slow) learned rate that would open the bank hours early. While the primary has no fit the lead time is the default 45 minutes, never v3's rate.",
+  "description": "The same time-of-use peak (16:15) as the v4 card, primary engine v4 with NO fitted model; v3 (the live comparison engine) has a slow learned rate that would open the bank at 12:15. While the primary has no fit the lead is the default 45 minutes: the window is 15:30 on every surface and on the thermostat, never v3's rate and never a v4 rate it does not have.",
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 76,
@@ -22,7 +22,8 @@
         "end": "21:00",
         "cost_tag": "high"
       }
-    ]
+    ],
+    "shadow_engine": "v3"
   },
   "events": [
     {
@@ -67,12 +68,22 @@
     {
       "at": "2026-07-13T14:00:00",
       "expect": "tou_precondition_not_applied",
-      "reason": "v4 has no fit and v3's slow rate is NOT used: the default 45-minute lead applies, so the bank opens at 15:30, not before."
+      "reason": "Default 45-minute lead: not banking at 14:00."
     },
     {
       "at": "2026-07-13T15:00:00",
       "expect": "tou_precondition_not_applied",
-      "reason": "Still before the default window (15:30): neither v3's slow rate (which would have opened the bank at 12:15) nor v4's rate (14:49) is borrowed."
+      "reason": "Not banking at 15:00 either (the window opens 15:30)."
+    },
+    {
+      "at": "2026-07-13T15:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T15:00:30",
+      "values": [
+        76.0,
+        68.0
+      ],
+      "reason": "The 15:30 cycle is the first inside the window: the comfort setpoint then the bank setpoint (pre-existing flicker, issue #1393: the assertion changes to a single write when it is fixed)."
     },
     {
       "at": "2026-07-13T15:30:00",
@@ -82,7 +93,14 @@
         "target": 68.0,
         "mode": "cool"
       },
-      "reason": "The default 45-minute lead window has opened (16:15 minus 45 minutes): the bank starts."
+      "reason": "Default 45-minute lead."
+    },
+    {
+      "at": "2026-07-13T15:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.tou_window.start",
+      "value": "15:30",
+      "reason": "The window every surface quotes is the default 45-minute lead (v3's rate: 12:15)."
     }
   ],
   "verdict": {
@@ -98,8 +116,9 @@
     "k_active_cool": -1.0,
     "k_active_heat": 1.0
   },
-  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions); DP-11 pending, unsigned",
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions), redesigned per the independent review; DP-11 pending, unsigned",
   "issue": 1230,
   "use_coordinator": true,
-  "skip_startup_coalesce": true
+  "skip_startup_coalesce": true,
+  "capture_next_action": true
 }

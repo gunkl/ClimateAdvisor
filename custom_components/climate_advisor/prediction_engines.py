@@ -405,8 +405,9 @@ def engine_state(source: Any, config: Mapping[str, Any] | None) -> dict[str, Any
             "text": (
                 ""
                 if ready
-                else f"Climate Advisor is using its default plan for pre-heat, the ceiling guard and setbacks "
-                f"until {ENGINES[primary].label} has learned your home."
+                else f"Climate Advisor is using its default plan for pre-heat, the time-of-use bank, "
+                f"the ceiling guard, setbacks and the window close time until "
+                f"{ENGINES[primary].label} has learned your home."
             ),
         },
     }

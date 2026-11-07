@@ -1,16 +1,17 @@
 {
   "name": "r6b_natvent_window_close_follows_primary__v4",
-  "description": "Warm day, windows recommended 06:00-17:00, primary engine v4. The house starts the morning hot (78F) and 71F outside. v3's curve for the day stays flat at 78F, so outdoor air never gets within a degree of it and v3 plans no early close. v4's own forecast of the house with the windows open cools it toward the outdoor air, meeting the climbing outdoor temperature in the late morning: v4 plans the windows to close then (the moment open windows stop helping). The planned window period, and so when an open window starts pausing the HVAC, follows the primary engine.",
+  "description": "Warm day (high 76), windows recommended 06:00-17:00, comfort band 68-76 F, primary engine v4 (v3 is the live comparison engine). The house starts the morning at 78 F with 69-71 F outside. v3's curve for the day stays flat at 78 F, so v3 plans no early close. v4's own forecast of the house with the windows open meets the rising outdoor air at 11:00: that is the plan's close the engine honours (engine._nat_vent_cutoff). Every surface the occupant reads (Next 24 hours list, the open step's 'until about', the close step, the briefing row) is judged on the primary engine's rates and says one story: close by 11:00 AM (the engine's period end; the same time as the open step says, never later).",
   "config": {
     "comfort_heat": 68,
-    "comfort_cool": 82,
+    "comfort_cool": 76,
     "setback_heat": 62,
-    "setback_cool": 86,
-    "sleep_heat": 64,
-    "sleep_cool": 80,
+    "setback_cool": 82,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
     "sleep_time": "22:30",
     "wake_time": "06:30",
-    "primary_engine": "v4"
+    "primary_engine": "v4",
+    "shadow_engine": "v3"
   },
   "thermal_model": {
     "confidence": "high",
@@ -22,7 +23,7 @@
   "v4_model": {
     "confidence": "ok",
     "house": {
-      "a_o": 0.05,
+      "a_o": 0.03,
       "a_w": 0.5,
       "q_c": 9.0,
       "q_h": 9.0,
@@ -324,16 +325,43 @@
       "field": "engine_state._nat_vent_cutoff",
       "value": "2026-05-20T11:00:00+00:00",
       "reason": "The primary engine (v4) plans the windows to close when open-window air stops cooling the house, and the engine acts on that time."
+    },
+    {
+      "at": "2026-05-20T08:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.briefing_windows_row",
+      "value": "Windows: Close by 11:00 AM",
+      "reason": "The briefing row shows the close time judged on v4's rates (v3's rates close the list at 10:16 AM)."
+    },
+    {
+      "at": "2026-05-20T08:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.you_steps",
+      "value": [
+        "07:01 windows_open",
+        "11:00 windows_close",
+        "06:31 windows_open",
+        "09:45 windows_close"
+      ],
+      "reason": "The Next 24 hours list: today's open and close, tomorrow's open and close, all on the primary engine's rates."
+    },
+    {
+      "at": "2026-05-20T08:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.window_step_state.text",
+      "value": "7:01 AM: open the windows. Outdoor air helps the house until about 11:00 AM.",
+      "reason": "The open step's 'until about' equals the close step and the briefing (X6: it used to keep the sentence it was first written with, 4:46 PM)."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "The nat-vent plan's close time follows the primary engine (v4)",
-    "observed_behavior": "The engine's nat_vent_cutoff is the v4-derived time.",
-    "expected_behavior": "The window period the engine honours (when an open window stops being 'as planned' and pauses the HVAC) matches the engine the occupant chose."
+    "summary": "The window plan the occupant reads follows the primary engine (v4) and every surface agrees",
+    "observed_behavior": "Engine cutoff 11:00; list, open sentence, close step and briefing all say 11:00 AM.",
+    "expected_behavior": "One story on every surface, judged on the engine the occupant chose; never on v3's rates behind a v4 primary's back (O3)."
   },
-  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions); DP-11 pending, unsigned",
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions), redesigned per the independent review; DP-11 pending, unsigned",
   "issue": 1230,
   "use_coordinator": true,
-  "skip_startup_coalesce": true
+  "skip_startup_coalesce": true,
+  "capture_next_action": true
 }

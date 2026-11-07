@@ -68,11 +68,17 @@ tick-frequency switching unrealistic:
   turns back *off* only once indoor temperature crosses that same deadband
   edge on the far side of setpoint (`target_temperature ± deadband_{heat,cool}_f`
   again, not the bare setpoint) — a symmetric round-trip swing band, not an
-  exact-setpoint trigger on either side (Issue #887). Optional
-  `off_offset_{heat,cool}_f` (Issue #1234) make it asymmetric: the stop point
-  becomes `target_temperature + off_offset_heat_f` (cool: `- off_offset_cool_f`),
-  so a real thermostat that starts heat at target-1.4 and stops at target-0.9
-  can be simulated.
+  exact-setpoint trigger on either side (Issue #887). `off_offset_{heat,cool}_f`
+  (Issue #1234) move the stop point to `target_temperature + off_offset_heat_f`
+  (cool: `- off_offset_cool_f`). Unset, they default to `-0.9` (Issue #1387): the
+  compressor starts 1.5 F past the target and stops 0.9 F short of it, the owner's
+  real thermostat as measured in #1234 (short runs of a few minutes, a small
+  duty cycle). Set them to `deadband_{heat,cool}_f` for the old symmetric band.
+- **Full capacity while running.** While the compressor is on, the room gets the
+  configured `k_active_*` every tick until the state machine stops it, and
+  `hvac_action` reports `heating`/`cooling` only then (Issue #1387). It used to
+  apply capacity only below the bare setpoint, so with a stop point above it the
+  room pinned at the setpoint while reporting `heating` for hours.
 - **Short-cycle protection (dwell timers).** Once the compressor starts, it
   stays on for at least `min_run_seconds` even if it reaches setpoint
   sooner; once it stops, it stays off for at least `min_off_seconds` even
@@ -197,10 +203,10 @@ Reconfigure**. This reloads the entry with the new values immediately.
 | `comfort_cool` | number | 76 | Comfort ceiling (°F) — passed through to the ODE clamp logic |
 | `outdoor_source` | entity (weather or sensor) | — required | Where outdoor temperature is read from each tick |
 | `tick_seconds` | number | 30 | How often the simulation advances (real elapsed wall time drives the math, not this number) |
-| `deadband_heat_f` | number | 1.5 | Heat mode: compressor turns **on** once indoor temp falls to `target_temperature - deadband_heat_f`, and **off** once indoor temp rises to `target_temperature + off_offset_heat_f` (default: `+deadband_heat_f`, symmetric) |
-| `off_offset_heat_f` | number (optional) | unset | Issue #1234: asymmetric deadband. Heat stop point as a signed distance past the target (e.g. `-0.9` with `deadband_heat_f` 1.4 reproduces a thermostat that starts at target-1.4 and stops at target-0.9). Unset = symmetric |
-| `off_offset_cool_f` | number (optional) | unset | Cool mirror: the compressor stops at `target_temperature - off_offset_cool_f` |
-| `deadband_cool_f` | number | 1.5 | Cool mode: compressor turns **on** once indoor temp rises to `target_temperature + deadband_cool_f`, and **off** once indoor temp falls to `target_temperature - deadband_cool_f` |
+| `deadband_heat_f` | number | 1.5 | Heat mode: compressor turns **on** once indoor temp falls to `target_temperature - deadband_heat_f`, and **off** once indoor temp rises to `target_temperature + off_offset_heat_f` (default `-0.9`: 0.9 F short of the target) |
+| `off_offset_heat_f` | number (optional) | -0.9 | Issue #1234: heat stop point as a signed distance past the target. Unset = `-0.9`, the measured real thermostat (Issue #1387); `+deadband_heat_f` = the old symmetric band |
+| `off_offset_cool_f` | number (optional) | -0.9 | Cool mirror: the compressor stops at `target_temperature - off_offset_cool_f` (default 0.9 F short of the target) |
+| `deadband_cool_f` | number | 1.5 | Cool mode: compressor turns **on** once indoor temp rises to `target_temperature + deadband_cool_f`, and **off** once indoor temp falls to `target_temperature - off_offset_cool_f` (default 0.9 F short of the target) |
 | `min_run_seconds` | number | 300 | Equipment-protection dwell timer: minimum time the compressor stays on once started, even if it reaches setpoint sooner |
 | `min_off_seconds` | number | 300 | Equipment-protection dwell timer: minimum time the compressor stays off once stopped, even if a deadband edge is crossed again sooner |
 

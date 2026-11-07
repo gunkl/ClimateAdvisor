@@ -389,6 +389,7 @@ class TestOwnCredentialAndModelFields:
 
         ensure_providers_registered()
         assert get_provider("anthropic").credential_setting == "ai_api_key"
+        assert get_provider("chatgpt").credential_setting is None  # credential_kind is account
 
     def test_coordinator_gate_reads_the_providers_own_key(self, own_fields_provider):
         from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
@@ -729,6 +730,7 @@ def test_investigator_fallback_names_the_zones_provider():
     ensure_providers_registered()
     expected = {
         "anthropic": "AI unavailable — hypotheses require cross-source analysis by Claude.",
+        "chatgpt": "AI unavailable — hypotheses require cross-source analysis by the AI provider.",
     }
     for provider, text in expected.items():
         result = investigation_fallback(SimpleNamespace(config={"ai_provider": provider}))

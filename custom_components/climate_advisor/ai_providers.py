@@ -15,7 +15,7 @@ from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
-_PROVIDER_MODULES = ("claude_api",)
+_PROVIDER_MODULES = ("claude_api", "chatgpt_backend")
 
 
 def ensure_providers_registered() -> None:

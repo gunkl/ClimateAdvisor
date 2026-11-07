@@ -557,5 +557,7 @@ class TestAmbiguousCardSaysWhatAndWhy:
         for name in ("strings.json", "translations/en.json"):
             issue = json.loads((root / name).read_text(encoding="utf-8"))["issues"]["zone_resolution_ambiguous"]
             text = issue["description"]
-            assert "{request}" in text and "{outcome}" in text and "?zone=<entry_id>" in text, name
+            assert "{request}" in text and "{outcome}" in text and "?zone=ENTRY_ID" in text, name
+            # hassfest rejects anything that reads as HTML in a translation string (CI "validate", #1427)
+            assert "<" not in text and ">" not in text, name
             assert "/api/climate_advisor/status" in text, name

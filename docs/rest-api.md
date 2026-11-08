@@ -111,7 +111,7 @@ Occupant view: a read-only page that shows how well prediction engine v4 (the de
 | Field | Meaning |
 |---|---|
 | `zone`, `sensor`, `lead`, `range`, `unit` | Echo of the resolved request |
-| `sensors` | `[{id, name, role}]`, one entry per id (a `_ca`-only model no longer adds a second `_ca`, Issue #1400): first `{id:"_ca", name:"Climate Advisor reading"}`, then the model's and chart-log sensors with a friendly name and a role (`thermostat's finer sensor`, `thermostat`, `bedroom sensor`, `room sensor`); entity ids found only in the archive/backtest are appended with an empty role |
+| `sensors` | `[{id, name, role}]`, one entry per id (a `_ca`-only model no longer adds a second `_ca`, Issue #1400): first `{id:"_ca", name:"Climate Advisor reading"}`, then the model's and chart-log sensors with a friendly name and a role (`thermostat's finer sensor`, `thermostat`, `bedroom sensor`, `room sensor`); entity ids found only in the archive/backtest are appended with an empty role. Each entry also has `has_v4` (v4 predicted this sensor at least once: live archive or backtest, any look-ahead) and `has_readings` (the chart log has a reading for it, any time; `_ca` = the `indoor` column), Issue #1431: the page labels a sensor without v4 "no v4 data yet" and disables one with neither |
 | `start`, `end`, `downsample` | Window (ISO, local offset) and `raw`/`hourly`/`daily` |
 | `points` | `[{t, actual?, v4?, v3?, flat?}]` ascending; fields absent when unknown (`v4` is absent on slots v4 has not predicted) |
 | `heat_runs` | `[[start, end], ...]` spans of consecutive chart rows with `hvac == "heating"` (page shades them) |
@@ -119,7 +119,8 @@ Occupant view: a read-only page that shows how well prediction engine v4 (the de
 | `model` | `{confidence: "none"|"low"|"ok", fitted_at, span_days}`; `confidence: "none"` with nulls when no model is stored |
 | `gate` | Rows from the backtest file: `{zone, season: "heating"|"summer", lead, v4, v3, flat, bias, pass, scored, ...}`, passed through (errors converted). `[]` without a backtest |
 | `gate_summary` | The backtest file's summary object (`passed`, `scored`, `total`, ...; the page shows "v4 beats both v3 and \"no change\" in N of M scored rows") or `null`. Its legacy `ready` flag decides nothing |
-| `primary_engine`, `shadow_engine` | The zone's configured engines, so the tiles lead with the primary and name the comparison engine |
+| `primary_engine`, `shadow_engine` | The zone's configured engines, so the tiles lead with the primary and the key names each engine by its role ("v4 (main engine)", "v3 (comparison)", "(not running now)") |
+| `ca_swaps` | `[iso, ...]` (Issue #1431, additive): when the reading Climate Advisor uses swapped sensor (bedtime / wake-up) inside the window, by the Status chart's rule (`prediction_accuracy.ca_swap_epochs` over the chart log's `band_sensor` changes, plus every configured bedtime/wake time outside the recorded span while `sleep_indoor_temp_entity` is set; the view passes `sleep_indoor_temp_entity`/`sleep_time`/`wake_time` from the zone's config). `[]` at daily resolution. The page breaks every `_ca` line (actual, v4, v3, "no change") there and marks the time |
 
 Sample (trimmed; full fixture `tests/fixtures/prediction_accuracy_sample.json`):
 

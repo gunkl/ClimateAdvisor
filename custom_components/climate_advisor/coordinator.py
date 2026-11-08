@@ -17365,7 +17365,54 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "Home Assistant is stopping: Climate Advisor stops commanding and notifying (instance %s)",
             _instance_tag(self),
         )
-        self.hass.async_create_task(self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_HA_STOP))
+        self.hass.async_create_task(self._persist_on_ha_stop())
+
+    async def _persist_on_ha_stop(self) -> None:
+        """The EVENT_HOMEASSISTANT_STOP write task: everything ``async_shutdown`` saves, for a real restart.
+
+        HA unloads config entries only on a reload or removal, never on a restart, so ``async_shutdown`` does not run
+        on a deploy, an update or a manual restart (63 ``ha_stop`` shutdowns against 2 ``unload`` on 2026-11-07).
+        Whatever was saved only there was lost on every restart (Issue #1438 audit):
+
+        * the minutes of a heating, cooling or fan-only run in progress (Issue #1434): flushed into today's record and
+          the state file saved, so the run's pre-restart minutes reach today's runtime;
+        * chart-log event rows (classification change, occupancy, override) appended since the last 30-minute save;
+        * the v4 archive and model file, written at most hourly (Issue #1423);
+        * the restart-cause diagnostics (Issue #413).
+
+        Idempotent with ``async_shutdown``: the runtime flush resets the on-since time to now, so a later flush adds
+        only the seconds since; the saves are atomic rewrites of the same state. Each step is guarded on its own, so
+        one failure cannot stop the others or raise into HA's stop."""
+        steps: list[tuple[str, Any]] = [
+            ("runtime and state", self._persist_runtime_and_state),
+            ("chart log", self._persist_chart_log),
+            ("v4 archive", self._v4_flush_on_shutdown),
+            ("diagnostics", functools.partial(self._persist_shutdown_diagnostics, kind=SHUTDOWN_KIND_HA_STOP)),
+        ]
+        for label, step in steps:
+            try:
+                await step()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - HA is stopping; save what can be saved
+                _LOGGER.warning("Home Assistant stop: could not save the %s", label, exc_info=True)
+
+    async def _persist_runtime_and_state(self) -> None:
+        """Flush the active session's runtime into today's record, then save the state file (Issue #1434)."""
+        self._flush_runtime_for_mode(self._hvac_session_mode)
+        await self._async_save_state()
+
+    async def _persist_chart_log(self) -> None:
+        """Save the chart log: event rows are appended between the 30-minute saves (Issue #1438)."""
+        chart_log = getattr(self, "_chart_log", None)
+        if chart_log is None:
+            return
+        try:
+            await self._executor_job(self._chart_log.save)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a failed write must not stop the unload's other saves
+            _LOGGER.warning("Could not save the chart log at shutdown; recent event rows may be lost", exc_info=True)
 
     async def async_shutdown(self) -> None:
         """Tear this instance down for good (Issue #1102: latched, idempotent).
@@ -17404,8 +17451,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Flush any accumulated runtime (heat/cool or fan_only) and save state before
             # cleanup. Issue #912: _flush_runtime_for_mode() replaces the old unconditional
             # _flush_hvac_runtime() so an in-progress fan_only session isn't lost on shutdown.
-            self._flush_runtime_for_mode(self._hvac_session_mode)
-            await self._async_save_state()
+            await self._persist_runtime_and_state()
+            await self._persist_chart_log()  # Issue #1438: event rows since the last 30-minute save
             await self._v4_flush_on_shutdown()
         finally:
             # Issue #1102: release always runs, even if a save above raised.

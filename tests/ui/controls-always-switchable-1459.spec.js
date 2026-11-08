@@ -131,25 +131,20 @@ for (const url of ['/', '/new_dashboard.html']) {
       expect(d.n).toBeGreaterThan(3);
     });
 
-    test('a strip that is on keeps its row, with the reason, when nothing is in view; the strip area does not jump', async ({ page }) => {
+    test('a strip comes and goes with its data, but its switch stays clickable and on (owner decision)', async ({ page }) => {
       await open(page, url);
       await expect(chip(page, 'strip:away')).toBeEnabled();
       await expect(chip(page, 'strip:away')).toHaveAttribute('aria-pressed', 'true');
       await expect(chip(page, 'strip:away')).toHaveClass(/no-data/);
       const live = await strips(page);
       expect(live.shown).toBe(true);
-      expect(live.rows).toContain('away');                         // nothing away in the loaded time, row still there
-      expect(live.empty.away).toMatch(/No away \/ vacation recorded/);
-      expect(live.rows).toContain('heating');
-      expect(live.empty.heating).toBeUndefined();
-      await expect(page.locator('#activity-chart')).toHaveAttribute('aria-label', /Away \/ Vacation: No away/);
-      for (let i = 0; i < 3; i++) await page.evaluate(() => shiftChartWindow(-1));   // into history with nothing in it
-      await page.waitForFunction(() => window.__test_strips && window.__test_strips.empty.heating, null, { timeout: 8000 });
-      const past = await strips(page);
-      expect(past.rows).toEqual(live.rows);
-      expect(past.h).toBe(live.h);
-      await expect(chip(page, 'strip:heating')).toBeEnabled();
-      await expect(chip(page, 'strip:heating')).toHaveAttribute('aria-pressed', 'true');
+      expect(live.rows).not.toContain('away');                     // nothing away in the loaded time: no row
+      expect(live.rows).toContain('heating');                      // heating has data: its row is drawn
+      await chip(page, 'strip:away').click();                      // still switchable: off, then on again
+      await expect(chip(page, 'strip:away')).toHaveAttribute('aria-pressed', 'false');
+      await chip(page, 'strip:away').click();
+      await expect(chip(page, 'strip:away')).toHaveAttribute('aria-pressed', 'true');
+      expect((await stored(page))['strip:away']).toBe(true);
     });
 
     test('a look-ahead button with nothing in view is choosable and the row says "none in this view"', async ({ page }) => {
@@ -225,7 +220,7 @@ for (const url of ['/', '/new_dashboard.html']) {
       await expect(chip(page, 'v4:_ca')).toBeEnabled();
       // and in history with nothing at all in view, still nothing locks
       for (let i = 0; i < 3; i++) await page.evaluate(() => shiftChartWindow(-1));
-      await page.waitForFunction(() => window.__test_strips && window.__test_strips.empty.heating, null, { timeout: 8000 });
+      await page.waitForFunction(() => !!window.__test_strips, null, { timeout: 8000 });
       await expect(page.locator('#chart-key-body [data-series]:disabled')).toHaveCount(0);
     });
   });

@@ -1333,12 +1333,11 @@
   function drawStrips() {
     const canvas = document.getElementById('activity-chart');
     if (!canvas) return;
-    // Issue #1459: a strip that is switched on keeps its row even with nothing in view (an empty labelled row with the
-    // reason, same height), so the strip area does not jump as the view moves. Only a strip the home cannot have
-    // (no fan, no door/window sensors, no occupancy switches) has no row.
-    const rows = STRIP_ROWS.filter(r => _stripOn(r.id) && !_stripLock(r.id));
+    // A strip row comes and goes with its data (owner decision, #1459 review): it is drawn when it is switched on and has
+    // something in the loaded time, as before #1459. Its switch stays clickable and remembered either way (#1459); a
+    // strip the home cannot have (no fan, no door/window sensors, no occupancy switches) never has a row.
+    const rows = STRIP_ROWS.filter(r => _stripOn(r.id) && !_stripLock(r.id) && (_stripSegs[r.id] || []).length > 0);
     const empty = {};
-    rows.forEach(r => { const why = _chipEmpty('strip:' + r.id, null); if (why) empty[r.id] = why; });
     const wrap = canvas.parentElement;
     wrap.style.display = rows.length ? '' : 'none';
     _stripLegend(wrap, rows);

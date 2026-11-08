@@ -295,7 +295,7 @@ PARITY = [
     (
         [],
         "_group('Overlays', 'Overlays', overlays)",
-        "Chart overlays (target band, target, plan; humidity and feels-like hidden until Issue #1414)",
+        "Chart overlays (target band, target, plan; humidity and feels-like are indoor / outdoor lines, Issue #1414)",
         ["_group('Overlays', 'Overlays', overlays)", "ov:plan"],
         "placed",
         "",

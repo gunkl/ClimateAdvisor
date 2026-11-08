@@ -7,6 +7,16 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 - Fix #1454: an "Ambiguous zone selection" card no longer appears in Repairs after a Home Assistant restart when nothing is misconfigured. Climate Advisor's own dashboards raised it: a dashboard left open across a restart retried its status request with no zone while Climate Advisor was still starting, and a browser with no saved zone (first visit, cleared storage) asked for the zone list with an unscoped status request. Now the classic dashboard, the new dashboard and the Prediction accuracy page (on its own and on the Analysis tab) read the zone list from a new read-only `GET /api/climate_advisor/zones`, which names no zone by design and never raises the card, and every other request names a zone, a single-zone install included. A failed status request is retried for the same zone after 2 s, 5 s and 10 s, then the page says "Climate Advisor is starting" and keeps trying every minute; the rest of the page reloads once it answers. A saved zone that no longer exists is replaced by the first zone at once. The card is still raised for every other request that names no zone (Issue #1418 rule unchanged). Chart choices saved on a single-zone install before this release are kept.
 
+## [0.9.11] — 2026-11-08
+
+- Fix #1414: the Status charts now show humidity and how warm or cold it feels.
+  - **Lines:** the temperature chart can draw the humidity of the room Climate Advisor is reading (the thermostat's room by day, the bedroom in your sleep window) and its feels-like. The outdoor chart can draw outdoor humidity and feels-like, continuing into the forecast when the weather service provides humidity and wind.
+  - **Feels-like rule:** it is the National Weather Service heat index on warm, humid readings (80°F and up) and, outdoors, the NWS wind chill on cold, windy readings (50°F and below, wind above 3 mph). Otherwise the line has a gap rather than a guess.
+  - **Where to find them:** humidity reads in % on a right-hand axis. Each line is switched on in the chart key and shows in the hover readout and the table.
+  - **Humidity sources:** found automatically, from a humidity sensor on the same device as the temperature sensor in use, the thermostat's own reading, or for outdoors the weather service. Settings → Temperature sources has optional "Indoor humidity", "Bedroom humidity" and "Outdoor humidity" choices to pick a sensor yourself.
+  - **No effect on control:** chart only; no heating, cooling or window decision changes.
+- Fix #1455: when a humidity line changes source (for example the chosen sensor goes unavailable, or the outdoor line falls back to the weather service), the log and the Activity log say so once, naming both sources and why.
+
 ## [0.9.10] — 2026-11-07
 
 - Includes `main` through #1452 (developer tooling only: the unit tier runs as four parallel CI jobs, #1450; local slice docs, #1452). No change at home.

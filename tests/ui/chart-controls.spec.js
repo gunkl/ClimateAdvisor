@@ -4,9 +4,9 @@ const path = require('path');
 
 // 0.9.6 Lane F: the Status chart's controls, against the live 0.9.5 Zone 1 shape (tests/fixtures/chart_v2_zone1_live_095.json):
 // v4 model "_ca"-only; v4 future/baseline for "_ca" only; v4 past for "_ca" and the thermostat's finer sensor (from the
-// backtest); nothing from v4 for the thermostat or the bedroom sensor; no humidity / feels-like ever logged.
+// backtest); nothing from v4 for the thermostat or the bedroom sensor; no humidity / feels-like logged.
 //  1. v4 chips only for the sensors v4 has data for; the rest on one "v4 is still learning" line; a history-only sensor has one chip (#1430).
-//  2. Humidity and Feels-like are hidden (Issue #1414) and their stored choices dropped.
+//  2. Humidity and Feels-like (Issue #1414): ordinary indoor/outdoor lines; the old ov: choices move to the indoor lines.
 //  4. The owner's "v4 has no past predictions to show yet" while v4 had days of them: scrolled into history the fetched
 //     window has none, so the row said "yet". It now says "none in this view" (and when v4 has them, from v4.past_span).
 
@@ -97,7 +97,7 @@ for (const url of ['/', '/new_dashboard.html']) {
       expect(n).toBeGreaterThan(10);
     });
 
-    test('Humidity and Feels-like are hidden, even with readings, and their stored choices are dropped', async ({ page }) => {
+    test('Humidity and Feels-like (Issue #1414): the old overlay choices move to the indoor lines; no overlay chip', async ({ page }) => {
       await page.addInitScript(() => {
         if (sessionStorage.getItem('seeded')) return;
         sessionStorage.setItem('seeded', '1');
@@ -106,12 +106,20 @@ for (const url of ['/', '/new_dashboard.html']) {
       await open(page, url, { mutate: b => { b.state_log = b.state_log.map(e => Object.assign({}, e, { humidity: 45, feelslike: 70 })); } });
       await expect(chip(page, 'ov:humidity')).toHaveCount(0);
       await expect(chip(page, 'ov:feelslike')).toHaveCount(0);
-      await expect(page.locator('#chart-key-body')).not.toContainText('Humidity');
+      await expect(chip(page, 'ind:humidity')).toHaveAttribute('aria-pressed', 'true');
+      await expect(chip(page, 'ind:feelslike')).toHaveAttribute('aria-pressed', 'true');
       const drawn = await page.evaluate(() => Chart.getChart(document.getElementById('temp-chart')).data.datasets
-        .filter(d => d.caId === 'ov:humidity' || d.caId === 'ov:feelslike').some(d => !d.hidden));
-      expect(drawn).toBe(false);
+        .filter(d => d.caId === 'ind:humidity' || d.caId === 'ind:feelslike').map(d => d.caId + ':' + d.yAxisID + ':' + !d.hidden).sort());
+      expect(drawn).toEqual(['ind:feelslike:y:true', 'ind:humidity:yRight:true']);
       const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:mock-zone')).on);
-      expect(stored).toEqual({ 'ov:band': false });
+      expect(stored).toEqual({ 'ov:band': false, 'ind:humidity': true, 'ind:feelslike': true });
+    });
+
+    test('Humidity and Feels-like with nothing logged (the live 0.9.5 shape): chips disabled with the reason', async ({ page }) => {
+      await open(page, url);
+      await expect(chip(page, 'ind:humidity')).toBeDisabled();
+      await expect(chip(page, 'ind:humidity')).toHaveAttribute('title', 'No humidity reading recorded in this view');
+      await expect(chip(page, 'out:feelslike')).toHaveAttribute('title', /heat index \(80°F and up\) or wind chill \(50°F and below with wind\)/);
     });
 
     test('the owner\'s case: scrolled into history the row says "none in this view", never "none yet"', async ({ page }) => {

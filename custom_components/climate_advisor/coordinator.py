@@ -332,7 +332,14 @@ from .fan_status import (
 )
 from .feels_like import feels_like_f, wind_speed_to_mph
 from .forecast_archive import ForecastArchive
-from .humidity_sources import ROLE_INDOOR_SLEEP, ROLE_OUTDOOR, indoor_role_for, resolve_humidity
+from .humidity_sources import (
+    ROLE_INDOOR_DAY,
+    ROLE_INDOOR_SLEEP,
+    ROLE_OUTDOOR,
+    indoor_role_for,
+    read_humidity_source,
+    resolve_humidity,
+)
 from .hvac_action import (
     is_hvac_action_active,
     is_hvac_compressor_active,
@@ -567,6 +574,13 @@ _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
 # post-conversion reader uses it, so stripping (not converting) guarantees a Celsius state_log can never carry a stray F
 # value and keeps the 24h/3d raw payload small. tests/test_chart_celsius.py requires every dict kwarg here.
 _CHART_LOG_STATE_LOG_STRIPPED_KEYS: Final[tuple[str, ...]] = ("indoor_sensors",)
+
+# Issue #1455: what each humidity role is called in its source-change line and Activity row.
+_HUMIDITY_ROLE_SUBJECT: Final[dict[str, str]] = {
+    ROLE_INDOOR_DAY: "room humidity",
+    ROLE_INDOOR_SLEEP: "bedroom humidity",
+    ROLE_OUTDOOR: "outdoor humidity",
+}
 
 
 @dataclass
@@ -1238,8 +1252,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._indoor_companion_in_use: str | None = None
         self._indoor_companion_reason: str | None = None
         self._indoor_companion_ambiguous_logged: bool = False
-        # Issue #1230 R1c: the sensor CA last announced as the room's reading (entity, role) - None until known.
-        self._indoor_source_announced: str | None = None
+        # Issue #1230 R1c / #1455: the source CA last announced per reading ("indoor" temperature, "humidity:<role>"),
+        # a key is absent until its first announcement. Event loop only (see _announce_source).
+        self._sources_announced: dict[str, str | None] = {}
         self._indoor_source_announced_role: str | None = None
         self._indoor_source_companions_seen: set[str] = set()
         self._indoor_source_left_sleep_failed: bool = False
@@ -5321,8 +5336,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _indoor_source_ensure_attrs(self) -> None:
         """Default the source-switch attrs on coordinators built via ``object.__new__`` (tests)."""
+        self._sources_announced_map()
         for name, default in (
-            ("_indoor_source_announced", None),
             ("_indoor_source_announced_role", None),
             ("_indoor_source_left_sleep_failed", False),
         ):
@@ -5401,52 +5416,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         self._indoor_source_ensure_attrs()
         using = reading.source_entity
-        if getattr(self, "_startup_coalesce_active", True) or using is None:
+        if using is None or not self._source_changed("indoor", using):
             return
-        previous = self._indoor_source_announced
-        if using == previous:
-            return
+        previous = self._sources_announced.get("indoor")
         role = self._indoor_source_role(using, reading)
-        zone = self._indoor_zone_title()
 
         def _fmt(value: float | None) -> str:
             return "no reading" if value is None else f"{value:.2f}".rstrip("0").rstrip(".") + "°F"
 
         to_value = reading.value
+        to_name = self._indoor_friendly_name(using)
+        to_text = f'"{to_name}" ({using}, {role}, {_fmt(to_value)})'
         if previous is None:
             self._record_indoor_source(using, role)
-            _LOGGER.info(
-                'Zone "%s": room temperature using "%s" (%s, %s, %s)',
-                zone,
-                self._indoor_friendly_name(using),
-                using,
-                role,
-                _fmt(to_value),
-            )
+            self._announce_source("indoor", using, subject="room temperature", to_text=to_text)
             return
         was_role = self._indoor_source_announced_role or "thermostat"
         reason = self._indoor_source_reason(reading, using, was_role)
         from_value = self._indoor_snapshot_f().get(previous)
-        from_name, to_name = self._indoor_friendly_name(previous), self._indoor_friendly_name(using)
+        from_name = self._indoor_friendly_name(previous)
         self._indoor_source_left_sleep_failed = was_role == "sleep sensor" and bool(reading.sleep_reason)
         self._record_indoor_source(using, role)
-        _LOGGER.info(
-            'Zone "%s": room temperature now from "%s" (%s, %s, %s) instead of "%s" (%s, %s, %s): %s',
-            zone,
-            to_name,
+        self._announce_source(
+            "indoor",
             using,
-            role,
-            _fmt(to_value),
-            from_name,
-            previous,
-            was_role,
-            _fmt(from_value),
-            reason,
-        )
-        self._emit_event(
-            "indoor_source_changed",
-            {
-                "zone": zone,
+            subject="room temperature",
+            to_text=to_text,
+            from_text=f'"{from_name}" ({previous}, {was_role}, {_fmt(from_value)})',
+            reason=reason,
+            event_type="indoor_source_changed",
+            payload={
                 "from_entity": previous,
                 "from_name": from_name,
                 "from_role": was_role,
@@ -5455,9 +5454,64 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "to_name": to_name,
                 "to_role": role,
                 "to_value_f": to_value,
-                "reason": reason,
             },
         )
+
+    def _sources_announced_map(self) -> dict[str, str | None]:
+        """The announced-source map, defaulted on coordinators built via ``object.__new__`` (tests)."""
+        announced = getattr(self, "_sources_announced", None)
+        if not isinstance(announced, dict):
+            announced = {}
+            self._sources_announced = announced
+        return announced
+
+    def _source_changed(self, key: str, using: str | None) -> bool:
+        """Whether ``using`` is a REAL change of the source announced for ``key`` (Issue #1230 R1c, #1455).
+
+        False while the startup coalesce is active (nothing is announced or recorded) and for a repeat of the
+        announced source; True for the first source after startup and for every real change. ``None`` is a source
+        here (humidity: "no source"); the temperature caller never passes it.
+        """
+        if getattr(self, "_startup_coalesce_active", True):
+            return False
+        announced = self._sources_announced_map()
+        return key not in announced or announced[key] != using
+
+    def _announce_source(
+        self,
+        key: str,
+        using: str | None,
+        *,
+        subject: str,
+        to_text: str,
+        from_text: str | None = None,
+        reason: str | None = None,
+        event_type: str | None = None,
+        payload: dict[str, Any] | None = None,
+        using_note: str | None = None,
+    ) -> None:
+        """The one writer of a source announcement: one INFO line and, on a real change, one Activity event.
+
+        Shared by the room temperature (``_note_indoor_source``, Issue #1230 R1c) and the three humidity roles
+        (``_note_humidity_source``, Issue #1455). Call only after ``_source_changed(key, using)`` is True, and only on
+        the event loop (the map has no lock; every caller runs there). The first announcement for ``key`` is
+        ``Zone "<title>": <subject> using <to_text>`` (plus ``: <using_note>`` when given) with no event; each later
+        one is ``Zone "<title>": <subject> now from <to_text> instead of <from_text>: <reason>`` plus the event
+        ``event_type`` with ``zone``, ``payload`` and ``reason``.
+        """
+        announced = self._sources_announced_map()
+        first = key not in announced
+        announced[key] = using
+        zone = self._indoor_zone_title()
+        if first:
+            if using_note:
+                _LOGGER.info('Zone "%s": %s using %s: %s', zone, subject, to_text, using_note)
+            else:
+                _LOGGER.info('Zone "%s": %s using %s', zone, subject, to_text)
+            return
+        _LOGGER.info('Zone "%s": %s now from %s instead of %s: %s', zone, subject, to_text, from_text, reason)
+        if event_type:
+            self._emit_event(event_type, {"zone": zone, **(payload or {}), "reason": reason})
 
     def _indoor_snapshot_f(self) -> dict[str, float | None]:
         """Every known indoor sensor's reading now, for the "instead of" value of a switch line (never raises).
@@ -5478,8 +5532,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return {}
 
     def _record_indoor_source(self, using: str, role: str) -> None:
-        """Remember the announced sensor (and that a finer sensor has been in use)."""
-        self._indoor_source_announced = using
+        """Remember the announced sensor's role (and that a finer sensor has been in use); ``_announce_source``
+        records the sensor itself."""
         self._indoor_source_announced_role = role
         if role == "thermostat's finer sensor":
             self._indoor_source_companions_seen.add(using)
@@ -5639,9 +5693,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             def _discover(eid: str, exclude: bool) -> tuple[str, ...]:
                 return self._companion_sensors(eid, "humidity", exclude)
 
-            rh_in, _src_in = resolve_humidity(
+            rh_in, src_in = resolve_humidity(
                 self.hass, role, chosen=chosen, source_entities=sources, fallback_entity=fallback, discover=_discover
             )
+            self._note_humidity_source(role, src_in, rh_in, chosen)
             if rh_in is not None:
                 out["humidity"] = rh_in
                 fl_in = feels_like_f(indoor_f, rh_in)
@@ -5654,14 +5709,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if cfg.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE) != TEMP_SOURCE_WEATHER_SERVICE
                 else None
             )
-            rh_out, _src_out = resolve_humidity(
+            chosen_out = cfg.get(CONF_OUTDOOR_HUMIDITY_ENTITY)
+            rh_out, src_out = resolve_humidity(
                 self.hass,
                 ROLE_OUTDOOR,
-                chosen=cfg.get(CONF_OUTDOOR_HUMIDITY_ENTITY),
+                chosen=chosen_out,
                 source_entities=(outdoor_sensor,),
                 fallback_entity=weather,
                 discover=_discover,
             )
+            self._note_humidity_source(ROLE_OUTDOOR, src_out, rh_out, chosen_out)
             if rh_out is not None:
                 out["outdoor_humidity"] = rh_out
             wind_mph = None
@@ -5674,6 +5731,99 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:  # noqa: BLE001 - a chart row must never fail on humidity
             _LOGGER.debug("chart_log: could not read humidity / feels-like", exc_info=True)
         return out
+
+    def _humidity_source_kind(self, role: str, source: str | None, chosen: str | None) -> str | None:
+        """Plain-words kind of a humidity source (Issue #1455); None for "no source"."""
+        if source is None:
+            return None
+        if chosen and source == chosen:
+            return "your chosen sensor"
+        if "#" in source:
+            return "weather service" if role == ROLE_OUTDOOR else "thermostat"
+        return "sensor on the device"
+
+    def _humidity_source_reason(self, role: str, source: str | None, chosen: str | None) -> str:
+        """Why this humidity source is the one in use, in plain words (Issue #1455)."""
+        if chosen and source == chosen:
+            return "back to your chosen sensor"
+        if chosen:
+            return "the chosen sensor is unavailable"
+        if source is None:
+            if role == ROLE_OUTDOOR:
+                return "no outdoor humidity sensor and no weather service humidity"
+            return "no humidity sensor found on the device"
+        if "#" in source:
+            if role == ROLE_OUTDOOR:
+                return "weather service (no outdoor humidity sensor)"
+            return "no humidity sensor found on the device"
+        return "humidity sensor found on the device"
+
+    def _note_humidity_source(self, role: str, source: str | None, value: float | None, chosen: str | None) -> None:
+        """Announce each real change of the humidity source a chart role reads, once (Issue #1455).
+
+        Occupant view: when the bedroom's humidity sensor dies, or the outdoor line drops to the weather service's
+        area-wide humidity, the log and the Activity log say so instead of the chart line quietly changing meaning.
+        Same mechanism as the room temperature (``_source_changed`` / ``_announce_source``, Issue #1230 R1c): one
+        INFO line and one ``humidity_source_changed`` event per real change per role per zone, nothing for a repeat,
+        nothing while the startup coalesce is active, and the first source after it is a "using" line only. "No
+        source" (``None``) is a source here, so a dead bedroom sensor with no fallback is announced too. Called from
+        ``_read_chart_humidity``, whose every caller (the five chart-row sites) runs on the event loop. Chart only:
+        no Repairs card. Never raises.
+        """
+        try:
+            key = f"humidity:{role}"
+            if not self._source_changed(key, source):
+                return
+            subject = _HUMIDITY_ROLE_SUBJECT.get(role, f"{role} humidity")
+            reason = self._humidity_source_reason(role, source, chosen)
+            to_name, to_kind = self._humidity_source_name(source), self._humidity_source_kind(role, source, chosen)
+            to_text = self._humidity_source_text(source, to_name, to_kind, value)
+            announced = self._sources_announced_map()
+            if key not in announced:
+                note = None if chosen and source == chosen else reason
+                self._announce_source(key, source, subject=subject, to_text=to_text, using_note=note)
+                return
+            previous = announced[key]
+            from_value = read_humidity_source(self.hass, previous)
+            from_name = self._humidity_source_name(previous)
+            from_kind = self._humidity_source_kind(role, previous, chosen)
+            self._announce_source(
+                key,
+                source,
+                subject=subject,
+                to_text=to_text,
+                from_text=self._humidity_source_text(previous, from_name, from_kind, from_value),
+                reason=reason,
+                event_type="humidity_source_changed",
+                payload={
+                    "role": role,
+                    "subject": subject,
+                    "from_entity": previous,
+                    "from_name": from_name,
+                    "from_kind": from_kind,
+                    "from_rh": from_value,
+                    "to_entity": source,
+                    "to_name": to_name,
+                    "to_kind": to_kind,
+                    "to_rh": value,
+                },
+            )
+        except Exception:  # noqa: BLE001 - log text must never fail a chart row
+            _LOGGER.debug("chart_log: could not announce the humidity source", exc_info=True)
+
+    def _humidity_source_name(self, source: str | None) -> str | None:
+        """Friendly name of a humidity source's entity (``climate.x#current_humidity`` names ``climate.x``)."""
+        if source is None:
+            return None
+        return self._indoor_friendly_name(source.split("#", 1)[0])
+
+    @staticmethod
+    def _humidity_source_text(source: str | None, name: str | None, kind: str | None, value: float | None) -> str:
+        """``"<name>" (<source>, <kind>, <value>%)``, or ``no humidity source``; the value at native resolution."""
+        if source is None:
+            return "no humidity source"
+        shown = "no reading" if value is None else f"{value:g}%"
+        return f'"{name}" ({source}, {kind}, {shown})'
 
     def _companion_for_resolver(self) -> CompanionSensors | None:
         """The companion holder for the indoor resolver, or None when the occupant set it Off (Issue #1230 R1b)."""

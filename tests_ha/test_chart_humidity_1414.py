@@ -104,5 +104,16 @@ async def test_rows_carry_humidity_and_feels_like(hass: HomeAssistant, tmp_path)
     last = chart["state_log"][-1]
     assert last["outdoor_humidity"] == 80.0 and last["outdoor_feelslike"] == pytest.approx(17.4, abs=0.05)
 
+    # Issue #1459: the capabilities block, built on HA's executor thread as the REST view does, finds the thermostat's
+    # own humidity sensor through the device lookup the rows above made on the event loop (cache only: the thermostat's
+    # current_humidity is gone here, so only the device sensor can make it True).
+    attrs = {k: v for k, v in hass.states.get(climate_id).attributes.items() if k != "current_humidity"}
+    hass.states.async_set(climate_id, "cool", attrs)
+    caps = (await hass.async_add_executor_job(coordinator.get_chart_data, "24h"))["capabilities"]
+    assert caps["humidity_indoor"] is True and caps["humidity_outdoor"] is True
+    coordinator._companion_sensors_cache = {}  # no lookup made on the loop yet: the executor never reads the registry
+    caps = (await hass.async_add_executor_job(coordinator.get_chart_data, "24h"))["capabilities"]
+    assert caps["humidity_indoor"] is False
+
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

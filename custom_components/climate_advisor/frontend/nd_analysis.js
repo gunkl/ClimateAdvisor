@@ -162,7 +162,8 @@
     }
     if (tm) {
       var sh = tm.swing_heat != null ? tm.swing_heat : null, sc = tm.swing_cool != null ? tm.swing_cool : null;
-      if (sh != null || sc != null) row('Thermostat swing: heat starts ' + ND.num(sh != null ? sh : 1.5, 1) + ' below the setpoint, cooling ' + ND.num(sc != null ? sc : 1.5, 1) + ' above' +
+      var swDec = ND.sym(tm.unit || ND.unit) === '°C' ? 2 : 1;  // Issue #1477: 1.5 F = 0.83 C, not 0.8
+      if (sh != null || sc != null) row('Thermostat swing: heat starts ' + ND.num(sh != null ? sh : 1.5, swDec) + ' below the setpoint, cooling ' + ND.num(sc != null ? sc : 1.5, swDec) + ' above' +
         (tm.swing_heat_measured && tm.swing_cool_measured ? '' : ' (partly estimated)'), 'swing_heat ' + ND.num(sh, 2) + ' · swing_cool ' + ND.num(sc, 2) + ' ' + ND.sym(tm.unit || ND.unit), '');
       var envN = (tm.observation_count_passive || 0) + (tm.observation_count_vent_window || 0) + (tm.observation_count_vent_fan || 0) + (tm.observation_count_solar || 0);
       var hvN = (tm.observation_count_heat || 0) + (tm.observation_count_cool || 0);

@@ -3,6 +3,21 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.17] — unreleased
+
+- Fix #1477: the heat and cool "swing" Climate Advisor learns (how far past the setpoint your thermostat lets the room drift before it starts the heat or AC) now comes from your finest temperature readings and is rounded up to the next half degree.
+  - **What you'll notice:** on a thermostat that starts the heat about 1.44 °F below its setpoint, the Thermal model card now says 1.5 °F below setpoint instead of 1.0 °F. On a Celsius install the same swing reads 0.83 °C.
+  - **Why it was stuck at 1.0 °F:** the learned value was the middle of the last 15 heat starts. Five older starts had been read on the thermostat's whole-degree display (1.0 °F each). Only two had been read on its finer sensor (1.44 °F each). Now, when finer readings are among the recent starts, they decide; whole-degree starts count again once no finer one is left among them.
+  - **Rounding:** the value is always rounded up to the next half degree °F (1.44 → 1.5, 1.0 stays 1.0, 1.01 → 1.5). A swing that is too small makes Climate Advisor expect the heat or AC sooner than your thermostat really starts it. The 1.5 °F default before anything is learned is unchanged.
+  - **Takes effect at once:** the stored value is recomputed from the recent starts when Climate Advisor loads, without waiting for the next heating or cooling run.
+  - **What changes at home, with a heat swing of 1.5 °F instead of 1.0 °F (thermostat in heat):**
+    - **Bedroom at night:** Climate Advisor raises the hallway setpoint for the bedroom once the bedroom is more than 1.5 °F below its target (was 1.0 °F), and lowers it again once the bedroom is more than 1.5 °F past the target.
+    - **Comfort alerts:** a room up to 1.5 °F under the bottom of your comfort range is now treated as the thermostat's own drift, not a comfort problem.
+    - **Window suggestions:** outdoor air that would cool the house is no longer suggested while the house is within 1.5 °F of the bottom of the range.
+  - **Cooling:** the cool swing works the same way. It is still at its 1.5 °F default on a home that has not cooled since swing learning began. It learns at the first real cooling runs, including on thermostats that use a heat/cool range.
+  - **Plan list:** when a direction has not been learned yet, the Next 24 hours plan now uses the same 1.5 °F default as everything else (it used 1.0 °F).
+  - **Tools:** `tools/thermal_replay.py --chart-log` reads each past run at the precision it was recorded with, so it learns the same value as the integration. `tools/learning_db.py --swing` and the AI context show the median before rounding next to the stored value.
+
 ## [0.9.14] — 2026-11-08
 
 - Fix #1463: the Status chart's humidity axes now always run 0-100%, on both the temperature and outdoor charts. Before, the axis fitted itself to the humidity in view, so a small change (for example the bedroom going from 57% to 60% in an hour) was stretched across the whole chart height and looked like a line shooting straight up.

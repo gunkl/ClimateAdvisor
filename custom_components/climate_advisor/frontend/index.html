@@ -1447,8 +1447,11 @@
   if (tm.cooling_rate != null) hvacParamRows.push({ label: 'Cooling', value: `−${tm.cooling_rate.toFixed(1)} ${unitLabel}/hr` });
   // Swing rows — show only when HVAC has ever been observed
   if (tm.heating_rate != null || tm.cooling_rate != null || tm.observation_count_swing_heat > 0 || tm.observation_count_swing_cool > 0) {
-    const swHeat = (tm.swing_heat ?? 1.5).toFixed(1);
-    const swCool = (tm.swing_cool ?? 1.5).toFixed(1);
+    // Issue #1477: the swing is a half degree F (1.5 F); in Celsius that is 0.83 C, so show two decimals there
+    // (one would print 0.8 C = 1.44 F, the very undershoot the rounding removes).
+    const swDec = unitLabel === '°C' ? 2 : 1;
+    const swHeat = (tm.swing_heat ?? 1.5).toFixed(swDec);
+    const swCool = (tm.swing_cool ?? 1.5).toFixed(swDec);
     const swHeatHint = tm.swing_heat_measured ? '' : ' <span class="tm-swing-hint">(estimated)</span>';
     const swCoolHint = tm.swing_cool_measured ? '' : ' <span class="tm-swing-hint">(estimated)</span>';
     // Issue #1234: the swing is one-sided - how far past the setpoint the thermostat lets the room

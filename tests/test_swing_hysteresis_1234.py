@@ -95,6 +95,11 @@ class _Rig:
         return self.model()[f"swing_{self.mode}_f"]
 
     @property
+    def raw(self) -> float | None:
+        """Issue #1477: the median before the half-degree-up rounding (``swing`` is that rounded up)."""
+        return self.model()[f"swing_{self.mode}_raw_f"]
+
+    @property
     def count(self) -> int:
         return self.model()[f"observation_count_swing_{self.mode}"]
 
@@ -139,7 +144,7 @@ def test_steady_fine_sensor_cycle_samples_the_real_hysteresis(tmp_path, mode):
     on = _past(mode, sp, 1.36)
     off = _past(mode, sp, -0.18)  # coasts to just past the setpoint
     rig.cycle(_T0, sp=sp, on_indoor=on, off_indoor=off)
-    assert rig.swing == pytest.approx(1.36)
+    assert rig.swing == 1.5 and rig.raw == pytest.approx(1.36)  # Issue #1477: stored = raw rounded up to 0.5
     assert rig.model()[f"swing_{mode}_resolution_f"] == 0.0
 
 
@@ -166,7 +171,7 @@ def test_on_transition_inside_setpoint_change_window_is_not_hysteresis(tmp_path,
     rig.fire(_T0 + timedelta(seconds=30), action=_MODES[mode]["running"], indoor=sp)
     rig.fire(_T0 + timedelta(minutes=9), action="idle", indoor=_past(mode, new_sp, 0.5))
     assert rig.count == 1
-    assert rig.swing == pytest.approx(1.4)
+    assert rig.swing == 1.5 and rig.raw == pytest.approx(1.4)  # Issue #1477: stored = raw rounded up to 0.5
 
 
 def test_setpoint_change_window_boundary_both_sides(tmp_path, mode):
@@ -229,7 +234,7 @@ def test_hvac_mode_change_counts_as_a_jump_not_hysteresis(tmp_path, mode):
     rig.fire(_T0 + timedelta(seconds=20), action=_MODES[mode]["running"], indoor=_past(mode, sp, 3.0))
     rig.fire(_T0 + timedelta(minutes=9), action="idle", indoor=_past(mode, sp, 0.2))
     assert rig.count == 1
-    assert rig.swing == pytest.approx(1.4)
+    assert rig.swing == 1.5 and rig.raw == pytest.approx(1.4)  # Issue #1477: stored = raw rounded up to 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +250,7 @@ def test_wrong_direction_run_gives_no_sample(tmp_path, mode):
     on = _past(mode, sp, 1.3)
     rig.cycle(_T0, sp=sp, on_indoor=on, off_indoor=on + _MODES[mode]["past"] * 0.4)  # moved further away
     assert rig.count == 1
-    assert rig.swing == pytest.approx(1.4)
+    assert rig.swing == 1.5 and rig.raw == pytest.approx(1.4)  # Issue #1477: stored = raw rounded up to 0.5
 
 
 def test_on_at_or_inside_setpoint_gives_no_sample(tmp_path, mode):
@@ -369,7 +374,8 @@ def test_migration_runs_once_and_keeps_newly_learned_values(tmp_path):
     eng.save_state()
     eng2 = LearningEngine(tmp_path)
     eng2.load_state()
-    assert eng2.get_thermal_model()["swing_heat_f"] == pytest.approx(1.4)
+    assert eng2.get_thermal_model()["swing_heat_f"] == 1.5  # Issue #1477: 1.4 rounded up to the half degree
+    assert eng2.get_thermal_model()["swing_heat_raw_f"] == pytest.approx(1.4)
     assert eng2.get_thermal_model()["observation_count_swing_heat"] == 1
 
 
@@ -384,7 +390,7 @@ def test_off_point_is_recorded_separately_and_never_mixed_into_swing(tmp_path, m
     _settled(rig, sp)
     rig.cycle(_T0, sp=sp, on_indoor=_past(mode, sp, 1.4), off_indoor=_past(mode, sp, 0.9))
     m = rig.model()
-    assert rig.swing == pytest.approx(1.4)
+    assert rig.swing == 1.5 and rig.raw == pytest.approx(1.4)  # Issue #1477: stored = raw rounded up to 0.5
     assert m[f"swing_{mode}_off_point_f"] == pytest.approx(0.9)
 
 
@@ -448,7 +454,9 @@ def test_replay_and_production_agree_on_the_same_cycles(tmp_path, mode):
         rig.cycle(_T0, sp=sp, on_indoor=on, off_indoor=off)
         live = rig.swing
         replayed = tr.compute_swing_samples_from_chart_log(_chart_rows(mode, sp, on, off))[mode]
-        replay_val = replayed[0]["value_f"] if replayed else None
+        # Issue #1477: live stores the estimator's output (rounded up to 0.5 F), so compare it with the same
+        # estimator over the replayed samples, the path thermal_replay writes (``apply_swing_samples``).
+        replay_val = tr._swing.summarize_swing_samples(replayed)["value_f"] if replayed else None
         assert live == replay_val, f"case {i}: live={live} replay={replay_val}"
 
 
@@ -579,7 +587,7 @@ def test_hvac_action_flap_does_not_make_a_second_sample(tmp_path, mode):
     rig.fire(_T0 + timedelta(minutes=4, seconds=5), action=run, indoor=_past(mode, sp, 1.0))  # flap
     rig.fire(_T0 + timedelta(minutes=9), action="idle", indoor=_past(mode, sp, 0.6))
     assert rig.count == 1
-    assert rig.swing == pytest.approx(1.4)
+    assert rig.swing == 1.5 and rig.raw == pytest.approx(1.4)  # Issue #1477: stored = raw rounded up to 0.5
     # a genuine later start (minutes after the off) is still a sample
     rig.cycle(_T0 + timedelta(hours=1), sp=sp, on_indoor=_past(mode, sp, 1.4), off_indoor=_past(mode, sp, 0.9))
     assert rig.count == 2

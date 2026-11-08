@@ -673,7 +673,13 @@ Retired: `abs(T_end - T_start) / 2` (half the rise per run) and its `THERMAL_HVA
 
 **Exclusions:** on-transition within `THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S` of a setpoint/HVAC-mode change (startup counts as one: `async_setup` stamps `_last_setpoint_change_ts`, which is not persisted, so a change made just before a restart can't be learned as hysteresis — Issue #1256; at most one sample is lost per restart); phantom (mode-fallback) sessions; `hvac_action` flapping (on within `THERMAL_SWING_REARM_WINDOW_S` of the previous off, same direction); wrong-direction runs (heat that cooled / cool that warmed). Rules: `swing.evaluate_swing_cycle` (shared by `coordinator.py` and `tools/thermal_replay.py`).
 
-**Estimator:** median of the last `THERMAL_SWING_ESTIMATOR_WINDOW` samples. Resolution is inferred from the readings themselves in the configured unit (`swing.infer_resolution_f`: whole F -> 1.0, half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, finer such as an Ecobee's tenths -> 0.0); with fewer than 3 distinct readings it falls back to the source (sensor/input_number 0.0; `climate_fallback` one whole degree of the configured unit: 1.0 F, or 1.8 F on Celsius). A quantised sample is `setpoint - k`, true value within +/- resolution/2. The stop point is kept in `swing_*_off_point_f` and never mixed into the swing; coast overshoot (Issue #1233) is a separate quantity, below.
+**Estimator:** median of the last `THERMAL_SWING_ESTIMATOR_WINDOW` samples, using only the finest-resolution samples in that window when it mixes resolutions (`swing.finest_resolution_samples`, Issue #1477), rounded UP to the next half degree F (`swing.round_swing_up_f`):
+```
+swing_f     = ceil((median - 1e-6) / 0.5) * 0.5     # 1.44 -> 1.5, 1.0 -> 1.0, 1.0000001 -> 1.0, 1.01 -> 1.5
+swing_raw_f = median                                 # diagnostics only
+display     = swing_f                (F)   |   swing_f * 5/9, 2 decimals   (C; 1.5 F -> 0.83 C, no offset)
+```
+Owner decision 2026-11-08: a too-small swing makes CA expect the equipment sooner than the thermostat starts, so err up. `LearningEngine.load_state` recomputes the stored value from the retained samples (`swing.refresh_swing_cache`). `tools/thermal_replay.py` infers each replayed cycle's resolution from the nearest readings up to its stop (`_local_reading_resolution`), so a log that switched to a finer sensor gives its old whole-degree cycles 1.0 as live recorded them. Resolution is inferred from the readings themselves in the configured unit (`swing.infer_resolution_f`: whole F -> 1.0, half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, finer such as an Ecobee's tenths -> 0.0); with fewer than 3 distinct readings it falls back to the source (sensor/input_number 0.0; `climate_fallback` one whole degree of the configured unit: 1.0 F, or 1.8 F on Celsius). A quantised sample is `setpoint - k`, true value within +/- resolution/2. The stop point is kept in `swing_*_off_point_f` and never mixed into the swing; coast overshoot (Issue #1233) is a separate quantity, below.
 
 **Thermostats with no `hvac_action`:** sampling uses only real `hvac_action` heating/cooling edges, so a thermostat that never reports `hvac_action` never learns a swing and stays at `THERMAL_SWING_DEFAULT_F` (1.5 F, "estimated").
 
@@ -697,6 +703,8 @@ by 5/9 for Celsius), never `from_fahrenheit()`. The +32 offset does not apply.
 | `THERMAL_SWING_REARM_WINDOW_S` | 60 | On within this long of the previous off = `hvac_action` flap, not a sample |
 | `THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F` | 1.0 | Fallback quantisation of the climate_fallback reading until 3 distinct readings exist (x1.8 = 1.8 F on Celsius); otherwise inferred from the readings |
 | `THERMAL_SWING_DEFINITION_VERSION` | 2 | Cache marker; older caches are nulled on load |
+| `THERMAL_SWING_ROUND_STEP_F` | 0.5 | Issue #1477: the stored/used swing is rounded UP to this step (F) |
+| `THERMAL_SWING_ROUND_TOLERANCE_F` | 1e-6 | Issue #1477: float noise below this does not round up |
 | `THERMAL_SWING_CONF_LOW` / `_MEDIUM` / `_HIGH` | 1 / 3 / 10 | none -> low -> medium -> high thresholds |
 | `THERMAL_SWING_AUDIT_CAP` | 50 | Newest judged cycles kept per mode in `swing_*_audit` (Issue #1233); `swing_*_reject_counts` are cumulative |
 | `THERMAL_COAST_MAX_S` | 1800 | A coast window ends at the latest this long after the stop |

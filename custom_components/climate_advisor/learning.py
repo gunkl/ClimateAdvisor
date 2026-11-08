@@ -61,6 +61,7 @@ from .swing import (
     apply_coast_samples,
     apply_swing_samples,
     record_swing_audit,
+    refresh_swing_cache,
     reset_swing_cache,
     swing_debug_summary,
 )
@@ -1102,6 +1103,19 @@ class LearningEngine:
                         "Thermal model cache: swing values from the retired definition reset (Issue #1234); "
                         "they re-learn from real heat/cool start points"
                     )
+                # Issue #1477: recompute the stored swing from the retained samples with the current estimator
+                # (finest-resolution samples, rounded up to the next half degree F), so a value stored by an
+                # older estimator is right from the first cycle after the update.
+                if isinstance(_cache_mig, dict):
+                    _before_swing = {m: _cache_mig.get(f"swing_{m}_f") for m in ("heat", "cool")}
+                    for _mode in refresh_swing_cache(_cache_mig):
+                        _LOGGER.info(
+                            "Thermal model cache: %s swing recomputed %s -> %s F (raw median %s F; Issue #1477)",
+                            _mode,
+                            _before_swing[_mode],
+                            _cache_mig.get(f"swing_{_mode}_f"),
+                            _cache_mig.get(f"swing_{_mode}_raw_f"),
+                        )
                 # Issue #1277: confidence grades are computed live from the counts; the stored copies were
                 # never refreshed and misled the diagnostic tools, so drop them.
                 if isinstance(_cache_mig, dict) and drop_stored_grades(_cache_mig):
@@ -1536,6 +1550,9 @@ class LearningEngine:
             "swing_cool_f_display": (
                 cache.get("swing_cool_f") if cache.get("swing_cool_f") is not None else THERMAL_SWING_DEFAULT_F
             ),
+            # Issue #1477: the median before the half-degree-up rounding (diagnostics only; never a decision input)
+            "swing_heat_raw_f": cache.get("swing_heat_raw_f"),
+            "swing_cool_raw_f": cache.get("swing_cool_raw_f"),
             "swing_heat_resolution_f": cache.get("swing_heat_resolution_f", 0.0),
             "swing_cool_resolution_f": cache.get("swing_cool_resolution_f", 0.0),
             "swing_heat_off_point_f": cache.get("swing_heat_off_point_f"),

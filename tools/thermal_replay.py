@@ -1546,6 +1546,33 @@ def _chart_entries_to_ols_samples(
     return result
 
 
+def _local_reading_resolution(readings: list, log_has_finer: bool) -> float | None:
+    """Reading resolution of the cycle that just ended, from the readings up to its stop (Issue #1477).
+
+    Walks back from the newest reading (the cycle's own stop and start come first) only as far as needed for
+    ``infer_resolution_f``'s distinct readings, so a log that switched from the thermostat's whole-degree
+    reading to its finer sensor gives each cycle the resolution it was read at (an off-grid reading in the
+    span makes it fine at once). A steady thermostat repeats one or two readings and never gets there: when
+    the log is proven to hold finer readings elsewhere (``log_has_finer``), the cycle's own two readings both
+    on a grid are that grid's (a fine sensor is off-grid). Otherwise ``None``: the caller falls back to the
+    whole log, as before (one repeated whole reading on its own proves nothing).
+    """
+    distinct: set[float] = set()
+    span: list = []
+    for r in reversed(readings):
+        if r is None:
+            continue
+        span.append(r)
+        distinct.add(round(float(r), 2))
+        if len(distinct) >= 3:
+            return _swing.infer_resolution_f(span)
+    if log_has_finer:
+        own = [r for r in readings[-2:] if r is not None]
+        if len(own) == 2:
+            return _swing.grid_resolution_f(own)
+    return None
+
+
 def compute_swing_samples_from_chart_log(entries: list[dict]) -> dict[str, list[dict]]:
     """Swing samples (``{"heat": [...], "cool": [...]}``) from chart_log ``hvac_action_change`` rows.
 
@@ -1564,20 +1591,29 @@ def compute_swing_samples_from_chart_log(entries: list[dict]) -> dict[str, list[
     never ``indoor``, which is the comfort-facing value and carries the sleep-window bedroom swap.
     Rows without it (every chart_log written before v0.8.34) give no sample - live re-learns
     after the migration, so an empty backfill on old data is the safe outcome. Reading resolution
-    is inferred from those readings (unit unknown here, so Fahrenheit then Celsius grids); the
-    same ``THERMAL_SWING_REARM_WINDOW_S`` flap guard as live applies.
+    is inferred from those readings (unit unknown here, so Fahrenheit then Celsius grids) PER CYCLE,
+    over the nearest event rows up to the cycle's stop row (``_local_reading_resolution``, Issue #1477):
+    a log that switched from the thermostat's whole-degree reading to its finer sensor (0.9.2, #1230 R1b)
+    gives its older cycles 1.0 and its newer ones 0.0, as live recorded them, so the estimator's
+    finest-resolution rule (``swing.finest_resolution_samples``) sees the same tiers as live. Too few
+    distinct readings nearby fall back to the whole log's inference. The same
+    ``THERMAL_SWING_REARM_WINDOW_S`` flap guard as live applies.
     """
     rows = [e for e in entries if e.get("ts")]
     event_rows = [e for e in rows if e.get("event") == "hvac_action_change"]
     inferred = _swing.infer_resolution_f([e.get("indoor_primary") for e in event_rows])
-    resolution = inferred if inferred is not None else 0.0
+    log_resolution = inferred if inferred is not None else 0.0
+    seen_readings: list = []
     out: dict[str, list[dict]] = {"heat": [], "cool": []}
     open_cycle: dict | None = None
     last_off: dict[str, str] = {}
     for idx, row in enumerate(rows):
         if row.get("event") == "hvac_action_change":
+            seen_readings.append(row.get("indoor_primary"))
             cat = _hvac_category(row.get("hvac"))
             if open_cycle is not None and cat != open_cycle["mode"]:
+                local = _local_reading_resolution(seen_readings, log_has_finer=inferred == 0.0)
+                resolution = local if local is not None else log_resolution
                 verdict = _swing.evaluate_swing_cycle(
                     mode=open_cycle["mode"],
                     ts=open_cycle["ts"],

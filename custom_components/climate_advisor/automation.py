@@ -7470,7 +7470,8 @@ class AutomationEngine:
             self._remote_last_reason = decision.reason
             raised = decision.action is RemoteOffsetAction.RAISE
             note = (
-                f"{decision.reason}: remote {self._t(ctx.value_f)} vs target {self._t(target)} swing {self._td(swing)}"
+                f"{decision.reason}: remote {self._t(ctx.value_f)} vs target {self._t(target)}"
+                f" swing {self._td(swing, 2 if self._temp_unit == 'celsius' else 1)}"  # #1477: 1.5 F = 0.83 C
             )
         applied = self._remote_offset_applied_f
         if applied is None:

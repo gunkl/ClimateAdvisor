@@ -407,7 +407,7 @@ test.describe('Temperature Forecast Chart', () => {
   test('status tab shows °C not °F when unit is celsius', async ({ browser }) => {
     const context = await browser.newContext();
     const page = await context.newPage();
-    await page.route('**/api/climate_advisor/status', route => route.fulfill({
+    await page.route('**/api/climate_advisor/status**', route => route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({

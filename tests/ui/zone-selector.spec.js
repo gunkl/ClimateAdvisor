@@ -19,6 +19,18 @@ const { test, expect } = require('@playwright/test');
 // describe block at the bottom of this file, which mirrors the real
 // two-step shape instead of collapsing it into one mocked response.
 
+// Issue #1454: the dashboards read the zone list from GET /zones (names no zone by design, raises nothing), never from
+// an unscoped /status. The mock server answers /zones with one zone ('mock-zone'); a multi-zone test serves its list.
+async function routeZones(page, zones) {
+  await page.route('**/api/climate_advisor/zones**', (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify({ zones, zone_count: zones.length }),
+  }));
+}
+const TWO_ZONES = [
+  { entry_id: 'zone-bedroom', title: 'Bedroom' },
+  { entry_id: 'zone-living', title: 'Living Room' },
+];
+
 test.describe('Zone selector (Issue #796 PR9)', () => {
 
   test('single-zone install: selector row stays hidden (pixel-identical to today)', async ({ page }) => {
@@ -259,6 +271,7 @@ test.describe('Zone selector (Issue #796 PR9)', () => {
       });
     });
 
+    await routeZones(page, TWO_ZONES);
     // Seed localStorage with an entry_id for a zone that has since been
     // removed, before any page script runs — simulates a returning user
     // whose stored selection is now stale.
@@ -268,8 +281,8 @@ test.describe('Zone selector (Issue #796 PR9)', () => {
 
     await page.goto('/');
     // The very first /status request carries the stale entry_id and 503s;
-    // loadStatus()'s self-heal (Issue #812 fix) must clear it and retry
-    // unscoped before the page ever settles into a visible, non-error state.
+    // loadStatus() re-reads the zone list from /zones (Issue #1454: never an
+    // unscoped /status), re-picks the first zone and retries it at once.
     await page.waitForSelector('#status-grid', { state: 'visible' });
 
     const row = page.locator('#zone-selector-row');
@@ -288,42 +301,25 @@ test.describe('Zone selector (Issue #796 PR9)', () => {
     expect(stored).toBe('zone-bedroom');
   });
 
-  test.describe('Issue #813: real two-step bootstrap contract (no guessing, ever)', () => {
+  test.describe('Issue #813 / #1454: a first visit never sends an unscoped request', () => {
 
-    test('first-ever visit, multi-zone: bootstrap response never carries status data, second request supplies it', async ({ page }) => {
-      const zones = [
-        { entry_id: 'zone-bedroom', title: 'Bedroom' },
-        { entry_id: 'zone-living', title: 'Living Room' },
-      ];
-      let firstCallSeenWithNoEntryId = false;
-
+    test('first-ever visit, multi-zone: the zone list comes from /zones and the first status request names a zone', async ({ page }) => {
+      const unscopedStatus = [];
+      page.on('request', (req) => {
+        if (req.url().includes('/api/climate_advisor/status') && !/[?&](entry_id|zone)=/.test(req.url())) unscopedStatus.push(req.url());
+      });
+      await routeZones(page, TWO_ZONES);
       await page.route('**/api/climate_advisor/status**', (route) => {
-        const url = new URL(route.request().url());
-        const entryId = url.searchParams.get('entry_id');
-        if (!entryId) {
-          firstCallSeenWithNoEntryId = true;
-          // Mirrors api.py's real bootstrap-only response exactly: no
-          // coordinator-derived field is present at all — proving the
-          // backend never resolved (guessed) a coordinator for this call.
-          route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ zone_selection_required: true, zones, zone_count: 2 }),
-          });
-          return;
+        const entryId = new URL(route.request().url()).searchParams.get('entry_id');
+        if (!entryId) { // the real backend's bootstrap answer, which also raises the Repairs card: must never be asked
+          return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ zone_selection_required: true, zones: TWO_ZONES, zone_count: 2 }) });
         }
         route.fulfill({
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({
-            day_type: 'mild',
-            hvac_mode: 'off',
-            automation_enabled: true,
-            occupancy_mode: 'home',
-            automation_status: 'active',
-            compliance_score: 1.0,
-            zones,
-            zone_count: 2,
+            day_type: 'mild', hvac_mode: 'off', automation_enabled: true, occupancy_mode: 'home',
+            automation_status: 'active', compliance_score: 1.0, zones: TWO_ZONES, zone_count: 2,
           }),
         });
       });
@@ -335,59 +331,35 @@ test.describe('Zone selector (Issue #796 PR9)', () => {
       await scopedStatusRequest;
       await page.waitForSelector('#status-grid', { state: 'visible' });
 
-      expect(firstCallSeenWithNoEntryId).toBe(true);
+      expect(unscopedStatus).toEqual([]);
       const buttons = page.locator('#zone-selector-row .zone-tab-btn');
       await expect(buttons).toHaveCount(2);
       await expect(buttons.nth(0)).toHaveClass(/active/);
-      // The status grid must reflect the real (second-request) data, not be
-      // stuck on the bootstrap response's absence of status fields.
       await expect(page.locator('#status-grid')).toContainText('Following today’s plan');
       const stored = await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'));
       expect(stored).toBe('zone-bedroom');
     });
 
-    test('stale stored entry_id chains through BOTH the 503 self-heal and the bootstrap requirement to a real result', async ({ page }) => {
-      // Worst realistic case for the shared retry-depth counter: a stale
-      // stored entry_id 503s first (self-heal #1: clear + retry unscoped),
-      // and since the install is still multi-zone, the unscoped retry comes
-      // back zone_selection_required (self-heal #2: pick a zone + retry
-      // scoped) before the third call finally succeeds. Proves the counter
-      // guard doesn't let the first correction swallow the second.
-      const zones = [
-        { entry_id: 'zone-bedroom', title: 'Bedroom' },
-        { entry_id: 'zone-living', title: 'Living Room' },
-      ];
+    test('stale stored entry_id: the 503 re-reads /zones and the first listed zone is loaded, never unscoped', async ({ page }) => {
+      const unscopedStatus = [];
+      page.on('request', (req) => {
+        if (req.url().includes('/api/climate_advisor/status') && !/[?&](entry_id|zone)=/.test(req.url())) unscopedStatus.push(req.url());
+      });
+      await routeZones(page, TWO_ZONES);
       await page.route('**/api/climate_advisor/status**', (route) => {
-        const url = new URL(route.request().url());
-        const entryId = url.searchParams.get('entry_id');
+        const entryId = new URL(route.request().url()).searchParams.get('entry_id');
         if (entryId === 'zone-removed') {
-          route.fulfill({
-            status: 503,
-            contentType: 'application/json',
-            body: JSON.stringify({ error: 'Climate Advisor not loaded' }),
-          });
-          return;
+          return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Climate Advisor not loaded' }) });
         }
         if (!entryId) {
-          route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ zone_selection_required: true, zones, zone_count: 2 }),
-          });
-          return;
+          return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ zone_selection_required: true, zones: TWO_ZONES, zone_count: 2 }) });
         }
         route.fulfill({
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({
-            day_type: 'mild',
-            hvac_mode: 'off',
-            automation_enabled: true,
-            occupancy_mode: 'home',
-            automation_status: 'active',
-            compliance_score: 1.0,
-            zones,
-            zone_count: 2,
+            day_type: 'mild', hvac_mode: 'off', automation_enabled: true, occupancy_mode: 'home',
+            automation_status: 'active', compliance_score: 1.0, zones: TWO_ZONES, zone_count: 2,
           }),
         });
       });
@@ -403,6 +375,7 @@ test.describe('Zone selector (Issue #796 PR9)', () => {
       await expect(buttons).toHaveCount(2);
       await expect(buttons.nth(0)).toHaveClass(/active/);
       await expect(page.locator('#status-grid')).toContainText('Following today’s plan');
+      expect(unscopedStatus).toEqual([]);
       const stored = await page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'));
       expect(stored).toBe('zone-bedroom');
     });
@@ -421,6 +394,8 @@ const ZONES_1418 = [ // three zones, so the list stays multi-zone while one relo
   { entry_id: 'zone-studio', title: 'Studio' },
 ];
 async function routeStatus1418(page) {
+  // the real list_zones() omits a zone whose coordinator is not loaded (mid-reload)
+  await routeZones(page, ZONES_1418.filter((z) => z.entry_id !== 'zone-living'));
   await page.route('**/api/climate_advisor/status**', (route) => {
     const url = new URL(route.request().url());
     const entryId = url.searchParams.get('entry_id');
@@ -437,7 +412,7 @@ async function routeStatus1418(page) {
     });
   });
 }
-const UNSCOPED_1418 = /\/api\/climate_advisor\/(chart_data|automation_state|briefing|learning|engines|timeline|settings_extra)(\?|$)/;
+const UNSCOPED_1418 = /\/api\/climate_advisor\/(status|chart_data|automation_state|briefing|learning|engines|timeline|settings_extra)(\?|$)/;
 
 test('Issue #1418 (classic): a zone mid-reload does not leave the page polling with no zone', async ({ page }) => {
   await routeStatus1418(page);
@@ -481,6 +456,7 @@ test('Issue #1418 (new dashboard): a zone mid-reload does not leave the page pol
 // every later request went out with no entry_id. Now the page stays on the zone the owner picked.
 async function routeStatusReloadedOnce(page) {
   let living503 = 1;
+  await routeZones(page, ZONES_1418);
   await page.route('**/api/climate_advisor/status**', (route) => {
     const entryId = new URL(route.request().url()).searchParams.get('entry_id');
     if (entryId === 'zone-living' && living503 > 0) {

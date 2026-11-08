@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.12] — 2026-11-08
+
+- Fix #1454: an "Ambiguous zone selection" card no longer appears in Repairs after a Home Assistant restart when nothing is misconfigured. Climate Advisor's own dashboards raised it: a dashboard left open across a restart retried its status request with no zone while Climate Advisor was still starting, and a browser with no saved zone (first visit, cleared storage) asked for the zone list with an unscoped status request. Now the classic dashboard, the new dashboard and the Prediction accuracy page (on its own and on the Analysis tab) read the zone list from a new read-only `GET /api/climate_advisor/zones`, which names no zone by design and never raises the card, and every other request names a zone, a single-zone install included. A failed status request is retried for the same zone after 2 s, 5 s and 10 s, then the page says "Climate Advisor is starting" and keeps trying every minute; the rest of the page reloads once it answers. A saved zone that no longer exists is replaced by the first zone at once. The card is still raised for every other request that names no zone (Issue #1418 rule unchanged). Chart choices saved on a single-zone install before this release are kept.
+
 ## [0.9.11] — 2026-11-08
 
 - Fix #1414: the Status charts now show humidity and how warm or cold it feels.

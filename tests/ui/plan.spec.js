@@ -81,7 +81,7 @@ test.describe('Next 24 hours and the plan overlay (classic Status)', () => {
     await page.locator('#chart-key-body [data-series="ov:plan"]').click();
     await expect(page.locator('#chart-key-body [data-series="ov:plan"]')).toHaveAttribute('aria-pressed', 'false');
     expect((await planDatasets(page))[0].hidden).toBe(true);
-    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:default')));
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:mock-zone')));
     expect(stored.on['ov:plan']).toBe(false);
     await page.reload();
     await waitForChart(page);
@@ -150,7 +150,7 @@ test.describe('Next 24 hours and the plan overlay (classic Status)', () => {
   });
 
   test('a Celsius plan keeps the unit of the payload', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (r) => r.fulfill({ status: 200, contentType: 'application/json',
+    await page.route('**/api/climate_advisor/status**', (r) => r.fulfill({ status: 200, contentType: 'application/json',
       body: JSON.stringify({ day_type: 'mild', hvac_mode: 'off', unit: 'celsius', indoor_temp: 21.5, outdoor_temp: 18, automation_enabled: true, occupancy_mode: 'home' }) }));
     await page.route('**/api/climate_advisor/timeline**', async (r) => {
       const resp = await r.fetch();

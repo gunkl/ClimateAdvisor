@@ -126,9 +126,21 @@
     if (!ND.zone) return path;
     return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'entry_id=' + encodeURIComponent(ND.zone);
   };
+  // Issue #1454: every request names a zone. With none known yet (first load, nothing stored) the zone list comes from
+  // GET zones (names no zone by design, raises nothing) and a zone is picked first; with no zone loaded at all
+  // (Climate Advisor still starting) the request is not sent. An unscoped request raises the "Ambiguous zone
+  // selection" Repairs card (owner's rule, Issue #1418), so the dashboard never sends one.
+  ND.STARTING = 'Climate Advisor is starting';
+  function startingError() { var e = new Error(ND.STARTING); e.status = 503; e.starting = true; return e; }
+  ND.scopedPath = async function (path) {
+    if (!ND.zone) await ND.ensureZone();
+    if (!ND.zone) throw startingError();
+    return ND.withZone(path);
+  };
   async function request(path, opts, parse) {
     opts = opts || {};
-    if (!opts.noZone) path = ND.withZone(path); // noZone: only loadStatus()'s stale-zone retry (Issue #1418)
+    // zoneless: only GET zones (refreshZones below), the one view that names no zone by design
+    if (!opts.zoneless) path = await ND.scopedPath(path);
     var token = await getToken();
     var headers = Object.assign({}, opts.headers || {});
     if (token) headers.Authorization = 'Bearer ' + token;
@@ -161,10 +173,15 @@
   var zoneSig = null;
   function renderZones(zones, count) {
     var wrap = ND.$('zone-wrap'), sel = ND.$('zone-select');
-    if (!zones || count <= 1) {
+    if (!zones || !zones.length) { // none loaded (still starting): keep the zone, it is listed again once it is up
       wrap.hidden = true; sel.textContent = ''; zoneSig = null;
-      if (ND.zone) { ND.zone = null; ND.ls.del(ZONE_KEY); }
       return false;
+    }
+    if (count <= 1) { // Issue #1454: one zone is still named on every request; only the picker is hidden
+      wrap.hidden = true; sel.textContent = ''; zoneSig = null;
+      if (ND.zone === zones[0].entry_id) return false;
+      ND.zone = zones[0].entry_id; ND.ls.set(ZONE_KEY, ND.zone);
+      return true;
     }
     var sig = zones.map(function (z) { return z.entry_id; }).join(',');
     var changed = false;
@@ -184,36 +201,71 @@
     return changed;
   }
 
+  // The zone list from GET zones (Issue #1454). renderZones() keeps a listed zone, re-picks an unlisted one, and keeps
+  // the zone while the list is empty (still starting).
+  ND.refreshZones = async function () {
+    var d = await request('zones', { zoneless: true }, true);
+    var zones = d && Array.isArray(d.zones) ? d.zones : [];
+    renderZones(zones, zones.length);
+    return zones;
+  };
+  var zonePending = null;
+  ND.ensureZone = function () { // one zone-list request shared by everything that fires before a zone is known
+    if (ND.zone) return Promise.resolve(ND.zone);
+    if (!zonePending) {
+      zonePending = ND.refreshZones().catch(function () { return null; })
+        .then(function () { zonePending = null; return ND.zone; });
+    }
+    return zonePending;
+  };
+
   // ---------- status, health, banners ----------
-  var MAX_RETRY = 3;
-  ND.loadStatus = async function (depth, noZone) {
-    depth = depth || 0;
+  // Issue #1454: a failed status call (a 503 while Home Assistant restarts, a 404 before the views are registered, a
+  // network error) re-reads the zone list and retries the SAME zone after a back-off, then shows "Climate Advisor is
+  // starting"; the minute poll keeps trying. Before, the 503 retry dropped the zone and raised the Repairs card.
+  ND.STATUS_BACKOFF_MS = [2000, 5000, 10000];
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  ND.loadStatus = async function (attempt) {
+    attempt = attempt || 0;
     try {
-      var data = await ND.api('status', noZone ? { noZone: true } : undefined);
-      if (data.zone_selection_required) {
+      var data = await ND.api('status');
+      if (data.zone_selection_required) { // not expected (the request named a zone): re-pick from the list, retry
         renderZones(data.zones, data.zone_count);
-        if (depth < MAX_RETRY) return ND.loadStatus(depth + 1);
+        if (attempt < ND.STATUS_BACKOFF_MS.length) return ND.loadStatus(attempt + 1);
         return null;
       }
       renderZones(data.zones, data.zone_count);
+      var recovered = ND._statusDown || attempt > 0;
+      ND._statusDown = false;
       ND.status = data;
       ND.unit = data.unit || ND.unit;
       renderHealth(data);
       ND.renderBanners();
       ND.emit('status', data);
+      if (recovered && !ND._booting) ND.emit('refresh'); // the tab's own loads failed while Climate Advisor was starting
       return data;
     } catch (e) {
-      // Stale or reloading zone: keep ND.zone and send only this retry unscoped; renderZones() keeps it if it is
-      // listed again, else picks the first (Issue #1418: clearing it let requests fired meanwhile go unscoped and
-      // come back with the first zone's data).
-      if (depth < MAX_RETRY && ND.zone && e.message === 'HTTP 503' && !noZone) return ND.loadStatus(depth + 1, true);
-      ND.status = null;
-      ND.$('health-text').textContent = 'Could not load status: ' + e.message;
-      ND.$('health').className = 'health bad';
-      ND.renderBanners();
-      return null;
+      if (e.status === 400 || e.status === 401 || e.message === 'HTTP 401') return statusFailed('Could not load status: ' + e.message);
+      var before = ND.zone;
+      try { await ND.refreshZones(); } catch (e2) { /* zones not served yet: still starting */ }
+      if (attempt < ND.STATUS_BACKOFF_MS.length) {
+        if (!ND.status) { ND.$('health-text').textContent = 'Connecting to Climate Advisor…'; }
+        // a stored zone that is no longer listed was just re-picked: retry it now; the same zone waits
+        await wait(ND.zone !== before && ND.zone ? 0 : ND.STATUS_BACKOFF_MS[attempt]);
+        return ND.loadStatus(attempt + 1);
+      }
+      var starting = e.starting || !e.status || e.status === 404 || e.status >= 500;
+      return statusFailed(starting ? ND.STARTING + '. This page keeps trying every minute.' : 'Could not load status: ' + e.message);
     }
   };
+  function statusFailed(text) {
+    ND._statusDown = true;
+    ND.status = null;
+    ND.$('health-text').textContent = text;
+    ND.$('health').className = 'health bad';
+    ND.renderBanners();
+    return null;
+  }
   function renderHealth(s) {
     var ok = s.coordinator_healthy !== false;
     ND.$('health').className = 'health ' + (ok ? 'ok' : 'bad');

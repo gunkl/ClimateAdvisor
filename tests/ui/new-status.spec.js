@@ -50,7 +50,7 @@ test.describe('New dashboard: Status tab', () => {
     await expect(page.locator('.range-btn[data-range="3d"]')).toHaveAttribute('aria-pressed', 'true');
     await page.locator('#chart-key > summary').click(); // the key starts folded
     await page.locator('#chart-key-body [data-series="ov:plan"]').click();
-    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:default')));
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:mock-zone')));
     expect(stored.on['ov:plan']).toBe(false);
     expect(stored.range).toBe('3d');
     await page.locator('#chart-table-toggle').click();

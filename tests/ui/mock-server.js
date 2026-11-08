@@ -217,6 +217,13 @@ try { localStorage.setItem('hassTokens', JSON.stringify({access_token:'mock-toke
     return;
   }
 
+  // Issue #1454: the zone list the dashboards ask for before their first scoped call (names no zone by design)
+  if (pathname === '/api/climate_advisor/zones') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ zones: [{ entry_id: 'mock-zone', title: 'Home' }], zone_count: 1, version: 'mock' }));
+    return;
+  }
+
   if (pathname === '/api/climate_advisor/status') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({

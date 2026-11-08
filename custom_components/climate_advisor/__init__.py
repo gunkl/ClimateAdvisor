@@ -23,7 +23,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.start import async_at_started
 
 from . import log_capture, zone_registry
-from .api import API_VIEWS
+from .api import API_VIEWS, ZONELESS_VIEWS
 from .const import (
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
@@ -759,7 +759,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         with log_capture.zone_scope(coordinator.zone_label):
             try:
                 # Register REST API views for the dashboard panel
-                for view_cls in (*API_VIEWS, *DASHBOARD_VIEWS):
+                for view_cls in (*API_VIEWS, *DASHBOARD_VIEWS, *ZONELESS_VIEWS):
                     hass.http.register_view(view_cls())
 
                 # Register dashboard panel (iframe serving frontend/entry.html, which opens the new dashboard

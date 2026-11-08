@@ -27,7 +27,7 @@ const OFFSET = {
 };
 
 async function hvacHtml(page, body) {
-  await page.route('**/api/climate_advisor/status', (route) => {
+  await page.route('**/api/climate_advisor/status**', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
   await page.goto('/');
@@ -66,7 +66,7 @@ test.describe('Status card offset line (Issue #1194 d)', () => {
 // Issue #1194 (d) P2: the dashed "Thermostat set" chart series has a legend item only while it exists.
 test.describe('Chart legend for the commanded setpoint (Issue #1194 d)', () => {
   test('the Thermostat set legend item is hidden on a page with no offset night', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (route) => {
+    await page.route('**/api/climate_advisor/status**', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(BASE) });
     });
     await page.goto('/');

@@ -663,10 +663,26 @@ def test_auth_and_zone_handling_matches_classic():
         "climate_advisor_selected_zone",
         "entry_id=",
         "zone_selection_required",
-        "HTTP 503",
+        # Issue #1454: the zone list from GET zones, a failed status call retried with the same zone after a back-off
+        "zoneless: true",
+        "STATUS_BACKOFF_MS",
+        "Climate Advisor is starting",
     ):
         assert frag in core, frag
         assert frag in INDEX, frag
+
+
+def test_no_page_has_an_unscoped_request_path():
+    """Issue #1454: the #1418 ``noZone`` retry (status with no zone after a 503) raised the Repairs card after every
+    restart. No dashboard page may keep a way to send a request without a zone (only GET zones names none)."""
+    pages = {
+        **JS,
+        "index.html": INDEX,
+        "prediction_accuracy.html": (FE / "prediction_accuracy.html").read_text("utf-8"),
+    }
+    for name, src in pages.items():
+        assert "noZone" not in src, name
+        assert "authedFetch('/api/climate_advisor/status')" not in src, name
 
 
 def test_no_external_resources_and_no_chart_library():
@@ -704,6 +720,7 @@ def _known_endpoints() -> set[str]:
 def _endpoints_used(js: str) -> set[str]:
     found = set(re.findall(r"ND\.(?:api|post|stream)\('([a-z_]+)", js))
     found |= set(re.findall(r"withZone\('([a-z_]+)'", js))
+    found |= set(re.findall(r"scopedPath\('([a-z_]+)'", js))
     return found
 
 

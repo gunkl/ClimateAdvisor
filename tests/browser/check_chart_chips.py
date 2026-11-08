@@ -112,6 +112,8 @@ def open_page(browser, page: str, which: str, name: str):
         body = {}
         if ep == "chart_data":
             body = chart_payload(which)
+        elif ep == "zones":  # Issue #1454: the zone list, asked before any scoped call
+            body = {"zones": [{"entry_id": "zone-1", "title": "Zone 1"}], "zone_count": 1}
         elif ep == "status":
             body = dict(FX["status"], zone_count=1, zones=[])
         elif ep in FX:

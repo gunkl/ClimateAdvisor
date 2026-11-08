@@ -204,6 +204,13 @@ def route_factory(overrides: dict):
         requests.append((r.request.method, ep, u.query, body))
         if ep in overrides:
             payload = overrides[ep]
+            if callable(payload):
+                code, payload = payload()
+                r.fulfill(status=code, content_type="application/json", body=json.dumps(payload))
+                return
+        elif ep == "zones":  # Issue #1454: the zone list, asked before any scoped call
+            zs = FX["status"]["zones"]
+            payload = {"zones": zs, "zone_count": len(zs)}
         elif ep == "prediction_accuracy":
             r.fulfill(status=200, content_type="application/json", body=PA)
             return
@@ -232,10 +239,13 @@ def new_page(browser, vp, scheme, overrides=None, name=""):
         "localStorage.setItem('hassTokens', JSON.stringify({access_token:'t',token_type:'Bearer',expires:Date.now()+3.6e6}))"
     )
     pg = ctx.new_page()
-    pg.on(
-        "console",
-        lambda m: problems.append(f"{name} console.{m.type}: {m.text}") if m.type in ("error", "warning") else None,
-    )
+    restart = name.startswith("1454:restart")  # answers 503 on purpose
+
+    def on_console(m):
+        if m.type in ("error", "warning") and not (restart and m.text.startswith("Failed to load resource")):
+            problems.append(f"{name} console.{m.type}: {m.text}")
+
+    pg.on("console", on_console)
     pg.on("pageerror", lambda e: problems.append(f"{name} pageerror: {e}"))
     pg.route("**/api/**", route_factory(overrides or {}))
     return ctx, pg
@@ -707,8 +717,49 @@ def accuracy_1431(browser):
     ctx.close()
 
 
+def restart_1454(browser):
+    """Issue #1454: a restart (status 503 twice, then answers) and a first visit (nothing stored): the page ends up
+    on the zone's data and sends no Climate Advisor request without a zone (only GET zones names none)."""
+    left = {"n": 2}
+
+    def status():
+        if left["n"] > 0:
+            left["n"] -= 1
+            return 503, {"error": "Climate Advisor not loaded"}
+        return 200, FX["status"]
+
+    for case, overrides in (("restart", {"status": status}), ("first-visit", {})):
+        before = len(requests)
+        ctx, pg = new_page(browser, {"width": 1280, "height": 900}, "light", overrides, name=f"1454:{case}")
+        if case == "restart":
+            pg.add_init_script("localStorage.setItem('climate_advisor_selected_zone', 'zone-2')")
+        pg.goto(BASE)
+        try:
+            pg.wait_for_function(
+                "document.getElementById('health-text').textContent.indexOf('Healthy') === 0", timeout=20000
+            )
+        except Exception:  # noqa: BLE001
+            problems.append(f"1454 {case}: never showed the zone's status: {pg.locator('#health-text').inner_text()!r}")
+        for tab in ("analysis", "debug", "settings", "status"):
+            pg.locator(f"#tab-btn-{tab}").click()
+            pg.wait_for_timeout(500)
+        unscoped = [
+            f"{m} {e}?{q}"
+            for m, e, q, _b in requests[before:]
+            if e != "zones" and "entry_id=" not in q and "zone=" not in q
+        ]
+        if unscoped:
+            problems.append(f"1454 {case}: unscoped requests: {unscoped}")
+        want = "zone-2" if case == "restart" else "zone-1"
+        if pg.evaluate("localStorage.getItem('climate_advisor_selected_zone')") != want:
+            problems.append(f"1454 {case}: stored zone is not {want}")
+        pg.screenshot(path=str(OUT / f"1454-{case}.png"), full_page=False)
+        ctx.close()
+
+
 with sync_playwright() as p:
     b = p.chromium.launch()
+    restart_1454(b)
     accuracy_without_v4(b)
     accuracy_1431(b)
     run_matrix(b)
@@ -716,6 +767,11 @@ with sync_playwright() as p:
     behaviour(b)
     b.close()
 
+_unscoped = sorted(
+    {f"{m} {e}" for m, e, q, _b in requests if e != "zones" and "entry_id=" not in q and "zone=" not in q}
+)
+if _unscoped:  # Issue #1454: every dashboard request names a zone
+    problems.append(f"unscoped Climate Advisor requests: {_unscoped}")
 print("\n".join(problems) or "no problems")
 print("distinct endpoints:", sorted({e.split("?")[0] for m, e, q, bd in requests})[:30])
 sys.exit(1 if problems else 0)

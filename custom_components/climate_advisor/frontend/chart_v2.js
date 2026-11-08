@@ -144,7 +144,13 @@
   function _readPrefs() {
     const prefs = { on: {}, range: '24h', ahead: '24h', lead: '4h', table: false, keyOpen: false };
     try {
-      const raw = window.localStorage.getItem(_prefsKey());
+      let raw = window.localStorage.getItem(_prefsKey());
+      // Issue #1454: a single-zone page now names its zone too, so its choices saved before then (under ':default')
+      // are read once and re-saved under the zone.
+      if (!raw && _host.zone()) {
+        raw = window.localStorage.getItem(CHART_PREFS_KEY + ':default');
+        if (raw) prefs.migrated = true;
+      }
       if (!raw) return prefs;
       const p = JSON.parse(raw);
       if (p && typeof p === 'object') {

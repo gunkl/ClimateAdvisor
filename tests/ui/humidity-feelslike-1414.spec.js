@@ -151,7 +151,7 @@ for (const path of ['/', '/new_dashboard.html']) {
       const ds = await dsInfo(page);
       expect(ds['ind:humidity'].hidden).toBe(false);
       expect((await axes(page)).in.rightLabels.some(l => /%$/.test(l))).toBe(true);
-      const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:default')).on);
+      const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:mock-zone')).on);
       expect(stored['ind:humidity']).toBe(true);
       expect('ov:humidity' in stored).toBe(false);
     });

@@ -826,9 +826,38 @@
     return path + sep + 'entry_id=' + encodeURIComponent(_selectedEntryId);
   }
 
+  // Issue #1454: every request names a zone. With none known yet (first visit, nothing stored) the zone list comes
+  // from GET zones (names no zone by design, raises nothing) and a zone is picked before the request goes out; with
+  // no zone loaded at all (Climate Advisor still starting) the request is not sent. An unscoped request raises the
+  // "Ambiguous zone selection" Repairs card (owner's rule, Issue #1418), so this page never sends one.
+  const CA_STARTING = 'Climate Advisor is starting';
+  function _startingError() { const e = new Error(CA_STARTING); e.status = 503; e.starting = true; return e; }
+  async function _scopedPath(path) {
+    if (!_selectedEntryId) await _ensureZone();
+    if (!_selectedEntryId) throw _startingError();
+    return _withZoneParam(path);
+  }
+
+  // The zone list (GET zones). renderZoneSelector() keeps a listed zone, re-picks an unlisted one and keeps the zone
+  // while the list is empty (still starting).
+  async function _refreshZones() {
+    const d = await apiFetch('zones', { zoneless: true });
+    const zones = d && Array.isArray(d.zones) ? d.zones : [];
+    renderZoneSelector(zones, zones.length);
+    return zones;
+  }
+  let _zonePending = null;
+  function _ensureZone() {   // one zone-list request shared by every load that fires before a zone is known
+    if (_selectedEntryId) return Promise.resolve(_selectedEntryId);
+    if (!_zonePending) {
+      _zonePending = _refreshZones().catch(() => null).then(() => { _zonePending = null; return _selectedEntryId; });
+    }
+    return _zonePending;
+  }
+
   async function apiFetch(path, opts = {}) {
-    // opts.noZone: send this one request without entry_id (only loadStatus()'s stale-zone retry, Issue #1418).
-    if (!opts.noZone) path = _withZoneParam(path);
+    // opts.zoneless: only GET zones (_refreshZones), the one view that names no zone by design.
+    if (!opts.zoneless) path = await _scopedPath(path);
     const token = await getAuthToken();
     const headers = { ...(opts.headers || {}) };
     if (token) {
@@ -882,7 +911,7 @@
     // the same choke point apiFetch() uses so an AI report is generated for
     // (and rendered under) the zone the user actually has selected, not
     // whatever zone_registry.get_default_coordinator() falls back to.
-    path = _withZoneParam(path);
+    path = await _scopedPath(path);
     const token = await getAuthToken();
     const headers = {
       'Accept': 'text/event-stream',
@@ -933,14 +962,25 @@
     // actually disagreed in practice, but the code didn't match its own
     // documentation. Now actually reads `zone_count` from the payload so the
     // code and its comments describe the same thing.
-    if (!zones || zoneCount <= 1) {
-      // Single-zone (or zero-zone, e.g. right after a reload) install —
-      // no selector, and no lingering entry_id from a since-removed zone.
+    if (!zones || !zones.length) {
+      // No zone loaded (Climate Advisor still starting, e.g. right after a
+      // restart): no selector, and the zone is kept; it is listed again
+      // once it is up (Issue #1454).
       row.hidden = true;
       row.innerHTML = '';
       _zoneSelectorSignature = null;
-      _selectedEntryId = null;
-      _storeSelectedZone(null);
+      return;
+    }
+    if (zoneCount <= 1) {
+      // Single-zone install: no selector, but every request still names the
+      // zone (Issue #1454: the page never sends an unscoped request).
+      row.hidden = true;
+      row.innerHTML = '';
+      _zoneSelectorSignature = null;
+      if (_selectedEntryId !== zones[0].entry_id) {
+        _selectedEntryId = zones[0].entry_id;
+        _storeSelectedZone(_selectedEntryId);
+      }
       return;
     }
 
@@ -1000,41 +1040,37 @@
   }
 
   // --- Status tab ---
-  // _retryDepth: two independent self-corrections can each need their own
-  // retry — a stale stored entry_id (503, caught below) and Issue #813's
-  // zone_selection_required bootstrap response (caught above) — and a stale
-  // entry_id can legitimately trigger BOTH in sequence (503 -> clear
-  // selection -> retry unscoped -> backend says zone_selection_required
-  // since it's multi-zone -> pick a zone -> retry once more, now scoped). A
-  // single boolean flag can't guard two independent chained corrections
-  // without one of them silently swallowing the final real fetch, so this
-  // counts attempts instead and gives up after MAX_STATUS_RETRIES rather
-  // than looping forever on a genuinely broken backend.
+  // Issue #1454: a failed status call (a 503 while Home Assistant restarts,
+  // a 404 before the views are registered, a network error) re-reads the
+  // zone list and retries the SAME zone after a back-off (2 s, 5 s, 10 s),
+  // then shows "Climate Advisor is starting"; the 60 s poll keeps trying and
+  // the first success re-fires the other loads. A stored zone that is no
+  // longer listed is re-picked from the list and retried at once. Before,
+  // the 503 retry (#812, #1418) went out with no zone, and raised the
+  // "Ambiguous zone selection" Repairs card after every restart.
   let _lastStatus = null;         // last /status payload (the reading cards read it)
-  const MAX_STATUS_RETRIES = 3;
+  let _statusDown = false;        // the last status call failed (re-fire the other loads on recovery)
+  const STATUS_BACKOFF_MS = [2000, 5000, 10000];
 
-  async function loadStatus(_retryDepth, _noZone) {
-    const depth = _retryDepth || 0;
+  async function loadStatus(_attempt) {
+    const attempt = _attempt || 0;
     try {
-      const data = await apiFetch('status', _noZone ? { noZone: true } : {});
-      // Issue #813: on a genuine first-ever visit (no stored zone), the
-      // backend now refuses to guess a zone for this bootstrap call — it
-      // returns zone_selection_required + the zone list instead of full
-      // status data. renderZoneSelector() picks zones[0] deterministically
-      // and persists it (same logic as any other stale/missing selection),
-      // then this call is retried — now with an explicit entry_id, so it
-      // comes back with the real status payload.
+      const data = await apiFetch('status');
       if (data.zone_selection_required) {
+        // Not expected (the request named a zone): re-pick from the list and retry.
         renderZoneSelector(data.zones, data.zone_count);
-        if (depth < MAX_STATUS_RETRIES) return loadStatus(depth + 1);
+        if (attempt < STATUS_BACKOFF_MS.length) return loadStatus(attempt + 1);
         return;
       }
       renderZoneSelector(data.zones, data.zone_count);
+      const recovered = _statusDown || attempt > 0;
+      _statusDown = false;
       _lastStatus = data;
       CAChartV2.setStatus(data);
       const grid = document.getElementById('status-grid');
       renderReadingCards();
       document.getElementById('status-loading').style.display = 'none';
+      document.getElementById('status-loading').textContent = 'Loading...';
       grid.style.display = 'grid';
       updateAutomationButton(data.automation_enabled);
       // Issue #1095: a grace period can be active with no override flag behind it (fan_off,
@@ -1050,42 +1086,22 @@
       fanBtn.disabled = !(data.fan_override_active || data.fan_off_hold_active);
       fanBtn.textContent = (!data.fan_override_active && data.fan_off_hold_active) ? 'End Fan-Off Pause' : 'Cancel Fan Override';
       document.getElementById('resume-pause-btn').disabled = !data.paused_by_door;
+      // The other loads failed the same way while Climate Advisor was starting: re-fire them now it answers.
+      if (recovered) _loadNonStatus();
+      return data;
     } catch (e) {
-      // Issue #812 fix: a stored-but-now-stale zone selection (the saved
-      // entry_id was deleted, or the integration was reinstalled with new
-      // entry_ids) makes THIS request — the very first one to fire — resolve
-      // to no coordinator (api.py::_get_coordinator returns None when
-      // zone_registry.get_coordinator() can't find the entry_id, producing
-      // HTTP 503 {"error": "Climate Advisor not loaded"}). A stale
-      // _selectedEntryId normally self-heals inside renderZoneSelector()
-      // above, but that only runs on a *successful* response — it never gets
-      // a chance to run here, so without this check the dashboard would show
-      // this error forever on every reload (the stored value never gets
-      // cleared). Detect the specific case — this request WAS zone-scoped,
-      // and got back the "no coordinator resolved" 503 — and self-heal:
-      // clear the stale selection and retry once, unscoped (the backend then
-      // falls back to zone_registry.get_default_coordinator(), same as
-      // today's single-zone behavior). Guarded to retry at most once so a
-      // genuine "Climate Advisor not loaded at all" 503 still surfaces as a
-      // real error instead of looping forever.
-      if (depth < MAX_STATUS_RETRIES && _selectedEntryId && e.message === 'HTTP 503' && !_noZone) {
-        // Issue #1418: keep the selection and send ONLY this retry without a
-        // zone (the zone list comes back; renderZoneSelector() keeps the
-        // selection if that zone is listed again, else picks the first).
-        // Clearing _selectedEntryId here, as #812 did, let every request fired
-        // meanwhile (the chart's plan reload, the 60s poll, the 7 re-fired
-        // loads) go out with no entry_id and be answered with the first
-        // zone's data, under this zone's tab.
-        const result = await loadStatus(depth + 1, true);
-        // The other 7 loadAll() calls fired in parallel with the same stale
-        // entry_id and failed the same way — re-fire them now that the
-        // selection is corrected instead of leaving them broken until the
-        // next poll cycle (60s), or longer for loadChart (5min poll) /
-        // loadSettings & loadAIData (next tab click).
-        _loadNonStatus();
-        return result;
+      const loading = document.getElementById('status-loading');
+      if (e.status === 400 || e.status === 401 || e.message === 'HTTP 401') { _statusDown = true; loading.textContent = 'Failed to load status: ' + e.message; return; }
+      const before = _selectedEntryId;
+      try { await _refreshZones(); } catch (_) { /* zones not served yet: still starting */ }
+      if (attempt < STATUS_BACKOFF_MS.length) {
+        await new Promise(r => setTimeout(r, _selectedEntryId && _selectedEntryId !== before ? 0 : STATUS_BACKOFF_MS[attempt]));
+        return loadStatus(attempt + 1);
       }
-      document.getElementById('status-loading').textContent = 'Failed to load status: ' + e.message;
+      _statusDown = true;
+      const starting = e.starting || !e.status || e.status === 404 || e.status >= 500;
+      loading.textContent = starting ? CA_STARTING + '. This page keeps trying every minute.' : 'Failed to load status: ' + e.message;
+      loading.style.display = '';
     }
   }
 
@@ -2841,7 +2857,7 @@
       // fetch()/auth header, so _withZoneParam() is applied manually here
       // rather than switching to apiPost() (which would also change this
       // function's existing non-2xx/error-body handling below).
-      const resp = await fetch('/api/climate_advisor/' + _withZoneParam('submit_github_issue'), {
+      const resp = await fetch('/api/climate_advisor/' + await _scopedPath('submit_github_issue'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
         body: JSON.stringify({ title, body, labels }),

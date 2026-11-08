@@ -347,6 +347,7 @@ CONTRAST_JS = """
 """
 
 requests: list[tuple[str, str, str]] = []
+unscoped: list[str] = []  # Issue #1454: every dashboard request names a zone (only GET zones names none)
 
 
 def new_page(browser, vp, scheme, overrides=None, name=""):
@@ -372,6 +373,9 @@ def new_page(browser, vp, scheme, overrides=None, name=""):
         u = urllib.parse.urlparse(r.request.url)
         ep = u.path.split("/api/climate_advisor/")[-1]
         requests.append((r.request.method, ep, r.request.post_data or ""))
+        q = urllib.parse.parse_qs(u.query)
+        if ep != "zones" and not (q.get("entry_id") or q.get("zone")):
+            unscoped.append(f"{name}: {r.request.method} {ep}")
 
         def j(body, code=200):
             r.fulfill(status=code, content_type="application/json", body=json.dumps(body))
@@ -381,6 +385,8 @@ def new_page(browser, vp, scheme, overrides=None, name=""):
             return j(*(o if isinstance(o, tuple) else (o,)))
         if r.request.method == "POST":
             return j({"message": "ok", "success": True})
+        if ep == "zones":
+            return j({"zones": [{"entry_id": "zone-1", "title": "Zone 1"}], "zone_count": 1})
         if ep == "status":
             st = dict(
                 FX["status"],
@@ -961,6 +967,7 @@ with sync_playwright() as p:
     classic_celsius(b)
     b.close()
 
+check("no unscoped Climate Advisor request (Issue #1454)", not unscoped, "; ".join(sorted(set(unscoped))[:10]))
 print(f"{checks - len(problems)}/{checks} checks passed")
 print("\n".join(problems) or "no problems")
 sys.exit(1 if problems else 0)

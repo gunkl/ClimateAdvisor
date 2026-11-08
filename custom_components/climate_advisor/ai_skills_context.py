@@ -2279,6 +2279,24 @@ def _render_indoor_source_changed(p: dict, unit: str) -> tuple[str, str]:
     return label, ", ".join(parts)
 
 
+def _render_forecast_model_changed(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1432: the model the prediction engine's decisions read changed (stitched CA reading <-> each room).
+
+    ``detail_template`` carries ``{tN}`` slots for temperature DIFFERENCES stored in degrees F (``temps_f``), filled
+    here in the report's unit."""
+    label = str(p.get("headline") or "Prediction model changed")
+    tmpl = p.get("detail_template")
+    if not isinstance(tmpl, str):
+        return label, ""
+    temps = p.get("temps_f") if isinstance(p.get("temps_f"), dict) else {}
+    try:
+        return label, tmpl.format(
+            **{str(k): format_temp_delta(float(v), unit, 2) for k, v in temps.items() if isinstance(v, (int, float))}
+        )
+    except KeyError, IndexError, ValueError:
+        return label, ""
+
+
 def _render_indoor_sensor_recovered(p: dict, unit: str) -> tuple[str, str]:
     """Issue #1033: an indoor sensor is being read again."""
     role = "Sleep sensor" if p.get("role") == "sleep" else "Indoor sensor"
@@ -3350,6 +3368,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "indoor_sensor_unavailable": _render_indoor_sensor_unavailable,
     "indoor_sensor_recovered": _render_indoor_sensor_recovered,
     "indoor_source_changed": _render_indoor_source_changed,
+    "forecast_model_changed": _render_forecast_model_changed,
     "fan_blind_started": _render_fan_blind_started,
     "fan_blind_stopped": _render_fan_blind_stopped,
     "fan_blind_recovered": _render_fan_blind_recovered,
@@ -3464,6 +3483,7 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
         "indoor_source_changed",
+        "forecast_model_changed",
         "entity_unavailable",
         "entity_recovered",
         "fan_blind_started",

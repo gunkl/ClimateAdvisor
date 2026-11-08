@@ -112,16 +112,19 @@ def run_fit(
     primary_aliases: Sequence[str] = (),
     in_sleep: Callable[[datetime], bool] | None = None,
     train_days: float | None = None,
+    sleep_sensor: str | None = None,
 ) -> tuple[dict, float, str]:
     """Fit a model from the retained history. Blocking and CPU-bound: run via the executor only.
 
     Returns ``(model_dict, seconds, summary_line)``. The previous stored model warm-starts the refit.
     Raises on any failure; the caller keeps the previous model.
 
-    The nodes are chosen by ``predictor_v4.resolve_nodes`` - the same rule the backtest uses (Issue #1230 R1b, M1):
-    the entity ``primary`` is kept when it reads on 80 % of the history (older rows are mapped onto it through
-    ``primary_aliases`` / ``indoor_primary`` / ``indoor`` outside the sleep window ``in_sleep``), else the model is
-    the ``_ca`` reading alone.
+    The model is chosen by ``predictor_v4.choose_control_model`` - the same rule and gate the backtest uses (Issue
+    #1432): B (the entity ``primary`` plus the configured ``sleep_sensor`` as a node, composed by time of day) once
+    both have 3+ days of their own readings (or the old whole-window coverage; older rows map onto the primary through
+    ``primary_aliases`` / ``indoor_primary`` / ``indoor`` outside the sleep window ``in_sleep``) AND its ``_ca`` replay
+    is no worse than A's; else A, the ``_ca`` reading alone. ``sleep_sensor`` None = no separate sleep sensor. The
+    record is ``model_dict["fit"]["node_choice"]``.
 
     ``train_days`` bounds the training window to the last N days before ``now`` (rows and forecast snapshots): the
     same rule as the backtest's ``--train-days`` (Issue #1230 R1b). Months-old rows describe a different season, a
@@ -141,25 +144,166 @@ def run_fit(
     if train_days:
         entries = rows_in_window(entries, now, train_days)
     entity_primary = primary
-    samples, primary, ordered = build_samples(
-        p,
-        entries,
-        snapshots=snapshots,
-        tz=tz,
-        primary=primary,
-        sensors=sensors,
-        aliases=tuple(primary_aliases),
-        in_sleep=in_sleep,
-    )
     warm = p.from_dict(dict(previous_model)) if previous_model else None
-    # Issue #1422: sensors with 3+ days of their OWN history become display-only nodes (chart lines, never control).
-    display = display_candidates(
-        p, entries, primary=primary, ordered=ordered, entity_primary=entity_primary, sensors=sensors, tz=tz
-    )
-    extra: dict[str, Any] = {"display_sensors": display} if display else {}
-    model = p.fit(samples, primary=primary, sensors=ordered, tz=tz, now=now, warm_start=warm, **extra)
+    choose = getattr(p, "choose_control_model", None)
+    if choose is not None:
+        # Issue #1432: A (stitched ``_ca``) or B (a node per room), the rule and backtest gate the backtest shares.
+        chosen = choose(
+            entries,
+            tz=tz,
+            now=now,
+            primary=primary,
+            sensors=list(sensors),
+            sleep_sensor=sleep_sensor,
+            aliases=tuple(primary_aliases),
+            in_sleep=in_sleep,
+            archive_snapshots=snapshots,
+            warm_start=warm,
+        )
+        model, samples, primary, ordered = chosen.model, chosen.samples, chosen.primary, chosen.nodes
+        # Issue #1422: sensors with 3+ days of their OWN history become display-only nodes (chart lines, never control)
+        display = display_candidates(
+            p, entries, primary=primary, ordered=ordered, entity_primary=entity_primary, sensors=sensors, tz=tz
+        )
+        if display and model.confidence != "none":
+            model = p.with_display_nodes(
+                model,
+                samples,
+                display_sensors=display,
+                tz=tz,
+                warm=warm.display_nodes if warm is not None else None,
+            )
+    else:
+        samples, primary, ordered = build_samples(
+            p,
+            entries,
+            snapshots=snapshots,
+            tz=tz,
+            primary=primary,
+            sensors=sensors,
+            aliases=tuple(primary_aliases),
+            in_sleep=in_sleep,
+        )
+        display = display_candidates(
+            p, entries, primary=primary, ordered=ordered, entity_primary=entity_primary, sensors=sensors, tz=tz
+        )
+        extra: dict[str, Any] = {"display_sensors": display} if display else {}
+        model = p.fit(samples, primary=primary, sensors=ordered, tz=tz, now=now, warm_start=warm, **extra)
     line = p.summary_line(model) if hasattr(p, "summary_line") else ""
     return p.to_dict(model), time.perf_counter() - t0, line
+
+
+# ---------------------------------------------------------------------------
+# Which model the decisions read, in words (Issue #1432)
+# ---------------------------------------------------------------------------
+
+MODEL_STITCHED = "stitched"  # predictor_v4.MODEL_STITCHED (A: the stitched Climate Advisor reading)
+MODEL_PER_ROOM = "per_room"  # predictor_v4.MODEL_PER_ROOM (B: a node per room, composed by time of day)
+
+
+def node_choice(model_dict: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The stored model's node-choice record (``fit["node_choice"]``); a model written before Issue #1432 has none and
+    reads as ``{"model": ...}`` inferred from its primary (``_ca`` -> stitched, an entity -> per room). ``None``: no
+    model."""
+    if not isinstance(model_dict, Mapping):
+        return None
+    fit = model_dict.get("fit")
+    rec = fit.get("node_choice") if isinstance(fit, Mapping) else None
+    if isinstance(rec, Mapping) and rec.get("model") in (MODEL_STITCHED, MODEL_PER_ROOM):
+        return dict(rec)
+    primary = model_dict.get("primary")
+    if not isinstance(primary, str) or not primary:
+        return None
+    return {"model": MODEL_STITCHED if primary == "_ca" else MODEL_PER_ROOM, "reason": "inferred"}
+
+
+def node_choice_changed(previous: Mapping[str, Any] | None, new: Mapping[str, Any] | None) -> bool:
+    """True when the model the decisions read changed kind between two stored models (first fit: False)."""
+    a, b = node_choice(previous), node_choice(new)
+    return a is not None and b is not None and a["model"] != b["model"]
+
+
+def describe_node_choice(
+    choice: Mapping[str, Any] | None,
+    *,
+    fmt_delta: Callable[[float], str] = lambda f: f"{f:.2f}°F",
+    names: Mapping[str, str] | None = None,
+    changed: bool = False,
+) -> tuple[str, str]:
+    """``(headline, reason)`` in plain words for the INFO line, the Activity row and the Debug tab (Issue #1432).
+
+    ``fmt_delta`` formats a temperature DIFFERENCE given in degrees F in the user's unit (``format_temp_delta``);
+    ``names`` maps entity ids to friendly names. ``changed`` words the headline as a change ("now forecasts")."""
+    if not isinstance(choice, Mapping):
+        return "", ""
+    names = names or {}
+    now_w = "now " if changed else ""
+    prim, sleep = choice.get("primary"), choice.get("sleep")
+    p_name = names.get(prim, prim) if isinstance(prim, str) else "the thermostat"
+    s_name = names.get(sleep, sleep) if isinstance(sleep, str) else "the sleep sensor"
+    per_room = choice.get("model") == MODEL_PER_ROOM
+    if per_room:
+        headline = (
+            f"v4 {now_w}forecasts each room separately (thermostat by day, bedroom at night)"
+            if sleep
+            else f"v4 {now_w}forecasts the thermostat's room from its own readings"
+        )
+    else:
+        headline = f"v4 {now_w}forecasts from the stitched Climate Advisor reading (one model for every room)"
+
+    def days(key: str) -> str:
+        d = choice.get(f"{key}_days")
+        return f"{float(d):.1f} days" if isinstance(d, (int, float)) else "no days"
+
+    need = choice.get("min_days", 3.0)
+    need_w = f"{float(need):g}" if isinstance(need, (int, float)) else "3"
+    mae = (choice.get("scores") or {}).get("mae") or {}
+    a, b = mae.get(MODEL_STITCHED) or {}, mae.get(MODEL_PER_ROOM) or {}
+    lead = str(choice.get("lead") or "4h")
+
+    def score_txt() -> str:
+        if b.get(lead) is None or a.get(lead) is None:
+            return ""
+        who = "the per-room forecast" if sleep else f"{p_name}'s own forecast"
+        main = f"{who} scored {fmt_delta(b[lead])} vs {fmt_delta(a[lead])} at {lead[:-1]} h"
+        others = [
+            f"{k[:-1]} h {fmt_delta(b[k])} vs {fmt_delta(a[k])}"
+            for k in ("1h", "12h")
+            if k != lead and a.get(k) is not None and b.get(k) is not None
+        ]
+        return main + (f" ({', '.join(others)})" if others else "")
+
+    reason_code = choice.get("reason")
+    rooms = "both rooms have" if sleep else f"{p_name} has"
+    qual = f"{rooms} {need_w}+ days of readings ({p_name} {days('primary')}" + (
+        f", {s_name} {days('sleep')})" if sleep else ")"
+    )
+    if reason_code == "per_room_no_worse":
+        reason = f"{qual} and {score_txt()} on this home's history"
+    elif reason_code == "stitched_not_usable":
+        reason = f"{qual} and the stitched model has no usable fit"
+    elif reason_code == "per_room_scored_worse":
+        tol = choice.get("tolerance_f")
+        tol_w = f" (it may be at most {fmt_delta(float(tol))} worse)" if isinstance(tol, (int, float)) else ""
+        reason = f"{qual}, but {score_txt()} on this home's history{tol_w}"
+    elif reason_code == "too_few_shared_anchors":
+        n = (choice.get("scores") or {}).get("n_anchors")
+        reason = f"{qual}, but there is not enough shared history yet to compare the two forecasts ({n} points)"
+    elif reason_code == "per_room_not_usable":
+        why = choice.get("per_room_fit_reason") or "no usable fit"
+        reason = f"{qual}, but its own model could not be fitted ({why})"
+    elif reason_code == "primary_not_ready":
+        reason = f"{p_name} has only {days('primary')} of its own readings (needs {need_w})"
+    elif reason_code == "sleep_not_ready":
+        reason = (
+            f"{s_name} has only {days('sleep')} of its own readings (needs {need_w}); sleep hours are never "
+            f"forecast from {p_name}'s room"
+        )
+    elif reason_code == "no_primary_entity":
+        reason = "no thermostat sensor to model on its own"
+    else:
+        reason = ""
+    return headline, reason
 
 
 def display_candidates(
@@ -518,11 +662,16 @@ def chart_extras(
     inputs: Sequence[Any],
     outdoor_now_f: float | None = None,
     forecast_now_f: float | None = None,
+    ca_sleep_node: str | None = None,
+    ca_sleep_time: str | None = None,
+    ca_wake_time: str | None = None,
 ) -> tuple[list[tuple[datetime, float]], dict[str, list[tuple[datetime, float]]]]:
     """The two extra future lines the Status chart draws: ``(corrected_outdoor, baseline_by_sensor)`` (Issue #1230 R2).
 
     * corrected outdoor: the service's hourly outdoor values after v4's learned correction;
     * baseline: the same predict with no thermostat setpoints ("the house with no HVAC"), windows as planned.
+      ``ca_sleep_node`` (+ the window) composes its ``_ca`` line the way the plan cycle does (Issue #1432), so the
+      no-plan line never shows the thermostat's room for a sleep hour.
 
     Display only. Each half fails on its own into an empty result, so one broken line never hides the other. Blocking
     CPU (about 1 ms): run via the executor.
@@ -550,6 +699,8 @@ def chart_extras(
             plain = [dataclasses.replace(i, heat_sp_f=None, cool_sp_f=None) for i in inputs]
             # display only: the no-plan line includes the display-only nodes too (Issue #1422)
             disp: dict[str, Any] = {"display_nodes": True} if getattr(model, "display_nodes", None) else {}
+            if ca_sleep_node:
+                disp.update(ca_sleep_node=ca_sleep_node, ca_sleep_time=ca_sleep_time, ca_wake_time=ca_wake_time)
             out = p.predict(
                 model,
                 now=now,
@@ -597,6 +748,8 @@ def model_summary(model_dict: Mapping[str, Any] | None) -> dict[str, Any]:
         if isinstance(model_dict.get("display_nodes"), Mapping)
         else [],
         "schema_version": model_dict.get("schema_version"),
+        # Issue #1432: which model the decisions read (stitched or per room) and why; numbers in degrees F
+        "node_choice": node_choice(model_dict),
     }
 
 

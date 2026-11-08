@@ -349,8 +349,8 @@
     "issue": 229
   },
   "hot_plateau_pre_cool_applied": {
-    "sha256": "9420399d1886bc767d6388597eac9d027b0b8c68ee67daa799945f5a283a7630",
-    "signed": "2026-08-02",
+    "sha256": "831f22e9e7ccd95b1f9550919d43a0b78e68fba7092abe55a02ffb49ba957f29",
+    "signed": "2026-11-07",
     "issue": 558
   },
   "issue_620_fan_off_grace_blocks_idle_reactivation": {

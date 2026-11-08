@@ -172,6 +172,11 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # (thermostat, its finer sensor, dedicated or sleep sensor). It never commands HVAC; the decision events that
         # follow still map, so registering it unmapped cannot hide a real failure.
         "indoor_source_changed",
+        # Issue #1432: forecast_model_changed announces which v4 model the decisions read after a nightly fit
+        # (stitched CA reading or each room separately). It commands nothing itself; the decisions that read the new
+        # model still emit their own deciding events, so leaving it unmapped cannot hide a real failure, while mapping
+        # it to 'unknown:<type>' could shadow a real outcome under last-decision-wins.
+        "forecast_model_changed",
         # Issue #1322: entity outage / recovery rows are observational (Activity log only; no decision to judge).
         "entity_unavailable",
         "entity_recovered",

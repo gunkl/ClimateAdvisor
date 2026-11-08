@@ -262,6 +262,7 @@ def test_the_hover_panel_shows_the_thermostat_set_value():
     """Chart v2 (#1230 R2): the readout's Overlays row reads the chart datasets, skipping hidden ones and gaps."""
     html = _index_html()
     body = html.split("function _renderReadout(", 1)[1].split("\n  function clearChartPin", 1)[0]
-    assert "['Humidity %', 'Feels-like', 'Target', 'Thermostat set'].includes(ds.label)" in body
+    # both ov:target datasets ('Target' and 'Thermostat set'); humidity / feels-like are series since Issue #1414
+    assert "ds.caId !== 'ov:target'" in body
     assert "ds.hidden" in body, "a hidden (toggled-off) series must not show a hover value"
     assert "if (v == null) return;" in body, "no value across a gap (null rows outside offset stretches)"

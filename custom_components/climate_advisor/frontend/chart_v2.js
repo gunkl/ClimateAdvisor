@@ -99,10 +99,11 @@
   // One line pattern per sensor (solid, dash-dot, dotted, long dash, short dash): identity is never colour alone.
   const SENSOR_DASH = [[], [8, 3, 2, 3], [2, 3], [10, 4], [4, 4]];
   const OUT_PX = 44;                  // fixed left axis width so the indoor and outdoor plot areas line up
-  const RIGHT_PX = 40;                // fixed right gutter (kept for the humidity axis, Issue #1414)
-  // Humidity and feels-like: no reading has ever been logged for them (chart_log has no humidity / feelslike), so
-  // their chips are hidden on both dashboards until Issue #1414 wires them up; stored choices are dropped on read.
-  const HIDDEN_OVERLAYS = ['ov:humidity', 'ov:feelslike'];
+  const RIGHT_PX = 40;                // fixed right gutter on BOTH charts: the humidity % axis (Issue #1414)
+  // Issue #1414: humidity and feels-like are ordinary series (ind:/out:humidity, ind:/out:feelslike); the old overlay
+  // ids are moved to the indoor lines when the prefs are read (and re-saved once).
+  const OLD_OVERLAY_IDS = { 'ov:humidity': 'ind:humidity', 'ov:feelslike': 'ind:feelslike' };
+  const HUM_FEELS_IDS = ['ind:humidity', 'ind:feelslike', 'out:humidity', 'out:feelslike'];
 
   let _tempChart = null;          // Chart.js instance: indoor chart (canvas #temp-chart)
   let _outChart = null;           // Chart.js instance: outdoor chart (canvas #out-chart)
@@ -149,8 +150,14 @@
       if (p && typeof p === 'object') {
         if (p.on && typeof p.on === 'object') {
           Object.keys(p.on).forEach(k => { if (typeof p.on[k] === 'boolean') prefs.on[k] = p.on[k]; });
-          // Humidity and feels-like are hidden until they are wired up (Issue #1414): drop their stored choices.
-          HIDDEN_OVERLAYS.forEach(k => { if (k in prefs.on) { delete prefs.on[k]; prefs.migrated = true; } });
+          // Issue #1414: the old humidity / feels-like overlay choices become the indoor lines' choices.
+          Object.keys(OLD_OVERLAY_IDS).forEach(k => {
+            if (!(k in prefs.on)) return;
+            const nk = OLD_OVERLAY_IDS[k];
+            if (typeof prefs.on[nk] !== 'boolean') prefs.on[nk] = prefs.on[k];
+            delete prefs.on[k];
+            prefs.migrated = true;
+          });
         }
         if (CHART_RANGES.includes(p.range)) prefs.range = p.range;
         if (CHART_AHEADS.includes(p.ahead)) prefs.ahead = p.ahead;
@@ -186,7 +193,7 @@
     _syncKeyOpen();
   }
 
-  // The baseline ("no plan") and the two optional overlays start off (DP-1). Of the indoor readings only the CA reading
+  // The baseline ("no plan") and the humidity / feels-like lines start off (DP-1, Issue #1414). Of the indoor readings only the CA reading
   // starts on (it follows whichever sensor CA reads); every chip choice is remembered per browser, per zone.
   // Prediction engines (Settings -> Prediction engine): the PRIMARY engine's line is the main prediction, the optional
   // SHADOW engine's line is drawn for comparison, and any other engine's lines start off but stay in the key. While
@@ -202,7 +209,7 @@
     if (id === 'schedule') return !!_engines().fallback && _engines().primary !== 'v3';
     if (id.startsWith('v4:') || id === 'out:corrected') return _shown('v4') && _v4HasData();
     if (id.startsWith('base:')) return false;
-    if (id === 'ov:humidity' || id === 'ov:feelslike') return false;
+    if (HUM_FEELS_IDS.includes(id)) return false;   // Issue #1414: humidity and feels-like lines start off
     if (id === 'ind:_ca') return true;
     // Each sensor's own line starts off: the CA reading is the one indoor line until you pick others (unless it has no data).
     if (id.startsWith('ind:')) return !((_lastChartData && _lastChartData.actual_indoor) || []).length;
@@ -247,7 +254,6 @@
   }
 
   function _isOn(id) {
-    if (HIDDEN_OVERLAYS.includes(id)) return false;   // Issue #1414: not offered until wired up
     const on = _chartPrefs ? _chartPrefs.on : {};
     const k = _prefId(id);
     let v = on[k];
@@ -411,6 +417,18 @@
     S.push(_mkSeries({ id: 'ind:_ca', group: 'indoor', short: 'CA reading', label: 'CA reading',
       role: 'the reading Climate Advisor uses', color: 'ink', dash: [1, 3], width: 1.5, sensor: '_ca', kind: 'actual', breaks: caBreaks }, caPts));
 
+    // Issue #1414: humidity (right % axis) and feels-like (left temperature axis), indoor and outdoor, as ordinary
+    // lines. Past from the chart log rows that carry the value (a row without it is a gap, never a guess); outdoor
+    // future from the forecast lists. Feels-like is absent unless it is a real heat index / wind chill.
+    const logPts = key => state.filter(e => e[key] != null).map(e => ({ x: _parseTs(e.ts), y: e[key] })).filter(p => p.x <= nowMs);
+    const fcPts = list => (list || []).map(p => ({ x: _parseTs(p.ts), y: p.value })).filter(p => p.y != null && p.x > nowMs);
+    const hiF = _tempTxt(80), lowF = _tempTxt(50);
+    S.push(_mkSeries({ id: 'ind:humidity', group: 'indoor', short: 'Indoor humidity', label: 'Humidity', role: 'relative humidity of the room Climate Advisor reads',
+      color: 'hum', width: 1.5, axis: 'yRight', unit: '%', kind: 'actual', emptyReason: 'No humidity reading recorded in this view' }, logPts('humidity')));
+    S.push(_mkSeries({ id: 'ind:feelslike', group: 'indoor', short: 'Indoor feels-like', label: 'Feels-like', role: 'heat index, shown only at ' + hiF + ' and up',
+      color: 'feels', dash: [3, 3], width: 1.5, kind: 'actual',
+      emptyReason: 'Indoor feels-like only shows as a heat index (' + hiF + ' and up)' }, logPts('feelslike')));
+
     // Predicted: v3's prediction of the CA reading: the 4 h-ahead snapshots logged earlier, then the live forecast.
     // Issue #1430: labelled by what it predicts; the key's Main / Comparison block names the engine and its role.
     const histPredIndoor = state.map(e => ({ x: _parseTs(e.ts), y: e.pred_indoor != null ? e.pred_indoor : e.pred_indoor_avg != null ? e.pred_indoor_avg : null }))
@@ -483,6 +501,15 @@
     const corr = [...(co.past || []), ...(co.future || [])].map(p => ({ x: _parseTs(p.ts), y: p.temp }));
     S.push(_mkSeries({ id: 'out:corrected', group: 'outdoor', short: 'Corrected', label: 'CA-corrected forecast', color: 'svc', width: 2.5,
       chart: 'out', missVs: 'out:sensor', kind: 'pred', disabledReason: why }, v4Ready ? corr : []));
+    // Outdoor humidity / feels-like (Issue #1414): dashed, so they never read as the indoor lines of the same colour.
+    S.push(_mkSeries({ id: 'out:humidity', group: 'outdoor', short: 'Outdoor humidity', label: 'Humidity', role: 'outdoor relative humidity; right of Now, the forecast',
+      color: 'hum', dash: [8, 4], width: 1.5, chart: 'out', axis: 'yRight', unit: '%', kind: 'actual',
+      emptyReason: 'No humidity reading recorded in this view' }, [...logPts('outdoor_humidity'), ...fcPts(cd.outdoor_humidity_forecast)]));
+    S.push(_mkSeries({ id: 'out:feelslike', group: 'outdoor', short: 'Outdoor feels-like', label: 'Feels-like',
+      role: 'heat index at ' + hiF + ' and up, wind chill at ' + lowF + ' and below with wind; right of Now, the forecast',
+      color: 'feels', dash: [8, 3, 2, 3], width: 1.5, chart: 'out', kind: 'actual',
+      emptyReason: 'Feels-like only shows as a heat index (' + hiF + ' and up) or wind chill (' + lowF + ' and below with wind)' },
+      [...logPts('outdoor_feelslike'), ...fcPts(cd.outdoor_feelslike_forecast)]));
     return S;
   }
 
@@ -527,6 +554,8 @@
   function _fmt(v, digits) { return v == null ? '—' : v.toFixed(digits == null ? 1 : digits); }
   function _fmtSigned(v) { return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(1); }
   function _unitSym() { return unitSymbol(_lastChartData ? _lastChartData.unit : (_lastStatus ? _lastStatus.unit : null)); }
+  // a fixed °F threshold in the display unit, for wording (80 °F reads "27°C")
+  function _tempTxt(f) { return _unitSym() === '°C' ? Math.round((f - 32) * 5 / 9) + '°C' : f + '°F'; }
 
   // ---- the key (compact, grouped, independent toggles) ----
   function _swatch(s) {
@@ -650,6 +679,7 @@
         others.map(l => l.replace('h', ' h')).join(' or ') + ' under "Past v4 lines"';
     }
     if (dss.some(d => _ptsAny(d.data || [])) || (s && s.pastElsewhere)) return _NOT_IN_VIEW;
+    if (s && s.emptyReason) return s.emptyReason;   // humidity / feels-like: why there is nothing (Issue #1414)
     if (id === 'ov:band') return 'No target band recorded or scheduled in the loaded time';
     if (id === 'ov:target') return 'No target recorded or scheduled in the loaded time';
     if (s && s.kind === 'actual') return 'No readings from ' + s.label + ' in the loaded time';
@@ -788,7 +818,6 @@
     });
     const outHtml = S.filter(s => s.group === 'outdoor').map(chipFor).join('');
     const ovSw = (color, dash, w) => '<svg class="key-sw" width="30" height="10" aria-hidden="true"><line x1="2" y1="5" x2="28" y2="5" stroke="' + color + '" stroke-width="' + w + '"' + (dash ? ' stroke-dasharray="' + dash + '"' : '') + ' stroke-linecap="round"/></svg>';
-    // Humidity and feels-like are not offered until they are wired up (Issue #1414; HIDDEN_OVERLAYS).
     const bandLabel = _bandLabelInView();
     const overlays =
       ovChip('ov:band', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><rect x="2" y="1" width="26" height="8" rx="2" fill="var(--c-band)" stroke="var(--c-bandline)" stroke-dasharray="3 2"/></svg><span>' + escapeHtml(bandLabel) + '</span>', bandLabel) +
@@ -948,7 +977,7 @@
       borderWidth: s.width, borderDash: s.dash, borderCapStyle: s.dash.length && s.dash[0] <= 2 ? 'round' : 'butt',
       // a lone point between gaps (e.g. one daily mean in view) has no segment: draw it as a dot so it is visible
       pointRadius: c => _isolated(c.dataset.data, c.dataIndex) ? 2.5 : 0, pointStyle: 'circle', pointBackgroundColor: color,
-      pointBorderWidth: 0, tension: 0.2, spanGaps: false, yAxisID: 'y',
+      pointBorderWidth: 0, tension: 0.2, spanGaps: false, yAxisID: s.axis || 'y',
       hidden: !_isOn(s.id) || !!s.disabledReason || s.raw.length === 0,
       order: s.kind === 'actual' ? 3 : 2,
     };
@@ -998,14 +1027,6 @@
         borderDash: [3, 3], backgroundColor: 'transparent', fill: false, pointRadius: 0, tension: 0, yAxisID: 'y', hidden: !bandOn, order: 6 });
     }
 
-    // Humidity / feels-like overlays
-    const humidityPts = log.filter(e => e.humidity != null).map(e => ({ x: _parseTs(e.ts), y: e.humidity }));
-    const feelsLikePts = log.filter(e => e.feelslike != null).map(e => ({ x: _parseTs(e.ts), y: e.feelslike }));
-    datasets.push({ caId: 'ov:humidity', label: 'Humidity %', type: 'line', data: humidityPts, borderColor: _cssVar('--c-hum'), borderWidth: 1.5,
-      pointRadius: 0, pointStyle: 'line', tension: 0.2, yAxisID: 'yRight', hidden: !_isOn('ov:humidity') || humidityPts.length === 0, order: 6 });
-    datasets.push({ caId: 'ov:feelslike', label: 'Feels-like', type: 'line', data: feelsLikePts, borderColor: _cssVar('--c-feels'), borderWidth: 1.5,
-      borderDash: [3, 3], pointRadius: 0, pointStyle: 'line', tension: 0.2, yAxisID: 'y', hidden: !_isOn('ov:feelslike') || feelsLikePts.length === 0, order: 7 });
-
     // The plan path (R3 timeline): where the house is predicted to go under the plan, from NOW on.
     const planPathPts = _planPath();
     if (planPathPts.length) {
@@ -1049,12 +1070,16 @@
       });
     }
 
-    const humOn = _isOn('ov:humidity') && humidityPts.length > 0;
+    // The right % axis: always RIGHT_PX wide on both charts (so their plot areas line up), its labels shown only
+    // while a humidity line on that chart is drawn (Issue #1414). It reads the dataset's live `hidden`, so a toggle
+    // (toggleSeries -> update) shows or blanks the labels without a rebuild.
+    const rightAxis = lim => ({ position: 'right', display: true, grid: { display: false }, border: { display: false },
+      ticks: { color: textColor, maxTicksLimit: lim, callback(v) { return this.chart.data.datasets.some(d => d.yAxisID === 'yRight' && !d.hidden) ? v + '%' : ''; } },
+      afterFit(sc) { sc.width = RIGHT_PX; } });
     const indoorScales = {
       x: _xScaleOptions(win, false, gridColor, textColor),
       y: { position: 'left', grid: { color: gridColor }, ticks: { color: textColor, callback: v => v + '°' }, afterFit(sc) { sc.width = OUT_PX; } },
-      yRight: { position: 'right', display: true, grid: { display: false }, border: { display: false },
-        ticks: { color: textColor, callback: v => (humOn ? v + '%' : '') }, afterFit(sc) { sc.width = RIGHT_PX; } },
+      yRight: rightAxis(11),
     };
     try {
       _tempChart = new Chart(canvas, {
@@ -1072,11 +1097,12 @@
     const outScales = {
       x: _xScaleOptions(win, true, gridColor, textColor),
       y: { position: 'left', grid: { color: gridColor }, ticks: { color: textColor, maxTicksLimit: 4, callback: v => v + '°' }, afterFit(sc) { sc.width = OUT_PX; } },
+      yRight: rightAxis(4),   // takes the RIGHT_PX gutter the old right padding held: the plot areas stay aligned
     };
     try {
       _outChart = new Chart(outCanvas, {
         type: 'line', data: { datasets: outDatasets },
-        options: _baseOptions(win, { scales: outScales, padRight: RIGHT_PX }),
+        options: _baseOptions(win, { scales: outScales }),
         plugins: [_annotationPlugin(false, log)],
       });
     } catch (err) {
@@ -1391,21 +1417,20 @@
         const a = ref ? _valueAt(ref, ms) : null;
         if (a != null) miss = ' <span class="chp-miss" title="' + escapeHtml(s.short) + ' minus what was read">(' + _fmtSigned(v - a) + ')</span>';
       }
-      const item = _chpItem('var(--c-' + s.color + ')', escapeHtml(s.short) + ': <strong>' + _fmt(v, 1) + sym + '</strong>' + miss);
+      // a series' own unit ('%' for humidity, Issue #1414), else the temperature degree sign
+      const item = _chpItem('var(--c-' + s.color + ')', escapeHtml(s.short) + ': <strong>' + _fmt(v, 1) + (s.unit || sym) + '</strong>' + miss);
       lines[s.group] += item;
     });
     const log = (_lastChartData && _lastChartData.state_log) || [];
-    // Overlay values (humidity, feels-like, target) come from their chart datasets.
+    // Overlay values (the target and the commanded setpoint) come from their chart datasets.
     let overlay = '';
     if (_tempChart) {
       _tempChart.data.datasets.forEach(ds => {
-        if (ds.hidden || !ds.data || !ds.data.length || ds.label.startsWith('_') || ds.label === 'Target Band') return;
-        if (!['Humidity %', 'Feels-like', 'Target', 'Thermostat set'].includes(ds.label)) return;
+        if (ds.caId !== 'ov:target' || ds.hidden || !ds.data || !ds.data.length) return;
         const s = { data: ds.data, tol: 90 * 60000 };
         const v = _valueAt(s, ms);
         if (v == null) return;
-        const col = ds.label === 'Humidity %' ? 'var(--c-hum)' : ds.label === 'Feels-like' ? 'var(--c-feels)' : 'var(--c-target)';
-        overlay += _chpItem(col, escapeHtml(ds.label === 'Humidity %' ? 'Humidity' : ds.label) + ': <strong>' + Math.round(v) + (ds.label === 'Humidity %' ? '%' : sym) + '</strong>');
+        overlay += _chpItem('var(--c-target)', escapeHtml(ds.label) + ': <strong>' + Math.round(v) + sym + '</strong>');
       });
     }
     if (_tempChart && _isOn('ov:band')) {
@@ -1618,7 +1643,7 @@
   }
 
   function toggleOverlay(name) {
-    const map = { comfort_band: 'ov:band', setpoint: 'ov:target', plan: 'ov:plan' };   // humidity / feels-like: Issue #1414
+    const map = { comfort_band: 'ov:band', setpoint: 'ov:target', plan: 'ov:plan' };
     if (map[name]) toggleSeries(map[name]);
   }
 
@@ -1726,17 +1751,17 @@
     const m = buildTableModel();
     const sym = _unitSym();
     const fmtT = t => new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-    const head = '<tr><th scope="col">Time</th>' + m.cols.map(c => '<th scope="col">' + escapeHtml(c.short) + ' (' + sym + ')</th>').join('') + '<th scope="col">Thermostat</th></tr>';
+    const head = '<tr><th scope="col">Time</th>' + m.cols.map(c => '<th scope="col">' + escapeHtml(c.short) + ' (' + (c.unit || sym) + ')</th>').join('') + '<th scope="col">Thermostat</th></tr>';
     const body = m.rows.map(r => '<tr' + (r.t > Date.now() ? ' class="future"' : '') + '><th scope="row">' + escapeHtml(fmtT(r.t)) + '</th>' +
       r.cells.map(v => '<td>' + (v == null ? '—' : v.toFixed(1)) + '</td>').join('') + '<td>' + escapeHtml(r.state || '') + '</td></tr>').join('');
-    wrap.querySelector('table').innerHTML = '<caption>Temperatures in ' + escapeHtml(sym) + ', every ' + Math.round(m.step / 60000) +
+    wrap.querySelector('table').innerHTML = '<caption>Temperatures in ' + escapeHtml(sym) + (m.cols.some(c => c.unit === '%') ? ', humidity in %' : '') + ', every ' + Math.round(m.step / 60000) +
       ' minutes. Rows after now are predictions.</caption><thead>' + head + '</thead><tbody>' + body + '</tbody>';
   }
 
   function copyChartTable() {
     const m = buildTableModel();
     const sym = _unitSym();
-    const lines = [['Time'].concat(m.cols.map(c => c.short + ' (' + sym + ')'), ['Thermostat']).join('\t')];
+    const lines = [['Time'].concat(m.cols.map(c => c.short + ' (' + (c.unit || sym) + ')'), ['Thermostat']).join('\t')];
     m.rows.forEach(r => lines.push([new Date(r.t).toISOString()].concat(r.cells.map(v => v == null ? '' : v.toFixed(1)), [r.state || '']).join('\t')));
     _copyText(lines.join('\n'));
     const btn = document.getElementById('chart-table-copy');

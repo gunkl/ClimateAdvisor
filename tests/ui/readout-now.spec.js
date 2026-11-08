@@ -161,7 +161,7 @@ for (const pg of PAGES) {
         const rest = await readout(page);
         expect(rest.mode).toBe('rest');
         expect(rest.rows.Overlays.join(' | ')).toContain('Target: 70');
-        expect(rest.rows.Overlays.join(' | ')).not.toContain('Humidity');   // hidden until Issue #1414
+        expect(rest.rows.Overlays.join(' | ')).not.toContain('Humidity');   // Issue #1414: the humidity line starts off
         const chartTop = await page.evaluate(() => document.getElementById('temp-chart').getBoundingClientRect().top + window.scrollY);
         let tallest = rest.height;
         for (const f of [0.15, 0.5, 0.85]) {

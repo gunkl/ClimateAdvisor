@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.18] — 2026-11-08
+
+Developer tooling only: nothing changes in the home, and Climate Advisor behaves exactly as in 0.9.17.
+
+- Fix #1480: `python scripts/test.py ha` can now run all of CI's real-HA slices at once with `CA_HA_SHARDS=N` (one pytest process per slice, each with `CA_HA_WORKERS` workers, output prefixed `[K/N]`, each slice's time at the end, a failure if any slice fails). The slices are the same as CI's `ha-real (K/4)` jobs. The recommended local run is `CA_HA_SHARDS=4 CA_HA_WORKERS=2`: CI's four slices in about 90 s on the 24-core dev machine, against 103-155 s for one `CA_HA_WORKERS=auto` process. Setting both `CA_HA_SHARDS` and `CA_HA_SHARD` (or `CA_UNIT_SHARDS` and `CA_UNIT_SHARD`) is now refused instead of one being silently ignored.
+- Fix #1481: the repository no longer tracks a `node_modules` link that pointed into one developer's worktree, and `.gitignore` now ignores `node_modules` when it is a link. A checkout that had its own `node_modules` link can merge `main` again. A checkout that only had the tracked link loses it when it updates: re-create it (`ln -s <your node_modules> node_modules`) or run `npm install`.
+
 ## [0.9.17] — 2026-11-08
 
 - Fix #1477: the heat and cool "swing" Climate Advisor learns (how far past the setpoint your thermostat lets the room drift before it starts the heat or AC) now comes from your finest temperature readings and is rounded up to the next half degree.

@@ -54,7 +54,7 @@ The full module map is in [docs/02-ARCHITECTURE-REFERENCE.md](docs/02-ARCHITECTU
 
 ```bash
 python scripts/test.py unit      # stub tier (tests/); fastest: CA_UNIT_SHARDS=4 CA_UNIT_WORKERS=2
-python scripts/test.py ha        # real Home Assistant tier (tests_ha/, WSL on Windows); CA_HA_WORKERS=N
+python scripts/test.py ha        # real Home Assistant tier (tests_ha/, WSL on Windows); recommended: CA_HA_SHARDS=4 CA_HA_WORKERS=2
 python scripts/test.py unit tests/test_classifier.py -v   # extra args go to pytest
 ruff check . && ruff format --check .
 ```

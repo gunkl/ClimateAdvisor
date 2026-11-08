@@ -42,7 +42,7 @@ scratch_chart_log.json
 get-pip.py
 
 # JavaScript / Playwright
-node_modules/
+node_modules
 package-lock.json
 playwright-report/
 test-results/

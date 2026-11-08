@@ -95,6 +95,10 @@ DOOR_WINDOW_PAUSE_SECONDS = 180  # deprecated — use CONF_SENSOR_DEBOUNCE inste
 # Door/window sensor configuration
 CONF_SENSOR_POLARITY_INVERTED = "sensor_polarity_inverted"
 
+# Indoor humidity sensor (optional, device_class humidity, unit %). Used only
+# for the chart humidity / feels-like overlays — never for control decisions.
+CONF_INDOOR_HUMIDITY_ENTITY = "indoor_humidity_entity"
+
 # Temperature unit preference (stored as canonical fahrenheit internally)
 CONF_TEMP_UNIT = "temp_unit"
 DEFAULT_TEMP_UNIT = "fahrenheit"
@@ -802,6 +806,15 @@ CONFIG_METADATA = {
             "Optional bedroom sensor used for comfort and automation decisions while your sleep"
             " schedule is active (the thermal model always uses the primary sensor). Falls back"
             " to the primary sensor if unavailable. Leave blank to disable."
+        ),
+        "category": "sensors",
+    },
+    "indoor_humidity_entity": {
+        "label": "Indoor Humidity Sensor",
+        "description": (
+            "Optional humidity sensor (e.g. from the smart thermostat) used only for the"
+            " chart humidity / feels-like overlays. Never affects control decisions."
+            " Leave blank to disable."
         ),
         "category": "sensors",
     },

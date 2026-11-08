@@ -181,7 +181,7 @@ class TestInitialFlowShape:
         schedule = asyncio.run(flow.async_step_schedule(None))
         for result in (sources, sensors, occupancy, schedule):
             assert not (_schema_keys(result) & _MOVED_FROM_INITIAL)
-        assert _schema_keys(sensors) == {"door_window_sensors", "sensor_polarity_inverted", "fan_mode", "fan_entity"}
+        assert _schema_keys(sensors) == {"door_window_sensors", "sensor_polarity_inverted", "indoor_humidity_entity", "fan_mode", "fan_entity"}
         assert len(_schema_keys(occupancy)) == 6
         assert "briefing_notifications_enabled" in _schema_keys(schedule)
 

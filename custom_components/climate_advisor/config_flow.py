@@ -53,6 +53,7 @@ from .const import (
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
     CONF_HVAC_FAN_RESTRICT_MODE,
+    CONF_INDOOR_HUMIDITY_ENTITY,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_SOFT_START_ENABLED,
@@ -755,6 +756,12 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(
                         CONF_SENSOR_POLARITY_INVERTED, default=values.get(CONF_SENSOR_POLARITY_INVERTED, False)
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_INDOOR_HUMIDITY_ENTITY,
+                        description={"suggested_value": None},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="sensor", device_class="humidity")
+                    ),
                     vol.Optional(CONF_FAN_MODE, default=values.get(CONF_FAN_MODE, DEFAULT_FAN_MODE)): (
                         selector.SelectSelector(
                             selector.SelectSelectorConfig(
@@ -1224,7 +1231,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             ):
                 if key in user_input:
                     user_input[key] = int(user_input[key] * 60)
-            clearable = (CONF_FAN_ENTITY, CONF_FAN_STATE_ENTITY, CONF_FAN_REMOTE_ENTITY)
+            clearable = (CONF_FAN_ENTITY, CONF_FAN_STATE_ENTITY, CONF_FAN_REMOTE_ENTITY, CONF_INDOOR_HUMIDITY_ENTITY)
             merged = {**self.config_entry.data, **user_input}
             for key in clearable:
                 if key not in user_input:
@@ -1259,6 +1266,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         CONF_SENSOR_POLARITY_INVERTED,
                         default=current.get(CONF_SENSOR_POLARITY_INVERTED, False),
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_INDOOR_HUMIDITY_ENTITY,
+                        description={"suggested_value": current.get(CONF_INDOOR_HUMIDITY_ENTITY)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="sensor", device_class="humidity")
+                    ),
                     vol.Optional(
                         CONF_SENSOR_DEBOUNCE,
                         default=current.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS) // 60,

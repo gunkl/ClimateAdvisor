@@ -83,12 +83,14 @@
         "data": {
           "door_window_sensors": "Door/Window Sensors",
           "sensor_polarity_inverted": "Invert Sensor Polarity",
+          "indoor_humidity_entity": "Indoor Humidity Sensor",
           "fan_mode": "Fan Control Mode",
           "fan_entity": "Fan Entity"
         },
         "data_description": {
           "door_window_sensors": "Select any binary sensor entities to monitor, including binary sensor groups that bundle multiple sensors together.",
           "sensor_polarity_inverted": "Enable this if your sensors report 'on' when closed and 'off' when open, which is the opposite of the Home Assistant standard.",
+          "indoor_humidity_entity": "Optional humidity sensor used only for the chart humidity / feels-like overlays. Leave blank to disable.",
           "fan_mode": "How to control fans for ventilation. 'Whole house fan' controls a dedicated fan entity. 'HVAC fan' uses the thermostat fan mode.",
           "fan_entity": "The fan or switch entity to control (only needed for whole house fan mode)."
         }
@@ -239,6 +241,7 @@
         "data": {
           "door_window_sensors": "Door/Window Sensors",
           "sensor_polarity_inverted": "Invert Sensor Polarity",
+          "indoor_humidity_entity": "Indoor Humidity Sensor",
           "sensor_debounce_seconds": "Sensor Debounce Delay",
           "manual_grace_seconds": "Manual Change Pause",
           "automation_grace_seconds": "Automated Change Cooldown",
@@ -255,6 +258,7 @@
         "data_description": {
           "door_window_sensors": "Select any binary sensor entities to monitor, including binary sensor groups that bundle multiple sensors together.",
           "sensor_polarity_inverted": "Enable this if your sensors report 'on' when closed and 'off' when open, which is the opposite of the Home Assistant standard.",
+          "indoor_humidity_entity": "Optional humidity sensor (e.g. from the smart thermostat) used only for the chart humidity / feels-like overlays. Leave blank to disable.",
           "sensor_debounce_seconds": "How long a door/window sensor's state must hold steady before Climate Advisor reacts to it -- pausing/resuming HVAC, or engaging/exiting natural-ventilation fan control. Prevents brief openings or a flaky sensor bounce from triggering a reaction.",
           "manual_grace_seconds": "How long to wait after you manually adjust the thermostat before Climate Advisor resumes automation.",
           "automation_grace_seconds": "How long to wait after Climate Advisor makes an automated change before allowing another one.",

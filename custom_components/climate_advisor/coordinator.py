@@ -125,6 +125,7 @@ from .const import (
     CONF_GUEST_TOGGLE_INVERT,
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
+    CONF_INDOOR_HUMIDITY_ENTITY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_HYSTERESIS_F,
     CONF_NATURAL_VENT_DELTA,
@@ -3946,6 +3947,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self._fan_is_running(_fan_status_cc) if self.automation_engine else False,
                     )
                     _band_lower_cc, _band_upper_cc = self._target_band_lower_upper_now()
+                    _hum_cc, _fl_cc = self._resolve_chart_humidity_feelslike(forecast.current_indoor_temp)
                     self._chart_log.append(
                         hvac=_chart_hvac_cc,
                         fan=self._fan_is_running(_fan_status_cc) if self.automation_engine else False,
@@ -3963,6 +3965,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         lower=_band_lower_cc,
                         upper=_band_upper_cc,
                         nat_vent_target=self._nat_vent_target_now(),
+                        humidity=_hum_cc,
+                        feelslike=_fl_cc,
                     )
 
             # Issue #968/#1018: validate the thermostat's reported unit (latched, once checkable).
@@ -4628,6 +4632,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("chart_log: thermostat not reporting yet during start-up — poll entry skipped")
             else:
                 _band_lower_poll, _band_upper_poll = self._target_band_lower_upper_now()
+                _hum_poll, _fl_poll = self._resolve_chart_humidity_feelslike(indoor_temp)
                 self._chart_log.append(
                     hvac=_chart_hvac_poll,
                     fan=self._fan_is_running(_fan_status_poll),
@@ -4648,6 +4653,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     lower=_band_lower_poll,
                     upper=_band_upper_poll,
                     nat_vent_target=self._nat_vent_target_now(),
+                    humidity=_hum_poll,
+                    feelslike=_fl_poll,
                 )
                 await self._executor_job(self._chart_log.save)
                 _LOGGER.debug(
@@ -4998,6 +5005,88 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
             sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
         )
+
+    def _get_indoor_humidity(self) -> float | None:
+        """Read indoor relative humidity (%) for chart overlays only.
+
+        Priority: configured ``indoor_humidity_entity`` sensor state, then the
+        climate entity's ``current_humidity``/``humidity`` attribute, then the
+        weather entity's ``humidity`` attribute. Returns None when nothing
+        usable is available. Never affects control decisions.
+        """
+        entity_id = self.config.get(CONF_INDOOR_HUMIDITY_ENTITY)
+        if entity_id:
+            state = self.hass.states.get(entity_id)
+            if state is not None and not is_unavailable_state(state.state):
+                try:
+                    val = float(state.state)
+                except (ValueError, TypeError):
+                    val = None
+                if val is not None and math.isfinite(val) and 0 <= val <= 100:
+                    return round(val, 1)
+        climate_entity = self.config.get("climate_entity")
+        if climate_entity:
+            cstate = self.hass.states.get(climate_entity)
+            if cstate is not None:
+                for attr in ("current_humidity", "humidity"):
+                    raw = cstate.attributes.get(attr)
+                    if raw is None:
+                        continue
+                    try:
+                        val = float(raw)
+                    except (ValueError, TypeError):
+                        continue
+                    if math.isfinite(val) and 0 <= val <= 100:
+                        return round(val, 1)
+        weather_entity = self.config.get("weather_entity")
+        if weather_entity:
+            wstate = self.hass.states.get(weather_entity)
+            if wstate is not None:
+                raw = wstate.attributes.get("humidity")
+                if raw is not None:
+                    try:
+                        val = float(raw)
+                    except (ValueError, TypeError):
+                        val = None
+                    if val is not None and math.isfinite(val) and 0 <= val <= 100:
+                        return round(val, 1)
+        return None
+
+    @staticmethod
+    def _compute_feelslike_f(temp_f: float | None, humidity: float | None) -> float | None:
+        """NOAA Rothfusz heat-index feels-like (°F) for chart overlays only.
+
+        Returns the input temp when either reading is missing or temp < 80°F
+        (heat index is undefined there); None only when temp itself is None.
+        """
+        if temp_f is None:
+            return None
+        if humidity is None or temp_f < 80:
+            return round(temp_f, 1)
+        rh = humidity
+        hi = (
+            -42.379
+            + 2.04901523 * temp_f
+            + 10.14333127 * rh
+            - 0.22475541 * temp_f * rh
+            - 0.00683783 * temp_f * temp_f
+            - 0.05481717 * rh * rh
+            + 0.00122874 * temp_f * temp_f * rh
+            + 0.00085282 * temp_f * rh * rh
+            - 0.00000199 * temp_f * temp_f * rh * rh
+        )
+        if rh < 13 and 80 <= temp_f <= 112:
+            hi -= ((13 - rh) / 4) * math.sqrt((17 - abs(temp_f - 95)) / 17)
+        elif rh > 85 and 80 <= temp_f <= 87:
+            hi += ((rh - 85) / 10) * ((87 - temp_f) / 5)
+        return round(hi, 1)
+
+    def _resolve_chart_humidity_feelslike(
+        self, indoor_temp: float | None
+    ) -> tuple[float | None, float | None]:
+        """Read humidity and derive feels-like for one chart-log entry."""
+        humidity = self._get_indoor_humidity()
+        return humidity, self._compute_feelslike_f(indoor_temp, humidity)
 
     async def _get_forecast_data(self) -> list:
         """Get forecast data using the weather.get_forecasts service.
@@ -7451,6 +7540,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._fan_is_running(),
                 )
                 _band_lower_ov, _band_upper_ov = self._target_band_lower_upper_now()
+                _hum_ov, _fl_ov = self._resolve_chart_humidity_feelslike(_indoor)
                 self._chart_log.append(
                     hvac=_chart_hvac_ov,
                     fan=self._fan_is_running(),
@@ -7472,6 +7562,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     lower=_band_lower_ov,
                     upper=_band_upper_ov,
                     nat_vent_target=self._nat_vent_target_now(),
+                    humidity=_hum_ov,
+                    feelslike=_fl_ov,
                 )
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
@@ -7590,10 +7682,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # Issue #1234: the always-primary reading (never the sleep-window swap) that live swing
                 # sampling uses, so thermal_replay's swing backfill reads the same sensor.
                 _primary_hac = self._get_indoor_temp_with_provenance().primary_value
+                _indoor_hac = self._get_indoor_temp()
+                _hum_hac, _fl_hac = self._resolve_chart_humidity_feelslike(_indoor_hac)
                 self._chart_log.append(
                     hvac=new_action,
                     fan=self._fan_is_running(),
-                    indoor=self._get_indoor_temp(),
+                    indoor=_indoor_hac,
                     indoor_primary=_primary_hac if isinstance(_primary_hac, int | float) else None,
                     outdoor=None,
                     windows_open=self._any_sensor_open(),
@@ -7612,6 +7706,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     lower=_band_lower_hac,
                     upper=_band_upper_hac,
                     nat_vent_target=self._nat_vent_target_now(),
+                    humidity=_hum_hac,
+                    feelslike=_fl_hac,
                 )
                 await self._executor_job(self._chart_log.save)
 

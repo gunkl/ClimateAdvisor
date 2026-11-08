@@ -161,6 +161,8 @@ class ChartStateLog:
         nat_vent_target: float | None = None,
         indoor_primary: float | None = None,
         comfort_target: float | None = None,
+        humidity: float | None = None,
+        feelslike: float | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
 
@@ -210,6 +212,8 @@ class ChartStateLog:
             "lower": lower,
             "upper": upper,
             "nat_vent_target": nat_vent_target,
+            "humidity": humidity,
+            "feelslike": feelslike,
         }
         if event is not None:
             entry["event"] = event
@@ -338,6 +342,8 @@ class ChartStateLog:
             lower_vals = [e["lower"] for e in group if e.get("lower") is not None]
             upper_vals = [e["upper"] for e in group if e.get("upper") is not None]
             nat_vent_target_vals = [e["nat_vent_target"] for e in group if e.get("nat_vent_target") is not None]
+            humidity_vals = [e["humidity"] for e in group if e.get("humidity") is not None]
+            feelslike_vals = [e["feelslike"] for e in group if e.get("feelslike") is not None]
             comfort_target = _bucket_comfort_target(group)
 
             summary: dict[str, Any] = {
@@ -360,6 +366,8 @@ class ChartStateLog:
                 "nat_vent_target": (
                     round(sum(nat_vent_target_vals) / len(nat_vent_target_vals), 1) if nat_vent_target_vals else None
                 ),
+                "humidity": round(sum(humidity_vals) / len(humidity_vals), 1) if humidity_vals else None,
+                "feelslike": round(sum(feelslike_vals) / len(feelslike_vals), 1) if feelslike_vals else None,
             }
             if comfort_target is not None:
                 summary["comfort_target"] = comfort_target
@@ -393,6 +401,8 @@ class ChartStateLog:
             lower_vals = [e["lower"] for e in group if e.get("lower") is not None]
             upper_vals = [e["upper"] for e in group if e.get("upper") is not None]
             nat_vent_target_vals = [e["nat_vent_target"] for e in group if e.get("nat_vent_target") is not None]
+            humidity_vals = [e["humidity"] for e in group if e.get("humidity") is not None]
+            feelslike_vals = [e["feelslike"] for e in group if e.get("feelslike") is not None]
             comfort_target = _bucket_comfort_target(group)
 
             summary: dict[str, Any] = {
@@ -421,6 +431,8 @@ class ChartStateLog:
                 "nat_vent_target": (
                     round(sum(nat_vent_target_vals) / len(nat_vent_target_vals), 1) if nat_vent_target_vals else None
                 ),
+                "humidity": round(sum(humidity_vals) / len(humidity_vals), 1) if humidity_vals else None,
+                "feelslike": round(sum(feelslike_vals) / len(feelslike_vals), 1) if feelslike_vals else None,
             }
             if comfort_target is not None:
                 summary["comfort_target"] = comfort_target

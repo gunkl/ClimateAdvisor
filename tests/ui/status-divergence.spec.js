@@ -10,7 +10,7 @@ const { test, expect } = require('@playwright/test');
 test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
 
   test('shows (CA: X) annotation when real setpoint diverges from CA target by >1 degree', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (route) => {
+    await page.route('**/api/climate_advisor/status**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -40,7 +40,7 @@ test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
   });
 
   test('shows no annotation when real setpoint matches CA target', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (route) => {
+    await page.route('**/api/climate_advisor/status**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -88,7 +88,7 @@ test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
 test.describe('Natural Vent info merged into Status card (Issue #407, #409)', () => {
 
   test('Status card shows the cycling band when nat-vent is active', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (route) => {
+    await page.route('**/api/climate_advisor/status**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -134,7 +134,7 @@ test.describe('Natural Vent info merged into Status card (Issue #407, #409)', ()
   });
 
   test('Status card shows no nat-vent line when nat-vent is not active', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (route) => {
+    await page.route('**/api/climate_advisor/status**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',

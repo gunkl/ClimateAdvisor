@@ -248,7 +248,8 @@
     if (!resp.ok) {
       var msg = 'HTTP ' + resp.status;
       try { var b = await resp.json(); if (b && b.message) msg = b.message; } catch (e) { /* ignore */ }
-      throw new Error(msg);
+      var err = new Error(msg); err.status = resp.status;
+      throw err;
     }
     return resp.json();
   }
@@ -430,13 +431,24 @@
   };
 
   // ---------- loading ----------
-  async function load() {
+  // Issue #1454: every request names a zone. The zone list comes from GET zones (names no zone by design, raises
+  // nothing); with no zone loaded yet (Climate Advisor still starting) nothing is sent. A failed request (a startup 503,
+  // a 404 before the views are registered) re-reads the zone list and retries the same zone after 2 s, 5 s and 10 s,
+  // then says Climate Advisor is starting. An unscoped request raised the "Ambiguous zone selection" Repairs card.
+  var BACKOFF_MS = [2000, 5000, 10000], retryTimer = null;
+  var STARTING = 'Climate Advisor is starting. Try again in a minute.';
+  async function load(attempt) {
+    attempt = typeof attempt === 'number' ? attempt : 0;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     var seq = ++reqSeq;
     if (reqCtl) { try { reqCtl.abort(); } catch (e) { /* ignore */ } }
     reqCtl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     S.loading = true; S.error = null;
     renderAll();
     try {
+      if (!S.zone) await loadZones();
+      if (seq !== reqSeq) return;
+      if (!S.zone) { var se = new Error(STARTING); se.starting = true; throw se; }
       var d = await authedFetch(buildUrl(S), reqCtl ? reqCtl.signal : undefined);
       if (seq !== reqSeq) return;
       S.data = d;
@@ -444,27 +456,38 @@
       S.loading = false;
     } catch (e) {
       if (seq !== reqSeq || (e && e.name === 'AbortError')) return;
+      var retryable = e.starting || !e.status || e.status === 404 || e.status >= 500;
+      if (retryable && attempt < BACKOFF_MS.length) {
+        var before = S.zone;
+        await loadZones();
+        if (seq !== reqSeq) return;
+        retryTimer = setTimeout(function () { load(attempt + 1); }, S.zone && S.zone !== before ? 0 : BACKOFF_MS[attempt]);
+        return; // still "Loading…"
+      }
       S.loading = false;
-      S.error = (e && e.message) ? e.message : 'request failed';
+      S.error = retryable ? STARTING : ((e && e.message) ? e.message : 'request failed');
     }
     renderAll();
   }
 
   async function loadZones() {
     try {
-      var st = await authedFetch('/api/climate_advisor/status');
-      if (st && Array.isArray(st.zones) && st.zone_count > 1) {
-        S.zones = st.zones;
-        var sel = $('zone-select'); sel.textContent = '';
-        st.zones.forEach(function (z) {
-          var o = document.createElement('option');
-          o.value = z.entry_id; o.textContent = z.title || z.entry_id;
-          sel.appendChild(o);
-        });
-        if (!S.zone || !st.zones.some(function (z) { return z.entry_id === S.zone; })) S.zone = st.zones[0].entry_id;
-        sel.value = S.zone;
+      var st = await authedFetch('/api/climate_advisor/zones');
+      var zones = st && Array.isArray(st.zones) ? st.zones : [];
+      if (!zones.length) return; // none loaded yet (starting): keep the zone, it is listed again once it is up
+      S.zones = zones;
+      var sel = $('zone-select'); sel.textContent = '';
+      zones.forEach(function (z) {
+        var o = document.createElement('option');
+        o.value = z.entry_id; o.textContent = z.title || z.entry_id;
+        sel.appendChild(o);
+      });
+      if (!S.zone || !zones.some(function (z) { return z.entry_id === S.zone; })) {
+        S.zone = zones[0].entry_id;
+        try { localStorage.setItem(ZONE_STORAGE_KEY, S.zone); } catch (e) { /* ignore */ }
       }
-    } catch (e) { /* single zone or status unavailable: zone-less request */ }
+      sel.value = S.zone;
+    } catch (e) { /* zones not served yet (starting): load() waits and retries */ }
   }
 
   // ---------- rendering ----------
@@ -495,7 +518,7 @@
       e.innerHTML = '<strong>Could not load prediction accuracy.</strong> ' + esc(S.error) + ' ';
       var r = document.createElement('button');
       r.type = 'button'; r.className = 'retry'; r.id = 'retry'; r.textContent = 'Retry';
-      r.addEventListener('click', load);
+      r.addEventListener('click', function () { load(); });
       e.appendChild(r);
       box.appendChild(e);
       return;

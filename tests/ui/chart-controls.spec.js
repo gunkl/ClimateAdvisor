@@ -101,7 +101,7 @@ for (const url of ['/', '/new_dashboard.html']) {
       await page.addInitScript(() => {
         if (sessionStorage.getItem('seeded')) return;
         sessionStorage.setItem('seeded', '1');
-        localStorage.setItem('ca_chart_v2:default', JSON.stringify({ on: { 'ov:humidity': true, 'ov:feelslike': true, 'ov:band': false } }));
+        localStorage.setItem('ca_chart_v2:mock-zone', JSON.stringify({ on: { 'ov:humidity': true, 'ov:feelslike': true, 'ov:band': false } }));
       });
       await open(page, url, { mutate: b => { b.state_log = b.state_log.map(e => Object.assign({}, e, { humidity: 45, feelslike: 70 })); } });
       await expect(chip(page, 'ov:humidity')).toHaveCount(0);
@@ -110,7 +110,7 @@ for (const url of ['/', '/new_dashboard.html']) {
       const drawn = await page.evaluate(() => Chart.getChart(document.getElementById('temp-chart')).data.datasets
         .filter(d => d.caId === 'ov:humidity' || d.caId === 'ov:feelslike').some(d => !d.hidden));
       expect(drawn).toBe(false);
-      const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:default')).on);
+      const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:mock-zone')).on);
       expect(stored).toEqual({ 'ov:band': false });
     });
 

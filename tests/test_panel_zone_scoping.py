@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from custom_components.climate_advisor.api import API_VIEWS
+from custom_components.climate_advisor.api import API_VIEWS, ZONELESS_VIEWS
 from custom_components.climate_advisor.const import DOMAIN, PANEL_FRONTEND_PATH
 from custom_components.climate_advisor.dashboard_api import DASHBOARD_VIEWS
 from tools.sim_harness._loop import run_coro
@@ -35,7 +35,7 @@ from tools.sim_harness.multi_zone_assertions import check_multi_zone_assertion
 # Every shared view __init__.py registers once (``for view_cls in (*API_VIEWS, *DASHBOARD_VIEWS)``):
 # the classic REST views plus the opt-in dashboard's views (Issue #1230 R5). Derived from the real
 # lists, so adding a view to either never needs this test touched.
-SHARED_VIEWS = [*API_VIEWS, *DASHBOARD_VIEWS]
+SHARED_VIEWS = [*API_VIEWS, *DASHBOARD_VIEWS, *ZONELESS_VIEWS]
 
 
 class TestPanelAndViewRegistrationScoping:

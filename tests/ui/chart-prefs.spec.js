@@ -4,7 +4,7 @@ const { test, expect } = require('@playwright/test');
 // 'ca_chart_v2:<zone>'), starts with "CA reading" as the only indoor reading line, remembers engine lines by ROLE
 // (primary / shadow) so switching engines keeps the choice, and says in words what the "Past v4 lines" row does.
 
-const KEY = 'ca_chart_v2:default';
+const KEY = 'ca_chart_v2:mock-zone';
 const SENSORS = [
   { id: 'sensor.living', name: 'Living room', role: 'main' },
   { id: 'sensor.bed', name: 'Bedroom', role: 'other' },

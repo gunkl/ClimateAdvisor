@@ -747,7 +747,7 @@ duplicated onto the Repairs card. This mirrors the existing split between
 `_LOGGER.warning()` detail and the shorter `weather_entity_not_found` card
 text already in this codebase.
 
-**Superseded (Issue #1418):** that copy named no cause and no remedy. The owner saw it on a 7-zone install and could not tell what to change. The card now carries `{request}` (method, path, caller) and `{outcome}` ("answered with the data of zone \"Zone 1\"" or "refused, and nothing was changed") placeholders, and tells the owner to add `?zone=<entry_id>`. Every view now reads `zone` as well as `entry_id`, via `api._zone_param()`. The owner also ruled that the card is raised on **every** unscoped request, on every endpoint (including the `status` bootstrap) and from every caller. It no longer shares the WARNING throttle, and a dismissed card comes back (`zone_registry._raise_ambiguous_issue`, `flag_unscoped_request`). See [REST API — Choosing a zone](rest-api.md#choosing-a-zone-zone).
+**Superseded (Issue #1418):** that copy named no cause and no remedy. The owner saw it on a 7-zone install and could not tell what to change. The card now carries `{request}` (method, path, caller) and `{outcome}` ("answered with the data of zone \"Zone 1\"" or "refused, and nothing was changed") placeholders, and tells the owner to add `?zone=<entry_id>`. Every view now reads `zone` as well as `entry_id`, via `api._zone_param()`. The owner also ruled that the card is raised on **every** unscoped request, on every endpoint (including the `status` bootstrap) and from every caller. It no longer shares the WARNING throttle, and a dismissed card comes back (`zone_registry._raise_ambiguous_issue`, `flag_unscoped_request`). The one exception is `GET /zones` (Issue #1454), which names no zone by design and is what the dashboards ask for the zone list, so the dashboards themselves never raise the card. See [REST API — Choosing a zone](rest-api.md#choosing-a-zone-zone).
 
 **Structural closure:** PR9 should ship in the same release batch as PR7
 wherever practically possible, narrowing the window between merge and every
@@ -1176,10 +1176,21 @@ that only runs on the success path is not a self-heal for the failure mode
 that matters most — the one that guarantees every subsequent request fails
 the same way.
 
+**Superseded (Issue #1454):** the unscoped retry raised the "Ambiguous zone
+selection" Repairs card (Issue #1418 made every unscoped request raise it), so a
+dashboard left open across a Home Assistant restart raised it every time. The
+dashboards now never send an unscoped request: the zone list comes from
+`GET /zones` (names no zone, raises nothing), a stored zone that is not listed
+is re-picked from it and retried at once, and a listed zone (or an empty list:
+still starting) is retried with the same zone after 2 s, 5 s and 10 s before
+the page says "Climate Advisor is starting". A first visit asks `/zones` before
+any scoped call. See [REST API — Choosing a zone](rest-api.md#choosing-a-zone-zone).
+
 **Test coverage:** `tests/ui/zone-selector.spec.js` (Playwright, real
 headless Chromium against the existing mock-server harness, actually
 executed) — `"Issue #812: zone selection persists across a page reload"` and
-`"Issue #812: a stored zone that no longer exists falls back gracefully"`.
+`"Issue #812: a stored zone that no longer exists falls back gracefully"`;
+`tests/ui/scoped-requests-1454.spec.js` (Issue #1454: restart and first visit, both dashboards and the accuracy page).
 
 ##### 10b — Repairs flows hard-coded `entries[0]`, issue_ids were domain-wide
 

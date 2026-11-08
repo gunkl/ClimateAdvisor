@@ -401,7 +401,7 @@
     body = await appendIncident(body);
     var token = await ND.getToken();
     try {
-      var resp = await fetch('/api/climate_advisor/' + ND.withZone('submit_github_issue'), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify({ title: title, body: body, labels: labels }) });
+      var resp = await fetch('/api/climate_advisor/' + await ND.scopedPath('submit_github_issue'), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify({ title: title, body: body, labels: labels }) });
       var data = await resp.json();
       if (data.success) { st.innerHTML = 'Issue created: <a href="' + esc(data.issue_url) + '" target="_blank" rel="noopener">#' + esc(data.issue_number) + '</a>'; $('gh-cancel').textContent = 'Close'; }
       else if (data.error === 'not_configured') { $('github-modal-not-configured').hidden = false; st.textContent = ''; btn.disabled = false; }

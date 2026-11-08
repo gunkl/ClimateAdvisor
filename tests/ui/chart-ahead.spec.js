@@ -7,7 +7,7 @@ const { test, expect } = require('@playwright/test');
 const H = 3600000;
 const RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y'];
 const PAGES = [['classic', '/'], ['new dashboard', '/new_dashboard.html']];
-const KEY = 'ca_chart_v2:default';
+const KEY = 'ca_chart_v2:mock-zone';
 
 async function open(page, url) {
   await page.goto(url);

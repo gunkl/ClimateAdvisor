@@ -41,6 +41,7 @@ from .const import (
     API_SUBMIT_GITHUB_ISSUE,
     API_TIMELINE,
     API_TOGGLE_AUTOMATION,
+    API_ZONES,
     ATTR_AUTOMATION_STATUS,
     ATTR_COMPLIANCE_SCORE,
     ATTR_CONTACT_STATUS,
@@ -1558,6 +1559,27 @@ class ClimateAdvisorNightStrategyView(HomeAssistantView):
             return self.json(payload)
 
 
+class ClimateAdvisorZonesView(HomeAssistantView):
+    """GET /api/climate_advisor/zones - the loaded zones: ``{zones: [{entry_id, title}], zone_count, version}``.
+
+    Issue #1454: the dashboards ask this, not ``status``, for the zone list on a first load (no stored zone) and after
+    a failed scoped call (a startup 503), so they never send an unscoped request. Before, they sent ``GET /status``
+    with no zone, which raised the "Ambiguous zone selection" Repairs card after a restart. This view names no zone by
+    design and reads nothing of any zone (``zone_registry.list_zones()`` only), so it never raises the card; every
+    other view still flags an unscoped request (owner's rule, Issue #1418). An empty list means Climate Advisor is
+    still starting. Read-only. Kept out of ``API_VIEWS`` (in ``ZONELESS_VIEWS``) because it is the one view with no
+    zone.
+    """
+
+    url = API_ZONES
+    name = "api:climate_advisor:zones"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        zones = zone_registry.list_zones(request.app["hass"])
+        return self.json({"zones": zones, "zone_count": len(zones), "version": VERSION})
+
+
 class ClimateAdvisorDeleteReportView(HomeAssistantView):
     """POST /api/climate_advisor/delete_report — delete a report by type + timestamp."""
 
@@ -1691,3 +1713,6 @@ API_VIEWS = [
     ClimateAdvisorTimelineView,
     ClimateAdvisorNightStrategyView,
 ]
+
+# Issue #1454: views that name no zone by design (registered next to API_VIEWS; they never flag an unscoped request).
+ZONELESS_VIEWS = [ClimateAdvisorZonesView]

@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.10"
+VERSION = "0.9.12"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -762,6 +762,7 @@ API_ENGINES = f"{API_BASE}/engines"
 API_PREDICTION_ACCURACY = f"{API_BASE}/prediction_accuracy"
 API_TIMELINE = f"{API_BASE}/timeline"  # Issue #1230 R3b: the operation timeline, read-only
 API_NIGHT_STRATEGY = f"{API_BASE}/night_strategy"  # Issue #1230 R6: tonight's bedroom strategy (advice), read-only
+API_ZONES = f"{API_BASE}/zones"  # Issue #1454: the zone list; names no zone by design, never raises the Repairs card
 
 # Panel
 PANEL_URL = "/climate_advisor/frontend"

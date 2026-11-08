@@ -187,6 +187,10 @@ _SURFACE_READERS = {
     "timeline_payload",
     "timeline_operations_lines",
     "_surface_timeline",
+    # Issue #1436: the chart's forward window/nat-vent flags (get_chart_data -> predicted_activity) and the chart log's
+    # ``windows_planned`` row field read the plan's spans; display only, like timeline_payload
+    "get_chart_data",
+    "_read_chart_windows_planned",
 }
 
 

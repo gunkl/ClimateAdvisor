@@ -433,6 +433,9 @@ from .timeline_surfaces import (
     apply_direction_veto,
     next_automation_candidates,
     operations_lines,
+    planned_windows_open,
+    strip_covers,
+    strip_spans,
     timeline_api_payload,
     timeline_windows,
     tou_bank_end_label,
@@ -6482,6 +6485,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1404: the hold in force now (a time-of-use bank), for the plan list's "Now" row. A view field like
         # text_short: the stored timeline contract and its steps are unchanged.
         out["current_hold"] = self.current_hold_payload()
+        # Issue #1436: the chart's activity strips right of NOW, read off this same plan (a view field like text_short).
+        out["strips"] = strip_spans(tl, dt_util.now())
         return out
 
     def timeline_operations_lines(self) -> list[str]:
@@ -15621,12 +15626,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             engine = self.automation_engine
             if engine is not None and (bool(engine._manual_override_active) or bool(engine._grace_active)):
                 out["override"] = True
+            out.update(self._read_chart_windows_planned())
             source = self._get_indoor_temp_with_provenance().source_entity
             if isinstance(source, str) and source:
                 out["band_sensor"] = source
         except Exception:  # noqa: BLE001 - a chart row must never fail on context
             _LOGGER.debug("chart_log: could not read row context", exc_info=True)
         return out
+
+    def _read_chart_windows_planned(self) -> dict[str, Any]:
+        """``{"windows_planned": bool}`` for a chart row: whether the operation timeline expects the windows open now.
+
+        Issue #1436: the PAST "Win plan" strip read ``windows_recommended`` (the classifier's live flag, true at 4 AM on
+        a warm day), so it disagreed with the plan as soon as the plan's close time went by. The row now records what
+        the plan said, the same meaning as the strip's faded part. Empty (key absent) with no timeline; never raises.
+        """
+        try:
+            tl = self._surface_timeline()
+            if tl is None:
+                return {}
+            return {"windows_planned": bool(planned_windows_open(tl, dt_util.now()))}
+        except Exception:  # noqa: BLE001 - a chart row must never fail on the plan
+            _LOGGER.debug("chart_log: could not read the planned window state", exc_info=True)
+            return {}
 
     def _read_chart_comfort_target(self) -> float | None:
         """The room's comfort target (internal F) while the remote-sensor outer loop holds an offset, else None.
@@ -16852,8 +16874,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _ae._natural_vent_active if _ae else False,
             )
 
+        # Issue #1436: the window and nat-vent flags per hour are the PLAN's (the operation timeline's window periods
+        # and nat-vent sessions, the same spans the chart's faded strips draw), never the regime walk's: the walk knows
+        # nothing of the plan's close time, so the forward Target line drew a nat-vent target all night under a plan
+        # that closes the windows at 7 PM. A coordinator with no timeline (degraded) keeps the walk, as every surface's
+        # degraded path does.
+        _plan_spans: list[dict] | None = None
+        if not is_historical:
+            try:
+                _plan_tl = self._surface_timeline()
+                _plan_spans = strip_spans(_plan_tl, now) if _plan_tl is not None else None
+            except Exception:  # noqa: BLE001 - the chart never fails on the plan; it falls back to the walk
+                _LOGGER.debug("chart: plan strips unavailable", exc_info=True)
+                _plan_spans = None
         _predicted_activity = (
-            [] if is_historical else _compute_predicted_activity(_conv_band, _regime_by_ts, self.config)
+            []
+            if is_historical
+            else _compute_predicted_activity(_conv_band, _regime_by_ts, self.config, plan_spans=_plan_spans)
         )
         _hvac_mode_by_ts = {ts: regime.get("hvac_mode", "off") for ts, regime in _regime_by_ts.items()}
         _effective_target_history = [
@@ -19591,15 +19628,19 @@ def _compute_predicted_activity(
     target_band: list[dict],
     regime_by_ts: dict[str, dict],
     config: dict,
+    plan_spans: list[dict] | None = None,
 ) -> list[dict]:
     """Per forecast hour: hvac_mode intent, fan_active, windows_recommended.
 
-    Issue #802: reads the already-resolved per-hour regime map from
+    Issue #802: ``hvac_mode`` reads the already-resolved per-hour regime map from
     ``_walk_forward_regime()`` (a genuine forward walk of the real production
-    decide_nat_vent_gate()/decide_nat_vent_exit()/decide_ode_ceiling_guard() functions)
-    instead of an independent, session-memory-less temperature-inequality heuristic —
-    ``fan_active`` and ``windows_recommended`` now mirror the same signal rather than being
-    two separately-computed, near-identical, similarly-flickery formulas.
+    decide_nat_vent_gate()/decide_nat_vent_exit()/decide_ode_ceiling_guard() functions).
+
+    Issue #1436: ``fan_active`` and ``windows_recommended`` are the PLAN's when ``plan_spans`` is given
+    (``timeline_surfaces.strip_spans``: the operation timeline's nat-vent sessions and window periods, the same spans
+    the chart's faded strips draw), so the forward Target line's nat-vent tier never runs past the plan's close time.
+    The chart no longer draws a strip from this field. ``plan_spans=None`` (a coordinator with no timeline, the
+    degraded path) keeps the walk's nat-vent flag for both.
     """
     fan_mode = str(config.get("fan_mode", "auto"))
 
@@ -19611,8 +19652,16 @@ def _compute_predicted_activity(
         regime = regime_by_ts.get(ts, {})
         hvac_mode = regime.get("hvac_mode", "off")
 
-        fan_active = True if fan_mode == "on" else bool(regime.get("nat_vent_active"))
-        windows_recommended = fan_active
+        if plan_spans is None:
+            fan_active = True if fan_mode == "on" else bool(regime.get("nat_vent_active"))
+            windows_recommended = fan_active
+        else:
+            at: datetime | None = None
+            with contextlib.suppress(TypeError, ValueError):
+                at = datetime.fromisoformat(str(ts))
+            in_session = at is not None and strip_covers(plan_spans, "natvent", at)
+            fan_active = True if fan_mode == "on" else in_session
+            windows_recommended = at is not None and strip_covers(plan_spans, "windowsplan", at)
 
         result.append(
             {

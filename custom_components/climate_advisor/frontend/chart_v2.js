@@ -1086,56 +1086,82 @@
   // ---- activity strips ----
   function _hvacOf(e) { return (e.hvac || '').toLowerCase(); }
 
+  // Issue #1436: solid = what happened (the chart log), faded = what the plan expects (the operation timeline's
+  // `strips`, timeline_surfaces.strip_spans: window periods, nat-vent sessions, predicted runs, the setback and the
+  // override the plan holds). Nothing right of NOW comes from chart_data.predicted_activity any more: that older
+  // hour-by-hour predictor ignored the plan's close time and drew Nat-vent and Win plan all night.
   function _stripSegments(cd) {
     const log = (cd.state_log || []).slice().sort((a, b) => _parseTs(a.ts) - _parseTs(b.ts));
-    const pred = (cd.predicted_activity || []).slice().sort((a, b) => _parseTs(a.ts) - _parseTs(b.ts));
     const tests = {
       heating: e => _hvacOf(e) === 'heating',
       cooling: e => _hvacOf(e) === 'cooling',
       fan: e => e.fan_running === true || _hvacOf(e) === 'fan' || (e.fan_running === undefined && e.nat_vent_active === undefined && !!e.fan),
       natvent: e => !!e.nat_vent_active,
       windows: e => !!e.windows_open,
-      windowsplan: e => !!e.windows_recommended,
+      // what the plan said at the time (windows_planned, #1436); older rows only have the classifier's live flag
+      windowsplan: e => (typeof e.windows_planned === 'boolean' ? e.windows_planned : !!e.windows_recommended),
       away: e => e.occupancy === 'away' || e.occupancy === 'vacation',
       override: e => e.override === true,
     };
-    const ftests = {
-      heating: p => _normalizeTargetMode(p.hvac_mode) === 'heat',
-      cooling: p => _normalizeTargetMode(p.hvac_mode) === 'cool',
-      fan: () => false,   // a forecast cannot assert the fan is physically running (armed is not running)
-      natvent: p => !!(p.fan_running || p.nat_vent_active || p.fan_active),
-      windows: () => false,
-      windowsplan: p => !!p.windows_recommended,
-      away: () => false,        // a forecast says nothing about who will be home
-      override: () => false,
-    };
+    const now = Date.now();
+    const plan = (_timelineState === 'ok' && _timeline && Array.isArray(_timeline.strips)) ? _timeline.strips : [];
     const out = {};
     STRIP_ROWS.forEach(r => {
       const segs = [];
-      const push = (a, b, future) => {
+      const push = (a, b, future, step) => {
+        if (!(b > a)) return;
         const last = segs[segs.length - 1];
-        if (last && last.future === future && a <= last.b + 1) last.b = Math.max(last.b, b);
-        else segs.push({ a, b, future });
+        if (!future && last && !last.future && a <= last.b + 1) last.b = Math.max(last.b, b);
+        else segs.push({ a, b, future, step: step || null });
       };
+      // The past: a row's state holds from its time until the next row (rows are written at every change and every
+      // 30 minutes, Issue #1425), never centred on the poll, and never beyond NOW (the last row holds up to 30 min).
       log.forEach((e, i) => {
         if (!tests[r.id](e)) return;
         const ts = _parseTs(e.ts);
-        const prev = i > 0 ? _parseTs(log[i - 1].ts) : ts - 1800000;
+        if (isNaN(ts) || ts >= now) return;
         const next = i < log.length - 1 ? _parseTs(log[i + 1].ts) : ts + 1800000;
-        // Away / Vacation: a row is written when occupancy changes, so the mode holds from its row to the next
-        // (the bar starts when you left and ends when you came home, never centred on a 30-minute poll).
-        if (r.id === 'away') push(ts, i < log.length - 1 ? next : Math.max(ts, Math.min(next, Date.now())), false);
-        else push((ts + prev) / 2, (ts + next) / 2, false);
+        push(ts, Math.min(next, now), false);
       });
-      pred.forEach((p, i) => {
-        if (!ftests[r.id](p)) return;
-        const a = _parseTs(p.ts);
-        const b = i < pred.length - 1 ? _parseTs(pred[i + 1].ts) : a + 3600000;
-        push(a, b, true);
+      // The plan, right of NOW: one segment per plan span, carrying the step its hover names.
+      plan.forEach(sp => {
+        if (!sp || sp.row !== r.id) return;
+        const a = Math.max(_parseTs(sp.start), now), b = _parseTs(sp.end);
+        if (isNaN(a) || isNaN(b)) return;
+        push(a, b, true, { text: sp.text || '', short: sp.text_short || sp.text || '', kind: sp.kind || '',
+          at: sp.step_ts ? _parseTs(sp.step_ts) : null, actor: sp.actor || 'ca', confidence: sp.confidence || 'ok' });
       });
       out[r.id] = segs;
     });
     return out;
+  }
+
+  // The plan span a faded strip draws at `ms` for each strip that is on (Issue #1436: the hover names the plan step).
+  function _stripPlanAt(ms) {
+    if (!(ms > Date.now())) return [];
+    const found = [];
+    STRIP_ROWS.forEach(r => {
+      if (!_stripOn(r.id)) return;
+      const sg = (_stripSegs[r.id] || []).find(g => g.future && g.a <= ms && ms < g.b);
+      if (sg && sg.step) found.push({ row: r, step: sg.step });
+    });
+    return found;
+  }
+
+  // Issue #1436: one line under the strips says what solid and faded mean (both dashboards: the module adds it).
+  const STRIP_LEGEND_TEXT = 'Solid: what happened \u00b7 Faded: what the plan expects';
+  function _stripLegend(wrap, rows) {
+    let el = document.getElementById('chart-strip-legend');
+    if (!el) {
+      el = document.createElement('p');
+      el.id = 'chart-strip-legend';
+      el.className = 'strip-legend';
+      el.innerHTML = '<span class="strip-legend-sw strip-legend-solid" aria-hidden="true"></span>Solid: what happened' +
+        ' \u00b7 <span class="strip-legend-sw strip-legend-faded" aria-hidden="true"></span>Faded: what the plan expects';
+      el.setAttribute('aria-label', STRIP_LEGEND_TEXT);
+      wrap.appendChild(el);
+    }
+    el.hidden = !rows.length;
   }
 
   function drawStrips() {
@@ -1144,6 +1170,8 @@
     const rows = STRIP_ROWS.filter(r => _stripOn(r.id) && (_stripSegs[r.id] || []).length > 0);
     const wrap = canvas.parentElement;
     wrap.style.display = rows.length ? '' : 'none';
+    _stripLegend(wrap, rows);
+    window.__test_strips = { rows: rows.map(r => r.id), segs: _stripSegs };   // test hook (tests/ui/strips-plan.spec.js)
     if (!rows.length) return;
     const xs = _tempChart && _tempChart.scales && _tempChart.scales.x ? _tempChart.scales.x : null;
     const win = _viewWindow();
@@ -1321,6 +1349,14 @@
     const planStep = ms >= Date.now() - 60000 ? _planNear(ms) : null;   // NOW itself (a minute's slack) counts as ahead
     if (planStep) overlay += _chpItem(planStep.actor === 'you' ? 'var(--c-target)' : 'var(--c-plan)',
       escapeHtml(planStep.actor === 'you' ? 'You' : 'CA') + ' ' + escapeHtml(_clock(planStep._ms)) + ': <strong>' + escapeHtml(planStep.text_short || planStep.text || '') + '</strong>');
+    // Issue #1436: right of NOW each faded strip names the plan step it draws ("Win plan: 7:14 PM: close the windows ...")
+    let activity = '';
+    // (the step's time and who acts beside it, its sentence without the time, as the plan overlay's line does, #1399)
+    _stripPlanAt(ms).forEach(({ row, step }) => {
+      const who = step.at == null ? '' : ' \u00b7 ' + (step.actor === 'you' ? 'You' : 'CA') + ' ' + escapeHtml(_clock(step.at));
+      activity += _chpItem(row.color, escapeHtml(row.short) + ' <span class="chp-plan-tag">plan</span>' + who + ': <strong>' +
+        escapeHtml(step.short) + '</strong>' + (step.confidence === 'low' ? ' <span class="plan-qual">may help</span>' : ''));
+    });
     let closest = null, minDiff = Infinity;
     log.forEach(e => {
       const diff = Math.abs(_parseTs(e.ts) - ms);
@@ -1342,7 +1378,7 @@
       ? '<span class="chp-hint">' + (touchOnly ? 'Tap the chart to pin a time' : 'Hover the chart for any time; click to pin') + '</span>'
       : _cursorPinned ? '<button type="button" class="chp-clear" onclick="clearChartPin()">Pinned · ' + (touchOnly ? 'tap' : 'click') + ' to release</button>' : '';
     const body = _readoutRow('Indoor', lines.indoor) + _readoutRow('Predicted', lines.predicted) + _readoutRow('Outdoor', lines.outdoor) +
-      _readoutRow('Overlays', overlay) + (stateHtml ? '<div class="chp-row">' + stateHtml + '</div>' : '');
+      _readoutRow('Overlays', overlay) + _readoutRow('Activity', activity) + (stateHtml ? '<div class="chp-row">' + stateHtml + '</div>' : '');
     const prevH = _readoutFresh ? 0 : panel.offsetHeight;
     _readoutFresh = false;
     panel.dataset.mode = restLabel ? 'rest' : (_cursorPinned ? 'pinned' : 'hover');

@@ -390,7 +390,21 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
     # Status, the thresholds (ca_target_heat/cool, the reading cards), the briefing's HVAC Mode row, the chart band now,
     # Next Automation and the plan list's "Now" row tell the same story as the thermostat writes.
     out["hold"] = _capture_hold(coordinator, engine)
+    # Issue #1436 (additive): the chart's future activity strips against the plan (``strip_check``): the strips the
+    # timeline payload hands the chart, the chart payload's predicted_activity hours, and the P8 verdict on both.
+    out["chart_strips"] = _capture_chart_strips(coordinator, updates)
     return out
+
+
+def _capture_chart_strips(coordinator: Any, updates: list[dict]) -> dict[str, Any] | None:
+    from homeassistant.util import dt as _dt  # noqa: PLC0415
+
+    from tools.sim_harness.strip_check import check_coordinator  # noqa: PLC0415
+
+    try:
+        return check_coordinator(coordinator, _dt.now(), float(updates[-1]["outdoor_f"]) if updates else None)
+    except Exception as exc:  # noqa: BLE001 - a capture never breaks the run; the golden sees the error
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def _capture_hold(coordinator: Any, engine: Any) -> dict[str, Any]:

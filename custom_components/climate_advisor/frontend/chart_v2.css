@@ -54,6 +54,25 @@
   .activity-timeline canvas {
     display: block;
   }
+  /* Issue #1436: what solid and faded strips mean */
+  .strip-legend {
+    margin: 3px 0 0;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    line-height: 1.3;
+  }
+  .strip-legend[hidden] { display: none; }
+  .strip-legend-sw {
+    display: inline-block;
+    width: 14px;
+    height: 8px;
+    margin: 0 4px 0 0;
+    vertical-align: middle;
+    border-radius: 2px;
+    background: var(--text-secondary);
+  }
+  .strip-legend-faded { opacity: 0.4; margin-left: 2px; }
+  .chp-plan-tag { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.8; }
   .chart-hover-panel {
     height: 24px;
     overflow: hidden;

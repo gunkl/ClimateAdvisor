@@ -4416,9 +4416,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # self._current_classification is always fresh.
             await self._apply_tou_schedule()
 
-            if self._maybe_regenerate_briefing_for_drift():
-                await self._async_save_state()
-
             # Reset startup retry state on success (Issue #1337: a real fetch, not the kept forecast)
             if forecast.from_kept_forecast is not True and self._startup_retries_remaining < 5:
                 _LOGGER.info(
@@ -4845,6 +4842,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R3b: the operation timeline is generated ONCE per cycle, here, before any surface is computed:
         # Next Action, Next Automation, the briefing and the REST endpoint all read this one result.
         self._timeline_shadow_run("cycle")
+
+        # Issue #1436 audit: the drift-regenerated briefing reads the plan, so it runs after the planning step above
+        # (it used to run earlier in the cycle, where its read rebuilt the plan mid-cycle).
+        if forecast and not _outage_retry_only and c is not None and self._maybe_regenerate_briefing_for_drift():
+            await self._async_save_state()
 
         next_auto = self._compute_next_automation_action(c)
         fan_running = self.automation_engine._fan_active
@@ -6059,7 +6061,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._timeline_dirty = event_type
 
     def _timeline_tick(self) -> None:
+        """The 5-minute planning step: a marked change, or (Issue #1436 audit) a new local day the cycle has not planned
+        yet, now that no read builds the plan."""
         reason = getattr(self, "_timeline_dirty", None)
+        if reason is None:
+            latch = getattr(self, "_timeline_latch", None)
+            tl = latch.timeline if latch is not None else None
+            if tl is not None and tl.day != dt_util.now().date():
+                reason = "new_day"
         if reason is not None:
             self._timeline_shadow_run(reason)
 
@@ -6427,7 +6436,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         try:
             from . import night_strategy  # noqa: PLC0415
 
-            self._surface_timeline()  # refreshes the plan (and with it the night strategy) when stale
+            # read only (Issue #1436 audit): the night strategy is planned with the timeline, by its planning steps
             cache = getattr(self, "_timeline_night", None) or {}
             strategy = cache.get("strategy")
             if strategy is None:
@@ -6438,42 +6447,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("night_strategy_payload failed", exc_info=True)
             return None, "error"
 
-    def _surface_timeline(self, *, live: bool = True, refresh: bool = True) -> Any:
-        """The timeline the occupant-facing surfaces read (Issue #1230 R3b), or None in a degraded coordinator.
+    def _surface_timeline(self, *, live: bool = True) -> Any:
+        """The timeline the occupant-facing surfaces read (Issue #1230 R3b), or None (no plan yet / degraded).
 
         ``live`` (default) marks the window step the live direction rule vetoes right now as held, so the plan list, the
         briefing and the REST body say what the Next Action card says (``timeline_surfaces.apply_direction_veto``);
         ``live=False`` is the plan as latched (the card applies the veto itself with the readings it was handed).
 
-        The cycle generates it once before the surfaces are computed. A standalone read (the REST endpoint, a harness
-        capture, a surface asked between cycles) refreshes it when the last run is older than two minutes or belongs
-        to another local day, so a surface never reads yesterday's plan. Never raises.
-
-        ``refresh=False`` (Issue #1436 regression fix): read the plan as latched, never build it. The chart log row and
-        the chart payload are written/read in the middle of a cycle; a refresh there latched the day's plan from
-        half-updated inputs (real HA: the evening window step moved from 7:30 PM to 7:00 PM and was marked done).
+        READ ONLY (Issue #1436 mirror audit): it returns the plan as latched and never builds or refreshes it. Only the
+        planning steps build it (``_timeline_shadow_run``: the cycle, the occupancy change, the 5-minute tick for a
+        marked change or a new local day, the briefing send). Before, any read older than two minutes rebuilt it, so a
+        read in the middle of a cycle (a chart row, a card refresh, a REST call) latched the day's plan from
+        half-updated inputs (real HA: the evening window step moved from 7:30 PM to 7:00 PM and was marked done). Before
+        the first plan, or on a new local day before its plan, it returns None: "no plan yet" (the REST endpoint answers
+        503, the cards use their documented degraded path). Never raises.
         """
         latch = getattr(self, "_timeline_latch", None)
         if latch is None or getattr(self, "_shut_down", False) is True or self._current_classification is None:
             return None
         try:
             tl = latch.timeline
-            last = (getattr(self, "_timeline_last", None) or {}).get("at")
-            now = dt_util.now()
-            stale = tl is None or tl.day != now.date()
-            if not refresh:
-                if stale:
-                    return None
-                return self._apply_live_direction_veto(tl) if live else tl
-            if not stale and last:
-                at = dt_util.parse_datetime(last)
-                stale = at is None or abs((now - at).total_seconds()) > 120.0
-            if stale:
-                self._timeline_shadow_run("surface")
-                tl = latch.timeline
-            if live and tl is not None:
-                tl = self._apply_live_direction_veto(tl)
-            return tl
+            if tl is None or tl.day != dt_util.now().date():
+                return None
+            return self._apply_live_direction_veto(tl) if live else tl
         except Exception:  # noqa: BLE001 - a surface falls back to its degraded path rather than fail
             _LOGGER.debug("surface timeline unavailable", exc_info=True)
             return None
@@ -8065,6 +8061,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # extracted to _ensure_today_record() so the regular classification cycle can also
             # call it — this call site is now just the once-daily "make sure it's current" path.
             self._ensure_today_record(classification)
+
+            # Issue #1436 audit: the briefing send is a planning step (it may have re-classified and re-applied the day
+            # above); the plan is brought up to date here, and the text below only reads it.
+            self._timeline_shadow_run("briefing")
 
             # Generate briefing text and track which suggestions were sent
             suggestions = self.learning.generate_suggestions()
@@ -15691,7 +15691,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         the plan said, the same meaning as the strip's faded part. Empty (key absent) with no timeline; never raises.
         """
         try:
-            tl = self._surface_timeline(refresh=False)  # a chart row is written mid-cycle: never build the plan here
+            tl = self._surface_timeline()  # a chart row is written mid-cycle: never build the plan here
             if tl is None:
                 return {}
             return {"windows_planned": bool(planned_windows_open(tl, dt_util.now()))}
@@ -16931,7 +16931,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _plan_spans: list[dict] | None = None
         if not is_historical:
             try:
-                _plan_tl = self._surface_timeline(refresh=False)  # never build the plan from a chart read
+                _plan_tl = self._surface_timeline()  # never build the plan from a chart read
                 _plan_spans = strip_spans(_plan_tl, now) if _plan_tl is not None else None
             except Exception:  # noqa: BLE001 - the chart never fails on the plan; it falls back to the walk
                 _LOGGER.debug("chart: plan strips unavailable", exc_info=True)

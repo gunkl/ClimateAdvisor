@@ -504,22 +504,141 @@ def test_runs_are_never_duplicated_two_days_have_the_same_times():
 # --- regression caught by the real-HA goldens r3b_hot_*_evening_window_period and r3b_mild_evening_* ------------
 
 
-def test_chart_reads_never_build_the_plan():
-    """A chart log row is written in the middle of a cycle. Reading the plan there must not build it: on real HA the
-    refresh latched the day's plan from half-updated inputs, so the evening "open the windows" step moved from
-    7:30 PM to 7:00 PM and was already marked done when the occupant read it."""
+def _fresh_coord(day_offset: int = 0):
     from unittest.mock import MagicMock
 
     mod = _coord_mod()
     coord = object.__new__(mod.ClimateAdvisorCoordinator)
-    coord._timeline_latch = MagicMock(timeline=None)
-    coord._timeline_last = {"at": "2000-01-01T00:00:00+00:00"}
+    today = mod.dt_util.now().date() + timedelta(days=day_offset)
+    coord._timeline_latch = MagicMock(timeline=MagicMock(day=today))
+    coord._timeline_last = {"at": "2000-01-01T00:00:00+00:00"}  # a run long ago: the old code rebuilt here
     coord._current_classification = object()
     coord._shut_down = False
     coord._timeline_shadow_run = MagicMock()
-    assert coord._read_chart_windows_planned() == {}
-    assert coord._surface_timeline(refresh=False) is None
+    coord._apply_live_direction_veto = lambda tl: tl
+    return coord
+
+
+def test_a_surface_read_returns_the_latched_plan_and_never_builds_it():
+    """Issue #1436 mirror audit. A read in the middle of a cycle (a chart row) used to rebuild the plan whenever the
+    last run was over two minutes old: on real HA the day's plan was latched from half-updated inputs, so the evening
+    "open the windows" step moved from 7:30 PM to 7:00 PM and was already done when the occupant read it."""
+    coord = _fresh_coord()
+    assert coord._surface_timeline() is coord._timeline_latch.timeline
     coord._timeline_shadow_run.assert_not_called()
-    # the surfaces that may build it (REST timeline, cards) still do
-    coord._surface_timeline()
-    coord._timeline_shadow_run.assert_called_once_with("surface")
+
+
+def test_no_plan_yet_reads_as_none_and_builds_nothing():
+    coord = _fresh_coord()
+    coord._timeline_latch.timeline = None  # startup: before the first cycle
+    assert coord._surface_timeline() is None
+    assert coord._read_chart_windows_planned() == {}
+    assert coord.timeline_payload() is None  # the REST endpoint answers 503 "no plan yet"
+    assert coord.timeline_operations_lines() == []
+    coord._timeline_shadow_run.assert_not_called()
+
+
+def test_yesterdays_plan_is_not_shown_and_the_five_minute_tick_plans_the_new_day():
+    coord = _fresh_coord(day_offset=-1)
+    coord._timeline_dirty = None
+    assert coord._surface_timeline() is None
+    coord._timeline_shadow_run.assert_not_called()
+    coord._timeline_tick()  # a planning step
+    coord._timeline_shadow_run.assert_called_once_with("new_day")
+
+
+def test_the_tick_does_not_rebuild_a_current_plan_with_nothing_marked():
+    coord = _fresh_coord()
+    coord._timeline_dirty = None
+    coord._timeline_tick()
+    coord._timeline_shadow_run.assert_not_called()
+
+
+# The read paths of the audit (docs: 0.9.8-strips-decisions.md). None of them may reach a plan build, directly or
+# through any other coordinator method; only the planning steps may.
+_READ_PATHS = (
+    "timeline_payload",  # GET /timeline
+    "night_strategy_payload",  # GET /night_strategy
+    "tomorrow_plan",  # GET /learning (Analysis "Tomorrow (plan)")
+    "get_chart_data",  # GET /chart_data
+    "get_debug_state",  # GET /automation_state, diagnostics
+    "timeline_debug",
+    "timeline_operations_lines",
+    "_build_briefing_text",  # the briefing text (send, regenerate, drift)
+    "_maybe_regenerate_briefing_for_drift",
+    "_compute_next_action",  # Next Action card (cycle, TOU-bank card refresh)
+    "_compute_next_automation_action",  # Next Automation card
+    "_push_tou_bank_card_status",
+    "_read_chart_context",  # every chart log row
+    "_read_chart_windows_planned",
+    "_surface_timeline",
+    "current_hold_payload",  # GET /status, timeline
+)
+_PLANNING_STEPS = {
+    "_async_update_data_impl",
+    "_async_occupancy_toggle_changed",
+    "_async_thermal_sample_tick",
+    "_timeline_tick",
+    "_async_send_briefing",
+}
+_BUILDERS = {"_timeline_shadow_run", "_timeline_shadow_run_impl", "_timeline_night_apply", "_timeline_night_plan"}
+
+
+def _call_graph():
+    import ast
+    from pathlib import Path
+
+    src = Path(_coord_mod().__file__).read_text(encoding="utf-8")
+    cls = next(n for n in ast.parse(src).body if isinstance(n, ast.ClassDef) and n.name == "ClimateAdvisorCoordinator")
+    graph: dict[str, set[str]] = {}
+    for fn in cls.body:
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            graph[fn.name] = {
+                n.attr
+                for n in ast.walk(fn)
+                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "self"
+            }
+    return graph
+
+
+def _reaches_builder(graph, start):
+    seen, todo = set(), [start]
+    while todo:
+        m = todo.pop()
+        if m in seen:
+            continue
+        seen.add(m)
+        if m in _BUILDERS:
+            return m
+        if m in _PLANNING_STEPS and m != start:
+            continue  # a planning step a read path schedules is not a read-path build (none does today)
+        todo.extend(x for x in graph.get(m, ()) if x in graph)
+    return None
+
+
+@pytest.mark.parametrize("path", _READ_PATHS)
+def test_read_path_never_reaches_a_plan_build(path):
+    graph = _call_graph()
+    assert path in graph, path
+    assert _reaches_builder(graph, path) is None, f"{path} reaches a plan build"
+
+
+def test_only_the_planning_steps_build_the_plan():
+    graph = _call_graph()
+    builders = {m for m in graph if m not in _BUILDERS and graph[m] & {"_timeline_shadow_run"}}
+    # the 5-minute thermal tick reaches the build through _timeline_tick
+    assert builders == _PLANNING_STEPS - {"_async_thermal_sample_tick"}, builders
+    assert "_timeline_tick" in graph["_async_thermal_sample_tick"]
+
+
+def test_the_api_and_the_sensors_never_build_the_plan():
+    from pathlib import Path
+
+    pkg = Path(_coord_mod().__file__).parent
+    for name in ("api.py", "sensor.py", "binary_sensor.py", "switch.py", "diagnostics.py", "dashboard_api.py"):
+        f = pkg / name
+        if f.exists():
+            text = f.read_text(encoding="utf-8")
+            assert "_timeline_shadow_run" not in text and "build_timeline" not in text and ".update(snap" not in text, (
+                name
+            )

@@ -711,7 +711,13 @@ class SurfaceProbe(PromiseProbe):
         )
 
     def _sample(self, label: str, now: datetime) -> None:
+        from tools.sim_harness.scenario_model import run_planning_step  # noqa: PLC0415
+
         s = self._session
+        # Issue #1436 audit: production builds the plan only in its planning steps (no surface read does), so the probe
+        # runs the cycle's planning step before reading, as the cycle does before it computes the surfaces
+        with contextlib.suppress(Exception):
+            run_planning_step(s.coordinator)
         armed = read_armed(s)
         if armed is None:
             return

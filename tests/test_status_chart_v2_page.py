@@ -34,7 +34,11 @@ def test_two_charts_one_strip_canvas_and_a_cursor():
     assert "chart-container-out" in INDEX
     # the plot areas of the two charts line up: fixed axis widths and a fixed right gutter
     assert "const OUT_PX = 44" in INDEX and "const RIGHT_PX = 40" in INDEX
-    assert "sc.width = OUT_PX" in INDEX and "sc.width = RIGHT_PX" in INDEX and "padRight: RIGHT_PX" in INDEX
+    assert "sc.width = OUT_PX" in INDEX and "sc.width = RIGHT_PX" in INDEX
+    # Issue #1414: both charts carry the same RIGHT_PX-wide right % axis (its labels blank while no humidity line is
+    # drawn on that chart), so the outdoor chart no longer pads its right side
+    draw = _func("drawChart")
+    assert draw.count("yRight: rightAxis(") == 2 and "padRight: RIGHT_PX" not in draw
 
 
 def test_time_controls_past_ahead_scroll_now():
@@ -81,12 +85,13 @@ def test_every_toggle_group_is_in_the_key():
         assert f"_group('{group}'" in key, group
     for sid in ("ov:band", "ov:target", "ov:plan", "strip:events"):
         assert f"'{sid}'" in key, sid
-    # 0.9.6 Lane F: humidity / feels-like were never logged, so they are not offered until Issue #1414 wires them up
+    # Issue #1414: humidity / feels-like are ordinary indoor and outdoor series, not overlays; the old overlay
+    # choices move to the indoor lines (and are re-saved) when the prefs are read
     for sid in ("ov:humidity", "ov:feelslike"):
         assert f"'{sid}'" not in key, sid
-    assert "const HIDDEN_OVERLAYS = ['ov:humidity', 'ov:feelslike']" in INDEX
-    assert "HIDDEN_OVERLAYS.includes(id)) return false" in _func("_isOn")
-    assert "HIDDEN_OVERLAYS.forEach" in _func("_readPrefs")  # stored choices dropped (and re-saved) on read
+    assert "HIDDEN_OVERLAYS" not in INDEX
+    assert "const OLD_OVERLAY_IDS = { 'ov:humidity': 'ind:humidity', 'ov:feelslike': 'ind:feelslike' }" in INDEX
+    assert "OLD_OVERLAY_IDS" in _func("_readPrefs") and "prefs.migrated = true" in _func("_readPrefs")
     assert "STRIP_ROWS.map(r => ovChip('strip:' + r.id" in key
     for row in ("heating", "cooling", "fan", "natvent", "windows", "windowsplan"):
         assert f"id: '{row}'" in INDEX, row
@@ -100,8 +105,14 @@ def test_every_toggle_group_is_in_the_key():
         "'out:sensor'",
         "'out:service'",
         "'out:corrected'",
+        "'ind:humidity'",
+        "'ind:feelslike'",
+        "'out:humidity'",
+        "'out:feelslike'",
     ):
         assert sid in ser, sid
+    assert "axis: 'yRight', unit: '%'" in ser  # humidity: right % axis
+    assert "yAxisID: s.axis || 'y'" in _func("_dsFor")
     # chips are real buttons with aria-pressed; the key is one delegated handler
     chip = _func("_chip")
     assert '<button type="button"' in chip and "aria-pressed" in chip
@@ -111,7 +122,8 @@ def test_every_toggle_group_is_in_the_key():
 def test_defaults_baseline_overlays_and_ca_reading_start_off():
     d = _func("_defaultOn")
     assert "id.startsWith('base:')) return false" in d
-    assert "'ov:humidity'" in d and "'ov:feelslike'" in d
+    assert "HUM_FEELS_IDS.includes(id)) return false" in d  # humidity / feels-like start off (Issue #1414)
+    assert "const HUM_FEELS_IDS = ['ind:humidity', 'ind:feelslike', 'out:humidity', 'out:feelslike']" in INDEX
     assert "id === 'ind:_ca'" in d
 
 
@@ -258,7 +270,9 @@ def test_activity_strips_toggle_and_future_is_dimmer():
 
 
 def test_every_existing_overlay_is_kept():
-    assert "label: 'Target Band'" in INDEX and "label: 'Humidity %'" in INDEX and "label: 'Feels-like'" in INDEX
+    assert "label: 'Target Band'" in INDEX
+    # Issue #1414: humidity / feels-like are series now (label 'Humidity' / 'Feels-like'), not overlay datasets
+    assert "label: 'Humidity %'" not in INDEX and "label: 'Humidity'" in INDEX and "label: 'Feels-like'" in INDEX
     assert "label: 'Target'" in INDEX and "label: 'Thermostat set'" in INDEX
     assert "segment: { borderColor:" in INDEX  # heat / cool coloured target line
     assert "chartData.commanded_setpoint_history" in INDEX

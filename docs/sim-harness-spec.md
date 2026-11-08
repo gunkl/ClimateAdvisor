@@ -398,11 +398,11 @@ The virtual clock `start` must be timezone-aware (`FakeScheduler.__init__` raise
 | `sensor_open` | `engine.handle_door_window_open(entity_id)` |
 | `sensor_close` | If all closed: `engine.handle_all_doors_windows_closed()` |
 | `classification` | `engine.apply_classification(classification)` |
-| `occupancy_away` | `engine.set_occupancy_mode("away")` + `engine.handle_occupancy_away()` |
-| `occupancy_home` | `engine.set_occupancy_mode("home")` + `engine.handle_occupancy_home()` |
-| `occupancy_vacation` | `engine.set_occupancy_mode("vacation")` + `engine.handle_occupancy_vacation()` |
-| `occupancy_change` | Dispatches to away/home/vacation by `event["mode"]` |
-| `occupancy_change_with_override` | Sets `engine._manual_override_active = True`, then dispatches |
+| `occupancy_away` | `engine.set_occupancy_mode("away")` + `engine.handle_occupancy_away()`. With a coordinator: through `coordinator._run_occupancy_handler("away")` (Issue #1409) |
+| `occupancy_home` | `engine.set_occupancy_mode("home")` + `engine.handle_occupancy_home()`. With a coordinator: through `coordinator._run_occupancy_handler("home")` (Issue #1409) |
+| `occupancy_vacation` | `engine.set_occupancy_mode("vacation")` + `engine.handle_occupancy_vacation()`. With a coordinator: through `coordinator._run_occupancy_handler("vacation")` (Issue #1409) |
+| `occupancy_change` | Dispatches to away/home/vacation by `event["mode"]`; with a coordinator, through `coordinator._run_occupancy_handler(mode)` (Issue #1409) |
+| `occupancy_change_with_override` | Sets `engine._manual_override_active = True`, then dispatches as `occupancy_change`, including the coordinator's `_run_occupancy_handler(mode)` entry (production's `_occupancy_bank_write` flag and `occupancy_change()` context) when a coordinator is present; before Issue #1435 it called the engine handler directly. The real-HA adapter does the same |
 | `bedtime` | `engine.handle_bedtime()`. With a coordinator: nothing when the coordinator's own daily `sleep_time` timer (default 22:30) is in the event's minute, because the clock already fired it (Issue #1420) |
 | `wakeup` | `engine.handle_morning_wakeup()`. With a coordinator: nothing when its own daily `wake_time` timer (default 06:30) is in the event's minute (Issue #1420) |
 | `pre_cool` | Indoor inject + `engine.handle_pre_cool(indoor_temp, nat_vent_just_closed)`. With a coordinator: inject only, when the coordinator's own pre-cool trigger (`_async_pre_cool_trigger`) fired in the event's minute (Issue #1420) |

@@ -55,6 +55,9 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
   occupancy_change        → dispatches to away/home/vacation by event["mode"]
   occupancy_change_with_override
                           → sets _manual_override_active=True then dispatches
+  (all occupancy events)  with a coordinator, the handler runs through
+                            coordinator._run_occupancy_handler(mode) (production's entry: the #1409
+                            _occupancy_bank_write flag + occupancy_change() context; Issues #1409, #1435)
   bedtime                 → run_coro(engine.handle_bedtime()); with a coordinator, nothing when its own
                             daily sleep_time timer is in the event's minute (the clock already fired it;
                             Issue #1420)
@@ -838,17 +841,16 @@ def _dispatch_event(
         run_coro(_occupancy_handler(engine, coordinator, mode))
 
     elif etype == "occupancy_change_with_override":
-        # Mirrors simulate.py: set override active, then dispatch occupancy
+        # Set override active, then dispatch occupancy.  Issue #1435 (test-infrastructure change, dispatch only): this
+        # branch called the engine handler directly, so with a coordinator it skipped _run_occupancy_handler (the
+        # #1409 _occupancy_bank_write flag and occupancy_change() context) -- a path production never takes, the
+        # mirror of the plain occupancy events fixed in #1409.  Could it hide a failure? No: the same engine handler
+        # runs; the entry only adds what production adds.  Engine-only sessions keep the direct call.
         engine._manual_override_active = True
         mode = event.get("mode", "home")
         engine.set_occupancy_mode(mode)
         sync_coordinator_occupancy(coordinator, mode)
-        if mode == "away":
-            run_coro(engine.handle_occupancy_away())
-        elif mode == "vacation":
-            run_coro(engine.handle_occupancy_vacation())
-        else:
-            run_coro(engine.handle_occupancy_home())
+        run_coro(_occupancy_handler(engine, coordinator, mode))
 
     elif etype in ("bedtime", "wakeup"):
         # Issue #1420 (test-infrastructure change, dispatch only): with a coordinator its own daily timer

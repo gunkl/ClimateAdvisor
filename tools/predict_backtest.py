@@ -844,6 +844,77 @@ def week_nodes(
     )
 
 
+def fit_week_shared(
+    pred: Any,
+    train_rows: list[dict],
+    snaps: list[dict],
+    *,
+    W: datetime,
+    cand_primary: str,
+    cand_nodes: list[str],
+    sleep_node: str | None,
+    aliases: tuple[str, ...],
+    in_sleep: Any,
+    tz: tzinfo,
+    min_train_days: float,
+    info: dict[str, Any],
+) -> tuple[Any, str, list[str]] | None:
+    """One week's fit through ``predictor_v4.choose_control_model`` - the live fit's own rule and gate (Issue #1432):
+    A (the stitched ``_ca`` reading) or B (the primary entity + the inferred sleep sensor as a node), B only once both
+    have 3+ days of their own readings and its ``_ca`` replay on the training rows is no worse than A's. Display-only
+    nodes are added after, the same way the live fit adds them. ``(model, primary, nodes)``, or ``None`` when the
+    week is skipped (too little history: ``info["skipped"]``) or the fit failed (``info["fit_error"]``)."""
+    W_ep = W.timestamp()
+
+    def no_leak(smp: list[Any]) -> list[Any]:
+        kept = [x for x in smp if x.ts.timestamp() < W_ep]
+        assert_no_leak(kept, W, "fit samples", key=lambda x: x.ts)
+        return kept
+
+    pre = no_leak(
+        pred.samples_from_chart_log(
+            train_rows, tz=tz, archive_snapshots=snaps or None, primary_aliases=aliases, in_sleep=in_sleep
+        )
+    )
+    span_days = (pre[-1].ts - pre[0].ts).total_seconds() / 86400 if len(pre) > 1 else 0.0
+    if span_days < min_train_days:
+        info["skipped"] = f"only {span_days:.1f} days of training samples"
+        return None
+    try:
+        chosen = pred.choose_control_model(
+            train_rows,
+            tz=tz,
+            now=W,
+            primary=cand_primary,
+            sensors=list(cand_nodes),
+            sleep_sensor=sleep_node,
+            aliases=aliases,
+            in_sleep=in_sleep,
+            archive_snapshots=snaps or None,
+            horizon_h=12,
+            sample_filter=no_leak,
+        )
+        model, primary, nodes = chosen.model, chosen.primary, list(chosen.nodes)
+        info["primary"], info["nodes"] = primary, list(nodes)
+        info["node_choice"] = _jsonable((model.fit or {}).get("node_choice"))
+        info["n_samples"] = len(chosen.samples)
+        disp_fn = getattr(pred, "resolve_display_nodes", None)
+        display = (
+            list(disp_fn(train_rows, nodes=list(nodes), primary=cand_primary, sensors=list(cand_nodes), tz=tz))
+            if disp_fn is not None
+            else []
+        )
+        info["display_nodes"] = display
+        if display and model.confidence != "none":
+            model = pred.with_display_nodes(model, chosen.samples, display_sensors=display, tz=tz)
+    except LeakageError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        info["fit_error"] = f"{type(exc).__name__}: {exc}"
+        return None
+    return model, primary, nodes
+
+
 def grid_steps(anchor: datetime, count: int) -> list[datetime]:
     """The predictor's own DST-safe UTC-stepped grid when it has one, else the same by epoch."""
     fn = getattr(_PREDICTOR, "grid_steps", None)
@@ -852,19 +923,18 @@ def grid_steps(anchor: datetime, count: int) -> list[datetime]:
 
 def _v4_value(v4, src_key, sensor, t_ep, T, sleep_node, in_sleep, sensors_model, tz):
     """The v4 value scored for ``sensor`` at ``t_ep``. ``_ca`` is the reading CA used: the sleep node's prediction
-    inside the sleep window when that node was modelled (Issue #1230 R1b, M3), else the primary node's."""
+    inside the sleep window when that node was modelled (Issue #1230 R1b, M3), else the primary node's.
+
+    Issue #1432 (the live ``ca_line`` guard): with a room node as the primary, a sleep hour the sleep node does not
+    answer (not modelled, or no value) is not scored at all - never from the thermostat's room."""
     if not v4:
         return None
-    if (
-        sensor == CA
-        and sleep_node
-        and sleep_node in sensors_model
-        and in_sleep is not None
-        and in_sleep(T.astimezone(tz))
-    ):
-        v = v4.get(sleep_node, {}).get(t_ep)
+    if sensor == CA and sleep_node and in_sleep is not None and in_sleep(T.astimezone(tz)):
+        v = v4.get(sleep_node, {}).get(t_ep) if sleep_node in sensors_model else None
         if v is not None:
             return v
+        if src_key != CA:
+            return None
     return v4.get(src_key, {}).get(t_ep)
 
 
@@ -934,56 +1004,86 @@ def run_backtest(
             snaps = [s for s in snaps_sorted if parse_ts(s["issued"], tz).timestamp() < W_ep]
             assert_no_leak(train_rows, W, "fit rows", key=lambda r: parse_ts(r["ts"], tz))
             assert_no_leak(snaps, W, "fit forecast snapshots", key=lambda s: parse_ts(s["issued"], tz))
-            primary, nodes = week_nodes(
-                train_rows,
-                cand_primary,
-                cand_nodes,
-                bool(getattr(args, "primary", None)),
-                aliases=aliases,
-                tz=tz,
-                in_sleep=in_sleep,
-            )
-            info["primary"], info["nodes"] = primary, list(nodes)
-            # Issue #1422: the live fit's display-only nodes (3+ days of a sensor's OWN history), same shared rule.
-            disp_fn = getattr(pred, "resolve_display_nodes", None)
-            display = (
-                list(disp_fn(train_rows, nodes=list(nodes), primary=cand_primary, sensors=list(cand_nodes), tz=tz))
-                if disp_fn is not None
-                else []
-            )
-            info["display_nodes"] = display
-            seen_nodes.update(dict.fromkeys(nodes))
-            samples = pred.samples_from_chart_log(
-                train_rows,
-                tz=tz,
-                archive_snapshots=snaps or None,
-                primary=None if primary == CA else primary,
-                primary_aliases=aliases,
-                in_sleep=in_sleep,
-            )
-            kept = [s for s in samples if s.ts.timestamp() < W_ep]
-            info["dropped_future_samples"] = len(samples) - len(kept)
-            assert_no_leak(kept, W, "fit samples", key=lambda s: s.ts)
-            info["n_samples"] = len(kept)
-            span_days = (kept[-1].ts - kept[0].ts).total_seconds() / 86400 if len(kept) > 1 else 0.0
-            if span_days < args.min_train_days:
-                info["skipped"] = f"only {span_days:.1f} days of training samples"
-                week_info.append(info)
-                continue
-            try:
-                disp_kw = {"display_sensors": display} if display else {}
-                model = pred.fit(kept, primary=primary, sensors=list(nodes), tz=tz, now=W, horizon_h=12, **disp_kw)
+            choose = None if getattr(args, "primary", None) else getattr(pred, "choose_control_model", None)
+            if choose is not None:
+                # Issue #1432: the live fit's own choice (A stitched / B per room, with the backtest gate), so the
+                # accuracy page scores the model control would have read that week.
+                fitted = fit_week_shared(
+                    pred,
+                    train_rows,
+                    snaps,
+                    W=W,
+                    cand_primary=cand_primary,
+                    cand_nodes=cand_nodes,
+                    sleep_node=sleep_node,
+                    aliases=aliases,
+                    in_sleep=in_sleep,
+                    tz=tz,
+                    min_train_days=args.min_train_days,
+                    info=info,
+                )
+                if fitted is None:
+                    if info.get("fit_error"):
+                        model = None
+                        log(f"  week {W.date()} fit failed: {info['fit_error']}")
+                    week_info.append(info)
+                    continue
+                model, primary, nodes = fitted
+                seen_nodes.update(dict.fromkeys(nodes))
                 seen_nodes.update(dict.fromkeys(getattr(model, "display_nodes", None) or {}))
                 last_fit_week = wi
                 info["fitted"] = True
-            except LeakageError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                info["fit_error"] = f"{type(exc).__name__}: {exc}"
-                model = None
-                week_info.append(info)
-                log(f"  week {W.date()} fit failed: {info['fit_error']}")
-                continue
+            else:
+                primary, nodes = week_nodes(
+                    train_rows,
+                    cand_primary,
+                    cand_nodes,
+                    bool(getattr(args, "primary", None)),
+                    aliases=aliases,
+                    tz=tz,
+                    in_sleep=in_sleep,
+                )
+                info["primary"], info["nodes"] = primary, list(nodes)
+                # Issue #1422: the live fit's display-only nodes (3+ days of a sensor's OWN history), same shared rule.
+                disp_fn = getattr(pred, "resolve_display_nodes", None)
+                display = (
+                    list(disp_fn(train_rows, nodes=list(nodes), primary=cand_primary, sensors=list(cand_nodes), tz=tz))
+                    if disp_fn is not None
+                    else []
+                )
+                info["display_nodes"] = display
+                seen_nodes.update(dict.fromkeys(nodes))
+                samples = pred.samples_from_chart_log(
+                    train_rows,
+                    tz=tz,
+                    archive_snapshots=snaps or None,
+                    primary=None if primary == CA else primary,
+                    primary_aliases=aliases,
+                    in_sleep=in_sleep,
+                )
+                kept = [s for s in samples if s.ts.timestamp() < W_ep]
+                info["dropped_future_samples"] = len(samples) - len(kept)
+                assert_no_leak(kept, W, "fit samples", key=lambda s: s.ts)
+                info["n_samples"] = len(kept)
+                span_days = (kept[-1].ts - kept[0].ts).total_seconds() / 86400 if len(kept) > 1 else 0.0
+                if span_days < args.min_train_days:
+                    info["skipped"] = f"only {span_days:.1f} days of training samples"
+                    week_info.append(info)
+                    continue
+                try:
+                    disp_kw = {"display_sensors": display} if display else {}
+                    model = pred.fit(kept, primary=primary, sensors=list(nodes), tz=tz, now=W, horizon_h=12, **disp_kw)
+                    seen_nodes.update(dict.fromkeys(getattr(model, "display_nodes", None) or {}))
+                    last_fit_week = wi
+                    info["fitted"] = True
+                except LeakageError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    info["fit_error"] = f"{type(exc).__name__}: {exc}"
+                    model = None
+                    week_info.append(info)
+                    log(f"  week {W.date()} fit failed: {info['fit_error']}")
+                    continue
         if model is None:
             week_info.append(info)
             continue

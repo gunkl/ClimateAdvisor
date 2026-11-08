@@ -109,6 +109,9 @@
     var sens = Array.isArray(v.sensors) ? v.sensors : [], names = v.sensor_names || {};
     var sname = function (id) { return id === '_ca' ? 'Climate Advisor reading' : names[id] || id; };
     rows.push(['Sensors modelled', !sens.length ? DASH : sens.length === 1 && sens[0] === '_ca' ? 'Climate Advisor reading only' : sens.map(sname).join(', ')]);
+    // Issue #1432: which model the decisions read (stitched CA reading or each room separately) and why, in words
+    var fm = v.forecast_model && typeof v.forecast_model === 'object' ? v.forecast_model : null;
+    rows.push(['Forecast model', fm && fm.text ? String(fm.text) : DASH]);
     var lc = v.last_cycle || {};
     rows.push(['Last prediction', !lc.at ? DASH : [tDay(lc.at), has(lc.inputs) ? count(lc.inputs, 'forecast input', 'forecast inputs') : '', has(lc.ms) ? Math.round(lc.ms) + ' ms' : '', has(lc.archived) ? count(lc.archived, 'slot', 'slots') + ' archived' : '', lc.predicted === false ? 'no prediction made' : ''].filter(Boolean).join(', ')]);
     var ar = v.archive_slots, arTxt = DASH;

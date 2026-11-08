@@ -5805,7 +5805,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         aliases = tuple(c for c in (self.config.get("climate_entity"),) if c)
         cfg = dict(self.config)
         in_sleep = (lambda dt, _cfg=cfg: _in_sleep_window(dt, _cfg)) if cfg.get("sleep_indoor_temp_entity") else None
-        return {"primary": primary, "sensors": sensors, "aliases": aliases, "in_sleep": in_sleep}
+        # Issue #1432: the separate sleep sensor (None: none configured, or it is the primary): the per-room model
+        # needs it modelled before it is used, so sleep hours are never forecast from the thermostat's room.
+        sleep = cfg.get("sleep_indoor_temp_entity") or None
+        sleep_sensor = sleep if sleep and sleep != primary else None
+        return {
+            "primary": primary,
+            "sensors": sensors,
+            "aliases": aliases,
+            "in_sleep": in_sleep,
+            "sleep_sensor": sleep_sensor,
+        }
 
     async def _v4_run_night_replay(self, reason: str) -> None:
         """The nightly recorded-night replay behind the night-strategy gate (Issue #1230 R6). Never raises.
@@ -5929,6 +5939,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             primary_aliases=aliases,
                             in_sleep=in_sleep,
                             train_days=V4_FIT_TRAIN_DAYS,
+                            sleep_sensor=node.get("sleep_sensor"),
                         )
                     )
                 if getattr(self, "_shut_down", False) is True:
@@ -5958,6 +5969,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     len(summary["sensors"]),
                     seconds,
                 )
+                self._v4_note_node_choice(reason, previous, model_dict)
                 await self._executor_job(self._v4_store.save)
                 # Issue #1230 R6: the night-strategy gate's evidence is re-run right after every fit (own failures).
                 await self._v4_run_night_replay(reason)
@@ -5984,6 +5996,65 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         finally:
             self._v4_fit_running = False
             self._v4_fit_task = None
+
+    def _v4_note_node_choice(
+        self, reason: str, previous: Mapping[str, Any] | None, model_dict: Mapping[str, Any]
+    ) -> None:
+        """Say which model v4's decisions now read and why (Issue #1432). Never raises.
+
+        Occupant view: pre-heat, pre-cool, the ceiling guard and the setback depth read v4's forecast of the reading CA
+        uses. One INFO line on every fit names the model (the stitched CA reading, or each room separately) and the
+        reason (which rooms qualified, a missing bedroom node, or the backtest scores); when the choice CHANGES between
+        fits a ``forecast_model_changed`` Activity row says so in plain words. Temperatures in the user's unit."""
+        try:
+            choice = v4_shadow.node_choice(model_dict)
+            if choice is None:
+                return
+            unit = self.config.get("temp_unit", "fahrenheit")
+            ids = [s for s in (choice.get("primary"), choice.get("sleep")) if isinstance(s, str)]
+            try:
+                names = {m["id"]: m["name"] for m in self.v4_indoor_sensors_meta(ids)}
+            except Exception:  # noqa: BLE001 - friendly names are cosmetic
+                names = {}
+            changed = v4_shadow.node_choice_changed(previous, model_dict)
+            headline, why = v4_shadow.describe_node_choice(
+                choice, fmt_delta=lambda f: format_temp_delta(f, unit, 2), names=names, changed=changed
+            )
+            _LOGGER.info(
+                "v4 fit (%s): decisions use the %s model (%s): %s: %s",
+                reason,
+                choice.get("model"),
+                choice.get("reason"),
+                headline,
+                why or "-",
+            )
+            if changed:
+                # The Activity row is rendered in the report's unit: its temperature differences are ``{tN}`` slots
+                # filled from ``temps_f`` (degrees F) at render time; braces in friendly names are escaped.
+                temps: dict[str, float] = {}
+
+                def _slot(f: float) -> str:
+                    key = f"t{len(temps)}"
+                    temps[key] = round(float(f), 3)
+                    return "{" + key + "}"
+
+                esc = {k: str(v).replace("{", "{{").replace("}", "}}") for k, v in names.items()}
+                _h, template = v4_shadow.describe_node_choice(choice, fmt_delta=_slot, names=esc, changed=True)
+                prev = v4_shadow.node_choice(previous) or {}
+                self._emit_event(
+                    "forecast_model_changed",
+                    {
+                        "zone": self.zone_label,
+                        "from_model": prev.get("model"),
+                        "to_model": choice.get("model"),
+                        "reason": choice.get("reason"),
+                        "headline": headline,
+                        "detail_template": template,
+                        "temps_f": temps,
+                    },
+                )
+        except Exception:  # noqa: BLE001 - a log line must never fail the fit
+            _LOGGER.debug("v4 node-choice note failed", exc_info=True)
 
     async def _v4_run_display_fit(
         self, now: datetime, primary: str, sensors: list[str], aliases: tuple[str, ...], in_sleep: Any
@@ -6619,9 +6690,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None
 
     def _v4_sleep_node(self, model_dict: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
-        """``(sleep sensor id, sleep_time, wake_time)`` when the configured sleep sensor is a node of the model."""
+        """``(sleep sensor id, sleep_time, wake_time)`` when the configured sleep sensor is a node of the model, or the
+        model's primary is a room node (Issue #1432: then ``_ca`` is always composed, and a sleep hour the bedroom
+        node cannot answer is left out instead of being filled from the thermostat's room)."""
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
-        sleep_node = sleep_entity if sleep_entity and sleep_entity in (model_dict.get("sensors") or []) else None
+        primary = model_dict.get("primary")
+        sleep_node = (
+            sleep_entity
+            if sleep_entity
+            and sleep_entity != primary
+            and (sleep_entity in (model_dict.get("sensors") or []) or (isinstance(primary, str) and primary != "_ca"))
+            else None
+        )
         return (
             sleep_node,
             self.config.get("sleep_time") if sleep_node else None,
@@ -6797,6 +6877,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         inputs=inputs,
                         outdoor_now_f=row.get("outdoor"),
                         forecast_now_f=row.get("pred_outdoor"),
+                        ca_sleep_node=cycle["ca_sleep_node"],
+                        ca_sleep_time=cycle["ca_sleep_time"],
+                        ca_wake_time=cycle["ca_wake_time"],
                     )
                 )
             except Exception:  # noqa: BLE001 - the extra lines are optional; v4 lines still draw
@@ -7200,6 +7283,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             unit = self.config.get("temp_unit", "fahrenheit")
             state = self._v4_store
             out = v4_shadow.model_summary(state.v4_model)
+            choice = out.pop("node_choice", None)  # raw degrees F: shown below in words, in the user's unit
             out["mae_by_lead"] = {k: display_delta(v, unit, 2) for k, v in out.get("mae_by_lead", {}).items()}
             out["unit"] = UNIT_SYMBOL.get(unit, "°F")
             out["engine_available"] = v4_shadow.predictor_available()
@@ -7219,6 +7303,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 ids = [s for s in out.get("sensors") or [] if s != "_ca"]
                 out["sensor_names"] = {m["id"]: m["name"] for m in self.v4_indoor_sensors_meta(ids)}
+                # Issue #1432: which model the decisions read, and why, in words and the user's unit
+                if isinstance(choice, Mapping):
+                    c_ids = [s for s in (choice.get("primary"), choice.get("sleep")) if isinstance(s, str)]
+                    c_names = {m["id"]: m["name"] for m in self.v4_indoor_sensors_meta(c_ids)}
+                    headline, why = v4_shadow.describe_node_choice(
+                        choice, fmt_delta=lambda f: format_temp_delta(f, unit, 2), names=c_names
+                    )
+                    out["forecast_model"] = {
+                        "model": choice.get("model"),
+                        "reason": choice.get("reason"),
+                        "text": headline + (f": {why}" if why else ""),
+                    }
             except Exception:  # noqa: BLE001 - cosmetic
                 _LOGGER.debug("v4_model_summary names/archive start failed", exc_info=True)
             return out

@@ -58,7 +58,8 @@ def test_real_hallway_cycles_measure_the_thermostats_firing_offset():
     """The owner's measured 1.36-1.46 F (steady cycles) comes out of the audit."""
     audit = _load().audit_cycles(_fixture_cycles())
     heat = audit["heat"]
-    assert 1.36 <= heat["summary"]["value_f"] <= 1.46, heat["summary"]
+    assert 1.36 <= heat["summary"]["raw_value_f"] <= 1.46, heat["summary"]
+    assert heat["summary"]["value_f"] == 1.5  # Issue #1477: stored rounded up to the next half degree
     assert heat["summary"]["n"] >= 10
     # CA's own morning raises (setpoint age 0) are not hysteresis and must be excluded
     assert heat["reject_counts"].get("setpoint_change", 0) >= 5
@@ -250,7 +251,7 @@ def test_audit_from_ha_logs_history_text_uses_the_fine_sensor():
     )
     heat = audit["heat"]
     assert heat["summary"]["n"] == 3
-    assert heat["summary"]["value_f"] == pytest.approx(1.36)
+    assert heat["summary"]["raw_value_f"] == pytest.approx(1.36)  # Issue #1477: value_f is that rounded up (1.5)
     assert heat["reject_counts"] == {"setpoint_change": 1}
     # the peak the room reached after heat-off is reported next to (never inside) the swing
     assert heat["coast"]["median_f"] == pytest.approx(69.26 - 68.18)
@@ -296,7 +297,7 @@ def test_celsius_history_is_converted_to_fahrenheit_before_judging():
         "2026-11-01T06:59:30+00:00 | 19.80 | x=1\n2026-11-01T07:07:55+00:00 | 20.10 | x=1", unit="celsius"
     )
     audit = mod.audit_history(rows, sensor_rows=sens, unit="celsius")
-    assert audit["heat"]["summary"]["value_f"] == pytest.approx(1.36, abs=0.02)
+    assert audit["heat"]["summary"]["raw_value_f"] == pytest.approx(1.36, abs=0.02)  # Issue #1477: raw median
 
 
 def test_cooling_cycles_are_audited_too():
@@ -310,7 +311,7 @@ def test_cooling_cycles_are_audited_too():
     )
     sens = "2026-07-01T08:59:50+00:00 | 76.4 | x=1\n2026-07-01T09:09:55+00:00 | 75.2 | x=1"
     audit = mod.audit_history(mod.parse_climate_history(clim), sensor_rows=mod.parse_sensor_history(sens))
-    assert audit["cool"]["summary"]["value_f"] == pytest.approx(1.4)
+    assert audit["cool"]["summary"]["raw_value_f"] == pytest.approx(1.4)  # Issue #1477: stored as 1.5
     assert audit["heat"]["rows"] == []
 
 

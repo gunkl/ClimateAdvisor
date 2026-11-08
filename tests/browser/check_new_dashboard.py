@@ -735,7 +735,9 @@ def restart_1454(browser):
             pg.add_init_script("localStorage.setItem('climate_advisor_selected_zone', 'zone-2')")
         pg.goto(BASE)
         try:
-            pg.wait_for_function("document.getElementById('health-text').textContent.indexOf('Healthy') === 0", timeout=20000)
+            pg.wait_for_function(
+                "document.getElementById('health-text').textContent.indexOf('Healthy') === 0", timeout=20000
+            )
         except Exception:  # noqa: BLE001
             problems.append(f"1454 {case}: never showed the zone's status: {pg.locator('#health-text').inner_text()!r}")
         for tab in ("analysis", "debug", "settings", "status"):
@@ -765,7 +767,9 @@ with sync_playwright() as p:
     behaviour(b)
     b.close()
 
-_unscoped = sorted({f"{m} {e}" for m, e, q, _b in requests if e != "zones" and "entry_id=" not in q and "zone=" not in q})
+_unscoped = sorted(
+    {f"{m} {e}" for m, e, q, _b in requests if e != "zones" and "entry_id=" not in q and "zone=" not in q}
+)
 if _unscoped:  # Issue #1454: every dashboard request names a zone
     problems.append(f"unscoped Climate Advisor requests: {_unscoped}")
 print("\n".join(problems) or "no problems")

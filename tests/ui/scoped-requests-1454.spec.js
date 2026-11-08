@@ -111,6 +111,8 @@ test.describe('Issue #1454: the dashboards never send an unscoped request', () =
     await page.locator('#tab-btn-analysis').click();
     await expect(page.frameLocator('#pa-frame').locator('#tiles')).toContainText('average miss');
     expect(ca.unscoped()).toEqual([]);
+    // the Status chart's request (temperature, and the #1414 humidity / feels-like series) names the zone
+    expect(ca.urls.some((u) => u.includes('chart_data') && u.includes('entry_id=zone-b'))).toBe(true);
     expect(await stored(page)).toBe('zone-b');
   });
 

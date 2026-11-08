@@ -675,7 +675,11 @@ def test_auth_and_zone_handling_matches_classic():
 def test_no_page_has_an_unscoped_request_path():
     """Issue #1454: the #1418 ``noZone`` retry (status with no zone after a 503) raised the Repairs card after every
     restart. No dashboard page may keep a way to send a request without a zone (only GET zones names none)."""
-    pages = {**JS, "index.html": INDEX, "prediction_accuracy.html": (FE / "prediction_accuracy.html").read_text("utf-8")}
+    pages = {
+        **JS,
+        "index.html": INDEX,
+        "prediction_accuracy.html": (FE / "prediction_accuracy.html").read_text("utf-8"),
+    }
     for name, src in pages.items():
         assert "noZone" not in src, name
         assert "authedFetch('/api/climate_advisor/status')" not in src, name

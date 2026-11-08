@@ -216,6 +216,7 @@ def test_recorded_outdoor_reading_reaches_the_soft_start_peak():
 
     coord, *_ = build_headless_coordinator()
     coord._apply_outdoor_temp(71.0, record_history=True)
+    assert coord.automation_engine.inputs.outdoor_today_peak() == 71.0  # read before the later readings arrive
     coord._apply_outdoor_temp(79.0, record_history=True)
     coord._apply_outdoor_temp(75.0, record_history=True)
     coord._apply_outdoor_temp(90.0, record_history=False)  # a live reading not recorded: not a sample

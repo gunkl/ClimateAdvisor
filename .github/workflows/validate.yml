@@ -37,9 +37,11 @@ jobs:
         run: uv run --locked --only-group test ruff format --check .
 
   # The unit tier in round-robin slices (CA_UNIT_SHARD, tests/conftest.py): one serial job took 8-14 min.
-  # To change the slice count, change the matrix list AND the "/4" in CA_UNIT_SHARD together.
+  # 8 slices x 4 workers (each runner has 4 CPUs): twice the workers of the first 4 x 4 layout (3.5 min, one slice
+  # ~1 min behind the rest), in smaller slices so a slow test holds up less of the run.
+  # To change the slice count, change the matrix list, the "/8" in the job name and CA_UNIT_SHARD, and the step name.
   unit:
-    name: unit (${{ matrix.shard }}/4)
+    name: unit (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -47,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
 
     steps:
       - name: Checkout code
@@ -56,11 +58,11 @@ jobs:
       - name: Set up uv (uv reads the Python version from .python-version)
         uses: astral-sh/setup-uv@v10.3.3
 
-      - name: Run unit tests (slice ${{ matrix.shard }} of 4)
+      - name: Run unit tests (slice ${{ matrix.shard }} of 8)
         run: python3 scripts/test.py unit
         env:
           CA_UNIT_WORKERS: "4"
-          CA_UNIT_SHARD: "${{ matrix.shard }}/4"
+          CA_UNIT_SHARD: "${{ matrix.shard }}/8"
 
   # Issue #1186: each changed test file must also pass ALONE (order-dependence guard).
   # No-op when no tests/test_*.py changed (e.g. a push to main).

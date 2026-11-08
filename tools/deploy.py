@@ -580,6 +580,17 @@ def do_rollback(config: dict[str, str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def check_maintenance_line(allow: bool) -> tuple[bool, str]:
+    """This tree is the 0.8.x maintenance line: a real deploy needs --allow-maintenance-branch. Returns (ok, msg)."""
+    if allow:
+        return True, "Deploying the 0.8.x maintenance line (--allow-maintenance-branch): server rolled back to 0.8"
+    return False, (
+        "This is the 0.8.x maintenance line; the server runs the current line from main. Deploying it would roll the "
+        "house back to 0.8 (possibly across storage changes made since). Release 0.8 fixes with a GitHub Release on "
+        "0.8.x instead, deploy from main, or pass --allow-maintenance-branch to deploy this anyway."
+    )
+
+
 def main() -> None:
     # Enable ANSI colors on Windows
     if sys.platform == "win32":
@@ -589,6 +600,11 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Validate only, show what would deploy")
     parser.add_argument("--skip-restart", action="store_true", help="Deploy without restarting HA")
     parser.add_argument("--rollback", action="store_true", help="Restore most recent backup")
+    parser.add_argument(
+        "--allow-maintenance-branch",
+        action="store_true",
+        help="Deploy this 0.8 maintenance code anyway (it would roll a server running 0.9 back to 0.8)",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -618,6 +634,14 @@ def main() -> None:
     if args.rollback:
         do_rollback(config)
         sys.exit(0)
+
+    # Step 0: this is the 0.8.x maintenance line (owner decision 2026-11-08). The owner's server runs the current line
+    # from main (0.9); deploying this code would roll the house back to 0.8, possibly across storage changes made since.
+    # 0.8 fixes are released with a GitHub Release on this branch, not deployed. Dry runs and --rollback stay allowed.
+    ok_to_deploy, message = check_maintenance_line(args.allow_maintenance_branch)
+    (info if ok_to_deploy else fail)(message)
+    if not ok_to_deploy and not args.dry_run:
+        sys.exit(1)
 
     # Step 1: Validate
     if not run_validation():

@@ -679,7 +679,7 @@ swing_f     = ceil((median - 1e-6) / 0.5) * 0.5     # 1.44 -> 1.5, 1.0 -> 1.0, 1
 swing_raw_f = median                                 # diagnostics only
 display     = swing_f                (F)   |   swing_f * 5/9, 2 decimals   (C; 1.5 F -> 0.83 C, no offset)
 ```
-Owner decision 2026-11-08: a too-small swing makes CA expect the equipment sooner than the thermostat starts, so err up. `LearningEngine.load_state` recomputes the stored value from the retained samples (`swing.refresh_swing_cache`). `tools/thermal_replay.py` infers each replayed cycle's resolution from the nearest readings up to its stop (`_local_reading_resolution`), so a log that switched to a finer sensor gives its old whole-degree cycles 1.0 as live recorded them. Resolution is inferred from the readings themselves in the configured unit (`swing.infer_resolution_f`: whole F -> 1.0, half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, finer such as an Ecobee's tenths -> 0.0); with fewer than 3 distinct readings it falls back to the source (sensor/input_number 0.0; `climate_fallback` one whole degree of the configured unit: 1.0 F, or 1.8 F on Celsius). A quantised sample is `setpoint - k`, true value within +/- resolution/2. The stop point is kept in `swing_*_off_point_f` and never mixed into the swing; coast overshoot (Issue #1233) is a separate quantity, below.
+Owner decision 2026-11-08: a too-small swing makes CA expect the equipment sooner than the thermostat starts, so err up. Second owner decision (PR #1482): the #1194 bedroom outer loop and its night-strategy emulation trigger on the MEASURED swing (`swing.measured_swing_f`: `swing_*_raw_f`, else `swing_*_f`, else 1.5 F); the comfort detectors (incident scan, violation minutes, stall alert, incident payload, AI cross-validation) and the thermostat-model uses (direction rule, night-strategy and plan-list discomfort) use the rounded value. Both are in chart_data `thermal_model` (`swing_*` and `swing_*_raw`). `LearningEngine.load_state` recomputes the stored value from the retained samples (`swing.refresh_swing_cache`). `tools/thermal_replay.py` infers each replayed cycle's resolution from the nearest readings up to its stop (`_local_reading_resolution`), so a log that switched to a finer sensor gives its old whole-degree cycles 1.0 as live recorded them. Resolution is inferred from the readings themselves in the configured unit (`swing.infer_resolution_f`: whole F -> 1.0, half F -> 0.5, whole C -> 1.8 F, half C -> 0.9 F, finer such as an Ecobee's tenths -> 0.0); with fewer than 3 distinct readings it falls back to the source (sensor/input_number 0.0; `climate_fallback` one whole degree of the configured unit: 1.0 F, or 1.8 F on Celsius). A quantised sample is `setpoint - k`, true value within +/- resolution/2. The stop point is kept in `swing_*_off_point_f` and never mixed into the swing; coast overshoot (Issue #1233) is a separate quantity, below.
 
 **Thermostats with no `hvac_action`:** sampling uses only real `hvac_action` heating/cooling edges, so a thermostat that never reports `hvac_action` never learns a swing and stays at `THERMAL_SWING_DEFAULT_F` (1.5 F, "estimated").
 
@@ -4325,9 +4325,11 @@ never a rejection, retry or nudge -- **Setpoint read-back and a late echo (Issue
 `docs/grace-periods-spec.md` "Setpoint echo recognition by value");
 `_pending_setpoint_target` is the target a re-asserting writer passes back in, so the offset is never applied twice.
 
-**The rule (heat; cool mirrors).** `swing` = learned `swing_heat_f` / `swing_cool_f` read from the engine's thermal
-model (read-only; default `THERMAL_SWING_DEFAULT_F` = 1.5 F when unlearned; learning of the swing is #1234, not
-touched here). `gap` = `target - remote` (heat) or `remote - target` (cool).
+**The rule (heat; cool mirrors).** `swing` = the MEASURED learned swing read from the engine's thermal model
+(`swing.measured_swing_f`: `swing_heat_raw_f` / `swing_cool_raw_f`, the unrounded median, else `swing_*_f` when no
+samples are retained, else `THERMAL_SWING_DEFAULT_F` = 1.5 F; owner decision on PR #1482 / Issue #1477: the loop acts
+on comfort, so it is not given the half-degree-up value the comfort detectors use; read-only; learning of the swing is
+#1234). `gap` = `target - remote` (heat) or `remote - target` (cool).
 
 | Remote vs target | Equipment | Since last raise | Action | New offset |
 |---|---|---|---|---|

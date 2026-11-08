@@ -299,6 +299,25 @@ def round_swing_up_f(value: float | None) -> float | None:
     return round(math.ceil((float(value) - THERMAL_SWING_ROUND_TOLERANCE_F) / step) * step, 2)
 
 
+def measured_swing_f(thermal: Any, mode: str) -> float:
+    """The MEASURED swing for ``mode`` (degF): the unrounded median, for a consumer that acts on comfort.
+
+    Owner decision 2026-11-08 (Issue #1477, PR #1482): "i want the bedroom loop on the measured swing, and the
+    incident detection on the rounded up swing". The bedroom outer loop (#1194) and its night-strategy emulation
+    read this; every detector and thermostat-model use reads the rounded ``swing_{mode}_f``.
+
+    ``swing_{mode}_raw_f`` when known; else ``swing_{mode}_f`` (a value with no retained samples - e.g. a cache
+    written before 0.9.17 or a scenario's thermal model - is the only measurement there is); else, with no
+    samples at all, ``THERMAL_SWING_DEFAULT_F`` (1.5 F), the same default the rounded value falls back to.
+    """
+    if isinstance(thermal, dict):
+        for key in (f"swing_{mode}_raw_f", f"swing_{mode}_f"):
+            v = thermal.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 < v < float("inf"):
+                return float(v)
+    return THERMAL_SWING_DEFAULT_F
+
+
 def _sample_resolution(sample: dict[str, Any]) -> float | None:
     """The reading granularity recorded on one sample (degF; 0.0 = fine), or ``None`` when unknown."""
     r = sample.get("resolution_f")

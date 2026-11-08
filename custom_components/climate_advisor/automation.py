@@ -133,7 +133,6 @@ from .const import (
     SETPOINT_HOLD_TOLERANCE_F,
     SETPOINT_RETRY_DELAY_S,
     TEMP_SOURCE_CLIMATE_FALLBACK,
-    THERMAL_SWING_DEFAULT_F,
     TIMER_BOUNDARY_SETTLE_SECONDS,
     TREND_THRESHOLD_MODERATE,
     TREND_THRESHOLD_SIGNIFICANT,
@@ -312,6 +311,7 @@ from .setpoint_verify_decision import (
     decide_mode_alignment,
     decide_setpoint_verify,
 )
+from .swing import measured_swing_f
 from .temperature import (
     display_delta,
     display_temp,
@@ -7196,11 +7196,12 @@ class AutomationEngine:
         )
 
     def _remote_swing_f(self, mode: str) -> float:
-        """The hysteresis at the remote sensor: the learned swing for the mode, else the default (read-only)."""
-        value = self.inputs.thermal_model().get("swing_heat_f" if mode == "heat" else "swing_cool_f")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 < value < float("inf"):
-            return THERMAL_SWING_DEFAULT_F
-        return float(value)
+        """The hysteresis at the remote sensor: the MEASURED swing for the mode, else the default (read-only).
+
+        Owner decision (Issue #1477, PR #1482): the bedroom loop acts on comfort, so it uses the unrounded measured
+        swing (Zone 1: 1.44 F), not the half-degree-up value the detectors use (1.5 F). ``swing.measured_swing_f``.
+        """
+        return measured_swing_f(self.inputs.thermal_model(), mode)
 
     def _remote_band_edges(self) -> tuple[float, float]:
         """The comfort band's (floor, ceiling) in force now: the edges the offset may not cross."""

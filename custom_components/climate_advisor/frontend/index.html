@@ -1456,8 +1456,13 @@
     const swCoolHint = tm.swing_cool_measured ? '' : ' <span class="tm-swing-hint">(estimated)</span>';
     // Issue #1234: the swing is one-sided - how far past the setpoint the thermostat lets the room
     // drift before it starts the equipment - so it is not shown as a symmetric "±".
-    hvacParamRows.push({ label: 'Heat swing', value: `${swHeat} ${unitLabel} below setpoint${swHeatHint}` });
-    hvacParamRows.push({ label: 'Cool swing', value: `${swCool} ${unitLabel} above setpoint${swCoolHint}` });
+    // Issue #1477 owner decision: the rounded-up swing (comfort detectors) with the measured one (bedroom loop) beside it
+    const swRaw = (v, raw, measured) => (measured && raw != null && Math.abs(raw - v) > 0.004)
+      ? ` (measured ${raw.toFixed(2)} ${unitLabel})` : '';
+    const swHeatRaw = swRaw(tm.swing_heat ?? 1.5, tm.swing_heat_raw, tm.swing_heat_measured);
+    const swCoolRaw = swRaw(tm.swing_cool ?? 1.5, tm.swing_cool_raw, tm.swing_cool_measured);
+    hvacParamRows.push({ label: 'Heat swing', value: `${swHeat} ${unitLabel}${swHeatRaw} below setpoint${swHeatHint}` });
+    hvacParamRows.push({ label: 'Cool swing', value: `${swCool} ${unitLabel}${swCoolRaw} above setpoint${swCoolHint}` });
   }
   const hvacHint = hvacConf === 'none'
     ? `<p class="tm-hint">Updates each time the system runs a heating or cooling cycle.</p>`

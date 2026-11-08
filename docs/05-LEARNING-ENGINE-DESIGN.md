@@ -503,6 +503,16 @@ with two rules added by Issue #1477 (`swing.summarize_swing_samples`):
   than the thermostat starts. The unrounded median is kept as `swing_{heat,cool}_raw_f` (diagnostics only:
   `learning_db.py --swing`, the AI context; never a decision input). A Celsius install shows the stored value
   as a delta, x 5/9 with no offset (1.5 F -> 0.83 C, two decimals in Celsius so it is not printed as 0.8 C).
+- **Which value each consumer reads** (owner decision 2026-11-08, PR #1482: "i want the bedroom loop on the measured
+  swing, and the incident detection on the rounded up swing (to reduce the number of false incidents)"):
+  - **measured** (`swing.measured_swing_f`: `swing_*_raw_f`, else `swing_*_f` when no samples are retained, else the
+    1.5 F default) - the #1194 bedroom outer loop (`AutomationEngine._remote_swing_f`) and its emulation in the
+    night strategy (`NightInputs.loop_swing_*_f`). It acts on comfort.
+  - **rounded up** (`swing_*_f`) - every detector (comfort incidents, violation minutes, the #1050 stall alert, the
+    incident payload's tolerance, the AI cross-validation) and every thermostat-model use (the direction rule and
+    windows advice, the night strategy's and the plan list's discomfort beyond the swing).
+  - both are shown: chart_data `thermal_model.swing_{heat,cool}` (rounded) and `swing_{heat,cool}_raw` (measured), the
+    Thermal model card and the Analysis row ("1.5 °F (measured 1.44 °F)").
 - **Corrected on load** (`swing.refresh_swing_cache`, called by `LearningEngine.load_state`): the stored
   value is recomputed from the retained samples with the current estimator (a value with no samples is just
   rounded up), so an update corrects it at once instead of at the next accepted cycle. Counts, audit and

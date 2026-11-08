@@ -369,3 +369,133 @@ def test_learning_db_summary_line_shows_the_median_behind_the_rounded_value():
     ldb_lines = ldb._format_swing_mode_section(swing, cache, "heat", last_n=0)
     assert any("recomputed 1.50" in line and "median 1.44" in line and "of the 2 finest" in line for line in ldb_lines)
     assert not any("MISMATCH" in line for line in ldb_lines)
+
+
+# ---------------------------------------------------------------------------
+# Owner decision (PR #1482): the bedroom loop on the MEASURED swing, the detectors on the ROUNDED-UP swing
+# ---------------------------------------------------------------------------
+# Zone 1 as stored by 0.9.17: measured 1.44 F, rounded up 1.5 F. Every pin below sits in the 0.06 F gap between the
+# two, so a consumer reading the other value fails.
+_ZONE1_MODEL = {"swing_heat_f": 1.5, "swing_heat_raw_f": 1.44, "swing_cool_f": 1.5, "swing_cool_raw_f": 1.26}
+
+
+@pytest.mark.parametrize(
+    ("thermal", "expected"),
+    [
+        (_ZONE1_MODEL, 1.44),
+        ({"swing_heat_f": 0.59}, 0.59),  # no raw (pre-0.9.17 cache or a scenario's model): the value is the measurement
+        ({"swing_heat_f": None, "swing_heat_raw_f": None}, THERMAL_SWING_DEFAULT_F),  # no samples: the 1.5 default
+        ({}, THERMAL_SWING_DEFAULT_F),
+        (None, THERMAL_SWING_DEFAULT_F),
+        ({"swing_heat_raw_f": True, "swing_heat_f": 0.0}, THERMAL_SWING_DEFAULT_F),
+    ],
+)
+def test_measured_swing_falls_back_to_the_value_then_the_default(thermal, expected):
+    assert swing.measured_swing_f(thermal, "heat") == expected
+
+
+def test_bedroom_loop_triggers_on_the_measured_swing_not_the_rounded_one():
+    """Bedroom 1.48 F under its 66 F target: past the measured 1.44 F, inside the rounded 1.5 F -> the loop raises."""
+    from tests.test_remote_offset_1194a import Env
+
+    env = Env(bedroom_f=64.52)
+    env.engine.inputs.thermal = dict(_ZONE1_MODEL)
+    env.write(66.0)
+    env.check()
+    assert env.sp_f() == [66.0, 68.0]
+    # control: the same bedroom with only the rounded value known holds (1.48 < 1.5)
+    env = Env(bedroom_f=64.52)
+    env.engine.inputs.thermal = {"swing_heat_f": 1.5}
+    env.write(66.0)
+    env.check()
+    assert env.sp_f() == [66.0]
+
+
+def test_bedroom_loop_with_nothing_learned_uses_the_default():
+    from tests.test_remote_offset_1194a import Env
+
+    env = Env(bedroom_f=64.6)  # 1.4 under the target: inside the 1.5 default
+    env.engine.inputs.thermal = {"swing_heat_f": None, "swing_heat_raw_f": None}
+    env.write(66.0)
+    env.check()
+    assert env.sp_f() == [66.0]
+
+
+def _detector_coord(mode: str = "heat"):
+    from tests.test_comfort_swing_tolerance_1258 import _coord
+
+    coord = _coord(mode=mode)
+    coord.learning.get_thermal_model.return_value = dict(_ZONE1_MODEL)
+    return coord
+
+
+def test_incident_scan_uses_the_rounded_swing():
+    """1.47 F under the 68 F floor in heat: inside the rounded 1.5 F (no incident), past the measured 1.44 F."""
+    from tests.test_comfort_swing_tolerance_1258 import _scan
+
+    assert _scan(_detector_coord(), 66.53) == []
+    assert [e["incident_class"] for e in _scan(_detector_coord(), 66.45)] == ["comfort_undertemp"]
+
+
+def test_violation_minutes_and_stall_alert_tolerance_use_the_rounded_swing():
+    coord = _detector_coord()
+    assert coord._is_tolerated_comfort_deviation(66.53, 68.0, 74.0) is True  # violation minutes + #1050 stall alert
+    assert coord._is_within_thermostat_hysteresis(66.53, 68.0, 74.0) is True
+    cool = _detector_coord("cool")
+    assert cool._is_tolerated_comfort_deviation(75.47, 68.0, 74.0) is True  # cool mirror: measured 1.26 < 1.47
+
+
+def test_incident_payload_records_the_rounded_tolerance():
+    ctx = _detector_coord()._hysteresis_incident_context("heat")
+    assert ctx["swing_tolerance_f"] == 1.5 and ctx["swing_tolerance_source"] == "learned"
+
+
+def test_direction_rule_uses_the_rounded_swing():
+    """Thermostat model: within one swing above the floor, cooler air would only start the heat (vetoed)."""
+    import types
+
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    coord = _detector_coord()
+    coord._outdoor_direction_ok = types.MethodType(ClimateAdvisorCoordinator._outdoor_direction_ok, coord)
+    coord.automation_engine._paused_by_door = False
+    assert coord._outdoor_direction_ok(60.0, 69.47, 68.0, 74.0) is False  # 1.47 above the floor: inside 1.5
+
+
+def test_ai_cross_validation_uses_the_rounded_swing():
+    import asyncio
+
+    from custom_components.climate_advisor.ai_skills_context import build_state_cross_validation_context
+    from tests.test_ai_skills_context_state_cross_validation import _make_coordinator, _make_hass
+
+    learning = MagicMock()
+    learning.get_thermal_model.return_value = dict(_ZONE1_MODEL)
+    coord = _make_coordinator(data={"hvac_mode": "heat", "hvac_action": "idle"}, learning=learning)
+    ctx = asyncio.run(build_state_cross_validation_context(_make_hass(current_temperature=66.53), coord))
+    assert "[FLAG]" not in ctx and "within tolerance" in ctx and "1.5" in ctx
+
+
+def test_night_strategy_emulates_the_bedroom_loop_on_the_measured_swing():
+    """The emulated #1194 loop follows ``loop_swing_*`` (the measured swing); the score keeps the rounded one."""
+    import dataclasses
+
+    from custom_components.climate_advisor import night_strategy as ns
+    from tests.test_night_strategy import BED, HALL, cold_night
+
+    cold_bed = cold_night(readings={HALL: 68.0, BED: 64.4})
+    split = ns.plan_night(dataclasses.replace(cold_bed, swing_heat_f=1.5, loop_swing_heat_f=0.3))
+    loop_only = ns.plan_night(dataclasses.replace(cold_bed, swing_heat_f=0.3))
+    rounded = ns.plan_night(dataclasses.replace(cold_bed, swing_heat_f=1.5))
+    a, b, c = (p.option(ns.OPT_CLOSED) for p in (split, loop_only, rounded))
+    assert a.heat_min == b.heat_min and a.bed_wake_f == b.bed_wake_f  # same emulated loop
+    assert a.heat_min != c.heat_min  # ... which is not the rounded value's loop
+
+
+def test_chart_payload_and_dashboards_carry_both_values():
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "custom_components" / "climate_advisor"
+    coord_src = (src / "coordinator.py").read_text()
+    assert '"swing_heat_raw": display_delta(measured_swing_f(thermal_model, "heat"), unit, 2)' in coord_src
+    assert '"swing_cool_raw": display_delta(measured_swing_f(thermal_model, "cool"), unit, 2)' in coord_src
+    assert display_delta(swing.measured_swing_f(_ZONE1_MODEL, "heat"), "celsius", 2) == 0.8  # 1.44 F x 5/9

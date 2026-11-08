@@ -451,6 +451,8 @@ from .whf_safety_decision import (
 
 _LOGGER = logging.getLogger(__name__)
 _V4_FIT_LOCK_KEY = "climate_advisor_v4_fit_lock"  # hass.data key of the domain-wide v4 fit lock (Issue #1230 R1b, M5)
+# Issue #1422: the off-cycle fit that only folds newly qualified display-only sensor nodes into the stored model.
+V4_DISPLAY_FIT_REASON = "display_nodes"
 # Issue #1415: the one-time split of the old shared investigation-reports file runs in executor threads; two zones
 # starting at once must not split it twice (each would copy, one would remove it under the other).
 _INVESTIGATION_MIGRATION_LOCK = threading.Lock()
@@ -898,6 +900,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_fit_running = False
         self._v4_fit_task: asyncio.Task[Any] | None = None
         self._v4_last_fit_attempt: float | None = None
+        self._v4_last_display_check: float | None = None  # Issue #1422: newly qualified display nodes, every 6 h
         self._v4_last_fit: dict[str, Any] = {}
         self._v4_last_cycle: dict[str, Any] = {}
         self._v4_last_future: dict[str, Any] | None = None  # newest 24 h prediction, for the Status chart (R2)
@@ -5951,6 +5954,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 # Captured on the loop (rule: no self.* reads inside the executor job); the row copy is shallow.
                 # One fit at a time across ALL zones (M5): several zones fitting at once starve the event loop (GIL).
+                if reason == V4_DISPLAY_FIT_REASON:
+                    await self._v4_run_display_fit(now, primary, sensors, aliases, in_sleep)
+                    return
                 async with self._v4_fit_lock():
                     model_dict, seconds, fit_line = await self._executor_job(
                         functools.partial(
@@ -6021,7 +6027,68 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._v4_fit_running = False
             self._v4_fit_task = None
 
-    # ── Issue #1230 R3a: operation timeline (shadow) ─────────────────────────────────────────────────────────────
+    async def _v4_run_display_fit(
+        self, now: datetime, primary: str, sensors: list[str], aliases: tuple[str, ...], in_sleep: Any
+    ) -> None:
+        """Fold newly qualified display-only sensor nodes into the stored model (Issue #1422, option b). Never raises.
+
+        Occupant view: the bedroom or thermostat line appears on the Status chart within about 6 h of the sensor
+        reaching 3 days of its own history. Display only: ``v4_shadow.run_display_fit`` copies every control key of
+        the stored model through unchanged (house, control nodes, thermostat, confidence, ``fitted_at``), so the
+        decisions read the same model; no night replay runs (its evidence depends on the control model alone). A
+        failure keeps the stored model and does not mark the fit as failed."""
+        state = self._v4_store
+        model_dict = state.v4_model
+        if not isinstance(model_dict, dict) or model_dict.get("confidence", "none") == "none":
+            return
+        try:
+            async with self._v4_fit_lock():
+                new_dict, seconds, line = await self._executor_job(
+                    functools.partial(
+                        v4_shadow.run_display_fit,
+                        chart_entries=self._chart_log.raw_entries(),
+                        tz=now.tzinfo,
+                        now=now,
+                        primary=primary,
+                        sensors=sensors,
+                        model_dict=model_dict,
+                        primary_aliases=aliases,
+                        in_sleep=in_sleep,
+                        train_days=V4_FIT_TRAIN_DAYS,
+                    )
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - display lines only; the stored model stays
+            _LOGGER.warning("v4 display-node fit failed; keeping the stored model", exc_info=True)
+            return
+        if getattr(self, "_shut_down", False) is True or state.v4_model is not model_dict:
+            return  # unloaded, or a full fit replaced the model meanwhile: drop this result
+        state.v4_model = new_dict
+        state.dirty = True
+        _LOGGER.info("v4 fit (%s): %s took %.1fs", V4_DISPLAY_FIT_REASON, line, seconds)
+        await self._executor_job(self._v4_store.save)
+
+    def _v4_display_pending(self, model_dict: Mapping[str, Any]) -> list[str]:
+        """Sensors that newly qualify as display-only nodes (Issue #1422); ``[]`` on any error. Event loop: one pass
+        over the last 30 days of chart rows, run at most every 6 h (the retry interval)."""
+        try:
+            node = self._v4_node_inputs()
+            now = dt_util.now()
+            return v4_shadow.display_pending(
+                model_dict,
+                self._chart_log.raw_entries(),
+                now=now,
+                tz=now.tzinfo,
+                primary=node["primary"],
+                sensors=node["sensors"],
+                train_days=V4_FIT_TRAIN_DAYS,
+            )
+        except Exception:  # noqa: BLE001 - a display trigger must never break the cycle
+            _LOGGER.debug("v4 display-node check failed", exc_info=True)
+            return []
+
+    # ── Issue #1230 R3a: operation timeline (shadow)─────────────────────────────────────────────────────────────
     # The pure plan lives in operation_timeline.py. Here: build the snapshot from the live plan, run the per-day latch,
     # keep the last result for the debug payload. Nothing below writes to the engine, the classification or a surface.
 
@@ -6716,6 +6783,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             last = self._v4_last_fit_attempt
             if last is None or _monotonic() - last >= V4_FIT_RETRY_MIN_INTERVAL_S:
                 self._v4_start_night_replay("night_replay")
+        if (
+            model_dict.get("confidence", "none") != "none"
+            and not self._v4_fit_running
+            and getattr(self, "_startup_coalesce_active", False) is not True
+        ):
+            # Issue #1422: a sensor that newly qualifies as a display-only node (3+ days of its own history) is folded
+            # in at the 6-hourly retry instead of waiting for 03:15. Display only: the control model is not refitted.
+            last_chk = getattr(self, "_v4_last_display_check", None)
+            if last_chk is None or _monotonic() - last_chk >= V4_FIT_RETRY_MIN_INTERVAL_S:
+                self._v4_last_display_check = _monotonic()
+                if self._v4_display_pending(model_dict):
+                    self._v4_start_fit(V4_DISPLAY_FIT_REASON)
         started = _perf_counter()
         now = dt_util.now()
         sleep_node, sleep_time, wake_time = self._v4_sleep_node(model_dict)
@@ -6735,7 +6814,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         cycle = self._v4_cycle_kwargs(now, row, model_dict, state)
         readings = cycle["readings"]
         inputs = cycle["inputs"]
-        predictions, new_mass = await self._executor_job(functools.partial(v4_shadow.run_cycle, **cycle))
+        predictions, new_mass = await self._executor_job(functools.partial(v4_shadow.run_cycle, display=True, **cycle))
         if getattr(self, "_shut_down", False) is True:
             return
         state.v4_mass_f = new_mass

@@ -697,5 +697,10 @@
     "sha256": "ccd843b35c03dff959c7296dbf1c436c0b976c8b808b8653d2159a62cf75d5b1",
     "signed": "2026-11-07",
     "issue": 1417
+  },
+  "issue_1436_warm_day_evening_floor_close_strips_follow_plan__whf": {
+    "sha256": "c000047b488eed89178c522061311696218b7ffa942ed43b3913bb66977780c6",
+    "signed": "2026-11-07",
+    "issue": 1436
   }
 }

@@ -265,6 +265,13 @@
   .plan-qual { display: inline-block; font-size: 0.72rem; padding: 0 6px; border: 1px dashed var(--text-secondary); border-radius: 8px; color: var(--text-secondary); margin-left: 4px; white-space: nowrap; }
   .plan-note { display: block; font-size: 0.74rem; color: var(--text-secondary); margin-top: 1px; }
   .plan-empty { color: var(--text-secondary); font-size: 0.84rem; padding: 4px 0; }
+  /* Issue #1483: the outlook after the first 24 h, one folded row per day */
+  .plan-later-head { font-size: 0.74rem; color: var(--text-secondary); padding: 10px 0 2px; border-top: 1px solid var(--border); }
+  .plan-later { border-top: 1px solid var(--border); }
+  .plan-later summary { display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; padding: 8px 0; cursor: pointer; min-height: 24px; font-size: 0.86rem; }
+  .plan-later-day { font-weight: 600; }
+  .plan-later-sum { color: var(--text-secondary); font-size: 0.78rem; }
+  .plan-later .plan-list { padding-left: 1.1em; }
   .plan-foot { font-size: 0.78rem; color: var(--text-secondary); margin-top: 6px; }
   .plan-foot:empty { display: none; }
   @media (max-width: 640px) {

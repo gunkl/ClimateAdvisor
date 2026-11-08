@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.18"
+VERSION = "0.9.19"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -598,7 +598,7 @@ V4_FIT_RETRY_MIN_INTERVAL_S = 6 * 3600  # a first fit that failed is retried by 
 # changes; the first 24 h of the display line are the same inputs, so the two agree there.
 V4_PREDICT_HORIZON_HOURS = 168
 V4_CONTROL_HORIZON_HOURS = 24
-V4_PLAN_DAYS_AHEAD = 6  # a planned window period for each forecast day up to today + this (within the week)
+PLAN_DAYS_AHEAD = 6  # a planned window period for each forecast day up to today + this (within the week)
 V4_MASS_MAX_GAP_S = 7200  # a hidden-node state older than this is re-seeded from the reading instead of stepped
 
 # Learning system

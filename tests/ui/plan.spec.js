@@ -14,7 +14,7 @@ async function waitForChart(page) {
   }, { timeout: 8000 });
 }
 async function waitForPlan(page) {
-  await page.waitForFunction(() => document.querySelectorAll('#plan-list .plan-row, #plan-list .plan-empty').length > 0
+  await page.waitForFunction(() => document.querySelectorAll('#plan-list > .plan-row, #plan-list .plan-empty').length > 0
     && !document.querySelector('#plan-list').textContent.includes('Loading the plan'), { timeout: 8000 });
 }
 const planDatasets = (page) => page.evaluate(() => Chart.getChart(document.getElementById('temp-chart')).data.datasets
@@ -25,7 +25,7 @@ test.describe('Next 24 hours and the plan overlay (classic Status)', () => {
     await page.goto('/');
     await waitForChart(page);
     await waitForPlan(page);
-    const rows = page.locator('#plan-list .plan-row');
+    const rows = page.locator('#plan-list > .plan-row');
     await expect(rows).toHaveCount(4);
     const texts = await rows.evaluateAll(els => els.map(e => ({ actor: e.dataset.actor, kind: e.dataset.kind, text: e.querySelector('.plan-text').innerText })));
     expect(texts.map(t => t.kind)).toEqual(['windows_open', 'precool_start', 'windows_close', 'sleep_band']);
@@ -39,14 +39,14 @@ test.describe('Next 24 hours and the plan overlay (classic Status)', () => {
   test('a "you" step shows a reminder 30 minutes ahead; a low-confidence one says "may help"', async ({ page }) => {
     await page.goto('/');
     await waitForPlan(page);
-    const open = page.locator('#plan-list .plan-row[data-kind="windows_open"]');
+    const open = page.locator('#plan-list > .plan-row[data-kind="windows_open"]');
     await expect(open.locator('.plan-note')).toContainText('Reminder at');
     await expect(open.locator('.plan-qual')).toHaveCount(0);
-    const close = page.locator('#plan-list .plan-row[data-kind="windows_close"]');
+    const close = page.locator('#plan-list > .plan-row[data-kind="windows_close"]');
     await expect(close.locator('.plan-qual')).toHaveText('may help');
     await expect(close).toHaveClass(/plan-low/);
     // a CA step has no reminder
-    await expect(page.locator('#plan-list .plan-row[data-kind="precool_start"] .plan-note')).toHaveCount(0);
+    await expect(page.locator('#plan-list > .plan-row[data-kind="precool_start"] .plan-note')).toHaveCount(0);
   });
 
   test('the overlay: a chip in the Overlays group, markers and a future-only path, on by default', async ({ page }) => {
@@ -89,7 +89,7 @@ test.describe('Next 24 hours and the plan overlay (classic Status)', () => {
     await expect(page.locator('#chart-key-body [data-series="ov:plan"]')).toHaveAttribute('aria-pressed', 'false');
     expect((await planDatasets(page))[0].hidden).toBe(true);
     // the list itself is not an overlay: it stays
-    await expect(page.locator('#plan-list .plan-row')).toHaveCount(4);
+    await expect(page.locator('#plan-list > .plan-row')).toHaveCount(4);
     // and back on
     await page.locator('#chart-key-body [data-series="ov:plan"]').click();
     expect((await planDatasets(page))[0].hidden).toBe(false);
@@ -146,7 +146,7 @@ test.describe('Next 24 hours and the plan overlay (classic Status)', () => {
     await waitForPlan(page);
     // the mock chart payload has no v4 block, so v4 is not ready: the steps still show, the path does not
     expect(await planDatasets(page)).toEqual([]);
-    await expect(page.locator('#plan-list .plan-row')).toHaveCount(4);
+    await expect(page.locator('#plan-list > .plan-row')).toHaveCount(4);
   });
 
   test('a Celsius plan keeps the unit of the payload', async ({ page }) => {

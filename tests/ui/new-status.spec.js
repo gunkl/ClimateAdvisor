@@ -6,7 +6,7 @@ const { test, expect } = require('@playwright/test');
 
 async function open(page, hash) {
   await page.goto('/new_dashboard.html' + (hash || ''));
-  await page.waitForFunction(() => document.querySelector('#status-plan-list .plan-row, #status-plan-list .plan-empty')
+  await page.waitForFunction(() => document.querySelector('#status-plan-list > .plan-row, #status-plan-list .plan-empty')
     && document.getElementById('temp-chart') && typeof Chart !== 'undefined' && !!Chart.getChart(document.getElementById('temp-chart')), { timeout: 8000 });
 }
 const strategy = (numbers) => async (route) => {
@@ -60,10 +60,10 @@ test.describe('New dashboard: Status tab', () => {
 
   test('Next 24 hours lists the steps, "you" and "CA", with the qualifier on a low-confidence step', async ({ page }) => {
     await open(page);
-    const rows = page.locator('#status-plan-list .plan-row');
+    const rows = page.locator('#status-plan-list > .plan-row');
     await expect(rows).toHaveCount(4);
     await expect(rows.nth(0).locator('.plan-actor')).toContainText('You');
-    await expect(page.locator('#status-plan-list .plan-row[data-kind="windows_close"] .plan-qual')).toHaveText('may help');
+    await expect(page.locator('#status-plan-list > .plan-row[data-kind="windows_close"] .plan-qual')).toHaveText('may help');
   });
 
   test('Tonight in the bedroom is live: no sample badge, the recommended plan, the options and their figures', async ({ page }) => {

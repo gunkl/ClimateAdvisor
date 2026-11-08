@@ -6413,7 +6413,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("night_strategy_payload failed", exc_info=True)
             return None, "error"
 
-    def _surface_timeline(self, *, live: bool = True) -> Any:
+    def _surface_timeline(self, *, live: bool = True, refresh: bool = True) -> Any:
         """The timeline the occupant-facing surfaces read (Issue #1230 R3b), or None in a degraded coordinator.
 
         ``live`` (default) marks the window step the live direction rule vetoes right now as held, so the plan list, the
@@ -6423,6 +6423,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         The cycle generates it once before the surfaces are computed. A standalone read (the REST endpoint, a harness
         capture, a surface asked between cycles) refreshes it when the last run is older than two minutes or belongs
         to another local day, so a surface never reads yesterday's plan. Never raises.
+
+        ``refresh=False`` (Issue #1436 regression fix): read the plan as latched, never build it. The chart log row and
+        the chart payload are written/read in the middle of a cycle; a refresh there latched the day's plan from
+        half-updated inputs (real HA: the evening window step moved from 7:30 PM to 7:00 PM and was marked done).
         """
         latch = getattr(self, "_timeline_latch", None)
         if latch is None or getattr(self, "_shut_down", False) is True or self._current_classification is None:
@@ -6432,6 +6436,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             last = (getattr(self, "_timeline_last", None) or {}).get("at")
             now = dt_util.now()
             stale = tl is None or tl.day != now.date()
+            if not refresh:
+                if stale:
+                    return None
+                return self._apply_live_direction_veto(tl) if live else tl
             if not stale and last:
                 at = dt_util.parse_datetime(last)
                 stale = at is None or abs((now - at).total_seconds()) > 120.0
@@ -15642,7 +15650,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         the plan said, the same meaning as the strip's faded part. Empty (key absent) with no timeline; never raises.
         """
         try:
-            tl = self._surface_timeline()
+            tl = self._surface_timeline(refresh=False)  # a chart row is written mid-cycle: never build the plan here
             if tl is None:
                 return {}
             return {"windows_planned": bool(planned_windows_open(tl, dt_util.now()))}
@@ -16882,7 +16890,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _plan_spans: list[dict] | None = None
         if not is_historical:
             try:
-                _plan_tl = self._surface_timeline()
+                _plan_tl = self._surface_timeline(refresh=False)  # never build the plan from a chart read
                 _plan_spans = strip_spans(_plan_tl, now) if _plan_tl is not None else None
             except Exception:  # noqa: BLE001 - the chart never fails on the plan; it falls back to the walk
                 _LOGGER.debug("chart: plan strips unavailable", exc_info=True)

@@ -101,9 +101,10 @@ function makeTimelineFixture() {
     // one predicted heat run overnight (detail.runs; it has no step, so its own sentence).
     strips: [
       // a ~20 min heat run in a 2 h window (+660 to +780 min), drawn as the plan's per-step minutes (bursts)
-      ...[[675, 6], [705, 9], [750, 5]].map(([m, len]) => ({ row: 'heating', start: at(m), end: at(m + len), kind: 'run',
+      // plus one 20-second sliver at +720 (drawn at its minimum visible width, owner decision)
+      ...[[675, 6], [705, 9], [720, 1 / 3], [750, 5]].map(([m, len]) => ({ row: 'heating', start: at(m), end: at(m + len), kind: 'run',
         step_id: '', step_ts: null, actor: 'ca', confidence: 'ok', run: 0, window_start: at(660), window_end: at(780),
-        minutes: 20, placed: true,
+        minutes: 20.3, placed: true,
         text: 'Heating expected for about 20 min between ' + clock(660) + ' and ' + clock(780) + ", holding the band's floor.",
         text_short: 'Heating expected for about 20 min between ' + clock(660) + ' and ' + clock(780) + ", holding the band's floor." })),
       { row: 'windowsplan', start: at(45), end: at(240), kind: 'windows_open', step_id: 'windows_open45', confidence: 'ok',

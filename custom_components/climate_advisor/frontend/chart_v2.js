@@ -1140,17 +1140,36 @@
   }
 
   // The plan span a faded strip draws at `ms` for each strip that is on (Issue #1436: the hover names the plan step).
+  const RUN_MIN_PX = 3;   // the narrowest a run's sliver is drawn (owner decision): visible, never longer in the payload
+  function _msPerPx() {
+    const xs = _tempChart && _tempChart.scales ? _tempChart.scales.x : null;
+    return xs && xs.right > xs.left ? (xs.max - xs.min) / (xs.right - xs.left) : 0;
+  }
+  // { row, step, sliver } for each strip that is on: `sliver` is the run sliver under the cursor (its drawn width
+  // included), or null when the cursor is elsewhere in the run's window.
   function _stripPlanAt(ms) {
     if (!(ms > Date.now())) return [];
     const found = [];
+    const minMs = RUN_MIN_PX * _msPerPx();
     STRIP_ROWS.forEach(r => {
       if (!_stripOn(r.id)) return;
       const segs = (_stripSegs[r.id] || []).filter(g => g.future);
-      const sg = segs.find(g => g.a <= ms && ms < g.b) ||
-        segs.find(g => g.step && g.step.winA != null && g.step.winA <= ms && ms < g.step.winB);
-      if (sg && sg.step) found.push({ row: r, step: sg.step });
+      const hit = g => g.a <= ms && ms < (g.step && g.step.kind === 'run' ? Math.max(g.b, g.a + minMs) : g.b);
+      let sg = segs.find(hit), sliver = sg || null;
+      if (!sg) sg = segs.find(g => g.step && g.step.winA != null && g.step.winA <= ms && ms < g.step.winB);
+      if (sg && sg.step) found.push({ row: r, step: sg.step, sliver: sliver && sliver.step && sliver.step.kind === 'run' ? sliver : null });
     });
     return found;
+  }
+
+  // "about 1 min of 12 min cooling, 6:05 PM–8:35 PM": the sliver's real minutes and the run's total, so a sliver drawn
+  // wider than its minutes is never read as a longer run.
+  function _runSliverText(row, step, sliver) {
+    const mins = Math.max(1, Math.round((sliver.b - sliver.a) / 60000));
+    const total = Math.max(1, Math.round(step.minutes || 0));
+    const what = row.id === 'heating' ? 'heating' : 'cooling';
+    const win = step.winA != null && step.winB != null ? ', ' + _clock(step.winA) + '\u2013' + _clock(step.winB) : '';
+    return 'about ' + mins + ' min of ' + total + ' min ' + what + win;
   }
 
   // Issue #1436: one line under the strips says what solid and faded mean (both dashboards: the module adds it).
@@ -1209,7 +1228,10 @@
         const a = Math.max(rangeMin, sg.a), b = Math.min(rangeMax, sg.b);
         if (b <= rangeMin || a >= rangeMax) return;
         ctx.globalAlpha = sg.future ? 0.4 : 1;
-        ctx.fillRect(xPx(a), y, Math.max(1, xPx(b) - xPx(a)), rowH);
+        // Owner decision (#1436): a run is one sliver per expected on-period; a sliver gets a MINIMUM visible width at
+        // draw time only (the payload keeps the true minutes, and the hover says them).
+        const minW = sg.future && sg.step && sg.step.kind === 'run' ? RUN_MIN_PX : 1;
+        ctx.fillRect(xPx(a), y, Math.max(minW, xPx(b) - xPx(a)), rowH);
       });
       ctx.globalAlpha = 1;
       ctx.fillStyle = labelColor;
@@ -1357,10 +1379,11 @@
     // Issue #1436: right of NOW each faded strip names the plan step it draws ("Win plan: 7:14 PM: close the windows ...")
     let activity = '';
     // (the step's time and who acts beside it, its sentence without the time, as the plan overlay's line does, #1399)
-    _stripPlanAt(ms).forEach(({ row, step }) => {
+    _stripPlanAt(ms).forEach(({ row, step, sliver }) => {
       const who = step.at == null ? '' : ' \u00b7 ' + (step.actor === 'you' ? 'You' : 'CA') + ' ' + escapeHtml(_clock(step.at));
+      const said = sliver ? _runSliverText(row, step, sliver) : step.short;
       activity += _chpItem(row.color, escapeHtml(row.short) + ' <span class="chp-plan-tag">plan</span>' + who + ': <strong>' +
-        escapeHtml(step.short) + '</strong>' + (step.confidence === 'low' ? ' <span class="plan-qual">may help</span>' : ''));
+        escapeHtml(said) + '</strong>' + (step.confidence === 'low' ? ' <span class="plan-qual">may help</span>' : ''));
     });
     let closest = null, minDiff = Infinity;
     log.forEach(e => {

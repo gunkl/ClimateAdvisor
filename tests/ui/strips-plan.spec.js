@@ -36,9 +36,9 @@ for (const [name, path] of PAGES) {
       }
       // owner decision: a run's bars are its expected minutes where the plan puts them, never the 2 h window
       const heat = await futureSegs(page, 'heating');
-      expect(heat.length).toBe(3);
+      expect(heat.length).toBe(4);   // separate slivers, one per expected on-period (owner decision)
       const total = heat.reduce((n, g) => n + (g.b - g.a), 0) / 60000;
-      expect(Math.abs(total - 20)).toBeLessThan(0.5);
+      expect(Math.abs(total - 20.33)).toBeLessThan(0.1);   // the segments keep the true minutes
       expect(heat.every(g => g.a >= 660 * 60000 - 1000 && g.b <= 780 * 60000 + 1000)).toBe(true);
       expect(heat[0].text).toMatch(/^Heating expected for about 20 min between/);
     });
@@ -100,5 +100,30 @@ for (const [name, path] of PAGES) {
       window.__triggerHoverAt(ch.scales.x.getPixelForValue(Date.now() + 690 * 60000));   // between two bars
     });
     await expect(page.locator('#chart-hover-panel')).toContainText(/Heating\s*plan: Heating expected for about 20 min between/);
+  });
+
+  test(`a 20-second sliver is drawn at the minimum width and its hover says its own minutes and the run's (${name})`, async ({ page }) => {
+    await ready(page, path);
+    const px = await page.evaluate(() => {
+      const ch = Chart.getChart(document.getElementById('temp-chart'));
+      const x0 = ch.scales.x.getPixelForValue(Date.now() + 720 * 60000);
+      const c = document.getElementById('activity-chart');
+      const off = document.createElement('canvas'); off.width = c.width; off.height = c.height;
+      const g = off.getContext('2d', { willReadFrequently: true }); g.drawImage(c, 0, 0);
+      const row = window.__test_strips.rows.indexOf('heating'), y = row * 15 + 6, d = devicePixelRatio;
+      const painted = (x) => g.getImageData(Math.round(x * d), Math.round(y * d), 1, 1).data[3] > 0;
+      const trackAlpha = (x) => g.getImageData(Math.round(x * d), Math.round(y * d), 1, 1).data;
+      return { at: painted(x0 + 0.5), mid: painted(x0 + 2.2), x0, a: Array.from(trackAlpha(x0 + 2.2)), b: Array.from(trackAlpha(x0 + 6)) };
+    });
+    expect(px.at).toBe(true);
+    // the pixel 2 px in is the sliver's colour, not the empty track 6 px on
+    expect(px.a).not.toEqual(px.b);
+    await page.evaluate((x) => window.__triggerHoverAt(x + 1), px.x0);
+    await expect(page.locator('#chart-hover-panel')).toContainText(/Heating\s*plan: about 1 min of 20 min heating, \d{1,2}:\d{2}\s*[AP]M\u2013\d{1,2}:\d{2}\s*[AP]M/);
+    await page.evaluate(() => {
+      const ch = Chart.getChart(document.getElementById('temp-chart'));
+      window.__triggerHoverAt(ch.scales.x.getPixelForValue(Date.now() + 677 * 60000));
+    });
+    await expect(page.locator('#chart-hover-panel')).toContainText('about 6 min of 20 min heating');
   });
 }

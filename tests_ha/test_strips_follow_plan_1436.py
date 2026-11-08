@@ -6,7 +6,7 @@ drifts below 68F". Before the fix the faded strips under the chart (what the pla
 ``chart_data.predicted_activity``, an older predictor that ignored the floor and the close step, and drew the windows
 plan and natural ventilation again from 11 PM to 2 AM. Now each faded strip is a span of the plan.
 
-The pending golden ``tools/simulations/pending/issue_1436_*`` (unsigned, for owner review) is driven through real Home
+The signed golden ``tools/simulations/golden/issue_1436_*`` is driven through real Home
 Assistant and the real coordinator by the same adapter as ``test_goldens_realha.py``; the shared capture
 (``scenario_model.capture_next_action`` -> ``chart_strips``) must show strips that follow the plan real HA made, and the
 run must log no exception from Climate Advisor. Real HA's plan closes at 9:00 PM, not 7:00 PM (Issue #1440, see the
@@ -29,7 +29,7 @@ _PATH = (
     Path(__file__).resolve().parent.parent
     / "tools"
     / "simulations"
-    / "pending"
+    / "golden"
     / "issue_1436_warm_day_evening_floor_close_strips_follow_plan__whf.json"
 )
 

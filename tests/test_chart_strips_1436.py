@@ -499,3 +499,27 @@ def test_runs_are_never_duplicated_two_days_have_the_same_times():
     assert len(keys) == len(set(keys))
     assert len({r.start.date() for r in tl.runs}) == 2
     assert len({d["run"] for d in spans if d["row"] == "cooling"}) == len(tl.runs)
+
+
+# --- regression caught by the real-HA goldens r3b_hot_*_evening_window_period and r3b_mild_evening_* ------------
+
+
+def test_chart_reads_never_build_the_plan():
+    """A chart log row is written in the middle of a cycle. Reading the plan there must not build it: on real HA the
+    refresh latched the day's plan from half-updated inputs, so the evening "open the windows" step moved from
+    7:30 PM to 7:00 PM and was already marked done when the occupant read it."""
+    from unittest.mock import MagicMock
+
+    mod = _coord_mod()
+    coord = object.__new__(mod.ClimateAdvisorCoordinator)
+    coord._timeline_latch = MagicMock(timeline=None)
+    coord._timeline_last = {"at": "2000-01-01T00:00:00+00:00"}
+    coord._current_classification = object()
+    coord._shut_down = False
+    coord._timeline_shadow_run = MagicMock()
+    assert coord._read_chart_windows_planned() == {}
+    assert coord._surface_timeline(refresh=False) is None
+    coord._timeline_shadow_run.assert_not_called()
+    # the surfaces that may build it (REST timeline, cards) still do
+    coord._surface_timeline()
+    coord._timeline_shadow_run.assert_called_once_with("surface")

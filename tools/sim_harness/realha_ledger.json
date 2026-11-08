@@ -90,8 +90,6 @@
    "scenario": "issue_1436_warm_day_evening_floor_close_strips_follow_plan__whf",
    "class": "E",
    "failing_assertions": [
-    0,
-    1,
     2,
     3,
     4,
@@ -99,19 +97,17 @@
     6
    ],
    "failing_outcomes": {
-    "0": "classification_suppressed_paused",
-    "1": "classification_suppressed_paused",
     "2": "classification_suppressed_paused",
     "3": "classification_suppressed_paused",
     "4": "classification_suppressed_paused",
     "5": "classification_suppressed_paused",
     "6": "classification_suppressed_paused"
    },
-   "first_difference": "a0@2026-09-12T16:00 expected '7:00 PM: close the windows before the house drifts below 68°F.', real '9:00 PM: close the windows, the planned window period ends.' (windows_close.planned_end instead of comfort_edge)",
-   "evidence": "Adapter gap: realha_session._apply_injected_inputs seeds engine._hourly_forecast_temps but not coordinator._hourly_forecast_temps (only with v4_model), unlike run_production.py:471-476. weather.test_forecast returns nothing, so coordinator._refresh_hourly_forecast keeps its empty list and pushes it to the engine; the plan has no forecast and keeps the classifier's 21:00 close. The scenario thermal_model DOES reach the plan (engine._thermal_model and learning.get_thermal_model() both return it). A review probe that also seeded the coordinator copy got the 7:00 PM comfort_edge close (a0, a1 pass); a2-a6 then differ only by timing (steps at :00:10 put the 19:00 hour inside the period; tomorrow's close 09:45 vs 09:50). a7/a8 (P8 chart_strips agree) pass on real HA: the strips follow whichever plan real HA builds (16:00-21:00 and 06:30-10:00 for Win plan, Nat-vent and Fan), pinned by tests_ha/test_strips_follow_plan_1436.py. Fresh real-HA run at 7920e8d, 2026-11-07: failing 0-6, no exception, no leaked timer.",
-   "occupant_view": "No occupant impact: a real home's coordinator gets its forecast from the weather entity. Only the test tier plans this day without one.",
-   "issue_or_justification": "#1440: seed the scenario's hourly_forecast into the coordinator in the real-HA session (as Tier A does), then remove this row (planned in the #1443 refactor).",
-   "reviewer": "Independent review 2026-11-07 (awaiting human review)",
+   "first_difference": "a2@2026-09-12T16:00 expected windowsplan ['16:00-19:00', '08:45-09:50'], real ['16:00-19:00', '08:45-09:45'] (same for natvent/fan strips, a3/a4); a5/a6 expected activity hours ['17:00', '18:00', '09:00'], real ['17:00', '18:00', '19:00', '09:00']",
+   "evidence": "#1440 is fixed by #1443: the real-HA session now seeds the scenario's hourly_forecast into the coordinator, so the plan has the forecast and a0/a1 pass (the 7:00 PM comfort_edge close, 'Close windows by 7:00 PM'). What remains are the two timing-only differences #1440's triage already named: tomorrow's planned close is 09:45 on real HA vs 09:50 on Tier A (cause not isolated), and the 19:00 hour is counted as window/fan activity on real HA (the evening run ends at 19:00 on both, but real-HA steps land a few seconds past the minute, so the half-open hour bucket at 19:00 is touched). Today's 16:00-19:00 strips, the timeline/strip agreement (a8) and the empty problem list (a7) match Tier A. Dump: .pytest_cache/realha/issue_1436_warm_day_evening_floor_close_strips_follow_plan__whf.real.json",
+   "occupant_view": "No occupant impact: today's 7:00 PM close and its strips match Tier A; the differences are a 5-minute shift in tomorrow's planned close and one hour bucket at the close edge in the test tier.",
+   "issue_or_justification": "#1440 seeding fixed (a0/a1 removed from this row by #1443). Remaining a2-a6: real-HA timing granularity (steps a few seconds past the minute) and an unexplained 5-minute shift of tomorrow's close; needs its own investigation, not a golden edit.",
+   "reviewer": "#1443 lane triage 2026-11-07 (awaiting human review)",
    "date": "2026-11-07"
   }
  ]

@@ -291,12 +291,14 @@ from .const import (
     TREND_THRESHOLD_MODERATE,
     TREND_THRESHOLD_SIGNIFICANT,
     V4_ARCHIVE_SAVE_MIN_INTERVAL_S,
+    V4_CONTROL_HORIZON_HOURS,
     V4_FIT_HOUR,
     V4_FIT_MINUTE,
     V4_FIT_RETRY_MIN_INTERVAL_S,
     V4_FIT_STAGGER_S,
     V4_FIT_TRAIN_DAYS,
     V4_MASS_MAX_GAP_S,
+    V4_PLAN_DAYS_AHEAD,
     V4_PREDICT_HORIZON_HOURS,
     VERSION,
     WINDOW_OPPORTUNITY_MAX_LOW_F,
@@ -6956,7 +6958,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         }
 
     async def _v4_control_cycle(self) -> None:
-        """Before the decisions: predict 24 h with v4 from the live readings (Issue #1230 R6b).
+        """Before the decisions: predict 24 h with v4 from the live readings (Issue #1230 R6b; still 24 h on the real
+        hourly forecast after Issue #1483, which only lengthens the display line).
 
         The curve the decisions scan is the house's own drift under the plan's windows with NO thermostat acting (the
         v4 baseline): the ceiling guard and the nat-vent plan ask "when does the house leave the band on its own?", and
@@ -7006,6 +7009,65 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:  # noqa: BLE001 - optional context: tomorrow stays windows-closed
             return None
 
+    def _v4_hourly_until(self, now: datetime) -> str | None:
+        """ISO time of the last real hourly forecast hour (Issue #1483: where the chart draws v4's line as rougher)."""
+        pts = [
+            d if d.tzinfo is not None else d.replace(tzinfo=now.tzinfo)
+            for d, _t in _parse_forecast_entries(self._hourly_forecast_temps)
+        ]
+        return max(pts).isoformat() if pts else None
+
+    def _v4_later_window_plans(self, now: datetime) -> list[tuple[bool, Any, Any] | None]:
+        """The planned window period of each day after tomorrow, in order, for the week-long display line (#1483).
+
+        Occupant view: a warm spell on Thursday shows the house cooling over Thursday's planned window period, not a
+        week of closed windows. Each day is classified from its own daily forecast high and low exactly the way
+        tomorrow's is (``_tomorrow_classification_plan``: that day's high/low in the "today" position, trend stable,
+        no hysteresis seed), up to ``V4_PLAN_DAYS_AHEAD`` days ahead. A day the daily forecast does not cover, or that
+        has no high or no low, is ``None`` (windows closed). Display only: the decisions' prediction never reads it.
+        """
+        out: list[tuple[bool, Any, Any] | None] = []
+        try:
+            unit = self.config.get("temp_unit", "fahrenheit")
+            by_date: dict[date, dict] = {}
+            for entry in getattr(self, "_daily_forecast_full", None) or []:
+                d = _daily_entry_date(entry)
+                if d is not None:
+                    by_date.setdefault(d, entry)
+            today = now.date()
+            prev_low: float | None = None
+            prev = by_date.get(today + timedelta(days=1))
+            if prev is not None:
+                raw = _first_non_none(prev.get("templow"), prev.get("tempLow"))
+                prev_low = to_fahrenheit(raw, unit) if raw is not None else None
+            for k in range(2, V4_PLAN_DAYS_AHEAD + 1):
+                entry = by_date.get(today + timedelta(days=k))
+                hi_raw = _first_non_none(entry.get("temperature"), entry.get("tempHigh")) if entry else None
+                lo_raw = _first_non_none(entry.get("templow"), entry.get("tempLow")) if entry else None
+                if hi_raw is None or lo_raw is None:
+                    out.append(None)
+                    prev_low = None
+                    continue
+                hi, lo = to_fahrenheit(hi_raw, unit), to_fahrenheit(lo_raw, unit)
+                day_class = classify_day(
+                    ForecastSnapshot(
+                        today_high=hi,
+                        today_low=lo,
+                        tomorrow_high=hi,
+                        tomorrow_low=lo,
+                        current_outdoor_temp=prev_low if prev_low is not None else lo,
+                    ),
+                    **self._classify_kwargs(seed_hysteresis=False),
+                )
+                out.append(
+                    (bool(day_class.windows_recommended), day_class.window_open_time, day_class.window_close_time)
+                )
+                prev_low = lo
+        except Exception:  # noqa: BLE001 - optional context: the later days stay windows-closed
+            _LOGGER.debug("later-day window plans failed", exc_info=True)
+            return []
+        return out
+
     def _v4_sleep_node(self, model_dict: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
         """``(sleep sensor id, sleep_time, wake_time)`` when the configured sleep sensor is a node of the model, or the
         model's primary is a room node (Issue #1432: then ``_ca`` is always composed, and a sleep hour the bedroom
@@ -7026,13 +7088,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
     def _v4_cycle_kwargs(
-        self, now: datetime, row: Mapping[str, Any], model_dict: Mapping[str, Any], state: Any
+        self,
+        now: datetime,
+        row: Mapping[str, Any],
+        model_dict: Mapping[str, Any],
+        state: Any,
+        *,
+        week: bool = False,
     ) -> dict[str, Any]:
         """Every input of one v4 prediction, as ``v4_shadow.run_cycle`` keywords (plus ``readings``/``inputs`` echoed).
 
         Shared by the post-chart shadow cycle (``row`` = the chart row it just wrote) and the pre-decision control cycle
         (``row`` = the live readings, ``_v4_live_row``), so the two cannot drift. Reads the stored hidden-mass state and
-        never writes it. Event loop only (reads entity states and the chart log)."""
+        never writes it. Event loop only (reads entity states and the chart log).
+
+        ``week=True`` (the display cycle only, Issue #1483) predicts up to ``V4_PREDICT_HORIZON_HOURS`` (a week) on the
+        real hourly forecast followed by the hours built from the daily highs and lows, with each later day's planned
+        window period. The decisions' cycle keeps ``V4_CONTROL_HORIZON_HOURS`` (24 h) on the real hourly forecast, so
+        its inputs are unchanged; the first 24 h of both are the same inputs."""
         run_action, run_minutes = v4_shadow.run_state_from_rows(self._chart_log.raw_entries()[-80:], now)
         sleep_node, sleep_time, wake_time = self._v4_sleep_node(model_dict)
         readings: dict[str, float | None] = dict(row.get("indoor_sensors") or {})
@@ -7056,6 +7129,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             (d if d.tzinfo is not None else d.replace(tzinfo=local_tz), t)
             for d, t in _parse_forecast_entries(self._hourly_forecast_temps)
         ]
+        if week:
+            # Issue #1483: past the real hourly forecast, the chart's own hourly curve from the daily highs and lows
+            # (#906). Real hours are kept as they are; only the hours after the last real one are added.
+            extended = _build_extended_hourly_forecast(
+                self._hourly_forecast_temps,
+                getattr(self, "_daily_forecast_full", None),
+                now,
+                self.config.get("temp_unit", "fahrenheit"),
+            )
+            last_real = max((d for d, _t in hourly), default=None)
+            if last_real is not None:
+                hourly = hourly + [
+                    (d2, t)
+                    for d2, t in (
+                        (d if d.tzinfo is not None else d.replace(tzinfo=local_tz), t)
+                        for d, t in _parse_forecast_entries(extended)
+                    )
+                    if d2 > last_real
+                ]
         band: list[tuple[datetime, float | None, float | None]] = []
         lower_now, upper_now = self._target_band_lower_upper_now()
         band.append((now, lower_now, upper_now))
@@ -7079,6 +7171,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             day_modes=_compute_day_hvac_modes(self._hourly_forecast_temps, now, c),
             windows=windows,
             tomorrow_windows=tomorrow_windows,
+            later_windows=self._v4_later_window_plans(now) if week else (),
+            horizon_hours=V4_PREDICT_HORIZON_HOURS if week else V4_CONTROL_HORIZON_HOURS,
             step_min=v4_shadow.step_minutes(),
         )
 
@@ -7166,7 +7260,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if row is None or row.get("event") is not None or row_ts is None or abs((now - row_ts).total_seconds()) > 120:
             _LOGGER.debug("v4 shadow: no chart row for this cycle; skipped")
             return
-        cycle = self._v4_cycle_kwargs(now, row, model_dict, state)
+        # Issue #1483: the display line runs up to a week, as far as the forecast goes (decisions stay on 24 h).
+        cycle = self._v4_cycle_kwargs(now, row, model_dict, state, week=True)
         readings = cycle["readings"]
         inputs = cycle["inputs"]
         predictions, new_mass = await self._executor_job(functools.partial(v4_shadow.run_cycle, display=True, **cycle))
@@ -7207,6 +7302,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "predictions": predictions,
                 "corrected": corrected,
                 "baseline": baseline,
+                # Issue #1483: the last REAL hourly forecast hour; past it the line runs on the daily highs and lows
+                "hourly_until": self._v4_hourly_until(now),
             }
         # The archive file is a few MB: rewrite it at most hourly (and once at shutdown).
         mono = _monotonic()
@@ -7369,9 +7466,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if isinstance(sid, str) and sid not in ids:
                     ids.append(sid)
             # Issue #1400: the "_ca" line is broken wherever CA swaps the sensor it reads (bedtime / wake-up).
-            ca_swaps = self._chart_ca_swaps(
-                raw_log, start, end, now=now, historical=historical, ahead_s=(V4_PREDICT_HORIZON_HOURS + 1) * 3600.0
-            )
+            ca_swaps = self._chart_ca_swaps(raw_log, start, end, now=now, historical=historical)
             return build_chart_v4(
                 now=now,
                 start=start,
@@ -17234,7 +17329,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "expected_low": c.tomorrow_low,
         }
 
-    _CA_SWAPS_AHEAD_S = 6 * 86400.0  # the chart's longest look-ahead (5 d) plus a day
+    _CA_SWAPS_AHEAD_S = 8 * 86400.0  # the chart's longest look-ahead (7 d, Issue #1483) plus a day
 
     def _chart_ca_swaps(
         self,

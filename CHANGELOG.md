@@ -3,6 +3,18 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.18] — 2026-11-08
+
+- Fix #1483: v4's prediction line now runs as far ahead as your forecast goes, up to a week, instead of stopping at 24 hours.
+  - **What you'll notice:** on the Status chart the main prediction (v4) now runs for about 6 days, like the forecast, where it used to stop after one day. Choose **7d** under Ahead to see all of it.
+  - **Where the data comes from:** your weather service gives real hourly forecasts for about 48 hours (met.no). After that there is only a high and a low for each day. v4 follows the real hourly forecast first, then the same hourly curve the chart already builds from the daily highs and lows. It stops at the last forecast day. If your service gives more, v4 uses more, up to a week.
+  - **The far end looks rougher on purpose:** past the last real hourly forecast hour the line is drawn fainter (dashed if it was solid), and the hover readout tags those values "rough". Daily highs and lows say less than an hourly forecast.
+  - **Every forecast day gets its window plan:** each day after tomorrow is checked for a window period the same way tomorrow is, from its own forecast high and low. A warm Thursday shows the house cooling during Thursday's window period, not a week of closed windows. A day the forecast doesn't cover stays windows-closed.
+  - **What the house does is unchanged:** everything Climate Advisor decides still reads a 24-hour prediction made from the real hourly forecast only. The first 24 hours of the long line are made from exactly the same inputs, so the two agree there.
+  - **How good is it that far out?** v4 now also records what it said 2, 3 and 5 days ahead, and the Prediction accuracy page and the chart's past-line buttons offer those look-aheads. They fill from the live record only: the 2-day line has data 2 days after this update, the 5-day line after 5 days.
+  - **Plan list:** with v4 as the main engine, day two of the Next 48 hours list now has v4's temperature path behind it (it used to end at 24 hours). A plan list that runs as far as the forecast is the next step.
+  - **Storage:** v4's prediction record grows to about 1.1 MB per room line after 400 days (was about 0.75 MB). The weather forecast record is unchanged.
+
 ## [0.9.17] — 2026-11-08
 
 - Fix #1477: the heat and cool "swing" Climate Advisor learns (how far past the setpoint your thermostat lets the room drift before it starts the heat or AC) now comes from your finest temperature readings and is rounded up to the next half degree.

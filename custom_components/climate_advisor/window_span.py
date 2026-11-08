@@ -8,6 +8,7 @@ backtest (``tools/predict_backtest.py``) all read these, so the engines cannot d
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from datetime import time as dtime
 from typing import Any
@@ -59,6 +60,7 @@ def planned_window_spans(
     today: tuple[bool, dtime | None, dtime | None],
     tomorrow: tuple[bool, dtime | None, dtime | None] | None = None,
     *,
+    later: Sequence[tuple[bool, dtime | None, dtime | None] | None] = (),
     fallback_hours: float = WINDOW_PLAN_FALLBACK_HOURS,
 ) -> tuple[tuple[datetime, datetime], ...]:
     """Today's span (``planned_window_span``) plus tomorrow's (``day_offset=1``) when its plan is known (Issue #1391).
@@ -66,10 +68,15 @@ def planned_window_spans(
     Occupant view: tomorrow morning's planned window period (free cooling) is in the 24 h line after midnight, not
     just today's. ``tomorrow=None`` (plan unknown) -> tomorrow's hours stay windows-closed. Used by the live
     ``build_inputs`` and the backtest, so both read one rule.
+    ``later`` (Issue #1483) is the plan of each day after tomorrow, in order (``later[0]`` = the day after tomorrow,
+    ``day_offset=2``), for the week-long display line; ``None`` in it = that day's plan unknown = closed.
     """
     spans = [planned_window_span(anchor, *today, fallback_hours=fallback_hours)]
     if tomorrow is not None:
         spans.append(planned_window_span(anchor, *tomorrow, day_offset=1))
+    for i, day in enumerate(later):
+        if day is not None:
+            spans.append(planned_window_span(anchor, *day, day_offset=2 + i))
     return tuple(sp for sp in spans if sp is not None)
 
 

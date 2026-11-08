@@ -184,7 +184,8 @@ class TestChartCaLine:
             raw_log=_night_rows(),
         )
         assert out["sensors"] == ["_ca"] and out["future"]["_ca"]
-        assert len(out["breaks"]["_ca"]) == 4
+        # the 24 h window plus the chart's look-ahead and a day (8 d, Issue #1483): two swaps a day over 9 days
+        assert 16 <= len(out["breaks"]["_ca"]) <= 20
 
 
 # ----------------------------------------------------------------------------------------------- 2. the archive
@@ -245,8 +246,9 @@ class TestArchiveCaOnly:
         _seed_cycle_inputs(coord, scheduler)
         _cycle(coord, scheduler)
         assert fake.predict_calls and coord._v4_last_cycle["predicted"] is True
-        assert coord._v4_last_cycle["archived"] == 4
-        assert coord._v4_archive.slot_count() == {"_ca": 4}
+        # the seeded forecast reaches about 60 h: 1/4/12/24 h and, since Issue #1483, 48 h (not 72 h / 5 d)
+        assert coord._v4_last_cycle["archived"] == 5
+        assert coord._v4_archive.slot_count() == {"_ca": 5}
         assert coord._v4_last_future["predictions"]["_ca"]
 
 
@@ -349,8 +351,8 @@ class TestTopLevelCaSwaps:
         assert out["v4"]["reason"] == "not_running" and "breaks" not in out["v4"]
         times = sorted({datetime.fromisoformat(t).strftime("%H:%M") for t in out["ca_swaps"]})
         assert times == ["07:00", "22:30"]
-        # past window plus the chart's longest look-ahead: about two swaps a day over 7 days
-        assert 10 <= len(out["ca_swaps"]) <= 16
+        # past window plus the chart's longest look-ahead and a day (Issue #1483: 7 d + 1): two swaps a day over 9 days
+        assert 16 <= len(out["ca_swaps"]) <= 20
 
     def test_v4_alias_agrees_with_the_top_level_key(self, tmp_path):
         from tests.test_chart_v4_r2 import _archive_with, _chart, _coord, _future, _model  # noqa: PLC0415

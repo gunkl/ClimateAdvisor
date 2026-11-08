@@ -317,7 +317,11 @@ class TestV4Block:
     def test_ready_zone_gets_past_lines_per_sensor_and_lead_and_future_lines(self, tmp_path):
         coord = _coord(tmp_path, model=_model(), archive=_archive_with(tmp_path), last_future=_future(), backtest=READY)
         v4 = _chart(coord)["v4"]
-        assert v4["ready"] is True and v4["reason"] == "ok" and v4["leads"] == ["1h", "4h", "12h", "24h"]
+        assert (
+            v4["ready"] is True
+            and v4["reason"] == "ok"
+            and v4["leads"] == ["1h", "4h", "12h", "24h", "48h", "72h", "120h"]
+        )
         assert set(v4["past"]) == {"_ca", HALL, BED, FINE}  # "_ca" is drawn, broken at the swaps (Issue #1400)
         assert set(v4["past"][BED]) == {"1h", "4h", "12h", "24h"}
         assert len(v4["past"][BED]["4h"]) == 8 and v4["past"][BED]["4h"][0]["temp"] == 66.4

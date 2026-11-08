@@ -36,7 +36,7 @@ from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
-from .const import V4_BACKTEST_FILE
+from .const import V4_ARCHIVE_LEADS, V4_BACKTEST_FILE
 from .storage_paths import resolve_entry_scoped_path
 from .temperature import UNIT_SYMBOL, display_delta, display_temp
 from .v4_archive import V4Archive, lead_hours, slot_key
@@ -451,7 +451,7 @@ def _read_sensor_ids(rows: Sequence[Mapping[str, Any]]) -> set[str]:
 # Status chart (Issue #1230 R2)
 # ---------------------------------------------------------------------------
 
-CHART_LEADS = ("1h", "4h", "12h", "24h")
+CHART_LEADS = V4_ARCHIVE_LEADS  # Issue #1483: 1 h to 5 days; the backtest publishes 1-24 h only
 
 
 def backtest_scores(backtest: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -602,6 +602,7 @@ def build_chart_v4(
         "sensors": [],
         "future": {},
         "future_at": None,
+        "hourly_until": None,  # Issue #1483: last real hourly forecast hour; past it the line is from daily highs/lows
         "baseline": {},
         "past": {},
         "past_span": None,  # {"first", "last", "sensors"}: every past v4 prediction, in or out of this window
@@ -682,6 +683,7 @@ def build_chart_v4(
             if pts:
                 out["future"][sid] = _out_pairs(pts, tz, unit)
         out["future_at"] = last_future.get("at")
+        out["hourly_until"] = last_future.get("hourly_until")
         base = last_future.get("baseline")
         for sid in ids:
             pts = [(t.timestamp(), v) for t, v in _line(base, sid) if t.timestamp() > now_ts and math.isfinite(v)]

@@ -12,7 +12,7 @@ they thinned out in the hours after each deploy. Two causes, both pinned here:
    previous or the current curve, whichever was closer to that look-ahead, within ``fill_tolerance_s``; a longer outage
    stays an honest hole. First write still wins.
 
-Plus the size budget for every slot of 400 days x 4 leads, and the backtest/archive join with no gap.
+Plus the size budget for every slot of 400 days x every lead, and the backtest/archive join with no gap.
 """
 
 from __future__ import annotations
@@ -31,12 +31,16 @@ from custom_components.climate_advisor.v4_archive import V4Archive, fill_toleran
 TZ = ZoneInfo("America/Los_Angeles")
 CA = "_ca"
 SLOT = 1800
+# The look-aheads the deploy-time backtest publishes (the join with it is about these). The 2/3/5-day ones of Issue
+# #1483 come from the live archive only: they start once the archive is older than the look-ahead (TestLongLeads).
+BACKTEST_LEADS = ("1h", "4h", "12h", "24h")
 
 
 def _curve(cycle: datetime) -> list[tuple[datetime, float]]:
-    """A 24 h curve every 15 min whose value IS its look-ahead in hours (+60), so a test can read back how far ahead
-    each archived value was made: ``value - 60``."""
-    return [(cycle + timedelta(minutes=15 * k), 60.0 + 0.25 * k) for k in range(1, 97)]
+    """A week-long curve every 15 min (Issue #1483: the display line reaches the 2/3/5-day look-aheads) whose value
+    IS its look-ahead in hours (+60), so a test can read back how far ahead each archived value was made:
+    ``value - 60``."""
+    return [(cycle + timedelta(minutes=15 * k), 60.0 + 0.25 * k) for k in range(1, 4 * 168 + 1)]
 
 
 def _run(arch: V4Archive, cycles: list[datetime]) -> None:
@@ -136,7 +140,7 @@ class TestEverySlotFills:
             assert abs((v - 60.0) - 1.0) <= (fill_tolerance_s("1h") + 450) / 3600
 
     def test_the_tolerance_grows_with_the_lead(self):
-        assert [fill_tolerance_s(lead) / 60 for lead in V4_ARCHIVE_LEADS] == [30, 30, 90, 180]
+        assert [fill_tolerance_s(lead) / 60 for lead in V4_ARCHIVE_LEADS] == [30, 30, 90, 180, 360, 540, 900]
 
     def test_a_node_model_fills_its_node_lines_and_still_derives_ca(self, tmp_path):
         arch = V4Archive(tmp_path, entry_id="z")
@@ -236,9 +240,11 @@ class TestStopFlush:
 
 # ---------------------------------------------------------------------------------------------- 3. size budget
 class TestSizeBudget:
-    def test_every_slot_of_400_days_at_4_leads_fits_the_m4_budget_in_memory_and_on_disk(self, tmp_path):
+    def test_every_slot_of_400_days_at_every_lead_fits_the_m4_budget_in_memory_and_on_disk(self, tmp_path):
         """Memory is unchanged by the fill (each line already reserves 4 bytes per slot and lead); the file grows to
-        every slot written. Budget: 5 MB in memory (M4) and 1 MB per line on disk, for the worst case of four lines."""
+        every slot written. Budget: 5 MB in memory (M4) and, since Issue #1483 added the 2/3/5-day look-aheads (7
+        leads, was 4), 1.25 MB per line on disk (was 1 MB) for the worst case of four lines with a week-long saved
+        curve each. Live Zone 1 has two lines (about 2.2 MB at 400 days)."""
         n = V4_ARCHIVE_MAX_DAYS * 48
         now = datetime.now(UTC)
         base = int(now.timestamp()) // SLOT * SLOT - (n - 1) * SLOT
@@ -252,14 +258,14 @@ class TestSizeBudget:
         assert arch.memory_bytes() < 5 * 1024 * 1024
         assert arch.save()
         size = arch._path.stat().st_size
-        assert size < 4 * 1024 * 1024, f"{size / 1e6:.2f} MB for 4 lines x {V4_ARCHIVE_MAX_DAYS} days x 4 leads"
+        assert size < 5 * 1024 * 1024, f"{size / 1e6:.2f} MB for 4 lines x {V4_ARCHIVE_MAX_DAYS} days x 7 leads"
         again = V4Archive(tmp_path, entry_id="z")
         again.load()
         assert again.slot_count() == {s: n for s in lines}
 
 
 def _curve_pts(now: datetime) -> list[tuple[float, float]]:
-    return [(now.timestamp() + 900 * k, 68.25) for k in range(1, 97)]
+    return [(now.timestamp() + 900 * k, 68.25) for k in range(1, 4 * 168 + 1)]
 
 
 # ---------------------------------------------------------------------------------------------- 4. the join
@@ -274,7 +280,7 @@ class TestBacktestArchiveJoin:
             t += timedelta(minutes=30)
         _run(arch, cycles)
         points = {}
-        for lead in V4_ARCHIVE_LEADS:  # the deploy-time backtest: hourly, ending at the deploy
+        for lead in BACKTEST_LEADS:  # the deploy-time backtest: hourly, ending at the deploy
             rows, t = [], bt_end - timedelta(days=3)
             while t <= bt_end:
                 rows.append({"t": t.isoformat(), "actual": 68.0, "flat": 68.0, "v4": 61.0})
@@ -303,7 +309,7 @@ class TestBacktestArchiveJoin:
         last 24 h are the archive's 30-minute points, with nothing missing - no new deploy needed."""
         deploy = self.NOW - timedelta(days=2)
         arch, bt = self._setup(tmp_path, archive_start=deploy - timedelta(days=2, minutes=-14), bt_end=deploy)
-        for lead in V4_ARCHIVE_LEADS:
+        for lead in BACKTEST_LEADS:
             ts = [datetime.fromisoformat(p["ts"]).timestamp() for p in self._past(arch, bt)[lead]]
             gaps = [b - a for a, b in zip(ts, ts[1:], strict=False)]
             assert len(ts) == 48 and max(gaps) == SLOT, f"{lead}: {len(ts)} points, widest gap {max(gaps) / 60} min"
@@ -313,7 +319,7 @@ class TestBacktestArchiveJoin:
         never a gap wider than the backtest's own hour."""
         deploy = self.NOW - timedelta(hours=10)
         arch, bt = self._setup(tmp_path, archive_start=deploy - timedelta(days=2, minutes=-14), bt_end=deploy)
-        for lead in V4_ARCHIVE_LEADS:
+        for lead in BACKTEST_LEADS:
             ts = [datetime.fromisoformat(p["ts"]).timestamp() for p in self._past(arch, bt)[lead]]
             gaps = [b - a for a, b in zip(ts, ts[1:], strict=False)]
             assert max(gaps) <= SLOT, f"{lead}: widest gap {max(gaps) / 60} min"  # the archive covers both sides
@@ -327,7 +333,7 @@ class TestBacktestArchiveJoin:
         while t < self.NOW:
             rows.append({"ts": t.isoformat(), "hvac": "idle", "indoor": 68.0, "outdoor": 50.0})
             t += timedelta(minutes=30)
-        for lead in V4_ARCHIVE_LEADS:
+        for lead in BACKTEST_LEADS:
             out = pa.build_prediction_accuracy(
                 zone="z",
                 sensor=CA,
@@ -344,3 +350,58 @@ class TestBacktestArchiveJoin:
             )
             v4_points = [p for p in out["points"] if "v4" in p]
             assert len(v4_points) == 48, f"{lead}: {len(v4_points)} v4 points in 24 h"
+
+
+# ---------------------------------------------------------------------------------------------- 5. the long leads
+class TestLongLeads:
+    """Issue #1483: the 2/3/5-day look-aheads are scored from the live archive alone (the backtest stops at 24 h)."""
+
+    NOW = datetime(2026, 11, 16, 16, 0, tzinfo=TZ)
+
+    def test_an_archive_older_than_the_lead_scores_every_slot_of_the_day(self, tmp_path):
+        arch = V4Archive(tmp_path, entry_id="z")
+        cycles, t = [], self.NOW - timedelta(days=7, minutes=-14)
+        while t <= self.NOW:
+            cycles.append(t)
+            t += timedelta(minutes=30)
+        _run(arch, cycles)
+        rows, t = [], self.NOW - timedelta(days=3)
+        while t < self.NOW:
+            rows.append({"ts": t.isoformat(), "hvac": "idle", "indoor": 68.0, "outdoor": 50.0})
+            t += timedelta(minutes=30)
+        for lead in ("48h", "72h", "120h"):
+            out = pa.build_prediction_accuracy(
+                zone="z",
+                sensor=CA,
+                lead=lead,
+                range_str="24h",
+                before=None,
+                now=self.NOW,
+                unit="fahrenheit",
+                chart_rows=rows,
+                archive=arch,
+                backtest=None,
+                model={"has_model": True, "confidence": "ok", "primary": CA},
+                sensors_meta=[{"id": CA, "name": "Climate Advisor reading", "role": "x"}],
+            )
+            v4_points = [p for p in out["points"] if "v4" in p]
+            assert len(v4_points) == 48, f"{lead}: {len(v4_points)} v4 points in 24 h"
+            made = {round(p["v4"] - 60.0) for p in v4_points}  # the curve's value is how far ahead it was made
+            assert made == {lead_hours(lead)}, (lead, made)
+
+    def test_a_young_archive_has_no_long_lead_yet(self, tmp_path):
+        """Two days of archive: nothing was made 5 days before any slot yet, so the 5-day line is honestly empty."""
+        arch = V4Archive(tmp_path, entry_id="z")
+        cycles = [self.NOW - timedelta(days=2) + timedelta(minutes=30 * k) for k in range(97)]
+        _run(arch, cycles)
+        assert arch.series(CA, "120h", 0, self.NOW.timestamp()) == {}
+        assert arch.series(CA, "24h", 0, self.NOW.timestamp())
+
+    def test_a_curve_that_stops_short_writes_no_long_lead(self, tmp_path):
+        """A forecast that only reaches 2 days (a provider with a short daily forecast): the 3/5-day columns stay
+        empty."""
+        arch = V4Archive(tmp_path, entry_id="z")
+        c = self.NOW
+        arch.record(c, {CA: [(c + timedelta(minutes=15 * k), 60.0 + 0.25 * k) for k in range(1, 4 * 50)]}, CA)
+        assert arch.series(CA, "48h", 0, 1e12)
+        assert arch.series(CA, "72h", 0, 1e12) == {} and arch.series(CA, "120h", 0, 1e12) == {}

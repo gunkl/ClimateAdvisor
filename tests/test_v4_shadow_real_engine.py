@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from custom_components.climate_advisor import v4_shadow
-from tests.test_v4_shadow_wiring import _START, _bands, _build, _cycle, _hourly
+from tests.test_v4_shadow_wiring import _START, _bands, _build, _cycle, _hourly, _steps_to_forecast_end
 
 
 def _load_engine():
@@ -92,7 +92,7 @@ def test_real_fit_then_cycle_archives_and_is_cheap(real) -> None:
     wall_ms = (time.perf_counter() - t0) * 1000
     if model["confidence"] != "none":
         assert coord._v4_last_cycle["predicted"] is True and coord._v4_archive.data
-        assert coord._v4_last_cycle["inputs"] == 96
+        assert coord._v4_last_cycle["inputs"] == _steps_to_forecast_end(now)  # to the forecast end (Issue #1483)
     assert wall_ms < 500, f"shadow cycle took {wall_ms:.0f} ms"
     print(f"v4 shadow cycle: {coord._v4_last_cycle} wall={wall_ms:.1f}ms confidence={model['confidence']}")  # noqa: T201
 

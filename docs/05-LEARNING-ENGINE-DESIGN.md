@@ -653,10 +653,9 @@ The legacy `heating_rate_f_per_hour` and `cooling_rate_f_per_hour` fields are ke
 
 | Field | Type | Description |
 |---|---|---|
-| `pending_thermal_event` | `dict \| None` | Serialised in-progress HVAC event (legacy compat field; v3 also uses `coordinator._pending_observations` dict) |
 | `thermal_model_cache` | `dict \| None` | EWMA-accumulated model parameters for all six observation types |
 
-**Startup recovery:** On startup, the coordinator reads `pending_thermal_event` from `LearningState`. If an HVAC observation is in `post_heat` phase, it is restored to `_pending_observations` and monitoring continues. Active-phase HVAC observations are abandoned (cannot reliably resume an active HVAC session across a restart). Non-HVAC observations are not persisted and are simply restarted on the next poll if conditions hold.
+**No startup recovery of in-flight observations (Issue #1437):** A heating or cooling run in progress during an HA restart or zone reload teaches the thermal model only from the part after the restart, by design (Issue #1437). In-flight observations (`coordinator._pending_observations`) live in memory only and are never persisted; after the restart the Issue #96 late start (`_initialize_hvac_session_from_current_state`) opens a fresh observation from startup. The pre-restart part is never fitted because the thermostat keeps running while HA is down and Climate Advisor cannot see whether the run stopped and restarted in the gap, so a curve fitted across it would be invalid: a shorter clean observation beats a longer contaminated one. Non-HVAC decay observations restart on the next poll if their conditions still hold. The retired `LearningState.pending_observations` field (written only before Issue #133) and the v2 `pending_thermal_event` field are dropped silently on load if an old learning file still holds them, and are not written again.
 
 ### Sanity Bounds (from `const.py`)
 

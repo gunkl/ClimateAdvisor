@@ -13,7 +13,8 @@ scrolled back into history where the payload has nothing in view), every key chi
                own datasets have a point in the view; a past-lead button gives a v4 line a past point in the view.
 
 Also: no Humidity / Feels-like chip (Issue #1414), and in the live shape only the sensors v4 has data for get v4
-chips (the rest are named on the "v4 is still learning" line, the finer sensor's chips say "history only").
+chips (the rest are named on the "v4 is still learning" line, the finer sensor has one chip:
+"Past predictions only").
 Screenshots: chips-<page>-<payload>-<view>.png (the page) and key-<page>-<payload>-<view>.png (the key).
 Exits 1 on any problem.
 """
@@ -227,8 +228,7 @@ def live_shape(pg, name):
             [
                 "v4:_ca=Climate Advisor reading",
                 "base:_ca=Climate Advisor reading",
-                f"v4:{fin}=Santa Maria thermostat My ecobee Current Temperature (history only)",
-                f"base:{fin}=Santa Maria thermostat My ecobee Current Temperature (history only)",
+                f"v4:{fin}=Santa Maria thermostat My ecobee Current Temperature",
             ]
         ),
         str(v4_chips),
@@ -239,7 +239,7 @@ def live_shape(pg, name):
         learning.count() == 1 and learning.inner_text().strip() == "v4 is still learning: thermostat, bedroom sensor",
         learning.inner_text() if learning.count() else "(none)",
     )
-    check(f"{name}: the finer sensor's no-plan chip is disabled (no forecast)", chip(pg, f"base:{fin}").is_disabled())
+    check(f"{name}: the finer sensor has no no-plan chip (#1430)", chip(pg, f"base:{fin}").count() == 0)
 
 
 with sync_playwright() as p:

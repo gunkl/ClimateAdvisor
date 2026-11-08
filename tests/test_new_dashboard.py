@@ -43,6 +43,14 @@ PARITY = [
         "placed",
         "",
     ),
+    (
+        ["chart-role-main", "chart-role-comparison"],
+        "chart-role-main",
+        "Chart key: Predicted rows grouped by engine role, Main then Comparison (Issue #1430; shared chart module)",
+        ["chart-role-main", "chart-role-comparison"],
+        "placed",
+        "",
+    ),
     # ---- header / shell
     (
         ["zone-selector-row"],

@@ -9,6 +9,7 @@
 | What does v4 predict and for whom? | The temperature each configured room sensor will read 1-24 h ahead, learned from the home's own chart_log. On Zone 1 (real data) its 4 h MAE on the reading CA shows is about 0.6-0.8 F against 1.5 F for "nothing changes" and 1.6 F for v3. | [Model](#model-equations), `predictor_v4.py#L1079` |
 | Does anything decide with v4? | Only when v4 is the PRIMARY engine (default, Issue #1230 R6b): the ceiling guard and nat-vent plan read its no-HVAC baseline path (`run_cycle(baseline=True)`), the rate decisions read `control_rates()`. As the comparison engine, or when its fit is `none`, nothing decides with it. | [Control feed](prediction-engines-spec.md#control-feed-r6b), [v4 Shadow: invariant](v4-shadow-spec.md#nothing-on-a-decision-path-reads-v4) |
 | What is the state, and what are the inputs? | Primary node `H` (the thermostat's room reading), hidden thermal mass `M`, one node `B_j` per extra sensor. Inputs per 15-min step: outdoor temperature, sun, windows open, fan running, heating duty, cooling duty. | [Model](#model-equations) |
+| Why does a newly logged sensor get a v4 line after 3 days, and does that line change any decision (Issue #1422)? | A sensor the whole-window rule leaves out is judged over the span since its own first `indoor_sensors` row (`NODE_MIN_HISTORY_DAYS` = 3, 50 % coverage) and fitted AFTER the control fit with the house held, into `display_nodes`. Display only: never in `sensors`/`nodes`, so control rates, the control path, `_ca` and the night strategy are byte-identical with or without it. Folded in at the 6-hourly check when one newly qualifies. | [Display-only nodes](#display-only-nodes-issue-1422) |
 | How is the thermostat modelled? | Replayed from the recorded heating/cooling duty when fitting; emulated when predicting, from the plan's heat/cool setpoints with learned start offsets, burst length and reading quantisation. | [Thermostat](#thermostat-learning-and-emulation), `predictor_v4.py#L487` |
 | When is `predict()` allowed to answer? | Never when `confidence == "none"` (< 3 days of samples, diverged fit, or no 10 % skill over "no change" at 4 h on the training data). Callers then treat v4 as not learned yet: as primary the chart shows the schedule estimate and the decisions take their "learning not finished" defaults (never v3, [Prediction Engines Spec](prediction-engines-spec.md#fallback-while-the-primary-is-learning)); the accuracy views score nothing for v4. | [Confidence Gates](#confidence-gates), `predictor_v4.py#L97-L101` |
 | How is the forecast corrected? | 24 learned hourly biases (actual - forecast, interpolated around the clock) plus today's current miss decaying with a learned time constant, applied INSIDE `predict()` to the RAW forecast. | [Forecast Correction](#forecast-correction), `predictor_v4.py#L753` |
@@ -144,6 +145,16 @@ Occupant view: on a house that cools itself with open windows and the whole-hous
 
 The confidence gates count samples that carry a primary reading (`fit["primary_samples"]`, `sample_days`), not every grid point.
 
+### Display-only nodes (Issue #1422)
+
+Occupant view: per-sensor logging (`indoor_sensors`) began on a known day, so judging a sensor's coverage over the whole 30-day window kept the thermostat and the bedroom sensor at "v4 is still learning" on the Status chart for about two weeks although each already had days of readings (live Zone 1, 0.9.5: `sensors = ["_ca"]`). The control rule above is NOT changed - v4 is the primary engine, so a new control node would move pre-heat, ceiling-guard and setback timing. Instead:
+
+- **Rule.** `resolve_display_nodes(entries, nodes=, primary=, sensors=, tz)` takes the candidates the control rule left out (`sensors`, plus the entity `primary` when the model fell back to `_ca`) and keeps each one whose own history - from its first `indoor_sensors` row to the last row given - is at least `NODE_MIN_HISTORY_DAYS` (3 days) with a reading on at least `NODE_MIN_COVERAGE` (50 %) of those rows. A sensor that passes the control rule stays a control node exactly as before; a sensor whose own history reaches 50 % of the window graduates to a control node at that nightly fit, as it always did.
+- **Fit.** `fit(..., display_sensors=)` runs the control fit unchanged, then `fit_display_nodes` fits each display node alone: a node-only Levenberg-Marquardt (`DISPLAY_MAX_ITERATIONS` = 30, 5 parameters) on the samples from that sensor's first reading on, with the house parameters HELD (the primary trajectory is rolled once per node, so the cost is a fraction of a fit: about 0.2 s per node on the development machine, about 1 s on a Pi). `b_w` / `q_b` freeze as for control nodes. A node is kept only with `GATE_MIN_ANCHORS` anchors and a 4 h MAE at least `GATE_MIN_SKILL` below "its reading won't change" on its training anchors; `fit["display"] = {tried, kept, per_sensor, rejected}` records the outcome. Warm-started from the previous model's `display_nodes`.
+- **Display-only contract.** Display nodes live in `V4Model.display_nodes`, never in `sensors` / `nodes`. `predict(display_nodes=True)` adds their lines; it is passed only by the post-chart shadow cycle (`run_cycle(display=True)`) and the chart's no-plan baseline (`chart_extras`). The pre-decision control cycle never passes it, `control_rates` reads the house only, `ca_line` composes `_ca` from a CONTROL sleep node only (`predict` checks `ca_sleep_node in model.nodes`), and the night strategy iterates `model.sensors`. Since a node never feeds back into `H`, every primary, control-node and `_ca` value is identical with or without display nodes; `tests/test_v4_display_nodes_1422.py` pins the model, `control_rates`, `V4Engine.control_model` and the control path byte-identical, and the decision goldens are unchanged.
+- **Off-cycle refit.** See [v4 Shadow: Scheduling](v4-shadow-spec.md#scheduling): a sensor that newly qualifies between nightly fits is folded in at the 6-hourly check by `v4_shadow.run_display_fit`, which copies every control key of the stored model through unchanged.
+- **Backtest.** `tools/predict_backtest.py` applies the same rule per test week (`info["display_nodes"]`), predicts the display lines and scores them as their own sensors; `_ca` and the primary never read them.
+
 ## The `_ca` Line
 
 `_ca` is the reading Climate Advisor itself uses: the comfort-facing `indoor`, which is the sleep sensor's reading inside the sleep window. `ca_line(preds, primary, sleep_node, sleep_time, wake_time, tz)` composes it from the node predictions (the sleep node's inside the window when that node is modelled, else the primary's); `in_sleep_window` mirrors `automation._in_sleep_window` (pinned by a test). `predict(..., ca_sleep_node=...)` returns it under `"_ca"`; the archive derives it on read; the backtest scores `_ca` this way (it infers the sleep sensor and window from the log, since it has no HA config).
@@ -178,6 +189,7 @@ The confidence gates count samples that carry a primary reading (`fit["primary_s
 1. Pure and headless: no I/O, no clock, no logging side effects; same inputs give the same model and the same prediction.
 2. Nothing in R1 reads v4 for a decision; a v4 failure must never affect a cycle (callers catch).
 3. A sensor node never changes the primary node's trajectory.
+3a. A display-only node (Issue #1422) never changes the model's control fields (house, `sensors`, `nodes`, thermostat, confidence, `fitted_at`) or any control-facing output (`control_rates`, the control path, `_ca`).
 4. A mode that was never observed never produces an unbounded gain: its parameter is frozen and tied to the other by the production cool/heat ratio.
 5. Time is compared by epoch (`timestamp()`), never by subtracting aware datetimes that share a `tzinfo` (wall-clock arithmetic breaks on DST days).
 
@@ -197,6 +209,7 @@ The confidence gates count samples that carry a primary reading (`fit["primary_s
 {"schema_version": 1, "fitted_at": iso, "primary": entity_id, "sensors": [primary, ...],
  "house": {a_o, a_w, a_f, c_hm, c_mh, s, phase, q_h, q_c},
  "nodes": {entity_id: {b_h, b_o, b_w, s_b, q_b}},                 # every non-primary sensor
+ "display_nodes": {entity_id: {b_h, b_o, b_w, s_b, q_b}},         # Issue #1422: chart-only nodes, never control
  "thermostat": {on_below_f, on_above_f, burst_minutes, reading_step_f, burst_cool_minutes | null,
                 "off_above_f", "off_below_f", "min_run_heat_min" | null, "min_run_cool_min" | null, "calibrated"},   # R1b
  "openness": {"window_by_hour": [24 floats 0..1], "fan_by_hour": [24 floats 0..1], "days": float} | null,        # R1b
@@ -204,7 +217,7 @@ The confidence gates count samples that carry a primary reading (`fit["primary_s
  "fit": {...see Fit...}, "confidence": "none" | "low" | "ok"}
 ```
 
-`from_dict` returns `None` on a wrong/missing `schema_version`, a non-mapping, non-string or duplicated sensor ids, `sensors[0] != primary`, any missing/non-finite/out-of-bounds parameter, a missing node, a non-positive burst, a bias list that is not 24 finite floats, `nowcast_tau_h <= 0`, an unknown confidence, or a non-string `fitted_at`. R1b added fields without bumping `V4_SCHEMA_VERSION`: `from_dict` reads a model written before R1b (no stop offsets, minimum runs, `calibrated` or `openness`; they default to 0.0 / `None` / false / no prior, and a `c_mh` below the new 0.02 bound is clamped) and a malformed `openness` is rejected. A model without the new fields emulates with its stored start offsets and no stop offset until the next nightly fit replaces it. A future incompatible change bumps `V4_SCHEMA_VERSION`; older files are then refitted, not migrated.
+`from_dict` returns `None` on a wrong/missing `schema_version`, a non-mapping, non-string or duplicated sensor ids, `sensors[0] != primary`, any missing/non-finite/out-of-bounds parameter, a missing node, a non-positive burst, a bias list that is not 24 finite floats, `nowcast_tau_h <= 0`, an unknown confidence, or a non-string `fitted_at`. R1b added fields without bumping `V4_SCHEMA_VERSION`: `from_dict` reads a model written before R1b (no stop offsets, minimum runs, `calibrated` or `openness`; they default to 0.0 / `None` / false / no prior, and a `c_mh` below the new 0.02 bound is clamped) and a malformed `openness` is rejected. A model without the new fields emulates with its stored start offsets and no stop offset until the next nightly fit replaces it. `display_nodes` (Issue #1422) is optional the same way: absent -> none; a malformed map or node is dropped on its own and never rejects the model (display lines cannot cost the control model a refit); a display id that is also a model sensor or `_ca` is dropped. A future incompatible change bumps `V4_SCHEMA_VERSION`; older files are then refitted, not migrated.
 
 ## Deviations From The Contract (additive)
 
@@ -212,10 +225,10 @@ The confidence gates count samples that carry a primary reading (`fit["primary_s
 - `V4Thermostat.burst_cool_minutes` (default `None`); R1b: `off_above_f`, `off_below_f`, `min_run_heat_min`, `min_run_cool_min`, `calibrated`. `V4Model.openness`, `V4Sample.whf_running`.
 - `predict(..., outdoor_now_f=None, forecast_now_f=None)`: needed for the nowcast term. R1b: `hvac_action_now=None`, `run_elapsed_min=None`, `openness_prior=True`, `ca_sleep_node/ca_sleep_time/ca_wake_time=None`.
 - `rollout(..., init_run=None)`; `samples_from_chart_log(..., primary=None, primary_aliases=(), in_sleep=None)`; `fit(..., max_iterations=100)`.
-- `fit(..., max_anchors=160, warm_start=None)`.
+- `fit(..., max_anchors=160, warm_start=None)`; Issue #1422: `fit(..., display_sensors=())`, `predict(..., display_nodes=False)`, `V4Model.display_nodes`.
 - `step_mass(model, *, mass_f, readings, sample=None)`: `sample` optional.
 - `predict()` omits a sensor whose reading is missing instead of inventing a start value.
-- Helpers: `summary_line(model)` (INFO line for the nightly fit), `grid_steps(start, n)`, `learn_thermostat_detail`, `learn_openness`, `resolve_nodes`, `run_state_at`, `ca_line`, `in_sleep_window`, `CA_NODE`.
+- Helpers: `summary_line(model)` (INFO line for the nightly fit), `grid_steps(start, n)`, `learn_thermostat_detail`, `learn_openness`, `resolve_nodes`, `run_state_at`, `ca_line`, `in_sleep_window`, `CA_NODE`; Issue #1422: `resolve_display_nodes`, `fit_display_nodes`, `with_display_nodes`, `NODE_MIN_HISTORY_DAYS`, `NODE_MIN_COVERAGE`, `DISPLAY_MAX_ITERATIONS`.
 
 ## Performance
 

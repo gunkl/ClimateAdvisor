@@ -319,8 +319,8 @@ class TestInvestigationReports1356:
 
 
 class TestUnitChangeAcrossDays1360:
-    def test_yesterday_unit_change_clears_pending_and_emits_event_in_log(self, caplog):
-        """Occupant impact: switching units during an overnight outage drops the old-unit thermal samples and the
+    def test_yesterday_unit_change_emits_event_in_log(self, caplog):
+        """Occupant impact: switching units during an overnight outage drops the old-unit readings and the
         switch is visible in the activity report; the occupant's automation settings are untouched."""
         caplog.set_level(logging.WARNING, logger=_COORD_LOGGER)
         auto = {"fan_active": True}
@@ -332,14 +332,12 @@ class TestUnitChangeAcrossDays1360:
             event_log=[{"time": _iso(timedelta(hours=3)), "type": "earlier"}],
         )
         coord = _coord(state, config={"climate_entity": "c", "temp_unit": "fahrenheit"})
-        coord.learning._state.pending_observations = {"obs1": {"x": 1}, "obs2": {"x": 2}}
         with patch(f"{_COORD_LOGGER}.dt_util.now", return_value=_NOW):
             asyncio.run(coord.async_restore_state())
-        assert coord.learning._state.pending_observations == {}
         evt = _event(coord, "unit_changed")  # in the restored log, i.e. emitted after the log restore
         assert evt["from"] == "celsius"
         assert evt["to"] == "fahrenheit"
-        assert evt["dropped_pending_observations"] == 2
+        assert "dropped_pending_observations" not in evt  # Issue #1437: field retired
         assert _types(coord).index("earlier") < _types(coord).index("unit_changed")
         assert "Temperature unit changed" in caplog.text
         assert coord._automation_enabled is False

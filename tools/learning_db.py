@@ -997,111 +997,20 @@ def _print_daily_records(db: dict, n: int = 30) -> None:
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# Section G: Pending observations (from persisted learning DB JSON)
-# ---------------------------------------------------------------------------
-
-
-def _print_pending_observations(db: dict) -> None:
-    """Print pending_observations persisted in the learning DB JSON.
-
-    This shows observations that were in-flight when HA last persisted state.
-    Fields: obs_type, _phase, elapsed (from start_time), sample counts, peak_indoor_f.
-    """
-    pending = db.get("pending_observations")
-    print("Pending Observations (persisted)")
-    print("-" * 70)
-
-    if not isinstance(pending, dict) or not pending:
-        print("  No pending observations")
-        print()
-        return
-
-    import contextlib
-    import datetime as _dt_mod
-
-    _now_str = None
-    with contextlib.suppress(Exception):
-        _now_str = _dt_mod.datetime.now(_dt_mod.UTC).isoformat()
-
-    def _elapsed_str(start_str: str | None) -> str:
-        if not start_str or not _now_str:
-            return "?"
-        try:
-            start = _dt_mod.datetime.fromisoformat(start_str)
-            now = _dt_mod.datetime.fromisoformat(_now_str)
-            elapsed_s = (now - start).total_seconds()
-            mins = int(elapsed_s / 60)
-            return f"{mins}min"
-        except Exception:
-            return "?"
-
-    header = (
-        _pad("Type", 22)
-        + _pad("Phase", 12)
-        + _pad("Elapsed", 10)
-        + _pad("active_n", 10)
-        + _pad("post_n", 8)
-        + _pad("samples_n", 11)
-        + "peak_indoor"
-    )
-    print(header)
-    print("-" * 70)
-
-    for obs_type in OBS_TYPES:
-        obs = pending.get(obs_type)
-        if not isinstance(obs, dict):
-            continue
-        phase = obs.get("_phase", "active")
-        elapsed = _elapsed_str(obs.get("start_time"))
-        n_active = len(obs.get("active_samples", []))
-        n_post = len(obs.get("post_heat_samples", []))
-        n_samples = len(obs.get("samples", []))
-        peak = obs.get("peak_indoor_f")
-        peak_str = f"{peak:.1f}F" if isinstance(peak, float) else "-"
-
-        row = (
-            _pad(obs_type, 22)
-            + _pad(phase, 12)
-            + _pad(elapsed, 10)
-            + _pad(str(n_active), 10)
-            + _pad(str(n_post), 8)
-            + _pad(str(n_samples), 11)
-            + peak_str
-        )
-        print(row)
-
-    # Print any obs_types not in canonical list
-    for obs_type, obs in pending.items():
-        if obs_type not in OBS_TYPES and isinstance(obs, dict):
-            phase = obs.get("_phase", "?")
-            elapsed = _elapsed_str(obs.get("start_time"))
-            n_active = len(obs.get("active_samples", []))
-            n_post = len(obs.get("post_heat_samples", []))
-            n_samples = len(obs.get("samples", []))
-            peak = obs.get("peak_indoor_f")
-            peak_str = f"{peak:.1f}F" if isinstance(peak, float) else "-"
-            row = (
-                _pad(f"{obs_type} (unknown)", 22)
-                + _pad(phase, 12)
-                + _pad(elapsed, 10)
-                + _pad(str(n_active), 10)
-                + _pad(str(n_post), 8)
-                + _pad(str(n_samples), 11)
-                + peak_str
-            )
-            print(row)
-
-    print()
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Climate Advisor thermal learning DB diagnostic")
     parser.add_argument("--rejections", action="store_true", help="Show rejection log only")
     parser.add_argument("--committed", action="store_true", help="Show committed observations only")
     parser.add_argument("--model", action="store_true", help="Show model summary only")
     parser.add_argument("--thermal", action="store_true", help="Show chart_log endpoint observations only")
-    parser.add_argument("--pending", action="store_true", help="Show persisted pending observations")
+    parser.add_argument(
+        "--pending",
+        action="store_true",
+        help=(
+            "Show only the live in-flight observations (needs HA_URL/HA_TOKEN). They are never persisted: "
+            "a run in progress at a restart is learned from only after it (Issue #1437)."
+        ),
+    )
     parser.add_argument(
         "--swing",
         action="store_true",
@@ -1206,9 +1115,6 @@ def main() -> None:
 
     if show_thermal:
         _print_chart_log_endpoint_obs(db)
-
-    if show_pending:
-        _print_pending_observations(db)
 
     if show_daily:
         _print_daily_records(db, n=daily_n)

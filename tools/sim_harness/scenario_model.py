@@ -450,3 +450,94 @@ def sync_coordinator_occupancy(coordinator: Any, mode: str) -> None:
     coordinator._occupancy_mode = mode
     if hasattr(coordinator, "_timeline_shadow_run"):
         coordinator._timeline_shadow_run("occupancy")
+
+
+# Issue #1420: the coordinator's own daily schedule (``async_setup``: ``async_track_time_change`` at ``wake_time`` /
+# ``sleep_time``, production defaults 06:30 / 22:30) for the two schedule events a scenario can name.
+_DAILY_SCHEDULE = {"wakeup": ("wake_time", "06:30"), "bedtime": ("sleep_time", "22:30")}
+
+
+def daily_schedule_fires_at(coordinator: Any, etype: str, now: datetime) -> bool:
+    """Whether the coordinator's own daily ``etype`` timer fires in ``now``'s minute (Issue #1420).
+
+    Production has only that timer, so a ``bedtime`` / ``wakeup`` event in the same minute IS that timer: the
+    session's clock already fired it when it reached the event time, and calling the engine handler as well would
+    be a second write production never makes.  Reads the time the coordinator itself scheduled (its config, its
+    defaults, its parser), not the scenario's config, so an unset ``wake_time`` still matches the 06:30 default.
+    Shared by the FakeHass (coordinator) and real-HA adapters.
+    """
+    if coordinator is None or etype not in _DAILY_SCHEDULE:
+        return False
+    from custom_components.climate_advisor import coordinator as coordinator_module  # noqa: PLC0415
+
+    key, default = _DAILY_SCHEDULE[etype]
+    at = coordinator_module._parse_time(coordinator.config.get(key, default))
+    local = coordinator_module.dt_util.as_local(now)
+    return (local.hour, local.minute) == (at.hour, at.minute)
+
+
+class _PreCoolFireRecorder:
+    """Reference-counted class-level wrapper; see ``record_pre_cool_fires``."""
+
+    _installs: dict[Any, tuple[Any, int]] = {}  # coordinator class -> (original method, live sessions)
+
+    def __init__(self, coordinator_cls: Any) -> None:
+        self._cls = coordinator_cls
+        self._started = False
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        cls = self._cls
+        if cls in self._installs:
+            original, count = self._installs[cls]
+            self._installs[cls] = (original, count + 1)
+            return
+        original = cls.__dict__["_async_pre_cool_trigger"]
+
+        async def _async_pre_cool_trigger(coordinator_self: Any, now: datetime) -> Any:
+            fired = getattr(coordinator_self, "_sim_pre_cool_fired_at", None)
+            if not isinstance(fired, list):
+                fired = []
+                coordinator_self._sim_pre_cool_fired_at = fired
+            fired.append(now)
+            return await original(coordinator_self, now)
+
+        cls._async_pre_cool_trigger = _async_pre_cool_trigger
+        self._installs[cls] = (original, 1)
+
+    def stop(self) -> None:
+        if not self._started:
+            return
+        self._started = False
+        original, count = self._installs[self._cls]
+        if count > 1:
+            self._installs[self._cls] = (original, count - 1)
+            return
+        del self._installs[self._cls]
+        self._cls._async_pre_cool_trigger = original
+
+
+def record_pre_cool_fires(coordinator_cls: Any) -> _PreCoolFireRecorder:
+    """A class-level wrapper that notes each time the coordinator's own pre-cool timer fires (Issue #1420).
+
+    ``coordinator._maybe_schedule_pre_cool`` arms ``_async_pre_cool_trigger`` with ``async_track_point_in_time``;
+    the wrapper appends the fire time (the callback's ``now``) to ``coordinator_self._sim_pre_cool_fired_at`` and
+    then runs the real trigger unchanged.  Class-level so a timer armed during set-up or after a restart (a new
+    instance) is seen too; reference-counted so sessions that overlap in one process (in any close order) install
+    it once and restore the original when the last one stops.  Returns an unstarted recorder (``start`` / ``stop``).
+    """
+    return _PreCoolFireRecorder(coordinator_cls)
+
+
+def pre_cool_timer_fired_at(coordinator: Any, now: datetime) -> bool:
+    """Whether the coordinator's own pre-cool timer fired in ``now``'s minute (needs ``record_pre_cool_fires``).
+
+    Production has only that timer, so a ``pre_cool`` event in the same minute IS that timer (Issue #1420).
+    """
+    fired = getattr(coordinator, "_sim_pre_cool_fired_at", None) if coordinator is not None else None
+    if not isinstance(fired, list):
+        return False
+    minute = now.replace(second=0, microsecond=0)
+    return any(t.replace(second=0, microsecond=0) == minute for t in fired)

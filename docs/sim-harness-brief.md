@@ -78,7 +78,7 @@ Runs on every commit via `tests/test_production_harness.py`. Drives the real `Au
 Runs the real coordinator and config entry inside a real HA core (pytest-homeassistant-custom-component) with a small simulated home: the dev thermostat simulator (`ca_dev_thermostat_sim`), a real weather entity, contact sensors, a whole-house fan and a frozen clock. Built by `tests_ha/house/` (`make_house`); goldens replay through `tests_ha/realha_session.py` (`RealHASession`) and are judged by the same `outcomes.py`. Exercises:
 - `_async_thermostat_changed` and the other state listeners (HA state change timing)
 - Coordinator restart recovery and persistence (`house.restart()`; HA boot ordering is not modeled)
-- Timers, the periodic `_async_update_data` cycle, unload and reload cleanup (HA's leak checker)
+- Timers, the periodic `_async_update_data` cycle, unload and reload cleanup (HA's leak checker). A scenario's `bedtime`, `wakeup` or `pre_cool` event in the minute the coordinator's own timer fires only moves the clock; the timer makes the write, as in production (Issue #1420; the same holds in Tier A with `use_coordinator`)
 - Unit system, service validation, snapshots of the briefing and cards
 
 Goldens that fail on real HA are recorded in `tools/sim_harness/realha_ledger.json` (a two-way ratchet; see the spec). CI runs it as the `ha-real` job in `validate.yml` (8-minute cap) and the nightly `ha-lifecycle` job; `ha-compare-weekly.yml` diffs every golden between FakeHass and real HA.

@@ -55,8 +55,13 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
   occupancy_change        → dispatches to away/home/vacation by event["mode"]
   occupancy_change_with_override
                           → sets _manual_override_active=True then dispatches
-  bedtime                 → run_coro(engine.handle_bedtime())
-  wakeup                  → run_coro(engine.handle_morning_wakeup())
+  bedtime                 → run_coro(engine.handle_bedtime()); with a coordinator, nothing when its own
+                            daily sleep_time timer is in the event's minute (the clock already fired it;
+                            Issue #1420)
+  wakeup                  → run_coro(engine.handle_morning_wakeup()); with a coordinator, nothing when its
+                            own daily wake_time timer is in the event's minute (Issue #1420)
+  pre_cool                → inject indoor + run_coro(engine.handle_pre_cool(...)); with a coordinator,
+                            nothing more when its own pre-cool timer fired in the event's minute (Issue #1420)
   economizer_check        → run_coro(engine.check_window_cooling_opportunity(...))
   thermostat_state_changed
                           → (use_coordinator=True) states.async_set() — fires the real
@@ -135,10 +140,13 @@ from tools.sim_harness.scenario_model import (  # noqa: E402
     ProductionRunResult,
     build_classification_from_event,
     capture_next_action,
+    daily_schedule_fires_at,
     merged_scenario_config,
     parse_event_time,
     pin_scenario_thermal_model,
     pin_scenario_v4_model,
+    pre_cool_timer_fired_at,
+    record_pre_cool_fires,
     scenario_start_time,
     snapshot_engine_state,
     sorted_events,
@@ -380,7 +388,14 @@ class FakeHassSession:
 
         # --- Build headless engine (or real coordinator - Issue #474) ---
         coordinator: Any | None = None
+        self._pre_cool_patch: Any = None
         if use_coordinator:
+            # Issue #1420: note each fire of the coordinator's own pre-cool timer (class-level, so a timer armed
+            # during set-up is seen too); stopped by close()
+            from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator  # noqa: PLC0415
+
+            self._pre_cool_patch = record_pre_cool_fires(ClimateAdvisorCoordinator)
+            self._pre_cool_patch.start()
             # skip_startup_coalesce (scenario field, default False - the honest default,
             # see build_headless_coordinator's docstring): a freshly built coordinator has
             # its real 5-minute post-restart override-detection suppression window active,
@@ -388,13 +403,17 @@ class FakeHassSession:
             # itself) must opt out via "skip_startup_coalesce": true, or every dispatched
             # event vacuously early-returns before reaching any override-detection guard -
             # this was found and fixed for the #474 proving slice.
-            coordinator, fake_hass, scheduler, event_log = build_headless_coordinator(
-                config=merged_config,
-                climate_entity=climate_entity,
-                climate_state=initial_thermostat_mode,
-                start_time=start_dt,
-                skip_startup_coalesce=bool(scenario.get("skip_startup_coalesce", False)),
-            )
+            try:
+                coordinator, fake_hass, scheduler, event_log = build_headless_coordinator(
+                    config=merged_config,
+                    climate_entity=climate_entity,
+                    climate_state=initial_thermostat_mode,
+                    start_time=start_dt,
+                    skip_startup_coalesce=bool(scenario.get("skip_startup_coalesce", False)),
+                )
+            except BaseException:
+                self._pre_cool_patch.stop()
+                raise
             engine = coordinator.automation_engine
         else:
             engine, fake_hass, scheduler, event_log = build_headless_engine(
@@ -500,6 +519,8 @@ class FakeHassSession:
 
         # --- Everything from here runs under scheduler.installed() (patched clock + timers) ---
         self._stack = contextlib.ExitStack()
+        if self._pre_cool_patch is not None:
+            self._stack.callback(self._pre_cool_patch.stop)
         try:
             self._stack.enter_context(scheduler.installed())
             if probe is not None:
@@ -829,11 +850,15 @@ def _dispatch_event(
         else:
             run_coro(engine.handle_occupancy_home())
 
-    elif etype == "bedtime":
-        run_coro(engine.handle_bedtime())
-
-    elif etype == "wakeup":
-        run_coro(engine.handle_morning_wakeup())
+    elif etype in ("bedtime", "wakeup"):
+        # Issue #1420 (test-infrastructure change, dispatch only): with a coordinator its own daily timer
+        # (async_setup's async_track_time_change at sleep_time / wake_time) is real here and the clock already
+        # fired it on reaching the event time; production has only that timer, so a handler call as well was a
+        # second write production never makes (two wake-up writes).  Could it hide a failure? No: the decision is
+        # still production's, made by the real coordinator callback; events at any other minute, and engine-only
+        # sessions (no timers), keep the direct call.
+        if not daily_schedule_fires_at(coordinator, etype, scheduler.now()):
+            run_coro(engine.handle_bedtime() if etype == "bedtime" else engine.handle_morning_wakeup())
 
     elif etype == "economizer_check":
         outdoor_temp = float(event.get("outdoor_temp", event.get("outdoor_f", 70.0)))
@@ -1078,7 +1103,10 @@ def _dispatch_event(
         if indoor_temp is not None:
             _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
         nat_vent_just_closed = bool(event.get("nat_vent_just_closed", False))
-        run_coro(engine.handle_pre_cool(indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed))
+        # Issue #1420: with a coordinator, its own pre-cool timer firing in this minute IS the pre-cool (production's
+        # only write); the handler is not called a second time.  Engine-only sessions have no timer: direct call.
+        if not pre_cool_timer_fired_at(coordinator, scheduler.now()):
+            run_coro(engine.handle_pre_cool(indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed))
 
     elif etype == "coordinator_refresh" and coordinator is not None:
         # Issue #481: dispatches the real periodic coordinator cycle

@@ -5,17 +5,23 @@
   {
    "id": "_ca",
    "name": "Climate Advisor reading",
-   "role": "the reading Climate Advisor uses"
+   "role": "the reading Climate Advisor uses",
+   "has_v4": true,
+   "has_readings": true
   },
   {
    "id": "sensor.hallway_temp",
    "name": "Hallway",
-   "role": "thermostat's finer sensor"
+   "role": "thermostat's finer sensor",
+   "has_v4": true,
+   "has_readings": true
   },
   {
    "id": "sensor.bedroom_temp",
    "name": "Bedroom",
-   "role": ""
+   "role": "",
+   "has_v4": false,
+   "has_readings": true
   }
  ],
  "sensor": "_ca",
@@ -633,5 +639,11 @@
   "other_sensors_failing": 0
  },
  "primary_engine": "v4",
- "shadow_engine": "none"
+ "shadow_engine": "none",
+ "ca_swaps": [
+  "2026-10-31T22:00-07:00",
+  "2026-11-01T06:00-08:00",
+  "2026-11-01T22:00-08:00",
+  "2026-11-02T06:00-08:00"
+ ]
 }

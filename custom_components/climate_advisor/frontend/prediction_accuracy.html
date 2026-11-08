@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Climate Advisor - Prediction accuracy (preview)</title>
+<title>Climate Advisor - Prediction accuracy</title>
 <style>
   :root {
     --bg: #f6f6f4; --panel: #ffffff; --ink: #0b0b0b; --ink2: #52514e; --muted: #6b6a66;
@@ -42,6 +42,11 @@
   .grp button { padding: 0 11px; border: 0; background: transparent; cursor: pointer; }
   .grp button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
   .grp button:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* A sensor with nothing recorded (Issue #1431): aria-disabled, not disabled, so its reason still shows on hover */
+  .grp button[aria-disabled="true"] { color: var(--muted); cursor: not-allowed; }
+  .grp button .tag { font-size: 11px; color: var(--muted); }
+  .grp button[aria-pressed="true"] .tag { color: inherit; }
+  .note-v4 { border-left: 3px solid var(--s1); padding: 2px 0 2px 8px; }
   .grp button.nav { min-width: 36px; font-size: 16px; padding: 0 8px; }
   .reset, .retry { padding: 0 12px; border-radius: 8px; border: 1px solid var(--rule); background: transparent; cursor: pointer; }
   /* Same look as the new dashboard's .btn ("Back to classic" in new_dashboard.html) */
@@ -98,7 +103,6 @@
          'climate_advisor_dashboard' choice (classic -> index.html, otherwise new_dashboard.html). -->
     <a class="btn" href="entry.html" id="back-link">Back to dashboard</a>
     <div class="grow"></div>
-    <span class="sub">Preview page</span>
   </div>
 </header>
 <main>
@@ -128,8 +132,10 @@
 
     <div class="legend" id="legend">
       <span class="k"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2"></line></svg>Actual</span>
-      <span class="k" style="color: var(--s1)"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2.5"></line></svg>v4 (new)</span>
-      <span class="k" id="legend-v3" style="color: var(--s2)"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2" stroke-dasharray="5 3"></line></svg>v3 (today&#8217;s line)</span>
+      <span class="k" style="color: var(--s1)"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2.5"></line></svg><span id="legend-v4-name">v4</span></span>
+      <span class="k" id="legend-v3" style="color: var(--s2)"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="2" stroke-dasharray="5 3"></line></svg><span id="legend-v3-name">v3</span></span>
+      <span class="k" id="legend-flat" style="color: var(--muted)"><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="currentColor" stroke-width="1.5" stroke-dasharray="1 3" stroke-linecap="round"></line></svg>&#8220;No change&#8221; guess</span>
+      <span class="k" id="legend-swap" style="color: var(--muted)" hidden><svg width="10" height="12" aria-hidden="true"><line x1="5" y1="0" x2="5" y2="12" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 2"></line></svg>Sensor swap</span>
       <span class="k" style="color: var(--heat)"><svg width="14" height="8" aria-hidden="true"><rect width="14" height="8" rx="2" fill="currentColor" opacity="0.6"></rect></svg>Heat ran</span>
       <span class="grow"></span>
       <span class="hover" id="hover" aria-live="off"></span>
@@ -139,6 +145,8 @@
       <canvas id="pa-chart" tabindex="0" role="img" aria-label="Actual vs predicted indoor temperature. Use left and right arrow keys to read values."></canvas>
       <div class="overlay" id="chart-overlay" hidden></div>
     </div>
+    <div class="small" id="pa-explain"></div>
+    <div class="small note-v4" id="pa-nov4" role="status" hidden></div>
 
     <div class="tiles" id="tiles"></div>
     <div class="small" id="tile-note"></div>
@@ -158,7 +166,7 @@
     </div>
     <div class="small" id="seasons-note">Seasons are scored apart by what the HVAC was doing: heating days, and summer days (cooling or the whole-house fan); days with neither are reported separately.</div>
   </section>
-  <div class="sub">How well each prediction engine has forecast this house. The engine you choose under Settings, Prediction engine, times Climate Advisor&#8217;s decisions and draws the main line on the Status chart; these scores are information only. At 7 d and longer, lines are hourly averages, and at 1 y daily averages, as on today&#8217;s chart.</div>
+  <div class="sub">How well each prediction engine has forecast this house. The engine you choose under Settings, Prediction engine, times Climate Advisor&#8217;s decisions and draws the main line on the Status chart; these scores are information only. At 7 d and longer, lines are hourly averages, and at 1 y daily averages, as on the Status chart.</div>
 </main>
 
 <script>
@@ -330,19 +338,50 @@
   }
   function sensorList() {
     var ca = (S.sensors || []).filter(function (s) { return s && s.id === CA_SENSOR; })[0];
-    var list = [{ id: CA_SENSOR, name: (ca && ca.name) || 'Climate Advisor reading', role: ca && ca.role }];
+    var list = [{ id: CA_SENSOR, name: (ca && ca.name) || 'Climate Advisor reading', role: ca && ca.role, has_v4: ca && ca.has_v4, has_readings: ca && ca.has_readings }];
     (S.sensors || []).forEach(function (s) {
-      if (s && s.id && s.id !== CA_SENSOR) list.push({ id: s.id, name: s.name || s.id, role: s.role });
+      if (s && s.id && s.id !== CA_SENSOR) list.push({ id: s.id, name: s.name || s.id, role: s.role, has_v4: s.has_v4, has_readings: s.has_readings });
     });
     return list;
   }
+  function currentSensor() { return sensorList().filter(function (x) { return x.id === S.sensor; })[0] || null; }
+  // Issue #1431: what a sensor button can show. `has_v4` / `has_readings` come from the payload (absent = an older
+  // backend: unknown, so the button stays as it was). "_ca" is always selectable: its own states explain an empty model.
+  function sensorAvail(s) {
+    if (s.id !== CA_SENSOR && s.has_v4 === false && s.has_readings === false) {
+      return { off: true, tag: 'no data yet', why: 'Nothing recorded for this sensor yet: no readings and no v4 predictions' };
+    }
+    if (s.has_v4 === false) {
+      return { off: false, tag: 'no v4 data yet', why: 'v4 hasn’t learned this sensor yet (see #1422); its readings and the “no change” guess are still shown' };
+    }
+    return { off: false, tag: '', why: '' };
+  }
+  // The engines' roles (Settings, Prediction engine) from the payload: primary = "main engine", shadow = "comparison".
+  function engineRole(id) {
+    var d = S.data;
+    if (!d) return '';
+    var primary = d.primary_engine || 'v4', shadow = d.shadow_engine || 'none';
+    if (primary === id) return 'main engine';
+    if (shadow === id) return 'comparison';
+    return 'not running now';
+  }
+  function engineName(id) { var r = engineRole(id); return r ? id + ' (' + r + ')' : id; }
   function renderControls() {
     var gs = $('grp-sensor'); gs.textContent = '';
     sensorList().forEach(function (s) {
-      var b = segButton(s.name, S.sensor === s.id, function () { pickSensor(s.id); }, { value: s.id });
-      if (s.role) b.title = s.role;
+      var av = sensorAvail(s);
+      var b = segButton(s.name, S.sensor === s.id, function () { if (!av.off) pickSensor(s.id); }, { value: s.id });
+      if (av.tag) {
+        var tag = document.createElement('span');
+        tag.className = 'tag'; tag.textContent = ' · ' + av.tag;
+        b.appendChild(tag);
+      }
+      if (av.off) b.setAttribute('aria-disabled', 'true');
+      b.title = [s.role, av.why].filter(Boolean).join(' — ');
       gs.appendChild(b);
     });
+    $('legend-v4-name').textContent = engineName('v4');
+    $('legend-v3-name').textContent = engineName('v3');
     var gl = $('grp-lead'); gl.textContent = '';
     LEADS.forEach(function (l) {
       gl.appendChild(segButton(leadText(l) + ' ahead', S.lead === l, function () { pickLead(l); }, { value: l }));
@@ -361,6 +400,8 @@
     back.removeAttribute('aria-pressed'); fwd.removeAttribute('aria-pressed');
     $('reset-zoom').hidden = !S.zoom;
     $('legend-v3').hidden = S.sensor !== CA_SENSOR;
+    $('legend-flat').hidden = !(S.data && hasFlat());
+    $('legend-swap').hidden = !swapsInView().length;
     $('lbl-lead').textContent = 'Predicted';
     $('pa-sub').textContent = 'Each point is what a model said ' + leadText(S.lead) + ' earlier, drawn at the time it was about, next to what the sensor read';
     var zw = $('zone-wrap'); zw.hidden = !(S.zones && S.zones.length > 1);
@@ -383,6 +424,10 @@
     if (chart && chart.resetZoom) chart.resetZoom();
     renderAll();
   }
+  // Read-only view of what the chart draws, for the UI tests (Issue #1431): each line's points (null = a break).
+  window.__paLines = function () {
+    return chart ? chart.data.datasets.map(function (d) { return { label: d.label, data: d.data.map(function (q) { return q.y == null ? null : q.x; }), gapLimitMs: d.gapLimitMs }; }) : [];
+  };
 
   // ---------- loading ----------
   async function load() {
@@ -427,6 +472,7 @@
     renderControls();
     renderState();
     renderChart();
+    renderExplain();
     renderTiles();
     renderGate();
   }
@@ -463,8 +509,26 @@
       return;
     }
     if (S.data && pts().length === 0) {
-      overlay.hidden = false; overlay.textContent = 'No predictions in this window';
+      overlay.hidden = false; overlay.textContent = 'Nothing recorded in this window: scroll back or choose a longer range';
     }
+  }
+
+  // Issue #1431: one plain line under the chart saying what the points are, and why v4 has no line when it has none.
+  function renderExplain() {
+    var ex = $('pa-explain'), nv = $('pa-nov4');
+    if (!S.data || S.error) { ex.textContent = ''; nv.hidden = true; return; }
+    var t = 'Each point is a past prediction, made ' + leadText(S.lead) + ' ahead and drawn at the time it was about; ' +
+      'points close together join into a line, and lone dots mean the predictions there are spaced out.';
+    if (swapsInView().length) t += ' Lines break at the dashed marks: bedtime and wake-up, when the reading Climate Advisor uses switches sensor.';
+    ex.textContent = t;
+    var msg = '';
+    if (!isEmptyModel() && !pts().some(function (p) { return p.v4 != null; })) {
+      var cur = currentSensor();
+      if (cur && cur.has_v4 === false) msg = 'v4 hasn’t learned this sensor yet (see #1422), so there is no v4 line. The actual reading and the “no change” guess are still shown.';
+      else if (engineRole('v4') === 'not running now') msg = 'v4 is not running (Settings, Prediction engine), so it made no predictions in this view.';
+      else msg = 'No v4 predictions for this sensor in this view' + (cur && cur.has_v4 ? '; it has some at other times: scroll back or choose a longer range.' : '.');
+    }
+    nv.textContent = msg; nv.hidden = !msg;
   }
 
   function readColors() {
@@ -505,6 +569,17 @@
         ctx.fillRect(xa, ca.bottom - 8, Math.max(2, xb - xa), 8);
       });
       ctx.globalAlpha = 1;
+      // Sensor swaps (Issue #1431): a dashed mark where the "_ca" lines break.
+      var sw = swapMs();
+      if (sw.length) {
+        ctx.strokeStyle = col.muted; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+        sw.forEach(function (m) {
+          if (m < xs.min || m > xs.max) return;
+          var sx = xs.getPixelForValue(m);
+          ctx.beginPath(); ctx.moveTo(sx, ca.top); ctx.lineTo(sx, ca.bottom); ctx.stroke();
+        });
+        ctx.setLineDash([]);
+      }
       if (S.hoverIdx != null) {
         var hp = pts()[S.hoverIdx];
         if (hp) {
@@ -517,18 +592,73 @@
     }
   };
 
+  // ---------- lines (Issue #1431) ----------
+  // The sensor swaps (bedtime / wake-up) in this window: only the "_ca" lines follow the sensor CA reads, so only they
+  // break there (the Status chart's rule: payload `ca_swaps`, none at daily resolution).
+  function swapMs() {
+    if (S.sensor !== CA_SENSOR || !S.data || !Array.isArray(S.data.ca_swaps)) return [];
+    return S.data.ca_swaps.map(toMs).filter(function (v) { return v != null; }).sort(function (a, b) { return a - b; });
+  }
+  function swapsInView() { var w = viewWindow(); return swapMs().filter(function (m) { return m >= w[0] && m <= w[1]; }); }
+  // The spacing the points are meant to have: one per 30-minute slot (raw), per hour (7 d / 30 d) or per day (1 y).
+  function baseStepMs() {
+    var ds = S.data && S.data.downsample;
+    return ds === 'daily' ? 864e5 : (ds === 'hourly' ? 36e5 : 18e5);
+  }
+  function medianStepMs(own) {
+    var g = [];
+    for (var i = 1; i < own.length; i++) { var d = own[i].x - own[i - 1].x; if (d > 0) g.push(d); }
+    if (!g.length) return null;
+    g.sort(function (a, b) { return a - b; });
+    return g[g.length >> 1];
+  }
+  // One series' own points (no other series' slots in between), joined into a line. A null ends the line at a real
+  // gap (more than 1.5x the expected spacing: the slot length, or the series' own median spacing up to an hour, so
+  // the backtest's hourly points still join) and just before every swap. A point with no neighbour is a dot.
+  function lineOf(k, breaks) {
+    var own = [];
+    pts().forEach(function (q) { if (q[k] != null) own.push({ x: q.ms, y: q[k] }); });
+    var base = baseStepMs(), med = medianStepMs(own) || base;
+    var expected = Math.min(Math.max(med, base), Math.max(base, 36e5)), limit = 1.5 * expected;
+    var data = [], m = 0;
+    own.forEach(function (q, i) {
+      var cut = false;
+      if (i > 0 && q.x - own[i - 1].x > limit) cut = true;
+      while (m < breaks.length && breaks[m] <= q.x) { if (i > 0 && breaks[m] > own[i - 1].x) cut = true; m++; }
+      if (cut) data.push({ x: q.x - 1, y: null });
+      data.push(q);
+    });
+    var dots = data.map(function (q, i) {
+      if (q.y == null) return false;
+      var prev = i > 0 && data[i - 1].y != null, next = i < data.length - 1 && data[i + 1].y != null;
+      return !prev && !next;
+    });
+    return { data: data, dots: dots, limit: limit };
+  }
+  function lineSet(label, k, breaks, style) {
+    var l = lineOf(k, breaks);
+    return Object.assign({
+      label: label, data: l.data, spanGaps: false, borderCapStyle: 'round',
+      pointRadius: function (c) { return l.dots[c.dataIndex] ? 3 : 0; },
+      pointHoverRadius: function (c) { return l.dots[c.dataIndex] ? 4 : 0; },
+      pointBorderWidth: 0, gapLimitMs: l.limit
+    }, style);
+  }
   function datasets() {
-    var col = readColors(), p = pts(), few = p.length <= 120;
-    function ser(k) { return p.map(function (q) { return { x: q.ms, y: q[k] }; }); }
+    var col = readColors(), br = swapMs();
     var ds = [
-      { label: 'Actual', data: ser('a'), borderColor: col.ink, borderWidth: 1.6, pointRadius: few ? 2 : 0, pointBackgroundColor: col.ink, spanGaps: false, order: 3 },
-      { label: 'v4', data: ser('v4'), borderColor: col.s1, borderWidth: 2.4, pointRadius: few ? 2 : 0, pointBackgroundColor: col.s1, spanGaps: false, order: 1 }
+      lineSet('Actual', 'a', br, { borderColor: col.ink, borderWidth: 1.6, pointBackgroundColor: col.ink, order: 3 }),
+      lineSet('v4', 'v4', br, { borderColor: col.s1, borderWidth: 2.4, pointBackgroundColor: col.s1, order: 1 })
     ];
     if (hasV3()) {
-      ds.push({ label: 'v3', data: ser('v3'), borderColor: col.s2, borderWidth: 2, borderDash: [6, 4], pointRadius: 0, spanGaps: false, order: 2 });
+      ds.push(lineSet('v3', 'v3', br, { borderColor: col.s2, borderWidth: 2, borderDash: [6, 4], pointBackgroundColor: col.s2, order: 2 }));
+    }
+    if (hasFlat()) {
+      ds.push(lineSet('No change', 'f', br, { borderColor: col.muted, borderWidth: 1.5, borderDash: [1, 4], pointBackgroundColor: col.muted, order: 4 }));
     }
     return ds;
   }
+  function hasFlat() { return pts().some(function (p) { return p.f != null; }); }
 
   function renderChart() {
     var canvas = $('pa-chart');
@@ -561,7 +691,7 @@
                 onZoomComplete: function (ctx) {
                   var xs = ctx.chart.scales.x;
                   S.zoom = [xs.min, xs.max];
-                  renderControls(); renderTiles();
+                  renderControls(); renderExplain(); renderTiles();
                   $('window-label').textContent = fmtT(xs.min) + ' to ' + fmtT(xs.max) + avgLabel();
                 }
               },
@@ -601,6 +731,7 @@
     if (p.a != null) t.push('actual ' + fnum(p.a, 1) + u);
     if (p.v4 != null) t.push('v4 ' + fnum(p.v4, 1) + u);
     if (p.v3 != null && S.sensor === CA_SENSOR) t.push('v3 ' + fnum(p.v3, 1) + u);
+    if (p.f != null) t.push('no change ' + fnum(p.f, 1) + u);
     $('hover').textContent = t.join(' · ');
     if (chart) chart.draw();
   }
@@ -641,7 +772,7 @@
       : S.lead !== '4h' ? 'v3 is logged 4 h ahead only'
       : v3Running ? 'no v3 prediction logged in this window'
       : 'v3 is not running (Settings, Prediction engine); scroll back for its history';
-    var v3Miss = { l: 'v3 average miss', v: v3 ? fmiss(sc.v3_mae) : '—', n: v3 ? 'today’s line' + (sc.n_v3 ? ', ' + sc.n_v3 + ' predictions in view' : '') : v3Why };
+    var v3Miss = { l: 'v3 average miss', v: v3 ? fmiss(sc.v3_mae) : '—', n: v3 ? engineName('v3') + (sc.n_v3 ? ', ' + sc.n_v3 + ' predictions in view' : '') : v3Why };
     var v4Bias = { l: 'v4 runs warm or cold', v: fbias(sc.v4_bias), n: v3 ? 'v3 ' + fbias(sc.v3_bias) : 'in view' };
     var v3Bias = { l: 'v3 runs warm or cold', v: v3 ? fbias(sc.v3_bias) : '—', n: 'v4 ' + fbias(sc.v4_bias) };
     var tiles = selected === 'v3' ? [v3Miss, v4Miss, v3Bias] : [v4Miss, v3Miss, v4Bias];
@@ -671,7 +802,7 @@
     var body = $('gate-body');
     if (!rows.length) {
       body.innerHTML = '<tr><td colspan="10" class="na">No scored results yet.</td></tr>';
-      $('gate-verdict').textContent = 'Not yet: nothing scored';
+      $('gate-verdict').textContent = 'Nothing scored yet';
       $('gate-verdict').className = 'verdict';
       return;
     }

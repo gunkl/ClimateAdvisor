@@ -4,8 +4,10 @@ Shadow data only: nothing in a decision path reads it. It exists so v4's forecas
 what the house then did (the "Prediction accuracy" preview page, ``prediction_accuracy.py``).
 
 Same first-write-wins rule as the v3 ``_pred_archive`` (docs/chart-log-spec.md): the value kept for a 30-minute slot
-and look-ahead is the one written when the slot was exactly that far ahead, and a later prediction for the same slot
-never overwrites it.
+and look-ahead is the one written when the slot was that far ahead, and a later prediction for the same slot never
+overwrites it. Every slot is filled at every look-ahead (Issue #1423): a slot no cycle had within 15 minutes of the
+look-ahead (two cycles more than 30 minutes apart) takes the closer of the two neighbouring cycles' values, within
+``fill_tolerance_s``; the newest cycle's curves are kept (and persisted as ``"last"``) for that.
 
 In memory (R1b, M4) each sensor line is columnar: a base epoch plus one ``array('f')`` per look-ahead, indexed by
 ``(epoch - base) / 30 min`` with NaN for "not written". A line costs 4 bytes per slot and look-ahead (a 400-day line
@@ -39,6 +41,7 @@ retention is time-based (``V4_ARCHIVE_MAX_DAYS``), pruning runs at most once per
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import json
 import logging
@@ -60,6 +63,7 @@ _SLOT_S = 1800
 _FORMAT_VERSION = 1
 _NAN = float("nan")
 CA_LINE = "_ca"
+_FILL_MAX_GAP_S = 24 * 3600  # a previous curve older than this cannot fill anything (it ends 24 h after it was made)
 
 
 def slot_key(dt: datetime) -> int:
@@ -173,6 +177,9 @@ class V4Archive:
         self._lines: dict[str, _Line] = {}
         self.ca: dict[str, str | None] = {}  # how "_ca" is derived (see module docstring)
         self._last_prune: float | None = None
+        # The newest cycle's stored curves, (epoch, {sensor: [(epoch, temp_f)]}), so the next cycle can fill the slots
+        # between their look-ahead targets (Issue #1423). Persisted as the file's optional "last" object.
+        self._last: tuple[float, dict[str, list[tuple[float, float]]]] | None = None
         self.dirty = False
 
     # ------------------------------------------------------------------
@@ -313,6 +320,7 @@ class V4Archive:
 
     def _load(self) -> None:
         self._lines = {}
+        self._last = None
         self.dirty = False
         if not self._path.exists():
             _LOGGER.info("v4_archive: no archive file yet, starting empty")
@@ -330,6 +338,7 @@ class V4Archive:
         ca = raw.get("ca")
         if isinstance(ca, dict):
             self.ca = {k: (v if isinstance(v, str) else None) for k, v in ca.items()}
+        self._last = _parse_last(raw.get("last"))
         cutoff = datetime.now().timestamp() - self._max_days * 86400
         slots = 0
         for sensor, rows in sensors.items():
@@ -363,6 +372,12 @@ class V4Archive:
             payload: dict = {"v": _FORMAT_VERSION, "leads": leads, "sensors": sensors}
             if self.ca:
                 payload["ca"] = dict(self.ca)
+            last = self._last
+            if last is not None:  # the newest cycle's curves, for the gap fill after a restart (Issue #1423)
+                payload["last"] = {
+                    "at": round(last[0], 3),
+                    "sensors": {sid: [[round(t, 3), v] for t, v in pts] for sid, pts in list(last[1].items())},
+                }
             serialized = json.dumps(payload, separators=(",", ":"))
         except (TypeError, ValueError, RuntimeError) as err:
             _LOGGER.error("v4_archive: failed to serialize archive: %s", err)
@@ -396,7 +411,8 @@ class V4Archive:
         """Archive the 1/4/12/24 h values of one cycle's predictions, first write wins. Returns values newly added.
 
         ``predictions`` is ``predict()``'s result ``{sensor: [(ts, temp_f), ...]}``. For each look-ahead the
-        point nearest ``now + lead`` (within 10 minutes) is stored under the slot nearest its time. ``"_ca"`` is not
+        point nearest ``now + lead`` (within 10 minutes) is stored under the slot nearest its time, and the empty slots
+        between the previous cycle's target and this one's are filled (``_fill``, Issue #1423). ``"_ca"`` is not
         stored while it is derivable (``primary`` is a node this cycle predicted); for a ``_ca``-only model
         (``primary == "_ca"``, or no primary node line predicted) it is stored as its own line (Issue #1400).
         ``primary`` seeds the ``"_ca"`` source when none was configured. Never raises.
@@ -414,28 +430,80 @@ class V4Archive:
         added = 0
         # "_ca" is derivable only from a primary NODE line this cycle also predicts; otherwise store it (Issue #1400).
         ca_derivable = bool(primary) and primary != CA_LINE and bool(predictions.get(primary or ""))
+        curves: dict[str, list[tuple[float, float]]] = {}
         for sensor, points in predictions.items():
             if not points or (sensor == CA_LINE and ca_derivable):
                 continue
+            curve = sorted(
+                (ts.timestamp(), round(float(temp), 2))
+                for ts, temp in points
+                if isinstance(temp, int | float) and not isinstance(temp, bool) and math.isfinite(temp)
+            )
+            if curve:
+                curves[sensor] = curve
+        prev = self._last
+        prev_ok = prev is not None and 0 < now_ts - prev[0] <= _FILL_MAX_GAP_S
+        for sensor, curve in curves.items():
+            prev_curve = prev[1].get(sensor) if prev_ok and prev is not None else None
             for lead in V4_ARCHIVE_LEADS:
-                target = now_ts + _lead_seconds(lead)
-                best: tuple[float, datetime, float] | None = None
-                for ts, temp in points:
-                    if not isinstance(temp, int | float) or not math.isfinite(temp):
-                        continue
-                    gap = abs(ts.timestamp() - target)
-                    if best is None or gap < best[0]:
-                        best = (gap, ts, float(temp))
-                if best is None or best[0] > 600:
-                    continue
-                line = self._lines.setdefault(sensor, _Line())
-                if line.put_if_absent(slot_key(best[1]), lead, round(best[2], 2)):
-                    added += 1
+                lead_s = _lead_seconds(lead)
+                target = now_ts + lead_s
+                near = _nearest(curve, target, 600)
+                if near is not None:
+                    line = self._lines.setdefault(sensor, _Line())
+                    if line.put_if_absent(_slot_of(near[0]), lead, near[1]):
+                        added += 1
+                if prev_curve:
+                    assert prev is not None
+                    added += self._fill(sensor, lead, lead_s, prev[0], prev_curve, now_ts, curve)
+        if curves:
+            self._last = (now_ts, curves)
+            self.dirty = True
         if primary is not None and primary != self.ca.get("primary") and primary in self._lines:
             self.set_ca_source(primary, **{k: v for k, v in self.ca.items() if k != "primary"})
         if added:
             self.dirty = True
             self._maybe_prune(now_ts)
+        return added
+
+    def _fill(
+        self,
+        sensor: str,
+        lead: str,
+        lead_s: float,
+        prev_at: float,
+        prev_curve: list[tuple[float, float]],
+        now_ts: float,
+        curve: list[tuple[float, float]],
+    ) -> int:
+        """Fill the slots no cycle had exactly ``lead`` ahead between the previous cycle and this one (Issue #1423).
+
+        A cycle writes the one slot nearest ``now + lead``. When two cycles are more than 30 minutes apart (a skipped
+        or lost cycle, a restart, a refresh that moved the 30-minute timer), the slots between their targets were never
+        that far ahead of ANY cycle and stayed empty for good. Each such empty slot gets the value from whichever of the
+        two curves (the previous cycle's, this one's) was closest to ``lead`` ahead of it, if that is within
+        ``fill_tolerance_s(lead)``; an outage longer than that stays an honest hole. Never overwrites (first write
+        wins). Returns values added."""
+        tol = fill_tolerance_s(lead)
+        added = 0
+        for slot in range(_slot_of(prev_at + lead_s), _slot_of(now_ts + lead_s) + 1, _SLOT_S):
+            line = self._lines.get(sensor)
+            if line is not None and line.get(slot, lead) is not None:
+                continue
+            best: tuple[float, int, float] | None = None
+            for order, (at, pts) in enumerate(((prev_at, prev_curve), (now_ts, curve))):
+                near = _nearest(pts, slot, 600)
+                if near is None:
+                    continue
+                err = abs((near[0] - at) - lead_s)  # how far ahead this value really was
+                if best is None or (err, order) < best[:2]:
+                    best = (err, order, near[1])
+            if (
+                best is not None
+                and best[0] <= tol
+                and self._lines.setdefault(sensor, _Line()).put_if_absent(slot, lead, best[2])
+            ):
+                added += 1
         return added
 
     def _maybe_prune(self, now_ts: float) -> None:
@@ -506,6 +574,51 @@ class V4Archive:
 
 def _lead_seconds(lead: str) -> float:
     return float(lead.rstrip("h")) * 3600.0
+
+
+def _finite(v: object) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _parse_last(raw: object) -> tuple[float, dict[str, list[tuple[float, float]]]] | None:
+    """The file's optional ``"last"`` object -> ``(epoch, {sensor: sorted [(epoch, temp_f)]})``; odd -> None."""
+    if not isinstance(raw, dict) or not _finite(raw.get("at")) or not isinstance(raw.get("sensors"), dict):
+        return None
+    curves: dict[str, list[tuple[float, float]]] = {}
+    for sid, pts in raw["sensors"].items():
+        if not isinstance(sid, str) or not isinstance(pts, list):
+            continue
+        curve = sorted(
+            (float(p[0]), float(p[1]))
+            for p in pts
+            if isinstance(p, list) and len(p) == 2 and _finite(p[0]) and _finite(p[1])
+        )
+        if curve:
+            curves[sid] = curve
+    return (float(raw["at"]), curves) if curves else None
+
+
+def fill_tolerance_s(lead: str) -> float:
+    """How far from ``lead`` a gap-filled slot's real look-ahead may be (Issue #1423): 30 min, or 1/8 of the lead."""
+    return max(float(_SLOT_S), _lead_seconds(lead) / 8.0)
+
+
+def _slot_of(epoch: float) -> int:
+    return int(round(epoch / _SLOT_S)) * _SLOT_S
+
+
+def _nearest(curve: list[tuple[float, float]], t: float, within: float) -> tuple[float, float] | None:
+    """The point of a time-sorted ``[(epoch, temp)]`` curve nearest ``t``, if no further than ``within`` seconds."""
+    i = bisect.bisect_left(curve, (t,))
+    best: tuple[float, float] | None = None
+    for j in (i - 1, i):
+        if (
+            0 <= j < len(curve)
+            and abs(curve[j][0] - t) <= within
+            and (best is None or abs(curve[j][0] - t) < abs(best[0] - t))
+        ):
+            best = curve[j]
+    return best
 
 
 def lead_hours(lead: str) -> float:

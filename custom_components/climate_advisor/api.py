@@ -1474,6 +1474,12 @@ class ClimateAdvisorPredictionAccuracyView(HomeAssistantView):
             inputs = coordinator.v4_accuracy_inputs()
             config_dir = inputs.pop("config_dir")
             entry_id = inputs["zone"]
+            # Issue #1431: the bedtime / wake-up swap rule's settings, read on the loop (ca_swaps in the payload).
+            cfg = getattr(coordinator, "config", None)
+            if isinstance(cfg, dict):
+                inputs.setdefault("sleep_sensor", cfg.get("sleep_indoor_temp_entity"))
+                inputs.setdefault("sleep_time", cfg.get("sleep_time"))
+                inputs.setdefault("wake_time", cfg.get("wake_time"))
 
             def _build() -> dict[str, Any]:
                 # Blocking: reads the backtest file and walks the chart log.

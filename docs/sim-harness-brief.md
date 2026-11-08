@@ -79,6 +79,7 @@ Runs the real coordinator and config entry inside a real HA core (pytest-homeass
 - `_async_thermostat_changed` and the other state listeners (HA state change timing)
 - Coordinator restart recovery and persistence (`house.restart()`; HA boot ordering is not modeled)
 - Timers, the periodic `_async_update_data` cycle, unload and reload cleanup (HA's leak checker). A scenario's `bedtime`, `wakeup` or `pre_cool` event in the minute the coordinator's own timer fires only moves the clock; the timer makes the write, as in production (Issue #1420; the same holds in Tier A with `use_coordinator`)
+- Occupancy events (`occupancy_*`, including `occupancy_change_with_override`) run the handler through the coordinator's `_run_occupancy_handler`, production's only occupancy-change entry, so a change inside an open time-of-use bank window writes the new bank once (Issues #1409, #1435; the same holds in Tier A with `use_coordinator`)
 - Unit system, service validation, snapshots of the briefing and cards
 
 Goldens that fail on real HA are recorded in `tools/sim_harness/realha_ledger.json` (a two-way ratchet; see the spec). CI runs it as the `ha-real` job in `validate.yml` (8-minute cap) and the nightly `ha-lifecycle` job; `ha-compare-weekly.yml` diffs every golden between FakeHass and real HA.

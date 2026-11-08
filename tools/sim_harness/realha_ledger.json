@@ -85,6 +85,22 @@
    "failing_outcomes": {
     "1": "hvac_write_blocked_whf_active"
    }
+  },
+  {
+   "scenario": "warming_trend_pre_cool_applied",
+   "failing_assertions": [
+    1
+   ],
+   "first_difference": "a1@2026-07-17T02:30 expected pre_cool_applied 69, real setback_applied (no 02:30 write)",
+   "evidence": "Since #1420 the scenario's pre_cool event no longer calls handle_pre_cool a second time when the coordinator's own 02:30 trigger fired in that minute; that trigger is production's only pre-cool. The real trigger fired and logged 'Pre-cool trigger fired: skipped - the day this night wakes into is not pre-cool eligible': after midnight it re-checks eligibility on the day the night wakes into (#1378, owner decision), which needs today_high/today_low on the classification (warming trend against the recorded previous-day highs) or today_high >= the hot threshold. This scenario's hand-fed classification carries only day_type warm and setback_modifier -3.0, no highs, so the fire-time re-check cannot hold. Before #1420 the direct handler call (which skips that re-check) wrote 69 and hid this. Dump: .pytest_cache/realha/warming_trend_pre_cool_applied.real.json",
+   "occupant_view": "No occupant impact found: a real install's classification always carries the forecast highs the re-check reads (the sibling hot_plateau_pre_cool_applied and hot_night_same_mode_pre_cool_wakeup_keeps_cool_1417 carry them and pre-cool on real HA). Only this scenario's premise lacks them.",
+   "issue_or_justification": "Golden premise: the scenario models the pre-cool as an engine call and omits the forecast highs production's own trigger reads at fire time. The Tier A run (engine-only, no trigger) still exercises handle_pre_cool's target. Fix by giving the classification today_high/today_low/tomorrow_high (owner re-sign), not by restoring the double dispatch.",
+   "class": "G",
+   "reviewer": "Lane #1420 triage 2026-11-07 (awaiting human review)",
+   "date": "2026-11-07",
+   "failing_outcomes": {
+    "1": "setback_applied"
+   }
   }
  ]
 }

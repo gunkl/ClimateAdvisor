@@ -199,7 +199,12 @@ try { localStorage.setItem('hassTokens', JSON.stringify({access_token:'mock-toke
   if (jsFiles.includes(pathname) || ndFiles.test(pathname)) {
     try {
       const filename = pathname.slice(1);
-      const data = fs.readFileSync(path.join(FRONTEND_DIR, filename));
+      // The allow-list above already admits only plain file names; also refuse any path that resolves outside the
+      // frontend folder, so the file read never depends on the request alone (CodeQL js/path-injection).
+      const root = path.resolve(FRONTEND_DIR) + path.sep;
+      const filePath = path.resolve(root, filename);
+      if (!filePath.startsWith(root)) throw new Error('outside the frontend folder');
+      const data = fs.readFileSync(filePath);
       const types = { '.js': 'application/javascript', '.css': 'text/css', '.json': 'application/json', '.html': 'text/html' };
       res.writeHead(200, { 'Content-Type': types[path.extname(filename)] || 'application/octet-stream' });
       res.end(data);

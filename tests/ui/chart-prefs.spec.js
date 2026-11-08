@@ -162,18 +162,27 @@ test.describe('Status chart: the "Past v4 lines" row', () => {
     await expect(b4).toHaveText('4 h earlier');
     await expect(b4).toHaveAttribute('title', /4 h earlier/);
     await expect(b4).toBeEnabled();
-    // a look-back with no archived predictions in the view says so in words (0.9.6 Lane F: "in view", not "yet")
+    // a look-back with no archived predictions in the view says so in words (0.9.6 Lane F: "in view", not "yet");
+    // Issue #1459 (deliberate reversal of the 0.9.6 lock): it stays choosable, and choosing it says "none in this view"
     await expect(row.locator('[data-lead="12h"]')).toHaveText('12 h earlier (none in view)');
-    await expect(row.locator('[data-lead="12h"]')).toBeDisabled();
-    await row.locator('[data-lead="1h"]').click();
+    await expect(row.locator('[data-lead="12h"]')).toBeEnabled();
+    await expect(row.locator('#chart-lead-empty')).toHaveCount(0);
+    await row.locator('[data-lead="12h"]').click();
+    await expect(page.locator('#chart-lead-row [data-lead="12h"]')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('#chart-lead-row #chart-lead-empty')).toHaveText(/^12 h earlier: none in this view; choose /);
+    await expect(page.locator('#chart-lead-row #chart-lead-help')).toContainText('left of Now');
+    await page.locator('#chart-lead-row [data-lead="1h"]').click();
     await expect(row.locator('[data-lead="1h"]')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  test('with no past v4 predictions the row says so instead of showing greyed-out buttons', async ({ page }) => {
+  // Issue #1459: the buttons stay choosable (never greyed out for "nothing yet"); the row says why there is nothing
+  test('with no past v4 predictions the row says so, and the buttons stay choosable', async ({ page }) => {
     await open(page, { past: false });
     const row = page.locator('#chart-lead-row');
-    await expect(row.locator('#chart-lead-help')).toHaveText('v4 has no past predictions to show yet');
-    await expect(row.locator('[data-lead]')).toHaveCount(0);
+    await expect(row.locator('#chart-lead-empty')).toHaveText('v4 has no past predictions to show yet');
+    await expect(row.locator('#chart-lead-help')).toContainText('left of Now');
+    await expect(row.locator('[data-lead]')).toHaveCount(4);
+    await expect(row.locator('[data-lead]:disabled')).toHaveCount(0);
   });
 
   test('v4 not ready: no v4 chips and no row; one line says v4 is still learning the sensors', async ({ page }) => {

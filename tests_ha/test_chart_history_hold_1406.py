@@ -100,3 +100,61 @@ async def test_a_past_bank_is_drawn_as_the_hold(make_house, units):
     assert logged and all(
         (e["hold_lower"], e["hold_upper"]) == pytest.approx((conv(66.0), conv(68.0)), abs=0.06) for e in logged
     )
+
+
+# ── Issue #1459: chart_data carries what the zone has set up ─────────────────────────────────────────────────────────
+async def _live_chart_data(hass, entry_id: str) -> dict:
+    query = {"entry_id": entry_id, "range": "24h"}
+    request = SimpleNamespace(
+        app={"hass": hass},
+        query=query,
+        rel_url=SimpleNamespace(query=query),
+        method="GET",
+        path="/api/climate_advisor/chart_data",
+        remote="t",
+    )
+    response = await ClimateAdvisorChartDataView().get(request)
+    return json.loads(response.text)
+
+
+_CAPS_KEYS = {
+    "v4_running",
+    "outdoor_sensor",
+    "fan",
+    "door_sensors",
+    "occupancy",
+    "humidity_indoor",
+    "humidity_outdoor",
+}
+
+
+@pytest.mark.parametrize("set_up", [True, False])
+async def test_chart_data_carries_the_zone_capabilities(make_house, set_up):
+    """Occupant view: a house with a whole-house fan, a patio door sensor, a Home switch, a patio thermometer and
+    humidity sensors gets every chart-key control switchable; a bare house (v3 engine, nothing else) gets them locked.
+    Through the real REST view, the real coordinator, real Home Assistant."""
+    from tests_ha.house.builder import OUTDOOR_F_SENSOR
+
+    if set_up:
+        house = await make_house(
+            fan="whf",
+            contacts=["patio_door"],
+            extra_states={"input_boolean.home": "on", "sensor.room_rh": "48", "sensor.patio_rh": "62"},
+            ca_config={
+                "outdoor_temp_source": "sensor",
+                "outdoor_temp_entity": OUTDOOR_F_SENSOR,
+                "home_toggle_entity": "input_boolean.home",
+                "indoor_humidity_entity": "sensor.room_rh",
+                "outdoor_humidity_entity": "sensor.patio_rh",
+            },
+        )
+    else:
+        house = await make_house(ca_config={"primary_engine": "v3"})
+    body = await _live_chart_data(house.hass, house.ca_entry.entry_id)
+    caps = body["capabilities"]
+    assert set(caps) == _CAPS_KEYS
+    if set_up:
+        assert caps == dict.fromkeys(_CAPS_KEYS, True), caps
+    else:
+        # the sim thermostat reports no current_humidity and the house weather no humidity: no humidity source
+        assert caps == dict.fromkeys(_CAPS_KEYS, False), caps

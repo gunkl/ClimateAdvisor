@@ -93,7 +93,7 @@ def _make_engine(
     engine._whf_safety_snapshot_callback = lambda: WhfSafetySnapshot(
         fan_on=None, fan_on_for_s=None, sensors=tuple(SensorReading(is_open=sensor_open) for _ in sensors or [])
     )
-    engine._thermal_model = {"k_passive": -0.5, "confidence_k_passive": "high", "k_active_cool": -2.0}
+    engine.inputs.thermal = {"k_passive": -0.5, "confidence_k_passive": "high", "k_active_cool": -2.0}
     engine._natural_vent_active = False
     engine._last_outdoor_temp = 90.0
     engine._get_indoor_temp_f = lambda: 74.0
@@ -414,7 +414,13 @@ class TestCoordinatorPlanCacheReadsTheArmedCeiling:
         base = datetime(2026, 6, 1, 0, 0, 0)
         temps = [72.0] * 8 + [76.0] * 4 + [78.0] * 12
         coord = _make_full_chart_coord(daily_forecast_full=None)
-        coord.config = {**coord.config, "comfort_heat": 70, "comfort_cool": 75, "aggressive_savings": savings}
+        coord.config = {
+            **coord.config,
+            "comfort_heat": 70,
+            "comfort_cool": 75,
+            "aggressive_savings": savings,
+            "primary_engine": "v3",
+        }
         coord._current_classification = _fc_classification(hvac_mode="off")
         coord._last_predicted_indoor = [
             {"ts": (base + timedelta(hours=i)).isoformat(), "temp": t} for i, t in enumerate(temps)

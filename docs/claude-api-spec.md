@@ -22,7 +22,7 @@
 
 - **File:** `custom_components/climate_advisor/claude_api.py`
 - **Approximate line range:** L1 – L1266 (entire file)
-- **Primary entry points:** `ClaudeAPIClient.async_request()` (L278), `ClaudeAPIClient.__init__()` (L215)
+- **Primary entry points:** `ClaudeAPIClient.async_request()` (L252), `ClaudeAPIClient.__init__()` (L215)
 
 This spec covers `ClaudeAPIClient` and the supporting dataclasses (`ClaudeResponse`, `_CircuitBreaker`, `_RateLimitCounters`, `_BudgetTracker`). It does NOT cover:
 
@@ -360,20 +360,20 @@ If `from anthropic import ...` raises `ImportError`:
 
 ## Code Reference
 
-- [`ClaudeAPIClient.__init__`](../custom_components/climate_advisor/claude_api.py#L187) — construction, client init, dataclass setup
-- [`ClaudeAPIClient.async_request`](../custom_components/climate_advisor/claude_api.py#L241) — main public entry point; guard sequence + counter updates
-- [`async_request_streaming`](../custom_components/climate_advisor/claude_api.py#L388) — streaming entry point; single attempt, no capability-detection retry (Issue #572)
-- [`_check_circuit_breaker`](../custom_components/climate_advisor/claude_api.py#L789) — state machine query; transitions `"open"` → `"half_open"` on cooldown expiry
-- [`_build_request_kwargs`](../custom_components/climate_advisor/claude_api.py#L879) — single kwargs-building source for both request paths; pure `AI_MODEL_CAPABILITIES` table lookup (see [Per-Model Capability Table](#per-model-capability-table-issue-572))
-- [`_log_request_kwargs_decision`](../custom_components/climate_advisor/claude_api.py#L940) — DEBUG-logs the resolved request shape before every API call
-- [`_single_api_call`](../custom_components/climate_advisor/claude_api.py#L958) — one atomic non-streaming API call + response parsing; no retry policy of its own
-- [`_async_call_with_retry`](../custom_components/climate_advisor/claude_api.py#L1104) — non-streaming retry loop with exponential backoff; same-tier model-fallback on `NotFoundError`; no capability-detection retries (Issue #572)
-- [`_check_budget`](../custom_components/climate_advisor/claude_api.py#L817) — month-roll detection and cap check
-- [`_check_rate_limit`](../custom_components/climate_advisor/claude_api.py#L744) — daily counter check for `"auto"` vs `"manual"` callers
-- [`check_investigator_rate_limit`](../custom_components/climate_advisor/claude_api.py#L761) — separate investigator gate; also checks `CONF_AI_INVESTIGATOR_ENABLED`
-- [`update_config`](../custom_components/climate_advisor/claude_api.py#L718) — updates config in place; **not called from production code** — every real config change goes through `async_reload()` instead
-- [`get_persistent_stats`](../custom_components/climate_advisor/claude_api.py#L652) — serializes counters + monthly cost for HA state persistence
-- [`restore_persistent_stats`](../custom_components/climate_advisor/claude_api.py#L674) — rehydrates counters after HA restart or config reload
+- [`ClaudeAPIClient.__init__`](../custom_components/climate_advisor/claude_api.py#L198) — construction, client init, dataclass setup
+- [`ClaudeAPIClient.async_request`](../custom_components/climate_advisor/claude_api.py#L252) — main public entry point; guard sequence + counter updates
+- [`async_request_streaming`](../custom_components/climate_advisor/claude_api.py#L399) — streaming entry point; single attempt, no capability-detection retry (Issue #572)
+- [`_check_circuit_breaker`](../custom_components/climate_advisor/claude_api.py#L811) — state machine query; transitions `"open"` → `"half_open"` on cooldown expiry
+- [`_build_request_kwargs`](../custom_components/climate_advisor/claude_api.py#L901) — single kwargs-building source for both request paths; pure `AI_MODEL_CAPABILITIES` table lookup (see [Per-Model Capability Table](#per-model-capability-table-issue-572))
+- [`_log_request_kwargs_decision`](../custom_components/climate_advisor/claude_api.py#L962) — DEBUG-logs the resolved request shape before every API call
+- [`_single_api_call`](../custom_components/climate_advisor/claude_api.py#L980) — one atomic non-streaming API call + response parsing; no retry policy of its own
+- [`_async_call_with_retry`](../custom_components/climate_advisor/claude_api.py#L1126) — non-streaming retry loop with exponential backoff; same-tier model-fallback on `NotFoundError`; no capability-detection retries (Issue #572)
+- [`_check_budget`](../custom_components/climate_advisor/claude_api.py#L839) — month-roll detection and cap check
+- [`_check_rate_limit`](../custom_components/climate_advisor/claude_api.py#L766) — daily counter check for `"auto"` vs `"manual"` callers
+- [`check_investigator_rate_limit`](../custom_components/climate_advisor/claude_api.py#L783) — separate investigator gate; also checks `CONF_AI_INVESTIGATOR_ENABLED`
+- [`update_config`](../custom_components/climate_advisor/claude_api.py#L740) — updates config in place; **not called from production code** — every real config change goes through `async_reload()` instead
+- [`get_persistent_stats`](../custom_components/climate_advisor/claude_api.py#L674) — serializes counters + monthly cost for HA state persistence
+- [`restore_persistent_stats`](../custom_components/climate_advisor/claude_api.py#L696) — rehydrates counters after HA restart or config reload
 - [`ClaudeResponse`](../custom_components/climate_advisor/claude_api.py#L95) — response dataclass; all fields documented above
 - [`_CircuitBreaker`](../custom_components/climate_advisor/claude_api.py#L119) — state machine storage dataclass
 - [`_MODEL_COSTS`](../custom_components/climate_advisor/claude_api.py#L82) — per-model-prefix cost rates

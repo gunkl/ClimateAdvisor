@@ -23,7 +23,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.start import async_at_started
 
 from . import log_capture, zone_registry
-from .api import API_VIEWS
+from .api import API_VIEWS, ZONELESS_VIEWS
 from .const import (
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
@@ -96,6 +96,7 @@ from .const import (
     DEFAULT_TOU_LEAD_MINUTES,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
+    ENTRY_SCOPED_FILES,
     FAN_MODE_BOTH,
     FAN_MODE_WHOLE_HOUSE,
     PANEL_FRONTEND_PATH,
@@ -107,6 +108,8 @@ from .const import (
     VERSION,
 )
 from .coordinator import ClimateAdvisorCoordinator
+from .dashboard_api import DASHBOARD_VIEWS
+from .storage_paths import remove_entry_scoped_files
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -756,10 +759,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         with log_capture.zone_scope(coordinator.zone_label):
             try:
                 # Register REST API views for the dashboard panel
-                for view_cls in API_VIEWS:
+                for view_cls in (*API_VIEWS, *DASHBOARD_VIEWS, *ZONELESS_VIEWS):
                     hass.http.register_view(view_cls())
 
-                # Register dashboard panel (iframe serving frontend/index.html)
+                # Register dashboard panel (iframe serving frontend/entry.html, which opens the new dashboard
+                # by default or classic index.html when this browser chose classic)
                 frontend_path = Path(__file__).parent / "frontend"
                 from homeassistant.components.http import StaticPathConfig
 
@@ -770,7 +774,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 from homeassistant.components.frontend import async_register_built_in_panel
 
-                _panel_bytes = await hass.async_add_executor_job((frontend_path / "index.html").read_bytes)
+                def _read_panel_bytes() -> bytes:
+                    return b"".join(
+                        (frontend_path / name).read_bytes()
+                        for name in ("entry.html", "index.html", "new_dashboard.html")
+                    )
+
+                _panel_bytes = await hass.async_add_executor_job(_read_panel_bytes)
                 _panel_hash = hashlib.md5(_panel_bytes).hexdigest()[:8]
                 async_register_built_in_panel(
                     hass,
@@ -779,7 +789,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     sidebar_icon="mdi:thermostat",
                     frontend_url_path=PANEL_FRONTEND_PATH,
                     require_admin=False,
-                    config={"url": f"{PANEL_URL}/index.html?v={_panel_hash}"},
+                    config={"url": f"{PANEL_URL}/entry.html?v={_panel_hash}"},
                 )
             except Exception as err:  # noqa: BLE001 — see comment above: any failure here
                 # means the shared panel/views are already registered by another
@@ -800,6 +810,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _LOGGER.info("Climate Advisor v%s loaded successfully", VERSION)
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """A zone was deleted: remove its storage files and its own Repairs issues.
+
+    Occupant view: after deleting a zone, nothing of it is left behind: no state, learning, chart log or
+    forecast archive file on the SD card, and no Repairs card offering to "fix" a zone that no longer exists.
+    HA calls this after ``async_unload_entry`` (which already ran the final save), and only on deletion, not
+    on a reload or settings save. Never raises: a failed delete is logged and must not block the removal.
+    """
+    for issue_id in (f"weather_entity_not_found_{entry.entry_id}", f"reload_needed_{entry.entry_id}"):
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+    try:
+        await hass.async_add_executor_job(
+            remove_entry_scoped_files, Path(hass.config.config_dir), entry.entry_id, ENTRY_SCOPED_FILES
+        )
+    except Exception:  # noqa: BLE001 - removal of a zone must never fail on cleanup
+        _LOGGER.exception("Climate Advisor: could not clean up files of removed zone %s", entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

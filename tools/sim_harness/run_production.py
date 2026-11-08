@@ -55,8 +55,16 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
   occupancy_change        → dispatches to away/home/vacation by event["mode"]
   occupancy_change_with_override
                           → sets _manual_override_active=True then dispatches
-  bedtime                 → run_coro(engine.handle_bedtime())
-  wakeup                  → run_coro(engine.handle_morning_wakeup())
+  (all occupancy events)  with a coordinator, the handler runs through
+                            coordinator._run_occupancy_handler(mode) (production's entry: the #1409
+                            _occupancy_bank_write flag + occupancy_change() context; Issues #1409, #1435)
+  bedtime                 → run_coro(engine.handle_bedtime()); with a coordinator, nothing when its own
+                            daily sleep_time timer is in the event's minute (the clock already fired it;
+                            Issue #1420)
+  wakeup                  → run_coro(engine.handle_morning_wakeup()); with a coordinator, nothing when its
+                            own daily wake_time timer is in the event's minute (Issue #1420)
+  pre_cool                → inject indoor + run_coro(engine.handle_pre_cool(...)); with a coordinator,
+                            nothing more when its own pre-cool timer fired in the event's minute (Issue #1420)
   economizer_check        → run_coro(engine.check_window_cooling_opportunity(...))
   thermostat_state_changed
                           → (use_coordinator=True) states.async_set() — fires the real
@@ -134,12 +142,18 @@ from tools.sim_harness.ha_stubs import install_ha_stubs  # noqa: E402
 from tools.sim_harness.scenario_model import (  # noqa: E402
     ProductionRunResult,
     build_classification_from_event,
+    capture_next_action,
+    daily_schedule_fires_at,
     merged_scenario_config,
     parse_event_time,
     pin_scenario_thermal_model,
+    pin_scenario_v4_model,
+    pre_cool_timer_fired_at,
+    record_pre_cool_fires,
     scenario_start_time,
     snapshot_engine_state,
     sorted_events,
+    sync_coordinator_occupancy,
 )
 from tools.sim_harness.session import drive_scenario  # noqa: E402
 
@@ -157,6 +171,25 @@ __all__ = ["FakeHassSession", "ProductionRunResult", "run_production_scenario"]
 # ---------------------------------------------------------------------------
 # Indoor temp injection helpers
 # ---------------------------------------------------------------------------
+
+
+async def _occupancy_handler(engine: Any, coordinator: Any, mode: str) -> None:
+    """An occupancy event's handler, through the coordinator's occupancy-change entry when there is one.
+
+    Issue #1409 (test-infrastructure change): production runs every occupancy CHANGE through
+    ``ClimateAdvisorCoordinator._run_occupancy_handler`` (the toggle and its delayed away timer), which lets an open
+    time-of-use bank take the change's write. Calling the engine handler directly modelled a path production no longer
+    takes. Could it hide a failure? No: the engine handler is the same call; the wrapper only sets the flag production
+    sets. Engine-only sessions keep the direct call.
+    """
+    if coordinator is not None and hasattr(coordinator, "_run_occupancy_handler"):
+        await coordinator._run_occupancy_handler(mode)
+    elif mode == "away":
+        await engine.handle_occupancy_away()
+    elif mode == "vacation":
+        await engine.handle_occupancy_vacation()
+    else:
+        await engine.handle_occupancy_home()
 
 
 def _inject_indoor_temp(
@@ -358,7 +391,14 @@ class FakeHassSession:
 
         # --- Build headless engine (or real coordinator - Issue #474) ---
         coordinator: Any | None = None
+        self._pre_cool_patch: Any = None
         if use_coordinator:
+            # Issue #1420: note each fire of the coordinator's own pre-cool timer (class-level, so a timer armed
+            # during set-up is seen too); stopped by close()
+            from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator  # noqa: PLC0415
+
+            self._pre_cool_patch = record_pre_cool_fires(ClimateAdvisorCoordinator)
+            self._pre_cool_patch.start()
             # skip_startup_coalesce (scenario field, default False - the honest default,
             # see build_headless_coordinator's docstring): a freshly built coordinator has
             # its real 5-minute post-restart override-detection suppression window active,
@@ -366,15 +406,23 @@ class FakeHassSession:
             # itself) must opt out via "skip_startup_coalesce": true, or every dispatched
             # event vacuously early-returns before reaching any override-detection guard -
             # this was found and fixed for the #474 proving slice.
-            coordinator, fake_hass, scheduler, event_log = build_headless_coordinator(
-                config=merged_config,
-                climate_entity=climate_entity,
-                climate_state=initial_thermostat_mode,
-                start_time=start_dt,
-                skip_startup_coalesce=bool(scenario.get("skip_startup_coalesce", False)),
-            )
+            try:
+                coordinator, fake_hass, scheduler, event_log = build_headless_coordinator(
+                    config=merged_config,
+                    climate_entity=climate_entity,
+                    climate_state=initial_thermostat_mode,
+                    start_time=start_dt,
+                    skip_startup_coalesce=bool(scenario.get("skip_startup_coalesce", False)),
+                )
+            except BaseException:
+                self._pre_cool_patch.stop()
+                raise
             engine = coordinator.automation_engine
         else:
+            # Issue #1443: a bare engine has no coordinator, so the scenario owns the facts the engine reads (its
+            # thermal model and hourly forecast; see "Optional ODE inputs" below). Handed over at construction.
+            from custom_components.climate_advisor.engine_inputs import StaticEngineInputs  # noqa: PLC0415
+
             engine, fake_hass, scheduler, event_log = build_headless_engine(
                 config=merged_config,
                 climate_entity=climate_entity,
@@ -382,6 +430,12 @@ class FakeHassSession:
                 start_time=start_dt,
                 role=role,
                 dry_run=dry_run,
+                inputs=StaticEngineInputs(
+                    thermal=scenario["thermal_model"] if isinstance(scenario.get("thermal_model"), dict) else {},
+                    hourly_forecast=(
+                        scenario["hourly_forecast"] if isinstance(scenario.get("hourly_forecast"), list) else []
+                    ),
+                ),
             )
 
         # --- Issue #1048: opt-in thermostat quirk (scenario config "thermostat_quirk") ---
@@ -438,16 +492,18 @@ class FakeHassSession:
         #                       "k_active_heat": ..., "k_active_cool": ..., "k_vent": ...,
         #                       "k_solar": ...}
         #   "hourly_forecast": list of {"datetime": ISO8601, "temperature": float}
-        if "thermal_model" in scenario and isinstance(scenario["thermal_model"], dict):
-            engine._thermal_model = scenario["thermal_model"]
-            if coordinator is not None:
-                pin_scenario_thermal_model(coordinator, scenario["thermal_model"])
-        if "hourly_forecast" in scenario and isinstance(scenario["hourly_forecast"], list):
-            engine._hourly_forecast_temps = scenario["hourly_forecast"]
-            if coordinator is not None:
-                # Production's coordinator owns the forecast and pushes it to the engine
-                # (_refresh_hourly_forecast); keep both copies identical.
-                coordinator._hourly_forecast_temps = scenario["hourly_forecast"]
+        # Issue #1443: in coordinator mode they are seeded into the COORDINATOR, the single owner production reads
+        # them from (the coordinator passes them in at each engine decision); a bare engine got them at construction.
+        if "thermal_model" in scenario and isinstance(scenario["thermal_model"], dict) and coordinator is not None:
+            coordinator._thermal_model = scenario["thermal_model"]
+            pin_scenario_thermal_model(coordinator, scenario["thermal_model"])
+        # Issue #1230 R6b: ``v4_model`` is a compact spec of the zone's FITTED v4 model (see v4_model_from_spec). The
+        # primary engine (``config.primary_engine``, harness default v3) reads it for the decisions' rates and path.
+        if "v4_model" in scenario and isinstance(scenario["v4_model"], dict) and coordinator is not None:
+            pin_scenario_v4_model(coordinator, scenario["v4_model"])
+        if "hourly_forecast" in scenario and isinstance(scenario["hourly_forecast"], list) and coordinator is not None:
+            # Production's coordinator owns the forecast (_refresh_hourly_forecast); the engine holds no copy.
+            coordinator._hourly_forecast_temps = scenario["hourly_forecast"]
 
         # Issue #1310: a passive copy of each day record production finalizes (_async_end_of_day ->
         # learning.record_day), keyed by date, so a scenario can assert the day's runtime split with
@@ -474,6 +530,8 @@ class FakeHassSession:
 
         # --- Everything from here runs under scheduler.installed() (patched clock + timers) ---
         self._stack = contextlib.ExitStack()
+        if self._pre_cool_patch is not None:
+            self._stack.callback(self._pre_cool_patch.stop)
         try:
             self._stack.enter_context(scheduler.installed())
             if probe is not None:
@@ -559,6 +617,13 @@ class FakeHassSession:
             engine_state = snapshot_engine_state(self.engine)
             if self.finalized_days:  # Issue #1310 (absent when no day was finalized: snapshots unchanged)
                 engine_state["_finalized_days"] = dict(self.finalized_days)
+            # Issue #1276 (opt-in, owner-approved 2026-11-06): record the real Next Action card text so a
+            # scenario can assert on what the occupant is told, which no other surface exposes. Computed once
+            # at the end of the run from the last temp_update outdoor value (Tier A runs no weather entity, so
+            # production's refresh cycle never computes the card). Absent unless the scenario sets
+            # "capture_next_action": true, so every other golden's snapshot is unchanged.
+            if self.scenario.get("capture_next_action") and self.coordinator is not None:
+                engine_state["_next_action"] = self._capture_next_action()
         finally:
             self.close()
         result = ProductionRunResult(
@@ -571,6 +636,14 @@ class FakeHassSession:
             result.promise_report = self.probe.report()
         self._result = result
         return result
+
+    def _capture_next_action(self) -> dict[str, Any]:
+        """Issue #1276: the real ``_compute_next_action`` text for the run's final state.
+
+        Delegates to ``scenario_model.capture_next_action``, shared with the real-HA adapter so the
+        opt-in field means the same thing on both tiers.
+        """
+        return capture_next_action(self.coordinator, self.engine, self.scenario)
 
     def close(self) -> None:
         """Leave the patched clock/timer context (idempotent)."""
@@ -748,56 +821,54 @@ def _dispatch_event(
             # which this harness never fires unless a scenario explicitly seeds
             # weather), silently blocking setpoint-only override detection.
             coordinator._ensure_today_record(classification)
-        run_coro(engine.apply_classification(classification, indoor_temp=_cls_indoor_f))
-        # Issue #786: TOU scheduler — mirrors real production's per-cycle sequence
-        # (coordinator.py's _async_update_data_impl(): apply_classification() then
-        # _resolve_tou_schedule_state() then _apply_tou_schedule()). Purely additive: every
-        # existing scenario has no "schedules" key in its config, and
-        # _resolve_tou_schedule_state() no-ops immediately when config.get("schedules") is
-        # empty — so this changes nothing for any scenario that doesn't opt in.
+        # Issue #786/#1393: mirrors real production's per-cycle sequence (coordinator.py's
+        # _async_update_data_impl(): _resolve_tou_schedule_state() EARLY, then apply_classification(), then
+        # _apply_tou_schedule()). Purely additive for every scenario without a "schedules" config key
+        # (_resolve_tou_schedule_state() no-ops and the flag is False). With a bank window open the cycle's
+        # apply_classification() is told the bank owns the setpoint, exactly as the coordinator tells it.
+        _tou_owns = False
         if coordinator is not None:
             coordinator._resolve_tou_schedule_state()
+            _tou_owns = coordinator._tou_bank_owns_setpoint()
+        run_coro(
+            engine.apply_classification(classification, indoor_temp=_cls_indoor_f, tou_bank_owns_setpoint=_tou_owns)
+        )
+        if coordinator is not None:
             run_coro(coordinator._apply_tou_schedule())
 
-    elif etype == "occupancy_away":
-        engine.set_occupancy_mode("away")
-        run_coro(engine.handle_occupancy_away())
-
-    elif etype == "occupancy_home":
-        engine.set_occupancy_mode("home")
-        run_coro(engine.handle_occupancy_home())
-
-    elif etype == "occupancy_vacation":
-        engine.set_occupancy_mode("vacation")
-        run_coro(engine.handle_occupancy_vacation())
+    elif etype in ("occupancy_away", "occupancy_home", "occupancy_vacation"):
+        mode = etype.split("_", 1)[1]
+        engine.set_occupancy_mode(mode)
+        sync_coordinator_occupancy(coordinator, mode)
+        run_coro(_occupancy_handler(engine, coordinator, mode))
 
     elif etype == "occupancy_change":
         mode = event.get("mode", "home")
         engine.set_occupancy_mode(mode)
-        if mode == "away":
-            run_coro(engine.handle_occupancy_away())
-        elif mode == "vacation":
-            run_coro(engine.handle_occupancy_vacation())
-        else:
-            run_coro(engine.handle_occupancy_home())
+        sync_coordinator_occupancy(coordinator, mode)
+        run_coro(_occupancy_handler(engine, coordinator, mode))
 
     elif etype == "occupancy_change_with_override":
-        # Mirrors simulate.py: set override active, then dispatch occupancy
+        # Set override active, then dispatch occupancy.  Issue #1435 (test-infrastructure change, dispatch only): this
+        # branch called the engine handler directly, so with a coordinator it skipped _run_occupancy_handler (the
+        # #1409 _occupancy_bank_write flag and occupancy_change() context) -- a path production never takes, the
+        # mirror of the plain occupancy events fixed in #1409.  Could it hide a failure? No: the same engine handler
+        # runs; the entry only adds what production adds.  Engine-only sessions keep the direct call.
         engine._manual_override_active = True
         mode = event.get("mode", "home")
         engine.set_occupancy_mode(mode)
-        if mode == "away":
-            run_coro(engine.handle_occupancy_away())
-        elif mode == "vacation":
-            run_coro(engine.handle_occupancy_vacation())
-        else:
-            run_coro(engine.handle_occupancy_home())
+        sync_coordinator_occupancy(coordinator, mode)
+        run_coro(_occupancy_handler(engine, coordinator, mode))
 
-    elif etype == "bedtime":
-        run_coro(engine.handle_bedtime())
-
-    elif etype == "wakeup":
-        run_coro(engine.handle_morning_wakeup())
+    elif etype in ("bedtime", "wakeup"):
+        # Issue #1420 (test-infrastructure change, dispatch only): with a coordinator its own daily timer
+        # (async_setup's async_track_time_change at sleep_time / wake_time) is real here and the clock already
+        # fired it on reaching the event time; production has only that timer, so a handler call as well was a
+        # second write production never makes (two wake-up writes).  Could it hide a failure? No: the decision is
+        # still production's, made by the real coordinator callback; events at any other minute, and engine-only
+        # sessions (no timers), keep the direct call.
+        if not daily_schedule_fires_at(coordinator, etype, scheduler.now()):
+            run_coro(engine.handle_bedtime() if etype == "bedtime" else engine.handle_morning_wakeup())
 
     elif etype == "economizer_check":
         outdoor_temp = float(event.get("outdoor_temp", event.get("outdoor_f", 70.0)))
@@ -1042,7 +1113,10 @@ def _dispatch_event(
         if indoor_temp is not None:
             _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
         nat_vent_just_closed = bool(event.get("nat_vent_just_closed", False))
-        run_coro(engine.handle_pre_cool(indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed))
+        # Issue #1420: with a coordinator, its own pre-cool timer firing in this minute IS the pre-cool (production's
+        # only write); the handler is not called a second time.  Engine-only sessions have no timer: direct call.
+        if not pre_cool_timer_fired_at(coordinator, scheduler.now()):
+            run_coro(engine.handle_pre_cool(indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed))
 
     elif etype == "coordinator_refresh" and coordinator is not None:
         # Issue #481: dispatches the real periodic coordinator cycle
@@ -1232,13 +1306,34 @@ def _handle_temp_update(
     # apply_classification (with the current classification) — faithfully reproducing the
     # periodic ceiling-guard re-evaluation. Legacy ignores this field.
     predicted = event.get("predicted_indoor")
-    if predicted and getattr(engine, "_current_classification", None) is not None:
+    # Issue #1230 R6b: ``plan_cycle`` models the coordinator's periodic plan cycle without a v3 predicted curve: the
+    # primary engine predicts and the classification is re-applied with what the decisions would read.
+    plan_cycle = bool(event.get("plan_cycle"))
+    if (predicted or plan_cycle) and getattr(engine, "_current_classification", None) is not None:
         # Issue #295: pass current indoor temp so achievement gate is evaluated on cycle.
         _tu_indoor_f = float(indoor_f) if indoor_f is not None else None
+        _plan_kwargs: dict[str, Any] = {}
+        if coordinator is not None:
+            # In production the decisions read the PRIMARY engine's curve (control_predicted_indoor), refreshed by the
+            # cycle just before them. With the harness default (primary v3) that is the event's own curve, injected
+            # into the coordinator above: byte-identical to passing it to the engine directly.
+            run_coro(coordinator._refresh_control_prediction())
+            predicted = coordinator.control_predicted_indoor()
+            if plan_cycle:
+                # The rest of the production sequence (coordinator._async_update_data_impl): the nat-vent plan is
+                # computed from that curve and its cutoff handed to apply_classification. Only for ``plan_cycle``:
+                # an event that merely carries a curve keeps handing the engine no cutoff, as every golden was signed.
+                coordinator._compute_and_cache_nat_vent_plan()
+                _plan = getattr(coordinator, "_nat_vent_plan", None) or {}
+                _plan_kwargs = {
+                    "nat_vent_cutoff": _plan.get("nat_vent_cutoff"),
+                    "nat_vent_cutoff_already_reached": bool(_plan.get("nat_vent_cutoff_already_reached", False)),
+                }
         run_coro(
             engine.apply_classification(
                 engine._current_classification,
                 predicted_indoor=predicted,
                 indoor_temp=_tu_indoor_f,
+                **_plan_kwargs,
             )
         )

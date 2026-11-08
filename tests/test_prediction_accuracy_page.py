@@ -1,0 +1,265 @@
+"""Issue #1230 R1 lane D: static checks for the "Prediction accuracy" page.
+
+The repo has no JS runtime or headless browser, so (like the other frontend tests) these read the
+HTML/JS source and assert the invariants that matter: every control exists with its aria wiring,
+the request URL is built from each control, empty/error states exist, units come from the
+response, only bundled libraries load, and index.html links to the page.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+FRONTEND = ROOT / "custom_components" / "climate_advisor" / "frontend"
+PAGE = (FRONTEND / "prediction_accuracy.html").read_text(encoding="utf-8")
+INDEX = (
+    (FRONTEND / "index.html").read_text(encoding="utf-8")
+    + "\n"
+    + (FRONTEND / "chart_v2.js").read_text(encoding="utf-8")
+)
+FIXTURE = json.loads((ROOT / "tests" / "fixtures" / "prediction_accuracy_sample.json").read_text(encoding="utf-8"))
+
+
+def _func(name: str) -> str:
+    m = re.search(rf"  (?:async )?function {name}\(.*?\n  \}}\n", PAGE, re.DOTALL)
+    if not m:  # one-line functions
+        m = re.search(rf"  function {name}\(.*", PAGE)
+    assert m, f"{name} not found"
+    return m.group(0)
+
+
+# ---- controls ----------------------------------------------------------------------------------
+
+
+def test_control_groups_present_with_aria():
+    for gid, label in (
+        ("grp-sensor", 'aria-labelledby="lbl-sensor"'),
+        ("grp-lead", 'aria-label="How far ahead the prediction was made"'),
+        ("grp-range", 'aria-label="Time range"'),
+    ):
+        assert re.search(rf'role="group" {re.escape(label)} id="{gid}"', PAGE), gid
+    assert 'id="reset-zoom"' in PAGE and "Reset zoom" in PAGE
+    assert 'id="zone-select"' in PAGE
+
+
+def test_buttons_are_real_buttons_with_aria_pressed():
+    seg = _func("segButton")
+    assert "createElement('button')" in seg
+    assert "b.type = 'button'" in seg
+    assert "aria-pressed" in seg
+    assert "aria-label" in seg
+
+
+def test_ranges_leads_and_scroll():
+    assert "var RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y']" in PAGE
+    assert "var LEADS = ['1h', '4h', '12h', '24h']" in PAGE
+    assert "'Scroll back'" in PAGE and "'Scroll forward'" in PAGE
+    assert "\u2039" in PAGE and "\u203a" in PAGE
+    scroll = _func("scroll")
+    assert "S.before" in scroll and "toISOString" in scroll
+    assert "S.before = null" in scroll  # snaps back to live
+
+
+def test_sensor_group_is_ca_reading_plus_response_sensors():
+    sl = _func("sensorList")
+    assert "'Climate Advisor reading'" in sl  # Issue #1400: the name the payload gives "_ca", once
+    assert "s.id !== CA_SENSOR" in sl
+    assert "S.sensors" in sl
+    assert "S.sensors = d.sensors" in PAGE
+    assert "var CA_SENSOR = '_ca'" in PAGE
+
+
+def test_v3_only_for_ca_reading():
+    assert "S.sensor === CA_SENSOR" in _func("hasV3")
+    assert 'id="legend-v3"' in PAGE
+    assert "legend-v3').hidden = S.sensor !== CA_SENSOR" in PAGE
+
+
+def test_zoom_and_hover_wiring():
+    assert "drag: { enabled: true" in PAGE
+    assert "pinch: { enabled: true }" in PAGE
+    assert "resetZoom" in PAGE
+    assert "onKey" in PAGE and "ArrowLeft" in PAGE and 'tabindex="0"' in PAGE
+    assert 'id="hover"' in PAGE
+
+
+def test_heat_strip_tiles_scorecard_and_seasons():
+    assert "heat_runs" in PAGE and "Heat ran" in PAGE
+    for t in ("v4 average miss", "v3 average miss", "v4 runs warm or cold"):
+        assert t in PAGE
+    assert "S.data.stats" in PAGE
+    # DP-8 is information, never a gate: no ready / pass / fail language, the table only compares
+    assert 'id="gate-table"' in PAGE and "How each model has scored" in PAGE
+    assert "Ready to show v4" not in PAGE and "Pass'" not in PAGE and "'Fail'" not in PAGE
+    assert "v4 beats v3" in PAGE and "v4 beats no change" in PAGE
+    assert "Settings, Prediction engine" in PAGE  # which engine Status shows is the occupant's choice
+    assert 'id="seasons-note"' in PAGE and "Seasons are scored apart" in PAGE
+    assert "must pass on its own" not in PAGE
+    assert "r.scored === false" in PAGE and "Not scored yet" in PAGE
+
+
+def test_tiles_lead_with_the_primary_engine_and_name_the_comparison_engine():
+    tiles = _func("renderTiles")
+    assert "S.data.primary_engine" in tiles and "S.data.shadow_engine" in tiles
+    assert "main prediction on Status" in tiles
+
+
+# ---- request building --------------------------------------------------------------------------
+
+
+def test_request_url_built_from_every_control():
+    q = _func("buildQuery")
+    for key in ("zone", "sensor", "lead", "range", "before"):
+        assert f"p.set('{key}'" in q, key
+    # zone and before are optional; sensor/lead/range are always sent
+    assert "if (st.zone)" in q and "if (st.before)" in q
+    assert "var API_PATH = '/api/climate_advisor/prediction_accuracy'" in PAGE
+    assert "buildUrl(S)" in PAGE
+
+
+def test_every_control_triggers_a_reload_with_correct_state():
+    assert re.search(r"function pickSensor\(id\) \{ S\.sensor = id;.*load\(\)", PAGE)
+    assert re.search(r"function pickLead\(l\) \{ S\.lead = l;.*load\(\)", PAGE)
+    assert re.search(r"function pickRange\(r\) \{ S\.range = r; S\.before = null;.*load\(\)", PAGE)
+
+
+def test_fixture_matches_contract_shape():
+    for k in (
+        "zone",
+        "unit",
+        "sensors",
+        "lead",
+        "range",
+        "start",
+        "end",
+        "downsample",
+        "points",
+        "heat_runs",
+        "stats",
+        "model",
+        "gate",
+        "sensor",
+        "gate_summary",
+    ):
+        assert k in FIXTURE, k
+    assert FIXTURE["sensors"][0]["id"] == "_ca" and FIXTURE["sensor"] == "_ca"  # the endpoint lists `_ca` first
+    assert {"ready", "passed", "scored", "total"} <= set(FIXTURE["gate_summary"])
+    assert {"t", "actual", "v4", "v3"} <= set(FIXTURE["points"][0])
+    assert {"n", "v4_mae", "v3_mae", "flat_mae", "v4_bias", "v3_bias"} <= set(FIXTURE["stats"])
+    assert {"zone", "season", "lead", "v4", "v3", "flat", "bias", "pass", "scored"} <= set(FIXTURE["gate"][0])
+    assert FIXTURE["stats"]["v4_mae"] < FIXTURE["stats"]["v3_mae"]
+
+
+# ---- states, units, libraries, theming ---------------------------------------------------------
+
+
+def test_empty_and_error_states():
+    assert "v4 has not been fitted yet; it fits nightly at 3:15" in PAGE
+    assert "isEmptyModel" in PAGE and "conf === 'none'" in PAGE
+    assert "role', 'alert'" in PAGE and "Could not load prediction accuracy" in PAGE
+    assert "id = 'retry'" in PAGE
+
+
+def test_units_come_from_response():
+    assert "S.data.unit" in PAGE
+    assert "isC()" in PAGE
+    assert "BIAS_LIMIT_F * 5 / 9" in PAGE  # the +/-0.5 F limit shown as degrees C on Celsius installs
+    assert FIXTURE["unit"] == "°F"
+
+
+def test_only_bundled_libraries():
+    srcs = re.findall(r'<script[^>]+src="([^"]+)"', PAGE)
+    assert sorted(srcs) == ["chart.umd.min.js", "chartjs-plugin-zoom.min.js", "hammer.min.js"]
+    for s in srcs:
+        assert (FRONTEND / s).is_file()
+    assert "http://" not in PAGE and "https://" not in PAGE
+    assert not re.search(r"<link[^>]+href=", PAGE)
+
+
+def test_auth_matches_index_html():
+    for frag in ("home-assistant", "hassTokens", "'Authorization'", "refreshAccessToken", "resp.status === 401"):
+        assert frag in PAGE and frag in INDEX, frag
+
+
+def test_responsive_and_theme():
+    assert 'name="viewport"' in PAGE
+    assert "prefers-color-scheme: dark" in PAGE
+    assert "flex-wrap: wrap" in PAGE
+    assert "overflow-x: hidden" in PAGE
+    assert ":focus-visible" in PAGE
+
+
+def _lum(h: str) -> float:
+    h = h.lstrip("#")
+    rgb = [int(h[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def _ratio(a: str, b: str) -> float:
+    la, lb = sorted((_lum(a), _lum(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def _tokens(block: str) -> dict[str, str]:
+    return dict(re.findall(r"--([a-z0-9]+):\s*(#[0-9a-fA-F]{6})", block))
+
+
+def test_text_contrast_at_least_4_5():
+    light = _tokens(re.search(r":root \{(.*?)\}", PAGE, re.DOTALL).group(1))
+    dark = _tokens(re.search(r"prefers-color-scheme: dark\) \{\s*:root \{(.*?)\}", PAGE, re.DOTALL).group(1))
+    for toks in (light, dark):
+        for fg in ("ink", "ink2", "muted", "s1", "s2", "warn", "ok"):
+            for bg in ("panel", "chip"):
+                assert _ratio(toks[fg], toks[bg]) >= 4.5, (fg, bg, toks[fg], toks[bg])
+        assert _ratio(toks["panel"], toks["ink"]) >= 4.5  # pressed button text on ink
+        for fg in ("ink", "ink2", "muted"):
+            assert _ratio(toks[fg], toks["bg"]) >= 4.5, fg
+
+
+# ---- dashboard link ----------------------------------------------------------------------------
+
+
+def test_index_links_to_page_in_analysis_tab():
+    # classic's own link says where it came from, so the page's "Back to dashboard" returns to classic
+    assert 'href="prediction_accuracy.html?from=classic" id="prediction-accuracy-link"' in INDEX
+    assert "Prediction accuracy: how each engine has scored" in INDEX  # Issue #1431: no "(preview)"
+    assert "(preview)" not in PAGE and "today’s line" not in PAGE and "v4 (new)" not in PAGE
+    start = INDEX.index('id="tab-ai"')
+    assert "prediction_accuracy.html" in INDEX[start : start + 3000]
+    assert INDEX.count("prediction_accuracy") == 2  # the Analysis link and the chart's note
+
+
+# ---- Issue #1431 -------------------------------------------------------------------------------
+
+
+def test_engine_labels_follow_the_payload_roles():
+    role = _func("engineRole")
+    assert "d.primary_engine" in role and "d.shadow_engine" in role
+    assert "'main engine'" in role and "'comparison'" in role
+    assert "legend-v4-name').textContent = engineName('v4')" in PAGE
+    assert "legend-v3-name').textContent = engineName('v3')" in PAGE
+
+
+def test_lines_break_at_swaps_and_real_gaps_only():
+    line = _func("lineOf")
+    assert "1.5 * expected" in line and "breaks[m]" in line
+    assert "S.data.ca_swaps" in _func("swapMs") and "S.sensor !== CA_SENSOR" in _func("swapMs")
+    assert "few ?" not in PAGE  # no more "dots on every point" switch
+
+
+def test_explanation_and_no_v4_wording():
+    ex = _func("renderExplain")
+    assert "Each point is a past prediction" in ex
+    assert "lone dots mean the predictions there are spaced out" in ex
+    assert "v4 hasn’t learned this sensor yet (see #1422)" in ex
+
+
+def test_sensor_buttons_without_data_are_labelled_or_disabled():
+    av = _func("sensorAvail")
+    assert "has_v4 === false" in av and "has_readings === false" in av
+    assert "'no v4 data yet'" in av and "#1422" in av
+    assert "aria-disabled" in _func("renderControls")

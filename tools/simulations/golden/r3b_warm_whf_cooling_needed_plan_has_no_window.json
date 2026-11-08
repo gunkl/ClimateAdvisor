@@ -1,0 +1,142 @@
+{
+  "name": "r3b_warm_whf_cooling_needed_plan_has_no_window",
+  "description": "Issue #1276 family (mirror, D4): the house is above its ceiling and outdoor is cooler, but the engine does not recommend windows today: the card says opening windows would help and that Climate Advisor did not plan a window period, instead of inviting one as plan advice or only stating the problem.",
+  "source": "synthetic",
+  "issue": 1230,
+  "notes": [
+    "Issue #1230 R3b Tier A golden candidate (pending: owner approves, DP-11). The scenario sets capture_next_action, so the harness records the occupant surfaces at the end of the run (engine_state._next_action: Next Action text, Next Automation, the operation timeline's steps, the briefing Windows row). Every assertion below reads that capture through the existing field_equals assertion: outcomes.py is unchanged.",
+    "Tier A has no learned thermal model and no forecast: the engine's window recommendation therefore stands unvalidated (confidence low), and the timeline carries only what the classification event states.",
+    "R3b redesign (owner decision 2026-11-06): before, the card read 'Outdoor (70F) is cooler than indoor (76F), but today's plan has no window period.' (a problem with nothing to do). The AC is already cooling in this run (engine arms cool at the ceiling breach); what the AC does is the Status and Next Automation cards' job, not this card's."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house",
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ]
+  },
+  "events": [
+    {
+      "time": "2026-07-15T06:00:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.living_window"
+    },
+    {
+      "time": "2026-07-15T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 70.0
+    },
+    {
+      "time": "2026-07-15T14:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "today_high": 80,
+      "today_low": 66
+    },
+    {
+      "time": "2026-07-15T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 70.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.source",
+      "value": "timeline",
+      "track": "logic",
+      "reason": "the Next Action and Next Automation cards read the operation timeline (not the degraded legacy path)"
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.text",
+      "value": "Opening windows would help now \u2014 outdoor (70\u00b0F) is cooler than indoor (76\u00b0F). Climate Advisor didn't plan a window period today, so this one is your call.",
+      "track": "logic",
+      "reason": "the card tells the occupant what they can do now AND that it is unplanned (never 'Open windows ...', which is reserved for a window step the plan holds)"
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.advises_opening_windows",
+      "value": false,
+      "track": "logic",
+      "reason": "whether the card tells the occupant to open windows"
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.agrees",
+      "value": true,
+      "track": "logic",
+      "reason": "the card never invites a window the timeline does not hold"
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.next_automation.action",
+      "value": "Bedtime check",
+      "track": "logic",
+      "reason": "the Next Automation card's action is the earliest automation-executed timeline step still ahead"
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.next_automation.time",
+      "value": "10:30 PM",
+      "track": "logic",
+      "reason": "the Next Automation card's time is that step's time"
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.window_step",
+      "value": null,
+      "track": "logic",
+      "reason": "the timeline step the card came from (None when the plan holds no window step today)"
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.you_steps",
+      "value": [
+        "06:30 windows_open",
+        "10:00 windows_close"
+      ],
+      "track": "logic",
+      "reason": "the occupant steps the plan holds (today, then tomorrow's engine plan)"
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.window_confidence",
+      "value": [
+        "low"
+      ],
+      "track": "logic",
+      "reason": "D1: the engine's own recommendation is unvalidated in Tier A (no learned window effect), so low"
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.briefing_windows_row",
+      "value": "Windows: Closed all day",
+      "track": "logic",
+      "reason": "the briefing's Windows row reads the same window periods"
+    }
+  ],
+  "capture_next_action": true
+}

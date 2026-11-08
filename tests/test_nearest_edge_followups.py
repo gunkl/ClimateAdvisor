@@ -113,7 +113,7 @@ def _make_engine(
         notify_service=config["notify_service"],
         config=config,
     )
-    engine._thermal_model = {}
+    engine.inputs.thermal = {}
     engine._test_state = state
     return engine
 
@@ -269,7 +269,12 @@ class TestTouBankNotUndoneBySelector:
 
     def test_negative_control_without_the_window_the_selector_flips_to_heat(self):
         engine, clock, c = self._banked(hvac_mode="cool", target=64.0, indoor=71.0, mode="off", window=False)
-        for reading in (70.0, 69.0):
+        # Issue #1416: every bank write is now a "cool ran" record, so the settling guard ALSO holds cool in the heat
+        # margin (69) right after the bank; that second defence is correct, but it hides what this control isolates.
+        # 62.5 is 5.5 F under the floor, deeper than the hot-day tolerance (5 F): the guard releases (R1), so only
+        # the TOU window deferral can stop the flip (with the window, a breach is deferred too, see
+        # test_breach_during_banking_is_deliberately_deferred).
+        for reading in (70.0, 62.5):
             self._cycle(engine, clock, c, 64.0, reading)
         assert "heat" in _mode_writes(engine), "the deferral is what prevents the heat/cool fight"
 
@@ -289,7 +294,9 @@ class TestTouBankNotUndoneBySelector:
         # breach right after the heat bank -- exactly the overshoot the settling guard now HOLDS, so it can
         # no longer serve as the "selector flips without the window" control. The first reading (+5 min) is
         # inside the 600 s lock, the second (+10 min) is past it.
-        for reading in (73.0, 73.0):
+        # Issue #1416: the heat bank write is now a "heat ran" record too, so 73.0 is held by the settling guard; 79.5
+        # is 5.5 F over the ceiling, deeper than the cold-day tolerance (5 F), so only the window can stop the flip.
+        for reading in (73.0, 79.5):
             self._cycle(engine, clock, c, 76.0, reading)
         assert "cool" in _mode_writes(engine)
 
@@ -513,7 +520,7 @@ class TestOdeGuardSkipsWhileSelectorGuardsFloor:
     def _engine(self, indoor: float, mode: str = "off") -> AutomationEngine:
         engine = _make_engine(indoor=indoor, mode=mode, comfort_heat=68.0, comfort_cool=74.0)
         engine._last_outdoor_temp = 76.0
-        engine._thermal_model = {
+        engine.inputs.thermal = {
             "k_passive": -0.05,
             "confidence_k_passive": "medium",
             "k_active_cool": None,
@@ -545,12 +552,14 @@ class TestOdeGuardSkipsWhileSelectorGuardsFloor:
 
     def test_hysteresis_gap_with_cool_armed_still_writes(self):
         events, mode = self._fire(self._engine(71.0, mode="cool"))
-        assert "ceiling_guard_fired" in events and mode == "cool"
+        # Issue #1230 R6 (X1): the band arms cool at the ceiling itself, so the guard has nothing left to write
+        assert "ceiling_guard_fired" not in events and mode == "cool"
 
     def test_cool_zone_writes(self):
         for indoor in (72.0, 73.5):
             events, mode = self._fire(self._engine(indoor, mode="heat"))
-            assert "ceiling_guard_fired" in events and mode == "cool", indoor
+            # Issue #1230 R6 (X1): the band switches heat -> cool at the ceiling itself; the guard adds nothing
+            assert "ceiling_guard_fired" not in events and mode == "cool", indoor
 
 
 # ---------------------------------------------------------------------------
@@ -688,7 +697,9 @@ class TestStickyTouPreconditionWindow:
         _set_indoor(engine, 69.6)
         # Issue #1073 (S3): the TOU bank write now arms the 600 s mode-change lock, which would
         # also stop this non-breach flip; advance past it so the control still isolates the window.
-        clock.advance(minutes=11)
+        # Issue #1416: the bank write is also a "cool ran" record for the settling guard, which would hold cool in
+        # the heat margin; advance past comfort_family_recency_window_min (120) as well, for the same reason.
+        clock.advance(minutes=121)
         with patch(f"{_AUTOMATION}.dt_util.now", side_effect=clock):
             _run(engine.comfort_family_temperature_check(69.6, predicted_indoor=None))
         assert "heat" in _mode_writes(engine)
@@ -884,7 +895,7 @@ class TestOdeGuardUsesTheGuardsIndoor:
     def test_live_indoor_none_but_guard_indoor_in_the_heat_margin_skips_the_cool_write(self):
         engine = _make_engine(indoor=None, mode="off", comfort_heat=68.0, comfort_cool=74.0)
         engine._last_outdoor_temp = 76.0
-        engine._thermal_model = {
+        engine.inputs.thermal = {
             "k_passive": -0.05,
             "confidence_k_passive": "medium",
             "k_active_cool": None,

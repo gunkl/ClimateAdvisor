@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
@@ -41,6 +42,7 @@ from .const import (
     COMFORT_MODE_SWITCH_MIN_INTERVAL_S,
     COMFORT_REACTIVE_RETRY_S,
     COMFORT_RECENT_COMMAND_WINDOW_S,
+    COMPANION_SENSOR_OFF,
     CONF_ADAPTIVE_SETBACK,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
@@ -65,6 +67,7 @@ from .const import (
     CONF_SENSOR_DEBOUNCE,
     CONF_SLEEP_COOL,
     CONF_SLEEP_HEAT,
+    CONF_THERMOSTAT_COMPANION_SENSOR,
     CONF_THRESHOLD_HOT,
     CONF_WELCOME_HOME_DEBOUNCE,
     DAY_TYPE_COLD,
@@ -92,6 +95,7 @@ from .const import (
     DEFAULT_SETBACK_HEAT,
     DEFAULT_SLEEP_COOL,
     DEFAULT_SLEEP_HEAT,
+    DEFAULT_THERMOSTAT_COMPANION_SENSOR,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     ECONOMIZER_EVENING_END_HOUR,
@@ -204,6 +208,7 @@ from .economizer_lifecycle import (
     EconomizerLifecycleState,
     derive_economizer_lifecycle_state,
 )
+from .engine_inputs import EMPTY_ENGINE_INPUTS, EngineFacts, EngineInputs, StaticEngineInputs, TouAvWindow
 from .fan_drift_reconciliation import FanDriftInputs, FanDriftOutcome, decide_fan_drift_reconciliation
 from .fan_lifecycle import (
     FanCyclingState,
@@ -235,6 +240,7 @@ from .fan_toggle_rate_limit import (
 from .hvac_action import is_hvac_compressor_active
 from .incident_payload import build_incident_payload, is_climate_validation_error
 from .indoor_temp import (
+    CompanionSensors,
     IndoorTempReading,
     remote_reading_fresh,
     resolve_indoor_temp_f,
@@ -801,6 +807,27 @@ def _band_num(value_f: float, unit: str) -> str:
     return f"{display_temp(value_f, unit, 0):.0f}"
 
 
+# Issue #1409: the engine whose occupancy CHANGE is running in THIS task (a context variable, so a concurrent coroutine
+# -- a cycle's away/vacation reapply, a timer -- that calls the same handler while this one awaits never sees it).
+_OCCUPANCY_CHANGE: contextvars.ContextVar[Any] = contextvars.ContextVar("ca_occupancy_change", default=None)
+
+# Issue #1443: the coordinator-owned facts PASSED IN for the decision call running in THIS task, as (engine, facts).
+# Set only for the duration of ``AutomationEngine.decision_facts()`` (``engine_inputs.decide``); never stored on
+# the engine. A context variable, so a concurrent coroutine never reads another call's snapshot.
+_DECISION_FACTS: contextvars.ContextVar[tuple[Any, EngineFacts] | None] = contextvars.ContextVar(
+    "ca_decision_facts", default=None
+)
+
+
+@dataclass(frozen=True)
+class OccupancyBankWrite:
+    """The time-of-use bank write an occupancy change made instead of its band (Issue #1409)."""
+
+    target_f: float
+    mode: str
+    result: Any = None  # HvacCommandResult of the write
+
+
 # Issue #1345: values of ``ComfortBand.context`` -- the band in force, exposed as the ``context``
 # attribute of the Heat/Cool Threshold sensors. "tou_expansion" is an away/vacation band widened
 # for a time-of-use high-cost window; "prefer_savings" is the awake comfort band widened by
@@ -1128,6 +1155,26 @@ def resolve_active_band(
     )
 
 
+def band_resolver_for(classification: DayClassification, config: dict) -> Callable[[datetime, str], ComfortBand]:
+    """``(instant, occupancy_mode) -> ComfortBand`` for the operation timeline (Issue #1230 R3a).
+
+    The same ``select_comfort_band()`` call ``resolve_active_band()`` makes, but asked about any instant and
+    occupancy, so the timeline reads the engine's own band at every wake/sleep boundary instead of keeping a second
+    copy of the band maths. Read-only: it commands nothing.
+    """
+
+    def _band(at: datetime, occupancy_mode: str) -> ComfortBand:
+        return select_comfort_band(
+            classification,
+            config,
+            occupancy_mode=occupancy_mode,
+            in_sleep_window=_in_sleep_window(at, config),
+            aggressive_savings=bool(config.get("aggressive_savings", False)),
+        )
+
+    return _band
+
+
 def fallback_edges_without_classification(now: datetime, config: dict) -> tuple[float | None, float | None]:
     """Display-only (heat, cool) edges before the first classification exists (Issue #1080).
 
@@ -1162,13 +1209,20 @@ def active_thresholds_for(coordinator: Any, now: datetime | None = None) -> dict
     config = coordinator.config
     classification = coordinator.current_classification
     if classification is not None:
+        # Issue #1404: while a time-of-use bank owns the setpoint the thermostat is told the bank target, so the
+        # thresholds quote it (the shared display resolver, coordinator.current_hold()). No bank: unchanged below.
+        _hold_fn = getattr(coordinator, "current_hold", None)
+        _current = _hold_fn(now) if callable(_hold_fn) else None
+        if isinstance(_current, CurrentHold) and _current.bank is not None:
+            _b = _current.band
+            return {"heat": _b.floor, "cool": _b.ceiling, "context": _b.context, "provisional": False}
         ae = coordinator.automation_engine
         band = resolve_active_band(
             classification,
             config,
             occupancy_mode=coordinator._occupancy_mode,
             now=now,
-            tou_expansion_f=(ae._tou_av_expansion_f if ae is not None else 0.0),
+            tou_expansion_f=(ae._active_tou_av_window().expansion_f if ae is not None else 0.0),
         )
         # Issue #1371: a held overnight pre-cool is what the thermostat is armed with, so the status API and the
         # threshold sensors quote it (the same substitution apply_classification() makes).
@@ -1185,6 +1239,124 @@ def active_thresholds_for(coordinator: Any, now: datetime | None = None) -> dict
         "context": BAND_CONTEXT_SLEEP if _in_sleep_window(now, config) else BAND_CONTEXT_COMFORT,
         "provisional": True,
     }
+
+
+# ── Issue #1404: the hold every surface quotes ──────────────────────────────────────────────────────────────────────
+# Occupant view: while the house pre-cools or pre-heats for a time-of-use high-cost period (a "bank"), the thermostat
+# is told the bank target, not the schedule band. Status, the briefing, Next Action, Next Automation, Next 24 hours,
+# the reading cards and the chart all quote ONE answer, built here (pure) and assembled live by
+# ``ClimateAdvisorCoordinator.current_hold()``. DISPLAY ONLY: no decision path reads it; ``_resolved_comfort_band()``
+# stays the schedule band every restore, adoption and offset cap resolves against.
+
+# Not in BAND_CONTEXTS (the select_comfort_band() contexts): a bank is laid over the schedule band by the display
+# resolver, never chosen by the band selector.
+BAND_CONTEXT_TOU_BANK = "tou_bank"
+DISPLAY_BAND_CONTEXTS: tuple[str, ...] = (*BAND_CONTEXTS, BAND_CONTEXT_TOU_BANK)
+
+
+@dataclass(frozen=True)
+class TouBankHold:
+    """A time-of-use bank that owns the thermostat right now (internal °F)."""
+
+    target: float  # what the thermostat is told
+    mode: str  # "cool" (pre-cool) | "heat" (pre-heat)
+    ends: datetime  # the high-cost period's start: the bank ends and the schedule band returns
+    schedule_id: str | None = None
+    period_end: datetime | None = None  # the high-cost period's own end (away/vacation widening), when known
+
+
+@dataclass(frozen=True)
+class CurrentHold:
+    """What the house is held to now (Issue #1404).
+
+    ``band`` is the hold (the bank band while banking, else the schedule band); ``schedule_band`` the home / sleep /
+    Away / Vacation band underneath; ``after_band`` the band in force when the bank ends (``bank.ends``), which for
+    Away/Vacation is the setback band widened for the high-cost period.
+    """
+
+    band: ComfortBand
+    schedule_band: ComfortBand
+    bank: TouBankHold | None = None
+    after_band: ComfortBand | None = None
+    occupancy_mode: str = "home"
+    # The family the thermostat is armed in now ("heat" / "cool"), when known: the bank's mode while banking, else
+    # (occupied and awake) the comfort-edge selector's last resolved family, which can differ from the day's mode
+    # (e.g. heat 68 F at the floor right after a cool bank ends). None = use the day's mode.
+    family: str | None = None
+
+
+def tou_bank_band(schedule: ComfortBand, target: float, mode: str) -> ComfortBand:
+    """The band a bank holds (pure): the edge for the bank's mode IS the target the thermostat is told.
+
+    Pre-cool: ceiling = target (the AC runs above it); pre-heat: floor = target. The other edge stays the schedule's,
+    moved only as far as needed to keep floor <= ceiling (a sleep-destination bank can aim past it).
+    """
+    target = float(target)
+    if mode == "cool":
+        return ComfortBand(
+            floor=min(schedule.floor, target),
+            ceiling=target,
+            active="ceiling",
+            reason=f"time-of-use pre-cool to {target:.1f}F",
+            context=BAND_CONTEXT_TOU_BANK,
+        )
+    return ComfortBand(
+        floor=target,
+        ceiling=max(schedule.ceiling, target),
+        active="floor",
+        reason=f"time-of-use pre-heat to {target:.1f}F",
+        context=BAND_CONTEXT_TOU_BANK,
+    )
+
+
+def hold_band_label(band: ComfortBand, occupancy_mode: str) -> str:
+    """'comfort band' / 'sleep band' / 'Away band' / 'Vacation band' for a schedule band (pure)."""
+    ctx = getattr(band, "context", "")
+    if ctx == BAND_CONTEXT_VACATION or (ctx == BAND_CONTEXT_TOU_EXPANSION and occupancy_mode == OCCUPANCY_VACATION):
+        return "Vacation band"
+    if ctx in (BAND_CONTEXT_AWAY, BAND_CONTEXT_TOU_EXPANSION):
+        return "Away band"
+    if ctx == BAND_CONTEXT_SLEEP:
+        return "sleep band"
+    return "comfort band"
+
+
+def _hold_band_text(band: ComfortBand, unit: str) -> str:
+    """'60–80°F' (display unit, whole degrees)."""
+    return f"{format_temp(band.floor, unit)[:-2]}–{format_temp(band.ceiling, unit)}"
+
+
+def _hold_clock(at: datetime) -> str:
+    return dt_util.as_local(at).strftime("%I:%M %p").lstrip("0")
+
+
+def hold_after_text(hold: CurrentHold, unit: str) -> str:
+    """What follows the bank (pure): 'the Away band widened to 60–83°F until 9:00 PM' with a high-cost widening (the
+    Away/Vacation default), 'back to the Away band 60–80°F' without one, 'back to the comfort band 68–76°F' at home.
+    '' without a bank."""
+    if hold.bank is None:
+        return ""
+    after = hold.after_band or hold.schedule_band
+    label = hold_band_label(after, hold.occupancy_mode)
+    if getattr(after, "context", "") == BAND_CONTEXT_TOU_EXPANSION:
+        until = f" until {_hold_clock(hold.bank.period_end)}" if hold.bank.period_end is not None else ""
+        return f"the {label} widened to {_hold_band_text(after, unit)}{until}"
+    return f"back to the {label} {_hold_band_text(after, unit)}"
+
+
+def hold_sentence(hold: CurrentHold | None, unit: str) -> str | None:
+    """The one bank sentence every surface quotes (pure), or None when no bank owns the thermostat.
+
+    'Pre-cooling to 77°F until the 4:15 PM high-cost period, then the Away band widened to 60–83°F until 9:00 PM'
+    (home: '..., then back to the comfort band 68–76°F').
+    """
+    if hold is None or hold.bank is None:
+        return None
+    verb = "Pre-cooling" if hold.bank.mode == "cool" else "Pre-heating"
+    return (
+        f"{verb} to {format_temp(hold.bank.target, unit)} until the {_hold_clock(hold.bank.ends)} high-cost period, "
+        f"then {hold_after_text(hold, unit)}"
+    )
 
 
 def pre_cool_sleep_window_config(config: dict) -> dict:
@@ -1419,6 +1591,18 @@ def compute_bedtime_setback(
 # Issue #1371: "pre_cool" is deliberate too -- the spec (comfort-edge-selection-spec section 2) has always said a
 # pre-cool counts as "cool ran" (R3), but its writes were labelled "selector" and the guard never saw them.
 _DELIBERATE_MODE_REASONS: frozenset[str] = frozenset({"user", "tou", "ode_guard", "pre_cool"})
+# Issues #1416/#1417: the side(s) a deliberate command of each reason stands for, for the "ran" record a deliberate
+# write leaves even when it does not change the mode (``_note_deliberate_command``). Pre-cool and the ceiling guard
+# are cool commands: a heat write the selector makes inside a pre-cool pass is not the pre-cool. A TOU bank stands
+# for whichever side it banked. ``user`` is absent on purpose: an occupant's MODE change is in the ring buffer
+# already, and a setpoint-only change says nothing about a side having run (raising the cool setpoint asks for LESS
+# cooling), so it counts only when the equipment is seen running
+# (test_setpoint_only_override_without_equipment_run_does_not_hold).
+_DELIBERATE_COMMAND_SIDES: dict[str, frozenset[str]] = {
+    "tou": frozenset({"heat", "cool"}),
+    "pre_cool": frozenset({"cool"}),
+    "ode_guard": frozenset({"cool"}),
+}
 # Issue #1073: a settling-guard hold that re-enters within this many seconds of the previous episode's end
 # (same candidate) reopens that episode rather than starting a new one.
 _COMFORT_HOLD_MERGE_S = 600.0
@@ -1478,6 +1662,10 @@ class AutomationEngineCallbacks:
 
 class AutomationEngine:
     """Manages HVAC automations based on daily classification."""
+
+    # Issue #1230 R1b: class-level default so an engine built via object.__new__ (tests) still resolves; the
+    # coordinator assigns its shared holder in __init__.
+    indoor_companion: CompanionSensors | None = None
 
     # Issue #729: class-level default so a test fixture that partially constructs an
     # engine via object.__new__(AutomationEngine) (skipping __init__ — an established
@@ -1580,6 +1768,14 @@ class AutomationEngine:
     # actually resuming (see occupancy_restore_hold_reason()). Class-level default for engines
     # built via object.__new__ in tests.
     _occupancy_restore_deferred_pending: bool = False
+    # Issue #1425: True once the thermostat was actually sent a band (or a time-of-use bank) while away/vacation, in
+    # this away period. Reset when the house goes away; a deferred arrival restore is a "still on the setback" hold
+    # only when it is True (a setback a door/window pause skipped never reached the thermostat).
+    _away_setback_sent: bool = False
+    # Issue #1433: True while the coordinator's 15-minute away timer runs (set when the timer starts, cleared when it
+    # expires or is cancelled). The engine already knows the house is away (Issue #85), but the setback waits for the
+    # timer: until then no other path (the 30-minute cycle, bedtime, pre-cool, a time-of-use start) sends it.
+    _away_setback_pending: bool = False
     # Issue #1050 (#1048 change 21): fan command read-back. Attempts = how many times a CA fan-on
     # was found ignored by the command entity (0 -> next ignore retries once without a grace period;
     # >=1 -> gives up with the normal grace period + one warning episode). Episode fields use
@@ -1637,6 +1833,7 @@ class AutomationEngine:
         *,
         callbacks: AutomationEngineCallbacks | None = None,
         role: str = "production",
+        inputs: EngineInputs | None = None,
     ) -> None:
         """Initialize the automation engine."""
         self.hass = hass
@@ -1646,6 +1843,9 @@ class AutomationEngine:
         self.notify_service = notify_service
         self.config = config
         self.sensor_polarity_inverted = sensor_polarity_inverted
+        # Issue #1230 R1b: the coordinator's thermostat-companion candidates + 'finer' latch, set by the coordinator
+        # after construction. None (headless harness, no registry) = the resolver behaves exactly as before.
+        self.indoor_companion: CompanionSensors | None = None
         # Issue #604: label only, for logging/future observability — never branched on
         # inside this class or the 9 coordinator callback methods. Isolation between a
         # production and a future shadow engine is structural (which callables get wired
@@ -1786,6 +1986,11 @@ class AutomationEngine:
         # forgetting a recent cycle on restart would defeat the guard's purpose.
         self._last_hvac_heating_active: str | None = None  # ISO timestamp
         self._last_hvac_cooling_active: str | None = None  # ISO timestamp
+        # Issues #1416/#1417: the newest DELIBERATE command per side ("heat"/"cool" -> {"ts": ISO, "reason": ...}):
+        # a TOU bank write, an overnight pre-cool write or a ceiling-guard cool write, each one the thermostat
+        # accepted. It counts as "that side ran" for the settling guard
+        # (_minutes_since_family_ran) even when the mode did not change. Persisted like the stamps above.
+        self._deliberate_commands: dict[str, dict[str, str]] = {}
         # Issue #843: same continuously-refreshed-while-active / frozen-once-inactive
         # pattern as the two fields above (Issue #835), extended to fan/nat-vent
         # activity — used by the comfort-family FSM's recency-gated deadband
@@ -2079,6 +2284,10 @@ class AutomationEngine:
         # family, for the reactive-retry rate limit and the once-per-realised-switch event.
         self._last_selector_write_attempt: tuple[str, datetime] | None = None
         self._last_resolved_family: str | None = None
+        # Issue #1409: the coordinator's occupancy-change bank writer (returns the write it made, or None). Asked only
+        # inside ``occupancy_change()`` (this task's OCCUPANCY CHANGE); every other caller of the occupancy handlers
+        # (cycle, timers, redirects) is unaffected.
+        self._occupancy_bank_write: Callable[[], Awaitable[OccupancyBankWrite | None]] | None = None
 
         # Nat-vent soft-start sub-mode (Issue #540, scoped from #533): qualifies WHY an
         # active nat-vent session was entered — True when entered via the parity/
@@ -2090,12 +2299,8 @@ class AutomationEngine:
         self._nat_vent_soft_start: bool = False
         # Issue #1142: one 'close the windows' push per blower ventilation session.
         self._close_windows_advised: bool = False
-        # Today's observed outdoor peak-so-far and sample count, mirrored from the
-        # coordinator's _outdoor_temp_history (single source of truth — see
-        # coordinator._apply_outdoor_temp()). Not serialized — rebuilt from the
-        # coordinator's own persisted/restored history within one update cycle.
-        self._outdoor_temp_today_peak: float | None = None
-        self._outdoor_temp_today_sample_count: int = 0
+        # Today's observed outdoor peak-so-far and sample count: read live from the coordinator's
+        # _outdoor_temp_history through ``self._inputs`` (Issue #1443; no engine copy).
         # Issue #757 Phase 6 Step 5 correction: the nat-vent lifecycle FSM
         # (nat_vent_fsm.py, Issue #594 Phase R) is now unconditionally authoritative
         # for all 10 real nat-vent trigger sites — _natvent_fsm_authoritative has
@@ -2337,26 +2542,27 @@ class AutomationEngine:
         # Welcome home notification debounce (Issue #59)
         self._last_welcome_home_notified: datetime | None = None
 
-        # Thermal model — set by coordinator before apply_classification()
-        self._thermal_model: dict = {}
+        # Issue #1443: the coordinator-owned facts the decisions read (thermal model, forecast peak, today's outdoor
+        # peak, the Away/Vacation TOU window) are PASSED IN by the coordinator for each decision call
+        # (decision_facts / _facts); the engine holds no copy. ``_inputs`` is only the facts source for a decision
+        # with no coordinator call frame (an engine timer, a read-only reader) and the thermal-model accessor. A bare
+        # engine (headless engine-only harness, unit tests) gets a StaticEngineInputs its builder owns.
+        self._inputs: EngineInputs = inputs if inputs is not None else StaticEngineInputs()
+        # Issue #1230 R6b: the coordinator hands the engine a live provider of the thermal-model scalars the
+        # prediction-dependent decisions read (the primary prediction engine's; see ``_control_model``). None on a bare
+        # engine: the decisions then read the provider's ``thermal_model()`` itself.
+        self._control_model_provider: Callable[[dict | None], dict | None] | None = None
 
-        # Issue #899: away/vacation TOU pre-conditioning — live state pushed by the
-        # coordinator each cycle (_resolve_tou_schedule_state()), read by
-        # _apply_occupancy_away_vacation_decision() so ANY call to
+        # Issue #899: away/vacation TOU pre-conditioning — the coordinator's live window
+        # (_sync_tou_away_vacation_state(), each cycle), passed in with each decision's facts
+        # (Issue #1443) and read by _apply_occupancy_away_vacation_decision() so ANY call to
         # handle_occupancy_away()/handle_occupancy_vacation() (the regular 30-min cycle,
         # the precise T_start guard timer, or any other trigger) picks up the currently
         # active TOU window's band expansion, not just the trigger that happened to fire.
-        # All three are 0.0/None outside an active away/vacation TOU window.
-        self._tou_av_expansion_f: float = 0.0
-        self._tou_av_active_schedule_id: str | None = None
-        self._tou_av_precondition_target: float | None = None
         # Dedup for the completed-vs-stopped-early observability log — only logged once per
-        # window (the first call that observes a nonzero _tou_av_expansion_f for a given
+        # window (the first call that observes a nonzero TOU expansion for a given
         # schedule_id), not every cycle the window stays active.
         self._tou_av_window_logged_schedule_id: str | None = None
-
-        # Hourly forecast temps — injected by coordinator on each 30-min poll
-        self._hourly_forecast_temps: list[dict] = []
 
         # Occupancy mode — synced by coordinator (Issue #85)
         self._occupancy_mode: str = OCCUPANCY_HOME
@@ -2367,6 +2573,86 @@ class AutomationEngine:
         # `self._x_callback: Any | None = None` assignments above.
         if callbacks is not None:
             self.set_callbacks(callbacks)
+
+    @property
+    def inputs(self) -> EngineInputs:
+        """The facts source (snapshot builder) and thermal-model accessor (Issue #1443)."""
+        return getattr(self, "_inputs", None) or EMPTY_ENGINE_INPUTS  # getattr: tests build engines via __new__
+
+    @contextlib.contextmanager
+    def decision_facts(self, facts: EngineFacts) -> Iterator[None]:
+        """Issue #1443: the coordinator passes its facts in for the decision call made inside this ``with`` body.
+
+        Only for this task and this body (a context variable); nothing is kept on the engine afterwards.
+        """
+        token = _DECISION_FACTS.set((self, facts))
+        try:
+            yield
+        finally:
+            _DECISION_FACTS.reset(token)
+
+    def _facts(self, now: datetime) -> EngineFacts:
+        """The facts for a decision at ``now``: the snapshot passed in for this call, else a fresh one (Issue #1443).
+
+        A fresh snapshot is built by the source only where no coordinator call passed one in (an engine-internal
+        timer, a read-only reader) or the passed one is not for this moment (older than FACTS_MAX_AGE: a timer
+        that fires later inside the context that captured it). Never cached.
+        """
+        passed = _DECISION_FACTS.get()
+        if passed is not None and passed[0] is self and passed[1].fresh_for(now):
+            return passed[1]
+        return self.inputs.build_facts(now)
+
+    def _active_tou_av_window(self) -> TouAvWindow:
+        """The active Away/Vacation TOU window (Issue #899), as passed in for this decision (Issue #1443)."""
+        return self._facts(dt_util.now()).tou_av
+
+    # ------------------------------------------------------------------
+    # Issue #1443: engine-owned state the coordinator reports into. The coordinator decides WHEN (an observation or a
+    # correction); the engine performs the write, so no module outside automation.py assigns an engine private.
+    # ------------------------------------------------------------------
+
+    def note_equipment_ran(self, direction: str, stamp: datetime) -> None:
+        """The thermostat reported heating/cooling at ``stamp`` (event grain, #1073 S4): the persisted last-ran."""
+        iso = stamp.isoformat()
+        if direction == "heat":
+            self._last_hvac_heating_active = iso
+        else:
+            self._last_hvac_cooling_active = iso
+
+    def note_cycle_activity(self, hvac_action: Any, now: datetime) -> None:
+        """The 30-min cycle's hvac_action read (#835) plus this engine's own fan/nat-vent flags (#843) at ``now``."""
+        iso = now.isoformat()
+        _hvac_action_lower = str(hvac_action).lower()
+        if _hvac_action_lower == "heating":
+            self._last_hvac_heating_active = iso
+        elif _hvac_action_lower == "cooling":
+            self._last_hvac_cooling_active = iso
+        if self._fan_active:
+            self._last_fan_active = iso
+        if self._natural_vent_active:
+            self._last_natvent_active = iso
+
+    def note_observed_fan_origin(self, hint: str) -> None:
+        """Why an uncommanded thermostat blower just started (read by ``_note_observed_fan_started``)."""
+        self._observed_fan_origin_hint = hint
+
+    def clear_stale_fan_ownership(self) -> None:
+        """The coordinator's self-heal found the ownership flag with the blower physically off and nothing behind it."""
+        self._fan_active = False
+        self._fan_on_since = None
+
+    def clear_stale_hvac_fan_flag(self) -> None:
+        """The thermostat went fully off while an HVAC-fan (not nat-vent) session was still marked active."""
+        self._fan_active = False
+
+    def mark_ha_stopping(self) -> None:
+        """EVENT_HOMEASSISTANT_STOP (#1183): every refusal site of the #1102 latch skips from now on."""
+        self._ha_stopping = True
+
+    def latch_shutdown(self) -> None:
+        """The coordinator is shutting down (#1102): latch before its awaited saves (``cleanup()`` latches too)."""
+        self._shut_down = True
 
     def set_callbacks(self, callbacks: AutomationEngineCallbacks) -> None:
         """(Re-)wire the 9 coordinator callback bundle onto this engine.
@@ -2539,7 +2825,33 @@ class AutomationEngine:
             mode = OCCUPANCY_HOME
         if mode != self._occupancy_mode:
             _LOGGER.info("Occupancy mode changed: %s → %s", self._occupancy_mode, mode)
+            _away = (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+            if mode in _away and self._occupancy_mode not in _away:
+                self._away_setback_sent = False  # Issue #1425: a new away period; nothing sent for it yet
+        if mode != OCCUPANCY_AWAY:
+            self._away_setback_pending = False  # Issue #1433: only an Away waits for the away timer
         self._occupancy_mode = mode
+
+    def set_away_setback_pending(self, pending: bool) -> None:
+        """Issue #1433: the coordinator's 15-minute away timer is running (True) or has expired / been cancelled.
+
+        Occupant view: you step out for a few minutes (or a phone drops off the network); the setback waits 15 minutes
+        so a short absence never sets the heat or the AC back. While pending, ``handle_occupancy_away()`` and the
+        Away time-of-use bank send nothing, so the thermostat stays on the home band the chart draws (Issue #1425);
+        the timer itself clears this flag first and then applies the setback.
+        """
+        self._away_setback_pending = bool(pending) and self._occupancy_mode == OCCUPANCY_AWAY
+
+    def _away_setback_waits_for_timer(self, caller: str) -> bool:
+        """True (and logged) when the away setback must wait for the running away timer (Issue #1433)."""
+        if not (self._away_setback_pending and self._occupancy_mode == OCCUPANCY_AWAY):
+            return False
+        _LOGGER.info(
+            "%s: away setback pending -- the 15-minute away timer is still running, the thermostat keeps the home band "
+            "until it expires",
+            caller,
+        )
+        return True
 
     def update_outdoor_temp(self, temp: float | None) -> None:
         """Update the cached outdoor temperature used for natural vent decisions."""
@@ -4823,6 +5135,7 @@ class AutomationEngine:
         indoor_temp: float | None = None,
         nat_vent_cutoff: datetime | None = None,
         nat_vent_cutoff_already_reached: bool = False,
+        tou_bank_owns_setpoint: bool = False,
     ) -> None:
         """Apply a new day classification — adjust HVAC behavior accordingly.
 
@@ -4851,6 +5164,12 @@ class AutomationEngine:
                 crossing already behind us, so ``nat_vent_cutoff`` is only the next grid point after "now").
                 When True the planned window period is over. Callers that pass no cutoff reset both to
                 None/False.
+            tou_bank_owns_setpoint: Issue #1393 -- the coordinator's resolved time-of-use phase this cycle is
+                ``PRECONDITIONING`` (Home/Guest) and ``_apply_tou_schedule()`` runs right after this call and writes
+                the bank target. The comfort band edge is then NOT written here (it would be contradicted in the same
+                second: cool 76 then 68, heat 68 then 76); every other path of this method is unchanged. Honoured only
+                when the shared gate is ``PROCEED`` and no door/window or blower hold applies -- exactly the cases in
+                which ``apply_tou_precondition()`` is guaranteed to write.
         """
         async with self._decision_pass("apply_classification"):
             self._current_classification = classification
@@ -4938,10 +5257,22 @@ class AutomationEngine:
             # override (or anything else) has moved the thermostat off the setback value.
             # Issue #1363: the reapply writes the setpoint, and that write schedules a 5-minute revisit; cancel it
             # like the normal path does below, or Away/Vacation re-sends the same setpoint every 5 minutes.
+            if _gate == ScheduledBandGate.DEFER_OCCUPANCY and self._tou_bank_skips_band_write(tou_bank_owns_setpoint):
+                # Issue #1395 (the Away/Vacation mirror of #1393): the split-delta bank write follows this pass, so the
+                # setback band (cool 82/85, heat mirror) is not written first.
+                _LOGGER.info(
+                    "apply_classification: time-of-use bank owns the setpoint this cycle (%s) -- setback band not "
+                    "written (the bank target is written once by the TOU step)",
+                    self._occupancy_mode,
+                )
+                self._cancel_classification_revisit()
+                return
             if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
                 if self._occupancy_mode == OCCUPANCY_VACATION:
                     _LOGGER.info("Vacation mode — reapplying deep setback instead of comfort temps")
                     await self.handle_occupancy_vacation()
+                elif self._away_setback_waits_for_timer("apply_classification"):
+                    pass  # Issue #1433: the timer applies the setback; nothing is written this cycle
                 else:
                     _LOGGER.info("Away mode — reapplying setback instead of comfort temps")
                     await self.handle_occupancy_away()
@@ -5093,7 +5424,17 @@ class AutomationEngine:
             )
             # Issue #1371: an overnight pre-cool in force is kept, not overwritten by the plain sleep band.
             _held = self._hold_pre_cool_band(_band)
-            if _held is not _band:
+            if _gate == ScheduledBandGate.PROCEED and self._tou_bank_skips_band_write(tou_bank_owns_setpoint):
+                # Issue #1393: the time-of-use bank owns the setpoint this cycle -- _apply_tou_schedule() writes the
+                # bank target once, right after this pass. Keep the cached intended band (the reactive comfort check
+                # reads it) but do not write the edge the bank target would immediately contradict.
+                self._last_comfort_band = _held
+                _LOGGER.info(
+                    "apply_classification: time-of-use bank owns the setpoint this cycle -- comfort band edge not "
+                    "written (the bank target is written once by the TOU step); day_type=%s",
+                    classification.day_type,
+                )
+            elif _held is not _band:
                 await self._apply_comfort_band(_held, reason=cls_reason + " (pre-cool held)", mode_reason="pre_cool")
             else:
                 await self._apply_comfort_band(_band, reason=cls_reason)
@@ -5115,6 +5456,53 @@ class AutomationEngine:
             await self._apply_ode_ceiling_guard_decision(classification, predicted_indoor, _cls_decision)
 
             self._cancel_classification_revisit()
+
+    def _tou_gate_ignoring_occupancy(self) -> ScheduledBandGate:
+        """The shared scheduled-band gate with the occupancy check taken out (Issue #1395).
+
+        The occupancy answer (``DEFER_OCCUPANCY``) comes first in ``decide_scheduled_band_gate()`` and hides the holds
+        below it. A time-of-use bank (Home/Guest or Away/Vacation) cares only about those: a manual override, a
+        door/window pause, nat-vent or whole-house-fan ownership.
+        """
+        return decide_scheduled_band_gate(
+            occupancy_mode=OCCUPANCY_HOME,
+            manual_override_active=self._manual_override_active,
+            paused_by_door=self._paused_by_door,
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+        )
+
+    def tou_bank_gates_pass(self) -> bool:
+        """CONTROL (Issues #1404/#1409): nothing defers a time-of-use bank right now, so its write would land.
+
+        The bank writes skip on an unconfirmed manual change, then on the same holds ``_tou_bank_skips_band_write()``
+        checks (a manual override, a door/window pause, nat-vent or whole-house-fan ownership, a settled-open sensor,
+        a blower session). Reads state only. The control source the coordinator's ``_tou_bank_in_force()`` uses; the
+        display resolver reads it through there (display reads control, never the reverse).
+        """
+        return bool(not self._override_confirm_pending and self._tou_bank_skips_band_write(True))
+
+    def tou_bank_holds_setpoint(self) -> bool:
+        """DISPLAY alias of ``tou_bank_gates_pass()`` (Issue #1404), kept for display callers and tests."""
+        return self.tou_bank_gates_pass()
+
+    def _tou_bank_skips_band_write(self, tou_bank_owns_setpoint: bool) -> bool:
+        """Issue #1393/#1395: True when this pass must not write a band because the time-of-use bank write follows it.
+
+        Only when the coordinator says the bank owns the setpoint AND nothing that would make the band pass pause or
+        hold the thermostat applies (a paused door/window, a settled-open sensor, a blower session): in those cases the
+        band pass keeps its own behaviour, exactly as before the skip existed.
+        """
+        return bool(
+            tou_bank_owns_setpoint
+            and self._tou_gate_ignoring_occupancy() == ScheduledBandGate.PROCEED
+            and not decide_open_sensor_hold(
+                natural_vent_active=self._natural_vent_active,
+                whf_owns_hvac=self._whf_owns_hvac(),
+                any_sensor_settled_open=self._any_monitored_sensor_settled_open(),
+            )
+            and not self._blower_session_holds_hvac_off()
+        )
 
     def _cancel_classification_revisit(self) -> None:
         """Cancel the 5-minute follow-up that this classification pass's own writes scheduled.
@@ -5285,6 +5673,12 @@ class AutomationEngine:
                 list(caps.modes),
             )
             return None
+
+        # Issue #1417: a deliberate band write (the overnight pre-cool and its 30-minute re-assert) is a "ran" record
+        # for its side even in the mode already armed; selector writes are not deliberate and record nothing.
+        self._note_deliberate_command(_cmd_shape, mode_reason, result=_write_result)
+        if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION) and hvac_outcome_label(_write_result) == "sent":
+            self._away_setback_sent = True  # Issue #1425: the thermostat now holds an away/vacation band
 
         # Issue #444, revised by Issue #591/#590 Finding D: _set_temperature() above is always
         # called (unconditional thermostat re-assertion) — only the human-facing ANNOUNCEMENT
@@ -6747,7 +7141,7 @@ class AutomationEngine:
 
     def _remote_swing_f(self, mode: str) -> float:
         """The hysteresis at the remote sensor: the learned swing for the mode, else the default (read-only)."""
-        value = (self._thermal_model or {}).get("swing_heat_f" if mode == "heat" else "swing_cool_f")
+        value = self.inputs.thermal_model().get("swing_heat_f" if mode == "heat" else "swing_cool_f")
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 < value < float("inf"):
             return THERMAL_SWING_DEFAULT_F
         return float(value)
@@ -7208,7 +7602,7 @@ class AutomationEngine:
                 now=dt_util.now(),
                 # Issue #1080: handle_occupancy_away/vacation arm the TOU-expanded band, so the
                 # read-only readers (status, incidents, override matching) must resolve it too.
-                tou_expansion_f=getattr(self, "_tou_av_expansion_f", 0.0),
+                tou_expansion_f=self._active_tou_av_window().expansion_f,
             )
             held = self._hold_pre_cool_band(band)
             return held if isinstance(held, ComfortBand) else band
@@ -7490,6 +7884,13 @@ class AutomationEngine:
                 target_override=target,
                 skip_setpoint_sanity_check=True,
             )
+        # None = redirected to the Away/Vacation setback (no bank was written), which records nothing.
+        self._note_deliberate_command(classification.hvac_mode, "tou", result=_tou_result)
+        # Issue #1395: the bank write schedules a 5-minute follow-up, which re-runs the whole cycle and so re-writes the
+        # same bank target (and schedules the next follow-up): a write every 5 minutes for the whole bank. The 30-minute
+        # cycle re-asserts and the 5-minute bank check re-banks from the thermostat's state, so cancel it (same rule as
+        # apply_classification(), #96 Root Cause E / #1363).
+        self._cancel_classification_revisit()
 
         # Emit only when the write above actually banked toward `target` — not when
         # _set_temperature_for_mode() redirected to away/vacation setback (Issue #85),
@@ -7537,6 +7938,8 @@ class AutomationEngine:
         ``DEFER_OCCUPANCY``/``PROCEED`` both fall through unchanged, since this method is
         only ever invoked while occupancy already is away/vacation.
         """
+        if self._away_setback_waits_for_timer(f"Away TOU pre-conditioning (schedule={schedule_id})"):
+            return  # Issue #1433: the away bank waits for the away timer like the setback band
         if self._override_confirm_pending:
             self._deferred_while_pending = True
             _LOGGER.info(
@@ -7549,13 +7952,10 @@ class AutomationEngine:
             return
 
         await self._sync_paused_by_door_with_live_sensors()
-        _gate = decide_scheduled_band_gate(
-            occupancy_mode=self._occupancy_mode,
-            manual_override_active=self._manual_override_active,
-            paused_by_door=self._paused_by_door,
-            natural_vent_active=self._natural_vent_active,
-            whf_owns_hvac=self._whf_owns_hvac(),
-        )
+        # Issue #1395: the shared gate answers DEFER_OCCUPANCY first for Away/Vacation, which hid every hold below it
+        # (override, door/window pause, nat-vent/WHF) from this bank. Ask it with the occupancy check taken out, so the
+        # Away/Vacation bank respects exactly the holds the Home/Guest bank respects.
+        _gate = self._tou_gate_ignoring_occupancy()
         if _gate in (
             ScheduledBandGate.DEFER_OVERRIDE,
             ScheduledBandGate.DEFER_PAUSED,
@@ -7581,6 +7981,8 @@ class AutomationEngine:
                 mode=mode,
                 skip_setpoint_sanity_check=True,
             )
+        self._note_deliberate_command(mode, "tou", result=_tou_av_result)
+        self._cancel_classification_revisit()  # Issue #1395: see apply_tou_precondition()
 
         _tou_av_outcome = hvac_outcome_label(_tou_av_result)
         _signature = (schedule_id, mode, round(target, 2), _tou_av_outcome)
@@ -8087,7 +8489,7 @@ class AutomationEngine:
                             {
                                 "outdoor": outdoor,
                                 "indoor": indoor,
-                                "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                "outdoor_today_peak": self._facts(dt_util.now()).outdoor_today_peak,
                                 "comfort_heat": comfort_heat,
                                 "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                             },
@@ -8550,7 +8952,7 @@ class AutomationEngine:
                         " past today's peak %.1f°F by >= %.1f°F, indoor > comfort_heat %.1f°F",
                         outdoor,
                         _indoor,
-                        self._outdoor_temp_today_peak or 0.0,
+                        self._facts(dt_util.now()).outdoor_today_peak or 0.0,
                         PEAK_DECLINE_MARGIN_F,
                         _comfort_heat,
                     )
@@ -8575,7 +8977,7 @@ class AutomationEngine:
                                 {
                                     "outdoor": outdoor,
                                     "indoor": _indoor,
-                                    "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                    "outdoor_today_peak": self._facts(dt_util.now()).outdoor_today_peak,
                                     "comfort_heat": _comfort_heat,
                                     "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                                 },
@@ -9104,7 +9506,7 @@ class AutomationEngine:
                         " past today's peak %.1f°F by >= %.1f°F",
                         outdoor,
                         indoor,
-                        self._outdoor_temp_today_peak or 0.0,
+                        self._facts(dt_util.now()).outdoor_today_peak or 0.0,
                         PEAK_DECLINE_MARGIN_F,
                     )
                     if self._emit_event_callback:
@@ -9113,7 +9515,7 @@ class AutomationEngine:
                             {
                                 "outdoor": outdoor,
                                 "indoor": indoor,
-                                "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                "outdoor_today_peak": self._facts(dt_util.now()).outdoor_today_peak,
                                 "comfort_heat": comfort_heat,
                                 "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                             },
@@ -11718,7 +12120,7 @@ class AutomationEngine:
                             {
                                 "outdoor": outdoor,
                                 "indoor": indoor,
-                                "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                "outdoor_today_peak": self._facts(dt_util.now()).outdoor_today_peak,
                                 "comfort_heat": self._nat_vent_reactivation_floor(),
                                 "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                             },
@@ -11792,9 +12194,45 @@ class AutomationEngine:
                 nat_vent_cutoff_already_reached=self._nat_vent_cutoff_already_reached,
             )
 
+    @contextlib.contextmanager
+    def occupancy_change(self) -> Iterator[None]:
+        """Mark this task as running an occupancy CHANGE for this engine (Issue #1409), for the ``with`` body only."""
+        token = _OCCUPANCY_CHANGE.set(self)
+        try:
+            yield
+        finally:
+            _OCCUPANCY_CHANGE.reset(token)
+
+    async def _bank_takes_occupancy_write(self, mode: str) -> OccupancyBankWrite | None:
+        """Issue #1409: on an occupancy change inside an open time-of-use bank window, write the new occupancy's bank
+        target instead of its band. Returns the write when the bank was written and accepted (the caller then writes
+        no band and records the bank); None keeps the band write exactly as before (not inside this task's occupancy
+        change, no bank window, a gate defers the bank, start-up coalescing, a failed or rejected write, a fault)."""
+        if _OCCUPANCY_CHANGE.get() is not self or self._occupancy_bank_write is None:
+            return None
+        try:
+            wrote = await self._occupancy_bank_write()
+        except Exception:  # noqa: BLE001 - never lose the band write to a bank fault
+            _LOGGER.warning("Occupancy %s: time-of-use bank write failed, writing the band", mode, exc_info=True)
+            return None
+        if not isinstance(wrote, OccupancyBankWrite):
+            return None
+        _LOGGER.info(
+            "Occupancy %s inside a time-of-use bank window: the bank target %s %.1f F was written instead of the band "
+            "(one write, no band-then-bank pair)",
+            mode,
+            wrote.mode,
+            wrote.target_f,
+        )
+        return wrote
+
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""
         self._occupancy_mode = OCCUPANCY_AWAY
+        # Issue #1433: every caller (the 30-minute cycle's reapply, bedtime, pre-cool, a time-of-use start) waits for
+        # the away timer; the timer clears the flag before it calls this handler.
+        if self._away_setback_waits_for_timer("Occupancy away"):
+            return
         # Issue #744 / Phase 6 Step 6: routes through the pure occupancy_fsm.py pair —
         # same logging, same events, same HVAC writes, driven by the returned decision.
         # The legacy inline branch this replaced is gone (graduated) — see
@@ -14422,8 +14860,8 @@ class AutomationEngine:
             fan_mode=str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)),
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
             occupancy_mode=self._occupancy_mode,
-            outdoor_today_peak=self._outdoor_temp_today_peak,
-            outdoor_sample_count=self._outdoor_temp_today_sample_count,
+            outdoor_today_peak=self._facts(now).outdoor_today_peak,
+            outdoor_sample_count=self._facts(now).outdoor_today_sample_count,
             peak_decline_margin=PEAK_DECLINE_MARGIN_F,
             paused_by_door=_paused_by_door,
             outdoor_exit_time=self._nat_vent_outdoor_exit_time,
@@ -14555,29 +14993,31 @@ class AutomationEngine:
     def _forecast_peak_next_2h(self, now: datetime) -> float | None:
         """Highest hourly-forecast temperature in the next 2 hours, or None (Issue #1138).
 
-        The shell half of the forecast-peak start guard: clock and datetime parsing live here, the
-        comparison lives in ``nat_vent_gate.decide_nat_vent_start_veto``.
+        Issue #1443: the engine never sees the forecast list. The coordinator computes the peak
+        (``engine_inputs.forecast_peak_next_2h``) into the facts it passes in for this decision, and the engine hands
+        the number to ``nat_vent_gate.decide_nat_vent_start_veto`` as ``forecast_peak_2h``.
         """
-        hourly = self._hourly_forecast_temps or []
-        if not hourly:
-            return None
-        now_dt = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
-        temps = [
-            h["temperature"]
-            for h in hourly
-            if h.get("temperature") is not None
-            and (parsed := _parse_forecast_dt(h.get("datetime"))) is not None
-            and now_dt
-            < (parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC))
-            <= now_dt + timedelta(hours=2)
-        ]
-        return max(temps) if temps else None
+        return self._facts(now).forecast_peak_2h
+
+    def _control_model(self) -> dict:
+        """The thermal-model dict the prediction-dependent decisions read (ceiling guard, nat-vent start veto).
+
+        Occupant view: these guards act on the rates and confidence of the prediction engine chosen in Settings, and on
+        a fresh install's defaults while that engine has not finished learning. The engine never names an engine: it
+        asks the provider the coordinator installed. Without one (a bare engine) it is the inputs' ``thermal_model()``
+        unchanged (Issue #1443: the coordinator owns the model; the engine holds no copy).
+        """
+        base = self.inputs.thermal_model()
+        provider = getattr(self, "_control_model_provider", None)  # getattr: tests build engines via __new__
+        if provider is None:
+            return base
+        return provider(base) or {}
 
     def _build_nat_vent_start_veto_inputs(
         self, *, now: datetime, indoor: float | None, outdoor: float | None
     ) -> NatVentStartVetoInputs:
         """Inputs for the forecast-peak / thermal-floor start guards (Issue #1138)."""
-        thermal = self._thermal_model or {}
+        thermal = self._control_model()
         return NatVentStartVetoInputs(
             outdoor=outdoor,
             indoor=indoor,
@@ -15609,8 +16049,8 @@ class AutomationEngine:
             comfort_heat=comfort_heat,
             comfort_cool=comfort_cool,
             fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
-            outdoor_today_peak=self._outdoor_temp_today_peak,
-            outdoor_sample_count=self._outdoor_temp_today_sample_count,
+            outdoor_today_peak=self._facts(dt_util.now()).outdoor_today_peak,
+            outdoor_sample_count=self._facts(dt_util.now()).outdoor_today_sample_count,
             peak_decline_margin=PEAK_DECLINE_MARGIN_F,
             full_gate_active=full_gate_active,
         )
@@ -15957,12 +16397,69 @@ class AutomationEngine:
         except TypeError:  # naive vs aware mix: treat the window as lapsed
             return False
 
+    def _note_deliberate_command(self, mode: str | None, reason: str, *, result: HvacCommandResult | None) -> None:
+        """Issues #1416/#1417: record a DELIBERATE command for ``mode``'s side ("that side ran").
+
+        Occupant view: on a thermostat that reports no ``hvac_action``, a deliberate write in the mode the thermostat
+        was already in left no record that its side ran -- a cool TOU bank ended with heat 68 F on a hot afternoon
+        (#1416), and a hot morning after an overnight pre-cool got heat at wake-up (#1417). Mode CHANGES are
+        recorded by the mode-change ring buffer; this is the record for the same-mode case, read by
+        ``_minutes_since_family_ran`` next to it.
+
+        ``reason`` is a key of ``_DELIBERATE_COMMAND_SIDES`` and the side must be one it stands for (a pre-cool
+        or ceiling-guard pass records only cool). A CA write records only when it reached the thermostat
+        (``result`` EXECUTED, or UNCONFIRMED: sent, answer unknown -- the ``_apply_tou_schedule`` test); a failed,
+        blocked, dry-run or superseded write, or no write (``None``), records nothing.
+        """
+        side = self._direction_key(mode) if isinstance(mode, str) else None
+        if side is None or side not in _DELIBERATE_COMMAND_SIDES.get(reason, frozenset()):
+            return
+        if result not in (HvacCommandResult.EXECUTED, HvacCommandResult.UNCONFIRMED):
+            return
+        records = getattr(self, "_deliberate_commands", None)
+        if not isinstance(records, dict):
+            records = {}
+        records[side] = {"ts": dt_util.now().isoformat(), "reason": reason}
+        self._deliberate_commands = records
+
+    def minutes_since_deliberate_command(self, direction: str, now: datetime) -> float | None:
+        """Issues #1416/#1417: minutes since the newest deliberate command for ``direction`` ("heat"/"cool";
+        "heating"/"cooling" accepted), or None if never / unknown."""
+        key = self._direction_key(direction)
+        records = getattr(self, "_deliberate_commands", None)
+        if key is None or not isinstance(records, dict):
+            return None
+        entry = records.get(key)
+        return self._minutes_since_iso(entry.get("ts") if isinstance(entry, dict) else None, now=now)
+
+    @staticmethod
+    def _sanitize_deliberate_commands(raw: Any) -> dict[str, dict[str, str]]:
+        """Validate a persisted ``_deliberate_commands`` (Issues #1416/#1417): heat/cool keys only, each with an ISO
+        ``ts`` and a known deliberate ``reason`` that stands for that side; anything else is dropped."""
+        out: dict[str, dict[str, str]] = {}
+        if isinstance(raw, dict):
+            for side in ("heat", "cool"):
+                entry = raw.get(side)
+                if not isinstance(entry, dict):
+                    continue
+                ts, reason = entry.get("ts"), entry.get("reason")
+                if not isinstance(ts, str) or side not in _DELIBERATE_COMMAND_SIDES.get(reason, frozenset()):
+                    continue
+                try:
+                    datetime.fromisoformat(ts)
+                except ValueError:
+                    continue
+                out[side] = {"ts": ts, "reason": reason}
+        return out
+
     def _minutes_since_family_ran(self, family: str, now: datetime) -> float | None:
         """Issue #1073/#1149: minutes since ``family`` ("heating"/"cooling") ran or was DELIBERATELY commanded.
 
-        min() of the equipment clock and the mode-change clock; either None = unknown, so the result is
-        None when neither is known. Only DELIBERATE commands count (user, TOU bank, ODE guard); a
-        selector/restore/default write says nothing about the equipment having run (the #1066 09:17 symptom).
+        min() of the equipment clock, the mode-change clock and (Issues #1416/#1417) the deliberate-command
+        clock; None = unknown, so the result is None when none is known. Only DELIBERATE commands count (user,
+        TOU bank, ODE guard, pre-cool); a selector/restore/default write says nothing about the equipment having
+        run (the #1066 09:17 symptom). A deliberate command counts even when it did not change the mode: without
+        ``hvac_action`` it is the only record that its side ran.
         The ONE place this fact is computed, for the known-family and the unknown-family settling guard alike.
         """
         _cands = [
@@ -15970,6 +16467,7 @@ class AutomationEngine:
             for v in (
                 self.minutes_since_equipment_ran(family, now),
                 self.minutes_since_mode_set(family, now, _DELIBERATE_MODE_REASONS),
+                self.minutes_since_deliberate_command(family, now),
             )
             # A negative value is a future timestamp (clock jump / restore): unknown, not "just ran".
             if v is not None and v >= 0.0
@@ -16173,7 +16671,7 @@ class AutomationEngine:
     def _model_confidence_for_log(self) -> str | None:
         """Thermal-model confidence label for the hold LOG only (S7). The guard itself never reads it (R7)."""
         try:
-            conf = (getattr(self, "_thermal_model", None) or {}).get("confidence")
+            conf = self.inputs.thermal_model().get("confidence")
         except Exception:  # noqa: BLE001 - logging aid only
             return None
         return conf if conf in ("none", "low", "medium", "high") else None
@@ -16546,7 +17044,7 @@ class AutomationEngine:
         resolver's calling convention matches every other ``_resolve_*_fsm_state()``
         dispatcher's shape: one snapshot in, one full decision out.
         """
-        _thermal = self._thermal_model or {}
+        _thermal = self._control_model()
         comfort_cool = self.config.get("comfort_cool")
         inputs = ClassificationFsmInputs(
             occupancy_mode=self._occupancy_mode,
@@ -16604,7 +17102,7 @@ class AutomationEngine:
         if outcome_obj is None or outcome_obj.outcome is OdeCeilingGuardOutcome.NOT_APPLICABLE:
             return
 
-        _thermal = self._thermal_model or {}
+        _thermal = self._control_model()
         _k_passive = _thermal.get("k_passive")
         _conf = _thermal.get("confidence_k_passive") or _thermal.get("confidence", "none")
         _k_via_bridge = bool(_thermal.get("k_passive_via_bridge"))
@@ -16804,6 +17302,60 @@ class AutomationEngine:
         # thermostat to cool (explicit mode switch, change 1) -- do not send a second
         # identical set_hvac_mode moments later.
         _mode_result_cg: HvacCommandResult | None = None  # None: mode call skipped (already cool this cycle)
+        # Issue #1230 R6 (X1): the guard never raises a cool setpoint and never re-sends what the thermostat already
+        # does. When the thermostat is already cooling at or BELOW the guard ceiling -- whoever set it (the comfort
+        # band, the sleep band at 72 against an awake ceiling of 74, an occupant) -- there is nothing to defend: no mode
+        # write, no setpoint write, no ceiling_guard_fired row. Before this rule the primary engine's no-AC forecast
+        # (v4) predicted the breach on every cycle, so every 2 hours the guard re-sent cool + the same setpoint and,
+        # from bedtime, each half hour the sleep band wrote 72 and the guard wrote 74 in the same second (the bedroom
+        # held at 74 instead of 72). An occupant's mode change or a setpoint ABOVE the ceiling fails this test, so the
+        # guard still acts exactly as before (off / heat / cool above the ceiling). Observe-only keeps recording its
+        # would-do.
+        # Issue #1403: a thermostat that reports CA's own write a fraction ABOVE what was sent (a write of 23.3 C under
+        # a 74 F ceiling reported as 23.5 C) is still holding CA's setpoint (#1397 tolerance), so the guard must not
+        # read it as "cooling above the ceiling" and re-send every cycle. CA's own setpoint is the held one (shown by
+        # the thermostat) or one still in the echo window (the band re-sends it earlier in this same cycle, which
+        # clears the held record until the echo). Only CA's own write counts: an occupant's setpoint above the
+        # ceiling still gets the guard.
+        _own_temps_cg: list[float] = []
+        _held_temp_cg = ((getattr(self, "_held_own_setpoints", None) or {}).get(self.climate_entity) or {}).get(
+            "temperature"
+        )
+        if isinstance(_held_temp_cg, (int, float)):
+            _own_temps_cg.append(float(_held_temp_cg))
+        for _w_cg in getattr(self, "_own_setpoint_writes", None) or ():
+            if (
+                getattr(_w_cg, "entity_id", None) == self.climate_entity
+                and getattr(_w_cg, "attribute", "") == "temperature"
+            ):
+                _own_temps_cg.append(float(_w_cg.value))
+        _holds_own_at_ceiling_cg = False
+        if _old_setpoint_raw_cg is not None:
+            try:
+                _holds_own_at_ceiling_cg = any(
+                    to_fahrenheit(_own, _unit) <= _ceiling_cg + 0.05
+                    and holds_own_setpoint(
+                        held={"temperature": _own},
+                        observed={"temperature": _old_setpoint_raw_cg},
+                        tolerance=hold_tolerance(_unit),
+                    )
+                    for _own in _own_temps_cg
+                )
+            except TypeError, ValueError:
+                _holds_own_at_ceiling_cg = False
+        if (
+            not self.dry_run
+            and _old_mode_cg == "cool"
+            and _old_setpoint_f_cg is not None
+            and (_old_setpoint_f_cg <= _ceiling_cg + 0.05 or _holds_own_at_ceiling_cg)
+        ):
+            _LOGGER.debug(
+                "ODE ceiling guard: thermostat already cooling at %.1f (<= ceiling %.1f) -- nothing to send",
+                _old_setpoint_f_cg,
+                _ceiling_cg,
+            )
+            self._arm_comfort_family("cooling", dt_util.now())
+            return
         with self._mode_change_context("ode_guard"):
             if self._mode_switch_marker_recent("cool"):
                 _LOGGER.debug(
@@ -16819,6 +17371,8 @@ class AutomationEngine:
                 reason="ODE ceiling guard — target comfort ceiling",
                 mode="cool",
             )
+        # Issue #1417: the guard's cool write is a deliberate "cool ran" record even when cool was already armed.
+        self._note_deliberate_command("cool", "ode_guard", result=_temp_result_cg)
         # Issue #843: this guard writes mode directly rather than going through
         # _resolve_comfort_family_via_fsm(), so it must arm the family state
         # itself — otherwise the FSM's own dwell/recency bookkeeping goes stale
@@ -16930,7 +17484,8 @@ class AutomationEngine:
 
         c = self._current_classification
         _occ_mode_const = OCCUPANCY_AWAY if mode == "away" else OCCUPANCY_VACATION
-        _tou_expansion = self._tou_av_expansion_f
+        _tou_av = self._active_tou_av_window()
+        _tou_expansion = _tou_av.expansion_f
         _band = select_comfort_band(
             c,
             self.config,
@@ -16945,9 +17500,9 @@ class AutomationEngine:
         # regular 30-min cycle that first observes the TOU window as active. Logged once
         # per window (dedup via _tou_av_window_logged_schedule_id), not every cycle the
         # window stays active.
-        if _tou_expansion and self._tou_av_active_schedule_id != self._tou_av_window_logged_schedule_id:
-            self._tou_av_window_logged_schedule_id = self._tou_av_active_schedule_id
-            _target = self._tou_av_precondition_target
+        if _tou_expansion and _tou_av.schedule_id != self._tou_av_window_logged_schedule_id:
+            self._tou_av_window_logged_schedule_id = _tou_av.schedule_id
+            _target = _tou_av.precondition_target
             _indoor = self._get_indoor_temp_f()
             if _target is not None and _indoor is not None:
                 _reached = (c.hvac_mode == "cool" and _indoor <= _target) or (
@@ -16971,21 +17526,38 @@ class AutomationEngine:
                         _band.ceiling,
                     )
 
+        # Issue #1409: inside an open time-of-use bank window the change writes the bank instead (decided first, so the
+        # record below states what the thermostat was actually sent).
+        _bank_write = await self._bank_takes_occupancy_write(mode)
         # Issue #591: WINDOWED dedup — see handle_occupancy_away()'s original comment for
         # the full rationale (repeated bands are often intentional re-confirmations, but
         # an unguarded site reopens the #584 double-emit shape within seconds).
         _sig = (mode, round(_band.floor, 2), round(_band.ceiling, 2))
+        if _bank_write is not None:
+            _sig = (mode, "tou_bank", _bank_write.mode, round(_bank_write.target_f, 2))
         if self._emit_event_callback and not self._recent_duplicate("occupancy_setback", _sig, window_seconds=600):
-            self._emit_event_callback(
-                "occupancy_setback",
-                {
-                    "mode": mode,
-                    "floor": _band.floor,
-                    "ceiling": _band.ceiling,
-                    "occupancy": mode,
-                    "indoor_f": self._get_indoor_temp_f(),
-                },
-            )
+            _payload: dict[str, Any] = {
+                "mode": mode,
+                "floor": _band.floor,
+                "ceiling": _band.ceiling,
+                "occupancy": mode,
+                "indoor_f": self._get_indoor_temp_f(),
+            }
+            if _bank_write is not None:
+                _payload.update(
+                    {
+                        "tou_bank": True,
+                        "target_f": _bank_write.target_f,
+                        "hvac_mode": _bank_write.mode,
+                        "outcome": hvac_outcome_label(_bank_write.result),
+                        "note": "a time-of-use bank owns the setpoint; the band applies after it",
+                    }
+                )
+            self._emit_event_callback("occupancy_setback", _payload)
+        if _bank_write is not None:
+            if hvac_outcome_label(_bank_write.result) == "sent":
+                self._away_setback_sent = True  # Issue #1425: the thermostat holds the away/vacation bank
+            return
         await self._apply_comfort_band(_band, reason=f"occupancy {mode} — setback band")
 
     def _resolve_occupancy_home_fsm_state(self) -> HomeDecision:
@@ -17084,8 +17656,10 @@ class AutomationEngine:
         # Issue #1208: the family the restore writes (band-derived), for every log/event/notification below.
         family = self._comfort_restore_family(c)
         if decision.restore_deferred_reason is not None:
-            # Issue #1050 (#1048 #18): the restore waits for the reason to clear.
-            self._occupancy_restore_deferred_pending = True
+            # Issue #1050 (#1048 #18): the restore waits for the reason to clear. Issue #1425: the chart and Status
+            # read the pending marker as "the thermostat is still on the away setback", so it is set only when a
+            # setback was actually sent this away period (a door/window pause that skipped it left nothing to hold).
+            self._occupancy_restore_deferred_pending = self._away_setback_sent
             if decision.restore_deferred_reason == "override_confirm_pending":
                 self._deferred_while_pending = True  # Issue #1133 F-E
             _LOGGER.info(
@@ -17106,8 +17680,11 @@ class AutomationEngine:
                 )
         if decision.restore:
             self._occupancy_restore_deferred_pending = False
-            with self._mode_change_context("restore"):
-                await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
+            self._away_setback_sent = False
+            _bank_write = await self._bank_takes_occupancy_write("home")
+            if _bank_write is None:
+                with self._mode_change_context("restore"):
+                    await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
             # The comfort-edge selector may have written the OTHER family than the band's active edge (a mild day
             # next to its floor arms heat); report the family it actually armed.
             # Issue #1245: report what ``_set_temperature_for_mode()`` actually did -- the resolved band edge for the
@@ -17117,7 +17694,20 @@ class AutomationEngine:
             # occupant is home, CA is back in control), but a write that failed / was dry-run / was superseded is
             # rendered "NOT sent" instead of reading as a setpoint the thermostat received.
             _w = self._last_mode_write
-            if self._emit_event_callback:
+            if self._emit_event_callback and _bank_write is not None:
+                # Issue #1409: the change wrote the home bank, not the comfort band: record what was sent.
+                self._emit_event_callback(
+                    "occupancy_comfort_restored",
+                    {
+                        "mode": _bank_write.mode,
+                        "target_f": _bank_write.target_f,
+                        "indoor_f": decision.indoor_temp_f,
+                        "outcome": hvac_outcome_label(_bank_write.result),
+                        "tou_bank": True,
+                        "note": "a time-of-use bank owns the setpoint; the comfort band applies after it",
+                    },
+                )
+            elif self._emit_event_callback:
                 if _w.held_reason is None and _w.target_f is not None:
                     self._emit_event_callback(
                         "occupancy_comfort_restored",
@@ -20258,6 +20848,14 @@ class AutomationEngine:
             "climate_entity": self.climate_entity,
             "in_sleep_window": _in_sleep_window(dt_util.now(), self.config),
             "sleep_indoor_temp_entity": self.config.get("sleep_indoor_temp_entity"),
+            # Issue #1230 R1b: the coordinator's shared candidates + 'finer' latch (None headless / when off), so the
+            # engine and the coordinator resolve the same value.
+            "companion": (
+                None
+                if self.config.get(CONF_THERMOSTAT_COMPANION_SENSOR, DEFAULT_THERMOSTAT_COMPANION_SENSOR)
+                == COMPANION_SENSOR_OFF
+                else self.indoor_companion
+            ),
         }
 
     def _get_indoor_reading(self) -> IndoorTempReading:
@@ -20390,6 +20988,9 @@ class AutomationEngine:
         # coil, recreating exactly the humidity issue the feature exists to prevent.
         self._last_hvac_heating_active = state.get("last_hvac_heating_active")
         self._last_hvac_cooling_active = state.get("last_hvac_cooling_active")
+        # Issues #1416/#1417: same rationale -- a restart right after a bank or pre-cool must not forget that its
+        # side ran.
+        self._deliberate_commands = self._sanitize_deliberate_commands(state.get("deliberate_commands"))
         # Issue #843: same restore rationale as the two fields above — forgetting
         # recent fan/nat-vent activity on restart would let the comfort-family FSM's
         # recency gate immediately treat a genuinely-recent cooling session as if it
@@ -20651,6 +21252,8 @@ class AutomationEngine:
             # Issue #835: NOT clean-slate — restored on restart (see restore_state()).
             "last_hvac_heating_active": self._last_hvac_heating_active,
             "last_hvac_cooling_active": self._last_hvac_cooling_active,
+            # Issues #1416/#1417: NOT clean-slate -- restored on restart (see restore_state()).
+            "deliberate_commands": {k: dict(v) for k, v in (getattr(self, "_deliberate_commands", None) or {}).items()},
             # Issue #843: NOT clean-slate — restored on restart (see restore_state()).
             "last_fan_active": self._last_fan_active,
             "last_natvent_active": self._last_natvent_active,

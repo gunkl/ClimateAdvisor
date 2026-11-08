@@ -107,15 +107,21 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 
 **Allowed scope:**
 - Files inside `custom_components/climate_advisor/` (the integration itself)
-- HA service calls to `climate` domain (set_hvac_mode, set_temperature) — these are the integration's core purpose
-- HA service calls to `notify` domain — user-configured notification service
-- One data file: `climate_advisor_learning.json` in the HA config root (learning engine state)
+- HA service calls to the `climate` domain on each zone's configured thermostat: `set_hvac_mode`, `set_temperature`, `set_fan_mode` — these are the integration's core purpose
+- HA service calls to the `notify` domain — the user-configured notification service, plus `notify.send_email` for the email briefing
+- `turn_on` / `turn_off` on each zone's configured whole-house fan entity (`CONF_FAN_ENTITY`: the `fan.*` or `switch.*` entity chosen in setup) — no other service on it, and no other fan or switch entity
+- `weather.get_forecasts` (read-only) on each zone's configured weather entity
+- Data files in the HA config root, and only these:
+  - the per-zone files whose base names are listed in `const.py` `ENTRY_SCOPED_FILES`, the single source of truth (today: state, chart log, learning DB, forecast archive, v4 archive, v4 backtest, v4 model, AI investigation history). Each is stored per zone as `<stem>_<entry_id>.json` and deleted when the zone is deleted; `tests/test_zone_removal_cleanup.py` fails if the package writes a per-zone file that is not listed. The v4 backtest file is read-only to the integration (`tools/predict_backtest.py --publish` writes it)
+  - the old one-per-install `climate_advisor_investigation_reports.json` (`INVESTIGATION_REPORTS_FILE`), only until it is split once into every zone's own copy and removed (Issue #1415)
+  - the short-lived temp files the atomic writes of those files create and rename into place
+- Approved exceptions logged in `docs/HA-BOUNDARY-EXCEPTIONS.md` (today: the dev-only test integrations, which Climate Advisor's own code never touches)
 
 **Everything else is OUT OF SCOPE.** This includes but is not limited to:
 - Modifying other integrations or their config
 - Writing to `configuration.yaml`, `automations.yaml`, `scripts.yaml`, or any other HA config file
-- Calling HA services outside `climate` and `notify` (e.g., `homeassistant.restart`, `input_boolean.turn_on`)
-- Creating files outside the integration directory (except the learning DB above)
+- Calling any HA service not listed above (e.g., `homeassistant.restart`, `input_boolean.turn_on`), or any service on an entity other than the configured thermostat, fan and weather entities
+- Creating files outside the integration directory other than the data files listed above. A new per-zone data file is added to `ENTRY_SCOPED_FILES`; any other new file in the config root is a boundary change and goes through the violation protocol below
 - Modifying HA add-on configurations
 - Deploying files outside `/config/custom_components/climate_advisor/` on the remote server
 
@@ -471,6 +477,8 @@ Single source of truth for how config-flow and options-flow fields are built.
 - **HA facts vs unknowns**: HA docs say `data` = field labels and `data_description` = text under the field, and labels should be succinct. The docs say nothing about label size or placement, so never claim to control label font size from the integration. The integration cannot and must not style HA's frontend or theme (HA Boundary Rule).
 - **Out of scope**: CONFIG_METADATA labels (dashboard Settings tab) intentionally keep units in their labels because that UI has no selector suffix.
 - **Checklist — adding a field**: add `data` + `data_description` to `strings.json` and `en.json`, unit via selector, label <=5 words, then run `tests/test_config_flow_strings.py`.
+- **Defaults registry (#1230 R5c (DP-10))**: every key an options-flow step can write has its default in `CONFIG_METADATA` (`"default": <value>`), or `"no_default": True` when none is meaningful (entity pickers, optional overrides such as `vacation_heat`, optional energy settings). `tests/test_config_metadata.py` fails on a new options-flow key with neither. The default must equal the options form's actual `default=` / `current.get(key, X)` value. Never add a second defaults table (the dashboard's changed-from-default markers read this).
+- **Optional numeric settings** (`energy_rate`, `heat_power_kw`, `cool_power_kw`): no default, `suggested_value` in the form, listed in the step's `clearable_keys`, read with `config.get(KEY)` and treated as "not set" when `None`. No migration. Derived numbers (e.g. `estimated_cost`) stay `None` when an input is missing; never invent a figure.
 
 ### Automation Logic Table (CRITICAL)
 
@@ -532,7 +540,7 @@ The three feeding flags this table's conditions read (`_fan_active`, `_fan_overr
 
 Claude Code's built-in memory system stores project context, tooling locations, and hard-won facts so they don't have to be re-discovered every session. Claude reads memory automatically at session start.
 
-**Thermal learning — model summary (Issues #114, #121, #587)**: `k_passive` (hr⁻¹, always negative — envelope decay rate) and `k_active_heat`/`k_active_cool` (°F/hr — HVAC contribution) are fitted from whole decay curves by OLS, not from a single start/end delta (v2, Issue #114). The v2 `PendingThermalEvent` state machine is gone (its persisted field was dropped in Issue #133): the coordinator keeps concurrent observations in `_pending_observations` (v3, Issue #121), persisted as `LearningState.pending_observations` so windows survive restarts. Observation types are `hvac_heat`, `hvac_cool`, `passive_decay`, `vent_window_decay`, `vent_fan_decay` and `solar_gain` (`OBS_TYPE_*` in `const.py`); `fan_only_decay`/`k_vent` were retired and `ventilated_decay` renamed to `vent_window_decay` in Issue #587. `THERMAL_HVAC_MIN_DECAY_F` = 0.3°F (was 1.0°F, which rejected every observation on short-cycling thermostats). `get_thermal_model()` returns `k_passive`, `k_active_heat`/`k_active_cool`, `k_vent_window`, `k_vent_fan`, `k_solar`, `confidence_k_passive` (graded independently of `confidence_k_hvac`) and the legacy aliases `heating_rate_f_per_hour`/`cooling_rate_f_per_hour`. Observation types, OLS functions, commit routing and the ODE: `docs/thermal-model-v3-spec.md`.
+**Thermal learning — model summary (Issues #114, #121, #587)**: `k_passive` (hr⁻¹, always negative — envelope decay rate) and `k_active_heat`/`k_active_cool` (°F/hr — HVAC contribution) are fitted from whole decay curves by OLS, not from a single start/end delta (v2, Issue #114). The v2 `PendingThermalEvent` state machine is gone (its persisted field was dropped in Issue #133): the coordinator keeps concurrent observations in `_pending_observations` (v3, Issue #121), in memory only: a run in progress at a restart is learned from only after it, by design (Issue #1437; the retired `LearningState.pending_observations` key is dropped on load). Observation types are `hvac_heat`, `hvac_cool`, `passive_decay`, `vent_window_decay`, `vent_fan_decay` and `solar_gain` (`OBS_TYPE_*` in `const.py`); `fan_only_decay`/`k_vent` were retired and `ventilated_decay` renamed to `vent_window_decay` in Issue #587. `THERMAL_HVAC_MIN_DECAY_F` = 0.3°F (was 1.0°F, which rejected every observation on short-cycling thermostats). `get_thermal_model()` returns `k_passive`, `k_active_heat`/`k_active_cool`, `k_vent_window`, `k_vent_fan`, `k_solar`, `confidence_k_passive` (graded independently of `confidence_k_hvac`) and the legacy aliases `heating_rate_f_per_hour`/`cooling_rate_f_per_hour`. Observation types, OLS functions, commit routing and the ODE: `docs/thermal-model-v3-spec.md`.
 
 **Thermal learning — CA Chart Log**: `/config/climate_advisor_chart_log_<entry_id>.json` (entry-scoped since multi-zone, `storage_paths.py`; the unscoped name only when there is no entry id; read via SSH like the learning DB — `tools/thermal_replay.py` discovers the path) contains up to 365 days of coordinator snapshots at ~30min resolution. Fields per entry include `ts`, `hvac`, `fan`, `fan_running`, `indoor`, `outdoor`, `windows_open` (`chart_log.py`; full schema in `docs/chart-log-spec.md`). It is the preferred data source for `python tools/thermal_replay.py --chart-log` because it holds all of these together at a consistent resolution. `sensor.climate_advisor_outdoor_temperature` does appear in the HA recorder (an earlier "excluded, zero entries" note here was wrong), but recorder retention and resolution vary by install; if outdoor looks frozen while indoor moves in HA history, check live recorder data before blaming the model. `sensor.santa_maria_hallway_current_temperature` has 0.18°F resolution (vs 1°F for `climate.santa_maria_hallway`) — prefer it as `--climate-entity` if re-running replay in entity mode.
 
@@ -726,6 +734,19 @@ git tag -f deployed/current HEAD
 git branch -d deploy/staging
 ```
 
+**Branch model (owner decision 2026-11-08): `main` is the current line, `0.8.x` is maintenance.**
+The 0.9 line (Issue #1230: the new prediction engine, operation timeline and dashboard) was built on a long-lived
+`0.9.x` branch and promoted to `main` at 0.9.14 (a fast-forward: `main` held no commit `0.9.x` lacked). `0.9.x` is
+retired (kept read-only; never deleted, no tag touched).
+- Current work (0.9 and later): branch from `origin/main`, PR into `main`, deploy from `main`, release from `main`.
+- 0.8 maintenance: `0.8.x` was cut from `main` at 0.8.72 (`59de8b1`). A fix for 0.8 users branches from
+  `origin/0.8.x`, PRs into `0.8.x` (CI runs there too) and is released as 0.8.73, 0.8.74 ... with a GitHub Release
+  on a tag on `0.8.x`. If the same bug exists on `main`, cherry-pick the fix into `main` as well (its own PR).
+- Never merge `0.8.x` into `main` or `main` into `0.8.x`: the lines only share cherry-picked fixes.
+- Deploy only from `main`: the owner's server runs the current line. `tools/deploy.py` refuses to deploy `0.8.x`
+  (it would roll the house back to 0.8, possibly across storage changes; `--allow-maintenance-branch` overrides).
+  `python tools/deploy.py --rollback` restores the last backup.
+
 **Conflict resolution**: coordinator.py conflicts between the ODE section (`_build_predicted_indoor_future()`,
 module-level near the end of the file) and the briefing/daily-record section (class methods) are independent — accept all changes from both.
 
@@ -799,7 +820,7 @@ After merge: `gh release edit vX.Y.Z --draft=false`
 #### Common mistakes to avoid
 - **Never open a PR without a version bump** — release notes fall out of sync
 - **Never deploy from individual fix worktrees** — see Multi-branch deploy rule above
-- **Never create a versioned GitHub Release until the version bump is in main**
+- **Never create a versioned GitHub Release until the version bump is on its line's branch** (`main` for the current line, `0.8.x` for 0.8 maintenance; tag that branch's commit)
 - **const.py VERSION and manifest.json version must always match** — enforced by test_version_sync.py
 
 ### Issue Requirements
@@ -995,6 +1016,8 @@ The dashboard is a single-file HTML/CSS/JS panel. When adding new status grid ca
 - Match the existing pattern in the Status tab's `loadStatus()` function
 - For clipboard operations, always include a `document.execCommand('copy')` fallback via temporary textarea — `navigator.clipboard` is unavailable in HA iframe panels without secure context
 - Use `escapeHtml()` for any user-provided or API-returned content rendered as innerHTML
+
+**Status chart v2 (Issue #1230 R2):** the chart reads one series catalog (`_buildSeries()`): charts, key, hover readout and table view all use it, so add a line there, never in one place only. v4 lines are gated server-side (`v4.ready`); never draw a v4 value the payload withheld. Choices persist in `localStorage` (`ca_chart_v2:<zone>`) inside try/catch. Static checks: `tests/test_status_chart_v2_page.py`.
 
 **Target Band (Issue #119):** The chart overlay previously called "Comfort Band" is now "Target Band". The `get_chart_data()` API response sends `target_band: [{ts, lower, upper}]` — a time-series array, not static scalars. The frontend renders this as a stepped/interpolated shaded region that changes with time of day and occupancy mode. If modifying chart rendering code, never assume `target_band` is a single pair of values; always iterate the array. The `_compute_target_band_schedule()` function in `coordinator.py` is the single source of truth for band logic — do not replicate band calculations in `index.html`.
 

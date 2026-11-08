@@ -151,8 +151,8 @@ class TestSite1DoorWindowOpenEntry:
             authoritative=True,
         )
         engine._last_outdoor_temp = 76.0  # parity, not below indoor
-        engine._outdoor_temp_today_peak = 90.0
-        engine._outdoor_temp_today_sample_count = 5
+        engine.inputs.today_peak = 90.0
+        engine.inputs.today_sample_count = 5
         asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
         assert engine._natural_vent_active is True
         assert engine._nat_vent_soft_start is True
@@ -213,8 +213,8 @@ class TestSite2IdleOpenReentry:
         for authoritative in (True, False):
             engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, indoor_f=76.0, authoritative=authoritative)
             self._arm_idle_open(engine, outdoor=76.0)  # parity, past peak below
-            engine._outdoor_temp_today_peak = 90.0
-            engine._outdoor_temp_today_sample_count = 5
+            engine.inputs.today_peak = 90.0
+            engine.inputs.today_sample_count = 5
             asyncio.run(engine.check_natural_vent_conditions())
             assert engine._natural_vent_active is True, f"authoritative={authoritative}"
             assert engine._nat_vent_soft_start is True, f"authoritative={authoritative}"
@@ -233,8 +233,8 @@ class TestSite2IdleOpenReentry:
             authoritative=True,
         )
         self._arm_idle_open(engine, outdoor=76.0)
-        engine._outdoor_temp_today_peak = 90.0
-        engine._outdoor_temp_today_sample_count = 5
+        engine.inputs.today_peak = 90.0
+        engine.inputs.today_sample_count = 5
         asyncio.run(engine.check_natural_vent_conditions())
         assert engine._natural_vent_active is False
         assert engine._nat_vent_soft_start is False
@@ -329,8 +329,8 @@ class TestSite3PausedReactivation:
         for authoritative in (True, False):
             engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, indoor_f=76.0, authoritative=authoritative)
             self._arm_paused(engine, outdoor=76.0)
-            engine._outdoor_temp_today_peak = 90.0
-            engine._outdoor_temp_today_sample_count = 5
+            engine.inputs.today_peak = 90.0
+            engine.inputs.today_sample_count = 5
             asyncio.run(engine.check_natural_vent_conditions())
             assert engine._natural_vent_active is True, f"authoritative={authoritative}"
             assert engine._nat_vent_soft_start is True, f"authoritative={authoritative}"
@@ -408,8 +408,8 @@ class TestSite4ReconcileFanOnStartup:
         soft-start adoption -- an FSM-produced ACTIVE_SOFT_START must be treated
         as "not eligible", not silently adopted as a full session."""
         engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, authoritative=True)
-        engine._outdoor_temp_today_peak = 90.0
-        engine._outdoor_temp_today_sample_count = 5
+        engine.inputs.today_peak = 90.0
+        engine.inputs.today_sample_count = 5
         engine._exit_nat_vent = AsyncMock()
         self._run_reconcile(engine, indoor=76.0, outdoor=76.0)  # parity only -> soft-start territory
         assert engine._natural_vent_active is False

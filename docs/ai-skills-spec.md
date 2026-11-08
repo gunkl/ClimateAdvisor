@@ -18,7 +18,7 @@ audit.
 
 | Question | Short answer (≤2 sentences) | → Full answer |
 |---|---|---|
-| What fields must an `AISkillDefinition` provide, and which are optional? | `name`, `description`, `system_prompt`, `context_builder`, and `response_parser` are required. `fallback`, `triggered_by`, `config_key_model`, `config_key_max_tokens`, and `config_key_reasoning` are optional (defaulting to `None`, `"manual"`, and three `None`s). | [AISkillDefinition contract](#aiskill-definition-contract) |
+| What fields must an `AISkillDefinition` provide, and which are optional? | `name`, `description`, `system_prompt`, `context_builder`, and `response_parser` are required. `fallback`, `triggered_by`, `config_key_model`, `config_key_max_tokens`, and `config_key_reasoning` are optional (defaulting to `None`, `"manual"`, and three `None`s). | [AISkillDefinition contract](#aiskilldefinition-contract) |
 | What happens when `register()` is called with a name that already exists? | A WARNING is logged and the existing entry is silently overwritten. No exception is raised. | [Registration — duplicate handling](#registration) |
 | What does `registry.get()` return for an unknown skill name? | It returns `None`. The caller is responsible for handling the `None` case; `async_execute()` handles it by returning a standard error dict. | [Lookup contract](#lookup-contract) |
 | What six keys does `async_execute()` always return, and what does each hold on the error path? | `success=False`, `source="error"`, `data={}`, `error="<message>"`, `input_context=""` (or the assembled context if available), `raw_response=""`. All six keys are always present regardless of which code path is taken. | [Return contract](#return-contract) |
@@ -443,7 +443,7 @@ Deterministic scan without Claude. Checks:
 - `total_manual_overrides > 50` threshold check
 - `frequent_overrides` suggestion evidence `override_count > 50` check
 
-Returns the same 8-key schema as `parse_investigation_response`. `full_text` is `""` (no raw Claude response). `hypotheses` and `recommended_actions` note that AI was unavailable. `activity_summary` is populated via `build_activity_summary_narrative()` (Issue #925) rather than left empty — see [Activity Summary](#activity-summary-issue-920-redesigned-issue-925) above.
+Returns the same 8-key schema as `parse_investigation_response`. `full_text` is `""` (no raw Claude response). `hypotheses` and `recommended_actions` note that AI was unavailable. `activity_summary` is populated via `build_activity_summary_narrative()` (Issue #925) rather than left empty — see [Activity Summary](#activity-sessions-provider) above.
 
 ---
 
@@ -490,12 +490,12 @@ The execution pipeline has no persistent state. From the registry's perspective,
 
 ## Code Reference
 
-- [`AISkillDefinition`](../custom_components/climate_advisor/ai_skills.py#L18) — dataclass definition
+- [`AISkillDefinition`](../custom_components/climate_advisor/ai_skills.py#L22) — dataclass definition
 - [`AISkillRegistry.register()`](../custom_components/climate_advisor/ai_skills.py#L41) — registration with duplicate overwrite
-- [`AISkillRegistry.get()`](../custom_components/climate_advisor/ai_skills.py#L48) — lookup returning `None` on miss
+- [`AISkillRegistry.get()`](../custom_components/climate_advisor/ai_skills.py#L38) — lookup returning `None` on miss
 - [`AISkillRegistry.async_execute()`](../custom_components/climate_advisor/ai_skills.py#L56) — full execution pipeline
 - [`_run_fallback()`](../custom_components/climate_advisor/ai_skills.py#L148) — fallback invocation with exception guard
-- [`_error_result()`](../custom_components/climate_advisor/ai_skills.py#L174) — standard error dict builder
+- [`_error_result()`](../custom_components/climate_advisor/ai_skills.py#L313) — standard error dict builder
 - [`async_build_investigator_context()`](../custom_components/climate_advisor/ai_skills_investigator.py) — thin orchestrator calling `ContextProviderRegistry.select(focus)`
 - [`parse_investigation_response()`](../custom_components/climate_advisor/ai_skills_investigator.py) — eight-section + `full_text` response parser
 - [`_check_activity_summary_drift()`](../custom_components/climate_advisor/ai_skills_investigator.py) — post-parse drift guardrail for `## ACTIVITY SUMMARY` (Issue #925, detection/logging only)

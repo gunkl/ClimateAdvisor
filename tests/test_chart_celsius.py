@@ -52,7 +52,8 @@ _RAW_F_ALLOWLIST = {
     "outdoor_max",
 }
 # Numeric daily/hourly summary fields that are not temperatures at all.
-_NON_TEMPERATURE_NUMERIC = {"fan_minutes"}
+# Issue #1414: relative humidity is a percentage, not a temperature: never unit-converted.
+_NON_TEMPERATURE_NUMERIC = {"fan_minutes", "humidity", "outdoor_humidity"}
 
 
 def _chart_log_mod():
@@ -188,8 +189,19 @@ def test_every_chart_log_temperature_field_is_classified(tmp_path):
     float_kwargs = [
         name
         for name, p in inspect.signature(chart_log_mod.ChartStateLog.append).parameters.items()
-        if "float" in str(p.annotation)
+        if "float" in str(p.annotation) and "dict" not in str(p.annotation)
     ]
+    # Issue #1230 R0: dict-valued kwargs (nested {entity_id: temp_f}) cannot be converted key-by-key; each must be
+    # listed in _CHART_LOG_STATE_LOG_STRIPPED_KEYS so get_chart_data() removes it from state_log.
+    dict_kwargs = [
+        name
+        for name, p in inspect.signature(chart_log_mod.ChartStateLog.append).parameters.items()
+        if "dict" in str(p.annotation)
+    ]
+    assert "indoor_sensors" in dict_kwargs
+    assert set(dict_kwargs) <= set(coord_mod._CHART_LOG_STATE_LOG_STRIPPED_KEYS), (
+        "a dict-valued chart-log field is neither converted nor stripped from state_log (Issue #1230 R0)"
+    )
     assert {"lower", "upper", "pred_outdoor", "pred_indoor"} <= set(float_kwargs), (
         "signature introspection no longer finds the known temperature keywords"
     )
@@ -202,6 +214,7 @@ def test_every_chart_log_temperature_field_is_classified(tmp_path):
             hvac="off",
             fan=False,
             ts=(now_utc - timedelta(hours=2)).isoformat(),
+            indoor_sensors={"climate.x": 71.5, "sensor.y": None},
             **{"indoor": None, "outdoor": None, **values},
         )
         raw_entry = dict(log._entries[0])
@@ -221,3 +234,32 @@ def test_every_chart_log_temperature_field_is_classified(tmp_path):
     assert set(float_kwargs) <= set(raw_entry)
     # The Target Band keys the frontend reads from state_log must be converted.
     assert {"lower", "upper"} <= converted
+
+
+@pytest.mark.parametrize("temp_unit", ["celsius", "fahrenheit"])
+@pytest.mark.parametrize("range_str", ["24h", "7d", "1y"])
+def test_state_log_never_carries_indoor_sensors(temp_unit, range_str, tmp_path):
+    """Issue #1230 R0: the nested raw-F ``indoor_sensors`` map is stripped from ``state_log`` in every tier, so a
+    Celsius frontend can never receive a stray Fahrenheit value; the stored log itself keeps it."""
+    chart_log_mod = _chart_log_mod()
+    now_utc = _NOW.replace(tzinfo=UTC)
+    with patch.object(chart_log_mod.dt_util, "now", return_value=now_utc):
+        log = chart_log_mod.ChartStateLog(tmp_path)
+        for h in (3, 2, 1):
+            log.append(
+                hvac="off",
+                fan=False,
+                indoor=72.0,
+                outdoor=60.0,
+                ts=(now_utc - timedelta(hours=h)).isoformat(),
+                indoor_sensors={"climate.x": 71.5, "sensor.y": 70.18},
+            )
+        entries = log.get_entries(range_str, before=now_utc)
+    assert entries and all("indoor_sensors" in e for e in entries), "bucketers must carry the field"
+
+    coord = _make_full_chart_coord(daily_forecast_full=_daily_6day_forecast(), temp_unit=temp_unit)
+    coord._chart_log.get_entries.return_value = entries
+    result = _run_chart(coord, range_str)
+    assert result["state_log"], "fixture must yield state_log rows"
+    assert all("indoor_sensors" not in e for e in result["state_log"])
+    assert "indoor_sensors" in log._entries[0]

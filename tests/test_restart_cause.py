@@ -61,6 +61,7 @@ def _make_coord_stub():
     # `coord` here is a bare MagicMock, not a real coordinator instance, so
     # this needs its own explicit stub matching the hass-level one above.
     coord._executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
+    coord.async_load_investigation_reports = AsyncMock()  # Issue #1415: restore awaits the per-zone loader
 
     coord.config = {"climate_entity": "climate.thermostat"}
     coord._unsub_listeners = []
@@ -82,6 +83,7 @@ def _make_coord_stub():
     coord._cancel_occupancy_away_timer = MagicMock()
     coord._unsubscribe_door_window_listeners = MagicMock()
     coord._async_save_state = AsyncMock()
+    coord._v4_flush_on_shutdown = AsyncMock()  # Issue #1230 R1: the v4 shadow flush is awaited at unload
 
     coord._rejection_log = {}
     coord._state_persistence = MagicMock()
@@ -120,6 +122,12 @@ def _make_coord_stub():
     # Issue #1357: the restart-cause logic moved out of async_restore_state() into this helper (it also runs on the
     # no-state and other-day paths). The old stub relied on the logic being inline, so the helper must be bound.
     coord._classify_restart_and_mark = types.MethodType(ClimateAdvisorCoordinator._classify_restart_and_mark, coord)
+    # Issue #1434/#1438: the STOP write task saves what async_shutdown saves; both share these helpers.
+    coord._flush_runtime_for_mode = MagicMock()
+    coord._hvac_session_mode = None
+    coord._chart_log = MagicMock()
+    for name in ("_persist_on_ha_stop", "_persist_runtime_and_state", "_persist_chart_log"):
+        setattr(coord, name, types.MethodType(getattr(ClimateAdvisorCoordinator, name), coord))
 
     return coord
 
@@ -384,7 +392,7 @@ class TestHomeAssistantStopEndsCommands:
         self._stop(coord)
 
         assert coord._ha_stopping is True
-        assert coord.automation_engine._ha_stopping is True
+        coord.automation_engine.mark_ha_stopping.assert_called_once_with()  # Issue #1443: the engine latches itself
 
     def test_stopping_refuses_the_update_cycle(self):
         coord = _make_coord_stub()
@@ -415,10 +423,11 @@ class TestHomeAssistantStopEndsCommands:
         coord.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
         self._stop(coord)
         asyncio.run(scheduled[0])
+        assert coord._async_save_state.call_count == 1  # Issue #1434: the STOP task saves the state file too
 
         asyncio.run(coord.async_shutdown())
 
-        coord._async_save_state.assert_called_once()
+        assert coord._async_save_state.call_count == 2, "the unload after the stop still saves state itself"
         coord.automation_engine.cleanup.assert_called_once()
         assert coord.learning._state.last_shutdown_kind == "unload"
 

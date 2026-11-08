@@ -13,7 +13,7 @@ import os
 import sys
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypedDict
@@ -879,6 +879,35 @@ def compute_k_active_single_point(
     return k_active
 
 
+def estimate_daily_cost(
+    heat_minutes: float,
+    cool_minutes: float,
+    total_minutes: float,
+    energy_rate: float | None,
+    heat_power_kw: float | None,
+    cool_power_kw: float | None,
+) -> float | None:
+    """Estimated electricity cost of one day's heating and cooling (#1230 R5c, DP-10).
+
+    ``minutes / 60 * power_kw * energy_rate`` per mode, summed. Returns ``None`` (never a guess) when:
+    no positive energy rate is set; a mode that ran has no power rating; or the per-mode minutes do not
+    account for the day's total runtime (a record from before the per-mode split). Fan-only runtime is not
+    costed (its draw is not modelled). A day where nothing ran costs 0.0.
+    """
+    if not energy_rate or energy_rate <= 0:
+        return None
+    if heat_minutes + cool_minutes < total_minutes - 1.0:
+        return None
+    cost = 0.0
+    for minutes, power_kw in ((heat_minutes, heat_power_kw), (cool_minutes, cool_power_kw)):
+        if minutes <= 0:
+            continue
+        if not power_kw or power_kw <= 0:
+            return None
+        cost += minutes / 60.0 * power_kw * energy_rate
+    return round(cost, 2)
+
+
 @dataclass
 class DailyRecord:
     """One day's worth of tracked data."""
@@ -903,6 +932,10 @@ class DailyRecord:
     window_open_actual_time: str | None = None
     window_close_actual_time: str | None = None
     hvac_runtime_minutes: float = 0.0
+    # #1230 R5c: the same runtime split by mode (heat + cool == hvac_runtime_minutes for new records), so the
+    # optional cost estimate can price heating and cooling at their own power ratings.
+    hvac_heat_runtime_minutes: float = 0.0
+    hvac_cool_runtime_minutes: float = 0.0
     # Issue #912: fan_only (thermostat or WHF-driven) runtime tracked separately from
     # true compressor/burner runtime above — never blend the two into a number that
     # implies heat/cool actually ran. Deliberately prefixed "thermostat_" to avoid
@@ -955,7 +988,6 @@ class LearningState:
     dismissed_suggestions: list[str] = field(default_factory=list)
     settings_history: list[dict] = field(default_factory=list)
     thermal_observations: list[dict] = field(default_factory=list)  # cap: THERMAL_OBS_CAP
-    pending_observations: dict = field(default_factory=dict)  # v3 multi-type obs windows
     thermal_model_cache: dict | None = None  # EWMA-accumulated k_passive, k_active_heat/cool
     rejection_log: dict = field(default_factory=dict)  # keyed by obs_type; each list capped at 100 entries
     # Restart-cause diagnostics (Issue #403)
@@ -1013,6 +1045,24 @@ class LearningEngine:
                     len(data.get("records", [])),
                 )
                 data.pop("pending_thermal_event", None)  # v2 field removed in Issue #133
+                # Issue #1437: retired (nothing wrote it since Issue #133; in-flight observations are not
+                # recovered across a restart, by design). Dropped silently: not an unknown newer-release key.
+                data.pop("pending_observations", None)
+                # Forward compatibility: a file written by a newer release may hold keys this one does not know.
+                # Ignore them (the known fields load intact) instead of raising and resetting the whole history.
+                known = {f.name for f in fields(LearningState)}
+                unknown = sorted(k for k in data if k not in known)
+                if unknown:
+                    # Visible at INFO (once per load): the next save drops these keys for good. A file with no known
+                    # key at all is not a learning file (e.g. another file written over it): WARNING, it loads empty.
+                    has_known = any(k in known for k in data)
+                    _LOGGER.log(
+                        logging.INFO if has_known else logging.WARNING,
+                        "Learning state: ignoring unknown keys from a newer release: %s%s",
+                        ", ".join(unknown),
+                        "" if has_known else " (no known field present: loading an empty learning state)",
+                    )
+                    data = {k: v for k, v in data.items() if k in known}
                 self._state = LearningState(**data)
                 # Validate all list fields — corrupted JSON may have wrong types
                 for field_name in (
@@ -1056,9 +1106,6 @@ class LearningEngine:
                 # never refreshed and misled the diagnostic tools, so drop them.
                 if isinstance(_cache_mig, dict) and drop_stored_grades(_cache_mig):
                     _LOGGER.debug("Thermal model cache: dropped stale stored confidence grades (Issue #1277)")
-                # Validate pending_observations is a dict
-                if not isinstance(self._state.pending_observations, dict):
-                    self._state.pending_observations = {}
                 # Validate rejection_log is a dict; apply per-obs-type cap on load
                 if not isinstance(self._state.rejection_log, dict):
                     self._state.rejection_log = {}

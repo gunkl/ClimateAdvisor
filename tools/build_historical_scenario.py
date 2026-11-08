@@ -25,6 +25,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _zone_storage import (  # noqa: E402
+    CHART_LOG_FILE,
+    ZoneSelectionRequired,
+    entry_id_from_remote_path,
+    format_zone_choices,
+    resolve_api_zone,
+    resolve_remote_path_with_discovery,
+    with_zone,
+)
+
 PENDING_DIR = REPO_ROOT / "tools" / "simulations" / "pending"
 
 
@@ -53,9 +64,6 @@ def load_config() -> dict[str, str]:
     return merged
 
 
-_CHART_LOG_REMOTE = "/config/climate_advisor_chart_log.json"
-
-
 def _ssh_args(config: dict) -> list[str]:
     """Build SSH command args (reuses thermal_replay.py pattern)."""
     host = config.get("HA_HOST", "homeassistant.local")
@@ -69,10 +77,16 @@ def _ssh_args(config: dict) -> list[str]:
     return args
 
 
-def fetch_chart_log_ssh(config: dict) -> list[dict]:
-    """SSH into HA and read the chart_log JSON."""
+def fetch_chart_log_ssh(config: dict, entry_id: str | None = None, resolved: dict | None = None) -> list[dict]:
+    """SSH into HA and read the zone's chart_log JSON (entry-scoped since #796; auto-discovered when only one zone's
+    file exists). ``resolved`` (optional) receives the ``entry_id`` read, so the event_log fetch matches (#1418)."""
+    remote = resolve_remote_path_with_discovery(
+        config, CHART_LOG_FILE, entry_id, lambda cfg, remote_cmd: [*_ssh_args(cfg), remote_cmd]
+    )
+    if resolved is not None:
+        resolved["entry_id"] = entry_id or entry_id_from_remote_path(CHART_LOG_FILE, remote)
     result = subprocess.run(
-        [*_ssh_args(config), f"cat {_CHART_LOG_REMOTE}"],
+        [*_ssh_args(config), f"cat {remote}"],
         capture_output=True,
         timeout=30,
     )
@@ -82,7 +96,7 @@ def fetch_chart_log_ssh(config: dict) -> list[dict]:
     return data.get("entries", [])
 
 
-def _fetch_event_log(config: dict, hours: int) -> list[dict]:
+def _fetch_event_log(config: dict, hours: int, entry_id: str | None = None) -> list[dict]:
     """Fetch event_log from HA REST API if HA_URL and HA_TOKEN are available.
 
     Returns list of event entries, or empty list if credentials unavailable.
@@ -102,7 +116,13 @@ def _fetch_event_log(config: dict, hours: int) -> list[dict]:
     try:
         import urllib.request
 
-        url = f"{ha_url}/api/climate_advisor/event_log?hours={hours}"
+        try:
+            zone = resolve_api_zone(ha_url, ha_token, entry_id)
+        except ZoneSelectionRequired as exc:
+            print("Warning: several zones are loaded — pass --entry-id, one of:", file=sys.stderr)
+            print(format_zone_choices(exc.zones), file=sys.stderr)
+            return []
+        url = with_zone(f"{ha_url}/api/climate_advisor/event_log?hours={hours}", zone)
 
         req = urllib.request.Request(
             url,
@@ -759,6 +779,11 @@ def main() -> None:
     )
     parser.add_argument("--hours", type=int, default=72, help="Look back N hours (default: 72)")
     parser.add_argument(
+        "--entry-id",
+        default=None,
+        help="Zone config entry_id (multi-zone installs). Auto-detected when only one zone's chart log exists.",
+    )
+    parser.add_argument(
         "--type",
         choices=[
             "comfort_violation",
@@ -799,7 +824,8 @@ def main() -> None:
     try:
         config = load_config()
         print("Fetching chart_log from HA via SSH...", file=sys.stderr)
-        entries = fetch_chart_log_ssh(config)
+        resolved: dict = {}
+        entries = fetch_chart_log_ssh(config, args.entry_id, resolved)
     except Exception as e:
         print(f"ERROR: Failed to fetch chart_log: {e}", file=sys.stderr)
         sys.exit(1)
@@ -819,7 +845,7 @@ def main() -> None:
     ):
         try:
             config = load_config()
-            event_entries = _fetch_event_log(config, args.hours)
+            event_entries = _fetch_event_log(config, args.hours, resolved.get("entry_id"))
             if not event_entries:
                 print(
                     f"ERROR: --type {args.type} requires event_log from HA API.",

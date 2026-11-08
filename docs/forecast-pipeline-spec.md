@@ -22,6 +22,7 @@ to the classifier and briefing.
 | What if the provider's temperature unit differs from Climate Advisor's? | [§ Provider Unit Assumption](#provider-unit-assumption) |
 | What happens while the weather entity is unavailable, and how is it retried? | [§ Weather Source Outage](#weather-source-outage) |
 | Does the 30-minute cycle stop while the weather service is down (Issue #1337)? | No. The snapshot is built from the kept daily forecast and live readings, so the cycle runs as usual; with no snapshot at all the work that needs no forecast still runs. A failed retry changes nothing; outdoor is never the 65°F placeholder. [§ Weather Source Outage](#weather-source-outage) |
+| Is every fetched hourly forecast kept for later error scoring (Issue #1230 R0)? | Yes, one snapshot per local clock hour, but only from a fetch that returned entries; the outage kept-forecast branch never records. [§ Forecast Archive](#forecast-archive-issue-1230-r0) |
 | Is the forecast thrown away during an outage (Issue #1337)? | No. Only a fetch that returns entries replaces the hourly or daily forecast; an outage keeps the last good one (hourly: minus hours more than 1 h past) and every consumer keeps using it. The cosine model is used only for hours past its end. [§ Kept forecast](#kept-forecast-issue-1337) |
 
 ## Datetime Format
@@ -138,6 +139,10 @@ A failed or empty fetch never wipes forecast data Climate Advisor already has.
 When there is no snapshot at all, `_run_weather_independent_cycle()` runs the cycle's work that needs none, on the saved day type and the live readings: first-cycle recovery after a restart (`_run_first_cycle_recovery()`), unit checks, today's `DailyRecord`, the startup coalesce (`_do_startup_coalesce()`, which ends the post-restart window that suppresses override detection, with or without a day type), the thermal-model refresh, time-of-use resolve/apply, stuck and orphaned grace clean-up, indoor history and Comfort Score minutes (`_track_indoor_comfort()`), and, with a real outdoor reading, the window-cooling and nat-vent re-checks; then it saves state. It does not recalculate the day type or re-apply the plan (the coalesce aside), since both need forecast data. Before #1337 all of this sat behind "did the weather service answer", although only the day type needs it: a restart during an outage kept override detection off until the weather returned, Comfort Score minutes were lost, and an outage across midnight left the new day without a record (#602's fix sat behind the same check).
 
 Entity health announces the outage and its recovery: [entity-health-brief](entity-health-brief.md).
+
+## Forecast Archive (Issue #1230 R0)
+
+`_refresh_hourly_forecast()` is also the only place the hourly forecast is archived. After it installs a fetch that returned entries (the `if fetched:` branch) it calls `_record_forecast_archive(fetched)`, which drops any `synthetic` entries, parses the rest and records one snapshot of what the provider said (up to 72 h ahead, internal °F, no conversion) into `ForecastArchive`, saving through the executor only when the archive changed. The kept-forecast branch used during an outage never reaches the archive, so an outage leaves a gap rather than stale data stamped with a new issue time. The call is wrapped so an archive failure never breaks the refresh or the cycle; the forecast is installed on the coordinator and engine first. Contract, schema, retention and the R1 read path: [Forecast Archive Spec](forecast-archive-spec.md).
 
 ## Timezone Strategy
 

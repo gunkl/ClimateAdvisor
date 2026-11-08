@@ -20,6 +20,7 @@ from custom_components.climate_advisor.automation import (
 )
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import OCCUPANCY_AWAY, OCCUPANCY_HOME, OCCUPANCY_VACATION
+from custom_components.climate_advisor.engine_inputs import TouAvWindow
 
 _CONFIG = {
     "comfort_heat": 70,
@@ -99,7 +100,7 @@ class TestResolvedBandMatchesArmedBand:
     )
     def test_cool_day_tou_window_resolver_equals_handler_write(self, occupancy, hvac_mode, expected_edge):
         engine = _engine()
-        engine._tou_av_expansion_f = 3.0
+        engine.inputs.tou_av = TouAvWindow(expansion_f=3.0)
         c = _classification(hvac_mode)
         engine._current_classification = c
         engine.set_occupancy_mode(occupancy)
@@ -115,7 +116,7 @@ class TestResolvedBandMatchesArmedBand:
 
     def test_heat_day_tou_window_widens_only_the_floor(self):
         engine = _engine()
-        engine._tou_av_expansion_f = 3.0
+        engine.inputs.tou_av = TouAvWindow(expansion_f=3.0)
         c = _classification("heat")
         engine.set_occupancy_mode(OCCUPANCY_AWAY)
         band = engine._resolved_comfort_band(c)
@@ -123,14 +124,14 @@ class TestResolvedBandMatchesArmedBand:
 
     def test_no_expansion_outside_a_tou_window(self):
         engine = _engine()
-        engine._tou_av_expansion_f = 0.0
+        engine.inputs.tou_av = TouAvWindow()
         engine.set_occupancy_mode(OCCUPANCY_AWAY)
         band = engine._resolved_comfort_band(_classification("cool"))
         assert (band.floor, band.ceiling) == (60.0, 80.0)
 
     def test_home_never_widens_even_if_expansion_is_set(self):
         engine = _engine()
-        engine._tou_av_expansion_f = 3.0
+        engine.inputs.tou_av = TouAvWindow(expansion_f=3.0)
         engine.set_occupancy_mode(OCCUPANCY_HOME)
         band = engine._resolved_comfort_band(_classification("cool"))
         assert (band.floor, band.ceiling) == (70.0, 75.0)

@@ -1,0 +1,123 @@
+{
+  "name": "r6b_primary_without_a_fit_uses_defaults_tou_lead__v4",
+  "description": "The same time-of-use peak (16:15) as the v4 card, primary engine v4 with NO fitted model; v3 (the live comparison engine) has a slow learned rate that would open the bank at 12:15. While the primary has no fit the lead is the default 45 minutes: the window is 15:30 on every surface and on the thermostat, never v3's rate and never a v4 rate it does not have.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v4",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ],
+    "shadow_engine": "v3"
+  },
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 14:00 plan cycle."
+    },
+    {
+      "time": "2026-07-13T15:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 15:00 plan cycle."
+    },
+    {
+      "time": "2026-07-13T15:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 15:30 plan cycle."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T14:00:00",
+      "expect": "tou_precondition_not_applied",
+      "reason": "Default 45-minute lead: not banking at 14:00."
+    },
+    {
+      "at": "2026-07-13T15:00:00",
+      "expect": "tou_precondition_not_applied",
+      "reason": "Not banking at 15:00 either (the window opens 15:30)."
+    },
+    {
+      "at": "2026-07-13T15:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T15:00:30",
+      "values": [
+        68.0
+      ],
+      "reason": "The 15:30 cycle is the first inside the window: the bank setpoint is written once, without the comfort setpoint first (issue #1393)."
+    },
+    {
+      "at": "2026-07-13T15:30:00",
+      "expect": "tou_precondition_applied",
+      "tou_precondition": {
+        "schedule_id": "peak1",
+        "target": 68.0,
+        "mode": "cool"
+      },
+      "reason": "Default 45-minute lead."
+    },
+    {
+      "at": "2026-07-13T15:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.tou_window.start",
+      "value": "15:30",
+      "reason": "The window every surface quotes is the default 45-minute lead (v3's rate: 12:15)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "With no usable fit the time-of-use bank uses the default lead",
+    "observed_behavior": "Not banking at 14:00; banking at 15:30.",
+    "expected_behavior": "Owner decision O3: defaults, not the other engine."
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions), redesigned per the independent review; DP-11 pending, unsigned",
+  "issue": 1230,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true
+}

@@ -1824,6 +1824,11 @@ def _render_occupancy_setback(p: dict, unit: str) -> tuple[str, str]:
     occ = p.get("occupancy") or p.get("mode", "")
     label = f"Occupancy setback ({occ})" if occ else "Occupancy setback"
     settings = _format_band_setpoint(p.get("floor"), p.get("ceiling"), None, unit)
+    if p.get("tou_bank") and p.get("target_f") is not None:
+        # Issue #1409: the change wrote the time-of-use bank, not the band: say what the thermostat was told.
+        with contextlib.suppress(TypeError, ValueError):
+            sent = f"{p.get('hvac_mode', '')} {format_temp(float(p['target_f']), unit)}".strip()
+            settings = f"sent {sent} (time-of-use bank owns the setpoint; band {settings} after it)"
     return label, settings
 
 
@@ -1839,6 +1844,8 @@ def _render_occupancy_comfort_restored(p: dict, unit: str) -> tuple[str, str]:
     if target is not None:
         with contextlib.suppress(TypeError, ValueError):
             settings = f"setpoint: {format_temp(float(target), unit)}"
+    if p.get("tou_bank") and settings:
+        settings += " (time-of-use bank owns the setpoint; comfort band after it)"  # Issue #1409
     return label, settings
 
 
@@ -2253,6 +2260,62 @@ def _render_indoor_sensor_unavailable(p: dict, unit: str) -> tuple[str, str]:
             "indoor-based automation decisions are paused until it reports again"
         )
     return label, ""
+
+
+def _render_indoor_source_changed(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1230 R1c: the sensor Climate Advisor reads the room temperature from changed."""
+    to_name = p.get("to_name") or p.get("to_entity") or "(unknown)"
+    from_name = p.get("from_name") or p.get("from_entity") or "(unknown)"
+    to_role = p.get("to_role")
+    label = f"Room temperature now from {to_name}" + (f" ({to_role})" if to_role else "")
+    label += f" instead of {from_name}"
+    parts: list[str] = []
+    if p.get("reason"):
+        parts.append(str(p["reason"]))
+    for key, text in (("to_value_f", "now"), ("from_value_f", "was")):
+        value_f = p.get(key)
+        if isinstance(value_f, (int, float)):
+            parts.append(f"{text} {format_temp(value_f, unit, 1)}")
+    return label, ", ".join(parts)
+
+
+def _render_humidity_source_changed(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1455: the source a chart humidity line (room, bedroom, outdoor) is read from changed. Chart only."""
+    subject = str(p.get("subject") or "humidity")
+    subject = subject[:1].upper() + subject[1:]
+    from_name = p.get("from_name") or p.get("from_entity") or "no humidity source"
+    if p.get("to_entity"):
+        to_name = p.get("to_name") or p.get("to_entity")
+        to_kind = p.get("to_kind")
+        label = f"{subject} now from {to_name}" + (f" ({to_kind})" if to_kind else "") + f" instead of {from_name}"
+    else:
+        label = f"{subject}: no humidity source (was {from_name})"
+    parts: list[str] = []
+    if p.get("reason"):
+        parts.append(str(p["reason"]))
+    for key, text in (("to_rh", "now"), ("from_rh", "was")):
+        value = p.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            parts.append(f"{text} {value:g}%")
+    return label, ", ".join(parts)
+
+
+def _render_forecast_model_changed(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1432: the model the prediction engine's decisions read changed (stitched CA reading <-> each room).
+
+    ``detail_template`` carries ``{tN}`` slots for temperature DIFFERENCES stored in degrees F (``temps_f``), filled
+    here in the report's unit."""
+    label = str(p.get("headline") or "Prediction model changed")
+    tmpl = p.get("detail_template")
+    if not isinstance(tmpl, str):
+        return label, ""
+    temps = p.get("temps_f") if isinstance(p.get("temps_f"), dict) else {}
+    try:
+        return label, tmpl.format(
+            **{str(k): format_temp_delta(float(v), unit, 2) for k, v in temps.items() if isinstance(v, (int, float))}
+        )
+    except KeyError, IndexError, ValueError:
+        return label, ""
 
 
 def _render_indoor_sensor_recovered(p: dict, unit: str) -> tuple[str, str]:
@@ -3325,6 +3388,9 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "entity_recovered": _render_entity_recovered,
     "indoor_sensor_unavailable": _render_indoor_sensor_unavailable,
     "indoor_sensor_recovered": _render_indoor_sensor_recovered,
+    "indoor_source_changed": _render_indoor_source_changed,
+    "humidity_source_changed": _render_humidity_source_changed,
+    "forecast_model_changed": _render_forecast_model_changed,
     "fan_blind_started": _render_fan_blind_started,
     "fan_blind_stopped": _render_fan_blind_stopped,
     "fan_blind_recovered": _render_fan_blind_recovered,
@@ -3438,6 +3504,9 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "outdoor_sensor_recovered",
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
+        "indoor_source_changed",
+        "humidity_source_changed",
+        "forecast_model_changed",
         "entity_unavailable",
         "entity_recovered",
         "fan_blind_started",

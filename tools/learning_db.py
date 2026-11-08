@@ -26,7 +26,15 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _zone_storage import LEARNING_DB_FILE, resolve_remote_path_with_discovery  # noqa: E402
+from _zone_storage import (  # noqa: E402
+    LEARNING_DB_FILE,
+    ZoneSelectionRequired,
+    entry_id_from_remote_path,
+    format_zone_choices,
+    resolve_api_zone,
+    resolve_remote_path_with_discovery,
+    with_zone,
+)
 from ha_logs import load_config, ssh_args, ssh_target  # noqa: E402
 
 # Kept for backward compatibility with anything importing this name directly;
@@ -76,12 +84,15 @@ def _load_dotenv() -> None:
 # ---------------------------------------------------------------------------
 
 
-def fetch_learning_db(config: dict[str, str], entry_id: str | None = None) -> dict:
+def fetch_learning_db(config: dict[str, str], entry_id: str | None = None, resolved: dict | None = None) -> dict:
     """SSH into HA and read the learning JSON file. Returns parsed dict.
 
     Since Issue #796, storage is entry-scoped in a multi-zone install. If
     entry_id isn't given, auto-discovers a single matching zone file, or
     falls back to the legacy unscoped path for single-zone installs.
+    ``resolved`` (optional) receives ``entry_id``: the zone whose file was read
+    (None for the legacy unscoped file), so the live REST section asks for the
+    same zone (Issue #1418).
     """
     remote_path = resolve_remote_path_with_discovery(
         config,
@@ -89,6 +100,8 @@ def fetch_learning_db(config: dict[str, str], entry_id: str | None = None) -> di
         entry_id,
         lambda cfg, remote_cmd: ssh_args(cfg) + [ssh_target(cfg), remote_cmd],
     )
+    if resolved is not None:
+        resolved["entry_id"] = entry_id or entry_id_from_remote_path(LEARNING_DB_FILE, remote_path)
     cmd = ssh_args(config) + [ssh_target(config), f"cat {remote_path}"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -122,12 +135,12 @@ def fetch_learning_db(config: dict[str, str], entry_id: str | None = None) -> di
 # ---------------------------------------------------------------------------
 
 
-def _fetch_live_pipeline(ha_url: str, ha_token: str) -> dict | None:
-    """Fetch live pipeline state from the debug API. Returns dict or None."""
+def _fetch_live_pipeline(ha_url: str, ha_token: str, entry_id: str | None = None) -> dict | None:
+    """Fetch live pipeline state from the debug API for ``entry_id``'s zone. Returns dict or None."""
     import urllib.error
     import urllib.request
 
-    url = f"{ha_url}{DEBUG_STATE_URL_PATH}"
+    url = with_zone(f"{ha_url}{DEBUG_STATE_URL_PATH}", entry_id)
     req = urllib.request.Request(
         url,
         headers={
@@ -984,111 +997,20 @@ def _print_daily_records(db: dict, n: int = 30) -> None:
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# Section G: Pending observations (from persisted learning DB JSON)
-# ---------------------------------------------------------------------------
-
-
-def _print_pending_observations(db: dict) -> None:
-    """Print pending_observations persisted in the learning DB JSON.
-
-    This shows observations that were in-flight when HA last persisted state.
-    Fields: obs_type, _phase, elapsed (from start_time), sample counts, peak_indoor_f.
-    """
-    pending = db.get("pending_observations")
-    print("Pending Observations (persisted)")
-    print("-" * 70)
-
-    if not isinstance(pending, dict) or not pending:
-        print("  No pending observations")
-        print()
-        return
-
-    import contextlib
-    import datetime as _dt_mod
-
-    _now_str = None
-    with contextlib.suppress(Exception):
-        _now_str = _dt_mod.datetime.now(_dt_mod.UTC).isoformat()
-
-    def _elapsed_str(start_str: str | None) -> str:
-        if not start_str or not _now_str:
-            return "?"
-        try:
-            start = _dt_mod.datetime.fromisoformat(start_str)
-            now = _dt_mod.datetime.fromisoformat(_now_str)
-            elapsed_s = (now - start).total_seconds()
-            mins = int(elapsed_s / 60)
-            return f"{mins}min"
-        except Exception:
-            return "?"
-
-    header = (
-        _pad("Type", 22)
-        + _pad("Phase", 12)
-        + _pad("Elapsed", 10)
-        + _pad("active_n", 10)
-        + _pad("post_n", 8)
-        + _pad("samples_n", 11)
-        + "peak_indoor"
-    )
-    print(header)
-    print("-" * 70)
-
-    for obs_type in OBS_TYPES:
-        obs = pending.get(obs_type)
-        if not isinstance(obs, dict):
-            continue
-        phase = obs.get("_phase", "active")
-        elapsed = _elapsed_str(obs.get("start_time"))
-        n_active = len(obs.get("active_samples", []))
-        n_post = len(obs.get("post_heat_samples", []))
-        n_samples = len(obs.get("samples", []))
-        peak = obs.get("peak_indoor_f")
-        peak_str = f"{peak:.1f}F" if isinstance(peak, float) else "-"
-
-        row = (
-            _pad(obs_type, 22)
-            + _pad(phase, 12)
-            + _pad(elapsed, 10)
-            + _pad(str(n_active), 10)
-            + _pad(str(n_post), 8)
-            + _pad(str(n_samples), 11)
-            + peak_str
-        )
-        print(row)
-
-    # Print any obs_types not in canonical list
-    for obs_type, obs in pending.items():
-        if obs_type not in OBS_TYPES and isinstance(obs, dict):
-            phase = obs.get("_phase", "?")
-            elapsed = _elapsed_str(obs.get("start_time"))
-            n_active = len(obs.get("active_samples", []))
-            n_post = len(obs.get("post_heat_samples", []))
-            n_samples = len(obs.get("samples", []))
-            peak = obs.get("peak_indoor_f")
-            peak_str = f"{peak:.1f}F" if isinstance(peak, float) else "-"
-            row = (
-                _pad(f"{obs_type} (unknown)", 22)
-                + _pad(phase, 12)
-                + _pad(elapsed, 10)
-                + _pad(str(n_active), 10)
-                + _pad(str(n_post), 8)
-                + _pad(str(n_samples), 11)
-                + peak_str
-            )
-            print(row)
-
-    print()
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Climate Advisor thermal learning DB diagnostic")
     parser.add_argument("--rejections", action="store_true", help="Show rejection log only")
     parser.add_argument("--committed", action="store_true", help="Show committed observations only")
     parser.add_argument("--model", action="store_true", help="Show model summary only")
     parser.add_argument("--thermal", action="store_true", help="Show chart_log endpoint observations only")
-    parser.add_argument("--pending", action="store_true", help="Show persisted pending observations")
+    parser.add_argument(
+        "--pending",
+        action="store_true",
+        help=(
+            "Show only the live in-flight observations (needs HA_URL/HA_TOKEN). They are never persisted: "
+            "a run in progress at a restart is learned from only after it (Issue #1437)."
+        ),
+    )
     parser.add_argument(
         "--swing",
         action="store_true",
@@ -1171,7 +1093,8 @@ def main() -> None:
     config = load_config()
 
     print(f"Reading {LEARNING_DB_FILE} from {config['HA_HOST']} ...")
-    db = fetch_learning_db(config, entry_id=getattr(args, "entry_id", None))
+    resolved: dict = {}
+    db = fetch_learning_db(config, entry_id=getattr(args, "entry_id", None), resolved=resolved)
     print()
 
     if show_check_587:
@@ -1193,9 +1116,6 @@ def main() -> None:
     if show_thermal:
         _print_chart_log_endpoint_obs(db)
 
-    if show_pending:
-        _print_pending_observations(db)
-
     if show_daily:
         _print_daily_records(db, n=daily_n)
 
@@ -1205,7 +1125,14 @@ def main() -> None:
     ha_token = os.environ.get("HA_TOKEN", "")
 
     if ha_url and ha_token:
-        live_data = _fetch_live_pipeline(ha_url, ha_token)
+        # Issue #1418: the live section must describe the same zone as the file above, never the first zone.
+        try:
+            live_zone = resolve_api_zone(ha_url, ha_token, resolved.get("entry_id"))
+        except ZoneSelectionRequired as exc:
+            print("(live pending observations skipped: several zones are loaded — pass --entry-id, one of:)")
+            print(format_zone_choices(exc.zones))
+            return
+        live_data = _fetch_live_pipeline(ha_url, ha_token, live_zone)
         if live_data is not None:
             _print_live_pipeline(live_data["thermal_pipeline"])
         else:

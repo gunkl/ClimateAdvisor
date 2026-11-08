@@ -27,6 +27,7 @@ from custom_components.climate_advisor import automation as _ae_mod
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import OCCUPANCY_HOME
+from custom_components.climate_advisor.engine_inputs import StaticEngineInputs  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -92,8 +93,7 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._current_classification = _make_hot_classification()
     ae._natural_vent_active = False
     ae._nat_vent_soft_start = False
-    ae._hourly_forecast_temps = []
-    ae._thermal_model = {}
+    ae._inputs = StaticEngineInputs()  # Issue #1443: the facts the engine reads (empty forecast/model/peak)
     ae._economizer_active = False
     ae._economizer_phase = "inactive"
     ae._paused_by_door = False
@@ -106,8 +106,6 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     # reads _occupancy_mode — previously only exercised when a test explicitly
     # set _natvent_fsm_authoritative=True.
     ae._occupancy_mode = OCCUPANCY_HOME
-    ae._outdoor_temp_today_peak = None
-    ae._outdoor_temp_today_sample_count = 0
     ae._nat_vent_outdoor_exit_time = None
     ae._grace_active = False
     ae._grace_churn_starts = {}  # Issue #1104: grace_churn tracking (set by __init__ in production)
@@ -651,6 +649,23 @@ class TestApplyClassificationStoresAlreadyReached_1231:
         assert all(flag == "self._nat_vent_cutoff_already_reached" for _, flag in passes), passes
 
 
+def _is_apply_classification_call(node) -> bool:  # noqa: ANN001
+    """An apply_classification() call, direct or routed through decide(coordinator, engine.apply_classification, ...)
+    (Issue #1443: the coordinator passes its facts in around the same call, with the same keywords)."""
+    import ast  # noqa: PLC0415
+
+    if not isinstance(node, ast.Call):
+        return False
+    if getattr(node.func, "attr", None) == "apply_classification":
+        return True
+    return (
+        isinstance(node.func, ast.Name)
+        and node.func.id in ("decide", "decide_sync")
+        and len(node.args) > 1
+        and getattr(node.args[1], "attr", None) == "apply_classification"
+    )
+
+
 class TestEveryProductionCallerKeepsThePlansClose_1231:
     def test_no_production_apply_classification_call_drops_the_cutoff_or_flag(self):
         """Structural (AST): a caller that passes neither value resets the engine to the static close, which
@@ -663,7 +678,7 @@ class TestEveryProductionCallerKeepsThePlansClose_1231:
         missing, sites = [], 0
         for path in sorted(pkg.glob("*.py")):
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "apply_classification":
+                if _is_apply_classification_call(node):
                     sites += 1
                     kws = {k.arg for k in node.keywords}
                     if not {"nat_vent_cutoff", "nat_vent_cutoff_already_reached"} <= kws:
@@ -698,12 +713,14 @@ class TestCoordinatorPassesAlreadyReached_1231:
         src = Path(__file__).resolve().parents[1] / "custom_components" / "climate_advisor" / "coordinator.py"
         sites = 0
         for node in ast.walk(ast.parse(src.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "apply_classification":
+            if _is_apply_classification_call(node):
                 kws = {k.arg for k in node.keywords}
                 if "nat_vent_cutoff" in kws:
                     sites += 1
                     assert "nat_vent_cutoff_already_reached" in kws, f"line {node.lineno}: cutoff without the flag"
-        assert sites == 4, f"expected 4 coordinator sites, found {sites}"
+        # 5 since Issue #1405: the Home/Guest bank-end timer (_fire_tou_home_bank_end) runs the regular cycle's own
+        # pass at the cost window's start, so it passes the same cutoff AND flag (checked above).
+        assert sites == 5, f"expected 5 coordinator sites, found {sites}"
 
 
 class TestExitEdgeFiresOnceWhenPeriodEndsViaAlreadyReached_1231:

@@ -16,10 +16,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector
 
-from . import zone_registry
+from . import prediction_engines, zone_registry
 from .const import (
     AI_MODELS,
     AI_REASONING_OPTIONS,
+    COMPANION_SENSOR_AUTO,
+    COMPANION_SENSOR_OFF,
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
     CONF_AI_ENABLED,
@@ -34,12 +36,14 @@ from .const import (
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_BRIEFING_NOTIFICATIONS_ENABLED,
+    CONF_COOL_POWER_KW,
     CONF_EMAIL_BRIEFING,
     CONF_EMAIL_DOOR_WINDOW_PAUSE,
     CONF_EMAIL_ENTITY_HEALTH,
     CONF_EMAIL_GRACE_EXPIRED,
     CONF_EMAIL_GRACE_REPAUSE,
     CONF_EMAIL_OCCUPANCY_HOME,
+    CONF_ENERGY_RATE,
     CONF_FAN_ENTITY,
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
@@ -50,20 +54,27 @@ from .const import (
     CONF_GITHUB_TOKEN,
     CONF_GUEST_TOGGLE,
     CONF_GUEST_TOGGLE_INVERT,
+    CONF_HEAT_POWER_KW,
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
     CONF_HVAC_FAN_RESTRICT_MODE,
+    CONF_INDOOR_HUMIDITY_ENTITY,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_SOFT_START_ENABLED,
+    CONF_OUTDOOR_HUMIDITY_ENTITY,
     CONF_OVERRIDE_CONFIRM_PERIOD,
+    CONF_PRIMARY_ENGINE,
     CONF_PUSH_BRIEFING,
     CONF_PUSH_DOOR_WINDOW_PAUSE,
     CONF_PUSH_ENTITY_HEALTH,
     CONF_PUSH_OCCUPANCY_HOME,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
+    CONF_SHADOW_ENGINE,
+    CONF_SLEEP_INDOOR_HUMIDITY_ENTITY,
     CONF_TEMP_UNIT,
+    CONF_THERMOSTAT_COMPANION_SENSOR,
     CONF_THRESHOLD_COOL,
     CONF_THRESHOLD_HOT,
     CONF_THRESHOLD_MILD,
@@ -92,12 +103,15 @@ from .const import (
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NAT_VENT_SOFT_START_ENABLED,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
+    DEFAULT_PRIMARY_ENGINE,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_SETBACK_COOL,
     DEFAULT_SETBACK_HEAT,
+    DEFAULT_SHADOW_ENGINE,
     DEFAULT_SLEEP_COOL,
     DEFAULT_SLEEP_HEAT,
     DEFAULT_TEMP_UNIT,
+    DEFAULT_THERMOSTAT_COMPANION_SENSOR,
     DEFAULT_THRESHOLD_COOL,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_THRESHOLD_MILD,
@@ -139,9 +153,18 @@ FAN_MODE_OPTIONS = [
     selector.SelectOptionDict(value=FAN_MODE_HVAC, label="HVAC fan mode"),
 ]
 
+
 # Issue #835: restricts *when* the hvac_fan/both fan mechanism is allowed to run,
 # based on which HVAC mode last ran — avoids raising humidity by circulating air
 # over wet coils shortly after a cooling cycle.
+def _engine_select(include_none: bool) -> selector.SelectSelectorConfig:
+    """The engine dropdown, straight from the engine registry (a newly registered engine appears with no edit here)."""
+    return selector.SelectSelectorConfig(
+        options=[selector.SelectOptionDict(value=i, label=lb) for i, lb in prediction_engines.options(include_none)],
+        mode=selector.SelectSelectorMode.DROPDOWN,
+    )
+
+
 HVAC_FAN_RESTRICT_OPTIONS = [
     selector.SelectOptionDict(value=HVAC_FAN_RESTRICT_HEAT, label="Heat only (avoid humidity after cooling)"),
     selector.SelectOptionDict(value=HVAC_FAN_RESTRICT_COOL, label="Cool only"),
@@ -152,6 +175,13 @@ OUTDOOR_SOURCE_OPTIONS = [
     selector.SelectOptionDict(value=TEMP_SOURCE_WEATHER_SERVICE, label="Weather service (recommended)"),
     selector.SelectOptionDict(value=TEMP_SOURCE_SENSOR, label="Dedicated sensor"),
     selector.SelectOptionDict(value=TEMP_SOURCE_INPUT_NUMBER, label="Input helper (input_number)"),
+]
+
+THERMOSTAT_COMPANION_OPTIONS = [
+    selector.SelectOptionDict(
+        value=COMPANION_SENSOR_AUTO, label="Auto (use the thermostat's finer sensor when proven)"
+    ),
+    selector.SelectOptionDict(value=COMPANION_SENSOR_OFF, label="Off (always use the thermostat's own reading)"),
 ]
 
 INDOOR_SOURCE_OPTIONS = [
@@ -874,6 +904,10 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return ClimateAdvisorOptionsFlow()
 
 
+# #1230 R5c: optional energy inputs (no defaults); blank = cleared = "not set".
+_ENERGY_KEYS = (CONF_ENERGY_RATE, CONF_HEAT_POWER_KW, CONF_COOL_POWER_KW)
+
+
 class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     """Handle options for Climate Advisor — menu-based navigation (Issue #50)."""
 
@@ -1160,7 +1194,15 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 )
                 await self._commit_section(
                     user_input,
-                    clearable_keys=("outdoor_temp_entity", "indoor_temp_entity", "sleep_indoor_temp_entity"),
+                    clearable_keys=(
+                        "outdoor_temp_entity",
+                        "indoor_temp_entity",
+                        "sleep_indoor_temp_entity",
+                        # Issue #1414: clearing a humidity selector returns that source to auto-detection.
+                        CONF_OUTDOOR_HUMIDITY_ENTITY,
+                        CONF_INDOOR_HUMIDITY_ENTITY,
+                        CONF_SLEEP_INDOOR_HUMIDITY_ENTITY,
+                    ),
                 )
                 return await self.async_step_init()
 
@@ -1184,6 +1226,10 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         "outdoor_temp_entity",
                         description={"suggested_value": current.get("outdoor_temp_entity")},
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["sensor", "input_number"])),
+                    vol.Optional(
+                        CONF_OUTDOOR_HUMIDITY_ENTITY,
+                        description={"suggested_value": current.get(CONF_OUTDOOR_HUMIDITY_ENTITY)},
+                    ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="humidity")),
                     vol.Required(
                         "indoor_temp_source",
                         default=current.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK),
@@ -1198,10 +1244,27 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         description={"suggested_value": current.get("indoor_temp_entity")},
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["sensor", "input_number"])),
                     vol.Optional(
+                        CONF_INDOOR_HUMIDITY_ENTITY,
+                        description={"suggested_value": current.get(CONF_INDOOR_HUMIDITY_ENTITY)},
+                    ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="humidity")),
+                    vol.Optional(
                         "sleep_indoor_temp_entity",
                         description={"suggested_value": current.get("sleep_indoor_temp_entity")},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+                    ),
+                    vol.Optional(
+                        CONF_SLEEP_INDOOR_HUMIDITY_ENTITY,
+                        description={"suggested_value": current.get(CONF_SLEEP_INDOOR_HUMIDITY_ENTITY)},
+                    ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="humidity")),
+                    vol.Required(
+                        CONF_THERMOSTAT_COMPANION_SENSOR,
+                        default=current.get(CONF_THERMOSTAT_COMPANION_SENSOR, DEFAULT_THERMOSTAT_COMPANION_SENSOR),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=THERMOSTAT_COMPANION_OPTIONS,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
                     ),
                 }
             ),
@@ -1683,11 +1746,18 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 errors["min_preheat_minutes"] = "preheat_min_exceeds_max"
             if default_p > max_p:
                 errors["default_preheat_minutes"] = "preheat_default_exceeds_max"
+            engine_error = prediction_engines.validate(
+                user_input.get(CONF_PRIMARY_ENGINE, DEFAULT_PRIMARY_ENGINE),
+                user_input.get(CONF_SHADOW_ENGINE, DEFAULT_SHADOW_ENGINE),
+            )
+            if engine_error:
+                errors[CONF_SHADOW_ENGINE] = engine_error
             if not errors:
                 await self._commit_section(
                     delta_fields_to_fahrenheit(
                         user_input, self.config_entry.data, self.config_entry.data.get(CONF_TEMP_UNIT, FAHRENHEIT)
-                    )
+                    ),
+                    clearable_keys=_ENERGY_KEYS,
                 )
                 return await self.async_step_init()
 
@@ -1711,6 +1781,14 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             step_id="advanced",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_PRIMARY_ENGINE,
+                        default=current.get(CONF_PRIMARY_ENGINE, DEFAULT_PRIMARY_ENGINE),
+                    ): selector.SelectSelector(_engine_select(False)),
+                    vol.Required(
+                        CONF_SHADOW_ENGINE,
+                        default=current.get(CONF_SHADOW_ENGINE, DEFAULT_SHADOW_ENGINE),
+                    ): selector.SelectSelector(_engine_select(True)),
                     vol.Required(
                         "learning_enabled",
                         default=current.get("learning_enabled", True),
@@ -1830,6 +1908,41 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                             max=360.0,
                             step=15.0,
                             unit_of_measurement="minutes",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    # #1230 R5c (DP-10): optional energy inputs for the daily cost estimate. No
+                    # default (suggested_value only) so a blank field really clears the stored value.
+                    vol.Optional(
+                        CONF_ENERGY_RATE, description={"suggested_value": current.get(CONF_ENERGY_RATE)}
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.0001,
+                            max=10.0,
+                            step="any",
+                            unit_of_measurement="per kWh",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_HEAT_POWER_KW, description={"suggested_value": current.get(CONF_HEAT_POWER_KW)}
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.1,
+                            max=50.0,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_COOL_POWER_KW, description={"suggested_value": current.get(CONF_COOL_POWER_KW)}
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.1,
+                            max=50.0,
+                            step=0.1,
+                            unit_of_measurement="kW",
                             mode=selector.NumberSelectorMode.BOX,
                         )
                     ),

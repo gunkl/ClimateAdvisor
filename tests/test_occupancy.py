@@ -1005,9 +1005,13 @@ class TestOccupancyAwayDelay:
         # Simulate timer expiry by invoking the stored callback
         timer_fn = captured_callback[0]
         # The callback receives `now` from HA's call_later mechanism
+        coord.hass.async_create_task = MagicMock()
         timer_fn(None)
 
-        # handle_occupancy_away should have been called (coroutine passed to async_create_task)
+        # Issue #1409: the timer schedules the coordinator's occupancy-change entry (which lets an open time-of-use
+        # bank take the write); running that task calls handle_occupancy_away once.
+        coord.hass.async_create_task.assert_called_once()
+        asyncio.run(coord.hass.async_create_task.call_args.args[0])
         away_mock.assert_called_once()
 
     # ── Test 4 ────────────────────────────────────────────────────

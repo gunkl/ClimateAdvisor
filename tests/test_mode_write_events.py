@@ -92,7 +92,7 @@ def _make_engine(*, indoor: float, mode: str, follow_commands: bool = True, **cf
         notify_service=config["notify_service"],
         config=config,
     )
-    engine._thermal_model = {}
+    engine.inputs.thermal = {}
     engine._test_state = state
     engine.events = []
     engine._emit_event_callback = lambda name, payload: engine.events.append((name, payload))
@@ -370,7 +370,7 @@ class TestHoldEpisodes:
     def _held(self, *, confidence=None):
         engine = _make_engine(indoor=67.0, mode="cool")
         if confidence is not None:
-            engine._thermal_model = {"confidence": confidence}
+            engine.inputs.thermal = {"confidence": confidence}
         clock = _Clock()
         _stamp_ran(engine, "cool", 40.0, clock.now)
         _apply(engine, clock, "mild", 67.0)

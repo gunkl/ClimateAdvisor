@@ -69,12 +69,18 @@ from tests_ha.house.settle import quiesce, track_executor
 from tools.sim_harness.scenario_model import (
     ProductionRunResult,
     build_classification_from_event,
+    capture_next_action,
+    daily_schedule_fires_at,
     merged_scenario_config,
     parse_event_time,
     pin_scenario_thermal_model,
+    pin_scenario_v4_model,
+    pre_cool_timer_fired_at,
+    record_pre_cool_fires,
     scenario_start_time,
     snapshot_engine_state,
     sorted_events,
+    sync_coordinator_occupancy,
 )
 
 __all__ = ["RealHASession", "async_drive_scenario"]
@@ -120,7 +126,6 @@ _MODE_BY_TYPE = {
     "nat_vent_temperature_check": "direct-callback",
     "activate_fan_min_runtime": "direct-callback",
     "classification": "direct-callback",
-    "pre_cool": "direct-callback",
     "occupancy_away": "direct-callback",
     "occupancy_home": "direct-callback",
     "occupancy_vacation": "direct-callback",
@@ -198,6 +203,7 @@ class RealHASession:
         self.event_log: list[tuple[str, dict, datetime | None]] = []
         self._errors = _ErrorCapture()
         self._patch: Any = None
+        self._pre_cool_patch: Any = None
         self._event_index = 0
         self._result: ProductionRunResult | None = None
         self._closed = False
@@ -275,6 +281,10 @@ class RealHASession:
 
         self._patch = patch.object(ClimateAdvisorCoordinator, "_emit_event", _emit_and_capture)
         self._patch.start()
+        # Issue #1420: note when the coordinator's own pre-cool timer fires, so a pre_cool event in that minute is
+        # the timer (time-travel), not a second handler call
+        self._pre_cool_patch = record_pre_cool_fires(ClimateAdvisorCoordinator)
+        self._pre_cool_patch.start()
         logging.getLogger("custom_components.climate_advisor").addHandler(self._errors)
 
         # A FakeHass scenario that never reports a temperature leaves the reading None; do not invent one
@@ -406,12 +416,29 @@ class RealHASession:
         coordinator._schedule_refresh = lambda: None  # production reads update_interval as a timedelta; keep it set
 
     def _apply_injected_inputs(self) -> None:
-        """Optional ODE inputs the scenario supplies (set on the live engine, as FakeHass does)."""
+        """Optional ODE inputs the scenario supplies, seeded into the COORDINATOR, as Tier A does (Issue #1440/#1443).
+
+        The coordinator is the single owner of the thermal model and the hourly forecast; it passes the facts in at
+        each engine decision and the engine holds no copy. Before #1440 this seeded only the engine's forecast
+        copy (the coordinator's only for ``v4_model`` scenarios), so the coordinator's first refresh pushed its empty
+        list over it and the plan, which the coordinator builds from its own list, never saw the scenario forecast.
+        Seeding the owner gives real HA the input Tier A has; the refresh then keeps the still-future hours (#1337).
+        """
+        if not hasattr(self.engine, "inputs"):
+            # A pre-#1443 tree (scripts/revert_proof.py runs this adapter against old custom_components): its engine
+            # still reads its own copies, so they are seeded too, as Tier A did then. Never runs against this tree.
+            if isinstance(self.scenario.get("thermal_model"), dict):
+                self.engine._thermal_model = self.scenario["thermal_model"]
+            if isinstance(self.scenario.get("hourly_forecast"), list):
+                self.engine._hourly_forecast_temps = self.scenario["hourly_forecast"]
         if isinstance(self.scenario.get("thermal_model"), dict):
-            self.engine._thermal_model = self.scenario["thermal_model"]
+            self.coordinator._thermal_model = self.scenario["thermal_model"]
             pin_scenario_thermal_model(self.coordinator, self.scenario["thermal_model"])
         if isinstance(self.scenario.get("hourly_forecast"), list):
-            self.engine._hourly_forecast_temps = self.scenario["hourly_forecast"]
+            self.coordinator._hourly_forecast_temps = self.scenario["hourly_forecast"]
+        # Issue #1230 R6b: the zone's fitted v4 model
+        if isinstance(self.scenario.get("v4_model"), dict):
+            pin_scenario_v4_model(self.coordinator, self.scenario["v4_model"])
 
     # ------------------------------------------------------------- Session API
     def now(self) -> datetime:
@@ -535,6 +562,21 @@ class RealHASession:
             # the periodic cycle's nat-vent re-evaluation: a real production trigger the scenario models per tick
             await engine.check_natural_vent_conditions()
             predicted = event.get("predicted_indoor")
+            if event.get("plan_cycle") and getattr(engine, "_current_classification", None) is not None:
+                # Issue #1230 R6b: the plan cycle (same sequence as run_production's ``plan_cycle``): the primary engine
+                # predicts, the nat-vent plan is computed from what the decisions read, the classification re-applied.
+                coordinator._last_predicted_indoor = predicted or []
+                await coordinator._refresh_control_prediction()
+                coordinator._compute_and_cache_nat_vent_plan()
+                plan = getattr(coordinator, "_nat_vent_plan", None) or {}
+                await engine.apply_classification(
+                    engine._current_classification,
+                    predicted_indoor=coordinator.control_predicted_indoor(),
+                    indoor_temp=float(indoor_f) if indoor_f is not None else None,
+                    nat_vent_cutoff=plan.get("nat_vent_cutoff"),
+                    nat_vent_cutoff_already_reached=bool(plan.get("nat_vent_cutoff_already_reached", False)),
+                )
+                return "direct-callback"
             if predicted:
                 # FakeHass hands the scenario's predicted curve to these two calls; the listener has no such curve
                 new_indoor = float(indoor_f) if indoor_f is not None else None
@@ -576,8 +618,13 @@ class RealHASession:
             classification = build_classification_from_event(event, cfg)
             coordinator._current_classification = classification
             coordinator._ensure_today_record(classification)
-            await engine.apply_classification(classification, indoor_temp=house.thermostat.indoor_f)
+            # Issue #1393: production order -- resolve early, tell apply_classification() the bank owns the setpoint.
             coordinator._resolve_tou_schedule_state()
+            await engine.apply_classification(
+                classification,
+                indoor_temp=house.thermostat.indoor_f,
+                tou_bank_owns_setpoint=coordinator._tou_bank_owns_setpoint(),
+            )
             await coordinator._apply_tou_schedule()
             return "direct-callback"
 
@@ -592,10 +639,22 @@ class RealHASession:
                 engine._manual_override_active = True
             occ = event.get("mode", "home") if "change" in etype else etype.split("_", 1)[1]
             engine.set_occupancy_mode(occ)
-            handler = {"away": engine.handle_occupancy_away, "vacation": engine.handle_occupancy_vacation}.get(
-                occ, engine.handle_occupancy_home
-            )
-            await handler()
+            # Production's occupancy toggle writes the coordinator's mode (and regenerates the timeline) BEFORE the
+            # handler runs, then runs the handler through the coordinator's occupancy-change entry
+            # (``_run_occupancy_handler``, Issue #1409), which lets an open time-of-use bank take the change's write.
+            # Test-infrastructure change (Issue #1409, mirrors run_production._occupancy_handler): this adapter used to
+            # call the engine handler directly and sync the coordinator afterwards -- a path production does not take,
+            # so the #1409 single write could never be seen on Tier B. Could it hide a failure? No: the same engine
+            # handler runs; the entry only sets the flag production sets, and the coordinator mode is what production
+            # has at that moment.
+            sync_coordinator_occupancy(coordinator, occ)
+            if coordinator is not None and hasattr(coordinator, "_run_occupancy_handler"):
+                await coordinator._run_occupancy_handler(occ)
+            else:
+                handler = {"away": engine.handle_occupancy_away, "vacation": engine.handle_occupancy_vacation}.get(
+                    occ, engine.handle_occupancy_home
+                )
+                await handler()
             return "direct-callback"
 
         if etype in ("bedtime", "wakeup"):
@@ -605,6 +664,10 @@ class RealHASession:
             if indoor_f is not None:
                 self._set_indoor(float(indoor_f))
                 await self._drain()
+            if pre_cool_timer_fired_at(coordinator, dt_util.utcnow()):
+                # Issue #1420: the coordinator's own pre-cool timer fired as the clock reached the event time; that
+                # is production's only pre-cool write, so the handler is not called a second time
+                return "time-travel"
             await engine.handle_pre_cool(
                 indoor_temp=float(indoor_f) if indoor_f is not None else None,
                 nat_vent_just_closed=bool(event.get("nat_vent_just_closed", False)),
@@ -694,12 +757,11 @@ class RealHASession:
         return "no-op"
 
     async def _scheduled_event(self, event: dict, etype: str) -> str:
-        """bedtime / wakeup: time-travel when the configured time is the event time, else the direct callback."""
+        """bedtime / wakeup: time-travel when the coordinator's own daily timer is in the event's minute, else the
+        direct callback.  Issue #1420: the time is the one the coordinator scheduled (its config and defaults), so a
+        scenario without ``sleep_time`` no longer gets a second bedtime call at the 22:30 default."""
         assert self.house is not None
-        key = "sleep_time" if etype == "bedtime" else "wake_time"
-        configured = self.config.get(key)
-        now = dt_util.utcnow()
-        if isinstance(configured, str) and configured[:5] == f"{now.hour:02d}:{now.minute:02d}":
+        if daily_schedule_fires_at(self.coordinator, etype, dt_util.utcnow()):
             return "time-travel"  # the production schedule already fired as the clock reached the event time
         handler = self.engine.handle_bedtime if etype == "bedtime" else self.engine.handle_morning_wakeup
         await handler()
@@ -762,6 +824,10 @@ class RealHASession:
         try:
             engine_state = snapshot_engine_state(self.engine)
             engine_state["_thermostat_hvac_mode"] = self.house.thermostat.mode if self.house else None
+            # Issue #1276: the same opt-in Next Action capture as FakeHassSession (shared helper), so a golden
+            # that asserts the card text is judged on real HA too. Absent unless the scenario opts in.
+            if self.scenario.get("capture_next_action") and self.house is not None:
+                engine_state["_next_action"] = capture_next_action(self.coordinator, self.engine, self.scenario)
             result = ProductionRunResult(
                 event_log=list(self.event_log),
                 action_log=self._action_log(),
@@ -797,9 +863,10 @@ class RealHASession:
         if self.house is not None:
             await self.house.close()
             self._collect_leaked_timers()
-        if self._patch is not None:
-            with contextlib.suppress(RuntimeError):
-                self._patch.stop()
+        for p in (self._pre_cool_patch, self._patch):
+            if p is not None:
+                with contextlib.suppress(RuntimeError):
+                    p.stop()
 
 
 async def async_drive_scenario(session: RealHASession, scenario: dict) -> ProductionRunResult:

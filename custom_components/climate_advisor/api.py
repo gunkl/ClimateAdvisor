@@ -6,15 +6,16 @@ import functools
 import json
 import logging
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_call_later
+from homeassistant.util import dt as dt_util
 
-from . import log_capture, zone_registry
+from . import log_capture, prediction_accuracy, zone_registry
 from .ai_skills_context import OUTDOOR_SENSOR_REASON_LABELS, build_event_timeline_table
 from .const import (
     API_AI_INVESTIGATE,
@@ -31,12 +32,16 @@ from .const import (
     API_FORCE_RECLASSIFY,
     API_INVESTIGATION_REPORTS,
     API_LEARNING,
+    API_NIGHT_STRATEGY,
+    API_PREDICTION_ACCURACY,
     API_RESPOND_SUGGESTION,
     API_RESUME_FROM_PAUSE,
     API_SEND_BRIEFING,
     API_STATUS,
     API_SUBMIT_GITHUB_ISSUE,
+    API_TIMELINE,
     API_TOGGLE_AUTOMATION,
+    API_ZONES,
     ATTR_AUTOMATION_STATUS,
     ATTR_COMPLIANCE_SCORE,
     ATTR_CONTACT_STATUS,
@@ -66,8 +71,10 @@ from .const import (
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
     TEMP_SOURCE_WEATHER_SERVICE,
+    V4_ARCHIVE_LEADS,
     VERSION,
 )
+from .engine_inputs import decide, decide_sync
 from .remote_offset import remote_offset_view_for
 from .temperature import FAHRENHEIT, UNIT_SYMBOL, display_delta, display_temp
 
@@ -120,6 +127,10 @@ def _temp_source_display(coordinator: Any, key: str, raw_source: str, label: str
         return f"{label} — none selected ({consequence})"
     if raw_source == TEMP_SOURCE_CLIMATE_FALLBACK and not is_outdoor and reason is not None:
         return f"{label} ({_suffix(reason)})"
+    # Issue #1230 R1b: the thermostat's finer companion sensor is the indoor reading right now.
+    companion_in_use = getattr(coordinator, "_indoor_companion_in_use", None)
+    if raw_source == TEMP_SOURCE_CLIMATE_FALLBACK and not is_outdoor and isinstance(companion_in_use, str):
+        return f"Thermostat (finer sensor — {companion_in_use})"
     if entity is None:
         return label
     if not needs_entity:
@@ -130,13 +141,29 @@ def _temp_source_display(coordinator: Any, key: str, raw_source: str, label: str
     return detail
 
 
+def _zone_param(request: web.Request) -> tuple[str | None, bool]:
+    """The zone a request names, from ``?zone=`` or ``?entry_id=`` (both mean the config entry id).
+
+    Issue #1418: the views added in 0.9.4 (prediction_accuracy, timeline, night_strategy) documented ``zone`` while
+    the other 18 read only ``entry_id``, so ``chart_data?zone=<id>`` silently answered for the first zone. Every view
+    now reads both through here. Returns ``(zone_id, conflict)``; ``conflict`` is True when both are given and name
+    different zones — the caller must refuse rather than pick one.
+    """
+    query = request.query
+    zone = str(query.get("zone") or "").strip() or None
+    entry_id = str(query.get("entry_id") or "").strip() or None
+    if zone and entry_id and zone != entry_id:
+        return None, True
+    return zone or entry_id, False
+
+
 def _get_coordinator(hass: HomeAssistant, request: web.Request):
     """Resolve the zone coordinator this request targets.
 
     Issue #796 Gap 4: previously always returned ``next(iter(entries.values()))``
     — an arbitrary "first" entry — regardless of how many zones were
     configured, meaning the entire REST/dashboard surface was blind to any
-    zone beyond the first. Now reads an optional ``entry_id`` query parameter
+    zone beyond the first. Now reads an optional ``zone`` (or ``entry_id``) query parameter
     and resolves it via ``zone_registry.resolve_zone()``, which centralizes
     ambiguous-zone handling (Issue #885) for every one of this module's 21
     call sites: an explicit ``entry_id`` always resolves that zone; when
@@ -152,9 +179,26 @@ def _get_coordinator(hass: HomeAssistant, request: web.Request):
     treating a ``None`` coordinator as "not loaded" — the two ``None`` causes
     require different responses.
     """
-    entry_id = request.query.get("entry_id")
+    return _resolve_request_zone(hass, request, allow_guess=(request.method != "POST"))
+
+
+def _resolve_request_zone(hass: HomeAssistant, request: web.Request, *, allow_guess: bool):
+    """``zone_registry.resolve_zone()`` for this request's ``zone``/``entry_id`` (see ``_zone_param()``).
+
+    Conflicting ``zone`` and ``entry_id`` values are refused (``(None, True)``) like an ambiguous request: answering
+    for either one could be the wrong zone.
+    """
+    zone_id, conflict = _zone_param(request)
     context = f"{request.method} {request.path} from {request.remote}"
-    return zone_registry.resolve_zone(hass, entry_id, context=context, allow_guess=(request.method != "POST"))
+    if conflict:
+        _LOGGER.warning(
+            "Climate Advisor: %s named two different zones (zone=%s, entry_id=%s) — refused. Send only one.",
+            context,
+            request.query.get("zone"),
+            request.query.get("entry_id"),
+        )
+        return None, True
+    return zone_registry.resolve_zone(hass, zone_id, context=context, allow_guess=allow_guess)
 
 
 def _ambiguous_zone_payload(hass: HomeAssistant) -> dict[str, Any]:
@@ -170,11 +214,25 @@ def _ambiguous_zone_payload(hass: HomeAssistant) -> dict[str, Any]:
     """
     zones = zone_registry.list_zones(hass)
     return {
-        "message": "Multiple Climate Advisor zones are configured — pass entry_id to target a specific zone.",
+        "message": (
+            "Multiple Climate Advisor zones are configured — add ?zone=<entry_id> (one of the entry_id values in "
+            "'zones') so the request names exactly one zone."
+        ),
         "zone_selection_required": True,
         "zones": zones,
         "zone_count": len(zones),
     }
+
+
+def _current_hold_payload(coordinator: Any) -> dict | None:
+    """``coordinator.current_hold_payload()`` (Issue #1404), or None when the coordinator has none (a dict only)."""
+    fn = getattr(coordinator, "current_hold_payload", None)
+    try:
+        out = fn() if callable(fn) else None
+    except Exception:  # noqa: BLE001 - a display field never breaks the status body
+        _LOGGER.debug("current_hold payload unavailable", exc_info=True)
+        return None
+    return out if isinstance(out, dict) else None
 
 
 class ClimateAdvisorStatusView(HomeAssistantView):
@@ -210,9 +268,16 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         # get_default_coordinator()'s own arbitrary-pick fallback is
         # untouched and still exists for defensive/edge-case callers — this
         # just ensures the dashboard's own bootstrap path never reaches it.
-        if not request.query.get("entry_id"):
+        if _zone_param(request) == (None, False):
             _bootstrap_zones = zone_registry.list_zones(hass)
             if len(_bootstrap_zones) > 1:
+                # Issue #1418: no zone's data is guessed here, but the request still named no zone, and the owner's
+                # rule is that every such request is flagged (dashboards on a device's first visit included).
+                zone_registry.flag_unscoped_request(
+                    hass,
+                    request=f"{request.method} {request.path} from {request.remote}",
+                    outcome="answered with the list of zones only",
+                )
                 return self.json(
                     {
                         "zone_selection_required": True,
@@ -367,6 +432,10 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "outdoor_temp": outdoor_temp_display,
                 "unit": unit,
                 "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),
+                # Issue #1404: the time-of-use bank holding the house right now (target, mode, end, the band it
+                # goes back to, and the one sentence every surface quotes), live; null when no bank owns the
+                # thermostat. ca_target_heat/ca_target_cool already quote the bank band while it does.
+                "current_hold": _current_hold_payload(coordinator),
                 # Issue #749: hard-invariant watchdog violations (e.g. AC and WHF both
                 # physically on at once) — empty list when nothing is wrong. Surfaced on the
                 # Status card only, per this project's Status Card Ontology: it answers "what's
@@ -828,7 +897,9 @@ def _schedule_reclassify_after_cancel(hass: HomeAssistant, coordinator: Any, ae:
             if coordinator._current_classification:
                 # Issue #1231: carry the plan's close through, or the reset reopens the planned window period.
                 hass.async_create_task(
-                    ae.apply_classification(
+                    decide(
+                        coordinator,
+                        ae.apply_classification,
                         coordinator._current_classification,
                         nat_vent_cutoff=ae._nat_vent_cutoff,
                         nat_vent_cutoff_already_reached=ae._nat_vent_cutoff_already_reached,
@@ -863,7 +934,7 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
             # cancelled" would misdescribe it.
             had_override = ae._occupant_override_active()
             had_hold = ae._fan_off_hold_active()  # Issue #1205: a hold can run with no grace behind it
-            cancelled = ae.cancel_override(reason="user_cancel_override")
+            cancelled = decide_sync(coordinator, ae.cancel_override, reason="user_cancel_override")
             if not cancelled:
                 return self.json({"status": "ok", "message": "No active override or grace period to cancel"})
 
@@ -900,7 +971,7 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
             if not ae.is_paused_by_door:
                 return self.json({"status": "ok", "message": "Not currently paused"})
 
-            restored_mode = await ae.resume_from_pause()
+            restored_mode = await decide(coordinator, ae.resume_from_pause)
             if ae.dry_run:
                 # Issue #1306: observe-only -- the pause is cleared, but no restore was sent (and no grace started).
                 return self.json(
@@ -953,7 +1024,7 @@ class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
             ae = coordinator.automation_engine
             had_fan_override = ae._fan_override_active
             had_hold = ae._fan_off_hold_active()  # Issue #1205: the fan-off pause is a fan-side request too
-            cancelled = ae.cancel_override(reason="user_cancel_fan_override")
+            cancelled = decide_sync(coordinator, ae.cancel_override, reason="user_cancel_fan_override")
             if not cancelled:
                 return self.json({"status": "ok", "message": "No active fan override to cancel."})
 
@@ -1359,7 +1430,154 @@ class ClimateAdvisorEnginesView(HomeAssistantView):
 
             status = coordinator.learning.get_engine_status()
             status["unit"] = coordinator.config.get("temp_unit", "fahrenheit")
+            # Issue #1230 R1: the v4 shadow model beside the v3 engines (Debug visibility only).
+            if hasattr(coordinator, "v4_model_summary"):
+                status["v4"] = coordinator.v4_model_summary()
             return self.json(status)
+
+
+class ClimateAdvisorPredictionAccuracyView(HomeAssistantView):
+    """GET /api/climate_advisor/prediction_accuracy - v4 vs v3 vs "no change" (Issue #1230 R1, read-only).
+
+    Query: ``zone`` (entry id; ``entry_id`` also accepted like the other views), ``sensor`` (entity id or ``_ca``,
+    default ``_ca``), ``lead`` (1h|4h|12h|24h, default 4h), ``range`` (6h|12h|24h|3d|7d|30d|1y, default 24h) and
+    ``before`` (ISO time, optional: the window ends there instead of now, for scrolling back). A bad ``lead`` or
+    ``range`` resets to its default and a bad ``before`` is ignored (clamped, never a 400, like chart_data).
+    """
+
+    url = API_PREDICTION_ACCURACY
+    name = "api:climate_advisor:prediction_accuracy"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        query = request.rel_url.query
+        # No guess with several zones and no ``zone`` (unlike the other GET views): a scorecard silently showing
+        # another zone's numbers would mislead the owner's per-zone v4 decision. The preview page always sends
+        # ``zone`` once ``/status`` has listed the zones; a single-zone install still resolves its only zone.
+        coordinator, ambiguous_refused = _resolve_request_zone(hass, request, allow_guess=False)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        with log_capture.zone_scope(coordinator.zone_label):
+            range_str = query.get("range", prediction_accuracy.DEFAULT_RANGE)
+            if range_str not in prediction_accuracy.RANGES:
+                range_str = prediction_accuracy.DEFAULT_RANGE
+            lead = query.get("lead", prediction_accuracy.DEFAULT_LEAD)
+            if lead not in V4_ARCHIVE_LEADS:
+                lead = prediction_accuracy.DEFAULT_LEAD
+            sensor = query.get("sensor") or prediction_accuracy.CA_SENSOR
+            before: datetime | None = None
+            if query.get("before"):
+                before = dt_util.parse_datetime(query["before"])
+                if before is not None and before.tzinfo is None:
+                    before = before.replace(tzinfo=dt_util.now().tzinfo)
+
+            inputs = coordinator.v4_accuracy_inputs()
+            config_dir = inputs.pop("config_dir")
+            entry_id = inputs["zone"]
+            # Issue #1431: the bedtime / wake-up swap rule's settings, read on the loop (ca_swaps in the payload).
+            cfg = getattr(coordinator, "config", None)
+            if isinstance(cfg, dict):
+                inputs.setdefault("sleep_sensor", cfg.get("sleep_indoor_temp_entity"))
+                inputs.setdefault("sleep_time", cfg.get("sleep_time"))
+                inputs.setdefault("wake_time", cfg.get("wake_time"))
+
+            def _build() -> dict[str, Any]:
+                # Blocking: reads the backtest file and walks the chart log.
+                return prediction_accuracy.build_prediction_accuracy(
+                    sensor=sensor,
+                    lead=lead,
+                    range_str=range_str,
+                    before=before,
+                    now=dt_util.now(),
+                    backtest=prediction_accuracy.load_backtest(config_dir, entry_id),
+                    **inputs,
+                )
+
+            return self.json(await hass.async_add_executor_job(log_capture.bind_zone_for_executor(_build)))
+
+
+class ClimateAdvisorTimelineView(HomeAssistantView):
+    """GET /api/climate_advisor/timeline - the operation timeline every occupant-facing surface reads (Issue #1230 R3b).
+
+    Query: ``zone`` (entry id; ``entry_id`` also accepted). With several zones and no ``zone`` the answer is 400 (the
+    same refusal as ``prediction_accuracy``): a plan silently shown for another zone would mislead. The body is the
+    frozen contract dict (``operation_timeline.to_dict``) with temperatures in the display unit, ``unit`` added, and
+    the builder's working data under ``detail``. 503 when the zone has no timeline yet (before its first
+    classification).
+    """
+
+    url = API_TIMELINE
+    name = "api:climate_advisor:timeline"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator, ambiguous_refused = _resolve_request_zone(hass, request, allow_guess=False)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+        with log_capture.zone_scope(coordinator.zone_label):
+            payload = coordinator.timeline_payload()
+            if payload is None:
+                return self.json({"error": "timeline_not_ready"}, status_code=503)
+            return self.json(payload)
+
+
+class ClimateAdvisorNightStrategyView(HomeAssistantView):
+    """GET /api/climate_advisor/night_strategy - tonight's bedroom strategy for the "Tonight in the bedroom" card
+    (Issue #1230 R6). Read-only advice: the page shows it, nothing starts a fan or opens a window.
+
+    Query: ``zone`` (entry id; ``entry_id`` also accepted); with several zones and no ``zone`` the answer is 400, the
+    same refusal as ``timeline``. The body is
+     ``NightStrategy.to_dict()`` with temperatures in the display unit, ``unit``,
+    ``headline``, ``tradeoffs``, ``source_model`` ("v4") and ``source_note`` added. ``show_numbers`` is false (and every
+    predicted figure ``null``) only while the bedroom model is below medium confidence; there is no accuracy gate.
+    503 ``{"error": "night_strategy_not_ready", "reason": ...}`` before a
+    night is in view and planned (daytime, no model yet, no forecast).
+    """
+
+    url = API_NIGHT_STRATEGY
+    name = "api:climate_advisor:night_strategy"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator, ambiguous_refused = _resolve_request_zone(hass, request, allow_guess=False)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+        with log_capture.zone_scope(coordinator.zone_label):
+            payload, reason = coordinator.night_strategy_payload()
+            if payload is None:
+                return self.json({"error": "night_strategy_not_ready", "reason": reason}, status_code=503)
+            return self.json(payload)
+
+
+class ClimateAdvisorZonesView(HomeAssistantView):
+    """GET /api/climate_advisor/zones - the loaded zones: ``{zones: [{entry_id, title}], zone_count, version}``.
+
+    Issue #1454: the dashboards ask this, not ``status``, for the zone list on a first load (no stored zone) and after
+    a failed scoped call (a startup 503), so they never send an unscoped request. Before, they sent ``GET /status``
+    with no zone, which raised the "Ambiguous zone selection" Repairs card after a restart. This view names no zone by
+    design and reads nothing of any zone (``zone_registry.list_zones()`` only), so it never raises the card; every
+    other view still flags an unscoped request (owner's rule, Issue #1418). An empty list means Climate Advisor is
+    still starting. Read-only. Kept out of ``API_VIEWS`` (in ``ZONELESS_VIEWS``) because it is the one view with no
+    zone.
+    """
+
+    url = API_ZONES
+    name = "api:climate_advisor:zones"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        zones = zone_registry.list_zones(request.app["hass"])
+        return self.json({"zones": zones, "zone_count": len(zones), "version": VERSION})
 
 
 class ClimateAdvisorDeleteReportView(HomeAssistantView):
@@ -1491,4 +1709,10 @@ API_VIEWS = [
     ClimateAdvisorSubmitGithubIssueView,
     ClimateAdvisorEventLogView,
     ClimateAdvisorEnginesView,
+    ClimateAdvisorPredictionAccuracyView,
+    ClimateAdvisorTimelineView,
+    ClimateAdvisorNightStrategyView,
 ]
+
+# Issue #1454: views that name no zone by design (registered next to API_VIEWS; they never flag an unscoped request).
+ZONELESS_VIEWS = [ClimateAdvisorZonesView]

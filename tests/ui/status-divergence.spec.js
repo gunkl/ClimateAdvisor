@@ -10,7 +10,7 @@ const { test, expect } = require('@playwright/test');
 test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
 
   test('shows (CA: X) annotation when real setpoint diverges from CA target by >1 degree', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (route) => {
+    await page.route('**/api/climate_advisor/status**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -36,11 +36,11 @@ test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
     const hvacItem = page.locator('.status-item', { hasText: 'HVAC' });
     const html = await hvacItem.innerHTML();
     expect(html).toContain('74');
-    expect(html).toContain('(CA: 72');
+    expect(html).toContain('(Climate Advisor wants 72');
   });
 
   test('shows no annotation when real setpoint matches CA target', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (route) => {
+    await page.route('**/api/climate_advisor/status**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -66,7 +66,7 @@ test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
     const hvacItem = page.locator('.status-item', { hasText: 'HVAC' });
     const html = await hvacItem.innerHTML();
     expect(html).toContain('72');
-    expect(html).not.toContain('(CA:');
+    expect(html).not.toContain('Climate Advisor wants');
   });
 
 });
@@ -88,7 +88,7 @@ test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
 test.describe('Natural Vent info merged into Status card (Issue #407, #409)', () => {
 
   test('Status card shows the cycling band when nat-vent is active', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (route) => {
+    await page.route('**/api/climate_advisor/status**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -134,7 +134,7 @@ test.describe('Natural Vent info merged into Status card (Issue #407, #409)', ()
   });
 
   test('Status card shows no nat-vent line when nat-vent is not active', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (route) => {
+    await page.route('**/api/climate_advisor/status**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',

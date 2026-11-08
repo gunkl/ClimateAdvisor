@@ -57,7 +57,7 @@ def _blower_engine(
     """``hvac_fan`` install on a mild day: the nat-vent entry gate is satisfied (outdoor < indoor)."""
     engine = _make_engine(indoor=indoor, mode=mode, **{CONF_FAN_MODE: FAN_MODE_HVAC, **cfg})
     engine._last_outdoor_temp = outdoor
-    engine._hourly_forecast_temps = []
+    engine.inputs.hourly_forecast = []
     engine._current_classification = _classification(day)
     engine._test_state.attributes.update({"fan_modes": ["auto", "on"], "fan_mode": "auto"})
     engine._sensor_check_callback = lambda: True
@@ -122,8 +122,8 @@ def _whf_soft_start_engine() -> AutomationEngine:
     """Hot evening, whole-house fan: outdoor 79 is above the full-gate threshold but below indoor 80 and past
     today's 85 peak, so only the soft start qualifies."""
     engine = _engine(mode="cool", indoor=80.0, outdoor=79.0)
-    engine._outdoor_temp_today_peak = 85.0
-    engine._outdoor_temp_today_sample_count = 20
+    engine.inputs.today_peak = 85.0
+    engine.inputs.today_sample_count = 20
     return engine
 
 
@@ -440,8 +440,8 @@ class TestSoftStartEdges:
 
     def test_control_blower_install_has_no_soft_start(self):
         engine = _blower_engine(indoor=80.0, outdoor=79.0)
-        engine._outdoor_temp_today_peak = 85.0
-        engine._outdoor_temp_today_sample_count = 20
+        engine.inputs.today_peak = 85.0
+        engine.inputs.today_sample_count = 20
         _open(engine)
         assert engine._natural_vent_active is False
         assert engine._paused_by_door is True

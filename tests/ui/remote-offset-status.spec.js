@@ -20,14 +20,14 @@ const BASE = {
 const OFFSET = {
   state: 'clamped',
   mode: 'heat',
-  text: 'Bedroom 66°F target - thermostat set 70°F (+4°F, clamped at the +4°F cap)',
+  text: 'Bedroom 66°F target - thermostat set 70°F (4° above the target, clamped at the 4° cap)',
   commanded: 70,
   expected_setpoint: 70,
   offset_active: true,
 };
 
 async function hvacHtml(page, body) {
-  await page.route('**/api/climate_advisor/status', (route) => {
+  await page.route('**/api/climate_advisor/status**', (route) => {
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
   await page.goto('/');
@@ -38,18 +38,18 @@ async function hvacHtml(page, body) {
 test.describe('Status card offset line (Issue #1194 d)', () => {
   test('an offset night shows the target and the command, not a (CA: 66) disagreement', async ({ page }) => {
     const html = await hvacHtml(page, { ...BASE, current_setpoint: 70, remote_offset: OFFSET });
-    expect(html).toContain('Bedroom 66°F target - thermostat set 70°F (+4°F, clamped at the +4°F cap)');
-    expect(html).not.toContain('(CA:');
+    expect(html).toContain('Bedroom 66°F target - thermostat set 70°F (4° above the target, clamped at the 4° cap)');
+    expect(html).not.toContain('Climate Advisor wants');
   });
 
   test('a thermostat reporting something other than the commanded value still shows (CA: X)', async ({ page }) => {
     const html = await hvacHtml(page, { ...BASE, current_setpoint: 74, remote_offset: OFFSET });
-    expect(html).toContain('(CA: 70');
+    expect(html).toContain('(Climate Advisor wants 70');
   });
 
   test('a thermostat no longer in the offset mode is not compared with the commanded value', async ({ page }) => {
     const html = await hvacHtml(page, { ...BASE, hvac_mode: 'off', current_setpoint: 74, remote_offset: OFFSET });
-    expect(html).not.toContain('(CA:');
+    expect(html).not.toContain('Climate Advisor wants');
   });
 
   test('no offset keeps the plain band-edge comparison', async ({ page }) => {
@@ -58,7 +58,7 @@ test.describe('Status card offset line (Issue #1194 d)', () => {
       current_setpoint: 70,
       remote_offset: { state: 'holding', text: null, expected_setpoint: null, offset_active: false },
     });
-    expect(html).toContain('(CA: 66');
+    expect(html).toContain('(Climate Advisor wants 66');
     expect(html).not.toContain('remote-offset-line');
   });
 });
@@ -66,7 +66,7 @@ test.describe('Status card offset line (Issue #1194 d)', () => {
 // Issue #1194 (d) P2: the dashed "Thermostat set" chart series has a legend item only while it exists.
 test.describe('Chart legend for the commanded setpoint (Issue #1194 d)', () => {
   test('the Thermostat set legend item is hidden on a page with no offset night', async ({ page }) => {
-    await page.route('**/api/climate_advisor/status', (route) => {
+    await page.route('**/api/climate_advisor/status**', (route) => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(BASE) });
     });
     await page.goto('/');

@@ -17,11 +17,15 @@ same logic" problem.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import sys
 import tempfile
 from pathlib import Path
+
+# No package-relative imports in this module: tools/_zone_storage.py loads it standalone (outside the package)
+# for the CLI tools, so the list of per-zone files lives in const.ENTRY_SCOPED_FILES and is passed in.
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -152,3 +156,107 @@ def migrate_legacy_storage_file(config_dir: Path, base_filename: str, entry_id: 
             legacy_path.name,
             err,
         )
+
+
+def remove_entry_scoped_files(config_dir: Path, entry_id: str, base_filenames: tuple[str, ...]) -> list[str]:
+    """Delete one removed zone's own storage files; return the names deleted (blocking: run in the executor).
+
+    Called only from ``async_remove_entry`` (the zone was deleted), never on unload or reload, which keep
+    their data, with ``base_filenames=const.ENTRY_SCOPED_FILES``. Deletes exactly the entry-scoped name of
+    each base, so another zone's files and a legacy unscoped file (which may still belong to an entry that
+    was never migrated) are never touched. A falsy ``entry_id`` deletes nothing, because
+    ``resolve_entry_scoped_path`` maps it to the shared unscoped name. Leftover ``.tmp`` files are not
+    removed: their mkstemp names cannot be tied to one zone. A missing file is skipped; an OSError on one
+    file is logged and the rest are still deleted. Never raises.
+    """
+    if not entry_id:
+        _LOGGER.warning("storage_paths: zone removal with no entry id; no files deleted")
+        return []
+    removed: list[str] = []
+    for base in base_filenames:
+        path = resolve_entry_scoped_path(config_dir, base, entry_id)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as err:
+            _LOGGER.warning("storage_paths: failed to delete %s for removed zone %s: %s", path.name, entry_id, err)
+            continue
+        removed.append(path.name)
+    _LOGGER.info(
+        "storage_paths: removed zone %s; deleted %d file(s): %s", entry_id, len(removed), ", ".join(removed) or "none"
+    )
+    return removed
+
+
+def split_shared_list_file(
+    config_dir: Path, base_filename: str, entry_ids: list[str], *, all_zones_known: bool = True
+) -> None:
+    """One-time split of a shared, unscoped JSON-list file into every zone's own copy (Issue #1415).
+
+    Used for the AI investigation history, which was one file per install while each zone saved its whole
+    in-memory list into it (the last zone to save erased the others). Its entries carry no zone tag, so no
+    entry can be attributed to one zone: every zone in ``entry_ids`` whose own file does not exist yet gets
+    the full list (what each zone's History already showed after a restart before the fix). A zone file that
+    already exists is never overwritten. The shared file is then removed, but only when ``all_zones_known``
+    (``entry_ids`` is every configured zone) and every write worked; otherwise it stays for the rest. A file
+    that is not valid JSON or not a list is unreadable either way: it is removed with a WARNING and every zone
+    starts fresh.
+
+    No-op when the shared file does not exist. Blocking I/O; callers hold a lock so two zones starting at
+    once cannot split it twice, and run it in the executor. Never raises.
+    """
+
+    legacy = config_dir / base_filename
+    if not legacy.exists():
+        return
+    try:
+        data = json.loads(legacy.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as err:
+        data = None
+        _LOGGER.warning("storage_paths: %s is unreadable (%s); removing it, zones start fresh", legacy.name, err)
+    if data is not None and not isinstance(data, list):
+        _LOGGER.warning("storage_paths: %s has an unexpected format; removing it, zones start fresh", legacy.name)
+        data = None
+
+    ok = True
+    if data is not None:
+        payload = json.dumps(data, indent=2, default=str).encode("utf-8")
+        for entry_id in entry_ids:
+            if not entry_id:
+                continue
+            new_path = resolve_entry_scoped_path(config_dir, base_filename, entry_id)
+            if new_path.exists():
+                continue
+            tmp_path_str = None
+            try:
+                tmp_fd, tmp_path_str = tempfile.mkstemp(dir=config_dir, prefix=f"{new_path.stem}_", suffix=".tmp")
+                with os.fdopen(tmp_fd, "wb") as f:
+                    f.write(payload)
+                os.replace(tmp_path_str, str(new_path))
+                if sys.platform != "win32":
+                    os.chmod(str(new_path), 0o600)
+            except OSError as err:
+                ok = False
+                _LOGGER.error(
+                    "storage_paths: failed to write %s while splitting %s: %s", new_path.name, legacy.name, err
+                )
+                if tmp_path_str:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp_path_str)
+                continue
+            _LOGGER.info("storage_paths: copied %d entries of %s -> %s", len(data), legacy.name, new_path.name)
+
+    if data is not None and (not all_zones_known or not ok):
+        return  # other zones (unknown here, or a failed write) still need the shared file
+    try:
+        legacy.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as err:
+        _LOGGER.warning("storage_paths: failed to remove %s: %s", legacy.name, err)
+        return
+    if data is not None:
+        _LOGGER.info("storage_paths: split %s into %d zone file(s) and removed it", legacy.name, len(entry_ids))

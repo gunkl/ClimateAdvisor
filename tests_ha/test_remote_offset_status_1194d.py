@@ -1,9 +1,9 @@
 """Real-HA test for Issue #1194 (d): what the occupant sees on an offset night, end to end.
 
 Occupant story: the bedroom is cold, the hallway thermostat is satisfied, and Climate Advisor has raised the hallway
-setpoint to the +4 F cap. The Status card must say "Bedroom 66F target - thermostat set 70F (+4F, clamped at the +4F
-cap)" instead of "70F (CA: 66F)", and the chart must keep the Target line at the bedroom's 66 F with the thermostat's
-70 F as its own series -- never a sleep band that appears to have moved.
+setpoint to the +4 F cap. The Status card must say "Bedroom 66F target - thermostat set 70F (4 above the target,
+clamped at the 4 cap)" instead of "70F (CA: 66F)", and the chart must keep the Target line at the bedroom's 66 F
+with the thermostat's 70 F as its own series -- never a sleep band that appears to have moved.
 
 The REAL status view and the REAL chart builder run against the real coordinator / engine (dev thermostat sim, real
 bedroom state). Explicit asserts only: the syrupy snapshot file is locked, no snapshot entry is added.
@@ -50,7 +50,8 @@ async def test_clamped_offset_night_status_and_chart(make_house, fan) -> None:
     assert ro["comfort_target"] == _PLAIN_F and ro["commanded"] == _PLAIN_F + 4.0
     assert ro["offset_applied"] == 4.0 and ro["offset_applied_f"] == 4.0
     assert ro["remote_reading"] == 58.0 and ro["remote_reading_age_s"] is not None
-    assert ro["text"] == "Bedroom 66°F target - thermostat set 70°F (+4°F, clamped at the +4°F cap)"
+    # Issue #1399: the offset is written as an unsigned gap, not like a reading ("+4°F")
+    assert ro["text"] == "Bedroom 66°F target - thermostat set 70°F (4° above the target, clamped at the 4° cap)"
     # The #402 comparison input: the thermostat reads the commanded 70, the expected value is 70 (no "(CA: 66)").
     assert body["current_setpoint"] == pytest.approx(_PLAIN_F + 4.0)
     assert ro["expected_setpoint"] == _PLAIN_F + 4.0 and body["ca_target_heat"] == _PLAIN_F

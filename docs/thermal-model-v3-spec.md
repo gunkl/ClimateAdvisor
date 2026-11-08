@@ -1,4 +1,4 @@
-<!-- Nav: ← [05-LEARNING-ENGINE-DESIGN.md](05-LEARNING-ENGINE-DESIGN.md) | → [learning.py](../custom_components/climate_advisor/learning.py) + [coordinator.py](../custom_components/climate_advisor/coordinator.py) | ↔ [08-COMPUTATION-REFERENCE.md](08-COMPUTATION-REFERENCE.md) -->
+<!-- Nav: ← [05-LEARNING-ENGINE-DESIGN.md](05-LEARNING-ENGINE-DESIGN.md) | → [learning.py](../custom_components/climate_advisor/learning.py) + [coordinator.py](../custom_components/climate_advisor/coordinator.py) | ↔ [08-COMPUTATION-REFERENCE.md](08-COMPUTATION-REFERENCE.md) [Predictor v4](predictor-v4-spec.md) -->
 
 # Thermal Model v3 — Territory Spec (Tier 3)
 
@@ -6,6 +6,7 @@
 
 | Question | Short answer (≤2 sentences) | → Full answer |
 |---|---|---|
+| Is v3 still the model that drives the house (0.9.4)? | Only when it is the zone's PRIMARY prediction engine (Settings -> Prediction engine; the default is v4). v3's learned observations (the learning database, swing, solar phase, vent rates) are always collected and stay the inputs every engine's control model is laid over; its own curve (`_last_predicted_indoor`) and 4 h `pred_archive` are built only while v3 is the primary or comparison engine. With v4 primary the rate decisions read v4's scalars over this model, or blanked "not learned yet" values, never v3's rates. v3's curve follows the same planned-window rule as v4, including tomorrow's planned period (`window_span.py`, `tomorrow_window=`, Issue #1391). | [Prediction Engines Spec](prediction-engines-spec.md), [08 §5b-i](08-COMPUTATION-REFERENCE.md#5b-i-which-prediction-engine-feeds-each-decision-issue-1230-r6b) |
 | What triggers a `passive_decay` observation and what does it measure? | Starts when HVAC off, fan off, windows closed, and `\|T_indoor − T_outdoor\| ≥ 3°F`; measures `k_passive` (envelope decay rate, hr⁻¹, always negative). Requires 30 samples minimum (long-window path) or 5 samples (rolling-window path). | [§Observation Types](#observation-types) |
 | When does the gate bridge activate and what does it do? | Activates when `k_passive is None OR confidence_k_passive == "none"` AND `k_vent_window` is not None and `≤ 0`. Promotes `k_vent_window` as a proxy `k_passive` so physics prediction can run on bridge-only homes without a data wipe. | [§Gate Bridge](#gate-bridge) |
 | What are the three rolling-window thresholds and what happens at each? | `THERMAL_ROLLING_MIN_WINDOW_MINUTES` (30 min): earliest commit attempt; `THERMAL_ROLLING_MAX_WINDOW_MINUTES` (240 min): hard cap — commit or abandon regardless of signal; signal check (`THERMAL_ROLLING_MIN_DELTA_T_F = 0.2°F`): required indoor ΔT to commit between the two limits. | [§Rolling Window Constraints](#rolling-window-constraints) |
@@ -24,6 +25,8 @@
 | What happens to thermal learning while the indoor sensor is unavailable? | `_get_current_sample()` returns `None` (no fake `0.0`); pre-heat and event-driven samples are skipped (DEBUG), and an HVAC session that starts during the outage is not started and records an `indoor_unavailable` rejection (INFO `Thermal HVAC observation not started`). Operational interruption, not a quality failure (Issue #1035). | [Indoor-sensor outage handling](#indoor-sensor-outage-handling-issue-1035) |
 | What rejection codes indicate normal operation vs. pipeline failure for HVAC obs types? | `new_session_started` (short-cycling), `plateau_guard` (insufficient post-heat decay), and `n=0 delta_t=0.00°F` (sensor quantization) are expected on some homes. `n=0` with elapsed > 0 in pre-v0.3.50 coordinators indicates the key-shadow bug. | [§Known Rejection Patterns](#known-rejection-patterns) |
 
+**Data sources for fitting (Issue #1230 R0, 0.9.1):** the chart_log fits below read `indoor`/`outdoor` per row. Rows written from 0.9.1 also carry `indoor_sensors` (`{entity_id: °F | null}` for every configured indoor sensor, independent of the sleep window; also the way to recover `indoor_primary` between `hvac_action_change` rows) - see [Chart Log Spec](chart-log-spec.md#indoor-sensors-field-issue-1230-r0). What the hourly weather forecast said at each point in time (for scoring forecast error by lead time) is archived by [Forecast Archive Spec](forecast-archive-spec.md), read through `ForecastArchive.get_snapshots()`. No fit in this spec reads either yet; they are R0 data foundations. **Prediction engine v4 (Issue #1230 R1):** a second, separate predictor ([Predictor v4 Spec](predictor-v4-spec.md)) trains on the same chart_log rows (and the forecast archive) and runs in shadow beside this model ([v4 Shadow Spec](v4-shadow-spec.md)). This spec's v3 model (`_build_predicted_indoor_future`, `_pred_archive`, chart `pred_indoor`) remains the ONLY decision model; no code in this spec reads v4, and v4 never writes `LearningState`.
+
 ---
 
 ## Scope
@@ -34,51 +37,51 @@
 
 **Issue #587 (k_vent/fan_only_decay retirement + vent split), and the two accompanying calculation-defect fixes, landed together** — see [§k_vent / fan_only_decay retirement](#k_vent--fan_only_decay-retirement-issue-587) for the combined summary. Tracking issues: [#587](https://github.com/gunkl/ClimateAdvisor/issues/587) (structural split), [#851](https://github.com/gunkl/ClimateAdvisor/issues/851) (endpoint estimator time-varying-outdoor bias), [#852](https://github.com/gunkl/ClimateAdvisor/issues/852) (solar_gain conduction attribution). Known-gap follow-ups filed alongside, not fixed in this round: [#853](https://github.com/gunkl/ClimateAdvisor/issues/853) (vent-observation sensor-causality gap), [#854](https://github.com/gunkl/ClimateAdvisor/issues/854) (post-deploy monitoring).
 
-**Line ranges (re-verified against source, 2026-09-04, post-Issue-#587):**
+**Line ranges (re-verified against source, 2026-11-07, v0.9.4):**
 
 | Function | File | Start line |
 |---|---|---|
-| `compute_k_passive` | learning.py | 276 |
-| `compute_k_passive_blocks` | learning.py | 374 |
-| `_interp_outdoor` | learning.py | 459 |
-| `_integrate_indoor_rk4` | learning.py | 480 |
-| `compute_k_passive_endpoint` | learning.py | 513 |
-| `compute_k_env_solar` | learning.py | 609 |
-| `compute_k_active` | learning.py | 685 |
-| `compute_k_solar` | learning.py | 744 |
-| `compute_k_active_single_point` | learning.py | 806 |
-| `record_thermal_observation` (method) | learning.py | 1078 |
-| `update_solar_phase_offset` | learning.py | 1219 |
-| `get_engine_status` | learning.py | 1296 |
-| `get_thermal_model` | learning.py | 1372 |
-| `_commit_event_from_dict` | learning.py | 1478 |
-| `_start_hvac_observation` | coordinator.py | 6115 |
-| `_sample_all_observations` | coordinator.py | 6219 |
-| `_evaluate_vent_split_observation` | coordinator.py | 6467 |
-| `_is_solar_hour` | coordinator.py | 6542 |
-| `_select_estimator` | coordinator.py | 6553 |
-| `_extract_passive_windows` | coordinator.py | 6630 |
-| `_extract_ventilated_windows` (`fan_state` kwarg) | coordinator.py | 6842 |
-| `_passive_endpoint_estimate` | coordinator.py | 6701 |
-| `_vent_endpoint_estimate` (renamed from `_ventilated_endpoint_estimate`) | coordinator.py | 6916 |
-| `_run_passive_chart_log_fit` | coordinator.py | 6734 |
-| `_run_vent_window_chart_log_fit` | coordinator.py | 6954 |
-| `_run_vent_fan_chart_log_fit` | coordinator.py | 6958 |
-| `_run_vent_chart_log_fit_impl` | coordinator.py | 6962 |
-| `_run_solar_phase_chart_log_fit` | coordinator.py | 7095 |
-| `_start_decay_observation` | coordinator.py | 7339 |
-| `_end_hvac_active_phase` | coordinator.py | 7361 |
-| `_check_hvac_stabilization` | coordinator.py | 7407 |
-| `_commit_observation` | coordinator.py | 7495 |
-| `_abandon_observation` | coordinator.py | 7531 |
-| `_commit_observation_if_sufficient` | coordinator.py | 7700 |
-| `_evaluate_rolling_window` | coordinator.py | 7733 |
-| `_commit_rolling_window_obs` | coordinator.py | 7804 |
-| `_simulate_indoor_physics` | coordinator.py | 9722 |
-| `_estimate_solar_phase_offset` | coordinator.py | 9796 |
-| `_simulate_indoor_physics_v3` | coordinator.py | 9962 |
-| `_build_predicted_indoor_future` | coordinator.py | 10335 |
-| `_solar_factor` | coordinator.py | 9775 |
+| `compute_k_passive` | learning.py | 311 |
+| `compute_k_passive_blocks` | learning.py | 409 |
+| `_interp_outdoor` | learning.py | 494 |
+| `_integrate_indoor_rk4` | learning.py | 515 |
+| `compute_k_passive_endpoint` | learning.py | 548 |
+| `compute_k_env_solar` | learning.py | 644 |
+| `compute_k_active` | learning.py | 720 |
+| `compute_k_solar` | learning.py | 779 |
+| `compute_k_active_single_point` | learning.py | 841 |
+| `record_thermal_observation` (method) | learning.py | 1192 |
+| `update_solar_phase_offset` | learning.py | 1338 |
+| `get_engine_status` | learning.py | 1389 |
+| `get_thermal_model` | learning.py | 1456 |
+| `_commit_event_from_dict` | learning.py | 1561 |
+| `_start_hvac_observation` | coordinator.py | 11796 |
+| `_sample_all_observations` | coordinator.py | 11928 |
+| `_evaluate_vent_split_observation` | coordinator.py | 12240 |
+| `_is_solar_hour` | coordinator.py | 12315 |
+| `_select_estimator` | coordinator.py | 12326 |
+| `_extract_passive_windows` | coordinator.py | 12403 |
+| `_extract_ventilated_windows` (`fan_state` kwarg) | coordinator.py | 12615 |
+| `_passive_endpoint_estimate` | coordinator.py | 12474 |
+| `_vent_endpoint_estimate` (renamed from `_ventilated_endpoint_estimate`) | coordinator.py | 12689 |
+| `_run_passive_chart_log_fit` | coordinator.py | 12507 |
+| `_run_vent_window_chart_log_fit` | coordinator.py | 12727 |
+| `_run_vent_fan_chart_log_fit` | coordinator.py | 12731 |
+| `_run_vent_chart_log_fit_impl` | coordinator.py | 12735 |
+| `_run_solar_phase_chart_log_fit` | coordinator.py | 12868 |
+| `_start_decay_observation` | coordinator.py | 13112 |
+| `_end_hvac_active_phase` | coordinator.py | 13134 |
+| `_check_hvac_stabilization` | coordinator.py | 13184 |
+| `_commit_observation` | coordinator.py | 13272 |
+| `_abandon_observation` | coordinator.py | 13308 |
+| `_commit_observation_if_sufficient` | coordinator.py | 13486 |
+| `_evaluate_rolling_window` | coordinator.py | 13519 |
+| `_commit_rolling_window_obs` | coordinator.py | 13590 |
+| `_simulate_indoor_physics` | coordinator.py | 16674 |
+| `_estimate_solar_phase_offset` | coordinator.py | 16757 |
+| `_simulate_indoor_physics_v3` | coordinator.py | 16923 |
+| `_build_predicted_indoor_future` | coordinator.py | 17369 |
+| `_solar_factor` | coordinator.py | 16736 |
 
 Line numbers shifted substantially from the pre-#587 table (coordinator.py grew ~2000 lines across this and other intervening changes) — re-verify with grep rather than trusting a cached line number if this table goes stale again.
 
@@ -160,6 +163,9 @@ Known consequences (accepted, not defects):
   non-HVAC triggers require a non-None indoor reading, so decisions are cushioned.
 - The restart-time late start (an HVAC run already in progress when HA restarts) is
   skipped if the indoor sensor has not loaded yet; that session is simply not learned.
+  When it does run, it learns only from the post-restart part of the run, by design
+  (Issue #1437): observations are never persisted, and a fit across the blind gap
+  while HA was down is invalid (the thermostat may have stopped and restarted unseen).
 - The single-point `k_active` fallback in `learning.py` (average of pre-heat plus active
   samples) can no longer be polluted by a stored `0.0`, because no `0.0` sample is ever
   stored.

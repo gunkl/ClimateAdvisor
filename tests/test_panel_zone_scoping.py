@@ -25,11 +25,17 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from custom_components.climate_advisor.api import API_VIEWS
+from custom_components.climate_advisor.api import API_VIEWS, ZONELESS_VIEWS
 from custom_components.climate_advisor.const import DOMAIN, PANEL_FRONTEND_PATH
+from custom_components.climate_advisor.dashboard_api import DASHBOARD_VIEWS
 from tools.sim_harness._loop import run_coro
 from tools.sim_harness.build_coordinator import build_headless_multi_zone
 from tools.sim_harness.multi_zone_assertions import check_multi_zone_assertion
+
+# Every shared view __init__.py registers once (``for view_cls in (*API_VIEWS, *DASHBOARD_VIEWS)``):
+# the classic REST views plus the opt-in dashboard's views (Issue #1230 R5). Derived from the real
+# lists, so adding a view to either never needs this test touched.
+SHARED_VIEWS = [*API_VIEWS, *DASHBOARD_VIEWS, *ZONELESS_VIEWS]
 
 
 class TestPanelAndViewRegistrationScoping:
@@ -53,9 +59,9 @@ class TestPanelAndViewRegistrationScoping:
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
 
         assert len(zones) == 2
-        assert len(fake_hass.http.registered_views) == len(API_VIEWS), (
+        assert len(fake_hass.http.registered_views) == len(SHARED_VIEWS), (
             "expected the shared REST views to be registered exactly once "
-            f"(len(API_VIEWS)={len(API_VIEWS)}), got "
+            f"(len(SHARED_VIEWS)={len(SHARED_VIEWS)}), got "
             f"{len(fake_hass.http.registered_views)} — the second zone's setup "
             "likely re-ran the registration loop instead of being guarded"
         )
@@ -89,11 +95,12 @@ class TestPanelAndViewRegistrationScoping:
 
         assert len(zones) == 2
         # If the second zone had attempted registration, registered_views
-        # would hold 2 * len(API_VIEWS) entries (the fake appends, it never
+        # would hold 2 * len(SHARED_VIEWS) entries (the fake appends, it never
         # deduplicates) — asserting the exact single-registration count here
         # is the direct evidence the guard fired for zone 2, not just that
         # the end state happens to look right.
-        assert len(fake_hass.http.registered_views) == len(API_VIEWS)
+        assert len(fake_hass.http.registered_views) == len(SHARED_VIEWS)
+        assert {type(v) for v in fake_hass.http.registered_views} == set(SHARED_VIEWS)
 
 
 class TestPanelRegistrationWarningZoneAttribution:

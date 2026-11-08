@@ -59,6 +59,89 @@ def _bucket_comfort_target(group: list[dict[str, Any]]) -> float | None:
     return round(sum(vals) / len(vals), 1)
 
 
+def _bucket_indoor_sensors(group: list[dict[str, Any]]) -> dict[str, float | None] | None:
+    """Per-entity mean (2 dp) of the rows' ``indoor_sensors``, or None when no row in the bucket carried the field.
+
+    Issue #1230 R0. Same precedent as ``comfort_target``: the key appears only when at least one row has it, under the
+    same name in the hourly and daily shapes. An entity whose every reading in the bucket is None stays in the mapping
+    as None (the sensor was configured but silent). Legacy rows without the field contribute nothing.
+    """
+    maps = [e["indoor_sensors"] for e in group if isinstance(e.get("indoor_sensors"), dict)]
+    if not maps:
+        return None
+    vals: dict[str, list[float]] = {}
+    for m in maps:
+        for entity_id, v in m.items():
+            bucket = vals.setdefault(entity_id, [])
+            if isinstance(v, int | float) and not isinstance(v, bool):
+                bucket.append(v)
+    return {k: (round(sum(v) / len(v), 2) if v else None) for k, v in vals.items()}
+
+
+def _bucket_hold(group: list[dict[str, Any]]) -> dict[str, float]:
+    """The bucket's ``hold_lower``/``hold_upper`` (Issue #1406), or {} when no row in it carried them.
+
+    Same rule as ``lower``/``upper`` (the mean of the rows, 1 dp), with each row contributing the band the chart drew
+    for it: its hold when it has one, else its ``lower``/``upper`` (on those rows the hold IS the band schedule). So an
+    hour or a day that is part bank and part not averages the drawn band, never the hold rows alone. Buckets without
+    any hold row get no keys (the ``comfort_target`` precedent), and the chart draws their ``lower``/``upper``.
+    """
+    if not any(e.get("hold_lower") is not None and e.get("hold_upper") is not None for e in group):
+        return {}
+    out: dict[str, float] = {}
+    for key, base in (("hold_lower", "lower"), ("hold_upper", "upper")):
+        vals = []
+        for e in group:
+            has_hold = e.get("hold_lower") is not None and e.get("hold_upper") is not None
+            v = e.get(key) if has_hold else e.get(base)
+            if v is not None:
+                vals.append(v)
+        if vals:
+            out[key] = round(sum(vals) / len(vals), 1)
+    return out if len(out) == 2 else {}
+
+
+# Issue #1414: humidity and feels-like fields (chart display only). Written only when a value exists.
+HUMIDITY_FEELSLIKE_KEYS: tuple[str, ...] = ("humidity", "feelslike", "outdoor_humidity", "outdoor_feelslike")
+
+
+def _bucket_optional_means(group: list[dict[str, Any]], keys: tuple[str, ...]) -> dict[str, float]:
+    """Each key's mean over the rows that carry it (not rounded: native resolution); a key no row carries is absent.
+
+    Issue #1414: one shared rule for the hourly and daily shapes, so a feels-like that applied for part of an hour
+    averages only the rows where NWS defined it (a mild row has no feels-like, never a stand-in value).
+    """
+    out: dict[str, float] = {}
+    for key in keys:
+        vals = [e[key] for e in group if isinstance(e.get(key), int | float) and not isinstance(e.get(key), bool)]
+        if vals:
+            out[key] = sum(vals) / len(vals)
+    return out
+
+
+def _bucket_context(group: list[dict[str, Any]]) -> dict[str, Any]:
+    """Bucket the Issue #1230 R2 context fields: dominant occupancy and band_sensor, override if any row had it.
+
+    Each key appears only when at least one row in the bucket carried it (same precedent as ``comfort_target``).
+    """
+    out: dict[str, Any] = {}
+    for key in ("occupancy", "band_sensor"):
+        counts: dict[str, int] = defaultdict(int)
+        for e in group:
+            v = e.get(key)
+            if isinstance(v, str) and v:
+                counts[v] += 1
+        if counts:
+            out[key] = max(counts, key=lambda k: counts[k])
+    if any(e.get("override") is True for e in group):
+        out["override"] = True
+    # Issue #1436: the plan's window state, when any row recorded it (true if the plan had the windows open in any row)
+    planned = [e.get("windows_planned") for e in group if isinstance(e.get("windows_planned"), bool)]
+    if planned:
+        out["windows_planned"] = any(planned)
+    return out
+
+
 class ChartStateLog:
     """Rolling log of HVAC state snapshots and event markers for charting."""
 
@@ -161,6 +244,17 @@ class ChartStateLog:
         nat_vent_target: float | None = None,
         indoor_primary: float | None = None,
         comfort_target: float | None = None,
+        indoor_sensors: dict[str, float | None] | None = None,
+        occupancy: str | None = None,
+        override: bool | None = None,
+        band_sensor: str | None = None,
+        hold_lower: float | None = None,
+        hold_upper: float | None = None,
+        windows_planned: bool | None = None,
+        humidity: float | None = None,
+        feelslike: float | None = None,
+        outdoor_humidity: float | None = None,
+        outdoor_feelslike: float | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
 
@@ -184,6 +278,32 @@ class ChartStateLog:
             offset (Issue #1194 d), so ``setpoint`` (what the thermostat was told) and the target the room is
             supposed to reach are charted apart. The key is present only when an offset was in force, so every other
             row and older logs are unchanged.
+        indoor_sensors: every configured indoor sensor's reading, ``{entity_id: temp_f_or_None}`` in internal F rounded
+            to 2 dp (``indoor_temp.read_indoor_sensors_f()``; ``None`` = that sensor failed the resolver's
+            parse/plausibility/stale rules). Read on every row regardless of the sleep window, so the v4 model can fit
+            one line per sensor. The key is present only when a mapping is given (new rows from the coordinator always
+            give one); older rows lack it. Informational only: nothing reads it for a decision or a display, and
+            ``get_chart_data()`` strips it from ``state_log`` (Issue #1230 R0).
+        occupancy: the zone occupancy mode on this row (home, away, vacation or guest; Issue #1230 R2),
+            so the Status chart can draw an Away / Vacation strip. Written when given; absent on older rows.
+        override: True while a manual override or its grace period is active on this row (Issue #1230 R2). Written only
+            when True, so ordinary rows stay as small as before; absent means "no override".
+        band_sensor: entity id of the sensor Climate Advisor was reading for comfort on this row, i.e. the sensor the
+            Target Band applied to (the bedroom sensor in the sleep window; Issue #1230 R2). Written when known.
+        hold_lower/hold_upper: the band the chart DREW at this instant when it differs from ``lower``/``upper``
+            (Issue #1406): a time-of-use bank drawn as the hold the thermostat is told (an Away cool bank to 77 F in a
+            60-80 F band: 60-77, where ``lower``/``upper`` keep the band schedule's 77-80), the schedule band while a
+            bank is deferred, the Away/Vacation period widened. Display only; the caller passes the pair only when it
+            differs, and it is written only as a pair, so ordinary rows and older logs are unchanged and
+            ``lower``/``upper`` keep their meaning for the replay tools.
+        windows_planned: whether the operation timeline expected the windows open at this instant (Issue #1436): the
+            PAST "Win plan" strip, the same meaning as its faded part. ``windows_recommended`` is the classifier's live
+            flag (true at 4 AM on a warm day), which is why it can no longer draw that strip. Written when given (True
+            or False); absent on older rows and while there is no plan.
+        humidity/feelslike/outdoor_humidity/outdoor_feelslike: Issue #1414, chart display only. ``humidity`` is the
+            indoor RH % of the room whose temperature is ``indoor`` (the bedroom in the sleep window), ``feelslike`` its
+            NWS heat index (internal F) when NWS defines one; ``outdoor_humidity`` the outdoor RH %,
+            ``outdoor_feelslike`` the NWS heat index or wind chill (internal F). Each is written only when not None.
         nat_vent_target: the real thermostatic target the nat-vent fan was cycling
             around this cycle (Phase 3a), computed via
             ``nat_vent_cycling.compute_nat_vent_target()`` — only meaningful (non-None)
@@ -217,6 +337,27 @@ class ChartStateLog:
             entry["indoor_primary"] = indoor_primary
         if comfort_target is not None:
             entry["comfort_target"] = comfort_target
+        if indoor_sensors is not None:
+            entry["indoor_sensors"] = dict(indoor_sensors)
+        if occupancy is not None:
+            entry["occupancy"] = occupancy
+        if override:
+            entry["override"] = True
+        if band_sensor is not None:
+            entry["band_sensor"] = band_sensor
+        if hold_lower is not None and hold_upper is not None:
+            entry["hold_lower"] = hold_lower
+            entry["hold_upper"] = hold_upper
+        if windows_planned is not None:
+            entry["windows_planned"] = bool(windows_planned)
+        for key, val in (
+            ("humidity", humidity),
+            ("feelslike", feelslike),
+            ("outdoor_humidity", outdoor_humidity),
+            ("outdoor_feelslike", outdoor_feelslike),
+        ):
+            if val is not None:
+                entry[key] = val
 
         self._entries.append(entry)
         self._maybe_prune()
@@ -276,6 +417,17 @@ class ChartStateLog:
         if range_days <= _HOURLY_THRESHOLD_DAYS:
             return self._bucket_hourly(filtered)
         return self._bucket_daily(filtered)
+
+    def last_entry(self) -> dict[str, Any] | None:
+        """The newest row appended (any kind), or None (Issue #1230 R1: the v4 shadow reads this cycle's row)."""
+        return self._entries[-1] if self._entries else None
+
+    def raw_entries(self) -> list[dict[str, Any]]:
+        """A shallow copy of every retained row, undownsampled (Issue #1230 R1: v4 fit and accuracy page).
+
+        Rows are never mutated after append, so the copy is safe to hand to an executor thread.
+        """
+        return list(self._entries)
 
     @property
     def entry_count(self) -> int:
@@ -339,6 +491,7 @@ class ChartStateLog:
             upper_vals = [e["upper"] for e in group if e.get("upper") is not None]
             nat_vent_target_vals = [e["nat_vent_target"] for e in group if e.get("nat_vent_target") is not None]
             comfort_target = _bucket_comfort_target(group)
+            indoor_sensors = _bucket_indoor_sensors(group)
 
             summary: dict[str, Any] = {
                 "ts": bucket_key,
@@ -363,6 +516,11 @@ class ChartStateLog:
             }
             if comfort_target is not None:
                 summary["comfort_target"] = comfort_target
+            if indoor_sensors is not None:
+                summary["indoor_sensors"] = indoor_sensors
+            summary.update(_bucket_hold(group))
+            summary.update(_bucket_context(group))
+            summary.update(_bucket_optional_means(group, HUMIDITY_FEELSLIKE_KEYS))
             if events:
                 summary["event"] = events
             result.append(summary)
@@ -394,6 +552,7 @@ class ChartStateLog:
             upper_vals = [e["upper"] for e in group if e.get("upper") is not None]
             nat_vent_target_vals = [e["nat_vent_target"] for e in group if e.get("nat_vent_target") is not None]
             comfort_target = _bucket_comfort_target(group)
+            indoor_sensors = _bucket_indoor_sensors(group)
 
             summary: dict[str, Any] = {
                 "ts": f"{day_key}T00:00:00+00:00",
@@ -424,6 +583,11 @@ class ChartStateLog:
             }
             if comfort_target is not None:
                 summary["comfort_target"] = comfort_target
+            if indoor_sensors is not None:
+                summary["indoor_sensors"] = indoor_sensors
+            summary.update(_bucket_hold(group))
+            summary.update(_bucket_context(group))
+            summary.update(_bucket_optional_means(group, HUMIDITY_FEELSLIKE_KEYS))
             if events:
                 summary["events"] = events
             result.append(summary)

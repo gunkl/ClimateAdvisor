@@ -67,5 +67,5 @@ No persistent state. The payload is a plain dict appended to `coordinator._event
 ## Disclosure Path
 
 ← Tier 1 parent: [Architecture Reference](02-ARCHITECTURE-REFERENCE.md)
-→ Tier 3: [Incident Classes](incident-classes.md), [Computation Reference — Command shapes since #301](08-COMPUTATION-REFERENCE.md#command-shapes-since-301-explicit-mode-switch-issue-1049)
+→ Tier 3: [Incident Classes](incident-classes.md), [Computation Reference — Command shapes since #301](08-COMPUTATION-REFERENCE.md#command-shapes-since-301--explicit-mode-switch-issue-1049-part-of-1048)
 ↔ Siblings: [Entity Health Brief](entity-health-brief.md)

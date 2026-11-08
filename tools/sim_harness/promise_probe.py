@@ -514,7 +514,16 @@ class FakeHassPromiseSource:
             fan_on=fan_on,
             contacts_open=contacts_open,
             automation_enabled=self._automation_enabled(),
+            occupancy=self._occupancy(),
         )
+
+    def _occupancy(self) -> str | None:
+        """The engine's occupancy mode, as production's reading takes it (``_promise_occupancy``, #1411)."""
+        mode = getattr(self._s.engine, "_occupancy_mode", None)
+        if not isinstance(mode, str):
+            coord = self._s.coordinator
+            mode = getattr(coord, "_occupancy_mode", None) if coord is not None else None
+        return mode if isinstance(mode, str) and mode else None
 
     def _automation_enabled(self) -> bool:
         coord = self._s.coordinator

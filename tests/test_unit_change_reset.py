@@ -444,25 +444,17 @@ class TestRestoreUnitChange:
         assert evt["dropped_indoor"] == 1
         assert evt["dropped_pred_archive"] == 2
         assert evt["dropped_classification"] is True
-        assert evt["dropped_pending_observations"] == 0
+        # Issue #1437: no persisted pending observations exist any more, so nothing to report.
+        assert "dropped_pending_observations" not in evt
+        assert "dropped_pending_observations" not in warn
 
-    @pytest.mark.parametrize(("saved", "current", "cleared"), [(FAHRENHEIT, CELSIUS, True), (CELSIUS, CELSIUS, False)])
-    def test_pending_observations_cleared_only_on_change(self, saved, current, cleared, caplog):
+    @pytest.mark.parametrize(("saved", "current"), [(FAHRENHEIT, CELSIUS), (CELSIUS, CELSIUS)])
+    def test_learning_data_untouched_by_unit_restore(self, saved, current):
+        """Learned thermal data survives a restore with or without a unit change (in-flight observations are
+        never persisted since Issue #1437, so there is nothing old-unit to drop from the learning state)."""
         coord = _make_coordinator(current)
-        pending = {"passive_decay": {"samples": [1, 2]}, "hvac_heat": {"samples": [3]}}
-        coord.learning._state.pending_observations = pending
         coord.learning._state.rejection_log = {"keep": "me"}
-        with caplog.at_level(logging.WARNING, logger=_COORD_LOGGER):
-            _run_restore(coord, _saved_state(unit=saved))
-        if cleared:
-            assert coord.learning._state.pending_observations == {}
-            assert isinstance(coord.learning._state.pending_observations, dict)
-            evt = next(e for e in coord._event_log if e["type"] == "unit_changed")
-            assert evt["dropped_pending_observations"] == 2
-            assert any("dropped_pending_observations=2" in r.getMessage() for r in caplog.records)
-        else:
-            assert set(coord.learning._state.pending_observations) == {"passive_decay", "hvac_heat"}
-        # Other learning data is never touched
+        _run_restore(coord, _saved_state(unit=saved))
         assert coord.learning._state.rejection_log == {"keep": "me"}
 
     def test_forecast_after_changed_unit_restore_uses_provider_values(self):

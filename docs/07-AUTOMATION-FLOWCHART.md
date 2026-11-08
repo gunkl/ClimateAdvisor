@@ -284,7 +284,7 @@ Fan state changes are monitored by two listeners. A dedicated fan entity listene
 
 Fan override is tracked separately from HVAC override — `_fan_override_active` is independent of `_manual_override_active`. Both can be active simultaneously — this independence is also why the two could previously produce contradictory-looking dashboard status text at once (fixed in `_compute_next_action()`, Issue #495 — see [08-COMPUTATION-REFERENCE.md](08-COMPUTATION-REFERENCE.md)).
 
-**HVAC suppression on manual fan-on (Issue #495):** for `FAN_MODE_WHOLE_HOUSE`/`BOTH`, `handle_fan_manual_override()` now also suppresses HVAC — the same `_suppress_hvac_for_whf()` helper `_activate_fan()` (CA-initiated activation) uses. Before this fix, only CA-initiated activation suppressed HVAC; a manually or remotely detected fan-on left the AC armed for the life of the override. `FAN_MODE_HVAC` is unaffected (the thermostat's own blower coexists with the compressor by design). See [fan-remote-spec.md § HVAC Suppression on Manual/Remote Fan-On](fan-remote-spec.md#hvac-suppression-on-manualremote-fan-on).
+**HVAC suppression on manual fan-on (Issue #495):** for `FAN_MODE_WHOLE_HOUSE`/`BOTH`, `handle_fan_manual_override()` now also suppresses HVAC — the same `_suppress_hvac_for_whf()` helper `_activate_fan()` (CA-initiated activation) uses. Before this fix, only CA-initiated activation suppressed HVAC; a manually or remotely detected fan-on left the AC armed for the life of the override. `FAN_MODE_HVAC` is unaffected (the thermostat's own blower coexists with the compressor by design). See [fan-remote-spec.md § HVAC Suppression on Manual/Remote Fan-On](fan-remote-spec.md#hvac-suppression-on-manualremote-fan-on-issue-495).
 
 ```mermaid
 graph TD
@@ -599,7 +599,7 @@ indoor or band missing?"}
 (day-type default only if mode unknown)"]
 ```
 
-`m` = `comfort_deadband_{day_type}_f`, at least 2 F, at most one third of the band width; if under 1 F the band is too narrow and only breaches switch. Pause, manual override, occupancy redirect and TOU pre-conditioning run before this and keep their priority. Details: [08 §6f](08-COMPUTATION-REFERENCE.md#6f-comfort-family-nearest-edge-arming-issue-1066--supersedes-827843858867).
+`m` = `comfort_deadband_{day_type}_f`, at least 2 F, at most one third of the band width; if under 1 F the band is too narrow and only breaches switch. Pause, manual override, occupancy redirect and TOU pre-conditioning run before this and keep their priority. Details: [08 §6f](08-COMPUTATION-REFERENCE.md#6f-comfort-family-nearest-edge-arming-issue-1066--supersedes-827843858867-settling-guard-issue-1073).
 
 
 On every 30-minute coordinator update, `apply_classification()` runs two sequential guards before executing the `warm` or `mild` classification's default HVAC-off action. The guards run in order; the second guard only evaluates if the first does not fire.
@@ -628,7 +628,7 @@ flowchart TD
 
 **`k_active_cool = None`** (first cooling season, any home): the 120-min fallback replaces the lead-time formula. This is the normal case for new installs and all homes before their first cooling cycle is learned.
 
-For the complete guard condition table, lead-time formula derivation, and bridge/occupancy interactions, see [§6c in the Computation Reference](08-COMPUTATION-REFERENCE.md#6c-warm-day-ode-ceiling-guard-issue-136).
+For the complete guard condition table, lead-time formula derivation, and bridge/occupancy interactions, see [§6c in the Computation Reference](08-COMPUTATION-REFERENCE.md#6c-warm-day-ode-ceiling-guard-issue-136-passive-safety-backstop--issue-249).
 
 ---
 

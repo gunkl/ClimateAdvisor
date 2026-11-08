@@ -259,14 +259,14 @@ class TestPredIndoorIntegration:
         """After get_thermal_model() returns a solid model, _thermal_model is populated.
 
         Verifies that assigning the result of get_thermal_model() to
-        automation_engine._thermal_model replaces the empty dict so physics
+        coordinator._thermal_model replaces the empty dict so physics
         prediction is unblocked on the same 30-min cycle.
         """
         ClimateAdvisorCoordinator = _get_coordinator_class()
         coord = object.__new__(ClimateAdvisorCoordinator)
 
         ae = MagicMock()
-        ae._thermal_model = {}
+        coord._thermal_model = {}
         coord.automation_engine = ae
 
         solid_model = {
@@ -275,17 +275,15 @@ class TestPredIndoorIntegration:
             "k_active_heat": 3.5,
             "k_active_cool": -3.0,
         }
-        assert coord.automation_engine._thermal_model == {}, "Pre-condition: model must start empty"
+        assert coord._thermal_model == {}, "Pre-condition: model must start empty"
 
         # Simulate the coordinator assignment (get_thermal_model returns solid_model)
         result = solid_model  # mirrors: self.learning.get_thermal_model(outdoor_temp_f=56.0, solar_factor=0.3)
-        coord.automation_engine._thermal_model = result
+        coord._thermal_model = result
 
-        assert coord.automation_engine._thermal_model != {}, (
-            "_thermal_model must not be empty after get_thermal_model() assignment"
-        )
-        assert coord.automation_engine._thermal_model.get("k_passive") == -0.05, (
-            f"Expected k_passive=-0.05, got {coord.automation_engine._thermal_model.get('k_passive')!r}"
+        assert coord._thermal_model != {}, "_thermal_model must not be empty after get_thermal_model() assignment"
+        assert coord._thermal_model.get("k_passive") == -0.05, (
+            f"Expected k_passive=-0.05, got {coord._thermal_model.get('k_passive')!r}"
         )
 
     def test_ode_cache_diverges_after_model_refresh(self):
@@ -729,7 +727,7 @@ class TestSingleChokePointBandConsolidation:
     def test_resolve_target_band_schedule_caches_same_value_build_target_band_for_returns(self):
         """_resolve_target_band_schedule() (the once-per-cycle cache consumed by the
         main-cycle and briefing calls to _build_predicted_indoor_future()) must store
-        exactly what _build_target_band_for(dt_util.now(), automation_engine._thermal_model)
+        exactly what _build_target_band_for(dt_util.now(), coordinator._thermal_model)
         would return — proving the cache is not a second, independently-computed copy."""
         import types
         from datetime import datetime
@@ -750,7 +748,7 @@ class TestSingleChokePointBandConsolidation:
 
         coord = self._make_coordinator(config, classification, hourly_forecast)
         coord.automation_engine = MagicMock()
-        coord.automation_engine._thermal_model = thermal_model
+        coord._thermal_model = thermal_model
         coord._resolve_target_band_schedule = types.MethodType(
             ClimateAdvisorCoordinator._resolve_target_band_schedule, coord
         )

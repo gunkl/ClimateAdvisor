@@ -329,7 +329,7 @@ def _make_chart_data_coord(
     coord._hourly_forecast_temps = MagicMock()
 
     ae = MagicMock()
-    ae._thermal_model = None
+    coord._thermal_model = None
     coord.automation_engine = ae
     # Issue #1054: the coordinator delegates band resolution to the engine; a MagicMock engine
     # would hand back MagicMock edges, so give it a concrete flat band from the coordinator config.

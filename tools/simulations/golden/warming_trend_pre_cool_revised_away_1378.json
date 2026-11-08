@@ -1,0 +1,111 @@
+{
+  "name": "warming_trend_pre_cool_revised_away_1378",
+  "description": "Control for warming_trend_pre_cool_applied: the same warming-trend night (14:00 classification today 80/62F, tomorrow 95/77F, setback_modifier -3.0, so the 02:30 pre-cool is decided in the evening), but the forecast is revised overnight: the 00:00 reclassification says the day the night wakes into is 82/62F. At 02:30 production's own trigger re-checks the night on that day (#1378): no warming trend (+1F against the recorded 80/62F) and not hot (82 < 85), so the AC is not run for heat that is no longer coming. The sleep ceiling stays 72F and nothing is written at 02:30.",
+  "source": "synthetic",
+  "issue": 1378,
+  "use_coordinator": true,
+  "notes": [
+    "Same config and evening as warming_trend_pre_cool_applied (the positive sibling); only the 00:00",
+    "  reclassification differs. Defaults: DEFAULT_SLEEP_COOL=72, DEFAULT_SLEEP_HEAT=64; wake 06:30 -> trigger 02:30.",
+    "14:00 classification: today 80/62, tomorrow 95/77, avg_delta +15 -> setback_modifier -3.0.",
+    "  _maybe_schedule_pre_cool() decides the night waking 07-17: PreCoolDecision(modifier -3.0, prev_high 80,",
+    "  prev_low 62). Status reads 'Pre-cool scheduled (69F @ 2:30 AM)'.",
+    "Overnight revision, modelled the way production receives it: the weather entity's forecast changes and the",
+    "  coordinator's next cycle (the first after midnight) reclassifies onto the new day. The scenario hand-feeds",
+    "  that classification at 00:00: today 82/62, tomorrow 75/60.",
+    "  (Mirrors tests_ha/test_pre_cool_overnight_1371.py::test_pre_cool_is_re_checked_at_fire_time_when_the_forecast_is_revised,",
+    "  which revises the weather entity to 82/62 at 23:59:30 and asserts no pre-cool event.)",
+    "02:30 fire-time re-check (resolve_pre_cool_modifier_for_night, night wakes into today 07-17):",
+    "  trend gate: ((82-80) + (62-62)) / 2 = +1 < TREND_THRESHOLD_MODERATE (5) -> no trend modifier;",
+    "  hot gate: today_high 82 < threshold_hot 85 -> no. Neither holds -> 'Pre-cool trigger fired: skipped'.",
+    "Assertions are on the thermostat (action_log), not on an event label: no set_temperature after the 00:00",
+    "  reclassification (which re-sends the unchanged 72F ceiling) through 02:30, and the last setpoint told is still 72F.",
+    "use_coordinator: true so Tier A runs the coordinator's own 02:30 trigger and its re-check, as real HA does.",
+    "Scenario effectiveness: if the fire-time re-check is removed (the trigger uses the evening's decision as is,",
+    "  or the re-check always returns the decided modifier), the trigger writes 69F at 02:30 and both 02:30 rows fail."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "wake_time": "06:30",
+    "sleep_time": "22:30"
+  },
+  "events": [
+    {
+      "time": "2026-07-16T14:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "setback_modifier": -3.0,
+      "today_high": 80.0,
+      "today_low": 62.0,
+      "tomorrow_high": 95.0,
+      "tomorrow_low": 77.0,
+      "trend_direction": "warming",
+      "trend_magnitude": 15.0,
+      "note": "Strong warming trend classification: today 80/62F, tomorrow 95/77F, avg_delta +15F -> setback_modifier -3.0. The pre-cool for the night waking 07-17 is decided now, recording 80/62F as the base for the 02:30 re-check."
+    },
+    {
+      "time": "2026-07-16T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 80.0,
+      "note": "Evening temperatures — AC holding indoor near comfort_cool."
+    },
+    {
+      "time": "2026-07-16T22:30:00",
+      "type": "bedtime",
+      "note": "Bedtime: normal sleep band [64/72] applied. Pre-cool fires separately at 02:30."
+    },
+    {
+      "time": "2026-07-17T00:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "setback_modifier": 0.0,
+      "today_high": 82.0,
+      "today_low": 62.0,
+      "tomorrow_high": 75.0,
+      "tomorrow_low": 60.0,
+      "trend_direction": "cooling",
+      "trend_magnitude": 4.5,
+      "note": "Forecast revised overnight: the coordinator's first cycle after midnight reclassifies onto the new day from the updated weather forecast, which now says 82/62F (was 95/77F at 14:00), then 75/60F. Classifier: day_type warm (82 >= 75, < 85); trend to 07-18 ((75-82)+(60-62))/2 = -4.5F, cooling below TREND_THRESHOLD_MODERATE, setback_modifier 0."
+    },
+    {
+      "time": "2026-07-17T02:30:00",
+      "type": "pre_cool",
+      "indoor_f": 76.5,
+      "nat_vent_just_closed": false,
+      "note": "Production's own pre-cool trigger fires (wake_time 06:30 - 4h fallback) and re-checks the night on the day it wakes into (#1378): warming trend from the recorded 80/62F to today's 82/62F is +1F (below 5), and today_high 82 < threshold_hot 85, so neither gate holds and the trigger skips. indoor=76.5F as in the applied sibling. Nothing is written."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-16T22:30:00",
+      "expect": "setback_applied",
+      "expect_temp": 72.0,
+      "reason": "Bedtime sleep band [64/72], as in the applied sibling: the evening is identical, the pre-cool has not fired."
+    },
+    {
+      "at": "2026-07-17T02:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-17T00:00:00",
+      "values": [],
+      "reason": "Nothing is written by the 02:30 trigger (or after the 00:00 reclassification's re-send of the unchanged 72F sleep ceiling): the trigger skips. A pre-cool that ignored the revised forecast would write 69F here."
+    },
+    {
+      "at": "2026-07-17T02:30:00",
+      "expect": "commanded_setpoint_at",
+      "value": 72.0,
+      "reason": "The thermostat is still told the 72F sleep ceiling at 02:30: the occupant sleeps at their normal ceiling and the AC is not run to bank cold for a hot day the forecast no longer predicts."
+    }
+  ],
+  "verdict": {
+    "type": "negative",
+    "summary": "Pre-cool decided in the evening on a +15F warming trend is dropped at 02:30 when the overnight forecast revision leaves neither a warming trend into the waking day nor a hot day; the sleep ceiling stays 72F",
+    "observed_behavior": "classification_applied -> setback_applied (72F sleep ceiling) -> 00:00 reclassification (82/62F, re-sends 72F) -> 02:30 trigger skipped; no setpoint write at 02:30",
+    "expected_behavior": "The #1378 fire-time re-check judges the night on the fresh forecast for the day it wakes into; a forecast revised so neither gate holds drops the night's pre-cool (docs/08-COMPUTATION-REFERENCE.md, Issue #1378)."
+  }
+}

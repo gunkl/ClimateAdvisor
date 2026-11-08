@@ -1,0 +1,151 @@
+{
+  "name": "r6b_tou_bank_lead_follows_primary__v4",
+  "description": "A time-of-use peak starts at 16:15. The house is at 72 F and banking toward 68 F means 4 F of cooling. v3's learned rate is slow (1 F per hour); v4's fitted AC is a realistic 3.5 F per hour (2.8 F in the first hour through the house's hidden mass). Primary engine v4 (v3 is the live comparison engine): the bank window opens at 14:24 (111 minutes before the peak), the plan says so, and the thermostat is told 68 F at the 14:25 check, not at the next half-hour cycle.",
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v4",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ],
+    "shadow_engine": "v3"
+  },
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 14:00 plan cycle."
+    },
+    {
+      "time": "2026-07-13T14:20:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 14:20 plan cycle (the v4 bank window has not started)."
+    },
+    {
+      "time": "2026-07-13T14:28:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 90.0,
+      "note": "End of run: three minutes after the 14:25 check."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T14:23:00",
+      "expect": "tou_precondition_not_applied",
+      "reason": "Before the window opens nothing is banked."
+    },
+    {
+      "at": "2026-07-13T14:24:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T13:00:30",
+      "values": [
+        76.0,
+        76.0
+      ],
+      "reason": "Until the window opens the thermostat is only told the comfort setpoint (the 14:00 and 14:20 cycles)."
+    },
+    {
+      "at": "2026-07-13T14:28:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.tou_window.start",
+      "value": "14:24",
+      "reason": "The window the plan shows starts 111 minutes before the 16:15 peak on v4's rate (a v3 rate would start at 12:15, the 45-minute default at 15:30)."
+    },
+    {
+      "at": "2026-07-13T14:28:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T14:24:00",
+      "values": [
+        68.0
+      ],
+      "reason": "The thermostat is told 68 F at the first 5-minute check at or after the window start (14:24:59), with no comfort write before it, not at the 14:30 half-hour cycle."
+    },
+    {
+      "at": "2026-07-13T14:28:00",
+      "expect": "tou_precondition_applied",
+      "tou_precondition": {
+        "schedule_id": "peak1",
+        "target": 68.0,
+        "mode": "cool"
+      },
+      "reason": "Banking toward 68 F."
+    },
+    {
+      "at": "2026-07-13T14:28:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.timeline.ca_steps",
+      "value": [
+        "14:24 precool_start",
+        "22:30 sleep_band",
+        "02:30 precool_start",
+        "06:00 briefing_send",
+        "06:30 wake_band",
+        "22:30 sleep_band",
+        "06:30 mode_change",
+        "06:30 wake_band"
+      ],
+      "reason": "The plan list names the same 14:24 start the thermostat acted on."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "The time-of-use bank opens by the primary engine (v4) rate, and the plan and the thermostat agree on when",
+    "observed_behavior": "Window 14:24; first 68 F written 14:24:59.",
+    "expected_behavior": "The AC is not run for hours more than the house needs before a peak price period, and the house is banked when the peak starts."
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "v4_model": {
+    "confidence": "ok",
+    "house": {
+      "a_o": 0.05,
+      "q_c": 3.5,
+      "q_h": 3.5
+    }
+  },
+  "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions), redesigned per the independent review; DP-11 pending, unsigned",
+  "issue": 1230,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true
+}

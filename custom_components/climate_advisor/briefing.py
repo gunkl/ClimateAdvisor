@@ -14,8 +14,9 @@ from __future__ import annotations
 import logging
 import platform
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time
+from typing import Any
 
 from homeassistant.util import dt as dt_util
 
@@ -24,6 +25,8 @@ from .automation import (
     _in_sleep_window,
     awake_comfort_edges,
     compute_pre_cool_target,
+    hold_after_text,
+    hold_sentence,
     resolve_pre_cool_modifier,
     select_comfort_band,
 )
@@ -54,6 +57,7 @@ from .nat_vent_plan import (
     resolve_with_fallback,
 )
 from .temperature import FAHRENHEIT, format_temp, format_temp_delta, free_cooling_direction_ok
+from .timeline_surfaces import TimelineWindows, operations_lines, timeline_windows
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -112,6 +116,12 @@ class _BriefingFacts:
     # Issue #1369: vacation band deeper than away on the edge that matters (heat day: floor, cool day: ceiling,
     # otherwise both edges). False when not on vacation. Separate vacation setpoints (#1347) may be equal/milder.
     vacation_deeper: bool = False
+    # Issue #1230 R3b: the planned open still ahead today (warm/mild), so the Windows row names BOTH times;
+    # and the live direction veto ("heat" or "warm") on a period that is running, so the row says "closed for now".
+    open_at: datetime | None = None
+    window_veto: str | None = None
+    # Issue #1404: the time-of-use bank holding the house right now (``automation.CurrentHold`` with a bank), or None.
+    current_hold: Any = None
 
 
 def _local(moment: datetime, now: datetime) -> datetime:
@@ -189,6 +199,7 @@ def _gather_briefing_facts(
     runtime_config: dict | None = None,
     now: datetime | None = None,
     awake_edges: tuple[float, float] | None = None,
+    windows: TimelineWindows | None = None,
 ) -> _BriefingFacts:
     """Gather the briefing's facts once (Issue #1231). ``config`` is the TLDR-shape dict built by
     ``generate_briefing()`` (comfort/setback/sleep_time/wake_time/aggressive_savings)."""
@@ -224,6 +235,10 @@ def _gather_briefing_facts(
         bedtime_target = adaptive if adaptive is not None else normal_bedtime
 
     windows_advice = _gives_window_advice(c, occupancy_mode)
+    if windows is not None and not windows.periods and c.day_type in (DAY_TYPE_WARM, DAY_TYPE_MILD):
+        # Issue #1230 R3b: the operation timeline is the plan; when it holds no window period today (the direction
+        # rule or bedtime removed it) the briefing does not talk about opening windows either.
+        windows_advice = False
     near_miss = _is_mild_near_miss(c, config["comfort_heat"], unoccupied=unoccupied, advice=windows_advice)
 
     close: _CloseFact | None = None
@@ -265,6 +280,30 @@ def _gather_briefing_facts(
         elif hot_evening:
             hot_evening_open = resolve_with_fallback(evening_dt, c.window_opportunity_evening_start)
 
+    open_at: datetime | None = None
+    window_veto = windows.vetoed if windows is not None and not unoccupied else None
+    if windows is not None and not unoccupied:
+        # Issue #1230 R3b: the window times the briefing states are the timeline's, never its own re-derivation.
+        periods = [(o, e) for o, e in windows.periods if e > now]
+        if c.day_type in (DAY_TYPE_WARM, DAY_TYPE_MILD) and windows_advice:
+            if periods:
+                close = _CloseFact(at=_local(periods[0][1], now), dynamic=True, already=False)
+                _o = periods[0][0]
+                open_at = _local(_o, now) if _o is not None and _local(_o, now) > now else None
+                later = [o for o, _e in periods[1:] if o is not None]
+                evening_open = _local(later[0], now) if later else None
+            else:
+                close = None
+                evening_open = None
+        elif c.day_type == DAY_TYPE_HOT:
+            morning = [p for p in periods if p[0] is None or p[0].hour < 12]
+            evening = [p for p in periods if p[0] is not None and p[0].hour >= 15]
+            hot_morning = bool(morning)
+            hot_evening = bool(evening)
+            close = _CloseFact(at=_local(morning[0][1], now), dynamic=True, already=False) if morning else None
+            hot_evening_open = _local(evening[0][0], now).time() if evening and evening[0][0] is not None else None
+            hot_evening = hot_evening_open is not None
+
     # Overnight pre-cool: only when it is actually expected to run tonight and someone is home to be promised it.
     pre_cool_target = None if unoccupied else bedtime_setback_cool
     hot_pre_cool_target: float | None = None
@@ -293,6 +332,8 @@ def _gather_briefing_facts(
         hot_pre_cool_target=hot_pre_cool_target,
         economizer_threshold=config["comfort_cool"] + ECONOMIZER_TEMP_DELTA,
         vacation_deeper=vacation_deeper,
+        open_at=open_at,
+        window_veto=window_veto,
     )
 
 
@@ -326,8 +367,18 @@ def generate_briefing(
     overnight_heat_engaged: bool = False,
     automation_overridden: bool = False,
     now: datetime | None = None,
+    timeline: Any | None = None,
+    current_hold: Any | None = None,
 ) -> str:
     """Generate the daily climate briefing message.
+
+    ``current_hold`` (Issue #1404): the coordinator's ``current_hold()``. While a time-of-use bank owns the
+    thermostat the HVAC Mode row quotes the bank target and when the schedule band returns, and Today's Steps opens
+    with the same sentence Status shows; otherwise (None, or no bank) the briefing is unchanged.
+
+    ``timeline`` (Issue #1230 R3b): the zone's operation timeline. When given, the briefing's window times are the
+    timeline's window steps and a "Today's steps" section lists the timeline's step sentences; without it (direct
+    calls, tests, a degraded coordinator) the briefing computes its facts as before.
 
     Args:
         classification: Today's day classification and recommendations.
@@ -513,7 +564,10 @@ def generate_briefing(
         runtime_config=runtime_config,
         now=now,
         awake_edges=(awake_heat, awake_cool),
+        windows=timeline_windows(timeline, (now or dt_util.now()).date()) if timeline is not None else None,
     )
+    if current_hold is not None and hasattr(current_hold, "band"):
+        facts = replace(facts, current_hold=current_hold)
     tldr_lines = _generate_tldr_table(c, config, temp_unit=temp_unit, facts=facts)
 
     if verbosity == "tldr_only":
@@ -596,6 +650,17 @@ def generate_briefing(
         lines.append("")
         lines.extend(grace_lines)
         _LOGGER.debug("Grace section included — source=%s", grace_source)
+
+    _bank_line = hold_sentence(facts.current_hold, temp_unit) if facts.current_hold is not None else None
+    if timeline is not None or _bank_line is not None:
+        ops = operations_lines(timeline, now or dt_util.now()) if timeline is not None else []
+        if _bank_line is not None:
+            ops = [f"  • Now: {_bank_line}.", *ops]
+        if ops:
+            lines.append("")
+            lines.append("\U0001f4cb Today's Steps")
+            lines.append("-" * 40)
+            lines.extend(ops)
 
     lines.append("")
     lines.extend(
@@ -713,19 +778,38 @@ def _generate_tldr_table(
     # A morning snapshot: the TOU away/vacation widening is not threaded in. Issue #1091: the band reflects the
     # real Prefer savings flag, so the row quotes the awake band the thermostat is armed with.
     _band = facts.band
-    if facts.unoccupied:
-        if c.hvac_mode == "cool":
+    _hold = facts.current_hold
+    _bank = getattr(_hold, "bank", None)
+    # Issue #1404 (mirrors): with the live hold, an empty house quotes the band in force (the Away/Vacation band
+    # widened for a high-cost period: the thermostat is told cool 83, not 80), and an occupied, awake home quotes the
+    # family the thermostat is armed in (after a cool bank: "Heat at 68", not "Cool at 76").
+    _day_mode = c.hvac_mode
+    if _hold is not None and _bank is None:
+        if facts.unoccupied:
+            _band = _hold.band
+        elif c.hvac_mode in ("heat", "cool") and getattr(_hold, "family", None) in ("heat", "cool"):
+            _day_mode = _hold.family
+    if _bank is not None:
+        # Issue #1404: a time-of-use bank owns the thermostat: the row quotes what it is told and what follows.
+        _verb = "Cool" if _bank.mode == "cool" else "Heat"
+        _until = dt_util.as_local(_bank.ends).strftime(_FMT_HOUR)
+        hvac_val = (
+            f"{_verb} at {format_temp(_bank.target, temp_unit)} until the {_until} high-cost period, "
+            f"then {hold_after_text(facts.current_hold, temp_unit)}"
+        )
+    elif facts.unoccupied:
+        if _day_mode == "cool":
             hvac_val = f"Cool at {format_temp(_band.ceiling, temp_unit)}"
-        elif c.hvac_mode == "heat":
+        elif _day_mode == "heat":
             hvac_val = f"Heat at {format_temp(_band.floor, temp_unit)}"
         else:
             # Issue #1253 (mirror of #1211): hvac_mode "off" on a warm/mild day is NOT "nothing runs" -- the
             # away/vacation band is armed (heat below its floor, cool above its ceiling). Name the held band.
             _label = "Vacation" if occupancy_mode == "vacation" else "Away"
             hvac_val = f"{_label} band {_band_text(_band.floor, _band.ceiling, temp_unit)}"
-    elif c.hvac_mode == "cool":
+    elif _day_mode == "cool":
         hvac_val = f"Cool at {format_temp(_band.ceiling, temp_unit)}"
-    elif c.hvac_mode == "heat":
+    elif _day_mode == "heat":
         hvac_val = f"Heat at {format_temp(_band.floor, temp_unit)}"
     else:
         # Issue #1211: hvac_mode "off" on a warm/mild day is NOT "off": the comfort band is armed (heat below
@@ -741,7 +825,10 @@ def _generate_tldr_table(
     if c.day_type != DAY_TYPE_HOT and facts.windows_advice and c.window_open_time and facts.close is not None:
         # Issue #876: the morning OPEN time is intentionally dropped from this row -- it carries no useful
         # information -- so the row shows only the close time, matching the conversational body.
-        windows_val = f"Close by {facts.close.text}"
+        if facts.open_at is not None:
+            windows_val = f"Open {facts.open_at.strftime(_FMT_HOUR)} – close by {facts.close.text}"
+        else:
+            windows_val = f"Close by {facts.close.text}"
     elif facts.hot_morning and facts.hot_evening and facts.close is not None:
         # Issue #878: close/open resolved TOGETHER (see resolve_window_pair()) -- the incident (Close by 6:00 PM /
         # Open 5:00 PM+) is prevented when the facts were gathered.
@@ -751,6 +838,10 @@ def _generate_tldr_table(
         windows_val = f"Close by {facts.close.text} (<{format_temp(threshold, temp_unit)})"
     elif facts.hot_evening and facts.hot_evening_open is not None:
         windows_val = f"Open {facts.hot_evening_open.strftime(_FMT_HOUR)} onward"
+    elif facts.window_veto == "heat":
+        windows_val = "Closed for now — outdoor air would cool the house below its floor"
+    elif facts.window_veto == "warm":
+        windows_val = "Closed for now — outdoor air isn't cooler than indoor yet"
     else:
         windows_val = "Closed all day"
 

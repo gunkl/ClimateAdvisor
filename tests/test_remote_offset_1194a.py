@@ -379,21 +379,21 @@ class TestHeatLoop:
 class TestSwingSource:
     def test_learned_swing_sets_hysteresis(self):
         env = Env(bedroom_f=65.3)  # gap 0.7
-        env.engine._thermal_model = {"swing_heat_f": 0.59}
+        env.engine.inputs.thermal = {"swing_heat_f": 0.59}
         env.write(66.0)
         env.check()
         assert env.sp_f() == [66.0, 68.0]  # 0.7 > 0.59
 
     def test_default_swing_when_unlearned(self):
         env = Env(bedroom_f=65.3)
-        env.engine._thermal_model = {"swing_heat_f": None}
+        env.engine.inputs.thermal = {"swing_heat_f": None}
         env.write(66.0)
         env.check()
         assert env.sp_f() == [66.0]  # 0.7 < 1.5 default
 
     def test_missing_model_uses_default(self):
         env = Env(bedroom_f=65.3)
-        env.engine._thermal_model = {}
+        env.engine.inputs.thermal = {}
         env.write(66.0)
         env.check()
         assert env.sp_f() == [66.0]
@@ -864,15 +864,14 @@ class TestFailedWriteBackOff:
 
 
 class TestResolverLogsOnChange:
-    """The shared resolver logs the sleep-sensor swap at INFO once per source change, DEBUG otherwise."""
+    """The shared resolver logs the sleep-sensor swap at DEBUG only (Issue #1230 R1c: the coordinator owns the INFO)."""
 
-    def test_info_once_per_change(self, caplog):
+    def test_resolver_never_writes_info(self, caplog):
         import logging
 
         from custom_components.climate_advisor import indoor_temp
 
         env = Env(bedroom_f=65.0)
-        indoor_temp._logged_indoor_source.clear()
 
         def resolve(in_window):
             return indoor_temp.resolve_indoor_temp_with_provenance(
@@ -892,18 +891,14 @@ class TestResolverLogsOnChange:
             for _ in range(5):
                 resolve(False)
             resolve(True)
-        infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
-        debugs = [r for r in caplog.records if r.levelno == logging.DEBUG and "Using sleep" in r.getMessage()]
-        assert sum("Using sleep indoor sensor" in m for m in infos) == 2, infos  # entering, and re-entering
-        assert sum("source changed to the primary" in m for m in infos) == 1, infos
-        assert len(debugs) == 59
+        resolver_records = [r for r in caplog.records if r.name == "custom_components.climate_advisor.indoor_temp"]
+        assert not [r for r in resolver_records if r.levelno >= logging.INFO], resolver_records
+        assert sum("Using sleep indoor sensor" in r.getMessage() for r in resolver_records) == 61
+        assert not hasattr(indoor_temp, "_logged_indoor_source")
 
     def test_engine_loop_minute_checks_stay_quiet(self, caplog):
         import logging
 
-        from custom_components.climate_advisor import indoor_temp
-
-        indoor_temp._logged_indoor_source.clear()
         env = Env(bedroom_f=65.0)
         env.write(66.0)
         caplog.clear()

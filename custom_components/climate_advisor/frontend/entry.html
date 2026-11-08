@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Climate Advisor</title>
+<!-- Issue #1230 R6a: the panel's entry. It shows nothing itself: it picks the new dashboard or the classic one and
+     replaces itself with it (location.replace: no extra history entry, no flash of the wrong page, the #hash and the
+     query string are carried over so deep links like #analysis or #settings/... still land). The choice is the
+     'climate_advisor_dashboard' key in this browser's localStorage ('classic' -> classic; unset, 'new', anything else,
+     or storage unavailable -> new). '?classic=1' forces classic for that visit only. -->
+<style>html,body{margin:0;background:Canvas;color:CanvasText;font:14px system-ui,sans-serif}p{padding:16px}</style>
+<script>
+(function () {
+  function chooseDashboard(pref, search) {
+    if (/(?:^|[?&])classic=1(?:&|$)/.test(search || '')) return 'index.html';
+    return pref === 'classic' ? 'index.html' : 'new_dashboard.html';
+  }
+  var pref = null;
+  try { pref = localStorage.getItem('climate_advisor_dashboard'); } catch (e) { pref = null; }
+  var target = chooseDashboard(pref, location.search) + (location.search || '') + (location.hash || '');
+  window.__chooseDashboard = chooseDashboard;
+  location.replace(target);
+})();
+</script>
+</head>
+<body>
+<noscript><p><a href="new_dashboard.html">Open Climate Advisor</a> &middot; <a href="index.html">classic dashboard</a></p></noscript>
+<p>Opening Climate Advisor&hellip; <a href="new_dashboard.html">new dashboard</a> &middot; <a href="index.html">classic</a></p>
+</body>
+</html>

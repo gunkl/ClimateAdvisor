@@ -10,8 +10,10 @@ the range you quote equal the range the engine is armed with right now?".
 DOCTRINE (design section 8): the READERS call the real production functions on the live FakeHass
 coordinator session; this module never re-derives a band.
 
-* armed reference ........ ``engine._resolved_comfort_band(classification)`` (what the thermostat gets)
-* chart band ............. ``coordinator._build_target_band_for(...)`` + ``_target_band_lower_upper_now()``
+* armed reference ........ ``coordinator.current_hold().band`` (what the thermostat gets: the schedule band
+  ``engine._resolved_comfort_band(classification)``, or a time-of-use bank's band while the bank owns it, #1404)
+* chart band ............. ``coordinator._chart_display_band(...)`` (what the chart draws) +
+  ``_target_band_lower_upper_now()``
 * Status API ............. the real ``ClimateAdvisorStatusView.get()`` (``ca_target_heat/cool``)
 * briefing ............... the real ``coordinator._build_briefing_text()`` HVAC Mode row
 * Next Action ............ the real ``coordinator._compute_next_action()``, boundary-probed
@@ -21,6 +23,9 @@ coordinator session; this module never re-derives a band.
 * cards / fans ........... ``_compute_automation_status`` / ``_compute_next_automation_action`` /
   ``_compute_fan_status`` / ``_compute_whf_status`` / ``_compute_hvac_fan_status`` must answer, and the
   fan cards must agree with the physical fan
+* chart strips (#1436) ... the chart's future activity strips (the real ``timeline_payload()["strips"]``) and the real
+  ``get_chart_data()["predicted_activity"]`` must follow the PLAN's window periods, sessions, runs and holds
+  (``strip_check``); this surface's reference is the operation timeline, not the armed band
 
 P8 is TEST-ONLY: it needs a live coordinator and engine, so it is not in the production ``PROMISES``
 registry (which is a tuple of pure ``check(PromiseInput, PromiseConfig)`` functions that also run at
@@ -75,6 +80,7 @@ SURFACES = (
     "thermostat_hold",
     "fan_cards",
     "cards",
+    "chart_strips",
 )
 
 
@@ -271,11 +277,23 @@ def household_schedule_complete(config: dict) -> bool:
 
 
 def read_armed(session: Any) -> Armed | None:
-    """The engine's own resolved band for the current classification (None before one exists)."""
+    """The band the thermostat is armed with now (None before a classification exists).
+
+    Issue #1404 (test-infrastructure change, semantic justification): this used to be
+    ``engine._resolved_comfort_band(c)`` alone, the SCHEDULE band. That was wrong during a time-of-use bank: since
+    #1393/#1395 the bank owns the setpoint, the cycle does not write the schedule band at all and the thermostat is
+    told the bank target (e.g. cool 77 F while the Away band is 60-80 F), so "armed" named a band the engine does not
+    arm then. It now reads the coordinator's shared display resolver ``current_hold()`` -- the production function
+    every surface quotes -- whose band IS ``_resolved_comfort_band(c)`` whenever no bank owns the thermostat
+    (deferred, outside the window, no schedule), and the bank band (pre-cool ceiling / pre-heat floor = the target)
+    while one does. The resolver is never re-derived here. A coordinator-less session keeps the engine band.
+    """
     c = session.engine._current_classification
     if c is None:
         return None
-    band = session.engine._resolved_comfort_band(c)
+    coord = getattr(session, "coordinator", None)
+    hold = coord.current_hold() if coord is not None and hasattr(coord, "current_hold") else None
+    band = hold.band if hold is not None else session.engine._resolved_comfort_band(c)
     return Armed(floor=float(band.floor), ceiling=float(band.ceiling), active=str(band.active))
 
 
@@ -301,7 +319,12 @@ def read_chart_band(session: Any) -> Shown | None:
     held = coord._occupancy_restore_held()
     if held:
         return None
-    sched = coord._build_target_band_for(now, engine._thermal_model, hourly_forecast_override=hourly)
+    # Issue #1404: the band the chart DRAWS (the display band: a time-of-use bank hour shows the target the
+    # thermostat is told), the same function get_chart_data() draws from.
+    builder = getattr(coord, "_chart_display_band", None) or coord._build_target_band_for  # pre-#1404 trees
+    # Issue #1443: the coordinator owns the thermal model (pre-#1443 trees: the engine's copy).
+    model = coord._thermal_model if hasattr(engine, "inputs") else engine._thermal_model
+    sched = builder(now, model, hourly_forecast_override=hourly)
     previous = getattr(coord, "_target_band_schedule", None)
     coord._target_band_schedule = sched
     try:
@@ -459,7 +482,12 @@ def read_thermostat_hold(session: Any, armed: Armed) -> Shown | None:
         or getattr(e, "_fan_active", False)
         or coord._occupancy_restore_held()
         or getattr(e, "_tou_precondition_until", None) is not None
-        or getattr(e, "_tou_av_precondition_target", None) is not None
+        or (
+            e.inputs.build_facts(_dt_util().now()).tou_av.precondition_target  # Issue #1443: the coordinator's window
+            if hasattr(e, "inputs")
+            else getattr(e, "_tou_av_precondition_target", None)  # a pre-#1443 tree
+        )
+        is not None
         or coord._startup_coalesce_active
     ):
         return None
@@ -602,6 +630,7 @@ class SurfaceProbe(PromiseProbe):
     """
 
     HOLD_SETTLE = timedelta(minutes=10)  # a thermostat write may still be settling right after a step
+    STRIPS_EVERY = timedelta(hours=2)  # the chart payload is the costly read: every 2 virtual hours + each change
 
     def __init__(
         self,
@@ -621,6 +650,8 @@ class SurfaceProbe(PromiseProbe):
         self.compared: dict[str, int] = {}
         self.divergences: list[Divergence] = []
         self._seen: set[tuple[str, str, str]] = set()
+        self._strips_last: datetime | None = None
+        self._strips_plan: tuple | None = None
 
     def attach(self, session: Any) -> None:
         super().attach(session)
@@ -687,7 +718,13 @@ class SurfaceProbe(PromiseProbe):
         )
 
     def _sample(self, label: str, now: datetime) -> None:
+        from tools.sim_harness.scenario_model import run_planning_step  # noqa: PLC0415
+
         s = self._session
+        # Issue #1436 audit: production builds the plan only in its planning steps (no surface read does), so the probe
+        # runs the cycle's planning step before reading, as the cycle does before it computes the surfaces
+        with contextlib.suppress(Exception):
+            run_planning_step(s.coordinator)
         armed = read_armed(s)
         if armed is None:
             return
@@ -756,6 +793,47 @@ class SurfaceProbe(PromiseProbe):
             self._record("fan_cards", label, now, problem, armed, Shown("fan_cards"))
         if fan_problems is not None:  # None = the accepted command-only blind spot, not compared
             self.compared["fan_cards"] = self.compared.get("fan_cards", 0) + 1
+        self._sample_chart_strips(label, now, armed)
+
+    def _sample_chart_strips(self, label: str, now: datetime, armed: Armed) -> None:
+        """Issue #1436: the chart's future strips against the plan (``strip_check``).
+
+        Read whenever the plan's step list changes, else at most every ``STRIPS_EVERY`` (the chart payload is the
+        expensive read; between plan changes only NOW moves, which the grid already slides across).
+        """
+        from tools.sim_harness.strip_check import check_coordinator  # noqa: PLC0415
+
+        s = self._session
+        coord = s.coordinator
+        try:
+            tl = coord._surface_timeline() if hasattr(coord, "_surface_timeline") else None
+        except Exception:  # noqa: BLE001 - _surface_timeline never raises; belt and braces
+            tl = None
+        if tl is None:
+            return
+        plan = tuple((st.ts, st.kind.value, st.status) for st in tl.steps)
+        due = self._strips_last is None or now - self._strips_last >= self.STRIPS_EVERY or plan != self._strips_plan
+        if not due:
+            return
+        self._strips_last, self._strips_plan = now, plan
+        outdoor = getattr(s.engine, "_last_outdoor_temp", None)
+        try:
+            got = check_coordinator(coord, now, outdoor if isinstance(outdoor, (int, float)) else None)
+        except Exception as exc:  # noqa: BLE001 - a reader that cannot answer is a finding
+            self._record(
+                "chart_strips",
+                label,
+                now,
+                f"chart_strips reader failed: {type(exc).__name__}: {str(exc)[:100]}",
+                armed,
+                Shown("chart_strips"),
+            )
+            return
+        if got is None:
+            return
+        self.compared["chart_strips"] = self.compared.get("chart_strips", 0) + 1
+        for problem in got["problems"]:
+            self._record("chart_strips", label, now, problem, armed, Shown("chart_strips"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -84,7 +84,7 @@ def _make_engine(*, indoor: float | None, mode: str) -> AutomationEngine:
         notify_service=config["notify_service"],
         config=config,
     )
-    engine._thermal_model = {}
+    engine.inputs.thermal = {}
     engine._test_state = state
     return engine
 

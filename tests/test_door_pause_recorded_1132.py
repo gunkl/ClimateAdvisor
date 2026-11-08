@@ -42,7 +42,7 @@ def _engine(
     """Engine on a mild day where the plain nat-vent entry gate is satisfied (outdoor < indoor)."""
     engine = _make_engine(indoor=indoor, mode=mode, **{CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
     engine._last_outdoor_temp = outdoor
-    engine._hourly_forecast_temps = []
+    engine.inputs.hourly_forecast = []
     engine._current_classification = _classification("mild")
     engine._sensor_check_callback = lambda: sensor_open
     engine._sensor_debounce_pending_callback = lambda: False
@@ -51,14 +51,14 @@ def _engine(
 
 def _forecast_peak_ahead(engine: AutomationEngine) -> None:
     """Phase 2 Guard 1: a 95F forecast peak within 2 h skips nat-vent."""
-    engine._hourly_forecast_temps = [
+    engine.inputs.hourly_forecast = [
         {"temperature": 95.0, "datetime": (_DAY + timedelta(hours=1)).isoformat()},
     ]
 
 
 def _floor_imminent(engine: AutomationEngine) -> None:
     """Phase 2 Guard 2: the thermal model predicts the comfort floor within MIN_VIABLE_NAT_VENT_HOURS."""
-    engine._thermal_model = {"confidence": "high", "k_passive": -1.0}
+    engine.inputs.thermal = {"confidence": "high", "k_passive": -1.0}
 
 
 def _open(engine: AutomationEngine) -> None:

@@ -135,10 +135,21 @@
     },
     {
       "at": "2026-05-20T12:30:00",
-      "expect": "ceiling_guard_fires_cool",
-      "simulator_support": false,
-      "note": "ODE ceiling guard: requires _last_predicted_indoor curve from _build_predicted_indoor_future() and k_passive/k_active_cool from thermal model. Window is closed (_paused_by_door=False) so apply_classification() guard does not block. In production: guard evaluates predicted indoor vs comfort_cool=74F; breach predicted within 120-min fallback lead time (k_active_cool=None); HVAC set to cool at comfort_cool=74F.",
-      "reason": "Ceiling guard fires when breach is predicted within lead_time AND window is closed (_paused_by_door=False). k_active_cool=None — 120-min fallback. Expected: HVAC set to cool, target=74F."
+      "expect": "hvac_mode_writes",
+      "since": "2026-05-20T12:00:00",
+      "values": [],
+      "reason": "Issue #1230 R6 (owner-approved edit): the thermostat has been on cool since the 10:05 window close, so NO mode write is sent in the half hour -- the guard does not re-send 'cool' (before: one set_hvac_mode cool at 12:30). The band re-sends only the unchanged 74 F setpoint."
+    },
+    {
+      "at": "2026-05-20T12:30:00",
+      "expect": "commanded_setpoint_at",
+      "value": 74.0,
+      "reason": "Issue #1230 R6 (owner-approved edit): at 12:30 the comfort band has already put the thermostat on cool at 74 F (indoor 73.8 is inside the cool arming margin), so the thermostat is cooling at the ceiling before the guard runs. The occupant's guarantee is the thermostat state, not a 'guard fired' label: it is told cool at 74 F."
+    },
+    {
+      "at": "2026-05-20T12:30:00",
+      "expect": "ceiling_guard_dormant",
+      "reason": "Issue #1230 R6 (owner-approved edit): the guard sees a breach predicted within the lead time but the thermostat already cools at or below its 74 F ceiling, so it sends nothing and records no 'ceiling_guard_fired' row (before: a redundant cool + set_temperature 74 pair and an Activity row 'setpoint 74 -> 74'). It still fires when the thermostat is off, in heat, or cooling above the ceiling."
     },
     {
       "at": "2026-05-20T14:30:00",

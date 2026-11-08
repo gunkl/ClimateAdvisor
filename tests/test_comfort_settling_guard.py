@@ -111,7 +111,7 @@ def _make_engine(*, indoor: float | None, mode: str, hvac_modes: list[str] | Non
         notify_service=config["notify_service"],
         config=config,
     )
-    engine._thermal_model = {}
+    engine.inputs.thermal = {}
     engine._test_state = state
     return engine
 
@@ -716,7 +716,7 @@ class TestR7:
         outcomes = []
         for model_conf in ("none", confidence):
             engine = _make_engine(indoor=67.0, mode="cool")
-            engine._thermal_model = {
+            engine.inputs.thermal = {
                 "confidence": model_conf,
                 "confidence_k_passive": model_conf,
                 "confidence_k_hvac": model_conf,

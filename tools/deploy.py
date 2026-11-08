@@ -9,6 +9,11 @@ Usage:
     python tools/deploy.py --dry-run        # Validate only, show what would deploy
     python tools/deploy.py --skip-restart   # Deploy without restarting HA
     python tools/deploy.py --rollback       # Restore most recent backup
+    python tools/deploy.py --no-backtest    # Deploy without publishing the v4 backtest afterwards
+
+After a successful deploy the v4 backtest (tools/predict_backtest.py) is run on THIS machine and its per-zone results
+file is published to the host (Issue #1400), so the Prediction accuracy page has its history and scorecard. It costs
+two more SSH connections (one read, one write) and a few minutes; a failure only warns.
 """
 
 import argparse
@@ -29,6 +34,18 @@ ENV_FILE = REPO_ROOT / ".deploy.env"
 LOG_DIR = REPO_ROOT / "logs"
 BACKUP_DIR = REPO_ROOT / "backups"
 BACKUP_KEEP_COUNT = 5
+
+# Long-lived development lines that the owner deploys from. A deploy from one of these must already contain every
+# commit on origin/main, otherwise it silently drops main's newer fixes from the server (each deploy replaces the
+# whole integration directory). main itself and any other branch are not checked. Empty since 2026-11-08: the 0.9.x
+# line (Issue #1230) was promoted to main, so the owner deploys from main again; list a branch here if a new
+# long-lived development line is opened.
+LONG_LIVED_BRANCHES: tuple[str, ...] = ()
+# Maintenance lines for OLDER releases (0.8.x since 2026-11-08). The owner's server runs main (0.9); deploying a
+# maintenance line would roll the house back to an older release, possibly across storage changes made since. Such a
+# branch is released (a GitHub Release on its own tag), not deployed here, unless --allow-maintenance-branch is given.
+MAINTENANCE_BRANCHES: tuple[str, ...] = ("0.8.x",)
+MAIN_REF = "origin/main"
 
 _log = logging.getLogger("deploy")
 _log_path: Path | None = None
@@ -274,6 +291,67 @@ def _split_marked_output(output: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def _git(*args: str) -> tuple[int, str]:
+    """Run a git command in the repo checkout. Returns (returncode, stripped stdout+stderr)."""
+    result = subprocess.run(["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True)
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def current_branch() -> str:
+    """Branch checked out in this repo, or "" when detached or git is unavailable."""
+    try:
+        rc, out = _git("rev-parse", "--abbrev-ref", "HEAD")
+    except OSError:
+        return ""
+    return out if rc == 0 and out != "HEAD" else ""
+
+
+def local_version() -> str:
+    """VERSION from const.py of the tree about to be deployed (display only)."""
+    match = re.search(r'^VERSION\s*=\s*"([^"]+)"', (COMPONENT_DIR / "const.py").read_text(), re.MULTILINE)
+    return match.group(1) if match else "unknown"
+
+
+def check_main_merged(branch: str, fetch: bool = True) -> tuple[bool, str]:
+    """Is origin/main fully merged into a long-lived branch before it is deployed?
+
+    Returns (ok, message). Branches not in LONG_LIVED_BRANCHES (main included) always
+    pass with an empty message. A failed fetch only warns: the check then uses the
+    last fetched origin/main.
+    """
+    if branch not in LONG_LIVED_BRANCHES:
+        return True, ""
+    notes = []
+    if fetch:
+        rc, out = _git("fetch", "--quiet", "origin", "main")
+        if rc != 0:
+            notes.append(f"could not fetch origin/main ({out or 'no output'}); using the last fetched copy")
+    rc, _ = _git("merge-base", "--is-ancestor", MAIN_REF, "HEAD")
+    if rc == 0:
+        return True, "; ".join(notes + [f"{MAIN_REF} is merged into {branch}"])
+    _, missing = _git("rev-list", "--count", f"HEAD..{MAIN_REF}")
+    notes.append(
+        f"{branch} is missing {missing or 'some'} commit(s) from {MAIN_REF}. Deploying it would remove "
+        f"main's newer fixes from the server. Merge main into {branch} first "
+        f"(git merge {MAIN_REF}, via a PR so CI runs), or pass --allow-stale-main to deploy anyway."
+    )
+    return False, "; ".join(notes)
+
+
+def check_maintenance_branch(branch: str) -> tuple[bool, str]:
+    """Refuse a deploy from a maintenance line for an older release (MAINTENANCE_BRANCHES).
+
+    Returns (ok, message): (True, "") for main and every other branch.
+    """
+    if branch not in MAINTENANCE_BRANCHES:
+        return True, ""
+    return False, (
+        f"{branch} is the maintenance line for an older release; this server runs main. Deploying it would roll the "
+        f"house back to {branch} (possibly across storage changes made since). Release {branch} fixes with a GitHub "
+        f"Release on that branch instead, or pass --allow-maintenance-branch to deploy it anyway."
+    )
+
+
 def run_validation() -> bool:
     step("Running pre-deploy validation")
     validate_script = str(REPO_ROOT / "tools" / "validate.py")
@@ -480,6 +558,56 @@ def deploy_files(config: dict[str, str], skip_restart: bool) -> tuple[bool, str]
     return True, sections["LOGS"]
 
 
+BACKTEST_TIMEOUT_S = 45 * 60
+
+
+def backtest_command() -> list[str]:
+    """The backtest run after a deploy: every zone, batched SSH (one read, one write), quiet."""
+    return [
+        sys.executable,
+        str(REPO_ROOT / "tools" / "predict_backtest.py"),
+        "--all-zones",
+        "--publish",
+        "--batch-ssh",
+        "-q",
+    ]
+
+
+def publish_backtest(run=subprocess.run) -> bool:
+    """Issue #1400: refresh the v4 backtest file on the host after a deploy. Never fails the deploy.
+
+    Occupant view: the Prediction accuracy page reads its history, gate rows and ``gate_summary`` from this file; the
+    integration only reads it (the backtest replays production v3 with HA stubbed and refits v4 once per test week,
+    minutes of CPU that must not run on the HA host). Reversal: ``--no-backtest``, or drop this step.
+    """
+    step("Publishing the v4 backtest (Prediction accuracy page history)")
+    cmd = backtest_command()
+    try:
+        result = run(cmd, capture_output=True, text=True, timeout=BACKTEST_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        fail(f"Backtest did not finish within {BACKTEST_TIMEOUT_S // 60} min; the deploy itself is complete")
+        info("Run it later: " + " ".join(shlex.quote(c) for c in cmd[1:]))
+        return False
+    except OSError as err:
+        fail(f"Backtest could not start ({err}); the deploy itself is complete")
+        return False
+    published = [ln for ln in (result.stdout or "").splitlines() if ln.startswith("published ")]
+    _log.info("backtest rc=%s stdout=%r stderr=%r", result.returncode, result.stdout, result.stderr)
+    if result.returncode != 0 or not published:
+        fail("Backtest was not published; the deploy itself is complete")
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
+        for line in tail:
+            gray(line)
+        info(
+            "If the SSH add-on's rate limit blocked it, wait for its cooldown and run: "
+            + " ".join(shlex.quote(c) for c in cmd[1:])
+        )
+        return False
+    for line in published:
+        ok(line)
+    return True
+
+
 def check_logs(log_output: str) -> None:
     """Report on an already-captured HA log tail (Issue #553: log fetching now happens
     server-side as part of deploy_files()'s/do_rollback()'s single connection, not a
@@ -589,6 +717,21 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Validate only, show what would deploy")
     parser.add_argument("--skip-restart", action="store_true", help="Deploy without restarting HA")
     parser.add_argument("--rollback", action="store_true", help="Restore most recent backup")
+    parser.add_argument(
+        "--allow-stale-main",
+        action="store_true",
+        help="Deploy a long-lived development branch (LONG_LIVED_BRANCHES) even if origin/main is not merged into it",
+    )
+    parser.add_argument(
+        "--allow-maintenance-branch",
+        action="store_true",
+        help=f"Deploy an older release's maintenance line ({', '.join(MAINTENANCE_BRANCHES)}) to this server",
+    )
+    parser.add_argument(
+        "--no-backtest",
+        action="store_true",
+        help="Skip publishing the v4 backtest after the deploy (Issue #1400)",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -614,10 +757,24 @@ def main() -> None:
     print(f"{Color.CYAN}============================================{Color.RESET}")
     print(f"  Host: {config['HA_HOST']}:{config['HA_SSH_PORT']}")
     print(f"  Target: {rpath}")
+    branch = current_branch()
+    print(f"  Branch: {branch or '(detached or unknown)'}  Version: {local_version()}")
 
     if args.rollback:
         do_rollback(config)
         sys.exit(0)
+
+    # Step 0: a long-lived branch must already contain origin/main (Issue #1230)
+    merged, message = check_main_merged(branch)
+    if message:
+        (info if merged else fail)(message)
+    if not merged and not args.dry_run and not args.allow_stale_main:
+        sys.exit(1)
+    current, message = check_maintenance_branch(branch)
+    if message:
+        fail(message) if not args.allow_maintenance_branch else info(message)
+    if not current and not args.dry_run and not args.allow_maintenance_branch:
+        sys.exit(1)
 
     # Step 1: Validate
     if not run_validation():
@@ -649,6 +806,10 @@ def main() -> None:
     # Step 4: Verify
     if not args.skip_restart:
         check_logs(log_output)
+
+    # Step 5: the v4 backtest file the Prediction accuracy page reads (Issue #1400); never fails the deploy
+    if not args.no_backtest:
+        publish_backtest()
 
     print(f"\n{Color.GREEN}============================================{Color.RESET}")
     print(f"{Color.GREEN}  Deployment complete!{Color.RESET}")

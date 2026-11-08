@@ -1,0 +1,159 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ],
+    "thermostat_reports_hvac_action": true
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "events": [
+    {
+      "time": "2026-01-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 30.0
+    },
+    {
+      "time": "2026-01-13T14:00:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T15:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T16:00:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 30.0
+    },
+    {
+      "time": "2026-01-13T16:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T16:35:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 30.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-13T16:14:59",
+      "expect": "hvac_mode_writes",
+      "since": "2026-01-13T14:00:00",
+      "values": [],
+      "reason": "The thermostat stays in the bank's heat mode until the period starts."
+    },
+    {
+      "at": "2026-01-13T16:14:59",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T15:30:00",
+      "values": [],
+      "reason": "Nothing is written between the 15:30 cycle (which re-asserted the bank) and the period's start."
+    },
+    {
+      "at": "2026-01-13T16:15:00",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T16:14:59",
+      "values": [
+        68.0
+      ],
+      "reason": "At the high-cost period's start (16:15) the bank ends and the comfort band is written once (heat 68 F, the furnace stops (indoor 75.5 F is far above 68 F)); before #1405 this write waited for the 16:30 cycle."
+    },
+    {
+      "at": "2026-01-13T16:15:00",
+      "expect": "hvac_mode_writes",
+      "since": "2026-01-13T16:14:59",
+      "values": [],
+      "reason": "No mode change at 16:15: the heat bank just ran, so the comfort-edge settling guard keeps heat and the band write is heat 68 F, where the furnace stops (indoor 75.5 F is far above 68 F). This is what real Home Assistant does (its thermostat reports hvac_action); the setpoint (68) differs from the bank target (76), so a bank re-send is told apart by the value."
+    },
+    {
+      "at": "2026-01-13T16:29:59",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T16:15:00",
+      "values": [],
+      "reason": "No re-send between the bank end and the next cycle."
+    },
+    {
+      "at": "2026-01-13T16:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T16:29:59",
+      "values": [
+        68.0
+      ],
+      "reason": "The regular cycle re-asserts the band as it always does."
+    },
+    {
+      "at": "2026-01-13T16:30:00",
+      "expect": "hvac_mode_writes",
+      "since": "2026-01-13T16:15:00",
+      "values": [],
+      "reason": "No mode change at the 16:30 cycle either: it re-asserts heat 68 F in the mode the bank ran (before #1405 this cycle made the first band write)."
+    },
+    {
+      "at": "2026-01-13T16:35:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.text",
+      "value": null,
+      "reason": "After the bank no surface claims one (issue #1404)."
+    },
+    {
+      "at": "2026-01-13T16:35:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.briefing_hvac_row",
+      "value": "HVAC Mode: Heat at 68°F",
+      "reason": "After the bank the briefing quotes the band write actually made at the period start."
+    }
+  ],
+  "name": "tou_home_heat_bank_ends_on_time_1405",
+  "description": "Issue #1405: a home pre-heated to 76 F for a 16:15 high-cost period. At the period's start the bank ends; before the fix the thermostat kept the bank setpoint until the next 30-minute cycle (here 16:30) wrote the comfort band. Now the Home/Guest bank-end timer (the mirror of the Away/Vacation T_start timer) makes that band write at 16:15: heat 68 F (the settling guard keeps the mode the bank just ran), so the furnace stops (indoor 75.5 F is far above 68 F). The thermostat reports hvac_action, as on real Home Assistant (the Tier B run of this golden agrees).",
+  "verdict": {
+    "type": "positive",
+    "summary": "A home bank ends at the high-cost period's start, not up to 30 minutes later",
+    "observed_behavior": "The band write (heat 68 F) lands at 16:15; before the fix the first band write after the bank was the 16:30 cycle's.",
+    "expected_behavior": "Occupant view: during the expensive period the thermostat holds the comfort band, not the pre-conditioning setpoint.",
+    "effectiveness": "Fails on 6ebdb16 (no write at 16:15, the band lands at 16:30). Deleting the home bank-end timer fails the 16:15 row; a timer that re-sends the bank (heat 76 F) fails it too (the band value is 68).",
+    "alignment": "docs/scheduler-spec.md and docs/08-COMPUTATION-REFERENCE.md (Issue #1405) describe the Home/Guest bank-end timer.",
+    "user_outcome": "If this regressed, a pre-cooled home would keep cooling to the floor (or a pre-heated one heating to the ceiling) for up to 30 minutes into the expensive period."
+  },
+  "source": "synthetic: Issue #1405",
+  "issue": 1405
+}

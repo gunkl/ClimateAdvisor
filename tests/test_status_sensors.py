@@ -243,7 +243,8 @@ def _compute_next_automation_action(
     from custom_components.climate_advisor import coordinator as _coord_mod
 
     coord = _make_real_coordinator(True, automation_engine, tou_phase_resolution=tou_phase_resolution)
-    coord.config = config
+    # these tests drive v3's curve (a v4 primary has none before its first refresh)
+    coord.config = {"primary_engine": "v3", **config}
     if pre_cool_trigger_dt is not None:
         coord._pre_cool_trigger_dt = pre_cool_trigger_dt
         coord._pre_cool_target = pre_cool_target
@@ -900,7 +901,8 @@ def _compute_next_automation_action_with_forecast(
     from custom_components.climate_advisor import coordinator as _coord_mod
 
     coord = _make_real_coordinator(True, automation_engine)
-    coord.config = config
+    # these tests drive v3's curve (a v4 primary has none before its first refresh)
+    coord.config = {"primary_engine": "v3", **config}
     coord._current_classification = c
     coord._last_predicted_indoor = predicted_indoor
     coord._hourly_forecast_temps = hourly_forecast_temps or []
@@ -916,7 +918,7 @@ def _compute_next_automation_action_with_forecast(
     real = _real_engine(indoor=75.0, mode="off", **config)
     real._natural_vent_active = bool(automation_engine._natural_vent_active)
     real._paused_by_door = bool(automation_engine.is_paused_by_door)
-    real._hourly_forecast_temps = hourly_forecast_temps or []
+    real.inputs.hourly_forecast = hourly_forecast_temps or []
     automation_engine._nat_vent_start_decision = real._nat_vent_start_decision
 
     now_dt = datetime.combine(date(2026, 7, 10), now_time)
@@ -1525,7 +1527,7 @@ class TestWarmDayForecastEventCandidates:
         ae._natural_vent_active = False
         c = _make_classification(day_type="warm", hvac_mode="off", windows_recommended=True)
         coord = _make_real_coordinator(True, ae)
-        coord.config = {"comfort_cool": 100.0}
+        coord.config = {"primary_engine": "v3", "comfort_cool": 100.0}
         coord._current_classification = c
         coord._nat_vent_plan = {
             "nat_vent_cutoff": None,
@@ -1583,7 +1585,7 @@ class TestWarmDayForecastEventCandidates:
         ):
             # Cycle 1: MILD, high comfort_cool — no ceiling breach in range.
             c_mild = _make_classification(day_type="mild", hvac_mode="off", windows_recommended=True)
-            coord.config = {"comfort_cool": 100.0}
+            coord.config = {"primary_engine": "v3", "comfort_cool": 100.0}
             coord._current_classification = c_mild
             coord._compute_and_cache_nat_vent_plan()
             assert coord._nat_vent_plan["ceiling_breach_time"] is None
@@ -1591,7 +1593,7 @@ class TestWarmDayForecastEventCandidates:
             # Cycle 2: re-classified to WARM with a lower comfort_cool that IS crossed
             # by the same indoor curve — the cached plan must update to match.
             c_warm = _make_classification(day_type="warm", hvac_mode="off", windows_recommended=True)
-            coord.config = {"comfort_cool": 75.0}
+            coord.config = {"primary_engine": "v3", "comfort_cool": 75.0}
             coord._current_classification = c_warm
             coord._compute_and_cache_nat_vent_plan()
             assert coord._nat_vent_plan["ceiling_breach_time"] is not None

@@ -168,6 +168,19 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # skipped, the deciding event (or its absence) is still what the assertion checks.
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
+        # Issue #1230 R1c: indoor_source_changed only announces which sensor the room reading now comes from
+        # (thermostat, its finer sensor, dedicated or sleep sensor). It never commands HVAC; the decision events that
+        # follow still map, so registering it unmapped cannot hide a real failure.
+        "indoor_source_changed",
+        # Issue #1455: humidity_source_changed only announces which source a chart humidity line (room, bedroom,
+        # outdoor) now reads. Chart display only: nothing in automation reads humidity and it commands nothing, so
+        # registering it unmapped cannot hide a real failure.
+        "humidity_source_changed",
+        # Issue #1432: forecast_model_changed announces which v4 model the decisions read after a nightly fit
+        # (stitched CA reading or each room separately). It commands nothing itself; the decisions that read the new
+        # model still emit their own deciding events, so leaving it unmapped cannot hide a real failure, while mapping
+        # it to 'unknown:<type>' could shadow a real outcome under last-decision-wins.
+        "forecast_model_changed",
         # Issue #1322: entity outage / recovery rows are observational (Activity log only; no decision to judge).
         "entity_unavailable",
         "entity_recovered",
@@ -1341,6 +1354,33 @@ def check_assertion(
         got = [v for ts, v in writes if since < ts <= at_str]
         want = [float(v) for v in assertion.get("values", [])]
         if len(got) == len(want) and all(abs(a - b) < 0.01 for a, b in zip(got, want, strict=True)):
+            return expect
+        return False
+
+    # --- hvac_mode_writes (Issue #1230 R6, X1) ---
+    # The mode analogue of ``setpoint_writes``: the exact ordered list of modes the engine really told the thermostat
+    # (``climate.set_hvac_mode`` calls in ``result.action_log``) in ``(since, at]``.  Payload:
+    #   hvac_mode_writes: {"values": ["cool", ...], "since": <ISO>?}   ([] asserts NO mode write)
+    # Rule-8 justification (test-infrastructure change): purely ADDITIVE -- a new ``expect`` string no existing
+    # scenario uses, so no existing result can change.  The previous semantics were not wrong, they could not say this:
+    # ``hvac_mode_never_commanded`` only forbids one mode and ``setpoint_writes`` ignores mode calls, so a guard that
+    # re-sent "cool" every two hours (cool -> cool, nothing the occupant could see change except a cloud write and an
+    # Activity row) passed every existing assertion.  Could it let a real failure pass silently?  No: it is an exact
+    # comparison against the service calls actually issued (a missing, extra or wrong mode write fails), and it is not
+    # evaluated unless a scenario names it.
+    if expect == "hvac_mode_writes":
+        at_str = assertion["at"]
+        since = assertion.get("since", "")
+        got_modes = [
+            e["data"]["hvac_mode"]
+            for e in result.action_log
+            if e.get("domain") == "climate"
+            and e.get("service") == "set_hvac_mode"
+            and e.get("ts") is not None
+            and "hvac_mode" in e.get("data", {})
+            and since < _naive_iso(e["ts"]) <= at_str
+        ]
+        if got_modes == [str(v) for v in assertion.get("values", [])]:
             return expect
         return False
 

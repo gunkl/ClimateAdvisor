@@ -418,3 +418,23 @@ class TestThermostatSnapshotInPayload:
 
         assert payload["thermostat_snapshot"] is None
         assert payload["debug_state"] == {"hvac_mode": "heat"}
+
+
+class TestDebugTabKeysInTheDownload:
+    """Issue #1399: the Debug tab has no catch-all group, so the diagnostics download is where every debug field lives.
+
+    Every key of the real get_debug_state() (read from the coordinator source) must come through the HA download's
+    ``debug_state`` unredacted, including the keys the Debug tab lists as download-only."""
+
+    def test_every_debug_state_key_and_every_download_only_key_reaches_the_download(self):
+        from tests.test_new_dashboard import _debug_lists, _get_debug_state_keys
+
+        keys = _get_debug_state_keys()
+        download_only = _debug_lists()[3]
+        assert download_only <= keys
+        entry = _make_entry("entry_a", "House")
+        coord = _make_coordinator({})
+        coord.get_debug_state.return_value = {k: f"value-of-{k}" for k in keys}
+        payload = asyncio.run(async_get_diagnostics_payload(_make_hass({"entry_a": coord}, [entry]), entry))
+        for key in keys | download_only:
+            assert payload["debug_state"].get(key) == f"value-of-{key}", f"{key} missing or redacted in the download"

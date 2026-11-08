@@ -1,4 +1,4 @@
-<!-- Nav: ← [docs/00-PROJECT-INSTRUCTIONS.md] | → [__init__.py#L480 | api.py#L73 | learning.py#L679 | state.py#L28 | chart_log.py#L46 | config_flow.py#L602 | indoor_temp.py#L44] | ↔ [docs/02-ARCHITECTURE-REFERENCE.md] -->
+<!-- Nav: ← [docs/00-PROJECT-INSTRUCTIONS.md] | → [__init__.py#L480 | api.py | learning.py#L1007 | state.py#L28 | chart_log.py#L103 | config_flow.py | indoor_temp.py#L44] | ↔ [docs/02-ARCHITECTURE-REFERENCE.md] -->
 
 # Multi-Zone Support — Territory Spec (Tier 3)
 
@@ -174,6 +174,7 @@ implementation followed and shipped as v0.7.0.
 | Were all zone-context gaps caught by the original nine-gap review? | No — Issue #812's audit found four more (dashboard first-load, Repairs `entries[0]`, zero log attribution, non-deterministic registry fallback order); Issue #911 later closed the remainder — every scheduled/event coordinator callback and every `api.py` REST handler are now zone-scoped too. | [Gap 10](#gap-10--residual-zone-context-gaps-found-by-issue-812s-audit) |
 | Does every zone send its own copy of the daily briefing notification? | It used to — Issue #817 Part 3/4 added a per-zone mute (`CONF_BRIEFING_NOTIFICATIONS_ENABLED`), defaulting only the stably-first zone to notifying, plus made the dashboard's Regenerate button stop force-sending a real push/email. | [Gap 10e](#10e--every-zone-independently-sent-its-own-daily-briefing-notification-issue-817-part-34) |
 | Did 10c's zone-attribution fix cover every log call site? | No — it wrapped only 7 sites (update cycle, briefing send, 5 service handlers). Issue #911 found ~13 unwrapped coordinator.py callbacks (door/window, occupancy, thermostat/fan listeners, pre-cool, etc.) plus all ~20 `api.py` REST handlers, still leaking cross-zone warnings — now fixed. | [Gap 10f](#10f--remaining-zone-attribution-gaps-closed-coordinator-callbacks-and-apipy-issue-911) |
+| Is the AI investigation history per zone? | Yes, since 0.9.6 (Issue #1415). It was one file per install while each zone saved its whole list into it, so the last zone to save erased the others' reports and every zone showed all zones' reports after a restart. Now `climate_advisor_investigation_reports_<entry_id>.json` (in `ENTRY_SCOPED_FILES`, deleted with the zone); the old shared file is copied to every zone once and removed. | [State Persistence: restore table](state-persistence.md#restore-across-the-date-boundary-issues-1349-1354-1360) |
 
 ## Scope
 
@@ -746,6 +747,8 @@ duplicated onto the Repairs card. This mirrors the existing split between
 `_LOGGER.warning()` detail and the shorter `weather_entity_not_found` card
 text already in this codebase.
 
+**Superseded (Issue #1418):** that copy named no cause and no remedy. The owner saw it on a 7-zone install and could not tell what to change. The card now carries `{request}` (method, path, caller) and `{outcome}` ("answered with the data of zone \"Zone 1\"" or "refused, and nothing was changed") placeholders, and tells the owner to add `?zone=<entry_id>`. Every view now reads `zone` as well as `entry_id`, via `api._zone_param()`. The owner also ruled that the card is raised on **every** unscoped request, on every endpoint (including the `status` bootstrap) and from every caller. It no longer shares the WARNING throttle, and a dismissed card comes back (`zone_registry._raise_ambiguous_issue`, `flag_unscoped_request`). The one exception is `GET /zones` (Issue #1454), which names no zone by design and is what the dashboards ask for the zone list, so the dashboards themselves never raise the card. See [REST API — Choosing a zone](rest-api.md#choosing-a-zone-zone).
+
 **Structural closure:** PR9 should ship in the same release batch as PR7
 wherever practically possible, narrowing the window between merge and every
 existing dashboard caller actually loading updated code. A `config_flow`
@@ -1173,10 +1176,21 @@ that only runs on the success path is not a self-heal for the failure mode
 that matters most — the one that guarantees every subsequent request fails
 the same way.
 
+**Superseded (Issue #1454):** the unscoped retry raised the "Ambiguous zone
+selection" Repairs card (Issue #1418 made every unscoped request raise it), so a
+dashboard left open across a Home Assistant restart raised it every time. The
+dashboards now never send an unscoped request: the zone list comes from
+`GET /zones` (names no zone, raises nothing), a stored zone that is not listed
+is re-picked from it and retried at once, and a listed zone (or an empty list:
+still starting) is retried with the same zone after 2 s, 5 s and 10 s before
+the page says "Climate Advisor is starting". A first visit asks `/zones` before
+any scoped call. See [REST API — Choosing a zone](rest-api.md#choosing-a-zone-zone).
+
 **Test coverage:** `tests/ui/zone-selector.spec.js` (Playwright, real
 headless Chromium against the existing mock-server harness, actually
 executed) — `"Issue #812: zone selection persists across a page reload"` and
-`"Issue #812: a stored zone that no longer exists falls back gracefully"`.
+`"Issue #812: a stored zone that no longer exists falls back gracefully"`;
+`tests/ui/scoped-requests-1454.spec.js` (Issue #1454: restart and first visit, both dashboards and the accuracy page).
 
 ##### 10b — Repairs flows hard-coded `entries[0]`, issue_ids were domain-wide
 
@@ -2496,7 +2510,7 @@ document.
   This was a real gap, not just a refactor target — it is now fixed for both
   callers by construction, since both delegate to the same guarded helper.
 
-  **(as built, Issue #1033):** the resolver stays stateless for readings and is still shared by both callers (since Issue #1194 (a) it keeps only a log-only `_logged_indoor_source` memory keyed by climate entity, so its sleep-sensor INFO line fires once per source change per zone), but the process-global `_sleep_sensor_miss_streaks` dict that Issue #895 added to it (a per-entity-id counter advanced by both the coordinator and the engine, therefore shared across zones using one sensor and cadence-dependent) is **gone**. Indoor-sensor episode state is now plain per-zone instance fields on each `ClimateAdvisorCoordinator` (`_indoor_primary_fallback_*`, `_indoor_sleep_fallback_*`: reason announced / since), driven only by `_refresh_indoor_sensor_health()`, so two zones sharing one sensor announce independently in their own logs. See `docs/08-COMPUTATION-REFERENCE.md` section 20. **Issue #1194 (a):** the remote-sensor outer loop's state (`_remote_*` fields: offset, applied value, startup-wait clock, measured latency) lives on each zone's own `AutomationEngine`, and its 1-minute floor timer is registered per coordinator; two zones sharing one sleep sensor each offset their own thermostat independently. **Issue #1194 (c):** the context entry/exit bookkeeping (`_remote_target_context`, `_remote_entered_at`, `_remote_exit_at`) is per engine too, so each zone's thermostat gets its own bedtime band before its own first decision and its own plain-target write at the end of the night; one zone's wake routine never delays or races another zone's exit.
+  **(as built, Issue #1033):** the resolver stays stateless for readings and is still shared by both callers (since Issue #1230 R1c it keeps no memory at all and logs at DEBUG only; the once-per-change INFO line is the coordinator funnel's `_note_indoor_source`, per zone), but the process-global `_sleep_sensor_miss_streaks` dict that Issue #895 added to it (a per-entity-id counter advanced by both the coordinator and the engine, therefore shared across zones using one sensor and cadence-dependent) is **gone**. Indoor-sensor episode state is now plain per-zone instance fields on each `ClimateAdvisorCoordinator` (`_indoor_primary_fallback_*`, `_indoor_sleep_fallback_*`: reason announced / since), driven only by `_refresh_indoor_sensor_health()`, so two zones sharing one sensor announce independently in their own logs. See `docs/08-COMPUTATION-REFERENCE.md` section 20. **Issue #1194 (a):** the remote-sensor outer loop's state (`_remote_*` fields: offset, applied value, startup-wait clock, measured latency) lives on each zone's own `AutomationEngine`, and its 1-minute floor timer is registered per coordinator; two zones sharing one sleep sensor each offset their own thermostat independently. **Issue #1194 (c):** the context entry/exit bookkeeping (`_remote_target_context`, `_remote_entered_at`, `_remote_exit_at`) is per engine too, so each zone's thermostat gets its own bedtime band before its own first decision and its own plain-target write at the end of the night; one zone's wake routine never delays or races another zone's exit.
 
   Shared logic is now `indoor_temp.resolve_indoor_temp_f()`
   (`indoor_temp.py:44-97`, new module, `indoor_temp.py:1-24`'s module
@@ -2553,45 +2567,45 @@ current-tense guidance.** As actually followed:
 
 ## Code Reference
 
-- [`async_setup_entry`](../custom_components/climate_advisor/__init__.py#L361) — per-entry coordinator construction (already correct); setup ordering relevant to Gap 6
-- [`handle_reset_learning_data`](../custom_components/climate_advisor/__init__.py#L504) — Gap 5's confirmed closure-capture bug
+- [`async_setup_entry`](../custom_components/climate_advisor/__init__.py#L487) — per-entry coordinator construction (already correct); setup ordering relevant to Gap 6
+- [`handle_reset_learning_data`](../custom_components/climate_advisor/__init__.py#L715) — Gap 5's confirmed closure-capture bug
 - [service registrations](../custom_components/climate_advisor/__init__.py#L460) — `respond_to_suggestion`, `force_reclassify`, `resend_briefing`, `dump_diagnostics`
-- [`reset_learning_data` registration](../custom_components/climate_advisor/__init__.py#L510) — domain-scoped, overwritten by second entry's setup
-- [REST view registration](../custom_components/climate_advisor/__init__.py#L517) — Gap 6
-- [panel registration](../custom_components/climate_advisor/__init__.py#L521) — `async_register_built_in_panel`, fixed `frontend_url_path`, Gap 6
-- [`_get_coordinator`](../custom_components/climate_advisor/api.py#L73) — Gap 4, **fixed, PR7 DONE** (was `#L72`, first-entry selection, 21 call sites, pre-PR7; now `entry_id`-aware, resolves via `zone_registry`)
-- [`api.py` sensitive-field redaction](../custom_components/climate_advisor/api.py#L556) (was `#L542` pre-PR7) — existing precedent reused for the redaction question
-- [`LearningEngine.__init__`](../custom_components/climate_advisor/learning.py#L679) — Gap 1, fixed-filename storage path (as designed); **now entry-scoped, PR6 DONE** — see `resolve_entry_scoped_path` below
-- [`LEARNING_DB_FILE`](../custom_components/climate_advisor/const.py#L292) — Gap 1's fixed filename constant
-- [`STATE_FILE`](../custom_components/climate_advisor/const.py#L280) — Gap 2's fixed filename constant
+- [`reset_learning_data` registration](../custom_components/climate_advisor/__init__.py) — domain-scoped, overwritten by second entry's setup
+- [REST view registration](../custom_components/climate_advisor/__init__.py) — Gap 6
+- [panel registration](../custom_components/climate_advisor/__init__.py) — `async_register_built_in_panel`, fixed `frontend_url_path`, Gap 6
+- [`_get_coordinator`](../custom_components/climate_advisor/api.py#L142) — Gap 4, **fixed, PR7 DONE** (was `#L72`, first-entry selection, 21 call sites, pre-PR7; now `entry_id`-aware, resolves via `zone_registry`)
+- [`api.py` sensitive-field redaction](../custom_components/climate_advisor/api.py) (was `#L542` pre-PR7) — existing precedent reused for the redaction question
+- [`LearningEngine.__init__`](../custom_components/climate_advisor/learning.py#L1007) — Gap 1, fixed-filename storage path (as designed); **now entry-scoped, PR6 DONE** — see `resolve_entry_scoped_path` below
+- [`LEARNING_DB_FILE`](../custom_components/climate_advisor/const.py#L591) — Gap 1's fixed filename constant
+- [`STATE_FILE`](../custom_components/climate_advisor/const.py#L553) — Gap 2's fixed filename constant
 - [`StatePersistence`](../custom_components/climate_advisor/state.py#L25) (`state.py`) — Gap 2, **now entry-scoped, PR6 DONE**
-- [`ChartStateLog`](../custom_components/climate_advisor/chart_log.py#L43) / `_CHART_LOG_FILE` (`chart_log.py`) — Gap 3, **now entry-scoped, PR6 DONE**
-- [`async_create_entry` zone-name field](../custom_components/climate_advisor/config_flow.py#L602) — Gap 7, **fixed, PR8 DONE** (field itself at `config_flow.py#L614`, suggestion helper at `config_flow.py#L161`); pre-PR8 this cited the hardcode at `config_flow.py:559`
-- [`AutomationEngine._get_indoor_temp_f`](../custom_components/climate_advisor/automation.py#L9876) — PR10 **DONE**; now a thin wrapper around `indoor_temp.resolve_indoor_temp_f()` (was a second, independent implementation at the old `automation.py:9691`, before the dedup)
-- [`coordinator._get_indoor_temp`](../custom_components/climate_advisor/coordinator.py#L3047) — PR10 **DONE**; now also a thin wrapper around the same shared helper (was the correct/guarded version at the old `coordinator.py:3002`)
-- [`indoor_temp.resolve_indoor_temp_f`](../custom_components/climate_advisor/indoor_temp.py#L44) (new, PR10 **DONE**) — the shared helper both classes now delegate to; also fixes a second bug found during the dedup (missing exception handling on automation.py's original climate_fallback path, see [Carried-Over Citations](#carried-over-citations))
+- [`ChartStateLog`](../custom_components/climate_advisor/chart_log.py#L100) / `_CHART_LOG_FILE` (`chart_log.py`) — Gap 3, **now entry-scoped, PR6 DONE**
+- [`async_create_entry` zone-name field](../custom_components/climate_advisor/config_flow.py) — Gap 7, **fixed, PR8 DONE** (field itself at `config_flow.py`, suggestion helper at `config_flow.py`); pre-PR8 this cited the hardcode at `config_flow.py:559`
+- [`AutomationEngine._get_indoor_temp_f`](../custom_components/climate_advisor/automation.py#L20310) — PR10 **DONE**; now a thin wrapper around `indoor_temp.resolve_indoor_temp_f()` (was a second, independent implementation at the old `automation.py:9691`, before the dedup)
+- [`coordinator._get_indoor_temp`](../custom_components/climate_advisor/coordinator.py#L5343) — PR10 **DONE**; now also a thin wrapper around the same shared helper (was the correct/guarded version at the old `coordinator.py:3002`)
+- [`indoor_temp.resolve_indoor_temp_f`](../custom_components/climate_advisor/indoor_temp.py#L475) (new, PR10 **DONE**) — the shared helper both classes now delegate to; also fixes a second bug found during the dedup (missing exception handling on automation.py's original climate_fallback path, see [Carried-Over Citations](#carried-over-citations))
 - [`fan_status.py::resolve_untracked_fan_status`](../custom_components/climate_advisor/fan_status.py) — precedent pattern for PR10's extraction and for the module-vs-mixin decision (followed exactly, as built)
-- [`coordinator.py:483`](../custom_components/climate_advisor/coordinator.py#L483) — existing per-entry `LearningEngine` construction that Gap 1's fix unlocks for free
-- [`coordinator.py:495-505`](../custom_components/climate_advisor/coordinator.py#L495) — existing per-entry `AutomationEngine` construction, already correct
-- [`zone_registry.py`](../custom_components/climate_advisor/zone_registry.py) (new, PR7 **DONE**; WARNING throttle added post-PR7, Verification fix) — Gap 4's fix; [`get_coordinator()`](../custom_components/climate_advisor/zone_registry.py#L95), [`iter_coordinators()`](../custom_components/climate_advisor/zone_registry.py#L100), [`get_default_coordinator()`](../custom_components/climate_advisor/zone_registry.py#L105) (line numbers shifted from `#L39,#L44,#L49` by the throttle fix's additions) — also the future Zone Influence feature's accessor surface; also now the accessor `_resolve_zone_coordinator()` (`__init__.py:392-423`, Gap 5's fix) delegates to instead of its own duplicate one-liner. [`_warn_once()`](../custom_components/climate_advisor/zone_registry.py#L65) and [`reset_warning_state()`](../custom_components/climate_advisor/zone_registry.py#L82) (both new, Verification fix) implement the once-per-distinct-outcome WARNING throttle — see "WARNING throttle fix" under Gap 4 above.
+- [`coordinator.py:483`](../custom_components/climate_advisor/coordinator.py) — existing per-entry `LearningEngine` construction that Gap 1's fix unlocks for free
+- [`coordinator.py:495-505`](../custom_components/climate_advisor/coordinator.py) — existing per-entry `AutomationEngine` construction, already correct
+- [`zone_registry.py`](../custom_components/climate_advisor/zone_registry.py) (new, PR7 **DONE**; WARNING throttle added post-PR7, Verification fix) — Gap 4's fix; [`get_coordinator()`](../custom_components/climate_advisor/zone_registry.py#L103), [`iter_coordinators()`](../custom_components/climate_advisor/zone_registry.py#L108), [`get_default_coordinator()`](../custom_components/climate_advisor/zone_registry.py#L236) (line numbers shifted from `#L39,#L44,#L49` by the throttle fix's additions) — also the future Zone Influence feature's accessor surface; also now the accessor `_resolve_zone_coordinator()` (`__init__.py:392-423`, Gap 5's fix) delegates to instead of its own duplicate one-liner. [`_warn_once()`](../custom_components/climate_advisor/zone_registry.py#L65) and [`reset_warning_state()`](../custom_components/climate_advisor/zone_registry.py#L90) (both new, Verification fix) implement the once-per-distinct-outcome WARNING throttle — see "WARNING throttle fix" under Gap 4 above.
 - `tests/test_zone_registry.py` (new, PR7 **DONE**; throttle test classes added post-PR7, Verification fix) — `get_coordinator`/`iter_coordinators`/`get_default_coordinator` across 0/1/2+ zones, including the single-zone fast path's `async_entries()` non-call, the multi-zone fallback's stable-order/WARNING-log behavior, the two previously-silent defensive branches now warning, and `TestGetDefaultCoordinatorWarningThrottle`'s throttle/reset coverage
 - `tests/test_api_multi_zone.py` (new, PR7 **DONE**) — `_get_coordinator(hass, request)`'s `entry_id`-resolution and absent-`entry_id` backward-compat path, driven through 4 of the 21 `api.py` view classes
 - `tests/test_repairs.py::TestZoneResolutionAmbiguousIssue` (new, PR7 **DONE**) — the `zone_resolution_ambiguous` Repairs issue's raise/clear lifecycle, driven through the real `async_setup_entry()`/`async_unload_entry()` via `build_headless_multi_zone()`
 - [`storage_paths.py`](../custom_components/climate_advisor/storage_paths.py) (new, PR6 **DONE**) — Gaps 1-3's shared fix; [`resolve_entry_scoped_path()`](../custom_components/climate_advisor/storage_paths.py#L29) (single source of truth for entry-scoped filenames — falls back to the unscoped legacy path when `entry_id` is falsy, a deviation from the original design snippet, see the "(as built, PR6)" note under [Gap 1](#gap-1--learningengine-db-collision)) and [`migrate_legacy_storage_file()`](../custom_components/climate_advisor/storage_paths.py#L59) (one-time idempotent migration, not in the original design snippet but called for by this document's own Pre-conditions item 3)
-- [`api.py:758`](../custom_components/climate_advisor/api.py#L758) (was `#L744` pre-PR7) — `request.query.get("hours", 12)`, the existing query-param precedent Gap 4's `entry_id` parameter followed, **PR7 DONE**
-- [`coordinator.py:1514`](../custom_components/climate_advisor/coordinator.py#L1514) — `hass.config_entries.async_get_entry(self._entry_id)`, the `entry.title` read precedent Gap 7's fix must use
-- [`coordinator.py:448`](../custom_components/climate_advisor/coordinator.py#L448) — `self._entry_id` attribute, read by the `entry.title` accessor above
-- [`repairs.py:38,77`](../custom_components/climate_advisor/repairs.py#L38) — `hass.config_entries.async_entries(DOMAIN)` precedent for the Transitional Safety Window's deterministic fallback order
-- [`const.py:1058-1059`](../custom_components/climate_advisor/const.py#L1058) — `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` (1058, 300s) / `THERMAL_FAN_SAMPLE_INTERVAL_S` (1059, 120s), cited in Zone Influence's data-flow-cadence analysis
-- [`door_window_fsm.py:310-311`](../custom_components/climate_advisor/door_window_fsm.py#L310) — `DoorWindowFsmInputs.natural_vent_active`/`.whf_owns_hvac`, the communicating-automata precedent for the future Zone Influence FSM's cross-instance `Inputs` shape
+- [`api.py:758`](../custom_components/climate_advisor/api.py) (was `#L744` pre-PR7) — `request.query.get("hours", 12)`, the existing query-param precedent Gap 4's `entry_id` parameter followed, **PR7 DONE**
+- [`coordinator.py:1514`](../custom_components/climate_advisor/coordinator.py) — `hass.config_entries.async_get_entry(self._entry_id)`, the `entry.title` read precedent Gap 7's fix must use
+- [`coordinator.py:448`](../custom_components/climate_advisor/coordinator.py) — `self._entry_id` attribute, read by the `entry.title` accessor above
+- [`repairs.py:38,77`](../custom_components/climate_advisor/repairs.py) — `hass.config_entries.async_entries(DOMAIN)` precedent for the Transitional Safety Window's deterministic fallback order
+- [`const.py:1058-1059`](../custom_components/climate_advisor/const.py) — `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` (1058, 300s) / `THERMAL_FAN_SAMPLE_INTERVAL_S` (1059, 120s), cited in Zone Influence's data-flow-cadence analysis
+- [`door_window_fsm.py:310-311`](../custom_components/climate_advisor/door_window_fsm.py) — `DoorWindowFsmInputs.natural_vent_active`/`.whf_owns_hvac`, the communicating-automata precedent for the future Zone Influence FSM's cross-instance `Inputs` shape
 - `build_coordinator.py:181` (`tools/sim_harness/build_coordinator.py`) — `build_headless_coordinator()`, constructs `ClimateAdvisorCoordinator` directly, bypassing `async_setup_entry()` entirely; the reason Gaps 5/6/8/9 have no regression coverage today. Left untouched by PR2 — single-zone tests keep this fast path.
 - `build_coordinator.py:177-180` — comment confirming `__init__` never touches `async_track_*`/`hass.bus`, i.e. no setup-entry side effects occur via the direct-construction path
-- [`build_headless_multi_zone()`](../tools/sim_harness/build_coordinator.py#L251) (`tools/sim_harness/build_coordinator.py:251-388`, new, PR2 **DONE**) — drives the REAL `async_setup_entry()`/`async_unload_entry()` per zone against one shared `FakeHass`; see the "(as built, PR2)" note under [Harness extension needed](#harness-extension-needed)
+- [`build_headless_multi_zone()`](../tools/sim_harness/build_coordinator.py#L339) (`tools/sim_harness/build_coordinator.py:251-388`, new, PR2 **DONE**) — drives the REAL `async_setup_entry()`/`async_unload_entry()` per zone against one shared `FakeHass`; see the "(as built, PR2)" note under [Harness extension needed](#harness-extension-needed)
 - [`multi_zone_assertions.py`](../tools/sim_harness/multi_zone_assertions.py) (new, PR2 **DONE**) — `cross_zone_isolation`/`service_registry_binding`/`teardown_cleanup` assertion evaluators plus `validate_zones_schema()`; see the "(as built, PR2)" note under [Golden scenario schema extension](#golden-scenario-schema-extension). Note: `service_registry_binding` is unused as of PR4 — see the "(as built, PR4)" note under [Testing Without Multi-Zone Hardware](#testing-without-multi-zone-hardware)
 - `ha_stubs.py:179-229,317-319` (`tools/sim_harness/ha_stubs.py`) — existing `_MockConfigFlow`/`_MockOptionsFlow` realification precedent PR2's new config-entry stub follows (PR2 **DONE**)
 - `fake_hass.py` (`tools/sim_harness/fake_hass.py`) — `.data`/`.config_entries` now added, PR2 **DONE**
 - `tests/test_api.py:43-60` — existing hand-built `hass.data = {DOMAIN: {"entry_1": coord}}` `MagicMock()` precedent for the shape `build_headless_multi_zone()` now produces via the real setup path instead
-- [`dump_diagnostics` fields](../custom_components/climate_advisor/__init__.py#L554) (`__init__.py:554-570`, was `:479-497` pre-Phase-B, PR1 **DONE** — now redirected through `diagnostics.py`'s shared helper, see the "(as built, PR1)" note under [Fix: implement HA's native diagnostics hook](#fix-implement-has-native-diagnostics-hook)) — original log-only diagnostics payload, superseded (not replaced) by the new `diagnostics.py` hook
+- [`dump_diagnostics` fields](../custom_components/climate_advisor/__init__.py) (`__init__.py:554-570`, was `:479-497` pre-Phase-B, PR1 **DONE** — now redirected through `diagnostics.py`'s shared helper, see the "(as built, PR1)" note under [Fix: implement HA's native diagnostics hook](#fix-implement-has-native-diagnostics-hook)) — original log-only diagnostics payload, superseded (not replaced) by the new `diagnostics.py` hook
 - [`diagnostics.py`](../custom_components/climate_advisor/diagnostics.py) (new, PR1 **DONE**) — `async_get_config_entry_diagnostics()` / `async_get_diagnostics_payload()`, HA's native Download Diagnostics hook; see [Diagnostics and Field Feedback](#diagnostics-and-field-feedback)
 - `docs/HA-BOUNDARY-EXCEPTIONS.md` — one active exception (learning-DB file); no new entry needed for `diagnostics.py`
 - [HA Developer Docs — Implements diagnostics](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/diagnostics/) — official signature/pattern for `async_get_config_entry_diagnostics`, `TO_REDACT`, and `async_redact_data()`

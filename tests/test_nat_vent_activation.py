@@ -878,7 +878,7 @@ class TestForecastRisingOutdoorSkip:
         engine._natural_vent_active = False
         engine._fan_override_active = False
         # Forecast: 1 hour ahead is 76F (above threshold 75F = 72 + 3)
-        engine._hourly_forecast_temps = [
+        engine.inputs.hourly_forecast = [
             self._make_forecast_entry("2026-04-20T11:00:00+00:00", 76.0),
         ]
         events: list[tuple] = []
@@ -906,7 +906,7 @@ class TestForecastRisingOutdoorSkip:
         engine._natural_vent_active = False
         engine._fan_override_active = False
         # Forecast: 1 hour ahead is 74F (below threshold 75F)
-        engine._hourly_forecast_temps = [
+        engine.inputs.hourly_forecast = [
             self._make_forecast_entry("2026-04-20T11:00:00+00:00", 74.0),
         ]
         events: list[tuple] = []
@@ -929,7 +929,7 @@ class TestForecastRisingOutdoorSkip:
         engine._last_outdoor_temp = 68.0
         engine._natural_vent_active = False
         engine._fan_override_active = False
-        engine._hourly_forecast_temps = []
+        engine.inputs.hourly_forecast = []
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
@@ -959,8 +959,8 @@ class TestThermalFloorImminentSkip:
         engine._last_outdoor_temp = 68.0
         engine._natural_vent_active = False
         engine._fan_override_active = False
-        engine._hourly_forecast_temps = []
-        engine._thermal_model = {"confidence": "medium", "k_passive": -0.3}
+        engine.inputs.hourly_forecast = []
+        engine.inputs.thermal = {"confidence": "medium", "k_passive": -0.3}
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
@@ -986,8 +986,8 @@ class TestThermalFloorImminentSkip:
         engine._last_outdoor_temp = 68.0
         engine._natural_vent_active = False
         engine._fan_override_active = False
-        engine._hourly_forecast_temps = []
-        engine._thermal_model = {"confidence": "medium", "k_passive": -0.1}
+        engine.inputs.hourly_forecast = []
+        engine.inputs.thermal = {"confidence": "medium", "k_passive": -0.1}
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
@@ -1001,8 +1001,8 @@ class TestThermalFloorImminentSkip:
         engine._last_outdoor_temp = 68.0
         engine._natural_vent_active = False
         engine._fan_override_active = False
-        engine._hourly_forecast_temps = []
-        engine._thermal_model = {"confidence": "low", "k_passive": -0.3}
+        engine.inputs.hourly_forecast = []
+        engine.inputs.thermal = {"confidence": "low", "k_passive": -0.3}
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
@@ -1021,8 +1021,8 @@ class TestThermalFloorImminentSkip:
         engine._last_outdoor_temp = 68.0
         engine._natural_vent_active = False
         engine._fan_override_active = False
-        engine._hourly_forecast_temps = []
-        engine._thermal_model = {}
+        engine.inputs.hourly_forecast = []
+        engine.inputs.thermal = {}
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
@@ -1075,8 +1075,8 @@ class TestIssue641ExitReactivationFlipFlop:
         engine._paused_by_door = False
         engine._fan_override_active = False
         engine._occupancy_mode = occupancy_mode
-        engine._thermal_model = {"confidence": "none", "k_passive": None}
-        engine._hourly_forecast_temps = []
+        engine.inputs.thermal = {"confidence": "none", "k_passive": None}
+        engine.inputs.hourly_forecast = []
         engine._sensor_check_callback = lambda: True  # monitored sensor still open, per the reported incident
         return engine
 

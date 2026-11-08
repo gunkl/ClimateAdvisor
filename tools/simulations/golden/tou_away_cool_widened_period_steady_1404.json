@@ -1,0 +1,192 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ]
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "name": "tou_away_cool_widened_period_steady_1404",
+  "events": [
+    {
+      "time": "2026-07-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 90.0
+    },
+    {
+      "time": "2026-07-13T13:00:01",
+      "type": "occupancy_away"
+    },
+    {
+      "time": "2026-07-13T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T14:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T15:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T15:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T16:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T16:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T17:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T17:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T18:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T18:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-07-13T18:40:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 90.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-13T16:14:59",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T15:59:59",
+      "values": [
+        77.0
+      ],
+      "reason": "The 16:00 cycle inside the bank writes the bank target once."
+    },
+    {
+      "at": "2026-07-13T16:15:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T16:14:59",
+      "values": [
+        83.0
+      ],
+      "reason": "At the period start the Away band widened to 83 F is written (the existing T_start timer)."
+    },
+    {
+      "at": "2026-07-13T18:00:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T17:59:59",
+      "values": [
+        83.0
+      ],
+      "reason": "Deep in the widened period each cycle re-asserts 83 F once."
+    },
+    {
+      "at": "2026-07-13T18:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.chart_band_now",
+      "value": [
+        60.0,
+        83.0
+      ],
+      "reason": "The chart draws the widened band the thermostat is told."
+    },
+    {
+      "at": "2026-07-13T18:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.briefing_hvac_row",
+      "value": "HVAC Mode: Cool at 83°F",
+      "reason": "The briefing quotes the widened edge."
+    },
+    {
+      "at": "2026-07-13T18:40:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.hold.thresholds",
+      "value": [
+        60.0,
+        83.0
+      ],
+      "reason": "The thresholds already quoted it (unchanged)."
+    }
+  ],
+  "description": "Issue #1404 (review: P8 coverage of the widened period): an empty house on a hot day with a 16:15-21:00 high-cost period, a cycle every 30 minutes until 18:30. The Away bank (cool 77 F) runs until 16:15, then the Away band widened to 83 F. This golden sits in the steady part of the widened period so surfaces_agree compares the chart and the briefing there (no signed golden reached it before).",
+  "verdict": {
+    "type": "positive",
+    "summary": "Deep in the Away widened high-cost period every surface quotes the widened edge",
+    "observed_behavior": "Thermostat: 77 F every cycle until 16:00, 83 F at 16:15 and every cycle after; chart 60-83 F, briefing Cool at 83 F.",
+    "expected_behavior": "Occupant view: during the expensive period the person reads the edge the empty house is held to (83 F), not 80 F.",
+    "effectiveness": "Fails on 06291d4's parent 5199046 and on 6ebdb16 (chart 60-80, briefing Cool at 80). Reverting the widened-edge fix (_chart_widened_band, the briefing's unoccupied hold band) fails the two field rows, and P8 surfaces_agree reports briefing 80 vs 83 and chart_band 80 vs 83 (steady chart bucket) on it.",
+    "alignment": "docs/08-COMPUTATION-REFERENCE.md 'Around the bank (review mirrors)'.",
+    "user_outcome": "If this regressed, the person checking on the empty house would read 80 F while it is held to 83 F for the whole expensive period."
+  },
+  "source": "synthetic: Issue #1404 review (second pass)",
+  "issue": 1404
+}

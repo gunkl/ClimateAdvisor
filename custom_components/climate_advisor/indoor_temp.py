@@ -412,36 +412,49 @@ def _names_non_room_sensor(entry: Any) -> bool:
     return False
 
 
-def discover_companion_temp_sensors(hass: Any, climate_entity: str | None) -> tuple[str, ...]:
-    """``sensor.*`` temperature entities on the SAME device as ``climate_entity`` (Issue #1230 R1), sorted.
+def discover_companion_sensors(
+    hass: Any, entity_id: str | None, device_class: str, *, exclude_non_room: bool = True
+) -> tuple[str, ...]:
+    """``sensor.*`` entities of ``device_class`` on the SAME device as ``entity_id``, sorted (Issue #1230 R1, #1414).
 
-    Occupant-first: many thermostats report ``current_temperature`` in whole degrees while the same device also exposes
-    a finer ``device_class: temperature`` sensor; logging that sensor lets the thermal model see the real heating curve.
+    ``entity_id`` may be any registered entity (a climate entity, a temperature sensor); its own id is never returned.
     Reads only the in-memory entity registry (no I/O) and so must run on the event loop. Disabled entities are skipped
     (``include_disabled_entities=False``); ``device_class`` is the user override else the integration's original class.
-    A sensor whose own name says outdoor / outside / exterior / floor is skipped (``_names_non_room_sensor``).
-    No climate entity, an unregistered one, or one with no device -> ``()``. Never raises. Consumers: chart_log
-    ``indoor_sensors`` and (Issue #1230 R1b) the ``CompanionSensors`` candidates the resolver may use for control.
+    With ``exclude_non_room`` (the default, for indoor roles) a sensor whose own name says outdoor / outside /
+    exterior / floor is skipped (``_names_non_room_sensor``); the outdoor humidity role passes False. No entity, an
+    unregistered one, or one with no device -> ``()``. Never raises.
     """
-    if not climate_entity:
+    if not entity_id:
         return ()
     try:
         ent_reg = er.async_get(hass)
-        entry = ent_reg.async_get(climate_entity)
+        entry = ent_reg.async_get(entity_id)
         if entry is None or entry.device_id is None:
             return ()
         found = [
             sibling.entity_id
             for sibling in er.async_entries_for_device(ent_reg, entry.device_id, include_disabled_entities=False)
             if sibling.domain == "sensor"
-            and (sibling.device_class or sibling.original_device_class) == "temperature"
-            and sibling.entity_id != climate_entity
-            and not _names_non_room_sensor(sibling)
+            and (sibling.device_class or sibling.original_device_class) == device_class
+            and sibling.entity_id != entity_id
+            and not (exclude_non_room and _names_non_room_sensor(sibling))
         ]
         return tuple(sorted(found))
     except Exception:  # noqa: BLE001 - discovery is best-effort; a chart row must never fail on it
-        _LOGGER.debug("Companion temperature sensor discovery failed for %s", climate_entity, exc_info=True)
+        _LOGGER.debug("Companion %s sensor discovery failed for %s", device_class, entity_id, exc_info=True)
         return ()
+
+
+def discover_companion_temp_sensors(hass: Any, climate_entity: str | None) -> tuple[str, ...]:
+    """``sensor.*`` temperature entities on the SAME device as ``climate_entity`` (Issue #1230 R1), sorted.
+
+    Occupant-first: many thermostats report ``current_temperature`` in whole degrees while the same device also exposes
+    a finer ``device_class: temperature`` sensor; logging that sensor lets the thermal model see the real heating curve.
+    A sensor whose own name says outdoor / outside / exterior / floor is skipped (``_names_non_room_sensor``).
+    Thin wrapper over ``discover_companion_sensors`` (Issue #1414). Consumers: chart_log ``indoor_sensors`` and
+    (Issue #1230 R1b) the ``CompanionSensors`` candidates the resolver may use for control.
+    """
+    return discover_companion_sensors(hass, climate_entity, "temperature")
 
 
 def _log_indoor_source(source: str | None, value_f: float | None) -> None:

@@ -62,6 +62,8 @@ custom_components/climate_advisor/
 ├── claude_api.py        # Centralized Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking. Provides async_request() for all AI features.
 ├── ai_skills.py         # AI skills framework: lightweight registry for pluggable AI analysis capabilities. Skills register a context builder, response parser, and optional fallback.
 ├── chart_log.py         # Chart state log: persistent 1-year ring buffer of HVAC/fan/temp data points and event markers, used by the Temperature Forecast chart.
+├── feels_like.py        # Issue #1414: pure NWS heat index / wind chill (feels_like_f) and weather wind-unit -> mph, chart display only. See chart-log-spec.md "Humidity and Feels-Like Fields".
+├── humidity_sources.py  # Issue #1414: one humidity resolver, three roles (indoor_day, indoor_sleep, outdoor); chart display only, never the climate TARGET humidity.
 ├── forecast_archive.py  # Forecast archive (Issue #1230 R0): persisted hourly-forecast snapshots, one per local hour, for forecast-error scoring. Record-only; entry-scoped JSON. See forecast-archive-spec.md.
 ├── predictor_v4.py      # Prediction engine v4 (Issue #1230 R1): pure-Python indoor-temperature predictor (hidden-mass thermal model, thermostat emulation, forecast correction, bounded Levenberg-Marquardt fit). Default PRIMARY engine since 0.9.4: as primary its baseline path and control_rates() reach the decisions through the coordinator's control feed (R6b); no decision module imports it. See predictor-v4-spec.md.
 ├── night_strategy.py    # Bedroom night strategy (Issue #1230 R4): pure planner (options per fan mode, DP-2 score, evidence gate) + apply_night_strategy(timeline). ADVISE ONLY (applied to the timeline since R6; never commands). See night-strategy-spec.md.
@@ -316,6 +318,13 @@ sleep_indoor_temp_entity: sensor.bedroom_temp (optional — Issue #895; used for
   entry and exit: the bedtime band is written at offset 0 BEFORE the loop's first decision of the night, the wake
   band is written at offset 0 (the offset is cleared first), and if no wake write comes the loop itself writes the
   plain target once after a 120 s grace -- see "Context entry and exit (Issue #1194 c)" there)
+indoor_humidity_entity: sensor.hallway_humidity (optional, Issue #1414; chart display only, blank = detect
+  automatically: a humidity sensor on the thermostat's or comfort sensor's device, else the thermostat's
+  current_humidity)
+sleep_indoor_humidity_entity: sensor.bedroom_humidity (optional, Issue #1414; used for the chart while the sleep
+  sensor is the comfort reading; blank = a humidity sensor on the sleep sensor's device, else none)
+outdoor_humidity_entity: sensor.patio_humidity (optional, Issue #1414; blank = a humidity sensor on the outdoor
+  sensor's device, else the weather entity's humidity)
 comfort_heat: 70 (°F)
 comfort_cool: 75 (°F)
 setback_heat: 60 (°F)

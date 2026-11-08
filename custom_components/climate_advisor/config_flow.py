@@ -58,9 +58,11 @@ from .const import (
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
     CONF_HVAC_FAN_RESTRICT_MODE,
+    CONF_INDOOR_HUMIDITY_ENTITY,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_SOFT_START_ENABLED,
+    CONF_OUTDOOR_HUMIDITY_ENTITY,
     CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_PRIMARY_ENGINE,
     CONF_PUSH_BRIEFING,
@@ -70,6 +72,7 @@ from .const import (
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
     CONF_SHADOW_ENGINE,
+    CONF_SLEEP_INDOOR_HUMIDITY_ENTITY,
     CONF_TEMP_UNIT,
     CONF_THERMOSTAT_COMPANION_SENSOR,
     CONF_THRESHOLD_COOL,
@@ -1191,7 +1194,15 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 )
                 await self._commit_section(
                     user_input,
-                    clearable_keys=("outdoor_temp_entity", "indoor_temp_entity", "sleep_indoor_temp_entity"),
+                    clearable_keys=(
+                        "outdoor_temp_entity",
+                        "indoor_temp_entity",
+                        "sleep_indoor_temp_entity",
+                        # Issue #1414: clearing a humidity selector returns that source to auto-detection.
+                        CONF_OUTDOOR_HUMIDITY_ENTITY,
+                        CONF_INDOOR_HUMIDITY_ENTITY,
+                        CONF_SLEEP_INDOOR_HUMIDITY_ENTITY,
+                    ),
                 )
                 return await self.async_step_init()
 
@@ -1215,6 +1226,10 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         "outdoor_temp_entity",
                         description={"suggested_value": current.get("outdoor_temp_entity")},
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["sensor", "input_number"])),
+                    vol.Optional(
+                        CONF_OUTDOOR_HUMIDITY_ENTITY,
+                        description={"suggested_value": current.get(CONF_OUTDOOR_HUMIDITY_ENTITY)},
+                    ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="humidity")),
                     vol.Required(
                         "indoor_temp_source",
                         default=current.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK),
@@ -1229,11 +1244,19 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         description={"suggested_value": current.get("indoor_temp_entity")},
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["sensor", "input_number"])),
                     vol.Optional(
+                        CONF_INDOOR_HUMIDITY_ENTITY,
+                        description={"suggested_value": current.get(CONF_INDOOR_HUMIDITY_ENTITY)},
+                    ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="humidity")),
+                    vol.Optional(
                         "sleep_indoor_temp_entity",
                         description={"suggested_value": current.get("sleep_indoor_temp_entity")},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
                     ),
+                    vol.Optional(
+                        CONF_SLEEP_INDOOR_HUMIDITY_ENTITY,
+                        description={"suggested_value": current.get(CONF_SLEEP_INDOOR_HUMIDITY_ENTITY)},
+                    ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="humidity")),
                     vol.Required(
                         CONF_THERMOSTAT_COMPANION_SENSOR,
                         default=current.get(CONF_THERMOSTAT_COMPANION_SENSOR, DEFAULT_THERMOSTAT_COMPANION_SENSOR),

@@ -221,17 +221,23 @@
         "data": {
           "outdoor_temp_source": "Outdoor Temperature Source",
           "outdoor_temp_entity": "Outdoor Temperature Entity",
+          "outdoor_humidity_entity": "Outdoor Humidity Sensor",
           "indoor_temp_source": "Indoor Temperature Source",
           "indoor_temp_entity": "Indoor Temperature Entity",
+          "indoor_humidity_entity": "Indoor Humidity Sensor",
           "sleep_indoor_temp_entity": "Sleep Indoor Temp Sensor",
+          "sleep_indoor_humidity_entity": "Sleep Humidity Sensor",
           "thermostat_companion_sensor": "Thermostat Finer Sensor"
         },
         "data_description": {
           "outdoor_temp_source": "Where to read outside temperature. 'Weather service' uses your weather integration; a dedicated sensor or input helper lets you use a specific entity. Switching back to 'Weather service' removes the chosen entity.",
           "outdoor_temp_entity": "Pick the sensor or input helper that reports outdoor temperature - the source above switches to match automatically. Clear this field to go back to the weather service.",
+          "outdoor_humidity_entity": "The outdoor humidity sensor shown on the Status chart with how warm or cold it feels outside. Chart only: no heating or cooling decision uses it. Leave blank to detect automatically.",
           "indoor_temp_source": "Where to read inside temperature. 'Climate entity' uses your thermostat's built-in sensor; a dedicated sensor or input helper lets you use a separate entity.",
           "indoor_temp_entity": "Pick the sensor or input helper that reports indoor temperature - the source above switches to match automatically. Clear this field to go back to the thermostat's built-in sensor.",
+          "indoor_humidity_entity": "The humidity sensor in the room Climate Advisor reads by day, shown on the Status chart with how warm the room feels. Chart only: no heating or cooling decision uses it. Leave blank to detect automatically.",
           "sleep_indoor_temp_entity": "Optional bedroom sensor used for comfort and automation decisions while your sleep schedule is active (the thermal model always uses the primary sensor). Falls back to the primary sensor if unavailable. Leave blank to disable.",
+          "sleep_indoor_humidity_entity": "The humidity sensor in the bedroom, shown on the Status chart while your sleep schedule is active. Chart only: no heating or cooling decision uses it. Leave blank to detect automatically.",
           "thermostat_companion_sensor": "Many thermostats report whole degrees on the main entity but also have a finer temperature sensor on the same device. Auto uses that finer sensor once it proves to be the same reading (within 1 degree F, showing fractions while the thermostat shows whole degrees) and falls back to the thermostat's own reading if it goes missing or disagrees. Only applies to the thermostat's built-in sensor source. Off always uses the thermostat's own reading."
         }
       },

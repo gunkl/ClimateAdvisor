@@ -87,7 +87,16 @@ LIVE = _tl(
     _step(_at(20, 30), StepKind.NIGHT_STRATEGY, text="8:30 PM: CA holds the bedroom between 66°F and 72°F tonight."),
     _step(_at(20, 30), StepKind.SLEEP_BAND),
     _step(_at(6, 15, 1), StepKind.WAKE_BAND),
-    runs=[PredictedRun("heat", _at(1, 17, 1), _at(4, 17, 1), 20.3, "hold_floor")],
+    runs=[
+        PredictedRun(
+            "heat",
+            _at(1, 17, 1),
+            _at(4, 17, 1),
+            20.3,
+            "hold_floor",
+            ((_at(2, 2, 1), 6.0), (_at(2, 47, 1), 9.3), (_at(3, 47, 1), 5.0)),
+        )
+    ],
 )
 
 
@@ -96,7 +105,8 @@ def test_the_owners_case_win_plan_ends_at_the_close_step_and_nothing_runs_overni
     rows = _rows(spans)
     assert rows["windowsplan"] == [("07 16:17", "07 19:14")]
     assert "natvent" not in rows and "fan" not in rows  # no session in the plan: nothing drawn, overnight or not
-    assert rows["heating"] == [("08 01:17", "08 04:17")]
+    # owner decision: the bar is the ~20 min the plan expects, where the plan's simulation puts them, never 3 hours
+    assert rows["heating"] == [("08 02:02", "08 02:08"), ("08 02:47", "08 02:56"), ("08 03:47", "08 03:52")]
     win = next(d for d in spans if d["row"] == "windowsplan")
     assert win["text"] == "7:14 PM: close the windows before the house drifts below 68°F."  # the hover's plan step
     assert win["kind"] == "windows_close"
@@ -187,11 +197,58 @@ def test_an_override_runs_from_now_to_the_resume_step():
     assert spans[0]["text"].startswith("6:45 PM")
 
 
-def test_runs_name_their_minutes_and_edge_and_cooling_runs_draw_the_cooling_row():
+def test_a_run_without_the_plans_placement_is_drawn_from_its_window_start_and_says_around():
     tl = _tl(runs=[PredictedRun("cool", _at(17, 0), _at(18, 30), 42.0, "hold_ceiling")])
     (span,) = strip_spans(tl, NOW)
-    assert span["row"] == "cooling" and span["kind"] == "run"
-    assert span["text"] == "Cooling expected for about 40 min between 5:00 PM and 6:30 PM, holding the band's ceiling."
+    assert span["row"] == "cooling" and span["kind"] == "run" and span["placed"] is False
+    assert (span["start"], span["end"]) == (_at(17, 0).isoformat(), _at(17, 42).isoformat())
+    assert (span["window_start"], span["window_end"], span["minutes"]) == (
+        _at(17, 0).isoformat(),
+        _at(18, 30).isoformat(),
+        42.0,
+    )
+    assert span["text"] == (
+        "Cooling expected for about 40 min, around 5:00 PM (the plan's window runs to 6:30 PM), "
+        "holding the band's ceiling."
+    )
+
+
+def test_placed_bursts_merge_when_they_touch_and_name_the_window():
+    run = PredictedRun("heat", _at(17, 0), _at(18, 0), 30.0, "hold_floor", ((_at(17, 0), 15.0), (_at(17, 15), 15.0)))
+    spans = strip_spans(_tl(runs=[run]), NOW)
+    assert [(d["start"], d["end"]) for d in spans] == [(_at(17, 0).isoformat(), _at(17, 30).isoformat())]
+    assert spans[0]["placed"] is True
+    assert (
+        spans[0]["text"] == "Heating expected for about 30 min between 5:00 PM and 6:00 PM, holding the band's floor."
+    )
+
+
+def test_built_runs_carry_the_plans_bursts_and_their_bars_add_up_to_the_minutes():
+    now = datetime(2026, 11, 4, 19, 5, tzinfo=TZ)
+    tl = build_timeline(make_snapshot("cold", now=now))
+    assert tl.runs, "a cold night plans heat runs"
+    for r in tl.runs:
+        assert r.bursts and abs(sum(m for _t, m in r.bursts) - r.minutes) < 0.01
+        assert r.to_dict()["bursts"]
+    spans = strip_spans(tl, now)
+    for idx, r in enumerate(tl.runs):
+        if r.start < now:
+            continue
+        bars = [d for d in spans if d.get("run") == idx]
+        total = sum(
+            (datetime.fromisoformat(d["end"]) - datetime.fromisoformat(d["start"])).total_seconds() for d in bars
+        )
+        assert abs(total / 60.0 - r.minutes) < 1.0, (r, bars)
+
+
+def test_strip_check_flags_a_run_drawn_as_its_whole_window():
+    from tools.sim_harness.strip_check import strip_problems
+
+    whole = [
+        {**d, "start": d["window_start"], "end": d["window_end"]} if d["row"] == "heating" else d
+        for d in strip_spans(LIVE, NOW)
+    ]
+    assert any("add up to" in p for p in strip_problems(LIVE, NOW, whole, None))
 
 
 def test_the_windows_open_row_has_no_plan_part_and_every_row_is_known():
@@ -236,7 +293,7 @@ def test_strip_check_fails_on_the_old_predictors_all_night_shape():
         for h in range(1, 16)
     ]
     problems = strip_problems(LIVE, NOW, None, old)
-    assert any("windows_recommended=True" in p and "next close step 19:14" in p for p in problems), problems
+    assert any("windows_recommended=True" in p and "closed then" in p for p in problems), problems
     assert any("fan_active" in p for p in problems), problems
     # the derived flags (what get_chart_data now hands out) pass
     spans = strip_spans(LIVE, NOW)
@@ -356,3 +413,89 @@ def test_the_built_plan_grid_is_not_vacuous():
             rows |= {d["row"] for d in strip_spans(build_timeline(make_snapshot(day_type, now=now)), now)}
     assert {"windowsplan", "natvent", "fan"} <= rows, rows
     assert rows & {"heating", "cooling"}, rows
+
+
+# --- the strip check's blind spots, closed (review of d57488f: each tampered span below used to pass) -----------------
+
+
+def _warm_plan():
+    now = datetime(2026, 11, 4, 7, 5, tzinfo=TZ)
+    tl = build_timeline(make_snapshot("warm", now=now))
+    return tl, now, strip_spans(tl, now)
+
+
+def _tamper(spans, row, fn):
+    out, done = [], False
+    for d in spans:
+        if d["row"] == row and not done:
+            done = True
+            d = fn(d)
+            if d is None:
+                continue
+        out.append(d)
+    assert done, row
+    return out
+
+
+def _later(iso, minutes):
+    return (datetime.fromisoformat(iso) + timedelta(minutes=minutes)).isoformat()
+
+
+@pytest.mark.parametrize(
+    ("row", "fn"),
+    [
+        ("windowsplan", lambda d: {**d, "end": _later(d["end"], 10)}),  # a 10-minute overrun past the close (#1439)
+        ("natvent", lambda d: {**d, "end": _later(d["end"], 10)}),
+        ("natvent", lambda d: None),  # the plan has a session, the strip is empty
+        ("fan", lambda d: None),
+        ("cooling", lambda d: None),  # the plan predicts a run, no bar
+        ("cooling", lambda d: {**d, "start": d["window_start"], "end": d["window_end"]}),  # the whole window
+        ("cooling", lambda d: {**d, "start": _later(d["start"], 15), "end": _later(d["end"], 15)}),  # misplaced
+    ],
+    ids=["win+10", "natvent+10", "natvent-dropped", "fan-dropped", "cool-dropped", "cool-window", "cool-moved"],
+)
+def test_strip_check_catches_each_tampered_span(row, fn):
+    from tools.sim_harness.strip_check import strip_problems
+
+    tl, now, spans = _warm_plan()
+    assert strip_problems(tl, now, spans, None) == []
+    assert strip_problems(tl, now, _tamper(spans, row, fn), None), row
+
+
+def test_strip_check_judges_nat_vent_against_the_plans_sessions_not_just_open_windows():
+    from tools.sim_harness.strip_check import strip_problems
+
+    tl = _tl(_step(_at(17, 0), StepKind.WINDOWS_OPEN, Actor.YOU), _step(_at(19, 0), StepKind.WINDOWS_CLOSE, Actor.YOU))
+    spans = strip_spans(tl, NOW)
+    assert strip_problems(tl, NOW, spans, None) == []
+    fake = [*spans, {"row": "natvent", "start": _at(17, 0).isoformat(), "end": _at(19, 0).isoformat()}]
+    assert any("no nat-vent session" in p for p in strip_problems(tl, NOW, fake, None))
+
+
+@pytest.mark.parametrize(
+    ("reason", "bad_end"), [("occupancy_setback.away", _at(12, 0, 1)), ("occupancy_setback.vacation", _at(23, 0))]
+)
+def test_strip_check_checks_the_away_end(reason, bad_end):
+    from tools.sim_harness.strip_check import strip_problems
+
+    tl = _tl(_step(NOW, StepKind.SETBACK_START, reason=reason))
+    spans = strip_spans(tl, NOW)
+    assert strip_problems(tl, NOW, spans, None) == []
+    assert strip_problems(tl, NOW, [{**spans[0], "end": bad_end.isoformat()}], None)
+
+
+def test_strip_check_catches_an_override_past_the_resume():
+    from tools.sim_harness.strip_check import strip_problems
+
+    tl = _tl(_step(_at(18, 45), StepKind.RESUME_SCHEDULE))
+    (span,) = strip_spans(tl, NOW)
+    assert strip_problems(tl, NOW, [{**span, "end": _at(19, 30).isoformat()}], None)
+
+
+def test_runs_are_never_duplicated_two_days_have_the_same_times():
+    """The review saw 'each cooling run twice': they were today's and tomorrow's runs at the same clock times."""
+    tl, now, spans = _warm_plan()
+    keys = [(r.mode, r.start, r.end) for r in tl.runs]
+    assert len(keys) == len(set(keys))
+    assert len({r.start.date() for r in tl.runs}) == 2
+    assert len({d["run"] for d in spans if d["row"] == "cooling"}) == len(tl.runs)

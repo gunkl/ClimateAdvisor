@@ -1128,8 +1128,11 @@
         if (!sp || sp.row !== r.id) return;
         const a = Math.max(_parseTs(sp.start), now), b = _parseTs(sp.end);
         if (isNaN(a) || isNaN(b)) return;
+        // A run's bar is its expected minutes (owner decision); its hover covers the whole run window.
+        const wa = sp.window_start ? _parseTs(sp.window_start) : NaN, wb = sp.window_end ? _parseTs(sp.window_end) : NaN;
         push(a, b, true, { text: sp.text || '', short: sp.text_short || sp.text || '', kind: sp.kind || '',
-          at: sp.step_ts ? _parseTs(sp.step_ts) : null, actor: sp.actor || 'ca', confidence: sp.confidence || 'ok' });
+          at: sp.step_ts ? _parseTs(sp.step_ts) : null, actor: sp.actor || 'ca', confidence: sp.confidence || 'ok',
+          winA: isNaN(wa) ? null : wa, winB: isNaN(wb) ? null : wb, minutes: sp.minutes == null ? null : sp.minutes });
       });
       out[r.id] = segs;
     });
@@ -1142,7 +1145,9 @@
     const found = [];
     STRIP_ROWS.forEach(r => {
       if (!_stripOn(r.id)) return;
-      const sg = (_stripSegs[r.id] || []).find(g => g.future && g.a <= ms && ms < g.b);
+      const segs = (_stripSegs[r.id] || []).filter(g => g.future);
+      const sg = segs.find(g => g.a <= ms && ms < g.b) ||
+        segs.find(g => g.step && g.step.winA != null && g.step.winA <= ms && ms < g.step.winB);
       if (sg && sg.step) found.push({ row: r, step: sg.step });
     });
     return found;

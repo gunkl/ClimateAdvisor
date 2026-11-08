@@ -9,7 +9,8 @@ plan and natural ventilation again from 11 PM to 2 AM. Now each faded strip is a
 The pending golden ``tools/simulations/pending/issue_1436_*`` (unsigned, for owner review) is driven through real Home
 Assistant and the real coordinator by the same adapter as ``test_goldens_realha.py``; the shared capture
 (``scenario_model.capture_next_action`` -> ``chart_strips``) must show strips that follow the plan real HA made, and the
-run must log no exception from Climate Advisor. Real HA's plan closes at a different time (see the note in the test).
+run must log no exception from Climate Advisor. Real HA's plan closes at 9:00 PM, not 7:00 PM (Issue #1440, see the
+note in the test).
 """
 
 from __future__ import annotations
@@ -53,10 +54,12 @@ async def test_pending_golden_strips_follow_the_plan_on_real_ha(hass, freezer, t
     assert win and [w.split("-")[1] for w in win] == closes[: len(win)], (win, steps)
     assert strips["strips"]["natvent"] == win and strips["strips"]["fan"] == win, strips
     assert capture["text"] == f"Close windows by {_clock(closes[0])}", capture["text"]
-    # The Tier A golden pins the comfort_edge close at 7:00 PM. Real HA plans this scenario with no forecast and no
-    # learned rates in the coordinator (the scenario's hourly_forecast and thermal_model do not reach the plan here:
-    # the weather refresh empties the forecast), so its plan closes at bedtime instead; the golden's timing assertions
-    # are therefore Tier A only, and this test holds real HA to the invariant the golden is about.
+    # The Tier A golden pins the comfort_edge close at 7:00 PM. Real HA closes at 9:00 PM, the classifier's
+    # window_close_time ("the planned window period ends", windows_close.planned_end), because the plan has no forecast
+    # here: realha_session._apply_injected_inputs seeds only the ENGINE's hourly forecast, not the coordinator's, and
+    # the coordinator's weather refresh then hands the engine its own empty copy (Issue #1440). The scenario's thermal
+    # model does reach the plan. The golden's timing assertions (0-6) are therefore Tier A only, and this test holds
+    # real HA to the invariant the golden is about.
     failing = [r["index"] for r in dump["assertions"] if r["pass"] is False]
     timing_only = {0, 1, 2, 3, 4, 5, 6}
     assert set(failing) <= timing_only, failing

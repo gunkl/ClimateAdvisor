@@ -100,9 +100,12 @@ function makeTimelineFixture() {
     // window period from the +45 min open to the +240 min close (the hover names the open step while it is ahead), and
     // one predicted heat run overnight (detail.runs; it has no step, so its own sentence).
     strips: [
-      { row: 'heating', start: at(660), end: at(780), kind: 'run', step_id: '', step_ts: null, actor: 'ca', confidence: 'ok',
-        text_short: 'Heating expected for about 20 min between ' + clock(660) + ' and ' + clock(780) + ", holding the band's floor.",
-        text: 'Heating expected for about 20 min between ' + clock(660) + ' and ' + clock(780) + ", holding the band's floor." },
+      // a ~20 min heat run in a 2 h window (+660 to +780 min), drawn as the plan's per-step minutes (bursts)
+      ...[[675, 6], [705, 9], [750, 5]].map(([m, len]) => ({ row: 'heating', start: at(m), end: at(m + len), kind: 'run',
+        step_id: '', step_ts: null, actor: 'ca', confidence: 'ok', run: 0, window_start: at(660), window_end: at(780),
+        minutes: 20, placed: true,
+        text: 'Heating expected for about 20 min between ' + clock(660) + ' and ' + clock(780) + ", holding the band's floor.",
+        text_short: 'Heating expected for about 20 min between ' + clock(660) + ' and ' + clock(780) + ", holding the band's floor." })),
       { row: 'windowsplan', start: at(45), end: at(240), kind: 'windows_open', step_id: 'windows_open45', confidence: 'ok',
         step_ts: at(45), actor: 'you', text: fill(45, '{t}: open the windows. Outdoor is 6°F cooler than the house.'),
         text_short: 'Open the windows. Outdoor is 6°F cooler than the house.' },

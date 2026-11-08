@@ -742,6 +742,9 @@ class PredictedRun:
     end: datetime
     minutes: float
     reason: str
+    # Issue #1436: where in [start, end) the plan's simulation runs the equipment: (step start, minutes in that
+    # 15-minute step), so the chart draws the expected minutes where they fall instead of the whole window
+    bursts: tuple[tuple[datetime, float], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -750,6 +753,7 @@ class PredictedRun:
             "end": self.end.isoformat(),
             "minutes": round(self.minutes, 1),
             "reason": self.reason,
+            "bursts": [[t.isoformat(), round(m, 1)] for t, m in self.bursts],
         }
 
 
@@ -1576,6 +1580,7 @@ def _run(steps: list[SimStep]) -> PredictedRun:
         last.ts,
         sum(s.hvac_min for s in steps),
         f"hold_{edge}",
+        tuple((s.ts - timedelta(minutes=SIM_STEP_MINUTES), s.hvac_min) for s in steps if s.hvac_min > 0),
     )
 
 

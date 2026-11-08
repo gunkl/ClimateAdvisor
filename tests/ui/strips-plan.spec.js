@@ -34,10 +34,13 @@ for (const [name, path] of PAGES) {
       for (const row of ['natvent', 'fan', 'windows', 'away', 'override', 'cooling']) {
         expect(await futureSegs(page, row), row).toEqual([]);
       }
+      // owner decision: a run's bars are its expected minutes where the plan puts them, never the 2 h window
       const heat = await futureSegs(page, 'heating');
-      expect(heat.length).toBe(1);
-      expect(Math.abs(heat[0].a - 660 * 60000)).toBeLessThan(5 * 60000);
-      expect(heat[0].text).toMatch(/^Heating expected for about 20 min/);
+      expect(heat.length).toBe(3);
+      const total = heat.reduce((n, g) => n + (g.b - g.a), 0) / 60000;
+      expect(Math.abs(total - 20)).toBeLessThan(0.5);
+      expect(heat.every(g => g.a >= 660 * 60000 - 1000 && g.b <= 780 * 60000 + 1000)).toBe(true);
+      expect(heat[0].text).toMatch(/^Heating expected for about 20 min between/);
     });
 
     test('the past is solid and ends at NOW; a row holds until the next row', async ({ page }) => {
@@ -88,5 +91,14 @@ for (const [name, path] of PAGES) {
       // nothing from the predictor: no Nat-vent named at that time
       await expect(panel).not.toContainText('Nat-vent');
     });
+  });
+
+  test(`a run's hover covers its whole window, between its bars too (${name})`, async ({ page }) => {
+    await ready(page, path);
+    await page.evaluate(() => {
+      const ch = Chart.getChart(document.getElementById('temp-chart'));
+      window.__triggerHoverAt(ch.scales.x.getPixelForValue(Date.now() + 690 * 60000));   // between two bars
+    });
+    await expect(page.locator('#chart-hover-panel')).toContainText(/Heating\s*plan: Heating expected for about 20 min between/);
   });
 }

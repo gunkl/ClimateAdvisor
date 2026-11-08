@@ -110,6 +110,20 @@ NODE_MIN_HISTORY_DAYS = 3.0  # a display node needs this much of its own history
 NODE_MIN_COVERAGE = 0.5  # ... and a reading on this share of the rows since its first row
 DISPLAY_MAX_ITERATIONS = 30  # node-only Levenberg-Marquardt: 5 parameters, the house trajectory rolled once
 
+# Which model the decisions read (Issue #1432). A = one model of the stitched Climate Advisor reading (``_ca``); B = a
+# node per room (the thermostat entity as the primary, the sleep sensor as a node) composed into ``_ca`` by
+# :func:`ca_line`. B is a candidate once the thermostat AND the sleep sensor each have ``NODE_MIN_HISTORY_DAYS`` of
+# their own readings (``NODE_MIN_COVERAGE``), and it is used only when its ``_ca`` replay on the training rows is no
+# worse than A's at every ``CA_GATE_LEADS`` lead (``CA_GATE_TOLERANCE_F`` slack). Sleep hours are never forecast from
+# the thermostat's model when a separate sleep sensor exists.
+MODEL_STITCHED = "stitched"  # A
+MODEL_PER_ROOM = "per_room"  # B
+CA_GATE_LEAD = "4h"  # the deciding lead (the confidence gate's skill lead); 1 h and 12 h are checked too
+CA_GATE_LEADS = ("1h", "4h", "12h")
+CA_GATE_TOLERANCE_F = 0.05  # B may be at most this much worse than A (MAE, degrees F) at each lead: noise, not skill
+CA_GATE_MAX_ANCHORS = 480  # shared replay anchors scored (an even stride), ~5 days of 15-min starts
+_GATE_LEAD_STEPS = {"1h": 4, "4h": 16, "12h": 48}
+
 _ACTIVE_HEAT = "heating"
 _ACTIVE_COOL = "cooling"
 
@@ -1771,9 +1785,18 @@ def predict(
     for j, sid in enumerate(node_ids):
         res[sid] = [(inp.ts, roll.nodes[j][k]) for k, inp in enumerate(inputs)]
     # ``_ca`` composes from a CONTROL sleep node only: a display-only bedroom node never becomes the CA-read line.
-    if ca_sleep_node and ca_sleep_node in res and ca_sleep_node != model.primary and ca_sleep_node in model.nodes:
+    # Issue #1432: with a room node as the primary (the per-room model) and a separate sleep sensor, ``_ca`` is ALWAYS
+    # composed, so a sleep hour the sleep node cannot answer (not modelled, reading missing this cycle) is left out of
+    # ``_ca`` instead of being filled from the thermostat's room by a caller that copies the primary line.
+    control_sleep = bool(ca_sleep_node) and ca_sleep_node in res and ca_sleep_node in model.nodes
+    if (
+        ca_sleep_node
+        and ca_sleep_node != model.primary
+        and (control_sleep or (model.primary != CA_NODE and ca_sleep_time and ca_wake_time))
+    ):
+        src = res if control_sleep else {k: v for k, v in res.items() if k != ca_sleep_node}
         res[CA_NODE] = ca_line(
-            res,
+            src,
             primary=model.primary,
             sleep_node=ca_sleep_node,
             sleep_time=ca_sleep_time,
@@ -2008,17 +2031,25 @@ def ca_line(
 
     During the sleep window ``indoor`` is the sleep sensor's reading, so a step inside the window takes the sleep
     node's prediction when that node was predicted; every other step takes the primary node's.
+
+    Never the wrong room (Issue #1432): when the primary is a room node (not the stitched ``_ca`` reading) and a
+    separate ``sleep_node`` exists, a step inside the sleep window that the sleep node does not answer is LEFT OUT of
+    the line, never filled from the primary (the thermostat's room). With the stitched ``_ca`` as the primary, its own
+    value is the CA reading at night too, so it stands in as before.
     """
     base = preds.get(primary) or []
     sleep = preds.get(sleep_node) if sleep_node else None
-    if not sleep:
+    guard = bool(sleep_node) and sleep_node != primary and primary != CA_NODE
+    if not sleep and not guard:
         return list(base)
-    by_ts = {t.timestamp(): v for t, v in sleep}
+    by_ts = {t.timestamp(): v for t, v in (sleep or [])}
     out = []
     for t, v in base:
-        if t.timestamp() in by_ts and in_sleep_window(t.astimezone(tz), sleep_time, wake_time):
+        if not in_sleep_window(t.astimezone(tz), sleep_time, wake_time):
+            out.append((t, v))
+        elif t.timestamp() in by_ts:
             out.append((t, by_ts[t.timestamp()]))
-        else:
+        elif not guard:
             out.append((t, v))
     return out
 
@@ -2281,6 +2312,326 @@ def resolve_display_nodes(
         if good / len(since) >= min_cov:
             out.append(sid)
     return out
+
+
+# ------------------------------------------------------------------- the control model choice (Issue #1432)
+def sensor_history(
+    entries: Sequence[Mapping[str, Any]],
+    sid: str,
+    *,
+    tz: tzinfo,
+    primary_aliases: Sequence[str] | None = None,
+    in_sleep: Callable[[datetime], bool] | None = None,
+) -> dict[str, float] | None:
+    """``{"days", "coverage"}`` of ``sid``'s OWN history in ``entries``, or ``None`` when it never appears.
+
+    The span runs from the sensor's first ``indoor_sensors`` row to the last row given (the #1422 display rule);
+    ``coverage`` is the share of the rows since then with a reading. With ``primary_aliases`` (not ``None``) ``sid`` is
+    the primary entity: a row also starts and counts its history through an alias or ``indoor_primary``, and a reading
+    is whatever :func:`_row_primary_value` maps onto the primary (the same mapping the fit's samples use)."""
+    rows: list[tuple[float, Mapping[str, Any]]] = []
+    for r in entries:
+        if not isinstance(r, Mapping):
+            continue
+        ts = _parse_ts(r.get("ts"), tz)
+        if ts is not None:
+            rows.append((ts.timestamp(), r))
+    if not rows:
+        return None
+    rows.sort(key=lambda x: x[0])
+    is_primary = primary_aliases is not None
+    keys = (sid, *(primary_aliases or ()))
+
+    def starts(r: Mapping[str, Any]) -> bool:
+        sens = r.get("indoor_sensors")
+        if isinstance(sens, Mapping) and any(k in sens for k in keys):
+            return True
+        return is_primary and _num(r.get("indoor_primary")) is not None
+
+    def reads(r: Mapping[str, Any]) -> bool:
+        if is_primary:
+            return _row_primary_value(r, sid, tuple(primary_aliases or ()), in_sleep, tz) is not None
+        sens = r.get("indoor_sensors")
+        return isinstance(sens, Mapping) and _num(sens.get(sid)) is not None
+
+    first = next((i for i, (_, r) in enumerate(rows) if starts(r)), None)
+    if first is None:
+        return None
+    since = rows[first:]
+    days = (rows[-1][0] - rows[first][0]) / 86400.0
+    return {"days": round(days, 2), "coverage": round(sum(1 for _, r in since if reads(r)) / len(since), 3)}
+
+
+@dataclass(frozen=True)
+class ControlNodePlan:
+    """The two candidate node sets for a fit (Issue #1432): A ``stitched`` (always) and B ``per_room`` (or None)."""
+
+    stitched: tuple[str, list[str]]
+    per_room: tuple[str, list[str]] | None
+    sleep_node: str | None  # the separate sleep sensor (None: none configured, or it is the primary)
+    record: dict[str, Any]  # what qualified and why: logged, stored as ``fit["node_choice"]``
+
+
+def resolve_control_nodes(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    primary: str,
+    sensors: Sequence[str],
+    sleep_sensor: str | None = None,
+    aliases: Sequence[str] = (),
+    in_sleep: Callable[[datetime], bool] | None = None,
+    tz: tzinfo,
+    min_history_days: float = NODE_MIN_HISTORY_DAYS,
+    min_cov: float = NODE_MIN_COVERAGE,
+) -> ControlNodePlan:
+    """The candidate control models for a fit on ``entries`` (the training rows): the ONE rule the live fit and the
+    backtest share (Issue #1432).
+
+    * A (``stitched``): ``_ca`` alone plus the extra entities :func:`resolve_nodes` keeps (50 % of the window).
+    * B (``per_room``): the primary entity plus the sleep sensor as a node (plus the same extras). It is a candidate
+      when the primary qualifies - 80 % of the window (:func:`resolve_nodes`, legacy rows through ``aliases`` /
+      ``indoor_primary`` / ``indoor`` outside the sleep window count) or ``min_history_days`` of its own history at
+      ``min_cov`` (:func:`sensor_history`, the #1422 rule) - AND, when a separate ``sleep_sensor`` is configured, the
+      sleep sensor qualifies the same way (50 % of the window, or its own history). The primary qualifying alone is
+      NOT enough while a sleep sensor exists: sleep hours would then be forecast from the thermostat's room.
+
+    Whether B is used is decided by :func:`choose_control_model` (the backtest gate)."""
+    legacy_prim, legacy_nodes = resolve_nodes(
+        entries, primary=primary, sensors=sensors, aliases=aliases, in_sleep=in_sleep, tz=tz
+    )
+    sleep = sleep_sensor if sleep_sensor and sleep_sensor not in (primary, CA_NODE) else None
+    extras = [s for s in legacy_nodes[1:] if s not in (primary, CA_NODE)]
+    stitched = (CA_NODE, [CA_NODE, *extras])
+    rec: dict[str, Any] = {
+        "primary": primary if primary and primary != CA_NODE else None,
+        "sleep": sleep,
+        "min_days": min_history_days,
+        "min_coverage": min_cov,
+    }
+    if not primary or primary == CA_NODE:
+        rec["reason"] = "no_primary_entity"
+        return ControlNodePlan(stitched, None, sleep, rec)
+    ph = sensor_history(entries, primary, tz=tz, primary_aliases=tuple(aliases), in_sleep=in_sleep) or {}
+    p_ok = legacy_prim == primary or (ph.get("days", 0.0) >= min_history_days and ph.get("coverage", 0.0) >= min_cov)
+    rec.update(primary_days=ph.get("days"), primary_coverage=ph.get("coverage"), primary_ok=p_ok)
+    s_ok = True
+    if sleep:
+        sh = sensor_history(entries, sleep, tz=tz) or {}
+        s_ok = sleep in extras or (sh.get("days", 0.0) >= min_history_days and sh.get("coverage", 0.0) >= min_cov)
+        rec.update(sleep_days=sh.get("days"), sleep_coverage=sh.get("coverage"), sleep_ok=s_ok)
+    if not p_ok:
+        rec["reason"] = "primary_not_ready"
+        return ControlNodePlan(stitched, None, sleep, rec)
+    if not s_ok:
+        rec["reason"] = "sleep_not_ready"
+        return ControlNodePlan(stitched, None, sleep, rec)
+    per_room = (primary, [primary, *([sleep] if sleep else []), *(s for s in extras if s != sleep)])
+    return ControlNodePlan(stitched, per_room, sleep, rec)
+
+
+def _ca_composes(model: V4Model, sleep_node: str | None) -> bool:
+    """True when ``model``'s ``_ca`` takes ``sleep_node``'s line inside the sleep window (``predict``'s rule)."""
+    return bool(sleep_node) and sleep_node != model.primary and sleep_node in model.nodes
+
+
+def score_ca_lines(
+    models: Mapping[str, V4Model],
+    samples: Sequence[V4Sample],
+    *,
+    tz: tzinfo,
+    sleep_node: str | None = None,
+    in_sleep: Callable[[datetime], bool] | None = None,
+    max_anchors: int = CA_GATE_MAX_ANCHORS,
+) -> dict[str, Any]:
+    """Replay MAE of each model's ``_ca`` line against the recorded CA reading, on SHARED anchors (Issue #1432).
+
+    The same replay as ``fit["mae_by_lead"]`` (recorded outdoor, windows, fan and heating/cooling duty from each
+    anchor's reading and hidden-mass state), but scored on the CA reading (``readings["_ca"]``, the comfort-facing
+    ``indoor``) at the ``CA_GATE_LEADS`` leads, with each model's ``_ca`` composed the way :func:`predict` composes it:
+    the sleep node's value inside the sleep window when that node is modelled, else the primary's. Only anchors every
+    model can start from are scored (each needs its primary reading, a composing model also its sleep reading), up to
+    ``max_anchors`` by an even stride, so the numbers compare like with like.
+    ``{"n_anchors": n, "mae": {label: {lead: mae | None}}, "n": {label: {lead: count}}}``. Never raises."""
+    out: dict[str, Any] = {"n_anchors": 0, "mae": {k: {} for k in models}, "n": {k: {} for k in models}}
+    if not models or not samples:
+        return out
+    try:
+        horizon = max(_GATE_LEAD_STEPS.values())
+        probs: dict[str, _Problem] = {}
+        for label, m in models.items():
+            extra = [s for s in m.sensors if s != m.primary]
+            probs[label] = _Problem(
+                samples, primary=m.primary, extra=extra, tz=tz, horizon_steps=horizon, max_anchors=10**9
+            )
+        usable: set[int] | None = None
+        for label, m in models.items():
+            pr = probs[label]
+            j = pr.extra.index(sleep_node) if _ca_composes(m, sleep_node) and sleep_node in pr.extra else None
+            ok = {a.i for a in pr.anchors if j is None or a.b0[j] is not None}
+            usable = ok if usable is None else usable & ok
+        common = sorted(usable or ())
+        if max_anchors and len(common) > max_anchors:
+            stride = math.ceil(len(common) / max_anchors)
+            common = common[::stride]
+        keep = set(common)
+        out["n_anchors"] = len(common)
+        if not common:
+            return out
+        for label, m in models.items():
+            pr = probs[label]
+            pr.anchors = [a for a in pr.anchors if a.i in keep]
+            hp = [float(m.house[k]) for k in HOUSE_KEYS]
+            ratio = hp[8] / hp[7] if hp[7] > 1e-9 else 1.0
+            passes = pr.house_pass(hp)
+            compose = _ca_composes(m, sleep_node) and sleep_node in pr.extra
+            j = pr.extra.index(sleep_node) if compose else None
+            nd = [float(m.nodes[sleep_node][k]) for k in NODE_KEYS] if compose and sleep_node else None
+            errs: dict[str, list[float]] = {lead: [] for lead in CA_GATE_LEADS}
+            for a, (hs, sun) in zip(pr.anchors, passes, strict=True):
+                traj = None
+                if j is not None and nd is not None and a.b0[j] is not None:
+                    traj = _roll_node(nd, a.h0, a.b0[j], a.out, a.win, hs, sun, a.uh, a.uc, ratio)
+                for lead in CA_GATE_LEADS:
+                    s = _GATE_LEAD_STEPS[lead]
+                    if s > a.length:
+                        continue
+                    smp = samples[a.i + s]
+                    actual = smp.readings.get(CA_NODE)
+                    if not _finite(actual):
+                        continue
+                    asleep = in_sleep is not None and in_sleep(smp.ts.astimezone(tz))
+                    pred = traj[s - 1] if (traj is not None and asleep) else hs[s - 1]
+                    errs[lead].append(abs(pred - float(actual)))  # type: ignore[arg-type]
+            out["mae"][label] = {lead: _round3(_mae(e)) for lead, e in errs.items()}
+            out["n"][label] = {lead: len(e) for lead, e in errs.items()}
+    except (ArithmeticError, ValueError, TypeError, IndexError, OverflowError) as exc:  # pragma: no cover
+        out["error"] = type(exc).__name__
+    return out
+
+
+def _round3(v: float | None) -> float | None:
+    return None if v is None else round(v, 3)
+
+
+def ca_gate(scores: Mapping[str, Any], *, tolerance_f: float = CA_GATE_TOLERANCE_F) -> tuple[bool, str]:
+    """``(per_room passes, reason)`` from :func:`score_ca_lines` output for ``stitched`` and ``per_room`` (Issue #1432).
+
+    Passes when at least ``GATE_MIN_ANCHORS`` shared anchors were scored, both models have a ``CA_GATE_LEAD`` score,
+    and at every ``CA_GATE_LEADS`` lead both scored the per-room MAE is at most the stitched MAE + ``tolerance_f``."""
+    mae = scores.get("mae") or {}
+    a, b = mae.get(MODEL_STITCHED) or {}, mae.get(MODEL_PER_ROOM) or {}
+    n = int(scores.get("n_anchors") or 0)
+    if n < GATE_MIN_ANCHORS or a.get(CA_GATE_LEAD) is None or b.get(CA_GATE_LEAD) is None:
+        return False, "too_few_shared_anchors"
+    for lead in CA_GATE_LEADS:
+        if a.get(lead) is not None and b.get(lead) is not None and b[lead] > a[lead] + tolerance_f:
+            return False, "per_room_scored_worse"
+    return True, "per_room_no_worse"
+
+
+@dataclass
+class ControlFit:
+    """The model the decisions read, the samples it was fitted on and why it was chosen (Issue #1432)."""
+
+    model: V4Model
+    samples: list[V4Sample]
+    primary: str
+    nodes: list[str]
+    choice: dict[str, Any]
+
+
+def choose_control_model(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    tz: tzinfo,
+    now: datetime,
+    primary: str,
+    sensors: Sequence[str],
+    sleep_sensor: str | None = None,
+    aliases: Sequence[str] = (),
+    in_sleep: Callable[[datetime], bool] | None = None,
+    archive_snapshots: Sequence[dict] | None = None,
+    warm_start: V4Model | None = None,
+    horizon_h: int = 12,
+    sample_filter: Callable[[list[V4Sample]], list[V4Sample]] | None = None,
+) -> ControlFit:
+    """Fit the model the decisions will read: A (stitched ``_ca``) or B (per room), Issue #1432.
+
+    Occupant view: pre-heat, pre-cool, the ceiling guard and the setback depth read v4's forecast of the reading CA
+    uses (the thermostat by day, the bedroom in the sleep window). B forecasts each room with its own node, so it is
+    used as soon as both rooms have ``NODE_MIN_HISTORY_DAYS`` of their own readings (:func:`resolve_control_nodes`) -
+    but only when, on this home's own training rows, B's ``_ca`` replay is no worse than A's (:func:`ca_gate`). Until
+    then, and whenever B is worse, A stands. Both models are fitted when B is a candidate (about twice a fit's cost).
+
+    ``sample_filter`` (the backtest's no-leak cut) is applied to each sample list before fitting. Display-only nodes
+    are NOT fitted here (callers add them with :func:`with_display_nodes`). The model's ``fit["node_choice"]`` records
+    the choice; ``choice["model"]`` is ``MODEL_STITCHED`` or ``MODEL_PER_ROOM``. Never raises on thin data."""
+    plan = resolve_control_nodes(
+        entries, primary=primary, sensors=sensors, sleep_sensor=sleep_sensor, aliases=aliases, in_sleep=in_sleep, tz=tz
+    )
+    choice: dict[str, Any] = dict(plan.record)
+    choice.update(tolerance_f=CA_GATE_TOLERANCE_F, lead=CA_GATE_LEAD)
+    keep = sample_filter or (lambda s: s)
+
+    def samples_for(prim: str) -> list[V4Sample]:
+        return keep(
+            samples_from_chart_log(
+                entries,
+                tz=tz,
+                archive_snapshots=archive_snapshots,
+                primary=None if prim == CA_NODE else prim,
+                primary_aliases=tuple(aliases),
+                in_sleep=in_sleep,
+            )
+        )
+
+    def fit_for(prim: str, nodes: list[str], smp: list[V4Sample]) -> V4Model:
+        return fit(smp, primary=prim, sensors=nodes, tz=tz, now=now, horizon_h=horizon_h, warm_start=warm_start)
+
+    a_prim, a_nodes = plan.stitched
+    a_samples = samples_for(a_prim)
+    model_a = fit_for(a_prim, a_nodes, a_samples)
+    chosen = ControlFit(model_a, a_samples, a_prim, list(a_nodes), choice)
+    if plan.per_room is not None:
+        b_prim, b_nodes = plan.per_room
+        b_samples = samples_for(b_prim)
+        model_b = fit_for(b_prim, b_nodes, b_samples)
+        scores = score_ca_lines(
+            {MODEL_STITCHED: model_a, MODEL_PER_ROOM: model_b}, b_samples, tz=tz, sleep_node=plan.sleep_node,
+            in_sleep=in_sleep,
+        )  # fmt: skip
+        choice["scores"] = scores
+        if model_b.confidence == "none":
+            choice["reason"] = "per_room_not_usable"
+            choice["per_room_fit_reason"] = model_b.fit.get("reason", "")
+        elif model_a.confidence == "none":
+            choice["reason"] = "stitched_not_usable"
+            chosen = ControlFit(model_b, b_samples, b_prim, list(b_nodes), choice)
+        else:
+            ok, why = ca_gate(scores)
+            choice["reason"] = why
+            if ok:
+                chosen = ControlFit(model_b, b_samples, b_prim, list(b_nodes), choice)
+    choice["model"] = MODEL_PER_ROOM if chosen.primary != CA_NODE else MODEL_STITCHED
+    fit_info = dict(chosen.model.fit) if isinstance(chosen.model.fit, Mapping) else {}
+    fit_info["node_choice"] = _jsonable_choice(choice)
+    chosen.model = dataclasses.replace(chosen.model, fit=fit_info)
+    return chosen
+
+
+def _jsonable_choice(choice: Mapping[str, Any]) -> dict[str, Any]:
+    """A JSON-safe copy (no NaN) of a node-choice record."""
+
+    def clean(v: Any) -> Any:
+        if isinstance(v, Mapping):
+            return {str(k): clean(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [clean(x) for x in v]
+        if isinstance(v, float) and not math.isfinite(v):
+            return None
+        return v
+
+    return clean(choice)
 
 
 def _hvac_at(tl: list[tuple[float, str]], g: float) -> str | None:

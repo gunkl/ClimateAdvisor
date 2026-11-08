@@ -227,10 +227,15 @@ class V4Archive:
     def _ca_value(self, epoch: int, lead: str) -> float | None:
         primary = self.ca.get("primary")
         sleep = self.ca.get("sleep")
-        if sleep and sleep in self._lines and self._in_sleep(epoch):
-            v = self._lines[sleep].get(epoch, lead)
+        if sleep and sleep != primary and self._in_sleep(epoch):
+            v = self._lines[sleep].get(epoch, lead) if sleep in self._lines else None
             if v is not None:
                 return v
+            # Issue #1432: a sleep slot the bedroom line cannot answer is never the thermostat's room (a room-node
+            # primary); a stored ``_ca`` slot (a stitched model's own CA reading) still answers it.
+            if primary and primary != CA_LINE:
+                stored = self._lines.get(CA_LINE)
+                return stored.get(epoch, lead) if stored is not None else None
         line = self._lines.get(primary or "")
         v = line.get(epoch, lead) if line is not None else None
         if v is None and CA_LINE in self._lines:  # a slot from a _ca-only model (Issue #1400)

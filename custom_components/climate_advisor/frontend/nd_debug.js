@@ -31,13 +31,28 @@
   var CUSTOM = { v4_model: 1, control_feed: 1, operation_timeline: 1 };
   var DASH = '—';
   var HINTS = {
-    occupancy_mode: 'Guest > Vacation > Home/Away', pre_pause_mode: 'HVAC mode before a door paused automation',
+    occupancy_mode: 'Guest > Vacation > Home/Away',
+    pre_pause_mode: 'The thermostat mode when the door or window opened, restored when it closes. It can differ from today\u2019s classification (the comfort edge or a manual change may have set it later)',
+    pause_suppressed_classification: 'Today\u2019s plan is on hold while a door or window is open; it is applied again when they close',
+    manual_grace_duration: 'How long Climate Advisor leaves a manual thermostat change alone',
+    fan_remote_speed: 'The fan remote\u2019s speed setting, shown even while the fan is off',
+    'Training-fit miss': 'How closely the last fit matched its own training history, not live accuracy: the Backtest below scores live predictions',
+    'Grade reason': 'v4 grades none / low / ok from its history length, its skill against \u201cno change\u201d, and usable heating and cooling thermostat starts. It is not an accuracy score',
+    'By mode': 'Usable thermostat starts per mode in the training window; ok needs enough in every mode the home has used',
+    'Shadow engine': 'v3 grades from how many observations it has learned, not from how accurate it is: compare both in the Backtest below',
+    Archive: 'Saved forecasts the Backtest scores against what actually happened',
+    'Last prediction': 'Slots archived = new forecast slots this prediction added to the archive (most predictions add none)',
+    'Mass node': 'v4\u2019s estimate of the slow part of the house (walls, floors, furniture), which lags the air temperature',
+    'Decision grade': 'The confidence the decisions read; v4 low reads as low, v4 ok as medium',
+    'v3 learned': 'v3\u2019s learned value from its observations, collected whichever engine is primary. The Decisions rows say which values the decisions actually read',
+    'v3 model': 'v3\u2019s own model version and checks; it drives decisions only when v3 is the primary engine',
     comfort_family_armed: 'Which comfort edge the thermostat is guarding, and the last heat/cool switch',
     comfort_family_hold: 'The thermostat is deliberately not flipping heat/cool yet: the house is only slightly past an edge shortly after the other side ran',
     'classification.day_type': 'Drives HVAC strategy', 'classification.windows_recommended': 'Open windows instead of HVAC',
     'classification.pre_condition': 'Pre-heat/cool before peak', 'classification.setback_modifier': 'Trend-based setpoint adjust',
-    'classification.window_open_time': 'Recommended open time', 'classification.window_close_time': 'Recommended close time',
-    'classification.today_low': 'Window opportunity needs today low at or below the threshold', 'classification.tomorrow_low': 'Evening opportunity needs tomorrow low at or below the threshold'
+    'classification.today_high': 'The higher of the forecast high and the warmest reading so far today',
+    'classification.low_is_estimated': 'Yes = the forecast gave no low; windows are then never recommended',
+    'classification.forecast_windows_recommended': 'The forecast\u2019s answer before the live outdoor check'
   };
 
   // Issue #1399: no raw JSON on this tab. An object reads "key value · key value", a list of objects "...; ...".
@@ -50,7 +65,13 @@
     if (typeof v === 'object') { var ks = Object.keys(v); return ks.length ? ks.map(function (k) { return k.replace(/_/g, ' ') + ' ' + fmt(v[k]); }).join(' · ') : 'none'; }
     return String(v);
   }
+  function dur(sec) {  // 10800 -> "3 h", 90 -> "1 min 30 s"
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), x = Math.round(sec % 60);
+    return [h ? h + ' h' : '', m ? m + ' min' : '', x || (!h && !m) ? x + ' s' : ''].filter(Boolean).join(' ');
+  }
   function fmtKey(k, v) {
+    if (typeof v === 'number' && /(_duration|_seconds|_seconds_remaining)$/.test(k)) return dur(v);
+    if (k === 'fan_remote_speed' && has(v) && A && A.fan_active === false) return v + ' (fan is off)';
     if (k === 'door_window_sensors' && v && typeof v === 'object') {
       var names = Object.keys(v);
       return names.length ? names.map(function (n) { return (v[n].friendly_name || n) + ': ' + (v[n].open ? 'open' : 'closed'); }).join('; ') : 'none';
@@ -86,6 +107,11 @@
     function conf(e) { return e.confidence && e.confidence !== 'none' ? e.confidence + ' confidence' : ''; }
     var prim = pe ? find(pe.primary) : null, sh = pe && pe.shadow && pe.shadow !== 'none' ? find(pe.shadow) : null;
     rows.push(['Primary engine', !pe || !pe.primary ? DASH : !prim ? pe.primary : prim.label + ': ' + (prim.usable ? ['usable', conf(prim)].filter(Boolean).join(', ') : 'still learning')]);
+    var gr = (v && v.grade) || {};
+    if (prim && prim.id === 'v4' && (gr.why || gr.by_mode)) {
+      if (gr.why) rows.push(['Grade reason', (v.confidence || 'none') + ': ' + gr.why]);
+      if (gr.by_mode) rows.push(['By mode', gr.by_mode]);
+    }
     rows.push(['Shadow engine', !pe ? DASH : !pe.shadow || pe.shadow === 'none' ? 'none' : !sh ? pe.shadow : sh.label + ': ' + (sh.usable ? conf(sh) || 'usable' : 'still learning')]);
     var dec = DASH;
     if (cf && cf.mode) {
@@ -105,7 +131,7 @@
     rows.push(['Last learned', learned]);
     var mae = v.mae_by_lead && typeof v.mae_by_lead === 'object' ? v.mae_by_lead : {};
     var leads = Object.keys(mae).filter(function (k) { return mae[k] != null; }).sort(function (a, b) { return parseFloat(a) - parseFloat(b); });
-    rows.push(['Typical miss', leads.length ? leads.map(function (k) { return k.replace(/^(\d+)\s*h$/, '$1 h') + ' ' + Number(mae[k]).toFixed(2) + u; }).join(' · ') : DASH]);
+    rows.push(['Training-fit miss', leads.length ? leads.map(function (k) { return k.replace(/^(\d+)\s*h$/, '$1 h') + ' ' + Number(mae[k]).toFixed(2) + u; }).join(' · ') : DASH]);
     var sens = Array.isArray(v.sensors) ? v.sensors : [], names = v.sensor_names || {};
     var sname = function (id) { return id === '_ca' ? 'Climate Advisor reading' : names[id] || id; };
     rows.push(['Sensors modelled', !sens.length ? DASH : sens.length === 1 && sens[0] === '_ca' ? 'Climate Advisor reading only' : sens.map(sname).join(', ')]);
@@ -113,7 +139,7 @@
     var fm = v.forecast_model && typeof v.forecast_model === 'object' ? v.forecast_model : null;
     rows.push(['Forecast model', fm && fm.text ? String(fm.text) : DASH]);
     var lc = v.last_cycle || {};
-    rows.push(['Last prediction', !lc.at ? DASH : [tDay(lc.at), has(lc.inputs) ? count(lc.inputs, 'forecast input', 'forecast inputs') : '', has(lc.ms) ? Math.round(lc.ms) + ' ms' : '', has(lc.archived) ? count(lc.archived, 'slot', 'slots') + ' archived' : '', lc.predicted === false ? 'no prediction made' : ''].filter(Boolean).join(', ')]);
+    rows.push(['Last prediction', !lc.at ? DASH : [tDay(lc.at), has(lc.inputs) ? count(lc.inputs, 'forecast input', 'forecast inputs') : '', has(lc.ms) ? Math.round(lc.ms) + ' ms' : '', has(lc.archived) ? count(lc.archived, 'new slot', 'new slots') + ' archived' : '', lc.predicted === false ? 'no prediction made' : ''].filter(Boolean).join(', ')]);
     var ar = v.archive_slots, arTxt = DASH;
     if (ar && typeof ar === 'object') {
       var vals = Object.keys(ar).map(function (k) { return Number(ar[k]) || 0; });
@@ -125,6 +151,66 @@
     rows.push(['Mass node', has(v.mass) ? Number(v.mass).toFixed(1) + u : DASH]);
     rows.push(['Fitting now', v.fit_running == null ? DASH : fmt(!!v.fit_running)]);
     rows.push(['Engine available', v.engine_available == null ? DASH : fmt(!!v.engine_available)]);
+    return rows;
+  }
+
+  // ---------- what the decisions read, and from where (engines payload's decisions list) ----------
+  var DEC_LABEL = { confidence: 'Decision grade', k_passive: 'Decisions: heat-loss rate', k_active_heat: 'Decisions: heating rate',
+    k_active_cool: 'Decisions: cooling rate', k_solar: 'Decisions: sun gain', solar_phase_offset_h: 'Decisions: sun timing',
+    k_vent_window: 'Decisions: window venting', k_vent_fan: 'Decisions: fan venting' };
+  function decisionRows(list, pe) {
+    if (!Array.isArray(list) || !list.length) return [];
+    var u = ND.sym(ND.unit), prim = (pe && pe.primary) || 'the primary engine';
+    var from = { v3: 'from v3\u2019s learned observations', v4: 'from v4', default: 'default (' + prim + ' still learning)', none: 'not learned yet (decisions use their defaults)' };
+    return list.map(function (d) {
+      var val = d.value;
+      if (d.source === 'none' || d.source === 'default') val = null;
+      var txt = val == null ? '' : d.kind === 'rate' ? fmt(val) + ' ' + u + '/h' : d.kind === 'per_hour' ? fmt(val) + ' /h' : d.kind === 'hours' ? fmt(val) + ' h' : String(val);
+      return { k: DEC_LABEL[d.key] || d.key, v: (txt ? txt + ' · ' : '') + (from[d.source] || d.source), hint: d.key === 'confidence' ? HINTS['Decision grade'] : 'The value the decisions read now (' + d.key + ')' };
+    });
+  }
+
+  // ---------- today's classification, in words, with the thresholds each row is judged on ----------
+  function hm(t) {  // "10:00:00" -> "10:00 AM"
+    var m = /^(\d\d):(\d\d)/.exec(t || ''); if (!m) return DASH;
+    var d = new Date(); d.setHours(+m[1], +m[2], 0, 0); return tShort(d);
+  }
+  function classificationRows(c) {
+    var u = ND.sym(ND.unit), r = c.window_rule || {}, th = c.trend_thresholds || {}, rows = [];
+    var deg = function (x) { return has(x) ? ND.num(x, 1) + u : DASH; };
+    var dd = function (f) { return ND.num(ND.dFToDisp(f), 1) + '°'; };
+    function add(k, v, hint) { rows.push({ k: k, v: v, hint: hint || HINTS['classification.' + k] || '' }); }
+    add('day_type', fmt(c.day_type));
+    add('trend_direction', fmt(c.trend_direction));
+    add('trend_magnitude', has(c.trend_magnitude) ? ND.num(c.trend_magnitude, 1) + '°' : DASH,
+      has(th.moderate) ? 'The setback adjusts at ' + ND.num(th.moderate, 0) + '° (by ' + dd(2) + ') and ' + ND.num(th.significant, 0) + '° (by ' + dd(3) + ')' : '');
+    add('hvac_mode', fmt(c.hvac_mode));
+    var why = [];
+    if (r.kind === 'range') {
+      if (c.low_is_estimated) why.push('today\u2019s low is only an estimate');
+      if (has(c.today_high) && has(r.high_at_least) && c.today_high < r.high_at_least) why.push('today\u2019s high ' + deg(c.today_high) + ' is below ' + deg(r.high_at_least));
+      if (has(c.today_low) && has(r.low_at_most) && c.today_low > r.low_at_most) why.push('today\u2019s low ' + deg(c.today_low) + ' is above ' + deg(r.low_at_most));
+      if (!why.length && c.forecast_windows_recommended && !c.windows_recommended) why.push('the forecast says yes, the live outdoor check says no');
+    } else if (r.kind === 'opportunity') why.push('a hot day: see the morning and evening opportunities');
+    else if (c.day_type) why.push('a ' + c.day_type + ' day: windows are not judged');
+    add('windows_recommended', (c.windows_recommended ? 'yes' : 'no') + (why.length ? ' (' + why.join('; ') + ')' : ''),
+      r.kind === 'range' ? 'Yes when today\u2019s high reaches ' + deg(r.high_at_least) + ' (comfort heat) and today\u2019s low reaches ' + deg(r.low_at_most) + ' (comfort cool minus 3°)' + (r.hysteresis ? ', with slack while already recommended' : '') : HINTS['classification.windows_recommended']);
+    var fixed = c.day_type ? ' (fixed for a ' + c.day_type + ' day' + (c.windows_recommended ? ')' : '; windows not recommended today)') : '';
+    add('window times', c.window_open_time ? hm(c.window_open_time) + ' – ' + hm(c.window_close_time) + fixed : 'none on a ' + (c.day_type || '?') + ' day',
+      'The open and close times are set by the day type and also feed the pre-cool and natural-ventilation plans, so they show even when windows are not recommended');
+    function opp(flag, s, e, name) {
+      if (r.kind !== 'opportunity') return 'not checked (hot days only)';
+      return flag ? 'yes, ' + hm(s) + ' – ' + hm(e) : 'no (' + name + ' low above ' + deg(r.opportunity_low_at_most) + ')';
+    }
+    add('morning opportunity', opp(c.window_opportunity_morning, c.window_opportunity_morning_start, c.window_opportunity_morning_end, 'today\u2019s'), 'On a hot day: needs today\u2019s low at or below ' + deg(r.opportunity_low_at_most));
+    add('evening opportunity', opp(c.window_opportunity_evening, c.window_opportunity_evening_start, c.window_opportunity_evening_end, 'tomorrow\u2019s'), 'On a hot day: needs tomorrow\u2019s low at or below ' + deg(r.opportunity_low_at_most));
+    add('pre_condition', c.pre_condition ? 'yes, ' + ND.num(c.pre_condition_target, 1) + '° past comfort' : 'no', HINTS['classification.pre_condition'] + ' (a cooling trend of ' + ND.num(th.moderate, 0) + '° or more)');
+    add('setback_modifier', ND.num(c.setback_modifier || 0, 1) + '°', HINTS['classification.setback_modifier']);
+    add('today_high', deg(c.today_high));
+    add('today_low', deg(c.today_low), r.kind === 'range' ? 'Windows need today\u2019s low at or below ' + deg(r.low_at_most) : r.kind === 'opportunity' ? 'The morning opportunity needs it at or below ' + deg(r.opportunity_low_at_most) : 'Not used for windows on this day type');
+    add('tomorrow_low', deg(c.tomorrow_low), r.kind === 'opportunity' ? 'The evening opportunity needs it at or below ' + deg(r.opportunity_low_at_most) : 'Used only on hot days (the evening opportunity)');
+    add('low_is_estimated', fmt(c.low_is_estimated));
+    add('forecast_windows_recommended', fmt(c.forecast_windows_recommended));
     return rows;
   }
 
@@ -152,22 +238,27 @@
         var v4s = (E && E.v4) || (A && A.v4_model);
         rows = rows.concat(rowsOf(engineRows(v4s, v4s && v4s.prediction_engines, A && A.control_feed)));
         if (E) {
+          rows = rows.concat(decisionRows(E.decisions, v4s && v4s.prediction_engines));
+          // v3's learned values (the learning observations): always collected, whichever engine is primary
           ['k_passive', 'k_solar', 'solar_phase_offset_h', 'k_vent_window', 'k_vent_fan'].forEach(function (k) {
-            var e = E[k]; if (e) rows.push(row(k, e.active ? fmt(e.value) + (e.confidence ? ' (' + e.confidence + ')' : '') : '(not yet active)'));
+            var e = E[k]; if (e) rows.push(row('v3 ' + k, e.active ? fmt(e.value) + (e.confidence ? ' (' + e.confidence + ')' : '') : '(not yet active)', 'v3 learned'));
           });
-          var h = E.k_active_hvac; if (h) rows.push(row('k_active_hvac', h.active && h.value ? 'heat ' + fmt(h.value.heat) + ' · cool ' + fmt(h.value.cool) + (h.confidence ? ' (' + h.confidence + ')' : '') : '(not yet active)'));
-          rows.push(row('physics', (E.ode_version || '?') + ' · ' + (E.physics_eligible ? 'eligible' : 'not eligible') + (E.physics_eligible_reason ? ' · ' + E.physics_eligible_reason : '')));
+          var h = E.k_active_hvac; if (h) rows.push(row('v3 k_active_hvac', h.active && h.value ? 'heat ' + fmt(h.value.heat) + ' · cool ' + fmt(h.value.cool) + (h.confidence ? ' (' + h.confidence + ')' : '') : '(not yet active)', 'v3 learned'));
+          rows.push(row('v3 model', (E.ode_version || '?') + ' physics · ' + (E.physics_eligible ? 'eligible' : 'not eligible') + (E.physics_eligible_reason ? ' · ' + E.physics_eligible_reason : '')));
         }
       }
       if (g[0] === 'Plan' && A && 'operation_timeline' in A) rows = rowsOf(planRows(A.operation_timeline));
       groups.push({ title: g[0] === 'Prediction engines (v4 shadow)' ? 'Prediction engines' : g[0], rows: rows });
     });
-    if (A && A.classification) { groups.splice(8, 0, { title: 'Today’s classification', rows: Object.keys(A.classification).map(function (k) { return row(k, fmt(A.classification[k]), 'classification.' + k); }) }); }
+    if (A && A.classification) { groups.splice(8, 0, { title: 'Today’s classification', rows: classificationRows(A.classification) }); }
     if (A && A.thermal_pipeline) {
       var tp = A.thermal_pipeline;
       groups.push({ title: 'Learning pipeline', rows: (tp.pending || []).map(function (p) {
         return row('pending ' + p.obs_type, p.status + ' · ' + p.elapsed_minutes + ' min · ' + p.sample_count + ' samples · indoor Δ' + ND.num(ND.dFToDisp(p.indoor_delta_f), 2) + '° · outdoor ' + ND.num(ND.fToDisp(p.outdoor_f), 1) + ND.sym(ND.unit));
-      }).concat(Object.keys(tp.rejection_log_counts || {}).map(function (k) { return row('skipped ' + k, String(tp.rejection_log_counts[k])); })) });
+      }).concat(Object.keys(tp.rejection_log_counts || {}).map(function (k) {
+        var n = tp.rejection_log_counts[k], cap = tp.rejection_log_cap;
+        return { k: 'skipped ' + k, v: has(cap) && n >= cap ? cap + ' or more (the list keeps the newest ' + cap + ')' : String(n), hint: 'Observations of this type that were not learned from' };
+      })) });
     }
     var lc = EV && EV.diagnostics && EV.diagnostics.last_command;
     if (lc) groups.push({ title: 'Last thermostat command', rows: Object.keys(lc).map(function (k) { return row(k, fmt(lc[k])); }) });
@@ -183,7 +274,7 @@
       if (!rows.length) return;
       total += rows.length;
       html += '<section class="card" style="margin:0 0 10px"><h2 style="font-size:14px">' + esc(g.title) + ' <span class="sub">' + rows.length + ' fields</span></h2><table class="field-table"><tbody>' +
-        rows.map(function (r) { return '<tr><td class="k">' + esc(r.k) + (r.hint ? '<span class="hint">' + esc(r.hint) + '</span>' : '') + '</td><td class="mono">' + esc(r.v) + '</td></tr>'; }).join('') + '</tbody></table></section>';
+        rows.map(function (r) { return '<tr><td class="k"><span class="kn">' + esc(r.k) + '</span>' + (r.hint ? '<span class="hint">' + esc(r.hint) + '</span>' : '') + '</td><td class="mono">' + esc(r.v) + '</td></tr>'; }).join('') + '</tbody></table></section>';
     });
     host.innerHTML = html || '<div class="empty">No field matches the filter.</div>';
     $('dbg-count').textContent = total + ' fields';

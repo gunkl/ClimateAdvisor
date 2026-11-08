@@ -223,6 +223,59 @@ def node_choice_changed(previous: Mapping[str, Any] | None, new: Mapping[str, An
     return a is not None and b is not None and a["model"] != b["model"]
 
 
+_MODE_WORD = {"heat": "heating", "cool": "cooling"}
+
+
+def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
+    """``(why, by_mode)`` in plain words for the Debug tab: why v4 has its grade, and each mode's thermostat starts.
+
+    ``summary`` is :func:`model_summary`'s dict. v4 is ``ok`` only when BOTH heating and cooling have enough usable
+    thermostat starts in the training window (``predictor_v4.fit``'s gates); this says which input holds it back."""
+    if not isinstance(summary, Mapping) or not summary.get("has_model"):
+        return "", ""
+    try:
+        pv = _predictor()
+        need_starts, need_days = int(pv.GATE_MIN_ACCEPTED_STARTS), float(pv.GATE_MIN_DAYS_OK)
+    except Exception:  # noqa: BLE001 - the words only; the engine's own gates are the source of truth
+        need_starts, need_days = 5, 10.0
+    modes = summary.get("modes") if isinstance(summary.get("modes"), Mapping) else {}
+
+    def mode_txt(mode: str) -> str:
+        m = modes.get(mode) if isinstance(modes.get(mode), Mapping) else {}
+        word, acc, tot = _MODE_WORD[mode], m.get("accepted"), m.get("starts")
+        if m.get("seen") is False or (not tot and m.get("seen") is None):
+            return f"{word} not seen"
+        if not isinstance(acc, int):
+            return f"{word}: no start count"
+        enough = "enough" if acc >= need_starts else f"needs {need_starts}"
+        return f"{word} {acc} usable of {tot} starts ({enough})"
+
+    span = summary.get("span_days")
+    window = f" in the last {round(float(span))} days" if isinstance(span, (int, float)) else ""
+    by_mode = " · ".join(mode_txt(m) for m in ("heat", "cool")) + window if modes else ""
+    days = summary.get("sample_days")
+    days_w = f"{float(days):.1f} days" if isinstance(days, (int, float)) else "too few days"
+    code = summary.get("confidence_reason") or ""
+    short = [
+        _MODE_WORD[m]
+        for m in ("heat", "cool")
+        if isinstance(modes.get(m), Mapping) and (modes[m].get("accepted") or 0) < need_starts
+    ]
+    unseen = [_MODE_WORD[m] for m in ("heat", "cool") if isinstance(modes.get(m), Mapping) and not modes[m].get("seen")]
+    why = {
+        "": "every check passes" if summary.get("confidence") == "ok" else "",
+        "under 3 days of samples": f"only {days_w} of history (needs 3)",
+        "fit diverged": "the last fit did not settle on a model",
+        "does not beat no-change at 4 h by 10 %": 'it does not yet beat "no change" by 10 % at 4 h ahead',
+        "under 10 days of samples": f"only {days_w} of history (needs {need_days:g} for ok)",
+        "heating or cooling not yet observed": f"{' and '.join(unseen) or 'one mode'} not seen{window} "
+        "(ok needs both heating and cooling)",
+        "too few accepted thermostat starts in a used mode": f"too few usable {' and '.join(short) or ''} starts "
+        f"(ok needs {need_starts} in each mode it has seen)".replace("usable  starts", "usable starts"),
+    }.get(code, code)
+    return why, by_mode
+
+
 def describe_node_choice(
     choice: Mapping[str, Any] | None,
     *,
@@ -296,7 +349,8 @@ def describe_node_choice(
         reason = f"{p_name} has only {days('primary')} of its own readings (needs {need_w})"
     elif reason_code == "sleep_not_ready":
         reason = (
-            f"{s_name} has only {days('sleep')} of its own readings (needs {need_w}); sleep hours are never "
+            f"{s_name} has only {days('sleep')} of its own readings (needs {need_w}) for a model of its own; until "
+            f"then the stitched reading (the bedroom at night) is forecast as one line, and sleep hours are never "
             f"forecast from {p_name}'s room"
         )
     elif reason_code == "no_primary_entity":
@@ -750,6 +804,17 @@ def model_summary(model_dict: Mapping[str, Any] | None) -> dict[str, Any]:
         "schema_version": model_dict.get("schema_version"),
         # Issue #1432: which model the decisions read (stitched or per room) and why; numbers in degrees F
         "node_choice": node_choice(model_dict),
+        # Debug tab: why the grade is what it is, and each mode's thermostat starts (the grade's per-mode inputs)
+        "confidence_reason": fit.get("reason") or None,
+        "sample_days": fit.get("sample_days"),
+        "modes": {
+            mode: {
+                "seen": fit.get(f"{mode}_seen"),
+                "starts": (fit.get("starts_total") or {}).get(mode),
+                "accepted": (fit.get("starts_accepted") or {}).get(mode),
+            }
+            for mode in ("heat", "cool")
+        },
     }
 
 

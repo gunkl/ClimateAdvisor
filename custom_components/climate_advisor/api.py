@@ -1433,6 +1433,9 @@ class ClimateAdvisorEnginesView(HomeAssistantView):
             # Issue #1230 R1: the v4 shadow model beside the v3 engines (Debug visibility only).
             if hasattr(coordinator, "v4_model_summary"):
                 status["v4"] = coordinator.v4_model_summary()
+            # The rates the decisions read now and where each comes from (the rows above are v3's learned values)
+            if hasattr(coordinator, "decision_rates_summary"):
+                status["decisions"] = coordinator.decision_rates_summary()
             return self.json(status)
 
 

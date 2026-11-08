@@ -55,7 +55,8 @@ python scripts/test.py unit --cov=custom_components/climate_advisor --cov-report
 - A skip caused by a missing or stubbed package is turned into a failure (`tests/conftest.py`).
 - **Parallel runs:** `CA_UNIT_WORKERS` and `CA_HA_WORKERS` set the pytest-xdist worker count, as a number or `auto`.
   Unset or `0` runs serially. CI uses `4` for both. Locally, use `CA_UNIT_WORKERS=8` rather than `auto`, which can run
-  out of RAM. `CA_HA_WORKERS=auto` is fine.
+  out of RAM. `CA_HA_WORKERS=auto` is fine. `CA_UNIT_SHARD=K/N` runs only the Kth of N round-robin slices of the unit
+  tier, as CI's four `unit` jobs do.
 - **Order-dependence guard (#1186):** `python scripts/test_changed_isolated.py [--base origin/main] [--all]` runs each
   changed `tests/test_*.py` in its own pytest process. CI runs it with `--strict`.
 
@@ -164,7 +165,10 @@ re-staging files are in [claude.md, Pre-commit Hooks](../claude.md#pre-commit-ho
 
 | Workflow | Job | What it runs | Required on `main` |
 |---|---|---|---|
-| `validate.yml` | `validate-and-test` | `tools/validate.py`, `ruff check .`, `ruff format --check .`, the unit tier, and changed test files in isolation (`CA_UNIT_WORKERS=4`) | yes |
+| `validate.yml` | `validate-and-test` | The gate: passes only when `lint`, all four `unit` slices and `isolated` pass | yes |
+| `validate.yml` | `lint` | `tools/validate.py`, `ruff check .`, `ruff format --check .` | via the gate |
+| `validate.yml` | `unit (K/4)` | One round-robin quarter of the unit tier each (`CA_UNIT_SHARD=K/4`, `CA_UNIT_WORKERS=4`), in parallel | via the gate |
+| `validate.yml` | `isolated` | Changed unit test files, each alone (`CA_UNIT_WORKERS=4`) | via the gate |
 | `validate.yml` | `ha-real` | The real-HA tier (`CA_HA_WORKERS=4`, `--durations=15`, 8-minute cap) | yes |
 | `hassfest.yml` | `validate` | Home Assistant's Hassfest | yes |
 | `hacs.yml` | `hacs` | HACS validation | no |

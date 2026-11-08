@@ -55,7 +55,7 @@ discomfort_fh = sum over steps of max(0, floor - swing_heat - T, T - ceiling - s
 score         = discomfort_fh * 1.0  +  hvac_minutes / 60                                                # 1 F-hour = 1 h of HVAC
 ```
 
-`swing_*` default to `THERMAL_SWING_DEFAULT_F` (the learned thermostat swing when the caller has it). Ties: within `TIE_EPS` = 0.05 of the best score. The weight is a constant in this release (DP-2 decided: not a setting).
+`swing_*` default to `THERMAL_SWING_DEFAULT_F` (the learned thermostat swing, rounded up to the half degree, when the caller has it). The emulated outer loop (point 2) uses `loop_swing_*_f`, the MEASURED swing (`swing.measured_swing_f`), as the live loop does (Issue #1477 owner decision); `None` falls back to `swing_*`. Ties: within `TIE_EPS` = 0.05 of the best score. The weight is a constant in this release (DP-2 decided: not a setting).
 
 ## Confidence Gate
 

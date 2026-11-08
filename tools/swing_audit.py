@@ -412,9 +412,13 @@ def format_report(audit: dict[str, Any], learned: dict[str, float | None] | None
         else:
             res = summ.get("resolution_f") or 0.0
             interval = f" +/-{res / 2:.2f}" if res else ""
+            # Issue #1477: "measured" is the raw median of the finest cycles (what the thermostat does); Climate
+            # Advisor stores and uses it rounded up to the next half degree F, which is what "learned" is compared to.
+            raw = summ.get("raw_value_f", summ["value_f"])
             out.append(
-                f"  measured {_f(summ['value_f'])}{interval} F {side} setpoint (median; range "
-                f"{_f(summ['min_f'])}-{_f(summ['max_f'])}), stops {_f(summ['off_point_f'])} F short of setpoint"
+                f"  measured {_f(raw)}{interval} F {side} setpoint (median; range "
+                f"{_f(summ['min_f'])}-{_f(summ['max_f'])}), stops {_f(summ['off_point_f'])} F short of setpoint;"
+                f" stored as {_f(summ['value_f'])} F (rounded up to the next 0.5 F)"
             )
             thermo = block.get("thermostat_summary")
             if thermo and thermo.get("value_f") is not None:
@@ -435,7 +439,8 @@ def format_report(audit: dict[str, Any], learned: dict[str, float | None] | None
             tol = max(0.25, (summ.get("resolution_f") or 0.0) / 2 + 0.1)
             verdict = "matches" if abs(want - summ["value_f"]) <= tol else "DIFFERS"
             out.append(
-                f"  learned {_f(want)} F vs measured {_f(summ['value_f'])} F -> {verdict} (tolerance {tol:.2f} F)"
+                f"  learned {_f(want)} F vs measured-and-rounded {_f(summ['value_f'])} F -> {verdict}"
+                f" (tolerance {tol:.2f} F)"
             )
         elif mode in learned:
             out.append(f"  learned {_f(want)} F (nothing to compare with)")

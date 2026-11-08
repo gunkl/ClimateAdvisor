@@ -736,6 +736,8 @@ def _swing_context_lines(thermal: dict[str, Any], config: dict[str, Any]) -> lis
     """Swing lines for the investigator: what it means, how it was learned, what was thrown away (Issue #1233)."""
     unit = config.get("temp_unit", "fahrenheit") if isinstance(config, dict) else "fahrenheit"
     dbg = thermal.get("swing_debug") or {}
+    # Issue #1477: the swing is a half degree F; one decimal in Celsius would print 1.5 F as 0.8 C (= 1.44 F)
+    dec = 2 if unit == "celsius" else 1
     lines = ["", f"  Thermostat swing — {thermal.get('swing_definition') or dbg.get('definition') or ''}"]
     for mode, side in (("heat", "below"), ("cool", "above")):
         value = thermal.get(f"swing_{mode}_f")
@@ -745,9 +747,11 @@ def _swing_context_lines(thermal: dict[str, Any], config: dict[str, Any]) -> lis
         else:
             res = thermal.get(f"swing_{mode}_resolution_f") or 0.0
             res_txt = f", readings quantised to {format_temp_delta(res, unit, 1)}" if res else ""
+            raw = thermal.get(f"swing_{mode}_raw_f")
+            raw_txt = f"median {format_temp_delta(raw, unit, 2)} rounded up to the next half degree F, " if raw else ""
             lines.append(
-                f"  {mode} swing: {format_temp_delta(value, unit, 1)} {side} setpoint"
-                f" (median of the last accepted cycles; {count} accepted in total{res_txt})"
+                f"  {mode} swing: {format_temp_delta(value, unit, dec)} {side} setpoint"
+                f" ({raw_txt}from the finest readings of the last accepted cycles; {count} accepted in total{res_txt})"
             )
         block = dbg.get(mode) or {}
         counts = block.get("reject_counts") or {}
@@ -4080,8 +4084,10 @@ async def build_state_cross_validation_context(hass: Any, coordinator: Any, **kw
             _held = thermostat_holds_direction(_direction, hvac_mode)
             _swing_tol, _swing_src = swing_tolerance(_swing_heat_f if _below else _swing_cool_f)
             _tol = _swing_tol if _held else COMFORT_DEVIATION_FLOOR_F
+            _swing_dec = 2 if _temp_unit == "celsius" else 1  # Issue #1477: 1.5 F = 0.83 C, not 0.8
             _tol_s = (
-                f"thermostat {_direction} swing {format_temp_delta(_swing_tol, _temp_unit, 1)}, {_swing_src}; "
+                f"thermostat {_direction} swing {format_temp_delta(_swing_tol, _temp_unit, _swing_dec)}, "
+                f"{_swing_src}; "
                 f"hvac_mode={hvac_mode}"
                 if _held
                 else f"{format_temp_delta(_tol, _temp_unit, 1)}; hvac_mode={hvac_mode} does not hold {_direction}, "

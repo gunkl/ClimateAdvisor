@@ -228,7 +228,7 @@ def test_accepted_sample_logs_one_info_line_with_zone_and_median_move(tmp_path, 
     assert rec.levelno == logging.INFO
     assert "accepted" in msg and f"mode={mode}" in msg and "zone=entry_zone_a" in msg
     assert "value=1.36" in msg
-    assert "median None->1.36" in msg and "n=1" in msg
+    assert "median None->1.5" in msg and "n=1" in msg  # Issue #1477: 1.36 stored rounded up to 0.5
     assert f"setpoint={sp:.1f}" in msg
 
 
@@ -325,8 +325,8 @@ def test_learning_db_swing_report(tmp_path):
     report = ldb.format_swing_debug(_db_with_swing(tmp_path), last_n=10)
     assert "Heat swing" in report and "Cool swing" in report
     assert "how far past the setpoint" in report  # the one-line definition
-    assert "recomputed median" in report and "1.40" in report  # median(1.36, 1.44)
-    assert "stored 1.40" in report  # stored == recomputed
+    assert "recomputed 1.50" in report and "median 1.40" in report  # median(1.36, 1.44), rounded up (#1477)
+    assert "stored 1.50" in report  # stored == recomputed
     assert "sensor.hall_fine" in report
     assert "non_positive" in report and "setpoint_change" in report  # histogram rows
     assert "reject histogram" in report.lower()
@@ -410,7 +410,7 @@ def test_ai_context_states_the_definition_and_the_reject_counts(tmp_path):
     coord.config = {"temp_unit": "fahrenheit"}
     text = asyncio.run(build_learning_context(MagicMock(), coord))
     assert "how far past the setpoint" in text
-    assert "heat swing: 1.4" in text.lower()
+    assert "heat swing: 1.5" in text.lower() and "median 1.40" in text.lower()  # Issue #1477
     assert "non_positive x1" in text
 
 
@@ -503,7 +503,7 @@ def test_coast_never_leaks_into_the_swing(tmp_path, mode):
     rig.fire(off_t + timedelta(minutes=2), indoor=_past(mode, sp, -1.5))  # a huge coast
     rig.fire(off_t + timedelta(minutes=12), action=_MODES[mode]["running"], indoor=_past(mode, sp, 1.4))
     assert (rig.swing, rig.model()[f"swing_{mode}_off_point_f"], rig.count) == swing_before
-    assert rig.swing == pytest.approx(1.36)
+    assert rig.swing == 1.5 and rig.raw == pytest.approx(1.36)  # Issue #1477: stored = raw rounded up to 0.5
     cache = _cache(rig)
     assert all("coast" not in k for s in cache[f"swing_{mode}_samples"] for k in s)
     assert all("coast" not in k for k in cache[f"swing_{mode}_audit"][0])

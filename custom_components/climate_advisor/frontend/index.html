@@ -1447,14 +1447,22 @@
   if (tm.cooling_rate != null) hvacParamRows.push({ label: 'Cooling', value: `−${tm.cooling_rate.toFixed(1)} ${unitLabel}/hr` });
   // Swing rows — show only when HVAC has ever been observed
   if (tm.heating_rate != null || tm.cooling_rate != null || tm.observation_count_swing_heat > 0 || tm.observation_count_swing_cool > 0) {
-    const swHeat = (tm.swing_heat ?? 1.5).toFixed(1);
-    const swCool = (tm.swing_cool ?? 1.5).toFixed(1);
+    // Issue #1477: the swing is a half degree F (1.5 F); in Celsius that is 0.83 C, so show two decimals there
+    // (one would print 0.8 C = 1.44 F, the very undershoot the rounding removes).
+    const swDec = unitLabel === '°C' ? 2 : 1;
+    const swHeat = (tm.swing_heat ?? 1.5).toFixed(swDec);
+    const swCool = (tm.swing_cool ?? 1.5).toFixed(swDec);
     const swHeatHint = tm.swing_heat_measured ? '' : ' <span class="tm-swing-hint">(estimated)</span>';
     const swCoolHint = tm.swing_cool_measured ? '' : ' <span class="tm-swing-hint">(estimated)</span>';
     // Issue #1234: the swing is one-sided - how far past the setpoint the thermostat lets the room
     // drift before it starts the equipment - so it is not shown as a symmetric "±".
-    hvacParamRows.push({ label: 'Heat swing', value: `${swHeat} ${unitLabel} below setpoint${swHeatHint}` });
-    hvacParamRows.push({ label: 'Cool swing', value: `${swCool} ${unitLabel} above setpoint${swCoolHint}` });
+    // Issue #1477 owner decision: the rounded-up swing (comfort detectors) with the measured one (bedroom loop) beside it
+    const swRaw = (v, raw, measured) => (measured && raw != null && Math.abs(raw - v) > 0.004)
+      ? ` (measured ${raw.toFixed(2)} ${unitLabel})` : '';
+    const swHeatRaw = swRaw(tm.swing_heat ?? 1.5, tm.swing_heat_raw, tm.swing_heat_measured);
+    const swCoolRaw = swRaw(tm.swing_cool ?? 1.5, tm.swing_cool_raw, tm.swing_cool_measured);
+    hvacParamRows.push({ label: 'Heat swing', value: `${swHeat} ${unitLabel}${swHeatRaw} below setpoint${swHeatHint}` });
+    hvacParamRows.push({ label: 'Cool swing', value: `${swCool} ${unitLabel}${swCoolRaw} above setpoint${swCoolHint}` });
   }
   const hvacHint = hvacConf === 'none'
     ? `<p class="tm-hint">Updates each time the system runs a heating or cooling cycle.</p>`

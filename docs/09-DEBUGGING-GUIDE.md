@@ -399,8 +399,13 @@ equipment.)
 
 1. **What did Climate Advisor judge, and why?** `python3 tools/learning_db.py --swing [--last 30] [--entry-id ID]`
    - one row per judged cycle (accepted or `rejected:<reason>`) with the setpoint, setpoint age, on/off readings,
-   source entity, resolution and trigger; the reject histogram; the median recomputed from the retained samples
-   (a `MISMATCH` flag means the stored value disagrees with them); and the coast section.
+   source entity, resolution and trigger; the reject histogram; the value recomputed from the retained samples
+   (`recomputed 1.50 = median 1.44 rounded up to the next 0.5 F, of the 2 finest of the last 7` - Issue #1477: only
+   the finest-resolution samples decide, and the stored value is their median rounded up to the half degree; a
+   `MISMATCH` flag means the stored value disagrees with them); and the coast section. A run of
+   `setpoint_change` rejects with `sp age` 1-20 s is normal: CA's bedroom outer loop (`remote-sensor offset`),
+   wake-up/bedtime/door-close writes or the occupant raised the setpoint and the equipment started because the
+   room was suddenly past it (check the `Set temperature to ...` INFO line seconds before the start).
 2. **Is it true of my equipment?** Save a few days of recorder history and compare:
    ```bash
    python3 tools/ha_logs.py --history --entity climate.my_thermostat --hours 72 > climate.txt

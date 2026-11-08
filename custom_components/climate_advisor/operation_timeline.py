@@ -39,6 +39,7 @@ from .const import (
     OCCUPANCY_VACATION,
     THERMAL_SOLAR_DAYTIME_END_H,
     THERMAL_SOLAR_DAYTIME_START_H,
+    THERMAL_SWING_DEFAULT_F,
 )
 from .temperature import format_temp, outdoor_direction_ok_for_thermostat
 from .thermal_confidence import grade_hvac_confidence, grade_solar_confidence
@@ -1156,8 +1157,9 @@ class _Simulator:
                     rate = abs(r.k_active_cool)
                     gain = min(free - seg.ceiling, rate * dt_h)
                     nxt, hvac_min, hvac_mode = free - gain, gain / rate * 60.0, "cool"
-            sw_h = r.swing_heat if r.swing_heat is not None else 1.0
-            sw_c = r.swing_cool if r.swing_cool is not None else 1.0
+            # Issue #1477: an unlearned swing is THERMAL_SWING_DEFAULT_F (1.5 F), as everywhere else (was 1.0 here)
+            sw_h = r.swing_heat if r.swing_heat is not None else THERMAL_SWING_DEFAULT_F
+            sw_c = r.swing_cool if r.swing_cool is not None else THERMAL_SWING_DEFAULT_F
             disc = max(0.0, seg.floor - sw_h - nxt) + max(0.0, nxt - seg.ceiling - sw_c)
             disc_fh = disc * dt_h
             steps.append(SimStep(ts_next, nxt, free, out, seg, open_, hvac_min, hvac_mode, disc_fh))

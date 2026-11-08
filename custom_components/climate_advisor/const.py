@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.16"
+VERSION = "0.9.17"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1707,6 +1707,13 @@ THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F: float = 1.0
 # Persisted-cache marker for the swing DEFINITION. Caches without it (or older) hold the retired
 # |T_off - T_on| / 2 values, which are nulled on load so they re-learn (Issue #1234).
 THERMAL_SWING_DEFINITION_VERSION: int = 2
+# Issue #1477 (owner decision 2026-11-08): the stored and used swing is rounded UP to the next half degree F,
+# ceil(x * 2) / 2 (1.44 -> 1.5, 1.0 -> 1.0, 1.01 -> 1.5). A swing that is too small makes CA expect the heat or AC
+# sooner than the thermostat really starts; one a little too large errs toward letting the thermostat act. A °C
+# install shows the same delta x 5/9 (1.5 F -> 0.83 C), no offset. The tolerance stops float noise (1.0000001)
+# from rounding a whole half degree up.
+THERMAL_SWING_ROUND_STEP_F: float = 0.5
+THERMAL_SWING_ROUND_TOLERANCE_F: float = 1e-6
 # Issue #1233: every evaluated heat/cool cycle (accepted OR rejected) is kept with its inputs so a
 # homeowner can see why the learned swing is what it is. Newest N per mode; the per-reason reject
 # counters are cumulative and not bounded by this window.

@@ -220,7 +220,13 @@
     }
     if (tm) {
       var sh = tm.swing_heat != null ? tm.swing_heat : null, sc = tm.swing_cool != null ? tm.swing_cool : null;
-      if (sh != null || sc != null) row('Thermostat swing: heat starts ' + ND.num(sh != null ? sh : 1.5, 1) + ' below the setpoint, cooling ' + ND.num(sc != null ? sc : 1.5, 1) + ' above' +
+      var swSym = ND.sym(tm.unit || ND.unit), swDec = swSym === '°C' ? 2 : 1;  // Issue #1477: 1.5 F = 0.83 C, not 0.8
+      // Issue #1477 owner decision: the rounded-up swing (detectors) with the measured one (the bedroom loop) beside it
+      var swTxt = function (v, raw, measured) {
+        var s = ND.num(v != null ? v : 1.5, swDec) + ' ' + swSym;
+        return measured && raw != null && Math.abs(raw - v) > 0.004 ? s + ' (measured ' + ND.num(raw, 2) + ' ' + swSym + ')' : s;
+      };
+      if (sh != null || sc != null) row('Thermostat swing: heat starts ' + swTxt(sh, tm.swing_heat_raw, tm.swing_heat_measured) + ' below the setpoint, cooling ' + swTxt(sc, tm.swing_cool_raw, tm.swing_cool_measured) + ' above' +
         (tm.swing_heat_measured && tm.swing_cool_measured ? '' : ' (partly estimated)'), 'swing_heat ' + ND.num(sh, 2) + ' · swing_cool ' + ND.num(sc, 2) + ' ' + ND.sym(tm.unit || ND.unit), '');
       var envN = (tm.observation_count_passive || 0) + (tm.observation_count_vent_window || 0) + (tm.observation_count_vent_fan || 0) + (tm.observation_count_solar || 0);
       var hvN = (tm.observation_count_heat || 0) + (tm.observation_count_cool || 0);

@@ -184,8 +184,12 @@ class NightInputs:
     ceiling_f: float
     target_sensor: str | None = None  # the bedroom sensor id; None -> the model's primary
     mass_f: float | None = None
-    swing_heat_f: float = THERMAL_SWING_DEFAULT_F
+    swing_heat_f: float = THERMAL_SWING_DEFAULT_F  # rounded-up learned swing: the score's "beyond the swing"
     swing_cool_f: float = THERMAL_SWING_DEFAULT_F
+    # Issue #1477 owner decision: the emulated #1194 outer loop uses the MEASURED swing, as the live loop does
+    # (``swing.measured_swing_f``); None -> the swing above.
+    loop_swing_heat_f: float | None = None
+    loop_swing_cool_f: float | None = None
     can_heat: bool = True
     can_cool: bool = True
     evidence: Evidence | None = None
@@ -489,13 +493,15 @@ def _simulate(
         if use_loop and run_mode == 0 and not paused and setpoints is None:
             gap_h = inp.floor_f - tgt_now
             gap_c = tgt_now - inp.ceiling_f
-            if gap_h > inp.swing_heat_f:
+            loop_h = inp.loop_swing_heat_f if inp.loop_swing_heat_f is not None else inp.swing_heat_f
+            loop_c = inp.loop_swing_cool_f if inp.loop_swing_cool_f is not None else inp.swing_cool_f
+            if gap_h > loop_h:
                 off_h = min(REMOTE_OFFSET_CAP_F, off_h + REMOTE_OFFSET_STEP_F)
-            elif gap_h < -inp.swing_heat_f:
+            elif gap_h < -loop_h:
                 off_h = max(0.0, off_h - REMOTE_OFFSET_STEP_F)
-            if gap_c > inp.swing_cool_f:
+            if gap_c > loop_c:
                 off_c = min(REMOTE_OFFSET_CAP_F, off_c + REMOTE_OFFSET_STEP_F)
-            elif gap_c < -inp.swing_cool_f:
+            elif gap_c < -loop_c:
                 off_c = max(0.0, off_c - REMOTE_OFFSET_STEP_F)
         sp_h = min(inp.floor_f + off_h, inp.ceiling_f - 1.0) if inp.can_heat else None
         sp_c = max(inp.ceiling_f - off_c, inp.floor_f + 1.0) if inp.can_cool else None

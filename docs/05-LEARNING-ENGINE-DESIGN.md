@@ -485,14 +485,46 @@ sample is `setpoint - k` with the true value within +/- resolution/2. The cache 
 `swing_{heat,cool}_resolution_f`; it is metadata, the value is never shifted.
 
 **Estimator:** the median of the last `THERMAL_SWING_ESTIMATOR_WINDOW` (15) accepted samples (robust to
-the odd long-recovery outlier, no alpha to tune, follows a changed thermostat setting within ~8 cycles).
+the odd long-recovery outlier, no alpha to tune, follows a changed thermostat setting within ~8 cycles),
+with two rules added by Issue #1477 (`swing.summarize_swing_samples`):
+
+- **Finest readings decide** (`swing.finest_resolution_samples`): when the window holds samples of
+  different `resolution_f`, only the finest tier is used. A whole-degree sample only says the true swing is
+  within +/- 0.5 of `setpoint - k`; on Zone 1 five 1.0 samples from the thermostat's whole-degree display
+  out-voted two 1.44 samples from its finer sensor (the plain median was 1.0). Nothing is dropped from the
+  stored window, so the coarse samples decide again once no finer one is left in it (reversible; a
+  weighting by resolution would make a 0.0 sample infinitely heavy, i.e. the same rule with more to tune).
+  A "finer" tier whose own readings infer no finer than the rest (a configured sensor reporting whole
+  degrees) does not count as finer; samples with no recorded resolution count as the coarsest.
+- **Rounded up to the next half degree F** (owner decision 2026-11-08, `swing.round_swing_up_f`):
+  `swing_{heat,cool}_f = ceil(median * 2) / 2` (1.44 -> 1.5, 1.0 -> 1.0, 1.01 -> 1.5), with a
+  `THERMAL_SWING_ROUND_TOLERANCE_F` (1e-6 F) so float noise (1.0000001) does not round up. Heat and cool alike;
+  the default (1.5 F) is already on the grid. A swing that is too small makes CA expect the heat or AC sooner
+  than the thermostat starts. The unrounded median is kept as `swing_{heat,cool}_raw_f` (diagnostics only:
+  `learning_db.py --swing`, the AI context; never a decision input). A Celsius install shows the stored value
+  as a delta, x 5/9 with no offset (1.5 F -> 0.83 C, two decimals in Celsius so it is not printed as 0.8 C).
+- **Which value each consumer reads** (owner decision 2026-11-08, PR #1482: "i want the bedroom loop on the measured
+  swing, and the incident detection on the rounded up swing (to reduce the number of false incidents)"):
+  - **measured** (`swing.measured_swing_f`: `swing_*_raw_f`, else `swing_*_f` when no samples are retained, else the
+    1.5 F default) - the #1194 bedroom outer loop (`AutomationEngine._remote_swing_f`) and its emulation in the
+    night strategy (`NightInputs.loop_swing_*_f`). It acts on comfort.
+  - **rounded up** (`swing_*_f`) - every detector (comfort incidents, violation minutes, the #1050 stall alert, the
+    incident payload's tolerance, the AI cross-validation) and every thermostat-model use (the direction rule and
+    windows advice, the night strategy's and the plan list's discomfort beyond the swing).
+  - both are shown: chart_data `thermal_model.swing_{heat,cool}` (rounded) and `swing_{heat,cool}_raw` (measured), the
+    Thermal model card and the Analysis row ("1.5 °F (measured 1.44 °F)").
+- **Corrected on load** (`swing.refresh_swing_cache`, called by `LearningEngine.load_state`): the stored
+  value is recomputed from the retained samples with the current estimator (a value with no samples is just
+  rounded up), so an update corrects it at once instead of at the next accepted cycle. Counts, audit and
+  reject counters are untouched; idempotent; one INFO line per changed mode.
 
 **Kept separately (never mixed into the swing):** `swing_{heat,cool}_off_point_f` - the stop point
 (`setpoint - indoor` at heat-off, same sign convention; recorded only if the setpoint was unchanged
 during the run). Coast overshoot (Issue #1233) is collected separately - see "Coast overshoot" below;
 the observation record keeps `setpoint_f` and `peak_indoor_f` for a later consumer such as #1194.
 
-**Storage:** `thermal_model_cache` - `swing_heat_f`/`swing_cool_f` (median),
+**Storage:** `thermal_model_cache` - `swing_heat_f`/`swing_cool_f` (median of the finest samples, rounded up to
+0.5 F), `swing_*_raw_f` (that median unrounded, Issue #1477),
 `swing_*_samples` (the retained window), `swing_*_resolution_f`, `swing_*_off_point_f`,
 `observation_count_swing_*` (accepted samples ever), `swing_definition_version`, and (Issue #1233)
 `swing_*_audit`, `swing_*_reject_counts`, `coast_*_samples`, `coast_*_f`, `coast_*_past_setpoint_f`,

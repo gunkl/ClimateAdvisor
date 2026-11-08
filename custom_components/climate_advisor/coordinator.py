@@ -425,6 +425,7 @@ from .swing import (
     coast_feed,
     coast_thermostat_event,
     evaluate_swing_cycle,
+    measured_swing_f,
     pick_setpoint,
     setpoint_or_mode_changed,
     swing_tolerance,
@@ -6794,6 +6795,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             can_cool=unknown or caps.supports_cool,
             swing_heat_f=model_thermal.get("swing_heat_f"),
             swing_cool_f=model_thermal.get("swing_cool_f"),
+            # Issue #1477 owner decision: the emulated bedroom loop uses the measured swing, like the live loop
+            loop_swing_heat_f=measured_swing_f(model_thermal, "heat"),
+            loop_swing_cool_f=measured_swing_f(model_thermal, "cool"),
             mass_f=self._v4_store.v4_mass_f,
             path=path,
             unit=snap.unit,
@@ -17644,6 +17648,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "observation_count_solar": thermal_model.get("observation_count_solar", 0),
                 "swing_heat": display_delta(thermal_model.get("swing_heat_f_display", 1.5), unit, 2),
                 "swing_cool": display_delta(thermal_model.get("swing_cool_f_display", 1.5), unit, 2),
+                # Issue #1477 owner decision: the MEASURED (unrounded) swing the bedroom loop acts on, next to the
+                # rounded-up swing above (detectors, thermostat model). Same default when nothing is learned.
+                "swing_heat_raw": display_delta(measured_swing_f(thermal_model, "heat"), unit, 2),
+                "swing_cool_raw": display_delta(measured_swing_f(thermal_model, "cool"), unit, 2),
                 "swing_heat_measured": thermal_model.get("swing_heat_f") is not None,
                 "swing_cool_measured": thermal_model.get("swing_cool_f") is not None,
                 # Issue #1234: reading granularity (the swing is +/- resolution/2) and the stop point

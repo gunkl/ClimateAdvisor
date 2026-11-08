@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.9] — 2026-11-07
+
+- Fix #1432: pre-heat, pre-cool and night setback timing now use a v4 forecast for each room (the thermostat by day, the bedroom at night) as soon as both rooms have about 3 days of their own readings, and only if that forecast is at least as accurate on your home's own history as the single stitched forecast used until now. Sleep hours are never forecast from the hallway. Each switch, and each time v4 stays on the stitched forecast, is logged with the reason; a change of model is shown in Activity ("v4 now forecasts each room separately … scored 0.45°F vs 0.60°F") and the Debug tab has a "Forecast model" row. Decisions still use the reading for the time of day, as before.
+- Fix #1446: the Status chart's no-plan v4 line, the past-prediction archive and the backtest scoring no longer fill sleep hours from the thermostat's room when the bedroom has no line yet.
+- Tests (#1441): the hot-plateau pre-cool golden now checks that the thermostat is really sent the pre-cool setpoint, once (re-signed).
+
 ## [0.9.8] — 2026-11-07
 
 - Fix #1430: the Status chart key now groups the Predicted lines by the roles you chose in Settings: the main engine first ("Main · v4"), then the comparison ("Comparison · v3"), with plainer row names ("Forecast with plan", "Forecast if Climate Advisor did nothing", "Past predictions only"). Before, v3 always came first on a row called "Today", so it looked like the main prediction. A sensor v4 has only past predictions for now shows one chip instead of a greyed no-plan chip. The hover readout, the folded summary and the table view follow the same order. The lines on the chart and your saved choices are unchanged.

@@ -60,6 +60,7 @@ from .const import (
     ATTR_WHF_STATUS,
     CONF_AI_ENABLED,
     CONF_AI_INVESTIGATOR_ENABLED,
+    CONF_ENERGY_RATE,
     CONF_GITHUB_REPO,
     CONF_GITHUB_TOKEN,
     CONFIG_METADATA,
@@ -663,6 +664,12 @@ class ClimateAdvisorLearningView(HomeAssistantView):
                     "comfort_range_low": display_temp(coordinator.config.get("comfort_heat", 70), unit),
                     "comfort_range_high": display_temp(coordinator.config.get("comfort_cool", 75), unit),
                     "unit": unit,
+                    # Analysis "Today" column: what holds now (the record latches and fills at end of day)
+                    "today_live": coordinator.analysis_today_live()
+                    if hasattr(coordinator, "analysis_today_live")
+                    else {},
+                    # Estimated cost needs a positive energy rate (Settings > Advanced); None = not set
+                    "cost_configured": bool((coordinator.config.get(CONF_ENERGY_RATE) or 0) > 0),
                 }
             )
 
@@ -1433,6 +1440,9 @@ class ClimateAdvisorEnginesView(HomeAssistantView):
             # Issue #1230 R1: the v4 shadow model beside the v3 engines (Debug visibility only).
             if hasattr(coordinator, "v4_model_summary"):
                 status["v4"] = coordinator.v4_model_summary()
+            # The rates the decisions read now and where each comes from (the rows above are v3's learned values)
+            if hasattr(coordinator, "decision_rates_summary"):
+                status["decisions"] = coordinator.decision_rates_summary()
             return self.json(status)
 
 

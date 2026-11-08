@@ -482,6 +482,22 @@ averaged across all intervals, where `rate_i = (T_in[i+1] − T_in[i]) / dt_hour
 
 ---
 
+## One fit per chart_log window (Issue #1476)
+
+The chart_log fits (`_run_passive_chart_log_fit`, `_run_vent_chart_log_fit_impl`) re-run on the newest window every time a passive stretch ends (heat starts, a window opens, the fan comes on, a restart). The startup backfills run twice (v1 and v2 flags). Every committed fit records its window's first and last chart_log stamps (`window_start`, `window_end`). `record_thermal_observation` refuses a fit of a window already in the list and returns `False`; the callers count only real commits.
+- **Match rule:** a fit matches another of the same mode on the window stamps. A row from before #1476 has no stamps, so it matches on the fit itself: same estimator, `k_passive` and `r_squared` to full float precision.
+- **Scope:** live decay observations are never matched.
+
+Before #1476 one night could sit in the list 20+ times. On load, `_drop_duplicate_chart_log_fits()` removes the repeats once (it is idempotent):
+- It subtracts them from `observation_count_passive`, `observation_count_vent_window` and `observation_count_vent_fan`.
+- It rebuilds `k_passive` by replaying the de-duplicated envelope observations, but only when replaying the stored list reproduces the stored `k_passive` within 2% (the list then explains the cache).
+- Vent rates keep their stored values; older history outside the list still weighs on them.
+
+Zone 1 (2026-11-08):
+- 108 repeats removed;
+- `k_passive` went from −0.0152 to −0.0516/h, which agrees with v4's independent −0.0513;
+- the Analysis tab's window/fan multipliers went from 9.1× / 9.9× to 2.7× / 2.9×.
+
 ## EWMA Update (_update_thermal_model_cache)
 
 Called by `record_thermal_observation()` on every successful commit. Applies one observation to the in-memory `thermal_model_cache` dict.

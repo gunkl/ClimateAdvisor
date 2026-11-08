@@ -1667,6 +1667,21 @@ class AutomationEngine:
     # coordinator assigns its shared holder in __init__.
     indoor_companion: CompanionSensors | None = None
 
+    # Issue #1474: today's DailyRecord. The coordinator owns it and replaces it (new day, restore, end of day), so the
+    # engine reads it live through its inputs (Issue #1443: the coordinator never writes an engine private); a held
+    # copy was never assigned in production, so every bedtime setback (applied or skipped) was written to nothing
+    # since #151. A bare engine (tests, tools: inputs without ``today_record``) keeps its own.
+    _today_record_own: Any | None = None
+
+    @property
+    def _today_record(self) -> Any | None:
+        live = getattr(self.inputs, "today_record", None)
+        return live() if callable(live) else self._today_record_own
+
+    @_today_record.setter
+    def _today_record(self, value: Any | None) -> None:
+        self._today_record_own = value
+
     # Issue #729: class-level default so a test fixture that partially constructs an
     # engine via object.__new__(AutomationEngine) (skipping __init__ — an established
     # pattern across many existing tests, see CLAUDE.md) still has a value for the
@@ -2504,8 +2519,7 @@ class AutomationEngine:
         # Set by coordinator after construction.
         self._reclassify_callback: Callable[..., None] | None = None
 
-        # Today's DailyRecord — set by coordinator; used for bedtime setback tracking
-        self._today_record: Any | None = None
+        # Today's DailyRecord: read live from the coordinator through ``inputs.today_record()`` (Issue #1474)
 
         # Issue #96: classification event dedup — track last emitted (day_type, hvac_mode) pair
         self._last_classification_applied: tuple[str, str] | None = None
@@ -3140,11 +3154,49 @@ class AutomationEngine:
         atomically alongside the grace flags for the SAME event (see
         ``cancel_override()``).
         """
+        _pending = self._pending_only_change()
         if self._override_confirm_pending:
             self._clear_override_confirm_action()
             self._legacy_clear_confirm_flag()
         self._deferred_while_pending = False  # Issue #1133 L1: whatever waited on a pending change is moot now
         self._clear_manual_override_active(reason)
+        self._announce_pending_change_ended(_pending, reason)
+
+    def _pending_only_change(self) -> tuple[str | None, str | None] | None:
+        """(mode, since) of an occupant change still inside its confirmation window with no confirmed override.
+
+        Captured BEFORE a clear: ``_clear_override_confirm_action()`` nulls the bookkeeping.
+        """
+        if self._override_confirm_pending and not self._manual_override_active:
+            return (self._override_confirm_mode, self._override_confirm_time)
+        return None
+
+    def _announce_pending_change_ended(self, pending: tuple[str | None, str | None] | None, reason: str) -> None:
+        """Say that an UNCONFIRMED occupant change was dropped (whole-house-fan press, cancel, away ...).
+
+        ``_clear_thermostat_override_flags()`` announces only a confirmed override, so a pending change that was
+        dropped left no trace: the Activity Report showed nothing and the household-promise journal kept the
+        change's episode open for ever (with Manual Change Pause = 0 nothing else ends it), reporting every later
+        Climate Advisor write as overriding it (generated day 12010000245). Same payload as a confirmed clear,
+        plus ``pending: True``.
+        """
+        if pending is None or not self._emit_event_callback:
+            return
+        mode, since = pending
+        _cs = self.hass.states.get(self.climate_entity) if self.hass else None
+        _old_setpoint_f = read_state_temp_f(_cs, "temperature", self._temp_unit)
+        _LOGGER.info("Clearing unconfirmed manual change — reason=%s (was %s since %s)", reason, mode, since)
+        self._emit_event_callback(
+            "override_cleared",
+            {
+                "was_mode": mode or "unknown",
+                "active_since": since,
+                "old_setpoint_f": round(_old_setpoint_f, 2) if _old_setpoint_f is not None else None,
+                "reason": reason,
+                "continues": False,
+                "pending": True,
+            },
+        )
 
     def _parse_grace_end(self) -> datetime | None:
         """The running grace's end as an aware datetime, or None when unknown."""
@@ -3328,6 +3380,7 @@ class AutomationEngine:
 
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
+        _pending = self._pending_only_change()
         if self._override_confirm_pending:
             self._clear_override_confirm_action()
         if _fan_side_cancel:
@@ -3338,6 +3391,7 @@ class AutomationEngine:
         self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
         # announce_fan=False: the supplemental fan-only "override_cleared" below already covers it.
         self._clear_manual_override_active(reason, announce_fan=False, keep_fan_override=not _fan_side_cancel)
+        self._announce_pending_change_ended(_pending, reason)
         had_fan = had_fan and not self._fan_override_active  # Issue #1205 F3: a kept fan run is not "cleared"
 
         # clear_manual_override() only emits "override_cleared" when a thermostat-mode override
@@ -3489,7 +3543,9 @@ class AutomationEngine:
                 self._override_confirm_pending,
                 self._protected_active_mode() or self._manual_override_mode or self._override_confirm_mode,
             )
+            _pending = self._pending_only_change()
             _replaced_pending = self._replace_thermostat_override(reason="new_override_during_grace")
+            self._announce_pending_change_ended(_pending, "new_override_during_grace")
         # Issue #1050: the occupant (or an RF remote) turned the fan on -- it demonstrably reacts, so
         # a read-back give-up no longer blocks CA's own fan activation.
         self._note_fan_readback_recovered()

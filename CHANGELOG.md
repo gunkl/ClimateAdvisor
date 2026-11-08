@@ -18,6 +18,28 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **Plan list:** when a direction has not been learned yet, the Next 24 hours plan now uses the same 1.5 °F default as everything else (it used 1.0 °F).
   - **Tools:** `tools/thermal_replay.py --chart-log` reads each past run at the precision it was recorded with, so it learns the same value as the integration. `tools/learning_db.py --swing` and the AI context show the median before rounding next to the stored value.
 
+## [0.9.16] — 2026-11-08
+
+- Fix #1474: the night setback is now recorded. Since v0.3.48 the bedtime routine wrote whether it applied a setback (and how deep) or skipped it (and why) into a copy of the daily record that was never connected to the one Climate Advisor saves, so every night was blank and the Analysis tab always read "none". Bookkeeping only: the setback itself ran as before. Nights before this release show "not recorded".
+- Fix #1475: the Analysis tab now says what each number covers.
+  - **Headline tiles:** "Prediction error, 4 h" is the main engine's own miss over the last 24 hours (v4: 0.5° on 2026-11-08). Before, it showed v3's logged forecast (1.3°), and v3 is only the comparison engine. The look-ahead bars below say they are v3's log. Comfort score, window advice, runtime and manual changes say "last 14 days" (they never covered all recorded days). "Promises missed" is an all-time total with the date of the last miss, not "last 24 h".
+  - **Today's windows:** "Windows advised" says whether windows are recommended now, for example "earlier today, not now (the live outdoor check says no)". It names the plan's own periods, or marks the times as fixed for the day type. "Windows actually open" says whether the opening counted as following the advice.
+  - **Other rows:** "Recommended HVAC mode" (heating can still run on an "off" day). Runtime shows heating and cooling minutes, or says the split wasn't recorded for a day that began on an older version. Today's high/low and average indoor show the values so far. Pre-conditioning and night setback say "not recorded" instead of a blank, and estimated cost says when it needs an energy rate in Settings.
+- Fix #1476: the Analysis tab's "Open windows move it toward outdoors N× faster" figures no longer creep up after restarts.
+  - **Before:** Climate Advisor saved the same night's closed-house measurement over and over, every time the heat started or a window opened, and again at each restart. One night could count 20+ times, dragging the learned closed-house rate onto it and inflating its confidence.
+  - **Now:** each night is saved once. The repeats already stored are removed on the next start, and the closed-house rate is recalculated without them. On a test home this moved the figures from 9.1× and 9.9× to 2.7× and 2.9×.
+
+## [0.9.15] — 2026-11-08
+
+- Fix #1471: when Climate Advisor drops a thermostat change you made before it was confirmed, the Activity Log now says so ("Override cleared"), the same as for a confirmed change. This happens when you press the whole-house fan in the same minute, cancel from the dashboard, or leave home. Before, the change just disappeared from the log, so it was hard to tell why Climate Advisor went back to its own plan.
+- Fix #1472 (test only): the nightly "settling flip" check no longer blames Climate Advisor when you switched the thermostat between heat and cool yourself. Climate Advisor keeping your chosen mode and applying your comfort edge after your grace ends is correct.
+- Fix #1468: the Debug tab now says where each value comes from and what each threshold is.
+  - **Prediction engines:** new "Decisions" rows show the rates the house runs on and which engine each comes from (with v4 primary: v4's heat-loss, heating and cooling rates; v3's learned sun and venting rates). v3's own rows are now labelled "v3". "Grade reason" and "By mode" say why v4 has its grade (for example 45 usable heating starts but 0 of the 5 cooling starts it needs). "Typical miss" is now "Training-fit miss", and the hints point to the Backtest for live accuracy.
+  - **Today's classification:** "windows recommended" says why (for example "today's high 65°F is below 68°F"). The window times are marked as fixed for the day type when windows are not recommended. The low rows name the threshold that applies today, and today's high is shown. The morning and evening opportunities say they are checked on hot days only, and the trend shows the setback thresholds.
+  - **Other rows:** skipped-observation counts at the list limit read "100 or more". Door and window sensors use their Home Assistant names. The grace duration reads in hours. The fan remote speed says when the fan is off.
+  - Display only: no heating, cooling or window decision changes.
+- Fix #1469: the Debug tab now shows v4's grade for heating and cooling separately, for example "v4: usable · heating ok · cooling low". Before, it showed one "low confidence", even while heating forecasts were good, because the top grade needs usable thermostat starts in every mode the home has used (Zone 1 had 0 of the 5 cooling starts it needs). Each mode is graded on its own usable starts and on how well v4 predicts the hours that mode runs. Display only: decisions read the same overall grade as before.
+
 ## [0.9.14] — 2026-11-08
 
 - Fix #1463: the Status chart's humidity axes now always run 0-100%, on both the temperature and outdoor charts. Before, the axis fitted itself to the humidity in view, so a small change (for example the bedroom going from 57% to 60% in an hour) was stretched across the whole chart height and looked like a line shooting straight up.

@@ -649,6 +649,23 @@ class TestApplyClassificationStoresAlreadyReached_1231:
         assert all(flag == "self._nat_vent_cutoff_already_reached" for _, flag in passes), passes
 
 
+def _is_apply_classification_call(node) -> bool:  # noqa: ANN001
+    """An apply_classification() call, direct or routed through decide(coordinator, engine.apply_classification, ...)
+    (Issue #1443: the coordinator passes its facts in around the same call, with the same keywords)."""
+    import ast  # noqa: PLC0415
+
+    if not isinstance(node, ast.Call):
+        return False
+    if getattr(node.func, "attr", None) == "apply_classification":
+        return True
+    return (
+        isinstance(node.func, ast.Name)
+        and node.func.id in ("decide", "decide_sync")
+        and len(node.args) > 1
+        and getattr(node.args[1], "attr", None) == "apply_classification"
+    )
+
+
 class TestEveryProductionCallerKeepsThePlansClose_1231:
     def test_no_production_apply_classification_call_drops_the_cutoff_or_flag(self):
         """Structural (AST): a caller that passes neither value resets the engine to the static close, which
@@ -661,7 +678,7 @@ class TestEveryProductionCallerKeepsThePlansClose_1231:
         missing, sites = [], 0
         for path in sorted(pkg.glob("*.py")):
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "apply_classification":
+                if _is_apply_classification_call(node):
                     sites += 1
                     kws = {k.arg for k in node.keywords}
                     if not {"nat_vent_cutoff", "nat_vent_cutoff_already_reached"} <= kws:
@@ -696,7 +713,7 @@ class TestCoordinatorPassesAlreadyReached_1231:
         src = Path(__file__).resolve().parents[1] / "custom_components" / "climate_advisor" / "coordinator.py"
         sites = 0
         for node in ast.walk(ast.parse(src.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "apply_classification":
+            if _is_apply_classification_call(node):
                 kws = {k.arg for k in node.keywords}
                 if "nat_vent_cutoff" in kws:
                     sites += 1

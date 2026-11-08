@@ -209,10 +209,16 @@ def _apply_classification_sites() -> dict[tuple[str, str], list[str]]:
         for fn in ast.walk(tree):
             if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
                 for node in ast.walk(fn):
-                    if (
-                        isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "apply_classification"
+                    # Issue #1443: a call routed through decide(coordinator, engine.apply_classification, ...) is the
+                    # same call with the same keywords (the coordinator passes its facts in around it).
+                    if isinstance(node, ast.Call) and (
+                        (isinstance(node.func, ast.Attribute) and node.func.attr == "apply_classification")
+                        or (
+                            isinstance(node.func, ast.Name)
+                            and node.func.id in ("decide", "decide_sync")
+                            and len(node.args) > 1
+                            and getattr(node.args[1], "attr", None) == "apply_classification"
+                        )
                     ):
                         kw = [k for k in node.keywords if k.arg == "tou_bank_owns_setpoint"]
                         sites[(name, fn.name)] = [ast.unparse(k.value) for k in kw]

@@ -1939,7 +1939,10 @@ def test_fix_d_call_site_does_not_ask_to_clear_the_fan_run():
         encoding="utf-8"
     )
     assert "clear_fan=True" not in src
-    assert "fsm_kind=_OGFEventKind.OVERRIDE_SUPERSEDED, clear_fan=False" in src
+    import re  # noqa: PLC0415
+
+    # the keywords may sit on separate lines since the call runs through decide_sync (Issue #1443)
+    assert re.search(r"fsm_kind=_OGFEventKind\.OVERRIDE_SUPERSEDED,\s*clear_fan=False", src)
 
 
 @pytest.mark.parametrize("fan_mode", _MODES)

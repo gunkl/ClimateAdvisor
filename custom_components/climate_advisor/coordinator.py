@@ -392,7 +392,7 @@ from .nat_vent_plan import (
 )
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
-from .operation_timeline import TIMELINE_TRIGGER_EVENTS, TimelineLatch, TimelineSnapshot
+from .operation_timeline import TIMELINE_HORIZON_HOURS, TIMELINE_TRIGGER_EVENTS, TimelineLatch, TimelineSnapshot
 from .operation_timeline import detail_dict as timeline_detail_dict
 from .operation_timeline import to_dict as timeline_to_dict
 from .override_confirm_split import ca_expected_mode
@@ -954,7 +954,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_last_display_check: float | None = None  # Issue #1422: newly qualified display nodes, every 6 h
         self._v4_last_fit: dict[str, Any] = {}
         self._v4_last_cycle: dict[str, Any] = {}
-        self._v4_last_future: dict[str, Any] | None = None  # newest 24 h prediction, for the Status chart (R2)
+        self._v4_last_future: dict[str, Any] | None = None  # newest display prediction (to a week, #1483) for the chart
         self._v4_cycle_failed_logged = False
         self._v4_last_archive_save: float | None = None
         # Issue #1230 R6b: the primary engine drives the decisions. ``_control_path`` is what they read as the predicted
@@ -6577,8 +6577,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             try:
                 chosen = prediction_engines.ENGINES[primary_id]
                 if prediction_engines.usable(chosen, self):  # still learning: today's default path stands in
+                    # Issue #1483: v4's display line runs up to a week; the plan list reads it up to its own horizon
+                    plan_end = now + timedelta(hours=TIMELINE_HORIZON_HOURS)
                     selected_pts = [
-                        (t, v) for t, v in prediction_engines.primary_path(chosen.future_path(self)) if t >= now
+                        (t, v)
+                        for t, v in prediction_engines.primary_path(chosen.future_path(self))
+                        if now <= t <= plan_end
                     ]
             except Exception:  # noqa: BLE001 - display only; v3's path stands in
                 _LOGGER.debug("primary-engine timeline path failed", exc_info=True)

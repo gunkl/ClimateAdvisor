@@ -222,3 +222,20 @@ class TestLaterDayWindows:
             (datetime.combine(d + timedelta(days=4), time(22, 0), tzinfo=now.tzinfo),
              datetime.combine(d + timedelta(days=5), time(1, 0), tzinfo=now.tzinfo)),
         )  # fmt: skip
+
+
+# ------------------------------------------------------------------------------- 4. the plan list's own horizon
+def test_the_plan_list_reads_the_week_long_line_only_up_to_its_own_horizon():
+    """The 48 h plan list takes v4's path up to 48 h (no day-6 temperatures in its summary); it used to stop at 24 h."""
+    from custom_components.climate_advisor.operation_timeline import TIMELINE_HORIZON_HOURS  # noqa: PLC0415
+    from tests.test_debug_pane_words import _mild_day  # noqa: PLC0415
+
+    coord, scheduler, _model = _setup()
+    now = scheduler.now()
+    week = [(now + timedelta(minutes=15 * k), 70.0) for k in range(1, V4_PREDICT_HORIZON_HOURS * 4 + 1)]
+    coord._v4_last_future = {"at": now.isoformat(), "predictions": {"_ca": week}, "corrected": [], "baseline": {}}
+    with scheduler.installed():
+        snap = coord._timeline_snapshot(_mild_day())
+    last = max(t for t, _v in snap.selected_path)
+    assert snap.selected_path_model == "v4"
+    assert last == now + timedelta(hours=TIMELINE_HORIZON_HOURS)

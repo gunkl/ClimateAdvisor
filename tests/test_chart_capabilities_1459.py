@@ -90,8 +90,11 @@ def _warm(coord, *, sleep: bool) -> None:
 
 
 # ── each flag, true and false ────────────────────────────────────────────────────────────────────────────────────────
-def test_bare_zone_has_nothing_but_v4():
-    caps = _caps(_coord())
+def test_bare_zone_has_nothing_but_v4(registry, frozen_now):
+    frozen_now(NOW)
+    coord = _coord()
+    _warm(coord, sleep=False)  # a chart row has looked the devices up: "nothing found" is now known
+    caps = _caps(coord)
     assert set(caps) == set(KEYS)
     assert caps == {k: k == "v4_running" for k in KEYS}  # v4 is the default primary engine
 
@@ -172,13 +175,26 @@ class TestHumidityIndoor:
         coord = _coord({CLIMATE: _state("cool", {"current_temperature": 75.0, "current_humidity": 41.0})})
         assert _caps(coord)["humidity_indoor"] is True
 
-    def test_target_humidity_is_not_a_source(self, registry):
+    def test_target_humidity_is_not_a_source(self, registry, frozen_now):
+        frozen_now(NOW)
         coord = _coord({CLIMATE: _state("cool", {"current_temperature": 75.0, "humidity": 45.0})})
+        _warm(coord, sleep=False)
         assert _caps(coord)["humidity_indoor"] is False
 
-    def test_nothing(self, registry):
+    @pytest.mark.parametrize("sleep", [False, True])
+    def test_nothing(self, registry, frozen_now, sleep):
+        frozen_now(NOW)
         coord = _coord({CLIMATE: _state("cool", {"current_temperature": 75.0})}, sleep_indoor_temp_entity=BED_TEMP)
+        _warm(coord, sleep=sleep)  # either room's row warms both rooms' lookups
         assert _caps(coord)["humidity_indoor"] is False
+
+    def test_cold_cache_is_available_until_a_lookup_finds_nothing(self, registry, frozen_now):
+        """Right after a restart, before the first chart row, nothing has been looked up: the chip must not lock."""
+        frozen_now(NOW)
+        coord = _coord({CLIMATE: _state("cool", {"current_temperature": 75.0})}, sleep_indoor_temp_entity=BED_TEMP)
+        assert _caps(coord)["humidity_indoor"] is True  # unknown means available
+        _warm(coord, sleep=False)
+        assert _caps(coord)["humidity_indoor"] is False  # a warmed lookup really found nothing
 
     def test_bedroom_device_sensor_counts_in_the_daytime(self, registry, frozen_now):
         """The bedroom's humidity sensor (only on the bedroom sensor's device) is found from a DAY row's warm-up."""
@@ -189,9 +205,9 @@ class TestHumidityIndoor:
             BED_RH: _state("61.7"),
         }
         coord = _coord(states, sleep_indoor_temp_entity=BED_TEMP)
-        assert _caps(coord)["humidity_indoor"] is False  # nothing looked up on the event loop yet: cache-only
         _warm(coord, sleep=False)
         assert _caps(coord)["humidity_indoor"] is True
+        assert coord._companion_sensors_cache[(BED_TEMP, "humidity", True)][0] == (BED_RH,)  # found via the warm-up
 
     def test_device_lookup_never_touches_the_registry_off_the_loop(self, frozen_now):
         frozen_now(NOW)
@@ -199,7 +215,7 @@ class TestHumidityIndoor:
         coord = _coord(states, sleep_indoor_temp_entity=BED_TEMP)
         boom = MagicMock(side_effect=AssertionError("registry read off the event loop"))
         with patch("custom_components.climate_advisor.indoor_temp.er", MagicMock(async_get=boom)):
-            assert _caps(coord)["humidity_indoor"] is False
+            assert _caps(coord)["humidity_indoor"] is True  # cold cache: unknown means available
         boom.assert_not_called()
 
 
@@ -226,7 +242,15 @@ class TestHumidityOutdoor:
 
     def test_nothing(self, registry):
         coord = _coord({WEATHER: _state("sunny", {})}, weather_entity=WEATHER)
-        assert _caps(coord)["humidity_outdoor"] is False
+        assert _caps(coord)["humidity_outdoor"] is False  # no outdoor sensor: no device lookup to wait for
+
+    def test_cold_cache_with_an_outdoor_sensor_is_available(self, registry, frozen_now):
+        frozen_now(NOW)
+        states = {CLIMATE: _state("cool", {"current_temperature": 75.0}), WEATHER: _state("sunny", {})}
+        coord = _coord(states, weather_entity=WEATHER, outdoor_temp_source="sensor", outdoor_temp_entity="sensor.x")
+        assert _caps(coord)["humidity_outdoor"] is True  # unknown means available
+        _warm(coord, sleep=False)
+        assert _caps(coord)["humidity_outdoor"] is False  # sensor.x has no humidity sensor on its device
 
     def test_indoor_humidity_never_counts_outdoors(self, registry):
         coord = _coord({CLIMATE: _state("cool", {"current_humidity": 41.0})}, weather_entity=WEATHER)

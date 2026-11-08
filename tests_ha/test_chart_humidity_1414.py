@@ -111,9 +111,11 @@ async def test_rows_carry_humidity_and_feels_like(hass: HomeAssistant, tmp_path)
     hass.states.async_set(climate_id, "cool", attrs)
     caps = (await hass.async_add_executor_job(coordinator.get_chart_data, "24h"))["capabilities"]
     assert caps["humidity_indoor"] is True and caps["humidity_outdoor"] is True
-    coordinator._companion_sensors_cache = {}  # no lookup made on the loop yet: the executor never reads the registry
+    # no lookup made on the loop yet (as after a restart): the executor never reads the registry, and unknown means
+    # available, so the chip does not lock while time passes
+    coordinator._companion_sensors_cache = {}
     caps = (await hass.async_add_executor_job(coordinator.get_chart_data, "24h"))["capabilities"]
-    assert caps["humidity_indoor"] is False
+    assert caps["humidity_indoor"] is True
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

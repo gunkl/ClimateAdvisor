@@ -7606,7 +7606,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         no door/window sensors, no occupancy switches, no humidity source, v4 switched off); "nothing in view yet"
         never locks. Each flag reads the same config keys / helpers production already uses. Runs on the executor
         thread inside ``get_chart_data()``: config and ``hass.states`` reads only, and the humidity device lookup is
-        cache-only (``_companion_sensors_cache``, kept warm on the event loop by ``_read_chart_humidity``). No I/O.
+        cache-only (``_companion_sensors_cache``, kept warm on the event loop by ``_read_chart_humidity``); a lookup
+        not cached yet reads as available, so a humidity flag is False only after a warmed lookup found nothing. No I/O.
         Never raises: a key whose check fails is True (nothing locks) and the failure is logged at debug.
         """
         cfg = self.config
@@ -7630,6 +7631,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self.hass, role, chosen=chosen, source_entities=sources, fallback_entity=fallback, discover=_cached
                 )
                 if value is not None:
+                    return True
+                # A device lookup not made yet on the event loop (cold cache, e.g. right after a restart, before the
+                # first chart row) is unknown, and unknown means available: time must never lock a control.
+                exclude = role != ROLE_OUTDOOR
+                if any(
+                    isinstance(eid, str)
+                    and eid
+                    and not (isinstance(cache, dict) and (eid, "humidity", exclude) in cache)
+                    for eid in sources
+                ):
                     return True
             return False
 

@@ -36,6 +36,9 @@ _WIRING = {
     "_async_thermal_sample_tick": "call",
     "_emit_event": "call",
     "get_debug_state": "debug",
+    # Issue #1436 audit: the briefing send re-classifies and re-applies the day, so it is a planning step; its one
+    # timeline call sits inside the zone-scope block (the whole body runs there), so it is checked as a nested call
+    "_async_send_briefing": "nested_call",
 }
 
 # night_strategy.py is the contract's pure advisory transformer (apply_night_strategy -> Timeline, R4); it imports no
@@ -187,6 +190,10 @@ _SURFACE_READERS = {
     "timeline_payload",
     "timeline_operations_lines",
     "_surface_timeline",
+    # Issue #1436: the chart's forward window/nat-vent flags (get_chart_data -> predicted_activity) and the chart log's
+    # ``windows_planned`` row field read the plan's spans; display only, like timeline_payload
+    "get_chart_data",
+    "_read_chart_windows_planned",
 }
 
 
@@ -234,7 +241,8 @@ def test_each_wiring_point_is_one_discarded_call_and_nothing_uses_the_result() -
             assert len(entry) == 1 and isinstance(entry[0][1], ast.Call)
             continue
         assert len(mentions) == 1, f"{method_name}: {len(mentions)} timeline references"
-        hooks = [s for s in method.body if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)]
+        body = method.body if kind == "call" else [n for n in ast.walk(method) if isinstance(n, ast.stmt)]
+        hooks = [s for s in body if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)]
         timeline_hooks = [
             s
             for s in hooks

@@ -698,6 +698,11 @@
     "signed": "2026-11-07",
     "issue": 1417
   },
+  "issue_1436_warm_day_evening_floor_close_strips_follow_plan__whf": {
+    "sha256": "c000047b488eed89178c522061311696218b7ffa942ed43b3913bb66977780c6",
+    "signed": "2026-11-07",
+    "issue": 1436
+  },
   "issue_1433_away_grace_periodic_cycle_holds_home": {
     "sha256": "cedf988d69c4cdcc1dc6e28e56c98db7438d6a8c7d61e3b9944e5b21870aac8b",
     "signed": "2026-11-07",

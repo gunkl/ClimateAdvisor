@@ -117,6 +117,10 @@ def _bucket_context(group: list[dict[str, Any]]) -> dict[str, Any]:
             out[key] = max(counts, key=lambda k: counts[k])
     if any(e.get("override") is True for e in group):
         out["override"] = True
+    # Issue #1436: the plan's window state, when any row recorded it (true if the plan had the windows open in any row)
+    planned = [e.get("windows_planned") for e in group if isinstance(e.get("windows_planned"), bool)]
+    if planned:
+        out["windows_planned"] = any(planned)
     return out
 
 
@@ -228,6 +232,7 @@ class ChartStateLog:
         band_sensor: str | None = None,
         hold_lower: float | None = None,
         hold_upper: float | None = None,
+        windows_planned: bool | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
 
@@ -269,6 +274,10 @@ class ChartStateLog:
             bank is deferred, the Away/Vacation period widened. Display only; the caller passes the pair only when it
             differs, and it is written only as a pair, so ordinary rows and older logs are unchanged and
             ``lower``/``upper`` keep their meaning for the replay tools.
+        windows_planned: whether the operation timeline expected the windows open at this instant (Issue #1436): the
+            PAST "Win plan" strip, the same meaning as its faded part. ``windows_recommended`` is the classifier's live
+            flag (true at 4 AM on a warm day), which is why it can no longer draw that strip. Written when given (True
+            or False); absent on older rows and while there is no plan.
         nat_vent_target: the real thermostatic target the nat-vent fan was cycling
             around this cycle (Phase 3a), computed via
             ``nat_vent_cycling.compute_nat_vent_target()`` — only meaningful (non-None)
@@ -313,6 +322,8 @@ class ChartStateLog:
         if hold_lower is not None and hold_upper is not None:
             entry["hold_lower"] = hold_lower
             entry["hold_upper"] = hold_upper
+        if windows_planned is not None:
+            entry["windows_planned"] = bool(windows_planned)
 
         self._entries.append(entry)
         self._maybe_prune()

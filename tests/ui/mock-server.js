@@ -45,11 +45,18 @@ function makeChartFixture() {
     windows_recommended: i >= 12 && i < 30,
   }));
 
+  // Issue #1436: the older hour-by-hour predictor said "windows recommended, fan active" for every hour ahead (the
+  // owner's case). The chart must not draw any strip from it: the faded strips come from the timeline's `strips`.
+  const predicted_activity = Array.from({length:48}, (_,i) => ({
+    ts: new Date(now + i * 3600000).toISOString(), hvac_mode: 'off', fan_active: true, windows_recommended: true,
+  }));
+
   return {
     predicted_indoor,
     forecast_outdoor,
     actual_outdoor, actual_indoor,
     state_log,
+    predicted_activity,
     comfort_heat: 68, comfort_cool: 74,
     current_hour: new Date().getHours() + new Date().getMinutes()/60,
     thermal_model: { confidence:'medium', observation_count_heat:8, observation_count_cool:5, heating_rate:2.1, cooling_rate:1.8, unit:'fahrenheit' }
@@ -89,6 +96,21 @@ function makeTimelineFixture() {
       step(1500, 'ca', 'wake_band', '{t}: CA switches to the daytime comfort band, 68°F to 74°F, and reads the thermostat again.', { text_short: 'Switches to the daytime comfort band, 68°F to 74°F, and reads the thermostat again.' }),
     ],
     path: Array.from({ length: 25 }, (_, i) => ({ ts: at(i * 60), temp_f: 70 + 2 * Math.sin(i / 4), sensor: '_ca', model: 'v3' })),
+    // Issue #1436: the chart's faded strips, as timeline_surfaces.strip_spans derives them from the steps above: the
+    // window period from the +45 min open to the +240 min close (the hover names the open step while it is ahead), and
+    // one predicted heat run overnight (detail.runs; it has no step, so its own sentence).
+    strips: [
+      // a ~20 min heat run in a 2 h window (+660 to +780 min), drawn as the plan's per-step minutes (bursts)
+      // plus one 20-second sliver at +720 (drawn at its minimum visible width, owner decision)
+      ...[[675, 6], [705, 9], [720, 1 / 3], [750, 5]].map(([m, len]) => ({ row: 'heating', start: at(m), end: at(m + len), kind: 'run',
+        step_id: '', step_ts: null, actor: 'ca', confidence: 'ok', run: 0, window_start: at(660), window_end: at(780),
+        minutes: 20.3, placed: true,
+        text: 'Heating expected for about 20 min between ' + clock(660) + ' and ' + clock(780) + ", holding the band's floor.",
+        text_short: 'Heating expected for about 20 min between ' + clock(660) + ' and ' + clock(780) + ", holding the band's floor." })),
+      { row: 'windowsplan', start: at(45), end: at(240), kind: 'windows_open', step_id: 'windows_open45', confidence: 'ok',
+        step_ts: at(45), actor: 'you', text: fill(45, '{t}: open the windows. Outdoor is 6°F cooler than the house.'),
+        text_short: 'Open the windows. Outdoor is 6°F cooler than the house.' },
+    ],
   };
 }
 

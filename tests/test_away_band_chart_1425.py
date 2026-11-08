@@ -85,4 +85,5 @@ class TestChartDrawsTheAwayPeriodFlat:
         assert "[..._stepHeld(histBandLower), ...futBandLower]" in _CHART
 
     def test_the_away_strip_runs_from_its_row_to_the_next(self):
-        assert "if (r.id === 'away') push(ts, i < log.length - 1 ? next : " in _CHART
+        # Issue #1436: every past strip now holds from its row to the next row (never past NOW), Away included
+        assert "push(ts, Math.min(next, now), false);" in _CHART

@@ -251,8 +251,10 @@ def test_activity_strips_toggle_and_future_is_dimmer():
     s = _func("drawStrips")
     assert "_stripOn(r.id)" in s and "sg.future ? 0.4 : 1" in s
     seg = _func("_stripSegments")
-    assert "fan: () => false" in seg  # a forecast cannot assert the fan is running
-    assert "windowsplan: p => !!p.windows_recommended" in seg
+    # Issue #1436: right of NOW every strip is a plan span (timeline `strips`), never chart_data.predicted_activity,
+    # whose all-night "fan active / windows recommended" contradicted the plan's close step
+    assert "_timeline.strips" in seg and "predicted_activity" not in seg
+    assert "e.windows_planned" in seg  # the past Win plan is what the plan said at the time
 
 
 def test_every_existing_overlay_is_kept():
@@ -321,7 +323,8 @@ def test_away_and_override_strips_read_the_chart_log_context_and_forecast_draws_
     assert "id: 'away'" in INDEX and "id: 'override'" in INDEX
     seg = _func("_stripSegments")
     assert "e.occupancy === 'away' || e.occupancy === 'vacation'" in seg and "e.override === true" in seg
-    assert "away: () => false" in seg and "override: () => false" in seg
+    # Issue #1436: their faded part is the plan's setback / resume span (timeline_surfaces.strip_spans), not a forecast
+    assert "sp.row !== r.id" in seg and "ftests" not in seg
 
 
 def test_band_is_labelled_with_the_sensor_it_applies_to_in_key_and_hover():

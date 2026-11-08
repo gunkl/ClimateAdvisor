@@ -382,6 +382,268 @@ def timeline_windows(tl: Timeline, day: Any) -> TimelineWindows:
 
 
 # ---------------------------------------------------------------------------
+# Chart activity strips right of NOW (Issue #1436)
+# ---------------------------------------------------------------------------
+#
+# Occupant view: under the chart, each activity strip is solid where it shows what happened and faded where it shows
+# what the plan expects. The faded part used to come from an older hour-by-hour predictor that knew nothing of the
+# plan's close time, the comfort floor or the night strategy, so it drew "Nat-vent" and "Win plan" all night under a
+# plan that said "7:14 PM: close the windows". Every faded strip is now a span of the plan itself: a window period
+# (open step to close step), a nat-vent session (start step to stop step), a predicted heat/AC run, the setback the plan
+# holds, an override CA resumes from. Nothing here plans; the spans are read off the timeline.
+
+STRIP_ROWS = ("heating", "cooling", "fan", "natvent", "windows", "windowsplan", "away", "override")
+
+
+def _window_spans(tl: Timeline, now: datetime) -> list[tuple[datetime, datetime, TimelineStep]]:
+    """The plan's window periods as (start, end, the step the hover names), vetoed periods left out.
+
+    A period already open when the plan was made has no open step: it runs from ``now``. A period the live direction
+    rule vetoes (its open step is held, the card says "keep windows closed") is not a period the plan expects, exactly
+    as the briefing's window times leave it out (``timeline_windows``). The hover names the step still ahead: the open
+    step before the period starts, the close step once it has.
+    """
+    out: list[tuple[datetime, datetime, TimelineStep]] = []
+    for o, c in window_periods(tl):
+        if o is not None and is_direction_vetoed(o):
+            continue
+        start = o.ts if o is not None else min(now, c.ts)
+        out.append((start, c.ts, o if o is not None and o.ts > now else c))
+    return out
+
+
+def planned_windows_open(tl: Timeline, at: datetime) -> bool:
+    """Whether the plan expects the windows open at ``at`` (one of its window periods covers it).
+
+    The chart log records this on every row (``windows_planned``) so the PAST "Win plan" strip shows what the plan said
+    at the time, the same meaning as the faded part (Issue #1436).
+    """
+    return any(a <= at < b for a, b, _s in _window_spans(tl, at))
+
+
+def _session_spans(
+    steps: list[TimelineStep], start_kind: StepKind, stop_kind: StepKind, now: datetime
+) -> list[tuple[datetime, datetime, TimelineStep | None, TimelineStep | None]]:
+    """(start, end, start step, stop step) pairs of a start/stop step kind, in time order.
+
+    A stop with no start before it is a session already running when the plan was made (``now`` on). A start with no
+    stop is returned with ``end == start`` and no stop step (the caller decides what ends it).
+    """
+    out: list[tuple[datetime, datetime, TimelineStep | None, TimelineStep | None]] = []
+    pending: TimelineStep | None = None
+    for s in steps:
+        if s.kind == start_kind:
+            pending = pending or s
+        elif s.kind == stop_kind:
+            out.append((pending.ts if pending is not None else min(now, s.ts), s.ts, pending, s))
+            pending = None
+    if pending is not None:
+        out.append((pending.ts, pending.ts, pending, None))
+    return out
+
+
+def _intersect(a: datetime, b: datetime, periods: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
+    return [(max(a, pa), min(b, pb)) for pa, pb in periods if min(b, pb) > max(a, pa)]
+
+
+def _about_min(minutes: float) -> int:
+    return max(5, int(round(minutes / 5.0)) * 5)
+
+
+def _run_text(mode: str, minutes: float, start: datetime, end: datetime, *, placed: bool = True) -> str:
+    verb = "Heating" if mode == "heat" else "Cooling"
+    edge = "floor" if mode == "heat" else "ceiling"
+    if placed:
+        return (
+            f"{verb} expected for about {_about_min(minutes)} min between {_clock(start)} and {_clock(end)}, "
+            f"holding the band's {edge}."
+        )
+    return (
+        f"{verb} expected for about {_about_min(minutes)} min, around {_clock(start)} (the plan's window runs to "
+        f"{_clock(end)}), holding the band's {edge}."
+    )
+
+
+def _run_bars(run: Any) -> tuple[list[tuple[datetime, datetime]], bool]:
+    """Where a predicted run's expected minutes are drawn (owner decision, Issue #1436): ``(bars, placed)``.
+
+    The bar is the run's MINUTES, never its whole window: a run of about 20 min of heat spread over a 3 h window is
+    20 min of bar. ``placed``: the plan's own placement (``PredictedRun.bursts``: each 15-minute simulation step's
+    minutes, drawn from that step's start; touching bars merge). Without it (a run from an older payload or a test),
+    the minutes are drawn from the window's start (the run holds the edge from the moment the house reaches it) and the
+    hover says "around".
+    """
+    bursts = list(getattr(run, "bursts", ()) or ())
+    bars: list[tuple[datetime, datetime]] = []
+    if bursts:
+        for t, m in sorted(bursts):
+            if m <= 0:
+                continue
+            a, b = max(t, run.start), min(t + timedelta(minutes=float(m)), run.end)
+            if b <= a:
+                continue
+            if bars and a <= bars[-1][1] + timedelta(seconds=1):
+                bars[-1] = (bars[-1][0], max(bars[-1][1], b))
+            else:
+                bars.append((a, b))
+        return bars, True
+    end = min(run.start + timedelta(minutes=float(run.minutes)), run.end)
+    return ([(run.start, end)] if end > run.start else []), False
+
+
+def _step_minutes(step: TimelineStep) -> float | None:
+    """A duration the plan step itself states (``facts`` ``minutes`` / ``duration_min``), or None."""
+    for key in ("minutes", "duration_min"):
+        v = step.facts.get(key)
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+    return None
+
+
+def _duration_bar(
+    a: datetime, b: datetime, step: TimelineStep | None
+) -> tuple[datetime, datetime, dict[str, Any] | None]:
+    """A fan / nat-vent bar whose plan step states a duration shows that duration, not the whole span (the owner's
+    rule for runs, mirrored; Issue #1436). No step emitted today carries one (nat-vent sessions and the night strategy's
+    fan advice are periods), so this keeps the span; it is the rule a future duration-bearing step gets."""
+    minutes = _step_minutes(step) if step is not None else None
+    if minutes is None or b - a <= timedelta(minutes=minutes):
+        return a, b, None
+    extra = {"window_start": a.isoformat(), "window_end": b.isoformat(), "minutes": round(minutes, 1), "placed": False}
+    return a, a + timedelta(minutes=minutes), extra
+
+
+def strip_spans(tl: Timeline, now: datetime) -> list[dict[str, Any]]:
+    """The chart's activity strips from ``now`` to the end of the plan, read off the timeline (Issue #1436).
+
+    One dict per span: ``row`` (a ``STRIP_ROWS`` id), ``start`` / ``end`` (ISO), ``kind`` (the step kind it came from,
+    or ``run``), ``step_id``, ``step_ts`` and ``actor`` of that step, ``text`` (the plan step's own sentence),
+    ``text_short`` (that sentence without its leading time, as the plan list shows it) and ``confidence``. A run has no
+    step: its ``text`` is its own sentence and ``step_ts`` is None.
+    Rules (docs/operation-timeline-spec.md, "Chart activity strips"):
+
+    * ``windowsplan``: each window period, open step to close step (``window_periods``); a period open already runs
+      from now; a period the live direction rule vetoes is left out.
+    * ``natvent``: each nat-vent session, start step to stop step (a stop with no start: a session running now; a
+      start with no stop ends at the next window close), clipped to the window periods: the session only runs while a
+      window the plan opens is open.
+    * ``fan``: the fan those sessions run, plus the night strategy's fan steps (fan on to fan off).
+    * ``heating`` / ``cooling``: the plan's predicted heat and AC runs (``DetailedTimeline.runs``), drawn as the run's
+      expected MINUTES where the plan places them (``_run_bars``, owner decision), never the whole run window; each bar
+      carries ``run``, ``window_start``, ``window_end``, ``minutes`` and ``placed``.
+    * ``away``: the setback the plan holds now (``setback_start``): to the next midnight for Away (the plan holds the
+      home band from tomorrow, ``operation_timeline._occupancy_for``), to the end of the plan for Vacation.
+    * ``override``: an occupant change CA holds, from now to the ``resume_schedule`` step.
+    * ``windows`` (windows physically open) has no plan part: the plan's expectation is ``windowsplan``.
+    """
+    horizon = tl.horizon_end
+    steps = sorted(tl.steps, key=lambda s: s.ts)
+    out: list[dict[str, Any]] = []
+
+    def add(
+        row: str,
+        a: datetime,
+        b: datetime,
+        step: TimelineStep | None,
+        *,
+        text: str = "",
+        kind: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        a2, b2 = max(a, now), min(b, horizon)
+        if b2 <= a2:
+            return
+        out.append(
+            {
+                **(extra or {}),
+                "row": row,
+                "start": a2.isoformat(),
+                "end": b2.isoformat(),
+                "kind": step.kind.value if step is not None else kind,
+                "step_id": step.id if step is not None else "",
+                "step_ts": step.ts.isoformat() if step is not None else None,
+                "actor": step.actor.value if step is not None else Actor.CA.value,
+                "text": step.text if step is not None else text,
+                # the hover shows the step's time beside it, so the sentence without its leading time (#1399)
+                "text_short": plan_list_text(step.text, step.actor.value) if step is not None else text,
+                "confidence": step.confidence if step is not None else "ok",
+            }
+        )
+
+    windows = _window_spans(tl, now)
+    periods = [(a, b) for a, b, _s in windows]
+    for a, b, step in windows:
+        add("windowsplan", a, b, step)
+
+    vetoed_ids = {s.id for s in steps if is_direction_vetoed(s) and s.id}
+    sessions: list[tuple[datetime, datetime, TimelineStep | None]] = []
+    for a, b, start, stop in _session_spans(steps, StepKind.NAT_VENT_START, StepKind.NAT_VENT_STOP, now):
+        if start is not None and start.after in vetoed_ids:
+            continue  # the fan session that follows an open the live rule vetoes is not expected either
+        if stop is None:
+            close = next((c for c in steps if c.kind == StepKind.WINDOWS_CLOSE and c.ts > a), None)
+            if close is None:
+                continue  # a predicted start with nothing in the plan to end it: its marker on the chart names it
+            b = close.ts
+        hover = start if start is not None and start.ts > now else (stop or start)
+        for ia, ib in _intersect(a, b, periods):
+            ia, ib, ex = _duration_bar(ia, ib, start)
+            sessions.append((ia, ib, hover, ex))
+            add("natvent", ia, ib, hover, extra=ex)
+    for ia, ib, hover, ex in sessions:
+        add("fan", ia, ib, hover, extra=ex)
+    for a, b, on, off in _session_spans(steps, StepKind.FAN_ON, StepKind.FAN_OFF, now):
+        if off is None:
+            continue
+        a, b, ex = _duration_bar(a, b, on)
+        add("fan", a, b, on if on is not None and on.ts > now else off, extra=ex)
+
+    for idx, r in enumerate(getattr(tl, "runs", ()) or ()):
+        row = "heating" if r.mode == "heat" else "cooling" if r.mode == "cool" else None
+        if row is None:
+            continue
+        bars, placed = _run_bars(r)
+        text = _run_text(r.mode, r.minutes, r.start, r.end, placed=placed)
+        extra = {
+            "run": idx,
+            "window_start": r.start.isoformat(),
+            "window_end": r.end.isoformat(),
+            "minutes": round(float(r.minutes), 1),
+            "placed": placed,
+        }
+        for a, b in bars:
+            add(row, a, b, None, text=text, kind="run", extra=extra)
+
+    for s in steps:
+        if s.kind == StepKind.SETBACK_START:
+            end = (
+                horizon
+                if s.reason.endswith(".vacation")
+                else datetime.combine(s.ts.date() + timedelta(days=1), time(0, 0), tzinfo=s.ts.tzinfo)
+            )
+            add("away", s.ts, end, s)
+        elif s.kind == StepKind.RESUME_SCHEDULE:
+            add("override", now, s.ts, s)
+
+    order = {r: i for i, r in enumerate(STRIP_ROWS)}
+    out.sort(key=lambda d: (order.get(d["row"], 99), d["start"]))
+    return out
+
+
+def strip_covers(spans: list[dict[str, Any]], row: str, at: datetime) -> bool:
+    """Whether a ``strip_spans`` row covers the instant ``at`` (start inclusive, end exclusive)."""
+    for d in spans:
+        if d.get("row") != row:
+            continue
+        try:
+            if datetime.fromisoformat(d["start"]) <= at < datetime.fromisoformat(d["end"]):
+                return True
+        except KeyError, TypeError, ValueError:
+            continue
+    return False
+
+
+# ---------------------------------------------------------------------------
 # REST view
 # ---------------------------------------------------------------------------
 

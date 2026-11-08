@@ -433,6 +433,9 @@ from .timeline_surfaces import (
     apply_direction_veto,
     next_automation_candidates,
     operations_lines,
+    planned_windows_open,
+    strip_covers,
+    strip_spans,
     timeline_api_payload,
     timeline_windows,
     tou_bank_end_label,
@@ -4413,9 +4416,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # self._current_classification is always fresh.
             await self._apply_tou_schedule()
 
-            if self._maybe_regenerate_briefing_for_drift():
-                await self._async_save_state()
-
             # Reset startup retry state on success (Issue #1337: a real fetch, not the kept forecast)
             if forecast.from_kept_forecast is not True and self._startup_retries_remaining < 5:
                 _LOGGER.info(
@@ -4842,6 +4842,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R3b: the operation timeline is generated ONCE per cycle, here, before any surface is computed:
         # Next Action, Next Automation, the briefing and the REST endpoint all read this one result.
         self._timeline_shadow_run("cycle")
+
+        # Issue #1436 audit: the drift-regenerated briefing reads the plan, so it runs after the planning step above
+        # (it used to run earlier in the cycle, where its read rebuilt the plan mid-cycle).
+        if forecast and not _outage_retry_only and c is not None and self._maybe_regenerate_briefing_for_drift():
+            await self._async_save_state()
 
         next_auto = self._compute_next_automation_action(c)
         fan_running = self.automation_engine._fan_active
@@ -6056,7 +6061,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._timeline_dirty = event_type
 
     def _timeline_tick(self) -> None:
+        """The 5-minute planning step: a marked change, or (Issue #1436 audit) a new local day the cycle has not planned
+        yet, now that no read builds the plan."""
         reason = getattr(self, "_timeline_dirty", None)
+        if reason is None:
+            latch = getattr(self, "_timeline_latch", None)
+            tl = latch.timeline if latch is not None else None
+            if tl is not None and tl.day != dt_util.now().date():
+                reason = "new_day"
         if reason is not None:
             self._timeline_shadow_run(reason)
 
@@ -6424,7 +6436,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         try:
             from . import night_strategy  # noqa: PLC0415
 
-            self._surface_timeline()  # refreshes the plan (and with it the night strategy) when stale
+            # read only (Issue #1436 audit): the night strategy is planned with the timeline, by its planning steps
             cache = getattr(self, "_timeline_night", None) or {}
             strategy = cache.get("strategy")
             if strategy is None:
@@ -6436,33 +6448,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None, "error"
 
     def _surface_timeline(self, *, live: bool = True) -> Any:
-        """The timeline the occupant-facing surfaces read (Issue #1230 R3b), or None in a degraded coordinator.
+        """The timeline the occupant-facing surfaces read (Issue #1230 R3b), or None (no plan yet / degraded).
 
         ``live`` (default) marks the window step the live direction rule vetoes right now as held, so the plan list, the
         briefing and the REST body say what the Next Action card says (``timeline_surfaces.apply_direction_veto``);
         ``live=False`` is the plan as latched (the card applies the veto itself with the readings it was handed).
 
-        The cycle generates it once before the surfaces are computed. A standalone read (the REST endpoint, a harness
-        capture, a surface asked between cycles) refreshes it when the last run is older than two minutes or belongs
-        to another local day, so a surface never reads yesterday's plan. Never raises.
+        READ ONLY (Issue #1436 mirror audit): it returns the plan as latched and never builds or refreshes it. Only the
+        planning steps build it (``_timeline_shadow_run``: the cycle, the occupancy change, the 5-minute tick for a
+        marked change or a new local day, the briefing send). Before, any read older than two minutes rebuilt it, so a
+        read in the middle of a cycle (a chart row, a card refresh, a REST call) latched the day's plan from
+        half-updated inputs (real HA: the evening window step moved from 7:30 PM to 7:00 PM and was marked done). Before
+        the first plan, or on a new local day before its plan, it returns None: "no plan yet" (the REST endpoint answers
+        503, the cards use their documented degraded path). Never raises.
         """
         latch = getattr(self, "_timeline_latch", None)
         if latch is None or getattr(self, "_shut_down", False) is True or self._current_classification is None:
             return None
         try:
             tl = latch.timeline
-            last = (getattr(self, "_timeline_last", None) or {}).get("at")
-            now = dt_util.now()
-            stale = tl is None or tl.day != now.date()
-            if not stale and last:
-                at = dt_util.parse_datetime(last)
-                stale = at is None or abs((now - at).total_seconds()) > 120.0
-            if stale:
-                self._timeline_shadow_run("surface")
-                tl = latch.timeline
-            if live and tl is not None:
-                tl = self._apply_live_direction_veto(tl)
-            return tl
+            if tl is None or tl.day != dt_util.now().date():
+                return None
+            return self._apply_live_direction_veto(tl) if live else tl
         except Exception:  # noqa: BLE001 - a surface falls back to its degraded path rather than fail
             _LOGGER.debug("surface timeline unavailable", exc_info=True)
             return None
@@ -6507,6 +6514,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1404: the hold in force now (a time-of-use bank), for the plan list's "Now" row. A view field like
         # text_short: the stored timeline contract and its steps are unchanged.
         out["current_hold"] = self.current_hold_payload()
+        # Issue #1436: the chart's activity strips right of NOW, read off this same plan (a view field like text_short).
+        out["strips"] = strip_spans(tl, dt_util.now())
         return out
 
     def timeline_operations_lines(self) -> list[str]:
@@ -8052,6 +8061,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # extracted to _ensure_today_record() so the regular classification cycle can also
             # call it — this call site is now just the once-daily "make sure it's current" path.
             self._ensure_today_record(classification)
+
+            # Issue #1436 audit: the briefing send is a planning step (it may have re-classified and re-applied the day
+            # above); the plan is brought up to date here, and the text below only reads it.
+            self._timeline_shadow_run("briefing")
 
             # Generate briefing text and track which suggestions were sent
             suggestions = self.learning.generate_suggestions()
@@ -15662,12 +15675,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             engine = self.automation_engine
             if engine is not None and (bool(engine._manual_override_active) or bool(engine._grace_active)):
                 out["override"] = True
+            out.update(self._read_chart_windows_planned())
             source = self._get_indoor_temp_with_provenance().source_entity
             if isinstance(source, str) and source:
                 out["band_sensor"] = source
         except Exception:  # noqa: BLE001 - a chart row must never fail on context
             _LOGGER.debug("chart_log: could not read row context", exc_info=True)
         return out
+
+    def _read_chart_windows_planned(self) -> dict[str, Any]:
+        """``{"windows_planned": bool}`` for a chart row: whether the operation timeline expects the windows open now.
+
+        Issue #1436: the PAST "Win plan" strip read ``windows_recommended`` (the classifier's live flag, true at 4 AM on
+        a warm day), so it disagreed with the plan as soon as the plan's close time went by. The row now records what
+        the plan said, the same meaning as the strip's faded part. Empty (key absent) with no timeline; never raises.
+        """
+        try:
+            tl = self._surface_timeline()  # a chart row is written mid-cycle: never build the plan here
+            if tl is None:
+                return {}
+            return {"windows_planned": bool(planned_windows_open(tl, dt_util.now()))}
+        except Exception:  # noqa: BLE001 - a chart row must never fail on the plan
+            _LOGGER.debug("chart_log: could not read the planned window state", exc_info=True)
+            return {}
 
     def _read_chart_comfort_target(self) -> float | None:
         """The room's comfort target (internal F) while the remote-sensor outer loop holds an offset, else None.
@@ -16893,8 +16923,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _ae._natural_vent_active if _ae else False,
             )
 
+        # Issue #1436: the window and nat-vent flags per hour are the PLAN's (the operation timeline's window periods
+        # and nat-vent sessions, the same spans the chart's faded strips draw), never the regime walk's: the walk knows
+        # nothing of the plan's close time, so the forward Target line drew a nat-vent target all night under a plan
+        # that closes the windows at 7 PM. A coordinator with no timeline (degraded) keeps the walk, as every surface's
+        # degraded path does.
+        _plan_spans: list[dict] | None = None
+        if not is_historical:
+            try:
+                _plan_tl = self._surface_timeline()  # never build the plan from a chart read
+                _plan_spans = strip_spans(_plan_tl, now) if _plan_tl is not None else None
+            except Exception:  # noqa: BLE001 - the chart never fails on the plan; it falls back to the walk
+                _LOGGER.debug("chart: plan strips unavailable", exc_info=True)
+                _plan_spans = None
         _predicted_activity = (
-            [] if is_historical else _compute_predicted_activity(_conv_band, _regime_by_ts, self.config)
+            []
+            if is_historical
+            else _compute_predicted_activity(_conv_band, _regime_by_ts, self.config, plan_spans=_plan_spans)
         )
         _hvac_mode_by_ts = {ts: regime.get("hvac_mode", "off") for ts, regime in _regime_by_ts.items()}
         _effective_target_history = [
@@ -19679,15 +19724,19 @@ def _compute_predicted_activity(
     target_band: list[dict],
     regime_by_ts: dict[str, dict],
     config: dict,
+    plan_spans: list[dict] | None = None,
 ) -> list[dict]:
     """Per forecast hour: hvac_mode intent, fan_active, windows_recommended.
 
-    Issue #802: reads the already-resolved per-hour regime map from
+    Issue #802: ``hvac_mode`` reads the already-resolved per-hour regime map from
     ``_walk_forward_regime()`` (a genuine forward walk of the real production
-    decide_nat_vent_gate()/decide_nat_vent_exit()/decide_ode_ceiling_guard() functions)
-    instead of an independent, session-memory-less temperature-inequality heuristic —
-    ``fan_active`` and ``windows_recommended`` now mirror the same signal rather than being
-    two separately-computed, near-identical, similarly-flickery formulas.
+    decide_nat_vent_gate()/decide_nat_vent_exit()/decide_ode_ceiling_guard() functions).
+
+    Issue #1436: ``fan_active`` and ``windows_recommended`` are the PLAN's when ``plan_spans`` is given
+    (``timeline_surfaces.strip_spans``: the operation timeline's nat-vent sessions and window periods, the same spans
+    the chart's faded strips draw), so the forward Target line's nat-vent tier never runs past the plan's close time.
+    The chart no longer draws a strip from this field. ``plan_spans=None`` (a coordinator with no timeline, the
+    degraded path) keeps the walk's nat-vent flag for both.
     """
     fan_mode = str(config.get("fan_mode", "auto"))
 
@@ -19699,8 +19748,16 @@ def _compute_predicted_activity(
         regime = regime_by_ts.get(ts, {})
         hvac_mode = regime.get("hvac_mode", "off")
 
-        fan_active = True if fan_mode == "on" else bool(regime.get("nat_vent_active"))
-        windows_recommended = fan_active
+        if plan_spans is None:
+            fan_active = True if fan_mode == "on" else bool(regime.get("nat_vent_active"))
+            windows_recommended = fan_active
+        else:
+            at: datetime | None = None
+            with contextlib.suppress(TypeError, ValueError):
+                at = datetime.fromisoformat(str(ts))
+            in_session = at is not None and strip_covers(plan_spans, "natvent", at)
+            fan_active = True if fan_mode == "on" else in_session
+            windows_recommended = at is not None and strip_covers(plan_spans, "windowsplan", at)
 
         result.append(
             {

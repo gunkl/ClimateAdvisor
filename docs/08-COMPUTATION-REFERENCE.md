@@ -1953,6 +1953,8 @@ revisited — a Hot day's morning window and evening reopen are two independent
 opportunities in the same day, and applying `"off"` days' single escalate-once pattern
 would silently suppress a later same-day reopen.
 
+**Superseded by Issue #1436:** `predicted_activity[].windows_recommended`/`fan_active` are now the operation timeline's window periods and nat-vent sessions at each hour (the walk only without a timeline), and no chart strip reads the field ([Operation Timeline Spec](operation-timeline-spec.md#chart-activity-strips-issue-1436)). The note below is kept as history.
+
 **Open question, not yet investigated (Issue #878-followup):** `chart_data`'s
 `predicted_activity` array is produced by `_walk_forward_regime()`/
 `_compute_predicted_activity()`. A separate, still-unconfirmed observation during this

@@ -23,6 +23,9 @@ coordinator session; this module never re-derives a band.
 * cards / fans ........... ``_compute_automation_status`` / ``_compute_next_automation_action`` /
   ``_compute_fan_status`` / ``_compute_whf_status`` / ``_compute_hvac_fan_status`` must answer, and the
   fan cards must agree with the physical fan
+* chart strips (#1436) ... the chart's future activity strips (the real ``timeline_payload()["strips"]``) and the real
+  ``get_chart_data()["predicted_activity"]`` must follow the PLAN's window periods, sessions, runs and holds
+  (``strip_check``); this surface's reference is the operation timeline, not the armed band
 
 P8 is TEST-ONLY: it needs a live coordinator and engine, so it is not in the production ``PROMISES``
 registry (which is a tuple of pure ``check(PromiseInput, PromiseConfig)`` functions that also run at
@@ -77,6 +80,7 @@ SURFACES = (
     "thermostat_hold",
     "fan_cards",
     "cards",
+    "chart_strips",
 )
 
 
@@ -619,6 +623,7 @@ class SurfaceProbe(PromiseProbe):
     """
 
     HOLD_SETTLE = timedelta(minutes=10)  # a thermostat write may still be settling right after a step
+    STRIPS_EVERY = timedelta(hours=2)  # the chart payload is the costly read: every 2 virtual hours + each change
 
     def __init__(
         self,
@@ -638,6 +643,8 @@ class SurfaceProbe(PromiseProbe):
         self.compared: dict[str, int] = {}
         self.divergences: list[Divergence] = []
         self._seen: set[tuple[str, str, str]] = set()
+        self._strips_last: datetime | None = None
+        self._strips_plan: tuple | None = None
 
     def attach(self, session: Any) -> None:
         super().attach(session)
@@ -704,7 +711,13 @@ class SurfaceProbe(PromiseProbe):
         )
 
     def _sample(self, label: str, now: datetime) -> None:
+        from tools.sim_harness.scenario_model import run_planning_step  # noqa: PLC0415
+
         s = self._session
+        # Issue #1436 audit: production builds the plan only in its planning steps (no surface read does), so the probe
+        # runs the cycle's planning step before reading, as the cycle does before it computes the surfaces
+        with contextlib.suppress(Exception):
+            run_planning_step(s.coordinator)
         armed = read_armed(s)
         if armed is None:
             return
@@ -773,6 +786,47 @@ class SurfaceProbe(PromiseProbe):
             self._record("fan_cards", label, now, problem, armed, Shown("fan_cards"))
         if fan_problems is not None:  # None = the accepted command-only blind spot, not compared
             self.compared["fan_cards"] = self.compared.get("fan_cards", 0) + 1
+        self._sample_chart_strips(label, now, armed)
+
+    def _sample_chart_strips(self, label: str, now: datetime, armed: Armed) -> None:
+        """Issue #1436: the chart's future strips against the plan (``strip_check``).
+
+        Read whenever the plan's step list changes, else at most every ``STRIPS_EVERY`` (the chart payload is the
+        expensive read; between plan changes only NOW moves, which the grid already slides across).
+        """
+        from tools.sim_harness.strip_check import check_coordinator  # noqa: PLC0415
+
+        s = self._session
+        coord = s.coordinator
+        try:
+            tl = coord._surface_timeline() if hasattr(coord, "_surface_timeline") else None
+        except Exception:  # noqa: BLE001 - _surface_timeline never raises; belt and braces
+            tl = None
+        if tl is None:
+            return
+        plan = tuple((st.ts, st.kind.value, st.status) for st in tl.steps)
+        due = self._strips_last is None or now - self._strips_last >= self.STRIPS_EVERY or plan != self._strips_plan
+        if not due:
+            return
+        self._strips_last, self._strips_plan = now, plan
+        outdoor = getattr(s.engine, "_last_outdoor_temp", None)
+        try:
+            got = check_coordinator(coord, now, outdoor if isinstance(outdoor, (int, float)) else None)
+        except Exception as exc:  # noqa: BLE001 - a reader that cannot answer is a finding
+            self._record(
+                "chart_strips",
+                label,
+                now,
+                f"chart_strips reader failed: {type(exc).__name__}: {str(exc)[:100]}",
+                armed,
+                Shown("chart_strips"),
+            )
+            return
+        if got is None:
+            return
+        self.compared["chart_strips"] = self.compared.get("chart_strips", 0) + 1
+        for problem in got["problems"]:
+            self._record("chart_strips", label, now, problem, armed, Shown("chart_strips"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -3,7 +3,7 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.9.17] — unreleased
+## [0.9.17] — 2026-11-08
 
 - Fix #1477: the heat and cool "swing" Climate Advisor learns (how far past the setpoint your thermostat lets the room drift before it starts the heat or AC) now comes from your finest temperature readings and is rounded up to the next half degree.
   - **What you'll notice:** on a thermostat that starts the heat about 1.44 °F below its setpoint, the Thermal model card now says 1.5 °F below setpoint instead of 1.0 °F. On a Celsius install the same swing reads 0.83 °C.

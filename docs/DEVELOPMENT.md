@@ -61,7 +61,7 @@ python scripts/test.py unit --cov=custom_components/climate_advisor --cov-report
   4 min 26 s against 7 min 50 s on a 24-core dev container (measured back to back, 2026-11-07), probably because
   one process ends on a long tail of slow `test_sim_generator` tests that four slices share out. Keep slices x workers
   near 8 on a RAM-limited machine (each worker holds about 1.8 GB); `auto` workers can run out of RAM.
-- **One CI slice:** `CA_UNIT_SHARD=K/4` runs only the Kth of the four slices, exactly as CI's `unit (K/4)` job does,
+- **One CI slice:** `CA_UNIT_SHARD=K/8` runs only the Kth of the eight slices, exactly as CI's `unit (K/8)` job does,
   to reproduce a failure in that job.
 - **Order-dependence guard (#1186):** `python scripts/test_changed_isolated.py [--base origin/main] [--all]` runs each
   changed `tests/test_*.py` in its own pytest process. CI runs it with `--strict`.
@@ -171,9 +171,9 @@ re-staging files are in [claude.md, Pre-commit Hooks](../claude.md#pre-commit-ho
 
 | Workflow | Job | What it runs | Required on `main` |
 |---|---|---|---|
-| `validate.yml` | `validate-and-test` | The gate: passes only when `lint`, all four `unit` slices and `isolated` pass | yes |
+| `validate.yml` | `validate-and-test` | The gate: passes only when `lint`, all eight `unit` slices and `isolated` pass | yes |
 | `validate.yml` | `lint` | `tools/validate.py`, `ruff check .`, `ruff format --check .` | via the gate |
-| `validate.yml` | `unit (K/4)` | One round-robin quarter of the unit tier each (`CA_UNIT_SHARD=K/4`, `CA_UNIT_WORKERS=4`), in parallel | via the gate |
+| `validate.yml` | `unit (K/8)` | One round-robin eighth of the unit tier each (`CA_UNIT_SHARD=K/8`, `CA_UNIT_WORKERS=4`), in parallel | via the gate |
 | `validate.yml` | `isolated` | Changed unit test files, each alone (`CA_UNIT_WORKERS=4`) | via the gate |
 | `validate.yml` | `ha-real` | The real-HA tier (`CA_HA_WORKERS=4`, `--durations=15`, 8-minute cap) | yes |
 | `hassfest.yml` | `validate` | Home Assistant's Hassfest | yes |

@@ -42,7 +42,7 @@ past(source, sensor, lead, start, end)      {slot_epoch: temp_f} the engine said
 
 ## Fallback while the primary is learning
 
-`get_chart_data()` adds `schedule_estimate` (display unit) only while `engine_state(...)["fallback"]` is true: `_build_predicted_indoor_future(..., thermal_model={})`, v3's setpoint-schedule ramp (the same path it has always used when its thermal model is below low confidence). The Status key shows it as "Schedule estimate (learning)" and `#chart-v4-note` carries the text. The timeline keeps today's default path (no `selected_path`) until the primary has a usable fit.
+`get_chart_data()` adds `schedule_estimate` (display unit) only while `engine_state(...)["fallback"]` is true: `_build_predicted_indoor_future(..., thermal_model={})`, v3's setpoint-schedule ramp (the same path it has always used when its thermal model is below low confidence). The Status key shows it as "Schedule estimate (learning)" on a "While learning" row of the Main block and `#chart-v4-note` carries the text. The timeline keeps today's default path (no `selected_path`) until the primary has a usable fit.
 
 ## What each consumer reads
 
@@ -50,6 +50,7 @@ past(source, sensor, lead, start, end)      {slot_epoch: temp_f} the engine said
 |---|---|---|
 | Status chart main line (both dashboards, `chart_v2.js`) | `prediction_engines.primary`; v3 line, v4 per-sensor lines or the schedule estimate | `_defaultOn`, `_engines()` |
 | Comparison line | `prediction_engines.shadow` (on by default when set); any other engine's lines start off but stay in the key | same |
+| Status chart key, Predicted group (Issue #1430) | `primary` / `shadow`: a "Main · <primary>" block first, then "Comparison · <shadow>" (none with no comparison engine), then "Not selected · <engine>"; the schedule estimate sits in the Main block. Hover readout, folded summary and table view list prediction lines in the same order. Series ids, colours and dashes do not depend on the roles | `renderKey`, `_byRole`, `_engines()` |
 | Accuracy / backtest views | `primary_engine`, `shadow_engine` in the payload: tiles lead with the primary and name the comparison engine | `prediction_accuracy.html` `renderTiles`, `nd_debug.js` |
 | Next 24 hours path and its text, briefing/Next Action sentences built from the timeline | `TimelineSnapshot.selected_path` (the primary's path) in `_choose_path` | `_timeline_snapshot`, `operation_timeline._choose_path` |
 | Night card | v4 only, labelled "from v4": figures when v4 runs (primary or shadow) and the bedroom model is at least medium confidence; v4 off -> 503 `reason: v4_off` and the card says so | `night_strategy.api_payload`, `_timeline_night_apply` |

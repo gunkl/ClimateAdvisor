@@ -234,6 +234,18 @@
     });
   }
 
+  // Issue #1430: prediction lines listed by engine role (the main engine and its schedule estimate, then the comparison,
+  // then any other), the same order as the key's Main / Comparison blocks; other lines keep their place. Display only.
+  function _byRole(S) {
+    const e = _engines();
+    const rank = s => s.id === 'schedule' ? 0 : { primary: 0, shadow: 1, other: 2 }[_roleOf(_engineOf(s.id) || 'v4', e)];
+    // the prediction lines, stably sorted by role, go back into the slots the prediction lines had
+    const pred = S.map((s, i) => [s, i]).filter(x => x[0].group === 'predicted')
+      .sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(x => x[0]);
+    let k = 0;
+    return S.map(s => s.group === 'predicted' ? pred[k++] : s);
+  }
+
   function _isOn(id) {
     if (HIDDEN_OVERLAYS.includes(id)) return false;   // Issue #1414: not offered until wired up
     const on = _chartPrefs ? _chartPrefs.on : {};
@@ -399,11 +411,12 @@
     S.push(_mkSeries({ id: 'ind:_ca', group: 'indoor', short: 'CA reading', label: 'CA reading',
       role: 'the reading Climate Advisor uses', color: 'ink', dash: [1, 3], width: 1.5, sensor: '_ca', kind: 'actual', breaks: caBreaks }, caPts));
 
-    // Predicted: today's prediction (v3): the 4 h-ahead snapshots logged earlier, then the live forecast.
+    // Predicted: v3's prediction of the CA reading: the 4 h-ahead snapshots logged earlier, then the live forecast.
+    // Issue #1430: labelled by what it predicts; the key's Main / Comparison block names the engine and its role.
     const histPredIndoor = state.map(e => ({ x: _parseTs(e.ts), y: e.pred_indoor != null ? e.pred_indoor : e.pred_indoor_avg != null ? e.pred_indoor_avg : null }))
       .filter(p => p.y != null && p.x <= nowMs);
     const futPredIndoor = (cd.predicted_indoor || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
-    S.push(_mkSeries({ id: 'v3', group: 'predicted', short: 'v3', label: "Today's prediction (v3)", role: 'made 4 h ahead on the left of NOW',
+    S.push(_mkSeries({ id: 'v3', group: 'predicted', short: 'v3', label: 'Climate Advisor reading', role: "v3's prediction of the reading Climate Advisor uses; left of Now, what it predicted 4 h earlier",
       color: 'v3', dash: [7, 4], width: 2, missVs: 'ind:_ca', kind: 'pred', breaks: caBreaks }, [...histPredIndoor, ...futPredIndoor]));
 
     // The schedule estimate: the main line while the primary engine is still learning.
@@ -417,7 +430,8 @@
       ? 'v4 is switched off (Settings, Prediction engine)' : 'v4 has no data for this zone yet (it is still learning this house)';
     // 0.9.6 Lane F: a v4 chip only for a sensor v4 has something for (past, forecast or no-plan line); the sensors v4
     // has not learned yet are named on one muted line instead (_v4Learning). A sensor with past predictions only (the
-    // backtest) and no forecast is labelled "history only" on both its chips.
+    // backtest) and no forecast gets one chip, on the key's "Past predictions only" row (Issue #1430: no no-plan chip
+    // for it, the no-plan line is a forecast and could never draw anything).
     _v4Learning = [];
     // v4.past only covers the fetched window; past_span.sensors lists every line with a past prediction anywhere, so a
     // short or scrolled view does not take a sensor's chips away (they are disabled "not in this view" instead).
@@ -431,18 +445,17 @@
       const pastElsewhere = spanSensors.includes(m.id);
       if (!v4Ready || (!pastAny && !pastElsewhere && !futRaw.length && !baseRaw.length)) { _v4Learning.push(m); return; }
       const histOnly = !futRaw.length && !baseRaw.length;
-      const label = m.name + (histOnly ? ' (history only)' : '');
+      const label = m.name;
       const past = (byLead[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       const fut = futRaw.map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       S.push(_mkSeries({ id: 'v4:' + m.id, group: 'predicted', sub: 'plan', short: 'v4 ' + m.name, label, color: 'plan', dash,
         width: 2.5, sensor: m.id, missVs: 'ind:' + m.id, kind: 'pred', disabledReason: why, histOnly, pastElsewhere,
         role: histOnly ? 'past v4 predictions only (from its backtest); v4 does not forecast ' + m.name + ' yet' : '' }, v4Ready ? [...past, ...fut] : []));
+      if (histOnly) return;   // Issue #1430: no no-plan line (a forecast) for a sensor v4 has only past predictions for
       const base = baseRaw.map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       S.push(_mkSeries({ id: 'base:' + m.id, group: 'predicted', sub: 'base', short: 'No plan ' + m.name, label, color: 'base', dash,
-        width: 2, sensor: m.id, kind: 'pred', histOnly,
-        disabledReason: why || (base.length ? '' : histOnly
-          ? 'No forecast for ' + m.name + ' yet: v4 has only its past predictions, and the no-plan line is a forecast'
-          : 'v4 has no no-plan line for ' + m.name + ' yet') }, v4Ready ? base : []));
+        width: 2, sensor: m.id, kind: 'pred',
+        disabledReason: why || (base.length ? '' : 'v4 has no no-plan line for ' + m.name + ' yet') }, v4Ready ? base : []));
     });
 
     // v4's line for the reading Climate Advisor uses (Issue #1400): the only line of a _ca-only model, and the one to
@@ -695,11 +708,22 @@
     const block = {};
     const blockOf = (id, s) => { if (!(id in block)) block[id] = _chipBlock(id, s); return block[id]; };
     const sw = s => _swatch(s);
+    const eng = _engines();
+    // Issue #1430: a prediction chip's accessible name says what the line is and which role its engine has.
+    const ROLE_WORD = { primary: 'main prediction', shadow: 'comparison', other: 'not selected in Settings' };
+    const predAria = s => {
+      const engine = s.id === 'schedule' ? null : s.id === 'v3' ? 'v3' : 'v4';
+      const what = s.id === 'schedule' ? 'schedule estimate while the main engine is still learning'
+        : s.id === 'v3' ? 'v3 prediction'
+        : s.histOnly ? 'v4 past predictions only'
+        : s.sub === 'base' ? 'v4 forecast if Climate Advisor did nothing' : 'v4 forecast with plan';
+      return s.label + ', ' + what + (engine ? ' (' + ROLE_WORD[_roleOf(engine, eng)] + ')' : '');
+    };
     const chipFor = s => {
       const why = blockOf(s.id, s);
       return _chip(s.id, sw(s) + '<span>' + escapeHtml(s.label) + '</span>', {
         noData: why == null ? s.raw.length === 0 : !!why, disabled: !!why, title: why || s.role || '',
-        aria: s.label + (s.sub === 'plan' ? ' with plan, v4' : s.sub === 'base' ? ' with no plan, v4' : '') + (why ? ': ' + why : ''),
+        aria: (s.group === 'predicted' ? predAria(s) : s.label) + (why ? ': ' + why : ''),
       });
     };
     // an overlay or strip chip: the same rule, with the reason on hover and in its accessible name
@@ -713,18 +737,24 @@
     const sched = S.find(s => s.id === 'schedule');
     const plan = S.filter(s => s.sub === 'plan');
     const base = S.filter(s => s.sub === 'base');
-    const eng = _engines();
     const shadowTxt = eng.shadow && eng.shadow !== 'none' ? 'Comparison: ' + eng.shadow : 'No comparison engine';
-    let predHtml = '<div class="key-row" id="chart-main-model"><span class="key-sub">Main</span><span>' +
+    let predHtml = '<div class="key-row" id="chart-main-model"><span class="key-sub">Engines</span><span>' +
       escapeHtml('Main prediction: ' + eng.primary + ' · ' + shadowTxt) + ' — change it in <a href="new_dashboard.html#settings">Settings → Prediction engine</a>.' +
       (eng.text ? ' ' + escapeHtml(eng.text) + '.' : '') + ' <a href="prediction_accuracy.html' + (/new_dashboard\.html$/.test(location.pathname) ? '' : '?from=classic') + // classic: its Back returns to index.html
-      '">How each engine has scored</a>.</span></div>' +
-      '<div class="key-row"><span class="key-sub">Today</span>' + chipFor(v3) + (sched && sched.raw.length > 0 ? chipFor(sched) : '') + '</div>';
+      '">How each engine has scored</a>.</span></div>';
     const ready = !!(v4 && v4.ready);
+    // Issue #1430: the prediction rows are grouped by ROLE, in the order Settings gives: the main engine's block first
+    // ("Main · <engine>"), then the comparison engine's ("Comparison · <engine>"), then any engine that is neither
+    // (its lines start off but stay in the key). The lines themselves (ids, colours, dashes) do not depend on this.
+    const row = (label, chips) => chips ? '<div class="key-row"><span class="key-sub">' + escapeHtml(label) + '</span>' + chips + '</div>' : '';
+    const engineRows = {};
+    engineRows.v3 = row('Prediction', chipFor(v3));
+    let v4Rows = '';
     if (plan.length) {
-      predHtml += '<div class="key-row"><span class="key-sub">v4 with plan</span>' + plan.map(chipFor).join('') + '</div>';
-      predHtml += '<div class="key-row"><span class="key-sub">v4 no plan</span>' + base.map(chipFor).join('') + '</div>';
-      predHtml += _leadRowHtml(v4, ready);
+      v4Rows += row('Forecast with plan', plan.filter(s => !s.histOnly).map(chipFor).join(''));
+      v4Rows += row('Forecast if Climate Advisor did nothing', base.map(chipFor).join(''));
+      v4Rows += row('Past predictions only', plan.filter(s => s.histOnly).map(chipFor).join(''));
+      v4Rows += _leadRowHtml(v4, ready);
     }
     // One muted line for the sensors v4 has nothing for yet (no chips for them: they would draw nothing).
     const v4Off = (eng.engines || []).some(x => x.id === 'v4' && !x.running);
@@ -738,9 +768,24 @@
         : !ready && reason === 'error' ? "v4's lines could not be read this time; they come back on the next refresh"
         : 'v4 is still learning' + (names.length ? ': ' + names.join(', ') : ' this house');
       const title = _v4Learning.map(m => m.name + (m.role ? ' (' + m.role + ')' : '')).join(', ');
-      predHtml += '<div class="key-row key-learning" id="chart-v4-learning"' + (title ? ' title="' + escapeHtml('No v4 lines yet for: ' + title) + '"' : '') +
+      v4Rows += '<div class="key-row key-learning" id="chart-v4-learning"' + (title ? ' title="' + escapeHtml('No v4 lines yet for: ' + title) + '"' : '') +
         '><span class="key-sub">' + escapeHtml(text) + '</span></div>';
     }
+    engineRows.v4 = v4Rows;
+    const ROLE_HEAD = { primary: [' id="chart-role-main"', 'Main', 'Main prediction'], shadow: [' id="chart-role-comparison"', 'Comparison', 'Comparison'],
+      other: ['', 'Not selected', 'Not selected in Settings'] };
+    const order = [eng.primary, eng.shadow].concat(['v3', 'v4']).filter((x, i, a) => x in engineRows && a.indexOf(x) === i);
+    order.forEach(engine => {
+      const role = _roleOf(engine, eng);
+      // the schedule estimate is the main line while the main engine is still learning: it sits in the Main block
+      const extra = role === 'primary' && sched && sched.raw.length > 0 ? row('While learning', chipFor(sched)) : '';
+      const inner = engineRows[engine] + extra;
+      if (!inner) return;
+      const h = ROLE_HEAD[role];
+      predHtml += '<div class="key-role"' + h[0] + ' data-engine="' + escapeHtml(engine) +
+        '" data-role="' + role + '" role="group" aria-label="' + escapeHtml(h[2] + ': ' + engine) + '"><span class="key-role-label">' +
+        escapeHtml(h[1] + ' · ' + engine) + '</span>' + inner + '</div>';
+    });
     const outHtml = S.filter(s => s.group === 'outdoor').map(chipFor).join('');
     const ovSw = (color, dash, w) => '<svg class="key-sw" width="30" height="10" aria-hidden="true"><line x1="2" y1="5" x2="28" y2="5" stroke="' + color + '" stroke-width="' + w + '"' + (dash ? ' stroke-dasharray="' + dash + '"' : '') + ' stroke-linecap="round"/></svg>';
     // Humidity and feels-like are not offered until they are wired up (Issue #1414; HIDDEN_OVERLAYS).
@@ -770,7 +815,7 @@
       }
     }
     // The one-line summary of what is drawn (shown while the key is folded): the lines on, then the overlays on.
-    _keyShown = S.filter(s => _isOn(s.id) && !blockOf(s.id, s) && s.raw.length > 0).map(s => s.short)
+    _keyShown = _byRole(S).filter(s => _isOn(s.id) && !blockOf(s.id, s) && s.raw.length > 0).map(s => s.short)
       .concat([...body.querySelectorAll('[data-series^="ov:"][aria-pressed="true"]:not(.no-data)')].map(b => b.textContent.trim()));
     _renderKeySummary();
   }
@@ -897,7 +942,7 @@
     const color = _cssVar('--c-' + s.color);
     return {
       caId: s.id,
-      label: s.id.startsWith('v4:') ? 'v4 ' + s.label : s.id.startsWith('base:') ? 'No plan ' + s.label : s.label,
+      label: s.id.startsWith('v4:') || s.id === 'v3' ? s.id.slice(0, 2) + ' ' + s.label : s.id.startsWith('base:') ? 'No plan ' + s.label : s.label,
       type: 'line', data: s.data,
       borderColor: color, backgroundColor: 'transparent',
       borderWidth: s.width, borderDash: s.dash, borderCapStyle: s.dash.length && s.dash[0] <= 2 ? 'round' : 'butt',
@@ -1281,7 +1326,7 @@
     const sym = '°';
     const isPast = ms <= Date.now();
     const lines = { indoor: '', predicted: '', outdoor: '' };
-    _series.forEach(s => {
+    _byRole(_series).forEach(s => {
       if (!_isOn(s.id) || s.disabledReason || s.raw.length === 0) return;
       const v = _valueAt(s, ms);
       if (v == null) return;
@@ -1591,7 +1636,7 @@
   function buildTableModel() {
     const win = _viewWindow();
     const step = _tableStep(win.max - win.min);
-    const cols = _series.filter(s => _isOn(s.id) && !s.disabledReason && s.raw.length > 0);
+    const cols = _byRole(_series).filter(s => _isOn(s.id) && !s.disabledReason && s.raw.length > 0);
     const rows = [];
     const first = Math.ceil(win.min / step) * step;
     const log = ((_lastChartData && _lastChartData.state_log) || []);

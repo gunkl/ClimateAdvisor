@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.16] — 2026-11-08
+
+- Fix #1476: the Analysis tab's "Open windows move it toward outdoors N× faster" figures no longer creep up after restarts.
+  - **Before:** Climate Advisor saved the same night's closed-house measurement over and over, every time the heat started or a window opened, and again at each restart. One night could count 20+ times, dragging the learned closed-house rate onto it and inflating its confidence.
+  - **Now:** each night is saved once. The repeats already stored are removed on the next start, and the closed-house rate is recalculated without them. On a test home this moved the figures from 9.1× and 9.9× to 2.7× and 2.9×.
+
 ## [0.9.15] — 2026-11-08
 
 - Fix #1471: when Climate Advisor drops a thermostat change you made before it was confirmed, the Activity Log now says so ("Override cleared"), the same as for a confirmed change. This happens when you press the whole-house fan in the same minute, cancel from the dashboard, or leave home. Before, the change just disappeared from the log, so it was hard to tell why Climate Advisor went back to its own plan.

@@ -13942,6 +13942,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             obs = {
                 "hvac_mode": "passive",
                 "k_passive": k,
+                "window_start": window[0]["ts"],
+                "window_end": window[-1]["ts"],
                 "confidence_grade": chosen["grade"],
                 "date": today_str,
                 "source": chosen["source"],
@@ -13950,7 +13952,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "delta_t_f": round(t_end - t_start, 2),
                 "ratio": round(ratio, 4) if ratio is not None else None,
             }
-            self.learning.record_thermal_observation(obs)
+            if not self.learning.record_thermal_observation(obs):
+                continue  # Issue #1476: this window is already recorded
             committed += 1
             _LOGGER.debug(
                 "chart_log passive: k=%.4f source=%s conf=%s dt=%.1fh dT=%.1fF",
@@ -14177,6 +14180,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             obs = {
                 "hvac_mode": hvac_mode_tag,
                 "k_passive": k,
+                "window_start": window[0]["ts"],
+                "window_end": window[-1]["ts"],
                 "confidence_grade": chosen["grade"],
                 "date": today_str,
                 "source": chosen["source"],
@@ -14185,7 +14190,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "delta_t_f": round(t_end - t_start, 2),
                 "ratio": round(ratio, 4) if ratio is not None else None,
             }
-            self.learning.record_thermal_observation(obs)
+            if not self.learning.record_thermal_observation(obs):
+                continue  # Issue #1476: this window is already recorded
             committed += 1
             _LOGGER.debug(
                 "chart_log %s: k=%.4f source=%s conf=%s dt=%.1fh dT=%.1fF",

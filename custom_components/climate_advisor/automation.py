@@ -1668,15 +1668,15 @@ class AutomationEngine:
     indoor_companion: CompanionSensors | None = None
 
     # Issue #1474: today's DailyRecord. The coordinator owns it and replaces it (new day, restore, end of day), so the
-    # engine reads it live through this provider; a held copy was never assigned in production, so every bedtime
-    # setback (applied or skipped) was written to nothing since #151. A bare engine (tests, tools) keeps its own.
-    _today_record_provider: Callable[[], Any] | None = None
+    # engine reads it live through its inputs (Issue #1443: the coordinator never writes an engine private); a held
+    # copy was never assigned in production, so every bedtime setback (applied or skipped) was written to nothing
+    # since #151. A bare engine (tests, tools: inputs without ``today_record``) keeps its own.
     _today_record_own: Any | None = None
 
     @property
     def _today_record(self) -> Any | None:
-        provider = self._today_record_provider
-        return provider() if provider is not None else self._today_record_own
+        live = getattr(self.inputs, "today_record", None)
+        return live() if callable(live) else self._today_record_own
 
     @_today_record.setter
     def _today_record(self, value: Any | None) -> None:
@@ -2519,7 +2519,7 @@ class AutomationEngine:
         # Set by coordinator after construction.
         self._reclassify_callback: Callable[..., None] | None = None
 
-        # Today's DailyRecord: read live from the coordinator (``_today_record_provider``, Issue #1474)
+        # Today's DailyRecord: read live from the coordinator through ``inputs.today_record()`` (Issue #1474)
 
         # Issue #96: classification event dedup — track last emitted (day_type, hvac_mode) pair
         self._last_classification_applied: tuple[str, str] | None = None

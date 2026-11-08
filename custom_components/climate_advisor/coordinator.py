@@ -1004,8 +1004,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R6b: the engine reads the primary engine's thermal-model scalars through this live provider (it
         # never names an engine); None on a bare engine (headless tools) = its own ``_thermal_model``.
         self.automation_engine._control_model_provider = self.control_thermal_model
-        # Issue #1474: the bedtime setback records into the coordinator's live record (it is replaced each day)
-        self.automation_engine._today_record_provider = lambda: self._today_record
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),

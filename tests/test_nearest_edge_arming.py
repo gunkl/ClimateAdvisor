@@ -104,7 +104,7 @@ def _make_engine(
         notify_service=config["notify_service"],
         config=config,
     )
-    engine._thermal_model = {}
+    engine.inputs.thermal = {}
     engine._test_state = state  # handle for tests
     return engine
 
@@ -404,7 +404,7 @@ class TestOdeCeilingWriteGate:
     def _engine(self, indoor: float) -> AutomationEngine:
         engine = _make_engine(indoor=indoor, mode="off", comfort_heat=70.0, comfort_cool=74.0)
         engine._last_outdoor_temp = 76.0
-        engine._thermal_model = {
+        engine.inputs.thermal = {
             "k_passive": -0.05,
             "confidence_k_passive": "medium",
             "k_active_cool": None,

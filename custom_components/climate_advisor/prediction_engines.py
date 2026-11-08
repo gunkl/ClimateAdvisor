@@ -149,8 +149,8 @@ class V3Engine:
         return str((state or {}).get("confidence", "none")) if isinstance(state, Mapping) else "none"
 
     def state_of(self, source: Any) -> Any:
-        engine = getattr(source, "automation_engine", None)
-        model = getattr(engine, "_thermal_model", None)
+        # Issue #1443: the coordinator owns the thermal model (the engine reads it, holds no copy).
+        model = getattr(source, "_thermal_model", None)
         return model if isinstance(model, Mapping) else {}
 
     def future_path(self, source: Any) -> dict[str, Path]:

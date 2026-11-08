@@ -24,10 +24,11 @@ Coordinator proxy:
     - ``engine._sensor_check_callback`` set to ``lambda: False`` (no open sensors)
     - ``engine._emit_event_callback``   appends to event_log
 
-  The engine does read ``self._thermal_model`` and ``self._hourly_forecast_temps``
-  directly as instance attributes, and ``self._current_classification`` — these
-  are set on the engine instance directly.  Use ``engine._thermal_model = {...}``
-  etc. after construction to inject test values.
+  The coordinator-owned facts the engine's decisions read (thermal model, hourly
+  forecast peak, today's outdoor peak, the Away/Vacation TOU window) come through ONE
+  read-only provider (Issue #1443, ``engine_inputs``). A bare engine has no coordinator,
+  so the caller owns them: pass ``inputs=StaticEngineInputs(thermal=..., hourly_forecast=...)``.
+  No engine private is written for them.
 """
 
 from __future__ import annotations
@@ -86,6 +87,7 @@ def build_headless_engine(
     sensor_polarity_inverted: bool = False,
     role: str = "production",
     dry_run: bool = False,
+    inputs: Any | None = None,
 ) -> tuple[Any, FakeHass, FakeScheduler, list[tuple[str, dict, datetime | None]]]:
     """Build and return a headless AutomationEngine.
 
@@ -115,6 +117,8 @@ def build_headless_engine(
                  ``fake_hass`` — the production dry-run behavior already used by
                  ``switch.py``, reused here so a shadow engine can never write a
                  real action_log entry.
+        inputs: Issue #1443 — the engine's read-only inputs provider (``engine_inputs.StaticEngineInputs`` for a
+                bare engine: the scenario's thermal model and hourly forecast). None = an empty one.
 
     Returns:
         ``(engine, fake_hass, scheduler, event_log)``
@@ -196,6 +200,7 @@ def build_headless_engine(
         config=merged_config,
         sensor_polarity_inverted=sensor_polarity_inverted,
         role=role,
+        inputs=inputs,
     )
     engine.dry_run = dry_run
 

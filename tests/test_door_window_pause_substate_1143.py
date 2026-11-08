@@ -197,7 +197,7 @@ class TestReactivationAfterActivePauseTakesPausedBranch:
     def _reactivate(self, engine) -> list[str]:
         events: list[str] = []
         engine._emit_event_callback = lambda name, data: events.append(name)
-        engine._hourly_forecast_temps = []  # the forecast peak that caused the pause has passed
+        engine.inputs.hourly_forecast = []  # the forecast peak that caused the pause has passed
         with patch(f"{_AUTOMATION}.dt_util.now", return_value=_DAY):
             _run(engine.check_natural_vent_conditions())
         return events

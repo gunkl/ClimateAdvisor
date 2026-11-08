@@ -811,13 +811,12 @@ class TestBriefingNotificationSplit:
         coord._get_hourly_forecast_data = AsyncMock(return_value=known)
         _bind_refresh_hourly_forecast(coord)
         coord._hourly_forecast_temps = []
-        coord.automation_engine._hourly_forecast_temps = None
 
         asyncio.run(coord._async_send_briefing(MagicMock()))
 
         coord._get_hourly_forecast_data.assert_awaited_once()
+        # Issue #1443: the coordinator's list is the only one (the engine reads it through its inputs provider).
         assert coord._hourly_forecast_temps is known
-        assert coord.automation_engine._hourly_forecast_temps is coord._hourly_forecast_temps
 
     @patch(
         "custom_components.climate_advisor.coordinator._build_future_forecast_outdoor",

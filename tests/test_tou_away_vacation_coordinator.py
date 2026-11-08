@@ -85,7 +85,7 @@ def _build_coordinator(occupancy_mode: str) -> ClimateAdvisorCoordinator:
     coord._tou_av_window_was_active = False
 
     ae = MagicMock()
-    ae._thermal_model = {}
+    coord._thermal_model = {}
     coord.automation_engine = ae
 
     for name in (
@@ -184,9 +184,9 @@ class TestTouAwayVacationTimer:
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now):
             coord._resolve_tou_schedule_state()
 
-        assert coord.automation_engine._tou_av_expansion_f > 0.0
-        assert coord.automation_engine._tou_av_active_schedule_id == "s1"
-        assert coord.automation_engine._tou_av_precondition_target is not None
+        assert coord._tou_av_window.expansion_f > 0.0
+        assert coord._tou_av_window.schedule_id == "s1"
+        assert coord._tou_av_window.precondition_target is not None
 
     def test_window_inactive_zeroes_engine_expansion(self) -> None:
         coord = _build_coordinator("away")
@@ -195,5 +195,5 @@ class TestTouAwayVacationTimer:
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now):
             coord._resolve_tou_schedule_state()
 
-        assert coord.automation_engine._tou_av_expansion_f == 0.0
-        assert coord.automation_engine._tou_av_active_schedule_id is None
+        assert coord._tou_av_window.expansion_f == 0.0
+        assert coord._tou_av_window.schedule_id is None

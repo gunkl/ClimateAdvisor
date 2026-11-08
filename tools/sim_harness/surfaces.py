@@ -318,7 +318,9 @@ def read_chart_band(session: Any) -> Shown | None:
     # Issue #1404: the band the chart DRAWS (the display band: a time-of-use bank hour shows the target the
     # thermostat is told), the same function get_chart_data() draws from.
     builder = getattr(coord, "_chart_display_band", None) or coord._build_target_band_for  # pre-#1404 trees
-    sched = builder(now, engine._thermal_model, hourly_forecast_override=hourly)
+    # Issue #1443: the coordinator owns the thermal model (pre-#1443 trees: the engine's copy).
+    model = coord._thermal_model if hasattr(engine, "inputs") else engine._thermal_model
+    sched = builder(now, model, hourly_forecast_override=hourly)
     previous = getattr(coord, "_target_band_schedule", None)
     coord._target_band_schedule = sched
     try:
@@ -476,7 +478,12 @@ def read_thermostat_hold(session: Any, armed: Armed) -> Shown | None:
         or getattr(e, "_fan_active", False)
         or coord._occupancy_restore_held()
         or getattr(e, "_tou_precondition_until", None) is not None
-        or getattr(e, "_tou_av_precondition_target", None) is not None
+        or (
+            e.inputs.tou_av_window().precondition_target  # Issue #1443: the coordinator's window, read via the engine
+            if hasattr(e, "inputs")
+            else getattr(e, "_tou_av_precondition_target", None)  # a pre-#1443 tree
+        )
+        is not None
         or coord._startup_coalesce_active
     ):
         return None

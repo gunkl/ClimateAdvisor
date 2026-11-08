@@ -99,8 +99,8 @@ def _arm_paused_reactivation(
     engine._nat_vent_soft_start = False
     engine._last_outdoor_temp = outdoor
     engine._nat_vent_outdoor_exit_time = None
-    engine._outdoor_temp_today_peak = outdoor_today_peak
-    engine._outdoor_temp_today_sample_count = outdoor_sample_count
+    engine.inputs.today_peak = outdoor_today_peak
+    engine.inputs.today_sample_count = outdoor_sample_count
 
 
 class TestSoftStartEntry:
@@ -196,8 +196,8 @@ class TestSoftStartUpgrade:
         engine._paused_by_door = False
         # outdoor now well below indoor - hysteresis(1.0) -> full gate clears
         engine._last_outdoor_temp = 70.0
-        engine._outdoor_temp_today_peak = 90.0
-        engine._outdoor_temp_today_sample_count = 5
+        engine.inputs.today_peak = 90.0
+        engine.inputs.today_sample_count = 5
 
         asyncio.run(engine.check_natural_vent_conditions())
 
@@ -211,8 +211,8 @@ class TestSoftStartUpgrade:
         engine._paused_by_door = False
         # outdoor still within the hysteresis gap -> full gate not yet satisfied
         engine._last_outdoor_temp = 75.5
-        engine._outdoor_temp_today_peak = 90.0
-        engine._outdoor_temp_today_sample_count = 5
+        engine.inputs.today_peak = 90.0
+        engine.inputs.today_sample_count = 5
 
         asyncio.run(engine.check_natural_vent_conditions())
 
@@ -233,8 +233,8 @@ class TestSoftStartUpgradeFsmAuthoritative:
         engine._nat_vent_soft_start = True
         engine._paused_by_door = False
         engine._last_outdoor_temp = 70.0
-        engine._outdoor_temp_today_peak = 90.0
-        engine._outdoor_temp_today_sample_count = 5
+        engine.inputs.today_peak = 90.0
+        engine.inputs.today_sample_count = 5
 
         asyncio.run(engine.check_natural_vent_conditions())
 
@@ -248,8 +248,8 @@ class TestSoftStartUpgradeFsmAuthoritative:
         engine._nat_vent_soft_start = True
         engine._paused_by_door = False
         engine._last_outdoor_temp = 75.5
-        engine._outdoor_temp_today_peak = 90.0
-        engine._outdoor_temp_today_sample_count = 5
+        engine.inputs.today_peak = 90.0
+        engine.inputs.today_sample_count = 5
 
         asyncio.run(engine.check_natural_vent_conditions())
 

@@ -288,7 +288,7 @@ class TestCeilingEscalationUsesDecisionSnapshot:
     def test_escalation_with_indoor_vanishing_uses_snapshot(self):
         engine = _make_engine()
         engine._natural_vent_active = True
-        engine._thermal_model = {"k_passive": -0.1, "confidence_k_passive": "high", "k_active_cool": 4.0}
+        engine.inputs.thermal = {"k_passive": -0.1, "confidence_k_passive": "high", "k_active_cool": 4.0}
         engine._last_outdoor_temp = 12.3  # must NOT leak into the payload
         engine._get_indoor_temp_f = MagicMock(return_value=None)
         engine._deactivate_fan = AsyncMock(return_value=_automation_mod.FanCommandResult.EXECUTED)

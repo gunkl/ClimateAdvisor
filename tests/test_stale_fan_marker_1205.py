@@ -78,7 +78,7 @@ class _Home:
         engine = _make_engine(indoor=72.0, mode="cool", **{CONF_FAN_MODE: fan_mode}, **config)
         engine._test_state.attributes["fan_modes"] = ["auto", "on"]
         engine._last_outdoor_temp = 65.0  # mild day: outdoor < indoor, plain nat-vent entry gate satisfied
-        engine._hourly_forecast_temps = []
+        engine.inputs.hourly_forecast = []
         engine._current_classification = _classification("mild")
         self.window_open = True
         engine._sensor_check_callback = lambda: self.window_open

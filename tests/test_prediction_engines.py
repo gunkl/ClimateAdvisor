@@ -75,7 +75,7 @@ def test_v3_and_v4_are_registered_with_the_contract() -> None:
 def test_v3_adapter_reads_the_learning_state_and_the_logged_archive() -> None:
     v3 = pe.ENGINES["v3"]
     src = SimpleNamespace(
-        automation_engine=SimpleNamespace(_thermal_model={"confidence": "medium"}),
+        _thermal_model={"confidence": "medium"},  # Issue #1443: the coordinator owns the model
         _last_predicted_indoor=[{"ts": NOW.isoformat(), "temp": 70.5}],
         _pred_archive={1800: 69.0, 99999999999: 1.0},
     )
@@ -213,7 +213,7 @@ def test_engine_state_primary_learning_then_ready_and_text() -> None:
     src = SimpleNamespace(
         _v4_store=SimpleNamespace(v4_model=None),
         _v4_fit_running=False,
-        automation_engine=SimpleNamespace(_thermal_model={"confidence": "medium"}),
+        _thermal_model={"confidence": "medium"},  # Issue #1443: the coordinator owns the model
     )
     s = pe.engine_state(src, {})
     assert s["fallback"] and s["primary_state"] == "learning"
@@ -225,7 +225,7 @@ def test_engine_state_primary_learning_then_ready_and_text() -> None:
     assert not s["fallback"] and s["text"] == "" and s["primary_state"] == "ready"
     # v3 as primary with a mature model is ready; with no thermal model it is learning (its own ramp fallback)
     assert pe.engine_state(src, {"primary_engine": "v3"})["primary_state"] == "ready"
-    src.automation_engine._thermal_model = {}
+    src._thermal_model = {}
     assert pe.engine_state(src, {"primary_engine": "v3"})["fallback"] is True
     # the other engine is never substituted: v3 being mature does not make a learning v4 "ready"
     src._v4_store.v4_model = None

@@ -153,7 +153,7 @@ class TestCoordinatorFreeze:
         assert _cycle(coord, _dt(15), 77.0).target == 77.0  # unfrozen: 76
         res = _cycle(coord, _dt(17), 77.0)  # inside the period
         assert res.expansion_f == 2.0  # unfrozen: 3
-        assert coord.automation_engine._tou_av_expansion_f == 2.0  # what the band write widens by
+        assert coord._tou_av_window.expansion_f == 2.0  # what the band write widens by
 
     def test_not_frozen_before_the_window_opens(self):
         coord = _coord()

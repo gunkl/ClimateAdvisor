@@ -101,8 +101,8 @@ def test_reactivation_profile_applies_the_lockout_but_the_grace_recheck_does_not
 
 def test_soft_start_profile_flag_and_config_switch():
     engine = _engine(mode="cool", indoor=80.0, outdoor=79.0)
-    engine._outdoor_temp_today_peak = 85.0
-    engine._outdoor_temp_today_sample_count = 20
+    engine.inputs.today_peak = 85.0
+    engine.inputs.today_sample_count = 20
     kwargs = {"indoor": 80.0, "outdoor": 79.0}
     assert _decide(engine, NAT_VENT_START_IDLE_OPEN, **kwargs).to_state == NatVentLifecycleState.ACTIVE_SOFT_START
     no_soft = NatVentStartProfile("no_soft", soft_start=False, live_lifecycle_state=True)
@@ -113,7 +113,7 @@ def test_soft_start_profile_flag_and_config_switch():
 
 def test_helper_returns_the_veto_when_a_start_rule_refuses():
     engine = _engine()
-    engine._hourly_forecast_temps = [{"temperature": 95.0, "datetime": "2026-10-28T15:00:00+00:00"}]
+    engine.inputs.hourly_forecast = [{"temperature": 95.0, "datetime": "2026-10-28T15:00:00+00:00"}]
     transition = _decide(engine, NAT_VENT_START_WINDOW_OPEN)
     assert transition.to_state == NatVentLifecycleState.INACTIVE
     assert transition.veto is not None

@@ -386,7 +386,7 @@ class TestHomeAssistantStopEndsCommands:
         self._stop(coord)
 
         assert coord._ha_stopping is True
-        assert coord.automation_engine._ha_stopping is True
+        coord.automation_engine.mark_ha_stopping.assert_called_once_with()  # Issue #1443: the engine latches itself
 
     def test_stopping_refuses_the_update_cycle(self):
         coord = _make_coord_stub()

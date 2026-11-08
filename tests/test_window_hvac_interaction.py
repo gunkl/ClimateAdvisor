@@ -27,6 +27,7 @@ from custom_components.climate_advisor import automation as _ae_mod
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import OCCUPANCY_HOME
+from custom_components.climate_advisor.engine_inputs import StaticEngineInputs  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -92,8 +93,7 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._current_classification = _make_hot_classification()
     ae._natural_vent_active = False
     ae._nat_vent_soft_start = False
-    ae._hourly_forecast_temps = []
-    ae._thermal_model = {}
+    ae._inputs = StaticEngineInputs()  # Issue #1443: the facts the engine reads (empty forecast/model/peak)
     ae._economizer_active = False
     ae._economizer_phase = "inactive"
     ae._paused_by_door = False
@@ -106,8 +106,6 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     # reads _occupancy_mode — previously only exercised when a test explicitly
     # set _natvent_fsm_authoritative=True.
     ae._occupancy_mode = OCCUPANCY_HOME
-    ae._outdoor_temp_today_peak = None
-    ae._outdoor_temp_today_sample_count = 0
     ae._nat_vent_outdoor_exit_time = None
     ae._grace_active = False
     ae._grace_churn_starts = {}  # Issue #1104: grace_churn tracking (set by __init__ in production)

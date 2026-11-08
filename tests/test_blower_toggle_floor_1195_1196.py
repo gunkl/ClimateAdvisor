@@ -47,7 +47,7 @@ def _blower_engine(*, mode: str = "off", sensor_open: bool = False, **cfg) -> Au
     engine = _make_engine(indoor=72.0, mode=mode, **{CONF_FAN_MODE: FAN_MODE_HVAC, **cfg})
     engine._test_state.attributes["fan_modes"] = ["auto", "on"]
     engine._last_outdoor_temp = 65.0
-    engine._hourly_forecast_temps = []
+    engine.inputs.hourly_forecast = []
     engine._current_classification = _classification("mild")
     engine._sensor_check_callback = lambda: sensor_open
     engine._sensor_debounce_pending_callback = lambda: False

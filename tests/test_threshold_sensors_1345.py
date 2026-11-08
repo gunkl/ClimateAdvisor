@@ -31,6 +31,7 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
     VACATION_SETBACK_EXTRA,
 )
+from custom_components.climate_advisor.engine_inputs import TouAvWindow  # noqa: E402
 from custom_components.climate_advisor.sensor import (  # noqa: E402
     ClimateAdvisorCoolThresholdSensor,
     ClimateAdvisorHeatThresholdSensor,
@@ -69,7 +70,7 @@ def _coordinator(
         None if no_classification else (classification if classification is not None else _make_classification())
     )
     ae = MagicMock()
-    ae._tou_av_expansion_f = tou_expansion_f
+    ae._active_tou_av_window.return_value = TouAvWindow(expansion_f=tou_expansion_f)
     coord.automation_engine = ae
     return coord
 
@@ -101,7 +102,7 @@ def _api(coord, now, unit: str = "fahrenheit"):
     cfg = {**coord.config, "temp_unit": unit}
     kwargs = {
         "occupancy_mode": coord._occupancy_mode,
-        "tou_expansion_f": coord.automation_engine._tou_av_expansion_f,
+        "tou_expansion_f": coord.automation_engine._active_tou_av_window().expansion_f,
     }
     if coord.current_classification is None:
         kwargs["no_classification"] = True

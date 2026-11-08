@@ -336,7 +336,6 @@ class TestCoordinatorWiring:
         coord._forecast_archive.record.side_effect = RuntimeError("boom")
         asyncio.run(coord._refresh_hourly_forecast())  # must not raise
         assert coord._hourly_forecast_temps is fetched
-        assert coord.automation_engine._hourly_forecast_temps is fetched
 
     def test_save_failure_in_executor_never_breaks_the_cycle(self, tmp_path, frozen_now):
         frozen_now(T0)

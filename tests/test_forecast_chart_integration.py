@@ -157,7 +157,7 @@ def _make_full_chart_coord(*, daily_forecast_full: list[dict] | None, temp_unit:
     coord._thermal_factors = None
 
     ae = MagicMock()
-    ae._thermal_model = None
+    coord._thermal_model = None
     ae._manual_override_active = False
     ae._manual_override_mode = None
     ae._natural_vent_active = False

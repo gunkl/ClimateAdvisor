@@ -660,7 +660,7 @@ class TestGraceExpiryRecheck:
         climate_state.state = "off"
         climate_state.attributes.get.return_value = 78.0
         engine.hass.states.get.return_value = climate_state
-        engine._hourly_forecast_temps = []
+        engine.inputs.hourly_forecast = []
 
         asyncio.run(engine._re_pause_for_open_sensor())
 
@@ -768,7 +768,7 @@ class TestGraceExpiryRecheckFsmAuthoritative:
         climate_state.state = "off"
         climate_state.attributes.get.return_value = 78.0
         engine.hass.states.get.return_value = climate_state
-        engine._hourly_forecast_temps = []
+        engine.inputs.hourly_forecast = []
         return engine
 
     def test_reactivates_via_nat_vent_fsm_when_authoritative(self):
@@ -835,7 +835,7 @@ class TestRePauseActivationRateLimitGuard:
         climate_state.state = "off"
         climate_state.attributes.get.return_value = 78.0
         engine.hass.states.get.return_value = climate_state
-        engine._hourly_forecast_temps = []
+        engine.inputs.hourly_forecast = []
         engine._natvent_fsm_authoritative = True
         return engine
 

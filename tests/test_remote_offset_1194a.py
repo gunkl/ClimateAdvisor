@@ -379,21 +379,21 @@ class TestHeatLoop:
 class TestSwingSource:
     def test_learned_swing_sets_hysteresis(self):
         env = Env(bedroom_f=65.3)  # gap 0.7
-        env.engine._thermal_model = {"swing_heat_f": 0.59}
+        env.engine.inputs.thermal = {"swing_heat_f": 0.59}
         env.write(66.0)
         env.check()
         assert env.sp_f() == [66.0, 68.0]  # 0.7 > 0.59
 
     def test_default_swing_when_unlearned(self):
         env = Env(bedroom_f=65.3)
-        env.engine._thermal_model = {"swing_heat_f": None}
+        env.engine.inputs.thermal = {"swing_heat_f": None}
         env.write(66.0)
         env.check()
         assert env.sp_f() == [66.0]  # 0.7 < 1.5 default
 
     def test_missing_model_uses_default(self):
         env = Env(bedroom_f=65.3)
-        env.engine._thermal_model = {}
+        env.engine.inputs.thermal = {}
         env.write(66.0)
         env.check()
         assert env.sp_f() == [66.0]

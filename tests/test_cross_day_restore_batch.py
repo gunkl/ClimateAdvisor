@@ -209,7 +209,6 @@ class TestKeptForecastAndPredArchive1359:
         coord = _restore(_base(saved_date, kept_forecast={"daily": daily, "hourly": hourly}))
         assert coord._daily_forecast_full == daily
         assert [e["temperature"] for e in coord._hourly_forecast_temps] == [52.0, 58.0]
-        assert coord.automation_engine._hourly_forecast_temps == coord._hourly_forecast_temps
 
     @_CROSS_DAY
     def test_pred_archive_kept_and_week_old_entries_dropped(self, saved_date):

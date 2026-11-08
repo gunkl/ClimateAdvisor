@@ -138,8 +138,7 @@ async def test_soft_start_evening_gets_no_hvac_paused_message(make_house) -> Non
     coordinator._outdoor_temp_history = [(now.isoformat(), t) for t in (84.0, 85.0, 84.0, 83.0, 82.0)] + list(
         coordinator._outdoor_temp_history
     )
-    engine._outdoor_temp_today_peak = 85.0
-    engine._outdoor_temp_today_sample_count = len(coordinator._outdoor_temp_history)
+    # Issue #1443: the engine reads today's peak (85) and sample count live from this buffer; no engine mirror to set.
     sent: list[tuple[str, str]] = []
     real_notify = engine._notify
 

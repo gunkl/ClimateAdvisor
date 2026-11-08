@@ -60,7 +60,7 @@ def _no_fan_engine(*, mode: str = "cool", indoor: float = 72.0, outdoor: float =
     """Same mild-day set-up as ``_engine()`` but with NO fan configured (fan_mode defaults to disabled)."""
     engine = _make_engine(indoor=indoor, mode=mode)
     engine._last_outdoor_temp = outdoor
-    engine._hourly_forecast_temps = []
+    engine.inputs.hourly_forecast = []
     engine._current_classification = _classification("mild")
     engine._sensor_check_callback = lambda: True
     engine._sensor_debounce_pending_callback = lambda: False
@@ -327,8 +327,8 @@ class TestGuardsHoldOnEveryStartSite:
         assert engine._paused_by_door is True
         assert "nat_vent_reactivated_while_paused" not in [n for n, _ in events]
         # re-evaluated every tick: the forecast peak ages out / the estimate moves -> next tick starts
-        engine._hourly_forecast_temps = []
-        engine._thermal_model = {}
+        engine.inputs.hourly_forecast = []
+        engine.inputs.thermal = {}
         _tick(engine)
         assert _fan_started(engine)
         assert engine._paused_by_door is False
@@ -339,8 +339,8 @@ class TestGuardsHoldOnEveryStartSite:
         guard(engine)
         _tick(engine)
         assert not _fan_started(engine)
-        engine._hourly_forecast_temps = []
-        engine._thermal_model = {}
+        engine.inputs.hourly_forecast = []
+        engine.inputs.thermal = {}
         _tick(engine)
         assert _fan_started(engine)
 

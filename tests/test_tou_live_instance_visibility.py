@@ -88,7 +88,6 @@ def _build_coordinator(hvac_mode: str) -> ClimateAdvisorCoordinator:
     ae._manual_override_active = False
     ae._override_confirm_pending = False
     ae._grace_end_time = None
-    ae._thermal_model = {}
     ae._is_within_planned_window_period = MagicMock(return_value=False)
     coord.automation_engine = ae
     coord._any_sensor_open = MagicMock(return_value=False)

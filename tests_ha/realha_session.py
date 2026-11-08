@@ -409,17 +409,29 @@ class RealHASession:
         coordinator._schedule_refresh = lambda: None  # production reads update_interval as a timedelta; keep it set
 
     def _apply_injected_inputs(self) -> None:
-        """Optional ODE inputs the scenario supplies (set on the live engine, as FakeHass does)."""
+        """Optional ODE inputs the scenario supplies, seeded into the COORDINATOR, as Tier A does (Issue #1440/#1443).
+
+        The coordinator is the single owner of the thermal model and the hourly forecast; the engine reads them live
+        through its read-only inputs provider and holds no copy. Before #1440 this seeded only the engine's forecast
+        copy (the coordinator's only for ``v4_model`` scenarios), so the coordinator's first refresh pushed its empty
+        list over it and the plan, which the coordinator builds from its own list, never saw the scenario forecast.
+        Seeding the owner gives real HA the input Tier A has; the refresh then keeps the still-future hours (#1337).
+        """
+        if not hasattr(self.engine, "inputs"):
+            # A pre-#1443 tree (scripts/revert_proof.py runs this adapter against old custom_components): its engine
+            # still reads its own copies, so they are seeded too, as Tier A did then. Never runs against this tree.
+            if isinstance(self.scenario.get("thermal_model"), dict):
+                self.engine._thermal_model = self.scenario["thermal_model"]
+            if isinstance(self.scenario.get("hourly_forecast"), list):
+                self.engine._hourly_forecast_temps = self.scenario["hourly_forecast"]
         if isinstance(self.scenario.get("thermal_model"), dict):
-            self.engine._thermal_model = self.scenario["thermal_model"]
+            self.coordinator._thermal_model = self.scenario["thermal_model"]
             pin_scenario_thermal_model(self.coordinator, self.scenario["thermal_model"])
         if isinstance(self.scenario.get("hourly_forecast"), list):
-            self.engine._hourly_forecast_temps = self.scenario["hourly_forecast"]
-        # Issue #1230 R6b: the zone's fitted v4 model + its forecast
+            self.coordinator._hourly_forecast_temps = self.scenario["hourly_forecast"]
+        # Issue #1230 R6b: the zone's fitted v4 model
         if isinstance(self.scenario.get("v4_model"), dict):
             pin_scenario_v4_model(self.coordinator, self.scenario["v4_model"])
-            if isinstance(self.scenario.get("hourly_forecast"), list):
-                self.coordinator._hourly_forecast_temps = self.scenario["hourly_forecast"]
 
     # ------------------------------------------------------------- Session API
     def now(self) -> datetime:

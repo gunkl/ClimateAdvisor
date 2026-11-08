@@ -303,6 +303,24 @@ def snapshot_engine_state(engine: Any) -> dict[str, Any]:
     return snap
 
 
+def run_planning_step(coordinator: Any) -> None:
+    """The cycle's planning step (``coordinator._timeline_shadow_run("cycle")``), run before the occupant surfaces are
+    read (Issue #1436 mirror audit, test-infrastructure change).
+
+    Semantic justification: the capture (and the P8 probe) read the surfaces, and until #1436 production's surface READ
+    rebuilt the plan whenever its last run was over two minutes old, so a capture always saw a plan built at that
+    moment. That read-builds-the-plan behaviour was the bug (a mid-cycle read latched the plan from half-updated
+    inputs); production now builds the plan only in its planning steps, and Tier A runs no 30-minute cycle at all. So
+    the harness runs production's own planning step, exactly as the cycle does just before it computes the surfaces
+    (``_async_update_data_impl``), then reads. Could this let a real failure pass silently? It cannot hide a read that
+    builds the plan (the unit tests pin that no read path reaches a build); it does mean a capture sees a plan as fresh
+    as the cycle right after the last event, which is what the occupant reads on the dashboard after that cycle.
+    The plan commands nothing (``tests/test_operation_timeline_structural.py``), so running it never changes the run.
+    """
+    if hasattr(coordinator, "_timeline_shadow_run"):
+        coordinator._timeline_shadow_run("cycle")
+
+
 def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[str, Any]:
     """The surfaces an occupant reads, for the run's final state (Issue #1276; extended by Issue #1230 R3b).
 
@@ -321,6 +339,7 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
     ``sensor_swap`` and ``has_resume_step``. Existing keys are unchanged.
     """
     updates = [e for e in sorted_events(scenario) if e.get("type") == "temp_update" and "outdoor_f" in e]
+    run_planning_step(coordinator)
     windows_open = coordinator._any_sensor_open()
     text = coordinator._compute_next_action(
         coordinator._current_classification,
@@ -390,7 +409,21 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
     # Status, the thresholds (ca_target_heat/cool, the reading cards), the briefing's HVAC Mode row, the chart band now,
     # Next Automation and the plan list's "Now" row tell the same story as the thermostat writes.
     out["hold"] = _capture_hold(coordinator, engine)
+    # Issue #1436 (additive): the chart's future activity strips against the plan (``strip_check``): the strips the
+    # timeline payload hands the chart, the chart payload's predicted_activity hours, and the P8 verdict on both.
+    out["chart_strips"] = _capture_chart_strips(coordinator, updates)
     return out
+
+
+def _capture_chart_strips(coordinator: Any, updates: list[dict]) -> dict[str, Any] | None:
+    from homeassistant.util import dt as _dt  # noqa: PLC0415
+
+    from tools.sim_harness.strip_check import check_coordinator  # noqa: PLC0415
+
+    try:
+        return check_coordinator(coordinator, _dt.now(), float(updates[-1]["outdoor_f"]) if updates else None)
+    except Exception as exc:  # noqa: BLE001 - a capture never breaks the run; the golden sees the error
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def _capture_hold(coordinator: Any, engine: Any) -> dict[str, Any]:

@@ -81,7 +81,7 @@ def test_on_edge_after_the_window_following_a_restart_is_sampled(tmp_path, mode)
     rig.fire(t_on, action=_MODES[mode]["running"], indoor=_past(mode, sp, 1.4))
     rig.fire(t_on + timedelta(minutes=8), action="idle", indoor=_past(mode, sp, 0.2))
     assert rig.count == 1
-    assert rig.swing == pytest.approx(1.4)
+    assert rig.swing == 1.5 and rig.raw == pytest.approx(1.4)  # Issue #1477: stored = raw rounded up to 0.5
 
 
 def test_async_setup_stamps_before_the_thermostat_listener_exists():

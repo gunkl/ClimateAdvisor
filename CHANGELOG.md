@@ -10,6 +10,22 @@ Developer tooling only: nothing changes in the home, and Climate Advisor behaves
 - Fix #1480: `python scripts/test.py ha` can now run all of CI's real-HA slices at once with `CA_HA_SHARDS=N` (one pytest process per slice, each with `CA_HA_WORKERS` workers, output prefixed `[K/N]`, each slice's time at the end, a failure if any slice fails). The slices are the same as CI's `ha-real (K/4)` jobs. On the 24-core dev machine the fastest full real-HA run is still one process, `CA_HA_WORKERS=8` (about 90 s); `CA_HA_SHARDS=4 CA_HA_WORKERS=2` runs CI's four slices in about the same time. Setting both `CA_HA_SHARDS` and `CA_HA_SHARD` (or `CA_UNIT_SHARDS` and `CA_UNIT_SHARD`) is now refused instead of one being silently ignored.
 - Fix #1481: the repository no longer tracks a `node_modules` link that pointed into one developer's worktree, and `.gitignore` now ignores `node_modules` when it is a link. A checkout that had its own `node_modules` link can merge `main` again. A checkout that only had the tracked link loses it when it updates: re-create it (`ln -s <your node_modules> node_modules`) or run `npm install`.
 
+## [0.9.17] — 2026-11-08
+
+- Fix #1477: the heat and cool "swing" Climate Advisor learns (how far past the setpoint your thermostat lets the room drift before it starts the heat or AC) now comes from your finest temperature readings and is rounded up to the next half degree.
+  - **What you'll notice:** on a thermostat that starts the heat about 1.44 °F below its setpoint, the Thermal model card and the Analysis tab now say "1.5 °F (measured 1.44 °F) below setpoint" instead of 1.0 °F. On a Celsius install the same swing reads "0.83 °C (measured 0.80 °C)".
+  - **Two values, each where it fits (owner decision):** the bedroom loop at night acts on your comfort, so it uses the measured swing (1.44 °F). Comfort alerts and the thermostat model use the rounded-up swing (1.5 °F), so fewer false comfort alerts.
+  - **Why it was stuck at 1.0 °F:** the learned value was the middle of the last 15 heat starts. Five older starts had been read on the thermostat's whole-degree display (1.0 °F each). Only two had been read on its finer sensor (1.44 °F each). Now, when finer readings are among the recent starts, they decide; whole-degree starts count again once no finer one is left among them.
+  - **Rounding:** the value is always rounded up to the next half degree °F (1.44 → 1.5, 1.0 stays 1.0, 1.01 → 1.5). A swing that is too small makes Climate Advisor expect the heat or AC sooner than your thermostat really starts it. The 1.5 °F default before anything is learned is unchanged.
+  - **Takes effect at once:** the stored value is recomputed from the recent starts when Climate Advisor loads, without waiting for the next heating or cooling run.
+  - **What changes at home, thermostat in heat (the swing was 1.0 °F before):**
+    - **Bedroom at night (measured swing, 1.44 °F):** Climate Advisor raises the hallway setpoint for the bedroom once the bedroom is more than 1.44 °F below its target (was 1.0 °F), and lowers it again once the bedroom is more than 1.44 °F past the target.
+    - **Comfort alerts:** a room up to 1.5 °F under the bottom of your comfort range is now treated as the thermostat's own drift, not a comfort problem.
+    - **Window suggestions:** outdoor air that would cool the house is no longer suggested while the house is within 1.5 °F of the bottom of the range.
+  - **Cooling:** the cool swing works the same way. It is still at its 1.5 °F default on a home that has not cooled since swing learning began. It learns at the first real cooling runs, including on thermostats that use a heat/cool range.
+  - **Plan list:** when a direction has not been learned yet, the Next 24 hours plan now uses the same 1.5 °F default as everything else (it used 1.0 °F).
+  - **Tools:** `tools/thermal_replay.py --chart-log` reads each past run at the precision it was recorded with, so it learns the same value as the integration. `tools/learning_db.py --swing` and the AI context show the median before rounding next to the stored value.
+
 ## [0.9.16] — 2026-11-08
 
 - Fix #1474: the night setback is now recorded. Since v0.3.48 the bedtime routine wrote whether it applied a setback (and how deep) or skipped it (and why) into a copy of the daily record that was never connected to the one Climate Advisor saves, so every night was blank and the Analysis tab always read "none". Bookkeeping only: the setback itself ran as before. Nights before this release show "not recorded".

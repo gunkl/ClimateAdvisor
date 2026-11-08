@@ -18,6 +18,7 @@ dependency-free (no Home Assistant import) and loadable as a standalone file by 
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,6 +39,8 @@ try:
         THERMAL_SWING_MAX_F,
         THERMAL_SWING_MIN_F,
         THERMAL_SWING_REARM_WINDOW_S,
+        THERMAL_SWING_ROUND_STEP_F,
+        THERMAL_SWING_ROUND_TOLERANCE_F,
         THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S,
         THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F,
     )
@@ -61,6 +64,8 @@ except ImportError:  # loaded as a standalone file by tools/ (the package __init
     THERMAL_SWING_MIN_F = _const.THERMAL_SWING_MIN_F
     THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S = _const.THERMAL_SWING_SETPOINT_CHANGE_WINDOW_S
     THERMAL_SWING_REARM_WINDOW_S = _const.THERMAL_SWING_REARM_WINDOW_S
+    THERMAL_SWING_ROUND_STEP_F = _const.THERMAL_SWING_ROUND_STEP_F
+    THERMAL_SWING_ROUND_TOLERANCE_F = _const.THERMAL_SWING_ROUND_TOLERANCE_F
     THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F = _const.THERMAL_SWING_WHOLE_DEGREE_RESOLUTION_F
 
 SWING_MODES = ("heat", "cool")
@@ -241,6 +246,18 @@ def infer_resolution_f(readings: list[float | None], unit: str | None = None) ->
     vals = sorted({round(float(r), 2) for r in readings if r is not None})
     if len(vals) < _MIN_DISTINCT_READINGS_FOR_RESOLUTION:
         return None
+    return grid_resolution_f(vals, unit)
+
+
+def grid_resolution_f(readings: list[float | None], unit: str | None = None) -> float:
+    """The coarsest reading grid every one of ``readings`` sits on (degF; 0.0 = on none, i.e. fine).
+
+    The grid test of ``infer_resolution_f`` without its distinct-readings bar - for a caller that already knows
+    the readings are a sample of a source proven finer elsewhere (``thermal_replay``, Issue #1477). Empty -> 0.0.
+    """
+    vals = [float(r) for r in readings if r is not None]
+    if not vals:
+        return 0.0
     units = (unit,) if unit in _RESOLUTION_GRIDS else ("fahrenheit", "celsius")
     for u in units:
         native = vals if u == "fahrenheit" else [(v - 32.0) / 1.8 for v in vals]
@@ -268,26 +285,109 @@ def merge_swing_samples(
     return merged[-cap:], added
 
 
-def summarize_swing_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    """Estimator: median of the last K samples, plus the interval half-width and off-point.
+def round_swing_up_f(value: float | None) -> float | None:
+    """The stored and used swing: ``value`` rounded UP to the next half degree F (Issue #1477).
 
-    ``resolution_f`` is inferred from the window's own on/off readings in the unit the thermostat
-    reports (``infer_resolution_f``); only when there are too few distinct readings does it fall
-    back to the worst SOURCE-implied resolution recorded on the samples. ``value_f`` of a
-    quantised window is ``setpoint - k``; the true hysteresis lies within +/- resolution/2.
+    ``ceil(x * 2) / 2``: 1.44 -> 1.5, 1.0 -> 1.0, 1.01 -> 1.5, 1.5 -> 1.5. ``THERMAL_SWING_ROUND_TOLERANCE_F``
+    keeps float noise (1.0000001) from rounding a whole half degree up. Owner decision 2026-11-08: a swing that is
+    too small makes CA expect the heat or AC sooner than the thermostat starts, so err upward. Always degF; a
+    Celsius display converts the result as a delta (x 5/9, no offset). ``None`` stays ``None``.
+    """
+    if value is None:
+        return None
+    step = THERMAL_SWING_ROUND_STEP_F
+    return round(math.ceil((float(value) - THERMAL_SWING_ROUND_TOLERANCE_F) / step) * step, 2)
+
+
+def measured_swing_f(thermal: Any, mode: str) -> float:
+    """The MEASURED swing for ``mode`` (degF): the unrounded median, for a consumer that acts on comfort.
+
+    Owner decision 2026-11-08 (Issue #1477, PR #1482): "i want the bedroom loop on the measured swing, and the
+    incident detection on the rounded up swing". The bedroom outer loop (#1194) and its night-strategy emulation
+    read this; every detector and thermostat-model use reads the rounded ``swing_{mode}_f``.
+
+    ``swing_{mode}_raw_f`` when known; else ``swing_{mode}_f`` (a value with no retained samples - e.g. a cache
+    written before 0.9.17 or a scenario's thermal model - is the only measurement there is); else, with no
+    samples at all, ``THERMAL_SWING_DEFAULT_F`` (1.5 F), the same default the rounded value falls back to.
+    """
+    if isinstance(thermal, dict):
+        for key in (f"swing_{mode}_raw_f", f"swing_{mode}_f"):
+            v = thermal.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 < v < float("inf"):
+                return float(v)
+    return THERMAL_SWING_DEFAULT_F
+
+
+def _sample_resolution(sample: dict[str, Any]) -> float | None:
+    """The reading granularity recorded on one sample (degF; 0.0 = fine), or ``None`` when unknown."""
+    r = sample.get("resolution_f")
+    if isinstance(r, bool) or not isinstance(r, (int, float)) or r < 0:
+        return None
+    return float(r)
+
+
+def _readings(samples: list[dict[str, Any]]) -> list[float | None]:
+    return [s.get(k) for s in samples for k in ("on_indoor_f", "off_indoor_f")]
+
+
+def finest_resolution_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The samples the estimator uses: the finest-resolution ones in ``samples`` (Issue #1477).
+
+    A whole-degree sample only says the true swing lies within +/- 0.5 of its reading (``setpoint - k``), so
+    when finer samples are in the window they decide and the coarse ones sit out: on Zone 1, five 1.0 samples
+    from the thermostat's whole-degree display out-voted two 1.44 readings of its finer sensor. Nothing is
+    dropped from the stored window, so the rule is reversible: the coarse samples are used again as soon as no
+    finer one is left in the window. A window of one resolution is returned unchanged; so is a "finer" tier
+    whose own readings turn out to be no finer than the rest (``infer_resolution_f``), e.g. a configured
+    sensor that reports whole degrees. Samples with no recorded resolution count as the coarsest.
+    """
+    known = [r for r in (_sample_resolution(s) for s in samples) if r is not None]
+    if not known:
+        return samples
+    finest = min(known)
+    tier = [s for s in samples if (r := _sample_resolution(s)) is not None and r <= finest + 1e-6]
+    if len(tier) == len(samples):
+        return samples
+    coarser = [r for r in known if r > finest + 1e-6]
+    inferred = infer_resolution_f(_readings(tier), tier[-1].get("reading_unit"))
+    if coarser and inferred is not None and inferred >= min(coarser) - 1e-6:
+        return samples
+    return tier
+
+
+def summarize_swing_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    """Estimator: the half-degree-up median of the window's finest samples, plus resolution and off-point.
+
+    The window is the last ``THERMAL_SWING_ESTIMATOR_WINDOW`` samples; of those, only the finest-resolution
+    ones are used (``finest_resolution_samples``, Issue #1477). ``raw_value_f`` is their median; ``value_f``
+    (what is stored and used) is that median rounded up to the next half degree (``round_swing_up_f``).
+    ``resolution_f`` is inferred from the used samples' own on/off readings in the unit the thermostat reports
+    (``infer_resolution_f``); only when there are too few distinct readings does it fall back to the worst
+    SOURCE-implied resolution recorded on them. ``n_used`` / ``n_window`` say how many samples decided.
     """
     window = samples[-THERMAL_SWING_ESTIMATOR_WINDOW:]
     if not window:
-        return {"value_f": None, "resolution_f": 0.0, "off_point_f": None}
-    values = [s["value_f"] for s in window]
-    readings = [s.get(k) for s in window for k in ("on_indoor_f", "off_indoor_f")]
-    inferred = infer_resolution_f(readings, window[-1].get("reading_unit"))
-    resolution = inferred if inferred is not None else max(float(s.get("resolution_f", 0.0) or 0.0) for s in window)
-    offs = [s["off_point_f"] for s in window if s.get("off_point_f") is not None]
+        return {
+            "value_f": None,
+            "raw_value_f": None,
+            "resolution_f": 0.0,
+            "off_point_f": None,
+            "n_used": 0,
+            "n_window": 0,
+        }
+    used = finest_resolution_samples(window)
+    values = [s["value_f"] for s in used]
+    inferred = infer_resolution_f(_readings(used), used[-1].get("reading_unit"))
+    resolution = inferred if inferred is not None else max(float(s.get("resolution_f", 0.0) or 0.0) for s in used)
+    offs = [s["off_point_f"] for s in used if s.get("off_point_f") is not None]
+    raw = round(median(values), 2)
     return {
-        "value_f": round(median(values), 2),
+        "value_f": round_swing_up_f(raw),
+        "raw_value_f": raw,
         "resolution_f": resolution,
         "off_point_f": round(median(offs), 2) if offs else None,
+        "n_used": len(used),
+        "n_window": len(window),
     }
 
 
@@ -295,23 +395,52 @@ def _prefix(mode: str) -> str:
     return "swing_heat" if mode == "heat" else "swing_cool"
 
 
+def _store_swing_summary(cache: dict[str, Any], mode: str, samples: list[dict[str, Any]]) -> None:
+    p = _prefix(mode)
+    summary = summarize_swing_samples(samples)
+    cache[f"{p}_samples"] = samples
+    cache[f"{p}_f"] = summary["value_f"]
+    cache[f"{p}_raw_f"] = summary["raw_value_f"]
+    cache[f"{p}_resolution_f"] = summary["resolution_f"]
+    cache[f"{p}_off_point_f"] = summary["off_point_f"]
+
+
 def apply_swing_samples(cache: dict[str, Any], mode: str, new_samples: list[dict[str, Any]]) -> int:
     """Fold accepted samples into a thermal_model_cache dict (live and replay share this).
 
-    Updates ``swing_{mode}_f`` (the median), ``swing_{mode}_samples`` (the retained window),
-    ``swing_{mode}_resolution_f``, ``swing_{mode}_off_point_f`` and
-    ``observation_count_swing_{mode}``. Returns the number of NEW samples added.
+    Updates ``swing_{mode}_f`` (the half-degree-up median of the finest samples, Issue #1477),
+    ``swing_{mode}_raw_f`` (that median before rounding), ``swing_{mode}_samples`` (the retained window),
+    ``swing_{mode}_resolution_f``, ``swing_{mode}_off_point_f`` and ``observation_count_swing_{mode}``.
+    Returns the number of NEW samples added.
     """
     p = _prefix(mode)
     merged, added = merge_swing_samples(cache.get(f"{p}_samples"), new_samples)
-    summary = summarize_swing_samples(merged)
-    cache[f"{p}_samples"] = merged
-    cache[f"{p}_f"] = summary["value_f"]
-    cache[f"{p}_resolution_f"] = summary["resolution_f"]
-    cache[f"{p}_off_point_f"] = summary["off_point_f"]
+    _store_swing_summary(cache, mode, merged)
     cache[f"observation_count_{p}"] = int(cache.get(f"observation_count_{p}", 0) or 0) + added
     cache["swing_definition_version"] = THERMAL_SWING_DEFINITION_VERSION
     return added
+
+
+def refresh_swing_cache(cache: dict[str, Any]) -> list[str]:
+    """Recompute each mode's stored swing from its retained samples with the current estimator (Issue #1477).
+
+    Called on load so a value stored by an older estimator (e.g. Zone 1's 1.0 from a median that let the
+    whole-degree samples out-vote the fine ones, never rounded) is corrected at once instead of waiting for
+    the next accepted heat/cool cycle. A mode with a value but no samples keeps it, rounded up. Counts,
+    audit and reject counters are untouched; idempotent. Returns the modes whose ``swing_{mode}_f`` changed.
+    """
+    changed: list[str] = []
+    for mode in SWING_MODES:
+        p = _prefix(mode)
+        before = cache.get(f"{p}_f")
+        samples = [s for s in (cache.get(f"{p}_samples") or []) if isinstance(s, dict) and "value_f" in s]
+        if samples:
+            _store_swing_summary(cache, mode, samples[-THERMAL_SWING_ESTIMATOR_WINDOW:])
+        elif isinstance(before, (int, float)) and not isinstance(before, bool) and before > 0:
+            cache[f"{p}_f"] = round_swing_up_f(before)
+        if cache.get(f"{p}_f") != before:
+            changed.append(mode)
+    return changed
 
 
 def _holds_swing_data(cache: dict[str, Any], mode: str) -> bool:
@@ -339,7 +468,7 @@ def reset_swing_cache(cache: dict[str, Any]) -> bool:
         p = _prefix(mode)
         cache[f"{p}_f"] = None
         cache[f"observation_count_{p}"] = 0
-        for extra in ("_samples", "_resolution_f", "_off_point_f", "_audit", "_reject_counts"):
+        for extra in ("_samples", "_raw_f", "_resolution_f", "_off_point_f", "_audit", "_reject_counts"):
             cache.pop(f"{p}{extra}", None)
     cache["swing_definition_version"] = THERMAL_SWING_DEFINITION_VERSION
     return True

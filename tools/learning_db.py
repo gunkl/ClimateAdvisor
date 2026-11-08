@@ -270,9 +270,12 @@ def _print_model_summary(db: dict) -> None:
             return f"None  ({cnt} samples)"
         res = cache.get(f"swing_{mode}_resolution_f") or 0.0
         off = cache.get(f"swing_{mode}_off_point_f")
+        raw = cache.get(f"swing_{mode}_raw_f")  # Issue #1477: the median before the half-degree-up rounding
         interval = f" +/-{res / 2:.2f}" if res else ""
+        raw_txt = f" (median {raw:.2f}, rounded up to 0.5 F)" if isinstance(raw, (int, float)) and raw != val else ""
         off_txt = f", stops {abs(off):.2f} F {'short of' if off >= 0 else 'past'} setpoint" if off is not None else ""
-        return f"{val:.2f} F{interval} {'below' if mode == 'heat' else 'above'} setpoint  ({cnt} samples{off_txt})"
+        side = "below" if mode == "heat" else "above"
+        return f"{val:.2f} F{raw_txt}{interval} {side} setpoint  ({cnt} samples{off_txt})"
 
     print(f"swing_heat:    {_swing_field('heat')}")
     print(f"swing_cool:    {_swing_field('cool')}")
@@ -367,8 +370,9 @@ def _format_swing_mode_section(swing: Any, cache: dict, mode: str, last_n: int) 
     res = summary["resolution_f"] or 0.0
     interval = f" +/-{res / 2:.2f}" if res else ""
     lines.append(
-        f"stored {_fmt_num(stored)}  |  recomputed median {_fmt_num(summary['value_f'])}{interval}"
-        f" of the last {len(samples)} accepted sample(s)  |  resolution {res:.2f} F"
+        f"stored {_fmt_num(stored)}  |  recomputed {_fmt_num(summary['value_f'])}{interval}"
+        f" = median {_fmt_num(summary['raw_value_f'])} rounded up to the next 0.5 F, of the {summary['n_used']}"
+        f" finest of the last {len(samples)} accepted sample(s)  |  resolution {res:.2f} F"
         f"  |  off-point {_fmt_num(summary['off_point_f'])}{verdict}"
     )
     lines.append(f"lifetime accepted samples: {cache.get(f'observation_count_{p}', 0)}")

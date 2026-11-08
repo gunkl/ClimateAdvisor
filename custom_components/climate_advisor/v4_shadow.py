@@ -929,6 +929,8 @@ def night_inputs(
     can_cool: bool = True,
     swing_heat_f: float | None = None,
     swing_cool_f: float | None = None,
+    loop_swing_heat_f: float | None = None,
+    loop_swing_cool_f: float | None = None,
     mass_f: float | None = None,
     path: Sequence[tuple[datetime, float]] | None = None,
     unit: str = "fahrenheit",
@@ -982,6 +984,8 @@ def night_inputs(
         mass_f=mass,
         swing_heat_f=swing_heat_f if swing_heat_f else ns.THERMAL_SWING_DEFAULT_F,
         swing_cool_f=swing_cool_f if swing_cool_f else ns.THERMAL_SWING_DEFAULT_F,
+        loop_swing_heat_f=loop_swing_heat_f or None,  # Issue #1477: the measured swing for the emulated loop
+        loop_swing_cool_f=loop_swing_cool_f or None,
         can_heat=can_heat,
         can_cool=can_cool,
         evidence=evidence,

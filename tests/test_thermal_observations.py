@@ -3669,7 +3669,8 @@ class TestSwingComputation:
         engine = self._make_engine(tmp_path)
         for i, v in enumerate([1.4, 1.4, 1.5, 4.0, 1.4, 1.5, 1.4]):
             engine.record_swing_sample("cool", self._sample(i, v))
-        assert engine.get_thermal_model()["swing_cool_f"] == pytest.approx(1.4)
+        assert engine.get_thermal_model()["swing_cool_f"] == 1.5  # Issue #1477: median 1.4 rounded up to 0.5
+        assert engine.get_thermal_model()["swing_cool_raw_f"] == pytest.approx(1.4)
 
     def test_quantised_samples_report_their_interval(self, tmp_path):
         engine = self._make_engine(tmp_path)

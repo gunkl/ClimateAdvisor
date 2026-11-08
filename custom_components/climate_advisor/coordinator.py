@@ -2981,6 +2981,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._occupancy_away_timer_cancel()
             self._occupancy_away_timer_cancel = None
             _LOGGER.debug("Occupancy away timer cancelled")
+        _engine = getattr(self, "automation_engine", None)
+        if _engine is not None:
+            _engine.set_away_setback_pending(False)  # Issue #1433: no timer, nothing waits for it
 
     def _cancel_tou_av_stop_timer(self) -> None:
         """Cancel any pending away/vacation TOU T_start guard timer (Issue #899).
@@ -3355,6 +3358,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             @callback
             def _occupancy_away_timer_expired(_now: Any) -> None:
                 self._occupancy_away_timer_cancel = None
+                self.automation_engine.set_away_setback_pending(False)  # Issue #1433: the setback is due now
                 _LOGGER.info("Occupancy away timer expired — applying setback")
                 self.hass.async_create_task(_apply_away_setback())
 
@@ -3363,6 +3367,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 delay_seconds,
                 self._zone_scoped_sync(_occupancy_away_timer_expired),
             )
+            # Issue #1433: until the timer expires no other path (the 30-minute cycle, bedtime, pre-cool, a
+            # time-of-use start) sends the setback; the thermostat stays on the home band the chart draws (#1425).
+            self.automation_engine.set_away_setback_pending(True)
         elif new_mode in present_modes:
             self._cancel_occupancy_away_timer()
             # Issue #899: occupancy left away/vacation — cancel any pending TOU T_start

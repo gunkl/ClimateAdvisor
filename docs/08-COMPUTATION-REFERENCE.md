@@ -872,6 +872,8 @@ When a restore WOULD have happened (every classification since Issue #1208: the 
 
 Tests: `tests/test_occupancy_restore_hold.py`, `tests/test_phase2_coordinator_followups.py` (chart band, accessor). See [occupancy-dispatch-spec.md](occupancy-dispatch-spec.md).
 
+**The away setback waits for the 15-minute timer (Issue #1433).** Occupant view: a short errand or a phone dropping off the network never sets the heat or the AC back. While the coordinator's away timer runs, `AutomationEngine._away_setback_pending` is True and `handle_occupancy_away()` (the 30-minute cycle's Away reapply, bedtime, pre-cool, the time-of-use period-start timer) and `apply_tou_away_vacation_precondition()` (the Away bank) send nothing; the timer clears the flag and applies the setback. After coming home every periodic cycle resolves the home band (`_resolved_comfort_band()` reads the live occupancy; no Away band or expansion is cached). The chart rows at 12:23 and 14:15 on 2026-11-07 (Away band 63-79 F while home, reported as #1433) were the #1425 "restore held after a setback never sent" case, written by 0.9.4/0.9.5 before 0.9.7 was deployed at 15:27; the thermostat was off and nothing was sent. Details: [Occupancy Dispatch Spec](occupancy-dispatch-spec.md#state-transitions).
+
 **Occupancy and wakeup events (Issue #240):** The following events are emitted by occupancy handlers when a setpoint change is actually applied, making these actions visible in the dashboard timeline and AI activity report:
 
 | Event type | Handler | Condition | Payload |

@@ -119,6 +119,8 @@ Consequence (updated by Issue #1066, nearest-edge arming): while a precondition 
 
 ## Away/Vacation Extension (Issue #899)
 
+**Inside the 15-minute away grace (Issue #1433):** the Away bank is not written while the away timer is still running (`_away_setback_pending`); it is sent when the timer expires, like the setback itself. Vacation has no grace and is never delayed. See [Occupancy Dispatch](occupancy-dispatch-spec.md).
+
 Everything above (Banking Target Resolution, Coast Phase) describes `resolve_tou_phase()`,
 which powers TOU pre-conditioning for **Home/Guest only**. Away/Vacation was unconditionally
 suppressed until Issue #899 — `apply_classification()`'s `DEFER_OCCUPANCY` branch means

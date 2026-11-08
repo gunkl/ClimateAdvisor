@@ -25,6 +25,10 @@ Environment knobs for the ha tier:
   runs serially (the local default; CI sets ``4``).
 * ``CA_HA_SHARD``: ``K/N`` runs only the Kth of N round-robin slices of the tier, passed as ``--ca-shard K/N``
   (CI runs four slices as parallel ``ha-real (K/4)`` jobs; see ``tools/pytest_shard.py``). Unset runs everything.
+* ``CA_HA_SHARDS``: ``N`` (local, not on Windows) runs all N of those slices at once as separate pytest processes, each
+  with ``CA_HA_WORKERS`` workers, prefixed ``[K/N]`` and timed like ``CA_UNIT_SHARDS``. On a 24-core / 31 GB machine
+  the fastest full run is a single process with ``CA_HA_WORKERS=8`` (~90 s); ``CA_HA_SHARDS=4 CA_HA_WORKERS=2`` runs
+  CI's four slices in about the same time. More than ~8 processes in total is slower (``docs/DEVELOPMENT.md``).
 * ``CA_COMPONENT_ROOT``: directory holding an alternate ``custom_components/climate_advisor``
   tree. Used by ``scripts/revert_proof.py`` to run the tests against an old commit; a Windows
   path is translated for WSL.

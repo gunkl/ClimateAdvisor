@@ -12,7 +12,7 @@ Home Assistant is covered in [SSH Setup](SSH-SETUP.md).
 | Question | Short answer | → Full answer |
 |---|---|---|
 | How do I set up the local dev environment without a running Home Assistant? | Install [uv](https://docs.astral.sh/uv/) and run `python scripts/test.py`. uv fetches Python 3.14 (`.python-version`) and the locked dependencies. The `tests/` tier needs no HA: `tools/sim_harness/ha_stubs.py` stubs every `homeassistant.*` module. | [§Setup](DEVELOPMENT.md#setup) |
-| How do I run the tests, in parallel, and check coverage? | `python scripts/test.py [unit\|ha\|all] [pytest args]`. `CA_UNIT_SHARDS=4 CA_UNIT_WORKERS=2` (the fastest local unit run) and `CA_HA_WORKERS=auto` turn on parallel runs (unset means serial). Coverage: `python scripts/test.py unit --cov=custom_components/climate_advisor`. | [§Running Tests](DEVELOPMENT.md#running-tests) |
+| How do I run the tests, in parallel, and check coverage? | `python scripts/test.py [unit\|ha\|all] [pytest args]`. `CA_UNIT_SHARDS=4 CA_UNIT_WORKERS=2` (the fastest local unit run) and `CA_HA_WORKERS=8` (the fastest local real-HA run; `CA_HA_SHARDS=4 CA_HA_WORKERS=2` runs CI's four slices at once in about the same time) turn on parallel runs (unset means serial). Coverage: `python scripts/test.py unit --cov=custom_components/climate_advisor`. | [§Running Tests](DEVELOPMENT.md#running-tests) |
 | What linting must pass? | The commands CI runs: `tools/validate.py`, `ruff check .` and `ruff format --check .`, each through `uv run --locked --only-group test`. | [§Linting](DEVELOPMENT.md#linting) |
 | Which CI checks must pass to merge to `main`? | Branch protection requires `validate-and-test` and `ha-real` (both in `validate.yml`) and `validate` (Hassfest). | [§CI](DEVELOPMENT.md#ci) |
 | How do I run the real-Home-Assistant tier, build the house fixture, prove a test fails without the fix, or update snapshots? | `python scripts/test.py ha` (WSL on Windows). Use the `make_house` fixture in `tests_ha/house/`. `scripts/revert_proof.py` proves an escaped-bug test fails on the pre-fix commit. | [Real-HA tier](DEVELOPMENT.md#real-ha-tier-the-house-markers-revert-proof-snapshots-step-2-issue-1127) |
@@ -54,13 +54,22 @@ python scripts/test.py unit --cov=custom_components/climate_advisor --cov-report
 - The unit tier always runs with `-W error::pytest.PytestUnraisableExceptionWarning -W error::RuntimeWarning`.
 - A skip caused by a missing or stubbed package is turned into a failure (`tests/conftest.py`).
 - **Parallel runs:** `CA_UNIT_WORKERS` and `CA_HA_WORKERS` set the pytest-xdist worker count, as a number or `auto`.
-  Unset or `0` runs serially. CI uses `4` for both. `CA_HA_WORKERS=auto` is fine locally.
+  Unset or `0` runs serially. CI uses `4` for both.
 - **Fastest local unit run:** `CA_UNIT_SHARDS=4 CA_UNIT_WORKERS=2 python scripts/test.py unit`. It runs four
   round-robin slices of the unit tier at once, each a pytest process with 2 workers, prefixes each slice's output with
   `[K/4]` and ends with each slice's time. That is 8 processes, the same memory as `CA_UNIT_WORKERS=8`, but faster:
   4 min 26 s against 7 min 50 s on a 24-core dev container (measured back to back, 2026-11-07), probably because
   one process ends on a long tail of slow `test_sim_generator` tests that four slices share out. Keep slices x workers
   near 8 on a RAM-limited machine (each worker holds about 1.8 GB); `auto` workers can run out of RAM.
+- **Real-HA tier locally:** `CA_HA_WORKERS=8 python scripts/test.py ha` is the fastest full run on a 24-core / 31 GB
+  dev container: 88-89 s, against 103-155 s for `CA_HA_WORKERS=auto` (12 workers there). `CA_HA_SHARDS=N` runs all N
+  of CI's round-robin slices at once, each a pytest process with `CA_HA_WORKERS` workers, prefixes each slice's
+  output with `[K/N]`, ends with each slice's time, and fails if any slice fails. `CA_HA_SHARDS=4 CA_HA_WORKERS=2`
+  (91 s) is the setting to use when you want CI's exact four slices; more processes than about 8 in total is slower,
+  not faster (4x4: 123-130 s, 4x6: 160 s, 3x8: 155 s). Unlike the unit tier, the real-HA tier has no long tail that
+  slicing shares out, so one process with 8 workers is as fast. Measured back to back on 2026-11-08 with identical
+  pass counts (610 passed, 1 skipped); the box was shared, so single runs vary by up to 2x. RAM is not the limit
+  (at least 19 GB stayed free). Not supported on Windows (WSL): use `CA_HA_WORKERS` or `CA_HA_SHARD` there.
 - **One CI slice:** `CA_UNIT_SHARD=K/8` runs only the Kth of the eight slices, exactly as CI's `unit (K/8)` job does,
   to reproduce a failure in that job. `CA_HA_SHARD=K/4` does the same for an `ha-real (K/4)` job.
 - **Order-dependence guard (#1186):** `python scripts/test_changed_isolated.py [--base origin/main] [--all]` runs each

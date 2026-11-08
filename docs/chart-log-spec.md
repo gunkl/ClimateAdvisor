@@ -559,10 +559,10 @@ Prior to Issue #137, `pred_indoor` was a single-step Euler approximation (`_ode_
 
 ### Thermal Model Refresh
 
-Added in Issues #137/#138. On every 30-min coordinator cycle, `automation_engine._thermal_model` is refreshed before the chart log append:
+Added in Issues #137/#138. On every 30-min coordinator cycle, the coordinator's `_thermal_model` (the only copy since Issue #1443; the engine reads it through its inputs provider) is refreshed before the chart log append:
 
 ```python
-self.automation_engine._thermal_model = self._learning.get_thermal_model(
+self._thermal_model = self._learning.get_thermal_model(
     outdoor_temp_f=outdoor_temp_f, solar_factor=solar_factor
 )
 ```

@@ -4,11 +4,11 @@ on:
   push:
     branches:
       - main
-      - 0.9.x
+      - 0.8.x
   pull_request:
     branches:
       - main
-      - 0.9.x
+      - 0.8.x
 
 jobs:
   # The checks that used to run serially in validate-and-test now run as parallel jobs; validate-and-test is the

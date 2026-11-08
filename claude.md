@@ -734,22 +734,18 @@ git tag -f deployed/current HEAD
 git branch -d deploy/staging
 ```
 
-**Long-lived `0.9.x` branch (Issue #1230, owner decision 2026-11-06)**: the new prediction
-engine, operation timeline and dashboard redesign (releases R0–R7) are built on `0.9.x`, not
-`main`. Other fixes keep going to `main` as 0.8.x.
-- #1230 work: branch from `origin/0.9.x`, open the PR against `0.9.x`. CI (validate, hacs,
-  hassfest) runs for PRs and pushes on `0.9.x` too.
-- Keep it current: merge (never rebase) `origin/main` into `0.9.x` through a PR, before every
-  deploy and whenever main has something worth having on the server.
-- Conflicts on that merge: `const.py` VERSION and `manifest.json` keep the branch's 0.9.N;
-  `CHANGELOG.md` keeps both entries, newest first; `fix_history.jsonl` keeps both lines.
-- Version bumps on `0.9.x` PRs go 0.9.0 → 0.9.1 → ... (same inline-bump rule as main).
-- Deploy from the `/workspace/ClimateAdvisor-0.9.x` worktree only. `tools/deploy.py` refuses
-  to deploy `0.9.x` unless `origin/main` is merged into it (`--allow-stale-main` overrides);
-  `main` and every other branch are not checked, so the deploy after the final merge back to
-  main works as before.
-- While the server runs 0.9.x, never deploy from `main`: it would remove the 0.9 work and may
-  meet stored data in a newer format. `python tools/deploy.py --rollback` restores the last backup.
+**Branch model (owner decision 2026-11-08): `main` is the current line, `0.8.x` is maintenance.**
+The 0.9 line (Issue #1230: the new prediction engine, operation timeline and dashboard) was built on a long-lived
+`0.9.x` branch and promoted to `main` at 0.9.14 (a fast-forward: `main` held no commit `0.9.x` lacked). `0.9.x` is
+retired (kept read-only; never deleted, no tag touched).
+- Current work (0.9 and later): branch from `origin/main`, PR into `main`, deploy from `main`, release from `main`.
+- 0.8 maintenance: `0.8.x` was cut from `main` at 0.8.72 (`59de8b1`). A fix for 0.8 users branches from
+  `origin/0.8.x`, PRs into `0.8.x` (CI runs there too) and is released as 0.8.73, 0.8.74 ... with a GitHub Release
+  on a tag on `0.8.x`. If the same bug exists on `main`, cherry-pick the fix into `main` as well (its own PR).
+- Never merge `0.8.x` into `main` or `main` into `0.8.x`: the lines only share cherry-picked fixes.
+- Deploy only from `main`: the owner's server runs the current line. `tools/deploy.py` refuses to deploy `0.8.x`
+  (it would roll the house back to 0.8, possibly across storage changes; `--allow-maintenance-branch` overrides).
+  `python tools/deploy.py --rollback` restores the last backup.
 
 **Conflict resolution**: coordinator.py conflicts between the ODE section (`_build_predicted_indoor_future()`,
 module-level near the end of the file) and the briefing/daily-record section (class methods) are independent — accept all changes from both.
@@ -824,7 +820,7 @@ After merge: `gh release edit vX.Y.Z --draft=false`
 #### Common mistakes to avoid
 - **Never open a PR without a version bump** — release notes fall out of sync
 - **Never deploy from individual fix worktrees** — see Multi-branch deploy rule above
-- **Never create a versioned GitHub Release until the version bump is in main**
+- **Never create a versioned GitHub Release until the version bump is on its line's branch** (`main` for the current line, `0.8.x` for 0.8 maintenance; tag that branch's commit)
 - **const.py VERSION and manifest.json version must always match** — enforced by test_version_sync.py
 
 ### Issue Requirements

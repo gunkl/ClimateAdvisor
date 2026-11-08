@@ -8,11 +8,10 @@ Contents: [Branches](#branches-and-where-a-change-goes) · [Setup](#development-
 
 Source: [claude.md, Git Workflow](claude.md#git-workflow) and `tools/deploy.py`.
 
-- **`0.9.x` is the long-lived line** for Issue #1230 (the new prediction engine, the operation timeline and the dashboard redesign). Work for it branches from `origin/0.9.x` and its pull request targets `0.9.x`. Versions on this line go 0.9.0 → 0.9.1 → ...
-- **`main` carries the 0.8.x fixes.** A fix that is not 0.9 work goes to `main` as the next 0.8.x and reaches `0.9.x` through the merge below.
-- **`main` is merged into `0.9.x`, never rebased,** through a pull request so CI runs, before every deploy and whenever `main` has something worth having on the server. On that merge, `const.py` `VERSION` and `manifest.json` keep the branch's 0.9.N, `CHANGELOG.md` keeps both entries newest first, and `fix_history.jsonl` keeps both lines.
-- **The deploy guard enforces it.** `tools/deploy.py` refuses to deploy `0.9.x` unless `origin/main` is already merged into it (`--allow-stale-main` overrides). Other branches are not checked.
-- **Never deploy from several worktrees.** Each deploy uploads the whole `custom_components/climate_advisor/` directory and overwrites the previous one, so only the last deploy survives. Put every fix that should be on the server into one branch, then deploy once. While the server runs 0.9.x, never deploy from `main`: it would remove the 0.9 work and may meet stored data in a newer format.
+- **`main` is the current line** (0.9 and later). Work branches from `origin/main` and its pull request targets `main`. The 0.9 line was built on a long-lived `0.9.x` branch and promoted to `main` at 0.9.14; `0.9.x` is retired.
+- **`0.8.x` is the 0.8 maintenance line,** cut from `main` at 0.8.72. A fix for 0.8 users branches from `origin/0.8.x`, targets `0.8.x` and is released as the next 0.8.N on that branch. If the bug also exists on `main`, cherry-pick the fix into `main` in its own pull request. The two lines are never merged into each other.
+- **Deploy only from `main`.** `tools/deploy.py` refuses to deploy `0.8.x`, because it would roll the server back to 0.8 (`--allow-maintenance-branch` overrides).
+- **Never deploy from several worktrees.** Each deploy uploads the whole `custom_components/climate_advisor/` directory and overwrites the previous one, so only the last deploy survives. Put every fix that should be on the server into one branch, then deploy once.
 - **Deploying** (owner only, it needs `.deploy.env`, see [SSH-SETUP](docs/SSH-SETUP.md)): `python tools/deploy.py` validates, backs up, copies, restarts and checks the logs; `--dry-run`, `--skip-restart` and `--rollback` (restore the newest backup) are the other modes.
 - **Names:** create the issue first and use its real number everywhere: branch `fix/<N>-short-description` or `feature/<N>-short-description`, commit and PR title `Fix #<N>: ...` or `Feat #<N>: ...`. Never guess an issue number.
 
@@ -54,7 +53,7 @@ Ruff settings are in `pyproject.toml` (line length 120). The pre-commit hooks (`
 
 ### CI
 
-`validate.yml` (`validate-and-test`, `ha-real`), `hassfest.yml` and `hacs.yml` run on pushes and pull requests to both `main` and `0.9.x`. The required checks on `main` are `validate-and-test`, `ha-real` and `validate` (Hassfest). The nightly (`nightly.yml`) runs generated household days and the full real-HA tier and opens a tracking issue when it fails. Details: [DEVELOPMENT.md, CI](docs/DEVELOPMENT.md#ci).
+`validate.yml` (`validate-and-test`, `ha-real`), `hassfest.yml` and `hacs.yml` run on pushes and pull requests to both `main` and `0.8.x`. The required checks on `main` are `validate-and-test`, `ha-real` and `validate` (Hassfest). The nightly (`nightly.yml`) runs generated household days and the full real-HA tier and opens a tracking issue when it fails. Details: [DEVELOPMENT.md, CI](docs/DEVELOPMENT.md#ci).
 
 ## Golden scenarios and the simulation harness
 
@@ -142,7 +141,7 @@ Source: [claude.md, Release Process](claude.md#release-process-critical--must-fo
 ## Pull request checklist
 
 - [ ] There is an issue, and its number is in the branch, the commit and the PR title (`Fix #N:` / `Feat #N:`).
-- [ ] The PR targets the right branch: `0.9.x` for #1230 work, `main` for 0.8.x fixes.
+- [ ] The PR targets the right branch: `main` for current work, `0.8.x` only for a 0.8 maintenance fix.
 - [ ] The description starts with what the person at home gets.
 - [ ] `tools/validate.py`, `ruff check .` and `ruff format --check .` are clean.
 - [ ] `python scripts/test.py unit` passes; `python scripts/test.py ha` too if you touched lifecycle, listeners, timers or persistence.

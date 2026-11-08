@@ -35,12 +35,16 @@ LOG_DIR = REPO_ROOT / "logs"
 BACKUP_DIR = REPO_ROOT / "backups"
 BACKUP_KEEP_COUNT = 5
 
-# Long-lived development lines that the owner deploys from (Issue #1230: the 0.9.x
-# prediction/dashboard line). A deploy from one of these must already contain every
-# commit on origin/main, otherwise it silently drops main's newer fixes from the
-# server (each deploy replaces the whole integration directory). main itself and any
-# other branch are not checked, so the standard deploy after merging back is unchanged.
-LONG_LIVED_BRANCHES = ("0.9.x",)
+# Long-lived development lines that the owner deploys from. A deploy from one of these must already contain every
+# commit on origin/main, otherwise it silently drops main's newer fixes from the server (each deploy replaces the
+# whole integration directory). main itself and any other branch are not checked. Empty since 2026-11-08: the 0.9.x
+# line (Issue #1230) was promoted to main, so the owner deploys from main again; list a branch here if a new
+# long-lived development line is opened.
+LONG_LIVED_BRANCHES: tuple[str, ...] = ()
+# Maintenance lines for OLDER releases (0.8.x since 2026-11-08). The owner's server runs main (0.9); deploying a
+# maintenance line would roll the house back to an older release, possibly across storage changes made since. Such a
+# branch is released (a GitHub Release on its own tag), not deployed here, unless --allow-maintenance-branch is given.
+MAINTENANCE_BRANCHES: tuple[str, ...] = ("0.8.x",)
 MAIN_REF = "origin/main"
 
 _log = logging.getLogger("deploy")
@@ -332,6 +336,20 @@ def check_main_merged(branch: str, fetch: bool = True) -> tuple[bool, str]:
         f"(git merge {MAIN_REF}, via a PR so CI runs), or pass --allow-stale-main to deploy anyway."
     )
     return False, "; ".join(notes)
+
+
+def check_maintenance_branch(branch: str) -> tuple[bool, str]:
+    """Refuse a deploy from a maintenance line for an older release (MAINTENANCE_BRANCHES).
+
+    Returns (ok, message): (True, "") for main and every other branch.
+    """
+    if branch not in MAINTENANCE_BRANCHES:
+        return True, ""
+    return False, (
+        f"{branch} is the maintenance line for an older release; this server runs main. Deploying it would roll the "
+        f"house back to {branch} (possibly across storage changes made since). Release {branch} fixes with a GitHub "
+        f"Release on that branch instead, or pass --allow-maintenance-branch to deploy it anyway."
+    )
 
 
 def run_validation() -> bool:
@@ -702,7 +720,12 @@ def main() -> None:
     parser.add_argument(
         "--allow-stale-main",
         action="store_true",
-        help=f"Deploy a long-lived branch ({', '.join(LONG_LIVED_BRANCHES)}) even if origin/main is not merged into it",
+        help="Deploy a long-lived development branch (LONG_LIVED_BRANCHES) even if origin/main is not merged into it",
+    )
+    parser.add_argument(
+        "--allow-maintenance-branch",
+        action="store_true",
+        help=f"Deploy an older release's maintenance line ({', '.join(MAINTENANCE_BRANCHES)}) to this server",
     )
     parser.add_argument(
         "--no-backtest",
@@ -746,6 +769,11 @@ def main() -> None:
     if message:
         (info if merged else fail)(message)
     if not merged and not args.dry_run and not args.allow_stale_main:
+        sys.exit(1)
+    current, message = check_maintenance_branch(branch)
+    if message:
+        fail(message) if not args.allow_maintenance_branch else info(message)
+    if not current and not args.dry_run and not args.allow_maintenance_branch:
         sys.exit(1)
 
     # Step 1: Validate

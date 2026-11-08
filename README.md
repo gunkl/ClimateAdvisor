@@ -101,7 +101,7 @@ Set a **Sleep Indoor Temp Sensor** to keep the bedroom, not the hallway, on targ
 
 **Manual:** copy `custom_components/climate_advisor` into `config/custom_components/`, restart, then add the integration as above.
 
-HACS installs published releases (see the "released" badge above). The 0.9 line (new prediction engine, one plan behind every card, the new dashboard) is built on the [`0.9.x`](https://github.com/gunkl/ClimateAdvisor/tree/0.9.x) branch; until a 0.9 release is published, install it manually from that branch.
+HACS installs published releases (see the "released" badge above). The 0.9 line (new prediction engine, one plan behind every card, the new dashboard) is on `main` and published as pre-releases until it is marked the latest release; 0.8 fixes continue on the [`0.8.x`](https://github.com/gunkl/ClimateAdvisor/tree/0.8.x) branch.
 
 ### Upgrading to 0.9.4
 
@@ -223,7 +223,7 @@ The panel is backed by a REST API; see [rest-api](docs/rest-api.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the branch model (`0.9.x` and `main`), setting up with `uv`, the test tiers, golden scenarios, how to write an issue and what a pull request needs. [DEVELOPMENT.md](docs/DEVELOPMENT.md) has the environment and test-tier details. The roadmap is tracked in [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the branch model (`main` and `0.8.x`), setting up with `uv`, the test tiers, golden scenarios, how to write an issue and what a pull request needs. [DEVELOPMENT.md](docs/DEVELOPMENT.md) has the environment and test-tier details. The roadmap is tracked in [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11).
 
 ## License
 

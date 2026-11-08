@@ -1,8 +1,9 @@
-"""Tests for the long-lived-branch deploy guard in tools/deploy.py (Issue #1230).
+"""Tests for the deploy branch guards in tools/deploy.py (Issue #1230; 0.8.x maintenance line 2026-11-08).
 
-A deploy from ``0.9.x`` must already contain every commit on ``origin/main``;
-``main`` and any other branch are never blocked. The tests run real git in a
-throwaway repository so the guard's git commands are exercised, not mocked.
+A deploy from a long-lived development branch must already contain every commit on ``origin/main``. No branch is
+long-lived since 0.9.x was promoted to main, so these tests configure ``0.9.x`` as one to keep the mechanism pinned.
+A deploy from the ``0.8.x`` maintenance line is refused (it would roll the house back) unless overridden; ``main``
+and other branches pass. The tests run real git in a throwaway repository so the guard's git commands are exercised.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _run(tmp_path, "clone", "-q", str(origin), str(clone))
     _run(clone, "checkout", "-q", "-b", "0.9.x")
     monkeypatch.setattr(deploy, "REPO_ROOT", clone)
+    monkeypatch.setattr(deploy, "LONG_LIVED_BRANCHES", ("0.9.x",))
     return clone
 
 
@@ -100,3 +102,17 @@ def test_detached_head_reports_no_branch(repo: Path) -> None:
 
 def test_local_version_reads_const() -> None:
     assert deploy.local_version().count(".") == 2
+
+
+def test_no_branch_is_long_lived_since_0_9_was_promoted_to_main() -> None:
+    assert deploy.LONG_LIVED_BRANCHES == ()
+    assert deploy.check_main_merged("0.9.x") == (True, "")
+
+
+def test_the_0_8_maintenance_line_is_refused_and_main_passes() -> None:
+    ok, message = deploy.check_maintenance_branch("0.8.x")
+    assert not ok
+    assert "roll the house back" in message
+    assert "--allow-maintenance-branch" in message
+    for branch in ("main", "fix/1-something", ""):
+        assert deploy.check_maintenance_branch(branch) == (True, "")

@@ -120,6 +120,23 @@ def resolve_humidity(
     return None, None
 
 
+def read_humidity_source(hass: Any, source: str | None) -> float | None:
+    """The current % of a ``resolve_humidity`` source (an entity id or ``"<entity>#<attribute>"``), else None.
+
+    Used for the "instead of" value when the source in use changes (Issue #1455). Only the two fallback attributes
+    ``resolve_humidity`` can return are read (never the climate TARGET humidity). Pure read; never raises.
+    """
+    if not isinstance(source, str) or not source:
+        return None
+    if "#" not in source:
+        return read_humidity_state(hass, source)
+    entity_id, attr = source.split("#", 1)
+    for role, spec in _FALLBACK_ATTR.items():
+        if spec is not None and spec[1] == attr:
+            return _read_fallback(hass, role, entity_id)
+    return None
+
+
 def indoor_role_for(source_entity: str | None, sleep_entity: str | None) -> str:
     """The indoor role a row uses: ``indoor_sleep`` when the comfort reading came from the sleep sensor, else day.
 

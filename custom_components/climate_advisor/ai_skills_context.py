@@ -2279,6 +2279,27 @@ def _render_indoor_source_changed(p: dict, unit: str) -> tuple[str, str]:
     return label, ", ".join(parts)
 
 
+def _render_humidity_source_changed(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #1455: the source a chart humidity line (room, bedroom, outdoor) is read from changed. Chart only."""
+    subject = str(p.get("subject") or "humidity")
+    subject = subject[:1].upper() + subject[1:]
+    from_name = p.get("from_name") or p.get("from_entity") or "no humidity source"
+    if p.get("to_entity"):
+        to_name = p.get("to_name") or p.get("to_entity")
+        to_kind = p.get("to_kind")
+        label = f"{subject} now from {to_name}" + (f" ({to_kind})" if to_kind else "") + f" instead of {from_name}"
+    else:
+        label = f"{subject}: no humidity source (was {from_name})"
+    parts: list[str] = []
+    if p.get("reason"):
+        parts.append(str(p["reason"]))
+    for key, text in (("to_rh", "now"), ("from_rh", "was")):
+        value = p.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            parts.append(f"{text} {value:g}%")
+    return label, ", ".join(parts)
+
+
 def _render_forecast_model_changed(p: dict, unit: str) -> tuple[str, str]:
     """Issue #1432: the model the prediction engine's decisions read changed (stitched CA reading <-> each room).
 
@@ -3368,6 +3389,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "indoor_sensor_unavailable": _render_indoor_sensor_unavailable,
     "indoor_sensor_recovered": _render_indoor_sensor_recovered,
     "indoor_source_changed": _render_indoor_source_changed,
+    "humidity_source_changed": _render_humidity_source_changed,
     "forecast_model_changed": _render_forecast_model_changed,
     "fan_blind_started": _render_fan_blind_started,
     "fan_blind_stopped": _render_fan_blind_stopped,
@@ -3483,6 +3505,7 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
         "indoor_source_changed",
+        "humidity_source_changed",
         "forecast_model_changed",
         "entity_unavailable",
         "entity_recovered",

@@ -172,6 +172,10 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # (thermostat, its finer sensor, dedicated or sleep sensor). It never commands HVAC; the decision events that
         # follow still map, so registering it unmapped cannot hide a real failure.
         "indoor_source_changed",
+        # Issue #1455: humidity_source_changed only announces which source a chart humidity line (room, bedroom,
+        # outdoor) now reads. Chart display only: nothing in automation reads humidity and it commands nothing, so
+        # registering it unmapped cannot hide a real failure.
+        "humidity_source_changed",
         # Issue #1432: forecast_model_changed announces which v4 model the decisions read after a nightly fit
         # (stitched CA reading or each room separately). It commands nothing itself; the decisions that read the new
         # model still emit their own deciding events, so leaving it unmapped cannot hide a real failure, while mapping

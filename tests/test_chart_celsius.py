@@ -52,7 +52,8 @@ _RAW_F_ALLOWLIST = {
     "outdoor_max",
 }
 # Numeric daily/hourly summary fields that are not temperatures at all.
-_NON_TEMPERATURE_NUMERIC = {"fan_minutes"}
+# Issue #1414: relative humidity is a percentage, not a temperature: never unit-converted.
+_NON_TEMPERATURE_NUMERIC = {"fan_minutes", "humidity", "outdoor_humidity"}
 
 
 def _chart_log_mod():

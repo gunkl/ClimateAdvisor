@@ -157,13 +157,13 @@
   /* ---- Chart v2 (Issue #1230 R2) ---- */
   :root {
     --c-ink: #212121; --c-plan: #1565c0; --c-base: #2e7d32; --c-v3: #e65100; --c-out: #616161; --c-svc: #6a3fc8;
-    --c-hum: #9c27b0; --c-feels: #00838f; --c-target: #f9a825; --c-band: rgba(76,175,80,0.10); --c-bandline: rgba(76,175,80,0.40);
+    --c-hum: #041295; --c-feels: #6d0358; --c-target: #f9a825; --c-band: rgba(76,175,80,0.10); --c-bandline: rgba(76,175,80,0.40);
     --chart-grid: rgba(0,0,0,0.08); --chart-track: rgba(0,0,0,0.06);
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --c-ink: #eceff1; --c-plan: #64b5f6; --c-base: #66bb6a; --c-v3: #ff9e5e; --c-out: #b0bec5; --c-svc: #b39ddb;
-      --c-hum: #ce93d8; --c-feels: #4dd0e1; --c-target: #ffca28; --c-band: rgba(76,175,80,0.14); --c-bandline: rgba(129,199,132,0.45);
+      --c-hum: #6455e7; --c-feels: #e2368c; --c-target: #ffca28; --c-band: rgba(76,175,80,0.14); --c-bandline: rgba(129,199,132,0.45);
       --chart-grid: rgba(255,255,255,0.09); --chart-track: rgba(255,255,255,0.06);
     }
   }
@@ -276,11 +276,11 @@
   /* An explicit theme choice (new dashboard: data-theme) wins over the system setting. */
   :root[data-theme="light"] {
     --c-ink: #212121; --c-plan: #1565c0; --c-base: #2e7d32; --c-v3: #e65100; --c-out: #616161; --c-svc: #6a3fc8;
-    --c-hum: #9c27b0; --c-feels: #00838f; --c-target: #f9a825; --c-band: rgba(76,175,80,0.10); --c-bandline: rgba(76,175,80,0.40);
+    --c-hum: #041295; --c-feels: #6d0358; --c-target: #f9a825; --c-band: rgba(76,175,80,0.10); --c-bandline: rgba(76,175,80,0.40);
     --chart-grid: rgba(0,0,0,0.08); --chart-track: rgba(0,0,0,0.06);
   }
   :root[data-theme="dark"] {
     --c-ink: #eceff1; --c-plan: #64b5f6; --c-base: #66bb6a; --c-v3: #ff9e5e; --c-out: #b0bec5; --c-svc: #b39ddb;
-    --c-hum: #ce93d8; --c-feels: #4dd0e1; --c-target: #ffca28; --c-band: rgba(76,175,80,0.14); --c-bandline: rgba(129,199,132,0.45);
+    --c-hum: #6455e7; --c-feels: #e2368c; --c-target: #ffca28; --c-band: rgba(76,175,80,0.14); --c-bandline: rgba(129,199,132,0.45);
     --chart-grid: rgba(255,255,255,0.09); --chart-track: rgba(255,255,255,0.06);
   }

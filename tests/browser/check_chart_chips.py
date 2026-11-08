@@ -12,7 +12,8 @@ scrolled back into history where the payload has nothing in view), every key chi
 * enabled   -> switching it on changes the pixels of the chart canvases (indoor, outdoor, strips), and a line chip's
                own datasets have a point in the view; a past-lead button gives a v4 line a past point in the view.
 
-Also: no Humidity / Feels-like chip (Issue #1414), and in the live shape only the sensors v4 has data for get v4
+Also: Humidity / Feels-like are indoor and outdoor line chips, never overlays (Issue #1414), and in the live
+shape only the sensors v4 has data for get v4
 chips (the rest are named on the "v4 is still learning" line, the finer sensor has one chip:
 "Past predictions only").
 Screenshots: chips-<page>-<payload>-<view>.png (the page) and key-<page>-<payload>-<view>.png (the key).
@@ -157,10 +158,10 @@ def audit(pg, name):
         "() => [...document.querySelectorAll('#chart-key-body [data-series]')].map(b => b.dataset.series)"
     )
     check(f"{name}: the key has chips", len(ids) >= 10, str(ids))
-    for hidden in ("ov:humidity", "ov:feelslike"):
-        check(f"{name}: no {hidden} chip (Issue #1414)", hidden not in ids)
-    key_text = pg.locator("#chart-key-body").inner_text()
-    check(f"{name}: no Humidity / Feels-like in the key", "Humidity" not in key_text and "Feels" not in key_text)
+    for old in ("ov:humidity", "ov:feelslike"):
+        check(f"{name}: no {old} overlay chip (Issue #1414)", old not in ids)
+    for line in ("ind:humidity", "ind:feelslike", "out:humidity", "out:feelslike"):
+        check(f"{name}: a {line} chip (Issue #1414)", line in ids)
     enabled = 0
     for sid in ids:
         c = chip(pg, sid)

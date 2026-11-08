@@ -3,6 +3,16 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.11] — 2026-11-08
+
+- Fix #1414: the Status charts now show humidity and how warm or cold it feels.
+  - **Lines:** the temperature chart can draw the humidity of the room Climate Advisor is reading (the thermostat's room by day, the bedroom in your sleep window) and its feels-like. The outdoor chart can draw outdoor humidity and feels-like, continuing into the forecast when the weather service provides humidity and wind.
+  - **Feels-like rule:** it is the National Weather Service heat index on warm, humid readings (80°F and up) and, outdoors, the NWS wind chill on cold, windy readings (50°F and below, wind above 3 mph). Otherwise the line has a gap rather than a guess.
+  - **Where to find them:** humidity reads in % on a right-hand axis. Each line is switched on in the chart key and shows in the hover readout and the table.
+  - **Humidity sources:** found automatically, from a humidity sensor on the same device as the temperature sensor in use, the thermostat's own reading, or for outdoors the weather service. Settings → Temperature sources has optional "Indoor humidity", "Bedroom humidity" and "Outdoor humidity" choices to pick a sensor yourself.
+  - **No effect on control:** chart only; no heating, cooling or window decision changes.
+- Fix #1455: when a humidity line changes source (for example the chosen sensor goes unavailable, or the outdoor line falls back to the weather service), the log and the Activity log say so once, naming both sources and why.
+
 ## [0.9.10] — 2026-11-07
 
 - Includes `main` through #1452 (developer tooling only: the unit tier runs as four parallel CI jobs, #1450; local slice docs, #1452). No change at home.

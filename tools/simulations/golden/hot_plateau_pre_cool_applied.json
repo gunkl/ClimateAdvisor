@@ -1,6 +1,6 @@
 {
   "name": "hot_plateau_pre_cool_applied",
-  "description": "Issue #558: a plateaued stretch of hot days (today 91°F, tomorrow 95°F — both hot, but the day-over-day trend magnitude is only +4°F, below TREND_THRESHOLD_MODERATE=5°F) previously got ZERO overnight pre-cool banking, indefinitely, because handle_pre_cool()'s only gate was setback_modifier < 0 (a fresh warming trend). resolve_pre_cool_modifier() now also fires on tomorrow's absolute hot classification (tomorrow_high >= threshold_hot=85) even when setback_modifier stays 0.0, using a flat HOT_DAY_PRE_COOL_MODIFIER=-2.0 fallback so the target isn't a no-op equal to sleep_cool.",
+  "description": "Issue #558: a plateaued stretch of hot days (today 91°F, tomorrow 95°F — both hot, but the day-over-day trend magnitude is only +4°F, below TREND_THRESHOLD_MODERATE=5°F) previously got ZERO overnight pre-cool banking, indefinitely, because handle_pre_cool()'s only gate was setback_modifier < 0 (a fresh warming trend). resolve_pre_cool_modifier() now also fires on tomorrow's absolute hot classification (tomorrow_high >= threshold_hot=85) even when setback_modifier stays 0.0, using a flat HOT_DAY_PRE_COOL_MODIFIER=-2.0 fallback so the target isn't a no-op equal to sleep_cool. A setpoint_writes row (Issue #1441) pins the real 70F service call, because the pre_cool_applied event row alone still passed with the write deleted.",
   "source": "synthetic",
   "issue": 558,
   "notes": [
@@ -24,7 +24,19 @@
     "compute_pre_cool_target(config, -2.0) = max(sleep_cool(72) + (-2.0), sleep_heat(64)+hysteresis(1)) =",
     "  max(70.0, 65.0) = 70.0 — 2F below the plain sleep band, not a no-op.",
     "No nat-vent configured (natural_vent_delta absent) → pre-cool uses wake_time-4h fallback.",
-    "  wake_time default = '06:30' → trigger at 02:30."
+    "  wake_time default = '06:30' → trigger at 02:30.",
+    "Assertion a2 (Issue #1441, added 0.9.9, owner re-sign): setpoint_writes (22:30, 02:30] == [70.0]. Without it a",
+    "  deleted pre-cool write still passed: handle_pre_cool() emits pre_cool_applied (target 70) after the write",
+    "  whatever its outcome, and a1 reads that event. Mutation-checked 2026-11-07: with the _apply_comfort_band() call",
+    "  in handle_pre_cool() replaced by a no-write result, a2 fails on Tier A and real HA while a1 still passes.",
+    "Window: since = the bedtime write's own timestamp (22:30:00, excluded by the exclusive bound). Both tiers write",
+    "  exactly 74 (14:00 classification; a use_coordinator run adds a 74 re-send at 14:04:59), 72 (22:30) and 70",
+    "  (02:30); nothing re-sends the 72F ceiling between bedtime and the trigger (no midnight reclassification here,",
+    "  unlike warming_trend_pre_cool_applied, whose window starts at its 00:00 reclassification).",
+    "use_coordinator is not needed (checked both ways): the engine-only run's direct handle_pre_cool() and the",
+    "  coordinator's own 02:30 trigger (#1378 fire-time re-check, which real HA always runs) both reach the hot-day",
+    "  gate, modifier -2.0 -> 70F, so the two paths agree. Unlike the warming-trend golden, no gate here depends on",
+    "  which day the night is judged against: the 14:00 classification's today (91F) and tomorrow (95F) are both hot."
   ],
   "config": {
     "comfort_heat": 70,
@@ -77,6 +89,15 @@
       "expect": "pre_cool_applied",
       "expect_temp": 70.0,
       "reason": "Pre-cool trigger fired via the hot-day fallback gate (Issue #558): setback_modifier=0.0 does not qualify via the trend branch, but tomorrow_high(95) >= threshold_hot(85) does, so resolve_pre_cool_modifier() returns HOT_DAY_PRE_COOL_MODIFIER=-2.0. compute_pre_cool_target() = sleep_cool(72) + (-2.0) = 70F, above the sleep_heat(64)+hysteresis(1)=65F floor, so it applies uncapped. Without this fallback the target would incorrectly equal sleep_cool(72) — a no-op — and this assertion would fail."
+    },
+    {
+      "at": "2026-07-17T02:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-16T22:30:00",
+      "values": [
+        70.0
+      ],
+      "reason": "The thermostat is really told 70F, once, after the 22:30 bedtime write (72F) and up to the 02:30 pre-cool trigger. The pre_cool_applied row above reads the event's target, which is announced after the write whatever its outcome (even not_sent); this row reads the service call itself, so a lost, wrong or doubled pre-cool write fails (Issue #1441). No production re-send of the unchanged 72F ceiling falls in the window on either tier: the scenario has no midnight reclassification, and the bedtime write at 22:30:00 is excluded by the exclusive since bound."
     }
   ],
   "verdict": {

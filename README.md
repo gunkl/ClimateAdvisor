@@ -16,13 +16,15 @@ A Home Assistant integration that runs your thermostat from the weather forecast
 
 **Requires Home Assistant 2026.3 or newer.** Available in the [HACS](https://hacs.xyz) default store.
 
+*Screenshots show an example house (simulated), not a real home.*
+
 | Temperature Forecast | Current Status |
 |---|---|
-| ![3-day view of predicted vs actual indoor/outdoor temperature with HVAC and window activity](docs/screenshots/forecast_3d.png) | ![Status tab with day type, HVAC mode, comfort score and today's strategy](docs/screenshots/status.png) |
+| ![3-day temperature chart: the indoor reading, the v4 prediction for the next 24 hours, the comfort band and target, outdoor temperature, and strips for heating, cooling and open windows](docs/screenshots/forecast_3d.png) | ![Status tab: what to do now, Climate Advisor's next step, the thermostat, outdoor, day type, doors and windows, occupancy and comfort score, and the temperature chart](docs/screenshots/status.png) |
 
 | 24-hour View | Analysis |
 |---|---|
-| ![24-hour forecast with the target band and prediction vs actual](docs/screenshots/forecast_24h.png) | ![Analysis tab with the Activity Record and AI Investigator](docs/screenshots/ai.png) |
+| ![24-hour temperature chart with the comfort band, the target, the indoor reading and the v4 prediction](docs/screenshots/forecast_24h.png) | ![Analysis tab: comfort score, window advice followed, HVAC runtime, a day-by-day table and what Climate Advisor has learned about the house](docs/screenshots/ai.png) |
 
 ## What it does
 

@@ -9,7 +9,10 @@ const { test, expect } = require('@playwright/test');
 // can never have (no outdoor sensor, no fan, no door/window sensors, no occupancy switches) get no chip at all; one
 // muted line in their group names them and where to set them up.
 
-const KEY = 'ca_chart_v2:default';
+// Saved choices are per zone since #1454 ('ca_chart_v2:<zone>'; the mock server's zone is 'mock-zone'). Seed both the
+// scoped key and the pre-#1454 default key, and read whichever the page wrote, so the test does not depend on when the
+// zone list arrives.
+const KEYS = ['ca_chart_v2:mock-zone', 'ca_chart_v2:default'];
 const H = 3600000;
 const SENSORS = [
   { id: 'sensor.living', name: 'Living room', role: 'thermostat' },
@@ -69,8 +72,8 @@ async function open(page, url, o, seed) {
     await page.addInitScript(([k, v]) => {
       if (sessionStorage.getItem('seeded')) return;
       sessionStorage.setItem('seeded', '1');
-      localStorage.setItem(k, JSON.stringify(v));
-    }, [KEY, seed]);
+      k.forEach(key => localStorage.setItem(key, JSON.stringify(v)));
+    }, [KEYS, seed]);
   }
   await routeChart(page, state);
   await page.goto(url);
@@ -84,7 +87,10 @@ async function ready(page) {
   if (!(await page.evaluate(() => document.getElementById('chart-key').open))) await page.locator('#chart-key > summary').click();
 }
 const chip = (page, id) => page.locator('#chart-key-body [data-series="' + id + '"]');
-const stored = (page) => page.evaluate((k) => (JSON.parse(localStorage.getItem(k) || '{}').on || {}), KEY);
+const stored = (page) => page.evaluate((keys) => {
+  for (const k of keys) { const v = localStorage.getItem(k); if (v) return JSON.parse(v).on || {}; }
+  return {};
+}, KEYS);
 const ds = (page, id) => page.evaluate((sid) => {
   for (const cid of ['temp-chart', 'out-chart']) {
     const c = Chart.getChart(document.getElementById(cid));

@@ -178,7 +178,11 @@ async def test_chart_data_carries_the_status_chart_v2_keys_and_the_engine_block(
     assert all("indoor_sensors" not in e for e in body["state_log"])
     # a fresh zone: v4 (the default primary engine) has nothing to draw yet, says so, and the page shows the schedule
     assert body["v4"]["ready"] is False and body["v4"]["reason"] == "no_model"
-    assert body["v4"]["past"] == {} and body["v4"]["future"] == {} and body["v4"]["leads"] == ["1h", "4h", "12h", "24h"]
+    assert (
+        body["v4"]["past"] == {}
+        and body["v4"]["future"] == {}
+        and body["v4"]["leads"] == ["1h", "4h", "12h", "24h", "48h", "72h", "120h"]
+    )
     engines = body["prediction_engines"]
     assert engines["primary"] == "v4" and engines["shadow"] == "none"
     assert engines["fallback"] is True and engines["primary_state"] == "learning" and engines["text"]

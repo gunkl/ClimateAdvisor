@@ -3,14 +3,17 @@
     pwvenv/bin/python tests/browser/check_chart_chips.py <repo-root> <screenshot-dir>
 
 Occupant view: the owner switched on v4 lines that did nothing ("most do nothing, and only one shows prior history").
-A chip that cannot draw must be disabled and say why; an enabled chip must change the chart. For both dashboards
+Issue #1459 (reverses the 0.9.6 lock): a chip with nothing in view stays switchable, in the faint no-data style, and
+says why; only a chip the home cannot have (from chart_data.capabilities) is disabled. For both dashboards
 (index.html, new_dashboard.html), two payloads (the live 0.9.5 Zone 1 shape, ``chart_v2_zone1_live_095.json``, and
 the full mock where v4 has every sensor, ``chart_v2_zone1_24h.json``) and three views (the default 24 h, 6 h, and
 scrolled back into history where the payload has nothing in view), every key chip and every past-lead button:
 
-* disabled  -> it has a reason in its title and its accessible name;
+* disabled  -> (locked) it has a reason in its title and its accessible name;
+* no-data   -> (enabled, nothing in view) it says why, and a click switches it on all the same;
 * enabled   -> switching it on changes the pixels of the chart canvases (indoor, outdoor, strips), and a line chip's
-               own datasets have a point in the view; a past-lead button gives a v4 line a past point in the view.
+               own datasets have a point in the view; a past-lead button gives a v4 line a past point in the view
+               (one with nothing in view stays choosable and the row says so).
 
 Also: Humidity / Feels-like are indoor and outdoor line chips, never overlays (Issue #1414), and in the live
 shape only the sensors v4 has data for get v4
@@ -178,6 +181,20 @@ def audit(pg, name):
             check(f"{name}: disabled {sid} ({label}) says why to a screen reader", title and title in aria, repr(aria))
             check(f"{name}: disabled {sid} ({label}) is off", c.get_attribute("aria-pressed") == "false")
             continue
+        if "no-data" in (c.get_attribute("class") or ""):
+            # Issue #1459: nothing in view: says why, and switches on all the same (it draws once there is data)
+            title = c.get_attribute("title") or ""
+            aria = c.get_attribute("aria-label") or ""
+            check(f"{name}: empty {sid} ({label}) says why on hover", len(title) > 10, repr(title))
+            check(f"{name}: empty {sid} ({label}) says why to a screen reader", title and title in aria, repr(aria))
+            was_on = c.get_attribute("aria-pressed") == "true"
+            c.click()
+            pg.wait_for_timeout(60)
+            now_on = chip(pg, sid).get_attribute("aria-pressed") == "true"
+            check(f"{name}: empty {sid} ({label}) switches", now_on != was_on)
+            chip(pg, sid).click()
+            pg.wait_for_timeout(60)
+            continue
         enabled += 1
         was_on = c.get_attribute("aria-pressed") == "true"
         if was_on:
@@ -210,6 +227,12 @@ def audit(pg, name):
             b = pg.locator(f'#chart-key-body [data-lead="{lead}"]')
             if b.is_disabled():
                 check(f"{name}: disabled lead {lead} says why", len(b.get_attribute("title") or "") > 10)
+                continue
+            if "no-data" in (b.get_attribute("class") or ""):
+                b.click()  # Issue #1459: choosable; the row then says there is none in this view
+                pg.wait_for_timeout(120)
+                check(f"{name}: empty lead {lead} is chosen and the row says so",
+                      pg.locator("#chart-lead-empty").count() == 1, lead)  # fmt: skip
                 continue
             b.click()
             pg.wait_for_timeout(120)

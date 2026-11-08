@@ -115,9 +115,11 @@ for (const url of ['/', '/new_dashboard.html']) {
       expect(stored).toEqual({ 'ov:band': false, 'ind:humidity': true, 'ind:feelslike': true });
     });
 
-    test('Humidity and Feels-like with nothing logged (the live 0.9.5 shape): chips disabled with the reason', async ({ page }) => {
+    // Issue #1459 (deliberate reversal of 0.9.6 #1421): an empty view keeps the reason but no longer disables the chip
+    test('Humidity and Feels-like with nothing logged (the live 0.9.5 shape): chips switchable, with the reason', async ({ page }) => {
       await open(page, url);
-      await expect(chip(page, 'ind:humidity')).toBeDisabled();
+      await expect(chip(page, 'ind:humidity')).toBeEnabled();
+      await expect(chip(page, 'ind:humidity')).toHaveClass(/no-data/);
       await expect(chip(page, 'ind:humidity')).toHaveAttribute('title', 'No humidity reading recorded in this view');
       await expect(chip(page, 'out:feelslike')).toHaveAttribute('title', /heat index \(80°F and up\) or wind chill \(50°F and below with wind\)/);
     });
@@ -126,7 +128,7 @@ for (const url of ['/', '/new_dashboard.html']) {
       await open(page, url);
       await expect(page.locator('#chart-lead-row [data-lead="4h"]')).toBeEnabled();   // the live view has past points
       for (let i = 0; i < 3; i++) await page.evaluate(() => shiftChartWindow(-1));     // 72 h back: before the capture
-      const help = page.locator('#chart-lead-row #chart-lead-help');
+      const help = page.locator('#chart-lead-row #chart-lead-empty');
       await expect(help).toHaveAttribute('data-lead-empty', 'view');
       await expect(help).toHaveText(/^No past v4 predictions in this view; v4 has them from .+ to .+$/);
       await expect(help).not.toContainText('yet');
@@ -140,19 +142,22 @@ for (const url of ['/', '/new_dashboard.html']) {
       await open(page, url, { pastAgeH: 8 });
       await expect(page.locator('#chart-lead-row [data-lead="4h"]')).toBeEnabled();
       await page.evaluate(() => setChartRange('6h'));
-      const help = page.locator('#chart-lead-row #chart-lead-help');
+      const help = page.locator('#chart-lead-row #chart-lead-empty');
       await expect(help).toHaveAttribute('data-lead-empty', 'view');
       await expect(help).toHaveText(/^No past v4 predictions in this view; v4 has them from .+ to .+$/);
       // and the v4 chips say why they draw nothing left of Now only where that is so: the CA reading still has its forecast
       await expect(chip(page, 'v4:_ca')).toBeEnabled();
-      await expect(chip(page, 'v4:' + FINER)).toBeDisabled();
+      // Issue #1459: nothing in view says why but stays switchable (and the look-ahead buttons stay choosable)
+      await expect(chip(page, 'v4:' + FINER)).toBeEnabled();
+      await expect(chip(page, 'v4:' + FINER)).toHaveClass(/no-data/);
       await expect(chip(page, 'v4:' + FINER)).toHaveAttribute('title', /Nothing to draw in this view/);
+      await expect(page.locator('#chart-lead-row [data-lead="4h"]')).toBeEnabled();
     });
 
     test('an older backend (no past_span): scrolled history still says "in this view"', async ({ page }) => {
       await open(page, url, { span: false });
       for (let i = 0; i < 3; i++) await page.evaluate(() => shiftChartWindow(-1));
-      await expect(page.locator('#chart-lead-row #chart-lead-help')).toHaveText('No past v4 predictions in this view');
+      await expect(page.locator('#chart-lead-row #chart-lead-empty')).toHaveText('No past v4 predictions in this view');
     });
 
     test('every range and the daily resolution: past lead buttons whenever the view has past points', async ({ page }) => {

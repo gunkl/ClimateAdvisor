@@ -55,7 +55,7 @@ def test_buttons_are_real_buttons_with_aria_pressed():
 
 def test_ranges_leads_and_scroll():
     assert "var RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y']" in PAGE
-    assert "var LEADS = ['1h', '4h', '12h', '24h']" in PAGE
+    assert "var LEADS = ['1h', '4h', '12h', '24h', '48h', '72h', '120h']" in PAGE
     assert "'Scroll back'" in PAGE and "'Scroll forward'" in PAGE
     assert "\u2039" in PAGE and "\u203a" in PAGE
     scroll = _func("scroll")

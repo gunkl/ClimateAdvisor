@@ -9,7 +9,7 @@ the home band for that timer (Issue #1425), so the chart and the thermostat disa
 chart rows (Away band 63-79 while home) are the Issue #1425 case, fixed in 0.9.7; they are pinned again here.
 
 Real Home Assistant, the real occupancy toggle and its real away timer, the real 30-minute cycle. Both fan modes.
-The two pending Tier A scenarios run here too, through ``RealHASession``.
+The two #1433 goldens (signed) run here too, through ``RealHASession``, with the extra in-grace precondition check.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from tools.sim_harness.outcomes import check_assertion
 pytestmark = pytest.mark.house
 
 _FANS = ["whf", "hvac_fan"]
-_PENDING = Path(__file__).resolve().parent.parent / "tools" / "simulations" / "pending"
+_PENDING = Path(__file__).resolve().parent.parent / "tools" / "simulations" / "golden"  # signed after review
 _SCENARIOS = ["issue_1433_away_grace_periodic_cycle_holds_home", "issue_1433_away_grace_tou_bank_holds_home"]
 _VACATION = "input_boolean.vacation"
 _GUEST = "input_boolean.guest"

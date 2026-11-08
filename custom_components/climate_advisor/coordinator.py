@@ -7645,7 +7645,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return False
 
         checks: dict[str, Callable[[], bool]] = {
-            "v4_running": lambda: prediction_engines.is_running(cfg, prediction_engines.ENGINE_V4),
+            "v4_running": lambda: self.engine_running(prediction_engines.ENGINE_V4),
             "outdoor_sensor": lambda: (
                 cfg.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
                 in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)

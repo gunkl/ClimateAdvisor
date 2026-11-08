@@ -53,6 +53,9 @@ _COORDINATOR_WIRING = {
     # Issue #1230 R2: the Status chart DISPLAYS v4 (when v4 has data or the occupant selected it). Display only:
     # see test_get_chart_data_only_displays_v4 for how narrowly it may touch v4.
     "get_chart_data",
+    # Issue #1459: the chart key's capabilities block says whether v4 runs, so a v4 chip is locked only when v4 is
+    # switched off. Display only, called only by get_chart_data (pinned in tests/test_chart_capabilities_1459.py).
+    "chart_capabilities",
     # Issue #1230 R6: the night strategy ADVISES (DP-7: nothing commands a fan, window or setpoint). These two read the
     # v4 model/state to plan tonight's bedroom advice and publish it read-only; they never feed v4 back
     # (test_night_wiring_is_advisory_only pins what they may write and call).
@@ -334,6 +337,7 @@ _SELECTION_COORDINATOR_METHODS = {
     "_timeline_snapshot",
     "_timeline_night_apply",
     "get_chart_data",
+    "chart_capabilities",  # Issue #1459: display only (the chart key's v4_running flag)
     "primary_engine_id",
     "shadow_engine_id",
     "engine_running",

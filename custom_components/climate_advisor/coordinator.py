@@ -434,6 +434,9 @@ from .timeline_surfaces import (
     apply_direction_veto,
     next_automation_candidates,
     operations_lines,
+    planned_windows_open,
+    strip_covers,
+    strip_spans,
     timeline_api_payload,
     timeline_windows,
     tou_bank_end_label,
@@ -452,6 +455,8 @@ from .whf_safety_decision import (
 
 _LOGGER = logging.getLogger(__name__)
 _V4_FIT_LOCK_KEY = "climate_advisor_v4_fit_lock"  # hass.data key of the domain-wide v4 fit lock (Issue #1230 R1b, M5)
+# Issue #1422: the off-cycle fit that only folds newly qualified display-only sensor nodes into the stored model.
+V4_DISPLAY_FIT_REASON = "display_nodes"
 # Issue #1415: the one-time split of the old shared investigation-reports file runs in executor threads; two zones
 # starting at once must not split it twice (each would copy, one would remove it under the other).
 _INVESTIGATION_MIGRATION_LOCK = threading.Lock()
@@ -903,6 +908,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_fit_running = False
         self._v4_fit_task: asyncio.Task[Any] | None = None
         self._v4_last_fit_attempt: float | None = None
+        self._v4_last_display_check: float | None = None  # Issue #1422: newly qualified display nodes, every 6 h
         self._v4_last_fit: dict[str, Any] = {}
         self._v4_last_cycle: dict[str, Any] = {}
         self._v4_last_future: dict[str, Any] | None = None  # newest 24 h prediction, for the Status chart (R2)
@@ -2223,8 +2229,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # weather provider's (e.g. a provider °C value passed through as °F). The rule
         # discards on ANY unit change, which also drops good samples from before a
         # switch into the wrong unit (harmless: they refill within a poll cycle).
-        # Decided once here and applied to the reading-derived restores below (and the
-        # persisted pending thermal observations). Missing/non-str => no-op.
+        # Decided once here and applied to the reading-derived restores below. Missing/non-str => no-op.
         _saved_unit = state.get("temp_unit")
         _restore_cfg = getattr(self, "config", None)
         _current_unit = _restore_cfg.get("temp_unit", "fahrenheit") if _restore_cfg is not None else None
@@ -2238,24 +2243,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _raw_arch = state.get("pred_archive")
             _dropped_arch = len(_raw_arch) if isinstance(_raw_arch, dict) else 0
             _dropped_cls = bool(state.get("classification"))
-            # Pending thermal observations hold samples taken under the old unit; clear
-            # them before the _first_run block recovers them. Only this dict is touched.
-            _learn_state = getattr(getattr(self, "learning", None), "_state", None)
-            _pending = getattr(_learn_state, "pending_observations", None)
-            _dropped_pending = len(_pending) if isinstance(_pending, dict) else 0
-            if isinstance(_pending, dict):
-                _pending.clear()
             _LOGGER.warning(
                 "Temperature unit changed since last run: same-day readings discarded "
                 "from=%s to=%s dropped_outdoor=%d dropped_indoor=%d dropped_pred_archive=%d "
-                "dropped_classification=%s dropped_pending_observations=%d",
+                "dropped_classification=%s",
                 _saved_unit,
                 _current_unit,
                 _dropped_outdoor,
                 _dropped_indoor,
                 _dropped_arch,
                 _dropped_cls,
-                _dropped_pending,
             )
             _unit_change_payload = {
                 "from": _saved_unit,
@@ -2264,7 +2261,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "dropped_indoor": _dropped_indoor,
                 "dropped_pred_archive": _dropped_arch,
                 "dropped_classification": _dropped_cls,
-                "dropped_pending_observations": _dropped_pending,
             }
 
         # Issue #1337: the kept forecast. Not under another unit: the daily list is in the provider's unit.
@@ -2982,6 +2978,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._occupancy_away_timer_cancel()
             self._occupancy_away_timer_cancel = None
             _LOGGER.debug("Occupancy away timer cancelled")
+        _engine = getattr(self, "automation_engine", None)
+        if _engine is not None:
+            _engine.set_away_setback_pending(False)  # Issue #1433: no timer, nothing waits for it
 
     def _cancel_tou_av_stop_timer(self) -> None:
         """Cancel any pending away/vacation TOU T_start guard timer (Issue #899).
@@ -3357,6 +3356,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             @callback
             def _occupancy_away_timer_expired(_now: Any) -> None:
                 self._occupancy_away_timer_cancel = None
+                self.automation_engine.set_away_setback_pending(False)  # Issue #1433: the setback is due now
                 _LOGGER.info("Occupancy away timer expired — applying setback")
                 self.hass.async_create_task(_apply_away_setback())
 
@@ -3365,6 +3365,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 delay_seconds,
                 self._zone_scoped_sync(_occupancy_away_timer_expired),
             )
+            # Issue #1433: until the timer expires no other path (the 30-minute cycle, bedtime, pre-cool, a
+            # time-of-use start) sends the setback; the thermostat stays on the home band the chart draws (#1425).
+            self.automation_engine.set_away_setback_pending(True)
         elif new_mode in present_modes:
             self._cancel_occupancy_away_timer()
             # Issue #899: occupancy left away/vacation — cancel any pending TOU T_start
@@ -3869,7 +3872,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         await self._async_save_state()
 
     def _run_first_cycle_recovery(self) -> None:
-        """First cycle after a restart: recover persisted observations and run the one-time backfills.
+        """First cycle after a restart: run the one-time chart_log backfills.
+
+        No in-flight thermal observation is recovered (Issue #1437): observations are never persisted,
+        so a run in progress at a restart is learned from only after it (see
+        ``_initialize_hvac_session_from_current_state``).
 
         Split out of the cycle so it also runs when no forecast exists during a weather outage (Issue #1337);
         none of it reads weather data.
@@ -3877,53 +3884,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
         if self._first_run:
             self._first_run = False
-            # Recover v3 pending_observations that survived restart
-            _pending_obs = self.learning._state.pending_observations
-            if isinstance(_pending_obs, dict):
-                for _obs_type, _obs in list(_pending_obs.items()):
-                    if not isinstance(_obs, dict):
-                        continue
-                    if _obs.get("_legacy_event"):
-                        # Legacy HVAC event migrated into pending_observations — use HVAC commit path
-                        session_mode = _obs.get("session_mode") or _obs.get("hvac_mode") or "heat"
-                        _obs["session_mode"] = session_mode
-                        self._pending_observations[_obs_type] = _obs
-                    else:
-                        # Bug 2 fix: For HVAC obs, check the right sample list based
-                        # on the current phase.  Pre-fix obs had 'samples': [] which
-                        # shadowed active_samples in the generic fallback, causing all
-                        # HVAC observations to be discarded on every HA restart.
-                        _hvac_types_sr = {OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL}
-                        if _obs_type in _hvac_types_sr:
-                            _phase_sr = _obs.get("_phase", "active")
-                            if _phase_sr == "post_heat":
-                                samples = _obs.get("post_heat_samples", [])
-                                min_s = THERMAL_MIN_POST_HEAT_SAMPLES
-                            else:
-                                # Active phase: any sample is worth recovering so
-                                # post-heat observation window can continue after restart.
-                                samples = _obs.get("active_samples", [])
-                                # Fall back to generic 'samples' key for pre-fix persisted obs
-                                if not samples:
-                                    samples = _obs.get("samples", [])
-                                min_s = 1
-                        else:
-                            samples = _obs.get("samples", _obs.get("active_samples", []))
-                            min_s = {
-                                OBS_TYPE_PASSIVE_DECAY: THERMAL_PASSIVE_MIN_SAMPLES,
-                                OBS_TYPE_VENT_WINDOW_DECAY: THERMAL_VENT_MIN_SAMPLES,
-                                OBS_TYPE_VENT_FAN_DECAY: THERMAL_VENT_MIN_SAMPLES,
-                                OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_MIN_SAMPLES,
-                            }.get(_obs_type, 10)
-                        if len(samples) >= min_s:
-                            self._pending_observations[_obs_type] = _obs
-                            _LOGGER.info(
-                                "Startup: recovered v3 observation type=%s obs_id=%s samples=%d phase=%s",
-                                _obs_type,
-                                _obs.get("obs_id", "?"),
-                                len(samples),
-                                _obs.get("_phase", "active"),
-                            )
+            # Issue #1437: no in-flight observation is recovered here. A run in progress at a restart is
+            # learned from only after the restart (the Issue #96 late start opens a fresh observation), by
+            # design: the thermostat keeps running while HA is down and CA cannot see whether the run stopped
+            # and restarted, so a fit across that blind gap would be invalid.
 
             # Chart_log endpoint estimator backfill (Issue #137): run once on first startup
             # after the new code is deployed. The chart_log is loaded in __init__ so entries
@@ -4452,9 +4416,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # self._current_classification is always fresh.
             await self._apply_tou_schedule()
 
-            if self._maybe_regenerate_briefing_for_drift():
-                await self._async_save_state()
-
             # Reset startup retry state on success (Issue #1337: a real fetch, not the kept forecast)
             if forecast.from_kept_forecast is not True and self._startup_retries_remaining < 5:
                 _LOGGER.info(
@@ -4874,6 +4835,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R3b: the operation timeline is generated ONCE per cycle, here, before any surface is computed:
         # Next Action, Next Automation, the briefing and the REST endpoint all read this one result.
         self._timeline_shadow_run("cycle")
+
+        # Issue #1436 audit: the drift-regenerated briefing reads the plan, so it runs after the planning step above
+        # (it used to run earlier in the cycle, where its read rebuilt the plan mid-cycle).
+        if forecast and not _outage_retry_only and c is not None and self._maybe_regenerate_briefing_for_drift():
+            await self._async_save_state()
 
         next_auto = self._compute_next_automation_action(c)
         fan_running = self.automation_engine._fan_active
@@ -5836,7 +5802,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         aliases = tuple(c for c in (self.config.get("climate_entity"),) if c)
         cfg = dict(self.config)
         in_sleep = (lambda dt, _cfg=cfg: _in_sleep_window(dt, _cfg)) if cfg.get("sleep_indoor_temp_entity") else None
-        return {"primary": primary, "sensors": sensors, "aliases": aliases, "in_sleep": in_sleep}
+        # Issue #1432: the separate sleep sensor (None: none configured, or it is the primary): the per-room model
+        # needs it modelled before it is used, so sleep hours are never forecast from the thermostat's room.
+        sleep = cfg.get("sleep_indoor_temp_entity") or None
+        sleep_sensor = sleep if sleep and sleep != primary else None
+        return {
+            "primary": primary,
+            "sensors": sensors,
+            "aliases": aliases,
+            "in_sleep": in_sleep,
+            "sleep_sensor": sleep_sensor,
+        }
 
     async def _v4_run_night_replay(self, reason: str) -> None:
         """The nightly recorded-night replay behind the night-strategy gate (Issue #1230 R6). Never raises.
@@ -5943,6 +5919,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 # Captured on the loop (rule: no self.* reads inside the executor job); the row copy is shallow.
                 # One fit at a time across ALL zones (M5): several zones fitting at once starve the event loop (GIL).
+                if reason == V4_DISPLAY_FIT_REASON:
+                    await self._v4_run_display_fit(now, primary, sensors, aliases, in_sleep)
+                    return
                 async with self._v4_fit_lock():
                     model_dict, seconds, fit_line = await self._executor_job(
                         functools.partial(
@@ -5957,6 +5936,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             primary_aliases=aliases,
                             in_sleep=in_sleep,
                             train_days=V4_FIT_TRAIN_DAYS,
+                            sleep_sensor=node.get("sleep_sensor"),
                         )
                     )
                 if getattr(self, "_shut_down", False) is True:
@@ -5986,6 +5966,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     len(summary["sensors"]),
                     seconds,
                 )
+                self._v4_note_node_choice(reason, previous, model_dict)
                 await self._executor_job(self._v4_store.save)
                 # Issue #1230 R6: the night-strategy gate's evidence is re-run right after every fit (own failures).
                 await self._v4_run_night_replay(reason)
@@ -6013,7 +5994,127 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._v4_fit_running = False
             self._v4_fit_task = None
 
-    # ── Issue #1230 R3a: operation timeline (shadow) ─────────────────────────────────────────────────────────────
+    def _v4_note_node_choice(
+        self, reason: str, previous: Mapping[str, Any] | None, model_dict: Mapping[str, Any]
+    ) -> None:
+        """Say which model v4's decisions now read and why (Issue #1432). Never raises.
+
+        Occupant view: pre-heat, pre-cool, the ceiling guard and the setback depth read v4's forecast of the reading CA
+        uses. One INFO line on every fit names the model (the stitched CA reading, or each room separately) and the
+        reason (which rooms qualified, a missing bedroom node, or the backtest scores); when the choice CHANGES between
+        fits a ``forecast_model_changed`` Activity row says so in plain words. Temperatures in the user's unit."""
+        try:
+            choice = v4_shadow.node_choice(model_dict)
+            if choice is None:
+                return
+            unit = self.config.get("temp_unit", "fahrenheit")
+            ids = [s for s in (choice.get("primary"), choice.get("sleep")) if isinstance(s, str)]
+            try:
+                names = {m["id"]: m["name"] for m in self.v4_indoor_sensors_meta(ids)}
+            except Exception:  # noqa: BLE001 - friendly names are cosmetic
+                names = {}
+            changed = v4_shadow.node_choice_changed(previous, model_dict)
+            headline, why = v4_shadow.describe_node_choice(
+                choice, fmt_delta=lambda f: format_temp_delta(f, unit, 2), names=names, changed=changed
+            )
+            _LOGGER.info(
+                "v4 fit (%s): decisions use the %s model (%s): %s: %s",
+                reason,
+                choice.get("model"),
+                choice.get("reason"),
+                headline,
+                why or "-",
+            )
+            if changed:
+                # The Activity row is rendered in the report's unit: its temperature differences are ``{tN}`` slots
+                # filled from ``temps_f`` (degrees F) at render time; braces in friendly names are escaped.
+                temps: dict[str, float] = {}
+
+                def _slot(f: float) -> str:
+                    key = f"t{len(temps)}"
+                    temps[key] = round(float(f), 3)
+                    return "{" + key + "}"
+
+                esc = {k: str(v).replace("{", "{{").replace("}", "}}") for k, v in names.items()}
+                _h, template = v4_shadow.describe_node_choice(choice, fmt_delta=_slot, names=esc, changed=True)
+                prev = v4_shadow.node_choice(previous) or {}
+                self._emit_event(
+                    "forecast_model_changed",
+                    {
+                        "zone": self.zone_label,
+                        "from_model": prev.get("model"),
+                        "to_model": choice.get("model"),
+                        "reason": choice.get("reason"),
+                        "headline": headline,
+                        "detail_template": template,
+                        "temps_f": temps,
+                    },
+                )
+        except Exception:  # noqa: BLE001 - a log line must never fail the fit
+            _LOGGER.debug("v4 node-choice note failed", exc_info=True)
+
+    async def _v4_run_display_fit(
+        self, now: datetime, primary: str, sensors: list[str], aliases: tuple[str, ...], in_sleep: Any
+    ) -> None:
+        """Fold newly qualified display-only sensor nodes into the stored model (Issue #1422, option b). Never raises.
+
+        Occupant view: the bedroom or thermostat line appears on the Status chart within about 6 h of the sensor
+        reaching 3 days of its own history. Display only: ``v4_shadow.run_display_fit`` copies every control key of
+        the stored model through unchanged (house, control nodes, thermostat, confidence, ``fitted_at``), so the
+        decisions read the same model; no night replay runs (its evidence depends on the control model alone). A
+        failure keeps the stored model and does not mark the fit as failed."""
+        state = self._v4_store
+        model_dict = state.v4_model
+        if not isinstance(model_dict, dict) or model_dict.get("confidence", "none") == "none":
+            return
+        try:
+            async with self._v4_fit_lock():
+                new_dict, seconds, line = await self._executor_job(
+                    functools.partial(
+                        v4_shadow.run_display_fit,
+                        chart_entries=self._chart_log.raw_entries(),
+                        tz=now.tzinfo,
+                        now=now,
+                        primary=primary,
+                        sensors=sensors,
+                        model_dict=model_dict,
+                        primary_aliases=aliases,
+                        in_sleep=in_sleep,
+                        train_days=V4_FIT_TRAIN_DAYS,
+                    )
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - display lines only; the stored model stays
+            _LOGGER.warning("v4 display-node fit failed; keeping the stored model", exc_info=True)
+            return
+        if getattr(self, "_shut_down", False) is True or state.v4_model is not model_dict:
+            return  # unloaded, or a full fit replaced the model meanwhile: drop this result
+        state.v4_model = new_dict
+        state.dirty = True
+        _LOGGER.info("v4 fit (%s): %s took %.1fs", V4_DISPLAY_FIT_REASON, line, seconds)
+        await self._executor_job(self._v4_store.save)
+
+    def _v4_display_pending(self, model_dict: Mapping[str, Any]) -> list[str]:
+        """Sensors that newly qualify as display-only nodes (Issue #1422); ``[]`` on any error. Event loop: one pass
+        over the last 30 days of chart rows, run at most every 6 h (the retry interval)."""
+        try:
+            node = self._v4_node_inputs()
+            now = dt_util.now()
+            return v4_shadow.display_pending(
+                model_dict,
+                self._chart_log.raw_entries(),
+                now=now,
+                tz=now.tzinfo,
+                primary=node["primary"],
+                sensors=node["sensors"],
+                train_days=V4_FIT_TRAIN_DAYS,
+            )
+        except Exception:  # noqa: BLE001 - a display trigger must never break the cycle
+            _LOGGER.debug("v4 display-node check failed", exc_info=True)
+            return []
+
+    # ── Issue #1230 R3a: operation timeline (shadow)─────────────────────────────────────────────────────────────
     # The pure plan lives in operation_timeline.py. Here: build the snapshot from the live plan, run the per-day latch,
     # keep the last result for the debug payload. Nothing below writes to the engine, the classification or a surface.
 
@@ -6023,7 +6124,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._timeline_dirty = event_type
 
     def _timeline_tick(self) -> None:
+        """The 5-minute planning step: a marked change, or (Issue #1436 audit) a new local day the cycle has not planned
+        yet, now that no read builds the plan."""
         reason = getattr(self, "_timeline_dirty", None)
+        if reason is None:
+            latch = getattr(self, "_timeline_latch", None)
+            tl = latch.timeline if latch is not None else None
+            if tl is not None and tl.day != dt_util.now().date():
+                reason = "new_day"
         if reason is not None:
             self._timeline_shadow_run(reason)
 
@@ -6391,7 +6499,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         try:
             from . import night_strategy  # noqa: PLC0415
 
-            self._surface_timeline()  # refreshes the plan (and with it the night strategy) when stale
+            # read only (Issue #1436 audit): the night strategy is planned with the timeline, by its planning steps
             cache = getattr(self, "_timeline_night", None) or {}
             strategy = cache.get("strategy")
             if strategy is None:
@@ -6403,33 +6511,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None, "error"
 
     def _surface_timeline(self, *, live: bool = True) -> Any:
-        """The timeline the occupant-facing surfaces read (Issue #1230 R3b), or None in a degraded coordinator.
+        """The timeline the occupant-facing surfaces read (Issue #1230 R3b), or None (no plan yet / degraded).
 
         ``live`` (default) marks the window step the live direction rule vetoes right now as held, so the plan list, the
         briefing and the REST body say what the Next Action card says (``timeline_surfaces.apply_direction_veto``);
         ``live=False`` is the plan as latched (the card applies the veto itself with the readings it was handed).
 
-        The cycle generates it once before the surfaces are computed. A standalone read (the REST endpoint, a harness
-        capture, a surface asked between cycles) refreshes it when the last run is older than two minutes or belongs
-        to another local day, so a surface never reads yesterday's plan. Never raises.
+        READ ONLY (Issue #1436 mirror audit): it returns the plan as latched and never builds or refreshes it. Only the
+        planning steps build it (``_timeline_shadow_run``: the cycle, the occupancy change, the 5-minute tick for a
+        marked change or a new local day, the briefing send). Before, any read older than two minutes rebuilt it, so a
+        read in the middle of a cycle (a chart row, a card refresh, a REST call) latched the day's plan from
+        half-updated inputs (real HA: the evening window step moved from 7:30 PM to 7:00 PM and was marked done). Before
+        the first plan, or on a new local day before its plan, it returns None: "no plan yet" (the REST endpoint answers
+        503, the cards use their documented degraded path). Never raises.
         """
         latch = getattr(self, "_timeline_latch", None)
         if latch is None or getattr(self, "_shut_down", False) is True or self._current_classification is None:
             return None
         try:
             tl = latch.timeline
-            last = (getattr(self, "_timeline_last", None) or {}).get("at")
-            now = dt_util.now()
-            stale = tl is None or tl.day != now.date()
-            if not stale and last:
-                at = dt_util.parse_datetime(last)
-                stale = at is None or abs((now - at).total_seconds()) > 120.0
-            if stale:
-                self._timeline_shadow_run("surface")
-                tl = latch.timeline
-            if live and tl is not None:
-                tl = self._apply_live_direction_veto(tl)
-            return tl
+            if tl is None or tl.day != dt_util.now().date():
+                return None
+            return self._apply_live_direction_veto(tl) if live else tl
         except Exception:  # noqa: BLE001 - a surface falls back to its degraded path rather than fail
             _LOGGER.debug("surface timeline unavailable", exc_info=True)
             return None
@@ -6474,6 +6577,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1404: the hold in force now (a time-of-use bank), for the plan list's "Now" row. A view field like
         # text_short: the stored timeline contract and its steps are unchanged.
         out["current_hold"] = self.current_hold_payload()
+        # Issue #1436: the chart's activity strips right of NOW, read off this same plan (a view field like text_short).
+        out["strips"] = strip_spans(tl, dt_util.now())
         return out
 
     def timeline_operations_lines(self) -> list[str]:
@@ -6586,9 +6691,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None
 
     def _v4_sleep_node(self, model_dict: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
-        """``(sleep sensor id, sleep_time, wake_time)`` when the configured sleep sensor is a node of the model."""
+        """``(sleep sensor id, sleep_time, wake_time)`` when the configured sleep sensor is a node of the model, or the
+        model's primary is a room node (Issue #1432: then ``_ca`` is always composed, and a sleep hour the bedroom
+        node cannot answer is left out instead of being filled from the thermostat's room)."""
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
-        sleep_node = sleep_entity if sleep_entity and sleep_entity in (model_dict.get("sensors") or []) else None
+        primary = model_dict.get("primary")
+        sleep_node = (
+            sleep_entity
+            if sleep_entity
+            and sleep_entity != primary
+            and (sleep_entity in (model_dict.get("sensors") or []) or (isinstance(primary, str) and primary != "_ca"))
+            else None
+        )
         return (
             sleep_node,
             self.config.get("sleep_time") if sleep_node else None,
@@ -6708,6 +6822,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             last = self._v4_last_fit_attempt
             if last is None or _monotonic() - last >= V4_FIT_RETRY_MIN_INTERVAL_S:
                 self._v4_start_night_replay("night_replay")
+        if (
+            model_dict.get("confidence", "none") != "none"
+            and not self._v4_fit_running
+            and getattr(self, "_startup_coalesce_active", False) is not True
+        ):
+            # Issue #1422: a sensor that newly qualifies as a display-only node (3+ days of its own history) is folded
+            # in at the 6-hourly retry instead of waiting for 03:15. Display only: the control model is not refitted.
+            last_chk = getattr(self, "_v4_last_display_check", None)
+            if last_chk is None or _monotonic() - last_chk >= V4_FIT_RETRY_MIN_INTERVAL_S:
+                self._v4_last_display_check = _monotonic()
+                if self._v4_display_pending(model_dict):
+                    self._v4_start_fit(V4_DISPLAY_FIT_REASON)
         started = _perf_counter()
         now = dt_util.now()
         sleep_node, sleep_time, wake_time = self._v4_sleep_node(model_dict)
@@ -6727,7 +6853,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         cycle = self._v4_cycle_kwargs(now, row, model_dict, state)
         readings = cycle["readings"]
         inputs = cycle["inputs"]
-        predictions, new_mass = await self._executor_job(functools.partial(v4_shadow.run_cycle, **cycle))
+        predictions, new_mass = await self._executor_job(functools.partial(v4_shadow.run_cycle, display=True, **cycle))
         if getattr(self, "_shut_down", False) is True:
             return
         state.v4_mass_f = new_mass
@@ -6752,6 +6878,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         inputs=inputs,
                         outdoor_now_f=row.get("outdoor"),
                         forecast_now_f=row.get("pred_outdoor"),
+                        ca_sleep_node=cycle["ca_sleep_node"],
+                        ca_sleep_time=cycle["ca_sleep_time"],
+                        ca_wake_time=cycle["ca_wake_time"],
                     )
                 )
             except Exception:  # noqa: BLE001 - the extra lines are optional; v4 lines still draw
@@ -7155,6 +7284,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             unit = self.config.get("temp_unit", "fahrenheit")
             state = self._v4_store
             out = v4_shadow.model_summary(state.v4_model)
+            choice = out.pop("node_choice", None)  # raw degrees F: shown below in words, in the user's unit
             out["mae_by_lead"] = {k: display_delta(v, unit, 2) for k, v in out.get("mae_by_lead", {}).items()}
             out["unit"] = UNIT_SYMBOL.get(unit, "°F")
             out["engine_available"] = v4_shadow.predictor_available()
@@ -7174,6 +7304,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 ids = [s for s in out.get("sensors") or [] if s != "_ca"]
                 out["sensor_names"] = {m["id"]: m["name"] for m in self.v4_indoor_sensors_meta(ids)}
+                # Issue #1432: which model the decisions read, and why, in words and the user's unit
+                if isinstance(choice, Mapping):
+                    c_ids = [s for s in (choice.get("primary"), choice.get("sleep")) if isinstance(s, str)]
+                    c_names = {m["id"]: m["name"] for m in self.v4_indoor_sensors_meta(c_ids)}
+                    headline, why = v4_shadow.describe_node_choice(
+                        choice, fmt_delta=lambda f: format_temp_delta(f, unit, 2), names=c_names
+                    )
+                    out["forecast_model"] = {
+                        "model": choice.get("model"),
+                        "reason": choice.get("reason"),
+                        "text": headline + (f": {why}" if why else ""),
+                    }
             except Exception:  # noqa: BLE001 - cosmetic
                 _LOGGER.debug("v4_model_summary names/archive start failed", exc_info=True)
             return out
@@ -8007,6 +8149,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # extracted to _ensure_today_record() so the regular classification cycle can also
             # call it — this call site is now just the once-daily "make sure it's current" path.
             self._ensure_today_record(classification)
+
+            # Issue #1436 audit: the briefing send is a planning step (it may have re-classified and re-applied the day
+            # above); the plan is brought up to date here, and the text below only reads it.
+            self._timeline_shadow_run("briefing")
 
             # Generate briefing text and track which suggestions were sent
             suggestions = self.learning.generate_suggestions()
@@ -12180,8 +12326,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _initialize_hvac_session_from_current_state(self, climate_state: Any) -> None:
         """Late-start HVAC session when HA restarted mid-session (Issue #96).
 
-        Sets session start from current time. Thermal observations will cover
-        only the post-restart portion — better than zero observations.
+        Sets session start from current time. The thermal observation covers only the
+        post-restart portion, by design (Issue #1437): the part of the run before the
+        restart is never learned from. In-flight observations are not persisted, and
+        resuming one would fit a curve across the blind gap while HA was down, during
+        which the thermostat kept running and CA cannot see whether the run stopped and
+        restarted. A shorter clean observation beats a longer contaminated one.
         Called from _async_update_data() on first update if HVAC is already running.
         """
         action = climate_state.attributes.get("hvac_action", "").lower()
@@ -15605,12 +15755,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             engine = self.automation_engine
             if engine is not None and (bool(engine._manual_override_active) or bool(engine._grace_active)):
                 out["override"] = True
+            out.update(self._read_chart_windows_planned())
             source = self._get_indoor_temp_with_provenance().source_entity
             if isinstance(source, str) and source:
                 out["band_sensor"] = source
         except Exception:  # noqa: BLE001 - a chart row must never fail on context
             _LOGGER.debug("chart_log: could not read row context", exc_info=True)
         return out
+
+    def _read_chart_windows_planned(self) -> dict[str, Any]:
+        """``{"windows_planned": bool}`` for a chart row: whether the operation timeline expects the windows open now.
+
+        Issue #1436: the PAST "Win plan" strip read ``windows_recommended`` (the classifier's live flag, true at 4 AM on
+        a warm day), so it disagreed with the plan as soon as the plan's close time went by. The row now records what
+        the plan said, the same meaning as the strip's faded part. Empty (key absent) with no timeline; never raises.
+        """
+        try:
+            tl = self._surface_timeline()  # a chart row is written mid-cycle: never build the plan here
+            if tl is None:
+                return {}
+            return {"windows_planned": bool(planned_windows_open(tl, dt_util.now()))}
+        except Exception:  # noqa: BLE001 - a chart row must never fail on the plan
+            _LOGGER.debug("chart_log: could not read the planned window state", exc_info=True)
+            return {}
 
     def _read_chart_comfort_target(self) -> float | None:
         """The room's comfort target (internal F) while the remote-sensor outer loop holds an offset, else None.
@@ -16836,8 +17003,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _ae._natural_vent_active if _ae else False,
             )
 
+        # Issue #1436: the window and nat-vent flags per hour are the PLAN's (the operation timeline's window periods
+        # and nat-vent sessions, the same spans the chart's faded strips draw), never the regime walk's: the walk knows
+        # nothing of the plan's close time, so the forward Target line drew a nat-vent target all night under a plan
+        # that closes the windows at 7 PM. A coordinator with no timeline (degraded) keeps the walk, as every surface's
+        # degraded path does.
+        _plan_spans: list[dict] | None = None
+        if not is_historical:
+            try:
+                _plan_tl = self._surface_timeline()  # never build the plan from a chart read
+                _plan_spans = strip_spans(_plan_tl, now) if _plan_tl is not None else None
+            except Exception:  # noqa: BLE001 - the chart never fails on the plan; it falls back to the walk
+                _LOGGER.debug("chart: plan strips unavailable", exc_info=True)
+                _plan_spans = None
         _predicted_activity = (
-            [] if is_historical else _compute_predicted_activity(_conv_band, _regime_by_ts, self.config)
+            []
+            if is_historical
+            else _compute_predicted_activity(_conv_band, _regime_by_ts, self.config, plan_spans=_plan_spans)
         )
         _hvac_mode_by_ts = {ts: regime.get("hvac_mode", "off") for ts, regime in _regime_by_ts.items()}
         _effective_target_history = [
@@ -17312,7 +17494,54 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "Home Assistant is stopping: Climate Advisor stops commanding and notifying (instance %s)",
             _instance_tag(self),
         )
-        self.hass.async_create_task(self._persist_shutdown_diagnostics(kind=SHUTDOWN_KIND_HA_STOP))
+        self.hass.async_create_task(self._persist_on_ha_stop())
+
+    async def _persist_on_ha_stop(self) -> None:
+        """The EVENT_HOMEASSISTANT_STOP write task: everything ``async_shutdown`` saves, for a real restart.
+
+        HA unloads config entries only on a reload or removal, never on a restart, so ``async_shutdown`` does not run
+        on a deploy, an update or a manual restart (63 ``ha_stop`` shutdowns against 2 ``unload`` on 2026-11-07).
+        Whatever was saved only there was lost on every restart (Issue #1438 audit):
+
+        * the minutes of a heating, cooling or fan-only run in progress (Issue #1434): flushed into today's record and
+          the state file saved, so the run's pre-restart minutes reach today's runtime;
+        * chart-log event rows (classification change, occupancy, override) appended since the last 30-minute save;
+        * the v4 archive and model file, written at most hourly (Issue #1423);
+        * the restart-cause diagnostics (Issue #413).
+
+        Idempotent with ``async_shutdown``: the runtime flush resets the on-since time to now, so a later flush adds
+        only the seconds since; the saves are atomic rewrites of the same state. Each step is guarded on its own, so
+        one failure cannot stop the others or raise into HA's stop."""
+        steps: list[tuple[str, Any]] = [
+            ("runtime and state", self._persist_runtime_and_state),
+            ("chart log", self._persist_chart_log),
+            ("v4 archive", self._v4_flush_on_shutdown),
+            ("diagnostics", functools.partial(self._persist_shutdown_diagnostics, kind=SHUTDOWN_KIND_HA_STOP)),
+        ]
+        for label, step in steps:
+            try:
+                await step()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - HA is stopping; save what can be saved
+                _LOGGER.warning("Home Assistant stop: could not save the %s", label, exc_info=True)
+
+    async def _persist_runtime_and_state(self) -> None:
+        """Flush the active session's runtime into today's record, then save the state file (Issue #1434)."""
+        self._flush_runtime_for_mode(self._hvac_session_mode)
+        await self._async_save_state()
+
+    async def _persist_chart_log(self) -> None:
+        """Save the chart log: event rows are appended between the 30-minute saves (Issue #1438)."""
+        chart_log = getattr(self, "_chart_log", None)
+        if chart_log is None:
+            return
+        try:
+            await self._executor_job(self._chart_log.save)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a failed write must not stop the unload's other saves
+            _LOGGER.warning("Could not save the chart log at shutdown; recent event rows may be lost", exc_info=True)
 
     async def async_shutdown(self) -> None:
         """Tear this instance down for good (Issue #1102: latched, idempotent).
@@ -17351,8 +17580,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Flush any accumulated runtime (heat/cool or fan_only) and save state before
             # cleanup. Issue #912: _flush_runtime_for_mode() replaces the old unconditional
             # _flush_hvac_runtime() so an in-progress fan_only session isn't lost on shutdown.
-            self._flush_runtime_for_mode(self._hvac_session_mode)
-            await self._async_save_state()
+            await self._persist_runtime_and_state()
+            await self._persist_chart_log()  # Issue #1438: event rows since the last 30-minute save
             await self._v4_flush_on_shutdown()
         finally:
             # Issue #1102: release always runs, even if a save above raised.
@@ -19575,15 +19804,19 @@ def _compute_predicted_activity(
     target_band: list[dict],
     regime_by_ts: dict[str, dict],
     config: dict,
+    plan_spans: list[dict] | None = None,
 ) -> list[dict]:
     """Per forecast hour: hvac_mode intent, fan_active, windows_recommended.
 
-    Issue #802: reads the already-resolved per-hour regime map from
+    Issue #802: ``hvac_mode`` reads the already-resolved per-hour regime map from
     ``_walk_forward_regime()`` (a genuine forward walk of the real production
-    decide_nat_vent_gate()/decide_nat_vent_exit()/decide_ode_ceiling_guard() functions)
-    instead of an independent, session-memory-less temperature-inequality heuristic —
-    ``fan_active`` and ``windows_recommended`` now mirror the same signal rather than being
-    two separately-computed, near-identical, similarly-flickery formulas.
+    decide_nat_vent_gate()/decide_nat_vent_exit()/decide_ode_ceiling_guard() functions).
+
+    Issue #1436: ``fan_active`` and ``windows_recommended`` are the PLAN's when ``plan_spans`` is given
+    (``timeline_surfaces.strip_spans``: the operation timeline's nat-vent sessions and window periods, the same spans
+    the chart's faded strips draw), so the forward Target line's nat-vent tier never runs past the plan's close time.
+    The chart no longer draws a strip from this field. ``plan_spans=None`` (a coordinator with no timeline, the
+    degraded path) keeps the walk's nat-vent flag for both.
     """
     fan_mode = str(config.get("fan_mode", "auto"))
 
@@ -19595,8 +19828,16 @@ def _compute_predicted_activity(
         regime = regime_by_ts.get(ts, {})
         hvac_mode = regime.get("hvac_mode", "off")
 
-        fan_active = True if fan_mode == "on" else bool(regime.get("nat_vent_active"))
-        windows_recommended = fan_active
+        if plan_spans is None:
+            fan_active = True if fan_mode == "on" else bool(regime.get("nat_vent_active"))
+            windows_recommended = fan_active
+        else:
+            at: datetime | None = None
+            with contextlib.suppress(TypeError, ValueError):
+                at = datetime.fromisoformat(str(ts))
+            in_session = at is not None and strip_covers(plan_spans, "natvent", at)
+            fan_active = True if fan_mode == "on" else in_session
+            windows_recommended = at is not None and strip_covers(plan_spans, "windowsplan", at)
 
         result.append(
             {

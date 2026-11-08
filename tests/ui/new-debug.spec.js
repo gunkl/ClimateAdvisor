@@ -20,6 +20,10 @@ function v4Summary(celsius, pe) {
     last_fit: { at: at(6, 42), reason: 'first', seconds: 1.0, ok: true },
     last_cycle: { at: at(7, 26), ms: 7.2, predicted: true, archived: 0, inputs: 96 },
     archive_slots: {}, archive_since: null, sensor_names: {},
+    // Issue #1432: which model the decisions read, already in words and the user's unit (coordinator.v4_model_summary)
+    forecast_model: celsius
+      ? { model: 'per_room', reason: 'per_room_no_worse', text: 'v4 forecasts each room separately (thermostat by day, bedroom at night): both rooms have 3+ days of readings (Hallway 6.0 days, Bedroom 6.0 days) and the per-room forecast scored 0.25°C vs 0.33°C at 4 h on this home\'s history' }
+      : { model: 'per_room', reason: 'per_room_no_worse', text: 'v4 forecasts each room separately (thermostat by day, bedroom at night): both rooms have 3+ days of readings (Hallway 6.0 days, Bedroom 6.0 days) and the per-room forecast scored 0.45°F vs 0.60°F at 4 h on this home\'s history' },
   };
 }
 const engineState = (over) => Object.assign({
@@ -90,6 +94,7 @@ test.describe('New dashboard: Debug tab', () => {
     await expect(value(page, 'Last learned')).toHaveText(/^\d{1,2}:42\s?AM from 30 days of history, 160 points \(first fit, 1 s\)$/);
     await expect(value(page, 'Typical miss')).toHaveText('1 h 0.65°F · 4 h 0.81°F · 12 h 0.80°F');
     await expect(value(page, 'Sensors modelled')).toHaveText('Climate Advisor reading only');
+    await expect(value(page, 'Forecast model')).toHaveText(/^v4 forecasts each room separately \(thermostat by day, bedroom at night\): .*0\.45°F vs 0\.60°F at 4 h/);
     await expect(value(page, 'Last prediction')).toHaveText(/^\d{1,2}:26\s?AM, 96 forecast inputs, 7 ms, 0 slots archived$/);
     await expect(value(page, 'Archive')).toHaveText('empty');
     await expect(value(page, 'Mass node')).toHaveText('67.4°F');
@@ -106,6 +111,7 @@ test.describe('New dashboard: Debug tab', () => {
     await openDebug(page, { celsius: true });
     await expect(value(page, 'Typical miss')).toHaveText('1 h 0.36°C · 4 h 0.45°C · 12 h 0.44°C');
     await expect(value(page, 'Mass node')).toHaveText('19.7°C');
+    await expect(value(page, 'Forecast model')).toContainText('0.25°C vs 0.33°C at 4 h');
     // (the fixture's last_action_reason is a captured °F sentence, so the check is scoped to the engine block)
     const engines = page.locator('#dbg-groups section').filter({ has: page.locator('h2', { hasText: /^Prediction engines/ }) });
     const cells = await engines.locator('td.mono').allInnerTexts();

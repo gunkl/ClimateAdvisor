@@ -70,10 +70,13 @@ from tools.sim_harness.scenario_model import (
     ProductionRunResult,
     build_classification_from_event,
     capture_next_action,
+    daily_schedule_fires_at,
     merged_scenario_config,
     parse_event_time,
     pin_scenario_thermal_model,
     pin_scenario_v4_model,
+    pre_cool_timer_fired_at,
+    record_pre_cool_fires,
     scenario_start_time,
     snapshot_engine_state,
     sorted_events,
@@ -123,7 +126,6 @@ _MODE_BY_TYPE = {
     "nat_vent_temperature_check": "direct-callback",
     "activate_fan_min_runtime": "direct-callback",
     "classification": "direct-callback",
-    "pre_cool": "direct-callback",
     "occupancy_away": "direct-callback",
     "occupancy_home": "direct-callback",
     "occupancy_vacation": "direct-callback",
@@ -201,6 +203,7 @@ class RealHASession:
         self.event_log: list[tuple[str, dict, datetime | None]] = []
         self._errors = _ErrorCapture()
         self._patch: Any = None
+        self._pre_cool_patch: Any = None
         self._event_index = 0
         self._result: ProductionRunResult | None = None
         self._closed = False
@@ -278,6 +281,10 @@ class RealHASession:
 
         self._patch = patch.object(ClimateAdvisorCoordinator, "_emit_event", _emit_and_capture)
         self._patch.start()
+        # Issue #1420: note when the coordinator's own pre-cool timer fires, so a pre_cool event in that minute is
+        # the timer (time-travel), not a second handler call
+        self._pre_cool_patch = record_pre_cool_fires(ClimateAdvisorCoordinator)
+        self._pre_cool_patch.start()
         logging.getLogger("custom_components.climate_advisor").addHandler(self._errors)
 
         # A FakeHass scenario that never reports a temperature leaves the reading None; do not invent one
@@ -657,6 +664,10 @@ class RealHASession:
             if indoor_f is not None:
                 self._set_indoor(float(indoor_f))
                 await self._drain()
+            if pre_cool_timer_fired_at(coordinator, dt_util.utcnow()):
+                # Issue #1420: the coordinator's own pre-cool timer fired as the clock reached the event time; that
+                # is production's only pre-cool write, so the handler is not called a second time
+                return "time-travel"
             await engine.handle_pre_cool(
                 indoor_temp=float(indoor_f) if indoor_f is not None else None,
                 nat_vent_just_closed=bool(event.get("nat_vent_just_closed", False)),
@@ -746,12 +757,11 @@ class RealHASession:
         return "no-op"
 
     async def _scheduled_event(self, event: dict, etype: str) -> str:
-        """bedtime / wakeup: time-travel when the configured time is the event time, else the direct callback."""
+        """bedtime / wakeup: time-travel when the coordinator's own daily timer is in the event's minute, else the
+        direct callback.  Issue #1420: the time is the one the coordinator scheduled (its config and defaults), so a
+        scenario without ``sleep_time`` no longer gets a second bedtime call at the 22:30 default."""
         assert self.house is not None
-        key = "sleep_time" if etype == "bedtime" else "wake_time"
-        configured = self.config.get(key)
-        now = dt_util.utcnow()
-        if isinstance(configured, str) and configured[:5] == f"{now.hour:02d}:{now.minute:02d}":
+        if daily_schedule_fires_at(self.coordinator, etype, dt_util.utcnow()):
             return "time-travel"  # the production schedule already fired as the clock reached the event time
         handler = self.engine.handle_bedtime if etype == "bedtime" else self.engine.handle_morning_wakeup
         await handler()
@@ -853,9 +863,10 @@ class RealHASession:
         if self.house is not None:
             await self.house.close()
             self._collect_leaked_timers()
-        if self._patch is not None:
-            with contextlib.suppress(RuntimeError):
-                self._patch.stop()
+        for p in (self._pre_cool_patch, self._patch):
+            if p is not None:
+                with contextlib.suppress(RuntimeError):
+                    p.stop()
 
 
 async def async_drive_scenario(session: RealHASession, scenario: dict) -> ProductionRunResult:

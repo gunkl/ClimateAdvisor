@@ -12,8 +12,9 @@ Allowed to mention v4 (anything named ``v4``/``predictor_v4``):
   decides or calls a service;
 * ``const.py`` (``V4_*`` constants), ``api.py`` (the read-only endpoint
   and the Debug ``engines`` field);
-* ``coordinator.py``, only in ``_v4*``/``v4_*`` methods and in six fixed wiring points that never feed v4 back: the
-  constructor, ``async_setup`` (nightly timer), ``async_restore_state`` (archive load), ``async_shutdown``,
+* ``coordinator.py``, only in ``_v4*``/``v4_*`` methods and in fixed wiring points that never feed v4 back: the
+  constructor, ``async_setup`` (nightly timer), ``async_restore_state`` (archive load), ``async_shutdown`` and the
+  HA-stop write task ``_persist_on_ha_stop`` (archive flush, Issue #1423),
   the per-cycle call and the Debug payload.
 
 Issue #1230 R6b: the PRIMARY engine now drives the prediction-dependent decisions, through the coordinator's control
@@ -45,6 +46,8 @@ _COORDINATOR_WIRING = {
     "async_setup",
     "async_restore_state",
     "async_shutdown",
+    # Issue #1423/#1438: the EVENT_HOMEASSISTANT_STOP write task flushes the v4 archive like async_shutdown does.
+    "_persist_on_ha_stop",
     "_async_update_data_impl",
     "get_debug_state",
     # Issue #1230 R2: the Status chart DISPLAYS v4 (when v4 has data or the occupant selected it). Display only:

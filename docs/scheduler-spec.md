@@ -119,6 +119,8 @@ Consequence (updated by Issue #1066, nearest-edge arming): while a precondition 
 
 ## Away/Vacation Extension (Issue #899)
 
+**Inside the 15-minute away grace (Issue #1433):** the Away bank is not written while the away timer is still running (`_away_setback_pending`); it is sent when the timer expires, like the setback itself. Vacation has no grace and is never delayed. See [Occupancy Dispatch](occupancy-dispatch-spec.md).
+
 Everything above (Banking Target Resolution, Coast Phase) describes `resolve_tou_phase()`,
 which powers TOU pre-conditioning for **Home/Guest only**. Away/Vacation was unconditionally
 suppressed until Issue #899 — `apply_classification()`'s `DEFER_OCCUPANCY` branch means
@@ -267,7 +269,8 @@ Per future forecast-hour timestamp, in priority order:
    `[precondition_start, schedule_start)` window (`coordinator._tou_precondition_window_tuple()`,
    the same tuple the Target Band's own TOU override branch above already consumes).
 2. **Nat-vent thermostatic cycling target** — while `predicted_activity[].fan_active` says
-   nat-vent is predicted active for that timestamp. Fed through the same shared
+   nat-vent is predicted active for that timestamp (since Issue #1436: inside one of the operation
+   timeline's nat-vent sessions, `timeline_surfaces.strip_spans`; the regime walk only without a timeline). Fed through the same shared
    `nat_vent_cycling.compute_nat_vent_target()` helper as the historical half and the live
    decision path, using *that timestamp's own* `target_band.lower`/`.upper` (already
    sleep/wake/TOU-ramp-aware) as the day/sleep floor-and-ceiling inputs. Degrades

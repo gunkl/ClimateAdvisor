@@ -147,9 +147,8 @@ def _make_hvac_coord(
     learning.save_state = MagicMock()
     learning._commit_event_from_dict = MagicMock(return_value={"hvac_mode": "cool"})
 
-    # LearningState stub for startup recovery tests
+    # LearningState stub
     state_stub = MagicMock()
-    state_stub.pending_observations = {}
     state_stub.rejection_log = {}
     learning._state = state_stub
     coord.learning = learning
@@ -323,187 +322,45 @@ class TestAbandonLogsRealSampleCount:
 
 
 # ---------------------------------------------------------------------------
-# Bug 2 — Startup recovery reads wrong key
+# Issue #1437 — no in-flight observation is recovered across a restart
 # ---------------------------------------------------------------------------
 
 
-class TestStartupRecoveryRecoversHvacObsWithActiveSamples:
-    """Startup recovery must recover HVAC obs that have active_samples but no 'samples' key.
-
-    Bug 2: Recovery code uses obs.get('samples', obs.get('active_samples', [])) so it
-    always gets [] (because 'samples': [] exists). Fix must check active_samples for
-    HVAC types in 'active' phase and post_heat_samples for 'post_heat' phase.
+class TestFirstCycleRecoveryRecoversNothing1437:
+    """Occupant impact: a heating/cooling run in progress during a restart teaches the model only from the part
+    after the restart, never from a fit across the blind gap while HA was down (the thermostat kept running and
+    CA cannot see whether the run stopped and restarted). The old v3 recovery of a persisted
+    ``LearningState.pending_observations`` was dead (nothing wrote it since Issue #133) and is gone.
     """
 
-    def test_hvac_cool_active_phase_recovered_with_active_samples(self):
-        """An hvac_cool obs with 2 active_samples (active phase) must survive restart."""
-        coord = _make_hvac_coord()
-        dt_mock = _make_dt_mock()
-
-        # Simulated persisted state — hvac_cool in active phase with active_samples
-        pending_obs = {
+    def test_legacy_pending_observations_on_state_is_not_recovered(self):
+        """Even if a legacy pending dict were present on the learning state, the first cycle ignores it."""
+        coord = _make_hvac_coord(learning_enabled=False)  # skip the one-time chart_log backfills
+        coord._first_run = True
+        coord.learning._state.pending_observations = {
             OBS_TYPE_HVAC_COOL: {
                 "obs_type": OBS_TYPE_HVAC_COOL,
-                "obs_id": "test-recover-1",
+                "obs_id": "legacy-1",
                 "start_time": _FAKE_NOW.isoformat(),
                 "status": "monitoring",
-                # No 'samples' key — post-fix persistence
-                "active_samples": [
-                    _samp(72.0, elapsed=0.0),
-                    _samp(71.5, elapsed=5.0),
-                ],
-                "post_heat_samples": [],
-                "pre_heat_samples": [],
-                "_phase": "active",
-                "hvac_mode": "cool",
-                "session_mode": "cool",
-            }
-        }
-        coord.learning._state.pending_observations = pending_obs
-
-        # Import the constants we need for the recovery logic
-        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
-        OBS_TYPE_HVAC_COOL_c = mod.OBS_TYPE_HVAC_COOL
-        OBS_TYPE_HVAC_HEAT_c = mod.OBS_TYPE_HVAC_HEAT
-        THERMAL_MIN_POST_HEAT_SAMPLES_c = mod.THERMAL_MIN_POST_HEAT_SAMPLES
-
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            _pending_obs = coord.learning._state.pending_observations
-            if isinstance(_pending_obs, dict):
-                for _obs_type, _obs in list(_pending_obs.items()):
-                    if not isinstance(_obs, dict):
-                        continue
-                    if _obs.get("_legacy_event"):
-                        coord._pending_observations[_obs_type] = _obs
-                    else:
-                        # This is the fixed recovery logic we want to verify
-                        _hvac_types = {OBS_TYPE_HVAC_COOL_c, OBS_TYPE_HVAC_HEAT_c}
-                        if _obs_type in _hvac_types:
-                            _phase = _obs.get("_phase", "active")
-                            if _phase == "post_heat":
-                                samples = _obs.get("post_heat_samples", [])
-                                min_s = THERMAL_MIN_POST_HEAT_SAMPLES_c
-                            else:
-                                samples = _obs.get("active_samples", [])
-                                min_s = 1  # any active sample is worth recovering
-                        else:
-                            samples = _obs.get("samples", _obs.get("active_samples", []))
-                            min_s = 10
-                        if len(samples) >= min_s:
-                            coord._pending_observations[_obs_type] = _obs
-
-        assert OBS_TYPE_HVAC_COOL in coord._pending_observations, (
-            "hvac_cool with 2 active_samples should survive startup recovery "
-            "but was discarded — startup recovery reads wrong key"
-        )
-
-    def test_hvac_cool_with_legacy_samples_key_still_recovered(self):
-        """A pre-fix persisted obs (has both 'samples': [] and 'active_samples') must
-        also be recovered — the old 'samples' key should not block recovery."""
-        coord = _make_hvac_coord()
-        dt_mock = _make_dt_mock()
-
-        pending_obs = {
-            OBS_TYPE_HVAC_COOL: {
-                "obs_type": OBS_TYPE_HVAC_COOL,
-                "obs_id": "test-recover-legacy-1",
-                "start_time": _FAKE_NOW.isoformat(),
-                "status": "monitoring",
-                "samples": [],  # legacy key — empty
-                "active_samples": [_samp(72.0, elapsed=0.0)],
+                "active_samples": [_samp(72.0, elapsed=0.0), _samp(71.5, elapsed=5.0)],
                 "post_heat_samples": [],
                 "_phase": "active",
-                "hvac_mode": "cool",
                 "session_mode": "cool",
             }
         }
-        coord.learning._state.pending_observations = pending_obs
+        coord._run_first_cycle_recovery()
+        assert coord._first_run is False
+        assert coord._pending_observations == {}, "no persisted observation may be resumed across a restart"
 
-        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
-        OBS_TYPE_HVAC_COOL_c = mod.OBS_TYPE_HVAC_COOL
-        OBS_TYPE_HVAC_HEAT_c = mod.OBS_TYPE_HVAC_HEAT
-        THERMAL_MIN_POST_HEAT_SAMPLES_c = mod.THERMAL_MIN_POST_HEAT_SAMPLES
+    def test_first_cycle_recovery_source_has_no_persisted_pending_reference(self):
+        """Structural guard against re-introducing the dead recovery path."""
+        import inspect
+        import re
 
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            _pending_obs = coord.learning._state.pending_observations
-            if isinstance(_pending_obs, dict):
-                for _obs_type, _obs in list(_pending_obs.items()):
-                    if not isinstance(_obs, dict):
-                        continue
-                    if _obs.get("_legacy_event"):
-                        coord._pending_observations[_obs_type] = _obs
-                    else:
-                        _hvac_types = {OBS_TYPE_HVAC_COOL_c, OBS_TYPE_HVAC_HEAT_c}
-                        if _obs_type in _hvac_types:
-                            _phase = _obs.get("_phase", "active")
-                            if _phase == "post_heat":
-                                samples = _obs.get("post_heat_samples", [])
-                                min_s = THERMAL_MIN_POST_HEAT_SAMPLES_c
-                            else:
-                                samples = _obs.get("active_samples", [])
-                                min_s = 1
-                        else:
-                            samples = _obs.get("samples", _obs.get("active_samples", []))
-                            min_s = 10
-                        if len(samples) >= min_s:
-                            coord._pending_observations[_obs_type] = _obs
-
-        assert OBS_TYPE_HVAC_COOL in coord._pending_observations, (
-            "Pre-fix obs with 'samples': [] shadow key must still be recovered via active_samples"
-        )
-
-    def test_hvac_cool_post_heat_phase_requires_post_heat_samples(self):
-        """A post_heat phase obs with 0 post_heat_samples should be discarded (min=4)."""
-        coord = _make_hvac_coord()
-        dt_mock = _make_dt_mock()
-
-        pending_obs = {
-            OBS_TYPE_HVAC_COOL: {
-                "obs_type": OBS_TYPE_HVAC_COOL,
-                "obs_id": "test-recover-post-1",
-                "start_time": _FAKE_NOW.isoformat(),
-                "status": "monitoring",
-                "active_samples": [_samp(72.0, elapsed=0.0)],
-                "post_heat_samples": [],  # empty — should not recover
-                "_phase": "post_heat",
-                "hvac_mode": "cool",
-                "session_mode": "cool",
-            }
-        }
-        coord.learning._state.pending_observations = pending_obs
-
-        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
-        OBS_TYPE_HVAC_COOL_c = mod.OBS_TYPE_HVAC_COOL
-        OBS_TYPE_HVAC_HEAT_c = mod.OBS_TYPE_HVAC_HEAT
-        THERMAL_MIN_POST_HEAT_SAMPLES_c = mod.THERMAL_MIN_POST_HEAT_SAMPLES
-
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            _pending_obs = coord.learning._state.pending_observations
-            if isinstance(_pending_obs, dict):
-                for _obs_type, _obs in list(_pending_obs.items()):
-                    if not isinstance(_obs, dict):
-                        continue
-                    if _obs.get("_legacy_event"):
-                        coord._pending_observations[_obs_type] = _obs
-                    else:
-                        _hvac_types = {OBS_TYPE_HVAC_COOL_c, OBS_TYPE_HVAC_HEAT_c}
-                        if _obs_type in _hvac_types:
-                            _phase = _obs.get("_phase", "active")
-                            if _phase == "post_heat":
-                                samples = _obs.get("post_heat_samples", [])
-                                min_s = THERMAL_MIN_POST_HEAT_SAMPLES_c
-                            else:
-                                samples = _obs.get("active_samples", [])
-                                min_s = 1
-                        else:
-                            samples = _obs.get("samples", _obs.get("active_samples", []))
-                            min_s = 10
-                        if len(samples) >= min_s:
-                            coord._pending_observations[_obs_type] = _obs
-
-        assert OBS_TYPE_HVAC_COOL not in coord._pending_observations, (
-            "post_heat obs with 0 post_heat_samples should be discarded (min=4)"
-        )
+        cls = _get_coordinator_class()
+        src = inspect.getsource(cls._run_first_cycle_recovery)
+        assert not re.search(r"_state\.pending_observations", src)
 
 
 # ---------------------------------------------------------------------------

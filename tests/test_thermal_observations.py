@@ -5,7 +5,7 @@ Covers the new multi-type observation pipeline:
   _sample_all_observations
   _abandon_observation / _commit_observation_if_sufficient
   _check_hvac_stabilization
-  LearningEngine v3 migration path (pending_thermal_event → pending_observations)
+  LearningEngine load of legacy fields (pending_thermal_event, pending_observations)
 """
 
 from __future__ import annotations
@@ -613,14 +613,14 @@ class TestMigrationLoadState:
 
     The v3 implementation uses data.pop("pending_thermal_event", None) to silently
     discard the v2 field.  These tests verify that loading a state file containing
-    the legacy field succeeds without error and leaves pending_observations empty.
+    the legacy field succeeds without error.
     """
 
     def test_migration_converts_pending_thermal_event_heat(self, tmp_path: Path):
         """Loading a legacy DB with pending_thermal_event[mode=heat] succeeds.
 
         The v2 field is discarded (data.pop) — no migration conversion occurs.
-        pending_observations stays empty; load does not crash.
+        Load does not crash.
         """
         import json
 
@@ -660,16 +660,13 @@ class TestMigrationLoadState:
         assert not hasattr(engine._state, "pending_thermal_event") or engine._state.pending_thermal_event is None, (
             "pending_thermal_event should not survive load (it is popped/discarded)"
         )
-        # pending_observations starts empty — no migration conversion
-        assert isinstance(engine._state.pending_observations, dict)
-        assert engine._state.pending_observations == {}, (
-            "pending_observations should be empty after discarding legacy pending_thermal_event"
-        )
+        # No migration conversion; the retired pending_observations field (Issue #1437) is gone too
+        assert not hasattr(engine._state, "pending_observations")
 
     def test_migration_discards_active_status_v2_event(self, tmp_path: Path):
         """Loading a legacy DB with pending_thermal_event[status=active] succeeds without error.
 
-        The v2 field is silently discarded via data.pop — pending_observations stays empty.
+        The v2 field is silently discarded via data.pop.
         """
         import json
 
@@ -698,12 +695,12 @@ class TestMigrationLoadState:
         engine = LearningEngine(tmp_path)
         engine.load_state()  # must not raise
 
-        assert engine._state.pending_observations == {}, "pending_observations must be empty after discarding v2 field"
+        assert not hasattr(engine._state, "pending_thermal_event")
 
     def test_migration_clears_pending_thermal_event_after_migration(self, tmp_path: Path):
         """Loading a legacy DB with pending_thermal_event[mode=cool] succeeds.
 
-        The v2 field is discarded — pending_observations is empty after load.
+        The v2 field is discarded.
         """
         import json
 
@@ -733,53 +730,49 @@ class TestMigrationLoadState:
         engine = LearningEngine(tmp_path)
         engine.load_state()  # must not raise
 
-        assert isinstance(engine._state.pending_observations, dict)
-        assert engine._state.pending_observations == {}, (
-            "pending_observations should be empty — v2 cool event is discarded, not converted"
-        )
+        assert not hasattr(engine._state, "pending_thermal_event")
 
-    def test_migration_skips_if_pending_observations_already_populated(self, tmp_path: Path):
-        """If pending_observations already has the obs_type, migration does not overwrite it."""
+    def test_legacy_pending_observations_key_loads_and_is_ignored(self, tmp_path: Path, caplog):
+        """Issue #1437: an existing install's learning file may still hold a populated pending_observations.
+
+        It loads cleanly, the learned data survives, the key is dropped silently (not reported as an unknown
+        newer-release key) and the next save no longer writes it.
+        """
         import json
+        import logging
 
-        existing_obs = {
+        legacy_obs = {
             OBS_TYPE_HVAC_HEAT: {
                 "obs_type": OBS_TYPE_HVAC_HEAT,
-                "obs_id": "already-there",
+                "obs_id": "legacy-in-flight",
                 "start_time": "2025-06-15T08:00:00",
                 "status": "monitoring",
-                "samples": [],
-                "flags_at_start": {},
-                "schema_version": 1,
+                "active_samples": [{"indoor_temp_f": 68.0, "elapsed_minutes": 0.0}],
+                "_phase": "active",
             }
         }
         state_dict = {
-            "records": [],
-            "active_suggestions": [],
-            "dismissed_suggestions": [],
-            "settings_history": [],
-            "thermal_observations": [],
+            "records": [{"date": "2099-01-01"}],
+            "thermal_observations": [{"obs_type": OBS_TYPE_HVAC_HEAT, "k_active": 3.0}],
             "thermal_model_cache": None,
-            "pending_observations": existing_obs,
-            "pending_thermal_event": {
-                "event_id": "should-not-overwrite",
-                "status": "active",
-                "session_mode": "heat",
-                "hvac_mode": "heat",
-                "active_start": "2025-06-15T09:00:00",
-                "active_samples": [],
-                "pre_heat_samples": [],
-                "post_heat_samples": [],
-            },
+            "rejection_log": {"hvac_heat": [{"reason": "keep"}]},
+            "pending_observations": legacy_obs,
         }
         state_file = tmp_path / "climate_advisor_learning.json"
         state_file.write_text(json.dumps(state_dict))
 
         engine = LearningEngine(tmp_path)
-        engine.load_state()
+        with caplog.at_level(logging.DEBUG):
+            engine.load_state()  # must not raise
 
-        # The pre-existing obs_id should NOT be overwritten by migration
-        assert engine._state.pending_observations[OBS_TYPE_HVAC_HEAT]["obs_id"] == "already-there"
+        assert not hasattr(engine._state, "pending_observations")
+        assert len(engine._state.records) == 1
+        assert len(engine._state.thermal_observations) == 1
+        assert engine._state.rejection_log == {"hvac_heat": [{"reason": "keep"}]}
+        assert not any("ignoring unknown keys" in r.getMessage() for r in caplog.records)
+
+        engine.save_state()
+        assert "pending_observations" not in json.loads(state_file.read_text())
 
 
 # ---------------------------------------------------------------------------

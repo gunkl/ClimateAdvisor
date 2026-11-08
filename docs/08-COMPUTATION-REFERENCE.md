@@ -226,7 +226,7 @@ Now:
 - **Coordinator:** `_maybe_schedule_pre_cool()` records `_pre_cool_decided`; the 23:59 reset keeps a pre-cool decided for the coming night (so the 00:00 cycle does not re-decide or double-schedule it) and clears everything else; once the decided night is over (after wake), the next night is decided on today's classification instead of waiting for 23:59. `_async_pre_cool_trigger()` judges the night itself and passes `modifier=` to `handle_pre_cool()` (skips when ineligible); `handle_pre_cool()` without `modifier` keeps judging its current classification (the Tier-A harness and goldens call it that way, modelling a trigger decided the evening before). The trigger-time function, nat-vent-exit reschedule, chart dip and ODE fallback all use the same judgment. The briefing's "tonight I'll pre-cool" still uses `resolve_pre_cool_modifier()`: its tonight wakes into tomorrow.
 - Pre-cool state is not persisted: a restart after midnight falls back to the today-hot rule above.
 
-Tests: `tests/test_pre_cool_midnight_1378.py`, `tests_ha/test_pre_cool_overnight_1371.py::test_pre_cool_decided_in_the_evening_survives_midnight` and `::test_pre_cool_is_re_checked_at_fire_time_when_the_forecast_is_revised`.
+Tests: `tests/test_pre_cool_midnight_1378.py`, `tests_ha/test_pre_cool_overnight_1371.py::test_pre_cool_decided_in_the_evening_survives_midnight` and `::test_pre_cool_is_re_checked_at_fire_time_when_the_forecast_is_revised`. Scenarios (both tiers, `use_coordinator`, the real 02:30 trigger): `warming_trend_pre_cool_applied` (trend gate holds at fire time, 80/62 -> 95/77 °F, 69 °F) and its control `warming_trend_pre_cool_revised_away_1378` (waking day revised to 82/62 °F overnight, no 02:30 write; pending signature).
 
 Tests: `tests/test_pre_cool_overnight_1371.py` and `tests_ha/test_pre_cool_overnight_1371.py`.
 
@@ -389,6 +389,8 @@ From Issue #119, the chart's "Target Band" overlay is no longer two static scala
 The thermal model collects observations from six parallel observation types, not just
 HVAC heat/cool cycles. Multiple observation types can run concurrently in a
 `_pending_observations` dict keyed by obs_type string.
+
+**Restart mid-run (Issue #1437):** A heating or cooling run in progress during an HA restart or zone reload teaches the thermal model only from the part after the restart, by design (Issue #1437). In-flight observations (`coordinator._pending_observations`) live in memory only and are never persisted; after the restart the Issue #96 late start (`_initialize_hvac_session_from_current_state`) opens a fresh observation from startup. The pre-restart part is never fitted because the thermostat keeps running while HA is down and Climate Advisor cannot see whether the run stopped and restarted in the gap, so a curve fitted across it would be invalid: a shorter clean observation beats a longer contaminated one. Non-HVAC decay observations restart on the next poll if their conditions still hold.
 
 | Type | Trigger | Measures | Min samples |
 |------|---------|----------|-------------|
@@ -872,6 +874,8 @@ When a restore WOULD have happened (every classification since Issue #1208: the 
 
 Tests: `tests/test_occupancy_restore_hold.py`, `tests/test_phase2_coordinator_followups.py` (chart band, accessor). See [occupancy-dispatch-spec.md](occupancy-dispatch-spec.md).
 
+**The away setback waits for the 15-minute timer (Issue #1433).** Occupant view: a short errand or a phone dropping off the network never sets the heat or the AC back. While the coordinator's away timer runs, `AutomationEngine._away_setback_pending` is True and `handle_occupancy_away()` (the 30-minute cycle's Away reapply, bedtime, pre-cool, the time-of-use period-start timer) and `apply_tou_away_vacation_precondition()` (the Away bank) send nothing; the timer clears the flag and applies the setback. After coming home every periodic cycle resolves the home band (`_resolved_comfort_band()` reads the live occupancy; no Away band or expansion is cached). The chart rows at 12:23 and 14:15 on 2026-11-07 (Away band 63-79 F while home, reported as #1433) were the #1425 "restore held after a setback never sent" case, written by 0.9.4/0.9.5 before 0.9.7 was deployed at 15:27; the thermostat was off and nothing was sent. Details: [Occupancy Dispatch Spec](occupancy-dispatch-spec.md#state-transitions).
+
 **Occupancy and wakeup events (Issue #240):** The following events are emitted by occupancy handlers when a setpoint change is actually applied, making these actions visible in the dashboard timeline and AI activity report:
 
 | Event type | Handler | Condition | Payload |
@@ -951,6 +955,8 @@ All five fields default to `None` at record creation. On a fire night, `setback_
 Regression origin: ebbf5ab (Fix #93, 2026-04-08) widened the fallback guard from `if new_action and old_action` to "neither side heating/cooling", which swept in idle/off. The resolved session mode (`heat`/`cool`/`fan_only`, Issue #912) selects which counter the timer feeds; only `heat`/`cool` open a thermal observation.
 
 **Day rollover (Issue #1241):** `_async_end_of_day` (23:59) flushes the running session into the day's record, which resets its timer to 23:59, and then keeps the session: the rest of the run lands in the next day's record and the live getters (`get_hvac_runtime_today()`, `get_thermostat_fan_only_runtime_today()`) keep counting, even before the first post-midnight cycle creates the new record. Before, it cleared `_hvac_on_since` / `_thermostat_fan_only_on_since` / `_hvac_session_mode`, so a 23:00–01:00 run credited 59 min and then 0 (regression origin 239cc20; 55c81ff/#912 extended the clear). Stale-session guard: the clear was also the only daily bound on a session whose off-edge was missed (an off-edge dropped during startup coalescing), so the session is kept only while the live thermostat state still reports it running by the edge rule above (`hvac_action.thermostat_reports_running`: heating/cooling, or the mode fallback without an idle/off report and without CA's own fan or nat-vent). An idle, off, unavailable or missing thermostat ends it at the rollover. The in-progress thermal observation never depended on the clear; it ends at the real off-edge.
+
+**Restart during a run (Issues #1434, #1437):** runtime and learning are treated differently on purpose. The minutes a heating, cooling or fan-only run had already run are kept in today's record: the `EVENT_HOMEASSISTANT_STOP` task flushes the runtime and saves the state, as a zone reload does (#1434, see [state-persistence.md](state-persistence.md)). The thermal model does not learn from the run's pre-restart part at all (#1437, see §5e): Climate Advisor cannot see what the equipment did while Home Assistant was down, so a fit across that gap would be invalid. After the restart, the Issue #96 late start opens a fresh observation from startup.
 
 **Startup coalescing (Issue #1286):** the edge rule above runs in `coordinator._track_hvac_runtime_edges()`, which `_async_thermostat_changed` calls **before** the startup-coalescing return. Runtime and session edges are equipment facts, not occupant changes; the return exists to suppress override detection only (#321, owner decision #1235 below). Before, the session block sat after that return. If HA restarted mid-run, the Issue #96 late start armed the session at the first refresh, and if the equipment stopped inside the ~300 s window CA missed the stop. "HVAC runtime today" then kept growing for idle equipment (any flush credited it), and the heat/cool observation kept sampling idle decay. The mirror case: a start inside the window was not counted until coalescing ended (about 4 min lost). Regression origin: b17104d (Fix #321, v0.4.18) placed the early return above the existing runtime block. Pinned by `tests_ha/test_restart_stop_during_coalescing_1286.py` (heat and cool, stop and start, revert-proofed against b22acec). A whole-house fan that stops inside the window is reconciled at coalesce end by `reconcile_fan_on_startup()`.
 
@@ -1946,6 +1952,8 @@ already at `"cool"`) and provably redundant: `decide_nat_vent_exit()`'s own
 revisited — a Hot day's morning window and evening reopen are two independent
 opportunities in the same day, and applying `"off"` days' single escalate-once pattern
 would silently suppress a later same-day reopen.
+
+**Superseded by Issue #1436:** `predicted_activity[].windows_recommended`/`fan_active` are now the operation timeline's window periods and nat-vent sessions at each hour (the walk only without a timeline), and no chart strip reads the field ([Operation Timeline Spec](operation-timeline-spec.md#chart-activity-strips-issue-1436)). The note below is kept as history.
 
 **Open question, not yet investigated (Issue #878-followup):** `chart_data`'s
 `predicted_activity` array is produced by `_walk_forward_regime()`/

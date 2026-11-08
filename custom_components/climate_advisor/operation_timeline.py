@@ -742,6 +742,9 @@ class PredictedRun:
     end: datetime
     minutes: float
     reason: str
+    # Issue #1436: where in [start, end) the plan's simulation runs the equipment: (step start, minutes in that
+    # 15-minute step), so the chart draws the expected minutes where they fall instead of the whole window
+    bursts: tuple[tuple[datetime, float], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -750,6 +753,7 @@ class PredictedRun:
             "end": self.end.isoformat(),
             "minutes": round(self.minutes, 1),
             "reason": self.reason,
+            "bursts": [[t.isoformat(), round(m, 1)] for t, m in self.bursts],
         }
 
 
@@ -1576,6 +1580,7 @@ def _run(steps: list[SimStep]) -> PredictedRun:
         last.ts,
         sum(s.hvac_min for s in steps),
         f"hold_{edge}",
+        tuple((s.ts - timedelta(minutes=SIM_STEP_MINUTES), s.hvac_min) for s in steps if s.hvac_min > 0),
     )
 
 
@@ -2350,6 +2355,32 @@ def _refresh_open_until(steps: list[TimelineStep], now: datetime, unit: str) -> 
     return out
 
 
+def _move_natvent_stops(
+    steps: list[TimelineStep], fresh: DetailedTimeline, moved: Mapping[datetime, datetime]
+) -> list[TimelineStep]:
+    """A nat-vent stop follows its window close when the latch moves that close earlier (Issue #1439, the #1436 mirror).
+
+    ``build_timeline`` emits the fan session's stop at the same instant as its period's close. The latch let the close
+    move earlier but kept the stop as first promised, so the list read "9:50 AM: close the windows" then "10:00 AM: CA
+    stops the whole-house fan as the window period ends", and the chart's nat-vent strip ran past the close. The stop
+    takes the fresh plan's stop at the new close time (same sentence table); without one it is left as it was.
+    """
+    if not moved:
+        return steps
+    fresh_stops = {f.ts: f for f in fresh.steps if f.kind == StepKind.NAT_VENT_STOP}
+    present = {s.id for s in steps}
+    out: list[TimelineStep] = []
+    for s in steps:
+        new_ts = moved.get(s.ts) if s.kind == StepKind.NAT_VENT_STOP else None
+        if new_ts is not None and new_ts in fresh_stops and s.status != "done":
+            repl = fresh_stops[new_ts]
+            if repl.id in present and repl.id != s.id:
+                continue  # the plan already holds the stop at the new close: drop the stale one
+            s = repl
+        out.append(s)
+    return out
+
+
 def _merge_latched(
     latched: DetailedTimeline, fresh: DetailedTimeline, now: datetime, unit: str = "fahrenheit"
 ) -> DetailedTimeline:
@@ -2361,6 +2392,7 @@ def _merge_latched(
     window_kinds = (StepKind.WINDOWS_OPEN, StepKind.WINDOWS_CLOSE)
     latched_window_ts = sorted(w.ts for w in latched.steps if w.kind in window_kinds)
     used: set[int] = set()
+    moved: dict[datetime, datetime] = {}  # latched close time -> the earlier close that replaced it
     steps: list[TimelineStep] = []
     for s in latched.steps:
         if s.meta.get("source_module") == "night_strategy":
@@ -2384,11 +2416,13 @@ def _merge_latched(
             repl = min(earlier, key=lambda f: s.ts - f.ts, default=None)  # the nearest earlier close
             if repl is not None:
                 used.add(id(repl))
+                moved[s.ts] = repl.ts
                 s = repl
         if s.ts < now and s.status == "planned":
             s = replace(s, meta={**s.meta, "status": "done"})
         steps.append(s)
     steps.extend(f for f in fresh.steps if _is_live(f) and f.ts >= now)
+    steps = _move_natvent_stops(steps, fresh, moved)
     steps.sort(key=lambda s: (s.ts, 0 if s.actor == Actor.CA else 1, s.kind.value))
     steps = _refresh_open_until(steps, now, unit)
     return replace(

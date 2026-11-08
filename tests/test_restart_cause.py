@@ -122,6 +122,12 @@ def _make_coord_stub():
     # Issue #1357: the restart-cause logic moved out of async_restore_state() into this helper (it also runs on the
     # no-state and other-day paths). The old stub relied on the logic being inline, so the helper must be bound.
     coord._classify_restart_and_mark = types.MethodType(ClimateAdvisorCoordinator._classify_restart_and_mark, coord)
+    # Issue #1434/#1438: the STOP write task saves what async_shutdown saves; both share these helpers.
+    coord._flush_runtime_for_mode = MagicMock()
+    coord._hvac_session_mode = None
+    coord._chart_log = MagicMock()
+    for name in ("_persist_on_ha_stop", "_persist_runtime_and_state", "_persist_chart_log"):
+        setattr(coord, name, types.MethodType(getattr(ClimateAdvisorCoordinator, name), coord))
 
     return coord
 
@@ -417,10 +423,11 @@ class TestHomeAssistantStopEndsCommands:
         coord.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
         self._stop(coord)
         asyncio.run(scheduled[0])
+        assert coord._async_save_state.call_count == 1  # Issue #1434: the STOP task saves the state file too
 
         asyncio.run(coord.async_shutdown())
 
-        coord._async_save_state.assert_called_once()
+        assert coord._async_save_state.call_count == 2, "the unload after the stop still saves state itself"
         coord.automation_engine.cleanup.assert_called_once()
         assert coord.learning._state.last_shutdown_kind == "unload"
 

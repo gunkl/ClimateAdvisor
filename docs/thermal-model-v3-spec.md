@@ -163,6 +163,9 @@ Known consequences (accepted, not defects):
   non-HVAC triggers require a non-None indoor reading, so decisions are cushioned.
 - The restart-time late start (an HVAC run already in progress when HA restarts) is
   skipped if the indoor sensor has not loaded yet; that session is simply not learned.
+  When it does run, it learns only from the post-restart part of the run, by design
+  (Issue #1437): observations are never persisted, and a fit across the blind gap
+  while HA was down is invalid (the thermostat may have stopped and restarted unseen).
 - The single-point `k_active` fallback in `learning.py` (average of pre-heat plus active
   samples) can no longer be polluted by a stored `0.0`, because no `0.0` sample is ever
   stored.

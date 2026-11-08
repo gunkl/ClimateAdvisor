@@ -124,9 +124,9 @@ There is no migration path in `state.py`. Any breaking schema change requires bu
 
 ### `temp_unit` key and restore rule (Issue #1015)
 
-The schema belongs to the coordinator, but one key has restore-time semantics worth recording here. `_build_state_dict` adds a top-level `"temp_unit"` (the configured unit, `"fahrenheit"` or `"celsius"`, at save time). The options flow does **not** reload the integration (`_commit_section()` only writes the config entry and raises a `reload_needed` Repairs issue, Issue #573); the new unit applies after a Repairs "Fix", a manual reload or an HA restart. The running coordinator's config is fixed for its lifetime and no save path writes a new unit first, so the saved `temp_unit` is always the unit the coordinator was *running with* (the old unit when a change is pending). On a reload `async_shutdown()` saves it; on an HA restart `async_shutdown()` is not called (the STOP listener only saves learning diagnostics), so the file holds the last periodic save, in the same old unit.
+The schema belongs to the coordinator, but one key has restore-time semantics worth recording here. `_build_state_dict` adds a top-level `"temp_unit"` (the configured unit, `"fahrenheit"` or `"celsius"`, at save time). The options flow does **not** reload the integration (`_commit_section()` only writes the config entry and raises a `reload_needed` Repairs issue, Issue #573); the new unit applies after a Repairs "Fix", a manual reload or an HA restart. The running coordinator's config is fixed for its lifetime and no save path writes a new unit first, so the saved `temp_unit` is always the unit the coordinator was *running with* (the old unit when a change is pending). On a reload `async_shutdown()` saves it; on an HA restart `async_shutdown()` is not called, and since 0.9.8 the STOP write task (`_persist_on_ha_stop`, below) saves the state file, still in the old unit the coordinator was running with.
 
-On **any** restore (`async_restore_state`, before the date gate, Issue #1360), the coordinator computes one boolean `unit_changed` = `saved_unit` is a `str` **and** differs from the current configured unit, and applies it to the restores below. Before #1360 the check ran only on a same-day restore, so a unit switch that coincided with an overnight outage let old-unit pending observations, kept forecast and `pred_archive` through. On a cross-day restore only `pending_observations`, `kept_forecast` and `pred_archive` are affected; `temp_history` and `classification` are not restored across days anyway.
+On **any** restore (`async_restore_state`, before the date gate, Issue #1360), the coordinator computes one boolean `unit_changed` = `saved_unit` is a `str` **and** differs from the current configured unit, and applies it to the restores below. Before #1360 the check ran only on a same-day restore, so a unit switch that coincided with an overnight outage let old-unit kept forecast and `pred_archive` through. On a cross-day restore only `kept_forecast` and `pred_archive` are affected; `temp_history` and `classification` are not restored across days anyway.
 
 | Section | Restored when unit unchanged | When `unit_changed` |
 |---|---|---|
@@ -134,14 +134,14 @@ On **any** restore (`async_restore_state`, before the date gate, Issue #1360), t
 | `pred_archive` | yes | **dropped** |
 | `kept_forecast` (Issue #1359) | yes | **dropped** |
 | `classification` | yes (bridge until first cycle) | **dropped** (recomputed on first cycle) |
-| learning `pending_observations` | yes | **dropped** (an observation spanning the switch would mix units; other learning data and the legacy `pending_thermal_event` field untouched) |
+| learning data | yes | **kept** (no in-flight thermal observation is persisted, so none can span the switch; Issue #1437 retired the dropped `pending_observations` key) |
 | `today_record`, briefing, `automation_state`, occupancy, flags | yes | **kept** |
 
 `temp_history`, `classification` and `today_record` are same-day only, so they exist here only on a same-day restore.
 
 The restore converts nothing (history is internal °F); the discard rule fires on any unit change and cannot tell bad samples from good, so it also drops good pre-switch samples (harmless; buffers refill on the next polls).
 
-A WARNING and a `unit_changed` event (persisted event log) are emitted. WARNING: `Temperature unit changed since last run: same-day readings discarded from=<saved_unit> to=<current_unit> dropped_outdoor=<n> dropped_indoor=<n> dropped_pred_archive=<n> dropped_classification=<True|False> dropped_pending_observations=<n>`. Event payload: `from`, `to`, `dropped_outdoor`, `dropped_indoor`, `dropped_pred_archive`, `dropped_classification`, `dropped_pending_observations`. A missing or non-string `temp_unit` is a no-op, so existing installs and the first upgrade to 0.7.83 behave as before (a unit change on that same restart is not detected). `STATE_VERSION` is unchanged: the key is additive, the loader checks only `version`, and older code ignores it, so the change is **downgrade-safe**. Not repaired: chart-log entries and learning/thermal records written while the unit was wrong.
+A WARNING and a `unit_changed` event (persisted event log) are emitted. WARNING: `Temperature unit changed since last run: same-day readings discarded from=<saved_unit> to=<current_unit> dropped_outdoor=<n> dropped_indoor=<n> dropped_pred_archive=<n> dropped_classification=<True|False>`. Event payload: `from`, `to`, `dropped_outdoor`, `dropped_indoor`, `dropped_pred_archive`, `dropped_classification` (before 0.9.8 also `dropped_pending_observations`, retired by Issue #1437). A missing or non-string `temp_unit` is a no-op, so existing installs and the first upgrade to 0.7.83 behave as before (a unit change on that same restart is not detected). `STATE_VERSION` is unchanged: the key is additive, the loader checks only `version`, and older code ignores it, so the change is **downgrade-safe**. Not repaired: chart-log entries and learning/thermal records written while the unit was wrong.
 
 See [temperature-conversion.md](temperature-conversion.md#unit-change-handling-issue-1015).
 
@@ -173,7 +173,7 @@ Order in `async_restore_state()`: load the state file; load investigation report
 | `occupancy_mode` (+ `set_occupancy_mode` bridge until `async_setup`) | same-day only | #28 (persisted), #85 (engine sync) | Superseded by the live toggles at setup (#1354); not trusted across a day |
 | `occupancy_away_since` | same-day only | #28 | Away-minute accounting for today |
 
-Vacation/Away (Issue #1354): the person who left on vacation and whose house restarted expects the setback at once, not after a 15-minute away grace. `async_setup()` computes the mode from the live occupancy toggles, syncs it into the engine with `set_occupancy_mode()` (the live toggles win over a restored mode; INFO `Occupancy at startup: engine <old> -> live toggles <new>` when they differ), and, when the mode is not home/guest and `occupancy_away_since` is unset, starts counting away minutes. It does not start the away timer or call `handle_occupancy_away/vacation()`: the setback reaches the thermostat through the normal plan application at the end of the startup coalescing window, like every other plan command after a restart.
+Vacation/Away (Issue #1354): the person who left on vacation and whose house restarted expects the setback at once, not after a 15-minute away grace. `async_setup()` computes the mode from the live occupancy toggles, syncs it into the engine with `set_occupancy_mode()` (the live toggles win over a restored mode; INFO `Occupancy at startup: engine <old> -> live toggles <new>` when they differ), and, when the mode is not home/guest and `occupancy_away_since` is unset, starts counting away minutes. It does not start the away timer or call `handle_occupancy_away/vacation()`: the setback reaches the thermostat through the normal plan application at the end of the startup coalescing window, like every other plan command after a restart. The engine's `_away_setback_pending` (Issue #1433, True only while an away timer runs) is memory-only, so after a restart it is False and nothing waits.
 
 Restart classification (Issue #1357, `_classify_restart_and_mark()`): `version_changed`, then reload / `user_restart` / `unknown` cause, then a `system_restarted` event with `recovered_events` = number of events restored into the log, then the `clean_shutdown` reset. It now runs on every restore, so a first run or a deleted/corrupt state file still emits `system_restarted` (with `recovered_events` 0 and the cause derived as before), and a cross-day restart reports the events it recovered. See [activity-report-table.md](activity-report-table.md).
 
@@ -191,6 +191,33 @@ Restart classification (Issue #1357, `_classify_restart_and_mark()`): `version_c
 6. **File permissions are set.** After `os.replace()`, `save()` calls `os.chmod(str(self._path), 0o600)` (guarded by `hasattr(os, "chmod")`, so it's a no-op on platforms without it, e.g. Windows) — satisfying the CLAUDE.md security rule requiring `0o600` on persisted state files. Fixed in Issue #384 (v0.4.53); this section previously described a gap that no longer exists — verified directly against `state.py` during the 2026-09-16 documentation staleness audit.
 7. **Additive coordinator keys do not bump `STATE_VERSION`.** `temp_unit` (Issue #1015) is read defensively (type-checked, missing = no-op) so older and newer code can share one file.
 8. **Every persisted key is classified any-restart or same-day.** A new coordinator state key must be placed deliberately in the table in [Restore across the date boundary](#restore-across-the-date-boundary-issues-1349-1354-1360): restored above the date gate if it is time-stamped, self-expiring, run-once or the occupant's own setting; below it only if its meaning is "today". Adding it below the gate by default re-creates the Issue #1349 family of bugs.
+
+### What a real HA restart saves (Issues #1434, #1438)
+
+HA unloads config entries only on a reload or removal, never on a restart, so `async_shutdown()` does not run on a deploy, an update or a manual restart (the live log on 2026-11-07: 63 `ha_stop` shutdowns against 2 `unload`). The `EVENT_HOMEASSISTANT_STOP` listener's single write task, `_persist_on_ha_stop()`, therefore saves what the unload path saves. The steps run in this order, each guarded on its own:
+
+1. Flush the in-progress session's runtime into today's record (`_flush_runtime_for_mode(self._hvac_session_mode)`), then save the state file.
+2. Save the chart log.
+3. Flush the v4 archive and model file (`_v4_flush_on_shutdown`).
+4. Write the restart-cause diagnostics (learning file).
+
+It is idempotent with `async_shutdown()`: the flush resets the on-since time to now, so a later flush (a reload, a second stop) adds only the seconds since. `async_shutdown()` now also saves the chart log, through the same `_persist_runtime_and_state` / `_persist_chart_log` helpers. Pinned by `tests_ha/test_stop_persists_1434_1438.py` (STOP with no unload, then restore) and `tests/test_stop_persists_1434_1438.py` (no double count).
+
+Audit of every store (#1438), verdict for a real restart before 0.9.8:
+
+| Store | Saved when | Restart lost data? | Now |
+|---|---|---|---|
+| State file (`climate_advisor_state_<id>.json`: today's record, promise stats, v3 `pred_archive`, engine state) | every successful cycle and at many event sites | yes: the minutes of a run in progress (`_hvac_on_since` is not persisted; the startup late start re-seeds it), plus anything changed since the last cycle | saved by the STOP task after the runtime flush |
+| Chart log | after each 30-minute poll row and the `hvac_action_change` row | yes: `classification_change`, `occupancy` and `override` event rows appended since the last save (on a reload too) | saved by the STOP task and by `async_shutdown()` |
+| v4 archive and model file (hidden-node mass state) | at most hourly, and on unload | yes: up to an hour (#1423) | flushed by the STOP task |
+| Learning file | right after each change (`learning.save_state` at every mutation site) and by the diagnostics write | no | unchanged (the STOP task's diagnostics step writes it as before) |
+| Learning file `pending_observations` (in-flight thermal observations) | never (no writer) | lost on both paths, not a restart-only gap: tracked as #1437, a design decision | unchanged |
+| Forecast archive | right after each `record()` that changed it | no | unchanged |
+| Night-strategy evidence (`night_validation`, in the v4 model file) | right after the replay (`_v4_store.save`) | no | also covered by the v4 flush |
+| v4 backtest file | never by the integration (written by `tools/predict_backtest.py --publish`) | no (read-only) | unchanged |
+| Per-zone investigation reports (#1415) | right after each report is stored | no | unchanged |
+| Operation-timeline latch | not persisted on either path (rebuilt from the live plan each cycle) | no data to lose | unchanged |
+| Promise journal | in memory only (a rolling window); its counters (`promise_stats`) are in the state file | the window is transient by design; the counters were up to one cycle stale | the counters are saved with the state file |
 
 ### Not persisted: the memory of CA's own setpoint writes (Issue #1232)
 

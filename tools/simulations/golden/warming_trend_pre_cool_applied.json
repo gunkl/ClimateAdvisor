@@ -1,8 +1,9 @@
 {
   "name": "warming_trend_pre_cool_applied",
-  "description": "Strong warming trend night: setback_modifier=-3.0. Bedtime at 22:30 sets normal sleep band [64/72]. Pre-cool trigger fires at 02:30 (wake_time 06:30 - 4h fallback, no nat-vent config). compute_pre_cool_target() computes a target of 69F (sleep_cool=72 + modifier=-3.0), which is above the sleep_heat+hysteresis floor (64+1=65), so it applies uncapped — the home banks 3F of cold thermal mass below the bedtime ceiling before the hot day peaks.",
+  "description": "Strong warming trend night: today 80/62F, tomorrow forecast 95/77F (avg_delta +15F, so the classifier's setback_modifier=-3.0). Bedtime at 22:30 sets normal sleep band [64/72]. Pre-cool trigger fires at 02:30 (wake_time 06:30 - 4h fallback, no nat-vent config). The scenario's inputs carry the forecast a real install's classification always carries, including the 00:00 reclassification onto the new day (95/77F), because production's own 02:30 trigger re-checks the night on the day it wakes into (#1378): warming trend from the recorded 80/62F to today's 95/77F holds, so the -3.0 modifier stands. compute_pre_cool_target() computes a target of 69F (sleep_cool=72 + modifier=-3.0), which is above the sleep_heat+hysteresis floor (64+1=65), so it applies uncapped — the home banks 3F of cold thermal mass below the bedtime ceiling before the hot day peaks.",
   "source": "synthetic",
   "issue": 258,
+  "use_coordinator": true,
   "notes": [
     "Config: comfort_heat=70, comfort_cool=74. No explicit sleep_cool/sleep_heat → defaults used:",
     "  handle_bedtime()'s select_comfort_band() reads DEFAULT_SLEEP_COOL=72.0, DEFAULT_SLEEP_HEAT=64.0",
@@ -30,7 +31,27 @@
     "Scenario effectiveness: if handle_pre_cool() is deleted, pre_cool_applied event never fires",
     "  and the 02:30 assertion fails — regression caught. If the floor formula regresses back to",
     "  comfort_heat + 2 (=72), this scenario's target would incorrectly clamp to 72 instead of 69,",
-    "  also catching that regression."
+    "  also catching that regression.",
+    "Issue #1420 / #1378 (owner-approved premise fix, 0.9.8): the inputs now carry the forecast production's real",
+    "  02:30 trigger reads at fire time. Before, the 14:00 classification held only day_type warm and",
+    "  setback_modifier -3.0, so the real trigger's #1378 re-check saw no trend and no hot day and skipped the",
+    "  night; the old direct handle_pre_cool() call skipped that re-check and hid the missing inputs.",
+    "14:00 classification (as the classifier makes it): today 80/62, tomorrow 95/77.",
+    "  avg_delta = ((95-80) + (77-62)) / 2 = +15 >= TREND_THRESHOLD_SIGNIFICANT (10) -> warming, magnitude 15,",
+    "  setback_modifier -3.0. today_high 80 < threshold_hot 85 (warm, not hot).",
+    "  _maybe_schedule_pre_cool() decides the night waking 07-17 and records PreCoolDecision(prev_high=80, prev_low=62).",
+    "00:00 classification: the coordinator's first cycle after midnight reclassifies onto the new day, whose forecast",
+    "  is 95/77 (hot) with a 95/77 plateau after it (stable, setback_modifier 0). This is the classification",
+    "  current at 02:30.",
+    "02:30 fire-time re-check (resolve_pre_cool_modifier_for_night): the night wakes into today (07-17), so it asks",
+    "  today's gates. Trend gate first: ((95-80) + (77-62)) / 2 = +15 -> -3.0, returned. The hot gate",
+    "  (today_high 95 >= 85) also holds but is not reached; it would give HOT_DAY_PRE_COOL_MODIFIER -2.0 -> 70F,",
+    "  so the 69F expectation proves the trend gate decided the night.",
+    "use_coordinator: true so Tier A runs the coordinator's own 02:30 trigger (and its re-check) like real HA. An",
+    "  engine-only run would call handle_pre_cool() without a modifier, which judges the 00:00 classification's",
+    "  tomorrow (07-18, a 95F plateau -> -2.0 -> 70F), a path production's trigger does not take.",
+    "Control: warming_trend_pre_cool_revised_away_1378 (same night, forecast revised overnight so neither gate holds).",
+    "Assertion a2 (added 0.9.8 with the premise fix, owner re-sign): setpoint_writes (00:00, 02:30] == [69.0]. Without it a deleted pre-cool write still passed: handle_pre_cool() emits pre_cool_applied (target 69) after the write whatever its outcome, and a1 reads that event."
   ],
   "config": {
     "comfort_heat": 70,
@@ -45,8 +66,15 @@
       "time": "2026-07-16T14:00:00",
       "type": "classification",
       "day_type": "warm",
+      "hvac_mode": "cool",
       "setback_modifier": -3.0,
-      "note": "Strong warming trend classification. Tomorrow +15F above today. Modifier=-3.0 seeds handle_pre_cool target."
+      "today_high": 80.0,
+      "today_low": 62.0,
+      "tomorrow_high": 95.0,
+      "tomorrow_low": 77.0,
+      "trend_direction": "warming",
+      "trend_magnitude": 15.0,
+      "note": "Strong warming trend classification: today 80/62F, tomorrow 95/77F, avg_delta +15F -> setback_modifier -3.0. The pre-cool for the night waking 07-17 is decided now, recording 80/62F as the base for the 02:30 re-check."
     },
     {
       "time": "2026-07-16T18:00:00",
@@ -61,11 +89,25 @@
       "note": "Bedtime: normal sleep band [64/72] applied. Pre-cool fires separately at 02:30."
     },
     {
+      "time": "2026-07-17T00:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "setback_modifier": 0.0,
+      "today_high": 95.0,
+      "today_low": 77.0,
+      "tomorrow_high": 95.0,
+      "tomorrow_low": 77.0,
+      "trend_direction": "stable",
+      "trend_magnitude": 0.0,
+      "note": "The coordinator's first cycle after midnight reclassifies onto the new day: today 95/77F as forecast the evening before, a 95/77F plateau after it. The 02:30 trigger re-checks the night against this."
+    },
+    {
       "time": "2026-07-17T02:30:00",
       "type": "pre_cool",
       "indoor_f": 76.5,
       "nat_vent_just_closed": false,
-      "note": "Pre-cool trigger fires (wake_time 06:30 - 4h fallback). indoor=76.5F, target=69F (no clamp — above the sleep_heat+hysteresis floor of 65F). No nat-vent bypass. AC lowers cool ceiling to 69F, 3F below the bedtime ceiling."
+      "note": "Production's own pre-cool trigger fires (wake_time 06:30 - 4h fallback). indoor=76.5F, target=69F (no clamp — above the sleep_heat+hysteresis floor of 65F). No nat-vent bypass. AC lowers cool ceiling to 69F, 3F below the bedtime ceiling. Fire-time re-check: warming trend 80/62 -> 95/77 (+15F) holds, modifier -3.0."
     }
   ],
   "assertions": [
@@ -80,6 +122,15 @@
       "expect": "pre_cool_applied",
       "expect_temp": 69.0,
       "reason": "Pre-cool trigger fired: sleep_cool(72) + modifier(-3.0) = 69F raw target, which is above the sleep_heat(64)+hysteresis(1)=65F floor, so it applies uncapped. AC lowers the cool ceiling to 69F, 3F below the bedtime ceiling (72F), banking cold thermal mass before the hot day."
+    },
+    {
+      "at": "2026-07-17T02:30:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-17T00:00:00",
+      "values": [
+        69.0
+      ],
+      "reason": "The thermostat is really told 69F, once, by production's own 02:30 trigger (after the 00:00 reclassification's re-send of the unchanged 72F ceiling). The pre_cool_applied row above reads the event's target, which is announced even when the write is not sent; this row reads the service call itself, so a lost or doubled pre-cool write fails."
     }
   ],
   "verdict": {

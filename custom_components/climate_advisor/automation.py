@@ -1765,6 +1765,10 @@ class AutomationEngine:
     # this away period. Reset when the house goes away; a deferred arrival restore is a "still on the setback" hold
     # only when it is True (a setback a door/window pause skipped never reached the thermostat).
     _away_setback_sent: bool = False
+    # Issue #1433: True while the coordinator's 15-minute away timer runs (set when the timer starts, cleared when it
+    # expires or is cancelled). The engine already knows the house is away (Issue #85), but the setback waits for the
+    # timer: until then no other path (the 30-minute cycle, bedtime, pre-cool, a time-of-use start) sends it.
+    _away_setback_pending: bool = False
     # Issue #1050 (#1048 change 21): fan command read-back. Attempts = how many times a CA fan-on
     # was found ignored by the command entity (0 -> next ignore retries once without a grace period;
     # >=1 -> gives up with the normal grace period + one warning episode). Episode fields use
@@ -2791,7 +2795,30 @@ class AutomationEngine:
             _away = (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
             if mode in _away and self._occupancy_mode not in _away:
                 self._away_setback_sent = False  # Issue #1425: a new away period; nothing sent for it yet
+        if mode != OCCUPANCY_AWAY:
+            self._away_setback_pending = False  # Issue #1433: only an Away waits for the away timer
         self._occupancy_mode = mode
+
+    def set_away_setback_pending(self, pending: bool) -> None:
+        """Issue #1433: the coordinator's 15-minute away timer is running (True) or has expired / been cancelled.
+
+        Occupant view: you step out for a few minutes (or a phone drops off the network); the setback waits 15 minutes
+        so a short absence never sets the heat or the AC back. While pending, ``handle_occupancy_away()`` and the
+        Away time-of-use bank send nothing, so the thermostat stays on the home band the chart draws (Issue #1425);
+        the timer itself clears this flag first and then applies the setback.
+        """
+        self._away_setback_pending = bool(pending) and self._occupancy_mode == OCCUPANCY_AWAY
+
+    def _away_setback_waits_for_timer(self, caller: str) -> bool:
+        """True (and logged) when the away setback must wait for the running away timer (Issue #1433)."""
+        if not (self._away_setback_pending and self._occupancy_mode == OCCUPANCY_AWAY):
+            return False
+        _LOGGER.info(
+            "%s: away setback pending -- the 15-minute away timer is still running, the thermostat keeps the home band "
+            "until it expires",
+            caller,
+        )
+        return True
 
     def update_outdoor_temp(self, temp: float | None) -> None:
         """Update the cached outdoor temperature used for natural vent decisions."""
@@ -5211,6 +5238,8 @@ class AutomationEngine:
                 if self._occupancy_mode == OCCUPANCY_VACATION:
                     _LOGGER.info("Vacation mode — reapplying deep setback instead of comfort temps")
                     await self.handle_occupancy_vacation()
+                elif self._away_setback_waits_for_timer("apply_classification"):
+                    pass  # Issue #1433: the timer applies the setback; nothing is written this cycle
                 else:
                     _LOGGER.info("Away mode — reapplying setback instead of comfort temps")
                     await self.handle_occupancy_away()
@@ -7876,6 +7905,8 @@ class AutomationEngine:
         ``DEFER_OCCUPANCY``/``PROCEED`` both fall through unchanged, since this method is
         only ever invoked while occupancy already is away/vacation.
         """
+        if self._away_setback_waits_for_timer(f"Away TOU pre-conditioning (schedule={schedule_id})"):
+            return  # Issue #1433: the away bank waits for the away timer like the setback band
         if self._override_confirm_pending:
             self._deferred_while_pending = True
             _LOGGER.info(
@@ -12165,6 +12196,10 @@ class AutomationEngine:
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""
         self._occupancy_mode = OCCUPANCY_AWAY
+        # Issue #1433: every caller (the 30-minute cycle's reapply, bedtime, pre-cool, a time-of-use start) waits for
+        # the away timer; the timer clears the flag before it calls this handler.
+        if self._away_setback_waits_for_timer("Occupancy away"):
+            return
         # Issue #744 / Phase 6 Step 6: routes through the pure occupancy_fsm.py pair —
         # same logging, same events, same HVAC writes, driven by the returned decision.
         # The legacy inline branch this replaced is gone (graduated) — see

@@ -1,0 +1,491 @@
+{
+  "name": "issue_1436_warm_day_evening_floor_close_strips_follow_plan__whf",
+  "description": "Issue #1436: a warm September day, windows open in the afternoon with the whole-house fan running, and the house cooling toward its 68F floor as the evening air drops. The plan says '7:00 PM: close the windows before the house drifts below 68F'. The chart's faded activity strips (what the plan expects) must say the same: Win plan, Nat-vent and Fan end at 7:00 PM, nothing overnight, and the next window period is tomorrow's 8:45-9:50 AM. Before the fix the faded strips came from an older predictor (chart_data.predicted_activity) that ignored the floor and the close step: it drew the windows plan and natural ventilation an hour past the 7:00 PM close and again from 11 PM to 2 AM, and left out tomorrow morning's period.",
+  "source": "synthetic: Issue #1436 (live Zone 1 2026-11-07: plan 'close the windows by 7:14 PM', strips Fan/Nat-vent/Win plan 5 PM to 7 AM); pending owner review, unsigned",
+  "issue": 1436,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 62,
+    "setback_cool": 82,
+    "sleep_heat": 66,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house",
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ]
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.15,
+    "k_active_cool": -2.0,
+    "k_active_heat": 2.0
+  },
+  "hourly_forecast": [
+    {
+      "datetime": "2026-09-12T00:00:00+00:00",
+      "temperature": 58
+    },
+    {
+      "datetime": "2026-09-12T01:00:00+00:00",
+      "temperature": 57
+    },
+    {
+      "datetime": "2026-09-12T02:00:00+00:00",
+      "temperature": 56
+    },
+    {
+      "datetime": "2026-09-12T03:00:00+00:00",
+      "temperature": 56
+    },
+    {
+      "datetime": "2026-09-12T04:00:00+00:00",
+      "temperature": 55
+    },
+    {
+      "datetime": "2026-09-12T05:00:00+00:00",
+      "temperature": 55
+    },
+    {
+      "datetime": "2026-09-12T06:00:00+00:00",
+      "temperature": 56
+    },
+    {
+      "datetime": "2026-09-12T07:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-09-12T08:00:00+00:00",
+      "temperature": 64
+    },
+    {
+      "datetime": "2026-09-12T09:00:00+00:00",
+      "temperature": 68
+    },
+    {
+      "datetime": "2026-09-12T10:00:00+00:00",
+      "temperature": 71
+    },
+    {
+      "datetime": "2026-09-12T11:00:00+00:00",
+      "temperature": 73
+    },
+    {
+      "datetime": "2026-09-12T12:00:00+00:00",
+      "temperature": 75
+    },
+    {
+      "datetime": "2026-09-12T13:00:00+00:00",
+      "temperature": 76
+    },
+    {
+      "datetime": "2026-09-12T14:00:00+00:00",
+      "temperature": 76
+    },
+    {
+      "datetime": "2026-09-12T15:00:00+00:00",
+      "temperature": 75
+    },
+    {
+      "datetime": "2026-09-12T16:00:00+00:00",
+      "temperature": 72
+    },
+    {
+      "datetime": "2026-09-12T17:00:00+00:00",
+      "temperature": 68
+    },
+    {
+      "datetime": "2026-09-12T18:00:00+00:00",
+      "temperature": 64
+    },
+    {
+      "datetime": "2026-09-12T19:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-09-12T20:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-09-12T21:00:00+00:00",
+      "temperature": 59
+    },
+    {
+      "datetime": "2026-09-12T22:00:00+00:00",
+      "temperature": 58
+    },
+    {
+      "datetime": "2026-09-12T23:00:00+00:00",
+      "temperature": 58
+    },
+    {
+      "datetime": "2026-09-13T00:00:00+00:00",
+      "temperature": 58
+    },
+    {
+      "datetime": "2026-09-13T01:00:00+00:00",
+      "temperature": 57
+    },
+    {
+      "datetime": "2026-09-13T02:00:00+00:00",
+      "temperature": 56
+    },
+    {
+      "datetime": "2026-09-13T03:00:00+00:00",
+      "temperature": 56
+    },
+    {
+      "datetime": "2026-09-13T04:00:00+00:00",
+      "temperature": 55
+    },
+    {
+      "datetime": "2026-09-13T05:00:00+00:00",
+      "temperature": 55
+    },
+    {
+      "datetime": "2026-09-13T06:00:00+00:00",
+      "temperature": 56
+    },
+    {
+      "datetime": "2026-09-13T07:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-09-13T08:00:00+00:00",
+      "temperature": 64
+    },
+    {
+      "datetime": "2026-09-13T09:00:00+00:00",
+      "temperature": 68
+    },
+    {
+      "datetime": "2026-09-13T10:00:00+00:00",
+      "temperature": 71
+    },
+    {
+      "datetime": "2026-09-13T11:00:00+00:00",
+      "temperature": 73
+    },
+    {
+      "datetime": "2026-09-13T12:00:00+00:00",
+      "temperature": 75
+    },
+    {
+      "datetime": "2026-09-13T13:00:00+00:00",
+      "temperature": 76
+    },
+    {
+      "datetime": "2026-09-13T14:00:00+00:00",
+      "temperature": 76
+    },
+    {
+      "datetime": "2026-09-13T15:00:00+00:00",
+      "temperature": 75
+    },
+    {
+      "datetime": "2026-09-13T16:00:00+00:00",
+      "temperature": 72
+    },
+    {
+      "datetime": "2026-09-13T17:00:00+00:00",
+      "temperature": 68
+    },
+    {
+      "datetime": "2026-09-13T18:00:00+00:00",
+      "temperature": 64
+    },
+    {
+      "datetime": "2026-09-13T19:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-09-13T20:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-09-13T21:00:00+00:00",
+      "temperature": 59
+    },
+    {
+      "datetime": "2026-09-13T22:00:00+00:00",
+      "temperature": 58
+    },
+    {
+      "datetime": "2026-09-13T23:00:00+00:00",
+      "temperature": 58
+    },
+    {
+      "datetime": "2026-09-14T00:00:00+00:00",
+      "temperature": 58
+    },
+    {
+      "datetime": "2026-09-14T01:00:00+00:00",
+      "temperature": 57
+    },
+    {
+      "datetime": "2026-09-14T02:00:00+00:00",
+      "temperature": 56
+    },
+    {
+      "datetime": "2026-09-14T03:00:00+00:00",
+      "temperature": 56
+    },
+    {
+      "datetime": "2026-09-14T04:00:00+00:00",
+      "temperature": 55
+    },
+    {
+      "datetime": "2026-09-14T05:00:00+00:00",
+      "temperature": 55
+    },
+    {
+      "datetime": "2026-09-14T06:00:00+00:00",
+      "temperature": 56
+    },
+    {
+      "datetime": "2026-09-14T07:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-09-14T08:00:00+00:00",
+      "temperature": 64
+    },
+    {
+      "datetime": "2026-09-14T09:00:00+00:00",
+      "temperature": 68
+    },
+    {
+      "datetime": "2026-09-14T10:00:00+00:00",
+      "temperature": 71
+    },
+    {
+      "datetime": "2026-09-14T11:00:00+00:00",
+      "temperature": 73
+    },
+    {
+      "datetime": "2026-09-14T12:00:00+00:00",
+      "temperature": 75
+    },
+    {
+      "datetime": "2026-09-14T13:00:00+00:00",
+      "temperature": 76
+    },
+    {
+      "datetime": "2026-09-14T14:00:00+00:00",
+      "temperature": 76
+    },
+    {
+      "datetime": "2026-09-14T15:00:00+00:00",
+      "temperature": 75
+    },
+    {
+      "datetime": "2026-09-14T16:00:00+00:00",
+      "temperature": 72
+    },
+    {
+      "datetime": "2026-09-14T17:00:00+00:00",
+      "temperature": 68
+    },
+    {
+      "datetime": "2026-09-14T18:00:00+00:00",
+      "temperature": 64
+    },
+    {
+      "datetime": "2026-09-14T19:00:00+00:00",
+      "temperature": 62
+    },
+    {
+      "datetime": "2026-09-14T20:00:00+00:00",
+      "temperature": 60
+    },
+    {
+      "datetime": "2026-09-14T21:00:00+00:00",
+      "temperature": 59
+    },
+    {
+      "datetime": "2026-09-14T22:00:00+00:00",
+      "temperature": 58
+    },
+    {
+      "datetime": "2026-09-14T23:00:00+00:00",
+      "temperature": 58
+    }
+  ],
+  "events": [
+    {
+      "time": "2026-09-12T15:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 75.0
+    },
+    {
+      "time": "2026-09-12T15:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "today_high": 76,
+      "today_low": 55,
+      "window_open_time": "06:00",
+      "window_close_time": "21:00"
+    },
+    {
+      "time": "2026-09-12T15:30:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window"
+    },
+    {
+      "time": "2026-09-12T16:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 72.0,
+      "plan_cycle": true,
+      "predicted_indoor": [
+        {
+          "ts": "2026-09-12T16:00:00+00:00",
+          "temp": 71
+        },
+        {
+          "ts": "2026-09-12T17:00:00+00:00",
+          "temp": 70.5
+        },
+        {
+          "ts": "2026-09-12T18:00:00+00:00",
+          "temp": 70
+        },
+        {
+          "ts": "2026-09-12T19:00:00+00:00",
+          "temp": 69.4
+        },
+        {
+          "ts": "2026-09-12T20:00:00+00:00",
+          "temp": 68.8
+        },
+        {
+          "ts": "2026-09-12T21:00:00+00:00",
+          "temp": 68.3
+        },
+        {
+          "ts": "2026-09-12T22:00:00+00:00",
+          "temp": 68
+        },
+        {
+          "ts": "2026-09-12T23:00:00+00:00",
+          "temp": 67.8
+        }
+      ]
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-12T16:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.window_step_state.text",
+      "value": "7:00 PM: close the windows before the house drifts below 68\u00b0F.",
+      "track": "logic",
+      "reason": "the plan closes the windows at 7:00 PM, before the house drifts below its floor (the live case's '7:14 PM' sentence)"
+    },
+    {
+      "at": "2026-09-12T16:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.text",
+      "value": "Close windows by 7:00 PM",
+      "track": "logic",
+      "reason": "the Next Action card says the same close time"
+    },
+    {
+      "at": "2026-09-12T16:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.chart_strips.strips.windowsplan",
+      "value": [
+        "16:00-19:00",
+        "08:45-09:50"
+      ],
+      "track": "logic",
+      "reason": "the faded Win plan strip is the plan's window periods: now to the 7:00 PM close, then tomorrow's 8:45-9:50 AM period; nothing overnight"
+    },
+    {
+      "at": "2026-09-12T16:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.chart_strips.strips.natvent",
+      "value": [
+        "16:00-19:00",
+        "08:45-09:50"
+      ],
+      "track": "logic",
+      "reason": "the faded Nat-vent strip is the plan's nat-vent sessions, inside its window periods"
+    },
+    {
+      "at": "2026-09-12T16:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.chart_strips.strips.fan",
+      "value": [
+        "16:00-19:00",
+        "08:45-09:50"
+      ],
+      "track": "logic",
+      "reason": "the faded Fan strip is the fan those sessions run"
+    },
+    {
+      "at": "2026-09-12T16:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.chart_strips.activity_windows_hours",
+      "value": [
+        "17:00",
+        "18:00",
+        "09:00"
+      ],
+      "track": "logic",
+      "reason": "the chart payload's predicted_activity marks windows recommended only where the plan has the windows open (the forward Target line reads it)"
+    },
+    {
+      "at": "2026-09-12T16:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.chart_strips.activity_fan_hours",
+      "value": [
+        "17:00",
+        "18:00",
+        "09:00"
+      ],
+      "track": "logic",
+      "reason": "predicted_activity's fan_active (the Target line's nat-vent tier) only inside the plan's sessions"
+    },
+    {
+      "at": "2026-09-12T16:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.chart_strips.problems",
+      "value": [],
+      "track": "logic",
+      "reason": "P8 chart_strips: no strip and no predicted_activity hour disagrees with the plan"
+    },
+    {
+      "at": "2026-09-12T16:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._next_action.chart_strips.agree",
+      "value": true,
+      "track": "logic",
+      "reason": "the chart's future activity agrees with the plan"
+    }
+  ],
+  "notes": [
+    "Occupant view: the person reads 'Close windows by 7:00 PM' on the card and the plan list, then looks at the strips under the chart. If the strips show Nat-vent and Win plan after 7 PM they cannot tell what the plan wants, which is the owner's report: 'it says close windows by ~7pm which sounds correct, but why does the bar chart show color for nat vent and windows plan?'.",
+    "Inputs: comfort band 68-76F, the classifier recommends windows 06:00-21:00 on a warm day; the occupant opens the living-room window at 15:30; the 16:00 plan cycle hands the plan a v3 curve that drifts from 71F to the 68F floor by about 22:00 and the outdoor forecast falls to 58F. The plan's window simulation closes the period at 19:00 (comfort_edge: before the house drifts below the floor).",
+    "Capture (capture_next_action, Issue #1276/#1230 R3b, extended by #1436): engine_state._next_action.chart_strips holds the strips the REAL timeline payload hands the chart (timeline_payload()['strips'], 'HH:MM-HH:MM' per row for the next 24 h), the hours the REAL chart payload's predicted_activity marks windows_recommended / fan_active, and the P8 chart_strips verdict (tools/sim_harness/strip_check.py). outcomes.py is unchanged (field_equals only).",
+    "Fails on the code before the fix (0.9.7 8f933bf with this harness, checked 2026-11-07): strips is null (the chart drew the future from predicted_activity), activity_windows_hours and activity_fan_hours are 17:00, 18:00, 19:00, 23:00, 00:00, 01:00 (natural ventilation and the windows plan after the 7:00 PM close and again overnight), agree is false with two problems; 7 of 9 assertions fail. Passes after the fix.",
+    "Three-exercise protocol (CLAUDE.md 10): (a) effectiveness: delete the strips derivation (timeline_surfaces.strip_spans) or route predicted_activity back to the regime walk and the strip and hour assertions fail; delete the plan's comfort_edge close and the card/close assertions fail. (b) docs vs production: docs/operation-timeline-spec.md 'Chart activity strips' states these rules; the golden asserts what production emits. (c) user outcome if this stops catching a regression: the chart again tells the occupant to keep windows open and run the fan all night while the card says close them at 7 PM; the house would drift below the 68F floor and the occupant cannot trust the page.",
+    "Real-HA tier (Issue #1440): the real-HA adapter seeds only the engine's hourly forecast, so the coordinator's refresh replaces it with an empty one and real HA plans this day without a forecast: the close is the classifier's 9:00 PM (windows_close.planned_end), not the 7:00 PM comfort_edge. The thermal model does reach the plan there. Assertions 0-6 are timing assertions and are Tier A only; 7-8 (P8 agree) hold on real HA, and tests_ha/test_strips_follow_plan_1436.py pins the strips to whichever plan real HA builds."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "The chart's faded strips follow the plan: windows, nat-vent and fan end at the plan's 7:00 PM close.",
+    "observed_behavior": "After the fix: Win plan, Nat-vent and Fan 16:00-19:00 and 08:45-09:50 tomorrow; predicted_activity hours 17:00, 18:00 and 09:00 (the hours after now inside a window period).",
+    "expected_behavior": "Every faded strip is a span of the operation timeline (window period, nat-vent session); nothing overnight while the plan has the windows closed."
+  }
+}

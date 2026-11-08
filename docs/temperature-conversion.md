@@ -176,8 +176,8 @@ Changing `temp_unit` in the options flow does **not** reload the integration. `_
 
 - **Not restored:** `temp_history` (outdoor and indoor), `pred_archive`, `classification` (recomputed on the first cycle).
 - **Kept:** `today_record`, briefing, `automation_state`, occupancy, flags.
-- The persisted pending thermal observations are also discarded. The persisted pending thermal observations (learning `pending_observations`) are discarded too, because an in-progress observation spanning the switch would mix samples read under both units. Other learning data is untouched, and the legacy single `pending_thermal_event` field is not touched.
-- A WARNING and a `unit_changed` event (persisted event log) are emitted. WARNING: `Temperature unit changed since last run: same-day readings discarded from=<saved_unit> to=<current_unit> dropped_outdoor=<n> dropped_indoor=<n> dropped_pred_archive=<n> dropped_classification=<True|False> dropped_pending_observations=<n>`. Event payload: `from`, `to`, `dropped_outdoor`, `dropped_indoor`, `dropped_pred_archive`, `dropped_classification`, `dropped_pending_observations`.
+- Learning data is untouched. No in-progress thermal observation can span the switch: observations are never persisted across a restart or reload (Issue #1437).
+- A WARNING and a `unit_changed` event (persisted event log) are emitted. WARNING: `Temperature unit changed since last run: same-day readings discarded from=<saved_unit> to=<current_unit> dropped_outdoor=<n> dropped_indoor=<n> dropped_pred_archive=<n> dropped_classification=<True|False>`. Event payload: `from`, `to`, `dropped_outdoor`, `dropped_indoor`, `dropped_pred_archive`, `dropped_classification` (before 0.9.8 also `dropped_pending_observations`, retired by Issue #1437).
 
 The rule discards on **any** unit change, not only a mismatch. The restore itself converts nothing (history is stored in internal °F); the reason for discarding is that samples taken while the configured unit disagreed with the provider's unit are wrong. The rule cannot tell good samples from bad, so it also drops good pre-switch samples (harmless: the buffers refill on the next polls).
 

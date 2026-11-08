@@ -6,7 +6,8 @@ recorded outdoor and indoor temperatures hour by hour, the occupant's own window
 happened. At every half hour the person asks the same four questions the dashboard answers (what should I do, what does
 CA do next, what does today's briefing say about windows, what is the plan) and the answers must be one answer: the card
 is the timeline's window step, Next Automation is the timeline's earliest CA step, the briefing's window times are the
-timeline's, the REST body is the timeline.
+timeline's, the REST body is the timeline, and (Issue #1436) the chart's faded activity strips and its
+predicted_activity hours follow the timeline's window periods, sessions, runs and holds.
 
 The recorded inputs are temperatures and window edges only (``tests_ha/data/zone1_variant_days.json``): what CA did on
 those days came from code versions that no longer exist, so it is not asserted here.
@@ -105,6 +106,14 @@ def _assert_surfaces_agree(house, *, day_label: str, seen: dict) -> None:
     assert [(s["ts"], s["kind"]) for s in payload["steps"]] == [(s.ts.isoformat(), s.kind.value) for s in tl.steps]
     assert payload["detail"]["days"][0]["day_type"] == cls.day_type
 
+    # --- chart strips (Issue #1436): the faded strips and the chart payload's predicted_activity follow the plan -----
+    from tools.sim_harness.strip_check import check_coordinator
+
+    got = check_coordinator(c, now, getattr(c, "_last_outdoor_temp", None))
+    assert got is not None and got["agree"], f"{day_label} {now:%H:%M}: chart strips vs plan: {got and got['problems']}"
+    if (got["strips"] or {}).get("windowsplan"):
+        seen["strip_windows"] += 1
+
 
 @pytest.mark.parametrize("day", list(_TALKS_ABOUT_WINDOWS))
 async def test_every_surface_agrees_with_the_timeline_on_a_recorded_zone_1_day(make_house, day) -> None:
@@ -127,7 +136,14 @@ async def test_every_surface_agrees_with_the_timeline_on_a_recorded_zone_1_day(m
         initial_hvac_mode="off",
         ca_config={"sleep_time": "20:30", "wake_time": "06:30", "sensor_debounce_seconds": 60},
     )
-    seen = {"advised": 0, "window_steps": 0, "briefing_close": 0, "plan_has_window_steps": 0, "cards": set()}
+    seen = {
+        "advised": 0,
+        "window_steps": 0,
+        "briefing_close": 0,
+        "plan_has_window_steps": 0,
+        "strip_windows": 0,
+        "cards": set(),
+    }
     pending = [(hm, kind) for hm, kind in edges if hm >= (5, 45)]
     window_is_open = any(hm < (5, 45) and kind == "open" for hm, kind in edges) and not any(
         hm < (5, 45) and kind == "close" for hm, kind in edges
@@ -169,6 +185,7 @@ async def test_every_surface_agrees_with_the_timeline_on_a_recorded_zone_1_day(m
         assert seen["window_steps"] > 0 and seen["briefing_close"] > 0, (day, seen)
         assert any(c.startswith("Open windows") for c in seen["cards"]), (day, seen)
         assert any(c.startswith("Keep windows") for c in seen["cards"]), (day, seen)
+        assert seen["strip_windows"] > 0, f"{day}: the chart never drew a planned window period: {seen}"
 
 
 def test_at_least_one_variant_day_must_talk_about_windows() -> None:

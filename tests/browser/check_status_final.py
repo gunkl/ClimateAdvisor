@@ -166,7 +166,80 @@ def timeline() -> dict:
             {"ts": at(i * 30), "temp_f": round(70 + 2.5 * math.sin(i / 5), 2), "sensor": "_ca", "model": "v3"}
             for i in range(60)
         ],
+        # Issue #1436: the faded strips (timeline_surfaces.strip_spans): the window period of the steps above, and one
+        # ~12 min cooling run as separate slivers (one per expected on-period), one of them 20 seconds long
+        "strips": [
+            {
+                "row": "cooling",
+                "start": at(m),
+                "end": at(m + n),
+                "kind": "run",
+                "step_id": "",
+                "step_ts": None,
+                "actor": "ca",
+                "confidence": "ok",
+                "run": 0,
+                "window_start": at(360),
+                "window_end": at(510),
+                "minutes": 12.3,
+                "placed": True,
+                "text": f"Cooling expected for about 10 min between {clock(360)} and {clock(510)}, holding the band's ceiling.",
+                "text_short": f"Cooling expected for about 10 min between {clock(360)} and {clock(510)}, holding the band's ceiling.",
+            }
+            for m, n in ((375, 5), (420, 1 / 3), (465, 7))
+        ]
+        + [
+            {
+                "row": "windowsplan",
+                "start": at(45),
+                "end": at(240),
+                "kind": "windows_open",
+                "step_id": "windows_open45",
+                "step_ts": at(45),
+                "actor": "you",
+                "confidence": "ok",
+                "text": f"{clock(45)}: open the windows. Outdoor is 6°F cooler than the house.",
+                "text_short": "Open the windows. Outdoor is 6°F cooler than the house.",
+            }
+        ],
     }
+
+
+STRIP_SLIVER_JS = """() => {
+  const ch = Chart.getChart(document.getElementById('temp-chart'));
+  // read a copy (one drawImage), never the page canvas itself: repeated readbacks on it log a Canvas2D warning
+  const c = document.getElementById('activity-chart'), d = devicePixelRatio;
+  const off = document.createElement('canvas'); off.width = c.width; off.height = c.height;
+  const g = off.getContext('2d', { willReadFrequently: true }); g.drawImage(c, 0, 0);
+  const st = window.__test_strips || { rows: [] };
+  const row = st.rows.indexOf('cooling');
+  const x0 = ch.scales.x.getPixelForValue(Date.now() + 420 * 60000);
+  const px = (x) => Array.from(g.getImageData(Math.round(x * d), Math.round((row * 15 + 6) * d), 1, 1).data);
+  const leg = document.getElementById('chart-strip-legend');
+  return { row, x0, inView: x0 > ch.scales.x.left && x0 < ch.scales.x.right - 8, at: px(x0 + 0.5), in2: px(x0 + 2.2),
+           track: px(x0 + 6), legend: leg && !leg.hidden ? leg.textContent : null };
+}"""
+
+
+def strip_checks(pg, name):
+    """Issue #1436: the legend line, a 20-second run sliver drawn at its minimum width, and its hover saying the
+    sliver's own minutes and the run's total (owner decision: separate slivers, a minimum visible width at draw time)."""
+    r = pg.evaluate(STRIP_SLIVER_JS)
+    check(
+        f"{name}: strip legend line",
+        r["legend"] == "Solid: what happened \u00b7 Faded: what the plan expects",
+        str(r["legend"]),
+    )
+    if not r["inView"] or r["row"] < 0:
+        return  # a range that does not reach +7 h (the narrow phone default): the sliver is not in view
+    check(f"{name}: a 20-second sliver is painted", r["at"][3] > 0, str(r))
+    check(f"{name}: the sliver has its minimum width (2 px in is not the track)", r["in2"] != r["track"], str(r))
+    pg.evaluate(f"() => window.__triggerHoverAt({r['x0']} + 1)")
+    pg.wait_for_timeout(100)
+    txt = pg.locator("#chart-hover-panel").inner_text()
+    check(f"{name}: sliver hover says its minutes and the run's", "about 1 min of 12 min cooling" in txt, txt[:200])
+    pg.evaluate("() => document.getElementById('chart-stack').dispatchEvent(new MouseEvent('mouseleave'))")
+    pg.wait_for_timeout(50)
 
 
 def _night(show_numbers=True) -> dict:
@@ -583,6 +656,7 @@ def run_page(browser, page, label, vp, scheme):
     plan_checks(pg, name, "#status-plan-list" if new else "#plan-list")
     layout(pg, name, vp)
     readout_checks(pg, name, label)
+    strip_checks(pg, name)
     if new:
         bad = pg.evaluate(CONTRAST_JS)
         check(f"{name}: Status text contrast", not bad, f"{len(bad)} low: {bad[:5]}")

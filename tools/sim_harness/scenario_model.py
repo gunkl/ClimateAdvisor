@@ -311,6 +311,24 @@ def snapshot_engine_state(engine: Any) -> dict[str, Any]:
     return snap
 
 
+def run_planning_step(coordinator: Any) -> None:
+    """The cycle's planning step (``coordinator._timeline_shadow_run("cycle")``), run before the occupant surfaces are
+    read (Issue #1436 mirror audit, test-infrastructure change).
+
+    Semantic justification: the capture (and the P8 probe) read the surfaces, and until #1436 production's surface READ
+    rebuilt the plan whenever its last run was over two minutes old, so a capture always saw a plan built at that
+    moment. That read-builds-the-plan behaviour was the bug (a mid-cycle read latched the plan from half-updated
+    inputs); production now builds the plan only in its planning steps, and Tier A runs no 30-minute cycle at all. So
+    the harness runs production's own planning step, exactly as the cycle does just before it computes the surfaces
+    (``_async_update_data_impl``), then reads. Could this let a real failure pass silently? It cannot hide a read that
+    builds the plan (the unit tests pin that no read path reaches a build); it does mean a capture sees a plan as fresh
+    as the cycle right after the last event, which is what the occupant reads on the dashboard after that cycle.
+    The plan commands nothing (``tests/test_operation_timeline_structural.py``), so running it never changes the run.
+    """
+    if hasattr(coordinator, "_timeline_shadow_run"):
+        coordinator._timeline_shadow_run("cycle")
+
+
 def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[str, Any]:
     """The surfaces an occupant reads, for the run's final state (Issue #1276; extended by Issue #1230 R3b).
 
@@ -329,6 +347,7 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
     ``sensor_swap`` and ``has_resume_step``. Existing keys are unchanged.
     """
     updates = [e for e in sorted_events(scenario) if e.get("type") == "temp_update" and "outdoor_f" in e]
+    run_planning_step(coordinator)
     windows_open = coordinator._any_sensor_open()
     text = coordinator._compute_next_action(
         coordinator._current_classification,
@@ -398,7 +417,21 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
     # Status, the thresholds (ca_target_heat/cool, the reading cards), the briefing's HVAC Mode row, the chart band now,
     # Next Automation and the plan list's "Now" row tell the same story as the thermostat writes.
     out["hold"] = _capture_hold(coordinator, engine)
+    # Issue #1436 (additive): the chart's future activity strips against the plan (``strip_check``): the strips the
+    # timeline payload hands the chart, the chart payload's predicted_activity hours, and the P8 verdict on both.
+    out["chart_strips"] = _capture_chart_strips(coordinator, updates)
     return out
+
+
+def _capture_chart_strips(coordinator: Any, updates: list[dict]) -> dict[str, Any] | None:
+    from homeassistant.util import dt as _dt  # noqa: PLC0415
+
+    from tools.sim_harness.strip_check import check_coordinator  # noqa: PLC0415
+
+    try:
+        return check_coordinator(coordinator, _dt.now(), float(updates[-1]["outdoor_f"]) if updates else None)
+    except Exception as exc:  # noqa: BLE001 - a capture never breaks the run; the golden sees the error
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def _capture_hold(coordinator: Any, engine: Any) -> dict[str, Any]:
@@ -460,3 +493,94 @@ def sync_coordinator_occupancy(coordinator: Any, mode: str) -> None:
     coordinator._occupancy_mode = mode
     if hasattr(coordinator, "_timeline_shadow_run"):
         coordinator._timeline_shadow_run("occupancy")
+
+
+# Issue #1420: the coordinator's own daily schedule (``async_setup``: ``async_track_time_change`` at ``wake_time`` /
+# ``sleep_time``, production defaults 06:30 / 22:30) for the two schedule events a scenario can name.
+_DAILY_SCHEDULE = {"wakeup": ("wake_time", "06:30"), "bedtime": ("sleep_time", "22:30")}
+
+
+def daily_schedule_fires_at(coordinator: Any, etype: str, now: datetime) -> bool:
+    """Whether the coordinator's own daily ``etype`` timer fires in ``now``'s minute (Issue #1420).
+
+    Production has only that timer, so a ``bedtime`` / ``wakeup`` event in the same minute IS that timer: the
+    session's clock already fired it when it reached the event time, and calling the engine handler as well would
+    be a second write production never makes.  Reads the time the coordinator itself scheduled (its config, its
+    defaults, its parser), not the scenario's config, so an unset ``wake_time`` still matches the 06:30 default.
+    Shared by the FakeHass (coordinator) and real-HA adapters.
+    """
+    if coordinator is None or etype not in _DAILY_SCHEDULE:
+        return False
+    from custom_components.climate_advisor import coordinator as coordinator_module  # noqa: PLC0415
+
+    key, default = _DAILY_SCHEDULE[etype]
+    at = coordinator_module._parse_time(coordinator.config.get(key, default))
+    local = coordinator_module.dt_util.as_local(now)
+    return (local.hour, local.minute) == (at.hour, at.minute)
+
+
+class _PreCoolFireRecorder:
+    """Reference-counted class-level wrapper; see ``record_pre_cool_fires``."""
+
+    _installs: dict[Any, tuple[Any, int]] = {}  # coordinator class -> (original method, live sessions)
+
+    def __init__(self, coordinator_cls: Any) -> None:
+        self._cls = coordinator_cls
+        self._started = False
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        cls = self._cls
+        if cls in self._installs:
+            original, count = self._installs[cls]
+            self._installs[cls] = (original, count + 1)
+            return
+        original = cls.__dict__["_async_pre_cool_trigger"]
+
+        async def _async_pre_cool_trigger(coordinator_self: Any, now: datetime) -> Any:
+            fired = getattr(coordinator_self, "_sim_pre_cool_fired_at", None)
+            if not isinstance(fired, list):
+                fired = []
+                coordinator_self._sim_pre_cool_fired_at = fired
+            fired.append(now)
+            return await original(coordinator_self, now)
+
+        cls._async_pre_cool_trigger = _async_pre_cool_trigger
+        self._installs[cls] = (original, 1)
+
+    def stop(self) -> None:
+        if not self._started:
+            return
+        self._started = False
+        original, count = self._installs[self._cls]
+        if count > 1:
+            self._installs[self._cls] = (original, count - 1)
+            return
+        del self._installs[self._cls]
+        self._cls._async_pre_cool_trigger = original
+
+
+def record_pre_cool_fires(coordinator_cls: Any) -> _PreCoolFireRecorder:
+    """A class-level wrapper that notes each time the coordinator's own pre-cool timer fires (Issue #1420).
+
+    ``coordinator._maybe_schedule_pre_cool`` arms ``_async_pre_cool_trigger`` with ``async_track_point_in_time``;
+    the wrapper appends the fire time (the callback's ``now``) to ``coordinator_self._sim_pre_cool_fired_at`` and
+    then runs the real trigger unchanged.  Class-level so a timer armed during set-up or after a restart (a new
+    instance) is seen too; reference-counted so sessions that overlap in one process (in any close order) install
+    it once and restore the original when the last one stops.  Returns an unstarted recorder (``start`` / ``stop``).
+    """
+    return _PreCoolFireRecorder(coordinator_cls)
+
+
+def pre_cool_timer_fired_at(coordinator: Any, now: datetime) -> bool:
+    """Whether the coordinator's own pre-cool timer fired in ``now``'s minute (needs ``record_pre_cool_fires``).
+
+    Production has only that timer, so a ``pre_cool`` event in the same minute IS that timer (Issue #1420).
+    """
+    fired = getattr(coordinator, "_sim_pre_cool_fired_at", None) if coordinator is not None else None
+    if not isinstance(fired, list):
+        return False
+    minute = now.replace(second=0, microsecond=0)
+    return any(t.replace(second=0, microsecond=0) == minute for t in fired)

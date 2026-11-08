@@ -98,6 +98,8 @@ def test_response_shape_matches_the_contract(tmp_path: Path) -> None:
         "id": "_ca",
         "name": "Climate Advisor reading",
         "role": "the reading Climate Advisor uses",
+        "has_v4": True,  # Issue #1431
+        "has_readings": True,
     }
     assert set(out["stats"]) == {"n", "n_v3", "n_flat", "v4_mae", "v3_mae", "flat_mae", "v4_bias", "v3_bias"}
     assert out["model"] == {"confidence": "ok", "fitted_at": "2026-11-06T03:15:00+00:00", "span_days": 30.0}

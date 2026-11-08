@@ -201,8 +201,17 @@ def build_prediction_accuracy(
     sensors_meta: Sequence[Mapping[str, Any]],
     primary_engine: str = "v4",
     shadow_engine: str = "none",
+    sleep_sensor: str | None = None,
+    sleep_time: Any = None,
+    wake_time: Any = None,
 ) -> dict[str, Any]:
-    """The endpoint payload. ``lead``/``range_str`` must already be valid (the view resets bad values to defaults)."""
+    """The endpoint payload. ``lead``/``range_str`` must already be valid (the view resets bad values to defaults).
+
+    ``sleep_sensor``/``sleep_time``/``wake_time`` are the zone's ``sleep_indoor_temp_entity``/``sleep_time``/
+    ``wake_time`` settings: with them ``ca_swaps`` (Issue #1431) lists when the reading Climate Advisor uses swapped
+    sensor in the window (``ca_swap_epochs``, the rule behind the Status chart's ``ca_swaps``), so the page breaks its
+    ``_ca`` lines there. Without a sleep sensor only the chart log's recorded ``band_sensor`` changes count.
+    """
     tz = now.tzinfo or datetime.now().astimezone().tzinfo
     assert tz is not None
     end = (before or now).timestamp()
@@ -334,6 +343,32 @@ def build_prediction_accuracy(
         if isinstance(extra, str) and extra not in known:
             known.add(extra)
             sensors_out.append({"id": extra, "name": extra, "role": ""})
+    # Issue #1431: whether each sensor has anything to draw at all (any time, any look-ahead), so the page can label a
+    # sensor v4 has not learned ("no v4 data yet") and disable one with nothing recorded instead of an empty chart.
+    v4_ids = _v4_sensor_ids(archive, bt_points)
+    read_ids = _read_sensor_ids(chart_rows)
+    for s in sensors_out:
+        sid = str(s.get("id"))
+        s["has_v4"] = sid in v4_ids
+        s["has_readings"] = sid in read_ids
+
+    # Issue #1431: when the reading CA uses swapped sensor (bedtime / wake-up) in this window, same rule as the Status
+    # chart's ``ca_swaps``; none at daily resolution (a daily mean is no one sensor's reading).
+    swaps: list[float] = []
+    if downsample != "daily":
+        try:
+            swaps = ca_swap_epochs(
+                chart_rows,
+                start,
+                end,
+                tz=tz,
+                sleep_sensor=sleep_sensor,
+                sleep_time=sleep_time,
+                wake_time=wake_time,
+            )
+        except Exception:  # noqa: BLE001 - display only: an unbroken line beats no page
+            _LOGGER.debug("prediction accuracy: sensor swap times failed", exc_info=True)
+            swaps = []
 
     gate_out: list[dict[str, Any]] = []
     raw_gate = backtest.get("gate") if isinstance(backtest, Mapping) else None
@@ -373,10 +408,43 @@ def build_prediction_accuracy(
         "gate": gate_out,
         "primary_engine": primary_engine,
         "shadow_engine": shadow_engine,
+        "ca_swaps": [_iso(t, tz) for t in swaps],
         "gate_summary": dict(backtest["gate_summary"])
         if isinstance(backtest, Mapping) and isinstance(backtest.get("gate_summary"), Mapping)
         else None,
     }
+
+
+def _v4_sensor_ids(archive: V4Archive, bt_points: Any) -> set[str]:
+    """Sensor ids with at least one v4 prediction: in the live archive or in the published backtest (any lead)."""
+    out: set[str] = set()
+    try:
+        out.update(sid for sid, n in archive.slot_count().items() if n)
+    except Exception:  # noqa: BLE001 - a label only
+        _LOGGER.debug("prediction accuracy: archive slot count failed", exc_info=True)
+    if isinstance(bt_points, Mapping):
+        for sid, by_lead in bt_points.items():
+            if not isinstance(sid, str) or not isinstance(by_lead, Mapping):
+                continue
+            for rows in by_lead.values():
+                if isinstance(rows, list) and any(
+                    isinstance(r, Mapping) and _num(r.get("v4")) is not None for r in rows
+                ):
+                    out.add(sid)
+                    break
+    return out
+
+
+def _read_sensor_ids(rows: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Sensor ids the chart log has a reading for (``_ca`` = the ``indoor`` column), any time."""
+    out: set[str] = set()
+    for r in rows:
+        if CA_SENSOR not in out and _num(r.get("indoor")) is not None:
+            out.add(CA_SENSOR)
+        readings = r.get("indoor_sensors")
+        if isinstance(readings, dict):
+            out.update(k for k, v in readings.items() if isinstance(k, str) and k not in out and _num(v) is not None)
+    return out
 
 
 # ---------------------------------------------------------------------------

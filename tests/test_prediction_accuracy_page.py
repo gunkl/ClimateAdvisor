@@ -1,4 +1,4 @@
-"""Issue #1230 R1 lane D: static checks for the "Prediction accuracy (preview)" page.
+"""Issue #1230 R1 lane D: static checks for the "Prediction accuracy" page.
 
 The repo has no JS runtime or headless browser, so (like the other frontend tests) these read the
 HTML/JS source and assert the invariants that matter: every control exists with its aria wiring,
@@ -226,7 +226,40 @@ def test_text_contrast_at_least_4_5():
 def test_index_links_to_page_in_analysis_tab():
     # classic's own link says where it came from, so the page's "Back to dashboard" returns to classic
     assert 'href="prediction_accuracy.html?from=classic" id="prediction-accuracy-link"' in INDEX
-    assert "Prediction accuracy (preview)" in INDEX
+    assert "Prediction accuracy: how each engine has scored" in INDEX  # Issue #1431: no "(preview)"
+    assert "(preview)" not in PAGE and "today’s line" not in PAGE and "v4 (new)" not in PAGE
     start = INDEX.index('id="tab-ai"')
     assert "prediction_accuracy.html" in INDEX[start : start + 3000]
     assert INDEX.count("prediction_accuracy") == 2  # the Analysis link and the chart's note
+
+
+# ---- Issue #1431 -------------------------------------------------------------------------------
+
+
+def test_engine_labels_follow_the_payload_roles():
+    role = _func("engineRole")
+    assert "d.primary_engine" in role and "d.shadow_engine" in role
+    assert "'main engine'" in role and "'comparison'" in role
+    assert "legend-v4-name').textContent = engineName('v4')" in PAGE
+    assert "legend-v3-name').textContent = engineName('v3')" in PAGE
+
+
+def test_lines_break_at_swaps_and_real_gaps_only():
+    line = _func("lineOf")
+    assert "1.5 * expected" in line and "breaks[m]" in line
+    assert "S.data.ca_swaps" in _func("swapMs") and "S.sensor !== CA_SENSOR" in _func("swapMs")
+    assert "few ?" not in PAGE  # no more "dots on every point" switch
+
+
+def test_explanation_and_no_v4_wording():
+    ex = _func("renderExplain")
+    assert "Each point is a past prediction" in ex
+    assert "lone dots mean the predictions there are spaced out" in ex
+    assert "v4 hasn’t learned this sensor yet (see #1422)" in ex
+
+
+def test_sensor_buttons_without_data_are_labelled_or_disabled():
+    av = _func("sensorAvail")
+    assert "has_v4 === false" in av and "has_readings === false" in av
+    assert "'no v4 data yet'" in av and "#1422" in av
+    assert "aria-disabled" in _func("renderControls")

@@ -635,9 +635,82 @@ def accuracy_without_v4(browser):
         ctx.close()
 
 
+SEGMENTS_JS = """
+() => window.__paLines().map(l => {
+  const seg = [];
+  for (let i = 1; i < l.data.length; i++) if (l.data[i - 1] != null && l.data[i] != null) seg.push([l.data[i - 1], l.data[i]]);
+  return { label: l.label, n: l.data.filter(x => x != null).length, breaks: l.data.filter(x => x == null).length, seg };
+})
+"""
+
+
+def accuracy_1431(browser):
+    """Issue #1431: engine roles in the labels, an explanation line, lines broken at the sensor swaps, joined hourly
+    points, a labelled no-v4 sensor and the dashboards' subtitle. Screenshots: pa-1431-<case>-<scheme>-<width>.png."""
+    d = json.loads(PA)
+    swaps = [dt.datetime.fromisoformat(t).timestamp() * 1000 for t in d["ca_swaps"]]
+    for scheme, vp in (("light", {"width": 1280, "height": 1000}), ("dark", {"width": 390, "height": 900})):
+        name = f"pa-1431:{scheme}:{vp['width']}"
+        ctx, pg = new_page(browser, vp, scheme, name=name)
+        pg.goto(f"http://127.0.0.1:{PORT}/prediction_accuracy.html")
+        pg.wait_for_timeout(1200)
+        want_v4 = "v4 (main engine)" if d["primary_engine"] == "v4" else "v4 (comparison)"
+        if pg.locator("#legend-v4-name").inner_text() != want_v4:
+            problems.append(f"{name}: v4 legend {pg.locator('#legend-v4-name').inner_text()!r}, want {want_v4!r}")
+        body = pg.locator("body").inner_text()
+        for stale in ("today\u2019s line", "(new)", "Preview", "preview", "runs in shadow"):
+            if stale in body:
+                problems.append(f"{name}: stale wording {stale!r} on the page")
+        if "Each point is a past prediction" not in pg.locator("#pa-explain").inner_text():
+            problems.append(f"{name}: no explanation line under the chart")
+        lines = pg.evaluate(SEGMENTS_JS)
+        for ln in lines:
+            for a, b in ln["seg"]:
+                if any(a < s <= b for s in swaps):
+                    problems.append(f"{name}: {ln['label']} crosses a sensor swap")
+                    break
+            if ln["n"] > 1 and not ln["seg"]:
+                problems.append(f"{name}: {ln['label']} is drawn as dots only ({ln['n']} hourly points)")
+        if not pg.locator("#legend-swap").is_visible():
+            problems.append(f"{name}: swap marks not in the key")
+        bed = pg.locator('#grp-sensor button[data-value="sensor.bedroom_temp"]')
+        if "no v4 data yet" not in bed.inner_text() or "#1422" not in (bed.get_attribute("title") or ""):
+            problems.append(f"{name}: bedroom button lacks 'no v4 data yet' / its reason")
+        if pg.evaluate("document.documentElement.scrollWidth") > vp["width"]:
+            problems.append(f"{name}: horizontal scroll")
+        pg.screenshot(path=str(OUT / f"pa-1431-swaps-{scheme}-{vp['width']}.png"), full_page=True)
+        ctx.close()
+        # the bedroom (no v4): words instead of a missing line
+        nv = json.loads(PA)
+        nv["points"] = [{k: v for k, v in q.items() if k not in ("v4", "v3")} for q in nv["points"]]
+        nv["sensor"] = "sensor.bedroom_temp"
+        ctx, pg = new_page(browser, vp, scheme, {"prediction_accuracy": nv}, name=name + ":bedroom")
+        pg.goto(f"http://127.0.0.1:{PORT}/prediction_accuracy.html")
+        pg.wait_for_timeout(1000)
+        pg.locator('#grp-sensor button[data-value="sensor.bedroom_temp"]').click()
+        pg.wait_for_timeout(600)
+        msg = pg.locator("#pa-nov4")
+        if not msg.is_visible() or "v4 hasn\u2019t learned this sensor yet (see #1422)" not in msg.inner_text():
+            problems.append(f"{name}: no-v4 sensor does not say so in words")
+        pg.screenshot(path=str(OUT / f"pa-1431-no-v4-sensor-{scheme}-{vp['width']}.png"), full_page=True)
+        ctx.close()
+    # the dashboards: no "Preview: v4 runs in shadow"
+    ctx, pg = new_page(browser, {"width": 1280, "height": 900}, "light", name="pa-1431:analysis")
+    pg.goto(f"{BASE}#analysis")
+    pg.wait_for_timeout(1500)
+    sub = pg.locator('section[aria-labelledby="an-pa-h"] .sub').inner_text()
+    if "Preview" in sub or "shadow" in sub:
+        problems.append(f"analysis accuracy subtitle still pre-O3: {sub!r}")
+    pg.locator("#pa-frame").scroll_into_view_if_needed()
+    pg.wait_for_timeout(800)
+    pg.screenshot(path=str(OUT / "pa-1431-analysis-embedded.png"), full_page=True)
+    ctx.close()
+
+
 with sync_playwright() as p:
     b = p.chromium.launch()
     accuracy_without_v4(b)
+    accuracy_1431(b)
     run_matrix(b)
     banner_cases(b)
     behaviour(b)

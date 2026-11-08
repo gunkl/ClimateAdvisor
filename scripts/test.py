@@ -11,6 +11,13 @@ Environment knobs for the unit tier:
 
 * ``CA_UNIT_WORKERS``: number of pytest-xdist workers (``auto`` for all cores). Unset or ``0`` runs
   serially (the local default).
+* ``CA_UNIT_SHARD``: ``K/N`` runs only the Kth of N round-robin slices of the collected tests (CI runs the
+  N slices as parallel jobs), passed to pytest as ``--ca-shard K/N`` (see ``tests/conftest.py``). Unset runs
+  everything.
+* ``CA_UNIT_SHARDS``: ``N`` (local) runs all N slices at once as separate pytest processes, each with
+  ``CA_UNIT_WORKERS`` workers, prefixes each slice's output with ``[K/N]`` and prints each slice's wall time.
+  Total processes = N x workers: on a RAM-limited machine keep that near the ``CA_UNIT_WORKERS`` you use today
+  (e.g. ``CA_UNIT_SHARDS=4 CA_UNIT_WORKERS=2`` instead of ``CA_UNIT_WORKERS=8``).
 
 Environment knobs for the ha tier:
 
@@ -35,6 +42,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -59,16 +68,60 @@ def _uv_cmd() -> list[str] | None:
     return None
 
 
-def _run_local(group: str, venv: str, pytest_args: list[str]) -> int:
+def _local_cmd(group: str, venv: str, pytest_args: list[str]) -> tuple[list[str], dict[str, str]] | None:
+    """The ``uv run ... pytest`` command and environment for one tier; None (after a message) without uv."""
     uv = _uv_cmd()
     if uv is None:
         install = UV_INSTALL_WINDOWS if os.name == "nt" else UV_INSTALL_UNIX
         print(f"uv is not installed. Install it with: {install}", file=sys.stderr)
-        return 2
+        return None
     env = {**os.environ, "UV_PROJECT_ENVIRONMENT": str(REPO / venv)}
-    cmd = [*uv, "run", "--locked", "--only-group", group, "pytest", *pytest_args]
+    return [*uv, "run", "--locked", "--only-group", group, "pytest", *pytest_args], env
+
+
+def _run_local(group: str, venv: str, pytest_args: list[str]) -> int:
+    if (local := _local_cmd(group, venv, pytest_args)) is None:
+        return 2
+    cmd, env = local
     print(f"+ [{venv}] {shlex.join(cmd)}", flush=True)
     return subprocess.run(cmd, cwd=REPO, env=env, check=False).returncode
+
+
+def _run_unit_shards(total: int, pytest_args: list[str]) -> int:
+    """``CA_UNIT_SHARDS``: every slice at once, one pytest process each, output prefixed and timed."""
+    if (local := _local_cmd("test", ".venv-test", ["--version"])) is None:
+        return 2
+    _, env = local
+    # Sync the venv once up front so the slices do not all race to install it.
+    if subprocess.run([*_uv_cmd(), "sync", "--locked", "--only-group", "test"], cwd=REPO, env=env).returncode:
+        return 2
+    lock = threading.Lock()
+    codes: dict[int, int] = {}
+    walls: dict[int, float] = {}
+
+    def run(k: int) -> None:
+        cmd, env = _local_cmd("test", ".venv-test", [*pytest_args, "--ca-shard", f"{k}/{total}"])
+        start = time.monotonic()
+        proc = subprocess.Popen(
+            cmd, cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        )
+        for line in proc.stdout:
+            with lock:
+                print(f"[{k}/{total}] {line}", end="", flush=True)
+        codes[k] = proc.wait()
+        walls[k] = time.monotonic() - start
+
+    print(f"+ [.venv-test] {total} slices at once: pytest {shlex.join(pytest_args)} --ca-shard K/{total}", flush=True)
+    start = time.monotonic()
+    threads = [threading.Thread(target=run, args=(k,)) for k in range(1, total + 1)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    print(f"\nunit tier in {total} slices: {time.monotonic() - start:.0f}s wall")
+    for k in range(1, total + 1):
+        print(f"  [{k}/{total}] {'passed' if codes[k] == 0 else f'FAILED (exit {codes[k]})'} in {walls[k]:.0f}s")
+    return next((c for c in codes.values() if c), 0)
 
 
 def _ha_env_passthrough() -> dict[str, str]:
@@ -150,7 +203,11 @@ def run_ha(extra: list[str]) -> int:
 def run_unit(extra: list[str]) -> int:
     # Default to the whole suite unless the caller named a test path or node id.
     targets = [] if any(a.startswith("tests") or a.endswith(".py") or "::" in a for a in extra) else ["tests/"]
-    return _run_local("test", ".venv-test", [*targets, *UNIT_ARGS, *_worker_args("CA_UNIT_WORKERS"), *extra])
+    args = [*targets, *UNIT_ARGS, *_worker_args("CA_UNIT_WORKERS"), *extra]
+    if shards := os.environ.get("CA_UNIT_SHARDS", "").strip():
+        return _run_unit_shards(int(shards), args)
+    shard = os.environ.get("CA_UNIT_SHARD", "").strip()
+    return _run_local("test", ".venv-test", [*args, *(["--ca-shard", shard] if shard else [])])
 
 
 def main(argv: list[str]) -> int:

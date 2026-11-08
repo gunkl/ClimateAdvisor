@@ -13,6 +13,7 @@
 | Which model do the decisions read: the stitched CA reading or a model per room (Issue #1432)? | B (a node per room: the thermostat entity as the primary, the sleep sensor as a node, composed into `_ca` by time of day) once BOTH have `NODE_MIN_HISTORY_DAYS` (3) of their own readings at `NODE_MIN_COVERAGE` (50 %) - or the old whole-window coverage - AND B's `_ca` replay on the training rows is no worse than A's (the stitched `_ca` model) at 1, 4 and 12 h within `CA_GATE_TOLERANCE_F` (0.05 F). Otherwise A. Sleep hours are never forecast from the thermostat's room while a separate sleep sensor exists. Logged on every fit; a change is a `forecast_model_changed` Activity row. | [Control model choice](#control-model-choice-issue-1432), [The `_ca` line](#the-_ca-line) |
 | How is the thermostat modelled? | Replayed from the recorded heating/cooling duty when fitting; emulated when predicting, from the plan's heat/cool setpoints with learned start offsets, burst length and reading quantisation. | [Thermostat](#thermostat-learning-and-emulation), `predictor_v4.py#L487` |
 | When is `predict()` allowed to answer? | Never when `confidence == "none"` (< 3 days of samples, diverged fit, or no 10 % skill over "no change" at 4 h on the training data). Callers then treat v4 as not learned yet: as primary the chart shows the schedule estimate and the decisions take their "learning not finished" defaults (never v3, [Prediction Engines Spec](prediction-engines-spec.md#fallback-while-the-primary-is-learning)); the accuracy views score nothing for v4. | [Confidence Gates](#confidence-gates), `predictor_v4.py#L97-L101` |
+| Are heating and cooling graded apart (Issue #1469)? | For display only: `fit["modes"]` grades each mode `none`/`unseen`/`low`/`ok` (its own usable starts and its own 4 h skill on the anchors where it ran), shown on the Debug tab. The whole-model `confidence` and every decision input are unchanged. | [Per-mode grades](#per-mode-grades-issue-1469) |
 | How is the forecast corrected? | 24 learned hourly biases (actual - forecast, interpolated around the clock) plus today's current miss decaying with a learned time constant, applied INSIDE `predict()` to the RAW forecast. | [Forecast Correction](#forecast-correction), `predictor_v4.py#L753` |
 | How long does a fit take? | Typically 0.2-6 s for 30-60 days of data on a laptop (100-iteration cap, 160 anchors, 2 sensors; a warm refit runs a second start). `predict()` is about 1 ms. | [Performance](#performance) |
 | Where does the fitted model live, who calls `fit()`/`predict()` and when? | `v4_shadow.py` and the coordinator call them: nightly fit 03:15, predict every 30-min cycle, model in `climate_advisor_v4_model_<id>.json`, predictions in `climate_advisor_v4_archive_<id>.json`. | [v4 Shadow Spec](v4-shadow-spec.md) |
@@ -186,7 +187,20 @@ Occupant view: per-sensor logging (`indoor_sensors`) began on a known day, so ju
 | `low` | otherwise, but fewer than 10 days of samples, or heating or cooling not yet observed (at least 2 h of duty each), or a used mode with fewer than 5 accepted thermostat starts | predicts |
 | `ok` | at least 10 days, both modes observed, skill gate passed | predicts |
 
-`predict()` also returns `None` when the primary reading is missing or `inputs` is empty. Sensors whose own reading is missing are left out of the result.
+`predict()` also returns `None` when the primary reading is missing or `inputs` is empty.
+
+### Per-mode grades (Issue #1469)
+
+Occupant view: v4 read "low confidence" all winter while it predicted heating well (Zone 1, 2026-11-08: heating 45 usable starts, cooling 0 of 5), and nothing said heating itself was fine. `fit["modes"]` adds one grade per mode, **for display only**: the whole-model `confidence` above is unchanged, and `control_rates` (everything a decision reads) is identical with or without it (owner decision, 2026-11-08: the "learning not finished" defaults already handle a `low` grade gracefully).
+
+| `fit["modes"][mode]["grade"]` | Condition (checked in this order) |
+|---|---|
+| `none` | the whole-model `confidence` is `none` |
+| `unseen` | the mode was not observed in the window (`heat_seen` / `cool_seen` false) |
+| `low` | under `GATE_MIN_DAYS_OK` (10) days; or fewer than `GATE_MIN_ACCEPTED_STARTS` (5) accepted starts of that mode; or fewer than `GATE_MIN_ANCHORS` anchors where that mode ran; or, on those anchors, 4 h MAE not at least `GATE_MIN_SKILL` (10 %) below "no change" |
+| `ok` | otherwise |
+
+An anchor counts for a mode when that mode had any duty in its first 16 steps (`_Problem.mode_errors`); each record also carries `n`, `mae`, `flat` and `reason`. Shown by the Debug tab ("Primary engine: v4: usable · heating ok · cooling low", "By mode") through `v4_shadow.model_summary` / `describe_grade`. Proof it never reaches a decision: `tests/test_v4_mode_grades_1469.py::TestNoBehaviourChange`.
 
 ## Pre-conditions
 

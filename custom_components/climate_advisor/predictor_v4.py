@@ -1043,6 +1043,25 @@ class _Problem:
             r.extend(self.node_residuals(j, nd, passes, ratio))
         return r, passes
 
+    def mode_errors(self, hp: Sequence[float], step: int) -> dict[str, tuple[list[float], list[float]]]:
+        """Primary ``(model, persistence)`` absolute errors at lead ``step``, per mode (Issue #1469).
+
+        An anchor counts for a mode when that mode had any duty in its first ``step`` steps: the hours whose
+        forecast depends on that mode's learned gain. An anchor with both counts for both."""
+        out: dict[str, tuple[list[float], list[float]]] = {"heat": ([], []), "cool": ([], [])}
+        for a, (hs, _sun) in zip(self.anchors, self.house_pass(hp), strict=True):
+            uses = {"heat": any(u > 0 for u in a.uh[:step]), "cool": any(u > 0 for u in a.uc[:step])}
+            if not (uses["heat"] or uses["cool"]):
+                continue
+            for k, v, _ in a.targets[0]:
+                if k + 1 != step:
+                    continue
+                for mode, used in uses.items():
+                    if used:
+                        out[mode][0].append(abs(hs[k] - v))
+                        out[mode][1].append(abs(a.h0 - v))
+        return out
+
     def lead_errors(
         self, hp: Sequence[float], nodes: Sequence[Sequence[float]]
     ) -> tuple[dict[int, list[float]], dict[int, list[float]], list[dict[int, list[float]]]]:
@@ -1072,6 +1091,49 @@ def _dot(a: tuple[int, list[float]], b: tuple[int, list[float]]) -> float:
     if e0 <= s0:
         return 0.0
     return sum(map(operator.mul, a[1][s0 - a[0] : e0 - a[0]], b[1][s0 - b[0] : e0 - b[0]], strict=True))
+
+
+def _mode_grades(
+    prob: _Problem,
+    hp: Sequence[float],
+    *,
+    confidence: str,
+    sample_days: float,
+    seen: Mapping[str, bool],
+    accepted: Mapping[str, int],
+    step: int,
+) -> dict[str, dict[str, Any]]:
+    """Heating and cooling graded apart (Issue #1469): ``{mode: {grade, reason, n, mae, flat}}``.
+
+    Occupant view: a winter of good heating forecasts is not held at "low" because the AC ran twice. Each mode is
+    ``ok`` once the shared gates pass (``confidence`` above ``none``, ``GATE_MIN_DAYS_OK`` days) AND the mode has
+    ``GATE_MIN_ACCEPTED_STARTS`` usable thermostat starts AND, on the ``GATE_MIN_ANCHORS``+ anchors where that mode
+    ran, the model beats "no change" at the skill lead by ``GATE_MIN_SKILL``. A mode the home did not use in the window
+    is ``unseen``. Display only: ``confidence`` (the whole-model grade every decision reads) is unchanged by this."""
+    if confidence == "none":
+        return {m: {"grade": "none", "reason": "no usable fit"} for m in ("heat", "cool")}
+    errs = prob.mode_errors(hp, step)
+    out: dict[str, dict[str, Any]] = {}
+    for mode in ("heat", "cool"):
+        model_e, flat_e = errs[mode]
+        m, f = _mae(model_e), _mae(flat_e)
+        rec: dict[str, Any] = {"n": len(model_e), "mae": round(m, 3) if m is not None else None}
+        rec["flat"] = round(f, 3) if f is not None else None
+        word = "heating" if mode == "heat" else "cooling"
+        if not seen.get(mode):
+            rec.update(grade="unseen", reason=f"{word} not seen")
+        elif sample_days < GATE_MIN_DAYS_OK:
+            rec.update(grade="low", reason="under 10 days of samples")
+        elif accepted.get(mode, 0) < GATE_MIN_ACCEPTED_STARTS:
+            rec.update(grade="low", reason="too few accepted thermostat starts")
+        elif len(model_e) < GATE_MIN_ANCHORS or m is None or not f:
+            rec.update(grade="low", reason=f"too few anchors with {word}")
+        elif m > (1.0 - GATE_MIN_SKILL) * f:
+            rec.update(grade="low", reason=f"does not beat no-change by 10 % while {word}")
+        else:
+            rec.update(grade="ok", reason="")
+        out[mode] = rec
+    return out
 
 
 def _mae(vals: Sequence[float] | None) -> float | None:
@@ -1467,6 +1529,15 @@ def _fit_problem(
         confidence, info["reason"] = "low", "too few accepted thermostat starts in a used mode"
     else:
         confidence, info["reason"] = "ok", ""
+    info["modes"] = _mode_grades(
+        prob,
+        hp,
+        confidence=confidence,
+        sample_days=sample_days,
+        seen={"heat": heat_seen, "cool": cool_seen},
+        accepted={"heat": tstats.heat_accepted, "cool": tstats.cool_accepted},
+        step=leads.get(ref, 16) if ref is not None else 16,
+    )
     return V4Model(
         schema_version=V4_SCHEMA_VERSION,
         fitted_at=base.fitted_at,

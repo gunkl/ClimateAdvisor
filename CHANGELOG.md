@@ -3,6 +3,25 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.19] — 2026-11-08
+
+- Fix #1483 (part 2): the plan now looks ahead as far as your forecast goes, up to a week.
+  - **What you'll notice:** under Next 24 hours the list is the same for the next 24 hours. After it come the later days, one folded row each ("Thu, Nov 12 · 4 steps · 2 for you"). Tap a day to see its steps. A day you opened stays open while the page refreshes. The chart's faded activity strips (window periods, heat and AC runs) now run out to the 7-day view too.
+  - **Each later day is planned on its own forecast:** its window period, its wake and bedtime bands and its predicted heat or AC runs. They are worked out the same way as today's and tomorrow's.
+  - **What the plan promises:** only the first 48 hours. Those steps stay as first said, unless something material changes. Later days are an outlook: they're rebuilt from the newest forecast every cycle, so they're never stale. A change in day 5's forecast never rewrites today's plan.
+  - **What the house does is unchanged:** nothing that controls the house reads the plan.
+
+## [0.9.18] — 2026-11-08
+
+- Fix #1483: v4's prediction line now runs as far ahead as your forecast goes, up to a week, instead of stopping at 24 hours.
+  - **What you'll notice:** on the Status chart the main prediction (v4) now runs for about 6 days, like the forecast, where it used to stop after one day. Choose **7d** under Ahead to see all of it.
+  - **Where the data comes from:** your weather service gives real hourly forecasts for about 48 hours (met.no). After that there is only a high and a low for each day. v4 follows the real hourly forecast first, then the same hourly curve the chart already builds from the daily highs and lows. It stops at the last forecast day. If your service gives more, v4 uses more, up to a week.
+  - **The far end looks rougher on purpose:** past the last real hourly forecast hour the line is drawn fainter (dashed if it was solid), and the hover readout tags those values "rough". Daily highs and lows say less than an hourly forecast.
+  - **Every forecast day gets its window plan:** each day after tomorrow is checked for a window period the same way tomorrow is, from its own forecast high and low. A warm Thursday shows the house cooling during Thursday's window period, not a week of closed windows. A day the forecast doesn't cover stays windows-closed.
+  - **What the house does is unchanged:** everything Climate Advisor decides still reads a 24-hour prediction made from the real hourly forecast only. The first 24 hours of the long line are made from exactly the same inputs, so the two agree there.
+  - **How good is it that far out?** v4 now also records what it said 2, 3 and 5 days ahead, and the Prediction accuracy page and the chart's past-line buttons offer those look-aheads. They fill from the live record only: the 2-day line has data 2 days after this update, the 5-day line after 5 days.
+  - **Plan list:** with v4 as the main engine, day two of the Next 48 hours list now has v4's temperature path behind it (it used to end at 24 hours). A plan list that runs as far as the forecast is the next step.
+  - **Storage:** v4's prediction record grows to about 1.1 MB per room line after 400 days (was about 0.75 MB). The weather forecast record is unchanged.
 ## [0.9.18] — 2026-11-08
 
 Developer tooling only: nothing changes in the home, and Climate Advisor behaves exactly as in 0.9.17.

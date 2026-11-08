@@ -176,7 +176,7 @@
   var API_PATH = '/api/climate_advisor/prediction_accuracy';
   var ZONE_STORAGE_KEY = 'climate_advisor_selected_zone'; // same key as index.html
   var CA_SENSOR = '_ca';
-  var LEADS = ['1h', '4h', '12h', '24h'];
+  var LEADS = ['1h', '4h', '12h', '24h', '48h', '72h', '120h'];  // Issue #1483: and 2, 3 and 5 days (live archive only)
   var RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y'];
   var RANGE_MS = {
     '6h': 6 * 3600e3, '12h': 12 * 3600e3, '24h': 24 * 3600e3, '3d': 72 * 3600e3,
@@ -273,7 +273,10 @@
   function fnum(v, d) { return v == null || isNaN(v) ? '—' : Number(v).toFixed(d == null ? 2 : d); }
   function fmiss(v) { return v == null ? '—' : fnum(v) + ' ' + unit(); }
   function fbias(v) { return v == null ? '—' : (v > 0 ? '+' : '') + fnum(v) + ' ' + unit(); }
-  function leadText(l) { return String(l).replace('h', ' h'); }
+  function leadText(l) {
+    var h = parseInt(l, 10);
+    return h >= 48 && h % 24 === 0 ? (h / 24) + ' days' : String(l).replace('h', ' h');
+  }
   function fmtT(ms) {
     return new Date(ms).toLocaleString(undefined, { weekday: 'short', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   }

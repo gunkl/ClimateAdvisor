@@ -43,6 +43,13 @@ def _hourly(start: datetime, hours: int = 60, base: float = 40.0) -> list[dict]:
     ]
 
 
+def _steps_to_forecast_end(now: datetime, hours: int = 60) -> int:
+    """15-minute steps from ``now`` to half an hour after the last ``_hourly`` hour: where the display line stops when
+    the forecast is shorter than its week (Issue #1483; no daily forecast seeded, so nothing is added past it)."""
+    last = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hours)
+    return int((last + timedelta(minutes=30) - now).total_seconds() // 900)
+
+
 def _bands(start: datetime, hours: int = 60) -> list[dict]:
     first = start.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     return [{"ts": (first + timedelta(hours=h)).isoformat(), "lower": 68.0, "upper": 76.0} for h in range(hours)]
@@ -299,16 +306,20 @@ def test_missing_engine_disables_the_shadow_quietly(monkeypatch: pytest.MonkeyPa
 # ---------------------------------------------------------------------------
 
 
-def test_cycle_predicts_24h_and_archives_first_write_wins(fake: FakePredictor) -> None:
+def test_cycle_predicts_to_the_forecast_end_and_archives_first_write_wins(fake: FakePredictor) -> None:
     coord, fake_hass, scheduler = _build()
     coord._v4_store.v4_model = _fake_model_dict(coord)
     _seed_cycle_inputs(coord, scheduler)
     _cycle(coord, scheduler)
 
     call = fake.predict_calls[0]
-    assert len(call["inputs"]) == 96  # 24 h on the 15-minute grid
+    # Issue #1483: the display line runs as far as the forecast goes (here 60 h), up to a week; was 24 h
+    n = _steps_to_forecast_end(scheduler.now())
+    assert len(call["inputs"]) == n
     first, last = call["inputs"][0], call["inputs"][-1]
-    assert first.ts == scheduler.now() + timedelta(minutes=15) and last.ts == scheduler.now() + timedelta(hours=24)
+    assert first.ts == scheduler.now() + timedelta(minutes=15) and last.ts == scheduler.now() + timedelta(
+        minutes=15 * n
+    )
     assert call["readings"]["_ca"] == 70.0 and call["readings"][coord.config["climate_entity"]] == 70.0
     # outdoor is the RAW hourly forecast interpolated, windows closed, fan off
     assert first.outdoor_f == pytest.approx(_expected_outdoor(scheduler.now(), first.ts))
@@ -394,7 +405,8 @@ def test_confidence_none_predicts_nothing_and_archives_nothing(fake: FakePredict
 
 
 def test_cycle_keeps_the_future_lines_for_the_status_chart(fake: FakePredictor) -> None:
-    """Issue #1230 R2: the newest 24 h lines, corrected outdoor forecast and no-plan baseline are kept (display)."""
+    """Issue #1230 R2: the newest lines (to the forecast's end since #1483), corrected outdoor forecast and no-plan
+    baseline are kept (display)."""
     coord, fake_hass, scheduler = _build()
     coord._v4_store.v4_model = _fake_model_dict(coord)
     _seed_cycle_inputs(coord, scheduler)
@@ -403,14 +415,15 @@ def test_cycle_keeps_the_future_lines_for_the_status_chart(fake: FakePredictor) 
     future = coord._v4_last_future
     assert future is not None and future["at"] == scheduler.now().isoformat()
     climate = coord.config["climate_entity"]
-    assert len(future["predictions"][climate]) == 96
+    n = _steps_to_forecast_end(scheduler.now())
+    assert len(future["predictions"][climate]) == n
     # corrected: the raw forecast plus the (fake) learned bias, on the same grid
-    assert len(future["corrected"]) == 96
+    assert len(future["corrected"]) == n
     assert future["corrected"][0][1] == pytest.approx(fake.predict_calls[0]["inputs"][0].outdoor_f + 1.5)
     # baseline: a second predict over the same plan with no thermostat setpoints (the house with no HVAC)
     base_call = fake.predict_calls[-1]
     assert all(i.heat_sp_f is None and i.cool_sp_f is None for i in base_call["inputs"])
-    assert len(fake.predict_calls) == 2 and len(future["baseline"][climate]) == 96
+    assert len(fake.predict_calls) == 2 and len(future["baseline"][climate]) == n
     # a cycle with nothing to predict from drops the stale lines instead of drawing yesterday's future
     coord._hourly_forecast_temps = []
     _tick(scheduler, 1800)

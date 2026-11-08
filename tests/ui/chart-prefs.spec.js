@@ -181,7 +181,7 @@ test.describe('Status chart: the "Past v4 lines" row', () => {
     const row = page.locator('#chart-lead-row');
     await expect(row.locator('#chart-lead-empty')).toHaveText('v4 has no past predictions to show yet');
     await expect(row.locator('#chart-lead-help')).toContainText('left of Now');
-    await expect(row.locator('[data-lead]')).toHaveCount(4);
+    await expect(row.locator('[data-lead]')).toHaveCount(7);   // 1, 4, 12, 24 h and 2, 3, 5 days (Issue #1483)
     await expect(row.locator('[data-lead]:disabled')).toHaveCount(0);
   });
 

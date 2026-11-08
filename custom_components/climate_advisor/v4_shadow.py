@@ -556,6 +556,7 @@ def build_inputs(
     day_modes: Mapping[Any, str] | None = None,
     windows: tuple[bool, Any, Any] = (False, None, None),
     tomorrow_windows: tuple[bool, Any, Any] | None = None,
+    later_windows: Sequence[tuple[bool, Any, Any] | None] = (),
     horizon_hours: int = V4_PREDICT_HORIZON_HOURS,
     step_min: int = DEFAULT_STEP_MINUTES,
 ) -> list[Any]:
@@ -567,8 +568,11 @@ def build_inputs(
     thermostat starts whichever side the room crosses), windows open inside the classification's window span when
     windows are recommended (``planned_window_span``: the same rule the backtest uses) and, for tomorrow's hours,
     inside tomorrow's own planned span when ``tomorrow_windows`` is given (Issue #1391; ``None`` = unknown = closed),
+    and inside each later day's own span from ``later_windows`` (Issue #1483: the week-long display line),
     fan off (v3 has no forecast fan schedule). The forecast is not extrapolated: the list stops half an hour after the
-    last forecast hour. Returns [] when there is not enough forecast to predict from.
+    last forecast hour, or at ``horizon_hours``, whichever comes first. ``hourly`` may include the hours built from
+    the daily highs and lows (the display cycle passes them; the decisions' cycle never does). Returns [] when there
+    is not enough forecast to predict from.
     """
     p = _predictor()
     pts = sorted((dt.timestamp(), float(temp)) for dt, temp in hourly if dt.tzinfo is not None)
@@ -577,7 +581,7 @@ def build_inputs(
     band_pts_lower = sorted((dt.timestamp(), float(lo)) for dt, lo, _hi in band if lo is not None)
     band_pts_upper = sorted((dt.timestamp(), float(hi)) for dt, _lo, hi in band if hi is not None)
     recommended, open_t, close_t = windows
-    span = planned_window_spans(now, (bool(recommended), open_t, close_t), tomorrow_windows)
+    span = planned_window_spans(now, (bool(recommended), open_t, close_t), tomorrow_windows, later=later_windows)
     last_fc = pts[-1][0] + 1800
     inputs: list[Any] = []
     _plan_setpoints = getattr(p, "plan_setpoints", None) or _plan_setpoints_fallback

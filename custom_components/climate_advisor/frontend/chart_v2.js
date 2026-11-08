@@ -91,9 +91,25 @@
   const CHART_RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y'];
   // Ahead: the forecast right of NOW. Never under a day, so the "now" view shows at least 24 h of future on every
   // range; a remembered shorter choice (the old '12h' button) reads back as 24h.
-  const CHART_AHEADS = ['24h', '48h', '5d'];
+  const CHART_AHEADS = ['24h', '48h', '5d', '7d'];   // Issue #1483: v4's line runs up to a week, as far as the forecast
   const MIN_AHEAD_H = 24;
-  const CHART_LEADS = ['1h', '4h', '12h', '24h'];
+  const CHART_LEADS = ['1h', '4h', '12h', '24h', '48h', '72h', '120h'];   // Issue #1483: and 2, 3 and 5 days
+  // a look-ahead in words: '4h' -> '4 h', '48h' -> '2 days' (whole days from 2 days on)
+  function _leadTxt(l) {
+    const h = parseInt(l, 10);
+    return h >= 48 && h % 24 === 0 ? (h / 24) + ' days' : l.replace('h', ' h');
+  }
+  // Issue #1483: past the last real hourly forecast hour v4's line runs on the daily highs and lows: drawn fainter
+  function _fade(color, alpha) {
+    const m = /^#([0-9a-f]{6})$/i.exec(String(color).trim());
+    if (m) {
+      const n = parseInt(m[1], 16);
+      return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + alpha + ')';
+    }
+    const r = /^rgba?\(([^)]+)\)$/i.exec(String(color).trim());
+    if (r) return 'rgba(' + r[1].split(',').slice(0, 3).join(',') + ',' + alpha + ')';
+    return color;
+  }
   const CHART_HOURS = { '6h': 6, '12h': 12, '24h': 24, '48h': 48, '3d': 72, '5d': 120, '7d': 168, '30d': 720, '1y': 8760 };
   const CHART_PREFS_KEY = 'ca_chart_v2';
   // One line pattern per sensor (solid, dash-dot, dotted, long dash, short dash): identity is never colour alone.
@@ -489,6 +505,7 @@
     // v4.past only covers the fetched window; past_span.sensors lists every line with a past prediction anywhere, so a
     // short or scrolled view does not take a sensor's chips away (they are disabled "not in this view" instead).
     const spanSensors = (v4.past_span && v4.past_span.sensors) || [];
+    const roughAfter = v4.hourly_until ? _parseTs(v4.hourly_until) : null;   // Issue #1483
     metas.forEach((m, i) => {
       const dash = SENSOR_DASH[i % SENSOR_DASH.length];
       const byLead = (v4.past || {})[m.id] || {};
@@ -502,12 +519,12 @@
       const past = (byLead[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       const fut = futRaw.map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       S.push(_mkSeries({ id: 'v4:' + m.id, group: 'predicted', sub: 'plan', short: 'v4 ' + m.name, label, color: 'plan', dash,
-        width: 2.5, sensor: m.id, missVs: 'ind:' + m.id, kind: 'pred', disabledReason: v4Lock, note: why, histOnly, pastElsewhere,
+        width: 2.5, sensor: m.id, missVs: 'ind:' + m.id, kind: 'pred', disabledReason: v4Lock, note: why, histOnly, pastElsewhere, roughAfter,
         role: histOnly ? 'past v4 predictions only (from its backtest); v4 does not forecast ' + m.name + ' yet' : '' }, v4Ready ? [...past, ...fut] : []));
       if (histOnly) return;   // Issue #1430: no no-plan line (a forecast) for a sensor v4 has only past predictions for
       const base = baseRaw.map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       S.push(_mkSeries({ id: 'base:' + m.id, group: 'predicted', sub: 'base', short: 'No plan ' + m.name, label, color: 'base', dash,
-        width: 2, sensor: m.id, kind: 'pred',
+        width: 2, sensor: m.id, kind: 'pred', roughAfter,
         disabledReason: v4Lock, note: why || (base.length ? '' : 'v4 has no no-plan line for ' + m.name + ' yet') }, v4Ready ? base : []));
     });
 
@@ -518,10 +535,11 @@
       const past = (((v4.past || {})._ca || {})[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       const fut = ((v4.future || {})._ca || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       S.push(_mkSeries({ id: 'v4:_ca', group: 'predicted', sub: 'plan', short: 'v4 ' + caName, label: caName, color: 'plan', dash: [],
-        width: 2.5, sensor: '_ca', missVs: 'ind:_ca', kind: 'pred', disabledReason: v4Lock, note: why, breaks: caBreaks }, v4Ready ? [...past, ...fut] : []));
+        width: 2.5, sensor: '_ca', missVs: 'ind:_ca', kind: 'pred', disabledReason: v4Lock, note: why, breaks: caBreaks, roughAfter },
+        v4Ready ? [...past, ...fut] : []));
       const base = ((v4.baseline || {})._ca || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       S.push(_mkSeries({ id: 'base:_ca', group: 'predicted', sub: 'base', short: 'No plan ' + caName, label: caName, color: 'base', dash: [],
-        width: 2, sensor: '_ca', kind: 'pred', disabledReason: v4Lock, note: why, breaks: caBreaks }, v4Ready ? base : []));
+        width: 2, sensor: '_ca', kind: 'pred', disabledReason: v4Lock, note: why, breaks: caBreaks, roughAfter }, v4Ready ? base : []));
     }
 
     // Outdoor chart: the sensor, the weather service, and v4's corrected forecast.
@@ -538,7 +556,8 @@
     const co = v4.corrected_outdoor || {};
     const corr = [...(co.past || []), ...(co.future || [])].map(p => ({ x: _parseTs(p.ts), y: p.temp }));
     S.push(_mkSeries({ id: 'out:corrected', group: 'outdoor', short: 'Corrected', label: 'CA-corrected forecast', color: 'svc', width: 2.5,
-      chart: 'out', missVs: 'out:sensor', kind: 'pred', disabledReason: v4Lock, note: why }, v4Ready ? corr : []));
+      chart: 'out', missVs: 'out:sensor', kind: 'pred', disabledReason: v4Lock, note: why,
+      roughAfter: v4.hourly_until ? _parseTs(v4.hourly_until) : null }, v4Ready ? corr : []));
     // Outdoor humidity / feels-like (Issue #1414): dashed, so they never read as the indoor lines of the same colour.
     S.push(_mkSeries({ id: 'out:humidity', group: 'outdoor', short: 'Outdoor humidity', label: 'Humidity', role: 'outdoor relative humidity; right of Now, the forecast',
       color: 'hum', dash: [8, 4], width: 1.5, chart: 'out', axis: 'yRight', unit: '%', kind: 'actual',
@@ -719,8 +738,8 @@
       const byLead = (((_lastChartData || {}).v4 || {}).past || {})[s.sensor] || {};
       const others = CHART_LEADS.filter(l => l !== _chartLead &&
         _ptsDraw((byLead[l] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })), win));
-      if (others.length) return 'No v4 predictions made ' + _chartLead.replace('h', ' h') + ' earlier in this view: choose ' +
-        others.map(l => l.replace('h', ' h')).join(' or ') + ' under "Past v4 lines"';
+      if (others.length) return 'No v4 predictions made ' + _leadTxt(_chartLead) + ' earlier in this view: choose ' +
+        others.map(_leadTxt).join(' or ') + ' under "Past v4 lines"';
     }
     if (s && s.note) return s.note;   // not yet: v4 learning, no no-plan line yet, schedule estimate not needed (#1459)
     if (dss.some(d => _ptsAny(d.data || [])) || (s && s.pastElsewhere)) return _NOT_IN_VIEW;
@@ -742,7 +761,7 @@
       .map(p => ({ x: _parseTs(p.ts), y: p.temp }));
     const leadInView = l => ready && _ptsDraw(pastPts(l), win);
     const anyInView = CHART_LEADS.some(leadInView);
-    const leadTxt = l => l.replace('h', ' h');
+    const leadTxt = _leadTxt;
     const leadHelp = 'Left of Now, each v4 line shows what v4 predicted that many hours earlier for each moment, so you can ' +
       'see how well it called it. This changes only the past part of the v4 lines; from Now on they stay the same.';
     const btns = '<div class="seg" role="group" aria-labelledby="chart-lead-label" aria-describedby="chart-lead-help">' +
@@ -1051,6 +1070,11 @@
       pointBorderWidth: 0, tension: 0.2, spanGaps: false, yAxisID: s.axis || 'y',
       hidden: !_isOn(s.id) || !!s.disabledReason || s.raw.length === 0,
       order: s.kind === 'actual' ? 3 : 2,
+      // Issue #1483: past the real hourly forecast the line is fainter (a solid line also dashed): rougher, as said
+      segment: s.roughAfter ? {
+        borderColor: c => c.p0.parsed.x >= s.roughAfter ? _fade(color, 0.45) : undefined,
+        borderDash: c => c.p0.parsed.x >= s.roughAfter ? (s.dash.length ? s.dash : [6, 4]) : undefined,
+      } : undefined,
     };
   }
 
@@ -1506,7 +1530,9 @@
         if (a != null) miss = ' <span class="chp-miss" title="' + escapeHtml(s.short) + ' minus what was read">(' + _fmtSigned(v - a) + ')</span>';
       }
       // a series' own unit ('%' for humidity, Issue #1414), else the temperature degree sign
-      const item = _chpItem('var(--c-' + s.color + ')', escapeHtml(s.short) + ': <strong>' + _fmt(v, 1) + (s.unit || sym) + '</strong>' + miss);
+      // Issue #1483: a v4 value past the real hourly forecast says it is built on the daily highs and lows
+      const rough = s.roughAfter && ms > s.roughAfter ? ' <span class="plan-qual" title="Past the hourly forecast: from the daily high and low">rough</span>' : '';
+      const item = _chpItem('var(--c-' + s.color + ')', escapeHtml(s.short) + ': <strong>' + _fmt(v, 1) + (s.unit || sym) + '</strong>' + miss + rough);
       lines[s.group] += item;
     });
     const log = (_lastChartData && _lastChartData.state_log) || [];
@@ -1892,6 +1918,10 @@
   // occupant is asked to do (diamond markers; hollow when the step only may help), and the list under it says the
   // same in words. Both read GET /api/climate_advisor/timeline; nothing here recomputes the plan.
   const PLAN_HORIZON_MS = 24 * 3600000;
+  // Issue #1483: past the first 24 h the plan's outlook (to the forecast's end, at most a week) is listed one folded
+  // row per later day; which days the occupant opened is kept across the list's re-renders.
+  const PLAN_OUTLOOK_MS = 7 * 24 * 3600000;
+  const _planOpenDays = new Set();
   const PLAN_HIDE_KINDS = ['briefing_send'];   // the daily briefing send is how the occupant is reading this
   let _timeline = null;            // last /timeline payload, or null
   let _timelineState = 'idle';     // idle | ok | none (no plan yet, HTTP 503) | error
@@ -1979,6 +2009,29 @@
       '<span class="plan-text">' + escapeHtml(s.text_short || s.text || '') + (low && !held ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
   }
 
+  // Issue #1483: the steps after the first 24 h, one folded row per local day: "Wed, Nov 11 · 5 steps · 1 for you".
+  // The outlook is rebuilt from the newest forecast every cycle (only the first 48 h are the plan's promise).
+  function _planLaterHtml(now) {
+    const later = _planSteps(PLAN_OUTLOOK_MS).filter(s => s._ms > now + PLAN_HORIZON_MS);
+    if (!later.length) return '';
+    const days = [];
+    later.forEach(s => {
+      const d = new Date(s._ms);
+      const key = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+      let g = days.find(x => x.key === key);
+      if (!g) { g = { key, label: d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }), steps: [] }; days.push(g); }
+      g.steps.push(s);
+    });
+    const rows = days.map(g => {
+      const you = g.steps.filter(s => s.actor === 'you').length;
+      const sum = g.steps.length + (g.steps.length === 1 ? ' step' : ' steps') + (you ? ' \u00b7 ' + you + ' for you' : '');
+      return '<li class="plan-later" data-day="' + escapeHtml(g.key) + '"><details' + (_planOpenDays.has(g.key) ? ' open' : '') + '>' +
+        '<summary><span class="plan-later-day">' + escapeHtml(g.label) + '</span><span class="plan-later-sum"> ' + escapeHtml(sum) + '</span></summary>' +
+        '<ul class="plan-list">' + g.steps.map(s => _planRowHtml(s, now)).join('') + '</ul></details></li>';
+    }).join('');
+    return '<li class="plan-later-head">Later: an outlook from the forecast, updated as the forecast changes</li>' + rows;
+  }
+
   // Issue #1404: a time-of-use bank holding the house right now opens the list ("Now"), in the same words as the
   // Status line, so the list says what the thermostat is told and when the band returns.
   function _planHoldRowHtml() {
@@ -2010,8 +2063,13 @@
       const hold = _planHoldRowHtml();
       body = (steps.length || hold) ? hold + steps.map(s => _planRowHtml(s, now)).join('')
         : '<li class="plan-empty">Nothing is planned for the next 24 hours.</li>';
+      body += _planLaterHtml(now);
     }
     el.innerHTML = body;
+    el.querySelectorAll('.plan-later details').forEach(dt => dt.addEventListener('toggle', () => {
+      const key = dt.parentNode.getAttribute('data-day');
+      if (dt.open) _planOpenDays.add(key); else _planOpenDays.delete(key);
+    }));
     const foot = el.parentNode && el.parentNode.querySelector('.plan-foot');
     if (foot) foot.innerHTML = extra;
   }

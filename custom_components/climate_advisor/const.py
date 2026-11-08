@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.18"
+VERSION = "0.9.19"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -575,13 +575,15 @@ PRED_ARCHIVE_HORIZON_HOURS = 4  # only archive ODE entries within this lookahead
 
 # Prediction engine v4 (Issue #1230 R1): runs beside v3 as the default primary DISPLAY engine (CONF_PRIMARY_ENGINE);
 # no decision reads it or the engine selection in 0.9.4.
-V4_ARCHIVE_FILE = "climate_advisor_v4_archive.json"  # what v4 said 1/4/12/24 h ahead, per sensor (first write wins)
+V4_ARCHIVE_FILE = "climate_advisor_v4_archive.json"  # what v4 said 1 h to 5 days ahead, per sensor (first write wins)
 V4_BACKTEST_FILE = (
     "climate_advisor_v4_backtest.json"  # published by tools/predict_backtest.py --publish; read-only here
 )
 V4_ARCHIVE_MAX_DAYS = 400  # time-based retention (a year of seasons plus margin)
 V4_MODEL_FILE = "climate_advisor_v4_model.json"  # the fitted v4 model + hidden-node state (not in the learning file)
-V4_ARCHIVE_LEADS: tuple[str, ...] = ("1h", "4h", "12h", "24h")
+# Issue #1483: 48/72/120 h (2, 3, 5 days) score the week-long display line; only a prediction that reached that far
+# writes them (the forecast must go that far), so a short forecast leaves those columns empty.
+V4_ARCHIVE_LEADS: tuple[str, ...] = ("1h", "4h", "12h", "24h", "48h", "72h", "120h")
 V4_ARCHIVE_SAVE_MIN_INTERVAL_S = 3600  # the file is a few MB: rewrite at most hourly (and once on shutdown)
 V4_FIT_HOUR = 3  # nightly fit, local time, after midnight bookkeeping
 V4_FIT_MINUTE = 15
@@ -590,7 +592,13 @@ V4_FIT_MINUTE = 15
 V4_FIT_TRAIN_DAYS = 30
 V4_FIT_STAGGER_S = 30 * 60  # each zone fits at 03:15 + a stable per-entry offset in [0, this) (Issue #1230 R1b, M5)
 V4_FIT_RETRY_MIN_INTERVAL_S = 6 * 3600  # a first fit that failed is retried by the cycle at most this often
-V4_PREDICT_HORIZON_HOURS = 24
+# Issue #1483: the DISPLAY prediction (Status chart, plan list path, archive) runs up to a week, as far as the forecast
+# goes: the real hourly forecast first, then the hourly curve built from the daily highs and lows (#906). The prediction
+# the DECISIONS read stays 24 h on the real hourly forecast only (V4_CONTROL_HORIZON_HOURS), so nothing the house does
+# changes; the first 24 h of the display line are the same inputs, so the two agree there.
+V4_PREDICT_HORIZON_HOURS = 168
+V4_CONTROL_HORIZON_HOURS = 24
+PLAN_DAYS_AHEAD = 6  # a planned window period for each forecast day up to today + this (within the week)
 V4_MASS_MAX_GAP_S = 7200  # a hidden-node state older than this is re-seeded from the reading instead of stepped
 
 # Learning system

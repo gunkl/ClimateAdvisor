@@ -15,7 +15,7 @@ for (const p of PAGES) {
     test('no row repeats its own time, starts with a capital, and a CA row does not start with "CA"', async ({ page }) => {
       await page.goto(p.url);
       await page.waitForFunction((sel) => document.querySelectorAll(sel + ' .plan-row').length > 0, p.list, { timeout: 8000 });
-      const rows = await page.locator(p.list + ' .plan-row').evaluateAll(els => els.map(e => ({
+      const rows = await page.locator(p.list + ' > .plan-row').evaluateAll(els => els.map(e => ({
         actor: e.dataset.actor,
         time: e.querySelector('.plan-time').innerText.trim(),
         text: e.querySelector('.plan-text').innerText.trim(),
@@ -30,9 +30,9 @@ for (const p of PAGES) {
         if (r.actor === 'ca') expect(/^CA\b/.test(r.text), r.text).toBe(false);
       }
       // the wording the owner asked for
-      const bed = await page.locator(p.list + ' .plan-row[data-kind="sleep_band"] .plan-text').innerText();
+      const bed = await page.locator(p.list + ' > .plan-row[data-kind="sleep_band"] .plan-text').innerText();
       expect(bed).toMatch(/^Bedtime: switches to the sleep band, 66°F to 72°F, and reads the bedroom sensor until /);
-      const pre = await page.locator(p.list + ' .plan-row[data-kind="precool_start"] .plan-text').innerText();
+      const pre = await page.locator(p.list + ' > .plan-row[data-kind="precool_start"] .plan-text').innerText();
       expect(pre).toMatch(/^Pre-cools the house to 70°F/);
     });
   });

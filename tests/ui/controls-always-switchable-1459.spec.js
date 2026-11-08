@@ -203,8 +203,8 @@ for (const url of ['/', '/new_dashboard.html']) {
       await routeChart(page, { o: { caps: Object.assign({}, ALL_CAPS, { v4_running: false }) } });
       await page.reload();
       await ready(page);
-      await expect(page.locator('#chart-lead-row [data-lead]')).toHaveCount(4);
-      await expect(page.locator('#chart-lead-row [data-lead]:disabled')).toHaveCount(4);
+      await expect(page.locator('#chart-lead-row [data-lead]')).toHaveCount(7);   // 1, 4, 12, 24 h and 2, 3, 5 days (Issue #1483)
+      await expect(page.locator('#chart-lead-row [data-lead]:disabled')).toHaveCount(7);
       await expect(page.locator('#chart-lead-row #chart-lead-help')).toHaveText('v4 is switched off (Settings → Prediction engine)');
       await expect(chip(page, 'v4:sensor.living')).toBeDisabled();
       expect((await ds(page, 'v4:sensor.living')).visible).toBe(false);

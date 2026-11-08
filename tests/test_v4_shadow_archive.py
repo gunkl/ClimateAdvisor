@@ -89,7 +89,7 @@ def test_save_and_load_round_trip_atomic_and_private(tmp_path: Path) -> None:
     if sys.platform != "win32":
         assert stat.S_IMODE(os.stat(arch._path).st_mode) == 0o600
     raw = json.loads(arch._path.read_text())
-    assert raw["leads"] == ["1h", "4h", "12h", "24h"] and set(raw["sensors"]) == {"climate.a"}
+    assert raw["leads"] == ["1h", "4h", "12h", "24h", "48h", "72h", "120h"] and set(raw["sensors"]) == {"climate.a"}
     assert raw["ca"]["primary"] == "climate.a"  # "_ca" is derived on read, not stored twice
 
     reloaded = _archive(tmp_path)

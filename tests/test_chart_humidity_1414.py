@@ -610,7 +610,16 @@ def test_in_the_coordinator_only_the_chart_paths_touch_it():
             _NEW_NAMES - {"feels_like", "humidity_sources"}
         ):
             users.add(fn.name)
-    assert users == {"_read_chart_humidity", "_read_chart_context", "get_chart_data"}
+    # Issue #1459: ``_humidity_role_inputs`` is the one config read of the resolver's inputs (shared by the chart rows
+    # and the capabilities block) and ``chart_capabilities`` only feeds ``chart_data["capabilities"]`` (pinned to
+    # ``get_chart_data`` by tests/test_chart_capabilities_1459.py): both chart display only, so the guard still holds.
+    assert users == {
+        "_read_chart_humidity",
+        "_read_chart_context",
+        "get_chart_data",
+        "_humidity_role_inputs",
+        "chart_capabilities",
+    }
     # and _read_chart_context's output only ever goes into a chart_log row
     readers = set()
     for fn in cls.body:

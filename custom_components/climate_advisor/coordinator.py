@@ -53,6 +53,7 @@ from .automation import (
     OccupancyBankWrite,
     PreCoolDecision,
     TouBankHold,
+    _fan_device_label,
     _in_sleep_window,
     _refuse_if_shut_down,
     awake_comfort_edges,
@@ -574,6 +575,9 @@ _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
 # post-conversion reader uses it, so stripping (not converting) guarantees a Celsius state_log can never carry a stray F
 # value and keeps the 24h/3d raw payload small. tests/test_chart_celsius.py requires every dict kwarg here.
 _CHART_LOG_STATE_LOG_STRIPPED_KEYS: Final[tuple[str, ...]] = ("indoor_sensors",)
+
+# The occupancy toggles a zone can configure (home / vacation / guest): the listeners and the chart capability block.
+_OCCUPANCY_TOGGLE_KEYS: Final[tuple[str, ...]] = (CONF_HOME_TOGGLE, CONF_VACATION_TOGGLE, CONF_GUEST_TOGGLE)
 
 # Issue #1455: what each humidity role is called in its source-change line and Activity row.
 _HUMIDITY_ROLE_SUBJECT: Final[dict[str, str]] = {
@@ -2995,7 +2999,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _subscribe_occupancy_listeners(self) -> None:
         """Subscribe to state changes for all configured occupancy toggles."""
-        for conf_key in (CONF_HOME_TOGGLE, CONF_VACATION_TOGGLE, CONF_GUEST_TOGGLE):
+        for conf_key in _OCCUPANCY_TOGGLE_KEYS:
             entity_id = self.config.get(conf_key)
             if entity_id:
                 self._unsub_occupancy_listeners.append(
@@ -5654,6 +5658,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         cache[key] = (found, now)
         return found
 
+    def _humidity_role_inputs(
+        self, role: str, source_entity: str | None = None
+    ) -> tuple[str | None, tuple[str | None, ...], str | None]:
+        """``(chosen, source_entities, fallback_entity)`` the Issue #1414 resolver uses for ``role`` in this zone.
+
+        One definition for the chart rows (``_read_chart_humidity``) and the chart's capabilities block (Issue #1459).
+        ``source_entity`` is the row's comfort reading (``IndoorTempReading.source_entity``), searched for the day room
+        between the climate entity and the dedicated indoor sensor; None leaves it out. Pure config read.
+        """
+        cfg = self.config
+        if role == ROLE_INDOOR_SLEEP:
+            return cfg.get(CONF_SLEEP_INDOOR_HUMIDITY_ENTITY), (cfg.get("sleep_indoor_temp_entity"),), None
+        if role == ROLE_OUTDOOR:
+            outdoor_sensor = (
+                cfg.get("outdoor_temp_entity")
+                if cfg.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE) != TEMP_SOURCE_WEATHER_SERVICE
+                else None
+            )
+            return cfg.get(CONF_OUTDOOR_HUMIDITY_ENTITY), (outdoor_sensor,), cfg.get("weather_entity")
+        climate = cfg.get("climate_entity")
+        dedicated = (
+            cfg.get("indoor_temp_entity")
+            if cfg.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
+            in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
+            else None
+        )
+        return cfg.get(CONF_INDOOR_HUMIDITY_ENTITY), (climate, source_entity, dedicated), climate
+
     def _read_chart_humidity(
         self, *, indoor_f: float | None, outdoor_f: float | None, reading: IndoorTempReading | None = None
     ) -> dict[str, float]:
@@ -5669,26 +5701,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         out: dict[str, float] = {}
         try:
             cfg = self.config
-            climate = cfg.get("climate_entity")
             sleep_entity = cfg.get("sleep_indoor_temp_entity")
             if reading is None:
                 reading = self._get_indoor_temp_with_provenance()
             source = getattr(reading, "source_entity", None)
             role = indoor_role_for(source, sleep_entity)
-            if role == ROLE_INDOOR_SLEEP:
-                chosen = cfg.get(CONF_SLEEP_INDOOR_HUMIDITY_ENTITY)
-                sources: tuple[str | None, ...] = (sleep_entity,)
-                fallback = None
-            else:
-                chosen = cfg.get(CONF_INDOOR_HUMIDITY_ENTITY)
-                dedicated = (
-                    cfg.get("indoor_temp_entity")
-                    if cfg.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
-                    in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
-                    else None
-                )
-                sources = (climate, source, dedicated)
-                fallback = climate
+            chosen, sources, fallback = self._humidity_role_inputs(role, source)
 
             def _discover(eid: str, exclude: bool) -> tuple[str, ...]:
                 return self._companion_sensors(eid, "humidity", exclude)
@@ -5697,6 +5715,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.hass, role, chosen=chosen, source_entities=sources, fallback_entity=fallback, discover=_discover
             )
             self._note_humidity_source(role, src_in, rh_in, chosen)
+            # Issue #1459: keep the OTHER indoor room's device lookup warm too (event loop, in-memory registry), so
+            # get_chart_data()'s capabilities block (executor thread, cache-only) can tell a bedroom humidity sensor
+            # exists in the daytime and the day room's in the sleep window.
+            other = ROLE_INDOOR_DAY if role == ROLE_INDOOR_SLEEP else ROLE_INDOOR_SLEEP
+            for eid in self._humidity_role_inputs(other)[1]:
+                if isinstance(eid, str) and eid:
+                    _discover(eid, True)
             if rh_in is not None:
                 out["humidity"] = rh_in
                 fl_in = feels_like_f(indoor_f, rh_in)
@@ -5704,18 +5729,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     out["feelslike"] = fl_in
 
             weather = cfg.get("weather_entity")
-            outdoor_sensor = (
-                cfg.get("outdoor_temp_entity")
-                if cfg.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE) != TEMP_SOURCE_WEATHER_SERVICE
-                else None
-            )
-            chosen_out = cfg.get(CONF_OUTDOOR_HUMIDITY_ENTITY)
+            chosen_out, sources_out, fallback_out = self._humidity_role_inputs(ROLE_OUTDOOR)
             rh_out, src_out = resolve_humidity(
                 self.hass,
                 ROLE_OUTDOOR,
                 chosen=chosen_out,
-                source_entities=(outdoor_sensor,),
-                fallback_entity=weather,
+                source_entities=sources_out,
+                fallback_entity=fallback_out,
                 discover=_discover,
             )
             self._note_humidity_source(ROLE_OUTDOOR, src_out, rh_out, chosen_out)
@@ -7577,6 +7597,73 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
         else:
             self._engine_fallback_logged = False
+        return out
+
+    def chart_capabilities(self) -> dict[str, bool]:
+        """What this zone has set up, for the Status chart key (Issue #1459): seven booleans, display only.
+
+        Occupant view: a chart control locks only when the home cannot have it as set up (no outdoor sensor, no fan,
+        no door/window sensors, no occupancy switches, no humidity source, v4 switched off); "nothing in view yet"
+        never locks. Each flag reads the same config keys / helpers production already uses. Runs on the executor
+        thread inside ``get_chart_data()``: config and ``hass.states`` reads only, and the humidity device lookup is
+        cache-only (``_companion_sensors_cache``, kept warm on the event loop by ``_read_chart_humidity``); a lookup
+        not cached yet reads as available, so a humidity flag is False only after a warmed lookup found nothing. No I/O.
+        Never raises: a key whose check fails is True (nothing locks) and the failure is logged at debug.
+        """
+        cfg = self.config
+
+        def _fan() -> bool:
+            label = _fan_device_label(cfg)
+            if label == "hvac_fan":
+                return True
+            return label in ("whf", "both") and bool(cfg.get(CONF_FAN_ENTITY))
+
+        def _humidity(*roles: str) -> bool:
+            cache = getattr(self, "_companion_sensors_cache", None)
+
+            def _cached(eid: str, exclude: bool) -> tuple[str, ...]:
+                hit = cache.get((eid, "humidity", bool(exclude))) if isinstance(cache, dict) else None
+                return hit[0] if hit else ()
+
+            for role in roles:
+                chosen, sources, fallback = self._humidity_role_inputs(role)
+                value, _src = resolve_humidity(
+                    self.hass, role, chosen=chosen, source_entities=sources, fallback_entity=fallback, discover=_cached
+                )
+                if value is not None:
+                    return True
+                # A device lookup not made yet on the event loop (cold cache, e.g. right after a restart, before the
+                # first chart row) is unknown, and unknown means available: time must never lock a control.
+                exclude = role != ROLE_OUTDOOR
+                if any(
+                    isinstance(eid, str)
+                    and eid
+                    and not (isinstance(cache, dict) and (eid, "humidity", exclude) in cache)
+                    for eid in sources
+                ):
+                    return True
+            return False
+
+        checks: dict[str, Callable[[], bool]] = {
+            "v4_running": lambda: prediction_engines.is_running(cfg, prediction_engines.ENGINE_V4),
+            "outdoor_sensor": lambda: (
+                cfg.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
+                in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
+                and bool(cfg.get("outdoor_temp_entity"))
+            ),
+            "fan": _fan,
+            "door_sensors": lambda: bool(self._resolve_monitored_sensors()),
+            "occupancy": lambda: any(cfg.get(k) for k in _OCCUPANCY_TOGGLE_KEYS),
+            "humidity_indoor": lambda: _humidity(ROLE_INDOOR_DAY, ROLE_INDOOR_SLEEP),
+            "humidity_outdoor": lambda: _humidity(ROLE_OUTDOOR),
+        }
+        out: dict[str, bool] = {}
+        for key, check in checks.items():
+            try:
+                out[key] = bool(check())
+            except Exception:  # noqa: BLE001 - display only: an unknown capability never locks a control
+                _LOGGER.debug("chart capability %s check failed; treating it as set up", key, exc_info=True)
+                out[key] = True
         return out
 
     def v4_model_summary(self) -> dict[str, Any]:
@@ -17521,6 +17608,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "ca_swaps": _ca_swaps,
             "prediction_engines": _engines_block,
             "schedule_estimate": _schedule_estimate,
+            # Issue #1459 (additive): what this zone has set up; the chart key locks a control only when it is False.
+            "capabilities": self.chart_capabilities(),
             "unit": unit,
         }
 

@@ -76,7 +76,7 @@ def _make_engine(*, indoor_temp: float, current_mode: str = "cool", **cfg) -> Au
     engine._natural_vent_active = False
     engine._fan_active = False
     engine._fan_override_active = False
-    engine._thermal_model = {}
+    engine.inputs.thermal = {}
     return engine
 
 

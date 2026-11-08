@@ -232,8 +232,9 @@ def pin_scenario_v4_model(coordinator: Any, spec: dict) -> None:
 def pin_scenario_thermal_model(coordinator: Any, model: dict) -> None:
     """Make a coordinator-mode run use the scenario's ``thermal_model`` through every refresh (Issue #1211).
 
-    A scenario's ``thermal_model`` used to be written only to ``engine._thermal_model``. In production that
-    attribute is whatever ``learning.get_thermal_model()`` last returned, and ``_async_update_data_impl``
+    A scenario's ``thermal_model`` used to be written only to ``engine._thermal_model`` (Issue #1443: now the
+    coordinator's ``_thermal_model``, the single owner). In production that attribute is whatever
+    ``learning.get_thermal_model()`` last returned, and ``_async_update_data_impl``
     rewrites it from that call every 30-minute cycle -- so in coordinator mode the first refresh silently
     replaced the scenario's model with the harness's empty learning store, and the two runner modes diverged.
     The scenario's model IS the learned model for that run, so the coordinator's learning store answers with it.
@@ -267,13 +268,24 @@ def snapshot_engine_state(engine: Any) -> dict[str, Any]:
         "_nat_vent_soft_start",  # Issue #606
         "_nat_vent_outdoor_exit_time",  # Issue #606
         "_last_outdoor_temp",  # Issue #633
-        "_outdoor_temp_today_peak",  # Issue #633
-        "_outdoor_temp_today_sample_count",  # Issue #633
         "_comfort_mode_family",  # Issue #821 - "heating"/"cooling"/None
         "_fan_manual_origin_unclosed",  # Issue #829
         "_nat_vent_cutoff_already_reached",  # Issue #1230 R6b
     ):
         snap[attr] = getattr(engine, attr, None)
+    # Issue #633: today's outdoor peak/sample count. Issue #1443: the engine holds no copy; it reads them from the
+    # coordinator in the facts passed in at each decision, so the snapshot asks the engine's facts source for one built
+    # now (same keys).
+    _inputs = getattr(engine, "inputs", None)
+    if _inputs is not None:
+        from homeassistant.util import dt as _dt_util  # noqa: PLC0415 - HA stubs are installed by now
+
+        _facts = _inputs.build_facts(_dt_util.now())
+        snap["_outdoor_temp_today_peak"] = _facts.outdoor_today_peak
+        snap["_outdoor_temp_today_sample_count"] = _facts.outdoor_today_sample_count
+    else:  # a pre-#1443 tree
+        snap["_outdoor_temp_today_peak"] = getattr(engine, "_outdoor_temp_today_peak", None)
+        snap["_outdoor_temp_today_sample_count"] = getattr(engine, "_outdoor_temp_today_sample_count", None)
     # Issue #1230 R6b: the nat-vent plan's cutoff the engine acts on (ISO string; None when no plan set one).
     _cutoff = getattr(engine, "_nat_vent_cutoff", None)
     snap["_nat_vent_cutoff"] = _cutoff.isoformat() if hasattr(_cutoff, "isoformat") else None
@@ -448,7 +460,9 @@ def _capture_hold(coordinator: Any, engine: Any) -> dict[str, Any]:
     hour0 = now.replace(minute=0, second=0, microsecond=0)
     hourly = [{"datetime": (hour0 + timedelta(hours=h)).isoformat(), "temperature": 60.0} for h in range(-24, 49)]
     builder = getattr(coordinator, "_chart_display_band", None) or coordinator._build_target_band_for
-    band = builder(now, engine._thermal_model, hourly_forecast_override=hourly)
+    # Issue #1443: the coordinator owns the thermal model (pre-#1443 trees: the engine's copy).
+    model = coordinator._thermal_model if hasattr(engine, "inputs") else engine._thermal_model
+    band = builder(now, model, hourly_forecast_override=hourly)
     current = [e for e in band if _dt.parse_datetime(str(e["ts"])) <= now]
     chart_now = None
     if current:

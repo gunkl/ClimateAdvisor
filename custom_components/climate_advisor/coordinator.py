@@ -296,6 +296,15 @@ from .const import (
     is_availability_recovery,
     is_unavailable_state,
 )
+from .engine_inputs import (
+    TOU_AV_INACTIVE,
+    CoordinatorEngineInputs,
+    EngineFacts,
+    TouAvWindow,
+    build_engine_facts,
+    decide,
+    decide_sync,
+)
 from .entity_health import (
     THERMOSTAT_CONFIG_KEY,
     EntityHealthIssue,
@@ -806,6 +815,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     # lazily created) so coordinators built via object.__new__ in tests still work. Not
     # persisted -- a restart restarts the 3 h clock, matching confirmed_transition.py.
     _equipment_last_active: dict[str, datetime] | None = None  # "heat"/"cool" -> last hvac_action seen
+    # Issue #1443: the coordinator is the single owner of the facts the engine's decisions read (it passes them in at
+    # each decision call, see engine_facts and engine_inputs.decide; no engine copy). Class-level defaults so
+    # object.__new__ stubs work.
+    _thermal_model: dict = {}  # learning.get_thermal_model()'s last answer; replaced, never mutated in place
+    _tou_av_window: TouAvWindow = TOU_AV_INACTIVE  # the active Away/Vacation TOU window (Issue #899)
     # Issue #1234: swing sampling state (class-level defaults so object.__new__ test stubs work).
     # Open heat/cool cycles awaiting their off-transition ("heat"/"cool" -> candidate dict); and when
     # the thermostat's setpoint or HVAC mode last changed. Not persisted: setup stamps it instead (Issue #1256).
@@ -951,6 +965,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             sensor_polarity_inverted=config.get(CONF_SENSOR_POLARITY_INVERTED, False),
             callbacks=self._build_production_automation_callbacks(),
             role="production",
+            # Issue #1443: the engine's facts source. This coordinator passes its facts in at each decision call
+            # (engine_inputs.decide); the source only builds a fresh snapshot (engine_facts) for an engine timer or a
+            # read-only reader, and is the thermal-model accessor. The engine holds no copy.
+            inputs=CoordinatorEngineInputs(self),
         )
         # Issue #1230 R6b: the engine reads the primary engine's thermal-model scalars through this live provider (it
         # never names an engine); None on a bare engine (headless tools) = its own ``_thermal_model``.
@@ -1086,6 +1104,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._outdoor_temp_history: list[tuple[str, float]] = []
         self._indoor_temp_history: list[tuple[str, float]] = []
         self._hourly_forecast_temps: list[dict] = []
+        self._thermal_model: dict = {}
+        self._tou_av_window: TouAvWindow = TOU_AV_INACTIVE
         # Full multi-day daily forecast (Issue #906) — cached by _get_forecast()
         # for chart-only forecast extension via _build_extended_hourly_forecast().
         self._daily_forecast_full: list[dict] = []
@@ -1363,7 +1383,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         both take the decision lock first, so the plan is applied to the state they leave. Repeated toggles coalesce
         in the refresh debouncer; switched off again meanwhile, nothing is re-applied (or the cycle runs observe-only).
         """
-        await self.automation_engine.async_reconcile_after_automation_enabled()
+        await decide(self, self.automation_engine.async_reconcile_after_automation_enabled)
         if not self._automation_enabled:
             return  # switched off again before the reconcile finished
         await self.async_request_refresh()
@@ -1584,7 +1604,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ae = self.automation_engine
                 if ae._fan_active or ae._natural_vent_active:
                     self.hass.async_create_task(
-                        ae.fan_thermostat_check(
+                        decide(
+                            self,
+                            ae.fan_thermostat_check,
                             indoor=self._get_indoor_temp(),
                             outdoor=self._last_outdoor_temp,
                             trigger="indoor",
@@ -1646,7 +1668,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ae = self.automation_engine
                 if ae._fan_active or ae._natural_vent_active:
                     self.hass.async_create_task(
-                        ae.fan_thermostat_check(
+                        decide(
+                            self,
+                            ae.fan_thermostat_check,
                             indoor=self._get_indoor_temp(),
                             outdoor=self._last_outdoor_temp,
                             trigger="outdoor",
@@ -1707,7 +1731,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
         # Start minimum fan runtime rolling cycle (Issue #77) — not clock-aligned
-        await self.automation_engine.start_min_fan_runtime_cycles()
+        await decide(self, self.automation_engine.start_min_fan_runtime_cycles)
 
         # Listener: detect user-initiated HA restart/stop (Issue #403) — best-effort restart
         # cause diagnostics. Distinguishes a user pressing "Restart Home Assistant" from a
@@ -1762,7 +1786,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.debug("WHF rule-2 overlap tracking failed", exc_info=True)
         try:
-            engine.request_whf_safety_check(trigger)
+            decide_sync(self, engine.request_whf_safety_check, trigger)
         except Exception:
             _LOGGER.warning("WHF safety check request failed: trigger=%s", trigger, exc_info=True)
 
@@ -2264,8 +2288,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._hourly_forecast_temps = _unexpired_hourly_forecast(
                     [e for e in hourly if isinstance(e, dict)], dt_util.now()
                 )
-                if getattr(self, "automation_engine", None) is not None:
-                    self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
 
         # Restore the event log ring buffer (Issue #1357: any restart). Issue #1362: BEFORE the engine's
         # restore_state() below, which re-arms a fan-off grace and emits grace_started; restoring the log
@@ -2279,7 +2301,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # reconcile_fan_on_startup().
         auto_state = state.get("automation_state", {})
         if auto_state:
-            self.automation_engine.restore_state(auto_state)
+            decide_sync(self, self.automation_engine.restore_state, auto_state)
 
         # Grace state is cleared by restore_state() (clean-slate design, Issue #282).
         # The coordinator does not reschedule grace timers on restart.
@@ -2386,14 +2408,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         temp_hist = {} if unit_changed else state.get("temp_history", {})
         self._outdoor_temp_history = [(ts, t) for ts, t in temp_hist.get("outdoor", [])]
         self._indoor_temp_history = [(ts, t) for ts, t in temp_hist.get("indoor", [])]
-        # Issue #540: mirror the restored buffer's peak/count immediately, so soft-start's
-        # minimum-sample guard doesn't see an artificially thin buffer for up to 30 min
-        # after a same-day restart (this restore path only runs when the persisted date
-        # matches today's local date — see the state_date == today_str gate above).
-        if self._outdoor_temp_history:
-            _restored_outdoor_temps = [t for _, t in self._outdoor_temp_history]
-            self.automation_engine._outdoor_temp_today_peak = max(_restored_outdoor_temps)
-            self.automation_engine._outdoor_temp_today_sample_count = len(_restored_outdoor_temps)
+        # Issue #540: soft-start's peak/count are computed from this restored buffer into the facts passed
+        # in at each decision (Issue #1443, no engine mirror), so its minimum-sample guard sees the full
+        # buffer immediately after a same-day restart (this restore path only runs when the
+        # persisted date matches today's local date — see the state_date == today_str gate above).
 
         # Today's record
         record_data = state.get("today_record")
@@ -3065,7 +3083,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             return
         self._resolve_tou_schedule_state()  # the window has started: phase NONE, the engine's bank window lapses
-        await engine.apply_classification(
+        await decide(
+            self,
+            engine.apply_classification,
             c,
             predicted_indoor=self.control_predicted_indoor(),
             indoor_temp=self._get_indoor_temp(),
@@ -3166,14 +3186,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.automation_engine.set_tou_precondition_window(_bank_until, _bank_mode)
             else:
                 self.automation_engine.set_tou_precondition_window(None)
+            # Issue #1443: this coordinator owns the window; it reaches the engine in the facts passed in (decide).
             if window_active:
-                self.automation_engine._tou_av_expansion_f = resolution.expansion_f or 0.0
-                self.automation_engine._tou_av_active_schedule_id = resolution.schedule_id
-                self.automation_engine._tou_av_precondition_target = resolution.target
+                self._tou_av_window = TouAvWindow(
+                    expansion_f=resolution.expansion_f or 0.0,
+                    schedule_id=resolution.schedule_id,
+                    precondition_target=resolution.target,
+                )
             else:
-                self.automation_engine._tou_av_expansion_f = 0.0
-                self.automation_engine._tou_av_active_schedule_id = None
-                self.automation_engine._tou_av_precondition_target = None
+                self._tou_av_window = TOU_AV_INACTIVE
 
         # --- Cycle-summary observability (Issue #899, Requirement 3): snapshot the
         # existing hvac_runtime_minutes/fan-runtime counters when the window becomes
@@ -3280,9 +3301,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # tick.
         self._resolve_tou_schedule_state()
         if mode == OCCUPANCY_VACATION:
-            await self.automation_engine.handle_occupancy_vacation()
+            await decide(self, self.automation_engine.handle_occupancy_vacation)
         else:
-            await self.automation_engine.handle_occupancy_away()
+            await decide(self, self.automation_engine.handle_occupancy_away)
         self._push_tou_bank_card_status()
 
     async def _async_occupancy_toggle_changed(self, event: Event) -> None:
@@ -3620,7 +3641,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     async def _async_planned_window_exit_sync(self) -> None:
         try:
-            await self.automation_engine.async_sync_after_planned_window_exit()
+            await decide(self, self.automation_engine.async_sync_after_planned_window_exit)
         except Exception:
             _LOGGER.warning("Planned-window exit reconcile failed; the next cycle retries", exc_info=True)
 
@@ -3738,12 +3759,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if record_history:
             self._outdoor_temp_history.append((dt_util.now().isoformat(), value))
             # Issue #540: nat-vent soft-start needs "today's observed peak so far" to
-            # detect a past-peak/declining trend. Computed here (single source of truth,
-            # same buffer used for forecast high/low correction below) and plumbed to the
-            # automation engine the same way _hourly_forecast_temps already is.
-            observed_temps = [t for _, t in self._outdoor_temp_history]
-            self.automation_engine._outdoor_temp_today_peak = max(observed_temps)
-            self.automation_engine._outdoor_temp_today_sample_count = len(observed_temps)
+            # detect a past-peak/declining trend. The engine reads it live from this buffer
+            # (single source of truth, same buffer used for forecast high/low correction below)
+            # in the facts passed in at each decision (Issue #1443, no engine mirror).
         if getattr(self, "data", None):
             self.data[ATTR_OUTDOOR_TEMP] = value
             self.async_update_listeners()
@@ -3794,7 +3812,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 _stale_mode = _ae._manual_override_mode
                 _stale_since = _ae._manual_override_time
-                _ae.clear_manual_override(reason="stuck_grace_recovery")
+                decide_sync(self, _ae.clear_manual_override, reason="stuck_grace_recovery")
                 self._emit_event(
                     "stuck_grace_recovered",
                     {
@@ -3815,18 +3833,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         #      change through the day (6 AM conditions are wrong by afternoon)
         #   3. Applies mid-day observation commits to same-day automation decisions
         if self.config.get("learning_enabled", True) and self.automation_engine:
-            self.automation_engine._thermal_model = self.learning.get_thermal_model(
+            self._thermal_model = self.learning.get_thermal_model(
                 outdoor_temp_f=self._last_outdoor_temp,
                 solar_factor=_solar_factor(dt_util.now().hour),
             )
             self._solar_phase_offset = (
-                self.automation_engine._thermal_model.get("solar_phase_offset_h")
-                or THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
+                self._thermal_model.get("solar_phase_offset_h") or THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
             )
             _LOGGER.debug(
                 "thermal model refreshed (30-min cycle): confidence=%s k_passive=%s solar_phase_offset=%.1f",
-                self.automation_engine._thermal_model.get("confidence", "none"),
-                self.automation_engine._thermal_model.get("k_passive"),
+                self._thermal_model.get("confidence", "none"),
+                self._thermal_model.get("k_passive"),
                 self._solar_phase_offset,
             )
 
@@ -3863,11 +3880,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 windows_open = self._today_record.windows_physically_opened and (
                     self._today_record.window_physical_close_time is None
                 )
-                await self.automation_engine.check_window_cooling_opportunity(
-                    outdoor, indoor, windows_open, current_hour=dt_util.now().hour
+                await decide(
+                    self,
+                    self.automation_engine.check_window_cooling_opportunity,
+                    outdoor,
+                    indoor,
+                    windows_open,
+                    current_hour=dt_util.now().hour,
                 )
             if self._should_run_regular_cycle_nat_vent_check():
-                await self.automation_engine.check_natural_vent_conditions()
+                await decide(self, self.automation_engine.check_natural_vent_conditions)
         await self._async_save_state()
 
     def _run_first_cycle_recovery(self) -> None:
@@ -3964,7 +3986,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # branch itself when nat-vent isn't viable — single source of truth.
             first_sensor = open_sensors[0]
             _LOGGER.debug("[coalesce-diag] before handle_door_window_open(%s)", first_sensor)
-            await self.automation_engine.handle_door_window_open(first_sensor)
+            await decide(self, self.automation_engine.handle_door_window_open, first_sensor)
             _LOGGER.debug("[coalesce-diag] after handle_door_window_open(%s)", first_sensor)
             nat_vent_activated = self.automation_engine._natural_vent_active
             _LOGGER.info(
@@ -3984,7 +4006,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             indoor_temp = self._get_indoor_temp()
             _LOGGER.debug("[coalesce-diag] before apply_classification() [coalesce path]")
-            await self.automation_engine.apply_classification(
+            await decide(
+                self,
+                self.automation_engine.apply_classification,
                 c,
                 predicted_indoor=self.control_predicted_indoor(),
                 indoor_temp=indoor_temp,
@@ -4022,7 +4046,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # manual action hours later. See _read_live_remote_timer_provenance()'s docstring.
         _remote_timer_provenance = self._read_live_remote_timer_provenance()
         _LOGGER.debug("[coalesce-diag] before reconcile_fan_on_startup()")
-        await self.automation_engine.reconcile_fan_on_startup(
+        await decide(
+            self,
+            self.automation_engine.reconcile_fan_on_startup,
             indoor=indoor,
             outdoor=outdoor,
             thermostat_fan_running=_thermostat_fan_running,
@@ -4094,7 +4120,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # semantic match is GRACE_TIMER_EXPIRED (grace ending with nothing left to protect).
         # Resolve BEFORE the cancel, so the FSM sees the grace being ended (same order as
         # AutomationEngine._on_grace_expired()'s keep branch).
-        ae._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
+        decide_sync(self, ae._resolve_override_grace_fsm_state, kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
         ae._cancel_grace_timers_action()
         # Issue #679: derive_door_window_lifecycle_state() also takes grace_active as an
         # input; this method used to also re-notify the door/window shadow FSM here
@@ -4212,8 +4238,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "fan_mode_config": fan_mode,
             },
         )
-        ae._fan_active = False
-        ae._fan_on_since = None
+        ae.clear_stale_fan_ownership()
 
     async def _async_update_data_impl(self) -> dict[str, Any]:
         """Fetch forecast and update classification (runs every 30 min)."""
@@ -4352,7 +4377,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self.config,
                         dt_util.now(),
                         current_indoor_temp=self._get_indoor_temp(),
-                        thermal_model=self.automation_engine._thermal_model if self.automation_engine else {},
+                        thermal_model=self._thermal_model if self.automation_engine else {},
                         occupancy_mode=self._occupancy_mode,
                         classification=self._current_classification,
                         band_schedule=self._target_band_schedule,
@@ -4398,7 +4423,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             else:
                 _LOGGER.debug("[coalesce-diag] before apply_classification() [regular cycle path]")
-                await self.automation_engine.apply_classification(
+                await decide(
+                    self,
+                    self.automation_engine.apply_classification,
                     self._current_classification,
                     predicted_indoor=self.control_predicted_indoor(),
                     indoor_temp=self._get_indoor_temp(),
@@ -4435,7 +4462,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 windows_open = self._today_record.windows_physically_opened and (
                     self._today_record.window_physical_close_time is None
                 )
-                await self.automation_engine.check_window_cooling_opportunity(
+                await decide(
+                    self,
+                    self.automation_engine.check_window_cooling_opportunity,
                     forecast.current_outdoor_temp,
                     forecast.current_indoor_temp,
                     windows_open,
@@ -4445,7 +4474,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Re-evaluate natural vent conditions while any sensor is open
             if self._should_run_regular_cycle_nat_vent_check():
                 _LOGGER.debug("[coalesce-diag] before check_natural_vent_conditions()")
-                await self.automation_engine.check_natural_vent_conditions()
+                await decide(self, self.automation_engine.check_natural_vent_conditions)
                 _LOGGER.debug("[coalesce-diag] after check_natural_vent_conditions()")
 
             # Save state after classification update
@@ -4521,18 +4550,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # hvac_fan_restrict_mode guard in _activate_fan() — the only per-cycle
         # ground-truth read of hvac_action, so this piggybacks on it rather than
         # polling separately.
+        # Issue #843: same piggyback pattern, extended to fan/nat-vent activity
+        # for the comfort-family FSM's recency-gated deadband. Issue #1443: the engine owns and
+        # persists these stamps; this cycle only reports what it read.
         if self.automation_engine:
-            _hvac_action_lower = str(hvac_action).lower()
-            if _hvac_action_lower == "heating":
-                self.automation_engine._last_hvac_heating_active = dt_util.now().isoformat()
-            elif _hvac_action_lower == "cooling":
-                self.automation_engine._last_hvac_cooling_active = dt_util.now().isoformat()
-            # Issue #843: same piggyback pattern, extended to fan/nat-vent activity
-            # for the comfort-family FSM's recency-gated deadband.
-            if self.automation_engine._fan_active:
-                self.automation_engine._last_fan_active = dt_util.now().isoformat()
-            if self.automation_engine._natural_vent_active:
-                self.automation_engine._last_natvent_active = dt_util.now().isoformat()
+            self.automation_engine.note_cycle_activity(hvac_action, dt_util.now())
         # Issue #466: setpoint fields, so consumers that don't need live sub-cycle
         # freshness (ai_skills_activity.py/ai_skills_context.py) can read from
         # coordinator.data instead of independently re-fetching hass.states.get().
@@ -4743,7 +4765,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _bst_fan_mode = str(_cs_bst.attributes.get("fan_mode", "")) if _cs_bst else ""
             _bst_hvac_action = str(_cs_bst.attributes.get("hvac_action", "")).lower() if _cs_bst else ""
             if not is_hvac_compressor_active(_bst_hvac_action):
-                await self.automation_engine.reconcile_fan_on_startup(
+                await decide(
+                    self,
+                    self.automation_engine.reconcile_fan_on_startup,
                     indoor=self._get_indoor_temp(),
                     outdoor=self._last_outdoor_temp,
                     # Issue #423: archetype-aware — WHF mode checks the real fan entity's
@@ -5716,7 +5740,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             kept = _unexpired_hourly_forecast(getattr(self, "_hourly_forecast_temps", None), dt_util.now())
             self._hourly_forecast_temps = kept
             self._note_hourly_forecast_cache(kept)
-        self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
         if fetched:
             # Issue #1230 R0: archive ONLY a successful fetch that returned entries - never the kept-forecast
             # branch above (an outage snapshot would re-record old data under a new issue time).
@@ -6215,7 +6238,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # decisions (nat-vent plan, TOU bank, ceiling guard) read them: v3 primary = v3's own model, a usable v4 =
         # v4's scalars over it, a v4 still learning = blanked (the engine's own recommendation stands, unvalidated).
         # It never reads v3's learned rates behind a v4 primary's back (O3), so every surface tells one story.
-        model = dict(self.control_thermal_model(dict(getattr(ae, "_thermal_model", None) or {})) or {})
+        model = dict(self.control_thermal_model(dict(self._thermal_model or {})) or {})
         band_schedule = self._target_band_schedule
         tou_window = self._tou_precondition_window_tuple()
         config = self.config
@@ -6554,7 +6577,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             indoor = self._get_indoor_temp()
             outdoor = self._last_outdoor_temp
             ae = self.automation_engine
-            armed = ae._resolved_comfort_band(c) if ae is not None else None
+            armed = decide_sync(self, ae._resolved_comfort_band, c) if ae is not None else None
             if armed is None:
                 armed = resolve_active_band(c, self.config, occupancy_mode=self._occupancy_mode, now=dt_util.now())
             return apply_direction_veto(
@@ -7091,6 +7114,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     # default). While that engine has not finished learning your home they behave exactly as they do on a fresh
     # install; they never borrow the other engine. The optional comparison (shadow) engine is never read here.
     # ------------------------------------------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Issue #1443: the facts the engine's decisions read are passed IN at the decision call. The coordinator owns
+    # them, computes one frozen snapshot at the call (engine_facts) and runs the engine call inside it
+    # (engine_inputs.decide / decide_sync); the engine keeps nothing. Every coordinator call into an engine method
+    # that reaches a decision goes through those (tests/test_engine_state_ownership_static.py enforces it).
+    # ------------------------------------------------------------------
+
+    def engine_facts(self, now: datetime) -> EngineFacts:
+        """The frozen snapshot of this coordinator's facts for a decision at ``now`` (Issue #1443)."""
+        return build_engine_facts(
+            now,
+            hourly_forecast=getattr(self, "_hourly_forecast_temps", None),
+            outdoor_history=getattr(self, "_outdoor_temp_history", None),
+            tou_av=getattr(self, "_tou_av_window", None),
+        )
+
     def control_thermal_model(self, base: dict | None) -> dict | None:
         """The thermal-model dict the RATE decisions read (``base`` = the v3 model the learning engine holds).
 
@@ -8090,13 +8129,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     outdoor_temp_f=self._last_outdoor_temp,
                     solar_factor=_solar_factor(now.hour),
                 )
-                self.automation_engine._thermal_model = thermal_model
+                self._thermal_model = thermal_model
                 self._solar_phase_offset = (
                     thermal_model.get("solar_phase_offset_h") or THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
                 )
             else:
                 thermal_model = {}
-                self.automation_engine._thermal_model = {}
+                self._thermal_model = {}
             confidence = thermal_model.get("confidence", "none")
             obs_count = thermal_model.get("observation_count_heat", 0) + thermal_model.get("observation_count_cool", 0)
             _LOGGER.debug(
@@ -8142,7 +8181,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             await self._refresh_control_prediction()
             self._compute_and_cache_nat_vent_plan()
-            await self.automation_engine.apply_classification(
+            await decide(
+                self,
+                self.automation_engine.apply_classification,
                 classification,
                 predicted_indoor=self.control_predicted_indoor(),
                 indoor_temp=self._get_indoor_temp(),
@@ -8238,11 +8279,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _async_morning_wakeup(self, now: datetime) -> None:
         """Handle morning wake-up."""
         _indoor_temp = self._get_indoor_temp()
-        await self.automation_engine.handle_morning_wakeup(indoor_temp=_indoor_temp)
+        await decide(self, self.automation_engine.handle_morning_wakeup, indoor_temp=_indoor_temp)
 
     async def _async_bedtime(self, now: datetime) -> None:
         """Handle bedtime setback."""
-        await self.automation_engine.handle_bedtime()
+        await decide(self, self.automation_engine.handle_bedtime)
 
     def _resolve_tou_schedule_state(self) -> None:
         """Resolve TOU cost-period schedule state for this cycle (Issue #786) — cheap,
@@ -8273,9 +8314,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now = dt_util.now()
         self._tou_active_cost_resolution = resolve_active_schedules(schedules, now)
         # Issue #1230 R6b: the bank's lead time (and the away/vacation depth) read the PRIMARY engine's rates.
-        thermal_model = self.control_thermal_model(
-            self.automation_engine._thermal_model if self.automation_engine else None
-        )
+        thermal_model = self.control_thermal_model(self._thermal_model if self.automation_engine else None)
         if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
             # Issue #899: split-delta precool/preheat + temporary band expansion, instead
             # of resolve_tou_phase()'s Home/Guest "bank to the comfort-band edge" behavior.
@@ -8470,7 +8509,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if now is None:
                 now = dt_util.now()
             occ = self._occupancy_mode
-            schedule = ae._resolved_comfort_band(c)
+            schedule = decide_sync(self, ae._resolved_comfort_band, c)
             bank = self._active_tou_bank(now)
             if bank is None:
                 return CurrentHold(
@@ -8631,12 +8670,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # occupancy-redirect safety net (this call site already IS the
                 # occupancy-aware away/vacation path — see
                 # apply_tou_away_vacation_precondition()'s own docstring).
-                await engine.apply_tou_away_vacation_precondition(
-                    self._current_classification, resolution.target, resolution.schedule_id, resolution.mode
+                await decide(
+                    self,
+                    engine.apply_tou_away_vacation_precondition,
+                    self._current_classification,
+                    resolution.target,
+                    resolution.schedule_id,
+                    resolution.mode,
                 )
             else:
-                await engine.apply_tou_precondition(
-                    self._current_classification, resolution.target, resolution.schedule_id
+                await decide(
+                    self,
+                    engine.apply_tou_precondition,
+                    self._current_classification,
+                    resolution.target,
+                    resolution.schedule_id,
                 )
             # Issue #1395: remember a bank write the thermostat accepted, for a device whose state shows neither a
             # single setpoint nor a range (see _thermostat_holds_tou_bank()).
@@ -9008,7 +9056,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R6b: the setback depth in the band is sized with the PRIMARY engine's rates.
         self._target_band_schedule = self._build_target_band_for(
             dt_util.now(),
-            self.control_thermal_model(self.automation_engine._thermal_model if self.automation_engine else None),
+            self.control_thermal_model(self._thermal_model if self.automation_engine else None),
         )
 
     def _compute_and_cache_nat_vent_plan(self) -> None:
@@ -9232,7 +9280,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         try:
             now = dt_util.now()
             engine = getattr(self, "automation_engine", None)
-            thermal_model = self.control_thermal_model(engine._thermal_model if engine else None)
+            thermal_model = self.control_thermal_model(self._thermal_model if engine else None)
             display = self._chart_display_band(now, thermal_model, raw_band=list(schedule))
             if not display:
                 return None, None
@@ -9410,7 +9458,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         nat_vent_just_closed = not self.automation_engine.natural_vent_active
         indoor_temp = self._get_indoor_temp()
-        result = await self.automation_engine.handle_pre_cool(
+        result = await decide(
+            self,
+            self.automation_engine.handle_pre_cool,
             indoor_temp=indoor_temp,
             nat_vent_just_closed=nat_vent_just_closed,
             modifier=_modifier,
@@ -9555,11 +9605,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._observed_extreme_warned = set()  # Issue #1015: new day, new warning latch
         # Issue #1337: the hourly forecast is not cleared here. The refetch below replaces it, and if the
         # weather service is down it keeps the still-future hours instead of dropping them at midnight.
-        # Issue #540: reset the soft-start peak-tracking mirror alongside the buffer it's
-        # derived from, so a stale "yesterday's peak" can't leak into the new day before
-        # the first post-midnight sample arrives.
-        self.automation_engine._outdoor_temp_today_peak = None
-        self.automation_engine._outdoor_temp_today_sample_count = 0
+        # Issue #540: the soft-start peak is read live from the buffer cleared above (Issue #1443),
+        # so a stale "yesterday's peak" can't leak into the new day before the first post-midnight
+        # sample arrives.
         # Issue #511: refetch immediately rather than waiting for the next 30-min
         # cycle — otherwise outdoor-temp interpolation has nothing to interpolate
         # against for up to ~30 min after every midnight reset, degrading nightly
@@ -9674,7 +9722,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             c.hvac_mode if c else "none",
                             c.windows_recommended if c else False,
                         )
-                        await self.automation_engine.handle_door_window_open(eid)
+                        await decide(self, self.automation_engine.handle_door_window_open, eid)
                         # Trigger coordinator refresh so sensor entities reflect post-evaluation state
                         self.hass.async_create_task(self.async_request_refresh())
                         if self._today_record:
@@ -9762,7 +9810,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     and self._today_record.window_physical_close_time is None
                 ):
                     self._today_record.window_physical_close_time = dt_util.now().isoformat()
-                await self.automation_engine.handle_all_doors_windows_closed()
+                await decide(self, self.automation_engine.handle_all_doors_windows_closed)
                 # Issue #489: post-decision refresh, mirroring the open path's
                 # post-handle_door_window_open refresh above — covers the real-pause-
                 # resume case (HVAC mode/temp restored, grace started), not just the
@@ -9809,15 +9857,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # can notice the sensor returning. Synchronous no-op when no episode is live.
         self.automation_engine.note_indoor_available(indoor)
         if self.automation_engine._natural_vent_active:
-            await self.automation_engine.nat_vent_temperature_check(indoor, outdoor=self._last_outdoor_temp)
+            await decide(
+                self, self.automation_engine.nat_vent_temperature_check, indoor, outdoor=self._last_outdoor_temp
+            )
         if self.automation_engine._fan_active or self.automation_engine._natural_vent_active:
-            await self.automation_engine.fan_thermostat_check(
+            await decide(
+                self,
+                self.automation_engine.fan_thermostat_check,
                 indoor=indoor,
                 outdoor=self._last_outdoor_temp,
                 trigger="tick",
             )
-        await self.automation_engine.comfort_family_temperature_check(
-            indoor, predicted_indoor=self.control_predicted_indoor()
+        await decide(
+            self,
+            self.automation_engine.comfort_family_temperature_check,
+            indoor,
+            predicted_indoor=self.control_predicted_indoor(),
         )
 
     async def _on_sleep_indoor_temp_changed(self, event: Event) -> None:
@@ -9850,7 +9905,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         if self._suppress_during_startup_coalescing("remote offset check"):
             return
-        await self.automation_engine.remote_offset_check()
+        await decide(self, self.automation_engine.remote_offset_check)
 
     async def _track_hvac_runtime_edges(self, old_state: Any, new_state: Any) -> None:
         """HVAC runtime tracking via hvac_action (preferred) or mode: on/off/glide edges of the session.
@@ -10119,7 +10174,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     old_state.state,
                     new_state.state,
                 )
-                await self.automation_engine.handle_manual_override_during_pause(
+                await decide(
+                    self,
+                    self.automation_engine.handle_manual_override_during_pause,
                     old_mode=old_state.state,
                     new_mode=new_state.state,
                     classification_mode=(
@@ -10171,10 +10228,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
-            ae._replace_thermostat_override(
-                reason="new_override_during_grace", fsm_kind=_OGFEventKind.OVERRIDE_SUPERSEDED, clear_fan=False
+            decide_sync(
+                self,
+                ae._replace_thermostat_override,
+                reason="new_override_during_grace",
+                fsm_kind=_OGFEventKind.OVERRIDE_SUPERSEDED,
+                clear_fan=False,
             )
-            self.automation_engine.handle_manual_override(
+            decide_sync(
+                self,
+                self.automation_engine.handle_manual_override,
                 old_mode=old_state.state,
                 new_mode=new_state.state,
                 classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
@@ -10257,7 +10320,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     indoor_sensors=self._read_chart_indoor_sensors(),
                     **self._read_chart_context(),
                 )
-            self.automation_engine.handle_manual_override(
+            decide_sync(
+                self,
+                self.automation_engine.handle_manual_override,
                 old_mode=old_state.state,
                 new_mode=new_state.state,
                 classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
@@ -10279,7 +10344,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _ae_347 = self.automation_engine
         _fan_ctl_347 = fan_control_enabled(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED))
         if old_action != "fan" and new_action == "fan":
-            _ae_347._observed_fan_origin_hint = (
+            _ae_347.note_observed_fan_origin(
                 "post_heat_tail"
                 if old_action in ("heating", "cooling")
                 else "thermostat_schedule"
@@ -10335,7 +10400,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 fan_mode_attr=_new_fan_mode_347,
                 hvac_action_attr=new_action,
             )
-            await _ae_347.reconcile_fan_on_startup(
+            await decide(
+                self,
+                _ae_347.reconcile_fan_on_startup,
                 indoor=self._get_indoor_temp(),
                 outdoor=self._last_outdoor_temp,
                 # Issue #423: this is the exact site that could misfire on a WHF config —
@@ -10356,7 +10423,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
             if _fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH) and not ae._natural_vent_active:
                 _LOGGER.warning("Thermostat set to off while HVAC fan was marked active — clearing stale fan state")
-                ae._fan_active = False
+                ae.clear_stale_hvac_fan_flag()
 
         # Chart_log: event-driven write when hvac_action transitions in/out of heating/cooling.
         # 30-minute polling can miss short cycles entirely — this captures the start and end
@@ -10681,7 +10748,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     new_temp,
                     new_state.state,
                 )
-                ae.handle_manual_override(
+                decide_sync(
+                    self,
+                    ae.handle_manual_override,
                     source="setpoint",
                     old_mode=old_state.state,
                     new_mode=new_state.state,
@@ -10776,12 +10845,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # (clears fan state, gates nat-vent re-activation) instead of handle_fan_manual_override()
             # (which sets the "user turned fan ON" override flag).
             if _fan_cancel_in_this_event:
-                self.automation_engine.on_fan_turned_off(
-                    fan_before=str(old_fan_mode), fan_after=str(new_fan_mode), hvac_fan=True
+                decide_sync(
+                    self,
+                    self.automation_engine.on_fan_turned_off,
+                    fan_before=str(old_fan_mode),
+                    fan_after=str(new_fan_mode),
+                    hvac_fan=True,
                 )
             else:
-                self.automation_engine.handle_fan_manual_override(
-                    fan_before=str(old_fan_mode), fan_after=str(new_fan_mode), hvac_fan=True
+                decide_sync(
+                    self,
+                    self.automation_engine.handle_fan_manual_override,
+                    fan_before=str(old_fan_mode),
+                    fan_after=str(new_fan_mode),
+                    hvac_fan=True,
                 )
 
     async def _async_command_fan_entity(self, *, on: bool) -> bool:
@@ -11101,8 +11178,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     old_state.state,
                     new_state.state,
                 )
-                self.automation_engine.handle_fan_manual_override(
-                    fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
+                decide_sync(
+                    self,
+                    self.automation_engine.handle_fan_manual_override,
+                    fan_before=str(old_state.state),
+                    fan_after=str(new_state.state),
+                    event_context_id=event_context_id,
                 )
             elif not is_on and (self.automation_engine._fan_active or self.automation_engine._fan_override_active):
                 # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
@@ -11119,8 +11200,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     old_state.state,
                     new_state.state,
                 )
-                self.automation_engine.on_fan_turned_off(
-                    fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
+                decide_sync(
+                    self,
+                    self.automation_engine.on_fan_turned_off,
+                    fan_before=str(old_state.state),
+                    fan_after=str(new_state.state),
+                    event_context_id=event_context_id,
                 )
         finally:
             self.hass.async_create_task(self.async_request_refresh())
@@ -11384,7 +11469,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _apply_fan_remote_override(self, burst: _PendingFanRemoteBurst) -> None:
         """Record a flushed remote press as a manual fan override (the pre-#1198 flush body)."""
         duration_seconds = burst.timer_hours * 3600 if burst.timer_hours is not None else None
-        self.automation_engine.handle_fan_manual_override(
+        decide_sync(
+            self,
+            self.automation_engine.handle_fan_manual_override,
             fan_before="?",
             fan_after="on",
             duration_override=duration_seconds,
@@ -11596,7 +11683,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if classification is None:
                 _LOGGER.warning("Setpoint re-assertion after fan-off: no current classification — skipping")
                 return
-            await self.automation_engine.apply_classification(
+            await decide(
+                self,
+                self.automation_engine.apply_classification,
                 classification,
                 predicted_indoor=self.control_predicted_indoor(),
                 indoor_temp=self._get_indoor_temp(),
@@ -11708,7 +11797,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             archetype_fan_running,
         )
         if archetype_fan_running and not is_hvac_compressor_active(hvac_action):
-            await ae.reconcile_fan_on_startup(
+            await decide(
+                self,
+                ae.reconcile_fan_on_startup,
                 indoor=self._get_indoor_temp(),
                 outdoor=self._last_outdoor_temp,
                 thermostat_fan_running=archetype_fan_running,
@@ -14604,7 +14695,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # away/vacation expansion the thermostat is armed with, Issue #1080) the restore, override matching
         # and the status API use; without one, the bare resolver.
         if ae is not None:
-            _armed = ae._resolved_comfort_band(c)
+            _armed = decide_sync(self, ae._resolved_comfort_band, c)
         else:
             _armed = resolve_active_band(
                 c,
@@ -14893,7 +14984,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if classification is not None:
             # Issue #1054/#1080: one resolver -- the engine's -- for every read-only surface (the
             # engine is built unconditionally in __init__, so there is no engine-less branch).
-            band = self.automation_engine._resolved_comfort_band(classification)
+            band = decide_sync(self, self.automation_engine._resolved_comfort_band, classification)
             return band.floor, band.ceiling
         return fallback_edges_without_classification(dt_util.now(), self.config)
 
@@ -15045,11 +15136,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # engine's minutes_since_equipment_ran() reads those fields (restored after restart).
             ae = getattr(self, "automation_engine", None)
             if ae is not None:
-                iso = stamp.isoformat()
-                if direction == "heat":
-                    ae._last_hvac_heating_active = iso
-                else:
-                    ae._last_hvac_cooling_active = iso
+                ae.note_equipment_ran(direction, stamp)
                 # Issue #1194 (a): the thermostat starting after an offset raise is the loop's actuation feedback.
                 ae.note_remote_offset_actuation(direction, stamp)
 
@@ -15265,7 +15352,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ae = self.automation_engine
             if res is None or c is None or ae is None:
                 return None
-            schedule = ae._resolved_comfort_band(c)
+            schedule = decide_sync(self, ae._resolved_comfort_band, c)
             hold = tou_bank_band(schedule, float(res.target), str(res.mode))
             return (float(hold.floor), float(hold.ceiling)), (float(schedule.floor), float(schedule.ceiling))
         except Exception:  # noqa: BLE001 - a score read must never break the update cycle
@@ -16585,8 +16672,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # the forecast temperatures -- the same nat-vent FSM answer the engine acts on (full gate, soft start,
                 # a fan exists, forecast-peak / thermal-floor guards, lockout, override), so this card never promises
                 # a start the engine will veto and does not miss a soft start.
-                return ae._nat_vent_start_decision(
-                    NAT_VENT_START_PREDICTION, indoor=indoor, outdoor=outdoor, at=ts
+                return decide_sync(
+                    self,
+                    ae._nat_vent_start_decision,
+                    NAT_VENT_START_PREDICTION,
+                    indoor=indoor,
+                    outdoor=outdoor,
+                    at=ts,
+                    facts_at=ts,
                 ).to_state in (NatVentLifecycleState.ACTIVE_FULL_GATE, NatVentLifecycleState.ACTIVE_SOFT_START)
 
             _nat_vent_outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
@@ -17505,7 +17598,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._ha_stopping = True
         engine = getattr(self, "automation_engine", None)
         if engine is not None:
-            engine._ha_stopping = True
+            engine.mark_ha_stopping()
         _LOGGER.info(
             "Home Assistant is stopping: Climate Advisor stops commanding and notifying (instance %s)",
             _instance_tag(self),
@@ -17584,7 +17677,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._shut_down = True
         engine = getattr(self, "automation_engine", None)
         if engine is not None:
-            engine._shut_down = True
+            engine.latch_shutdown()
         _LOGGER.info("Climate Advisor v%s shutting down (instance %s)", VERSION, _instance_tag(self))
         await super().async_shutdown()
 

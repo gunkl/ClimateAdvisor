@@ -516,7 +516,6 @@ class TestDailyRecordBriefingPreservation:
 
         ae = MagicMock()
         ae.apply_classification = AsyncMock()
-        ae._thermal_model = {}
         ae._natural_vent_active = False
         ae._fan_override_active = False
         coord.automation_engine = ae
@@ -592,7 +591,6 @@ class TestDailyRecordBriefingPreservation:
 
         ae = MagicMock()
         ae.apply_classification = AsyncMock()
-        ae._thermal_model = {}
         ae._natural_vent_active = False
         ae._fan_override_active = False
         coord.automation_engine = ae

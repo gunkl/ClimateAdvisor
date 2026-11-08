@@ -1198,7 +1198,7 @@ class TestSensorOpenedEventPayloadNatVent:
         # Inject outdoor temperature directly (normally set by coordinator)
         engine._last_outdoor_temp = outdoor_temp
         # No hourly forecast → skip forecast guard
-        engine._hourly_forecast_temps = []
+        engine.inputs.hourly_forecast = []
         return engine
 
     def test_sensor_opened_nat_vent_includes_hvac_and_fan_mode(self):

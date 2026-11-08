@@ -113,7 +113,7 @@ def _make_engine(
         notify_service=config["notify_service"],
         config=config,
     )
-    engine._thermal_model = {}
+    engine.inputs.thermal = {}
     engine._test_state = state
     return engine
 
@@ -520,7 +520,7 @@ class TestOdeGuardSkipsWhileSelectorGuardsFloor:
     def _engine(self, indoor: float, mode: str = "off") -> AutomationEngine:
         engine = _make_engine(indoor=indoor, mode=mode, comfort_heat=68.0, comfort_cool=74.0)
         engine._last_outdoor_temp = 76.0
-        engine._thermal_model = {
+        engine.inputs.thermal = {
             "k_passive": -0.05,
             "confidence_k_passive": "medium",
             "k_active_cool": None,
@@ -895,7 +895,7 @@ class TestOdeGuardUsesTheGuardsIndoor:
     def test_live_indoor_none_but_guard_indoor_in_the_heat_margin_skips_the_cool_write(self):
         engine = _make_engine(indoor=None, mode="off", comfort_heat=68.0, comfort_cool=74.0)
         engine._last_outdoor_temp = 76.0
-        engine._thermal_model = {
+        engine.inputs.thermal = {
             "k_passive": -0.05,
             "confidence_k_passive": "medium",
             "k_active_cool": None,

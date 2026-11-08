@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from custom_components.climate_advisor.api import ClimateAdvisorAutomationStateView
+from custom_components.climate_advisor.engine_inputs import TouAvWindow  # noqa: E402
 
 from .test_api import _make_view_request, _simulate_status_get
 from .test_nat_vent_dashboard_target import _make_nat_vent_coord_stub
@@ -84,7 +85,7 @@ class TestPromiseSummaryThroughTheRealApi:
         coord._occupancy_mode = "home"
         coord.current_classification = None
         ae = MagicMock()
-        ae._tou_av_expansion_f = 0.0
+        ae._active_tou_av_window.return_value = TouAvWindow()
         ae._manual_override_active = False
         ae._override_confirm_pending = False
         ae._fan_override_active = False

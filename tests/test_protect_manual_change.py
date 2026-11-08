@@ -93,7 +93,7 @@ def _engine(
     engine._test_state.attributes["temperature"] = setpoint
     engine._current_classification = _classification(day)
     engine._last_outdoor_temp = outdoor
-    engine._hourly_forecast_temps = []
+    engine.inputs.hourly_forecast = []
     engine._window_open = window_open
     engine._sensor_check_callback = lambda: engine._window_open
     engine._sensor_debounce_pending_callback = lambda: False

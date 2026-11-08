@@ -208,6 +208,7 @@ from .economizer_lifecycle import (
     EconomizerLifecycleState,
     derive_economizer_lifecycle_state,
 )
+from .engine_inputs import EMPTY_ENGINE_INPUTS, EngineFacts, EngineInputs, StaticEngineInputs, TouAvWindow
 from .fan_drift_reconciliation import FanDriftInputs, FanDriftOutcome, decide_fan_drift_reconciliation
 from .fan_lifecycle import (
     FanCyclingState,
@@ -810,6 +811,13 @@ def _band_num(value_f: float, unit: str) -> str:
 # -- a cycle's away/vacation reapply, a timer -- that calls the same handler while this one awaits never sees it).
 _OCCUPANCY_CHANGE: contextvars.ContextVar[Any] = contextvars.ContextVar("ca_occupancy_change", default=None)
 
+# Issue #1443: the coordinator-owned facts PASSED IN for the decision call running in THIS task, as (engine, facts).
+# Set only for the duration of ``AutomationEngine.decision_facts()`` (``engine_inputs.decide``); never stored on
+# the engine. A context variable, so a concurrent coroutine never reads another call's snapshot.
+_DECISION_FACTS: contextvars.ContextVar[tuple[Any, EngineFacts] | None] = contextvars.ContextVar(
+    "ca_decision_facts", default=None
+)
+
 
 @dataclass(frozen=True)
 class OccupancyBankWrite:
@@ -1214,7 +1222,7 @@ def active_thresholds_for(coordinator: Any, now: datetime | None = None) -> dict
             config,
             occupancy_mode=coordinator._occupancy_mode,
             now=now,
-            tou_expansion_f=(ae._tou_av_expansion_f if ae is not None else 0.0),
+            tou_expansion_f=(ae._active_tou_av_window().expansion_f if ae is not None else 0.0),
         )
         # Issue #1371: a held overnight pre-cool is what the thermostat is armed with, so the status API and the
         # threshold sensors quote it (the same substitution apply_classification() makes).
@@ -1825,6 +1833,7 @@ class AutomationEngine:
         *,
         callbacks: AutomationEngineCallbacks | None = None,
         role: str = "production",
+        inputs: EngineInputs | None = None,
     ) -> None:
         """Initialize the automation engine."""
         self.hass = hass
@@ -2290,12 +2299,8 @@ class AutomationEngine:
         self._nat_vent_soft_start: bool = False
         # Issue #1142: one 'close the windows' push per blower ventilation session.
         self._close_windows_advised: bool = False
-        # Today's observed outdoor peak-so-far and sample count, mirrored from the
-        # coordinator's _outdoor_temp_history (single source of truth — see
-        # coordinator._apply_outdoor_temp()). Not serialized — rebuilt from the
-        # coordinator's own persisted/restored history within one update cycle.
-        self._outdoor_temp_today_peak: float | None = None
-        self._outdoor_temp_today_sample_count: int = 0
+        # Today's observed outdoor peak-so-far and sample count: read live from the coordinator's
+        # _outdoor_temp_history through ``self._inputs`` (Issue #1443; no engine copy).
         # Issue #757 Phase 6 Step 5 correction: the nat-vent lifecycle FSM
         # (nat_vent_fsm.py, Issue #594 Phase R) is now unconditionally authoritative
         # for all 10 real nat-vent trigger sites — _natvent_fsm_authoritative has
@@ -2537,30 +2542,27 @@ class AutomationEngine:
         # Welcome home notification debounce (Issue #59)
         self._last_welcome_home_notified: datetime | None = None
 
-        # Thermal model — set by coordinator before apply_classification()
-        self._thermal_model: dict = {}
+        # Issue #1443: the coordinator-owned facts the decisions read (thermal model, forecast peak, today's outdoor
+        # peak, the Away/Vacation TOU window) are PASSED IN by the coordinator for each decision call
+        # (decision_facts / _facts); the engine holds no copy. ``_inputs`` is only the facts source for a decision
+        # with no coordinator call frame (an engine timer, a read-only reader) and the thermal-model accessor. A bare
+        # engine (headless engine-only harness, unit tests) gets a StaticEngineInputs its builder owns.
+        self._inputs: EngineInputs = inputs if inputs is not None else StaticEngineInputs()
         # Issue #1230 R6b: the coordinator hands the engine a live provider of the thermal-model scalars the
         # prediction-dependent decisions read (the primary prediction engine's; see ``_control_model``). None on a bare
-        # engine: the decisions then read ``_thermal_model`` itself.
+        # engine: the decisions then read the provider's ``thermal_model()`` itself.
         self._control_model_provider: Callable[[dict | None], dict | None] | None = None
 
-        # Issue #899: away/vacation TOU pre-conditioning — live state pushed by the
-        # coordinator each cycle (_resolve_tou_schedule_state()), read by
-        # _apply_occupancy_away_vacation_decision() so ANY call to
+        # Issue #899: away/vacation TOU pre-conditioning — the coordinator's live window
+        # (_sync_tou_away_vacation_state(), each cycle), passed in with each decision's facts
+        # (Issue #1443) and read by _apply_occupancy_away_vacation_decision() so ANY call to
         # handle_occupancy_away()/handle_occupancy_vacation() (the regular 30-min cycle,
         # the precise T_start guard timer, or any other trigger) picks up the currently
         # active TOU window's band expansion, not just the trigger that happened to fire.
-        # All three are 0.0/None outside an active away/vacation TOU window.
-        self._tou_av_expansion_f: float = 0.0
-        self._tou_av_active_schedule_id: str | None = None
-        self._tou_av_precondition_target: float | None = None
         # Dedup for the completed-vs-stopped-early observability log — only logged once per
-        # window (the first call that observes a nonzero _tou_av_expansion_f for a given
+        # window (the first call that observes a nonzero TOU expansion for a given
         # schedule_id), not every cycle the window stays active.
         self._tou_av_window_logged_schedule_id: str | None = None
-
-        # Hourly forecast temps — injected by coordinator on each 30-min poll
-        self._hourly_forecast_temps: list[dict] = []
 
         # Occupancy mode — synced by coordinator (Issue #85)
         self._occupancy_mode: str = OCCUPANCY_HOME
@@ -2571,6 +2573,86 @@ class AutomationEngine:
         # `self._x_callback: Any | None = None` assignments above.
         if callbacks is not None:
             self.set_callbacks(callbacks)
+
+    @property
+    def inputs(self) -> EngineInputs:
+        """The facts source (snapshot builder) and thermal-model accessor (Issue #1443)."""
+        return getattr(self, "_inputs", None) or EMPTY_ENGINE_INPUTS  # getattr: tests build engines via __new__
+
+    @contextlib.contextmanager
+    def decision_facts(self, facts: EngineFacts) -> Iterator[None]:
+        """Issue #1443: the coordinator passes its facts in for the decision call made inside this ``with`` body.
+
+        Only for this task and this body (a context variable); nothing is kept on the engine afterwards.
+        """
+        token = _DECISION_FACTS.set((self, facts))
+        try:
+            yield
+        finally:
+            _DECISION_FACTS.reset(token)
+
+    def _facts(self, now: datetime) -> EngineFacts:
+        """The facts for a decision at ``now``: the snapshot passed in for this call, else a fresh one (Issue #1443).
+
+        A fresh snapshot is built by the source only where no coordinator call passed one in (an engine-internal
+        timer, a read-only reader) or the passed one is not for this moment (older than FACTS_MAX_AGE: a timer
+        that fires later inside the context that captured it). Never cached.
+        """
+        passed = _DECISION_FACTS.get()
+        if passed is not None and passed[0] is self and passed[1].fresh_for(now):
+            return passed[1]
+        return self.inputs.build_facts(now)
+
+    def _active_tou_av_window(self) -> TouAvWindow:
+        """The active Away/Vacation TOU window (Issue #899), as passed in for this decision (Issue #1443)."""
+        return self._facts(dt_util.now()).tou_av
+
+    # ------------------------------------------------------------------
+    # Issue #1443: engine-owned state the coordinator reports into. The coordinator decides WHEN (an observation or a
+    # correction); the engine performs the write, so no module outside automation.py assigns an engine private.
+    # ------------------------------------------------------------------
+
+    def note_equipment_ran(self, direction: str, stamp: datetime) -> None:
+        """The thermostat reported heating/cooling at ``stamp`` (event grain, #1073 S4): the persisted last-ran."""
+        iso = stamp.isoformat()
+        if direction == "heat":
+            self._last_hvac_heating_active = iso
+        else:
+            self._last_hvac_cooling_active = iso
+
+    def note_cycle_activity(self, hvac_action: Any, now: datetime) -> None:
+        """The 30-min cycle's hvac_action read (#835) plus this engine's own fan/nat-vent flags (#843) at ``now``."""
+        iso = now.isoformat()
+        _hvac_action_lower = str(hvac_action).lower()
+        if _hvac_action_lower == "heating":
+            self._last_hvac_heating_active = iso
+        elif _hvac_action_lower == "cooling":
+            self._last_hvac_cooling_active = iso
+        if self._fan_active:
+            self._last_fan_active = iso
+        if self._natural_vent_active:
+            self._last_natvent_active = iso
+
+    def note_observed_fan_origin(self, hint: str) -> None:
+        """Why an uncommanded thermostat blower just started (read by ``_note_observed_fan_started``)."""
+        self._observed_fan_origin_hint = hint
+
+    def clear_stale_fan_ownership(self) -> None:
+        """The coordinator's self-heal found the ownership flag with the blower physically off and nothing behind it."""
+        self._fan_active = False
+        self._fan_on_since = None
+
+    def clear_stale_hvac_fan_flag(self) -> None:
+        """The thermostat went fully off while an HVAC-fan (not nat-vent) session was still marked active."""
+        self._fan_active = False
+
+    def mark_ha_stopping(self) -> None:
+        """EVENT_HOMEASSISTANT_STOP (#1183): every refusal site of the #1102 latch skips from now on."""
+        self._ha_stopping = True
+
+    def latch_shutdown(self) -> None:
+        """The coordinator is shutting down (#1102): latch before its awaited saves (``cleanup()`` latches too)."""
+        self._shut_down = True
 
     def set_callbacks(self, callbacks: AutomationEngineCallbacks) -> None:
         """(Re-)wire the 9 coordinator callback bundle onto this engine.
@@ -7059,7 +7141,7 @@ class AutomationEngine:
 
     def _remote_swing_f(self, mode: str) -> float:
         """The hysteresis at the remote sensor: the learned swing for the mode, else the default (read-only)."""
-        value = (self._thermal_model or {}).get("swing_heat_f" if mode == "heat" else "swing_cool_f")
+        value = self.inputs.thermal_model().get("swing_heat_f" if mode == "heat" else "swing_cool_f")
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 < value < float("inf"):
             return THERMAL_SWING_DEFAULT_F
         return float(value)
@@ -7520,7 +7602,7 @@ class AutomationEngine:
                 now=dt_util.now(),
                 # Issue #1080: handle_occupancy_away/vacation arm the TOU-expanded band, so the
                 # read-only readers (status, incidents, override matching) must resolve it too.
-                tou_expansion_f=getattr(self, "_tou_av_expansion_f", 0.0),
+                tou_expansion_f=self._active_tou_av_window().expansion_f,
             )
             held = self._hold_pre_cool_band(band)
             return held if isinstance(held, ComfortBand) else band
@@ -8407,7 +8489,7 @@ class AutomationEngine:
                             {
                                 "outdoor": outdoor,
                                 "indoor": indoor,
-                                "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                "outdoor_today_peak": self._facts(dt_util.now()).outdoor_today_peak,
                                 "comfort_heat": comfort_heat,
                                 "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                             },
@@ -8870,7 +8952,7 @@ class AutomationEngine:
                         " past today's peak %.1f°F by >= %.1f°F, indoor > comfort_heat %.1f°F",
                         outdoor,
                         _indoor,
-                        self._outdoor_temp_today_peak or 0.0,
+                        self._facts(dt_util.now()).outdoor_today_peak or 0.0,
                         PEAK_DECLINE_MARGIN_F,
                         _comfort_heat,
                     )
@@ -8895,7 +8977,7 @@ class AutomationEngine:
                                 {
                                     "outdoor": outdoor,
                                     "indoor": _indoor,
-                                    "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                    "outdoor_today_peak": self._facts(dt_util.now()).outdoor_today_peak,
                                     "comfort_heat": _comfort_heat,
                                     "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                                 },
@@ -9424,7 +9506,7 @@ class AutomationEngine:
                         " past today's peak %.1f°F by >= %.1f°F",
                         outdoor,
                         indoor,
-                        self._outdoor_temp_today_peak or 0.0,
+                        self._facts(dt_util.now()).outdoor_today_peak or 0.0,
                         PEAK_DECLINE_MARGIN_F,
                     )
                     if self._emit_event_callback:
@@ -9433,7 +9515,7 @@ class AutomationEngine:
                             {
                                 "outdoor": outdoor,
                                 "indoor": indoor,
-                                "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                "outdoor_today_peak": self._facts(dt_util.now()).outdoor_today_peak,
                                 "comfort_heat": comfort_heat,
                                 "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                             },
@@ -12038,7 +12120,7 @@ class AutomationEngine:
                             {
                                 "outdoor": outdoor,
                                 "indoor": indoor,
-                                "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                "outdoor_today_peak": self._facts(dt_util.now()).outdoor_today_peak,
                                 "comfort_heat": self._nat_vent_reactivation_floor(),
                                 "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                             },
@@ -14778,8 +14860,8 @@ class AutomationEngine:
             fan_mode=str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)),
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
             occupancy_mode=self._occupancy_mode,
-            outdoor_today_peak=self._outdoor_temp_today_peak,
-            outdoor_sample_count=self._outdoor_temp_today_sample_count,
+            outdoor_today_peak=self._facts(now).outdoor_today_peak,
+            outdoor_sample_count=self._facts(now).outdoor_today_sample_count,
             peak_decline_margin=PEAK_DECLINE_MARGIN_F,
             paused_by_door=_paused_by_door,
             outdoor_exit_time=self._nat_vent_outdoor_exit_time,
@@ -14911,32 +14993,21 @@ class AutomationEngine:
     def _forecast_peak_next_2h(self, now: datetime) -> float | None:
         """Highest hourly-forecast temperature in the next 2 hours, or None (Issue #1138).
 
-        The shell half of the forecast-peak start guard: clock and datetime parsing live here, the
-        comparison lives in ``nat_vent_gate.decide_nat_vent_start_veto``.
+        Issue #1443: the engine never sees the forecast list. The coordinator computes the peak
+        (``engine_inputs.forecast_peak_next_2h``) into the facts it passes in for this decision, and the engine hands
+        the number to ``nat_vent_gate.decide_nat_vent_start_veto`` as ``forecast_peak_2h``.
         """
-        hourly = self._hourly_forecast_temps or []
-        if not hourly:
-            return None
-        now_dt = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
-        temps = [
-            h["temperature"]
-            for h in hourly
-            if h.get("temperature") is not None
-            and (parsed := _parse_forecast_dt(h.get("datetime"))) is not None
-            and now_dt
-            < (parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC))
-            <= now_dt + timedelta(hours=2)
-        ]
-        return max(temps) if temps else None
+        return self._facts(now).forecast_peak_2h
 
     def _control_model(self) -> dict:
         """The thermal-model dict the prediction-dependent decisions read (ceiling guard, nat-vent start veto).
 
         Occupant view: these guards act on the rates and confidence of the prediction engine chosen in Settings, and on
         a fresh install's defaults while that engine has not finished learning. The engine never names an engine: it
-        asks the provider the coordinator installed. Without one (a bare engine) it is ``_thermal_model`` unchanged.
+        asks the provider the coordinator installed. Without one (a bare engine) it is the inputs' ``thermal_model()``
+        unchanged (Issue #1443: the coordinator owns the model; the engine holds no copy).
         """
-        base = self._thermal_model or {}
+        base = self.inputs.thermal_model()
         provider = getattr(self, "_control_model_provider", None)  # getattr: tests build engines via __new__
         if provider is None:
             return base
@@ -15978,8 +16049,8 @@ class AutomationEngine:
             comfort_heat=comfort_heat,
             comfort_cool=comfort_cool,
             fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
-            outdoor_today_peak=self._outdoor_temp_today_peak,
-            outdoor_sample_count=self._outdoor_temp_today_sample_count,
+            outdoor_today_peak=self._facts(dt_util.now()).outdoor_today_peak,
+            outdoor_sample_count=self._facts(dt_util.now()).outdoor_today_sample_count,
             peak_decline_margin=PEAK_DECLINE_MARGIN_F,
             full_gate_active=full_gate_active,
         )
@@ -16600,7 +16671,7 @@ class AutomationEngine:
     def _model_confidence_for_log(self) -> str | None:
         """Thermal-model confidence label for the hold LOG only (S7). The guard itself never reads it (R7)."""
         try:
-            conf = (getattr(self, "_thermal_model", None) or {}).get("confidence")
+            conf = self.inputs.thermal_model().get("confidence")
         except Exception:  # noqa: BLE001 - logging aid only
             return None
         return conf if conf in ("none", "low", "medium", "high") else None
@@ -17413,7 +17484,8 @@ class AutomationEngine:
 
         c = self._current_classification
         _occ_mode_const = OCCUPANCY_AWAY if mode == "away" else OCCUPANCY_VACATION
-        _tou_expansion = self._tou_av_expansion_f
+        _tou_av = self._active_tou_av_window()
+        _tou_expansion = _tou_av.expansion_f
         _band = select_comfort_band(
             c,
             self.config,
@@ -17428,9 +17500,9 @@ class AutomationEngine:
         # regular 30-min cycle that first observes the TOU window as active. Logged once
         # per window (dedup via _tou_av_window_logged_schedule_id), not every cycle the
         # window stays active.
-        if _tou_expansion and self._tou_av_active_schedule_id != self._tou_av_window_logged_schedule_id:
-            self._tou_av_window_logged_schedule_id = self._tou_av_active_schedule_id
-            _target = self._tou_av_precondition_target
+        if _tou_expansion and _tou_av.schedule_id != self._tou_av_window_logged_schedule_id:
+            self._tou_av_window_logged_schedule_id = _tou_av.schedule_id
+            _target = _tou_av.precondition_target
             _indoor = self._get_indoor_temp_f()
             if _target is not None and _indoor is not None:
                 _reached = (c.hvac_mode == "cool" and _indoor <= _target) or (

@@ -93,7 +93,7 @@ def _make_engine(
     engine._whf_safety_snapshot_callback = lambda: WhfSafetySnapshot(
         fan_on=None, fan_on_for_s=None, sensors=tuple(SensorReading(is_open=sensor_open) for _ in sensors or [])
     )
-    engine._thermal_model = {"k_passive": -0.5, "confidence_k_passive": "high", "k_active_cool": -2.0}
+    engine.inputs.thermal = {"k_passive": -0.5, "confidence_k_passive": "high", "k_active_cool": -2.0}
     engine._natural_vent_active = False
     engine._last_outdoor_temp = 90.0
     engine._get_indoor_temp_f = lambda: 74.0

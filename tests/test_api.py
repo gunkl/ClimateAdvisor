@@ -37,6 +37,7 @@ from custom_components.climate_advisor.const import (
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
 )
+from custom_components.climate_advisor.engine_inputs import TouAvWindow  # noqa: E402
 from custom_components.climate_advisor.learning import DailyRecord
 
 
@@ -544,7 +545,7 @@ def _status_get_with_climate_state(
     else:
         coord.current_classification = classification if classification is not None else _make_classification()
     ae = MagicMock()
-    ae._tou_av_expansion_f = tou_expansion_f
+    ae._active_tou_av_window.return_value = TouAvWindow(expansion_f=tou_expansion_f)
     ae._manual_override_active = False
     ae._override_confirm_pending = False
     ae._fan_override_active = False
@@ -730,7 +731,7 @@ class TestCATargetAndNatVentCelsiusConversion:
             else {"nat_vent_target": None, "nat_vent_on_threshold": None, "nat_vent_off_threshold": None}
         )
         ae = MagicMock()
-        ae._tou_av_expansion_f = 0.0
+        ae._active_tou_av_window.return_value = TouAvWindow()
         ae._manual_override_active = False
         ae._override_confirm_pending = False
         ae._fan_override_active = False

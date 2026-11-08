@@ -292,7 +292,7 @@ def _set_thermal_model(
     k_active_cool: float | None = None,
     bridge: bool = False,
 ) -> None:
-    engine._thermal_model = {
+    engine.inputs.thermal = {
         "k_passive": k_passive,
         "confidence_k_passive": conf,
         "k_active_cool": k_active_cool,
@@ -525,7 +525,7 @@ class TestCeilingGuardSkips:
         """No calibrated model (k_passive=None) → guard skips."""
         engine = _make_cg_engine(comfort_cool=74.0, indoor_temp=75.0)
         engine._last_outdoor_temp = 78.0
-        engine._thermal_model = {}  # no model
+        engine.inputs.thermal = {}  # no model
 
         now = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
         curve = _make_predicted_indoor(start_hour_utc=10, temps=[73.0, 74.5, 76.0])

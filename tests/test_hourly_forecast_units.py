@@ -138,7 +138,7 @@ class TestGetHourlyForecastDataNormalisation:
 
 
 # ---------------------------------------------------------------------------
-# b. _refresh_hourly_forecast mirrors to the engine
+# b. _refresh_hourly_forecast sets the coordinator's list (Issue #1443: the engine holds no copy)
 # ---------------------------------------------------------------------------
 
 
@@ -147,10 +147,8 @@ class TestRefreshHourlyForecast:
     def test_sets_coordinator_and_engine_to_same_normalised_list(self, unit):
         entries = [{"datetime": "a", "temperature": _native(20.0, unit)}]
         coord = _make_pipeline_coord(unit, entries)
-        coord.automation_engine._hourly_forecast_temps = None
         asyncio.run(coord._refresh_hourly_forecast())
         assert coord._hourly_forecast_temps[0]["temperature"] == pytest.approx(68.0)
-        assert coord.automation_engine._hourly_forecast_temps is coord._hourly_forecast_temps
 
     def test_calls_get_hourly_forecast_data(self):
         cls = _get_coordinator_class()
@@ -159,7 +157,7 @@ class TestRefreshHourlyForecast:
         coord._refresh_hourly_forecast = types.MethodType(cls._refresh_hourly_forecast, coord)
         asyncio.run(coord._refresh_hourly_forecast())
         coord._get_hourly_forecast_data.assert_awaited_once()
-        assert coord.automation_engine._hourly_forecast_temps == [{"temperature": 1.0}]
+        assert coord._hourly_forecast_temps == [{"temperature": 1.0}]
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +259,7 @@ class TestNatVentForecastGuardUnits:
         engine._last_outdoor_temp = 68.0
         engine._natural_vent_active = False
         engine._fan_override_active = False
-        engine._hourly_forecast_temps = coord.automation_engine._hourly_forecast_temps
+        engine.inputs.hourly_forecast = coord._hourly_forecast_temps
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
         now_aware = datetime(2026, 4, 20, 10, 0, 0, tzinfo=UTC)
@@ -306,7 +304,7 @@ class TestAllRefreshSitesUseHelper:
         lines = [ln.strip() for ln in src.splitlines() if "self._hourly_forecast_temps =" in ln]
         # Issue #1337: the helper assigns in two branches (a fresh fetch, or the kept forecast during an
         # outage); every refresh assignment must still be inside it. The one other site is restoring the kept
-        # forecast from saved state at start-up, which mirrors to the engine itself.
+        # forecast from saved state at start-up. Issue #1443: neither pushes a copy to the engine.
         cls = _get_coordinator_class()
         helper_src = inspect.getsource(cls._refresh_hourly_forecast)
         helper_lines = [ln.strip() for ln in helper_src.splitlines() if "self._hourly_forecast_temps =" in ln]
@@ -314,7 +312,8 @@ class TestAllRefreshSitesUseHelper:
         assert sorted(lines) == sorted([*helper_lines, restore_line]), lines
         assert "self._hourly_forecast_temps = fetched" in helper_lines
         restore_src = inspect.getsource(cls.async_restore_state)
-        assert "self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps" in restore_src
+        assert "automation_engine._hourly_forecast_temps" not in restore_src
+        assert "automation_engine._hourly_forecast_temps" not in helper_src
 
 
 # ---------------------------------------------------------------------------

@@ -11,16 +11,17 @@ on:
       - 0.9.x
 
 jobs:
-  validate-and-test:
+  # The checks that used to run serially in validate-and-test now run as parallel jobs; validate-and-test is the
+  # gate that collects them, so branch protection keeps requiring one unchanged check name.
+  lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0  # the isolated-file step diffs against origin/main
 
       - name: Set up uv (uv reads the Python version from .python-version)
         uses: astral-sh/setup-uv@v10.3.3
@@ -37,20 +38,70 @@ jobs:
       - name: Check formatting (ruff)
         run: uv run --locked --only-group test ruff format --check .
 
-      - name: Run unit tests
+  # The unit tier in round-robin slices (CA_UNIT_SHARD, tests/conftest.py): one serial job took 8-14 min.
+  # To change the slice count, change the matrix list AND the "/4" in CA_UNIT_SHARD together.
+  unit:
+    name: unit (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Run unit tests (slice ${{ matrix.shard }} of 4)
         run: python3 scripts/test.py unit
         env:
           CA_UNIT_WORKERS: "4"
+          CA_UNIT_SHARD: "${{ matrix.shard }}/4"
 
-      # Issue #1186: each changed test file must also pass ALONE (order-dependence guard).
-      # No-op when no tests/test_*.py changed (e.g. a push to main or 0.9.x). Diffs against the PR's base branch.
-      # Workers split one file's tests, never mix in another file: every xdist worker collects only that
-      # file, so a file that passes only because another file ran first still fails here. Serial, a PR
-      # touching tests/test_sim_generator.py paid ~6 min for that one file.
+  # Issue #1186: each changed test file must also pass ALONE (order-dependence guard).
+  # No-op when no tests/test_*.py changed (e.g. a push to main).
+  # Workers split one file's tests, never mix in another file: every xdist worker collects only that
+  # file, so a file that passes only because another file ran first still fails here. Serial, a PR
+  # touching tests/test_sim_generator.py paid ~6 min for that one file.
+  isolated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # diffs against origin/main
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.3.3
+
       - name: Run changed unit test files in isolation
         run: python3 scripts/test_changed_isolated.py --base "origin/${{ github.base_ref || github.ref_name }}" --strict
         env:
           CA_UNIT_WORKERS: "4"
+
+  validate-and-test:
+    if: always()
+    needs: [lint, unit, isolated]
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Every lint, unit slice and isolation job passed
+        run: |
+          echo 'lint=${{ needs.lint.result }} unit=${{ needs.unit.result }} isolated=${{ needs.isolated.result }}'
+          test '${{ needs.lint.result }}' = success
+          test '${{ needs.unit.result }}' = success
+          test '${{ needs.isolated.result }}' = success
 
   # Real Home Assistant tier (Issue #1102 follow-up S1). Its own job and its own
   # environment: tests/ stubs homeassistant for the whole process, and this plugin

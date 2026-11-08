@@ -35,7 +35,7 @@ def _build(*, classified: bool = True):
         climate_attributes={"current_temperature": 69, "temperature": 68},
     )
     coord._hourly_forecast_temps = _hourly(scheduler.now())
-    coord.automation_engine._thermal_model = {
+    coord._thermal_model = {
         "k_passive": -0.03,
         "k_active_heat": 5.5,
         "k_active_cool": -6.0,

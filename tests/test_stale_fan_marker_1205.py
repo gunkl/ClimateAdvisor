@@ -78,7 +78,7 @@ class _Home:
         engine = _make_engine(indoor=72.0, mode="cool", **{CONF_FAN_MODE: fan_mode}, **config)
         engine._test_state.attributes["fan_modes"] = ["auto", "on"]
         engine._last_outdoor_temp = 65.0  # mild day: outdoor < indoor, plain nat-vent entry gate satisfied
-        engine._hourly_forecast_temps = []
+        engine.inputs.hourly_forecast = []
         engine._current_classification = _classification("mild")
         self.window_open = True
         engine._sensor_check_callback = lambda: self.window_open
@@ -1939,7 +1939,10 @@ def test_fix_d_call_site_does_not_ask_to_clear_the_fan_run():
         encoding="utf-8"
     )
     assert "clear_fan=True" not in src
-    assert "fsm_kind=_OGFEventKind.OVERRIDE_SUPERSEDED, clear_fan=False" in src
+    import re  # noqa: PLC0415
+
+    # the keywords may sit on separate lines since the call runs through decide_sync (Issue #1443)
+    assert re.search(r"fsm_kind=_OGFEventKind\.OVERRIDE_SUPERSEDED,\s*clear_fan=False", src)
 
 
 @pytest.mark.parametrize("fan_mode", _MODES)

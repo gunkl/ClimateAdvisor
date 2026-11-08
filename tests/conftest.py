@@ -179,6 +179,44 @@ def _fail_missing_dep(report, reason: str) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# CI sharding: ``--ca-shard K/N`` keeps every Nth collected test, starting at the Kth (1-based)
+# ---------------------------------------------------------------------------
+# CI runs the unit tier as N parallel jobs (``CA_UNIT_SHARD=K/N``, which scripts/test.py turns into this option).
+# Dealing tests round-robin in collection order spreads each slow file (test_sim_generator holds most of the
+# runtime) over every shard instead of loading one shard with it, and needs no stored durations to keep in sync.
+# Collection order is deterministic, so the N shards partition the suite exactly, and xdist workers inherit the
+# option, so every worker of one shard selects the same tests. An option, not the environment variable: tests that
+# start a nested pytest run (test_promise_skip_guard) inherit the environment and would shard that run too.
+def pytest_addoption(parser):
+    parser.addoption("--ca-shard", default=None, metavar="K/N", help="run only the Kth of N round-robin slices")
+
+
+def _unit_shard(config) -> tuple[int, int] | None:
+    raw = (config.getoption("--ca-shard") or "").strip()
+    if not raw:
+        return None
+    k, _, n = raw.partition("/")
+    try:
+        shard, total = int(k), int(n)
+    except ValueError:
+        shard, total = 0, 0
+    if not 1 <= shard <= total:
+        raise pytest.UsageError(f"--ca-shard must be K/N with 1 <= K <= N, got {raw!r}")
+    return shard, total
+
+
+def pytest_collection_modifyitems(config, items):
+    if (spec := _unit_shard(config)) is None:
+        return
+    shard, total = spec
+    keep = [item for i, item in enumerate(items) if i % total == shard - 1]
+    drop = [item for i, item in enumerate(items) if i % total != shard - 1]
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+    items[:] = keep
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield

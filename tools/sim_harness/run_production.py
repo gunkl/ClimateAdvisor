@@ -419,6 +419,10 @@ class FakeHassSession:
                 raise
             engine = coordinator.automation_engine
         else:
+            # Issue #1443: a bare engine has no coordinator, so the scenario owns the facts the engine reads (its
+            # thermal model and hourly forecast; see "Optional ODE inputs" below). Handed over at construction.
+            from custom_components.climate_advisor.engine_inputs import StaticEngineInputs  # noqa: PLC0415
+
             engine, fake_hass, scheduler, event_log = build_headless_engine(
                 config=merged_config,
                 climate_entity=climate_entity,
@@ -426,6 +430,12 @@ class FakeHassSession:
                 start_time=start_dt,
                 role=role,
                 dry_run=dry_run,
+                inputs=StaticEngineInputs(
+                    thermal=scenario["thermal_model"] if isinstance(scenario.get("thermal_model"), dict) else {},
+                    hourly_forecast=(
+                        scenario["hourly_forecast"] if isinstance(scenario.get("hourly_forecast"), list) else []
+                    ),
+                ),
             )
 
         # --- Issue #1048: opt-in thermostat quirk (scenario config "thermostat_quirk") ---
@@ -482,20 +492,18 @@ class FakeHassSession:
         #                       "k_active_heat": ..., "k_active_cool": ..., "k_vent": ...,
         #                       "k_solar": ...}
         #   "hourly_forecast": list of {"datetime": ISO8601, "temperature": float}
-        if "thermal_model" in scenario and isinstance(scenario["thermal_model"], dict):
-            engine._thermal_model = scenario["thermal_model"]
-            if coordinator is not None:
-                pin_scenario_thermal_model(coordinator, scenario["thermal_model"])
+        # Issue #1443: in coordinator mode they are seeded into the COORDINATOR, the single owner production reads
+        # them from (the coordinator passes them in at each engine decision); a bare engine got them at construction.
+        if "thermal_model" in scenario and isinstance(scenario["thermal_model"], dict) and coordinator is not None:
+            coordinator._thermal_model = scenario["thermal_model"]
+            pin_scenario_thermal_model(coordinator, scenario["thermal_model"])
         # Issue #1230 R6b: ``v4_model`` is a compact spec of the zone's FITTED v4 model (see v4_model_from_spec). The
         # primary engine (``config.primary_engine``, harness default v3) reads it for the decisions' rates and path.
         if "v4_model" in scenario and isinstance(scenario["v4_model"], dict) and coordinator is not None:
             pin_scenario_v4_model(coordinator, scenario["v4_model"])
-        if "hourly_forecast" in scenario and isinstance(scenario["hourly_forecast"], list):
-            engine._hourly_forecast_temps = scenario["hourly_forecast"]
-            if coordinator is not None:
-                # Production's coordinator owns the forecast and pushes it to the engine
-                # (_refresh_hourly_forecast); keep both copies identical.
-                coordinator._hourly_forecast_temps = scenario["hourly_forecast"]
+        if "hourly_forecast" in scenario and isinstance(scenario["hourly_forecast"], list) and coordinator is not None:
+            # Production's coordinator owns the forecast (_refresh_hourly_forecast); the engine holds no copy.
+            coordinator._hourly_forecast_temps = scenario["hourly_forecast"]
 
         # Issue #1310: a passive copy of each day record production finalizes (_async_end_of_day ->
         # learning.record_day), keyed by date, so a scenario can assert the day's runtime split with

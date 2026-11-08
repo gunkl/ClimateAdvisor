@@ -53,7 +53,6 @@ class TestHourlyForecastKeptThroughOutage:
         assert times[0] == _NOW - timedelta(hours=1)  # one point behind now kept for interpolation
         assert times[-1] == _NOW + timedelta(hours=47)
         assert len(times) == 49
-        assert coord.automation_engine._hourly_forecast_temps is coord._hourly_forecast_temps
 
     def test_a_successful_fetch_replaces_the_kept_forecast(self):
         fresh = _hourly(_NOW, 48, base=40.0)

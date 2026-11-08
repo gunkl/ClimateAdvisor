@@ -56,7 +56,7 @@ def test_a_low_graded_v4_drives_the_ceiling_guard_exactly_like_a_low_graded_v3()
     _set_thermal_model(v3, k_passive=-0.15, conf="low", k_active_cool=-2.0)
 
     v4 = _engine()
-    v4._thermal_model = dict(_V3_BASE)  # v3's observations stay under v4's scalars
+    v4.inputs.thermal = dict(_V3_BASE)  # v3's observations stay under v4's scalars
     src = _v4_src("low")
     v4._control_model_provider = lambda base: pe.control_model(src, {"primary_engine": "v4"}, base)
     assert v4._control_model()["confidence_k_passive"] == "low"  # v4's own grade reaches the decision
@@ -102,7 +102,7 @@ def test_no_fit_primary_does_not_read_v3s_hot_curve_in_the_guard() -> None:
     so the guard has no rates to act on even when handed a breaching curve (the coordinator hands it the
     schedule estimate, not v3's curve, in production; the scenario card pins that end to end)."""
     engine = _engine()
-    engine._thermal_model = dict(_V3_BASE)  # v3 is good
+    engine.inputs.thermal = dict(_V3_BASE)  # v3 is good
     src = SimpleNamespace(_v4_store=SimpleNamespace(v4_model=None), _v4_fit_running=False)
     engine._control_model_provider = lambda base: pe.control_model(src, {"primary_engine": "v4"}, base)
     hot = _make_predicted_indoor(start_hour_utc=10, temps=[76.0, 77.0, 78.0])  # v3 curve of the same cycle
@@ -114,7 +114,7 @@ def test_no_fit_primary_does_not_read_v3s_hot_curve_in_the_guard() -> None:
     assert decision.ceiling_decision is None or decision.ceiling_decision.outcome.name != "ESCALATE"
     # with v3 primary the very same model and a breaching curve does act: the dependency is the primary setting
     v3 = _engine()
-    v3._thermal_model = dict(_V3_BASE)
+    v3.inputs.thermal = dict(_V3_BASE)
     assert _guard_decision(v3).ceiling_decision.outcome.name == "ESCALATE"
 
 

@@ -918,7 +918,7 @@ def _compute_next_automation_action_with_forecast(
     real = _real_engine(indoor=75.0, mode="off", **config)
     real._natural_vent_active = bool(automation_engine._natural_vent_active)
     real._paused_by_door = bool(automation_engine.is_paused_by_door)
-    real._hourly_forecast_temps = hourly_forecast_temps or []
+    real.inputs.hourly_forecast = hourly_forecast_temps or []
     automation_engine._nat_vent_start_decision = real._nat_vent_start_decision
 
     now_dt = datetime.combine(date(2026, 7, 10), now_time)

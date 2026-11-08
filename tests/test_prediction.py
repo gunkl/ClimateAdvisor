@@ -246,7 +246,7 @@ def _make_chart_coordinator(temp_unit: str = "fahrenheit", thermal_model_return:
     coord._indoor_temp_history = []
 
     ae = MagicMock()
-    ae._thermal_model = None
+    coord._thermal_model = None
     coord.automation_engine = ae
 
     learning = MagicMock()

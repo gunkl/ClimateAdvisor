@@ -73,6 +73,7 @@ from .const import (
     V4_ARCHIVE_LEADS,
     VERSION,
 )
+from .engine_inputs import decide, decide_sync
 from .remote_offset import remote_offset_view_for
 from .temperature import FAHRENHEIT, UNIT_SYMBOL, display_delta, display_temp
 
@@ -895,7 +896,9 @@ def _schedule_reclassify_after_cancel(hass: HomeAssistant, coordinator: Any, ae:
             if coordinator._current_classification:
                 # Issue #1231: carry the plan's close through, or the reset reopens the planned window period.
                 hass.async_create_task(
-                    ae.apply_classification(
+                    decide(
+                        coordinator,
+                        ae.apply_classification,
                         coordinator._current_classification,
                         nat_vent_cutoff=ae._nat_vent_cutoff,
                         nat_vent_cutoff_already_reached=ae._nat_vent_cutoff_already_reached,
@@ -930,7 +933,7 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
             # cancelled" would misdescribe it.
             had_override = ae._occupant_override_active()
             had_hold = ae._fan_off_hold_active()  # Issue #1205: a hold can run with no grace behind it
-            cancelled = ae.cancel_override(reason="user_cancel_override")
+            cancelled = decide_sync(coordinator, ae.cancel_override, reason="user_cancel_override")
             if not cancelled:
                 return self.json({"status": "ok", "message": "No active override or grace period to cancel"})
 
@@ -967,7 +970,7 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
             if not ae.is_paused_by_door:
                 return self.json({"status": "ok", "message": "Not currently paused"})
 
-            restored_mode = await ae.resume_from_pause()
+            restored_mode = await decide(coordinator, ae.resume_from_pause)
             if ae.dry_run:
                 # Issue #1306: observe-only -- the pause is cleared, but no restore was sent (and no grace started).
                 return self.json(
@@ -1020,7 +1023,7 @@ class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
             ae = coordinator.automation_engine
             had_fan_override = ae._fan_override_active
             had_hold = ae._fan_off_hold_active()  # Issue #1205: the fan-off pause is a fan-side request too
-            cancelled = ae.cancel_override(reason="user_cancel_fan_override")
+            cancelled = decide_sync(coordinator, ae.cancel_override, reason="user_cancel_fan_override")
             if not cancelled:
                 return self.json({"status": "ok", "message": "No active fan override to cancel."})
 

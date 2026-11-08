@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.16] — 2026-11-08
+
+- Fix #1474: the night setback is now recorded. Since v0.3.48 the bedtime routine wrote whether it applied a setback (and how deep) or skipped it (and why) into a copy of the daily record that was never connected to the one Climate Advisor saves, so every night was blank and the Analysis tab always read "none". Bookkeeping only: the setback itself ran as before. Nights before this release show "not recorded".
+- Fix #1475: the Analysis tab now says what each number covers.
+  - **Headline tiles:** "Prediction error, 4 h" is the main engine's own miss over the last 24 hours (v4: 0.5° on 2026-11-08). Before, it showed v3's logged forecast (1.3°), and v3 is only the comparison engine. The look-ahead bars below say they are v3's log. Comfort score, window advice, runtime and manual changes say "last 14 days" (they never covered all recorded days). "Promises missed" is an all-time total with the date of the last miss, not "last 24 h".
+  - **Today's windows:** "Windows advised" says whether windows are recommended now, for example "earlier today, not now (the live outdoor check says no)". It names the plan's own periods, or marks the times as fixed for the day type. "Windows actually open" says whether the opening counted as following the advice.
+  - **Other rows:** "Recommended HVAC mode" (heating can still run on an "off" day). Runtime shows heating and cooling minutes, or says the split wasn't recorded for a day that began on an older version. Today's high/low and average indoor show the values so far. Pre-conditioning and night setback say "not recorded" instead of a blank, and estimated cost says when it needs an energy rate in Settings.
+
 ## [0.9.15] — 2026-11-08
 
 - Fix #1471: when Climate Advisor drops a thermostat change you made before it was confirmed, the Activity Log now says so ("Override cleared"), the same as for a confirmed change. This happens when you press the whole-house fan in the same minute, cancel from the dashboard, or leave home. Before, the change just disappeared from the log, so it was hard to tell why Climate Advisor went back to its own plan.

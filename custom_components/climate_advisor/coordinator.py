@@ -1004,6 +1004,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R6b: the engine reads the primary engine's thermal-model scalars through this live provider (it
         # never names an engine); None on a bare engine (headless tools) = its own ``_thermal_model``.
         self.automation_engine._control_model_provider = self.control_thermal_model
+        # Issue #1474: the bedtime setback records into the coordinator's live record (it is replaced each day)
+        self.automation_engine._today_record_provider = lambda: self._today_record
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -17129,6 +17131,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Return yesterday's learning record, if available."""
         yesterday_str = (dt_util.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         return self.learning.get_record_by_date(yesterday_str)
+
+    def analysis_today_live(self) -> dict[str, Any]:
+        """Today so far, for the Analysis "Today" column (internal degrees F, like the daily records).
+
+        The record's ``windows_recommended`` latches "recommended at any point today" (compliance credit, #1211 O5)
+        and its high/low, average and observed extremes fill only at end of day; this says what holds NOW: the live
+        window answer, the forecast's own answer, the window periods the plan still holds for today, and the outdoor
+        extremes and indoor average seen so far. Never raises (a failure drops the block)."""
+        try:
+            c = self._current_classification
+            out: dict[str, Any] = {
+                "windows_recommended_now": bool(c.windows_recommended) if c else None,
+                "forecast_windows_recommended": bool(c.forecast_windows_recommended) if c else None,
+                "day_type": c.day_type if c else None,
+            }
+            tl = self._surface_timeline()
+            today = dt_util.now().date()
+            periods = [p for p in timeline_windows(tl, today).periods if p[0] is not None] if tl is not None else []
+            out["plan_windows"] = [[a.time().isoformat(), b.time().isoformat() if b else None] for a, b in periods]
+            outs = [t for _, t in (self._outdoor_temp_history or [])]
+            ins = [t for _, t in (self._indoor_temp_history or [])]
+            out["observed_high_f"] = round(max(outs), 1) if outs else None
+            out["observed_low_f"] = round(min(outs), 1) if outs else None
+            out["avg_indoor_f"] = round(sum(ins) / len(ins), 1) if ins else None
+            return out
+        except Exception:  # noqa: BLE001 - display only
+            _LOGGER.debug("analysis_today_live failed", exc_info=True)
+            return {}
 
     @property
     def tomorrow_plan(self) -> dict | None:

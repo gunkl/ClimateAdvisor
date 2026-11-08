@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.15] — 2026-11-08
+
+- Fix #1471: when Climate Advisor drops a thermostat change you made before it was confirmed, the Activity Log now says so ("Override cleared"), the same as for a confirmed change. This happens when you press the whole-house fan in the same minute, cancel from the dashboard, or leave home. Before, the change just disappeared from the log, so it was hard to tell why Climate Advisor went back to its own plan.
+- Fix #1472 (test only): the nightly "settling flip" check no longer blames Climate Advisor when you switched the thermostat between heat and cool yourself. Climate Advisor keeping your chosen mode and applying your comfort edge after your grace ends is correct.
+
 ## [0.9.14] — 2026-11-08
 
 - Fix #1463: the Status chart's humidity axes now always run 0-100%, on both the temperature and outdoor charts. Before, the axis fitted itself to the humidity in view, so a small change (for example the bedroom going from 57% to 60% in an hour) was stretched across the whole chart height and looked like a line shooting straight up.

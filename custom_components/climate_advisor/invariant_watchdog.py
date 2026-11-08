@@ -529,6 +529,24 @@ def _p1_arming_command_ts(inp: PromiseInput, side: str, cur_ts: datetime, excuse
     return min(stamps) if stamps else None
 
 
+def _p1_occupant_made_the_flip(
+    rs: tuple[Reading, ...] | list[Reading], i: int, side: str, last_opposite: datetime, occ_mode_ts: set[datetime]
+) -> bool:
+    """True when the occupant switched the thermostat into ``side`` after the opposite run and it stayed there.
+
+    Owner ruling 2026-11-08 (nightly seeds 12001000174 / 11005000249): the occupant chose the
+    opposite family themselves, so the flip is human-caused. CA keeping that mode and applying
+    its comfort edge when the grace ends is correct behaviour, not a settling failure. A flip
+    CA made itself (CA switched the mode) is still judged.
+    """
+    j = i
+    while j > 0 and rs[j].ts > last_opposite and (rs[j].hvac_mode or "").lower() == side:
+        if (rs[j - 1].hvac_mode or "").lower() != side:
+            return rs[j].ts in occ_mode_ts
+        j -= 1
+    return False
+
+
 def _p1_start_judged(rs: tuple[Reading, ...] | list[Reading], k: int) -> bool:
     """True when the equipment start at ``rs[k]`` was evaluable by P1 (same input gates as the main loop)."""
     if k <= 0:
@@ -550,6 +568,7 @@ def check_p1_settling_flip(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
     if window <= 0 or dip_limit <= 0:
         return hits
     occ_ts = sorted(o.ts for o in occupant_actions(inp) if o.target == "thermostat")
+    occ_mode_ts = {o.ts for o in occupant_actions(inp) if o.target == "thermostat" and o.what == "mode"}
     excuse = timedelta(minutes=NUMBERS.P1_OCCUPANT_EXCUSE_MIN)
     for i in range(1, len(rs)):
         prev, cur = rs[i - 1], rs[i]
@@ -604,6 +623,8 @@ def check_p1_settling_flip(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
                 break
             j -= 1
         if last_opposite is None:
+            continue
+        if _p1_occupant_made_the_flip(rs, i, side, last_opposite, occ_mode_ts):
             continue
         if _any_in_span(occ_ts, cur.ts, excuse, inclusive=True):
             continue

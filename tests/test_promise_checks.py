@@ -271,7 +271,7 @@ class TestP1SettlingFlip:
         assert hits_for("settling_flip", inp, cfg) == []
 
     # ── Issue #1150 part A: the lookback stops at same-side equipment ──
-    def _restart_after_earlier_heat(self, *, heat_run_between=True):
+    def _restart_after_earlier_heat(self, *, heat_run_between=True, ca_switched=False):
         """Seed 1012000093 shape: the AC ran, then a long in-family heat run, then idle, then a furnace restart.
 
         The restart is a normal furnace cycle: the opposite (cooling) run is behind a full heat run,
@@ -288,15 +288,39 @@ class TestP1SettlingFlip:
             rd(105, hvac_mode="heat", hvac_action="heating", indoor_f=67.5, setpoint_f=68.0),
         ]
         # The occupant (no CA command) started the first heat run, so only the restart is under test.
-        return make_input(rs, [])
+        # ``ca_switched``: CA, not the occupant, made the cool -> heat switch at minute 18.
+        return make_input(rs, [cmd(17.97, mode="heat")] if ca_switched else [])
 
     def test_twin_1150_heat_restart_after_an_earlier_in_family_heat_run_is_not_a_flip(self):
         assert hits_for("settling_flip", self._restart_after_earlier_heat()) == []
 
     def test_1150_same_shape_without_the_intervening_heat_run_is_still_a_flip(self):
-        """Revert-test: remove the heat run and the identical restart is a real flip, so part A is what silences it."""
-        (h,) = hits_for("settling_flip", self._restart_after_earlier_heat(heat_run_between=False))
+        """Revert-test: remove the heat run and the identical restart is a real flip, so part A is what silences it.
+
+        CA makes the cool -> heat switch here; an occupant-made switch is excused (see the next test).
+        """
+        inp = self._restart_after_earlier_heat(heat_run_between=False, ca_switched=True)
+        (h,) = hits_for("settling_flip", inp)
         assert dict(h.evidence)["side"] == "heat"
+
+    def test_occupant_switch_into_heat_makes_the_flip_theirs(self):
+        """Nightly seeds 12001000174 / 11005000249 (owner ruling 2026-11-08): the occupant switched cool -> heat
+        after the AC ran and the thermostat stayed in heat; CA applying the floor once the grace ended is correct,
+        so the later furnace start is the occupant's flip, not a settling failure."""
+        assert hits_for("settling_flip", self._restart_after_earlier_heat(heat_run_between=False)) == []
+
+    def test_mirror_occupant_switch_into_cool_makes_the_flip_theirs(self):
+        kw = {"forecast_high_f": 50.0}
+        rs = [
+            rd(0, hvac_mode="heat", hvac_action="heating", indoor_f=66.0, setpoint_f=68.0, **kw),
+            rd(13, hvac_mode="heat", hvac_action="idle", indoor_f=70.0, setpoint_f=68.0, **kw),
+            rd(18, hvac_mode="cool", hvac_action="idle", indoor_f=73.0, setpoint_f=76.0, **kw),
+            rd(60, hvac_mode="cool", hvac_action="idle", indoor_f=74.0, setpoint_f=74.0, **kw),
+            rd(65, hvac_mode="cool", hvac_action="cooling", indoor_f=74.5, setpoint_f=74.0, **kw),
+        ]
+        assert hits_for("settling_flip", make_input(rs, [cmd(59.97, service="set_temperature", setpoint_f=74.0)])) == []
+        (h,) = hits_for("settling_flip", make_input(rs, [cmd(17.97, mode="cool"), cmd(59.97, setpoint_f=74.0)]))
+        assert dict(h.evidence)["side"] == "cool"
 
     def test_mirror_1150_ac_restart_after_an_earlier_cooling_run_is_not_a_flip(self):
         kw = {"forecast_high_f": 50.0}

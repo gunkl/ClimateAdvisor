@@ -988,7 +988,6 @@ class LearningState:
     dismissed_suggestions: list[str] = field(default_factory=list)
     settings_history: list[dict] = field(default_factory=list)
     thermal_observations: list[dict] = field(default_factory=list)  # cap: THERMAL_OBS_CAP
-    pending_observations: dict = field(default_factory=dict)  # v3 multi-type obs windows
     thermal_model_cache: dict | None = None  # EWMA-accumulated k_passive, k_active_heat/cool
     rejection_log: dict = field(default_factory=dict)  # keyed by obs_type; each list capped at 100 entries
     # Restart-cause diagnostics (Issue #403)
@@ -1046,6 +1045,9 @@ class LearningEngine:
                     len(data.get("records", [])),
                 )
                 data.pop("pending_thermal_event", None)  # v2 field removed in Issue #133
+                # Issue #1437: retired (nothing wrote it since Issue #133; in-flight observations are not
+                # recovered across a restart, by design). Dropped silently: not an unknown newer-release key.
+                data.pop("pending_observations", None)
                 # Forward compatibility: a file written by a newer release may hold keys this one does not know.
                 # Ignore them (the known fields load intact) instead of raising and resetting the whole history.
                 known = {f.name for f in fields(LearningState)}
@@ -1104,9 +1106,6 @@ class LearningEngine:
                 # never refreshed and misled the diagnostic tools, so drop them.
                 if isinstance(_cache_mig, dict) and drop_stored_grades(_cache_mig):
                     _LOGGER.debug("Thermal model cache: dropped stale stored confidence grades (Issue #1277)")
-                # Validate pending_observations is a dict
-                if not isinstance(self._state.pending_observations, dict):
-                    self._state.pending_observations = {}
                 # Validate rejection_log is a dict; apply per-obs-type cap on load
                 if not isinstance(self._state.rejection_log, dict):
                     self._state.rejection_log = {}

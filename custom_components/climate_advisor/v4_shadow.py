@@ -140,6 +140,7 @@ def run_fit(
     entries = list(chart_entries)
     if train_days:
         entries = rows_in_window(entries, now, train_days)
+    entity_primary = primary
     samples, primary, ordered = build_samples(
         p,
         entries,
@@ -151,9 +152,117 @@ def run_fit(
         in_sleep=in_sleep,
     )
     warm = p.from_dict(dict(previous_model)) if previous_model else None
-    model = p.fit(samples, primary=primary, sensors=ordered, tz=tz, now=now, warm_start=warm)
+    # Issue #1422: sensors with 3+ days of their OWN history become display-only nodes (chart lines, never control).
+    display = display_candidates(
+        p, entries, primary=primary, ordered=ordered, entity_primary=entity_primary, sensors=sensors, tz=tz
+    )
+    extra: dict[str, Any] = {"display_sensors": display} if display else {}
+    model = p.fit(samples, primary=primary, sensors=ordered, tz=tz, now=now, warm_start=warm, **extra)
     line = p.summary_line(model) if hasattr(p, "summary_line") else ""
     return p.to_dict(model), time.perf_counter() - t0, line
+
+
+def display_candidates(
+    p: Any,
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    primary: str,
+    ordered: Sequence[str],
+    entity_primary: str,
+    sensors: Sequence[str],
+    tz: tzinfo,
+) -> list[str]:
+    """The display-only nodes for a fit on ``entries`` (Issue #1422, ``predictor_v4.resolve_display_nodes``): the
+    sensors the control rule left out that have at least 3 days of their own history. ``[]`` without the helper.
+    ``primary`` is the model's primary node (``_ca`` or the entity), ``entity_primary`` the configured entity."""
+    fn = getattr(p, "resolve_display_nodes", None)
+    if fn is None:
+        return []
+    nodes = [primary, *(s for s in ordered if s != primary)]
+    return list(fn(entries, nodes=nodes, primary=entity_primary, sensors=list(sensors), tz=tz))
+
+
+def run_display_fit(
+    *,
+    chart_entries: Sequence[Mapping[str, Any]],
+    tz: tzinfo,
+    now: datetime,
+    primary: str,
+    sensors: Sequence[str],
+    model_dict: Mapping[str, Any],
+    primary_aliases: Sequence[str] = (),
+    in_sleep: Callable[[datetime], bool] | None = None,
+    train_days: float | None = None,
+) -> tuple[dict, float, str]:
+    """Fold newly qualified display-only nodes into the stored model between nightly fits (Issue #1422, option b).
+
+    Occupant view: a bedroom sensor that reaches 3 days of its own history at 10:00 gets its chart line within about
+    6 h, not at the next 03:15 refit. Only the display nodes are fitted (house held: seconds on a Pi, not a full fit);
+    every other key of ``model_dict`` - house, control nodes, thermostat, confidence, ``fitted_at`` - is copied through
+    unchanged, so the decisions read the same model before and after. Blocking CPU: executor only. Raises on failure
+    (the caller keeps the stored model)."""
+    p = _predictor()
+    t0 = time.perf_counter()
+    model = p.from_dict(dict(model_dict))
+    if model is None:
+        raise ValueError("stored v4 model is not readable (unknown schema or malformed)")
+    entries = list(chart_entries)
+    if train_days:
+        entries = rows_in_window(entries, now, train_days)
+    display = display_candidates(
+        p, entries, primary=model.primary, ordered=list(model.sensors), entity_primary=primary, sensors=sensors, tz=tz
+    )
+    samples = p.samples_from_chart_log(
+        entries,
+        tz=tz,
+        primary=None if model.primary == getattr(p, "CA_NODE", "_ca") else model.primary,
+        primary_aliases=tuple(primary_aliases),
+        in_sleep=in_sleep,
+    )
+    refit = p.with_display_nodes(model, samples, display_sensors=display, tz=tz, warm=model.display_nodes)
+    out = dict(model_dict)
+    refit_dict = p.to_dict(refit)
+    out["display_nodes"] = refit_dict["display_nodes"]
+    fit = dict(out["fit"]) if isinstance(out.get("fit"), Mapping) else {}
+    fit["display"] = refit_dict["fit"].get("display", {})
+    out["fit"] = fit
+    kept = list(out["display_nodes"])
+    return out, time.perf_counter() - t0, f"v4 display nodes: kept={kept} tried={display}"
+
+
+def display_pending(
+    model_dict: Mapping[str, Any] | None,
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime,
+    tz: tzinfo,
+    primary: str,
+    sensors: Sequence[str],
+    train_days: float | None = None,
+) -> list[str]:
+    """Sensors that qualify as display nodes now but the stored model has not tried yet (Issue #1422): the trigger for
+    the off-cycle display refit. A sensor the last fit tried and rejected waits for the nightly refit, so a sensor that
+    never passes the skill bar does not cost a fit every 6 h. Pure and cheap (one pass over the rows)."""
+    if not isinstance(model_dict, Mapping) or model_dict.get("confidence", "none") == "none":
+        return []
+    p = _predictor()
+    rows = rows_in_window(list(entries), now, train_days) if train_days else list(entries)
+    model_sensors = [s for s in (model_dict.get("sensors") or []) if isinstance(s, str)]
+    display = display_candidates(
+        p,
+        rows,
+        primary=str(model_dict.get("primary")),
+        ordered=model_sensors,
+        entity_primary=primary,
+        sensors=sensors,
+        tz=tz,
+    )
+    fit = model_dict.get("fit")
+    disp = fit.get("display") if isinstance(fit, Mapping) else None
+    tried = set(disp.get("tried") or []) if isinstance(disp, Mapping) else set()
+    shown = model_dict.get("display_nodes")
+    tried |= set(shown) if isinstance(shown, Mapping) else set()
+    return [s for s in display if s not in tried]
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +423,7 @@ def run_cycle(
     ca_sleep_time: str | None = None,
     ca_wake_time: str | None = None,
     baseline: bool = False,
+    display: bool = False,
 ) -> tuple[dict[str, list[tuple[datetime, float]]] | None, float | None]:
     """Advance the hidden node ``mass_steps`` grid steps, then predict. Blocking CPU: run via the executor.
 
@@ -325,6 +435,8 @@ def run_cycle(
     reading is missing (the engine's own fallback signal); ``mass_f`` is then returned unchanged.
     ``hvac_action_now`` / ``run_elapsed_min`` carry a heating or cooling run already in progress into the thermostat
     emulation; ``ca_sleep_node`` (+ the sleep window) makes the result carry the ``_ca`` composite line.
+    ``display=True`` (the post-chart shadow cycle only, Issue #1422) adds the model's display-only node lines; the
+    pre-decision control cycle never passes it, and every other line is identical either way.
     """
     p = _predictor()
     model = p.from_dict(dict(model_dict))
@@ -347,6 +459,8 @@ def run_cycle(
         extra.update(hvac_action_now=hvac_action_now, run_elapsed_min=run_elapsed_min)
     if ca_sleep_node:
         extra.update(ca_sleep_node=ca_sleep_node, ca_sleep_time=ca_sleep_time, ca_wake_time=ca_wake_time)
+    if display and getattr(model, "display_nodes", None):
+        extra["display_nodes"] = True
     predictions = p.predict(
         model,
         now=now,
@@ -434,6 +548,8 @@ def chart_extras(
         model = p.from_dict(dict(model_dict))
         if model is not None:
             plain = [dataclasses.replace(i, heat_sp_f=None, cool_sp_f=None) for i in inputs]
+            # display only: the no-plan line includes the display-only nodes too (Issue #1422)
+            disp: dict[str, Any] = {"display_nodes": True} if getattr(model, "display_nodes", None) else {}
             out = p.predict(
                 model,
                 now=now,
@@ -443,6 +559,7 @@ def chart_extras(
                 tz=tz,
                 outdoor_now_f=outdoor_now_f,
                 forecast_now_f=forecast_now_f,
+                **disp,
             )
             baseline = {sid: list(pts) for sid, pts in (out or {}).items()}
     except Exception:  # noqa: BLE001 - optional line
@@ -475,6 +592,10 @@ def model_summary(model_dict: Mapping[str, Any] | None) -> dict[str, Any]:
         "mae_by_lead": {str(k): v for k, v in mae.items()} if isinstance(mae, Mapping) else {},
         "primary": model_dict.get("primary"),
         "sensors": list(model_dict.get("sensors") or []),
+        # Issue #1422: chart-only sensor lines (never control)
+        "display_sensors": list(model_dict.get("display_nodes") or {})
+        if isinstance(model_dict.get("display_nodes"), Mapping)
+        else [],
         "schema_version": model_dict.get("schema_version"),
     }
 

@@ -77,9 +77,12 @@
     },
     {
       "at": "2026-07-17T02:30:00",
-      "expect": "commanded_setpoint_at",
-      "value": 70.0,
-      "reason": "Pre-cool to 70 F (sleep_cool 72 + the hot-day modifier -2); 22:30 wrote 72, so 70 can only be the pre-cool. The value, not the count: on real HA the coordinator's own 02:30 pre-cool timer fires and the scenario's pre_cool event (a direct callback) calls the same handler again, so it is written twice there; production has only the timer (one write)."
+      "expect": "setpoint_writes",
+      "since": "2026-07-16T22:30:00",
+      "values": [
+        70.0
+      ],
+      "reason": "Pre-cool to 70 F (sleep_cool 72 + the hot-day modifier -2), written exactly once after the 22:30 bedtime write. On real HA the coordinator's own 02:30 pre-cool timer makes this write and the scenario's pre_cool event only moves the clock (Issue #1420); before #1420 the event called the handler as well, so the test saw it written twice."
     },
     {
       "at": "2026-07-17T06:30:00",

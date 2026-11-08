@@ -944,6 +944,14 @@ def run_backtest(
                 in_sleep=in_sleep,
             )
             info["primary"], info["nodes"] = primary, list(nodes)
+            # Issue #1422: the live fit's display-only nodes (3+ days of a sensor's OWN history), same shared rule.
+            disp_fn = getattr(pred, "resolve_display_nodes", None)
+            display = (
+                list(disp_fn(train_rows, nodes=list(nodes), primary=cand_primary, sensors=list(cand_nodes), tz=tz))
+                if disp_fn is not None
+                else []
+            )
+            info["display_nodes"] = display
             seen_nodes.update(dict.fromkeys(nodes))
             samples = pred.samples_from_chart_log(
                 train_rows,
@@ -963,7 +971,9 @@ def run_backtest(
                 week_info.append(info)
                 continue
             try:
-                model = pred.fit(kept, primary=primary, sensors=list(nodes), tz=tz, now=W, horizon_h=12)
+                disp_kw = {"display_sensors": display} if display else {}
+                model = pred.fit(kept, primary=primary, sensors=list(nodes), tz=tz, now=W, horizon_h=12, **disp_kw)
+                seen_nodes.update(dict.fromkeys(getattr(model, "display_nodes", None) or {}))
                 last_fit_week = wi
                 info["fitted"] = True
             except LeakageError:
@@ -999,6 +1009,8 @@ def run_backtest(
         mass: float | None = None
         prev_ep: float | None = None
         sensors_model = list(getattr(model, "sensors", nodes))
+        # display-only nodes are predicted and scored as their own lines; ``_ca`` and the primary never read them
+        display_model = [s for s in (getattr(model, "display_nodes", None) or {}) if s not in sensors_model]
         week_records = 0
         a_ep = W_ep
         while a_ep < w_end_ep and a_ep <= idx.t[-1] - 3600:
@@ -1029,7 +1041,7 @@ def run_backtest(
                     sea = seasons_by_day.get(A.astimezone(tz).date(), "shoulder")
                     hygiene_by_season[sea] = hygiene_by_season.get(sea, 0) + 1
                     continue
-            readings = {k: idx.last_at(k, A.timestamp()) for k in sensors_model}
+            readings = {k: idx.last_at(k, A.timestamp()) for k in [*sensors_model, *display_model]}
             primary_reading = readings.get(sensors_model[0]) if sensors_model else None
             if primary_reading is None:
                 skipped["no_reading"] += 1
@@ -1096,6 +1108,7 @@ def run_backtest(
                 mass=mass,
                 model=model,
                 hourly=hourly,
+                display=bool(display_model),
             ):
                 for inp in inputs:
                     if inp.ts.timestamp() <= A.timestamp():
@@ -1112,6 +1125,7 @@ def run_backtest(
                     hvac_action_now=act_now,
                     run_elapsed_min=run_min,
                     openness_prior=prior,
+                    **({"display_nodes": True} if display else {}),
                 )
                 if res is None:
                     return None
@@ -1162,7 +1176,7 @@ def run_backtest(
                     )
                 except Exception:  # noqa: BLE001
                     skipped["v3_error"] += 1
-            for sensor in dict.fromkeys([CA, *sensors_model]):
+            for sensor in dict.fromkeys([CA, *sensors_model, *display_model]):
                 base = idx.last_at(sensor, A.timestamp())
                 if base is None:
                     continue

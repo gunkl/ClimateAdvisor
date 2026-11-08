@@ -451,6 +451,8 @@ from .whf_safety_decision import (
 
 _LOGGER = logging.getLogger(__name__)
 _V4_FIT_LOCK_KEY = "climate_advisor_v4_fit_lock"  # hass.data key of the domain-wide v4 fit lock (Issue #1230 R1b, M5)
+# Issue #1422: the off-cycle fit that only folds newly qualified display-only sensor nodes into the stored model.
+V4_DISPLAY_FIT_REASON = "display_nodes"
 # Issue #1415: the one-time split of the old shared investigation-reports file runs in executor threads; two zones
 # starting at once must not split it twice (each would copy, one would remove it under the other).
 _INVESTIGATION_MIGRATION_LOCK = threading.Lock()
@@ -898,6 +900,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_fit_running = False
         self._v4_fit_task: asyncio.Task[Any] | None = None
         self._v4_last_fit_attempt: float | None = None
+        self._v4_last_display_check: float | None = None  # Issue #1422: newly qualified display nodes, every 6 h
         self._v4_last_fit: dict[str, Any] = {}
         self._v4_last_cycle: dict[str, Any] = {}
         self._v4_last_future: dict[str, Any] | None = None  # newest 24 h prediction, for the Status chart (R2)
@@ -2213,8 +2216,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # weather provider's (e.g. a provider °C value passed through as °F). The rule
         # discards on ANY unit change, which also drops good samples from before a
         # switch into the wrong unit (harmless: they refill within a poll cycle).
-        # Decided once here and applied to the reading-derived restores below (and the
-        # persisted pending thermal observations). Missing/non-str => no-op.
+        # Decided once here and applied to the reading-derived restores below. Missing/non-str => no-op.
         _saved_unit = state.get("temp_unit")
         _restore_cfg = getattr(self, "config", None)
         _current_unit = _restore_cfg.get("temp_unit", "fahrenheit") if _restore_cfg is not None else None
@@ -2228,24 +2230,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _raw_arch = state.get("pred_archive")
             _dropped_arch = len(_raw_arch) if isinstance(_raw_arch, dict) else 0
             _dropped_cls = bool(state.get("classification"))
-            # Pending thermal observations hold samples taken under the old unit; clear
-            # them before the _first_run block recovers them. Only this dict is touched.
-            _learn_state = getattr(getattr(self, "learning", None), "_state", None)
-            _pending = getattr(_learn_state, "pending_observations", None)
-            _dropped_pending = len(_pending) if isinstance(_pending, dict) else 0
-            if isinstance(_pending, dict):
-                _pending.clear()
             _LOGGER.warning(
                 "Temperature unit changed since last run: same-day readings discarded "
                 "from=%s to=%s dropped_outdoor=%d dropped_indoor=%d dropped_pred_archive=%d "
-                "dropped_classification=%s dropped_pending_observations=%d",
+                "dropped_classification=%s",
                 _saved_unit,
                 _current_unit,
                 _dropped_outdoor,
                 _dropped_indoor,
                 _dropped_arch,
                 _dropped_cls,
-                _dropped_pending,
             )
             _unit_change_payload = {
                 "from": _saved_unit,
@@ -2254,7 +2248,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "dropped_indoor": _dropped_indoor,
                 "dropped_pred_archive": _dropped_arch,
                 "dropped_classification": _dropped_cls,
-                "dropped_pending_observations": _dropped_pending,
             }
 
         # Issue #1337: the kept forecast. Not under another unit: the daily list is in the provider's unit.
@@ -3875,7 +3868,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         await self._async_save_state()
 
     def _run_first_cycle_recovery(self) -> None:
-        """First cycle after a restart: recover persisted observations and run the one-time backfills.
+        """First cycle after a restart: run the one-time chart_log backfills.
+
+        No in-flight thermal observation is recovered (Issue #1437): observations are never persisted,
+        so a run in progress at a restart is learned from only after it (see
+        ``_initialize_hvac_session_from_current_state``).
 
         Split out of the cycle so it also runs when no forecast exists during a weather outage (Issue #1337);
         none of it reads weather data.
@@ -3883,53 +3880,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
         if self._first_run:
             self._first_run = False
-            # Recover v3 pending_observations that survived restart
-            _pending_obs = self.learning._state.pending_observations
-            if isinstance(_pending_obs, dict):
-                for _obs_type, _obs in list(_pending_obs.items()):
-                    if not isinstance(_obs, dict):
-                        continue
-                    if _obs.get("_legacy_event"):
-                        # Legacy HVAC event migrated into pending_observations — use HVAC commit path
-                        session_mode = _obs.get("session_mode") or _obs.get("hvac_mode") or "heat"
-                        _obs["session_mode"] = session_mode
-                        self._pending_observations[_obs_type] = _obs
-                    else:
-                        # Bug 2 fix: For HVAC obs, check the right sample list based
-                        # on the current phase.  Pre-fix obs had 'samples': [] which
-                        # shadowed active_samples in the generic fallback, causing all
-                        # HVAC observations to be discarded on every HA restart.
-                        _hvac_types_sr = {OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL}
-                        if _obs_type in _hvac_types_sr:
-                            _phase_sr = _obs.get("_phase", "active")
-                            if _phase_sr == "post_heat":
-                                samples = _obs.get("post_heat_samples", [])
-                                min_s = THERMAL_MIN_POST_HEAT_SAMPLES
-                            else:
-                                # Active phase: any sample is worth recovering so
-                                # post-heat observation window can continue after restart.
-                                samples = _obs.get("active_samples", [])
-                                # Fall back to generic 'samples' key for pre-fix persisted obs
-                                if not samples:
-                                    samples = _obs.get("samples", [])
-                                min_s = 1
-                        else:
-                            samples = _obs.get("samples", _obs.get("active_samples", []))
-                            min_s = {
-                                OBS_TYPE_PASSIVE_DECAY: THERMAL_PASSIVE_MIN_SAMPLES,
-                                OBS_TYPE_VENT_WINDOW_DECAY: THERMAL_VENT_MIN_SAMPLES,
-                                OBS_TYPE_VENT_FAN_DECAY: THERMAL_VENT_MIN_SAMPLES,
-                                OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_MIN_SAMPLES,
-                            }.get(_obs_type, 10)
-                        if len(samples) >= min_s:
-                            self._pending_observations[_obs_type] = _obs
-                            _LOGGER.info(
-                                "Startup: recovered v3 observation type=%s obs_id=%s samples=%d phase=%s",
-                                _obs_type,
-                                _obs.get("obs_id", "?"),
-                                len(samples),
-                                _obs.get("_phase", "active"),
-                            )
+            # Issue #1437: no in-flight observation is recovered here. A run in progress at a restart is
+            # learned from only after the restart (the Issue #96 late start opens a fresh observation), by
+            # design: the thermostat keeps running while HA is down and CA cannot see whether the run stopped
+            # and restarted, so a fit across that blind gap would be invalid.
 
             # Chart_log endpoint estimator backfill (Issue #137): run once on first startup
             # after the new code is deployed. The chart_log is loaded in __init__ so entries
@@ -5958,6 +5912,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 # Captured on the loop (rule: no self.* reads inside the executor job); the row copy is shallow.
                 # One fit at a time across ALL zones (M5): several zones fitting at once starve the event loop (GIL).
+                if reason == V4_DISPLAY_FIT_REASON:
+                    await self._v4_run_display_fit(now, primary, sensors, aliases, in_sleep)
+                    return
                 async with self._v4_fit_lock():
                     model_dict, seconds, fit_line = await self._executor_job(
                         functools.partial(
@@ -6028,7 +5985,68 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._v4_fit_running = False
             self._v4_fit_task = None
 
-    # ── Issue #1230 R3a: operation timeline (shadow) ─────────────────────────────────────────────────────────────
+    async def _v4_run_display_fit(
+        self, now: datetime, primary: str, sensors: list[str], aliases: tuple[str, ...], in_sleep: Any
+    ) -> None:
+        """Fold newly qualified display-only sensor nodes into the stored model (Issue #1422, option b). Never raises.
+
+        Occupant view: the bedroom or thermostat line appears on the Status chart within about 6 h of the sensor
+        reaching 3 days of its own history. Display only: ``v4_shadow.run_display_fit`` copies every control key of
+        the stored model through unchanged (house, control nodes, thermostat, confidence, ``fitted_at``), so the
+        decisions read the same model; no night replay runs (its evidence depends on the control model alone). A
+        failure keeps the stored model and does not mark the fit as failed."""
+        state = self._v4_store
+        model_dict = state.v4_model
+        if not isinstance(model_dict, dict) or model_dict.get("confidence", "none") == "none":
+            return
+        try:
+            async with self._v4_fit_lock():
+                new_dict, seconds, line = await self._executor_job(
+                    functools.partial(
+                        v4_shadow.run_display_fit,
+                        chart_entries=self._chart_log.raw_entries(),
+                        tz=now.tzinfo,
+                        now=now,
+                        primary=primary,
+                        sensors=sensors,
+                        model_dict=model_dict,
+                        primary_aliases=aliases,
+                        in_sleep=in_sleep,
+                        train_days=V4_FIT_TRAIN_DAYS,
+                    )
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - display lines only; the stored model stays
+            _LOGGER.warning("v4 display-node fit failed; keeping the stored model", exc_info=True)
+            return
+        if getattr(self, "_shut_down", False) is True or state.v4_model is not model_dict:
+            return  # unloaded, or a full fit replaced the model meanwhile: drop this result
+        state.v4_model = new_dict
+        state.dirty = True
+        _LOGGER.info("v4 fit (%s): %s took %.1fs", V4_DISPLAY_FIT_REASON, line, seconds)
+        await self._executor_job(self._v4_store.save)
+
+    def _v4_display_pending(self, model_dict: Mapping[str, Any]) -> list[str]:
+        """Sensors that newly qualify as display-only nodes (Issue #1422); ``[]`` on any error. Event loop: one pass
+        over the last 30 days of chart rows, run at most every 6 h (the retry interval)."""
+        try:
+            node = self._v4_node_inputs()
+            now = dt_util.now()
+            return v4_shadow.display_pending(
+                model_dict,
+                self._chart_log.raw_entries(),
+                now=now,
+                tz=now.tzinfo,
+                primary=node["primary"],
+                sensors=node["sensors"],
+                train_days=V4_FIT_TRAIN_DAYS,
+            )
+        except Exception:  # noqa: BLE001 - a display trigger must never break the cycle
+            _LOGGER.debug("v4 display-node check failed", exc_info=True)
+            return []
+
+    # ── Issue #1230 R3a: operation timeline (shadow)─────────────────────────────────────────────────────────────
     # The pure plan lives in operation_timeline.py. Here: build the snapshot from the live plan, run the per-day latch,
     # keep the last result for the debug payload. Nothing below writes to the engine, the classification or a surface.
 
@@ -6723,6 +6741,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             last = self._v4_last_fit_attempt
             if last is None or _monotonic() - last >= V4_FIT_RETRY_MIN_INTERVAL_S:
                 self._v4_start_night_replay("night_replay")
+        if (
+            model_dict.get("confidence", "none") != "none"
+            and not self._v4_fit_running
+            and getattr(self, "_startup_coalesce_active", False) is not True
+        ):
+            # Issue #1422: a sensor that newly qualifies as a display-only node (3+ days of its own history) is folded
+            # in at the 6-hourly retry instead of waiting for 03:15. Display only: the control model is not refitted.
+            last_chk = getattr(self, "_v4_last_display_check", None)
+            if last_chk is None or _monotonic() - last_chk >= V4_FIT_RETRY_MIN_INTERVAL_S:
+                self._v4_last_display_check = _monotonic()
+                if self._v4_display_pending(model_dict):
+                    self._v4_start_fit(V4_DISPLAY_FIT_REASON)
         started = _perf_counter()
         now = dt_util.now()
         sleep_node, sleep_time, wake_time = self._v4_sleep_node(model_dict)
@@ -6742,7 +6772,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         cycle = self._v4_cycle_kwargs(now, row, model_dict, state)
         readings = cycle["readings"]
         inputs = cycle["inputs"]
-        predictions, new_mass = await self._executor_job(functools.partial(v4_shadow.run_cycle, **cycle))
+        predictions, new_mass = await self._executor_job(functools.partial(v4_shadow.run_cycle, display=True, **cycle))
         if getattr(self, "_shut_down", False) is True:
             return
         state.v4_mass_f = new_mass
@@ -12199,8 +12229,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _initialize_hvac_session_from_current_state(self, climate_state: Any) -> None:
         """Late-start HVAC session when HA restarted mid-session (Issue #96).
 
-        Sets session start from current time. Thermal observations will cover
-        only the post-restart portion — better than zero observations.
+        Sets session start from current time. The thermal observation covers only the
+        post-restart portion, by design (Issue #1437): the part of the run before the
+        restart is never learned from. In-flight observations are not persisted, and
+        resuming one would fit a curve across the blind gap while HA was down, during
+        which the thermostat kept running and CA cannot see whether the run stopped and
+        restarted. A shorter clean observation beats a longer contaminated one.
         Called from _async_update_data() on first update if HVAC is already running.
         """
         action = climate_state.attributes.get("hvac_action", "").lower()

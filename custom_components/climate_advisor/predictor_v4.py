@@ -102,6 +102,14 @@ GATE_MIN_MODE_STEPS = 8  # >= 2 h of heating (or cooling) to call the mode "seen
 
 CONFIDENCE_VALUES = ("none", "low", "ok")
 
+# Display-only sensor nodes (Issue #1422). A sensor whose per-sensor history began recently (``indoor_sensors``) is
+# judged over the span since ITS first row, not the whole training window, so it draws its own line within days. It
+# is fitted AFTER the control fit with the house parameters held, and kept in ``V4Model.display_nodes`` - never in
+# ``sensors`` / ``nodes`` - so nothing that decides (control rates, control path, ``_ca``, night strategy) reads it.
+NODE_MIN_HISTORY_DAYS = 3.0  # a display node needs this much of its own history (its first row to the window's end)
+NODE_MIN_COVERAGE = 0.5  # ... and a reading on this share of the rows since its first row
+DISPLAY_MAX_ITERATIONS = 30  # node-only Levenberg-Marquardt: 5 parameters, the house trajectory rolled once
+
 _ACTIVE_HEAT = "heating"
 _ACTIVE_COOL = "cooling"
 
@@ -191,6 +199,10 @@ class V4Model:
     fit: Mapping[str, Any]
     confidence: str
     openness: V4Openness | None = None
+    #: Issue #1422: display-only sensor nodes ``{entity_id: node params}`` (ordered). Drawn on the chart, never a
+    #: control node: not in ``sensors`` / ``nodes``, so the control rates, the control path, the ``_ca`` composite and
+    #: the night strategy cannot see them.
+    display_nodes: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
 
 
 @dataclass
@@ -1087,8 +1099,12 @@ def fit(
     max_iterations: int = 100,
     max_anchors: int = 160,
     warm_start: V4Model | None = None,
+    display_sensors: Sequence[str] = (),
 ) -> V4Model:
     """Fit the model by bounded Levenberg-Marquardt on multi-step rollout residuals.
+
+    ``display_sensors`` (Issue #1422, from :func:`resolve_display_nodes`) are fitted AFTER the model, house held, by
+    :func:`fit_display_nodes` into ``display_nodes``; the rest of the model is exactly what it is without them.
 
     Deterministic (no randomness, no wall-clock). Residuals are the primary and every extra sensor's
     rollout error at 1-h and then 30-min lead steps up to ``horizon_h``, weighted from 1.0 (lead 1)
@@ -1141,7 +1157,7 @@ def fit(
             base.fit["n_anchors"] = len(prob.anchors)
             base.fit["reason"] = "too few anchors"
             return base
-        return _fit_problem(
+        model = _fit_problem(
             prob,
             base,
             sensor_list,
@@ -1158,6 +1174,16 @@ def fit(
     except (ArithmeticError, ValueError, TypeError, IndexError, OverflowError) as exc:  # pragma: no cover
         base.fit["reason"] = f"fit failed: {type(exc).__name__}"
         return base
+    if display_sensors and model.confidence != "none":
+        model = with_display_nodes(
+            model,
+            samples,
+            display_sensors=display_sensors,
+            tz=tz,
+            warm=warm_start.display_nodes if warm_start is not None else None,
+            max_anchors=max_anchors,
+        )
+    return model
 
 
 def _fit_problem(
@@ -1442,6 +1468,182 @@ def _fit_problem(
     )
 
 
+# ------------------------------------------------------------------- display-only nodes (Issue #1422)
+def _lm_node(
+    prob: _Problem,
+    passes: list[tuple[list[float], list[float]]],
+    ratio: float,
+    start: Mapping[str, float],
+    frozen: set[str],
+    max_iterations: int,
+) -> dict[str, float]:
+    """Bounded Levenberg-Marquardt over ONE node's parameters (node 0 of ``prob``) on a fixed house trajectory."""
+    free = [k for k in NODE_KEYS if k not in frozen]
+    bnds = [NODE_BOUNDS[k] for k in free]
+
+    def params(z: Sequence[float]) -> list[float]:
+        d = dict(start)
+        for k, (lo, hi), zi in zip(free, bnds, z, strict=True):
+            d[k] = lo + min(1.0, max(0.0, zi)) * (hi - lo)
+        return [d[k] for k in NODE_KEYS]
+
+    z = [(start[k] - lo) / (hi - lo) for k, (lo, hi) in zip(free, bnds, strict=True)]
+    r = prob.node_residuals(0, params(z), passes, ratio)
+    cost = 0.5 * sum(x * x for x in r)
+    if not free or not r or not math.isfinite(cost):
+        return dict(zip(NODE_KEYS, params(z), strict=True))
+    lam = 1e-2
+    n = len(free)
+    for _ in range(max_iterations):
+        cols: list[list[float]] = []
+        for i in range(n):
+            step = 1e-3 if z[i] + 1e-3 <= 1.0 else -1e-3
+            zz = list(z)
+            zz[i] += step
+            rp = prob.node_residuals(0, params(zz), passes, ratio)
+            cols.append([(a - b) / step for a, b in zip(rp, r, strict=True)])
+        jtj = [[sum(map(operator.mul, cols[a], cols[b], strict=True)) for b in range(n)] for a in range(n)]
+        jtr = [sum(map(operator.mul, cols[a], r, strict=True)) for a in range(n)]
+        accepted = False
+        rel = moved = 0.0
+        for _ in range(8):
+            mat = [row[:] for row in jtj]
+            for d in range(n):
+                mat[d][d] += lam * (jtj[d][d] + 1e-9) + 1e-12
+            step_z = _solve(mat, [-g for g in jtr])
+            if step_z is None:
+                lam *= 10.0
+                continue
+            zn = [min(1.0, max(0.0, zi + si)) for zi, si in zip(z, step_z, strict=True)]
+            rn = prob.node_residuals(0, params(zn), passes, ratio)
+            cn = 0.5 * sum(x * x for x in rn)
+            if math.isfinite(cn) and cn < cost:
+                rel = (cost - cn) / max(cost, 1e-12)
+                moved = max(abs(a - b) for a, b in zip(zn, z, strict=True))
+                z, r, cost = zn, rn, cn
+                lam = max(lam / 3.0, 1e-7)
+                accepted = True
+                break
+            lam *= 4.0
+        if not accepted or rel < 1e-5 or moved < 1e-5:
+            break
+    return dict(zip(NODE_KEYS, params(z), strict=True))
+
+
+def fit_display_nodes(
+    model: V4Model,
+    samples: Sequence[V4Sample],
+    *,
+    display_sensors: Sequence[str],
+    tz: tzinfo,
+    warm: Mapping[str, Mapping[str, float]] | None = None,
+    max_anchors: int = 160,
+    max_iterations: int = DISPLAY_MAX_ITERATIONS,
+) -> tuple[dict[str, dict[str, float]], dict[str, Any]]:
+    """Fit display-only nodes on top of a fitted model (Issue #1422): ``(display_nodes, info)``.
+
+    Occupant view: a thermostat or bedroom sensor whose per-sensor logging began a few days ago gets its own v4 line
+    on the Status chart instead of "v4 is still learning" for two weeks. Nothing that decides reads these nodes.
+
+    The house parameters (and so the primary trajectory) are HELD at the model's values: each node is fitted alone,
+    by a node-only LM on the samples from that sensor's first reading on, so the control model is untouched by
+    construction (a node never feeds back into ``H``). A node is kept only when it has ``GATE_MIN_ANCHORS`` anchors
+    and beats "its reading won't change" at 4 h by ``GATE_MIN_SKILL`` - the same skill bar the model itself passes;
+    otherwise ``info["rejected"][sid]`` says why. Never raises.
+    """
+    out: dict[str, dict[str, float]] = {}
+    info: dict[str, Any] = {"tried": [], "kept": [], "per_sensor": {}, "rejected": {}}
+    if model.confidence == "none" or not samples:
+        return out, info
+    hp = [float(model.house[k]) for k in HOUSE_KEYS]
+    ratio = hp[8] / hp[7] if hp[7] > 1e-9 else 1.0
+    fit_info = model.fit if isinstance(model.fit, Mapping) else {}
+    try:
+        horizon_h = int(fit_info.get("horizon_h", 12) or 12)
+    except TypeError, ValueError:
+        horizon_h = 12
+    horizon_steps = max(4, int(horizon_h * 60 / V4_STEP_MINUTES))
+    taken = {model.primary, CA_NODE, *model.sensors}
+    for sid in dict.fromkeys(display_sensors):
+        if not isinstance(sid, str) or sid in taken:
+            continue
+        info["tried"].append(sid)
+        try:
+            k0 = next((k for k, s in enumerate(samples) if _finite(s.readings.get(sid))), None)
+            if k0 is None:
+                info["rejected"][sid] = "no readings"
+                continue
+            prob = _Problem(
+                samples[k0:],
+                primary=model.primary,
+                extra=[sid],
+                tz=tz,
+                horizon_steps=horizon_steps,
+                max_anchors=max_anchors,
+            )
+            n_node = sum(1 for a in prob.anchors if a.b0[0] is not None and a.targets[1])
+            if n_node < GATE_MIN_ANCHORS:
+                info["rejected"][sid] = "too few anchors"
+                continue
+            passes = prob.house_pass(hp)
+            frozen: set[str] = set()
+            if prob.win_steps < GATE_MIN_MODE_STEPS:
+                frozen.add("b_w")
+            if prob.heat_steps < GATE_MIN_MODE_STEPS and prob.cool_steps < GATE_MIN_MODE_STEPS:
+                frozen.add("q_b")
+            start = dict(NODE_START)
+            prev = (warm or {}).get(sid)
+            if isinstance(prev, Mapping):
+                start.update({k: float(v) for k, v in prev.items() if k in NODE_BOUNDS and _finite(v)})
+            for k, (lo, hi) in NODE_BOUNDS.items():
+                start[k] = min(hi, max(lo, start[k]))
+            nd = _lm_node(prob, passes, ratio, start, frozen, max_iterations)
+            if not all(math.isfinite(v) for v in nd.values()):
+                info["rejected"][sid] = "fit diverged"
+                continue
+            params = [nd[k] for k in NODE_KEYS]
+            model_err: dict[int, list[float]] = {}
+            flat_err: dict[int, list[float]] = {}
+            for a, (hs, sun) in zip(prob.anchors, passes, strict=True):
+                b0 = a.b0[0]
+                if b0 is None:
+                    continue
+                traj = _roll_node(params, a.h0, b0, a.out, a.win, hs, sun, a.uh, a.uc, ratio)
+                for k, v, _ in a.targets[1]:
+                    model_err.setdefault(k + 1, []).append(abs(traj[k] - v))
+                    flat_err.setdefault(k + 1, []).append(abs(b0 - v))
+            ref = 16 if 16 in model_err else 4
+            m, f = _mae(model_err.get(ref)), _mae(flat_err.get(ref))
+            if m is None or f is None or f <= 0 or m > (1.0 - GATE_MIN_SKILL) * f:
+                info["rejected"][sid] = f"does not beat no-change at {ref // 4} h by 10 %"
+                continue
+            out[sid] = nd
+            info["kept"].append(sid)
+            info["per_sensor"][sid] = {f"{ref // 4}h": round(m, 3), "flat": round(f, 3), "anchors": n_node}
+        except (ArithmeticError, ValueError, TypeError, IndexError, OverflowError) as exc:  # pragma: no cover
+            info["rejected"][sid] = f"fit failed: {type(exc).__name__}"
+    return out, info
+
+
+def with_display_nodes(
+    model: V4Model,
+    samples: Sequence[V4Sample],
+    *,
+    display_sensors: Sequence[str],
+    tz: tzinfo,
+    warm: Mapping[str, Mapping[str, float]] | None = None,
+    max_anchors: int = 160,
+) -> V4Model:
+    """``model`` with its ``display_nodes`` refitted (:func:`fit_display_nodes`); ``fit["display"]`` records why.
+    Every other field is the input model's own object: the control model is unchanged."""
+    nodes, info = fit_display_nodes(
+        model, samples, display_sensors=display_sensors, tz=tz, warm=warm, max_anchors=max_anchors
+    )
+    fit_info = dict(model.fit) if isinstance(model.fit, Mapping) else {}
+    fit_info["display"] = info
+    return dataclasses.replace(model, display_nodes=nodes, fit=fit_info)
+
+
 # --------------------------------------------------------------------------------- live use
 def step_mass(
     model: V4Model, *, mass_f: float | None, readings: Mapping[str, float | None], sample: V4Sample | None = None
@@ -1477,8 +1679,13 @@ def predict(
     ca_sleep_node: str | None = None,
     ca_sleep_time: str | None = None,
     ca_wake_time: str | None = None,
+    display_nodes: bool = False,
 ) -> dict[str, list[tuple[datetime, float]]] | None:
     """Predict every model sensor at each ``inputs[k].ts`` (consecutive 15-minute grid points after ``now``).
+
+    ``display_nodes=True`` (Issue #1422, the chart's lines only) also rolls the model's display-only nodes; every
+    other line (primary, control nodes, ``_ca``) is the same with or without it, because a node never feeds back into
+    the house and ``_ca`` only ever takes a CONTROL sleep node.
 
     ``None`` when confidence is "none", the primary reading is missing, or there are no inputs. Sensors
     whose own reading is missing are left out of the result. ``outdoor_now_f`` / ``forecast_now_f``
@@ -1510,6 +1717,14 @@ def predict(
         node_ids.append(sid)
         node_params.append([model.nodes[sid][k] for k in NODE_KEYS])
         b0.append(float(r))
+    if display_nodes:
+        for sid, params in model.display_nodes.items():
+            r = readings.get(sid)
+            if sid in model.nodes or sid == model.primary or r is None or not math.isfinite(r):
+                continue
+            node_ids.append(sid)
+            node_params.append([params[k] for k in NODE_KEYS])
+            b0.append(float(r))
     hours = [_local_hour(i.ts, tz) for i in inputs]
     lead_h = [(i.ts.timestamp() - now.timestamp()) / 3600.0 for i in inputs]
     out = _corrected_outdoor(
@@ -1555,7 +1770,8 @@ def predict(
     }
     for j, sid in enumerate(node_ids):
         res[sid] = [(inp.ts, roll.nodes[j][k]) for k, inp in enumerate(inputs)]
-    if ca_sleep_node and ca_sleep_node in res and ca_sleep_node != model.primary:
+    # ``_ca`` composes from a CONTROL sleep node only: a display-only bedroom node never becomes the CA-read line.
+    if ca_sleep_node and ca_sleep_node in res and ca_sleep_node != model.primary and ca_sleep_node in model.nodes:
         res[CA_NODE] = ca_line(
             res,
             primary=model.primary,
@@ -1604,6 +1820,8 @@ def to_dict(model: V4Model) -> dict[str, Any]:
         },
         "fit": _jsonable(model.fit),
         "confidence": model.confidence,
+        # Issue #1422: display-only nodes (chart lines, never control). Optional on read: older files have none.
+        "display_nodes": {sid: {k: float(p[k]) for k in NODE_KEYS} for sid, p in model.display_nodes.items()},
     }
 
 
@@ -1702,6 +1920,7 @@ def from_dict(d: Any) -> V4Model | None:
             if len(wbh) != 24 or len(fbh) != 24 or not all(math.isfinite(v) and 0.0 <= v <= 1.0 for v in (*wbh, *fbh)):
                 return None
             openness = V4Openness(wbh, fbh, float(op_raw.get("days", 0.0)))
+        display = _display_nodes_from(d.get("display_nodes"), sensors)
         return V4Model(
             schema_version=V4_SCHEMA_VERSION,
             fitted_at=fitted_at,
@@ -1714,9 +1933,29 @@ def from_dict(d: Any) -> V4Model | None:
             fit=dict(fit_info),
             confidence=conf,
             openness=openness,
+            display_nodes=display,
         )
     except KeyError, TypeError, ValueError, AttributeError, IndexError:
         return None
+
+
+def _display_nodes_from(raw: Any, sensors: Sequence[str]) -> dict[str, dict[str, float]]:
+    """The display-only nodes of a stored model (Issue #1422). Absent (older files) or malformed -> none; a bad node
+    is dropped on its own. Never rejects the model: these lines are display only, so they cannot cost the control
+    model a refit."""
+    out: dict[str, dict[str, float]] = {}
+    if not isinstance(raw, Mapping):
+        return out
+    for sid, p in raw.items():
+        if not isinstance(sid, str) or sid in sensors or sid == CA_NODE or not isinstance(p, Mapping):
+            continue
+        try:
+            nd = {k: float(p[k]) for k in NODE_KEYS}
+        except KeyError, TypeError, ValueError:
+            continue
+        if all(_finite(nd[k]) and lo - 1e-9 <= nd[k] <= hi + 1e-9 for k, (lo, hi) in NODE_BOUNDS.items()):
+            out[sid] = nd
+    return out
 
 
 def summary_line(model: V4Model) -> str:
@@ -1993,6 +2232,55 @@ def resolve_nodes(
         if cov >= min_extra_cov:
             extras.append(sid)
     return prim, [prim, *extras]
+
+
+def resolve_display_nodes(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    nodes: Sequence[str],
+    primary: str,
+    sensors: Sequence[str],
+    tz: tzinfo,
+    min_history_days: float = NODE_MIN_HISTORY_DAYS,
+    min_cov: float = NODE_MIN_COVERAGE,
+) -> list[str]:
+    """Display-only extra nodes for a fit on ``entries`` (Issue #1422): the sensors :func:`resolve_nodes` left out
+    that qualify on THEIR OWN history.
+
+    Occupant view: per-sensor logging (``indoor_sensors``) began on a known day, so judging a sensor over the whole
+    30-day window kept the thermostat and bedroom lines at "v4 is still learning" for about two weeks. Here each
+    candidate (``sensors``, plus the entity ``primary`` when the model fell back to ``_ca``) is judged over the span
+    from its first ``indoor_sensors`` row to the last row given: at least ``min_history_days`` of it, and a reading
+    on at least ``min_cov`` of those rows. ``nodes`` (the control nodes ``resolve_nodes`` chose) are never repeated, so
+    a sensor that passes the control rule stays a control node exactly as before.
+    """
+    taken = {CA_NODE, *nodes}
+    cands = [s for s in dict.fromkeys([primary, *sensors]) if isinstance(s, str) and s and s not in taken]
+    if not cands:
+        return []
+    rows: list[tuple[float, Mapping[str, Any] | None]] = []
+    for r in entries:
+        if not isinstance(r, Mapping):
+            continue
+        ts = _parse_ts(r.get("ts"), tz)
+        if ts is None:
+            continue
+        sens = r.get("indoor_sensors")
+        rows.append((ts.timestamp(), sens if isinstance(sens, Mapping) else None))
+    if not rows:
+        return []
+    rows.sort(key=lambda x: x[0])
+    last = rows[-1][0]
+    out: list[str] = []
+    for sid in cands:
+        first = next((i for i, (_, s) in enumerate(rows) if s is not None and sid in s), None)
+        if first is None or last - rows[first][0] < min_history_days * 86400.0:
+            continue
+        since = rows[first:]
+        good = sum(1 for _, s in since if s is not None and _num(s.get(sid)) is not None)
+        if good / len(since) >= min_cov:
+            out.append(sid)
+    return out
 
 
 def _hvac_at(tl: list[tuple[float, str]], g: float) -> str | None:

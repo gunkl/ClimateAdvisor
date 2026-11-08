@@ -2500,6 +2500,8 @@ class LearningEngine:
         return {
             "status": "active",
             "days_recorded": len(records),
+            # the scores below are over the most recent ``window_days`` records (14, or fewer while young)
+            "window_days": len(recent),
             "window_compliance": window_compliance,
             "window_compliance_denominator": len(window_days),
             "avg_daily_hvac_runtime_minutes": avg_runtime,

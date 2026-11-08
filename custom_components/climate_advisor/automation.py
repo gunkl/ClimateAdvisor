@@ -1667,6 +1667,21 @@ class AutomationEngine:
     # coordinator assigns its shared holder in __init__.
     indoor_companion: CompanionSensors | None = None
 
+    # Issue #1474: today's DailyRecord. The coordinator owns it and replaces it (new day, restore, end of day), so the
+    # engine reads it live through its inputs (Issue #1443: the coordinator never writes an engine private); a held
+    # copy was never assigned in production, so every bedtime setback (applied or skipped) was written to nothing
+    # since #151. A bare engine (tests, tools: inputs without ``today_record``) keeps its own.
+    _today_record_own: Any | None = None
+
+    @property
+    def _today_record(self) -> Any | None:
+        live = getattr(self.inputs, "today_record", None)
+        return live() if callable(live) else self._today_record_own
+
+    @_today_record.setter
+    def _today_record(self, value: Any | None) -> None:
+        self._today_record_own = value
+
     # Issue #729: class-level default so a test fixture that partially constructs an
     # engine via object.__new__(AutomationEngine) (skipping __init__ — an established
     # pattern across many existing tests, see CLAUDE.md) still has a value for the
@@ -2504,8 +2519,7 @@ class AutomationEngine:
         # Set by coordinator after construction.
         self._reclassify_callback: Callable[..., None] | None = None
 
-        # Today's DailyRecord — set by coordinator; used for bedtime setback tracking
-        self._today_record: Any | None = None
+        # Today's DailyRecord: read live from the coordinator through ``inputs.today_record()`` (Issue #1474)
 
         # Issue #96: classification event dedup — track last emitted (day_type, hvac_mode) pair
         self._last_classification_applied: tuple[str, str] | None = None

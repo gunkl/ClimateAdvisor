@@ -45,13 +45,15 @@
     var seq = ++loadSeq;
     var calls = await Promise.allSettled([
       ND.api('learning'), ND.api('engines'), ND.api('event_log?hours=2'), ND.api('chart_data?range=6h'),
-      ND.api('ai_status'), ND.api('investigation_reports')
+      ND.api('ai_status'), ND.api('investigation_reports'),
+      // Issue #1475: the headline 4 h error is the PRIMARY engine's live miss (the control-quality archive is v3's log)
+      ND.api('prediction_accuracy?lead=4h&range=24h')
     ]);
     if (seq !== loadSeq) return; // a newer load (zone switch) owns the screen
     var v = function (i) { return calls[i].status === 'fulfilled' ? calls[i].value : null; };
     var e = function (i) { return calls[i].status === 'rejected' ? calls[i].reason.message : null; };
-    D.learning = v(0); D.engines = v(1); D.events = v(2); D.chart = v(3); D.ai = v(4); D.reports = v(5);
-    D.errs = [e(0), e(1), e(2), e(3), e(4), e(5)];
+    D.learning = v(0); D.engines = v(1); D.events = v(2); D.chart = v(3); D.ai = v(4); D.reports = v(5); D.acc = v(6);
+    D.errs = [e(0), e(1), e(2), e(3), e(4), e(5), e(6)];
     loaded = true;
     renderAll();
   }
@@ -68,58 +70,114 @@
   function renderKpis() {
     var L = D.learning, host = $('an-kpis');
     if (!L) { host.innerHTML = '<div class="tile"><div class="l">Headline numbers</div><div class="err">' + esc(D.errs[0] || 'No data') + '</div></div>'; return; }
-    var c = L.compliance || {}, active = c.status === 'active', q = cq24(), pe = q && q.prediction_error && q.prediction_error.archive_lead;
+    var c = L.compliance || {}, active = c.status === 'active';
     var ps = ND.status && ND.status.promise_summary;
     var today = L.today_record ? L.today_record.manual_overrides || 0 : 0;
+    // Issue #1475: every score is over the most recent window_days records (14), not every recorded day
+    var wd = c.window_days || Math.min(14, c.days_recorded || 0), last = 'last ' + wd + ' days';
+    var pe = primaryMiss(), lastHit = promiseLastHit(ps);
     var tiles = [
-      { l: 'Comfort score', v: active ? pct(c.comfort_score) : '—', n: (c.days_recorded || 0) + ' days recorded',
-        t: '% of time the indoor temperature stayed within the target range in effect, averaged over the last 14 days' },
-      { l: 'Window advice followed', v: active ? pct(c.window_compliance) : '—', n: c.window_compliance_denominator != null ? 'of ' + c.window_compliance_denominator + ' days with advice' : '' },
-      { l: 'Runtime per day', v: active ? Math.round(c.avg_daily_hvac_runtime_minutes || 0) + ' min' : '—', n: 'average HVAC' +
+      { l: 'Comfort score', v: active ? pct(c.comfort_score) : '—', n: last + ' (' + (c.days_recorded || 0) + ' recorded)',
+        t: '% of time the indoor temperature stayed within the target range in effect, over the last ' + wd + ' days' },
+      { l: 'Window advice followed', v: active ? pct(c.window_compliance) : '—', n: c.window_compliance_denominator != null ? c.window_compliance_denominator + ' days with advice, ' + last : '' },
+      { l: 'Runtime per day', v: active ? Math.round(c.avg_daily_hvac_runtime_minutes || 0) + ' min' : '—', n: 'average HVAC, ' + last +
         (active && c.avg_daily_thermostat_fan_only_runtime_minutes ? ', fan-only ' + Math.round(c.avg_daily_thermostat_fan_only_runtime_minutes) + ' min' : '') },
-      { l: 'Manual changes', v: active ? String(c.total_manual_overrides || 0) : '—', n: 'total · ' + today + ' today' },
-      { l: 'Promises missed', v: ps ? String(ps.total_hits || 0) : '—', n: 'last 24 h' },
-      { l: 'Prediction error, 4 h', v: pe ? ND.num(ND.dFToDisp(pe.mean_abs_f), 1) + '°' : '—',
-        n: pe ? 'runs ' + (pe.mean_signed_f > 0 ? '+' : '') + ND.num(ND.dFToDisp(pe.mean_signed_f), 1) + '° ' + (pe.mean_signed_f > 0 ? 'warm' : 'cool') : 'not enough data yet' }
+      { l: 'Manual changes', v: active ? String(c.total_manual_overrides || 0) : '—', n: last + ' · ' + today + ' today' },
+      { l: 'Promises missed', v: ps ? String(ps.total_hits || 0) : '0', n: ps && lastHit ? 'in total · last ' + ND.fmtDateTime(lastHit) : 'none so far' },
+      { l: 'Prediction error, 4 h', v: pe ? ND.num(pe.mae, 1) + '°' : '—',
+        n: pe ? pe.engine + ', last 24 h · runs ' + (pe.bias > 0 ? '+' : '') + ND.num(pe.bias, 1) + '° ' + (pe.bias > 0 ? 'warm' : 'cool') : 'not enough data yet',
+        t: 'How far the main prediction 4 hours ahead was from what happened, over the last 24 hours (Debug > Backtest for more)' }
     ];
     host.innerHTML = tiles.map(function (t) {
       return '<div class="tile"' + (t.t ? ' title="' + esc(t.t) + '"' : '') + '><div class="l">' + esc(t.l) + '</div><div class="v">' + esc(t.v) + '</div><div class="n">' + esc(t.n) + '</div></div>';
     }).join('');
   }
 
+  // The primary engine's live 4 h miss over the last 24 h (prediction_accuracy, already in the user's unit), or null
+  function primaryMiss() {
+    var a = D.acc, s = a && a.stats; if (!s) return null;
+    var eng = a.primary_engine || 'v4', mae = s[eng + '_mae'], bias = s[eng + '_bias'];
+    return mae == null ? null : { engine: eng, mae: mae, bias: bias || 0 };
+  }
+  function promiseLastHit(ps) {
+    var t = ((ps && ps.promises) || []).map(function (p) { return p.last_hit; }).filter(Boolean).sort();
+    return t.length ? t[t.length - 1] : null;
+  }
+
   // ---------- days table: yesterday / today / tomorrow (plan) ----------
   function renderDays() {
     var L = D.learning, host = $('an-days');
     if (!L) { err(host, D.errs[0] || 'no data'); return; }
-    var y = L.yesterday_record, t = L.today_record, n = L.tomorrow_plan, u = ND.sym(L.unit || ND.unit);
+    var y = L.yesterday_record, t = L.today_record, n = L.tomorrow_plan, u = ND.sym(L.unit || ND.unit), TL = L.today_live || {};
     var lo = L.comfort_range_low, hi = L.comfort_range_high;
     var tip = 'Time the indoor temperature was outside the target range in effect at the time (your comfort range' +
       (lo != null && hi != null ? ' ' + lo + '–' + hi + u : '') + ' while awake; your sleep/away range during planned setbacks)';
     function pair(rec, a, b) { return tdisp(rec[a]) + '→' + tdisp(rec[b]); }
-    function hl(rec) { return pair(rec, 'forecast_high_f', 'observed_high_f') + ' / ' + pair(rec, 'forecast_low_f', 'observed_low_f'); }
+    function hl(rec) {
+      // Issue #1475: today's observed extremes fill only at end of day; show the outdoor high/low seen so far
+      if (rec === t && TL.observed_high_f != null && rec.observed_high_f == null) {
+        return tdisp(rec.forecast_high_f) + ' / ' + tdisp(rec.forecast_low_f) + ' · so far ' + tdisp(TL.observed_high_f) + ' / ' + tdisp(TL.observed_low_f);
+      }
+      return pair(rec, 'forecast_high_f', 'observed_high_f') + ' / ' + pair(rec, 'forecast_low_f', 'observed_low_f');
+    }
     function rec(fn) { return function (r) { return r ? fn(r) : '—'; }; }
+    function fixedTimes(r) { return hm(r.window_open_time) + '–' + hm(r.window_close_time) + ' (fixed for a ' + (r.day_type || '?') + ' day)'; }
+    // Issue #1475: a record's flag means "recommended at any point that day" (compliance credit); today also says
+    // what holds now, and names the plan's own periods instead of the day type's fixed times
+    function advised(r) {
+      if (r !== t || TL.windows_recommended_now == null) return yn(r.windows_recommended) + (r.windows_recommended ? ' · ' + fixedTimes(r) : '');
+      var now = TL.windows_recommended_now, plan = TL.plan_windows || [];
+      var head = now ? 'yes' : r.windows_recommended ? 'earlier today, not now' + (TL.forecast_windows_recommended ? ' (the live outdoor check says no)' : '') : 'no';
+      var times = plan.length ? ' · plan ' + plan.map(function (w) { return hm(w[0]) + '–' + hm(w[1]); }).join(', ') : (now ? ' · ' + fixedTimes(r) : '');
+      return head + times;
+    }
+    function opened(r) {
+      if (!r.windows_physically_opened && !r.window_physical_open_time) return 'no';
+      var credit = r.windows_recommended ? (r.windows_opened ? ' · counted as following advice' : ' · not counted (advice was off when opened)') : '';
+      return 'yes · ' + span(r.window_physical_open_time, r.window_physical_close_time) + credit;
+    }
+    function runtime(r) {
+      var tot = r.hvac_runtime_minutes || 0, h = r.hvac_heat_runtime_minutes, c = r.hvac_cool_runtime_minutes;
+      if (h == null && c == null) return r0(tot) + ' min';
+      // the split is recorded from 0.9.x on; a day that began on an older version has minutes only in the total
+      return r0(tot) + ' min' + (h + c >= tot - 1 ? ' (heat ' + r0(h) + ' · cool ' + r0(c) + ')' : ' (heat/cool split not recorded for the whole day)');
+    }
     var rows = [
       ['Day type · trend', rec(function (r) { return (r.day_type || '—') + ' · ' + (r.trend_direction || '—'); }),
         function (p) { return p ? (p.day_type || '—') : ''; }],
-      ['HVAC mode', rec(function (r) { return r.hvac_mode_recommended || '—'; }), function (p) { return p ? (p.hvac_mode || '—') : ''; }],
+      ['Recommended HVAC mode', rec(function (r) { return r.hvac_mode_recommended || '—'; }), function (p) { return p ? (p.hvac_mode || '—') : ''; },
+        'The mode today\u2019s classification recommends. Heating or cooling can still run on an "off" day to hold your comfort range (see HVAC runtime)'],
       ['High / low (forecast → observed)', rec(hl),
         function (p) { return p && (p.expected_high != null || p.expected_low != null) ? 'expected ' + ND.num(p.expected_high, 0) + u + ' / ' + ND.num(p.expected_low, 0) + u : ''; }],
-      ['Windows advised', rec(function (r) { return yn(r.windows_recommended) + (r.windows_recommended ? ' · ' + hm(r.window_open_time) + '–' + hm(r.window_close_time) : ''); }),
-        function (p) { return p ? yn(p.windows_recommended) + (p.windows_recommended ? ' · ' + hm(p.window_open_time) + '–' + hm(p.window_close_time) : '') : ''; }],
-      ['Windows actually open', rec(function (r) { return yn(r.windows_opened) + (r.window_physical_open_time ? ' · ' + span(r.window_physical_open_time, r.window_physical_close_time) : ''); }), function () { return ''; }],
-      ['HVAC runtime', rec(function (r) { return r0(r.hvac_runtime_minutes) + ' min'; }), function () { return ''; }],
+      ['Windows advised', rec(advised),
+        function (p) { return p ? yn(p.windows_recommended) + (p.windows_recommended ? ' · plan ' + hm(p.window_open_time) + '–' + hm(p.window_close_time) : '') : ''; },
+        'Yes when opening windows was recommended at any point that day (that is what window advice is scored on). Fixed times come from the day type; plan times are the periods the plan holds'],
+      ['Windows actually open', rec(opened), function () { return ''; },
+        'When a door or window sensor read open. Counted as following advice only when it opened while windows were recommended'],
+      ['HVAC runtime', rec(runtime), function () { return ''; }],
       ['Fan-only runtime', rec(function (r) { return r0(r.thermostat_fan_only_runtime_minutes) + ' min'; }), function () { return ''; }],
       ['Avg indoor · minutes outside comfort', rec(function (r) {
         var m = r.comfort_violations_minutes || 0;
-        return (r.avg_indoor_temp != null ? tdisp(r.avg_indoor_temp, 1) + u : '—') + ' · ' + Math.round(m) + ' min (' + (m / 1440 * 100).toFixed(0) + '% of day)';
+        var avg = r.avg_indoor_temp != null ? tdisp(r.avg_indoor_temp, 1) + u : r === t && TL.avg_indoor_f != null ? tdisp(TL.avg_indoor_f, 1) + u + ' so far' : '—';
+        return avg + ' · ' + Math.round(m) + ' min (' + (m / 1440 * 100).toFixed(0) + '% of day)';
       }), function () { return ''; }, tip],
-      ['Night setback', rec(function (r) { return r.setback_depth_f ? ND.num(ND.dFToDisp(r.setback_depth_f), 1) + u + (r.setback_was_adaptive ? ' (adaptive)' : '') : (r.setback_skipped_reason || 'none'); }), function () { return ''; }],
-      ['Pre-conditioning', function (r) { return r && r.pre_condition != null ? yn(r.pre_condition) : '—'; }, function (p) { return p ? yn(p.pre_condition) : ''; }],
+      ['Night setback', rec(function (r) {
+        if (r.setback_depth_f) return ND.num(ND.dFToDisp(r.setback_depth_f), 1) + u + (r.setback_was_adaptive ? ' (adaptive)' : '');
+        if (r.setback_skipped_reason) return 'skipped (' + String(r.setback_skipped_reason).replace(/_/g, ' ') + ')';
+        // Issue #1474: bedtime results were not recorded before 0.9.16
+        return r === t ? 'after bedtime' : 'not recorded';
+      }), function () { return ''; }],
+      ['Pre-conditioning', function (r) { return r && r.pre_condition != null ? yn(r.pre_condition) : r ? 'not recorded' : '—'; }, function (p) { return p ? yn(p.pre_condition) : ''; },
+        'Past days do not record whether the plan pre-heated or pre-cooled; the plan column does'],
       ['Manual changes · door/window pauses', rec(function (r) { return (r.manual_overrides || 0) + ' · ' + (r.door_window_pause_events || 0); }), function () { return ''; }],
       ['Away minutes', rec(function (r) { return r0(r.occupancy_away_minutes); }), function () { return ''; }],
       // Filled at end of day from the optional Settings > Advanced energy rate and heating/cooling power (#1230 R5c);
       // blank ("—") when any is unset. Tomorrow stays blank: the plan carries no predicted HVAC minutes yet.
-      ['Estimated cost', rec(function (r) { return r.estimated_cost != null ? Number(r.estimated_cost).toFixed(2) : '—'; }), function () { return ''; },
+      ['Estimated cost', rec(function (r) {
+        if (r.estimated_cost != null) return Number(r.estimated_cost).toFixed(2);
+        if (!L.cost_configured) return 'set an energy rate in Settings';
+        return r === t ? 'after the day ends' : '—';
+      }), function () { return ''; },
         'Energy cost of the heating and cooling that ran, from your energy rate and heating/cooling power settings. Shown after the day ends, and only when those are set.']
     ];
     var dt = function (r, p) { return r && r.date ? ' ' + String(r.date).slice(5) : p || ''; };
@@ -132,9 +190,9 @@
     host.innerHTML = h + '</tbody></table>';
     $('an-days-sub').textContent = 'Tomorrow shows what the plan knows today; blank cells fill in as the plan grows.';
     var c = L.compliance || {};
-    $('an-compliance').textContent = c.status === 'active' ? 'Over ' + c.days_recorded + ' recorded days: window compliance ' + pct(c.window_compliance) +
+    $('an-compliance').textContent = c.status === 'active' ? 'Over the last ' + (c.window_days || Math.min(14, c.days_recorded)) + ' of ' + c.days_recorded + ' recorded days: window compliance ' + pct(c.window_compliance) +
       ', average HVAC runtime ' + Math.round(c.avg_daily_hvac_runtime_minutes || 0) + ' min/day, average fan-only ' + Math.round(c.avg_daily_thermostat_fan_only_runtime_minutes || 0) +
-      ' min/day, comfort score ' + pct(c.comfort_score) + ', ' + (c.total_manual_overrides || 0) + ' manual overrides in total.' : 'Compliance summary appears once a few days are recorded.';
+      ' min/day, comfort score ' + pct(c.comfort_score) + ', ' + (c.total_manual_overrides || 0) + ' manual overrides.' : 'Compliance summary appears once a few days are recorded.';
   }
 
   // ---------- the house model in plain language ----------
@@ -200,6 +258,9 @@
       host.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:6px 16px;font-size:13px">' + items.map(function (i) {
         return '<div style="display:flex;justify-content:space-between;gap:8px;border-top:1px solid var(--rule);padding-top:5px"><span style="color:var(--ink2)">' + esc(i[0]) + '</span><span class="num">' + esc(i[1]) + '</span></div>';
       }).join('') + '</div>';
+      // Issue #1475: these bars score the forecast v3 logs (pred_indoor); say so when v3 is not the main engine
+      var prim = (D.acc && D.acc.primary_engine) || (D.engines && D.engines.v4 && D.engines.v4.prediction_engines && D.engines.v4.prediction_engines.primary);
+      $('an-pe-src').textContent = prim && prim !== 'v3' ? 'v3\u2019s logged forecast (the comparison engine); the main ' + prim + ' miss is in the headline' : '';
       var H = q.prediction_error.horizons, rowsPe = [['30 min', H['30m']], ['60 min', H['60m']], ['2 h', H['120m']], ['4 h', q.prediction_error.archive_lead]].filter(function (r) { return r[1]; });
       var mx = Math.max.apply(null, rowsPe.map(function (r) { return r[1].mean_abs_f; }).concat([1]));
       pe.innerHTML = rowsPe.map(function (r) {
@@ -213,7 +274,7 @@
     pr.innerHTML = ps && ps.promises && ps.promises.length ? ps.promises.map(function (p) {
       return '<div style="font-size:13px;display:flex;justify-content:space-between;gap:8px;border-top:1px solid var(--rule);padding-top:5px;margin-bottom:5px"><span>' +
         esc(String(p.label || p.promise).replace(/^(\d+): /, '#$1 ')) + '</span><span style="color:var(--ink2)">×' + p.hits + (p.last_hit ? ' · last ' + esc(ND.fmtDateTime(p.last_hit)) : '') + '</span></div>';
-    }).join('') : '<div class="empty">None in the last 24 h.</div>';
+    }).join('') : '<div class="empty">None missed so far.</div>';
   }
 
   // ---------- suggestions (respond_suggestion, exactly as classic) ----------

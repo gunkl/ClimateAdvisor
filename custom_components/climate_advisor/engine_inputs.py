@@ -192,6 +192,10 @@ class CoordinatorEngineInputs:
     def thermal_model(self) -> dict:
         return getattr(self._coordinator, "_thermal_model", None) or {}
 
+    def today_record(self) -> Any:
+        """The coordinator's live DailyRecord (Issue #1474: replaced each day, so never held by the engine)."""
+        return getattr(self._coordinator, "_today_record", None)
+
 
 # --------------------------------------------------------------------------- passing the facts in (the call sites)
 def _facts_scope(coordinator: Any, method: Any, at: datetime) -> contextlib.AbstractContextManager[Any]:

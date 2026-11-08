@@ -7,6 +7,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 - Fix #1471: when Climate Advisor drops a thermostat change you made before it was confirmed, the Activity Log now says so ("Override cleared"), the same as for a confirmed change. This happens when you press the whole-house fan in the same minute, cancel from the dashboard, or leave home. Before, the change just disappeared from the log, so it was hard to tell why Climate Advisor went back to its own plan.
 - Fix #1472 (test only): the nightly "settling flip" check no longer blames Climate Advisor when you switched the thermostat between heat and cool yourself. Climate Advisor keeping your chosen mode and applying your comfort edge after your grace ends is correct.
+- Fix #1468: the Debug tab now says where each value comes from and what each threshold is.
+  - **Prediction engines:** new "Decisions" rows show the rates the house runs on and which engine each comes from (with v4 primary: v4's heat-loss, heating and cooling rates; v3's learned sun and venting rates). v3's own rows are now labelled "v3". "Grade reason" and "By mode" say why v4 has its grade (for example 45 usable heating starts but 0 of the 5 cooling starts it needs). "Typical miss" is now "Training-fit miss", and the hints point to the Backtest for live accuracy.
+  - **Today's classification:** "windows recommended" says why (for example "today's high 65°F is below 68°F"). The window times are marked as fixed for the day type when windows are not recommended. The low rows name the threshold that applies today, and today's high is shown. The morning and evening opportunities say they are checked on hot days only, and the trend shows the setback thresholds.
+  - **Other rows:** skipped-observation counts at the list limit read "100 or more". Door and window sensors use their Home Assistant names. The grace duration reads in hours. The fan remote speed says when the fan is off.
+  - Display only: no heating, cooling or window decision changes.
+- Fix #1469: the Debug tab now shows v4's grade for heating and cooling separately, for example "v4: usable · heating ok · cooling low". Before, it showed one "low confidence", even while heating forecasts were good, because the top grade needs usable thermostat starts in every mode the home has used (Zone 1 had 0 of the 5 cooling starts it needs). Each mode is graded on its own usable starts and on how well v4 predicts the hours that mode runs. Display only: decisions read the same overall grade as before.
 
 ## [0.9.14] — 2026-11-08
 

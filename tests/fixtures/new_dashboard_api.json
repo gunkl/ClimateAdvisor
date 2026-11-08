@@ -207,7 +207,7 @@
      "outdoor_f": 57.4
     }
    ],
-   "rejection_log_counts": {
+   "rejection_log_cap": 100, "rejection_log_counts": {
     "ventilated_decay": 100,
     "solar_gain": 100,
     "passive_decay": 100,

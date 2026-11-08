@@ -288,6 +288,8 @@ from .const import (
     THRESHOLD_HOT,
     THRESHOLD_MILD,
     THRESHOLD_WARM,
+    TREND_THRESHOLD_MODERATE,
+    TREND_THRESHOLD_SIGNIFICANT,
     V4_ARCHIVE_SAVE_MIN_INTERVAL_S,
     V4_FIT_HOUR,
     V4_FIT_MINUTE,
@@ -297,6 +299,8 @@ from .const import (
     V4_MASS_MAX_GAP_S,
     V4_PREDICT_HORIZON_HOURS,
     VERSION,
+    WINDOW_OPPORTUNITY_MAX_LOW_F,
+    WINDOWS_RECOMMENDED_HYSTERESIS_F,
     is_availability_recovery,
     is_unavailable_state,
 )
@@ -7419,6 +7423,48 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("control_thermal_model failed", exc_info=True)
             return {**dict(base or {}), **prediction_engines.CONTROL_BLANK_MODEL}
 
+    def decision_rates_summary(self) -> list[dict[str, Any]]:
+        """Debug tab: each rate the decisions read now, in the user's unit, and where it comes from.
+
+        ``source`` is the primary engine's id for the scalars it lays over the v3 model (``control_model`` with an
+        empty base returns exactly those), ``"v3"`` for a value the learning observations hold, ``"default"`` for a
+        rate blanked while the primary is still learning, ``"none"`` when nothing is learned yet. Never raises."""
+        try:
+            unit = self.config.get("temp_unit", "fahrenheit")
+            base = dict(self._thermal_model or {})
+            model = dict(self.control_thermal_model(dict(base)) or {})
+            engine = prediction_engines.primary_id(self.config)
+            ready = prediction_engines.control_ready(self, self.config)
+            v3 = engine == ENGINE_V3
+            own = set() if v3 or not ready else set(prediction_engines.control_model(self, self.config, {}) or {})
+            blank = set() if v3 or ready else set(prediction_engines.CONTROL_BLANK_MODEL)
+            rows: list[dict[str, Any]] = []
+            for key, kind in (
+                ("confidence", "grade"),
+                ("k_passive", "per_hour"),
+                ("k_active_heat", "rate"),
+                ("k_active_cool", "rate"),
+                ("k_solar", "rate"),
+                ("solar_phase_offset_h", "hours"),
+                ("k_vent_window", "per_hour"),
+                ("k_vent_fan", "per_hour"),
+            ):
+                raw = model.get(key)
+                value = display_delta(raw, unit, 3) if kind == "rate" and isinstance(raw, (int, float)) else raw
+                if key in own:
+                    source = engine
+                elif key in blank:
+                    source = "default"
+                elif raw is None or (key == "confidence" and raw == "none"):
+                    source = "none"
+                else:
+                    source = ENGINE_V3
+                rows.append({"key": key, "kind": kind, "value": value, "source": source})
+            return rows
+        except Exception:  # noqa: BLE001 - a debug field must never break the debug payload
+            _LOGGER.debug("decision_rates_summary failed", exc_info=True)
+            return []
+
     def control_predicted_indoor(self) -> list[dict] | None:
         """The predicted indoor curve every decision reads (``predicted_indoor=``): the primary engine's, this cycle's.
 
@@ -7689,6 +7735,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # so a failure here only drops these fields.
             try:
                 out["prediction_engines"] = self.prediction_engines_payload()
+                why, by_mode = v4_shadow.describe_grade(out)
+                out["grade"] = {"why": why, "by_mode": by_mode}
                 oldest = self._v4_archive.oldest_slot()
                 out["archive_since"] = (
                     datetime.fromtimestamp(oldest, tz=UTC).isoformat() if oldest is not None else None
@@ -17655,6 +17703,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return {
             "pending": pending,
             "rejection_log_counts": {ot: len(evts) for ot, evts in getattr(self, "_rejection_log", {}).items()},
+            # each type's list keeps the newest _REJECTION_LOG_CAP rejections: a count at the cap means "at least"
+            "rejection_log_cap": _REJECTION_LOG_CAP,
         }
 
     def compute_nat_vent_cycling_band(self) -> dict[str, float | None]:
@@ -17768,6 +17818,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:  # noqa: BLE001 - diagnostics must never break the debug view
             return None
 
+    @staticmethod
+    def _debug_window_rule(c: Any, unit: str) -> dict[str, Any]:
+        """The thresholds today's window rows were judged on (Debug tab), in the user's unit.
+
+        Warm and mild days: windows help when the high reaches comfort heat and the low reaches comfort cool minus
+        ``ECONOMIZER_TEMP_DELTA`` (``outdoor_air_helps``; ``WINDOWS_RECOMMENDED_HYSTERESIS_F`` of slack while already
+        recommended). Hot days: the morning/evening opportunity needs a low at or below
+        ``WINDOW_OPPORTUNITY_MAX_LOW_F``. Cool and cold days judge no window rule."""
+        slack = WINDOWS_RECOMMENDED_HYSTERESIS_F if getattr(c, "windows_hysteresis_seed", False) else 0.0
+        day = getattr(c, "day_type", None)
+        kind = "range" if day in (DAY_TYPE_WARM, DAY_TYPE_MILD) else ("opportunity" if day == DAY_TYPE_HOT else None)
+        return {
+            "kind": kind,
+            "high_at_least": display_temp(c.comfort_heat - slack, unit),
+            "low_at_most": display_temp(c.comfort_cool - ECONOMIZER_TEMP_DELTA + slack, unit),
+            "opportunity_low_at_most": display_temp(WINDOW_OPPORTUNITY_MAX_LOW_F, unit),
+            "hysteresis": bool(slack),
+        }
+
     def get_debug_state(self) -> dict[str, Any]:
         """Return serializable debug state for the dashboard."""
         ae = self.automation_engine
@@ -17777,9 +17846,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Door/window sensor states
         sensor_states = {}
         for sensor_id in self._resolved_sensors:
+            _st = self.hass.states.get(sensor_id)
+            _fname = _st.attributes.get("friendly_name") if _st is not None else None
             sensor_states[sensor_id] = {
                 "open": self._is_sensor_open(sensor_id),
-                "friendly_name": sensor_id.split(".")[-1].replace("_", " ").title(),
+                # the name the user gave it in HA; the entity id worded only when HA has none
+                "friendly_name": _fname or sensor_id.split(".")[-1].replace("_", " ").title(),
             }
 
         _nat_vent_band = self.compute_nat_vent_cycling_band()
@@ -17828,6 +17900,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "setback_modifier": display_delta(c.setback_modifier or 0, unit) if c else None,
                 "today_low": (display_temp(c.today_low, unit) if c else None),
                 "tomorrow_low": (display_temp(c.tomorrow_low, unit) if c else None),
+                # Debug tab: the inputs and thresholds the window rows are judged on, in the user's unit
+                "today_high": (display_temp(c.today_high, unit) if c else None),
+                "low_is_estimated": c.low_is_estimated if c else None,
+                "forecast_windows_recommended": c.forecast_windows_recommended if c else None,
+                "window_rule": self._debug_window_rule(c, unit) if c else None,
+                "trend_thresholds": {
+                    "moderate": display_delta(TREND_THRESHOLD_MODERATE, unit),
+                    "significant": display_delta(TREND_THRESHOLD_SIGNIFICANT, unit),
+                },
             },
             "last_action_time": ae._last_action_time,
             "last_action_reason": ae._last_action_reason,

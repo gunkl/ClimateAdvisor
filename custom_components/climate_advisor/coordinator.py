@@ -2216,8 +2216,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # weather provider's (e.g. a provider °C value passed through as °F). The rule
         # discards on ANY unit change, which also drops good samples from before a
         # switch into the wrong unit (harmless: they refill within a poll cycle).
-        # Decided once here and applied to the reading-derived restores below (and the
-        # persisted pending thermal observations). Missing/non-str => no-op.
+        # Decided once here and applied to the reading-derived restores below. Missing/non-str => no-op.
         _saved_unit = state.get("temp_unit")
         _restore_cfg = getattr(self, "config", None)
         _current_unit = _restore_cfg.get("temp_unit", "fahrenheit") if _restore_cfg is not None else None
@@ -2231,24 +2230,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _raw_arch = state.get("pred_archive")
             _dropped_arch = len(_raw_arch) if isinstance(_raw_arch, dict) else 0
             _dropped_cls = bool(state.get("classification"))
-            # Pending thermal observations hold samples taken under the old unit; clear
-            # them before the _first_run block recovers them. Only this dict is touched.
-            _learn_state = getattr(getattr(self, "learning", None), "_state", None)
-            _pending = getattr(_learn_state, "pending_observations", None)
-            _dropped_pending = len(_pending) if isinstance(_pending, dict) else 0
-            if isinstance(_pending, dict):
-                _pending.clear()
             _LOGGER.warning(
                 "Temperature unit changed since last run: same-day readings discarded "
                 "from=%s to=%s dropped_outdoor=%d dropped_indoor=%d dropped_pred_archive=%d "
-                "dropped_classification=%s dropped_pending_observations=%d",
+                "dropped_classification=%s",
                 _saved_unit,
                 _current_unit,
                 _dropped_outdoor,
                 _dropped_indoor,
                 _dropped_arch,
                 _dropped_cls,
-                _dropped_pending,
             )
             _unit_change_payload = {
                 "from": _saved_unit,
@@ -2257,7 +2248,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "dropped_indoor": _dropped_indoor,
                 "dropped_pred_archive": _dropped_arch,
                 "dropped_classification": _dropped_cls,
-                "dropped_pending_observations": _dropped_pending,
             }
 
         # Issue #1337: the kept forecast. Not under another unit: the daily list is in the provider's unit.
@@ -3878,7 +3868,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         await self._async_save_state()
 
     def _run_first_cycle_recovery(self) -> None:
-        """First cycle after a restart: recover persisted observations and run the one-time backfills.
+        """First cycle after a restart: run the one-time chart_log backfills.
+
+        No in-flight thermal observation is recovered (Issue #1437): observations are never persisted,
+        so a run in progress at a restart is learned from only after it (see
+        ``_initialize_hvac_session_from_current_state``).
 
         Split out of the cycle so it also runs when no forecast exists during a weather outage (Issue #1337);
         none of it reads weather data.
@@ -3886,53 +3880,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
         if self._first_run:
             self._first_run = False
-            # Recover v3 pending_observations that survived restart
-            _pending_obs = self.learning._state.pending_observations
-            if isinstance(_pending_obs, dict):
-                for _obs_type, _obs in list(_pending_obs.items()):
-                    if not isinstance(_obs, dict):
-                        continue
-                    if _obs.get("_legacy_event"):
-                        # Legacy HVAC event migrated into pending_observations — use HVAC commit path
-                        session_mode = _obs.get("session_mode") or _obs.get("hvac_mode") or "heat"
-                        _obs["session_mode"] = session_mode
-                        self._pending_observations[_obs_type] = _obs
-                    else:
-                        # Bug 2 fix: For HVAC obs, check the right sample list based
-                        # on the current phase.  Pre-fix obs had 'samples': [] which
-                        # shadowed active_samples in the generic fallback, causing all
-                        # HVAC observations to be discarded on every HA restart.
-                        _hvac_types_sr = {OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL}
-                        if _obs_type in _hvac_types_sr:
-                            _phase_sr = _obs.get("_phase", "active")
-                            if _phase_sr == "post_heat":
-                                samples = _obs.get("post_heat_samples", [])
-                                min_s = THERMAL_MIN_POST_HEAT_SAMPLES
-                            else:
-                                # Active phase: any sample is worth recovering so
-                                # post-heat observation window can continue after restart.
-                                samples = _obs.get("active_samples", [])
-                                # Fall back to generic 'samples' key for pre-fix persisted obs
-                                if not samples:
-                                    samples = _obs.get("samples", [])
-                                min_s = 1
-                        else:
-                            samples = _obs.get("samples", _obs.get("active_samples", []))
-                            min_s = {
-                                OBS_TYPE_PASSIVE_DECAY: THERMAL_PASSIVE_MIN_SAMPLES,
-                                OBS_TYPE_VENT_WINDOW_DECAY: THERMAL_VENT_MIN_SAMPLES,
-                                OBS_TYPE_VENT_FAN_DECAY: THERMAL_VENT_MIN_SAMPLES,
-                                OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_MIN_SAMPLES,
-                            }.get(_obs_type, 10)
-                        if len(samples) >= min_s:
-                            self._pending_observations[_obs_type] = _obs
-                            _LOGGER.info(
-                                "Startup: recovered v3 observation type=%s obs_id=%s samples=%d phase=%s",
-                                _obs_type,
-                                _obs.get("obs_id", "?"),
-                                len(samples),
-                                _obs.get("_phase", "active"),
-                            )
+            # Issue #1437: no in-flight observation is recovered here. A run in progress at a restart is
+            # learned from only after the restart (the Issue #96 late start opens a fresh observation), by
+            # design: the thermostat keeps running while HA is down and CA cannot see whether the run stopped
+            # and restarted, so a fit across that blind gap would be invalid.
 
             # Chart_log endpoint estimator backfill (Issue #137): run once on first startup
             # after the new code is deployed. The chart_log is loaded in __init__ so entries
@@ -12278,8 +12229,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _initialize_hvac_session_from_current_state(self, climate_state: Any) -> None:
         """Late-start HVAC session when HA restarted mid-session (Issue #96).
 
-        Sets session start from current time. Thermal observations will cover
-        only the post-restart portion — better than zero observations.
+        Sets session start from current time. The thermal observation covers only the
+        post-restart portion, by design (Issue #1437): the part of the run before the
+        restart is never learned from. In-flight observations are not persisted, and
+        resuming one would fit a curve across the blind gap while HA was down, during
+        which the thermostat kept running and CA cannot see whether the run stopped and
+        restarted. A shorter clean observation beats a longer contaminated one.
         Called from _async_update_data() on first update if HVAC is already running.
         """
         action = climate_state.attributes.get("hvac_action", "").lower()

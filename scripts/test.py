@@ -89,20 +89,39 @@ def _run_local(group: str, venv: str, pytest_args: list[str]) -> int:
     return subprocess.run(cmd, cwd=REPO, env=env, check=False).returncode
 
 
-def _run_unit_shards(total: int, pytest_args: list[str]) -> int:
-    """``CA_UNIT_SHARDS``: every slice at once, one pytest process each, output prefixed and timed."""
-    if (local := _local_cmd("test", ".venv-test", ["--version"])) is None:
+def _shard_count(var: str) -> int | None:
+    """``N`` from ``CA_UNIT_SHARDS`` / ``CA_HA_SHARDS``; None when unset or ``0``. Exits 2 on a bad value."""
+    raw = os.environ.get(var, "").strip()
+    if raw in ("", "0"):
+        return None
+    if not raw.isdigit():
+        print(f"{var} must be a whole number of slices, got {raw!r}", file=sys.stderr)
+        raise SystemExit(2)
+    single = var[:-1]  # CA_UNIT_SHARDS -> CA_UNIT_SHARD
+    if os.environ.get(single, "").strip():
+        print(f"Set {var} (all slices at once) or {single} (one slice), not both", file=sys.stderr)
+        raise SystemExit(2)
+    return int(raw)
+
+
+def _run_shards(tier: str, group: str, venv: str, total: int, pytest_args: list[str]) -> int:
+    """``CA_UNIT_SHARDS`` / ``CA_HA_SHARDS``: every slice at once, one pytest process each, output prefixed and timed.
+
+    Slice K gets ``--ca-shard K/N``, the same round-robin split as CI's ``CA_*_SHARD=K/N`` jobs
+    (``tools/pytest_shard.py``), so a local slice runs exactly the tests of the matching CI job.
+    """
+    if (local := _local_cmd(group, venv, ["--version"])) is None:
         return 2
     _, env = local
     # Sync the venv once up front so the slices do not all race to install it.
-    if subprocess.run([*_uv_cmd(), "sync", "--locked", "--only-group", "test"], cwd=REPO, env=env).returncode:
+    if subprocess.run([*_uv_cmd(), "sync", "--locked", "--only-group", group], cwd=REPO, env=env).returncode:
         return 2
     lock = threading.Lock()
     codes: dict[int, int] = {}
     walls: dict[int, float] = {}
 
     def run(k: int) -> None:
-        cmd, env = _local_cmd("test", ".venv-test", [*pytest_args, "--ca-shard", f"{k}/{total}"])
+        cmd, env = _local_cmd(group, venv, [*pytest_args, "--ca-shard", f"{k}/{total}"])
         start = time.monotonic()
         proc = subprocess.Popen(
             cmd, cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
@@ -113,14 +132,14 @@ def _run_unit_shards(total: int, pytest_args: list[str]) -> int:
         codes[k] = proc.wait()
         walls[k] = time.monotonic() - start
 
-    print(f"+ [.venv-test] {total} slices at once: pytest {shlex.join(pytest_args)} --ca-shard K/{total}", flush=True)
+    print(f"+ [{venv}] {total} slices at once: pytest {shlex.join(pytest_args)} --ca-shard K/{total}", flush=True)
     start = time.monotonic()
     threads = [threading.Thread(target=run, args=(k,)) for k in range(1, total + 1)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    print(f"\nunit tier in {total} slices: {time.monotonic() - start:.0f}s wall")
+    print(f"\n{tier} tier in {total} slices: {time.monotonic() - start:.0f}s wall")
     for k in range(1, total + 1):
         print(f"  [{k}/{total}] {'passed' if codes[k] == 0 else f'FAILED (exit {codes[k]})'} in {walls[k]:.0f}s")
     return next((c for c in codes.values() if c), 0)
@@ -193,22 +212,28 @@ def _run_ha_in_wsl(pytest_args: list[str]) -> int:
 def run_ha(extra: list[str]) -> int:
     # Default to the whole tier unless the caller named a test path or node id.
     targets = [] if any(a.startswith("tests_ha") or "::" in a for a in extra) else ["tests_ha/"]
+    shards = _shard_count("CA_HA_SHARDS")
     shard = os.environ.get("CA_HA_SHARD", "").strip()
-    args = [*HA_ARGS, *_worker_args(), *targets, *(["--ca-shard", shard] if shard else []), *extra]
+    args = [*HA_ARGS, *_worker_args(), *targets, *extra]
     if os.name == "nt":
-        return _run_ha_in_wsl(args)
+        if shards:
+            print("CA_HA_SHARDS is not supported on Windows (WSL); use CA_HA_WORKERS or CA_HA_SHARD.", file=sys.stderr)
+            return 2
+        return _run_ha_in_wsl([*args, *(["--ca-shard", shard] if shard else [])])
     env_extra = _ha_env_passthrough()
     if env_extra:
         os.environ.update(env_extra)
-    return _run_local("test-ha", ".venv-test-ha", args)
+    if shards:
+        return _run_shards("ha", "test-ha", ".venv-test-ha", shards, args)
+    return _run_local("test-ha", ".venv-test-ha", [*args, *(["--ca-shard", shard] if shard else [])])
 
 
 def run_unit(extra: list[str]) -> int:
     # Default to the whole suite unless the caller named a test path or node id.
     targets = [] if any(a.startswith("tests") or a.endswith(".py") or "::" in a for a in extra) else ["tests/"]
     args = [*targets, *UNIT_ARGS, *_worker_args("CA_UNIT_WORKERS"), *extra]
-    if shards := os.environ.get("CA_UNIT_SHARDS", "").strip():
-        return _run_unit_shards(int(shards), args)
+    if shards := _shard_count("CA_UNIT_SHARDS"):
+        return _run_shards("unit", "test", ".venv-test", shards, args)
     shard = os.environ.get("CA_UNIT_SHARD", "").strip()
     return _run_local("test", ".venv-test", [*args, *(["--ca-shard", shard] if shard else [])])
 

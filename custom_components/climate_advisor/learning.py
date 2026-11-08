@@ -193,6 +193,39 @@ def _ewma_update_field(cache: dict, field_name: str, value: float, alpha: float)
         cache[field_name] = (1.0 - alpha) * cache[field_name] + alpha * value
 
 
+_CHART_LOG_FIT_SOURCES = ("endpoint", "block_ols")
+
+
+def _same_chart_log_fit(a: dict, b: dict) -> bool:
+    """True when ``a`` and ``b`` are chart_log fits of the same window (Issue #1476).
+
+    Fits carry the window's first and last chart_log stamps; older fits (before #1476) did not, so
+    those match on the fit itself: same mode, estimator, k and R^2 (a refit of one window reproduces
+    them exactly, while two different windows never share both to full float precision).
+    """
+    if a.get("source") not in _CHART_LOG_FIT_SOURCES or a.get("hvac_mode") != b.get("hvac_mode"):
+        return False
+    if a.get("window_start") and b.get("window_start"):
+        return a["window_start"] == b["window_start"] and a.get("window_end") == b.get("window_end")
+    return (
+        a.get("k_passive") is not None
+        and a.get("source") == b.get("source")
+        and a.get("k_passive") == b.get("k_passive")
+        and a.get("r_squared") == b.get("r_squared")
+    )
+
+
+def _replay_envelope_k_passive(obs_list: list[dict]) -> float | None:
+    """EWMA ``k_passive`` as ``_update_thermal_model_cache`` builds it from these observations, from empty."""
+    alpha_map = {"high": 0.3, "medium": 0.15, "low": 0.05}
+    cache: dict = {}
+    for o in obs_list:
+        k = o.get("k_passive")
+        if isinstance(k, (int, float)) and o.get("hvac_mode") not in ("vent_window", "vent_fan"):
+            _ewma_update_field(cache, "k_passive", k, alpha_map.get(o.get("confidence_grade", "low"), 0.05))
+    return cache.get("k_passive")
+
+
 def _apply_two_param_solar_update(cache: dict, obs: dict, grade: str) -> None:
     """Blend a 2-param vent-split commit's separated k_solar term into the cache.
 
@@ -1106,6 +1139,8 @@ class LearningEngine:
                 # never refreshed and misled the diagnostic tools, so drop them.
                 if isinstance(_cache_mig, dict) and drop_stored_grades(_cache_mig):
                     _LOGGER.debug("Thermal model cache: dropped stale stored confidence grades (Issue #1277)")
+                # Issue #1476: undo repeated chart_log fits of one window.
+                self._drop_duplicate_chart_log_fits()
                 # Validate rejection_log is a dict; apply per-obs-type cap on load
                 if not isinstance(self._state.rejection_log, dict):
                     self._state.rejection_log = {}
@@ -1188,15 +1223,26 @@ class LearningEngine:
             len(self._state.records),
         )
 
-    def record_thermal_observation(self, obs: dict) -> None:
+    def record_thermal_observation(self, obs: dict) -> bool:
         """Record a thermal observation and update the EWMA thermal model cache.
 
         obs must be a dict representation of a committed ThermalObservation (v2).
         Trims to 90-day rolling window and enforces THERMAL_OBS_CAP.
         Also updates thermal_model_cache via EWMA using obs.confidence_grade.
+
+        Returns False (nothing recorded) for an invalid obs or a chart_log fit of a window that is
+        already recorded (Issue #1476): the chart_log fits re-run on the newest window every time a
+        passive stretch ends, so the same night used to be committed over and over.
         """
         if not isinstance(obs, dict) or "date" not in obs:
-            return
+            return False
+        if any(_same_chart_log_fit(obs, o) for o in self._state.thermal_observations):
+            _LOGGER.debug(
+                "chart_log %s fit of an already-recorded window skipped (Issue #1476): k=%s",
+                obs.get("hvac_mode"),
+                obs.get("k_passive"),
+            )
+            return False
         self._state.thermal_observations.append(obs)
         # 90-day rolling trim
         cutoff = (dt_util.now().date() - timedelta(days=90)).isoformat()
@@ -1207,6 +1253,59 @@ class LearningEngine:
 
         # Update EWMA cache
         self._update_thermal_model_cache(obs)
+        return True
+
+    def _drop_duplicate_chart_log_fits(self) -> None:
+        """Remove repeated chart_log fits of one window and undo their pull on the cache (Issue #1476).
+
+        Before #1476 the newest passive window was re-committed every time a passive stretch ended
+        (and at every restart), so one night could sit in the observation list 20+ times. That dragged
+        the EWMA ``k_passive`` onto that night, inflated the observation counts, and pushed real
+        observations out of the 200-entry cap. Idempotent: a list with no repeats is left untouched.
+
+        ``k_passive`` is rebuilt by replaying the de-duplicated envelope observations only when replaying
+        the list as stored reproduces the stored value (the list then explains the cache, so the
+        de-duplicated replay is what the cache would hold without the repeats). Otherwise it is left
+        alone. Vent rates keep their stored values (older history outside the list still weighs on them);
+        only their counts are corrected.
+        """
+        obs_list = self._state.thermal_observations
+        kept: list[dict] = []
+        dropped: dict[str, int] = {}
+        for o in obs_list:
+            if any(_same_chart_log_fit(o, k) for k in kept):
+                mode = str(o.get("hvac_mode"))
+                dropped[mode] = dropped.get(mode, 0) + 1
+                continue
+            kept.append(o)
+        if not dropped:
+            return
+        self._state.thermal_observations = kept
+        cache = self._state.thermal_model_cache
+        if not isinstance(cache, dict):
+            return
+        for mode, count_field in (
+            ("passive", "observation_count_passive"),
+            ("vent_window", "observation_count_vent_window"),
+            ("vent_fan", "observation_count_vent_fan"),
+        ):
+            n = dropped.get(mode, 0)
+            if n and isinstance(cache.get(count_field), int):
+                cache[count_field] = max(0, cache[count_field] - n)
+        old_k = cache.get("k_passive")
+        rebuilt = None
+        if any(m not in ("vent_window", "vent_fan") for m in dropped) and isinstance(old_k, (int, float)):
+            as_stored = _replay_envelope_k_passive(obs_list)
+            if as_stored is not None and abs(as_stored - old_k) <= 0.02 * abs(old_k):
+                rebuilt = _replay_envelope_k_passive(kept)
+                if rebuilt is not None:
+                    cache["k_passive"] = rebuilt
+        _LOGGER.info(
+            "Thermal observations: removed %d repeated chart_log fits %s (Issue #1476); k_passive %s",
+            sum(dropped.values()),
+            dropped,
+            f"{old_k:.4f} -> {rebuilt:.4f}" if rebuilt is not None else "kept",
+        )
 
     def _update_thermal_model_cache(self, obs: dict) -> None:
         """Apply one observation to the EWMA thermal model cache."""

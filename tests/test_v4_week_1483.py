@@ -16,8 +16,8 @@ import pytest
 from custom_components.climate_advisor import v4_shadow
 from custom_components.climate_advisor.classifier import ForecastSnapshot, classify_day
 from custom_components.climate_advisor.const import (
+    PLAN_DAYS_AHEAD,
     V4_CONTROL_HORIZON_HOURS,
-    V4_PLAN_DAYS_AHEAD,
     V4_PREDICT_HORIZON_HOURS,
 )
 from tests.test_control_feed_r6b import _ready, _refresh
@@ -149,7 +149,7 @@ class TestLaterDayWindows:
         coord, scheduler, _model = _setup()
         now = scheduler.now()
         plans = coord._v4_later_window_plans(now)
-        assert len(plans) == V4_PLAN_DAYS_AHEAD - 1  # the day after tomorrow up to today + V4_PLAN_DAYS_AHEAD
+        assert len(plans) == PLAN_DAYS_AHEAD - 1  # the day after tomorrow up to today + PLAN_DAYS_AHEAD
         for k, plan in enumerate(plans, start=2):
             hi, lo, prev_lo = 66.0 + k, 48.0 + k, 48.0 + k - 1
             want = classify_day(
@@ -191,7 +191,7 @@ class TestLaterDayWindows:
         monkeypatch.setattr(coord_mod, "classify_day", lambda fc, **kw: fed.append(fc) or real(fc, **kw))
         coord._v4_later_window_plans(now)
         assert [(round(f.today_high, 2), round(f.today_low, 2)) for f in fed] == [
-            (66.0 + k, 48.0 + k) for k in range(2, V4_PLAN_DAYS_AHEAD + 1)
+            (66.0 + k, 48.0 + k) for k in range(2, PLAN_DAYS_AHEAD + 1)
         ]
 
     def test_a_later_days_planned_period_opens_the_windows_in_the_display_line_only(self):
@@ -224,10 +224,10 @@ class TestLaterDayWindows:
         )  # fmt: skip
 
 
-# ------------------------------------------------------------------------------- 4. the plan list's own horizon
-def test_the_plan_list_reads_the_week_long_line_only_up_to_its_own_horizon():
-    """The 48 h plan list takes v4's path up to 48 h (no day-6 temperatures in its summary); it used to stop at 24 h."""
-    from custom_components.climate_advisor.operation_timeline import TIMELINE_HORIZON_HOURS  # noqa: PLC0415
+# ------------------------------------------------------------------------------- 4. the plan's outlook
+def test_the_plan_reads_the_week_long_line_up_to_its_outlook():
+    """The plan takes v4's week-long path (its outlook runs as far as the forecast goes); it used to stop at 24 h."""
+    from custom_components.climate_advisor.operation_timeline import TIMELINE_OUTLOOK_MAX_HOURS  # noqa: PLC0415
     from tests.test_debug_pane_words import _mild_day  # noqa: PLC0415
 
     coord, scheduler, _model = _setup()
@@ -238,4 +238,4 @@ def test_the_plan_list_reads_the_week_long_line_only_up_to_its_own_horizon():
         snap = coord._timeline_snapshot(_mild_day())
     last = max(t for t, _v in snap.selected_path)
     assert snap.selected_path_model == "v4"
-    assert last == now + timedelta(hours=TIMELINE_HORIZON_HOURS)
+    assert last == now + timedelta(hours=TIMELINE_OUTLOOK_MAX_HOURS)

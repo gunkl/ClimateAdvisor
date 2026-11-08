@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.19] — 2026-11-08
+
+- Fix #1483 (part 2): the plan now looks ahead as far as your forecast goes, up to a week.
+  - **What you'll notice:** under Next 24 hours the list is the same for the next 24 hours. After it come the later days, one folded row each ("Thu, Nov 12 · 4 steps · 2 for you"). Tap a day to see its steps. A day you opened stays open while the page refreshes. The chart's faded activity strips (window periods, heat and AC runs) now run out to the 7-day view too.
+  - **Each later day is planned on its own forecast:** its window period, its wake and bedtime bands and its predicted heat or AC runs. They are worked out the same way as today's and tomorrow's.
+  - **What the plan promises:** only the first 48 hours. Those steps stay as first said, unless something material changes. Later days are an outlook: they're rebuilt from the newest forecast every cycle, so they're never stale. A change in day 5's forecast never rewrites today's plan.
+  - **What the house does is unchanged:** nothing that controls the house reads the plan.
+
 ## [0.9.18] — 2026-11-08
 
 - Fix #1483: v4's prediction line now runs as far ahead as your forecast goes, up to a week, instead of stopping at 24 hours.

@@ -1918,6 +1918,10 @@
   // occupant is asked to do (diamond markers; hollow when the step only may help), and the list under it says the
   // same in words. Both read GET /api/climate_advisor/timeline; nothing here recomputes the plan.
   const PLAN_HORIZON_MS = 24 * 3600000;
+  // Issue #1483: past the first 24 h the plan's outlook (to the forecast's end, at most a week) is listed one folded
+  // row per later day; which days the occupant opened is kept across the list's re-renders.
+  const PLAN_OUTLOOK_MS = 7 * 24 * 3600000;
+  const _planOpenDays = new Set();
   const PLAN_HIDE_KINDS = ['briefing_send'];   // the daily briefing send is how the occupant is reading this
   let _timeline = null;            // last /timeline payload, or null
   let _timelineState = 'idle';     // idle | ok | none (no plan yet, HTTP 503) | error
@@ -2005,6 +2009,29 @@
       '<span class="plan-text">' + escapeHtml(s.text_short || s.text || '') + (low && !held ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
   }
 
+  // Issue #1483: the steps after the first 24 h, one folded row per local day: "Wed, Nov 11 · 5 steps · 1 for you".
+  // The outlook is rebuilt from the newest forecast every cycle (only the first 48 h are the plan's promise).
+  function _planLaterHtml(now) {
+    const later = _planSteps(PLAN_OUTLOOK_MS).filter(s => s._ms > now + PLAN_HORIZON_MS);
+    if (!later.length) return '';
+    const days = [];
+    later.forEach(s => {
+      const d = new Date(s._ms);
+      const key = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+      let g = days.find(x => x.key === key);
+      if (!g) { g = { key, label: d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }), steps: [] }; days.push(g); }
+      g.steps.push(s);
+    });
+    const rows = days.map(g => {
+      const you = g.steps.filter(s => s.actor === 'you').length;
+      const sum = g.steps.length + (g.steps.length === 1 ? ' step' : ' steps') + (you ? ' \u00b7 ' + you + ' for you' : '');
+      return '<li class="plan-later" data-day="' + escapeHtml(g.key) + '"><details' + (_planOpenDays.has(g.key) ? ' open' : '') + '>' +
+        '<summary><span class="plan-later-day">' + escapeHtml(g.label) + '</span><span class="plan-later-sum"> ' + escapeHtml(sum) + '</span></summary>' +
+        '<ul class="plan-list">' + g.steps.map(s => _planRowHtml(s, now)).join('') + '</ul></details></li>';
+    }).join('');
+    return '<li class="plan-later-head">Later: an outlook from the forecast, updated as the forecast changes</li>' + rows;
+  }
+
   // Issue #1404: a time-of-use bank holding the house right now opens the list ("Now"), in the same words as the
   // Status line, so the list says what the thermostat is told and when the band returns.
   function _planHoldRowHtml() {
@@ -2036,8 +2063,13 @@
       const hold = _planHoldRowHtml();
       body = (steps.length || hold) ? hold + steps.map(s => _planRowHtml(s, now)).join('')
         : '<li class="plan-empty">Nothing is planned for the next 24 hours.</li>';
+      body += _planLaterHtml(now);
     }
     el.innerHTML = body;
+    el.querySelectorAll('.plan-later details').forEach(dt => dt.addEventListener('toggle', () => {
+      const key = dt.parentNode.getAttribute('data-day');
+      if (dt.open) _planOpenDays.add(key); else _planOpenDays.delete(key);
+    }));
     const foot = el.parentNode && el.parentNode.querySelector('.plan-foot');
     if (foot) foot.innerHTML = extra;
   }

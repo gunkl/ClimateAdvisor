@@ -61,7 +61,7 @@ test.describe('Time-of-use bank on the Status cards (Issue #1404)', () => {
     await expect(page.locator('#status-ca-next')).toHaveText('High-cost period starts — back to the Away band 60–80°F');
     await expect(page.locator('#status-ca-next-time')).toHaveText('4:15 PM');
     await waitPlan(page, '#status-plan-list');
-    const first = page.locator('#status-plan-list .plan-row').first();
+    const first = page.locator('#status-plan-list > .plan-row').first();
     await expect(first).toHaveAttribute('data-kind', 'tou_bank');
     await expect(first.locator('.plan-time')).toHaveText('Now');
     await expect(first.locator('.plan-text')).toHaveText(SENTENCE);
@@ -76,7 +76,7 @@ test.describe('Time-of-use bank on the Status cards (Issue #1404)', () => {
     expect(grid).toContain('Pre-cooling to 77°F until the 4:15 PM high-cost period, then back to the Away band 60–80°F');
     expect(grid).not.toContain('wants 80');
     await waitPlan(page, '#plan-list');
-    await expect(page.locator('#plan-list .plan-row').first().locator('.plan-text')).toHaveText(SENTENCE);
+    await expect(page.locator('#plan-list > .plan-row').first().locator('.plan-text')).toHaveText(SENTENCE);
   });
 
   test('control: the pre-#1404 payload is exactly what made the card contradict the thermostat', async ({ page }) => {

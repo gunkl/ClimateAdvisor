@@ -497,7 +497,8 @@ def test_runs_are_never_duplicated_two_days_have_the_same_times():
     tl, now, spans = _warm_plan()
     keys = [(r.mode, r.start, r.end) for r in tl.runs]
     assert len(keys) == len(set(keys))
-    assert len({r.start.date() for r in tl.runs}) == 2
+    # today, tomorrow and (Issue #1483: the plan's outlook runs as far as the forecast goes) the fixture's third day
+    assert len({r.start.date() for r in tl.runs}) == 3
     assert len({d["run"] for d in spans if d["row"] == "cooling"}) == len(tl.runs)
 
 

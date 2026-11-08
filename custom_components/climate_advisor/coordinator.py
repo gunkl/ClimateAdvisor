@@ -211,6 +211,7 @@ from .const import (
     OCCUPANCY_SETBACK_MINUTES,
     OCCUPANCY_VACATION,
     OUTDOOR_SENSOR_STALE_HOURS,
+    PLAN_DAYS_AHEAD,
     PRED_ARCHIVE_HORIZON_HOURS,
     REJECT_ABANDONED,
     REJECT_AC_INSUFFICIENT_MIDDAY_ACTIVITY,
@@ -298,7 +299,6 @@ from .const import (
     V4_FIT_STAGGER_S,
     V4_FIT_TRAIN_DAYS,
     V4_MASS_MAX_GAP_S,
-    V4_PLAN_DAYS_AHEAD,
     V4_PREDICT_HORIZON_HOURS,
     VERSION,
     WINDOW_OPPORTUNITY_MAX_LOW_F,
@@ -392,7 +392,7 @@ from .nat_vent_plan import (
 )
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
-from .operation_timeline import TIMELINE_HORIZON_HOURS, TIMELINE_TRIGGER_EVENTS, TimelineLatch, TimelineSnapshot
+from .operation_timeline import TIMELINE_OUTLOOK_MAX_HOURS, TIMELINE_TRIGGER_EVENTS, TimelineLatch, TimelineSnapshot
 from .operation_timeline import detail_dict as timeline_detail_dict
 from .operation_timeline import to_dict as timeline_to_dict
 from .override_confirm_split import ca_expected_mode
@@ -6506,6 +6506,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             (d if d.tzinfo is not None else d.replace(tzinfo=local_tz), t)
             for d, t in _parse_forecast_entries(self._hourly_forecast_temps)
         ]
+        # Issue #1483: the plan's outlook runs on past the real hourly forecast on the daily highs and lows
+        hourly_until = max((d for d, _t in hourly), default=None)
+        hourly = self._outlook_hourly(hourly, now)
         plan = getattr(self, "_nat_vent_plan", None) or {}
         cutoff = plan.get("nat_vent_cutoff")
         opportunity: list[tuple[time, time]] = []
@@ -6577,8 +6580,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             try:
                 chosen = prediction_engines.ENGINES[primary_id]
                 if prediction_engines.usable(chosen, self):  # still learning: today's default path stands in
-                    # Issue #1483: v4's display line runs up to a week; the plan list reads it up to its own horizon
-                    plan_end = now + timedelta(hours=TIMELINE_HORIZON_HOURS)
+                    # Issue #1483: v4's display line runs up to a week, as far as the plan's outlook can reach
+                    plan_end = now + timedelta(hours=TIMELINE_OUTLOOK_MAX_HOURS)
                     selected_pts = [
                         (t, v)
                         for t, v in prediction_engines.primary_path(chosen.future_path(self))
@@ -6620,6 +6623,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "expected_low": tm["expected_low"],
                 }
             )
+        # Issue #1483: each later day's own plan, for the outlook (a day with no plan is left out: windows closed)
+        plan_days.extend(p for p in self._later_day_plans(now) if p is not None)
         # The away/vacation TOU window (Issue #899) the engine widens the held band for.
         _tou_av: tuple[Any, Any, Any] = (None, None, None)
         if (
@@ -6676,6 +6681,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             thermostat_mode=self._thermostat_hvac_mode(),
             windows_physically_open=self._any_sensor_open(),
             hourly=hourly,
+            hourly_until=hourly_until,
             thermal_model=model or None,
             v3_path=v3_pts,
             selected_path=selected_pts,
@@ -7021,16 +7027,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ]
         return max(pts).isoformat() if pts else None
 
-    def _v4_later_window_plans(self, now: datetime) -> list[tuple[bool, Any, Any] | None]:
-        """The planned window period of each day after tomorrow, in order, for the week-long display line (#1483).
+    def _later_day_plans(self, now: datetime) -> list[dict[str, Any] | None]:
+        """The plan of each day after tomorrow, in order, up to today + ``PLAN_DAYS_AHEAD`` (Issue #1483).
 
-        Occupant view: a warm spell on Thursday shows the house cooling over Thursday's planned window period, not a
-        week of closed windows. Each day is classified from its own daily forecast high and low exactly the way
-        tomorrow's is (``_tomorrow_classification_plan``: that day's high/low in the "today" position, trend stable,
-        no hysteresis seed), up to ``V4_PLAN_DAYS_AHEAD`` days ahead. A day the daily forecast does not cover, or that
-        has no high or no low, is ``None`` (windows closed). Display only: the decisions' prediction never reads it.
+        Occupant view: a warm spell on Thursday shows Thursday's own window period, in v4's week-long line and in the
+        plan's outlook, not a week of closed windows. Each day is classified from its own daily forecast high and low
+        exactly the way tomorrow's is (``_tomorrow_classification_plan``: that day's high/low in the "today" position,
+        trend stable, no hysteresis seed). A day the daily forecast does not cover, or that has no high or no low, is
+        ``None`` (no plan: windows closed). Each plan has the keys of a timeline ``plan_days`` entry. No decision reads
+        it: v4's display line and the plan's outlook only.
         """
-        out: list[tuple[bool, Any, Any] | None] = []
+        out: list[dict[str, Any] | None] = []
         try:
             unit = self.config.get("temp_unit", "fahrenheit")
             by_date: dict[date, dict] = {}
@@ -7044,8 +7051,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if prev is not None:
                 raw = _first_non_none(prev.get("templow"), prev.get("tempLow"))
                 prev_low = to_fahrenheit(raw, unit) if raw is not None else None
-            for k in range(2, V4_PLAN_DAYS_AHEAD + 1):
-                entry = by_date.get(today + timedelta(days=k))
+            for k in range(2, PLAN_DAYS_AHEAD + 1):
+                day = today + timedelta(days=k)
+                entry = by_date.get(day)
                 hi_raw = _first_non_none(entry.get("temperature"), entry.get("tempHigh")) if entry else None
                 lo_raw = _first_non_none(entry.get("templow"), entry.get("tempLow")) if entry else None
                 if hi_raw is None or lo_raw is None:
@@ -7064,13 +7072,55 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     **self._classify_kwargs(seed_hysteresis=False),
                 )
                 out.append(
-                    (bool(day_class.windows_recommended), day_class.window_open_time, day_class.window_close_time)
+                    {
+                        "date": day,
+                        "day_type": day_class.day_type,
+                        "hvac_mode": day_class.hvac_mode,
+                        "trend_direction": day_class.trend_direction,
+                        "windows_recommended": bool(day_class.windows_recommended),
+                        "window_open_time": day_class.window_open_time,
+                        "window_close_time": day_class.window_close_time,
+                        "pre_condition": bool(day_class.pre_condition),
+                        "expected_high": hi,
+                        "expected_low": lo,
+                    }
                 )
                 prev_low = lo
-        except Exception:  # noqa: BLE001 - optional context: the later days stay windows-closed
-            _LOGGER.debug("later-day window plans failed", exc_info=True)
+        except Exception:  # noqa: BLE001 - optional context: the later days have no plan (windows closed)
+            _LOGGER.debug("later-day plans failed", exc_info=True)
             return []
         return out
+
+    def _v4_later_window_plans(self, now: datetime) -> list[tuple[bool, Any, Any] | None]:
+        """Each later day's planned window period ``(recommended, open, close)`` for v4's week-long line (#1483)."""
+        return [
+            (p["windows_recommended"], p["window_open_time"], p["window_close_time"]) if p is not None else None
+            for p in self._later_day_plans(now)
+        ]
+
+    def _outlook_hourly(self, hourly: list[tuple[datetime, float]], now: datetime) -> list[tuple[datetime, float]]:
+        """``hourly`` (the real forecast) plus the hours built from the daily highs and lows after its last hour (#906).
+
+        Issue #1483: v4's week-long line and the plan's outlook read these; real hours are never replaced. Display and
+        plan only: the decisions' forecast stays the real hourly one."""
+        last_real = max((d for d, _t in hourly), default=None)
+        if last_real is None:
+            return list(hourly)
+        extended = _build_extended_hourly_forecast(
+            self._hourly_forecast_temps,
+            getattr(self, "_daily_forecast_full", None),
+            now,
+            self.config.get("temp_unit", "fahrenheit"),
+        )
+        more = [
+            (d2, t)
+            for d2, t in (
+                (d if d.tzinfo is not None else d.replace(tzinfo=now.tzinfo), t)
+                for d, t in _parse_forecast_entries(extended)
+            )
+            if d2 > last_real
+        ]
+        return list(hourly) + more
 
     def _v4_sleep_node(self, model_dict: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
         """``(sleep sensor id, sleep_time, wake_time)`` when the configured sleep sensor is a node of the model, or the
@@ -7136,22 +7186,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if week:
             # Issue #1483: past the real hourly forecast, the chart's own hourly curve from the daily highs and lows
             # (#906). Real hours are kept as they are; only the hours after the last real one are added.
-            extended = _build_extended_hourly_forecast(
-                self._hourly_forecast_temps,
-                getattr(self, "_daily_forecast_full", None),
-                now,
-                self.config.get("temp_unit", "fahrenheit"),
-            )
-            last_real = max((d for d, _t in hourly), default=None)
-            if last_real is not None:
-                hourly = hourly + [
-                    (d2, t)
-                    for d2, t in (
-                        (d if d.tzinfo is not None else d.replace(tzinfo=local_tz), t)
-                        for d, t in _parse_forecast_entries(extended)
-                    )
-                    if d2 > last_real
-                ]
+            hourly = self._outlook_hourly(hourly, now)
         band: list[tuple[datetime, float | None, float | None]] = []
         lower_now, upper_now = self._target_band_lower_upper_now()
         band.append((now, lower_now, upper_now))

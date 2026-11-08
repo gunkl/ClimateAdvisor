@@ -49,7 +49,11 @@ _LOGGER = logging.getLogger(__name__)
 TIMELINE_SCHEMA_VERSION = 1
 
 # --- Tunables (documented in docs/operation-timeline-spec.md; every number here is a decision, not a fit) ----------
+# Issue #1483: the plan PROMISES its first 48 h (the latch keeps those steps as first said, a material change
+# regenerates) and looks further ahead as an outlook, as far as the forecast goes and at most a week; outlook steps
+# are rebuilt every cycle from the newest forecast and never latched (``timeline_end``, ``_merge_latched``).
 TIMELINE_HORIZON_HOURS = 48
+TIMELINE_OUTLOOK_MAX_HOURS = 168
 SIM_STEP_MINUTES = 15
 YOU_STEP_LEAD_MIN = 30  # DP-4: a "you" step is shown this long before it is due (push is optional and off by default)
 DISCOMFORT_FH_PER_HVAC_H = 1.0  # DP-2: 1 F-hour outside the band (beyond the swing) weighs the same as 1 h of HVAC
@@ -593,6 +597,9 @@ class TimelineSnapshot:
     # and the window plan for tomorrow come from. Each: date, day_type, hvac_mode, trend_direction, windows_recommended,
     # window_open_time, window_close_time, pre_condition, expected_high, expected_low (internal degrees F).
     plan_days: Sequence[Mapping[str, Any]] = ()
+    # Issue #1483: the last REAL hourly forecast hour; ``hourly`` may run on past it with the hours built from the daily
+    # highs and lows (the outlook). None: every hour of ``hourly`` is real.
+    hourly_until: datetime | None = None
     # readings
     indoor: float | None = None  # what CA reads now (sleep sensor while asleep)
     indoor_primary: float | None = None  # the thermostat's own room; the simulation seed
@@ -1196,6 +1203,20 @@ def _direction_ok(snap: TimelineSnapshot, seg: Segment, outdoor: float, indoor: 
     )
 
 
+def promise_end(now: datetime) -> datetime:
+    """Where the plan's promise ends, ``TIMELINE_HORIZON_HOURS`` after ``now`` (latched steps, signature bands)."""
+    return now + timedelta(hours=TIMELINE_HORIZON_HOURS)
+
+
+def timeline_end(snap: TimelineSnapshot) -> datetime:
+    """The plan's end (Issue #1483): 48 h always; further, as far as the forecast goes, at most a week."""
+    end = promise_end(snap.now)
+    last = max((t for t, _v in snap.hourly), default=None)
+    if last is not None and last > end:
+        end = min(last, snap.now + timedelta(hours=TIMELINE_OUTLOOK_MAX_HOURS))
+    return end
+
+
 def _planned_spans(snap: TimelineSnapshot, end: datetime) -> list[tuple[str, datetime, datetime]]:
     """The classification's window periods as datetimes (today; the ODE-adjusted close when the plan has one)."""
     spans: list[tuple[str, datetime, datetime]] = []
@@ -1235,16 +1256,18 @@ def _planned_spans(snap: TimelineSnapshot, end: datetime) -> list[tuple[str, dat
         # warm / mild windows day: the plan's forecast-derived reopening tonight (the briefing's "reopen windows
         # around")
         spans.append(("planned", evening_open, datetime.combine(today + timedelta(days=1), time(0, 0), tzinfo=tz)))
-    tomorrow = today + timedelta(days=1)
-    for day in snap.plan_days:  # tomorrow's engine plan (the Analysis "Tomorrow (plan)" column reads these steps)
-        o, c = day.get("window_open_time"), day.get("window_close_time")
+    # tomorrow's engine plan (the Analysis "Tomorrow (plan)" column reads these steps) and, since Issue #1483, each
+    # later day's own plan in the outlook
+    for day in snap.plan_days:
+        o, c, d = day.get("window_open_time"), day.get("window_close_time"), day.get("date")
         if (
-            day.get("date") == tomorrow
+            isinstance(d, date)
+            and d > today
             and day.get("windows_recommended")
             and isinstance(o, time)
             and isinstance(c, time)
         ):
-            s, e = datetime.combine(tomorrow, o, tzinfo=tz), datetime.combine(tomorrow, c, tzinfo=tz)
+            s, e = datetime.combine(d, o, tzinfo=tz), datetime.combine(d, c, tzinfo=tz)
             if e > s:
                 spans.append(("planned", s, e))
     # nobody is home to open a window (away today, vacation every day)
@@ -1338,7 +1361,7 @@ def _refine_span(
     if first is None or last is None or last - first < timedelta(minutes=WINDOW_MIN_SPAN_MIN):
         return None
     if last >= end and kind != "planned":
-        end_reason = "horizon" if end >= snap.now + timedelta(hours=TIMELINE_HORIZON_HOURS) else end_reason
+        end_reason = "horizon" if end >= promise_end(snap.now) else end_reason
     return first, last, end_reason
 
 
@@ -1615,7 +1638,7 @@ def build_timeline(
 ) -> DetailedTimeline:
     """The whole plan from one snapshot. Never raises on missing optional inputs: steps whose facts are missing drop."""
     now = snap.now
-    end = now + timedelta(hours=TIMELINE_HORIZON_HOURS)
+    end = timeline_end(snap)
     unit = snap.unit
     segments = build_segments(snap, end)
     index = _SegmentIndex(segments)
@@ -2053,7 +2076,7 @@ def _apply_holds(
 def _choose_path(
     snap: TimelineSnapshot, accepted: Sequence[Span], final: Sim | None
 ) -> tuple[list[tuple[datetime, float]], str]:
-    planned = [(a, b) for _k, a, b in _planned_spans(snap, snap.now + timedelta(hours=TIMELINE_HORIZON_HOURS))]
+    planned = [(a, b) for _k, a, b in _planned_spans(snap, timeline_end(snap))]
     # the v3 path models today's window plan only: tomorrow's period (R3b) does not make it a different plan
     today = snap.now.date()
     same_as_v3 = sorted(sp for sp in accepted if sp[0].date() == today) == sorted(
@@ -2166,6 +2189,10 @@ class PlanSignature:
 
     @classmethod
     def of(cls, snap: TimelineSnapshot, segments: Sequence[Segment]) -> PlanSignature:
+        # Issue #1483: only the promised 48 h count; a band change in the outlook (day 5's mode after a new daily
+        # forecast) never regenerates the promised plan: outlook steps are rebuilt every cycle anyway
+        cut = promise_end(snap.now)
+        segments = [sg for sg in segments if sg.start < cut]
         today_mode = snap.day_modes.get(snap.now.date(), "")
         span = None
         if snap.windows_recommended and snap.window_open_time and snap.window_close_time:
@@ -2177,7 +2204,7 @@ class PlanSignature:
             snap.occupancy_mode,
             snap.fan_mode,
             tuple((s.start.timestamp(), round(s.base_floor, 1), round(s.base_ceiling, 1)) for s in segments),
-            segments[-1].end.timestamp() if segments else snap.now.timestamp(),
+            min(segments[-1].end, cut).timestamp() if segments else snap.now.timestamp(),
             bool(snap.paused_by_door),
             bool(snap.manual_override_active),
             bool(snap.grace_active),
@@ -2292,7 +2319,7 @@ class TimelineLatch:
         return self._timeline
 
     def update(self, snap: TimelineSnapshot, *, force: str | None = None) -> LatchOutcome:
-        end = snap.now + timedelta(hours=TIMELINE_HORIZON_HOURS)
+        end = timeline_end(snap)
         segments = build_segments(snap, end)
         sig = PlanSignature.of(snap, segments)
         reasons: list[str] = []
@@ -2389,7 +2416,10 @@ def _merge_latched(
     """Latched steps kept as promised (past ones marked done); a window close may only move EARLIER.
 
     Path, runs, band, candidates and summary are always the fresh ones: only the step list is latched.
+    Issue #1483: only the PROMISED steps are latched, those before ``promise_end(latched.generated_at)``; every step
+    after that point is the fresh plan's (the outlook, rebuilt from the newest forecast each cycle).
     """
+    cut = promise_end(latched.generated_at)
     fresh_closes = [f for f in fresh.steps if f.kind == StepKind.WINDOWS_CLOSE and f.ts >= now]
     window_kinds = (StepKind.WINDOWS_OPEN, StepKind.WINDOWS_CLOSE)
     latched_window_ts = sorted(w.ts for w in latched.steps if w.kind in window_kinds)
@@ -2399,6 +2429,8 @@ def _merge_latched(
     for s in latched.steps:
         if s.meta.get("source_module") == "night_strategy":
             continue  # R6: night strategy steps are re-applied by the caller after every update, never latched
+        if s.ts >= cut:
+            continue  # Issue #1483: the outlook is never latched (added from the fresh plan below)
         if _is_live(s) and s.ts >= now:
             continue  # replaced below by the fresh answer
         if s.kind == StepKind.WINDOWS_CLOSE and s.ts >= now:
@@ -2423,7 +2455,8 @@ def _merge_latched(
         if s.ts < now and s.status == "planned":
             s = replace(s, meta={**s.meta, "status": "done"})
         steps.append(s)
-    steps.extend(f for f in fresh.steps if _is_live(f) and f.ts >= now)
+    steps.extend(f for f in fresh.steps if _is_live(f) and now <= f.ts < cut)
+    steps.extend(f for f in fresh.steps if f.ts >= cut and f.meta.get("source_module") != "night_strategy")
     steps = _move_natvent_stops(steps, fresh, moved)
     steps.sort(key=lambda s: (s.ts, 0 if s.actor == Actor.CA else 1, s.kind.value))
     steps = _refresh_open_until(steps, now, unit)

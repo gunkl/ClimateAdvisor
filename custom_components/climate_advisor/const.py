@@ -640,6 +640,12 @@ INDOOR_SENSOR_STALE_HOURS = 12.0
 # (chart_log ``indoor_sensors`` companions and the R1b control candidates) before re-reading the entity registry.
 COMPANION_SENSOR_REFRESH_SECONDS = 900.0
 
+# Issue #1414: optional humidity sources for the Status charts (chart display only; no decision reads humidity).
+# Unset = detect automatically (``humidity_sources.resolve_humidity``).
+CONF_INDOOR_HUMIDITY_ENTITY = "indoor_humidity_entity"
+CONF_SLEEP_INDOOR_HUMIDITY_ENTITY = "sleep_indoor_humidity_entity"
+CONF_OUTDOOR_HUMIDITY_ENTITY = "outdoor_humidity_entity"
+
 # Issue #1230 R1b ("Bug D"): use the thermostat's finer companion temperature sensor for CONTROL when it is provably
 # the same reading at finer resolution. ``auto`` (default, also for entries saved before the option existed) = use it
 # when proven; ``off`` = exact pre-0.9.2 behavior (the thermostat's own current_temperature).
@@ -892,6 +898,30 @@ CONFIG_METADATA = {
             "Optional bedroom sensor used for comfort and automation decisions while your sleep"
             " schedule is active (the thermal model always uses the primary sensor). Falls back"
             " to the primary sensor if unavailable. Leave blank to disable."
+        ),
+        "category": "sensors",
+    },
+    CONF_INDOOR_HUMIDITY_ENTITY: {
+        "label": "Indoor Humidity Sensor",
+        "description": (
+            "The humidity sensor in the room Climate Advisor reads by day, shown on the Status chart with how warm the"
+            " room feels. Chart only: no heating or cooling decision uses it. Leave blank to detect automatically."
+        ),
+        "category": "sensors",
+    },
+    CONF_SLEEP_INDOOR_HUMIDITY_ENTITY: {
+        "label": "Sleep Humidity Sensor",
+        "description": (
+            "The humidity sensor in the bedroom, shown on the Status chart while your sleep schedule is active."
+            " Chart only: no heating or cooling decision uses it. Leave blank to detect automatically."
+        ),
+        "category": "sensors",
+    },
+    CONF_OUTDOOR_HUMIDITY_ENTITY: {
+        "label": "Outdoor Humidity Sensor",
+        "description": (
+            "The outdoor humidity sensor shown on the Status chart with how warm or cold it feels outside."
+            " Chart only: no heating or cooling decision uses it. Leave blank to detect automatically."
         ),
         "category": "sensors",
     },
@@ -2088,6 +2118,9 @@ _METADATA_NO_DEFAULT: frozenset[str] = frozenset(
         "vacation_cool",
         "notify_service",
         "sleep_indoor_temp_entity",
+        CONF_INDOOR_HUMIDITY_ENTITY,
+        CONF_SLEEP_INDOOR_HUMIDITY_ENTITY,
+        CONF_OUTDOOR_HUMIDITY_ENTITY,
         "door_window_sensors",
         "fan_entity",
         "fan_remote_entity",

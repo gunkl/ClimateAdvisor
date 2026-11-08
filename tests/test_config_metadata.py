@@ -29,6 +29,9 @@ EXPECTED_KEYS = {
     "outdoor_temp_source",
     "indoor_temp_source",
     "sleep_indoor_temp_entity",
+    "indoor_humidity_entity",  # Issue #1414
+    "sleep_indoor_humidity_entity",
+    "outdoor_humidity_entity",
     "thermostat_companion_sensor",  # Issue #1230 R1b
     "energy_rate",  # #1230 R5c (DP-10)
     "heat_power_kw",

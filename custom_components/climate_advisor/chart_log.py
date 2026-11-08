@@ -101,6 +101,24 @@ def _bucket_hold(group: list[dict[str, Any]]) -> dict[str, float]:
     return out if len(out) == 2 else {}
 
 
+# Issue #1414: humidity and feels-like fields (chart display only). Written only when a value exists.
+HUMIDITY_FEELSLIKE_KEYS: tuple[str, ...] = ("humidity", "feelslike", "outdoor_humidity", "outdoor_feelslike")
+
+
+def _bucket_optional_means(group: list[dict[str, Any]], keys: tuple[str, ...]) -> dict[str, float]:
+    """Each key's mean over the rows that carry it (not rounded: native resolution); a key no row carries is absent.
+
+    Issue #1414: one shared rule for the hourly and daily shapes, so a feels-like that applied for part of an hour
+    averages only the rows where NWS defined it (a mild row has no feels-like, never a stand-in value).
+    """
+    out: dict[str, float] = {}
+    for key in keys:
+        vals = [e[key] for e in group if isinstance(e.get(key), int | float) and not isinstance(e.get(key), bool)]
+        if vals:
+            out[key] = sum(vals) / len(vals)
+    return out
+
+
 def _bucket_context(group: list[dict[str, Any]]) -> dict[str, Any]:
     """Bucket the Issue #1230 R2 context fields: dominant occupancy and band_sensor, override if any row had it.
 
@@ -233,6 +251,10 @@ class ChartStateLog:
         hold_lower: float | None = None,
         hold_upper: float | None = None,
         windows_planned: bool | None = None,
+        humidity: float | None = None,
+        feelslike: float | None = None,
+        outdoor_humidity: float | None = None,
+        outdoor_feelslike: float | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
 
@@ -278,6 +300,10 @@ class ChartStateLog:
             PAST "Win plan" strip, the same meaning as its faded part. ``windows_recommended`` is the classifier's live
             flag (true at 4 AM on a warm day), which is why it can no longer draw that strip. Written when given (True
             or False); absent on older rows and while there is no plan.
+        humidity/feelslike/outdoor_humidity/outdoor_feelslike: Issue #1414, chart display only. ``humidity`` is the
+            indoor RH % of the room whose temperature is ``indoor`` (the bedroom in the sleep window), ``feelslike`` its
+            NWS heat index (internal F) when NWS defines one; ``outdoor_humidity`` the outdoor RH %,
+            ``outdoor_feelslike`` the NWS heat index or wind chill (internal F). Each is written only when not None.
         nat_vent_target: the real thermostatic target the nat-vent fan was cycling
             around this cycle (Phase 3a), computed via
             ``nat_vent_cycling.compute_nat_vent_target()`` — only meaningful (non-None)
@@ -324,6 +350,14 @@ class ChartStateLog:
             entry["hold_upper"] = hold_upper
         if windows_planned is not None:
             entry["windows_planned"] = bool(windows_planned)
+        for key, val in (
+            ("humidity", humidity),
+            ("feelslike", feelslike),
+            ("outdoor_humidity", outdoor_humidity),
+            ("outdoor_feelslike", outdoor_feelslike),
+        ):
+            if val is not None:
+                entry[key] = val
 
         self._entries.append(entry)
         self._maybe_prune()
@@ -486,6 +520,7 @@ class ChartStateLog:
                 summary["indoor_sensors"] = indoor_sensors
             summary.update(_bucket_hold(group))
             summary.update(_bucket_context(group))
+            summary.update(_bucket_optional_means(group, HUMIDITY_FEELSLIKE_KEYS))
             if events:
                 summary["event"] = events
             result.append(summary)
@@ -552,6 +587,7 @@ class ChartStateLog:
                 summary["indoor_sensors"] = indoor_sensors
             summary.update(_bucket_hold(group))
             summary.update(_bucket_context(group))
+            summary.update(_bucket_optional_means(group, HUMIDITY_FEELSLIKE_KEYS))
             if events:
                 summary["events"] = events
             result.append(summary)

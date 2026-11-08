@@ -143,12 +143,15 @@ from .const import (
     CONF_HEAT_POWER_KW,
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
+    CONF_INDOOR_HUMIDITY_ENTITY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_HYSTERESIS_F,
     CONF_NATURAL_VENT_DELTA,
+    CONF_OUTDOOR_HUMIDITY_ENTITY,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
     CONF_SLEEP_HEAT,
+    CONF_SLEEP_INDOOR_HUMIDITY_ENTITY,
     CONF_THERMOSTAT_COMPANION_SENSOR,
     CONF_THRESHOLD_COOL,
     CONF_THRESHOLD_HOT,
@@ -327,7 +330,9 @@ from .fan_status import (
     remote_event_is_echo_of,
     resolve_untracked_fan_status,
 )
+from .feels_like import feels_like_f, wind_speed_to_mph
 from .forecast_archive import ForecastArchive
+from .humidity_sources import ROLE_INDOOR_SLEEP, ROLE_OUTDOOR, indoor_role_for, resolve_humidity
 from .hvac_action import (
     is_hvac_action_active,
     is_hvac_compressor_active,
@@ -338,6 +343,7 @@ from .incident_payload import build_incident_payload
 from .indoor_temp import (
     CompanionSensors,
     IndoorTempReading,
+    discover_companion_sensors,
     discover_companion_temp_sensors,
     read_indoor_sensors_f,
     resolve_indoor_temp_with_provenance,
@@ -552,6 +558,9 @@ _CHART_LOG_CONVERTED_TEMP_KEYS: Final[tuple[str, ...]] = (
     "hold_lower",
     "hold_upper",
     "indoor_primary",
+    # Issue #1414: the indoor / outdoor feels-like the frontend draws straight from state_log (humidity is %, raw).
+    "feelslike",
+    "outdoor_feelslike",
 )
 # Issue #1230 R0: chart-log keys that get_chart_data() deliberately REMOVES from ``state_log``. ``indoor_sensors`` is a
 # nested {entity_id: degrees F} mapping for the v4 thermal model (read from the raw file); no frontend or
@@ -1217,6 +1226,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R1: temperature sensors on the climate entity's own device (chart_log ``indoor_sensors``), cached
         # with the monotonic time they were resolved; see ``_companion_temp_sensors``.
         self._companion_temp_sensors_cache: tuple[tuple[str, ...], float] | None = None
+        # Issue #1414: the same cache pattern for any (entity, device class, exclude non-room) lookup (chart humidity).
+        self._companion_sensors_cache: dict[tuple[str, str, bool], tuple[tuple[str, ...], float]] = {}
         # Issue #1230 R1b: the same candidates + 'finer' latch feed the resolver for control; shared with the engine.
         self._companion = CompanionSensors()
         self.automation_engine.indoor_companion = self._companion
@@ -4320,7 +4331,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         upper=_band_upper_cc,
                         nat_vent_target=self._nat_vent_target_now(),
                         indoor_sensors=self._read_chart_indoor_sensors(),
-                        **self._read_chart_context(),
+                        **self._read_chart_context(
+                            indoor=forecast.current_indoor_temp, outdoor=forecast.current_outdoor_temp
+                        ),
                     )
 
             # Issue #968/#1018: validate the thermostat's reported unit (latched, once checkable).
@@ -5020,7 +5033,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_poll,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
-                    **self._read_chart_context(),
+                    **self._read_chart_context(indoor=indoor_temp, outdoor=outdoor_temp),
                 )
                 await self._executor_job(self._chart_log.save)
                 _LOGGER.debug(
@@ -5567,6 +5580,100 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if companion is not None:
             companion.entities = found
         return found
+
+    def _companion_sensors(self, entity_id: str, device_class: str, exclude_non_room: bool = True) -> tuple[str, ...]:
+        """Sensors of ``device_class`` on ``entity_id``'s device, cached per key (Issue #1414; the R1 cache pattern).
+
+        Same refresh rule as ``_companion_temp_sensors``: re-read the in-memory entity registry at most every
+        ``COMPANION_SENSOR_REFRESH_SECONDS`` (monotonic) per (entity, device class, exclusion). Event loop only.
+        """
+        key = (entity_id, device_class, bool(exclude_non_room))
+        cache = getattr(self, "_companion_sensors_cache", None)  # getattr: bare-object test coordinators
+        if not isinstance(cache, dict):
+            cache = {}
+            self._companion_sensors_cache = cache
+        now = _monotonic()
+        cached = cache.get(key)
+        if cached is not None and now - cached[1] < COMPANION_SENSOR_REFRESH_SECONDS:
+            return cached[0]
+        found = discover_companion_sensors(self.hass, entity_id, device_class, exclude_non_room=exclude_non_room)
+        cache[key] = (found, now)
+        return found
+
+    def _read_chart_humidity(
+        self, *, indoor_f: float | None, outdoor_f: float | None, reading: IndoorTempReading | None = None
+    ) -> dict[str, float]:
+        """The Issue #1414 chart-row fields ``humidity``, ``feelslike``, ``outdoor_humidity``, ``outdoor_feelslike``.
+
+        CHART DISPLAY ONLY: nothing in automation or control reads these. Indoor humidity belongs to the room whose
+        temperature the row records: the role is chosen from ``reading.source_entity`` (sleep-window swapped), so in
+        the sleep window it is the bedroom's humidity sensor or nothing, never the day room's. ``feelslike`` is the NWS
+        heat index of the row's ``indoor`` (no wind indoors); ``outdoor_feelslike`` is the NWS heat index or wind chill
+        of the row's ``outdoor`` with the weather entity's ``wind_speed`` converted to mph. Internal F, never rounded;
+        a key is present only with a value. Never raises.
+        """
+        out: dict[str, float] = {}
+        try:
+            cfg = self.config
+            climate = cfg.get("climate_entity")
+            sleep_entity = cfg.get("sleep_indoor_temp_entity")
+            if reading is None:
+                reading = self._get_indoor_temp_with_provenance()
+            source = getattr(reading, "source_entity", None)
+            role = indoor_role_for(source, sleep_entity)
+            if role == ROLE_INDOOR_SLEEP:
+                chosen = cfg.get(CONF_SLEEP_INDOOR_HUMIDITY_ENTITY)
+                sources: tuple[str | None, ...] = (sleep_entity,)
+                fallback = None
+            else:
+                chosen = cfg.get(CONF_INDOOR_HUMIDITY_ENTITY)
+                dedicated = (
+                    cfg.get("indoor_temp_entity")
+                    if cfg.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
+                    in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
+                    else None
+                )
+                sources = (climate, source, dedicated)
+                fallback = climate
+
+            def _discover(eid: str, exclude: bool) -> tuple[str, ...]:
+                return self._companion_sensors(eid, "humidity", exclude)
+
+            rh_in, _src_in = resolve_humidity(
+                self.hass, role, chosen=chosen, source_entities=sources, fallback_entity=fallback, discover=_discover
+            )
+            if rh_in is not None:
+                out["humidity"] = rh_in
+                fl_in = feels_like_f(indoor_f, rh_in)
+                if fl_in is not None:
+                    out["feelslike"] = fl_in
+
+            weather = cfg.get("weather_entity")
+            outdoor_sensor = (
+                cfg.get("outdoor_temp_entity")
+                if cfg.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE) != TEMP_SOURCE_WEATHER_SERVICE
+                else None
+            )
+            rh_out, _src_out = resolve_humidity(
+                self.hass,
+                ROLE_OUTDOOR,
+                chosen=cfg.get(CONF_OUTDOOR_HUMIDITY_ENTITY),
+                source_entities=(outdoor_sensor,),
+                fallback_entity=weather,
+                discover=_discover,
+            )
+            if rh_out is not None:
+                out["outdoor_humidity"] = rh_out
+            wind_mph = None
+            ws = self.hass.states.get(weather) if weather else None
+            if ws is not None:
+                wind_mph = wind_speed_to_mph(ws.attributes.get("wind_speed"), ws.attributes.get("wind_speed_unit"))
+            fl_out = feels_like_f(outdoor_f, rh_out, wind_mph)
+            if fl_out is not None:
+                out["outdoor_feelslike"] = fl_out
+        except Exception:  # noqa: BLE001 - a chart row must never fail on humidity
+            _LOGGER.debug("chart_log: could not read humidity / feels-like", exc_info=True)
+        return out
 
     def _companion_for_resolver(self) -> CompanionSensors | None:
         """The companion holder for the indoor resolver, or None when the occupant set it Off (Issue #1230 R1b)."""
@@ -8633,11 +8740,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _fan_status = self._compute_fan_status() if self.automation_engine else "disabled"
             _lower, _upper = self._target_band_lower_upper_now()
             _LOGGER.debug("chart_log append: event=%s occupancy=%s", event, self._occupancy_mode)
+            _indoor_occ = self._get_indoor_temp()
+            _outdoor_occ = self._get_outdoor_temp(_weather_attrs, weather_down=_weather_down)
             self._chart_log.append(
                 hvac=self._read_chart_hvac_action(_fan_status),
                 fan=self._fan_is_running(_fan_status),
-                indoor=self._get_indoor_temp(),
-                outdoor=self._get_outdoor_temp(_weather_attrs, weather_down=_weather_down),
+                indoor=_indoor_occ,
+                outdoor=_outdoor_occ,
                 windows_open=self._any_sensor_open(),
                 windows_recommended=bool(self._current_classification.windows_recommended)
                 if self._current_classification
@@ -8651,7 +8760,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 upper=_upper,
                 nat_vent_target=self._nat_vent_target_now(),
                 indoor_sensors=self._read_chart_indoor_sensors(),
-                **self._read_chart_context(),
+                **self._read_chart_context(indoor=_indoor_occ, outdoor=_outdoor_occ),
             )
         except Exception:  # noqa: BLE001 - a chart row must never break an occupancy change
             _LOGGER.debug("chart_log: occupancy row not written (%s)", event, exc_info=True)
@@ -10318,7 +10427,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_ov,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
-                    **self._read_chart_context(),
+                    **self._read_chart_context(indoor=_indoor, outdoor=_outdoor_val),
                 )
             decide_sync(
                 self,
@@ -10441,10 +10550,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # Issue #1234: the always-primary reading (never the sleep-window swap) that live swing
                 # sampling uses, so thermal_replay's swing backfill reads the same sensor.
                 _primary_hac = self._get_indoor_temp_with_provenance().primary_value
+                _indoor_hac = self._get_indoor_temp()
                 self._chart_log.append(
                     hvac=new_action,
                     fan=self._fan_is_running(),
-                    indoor=self._get_indoor_temp(),
+                    indoor=_indoor_hac,
                     indoor_primary=_primary_hac if isinstance(_primary_hac, int | float) else None,
                     outdoor=None,
                     windows_open=self._any_sensor_open(),
@@ -10464,7 +10574,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_hac,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
-                    **self._read_chart_context(),
+                    # outdoor=None on this row, so no outdoor feels-like (same value the row stores)
+                    **self._read_chart_context(indoor=_indoor_hac, outdoor=None),
                 )
                 await self._executor_job(self._chart_log.save)
 
@@ -15841,16 +15952,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return "cooling"
         return hvac_action
 
-    def _read_chart_context(self) -> dict[str, Any]:
+    def _read_chart_context(self, *, indoor: float | None = None, outdoor: float | None = None) -> dict[str, Any]:
         """Per-row context for chart_log (Issue #1230 R2): occupancy mode, override/grace flag, the comfort sensor, and
         (Issue #1406) the drawn hold ``hold_lower``/``hold_upper`` when it differs from the band schedule.
 
         ``occupancy`` draws the Away / Vacation strip, ``override`` the Override / grace strip, ``band_sensor`` names
-        the sensor the Target Band applied to on that row. Read only; never raises into a chart row.
+        the sensor the Target Band applied to on that row. Issue #1414: ``indoor``/``outdoor`` are the SAME values the
+        row stores under those keys; they feed the humidity / feels-like fields (``_read_chart_humidity``, chart
+        display only). Read only; never raises into a chart row.
         """
         out: dict[str, Any] = {}
         # Issue #1406: the band the chart drew on this row, when it differs from the band schedule (lower/upper).
         out.update(self._read_chart_hold())
+        reading: IndoorTempReading | None = None
         try:
             mode = getattr(self, "_occupancy_mode", None)
             if isinstance(mode, str) and mode:
@@ -15859,11 +15973,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if engine is not None and (bool(engine._manual_override_active) or bool(engine._grace_active)):
                 out["override"] = True
             out.update(self._read_chart_windows_planned())
-            source = self._get_indoor_temp_with_provenance().source_entity
+            reading = self._get_indoor_temp_with_provenance()
+            source = reading.source_entity
             if isinstance(source, str) and source:
                 out["band_sensor"] = source
         except Exception:  # noqa: BLE001 - a chart row must never fail on context
             _LOGGER.debug("chart_log: could not read row context", exc_info=True)
+        out.update(self._read_chart_humidity(indoor_f=indoor, outdoor_f=outdoor, reading=reading))
         return out
 
     def _read_chart_windows_planned(self) -> dict[str, Any]:
@@ -17153,7 +17269,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             ]
 
+        # Issue #1414 (chart display only): outdoor humidity / feels-like ahead, from the REAL hourly forecast (never
+        # the synthetic extension, which has no humidity), present only when the provider's entries carry humidity.
+        _humidity_forecast: dict[str, list[dict]] = {}
+        if not is_historical:
+            try:
+                _ws = self.hass.states.get(self.config.get("weather_entity") or "")
+                _wind_unit = _ws.attributes.get("wind_speed_unit") if _ws is not None else None
+                _hf = _build_outdoor_humidity_feelslike_forecast(
+                    getattr(self, "_hourly_forecast_temps", None), now, _wind_unit
+                )
+                if _hf is not None:
+                    _humidity_forecast = {
+                        "outdoor_humidity_forecast": _hf[0],
+                        "outdoor_feelslike_forecast": [{"ts": p["ts"], "value": _conv(p["value"])} for p in _hf[1]],
+                    }
+            except Exception:  # noqa: BLE001 - optional chart lines
+                _LOGGER.debug("humidity forecast failed", exc_info=True)
+
         return {
+            **_humidity_forecast,
             "predicted_indoor": predicted_indoor,
             "forecast_outdoor": forecast_outdoor,
             "actual_outdoor": actual_outdoor,
@@ -19462,6 +19597,60 @@ def _build_future_forecast_outdoor(
             result.append({"ts": future_dt.isoformat(), "temp": round(float(entry["temp"]), 1)})
     result.sort(key=lambda x: x["ts"])
     return result
+
+
+def _build_outdoor_humidity_feelslike_forecast(
+    hourly_forecast: list[dict] | None, now: datetime, wind_speed_unit: str | None
+) -> tuple[list[dict], list[dict]] | None:
+    """Future (ts > now) outdoor humidity and feels-like points from the REAL hourly forecast (Issue #1414).
+
+    CHART DISPLAY ONLY. ``hourly_forecast`` is ``_hourly_forecast_temps`` (temperature already internal F; provider
+    fields such as ``humidity`` / ``wind_speed`` kept as the weather entity reports them, wind in the entity's
+    ``wind_speed_unit``). Returns ``(humidity, feelslike_f)`` as ``[{"ts", "value"}]`` lists, or None when no future
+    entry carries a humidity (the provider does not forecast it: both lists are then left out of the payload).
+    Feels-like follows the same NWS rule as the chart rows; a point with no defined value is omitted. Never rounded.
+    """
+    if not hourly_forecast:
+        return None
+    humidity: list[dict] = []
+    feels: list[dict] = []
+    carried = False
+    for entry in hourly_forecast:
+        if not isinstance(entry, dict):
+            continue
+        dt_str = entry.get("datetime") or entry.get("time")
+        try:
+            dt_obj = datetime.fromisoformat(dt_str)  # type: ignore[arg-type]
+        except ValueError, TypeError:
+            continue
+        local_dt = dt_util.as_local(dt_obj) if dt_obj.tzinfo else dt_obj
+        try:
+            if local_dt <= now:
+                continue
+        except TypeError:
+            continue
+        rh = entry.get("humidity")
+        if rh is None or isinstance(rh, bool):
+            continue
+        try:
+            rh_f = float(rh)
+        except ValueError, TypeError:
+            continue
+        if not math.isfinite(rh_f) or not 0.0 <= rh_f <= 100.0:
+            continue
+        carried = True
+        ts = local_dt.isoformat()
+        humidity.append({"ts": ts, "value": rh_f})
+        temp = entry.get("temperature") if entry.get("temperature") is not None else entry.get("temp")
+        wind_mph = wind_speed_to_mph(entry.get("wind_speed"), wind_speed_unit)
+        fl = feels_like_f(temp, rh_f, wind_mph)
+        if fl is not None:
+            feels.append({"ts": ts, "value": fl})
+    if not carried:
+        return None
+    humidity.sort(key=lambda x: x["ts"])
+    feels.sort(key=lambda x: x["ts"])
+    return humidity, feels
 
 
 def _extract_current_hour_forecast_temp(

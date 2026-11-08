@@ -1,0 +1,53 @@
+{
+  "name": "issue_1433_away_grace_periodic_cycle_holds_home",
+  "description": "Issue #1433: on a cold day with the windows closed, a 30-minute cycle that lands inside the 15-minute away timer must not send the away setback (heat 60 F); after each return home every periodic cycle keeps the home band (heat 70 F); while really away the periodic cycle keeps the setback.",
+  "source": "production incident 2026-11-07 (Zone 1, 11:23:12 'Away mode - reapplying setback' 4.5 min after leaving at 11:18:46)",
+  "issue": 1433,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant outcome: you step out for 12 minutes on a cold morning (or a phone's presence drops for a few minutes). Climate Advisor promises a 15-minute grace before the away setback, but a 30-minute cycle that lands in that grace set the heat to 60 F at once; the house cooled until you came back. After coming home, every later cycle must keep the 70 F comfort heat.",
+    "Drives the REAL occupancy toggle (home_toggle_entity) through the coordinator's own listener and its real 15-minute away timer, and the periodic 30-minute cycle as a classification event (the cycle's apply_classification(), as every golden models it), so the timer-pending state production is in is modelled, not skipped.",
+    "Two Away periods, as on 2026-11-07: the first is a short errand (back after 12 minutes, inside the timer), the second is longer (the timer applies the setback). A periodic cycle runs inside the timer, after each return, and while really away (the leaving mirror: the cycle must not undo Away).",
+    "(a) Scenario effectiveness: on 0.9.7 the 09:06 cycle writes heat 60 inside the timer, so the empty-writes assertion at 09:11 fails (EXPECTED FAIL before the fix).",
+    "(b) Docs <-> production: docs/occupancy-dispatch-spec.md (State Transitions: 'setback fires on expiry'; 30-Minute Poll Guards) and docs/chart-log-spec.md (#1425: the home band is drawn while the timer runs) say the setback waits for the timer.",
+    "(c) User outcome if this regresses: brief absences and presence flaps set the heat back while the household expects comfort; the chart draws the home band while the thermostat holds the setback."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "home_toggle_entity": "input_boolean.anyone_home"
+  },
+  "events": [
+    {"time": "2026-01-15T08:00:00", "type": "external_entity_state_change", "entity": "input_boolean.anyone_home", "state": "on", "note": "someone is home"},
+    {"time": "2026-01-15T08:00:30", "type": "temp_update", "indoor_f": 69.0, "outdoor_f": 35.0, "note": "cold morning, indoor just under the 70 F comfort floor"},
+    {"time": "2026-01-15T08:01:00", "type": "classification", "day_type": "cold", "hvac_mode": "heat", "windows_recommended": false, "note": "cold day: comfort heat 70 F"},
+    {"time": "2026-01-15T09:00:00", "type": "external_entity_state_change", "entity": "input_boolean.anyone_home", "state": "off", "note": "leave for a 12-minute errand: the 15-minute away timer starts"},
+    {"time": "2026-01-15T09:06:00", "type": "classification", "day_type": "cold", "hvac_mode": "heat", "windows_recommended": false, "note": "the 30-minute cycle (apply_classification): a periodic 30-minute cycle lands inside the away timer"},
+    {"time": "2026-01-15T09:12:00", "type": "external_entity_state_change", "entity": "input_boolean.anyone_home", "state": "on", "note": "back home after 12 minutes: the timer is cancelled, no setback was due"},
+    {"time": "2026-01-15T09:36:00", "type": "classification", "day_type": "cold", "hvac_mode": "heat", "windows_recommended": false, "note": "the 30-minute cycle (apply_classification): first periodic cycle after the first return"},
+    {"time": "2026-01-15T10:00:00", "type": "external_entity_state_change", "entity": "input_boolean.anyone_home", "state": "off", "note": "leave again: the timer applies the setback at 10:15"},
+    {"time": "2026-01-15T10:30:00", "type": "classification", "day_type": "cold", "hvac_mode": "heat", "windows_recommended": false, "note": "the 30-minute cycle (apply_classification): periodic cycle while really away (leaving mirror)"},
+    {"time": "2026-01-15T10:45:00", "type": "external_entity_state_change", "entity": "input_boolean.anyone_home", "state": "on", "note": "back home: comfort restored"},
+    {"time": "2026-01-15T11:15:00", "type": "classification", "day_type": "cold", "hvac_mode": "heat", "windows_recommended": false, "note": "the 30-minute cycle (apply_classification): first periodic cycle after the second return"}
+  ],
+  "assertions": [
+    {"at": "2026-01-15T08:59:00", "expect": "commanded_setpoint_at", "value": 70.0, "reason": "precondition: home, cold day, comfort heat 70 F on the thermostat"},
+    {"at": "2026-01-15T09:11:59", "expect": "setpoint_writes", "since": "2026-01-15T09:00:00", "values": [], "reason": "THE FIX: inside the 15-minute away timer the periodic cycle sends nothing (before the fix it sent heat 60 F at 09:06)"},
+    {"at": "2026-01-15T09:40:00", "expect": "commanded_setpoint_at", "value": 70.0, "reason": "after the first return the thermostat holds comfort heat 70 F"},
+    {"at": "2026-01-15T09:59:00", "expect": "setpoint_writes", "since": "2026-01-15T09:12:30", "values": [70.0], "reason": "after the first return every write is the home 70 F (the 09:36 periodic cycle), never the 60 F setback"},
+    {"at": "2026-01-15T10:20:00", "expect": "commanded_setpoint_at", "value": 60.0, "reason": "the away timer applied the setback (heat 60 F) at 10:15"},
+    {"at": "2026-01-15T10:31:00", "expect": "commanded_setpoint_at", "value": 60.0, "reason": "leaving mirror: the periodic cycle while away keeps the setback, it does not undo Away"},
+    {"at": "2026-01-15T10:46:00", "expect": "commanded_setpoint_at", "value": 70.0, "reason": "coming home restores comfort heat 70 F"},
+    {"at": "2026-01-15T11:20:00", "expect": "setpoint_writes", "since": "2026-01-15T10:45:30", "values": [70.0], "reason": "after the second return the periodic cycle writes the home 70 F, never the setback"},
+    {"at": "2026-01-15T11:20:00", "expect": "expect_band", "expect_band": {"floor": 70.0}, "reason": "the armed band after the second return is the home band (floor 70 F), not the 60 F setback"}
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Issue #1433: the away setback waits for the 15-minute timer; after every return each periodic cycle keeps the home band",
+    "observed_behavior": "pending review",
+    "expected_behavior": "no write inside the away timer; 70 F after each return; 60 F while really away"
+  }
+}

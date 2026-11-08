@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.8] — unreleased
+
+- Fix #1433: stepping out for a few minutes (or a phone dropping off the network) no longer sets the heat or the AC back. Climate Advisor waits 15 minutes before the away setback, but a 30-minute cycle that landed inside those 15 minutes sent the setback at once (on a cold day, for example, heat 60 °F five minutes after you left), and a pre-heat or pre-cool for a time-of-use period was cut to the Away target the same way. Now nothing sends the setback before the 15 minutes are up; if you come back sooner the thermostat was never changed. After you come home, every cycle keeps your home settings. The Away band drawn while you were home at 12:23 and 14:15 on 2026-11-07 was the #1425 chart issue, already fixed in 0.9.7; nothing was sent to the thermostat then.
+
 ## [0.9.7] — 2026-11-07
 
 - Fix #1418: with several zones, a request that named its zone with `?zone=` was answered with the first zone's data on 18 of the 21 dashboard endpoints (only `entry_id` was read), and raised an "Ambiguous zone selection" card that didn't say what caused it. Every endpoint now takes `zone` (or `entry_id`). Both dashboards no longer drop their zone after a zone reloads (for example after saving its options); before, they kept polling without one and showed the first zone. The diagnostic tools (`thermal_health.py`, `learning_db.py`, `simulation_loop.py`, `build_historical_scenario.py`) take `--entry-id` and stop with the zone list instead of reporting the first zone. The Repairs card now names the request and says to add `?zone=<entry_id>`. It is raised on every request that names no zone, on every endpoint and from every caller (dashboards, tools, scripts, agents), and comes back if dismissed. Only the log line stays throttled.

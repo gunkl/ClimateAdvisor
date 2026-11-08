@@ -1,0 +1,154 @@
+{
+  "name": "issue_1433_away_grace_tou_bank_holds_home",
+  "description": "Issue #1433 (time-of-use mirror, #1409/#1410): home inside a pre-heat bank window (heat 76 F), you step out for 10 minutes; a 30-minute cycle inside the 15-minute away timer must not write the Away bank or band; back home the home bank is kept and the band after the period is the home band.",
+  "source": "synthetic: Issue #1433 mirror review (TOU bank), built on tou_away_heat_bank_home_return_1404",
+  "issue": 1433,
+  "notes": [
+    "Occupant outcome: during a pre-heat before a high-cost period you step out briefly. The Away bank (or the Away band) must wait for the 15-minute timer like the plain setback, so the pre-heat to 76 F is not cut short by a short errand; the period then coasts and the home band 68 F returns at 16:15.",
+    "Drives the real occupancy toggle and its real away timer (home_toggle_entity) and the cycle's apply_classification() + _apply_tou_schedule() (classification event), the same order production runs them.",
+    "(a) Scenario effectiveness: on 0.9.7 the 15:55 cycle inside the away timer writes the Away pre-heat bank, so the empty-writes assertion fails (see the issue's test report).",
+    "(b) Docs <-> production: docs/scheduler-spec.md and docs/occupancy-dispatch-spec.md: the Away/Vacation bank is the away setback's time-of-use form; the setback fires on the timer's expiry.",
+    "(c) User outcome if this regresses: a short errand during a pre-heat drops the heat target to the Away bank and the house enters the high-cost period colder."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high"
+      }
+    ],
+    "home_toggle_entity": "input_boolean.anyone_home"
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "events": [
+    {
+      "time": "2026-01-13T13:00:00",
+      "type": "external_entity_state_change",
+      "entity": "input_boolean.anyone_home",
+      "state": "on",
+      "note": "someone is home"
+    },
+    {
+      "time": "2026-01-13T13:00:01",
+      "type": "temp_update",
+      "indoor_f": 64.0,
+      "outdoor_f": 30.0
+    },
+    {
+      "time": "2026-01-13T14:00:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "cycle at home"
+    },
+    {
+      "time": "2026-01-13T15:40:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "cycle at home inside the pre-heat bank window: the home bank (heat 76 F) is written"
+    },
+    {
+      "time": "2026-01-13T15:50:00",
+      "type": "external_entity_state_change",
+      "entity": "input_boolean.anyone_home",
+      "state": "off",
+      "note": "you step out: the 15-minute away timer starts"
+    },
+    {
+      "time": "2026-01-13T15:55:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "a 30-minute cycle inside the away timer"
+    },
+    {
+      "time": "2026-01-13T16:00:00",
+      "type": "external_entity_state_change",
+      "entity": "input_boolean.anyone_home",
+      "state": "on",
+      "note": "back after 10 minutes: the timer is cancelled"
+    },
+    {
+      "time": "2026-01-13T16:05:00",
+      "type": "temp_update",
+      "indoor_f": 64.5,
+      "outdoor_f": 30.0
+    },
+    {
+      "time": "2026-01-13T16:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "cycle inside the high-cost period, at home"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-13T15:49:59",
+      "expect": "commanded_setpoint_at",
+      "value": 76.0,
+      "reason": "precondition: the home pre-heat bank (heat 76 F) holds the thermostat"
+    },
+    {
+      "at": "2026-01-13T15:59:59",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T15:50:00",
+      "values": [],
+      "reason": "THE FIX: inside the away timer neither the Away bank nor the Away band is written"
+    },
+    {
+      "at": "2026-01-13T16:14:00",
+      "expect": "commanded_setpoint_at",
+      "value": 76.0,
+      "reason": "back home inside the bank window: the thermostat holds the home bank 76 F"
+    },
+    {
+      "at": "2026-01-13T16:31:00",
+      "expect": "commanded_setpoint_at",
+      "value": 68.0,
+      "reason": "after the bank, home: the home band floor 68 F (never the 60 F setback)"
+    },
+    {
+      "at": "2026-01-13T16:31:00",
+      "expect": "expect_band",
+      "expect_band": {
+        "floor": 68.0
+      },
+      "reason": "the armed band at home is the home band"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Issue #1433 TOU mirror: the Away bank waits for the away timer; home keeps the home bank",
+    "observed_behavior": "pending review",
+    "expected_behavior": "no write inside the away timer; 76 F bank then 68 F at home"
+  }
+}

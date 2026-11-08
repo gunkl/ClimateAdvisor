@@ -38,10 +38,12 @@ async def test_scenario_forecast_and_model_survive_the_real_refresh(hass, freeze
         assert coordinator._hourly_forecast_temps, "the scenario forecast must survive the coordinator's refresh"
         future = [e for e in scenario["hourly_forecast"] if dt_util.parse_datetime(e["datetime"]) > now]
         assert future, "the scenario must have forecast hours after its start"
-        # the engine holds no copy: it reads the owner's list through its inputs provider
+        # the engine holds no copy: the coordinator computes the peak into the facts it passes in
         assert not hasattr(engine, "_hourly_forecast_temps")
-        assert engine.inputs.forecast_peak_next_2h(now) == forecast_peak_next_2h(scenario["hourly_forecast"], now)
-        assert engine.inputs.forecast_peak_next_2h(now) is not None
+        facts = coordinator.engine_facts(now)  # the snapshot the coordinator passes in at a decision
+        assert facts.forecast_peak_2h == forecast_peak_next_2h(scenario["hourly_forecast"], now)
+        assert facts.forecast_peak_2h is not None
+        assert engine._facts(now).forecast_peak_2h == facts.forecast_peak_2h
         assert engine.inputs.thermal_model() == scenario["thermal_model"]
     finally:
         await session.close()

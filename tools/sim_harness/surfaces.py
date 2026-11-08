@@ -483,7 +483,7 @@ def read_thermostat_hold(session: Any, armed: Armed) -> Shown | None:
         or coord._occupancy_restore_held()
         or getattr(e, "_tou_precondition_until", None) is not None
         or (
-            e.inputs.tou_av_window().precondition_target  # Issue #1443: the coordinator's window, read via the engine
+            e.inputs.build_facts(_dt_util().now()).tou_av.precondition_target  # Issue #1443: the coordinator's window
             if hasattr(e, "inputs")
             else getattr(e, "_tou_av_precondition_target", None)  # a pre-#1443 tree
         )

@@ -418,8 +418,8 @@ class RealHASession:
     def _apply_injected_inputs(self) -> None:
         """Optional ODE inputs the scenario supplies, seeded into the COORDINATOR, as Tier A does (Issue #1440/#1443).
 
-        The coordinator is the single owner of the thermal model and the hourly forecast; the engine reads them live
-        through its read-only inputs provider and holds no copy. Before #1440 this seeded only the engine's forecast
+        The coordinator is the single owner of the thermal model and the hourly forecast; it passes the facts in at
+        each engine decision and the engine holds no copy. Before #1440 this seeded only the engine's forecast
         copy (the coordinator's only for ``v4_model`` scenarios), so the coordinator's first refresh pushed its empty
         list over it and the plan, which the coordinator builds from its own list, never saw the scenario forecast.
         Seeding the owner gives real HA the input Tier A has; the refresh then keeps the still-future hours (#1337).

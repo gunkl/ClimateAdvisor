@@ -274,11 +274,15 @@ def snapshot_engine_state(engine: Any) -> dict[str, Any]:
     ):
         snap[attr] = getattr(engine, attr, None)
     # Issue #633: today's outdoor peak/sample count. Issue #1443: the engine holds no copy; it reads them from the
-    # coordinator through its read-only inputs provider, so the snapshot reads the same provider (same keys).
+    # coordinator in the facts passed in at each decision, so the snapshot asks the engine's facts source for one built
+    # now (same keys).
     _inputs = getattr(engine, "inputs", None)
     if _inputs is not None:
-        snap["_outdoor_temp_today_peak"] = _inputs.outdoor_today_peak()
-        snap["_outdoor_temp_today_sample_count"] = _inputs.outdoor_today_sample_count()
+        from homeassistant.util import dt as _dt_util  # noqa: PLC0415 - HA stubs are installed by now
+
+        _facts = _inputs.build_facts(_dt_util.now())
+        snap["_outdoor_temp_today_peak"] = _facts.outdoor_today_peak
+        snap["_outdoor_temp_today_sample_count"] = _facts.outdoor_today_sample_count
     else:  # a pre-#1443 tree
         snap["_outdoor_temp_today_peak"] = getattr(engine, "_outdoor_temp_today_peak", None)
         snap["_outdoor_temp_today_sample_count"] = getattr(engine, "_outdoor_temp_today_sample_count", None)

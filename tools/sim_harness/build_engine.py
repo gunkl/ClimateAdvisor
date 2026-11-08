@@ -26,7 +26,7 @@ Coordinator proxy:
 
   The coordinator-owned facts the engine's decisions read (thermal model, hourly
   forecast peak, today's outdoor peak, the Away/Vacation TOU window) come through ONE
-  read-only provider (Issue #1443, ``engine_inputs``). A bare engine has no coordinator,
+  facts source (Issue #1443, ``engine_inputs``). A bare engine has no coordinator,
   so the caller owns them: pass ``inputs=StaticEngineInputs(thermal=..., hourly_forecast=...)``.
   No engine private is written for them.
 """
@@ -117,7 +117,7 @@ def build_headless_engine(
                  ``fake_hass`` — the production dry-run behavior already used by
                  ``switch.py``, reused here so a shadow engine can never write a
                  real action_log entry.
-        inputs: Issue #1443 — the engine's read-only inputs provider (``engine_inputs.StaticEngineInputs`` for a
+        inputs: Issue #1443 — the engine's facts source (``engine_inputs.StaticEngineInputs`` for a
                 bare engine: the scenario's thermal model and hourly forecast). None = an empty one.
 
     Returns:

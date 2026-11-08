@@ -493,7 +493,7 @@ class FakeHassSession:
         #                       "k_solar": ...}
         #   "hourly_forecast": list of {"datetime": ISO8601, "temperature": float}
         # Issue #1443: in coordinator mode they are seeded into the COORDINATOR, the single owner production reads
-        # them from (the engine reads them live through its inputs provider); a bare engine got them at construction.
+        # them from (the coordinator passes them in at each engine decision); a bare engine got them at construction.
         if "thermal_model" in scenario and isinstance(scenario["thermal_model"], dict) and coordinator is not None:
             coordinator._thermal_model = scenario["thermal_model"]
             pin_scenario_thermal_model(coordinator, scenario["thermal_model"])

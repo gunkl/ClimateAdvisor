@@ -170,9 +170,9 @@ class NatVentSoftStartGateInputs:
                                    apply to HVAC-only fan archetypes
       outdoor_today_peak       -> max of coordinator._outdoor_temp_history for today,
                                    read by the caller via the engine's read-only inputs
-                                   provider (engine.inputs.outdoor_today_peak(), #1443)
+                                   facts the coordinator passes in (EngineFacts, #1443)
       outdoor_sample_count     -> len(coordinator._outdoor_temp_history) for today, read
-                                   via engine.inputs.outdoor_today_sample_count()
+                                   in the same passed-in facts
       peak_decline_margin      -> PEAK_DECLINE_MARGIN_F (const.py), degrees below today's
                                    observed peak required before calling it "declining"
       full_gate_active         -> the caller's own decide_nat_vent_gate(...) result for the

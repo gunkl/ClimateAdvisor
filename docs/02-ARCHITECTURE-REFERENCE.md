@@ -5,7 +5,7 @@
 ## Anchors
 | Question | Short answer | → Full answer |
 |---|---|---|
-| Who owns the forecast, thermal model, today's outdoor peak and TOU window the engine's decisions read? May anything outside `automation.py` assign an `AutomationEngine` private? | The coordinator is the single owner; the engine holds no copy and reads them through one read-only provider (`engine_inputs.CoordinatorEngineInputs`, passed as `AutomationEngine(..., inputs=...)`). Single facts reach the decision as arguments (`forecast_peak_2h`, the soft-start peak). Engine-owned state is changed only through public engine methods. `tests/test_engine_state_ownership_static.py` fails on any other write. Issue #1443. | [Engine-State Ownership](#engine-state-ownership-issue-1443) |
+| Who owns the forecast, thermal model, today's outdoor peak and TOU window the engine's decisions read? May anything outside `automation.py` assign an `AutomationEngine` private? | The coordinator is the single owner and passes them in: it builds a frozen `EngineFacts` snapshot (`engine_facts(now)`) and runs each engine decision call inside it (`engine_inputs.decide`); the engine keeps no copy. Single facts reach the pure decisions as arguments (`forecast_peak_2h`, the soft-start peak). Accessors stay only for engine-internal timers/readers (`inputs.build_facts`) and the thermal model. Engine-owned state is changed only through public engine methods. `tests/test_engine_state_ownership_static.py` fails on any other write or on a direct decision call. Issue #1443. | [Engine-State Ownership](#engine-state-ownership-issue-1443) |
 | What are the source files and what does each own? | 96 files total as of v0.9.4 (2026-11-07; re-verify with `ls custom_components/climate_advisor/*.py`, this count drifts as features ship). The original 16 own one responsibility each: `coordinator.py` orchestrates, `classifier.py` classifies, `automation.py` executes HVAC calls, `learning.py` persists and analyses behavior, etc. Block 5's FSM migration (epic #594) added dozens more — mostly small pure `decide_*()` decision-core modules plus the lifecycle FSMs and the dispatcher pair — and multi-zone support (Issue #796, v0.7.0) added `zone_registry.py`, `storage_paths.py`, and `diagnostics.py`. The File Structure tree below predates several of these additions and is not exhaustive — see [Multi-Zone Spec](multi-zone-spec.md) for the multi-zone-specific modules. | [§File Structure](02-ARCHITECTURE-REFERENCE.md#file-structure) |
 | What is the FSM Decision Layer — the lifecycle FSMs, and is anything actually driving HVAC through them? | Seven subsystems (nat-vent, door-window, override-grace, fan, economizer, classification, occupancy) each have a dedicated FSM (two — classification, occupancy — are deliberately stateless). All are now the sole authoritative implementations — the legacy branches and `_*_fsm_authoritative` cutover flags were permanently removed in Phase 6 graduation (Issue #757). Each FSM is directly wired into `AutomationEngine` and drives real HVAC decisions. | [§FSM Decision Layer](02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer) |
 | How does data flow from the weather entity to an HVAC service call? | Weather entity → coordinator (every 30 min) → `classify_day()` → `DayClassification` → `apply_classification()` in the automation engine → `climate.set_temperature` / `climate.set_hvac_mode`. | [§Data Flow](02-ARCHITECTURE-REFERENCE.md#data-flow) |
@@ -88,7 +88,7 @@ custom_components/climate_advisor/
 │
 ├── nat_vent_fsm.py       # Nat-vent lifecycle FSM — unified (state, event) -> Transition table (Issue #633). Defines no state itself; drives NatVentLifecycleState from nat_vent_lifecycle.py.
 ├── nat_vent_lifecycle.py # Pure session-state derivation for nat-vent: NatVentLifecycleState (4 states — INACTIVE, ACTIVE_FULL_GATE, ACTIVE_SOFT_START, PAUSED_REACTIVATION_LOCKOUT) (Issue #606).
-├── engine_inputs.py      # Issue #1443: the read-only provider of the coordinator-owned facts the engine's decisions read (CoordinatorEngineInputs; StaticEngineInputs for a bare engine) and the pure forecast_peak_next_2h.
+├── engine_inputs.py      # Issue #1443: EngineFacts (the frozen snapshot the coordinator passes in at each decision), the engine's facts source for timers/readers (CoordinatorEngineInputs; StaticEngineInputs for a bare engine) and the pure forecast_peak_next_2h.
 ├── nat_vent_gate.py      # Pure decision core: the nat-vent reactivation gate (architecture-reset Step 2).
 ├── nat_vent_exit.py      # Pure decision core: the nat-vent active-session exit chain, all 5 exit reasons in priority order (Issue #608).
 ├── nat_vent_cycling.py   # Pure decision core: mid-session nat-vent fan cycling (Issue #698).
@@ -592,37 +592,46 @@ an event into the production event log) as a concrete negative example for revie
 
 Occupant view: the decisions Climate Advisor makes for the house (may a window-open fan session start, the nat-vent
 soft start, the time-of-use Away bank, the remote-sensor swing, the "HVAC cooled within 2 h" fan restriction) act on
-the forecast, learned thermal model, today's outdoor peak and TOU window the coordinator holds now, never on a copy one
-path forgot to refresh. Before #1443 the coordinator hand-pushed copies into engine privates; #1440 was one that drifted
-on the real-HA tier (the adapter seeded only the engine's forecast copy, the coordinator's refresh pushed its empty list
-over it).
+the forecast, learned thermal model, today's outdoor peak and TOU window the coordinator holds when it asks, never on
+a copy one path forgot to refresh. Before #1443 the coordinator hand-pushed copies into engine privates; #1440 was one
+that drifted on the real-HA tier (the adapter seeded only the engine's forecast copy, the coordinator's refresh pushed
+its empty list over it).
 
-**The rule.** The coordinator is the single owner of these facts, and the engine holds no copy:
+**The rule (owner's choice: values passed in).** The coordinator is the single owner, and the engine holds no copy.
+Single facts are computed by the coordinator and passed in at the decision call:
 
-| Fact | Owner (coordinator) | Engine reads | Decision input |
+| Fact | Owner (coordinator) | In `EngineFacts` | Decision input |
 |---|---|---|---|
-| hourly forecast | `_hourly_forecast_temps` (`_refresh_hourly_forecast`, kept-forecast restore) | `inputs.forecast_peak_next_2h(now)` (never the list) | `decide_nat_vent_start_veto(forecast_peak_2h=…)` (#1138) |
-| thermal model | `_thermal_model` (30-min cycle, forecast cycle) | `inputs.thermal_model()`, then `_control_model_provider` | ceiling guard, thermal-floor veto, remote swing |
-| today's outdoor peak / samples | `_outdoor_temp_history` (each recorded reading; same-day restore; midnight reset) | `inputs.outdoor_today_peak()` / `outdoor_today_sample_count()` | soft start (#540) |
-| Away/Vacation TOU window | `_tou_av_window: TouAvWindow` (`_sync_tou_away_vacation_state`) | `inputs.tou_av_window()` | Away/Vacation band expansion (#899) |
+| hourly forecast | `_hourly_forecast_temps` (`_refresh_hourly_forecast`, kept-forecast restore) | `forecast_peak_2h` (never the list) | `decide_nat_vent_start_veto(forecast_peak_2h=…)` (#1138) |
+| today's outdoor peak / samples | `_outdoor_temp_history` (each recorded reading; same-day restore; midnight reset) | `outdoor_today_peak`, `outdoor_today_sample_count` | soft start (#540) |
+| Away/Vacation TOU window | `_tou_av_window: TouAvWindow` (`_sync_tou_away_vacation_state`) | `tou_av` (expansion, schedule id, bank target) | Away/Vacation band expansion (#899) |
 
-- **One read-only provider**, handed to the constructor (`AutomationEngine(..., inputs=CoordinatorEngineInputs(self))`).
-  It reads the coordinator's attributes at call time and has no setters. A bare engine (headless engine-only harness,
-  unit tests) gets `StaticEngineInputs`, whose fields its builder owns; an engine built via `object.__new__` reads
-  `EMPTY_ENGINE_INPUTS`. A provider (rather than arguments from the coordinator) is used because the same decisions also
-  run from engine-internal timers with no coordinator call frame; the provider still hands single facts to the pure
-  decisions as arguments.
-- **Engine-owned state** stays on the engine and is changed only by the engine: the coordinator reports observations or
-  requests corrections through public methods (`note_equipment_ran`, `note_cycle_activity` for the persisted
-  `_last_hvac_*_active` / `_last_fan_active` / `_last_natvent_active` stamps; `note_observed_fan_origin`;
-  `clear_stale_fan_ownership`; `clear_stale_hvac_fan_flag`; `mark_ha_stopping`; `latch_shutdown`). The condition that
-  decides a correction stays in the coordinator.
-- **Static guard:** `tests/test_engine_state_ownership_static.py` (AST, alias-aware) fails on any assignment,
-  augmented assignment, `del`, item/nested assignment, mutating method call (`.append`, `.update`, ...) or
-  `setattr`/`delattr` of an engine private outside `automation.py`. Production allowlist: installs only
-  (`_control_model_provider`, `_command_observer`, `_occupancy_bank_write`). The harness (`tools/sim_harness/`,
-  `tests_ha/realha_session.py`) has its own allowlist (callback/observer installs, scenario-modelled engine-owned
-  preconditions, the `simulate_restart` clean slate). A stale allowlist entry fails too.
+- **Passed in.** `coordinator.engine_facts(now)` builds a frozen `EngineFacts` snapshot. Every coordinator (and
+  `api.py`) call into an engine method that reaches one of these facts goes through `decide(coordinator, method, ...)`
+  / `decide_sync(...)` (`engine_inputs`), which builds the snapshot when the call starts and runs the call inside
+  `engine.decision_facts(snapshot)`. That is a context variable scoped to that call and task, and nothing is kept on
+  the engine. The "Next Automation" prediction passes facts for the time it asks about (`facts_at=`).
+- **Never reused.** A snapshot older than `FACTS_MAX_AGE` (60 s), or passed for another engine, is ignored. A timer that
+  fires later inside a captured context gets a fresh one.
+- **Accessors that stay (no argument practical):**
+  - `inputs.build_facts(now)`, for an engine-internal timer (grace expiry re-check, override confirmation, fan
+    min-runtime cycle, WHF safety re-check) or a read-only reader in `automation.py` (`active_thresholds_for`, the
+    status/incident band). These have no coordinator call frame. In production it is the coordinator's own
+    `engine_facts`, built at that moment.
+  - `inputs.thermal_model()` then `_control_model_provider`: the whole learned model (with #1432, the per-room v4
+    control model) read by many decision helpers.
+  - A bare engine (headless engine-only harness, unit tests) gets `StaticEngineInputs`, whose fields its builder owns.
+- **Engine-owned state** stays on the engine and is changed only by the engine. The coordinator reports observations
+  or requests corrections through public methods: `note_equipment_ran` and `note_cycle_activity` for the persisted
+  `_last_hvac_*_active` / `_last_fan_active` / `_last_natvent_active` stamps (owner: "keep on engine"),
+  `note_observed_fan_origin`, `clear_stale_fan_ownership`, `clear_stale_hvac_fan_flag`, `mark_ha_stopping`,
+  `latch_shutdown`. The condition that decides a correction stays in the coordinator.
+- **Static guards** (`tests/test_engine_state_ownership_static.py`, AST, alias-aware):
+  - Any assignment, augmented assignment, `del`, item/nested assignment, mutating method call or `setattr`/`delattr`
+    of an engine private outside `automation.py` fails. Production allowlist: installs only (`_control_model_provider`,
+    `_command_observer`, `_occupancy_bank_write`). The harness has its own allowlist. A stale entry fails too.
+  - Any direct call from outside `automation.py` into an engine method that reaches a fact (one not routed through
+    `decide`) fails.
 - **Harnesses seed the owner** (#1440): Tier A coordinator mode and the real-HA adapter write the scenario's
   `thermal_model` / `hourly_forecast` to the coordinator; an engine-only run passes `StaticEngineInputs`.
 

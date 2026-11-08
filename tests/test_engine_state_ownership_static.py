@@ -230,3 +230,56 @@ self._own = 1            # not the engine: allowed
 """
     attrs = sorted(attr for _, _, attr in scan_source(src))
     assert attrs == ["_a", "_b", "_c", "_d", "_e", "_f", "_g", "_h", "_i", "_j", "_k", "_l"]
+
+
+# --------------------------------------------------------------------------- the facts are passed in (owner decision)
+def _decision_methods() -> set[str]:
+    """Every AutomationEngine method that reaches ``_facts`` (reads a coordinator-owned fact) on some path."""
+    tree = ast.parse(_ENGINE_MODULE.read_text(encoding="utf-8"))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AutomationEngine")
+    calls: dict[str, set[str]] = {}
+    for fn in cls.body:
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            calls[fn.name] = {
+                n.attr
+                for n in ast.walk(fn)
+                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "self"
+            }
+    reach = {"_facts"}
+    changed = True
+    while changed:
+        changed = False
+        for name, used in calls.items():
+            if name not in reach and used & reach:
+                reach.add(name)
+                changed = True
+    return reach - {"_facts", "decision_facts"}
+
+
+def test_every_coordinator_decision_call_passes_its_facts_in():
+    """Owner decision (#1443, "number 2"): values passed in at the decision call, nothing looked up live.
+
+    A direct call into an engine method that reaches a coordinator-owned fact would make the engine build the fact
+    itself; every such call outside automation.py goes through ``engine_inputs.decide`` / ``decide_sync``, which pass
+    a frozen snapshot computed at the call. (Engine-internal timers and the read-only readers inside automation.py
+    are the documented exception: they have no coordinator call frame.)
+    """
+    methods = _decision_methods()
+    assert {"handle_door_window_open", "check_natural_vent_conditions", "handle_occupancy_away"} <= methods
+    direct: list[str] = []
+    for path in sorted((REPO / "custom_components").rglob("*.py")):
+        if path.resolve() == _ENGINE_MODULE.resolve():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = _aliases(tree)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr not in methods:
+                continue
+            owner = node.func.value
+            if (isinstance(owner, ast.Name) and owner.id in aliases) or (
+                isinstance(owner, ast.Attribute) and owner.attr in _ENGINE_ATTRS
+            ):
+                direct.append(f"{path.relative_to(REPO).as_posix()}:{node.lineno} {node.func.attr}")
+    assert not direct, "engine decision called without passing the coordinator's facts in:\n  " + "\n  ".join(direct)

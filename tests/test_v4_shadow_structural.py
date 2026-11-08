@@ -338,6 +338,7 @@ _SELECTION_COORDINATOR_METHODS = {
     "_timeline_night_apply",
     "get_chart_data",
     "chart_capabilities",  # Issue #1459: display only (the chart key's v4_running flag)
+    "decision_rates_summary",  # Issue #1468: Debug tab only (which engine each decision rate comes from)
     "primary_engine_id",
     "shadow_engine_id",
     "engine_running",

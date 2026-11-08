@@ -38,12 +38,12 @@
     fan_remote_speed: 'The fan remote\u2019s speed setting, shown even while the fan is off',
     'Training-fit miss': 'How closely the last fit matched its own training history, not live accuracy: the Backtest below scores live predictions',
     'Grade reason': 'v4 grades none / low / ok from its history length, its skill against \u201cno change\u201d, and usable heating and cooling thermostat starts. It is not an accuracy score',
-    'By mode': 'Usable thermostat starts per mode in the training window; ok needs enough in every mode the home has used',
+    'By mode': 'Each mode graded on its own usable thermostat starts and how well v4 predicts the hours it runs. Shown for information: the decisions read the whole-model grade, which needs every mode the home has used to be ok',
     'Shadow engine': 'v3 grades from how many observations it has learned, not from how accurate it is: compare both in the Backtest below',
     Archive: 'Saved forecasts the Backtest scores against what actually happened',
     'Last prediction': 'Slots archived = new forecast slots this prediction added to the archive (most predictions add none)',
     'Mass node': 'v4\u2019s estimate of the slow part of the house (walls, floors, furniture), which lags the air temperature',
-    'Decision grade': 'The confidence the decisions read; v4 low reads as low, v4 ok as medium',
+    'Decision grade': 'The confidence the decisions read: v4\u2019s whole-model grade (low reads as low, ok as medium). The per-mode grades above are shown for information and do not change it',
     'v3 learned': 'v3\u2019s learned value from its observations, collected whichever engine is primary. The Decisions rows say which values the decisions actually read',
     'v3 model': 'v3\u2019s own model version and checks; it drives decisions only when v3 is the primary engine',
     comfort_family_armed: 'Which comfort edge the thermostat is guarding, and the last heat/cool switch',
@@ -106,7 +106,10 @@
     function label(id) { var e = find(id); return (e && e.label) || id; }
     function conf(e) { return e.confidence && e.confidence !== 'none' ? e.confidence + ' confidence' : ''; }
     var prim = pe ? find(pe.primary) : null, sh = pe && pe.shadow && pe.shadow !== 'none' ? find(pe.shadow) : null;
-    rows.push(['Primary engine', !pe || !pe.primary ? DASH : !prim ? pe.primary : prim.label + ': ' + (prim.usable ? ['usable', conf(prim)].filter(Boolean).join(', ') : 'still learning')]);
+    // Issue #1469: v4 grades heating and cooling apart; the row names both (a mode the home has not used: "not used")
+    var md = (v && v.modes) || {}, modeG = function (m, w) { var g = md[m] && md[m].grade; return g ? w + ' ' + (g === 'unseen' ? 'not used' : g) : ''; };
+    var perMode = [modeG('heat', 'heating'), modeG('cool', 'cooling')].filter(Boolean).join(' · ');
+    rows.push(['Primary engine', !pe || !pe.primary ? DASH : !prim ? pe.primary : prim.label + ': ' + (prim.usable ? (prim.id === 'v4' && perMode ? 'usable · ' + perMode : ['usable', conf(prim)].filter(Boolean).join(', ')) : 'still learning')]);
     var gr = (v && v.grade) || {};
     if (prim && prim.id === 'v4' && (gr.why || gr.by_mode)) {
       if (gr.why) rows.push(['Grade reason', (v.confidence || 'none') + ': ' + gr.why]);

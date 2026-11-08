@@ -242,13 +242,18 @@ def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
 
     def mode_txt(mode: str) -> str:
         m = modes.get(mode) if isinstance(modes.get(mode), Mapping) else {}
-        word, acc, tot = _MODE_WORD[mode], m.get("accepted"), m.get("starts")
-        if m.get("seen") is False or (not tot and m.get("seen") is None):
+        word, acc, tot, grade = _MODE_WORD[mode], m.get("accepted"), m.get("starts"), m.get("grade")
+        if grade == "unseen" or m.get("seen") is False or (not tot and m.get("seen") is None):
             return f"{word} not seen"
         if not isinstance(acc, int):
             return f"{word}: no start count"
         enough = "enough" if acc >= need_starts else f"needs {need_starts}"
-        return f"{word} {acc} usable of {tot} starts ({enough})"
+        starts = f"{acc} usable of {tot} starts ({enough})"
+        if grade in ("ok", "low", "none"):
+            why = m.get("reason") or ""
+            extra = f"; {why}" if grade == "low" and why and "starts" not in why else ""
+            return f"{word} {grade}: {starts}{extra}"
+        return f"{word} {starts}"
 
     span = summary.get("span_days")
     window = f" in the last {round(float(span))} days" if isinstance(span, (int, float)) else ""
@@ -777,6 +782,12 @@ def chart_extras(
 # ---------------------------------------------------------------------------
 
 
+def _mode_fit(fit: Mapping[str, Any], mode: str) -> Mapping[str, Any]:
+    modes = fit.get("modes")
+    rec = modes.get(mode) if isinstance(modes, Mapping) else None
+    return rec if isinstance(rec, Mapping) else {}
+
+
 def model_summary(model_dict: Mapping[str, Any] | None) -> dict[str, Any]:
     """Confidence, fitted_at, span and per-lead training MAE of a stored model, in internal degrees F.
 
@@ -812,6 +823,9 @@ def model_summary(model_dict: Mapping[str, Any] | None) -> dict[str, Any]:
                 "seen": fit.get(f"{mode}_seen"),
                 "starts": (fit.get("starts_total") or {}).get(mode),
                 "accepted": (fit.get("starts_accepted") or {}).get(mode),
+                # Issue #1469: the mode's own grade ("none" | "unseen" | "low" | "ok"; None before per-mode grades)
+                "grade": _mode_fit(fit, mode).get("grade"),
+                "reason": _mode_fit(fit, mode).get("reason"),
             }
             for mode in ("heat", "cool")
         },

@@ -10,6 +10,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **Today's classification:** "windows recommended" says why (for example "today's high 65°F is below 68°F"). The window times are marked as fixed for the day type when windows are not recommended. The low rows name the threshold that applies today, and today's high is shown. The morning and evening opportunities say they are checked on hot days only, and the trend shows the setback thresholds.
   - **Other rows:** skipped-observation counts at the list limit read "100 or more". Door and window sensors use their Home Assistant names. The grace duration reads in hours. The fan remote speed says when the fan is off.
   - Display only: no heating, cooling or window decision changes.
+- Fix #1469: the Debug tab now shows v4's grade for heating and cooling separately, for example "v4: usable · heating ok · cooling low". Before, it showed one "low confidence", even while heating forecasts were good, because the top grade needs usable thermostat starts in every mode the home has used (Zone 1 had 0 of the 5 cooling starts it needs). Each mode is graded on its own usable starts and on how well v4 predicts the hours that mode runs. Display only: decisions read the same overall grade as before.
 
 ## [0.9.14] — 2026-11-08
 

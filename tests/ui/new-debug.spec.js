@@ -51,7 +51,7 @@ function timeline() {
 async function openDebug(page, opts) {
   opts = opts || {};
   const celsius = !!opts.celsius;
-  const v4 = v4Summary(celsius, opts.engines);
+  const v4 = Object.assign(v4Summary(celsius, opts.engines), opts.v4 || {});
   const auto = Object.assign({}, FIX.automation_state, {
     unit: celsius ? 'celsius' : 'fahrenheit', v4_model: v4,
     control_feed: opts.controlFeed || { mode: 'v4', path_points: 47, own_path: true },
@@ -195,6 +195,21 @@ test.describe('New dashboard: Debug tab', () => {
     await expect(value(page, 'morning opportunity')).toHaveText(/^yes, 6:00\s?AM – 10:00\s?AM$/);
     await expect(value(page, 'evening opportunity')).toHaveText('no (tomorrow’s low above 80.0°F)');
     await expect(value(page, 'window times')).toHaveText('none on a hot day');
+  });
+
+  test('per-mode grades (#1469): the primary row names both, for information only', async ({ page }) => {
+    await openDebug(page, { v4: { modes: {
+      heat: { seen: true, starts: 61, accepted: 45, grade: 'ok', reason: '' },
+      cool: { seen: true, starts: 2, accepted: 0, grade: 'low', reason: 'too few accepted thermostat starts' } } } });
+    await expect(value(page, 'Primary engine')).toHaveText('v4: usable · heating ok · cooling low');
+    // the decisions keep reading the whole-model grade
+    await expect(value(page, 'Decision grade')).toHaveText('low · from v4');
+    await expect(value(page, 'Decisions: season')).toHaveCount(0);
+  });
+
+  test('a home without AC: cooling reads "not used"', async ({ page }) => {
+    await openDebug(page, { v4: { modes: { heat: { seen: true, starts: 61, accepted: 45, grade: 'ok' }, cool: { seen: false, starts: 0, accepted: 0, grade: 'unseen' } } } });
+    await expect(value(page, 'Primary engine')).toHaveText('v4: usable · heating ok · cooling not used');
   });
 
   test('capped skip counts, durations and the remote speed read in words', async ({ page }) => {

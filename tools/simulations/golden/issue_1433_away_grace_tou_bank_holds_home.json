@@ -54,7 +54,7 @@
     {
       "time": "2026-01-13T13:00:01",
       "type": "temp_update",
-      "indoor_f": 64.0,
+      "indoor_f": 69.0,
       "outdoor_f": 30.0
     },
     {
@@ -98,7 +98,7 @@
     {
       "time": "2026-01-13T16:05:00",
       "type": "temp_update",
-      "indoor_f": 64.5,
+      "indoor_f": 68.5,
       "outdoor_f": 30.0
     },
     {

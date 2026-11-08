@@ -1,7 +1,7 @@
 {
   "name": "issue_1433_away_grace_periodic_cycle_holds_home",
   "description": "Issue #1433: on a cold day with the windows closed, a 30-minute cycle that lands inside the 15-minute away timer must not send the away setback (heat 60 F); after each return home every periodic cycle keeps the home band (heat 70 F); while really away the periodic cycle keeps the setback.",
-  "source": "production incident 2026-11-07 (Zone 1, 11:23:12 'Away mode - reapplying setback' 4.5 min after leaving at 11:18:46)",
+  "source": "production log 2026-11-07 (Zone 1, 11:23:12 'Away mode - reapplying setback' 4.5 min after leaving at 11:18:46; nothing sent, windows open)",
   "issue": 1433,
   "use_coordinator": true,
   "skip_startup_coalesce": true,

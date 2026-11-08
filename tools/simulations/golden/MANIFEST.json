@@ -697,5 +697,15 @@
     "sha256": "ccd843b35c03dff959c7296dbf1c436c0b976c8b808b8653d2159a62cf75d5b1",
     "signed": "2026-11-07",
     "issue": 1417
+  },
+  "issue_1433_away_grace_periodic_cycle_holds_home": {
+    "sha256": "cedf988d69c4cdcc1dc6e28e56c98db7438d6a8c7d61e3b9944e5b21870aac8b",
+    "signed": "2026-11-07",
+    "issue": 1433
+  },
+  "issue_1433_away_grace_tou_bank_holds_home": {
+    "sha256": "1fa8ee4d1f2f4371e7fd058f5f62a319ab428d7e9c916df9a8ac75c378ded07c",
+    "signed": "2026-11-07",
+    "issue": 1433
   }
 }

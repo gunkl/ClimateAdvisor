@@ -1143,8 +1143,10 @@
 
     // The right % axis: always RIGHT_PX wide on both charts (so their plot areas line up), its labels shown only
     // while a humidity line on that chart is drawn (Issue #1414). It reads the dataset's live `hidden`, so a toggle
-    // (toggleSeries -> update) shows or blanks the labels without a rebuild.
-    const rightAxis = lim => ({ position: 'right', display: true, grid: { display: false }, border: { display: false },
+    // (toggleSeries -> update) shows or blanks the labels without a rebuild. Fixed 0-100% (Issue #1463, owner decision):
+    // relative humidity reads on one scale on both charts, so a 2-point change is drawn as the small change it is
+    // instead of being stretched to the full chart height by an auto-fitted axis.
+    const rightAxis = lim => ({ position: 'right', display: true, min: 0, max: 100, grid: { display: false }, border: { display: false },
       ticks: { color: textColor, maxTicksLimit: lim, callback(v) { return this.chart.data.datasets.some(d => d.yAxisID === 'yRight' && !d.hidden) ? v + '%' : ''; } },
       afterFit(sc) { sc.width = RIGHT_PX; } });
     const indoorScales = {

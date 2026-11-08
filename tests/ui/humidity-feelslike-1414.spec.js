@@ -24,6 +24,7 @@ function routeChart(page, opts) {
       const row = { ts: new Date(now - ago * H).toISOString(), hvac: 'cool', fan: false, indoor: t(81), outdoor: t(70),
         windows_open: false, windows_recommended: false, lower: t(68), upper: t(76), occupancy: 'home', outdoor_humidity: 60 };
       if (ago > 6 || ago < 4) row.humidity = 45.5;
+      if (o.narrow) { row.humidity = 57.3 + i * 0.11; row.outdoor_humidity = 74.7 + i * 0.04; }   // the 2026-11-07 night: ~3 points
       if (ago <= 3) row.feelslike = t(83);
       if (ago >= 8) row.outdoor_feelslike = t(40);
       return row;
@@ -154,6 +155,19 @@ for (const path of ['/', '/new_dashboard.html']) {
       const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('ca_chart_v2:mock-zone')).on);
       expect(stored['ind:humidity']).toBe(true);
       expect('ov:humidity' in stored).toBe(false);
+    });
+
+    test('Issue #1463: both humidity axes are fixed 0-100%, even when humidity barely moves', async ({ page }) => {
+      await routeChart(page, { narrow: true });
+      await open(page, path);
+      await chip(page, 'ind:humidity').click();
+      await chip(page, 'out:humidity').click();
+      const scale = await page.evaluate(() => ['temp-chart', 'out-chart'].map(id => {
+        const s = Chart.getChart(document.getElementById(id)).scales.yRight;
+        return { min: s.min, max: s.max };
+      }));
+      // An auto-fitted axis would run about 57-60% here and draw a 3-point rise as a line up the whole chart.
+      expect(scale).toEqual([{ min: 0, max: 100 }, { min: 0, max: 100 }]);
     });
 
     test('a °C payload reads in °C, and the feels-like reason is in °C', async ({ page }) => {

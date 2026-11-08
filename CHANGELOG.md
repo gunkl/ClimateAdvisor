@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.14] — 2026-11-08
+
+- Fix #1463: the Status chart's humidity axes now always run 0-100%, on both the temperature and outdoor charts. Before, the axis fitted itself to the humidity in view, so a small change (for example the bedroom going from 57% to 60% in an hour) was stretched across the whole chart height and looked like a line shooting straight up.
+
 ## [0.9.13] — 2026-11-08
 
 - Fix #1459: chart key switches no longer grey out just because nothing is in view. You can turn on Feels-like (or any line, overlay, strip or v4 look-ahead) at any time; it stays on, is remembered, and draws as soon as there is something to show, with a note saying why it is empty until then. Before, such a switch was locked and shown as off whenever the current view had nothing to draw, so a line that only appears on hot or cold days could only be turned on when the weather happened to line up. A switch is now locked only when your home isn't set up for it (v4 switched off, no outdoor sensor, no fan, no door/window sensors, no occupancy switches, no humidity source), and then it says where in Settings to set it up; a line your home can never have gets no switch at all. Activity strip rows still come and go with their data, as before; their switches can be turned on or off at any time.

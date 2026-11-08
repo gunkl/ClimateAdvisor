@@ -12,7 +12,7 @@ Environment knobs for the unit tier:
 * ``CA_UNIT_WORKERS``: number of pytest-xdist workers (``auto`` for all cores). Unset or ``0`` runs
   serially (the local default).
 * ``CA_UNIT_SHARD``: ``K/N`` runs only the Kth of N round-robin slices of the collected tests (CI runs the
-  N slices as parallel jobs), passed to pytest as ``--ca-shard K/N`` (see ``tests/conftest.py``). Unset runs
+  N slices as parallel jobs), passed to pytest as ``--ca-shard K/N`` (see ``tools/pytest_shard.py``). Unset runs
   everything.
 * ``CA_UNIT_SHARDS``: ``N`` (local) runs all N slices at once as separate pytest processes, each with
   ``CA_UNIT_WORKERS`` workers, prefixes each slice's output with ``[K/N]`` and prints each slice's wall time.
@@ -23,6 +23,8 @@ Environment knobs for the ha tier:
 
 * ``CA_HA_WORKERS``: number of pytest-xdist workers (``auto`` for all cores). Unset or ``0``
   runs serially (the local default; CI sets ``4``).
+* ``CA_HA_SHARD``: ``K/N`` runs only the Kth of N round-robin slices of the tier, passed as ``--ca-shard K/N``
+  (CI runs four slices as parallel ``ha-real (K/4)`` jobs; see ``tools/pytest_shard.py``). Unset runs everything.
 * ``CA_COMPONENT_ROOT``: directory holding an alternate ``custom_components/climate_advisor``
   tree. Used by ``scripts/revert_proof.py`` to run the tests against an old commit; a Windows
   path is translated for WSL.
@@ -191,7 +193,8 @@ def _run_ha_in_wsl(pytest_args: list[str]) -> int:
 def run_ha(extra: list[str]) -> int:
     # Default to the whole tier unless the caller named a test path or node id.
     targets = [] if any(a.startswith("tests_ha") or "::" in a for a in extra) else ["tests_ha/"]
-    args = [*HA_ARGS, *_worker_args(), *targets, *extra]
+    shard = os.environ.get("CA_HA_SHARD", "").strip()
+    args = [*HA_ARGS, *_worker_args(), *targets, *(["--ca-shard", shard] if shard else []), *extra]
     if os.name == "nt":
         return _run_ha_in_wsl(args)
     env_extra = _ha_env_passthrough()

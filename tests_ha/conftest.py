@@ -101,6 +101,9 @@ if _JITTER_MS > 0:
 
 
 def pytest_addoption(parser):
+    from tools.pytest_shard import add_shard_option
+
+    add_shard_option(parser)  # CI slices (--ca-shard K/N, CA_HA_SHARD), shared with the unit tier
     parser.addoption(
         "--ca-order",
         default="",
@@ -109,6 +112,9 @@ def pytest_addoption(parser):
 
 
 def pytest_collection_modifyitems(config, items):
+    from tools.pytest_shard import apply_shard
+
+    apply_shard(config, items)  # first, on the collection order, so the slices stay a partition under --ca-order
     order = config.getoption("--ca-order")
     if order == "reverse":
         items.reverse()

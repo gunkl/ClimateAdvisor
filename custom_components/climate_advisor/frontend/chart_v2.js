@@ -397,6 +397,31 @@
     }, def, { raw: sorted, data: _withBreaks(_withGaps(sorted, step), def.breaks), tol: Math.max(45 * 60000, 1.5 * step) });
   }
 
+  // ---- what this zone has set up (Issue #1459) ----
+  //
+  // Occupant view: a chart-key control is switchable, and its choice remembered, whenever the home CAN have that line;
+  // time, weather and the current view never lock it (an empty view only says why it is empty). It is locked only when
+  // the home cannot have it as set up, and then the reason says where to set it up. chart_data.capabilities carries those
+  // install facts; an older backend without it locks nothing (every capability counts as available).
+  const CAP_LOCK = {
+    v4_running: 'v4 is switched off (Settings \u2192 Prediction engine)',
+    outdoor_sensor: 'No outdoor sensor configured (Settings \u2192 Sensors)',
+    fan: 'No fan configured (Settings \u2192 Equipment)',
+    door_sensors: 'No door or window sensors configured (Settings \u2192 Sensors)',
+    occupancy: 'No home, vacation or guest switch configured (Settings \u2192 Occupancy)',
+    humidity_indoor: 'No indoor humidity source found (Settings \u2192 Sensors)',
+    humidity_outdoor: 'No outdoor humidity source found (Settings \u2192 Sensors)',
+  };
+  // the strips a home without the equipment can never have (no chip and no row then; the key names them once)
+  const STRIP_CAP = { fan: 'fan', natvent: 'fan', windows: 'door_sensors', windowsplan: 'door_sensors', away: 'occupancy' };
+  function _capLock(cd, name) {
+    const c = cd && cd.capabilities;
+    return c && typeof c === 'object' && c[name] === false ? CAP_LOCK[name] : '';
+  }
+  function _stripLock(r) { return STRIP_CAP[r] ? _capLock(_lastChartData, STRIP_CAP[r]) : ''; }
+
+  // disabledReason = locked: the home cannot have this line as set up (Issue #1459). note = why it has nothing to draw
+  // yet (v4 still learning, no no-plan line yet, schedule estimate not needed): the chip stays switchable.
   function _buildSeries(cd) {
     const nowMs = Date.now();
     const S = [];
@@ -424,10 +449,12 @@
     const fcPts = list => (list || []).map(p => ({ x: _parseTs(p.ts), y: p.value })).filter(p => p.y != null && p.x > nowMs);
     const hiF = _tempTxt(80), lowF = _tempTxt(50);
     S.push(_mkSeries({ id: 'ind:humidity', group: 'indoor', short: 'Indoor humidity', label: 'Humidity', role: 'relative humidity of the room Climate Advisor reads',
-      color: 'hum', width: 1.5, axis: 'yRight', unit: '%', kind: 'actual', emptyReason: 'No humidity reading recorded in this view' }, logPts('humidity')));
+      color: 'hum', width: 1.5, axis: 'yRight', unit: '%', kind: 'actual', emptyReason: 'No humidity reading recorded in this view',
+      disabledReason: _capLock(cd, 'humidity_indoor') }, logPts('humidity')));
     S.push(_mkSeries({ id: 'ind:feelslike', group: 'indoor', short: 'Indoor feels-like', label: 'Feels-like', role: 'heat index, shown only at ' + hiF + ' and up',
       color: 'feels', dash: [3, 3], width: 1.5, kind: 'actual',
-      emptyReason: 'Indoor feels-like only shows as a heat index (' + hiF + ' and up)' }, logPts('feelslike')));
+      emptyReason: 'Indoor feels-like only shows as a heat index (' + hiF + ' and up)',
+      disabledReason: _capLock(cd, 'humidity_indoor') }, logPts('feelslike')));
 
     // Predicted: v3's prediction of the CA reading: the 4 h-ahead snapshots logged earlier, then the live forecast.
     // Issue #1430: labelled by what it predicts; the key's Main / Comparison block names the engine and its role.
@@ -441,10 +468,12 @@
     const sched = (cd.schedule_estimate || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
     S.push(_mkSeries({ id: 'schedule', group: 'predicted', short: 'Schedule estimate', label: 'Schedule estimate (learning)',
       role: 'shown while the main prediction engine is still learning', color: 'base', dash: [4, 3], width: 2, missVs: 'ind:_ca', kind: 'pred',
-      disabledReason: sched.length ? '' : 'Not needed: the main engine has a usable fit' }, sched));
+      note: sched.length ? '' : 'Not needed: the main engine has a usable fit' }, sched));
 
     // v4: drawn whenever it has data; there is no accuracy gate (which model is the main line is the occupant's setting).
-    const why = v4Ready ? '' : (_engines().engines || []).some(x => x.id === 'v4' && !x.running)
+    // Issue #1459: only capabilities.v4_running=false locks the v4 lines; "no data yet" is a note, the chip stays switchable
+    const v4Lock = _capLock(cd, 'v4_running');
+    const why = (v4Lock || v4Ready) ? '' : (_engines().engines || []).some(x => x.id === 'v4' && !x.running)
       ? 'v4 is switched off (Settings, Prediction engine)' : 'v4 has no data for this zone yet (it is still learning this house)';
     // 0.9.6 Lane F: a v4 chip only for a sensor v4 has something for (past, forecast or no-plan line); the sensors v4
     // has not learned yet are named on one muted line instead (_v4Learning). A sensor with past predictions only (the
@@ -467,13 +496,13 @@
       const past = (byLead[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       const fut = futRaw.map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       S.push(_mkSeries({ id: 'v4:' + m.id, group: 'predicted', sub: 'plan', short: 'v4 ' + m.name, label, color: 'plan', dash,
-        width: 2.5, sensor: m.id, missVs: 'ind:' + m.id, kind: 'pred', disabledReason: why, histOnly, pastElsewhere,
+        width: 2.5, sensor: m.id, missVs: 'ind:' + m.id, kind: 'pred', disabledReason: v4Lock, note: why, histOnly, pastElsewhere,
         role: histOnly ? 'past v4 predictions only (from its backtest); v4 does not forecast ' + m.name + ' yet' : '' }, v4Ready ? [...past, ...fut] : []));
       if (histOnly) return;   // Issue #1430: no no-plan line (a forecast) for a sensor v4 has only past predictions for
       const base = baseRaw.map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       S.push(_mkSeries({ id: 'base:' + m.id, group: 'predicted', sub: 'base', short: 'No plan ' + m.name, label, color: 'base', dash,
         width: 2, sensor: m.id, kind: 'pred',
-        disabledReason: why || (base.length ? '' : 'v4 has no no-plan line for ' + m.name + ' yet') }, v4Ready ? base : []));
+        disabledReason: v4Lock, note: why || (base.length ? '' : 'v4 has no no-plan line for ' + m.name + ' yet') }, v4Ready ? base : []));
     });
 
     // v4's line for the reading Climate Advisor uses (Issue #1400): the only line of a _ca-only model, and the one to
@@ -483,15 +512,18 @@
       const past = (((v4.past || {})._ca || {})[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       const fut = ((v4.future || {})._ca || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       S.push(_mkSeries({ id: 'v4:_ca', group: 'predicted', sub: 'plan', short: 'v4 ' + caName, label: caName, color: 'plan', dash: [],
-        width: 2.5, sensor: '_ca', missVs: 'ind:_ca', kind: 'pred', disabledReason: why, breaks: caBreaks }, v4Ready ? [...past, ...fut] : []));
+        width: 2.5, sensor: '_ca', missVs: 'ind:_ca', kind: 'pred', disabledReason: v4Lock, note: why, breaks: caBreaks }, v4Ready ? [...past, ...fut] : []));
       const base = ((v4.baseline || {})._ca || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       S.push(_mkSeries({ id: 'base:_ca', group: 'predicted', sub: 'base', short: 'No plan ' + caName, label: caName, color: 'base', dash: [],
-        width: 2, sensor: '_ca', kind: 'pred', disabledReason: why, breaks: caBreaks }, v4Ready ? base : []));
+        width: 2, sensor: '_ca', kind: 'pred', disabledReason: v4Lock, note: why, breaks: caBreaks }, v4Ready ? base : []));
     }
 
     // Outdoor chart: the sensor, the weather service, and v4's corrected forecast.
     const outPts = (cd.actual_outdoor || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
-    S.push(_mkSeries({ id: 'out:sensor', group: 'outdoor', short: 'Outdoor sensor', label: 'Sensor', color: 'out', width: 2, chart: 'out', kind: 'actual' }, outPts));
+    // Issue #1459: a home with no outdoor sensor never has this line: no chip (noChip), never drawn (locked)
+    const outLock = _capLock(cd, 'outdoor_sensor');
+    S.push(_mkSeries({ id: 'out:sensor', group: 'outdoor', short: 'Outdoor sensor', label: 'Sensor', color: 'out', width: 2, chart: 'out', kind: 'actual',
+      disabledReason: outLock, noChip: !!outLock }, outPts));
     const histSvc = state.map(e => ({ x: _parseTs(e.ts), y: e.pred_outdoor != null ? e.pred_outdoor : e.pred_outdoor_avg != null ? e.pred_outdoor_avg : null }))
       .filter(p => p.y != null && p.x <= nowMs);
     const futSvc = (cd.forecast_outdoor || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
@@ -500,11 +532,11 @@
     const co = v4.corrected_outdoor || {};
     const corr = [...(co.past || []), ...(co.future || [])].map(p => ({ x: _parseTs(p.ts), y: p.temp }));
     S.push(_mkSeries({ id: 'out:corrected', group: 'outdoor', short: 'Corrected', label: 'CA-corrected forecast', color: 'svc', width: 2.5,
-      chart: 'out', missVs: 'out:sensor', kind: 'pred', disabledReason: why }, v4Ready ? corr : []));
+      chart: 'out', missVs: 'out:sensor', kind: 'pred', disabledReason: v4Lock, note: why }, v4Ready ? corr : []));
     // Outdoor humidity / feels-like (Issue #1414): dashed, so they never read as the indoor lines of the same colour.
     S.push(_mkSeries({ id: 'out:humidity', group: 'outdoor', short: 'Outdoor humidity', label: 'Humidity', role: 'outdoor relative humidity; right of Now, the forecast',
       color: 'hum', dash: [8, 4], width: 1.5, chart: 'out', axis: 'yRight', unit: '%', kind: 'actual',
-      emptyReason: 'No humidity reading recorded in this view' }, [...logPts('outdoor_humidity'), ...fcPts(cd.outdoor_humidity_forecast)]));
+      emptyReason: 'No humidity reading recorded in this view', disabledReason: _capLock(cd, 'humidity_outdoor') }, [...logPts('outdoor_humidity'), ...fcPts(cd.outdoor_humidity_forecast)]));
     S.push(_mkSeries({ id: 'out:feelslike', group: 'outdoor', short: 'Outdoor feels-like', label: 'Feels-like',
       role: 'heat index at ' + hiF + ' and up, wind chill at ' + lowF + ' and below with wind; right of Now, the forecast',
       color: 'feels', dash: [8, 3, 2, 3], width: 1.5, chart: 'out', kind: 'actual',
@@ -620,12 +652,13 @@
     return names.length ? 'Band (' + names.join(' / ') + ')' : 'Target band';
   }
 
-  // ---- what a chip would draw (0.9.6 Lane F: every chip that cannot draw anything is disabled and says why) ----
+  // ---- what a chip would draw (0.9.6 Lane F, Issue #1459) ----
   //
-  // Occupant view: switching a line on that has nothing to draw used to do nothing at all. Now a chip is switched off
-  // and disabled when its line has no point in the current view, with the reason on hover (title) and for screen
-  // readers (aria-label): no data at all, or data only at other times ("scroll or change the range"). The test reads
-  // the datasets actually handed to Chart.js, so it is the same data that would be drawn.
+  // Occupant view: a chip whose line has nothing in the current view says why, on hover (title) and for screen readers
+  // (aria-label), in the faint no-data style: no data at all, or data only at other times ("scroll or change the
+  // range"). Issue #1459: it is NOT disabled for that: it can still be switched on (say, feels-like ahead of a hot day)
+  // and the choice is kept; it draws once there is something in view. Only a lock (_chipLock: the home cannot have the
+  // line as set up) disables a chip. The test reads the datasets actually handed to Chart.js, the data that is drawn.
   function _ptsDraw(pts, win) {
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
@@ -643,9 +676,14 @@
     return out;
   }
   const _NOT_IN_VIEW = 'Nothing to draw in this view (it has data at other times): scroll or change the range';
-  // '' = draws something in this view; else the reason it cannot. null = not known yet (no chart drawn yet).
-  function _chipBlock(id, s) {
-    if (s && s.disabledReason) return s.disabledReason;
+  // Issue #1459: why a chip is LOCKED (the home cannot have its line as set up), or ''. Only this disables a chip.
+  function _chipLock(id, s) {
+    if (s) return s.disabledReason || '';
+    return id.startsWith('strip:') ? _stripLock(id.slice(6)) : '';
+  }
+  // Why a switchable chip's line has nothing in this view: '' = draws something; null = not known yet (no chart drawn
+  // yet). Never a reason to disable the chip (Issue #1459).
+  function _chipEmpty(id, s) {
     const win = _viewWindow();
     if (id.startsWith('strip:')) {
       const r = id.slice(6);
@@ -678,6 +716,7 @@
       if (others.length) return 'No v4 predictions made ' + _chartLead.replace('h', ' h') + ' earlier in this view: choose ' +
         others.map(l => l.replace('h', ' h')).join(' or ') + ' under "Past v4 lines"';
     }
+    if (s && s.note) return s.note;   // not yet: v4 learning, no no-plan line yet, schedule estimate not needed (#1459)
     if (dss.some(d => _ptsAny(d.data || [])) || (s && s.pastElsewhere)) return _NOT_IN_VIEW;
     if (s && s.emptyReason) return s.emptyReason;   // humidity / feels-like: why there is nothing (Issue #1414)
     if (id === 'ov:band') return 'No target band recorded or scheduled in the loaded time';
@@ -686,10 +725,12 @@
     return 'No data for this line in the loaded time';
   }
 
-  // The past-lead row: the look-ahead buttons, or one line saying why there is nothing to choose (Issue #1230 R2;
-  // 0.9.6 Lane F: "none in this view" vs "none yet"). The payload's v4.past only holds the fetched window; v4.past_span
-  // (every past prediction this zone has) tells the two apart. An older backend without it: "yet" only for a live view.
-  function _leadRowHtml(v4, ready) {
+  // The past-lead row: the look-ahead buttons (Issue #1230 R2). Issue #1459: always choosable (locked only when v4 is
+  // switched off: capabilities.v4_running=false); when the chosen look-ahead has nothing in view the row says "none in
+  // this view" (0.9.6 Lane F: "in this view" vs "yet"). The payload's v4.past only holds the fetched window;
+  // v4.past_span (every past prediction this zone has) tells the two apart. An older backend without it: "yet" only for
+  // a live view.
+  function _leadRowHtml(v4, ready, lock) {
     const win = _viewWindow();
     const pastPts = l => Object.values((v4 && v4.past) || {}).flatMap(byLead => ((byLead || {})[l] || []))
       .map(p => ({ x: _parseTs(p.ts), y: p.temp }));
@@ -698,18 +739,25 @@
     const leadTxt = l => l.replace('h', ' h');
     const leadHelp = 'Left of Now, each v4 line shows what v4 predicted that many hours earlier for each moment, so you can ' +
       'see how well it called it. This changes only the past part of the v4 lines; from Now on they stay the same.';
-    let inner;
-    if (anyInView) {
-      inner = '<div class="seg" role="group" aria-labelledby="chart-lead-label" aria-describedby="chart-lead-help">' +
-        CHART_LEADS.map(l => {
-          const has = leadInView(l);
-          return '<button type="button" class="seg-btn' + (l === _chartLead ? ' on' : '') + '" data-lead="' + l +
-            '" aria-pressed="' + (l === _chartLead ? 'true' : 'false') + '"' + (has ? '' : ' disabled') +
-            ' title="' + (has ? 'Left of Now, show what v4 predicted ' + leadTxt(l) + ' earlier for each moment'
-              : 'No predictions v4 made ' + leadTxt(l) + ' earlier in this view') + '">' +
-            leadTxt(l) + ' earlier' + (has ? '' : ' (none in view)') + '</button>';
-        }).join('') +
-        '</div><span class="key-sub" id="chart-lead-help">how far ahead v4 looked; changes only the v4 lines left of Now</span>';
+    const btns = '<div class="seg" role="group" aria-labelledby="chart-lead-label" aria-describedby="chart-lead-help">' +
+      CHART_LEADS.map(l => {
+        const has = leadInView(l);
+        const on = l === _chartLead && !lock;
+        return '<button type="button" class="seg-btn' + (on ? ' on' : '') + (has || lock ? '' : ' no-data') + '" data-lead="' + l +
+          '" aria-pressed="' + (on ? 'true' : 'false') + '"' + (lock ? ' disabled' : '') +
+          ' title="' + escapeHtml(lock || (has ? 'Left of Now, show what v4 predicted ' + leadTxt(l) + ' earlier for each moment'
+            : 'No predictions v4 made ' + leadTxt(l) + ' earlier in this view')) + '">' +
+          leadTxt(l) + ' earlier' + (has || lock ? '' : ' (none in view)') + '</button>';
+      }).join('') +
+      '</div><span class="key-sub" id="chart-lead-help">' + escapeHtml(lock || 'how far ahead v4 looked; changes only the v4 lines left of Now') + '</span>';
+    let note = '';
+    if (lock) {
+      // locked: the help line already says why
+    } else if (anyInView) {
+      if (!leadInView(_chartLead)) {
+        note = leadTxt(_chartLead) + ' earlier: none in this view; choose ' + CHART_LEADS.filter(leadInView).map(leadTxt).join(' or ');
+        note = '<span class="key-sub" id="chart-lead-empty" data-lead-empty="view">' + escapeHtml(note) + '</span>';
+      }
     } else {
       const span = v4 && v4.past_span;
       const loaded = ready && CHART_LEADS.some(l => pastPts(l).length > 0);
@@ -725,8 +773,9 @@
         msg = 'v4 has no past predictions to show yet';
         state = 'yet';
       }
-      inner = '<span class="key-sub" id="chart-lead-help" data-lead-empty="' + state + '">' + escapeHtml(msg) + '</span>';
+      note = '<span class="key-sub" id="chart-lead-empty" data-lead-empty="' + state + '">' + escapeHtml(msg) + '</span>';
     }
+    const inner = btns + note;
     return '<div class="key-row" id="chart-lead-row" title="' + escapeHtml(leadHelp) + '">' +
       '<span class="key-sub" id="chart-lead-label">Past v4 lines: predicted</span>' + inner + '</div>';
   }
@@ -736,7 +785,9 @@
     if (!body) return;
     const v4 = cd.v4 || null;
     const block = {};
-    const blockOf = (id, s) => { if (!(id in block)) block[id] = _chipBlock(id, s); return block[id]; };
+    // blockOf: why a chip's line is empty in this view (it stays switchable); lockOf: why it is locked (Issue #1459)
+    const blockOf = (id, s) => { if (!(id in block)) block[id] = _chipEmpty(id, s); return block[id]; };
+    const lockOf = (id, s) => _chipLock(id, s);
     const sw = s => _swatch(s);
     const eng = _engines();
     // Issue #1430: a prediction chip's accessible name says what the line is and which role its engine has.
@@ -750,16 +801,26 @@
       return s.label + ', ' + what + (engine ? ' (' + ROLE_WORD[_roleOf(engine, eng)] + ')' : '');
     };
     const chipFor = s => {
-      const why = blockOf(s.id, s);
+      const lock = lockOf(s.id, s);
+      const why = lock || blockOf(s.id, s);
       return _chip(s.id, sw(s) + '<span>' + escapeHtml(s.label) + '</span>', {
-        noData: why == null ? s.raw.length === 0 : !!why, disabled: !!why, title: why || s.role || '',
+        noData: why == null ? s.raw.length === 0 : !!why, disabled: !!lock, title: why || s.role || '',
         aria: (s.group === 'predicted' ? predAria(s) : s.label) + (why ? ': ' + why : ''),
       });
     };
     // an overlay or strip chip: the same rule, with the reason on hover and in its accessible name
     const ovChip = (id, inner, label, title) => {
-      const why = blockOf(id, null);
-      return _chip(id, inner, { noData: !!why, disabled: !!why, title: why || title || '', aria: why ? label + ': ' + why : '' });
+      const lock = lockOf(id, null);
+      const why = lock || blockOf(id, null);
+      return _chip(id, inner, { noData: !!why, disabled: !!lock, title: why || title || '', aria: why ? label + ': ' + why : '' });
+    };
+    // Issue #1459: lines and strips this home can never have get no chip; one muted line per group says where to set
+    // them up, so a missing chip is never a mystery.
+    const notSetUp = (idAttr, items) => {
+      const byWhy = {};
+      items.forEach(([label, why]) => { (byWhy[why] = byWhy[why] || []).push(label); });
+      const txt = Object.keys(byWhy).map(w => byWhy[w].join(', ') + ': ' + w).join(' \u00b7 ');
+      return txt ? '<span class="key-sub key-not-set-up" ' + idAttr + '>' + escapeHtml(txt) + '</span>' : '';
     };
     const ind = S.filter(s => s.group === 'indoor');
     const indoorHtml = ind.filter(s => s.id !== 'ind:_ca' || s.raw.length > 0).map(chipFor).join('');
@@ -784,10 +845,10 @@
       v4Rows += row('Forecast with plan', plan.filter(s => !s.histOnly).map(chipFor).join(''));
       v4Rows += row('Forecast if Climate Advisor did nothing', base.map(chipFor).join(''));
       v4Rows += row('Past predictions only', plan.filter(s => s.histOnly).map(chipFor).join(''));
-      v4Rows += _leadRowHtml(v4, ready);
+      v4Rows += _leadRowHtml(v4, ready, _capLock(cd, 'v4_running'));
     }
     // One muted line for the sensors v4 has nothing for yet (no chips for them: they would draw nothing).
-    const v4Off = (eng.engines || []).some(x => x.id === 'v4' && !x.running);
+    const v4Off = (eng.engines || []).some(x => x.id === 'v4' && !x.running) || !!_capLock(cd, 'v4_running');
     if (_v4Learning.length || (!ready && _shown('v4'))) {
       // the sensor's role when it says which one ("thermostat", "bedroom sensor"), else its name
       const KNOWN = ['thermostat', 'bedroom sensor', "thermostat's finer sensor"];
@@ -816,7 +877,9 @@
         '" data-role="' + role + '" role="group" aria-label="' + escapeHtml(h[2] + ': ' + engine) + '"><span class="key-role-label">' +
         escapeHtml(h[1] + ' · ' + engine) + '</span>' + inner + '</div>';
     });
-    const outHtml = S.filter(s => s.group === 'outdoor').map(chipFor).join('');
+    const outS = S.filter(s => s.group === 'outdoor');
+    const outHtml = outS.filter(s => !s.noChip).map(chipFor).join('') +
+      notSetUp('id="chart-out-not-set-up"', outS.filter(s => s.noChip).map(s => [s.short, s.disabledReason]));
     const ovSw = (color, dash, w) => '<svg class="key-sw" width="30" height="10" aria-hidden="true"><line x1="2" y1="5" x2="28" y2="5" stroke="' + color + '" stroke-width="' + w + '"' + (dash ? ' stroke-dasharray="' + dash + '"' : '') + ' stroke-linecap="round"/></svg>';
     const bandLabel = _bandLabelInView();
     const overlays =
@@ -824,9 +887,10 @@
       ovChip('ov:target', ovSw('var(--c-target)', '', 3) + '<span>Target</span>', 'Target') +
       ovChip('ov:plan', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><circle cx="8" cy="5" r="3.5" fill="var(--c-plan)"/><path d="M22 0 L27 5 L22 10 L17 5 Z" fill="var(--c-target)" stroke="var(--c-ink)" stroke-width="1"/></svg><span>Plan</span>',
         'Plan', 'What Climate Advisor will do (circles) and what you are asked to do (diamonds), from the plan');
-    const stripChips = STRIP_ROWS.map(r => ovChip('strip:' + r.id,
+    const stripChips = STRIP_ROWS.filter(r => !_stripLock(r.id)).map(r => ovChip('strip:' + r.id,
       '<svg class="key-sw" width="14" height="10" aria-hidden="true"><rect x="1" y="1" width="12" height="8" rx="2" fill="' + r.color + '"/></svg><span>' + r.label + '</span>', r.label)).join('') +
-      ovChip('strip:events', '<svg class="key-sw" width="14" height="10" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="10" stroke="#f44336" stroke-width="1.5" stroke-dasharray="3 2"/></svg><span>Events</span>', 'Events');
+      ovChip('strip:events', '<svg class="key-sw" width="14" height="10" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="10" stroke="#f44336" stroke-width="1.5" stroke-dasharray="3 2"/></svg><span>Events</span>', 'Events') +
+      notSetUp('id="chart-strips-not-set-up"', STRIP_ROWS.filter(r => _stripLock(r.id)).map(r => [r.label, _stripLock(r.id)]));
     body.innerHTML =
       _group('Indoor', 'Indoor lines', indoorHtml) +
       _group('Predicted', 'Prediction lines', predHtml) +
@@ -844,7 +908,8 @@
       }
     }
     // The one-line summary of what is drawn (shown while the key is folded): the lines on, then the overlays on.
-    _keyShown = _byRole(S).filter(s => _isOn(s.id) && !blockOf(s.id, s) && s.raw.length > 0).map(s => s.short)
+    // (an on line with nothing in view draws nothing, so it is not listed; a locked one is never drawn)
+    _keyShown = _byRole(S).filter(s => _isOn(s.id) && !s.disabledReason && !blockOf(s.id, s) && s.raw.length > 0).map(s => s.short)
       .concat([...body.querySelectorAll('[data-series^="ov:"][aria-pressed="true"]:not(.no-data)')].map(b => b.textContent.trim()));
     _renderKeySummary();
   }
@@ -1262,11 +1327,19 @@
   function drawStrips() {
     const canvas = document.getElementById('activity-chart');
     if (!canvas) return;
-    const rows = STRIP_ROWS.filter(r => _stripOn(r.id) && (_stripSegs[r.id] || []).length > 0);
+    // Issue #1459: a strip that is switched on keeps its row even with nothing in view (an empty labelled row with the
+    // reason, same height), so the strip area does not jump as the view moves. Only a strip the home cannot have
+    // (no fan, no door/window sensors, no occupancy switches) has no row.
+    const rows = STRIP_ROWS.filter(r => _stripOn(r.id) && !_stripLock(r.id));
+    const empty = {};
+    rows.forEach(r => { const why = _chipEmpty('strip:' + r.id, null); if (why) empty[r.id] = why; });
     const wrap = canvas.parentElement;
     wrap.style.display = rows.length ? '' : 'none';
     _stripLegend(wrap, rows);
-    window.__test_strips = { rows: rows.map(r => r.id), segs: _stripSegs };   // test hook (tests/ui/strips-plan.spec.js)
+    window.__test_strips = { rows: rows.map(r => r.id), segs: _stripSegs, empty };   // test hook (tests/ui/strips-plan.spec.js)
+    const base = 'Heating, cooling, fan, ventilation and window activity over time';
+    const emptyIds = Object.keys(empty);
+    canvas.setAttribute('aria-label', emptyIds.length ? base + '. ' + emptyIds.map(id => STRIP_ROWS.find(r => r.id === id).label + ': ' + empty[id]).join('. ') : base);
     if (!rows.length) return;
     const xs = _tempChart && _tempChart.scales && _tempChart.scales.x ? _tempChart.scales.x : null;
     const win = _viewWindow();
@@ -1306,6 +1379,14 @@
       });
       ctx.globalAlpha = 1;
       ctx.fillStyle = labelColor;
+      if (empty[r.id]) {
+        // nothing in view: say why inside the empty track (clipped to it)
+        ctx.save();
+        ctx.beginPath(); ctx.rect(plotLeft, y, plotW, rowH); ctx.clip();
+        ctx.textAlign = 'left';
+        ctx.fillText(empty[r.id] === _NOT_IN_VIEW ? 'None in this view: scroll or change the range' : empty[r.id], plotLeft + 4, y + rowH / 2);
+        ctx.restore();
+      }
       ctx.textAlign = 'right';
       ctx.fillText(r.short, plotLeft - 4, y + rowH / 2);
     });
@@ -1772,7 +1853,8 @@
     return {
       range: _chartRange, ahead: _chartAhead, lead: _chartLead, zoomed: _chartZoomed, zoomWin: _zoomWin, table: _tableView,
       offset: _windowOffset, cursor: _cursorMs, pinned: _cursorPinned, prefs: _chartPrefs,
-      series: _series.map(s => ({ id: s.id, n: s.raw.length, on: _isOn(s.id), disabled: s.disabledReason })),
+      // disabled = locked (the home cannot have it, Issue #1459); note = why it has nothing yet (still switchable)
+      series: _series.map(s => ({ id: s.id, n: s.raw.length, on: _isOn(s.id), disabled: s.disabledReason, note: s.note || '' })),
       win: _viewWindow(),
     };
   };

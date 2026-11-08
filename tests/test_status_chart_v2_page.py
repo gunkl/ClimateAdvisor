@@ -92,7 +92,8 @@ def test_every_toggle_group_is_in_the_key():
     assert "HIDDEN_OVERLAYS" not in INDEX
     assert "const OLD_OVERLAY_IDS = { 'ov:humidity': 'ind:humidity', 'ov:feelslike': 'ind:feelslike' }" in INDEX
     assert "OLD_OVERLAY_IDS" in _func("_readPrefs") and "prefs.migrated = true" in _func("_readPrefs")
-    assert "STRIP_ROWS.map(r => ovChip('strip:' + r.id" in key
+    # Issue #1459: a strip the home cannot have (capabilities) has no chip
+    assert "STRIP_ROWS.filter(r => !_stripLock(r.id)).map(r => ovChip('strip:' + r.id" in key
     for row in ("heating", "cooling", "fan", "natvent", "windows", "windowsplan"):
         assert f"id: '{row}'" in INDEX, row
     ser = _func("_buildSeries")
@@ -144,20 +145,24 @@ def test_v4_is_drawn_whenever_it_has_data_no_accuracy_gate():
     """Issue #1230 R6fe/X3 (owner decision O2: DP-8 is superseded, there is no accuracy gate).
 
     The chart draws v4 whenever the server says it has something to draw (``ready`` = "has data", not a verdict).
-    The only two reasons a v4 line is greyed out are that v4 is switched off or that it has no data for this zone yet;
-    neither mentions an accuracy check. The accuracy page is a link for information only."""
+    The only two notes on an empty v4 line are that v4 is switched off or that it has no data for this zone yet;
+    neither mentions an accuracy check. Issue #1459: those are notes on a switchable chip; only
+    ``capabilities.v4_running`` false locks a v4 line. The accuracy page is a link for information only."""
     ser = _func("_buildSeries")
     assert "const v4Ready = v4.ready === true" in ser
     assert "v4Ready ? [...past, ...fut] : []" in ser and "v4Ready ? base : []" in ser and "v4Ready ? corr : []" in ser
     assert "'v4 is switched off (Settings, Prediction engine)'" in ser
     assert "'v4 has no data for this zone yet (it is still learning this house)'" in ser
+    assert "const v4Lock = _capLock(cd, 'v4_running')" in ser and "disabledReason: v4Lock, note: why" in ser
     assert "accuracy check" not in ser
     key = _func("renderKey")
     assert '<a href="prediction_accuracy.html' in key and "How each engine has scored" in key
     assert "'?from=classic'" in key  # classic's link brings the scoring page back to classic
-    # a chip with nothing to draw in the view is disabled with its reason (0.9.6 Lane F); v4's own reasons come first
-    assert "disabled: !!why" in key and "blockOf(s.id, s)" in key
-    assert "if (s && s.disabledReason) return s.disabledReason" in _func("_chipBlock")
+    # Issue #1459 (reverses the 0.9.6 Lane F lock): a chip with nothing to draw in the view keeps its reason but stays
+    # switchable; only a lock (the home cannot have the line, from capabilities) disables it
+    assert "disabled: !!lock" in key and "blockOf(s.id, s)" in key and "disabled: !!why" not in key
+    assert "if (s) return s.disabledReason || ''" in _func("_chipLock")
+    assert "if (s && s.note) return s.note" in _func("_chipEmpty")
     assert "accuracy check" not in key
     assert "chart-v4-note" in INDEX
 
@@ -196,7 +201,7 @@ def test_the_servers_v4_ready_is_has_data_not_an_accuracy_verdict():
 def test_backtest_lead_is_selectable_and_defaults_to_four_hours():
     assert "let _chartLead = '4h'" in INDEX
     assert "[_chartLead]" in _func("_buildSeries")  # past v4 lines read the chosen lead
-    assert "_leadRowHtml(v4, ready)" in _func("renderKey")
+    assert "_leadRowHtml(v4, ready, _capLock(cd, 'v4_running'))" in _func("renderKey")
     assert "data-lead" in _func("_leadRowHtml") and "CHART_LEADS.map" in _func("_leadRowHtml")
     assert "_chartPrefs.lead = lead" in _func("setChartLead")
 

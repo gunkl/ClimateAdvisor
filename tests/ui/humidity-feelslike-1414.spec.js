@@ -172,7 +172,9 @@ for (const path of ['/', '/new_dashboard.html']) {
   });
 }
 
-test('°C payload with no feels-like at all: the disabled reason is in °C', async ({ page }) => {
+// Issue #1459 (deliberate reversal of the 0.9.6 #1421 lock): nothing in view no longer disables the chip; it stays
+// switchable in the faint no-data style and says why.
+test('°C payload with no feels-like at all: the empty-view reason is in °C (chip stays switchable)', async ({ page }) => {
   await page.route('**/api/climate_advisor/chart_data**', async (route) => {
     const resp = await route.fetch();
     const body = await resp.json();
@@ -182,7 +184,8 @@ test('°C payload with no feels-like at all: the disabled reason is in °C', asy
     await route.fulfill({ response: resp, body: JSON.stringify(body) });
   });
   await open(page, '/');
-  await expect(chip(page, 'out:feelslike')).toBeDisabled();
+  await expect(chip(page, 'out:feelslike')).toBeEnabled();
+  await expect(chip(page, 'out:feelslike')).toHaveClass(/no-data/);
   await expect(chip(page, 'out:feelslike')).toHaveAttribute('title',
     'Feels-like only shows as a heat index (27°C and up) or wind chill (10°C and below with wind)');
   await expect(chip(page, 'ind:feelslike')).toHaveAttribute('title', 'Indoor feels-like only shows as a heat index (27°C and up)');

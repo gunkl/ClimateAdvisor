@@ -44,13 +44,11 @@ async function mockAccuracy(page) {
 test.describe('Issue #1491: the accuracy page is never framed and never opened in a new tab', () => {
   test.describe.configure({ timeout: 30000 });
 
-  test('Analysis card: no frame, a summary from the request that works on the phone', async ({ page }) => {
+  test('Analysis card: the scores show with no frame (Issue #1497 draws the full view in the card)', async ({ page }) => {
     await mockAccuracy(page);
     await page.goto('/new_dashboard.html#analysis');
     const card = page.locator('#panel-analysis section[aria-labelledby="an-pa-h"]');
-    await expect(card.locator('#an-pa-summary')).toContainText('average miss', { timeout: 15000 });
-    await expect(card.locator('#an-pa-summary')).toContainText('v4 (main engine)');
-    await expect(card.locator('#an-pa-summary')).toContainText('0.4°F');
+    await expect(card.locator('#tiles')).toContainText('average miss', { timeout: 15000 });
     expect(await page.locator('iframe').count()).toBe(0);
   });
 

@@ -385,12 +385,13 @@
     </section>
 
     <section class="card" aria-labelledby="an-pa-h">
-      <!-- Issue #1491: no frame inside a frame. The dashboard is already inside Home Assistant's panel frame; an
-           embedded accuracy page could not reach HA's login (401 in the iOS app). The card shows a summary and the
-           link opens the full page in this same frame ("Back to dashboard" returns to this tab). -->
+      <!-- Issue #1497: the full accuracy view (shared pa_view.js, as on prediction_accuracy.html) is drawn right here.
+           Never in a frame (Issue #1491: the dashboard is already inside Home Assistant's panel frame, and a page one
+           frame deeper could not reach HA's login on a phone). The link opens the stand-alone page in this same frame
+           ("Back to dashboard" returns to this tab). -->
       <div class="card-head"><h2 id="an-pa-h">Prediction accuracy</h2><a id="prediction-accuracy-link" href="prediction_accuracy.html">Open on its own page</a></div>
       <div class="sub">How well each prediction engine guessed this home: its past predictions next to what the sensor then read. The main engine (Settings, Prediction engine) times Climate Advisor&#8217;s decisions; the comparison engine only draws a line.</div>
-      <div id="an-pa-summary" role="status"><div class="empty">Loading...</div></div>
+      <div id="an-pa-view"><div class="empty">Loading...</div></div>
     </section>
   </div>
 
@@ -468,6 +469,7 @@
 <script src="chart.umd.min.js"></script>
 <script src="chartjs-plugin-zoom.min.js"></script>
 <script src="chart_v2.js"></script>
+<script src="pa_view.js"></script>
 <script src="nd_core.js"></script>
 <script src="nd_night_card.js"></script>
 <script src="nd_status.js"></script>

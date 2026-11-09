@@ -12993,10 +12993,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         FAN_MODE_HVAC: thermostat attributes ARE the fan — trust them, unchanged.
         FAN_MODE_WHOLE_HOUSE: use _get_fan_physical_state() (the real configured WHF entity)
-            when fan_state_feedback is enabled; falls back to the thermostat signal only when
-            physical feedback is unavailable (command-only mode) — there is no better ground
-            truth in that case, so this is an explicit, documented fallback, not silent reuse
-            of the wrong signal.
+            when fan_state_feedback is enabled. With no physical reading (command-only mode, or
+            an unreadable entity) use Climate Advisor's own record of the fan (_fan_active), the
+            only reading it has and the one the fan cards use (Issue #1500). The thermostat
+            signal says nothing about a whole-house fan: under whole_house_fan the blower is the
+            occupant's equipment, not CA's fan (#1197). Reading it here made every AC/heat cycle
+            that ended with the blower "on" look like an unwarranted whole-house fan, so CA sent
+            a needless turn-off, logged a nat-vent exit and armed the #790 lockout (and, in
+            observe-only, left a stale "running" flag, Issue #1499).
         FAN_MODE_BOTH: ORs both signals. This is a strict superset of the old (wrong) behavior,
             not a true per-device model — the WHF and HVAC blower can genuinely be in different
             states and a single boolean can't represent that. Tracked as a known gap in a
@@ -13010,7 +13014,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             physical = self._get_fan_physical_state()
             if physical is not None:
                 return physical if fan_mode == FAN_MODE_WHOLE_HOUSE else (physical or thermostat_signal)
-            return thermostat_signal  # command-only mode — no independent ground truth available
+            if fan_mode == FAN_MODE_WHOLE_HOUSE:
+                # Issue #1500: CA's own record, never the blower -- a run CA started or the occupant's recorded run
+                # (live, or persisted across a restart and waiting to be re-armed by this reconcile, #1045).
+                ae = self.automation_engine
+                return bool(
+                    ae._fan_active or ae._fan_override_active or ae._pending_override_rearm_end is not None
+                )
+            return thermostat_signal  # unsupported `both` (#1175): unchanged
         return thermostat_signal
 
     async def _initialize_hvac_session_from_current_state(self, climate_state: Any) -> None:

@@ -582,16 +582,35 @@ class TestDeriveThermostatFanRunningForReconcile:
 
         assert coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="", hvac_action_attr="idle") is True
 
-    def test_command_only_mode_falls_back_to_thermostat_attrs(self):
-        """FAN_MODE_WHOLE_HOUSE with fan_state_feedback disabled: _get_fan_physical_state()
-        returns None (no ground truth) -> falls back to the thermostat-attribute signal
-        (documented, explicit fallback, not an accidental fallthrough)."""
+    @staticmethod
+    def _command_only_whf(*, fan_active=False, override=False, rearm_end=None):
         coord = _make_coord()
         coord.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
         coord._get_fan_physical_state = MagicMock(return_value=None)
+        ae = coord.automation_engine
+        ae._fan_active = fan_active
+        ae._fan_override_active = override
+        ae._pending_override_rearm_end = rearm_end
+        return coord
 
-        assert coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="", hvac_action_attr="fan") is True
+    def test_command_only_mode_never_reads_the_blower_as_the_whf(self):
+        """Issue #1500: FAN_MODE_WHOLE_HOUSE with no physical reading (command-only). The thermostat
+        blower is the occupant's equipment (#1197), so its "fan"/"on" signal is not a whole-house fan:
+        an AC cycle ending with the blower on must not read as an unwarranted WHF (needless turn-off,
+        nat-vent exit row, #790 lockout; in observe-only a stale running flag, #1499)."""
+        coord = self._command_only_whf()
+        assert coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="on", hvac_action_attr="fan") is False
         assert coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="", hvac_action_attr="idle") is False
+
+    def test_command_only_mode_reads_climate_advisors_own_record(self):
+        """Issue #1500: with no physical reading CA's own record is the reading -- a run it started, the
+        occupant's live run, or the occupant's run persisted across a restart awaiting re-arm (#1045)."""
+        for kw in ({"fan_active": True}, {"override": True}, {"rearm_end": "2026-05-12T23:00:00+00:00"}):
+            coord = self._command_only_whf(**kw)
+            assert (
+                coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="auto", hvac_action_attr="idle")
+                is True
+            ), kw
 
     def test_both_mode_ors_whf_and_thermostat_signals(self):
         """FAN_MODE_BOTH: ORs the real WHF physical state with the thermostat signal — a

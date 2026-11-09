@@ -10,9 +10,9 @@ conditioning and the whole-house fan did that day.
 * else ``"shoulder"`` (a day with neither: reported apart, never scored).
 
 Moved here from ``tools/predict_backtest.py`` in Issue #1492. The one rule shared by the live "How each model has
-scored" table (``prediction_accuracy.live_scorecard``) and the walk-forward backtest (``tools/predict_backtest.py`` imports this file by path). Pure: standard library only, no
-package-relative import, so the tool can load it without Home Assistant. The label only groups scores; no model and no
-decision reads it.
+scored" table (``prediction_accuracy.live_scorecard``) and the walk-forward backtest (``tools/predict_backtest.py``
+imports this file by path). Pure: standard library only, no package-relative import, so the tool can load it without
+Home Assistant. The label only groups scores; no model and no decision reads it.
 """
 
 from __future__ import annotations

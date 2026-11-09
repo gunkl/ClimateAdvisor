@@ -406,7 +406,7 @@ class TestPersistence:
         return types.MethodType(cls._build_state_dict, c)()
 
     def test_promise_stats_are_persisted(self):
-        stats = {"settling_flip": {"hits": 2, "first_ts": "a", "last_ts": "b"}}
+        stats = {"settling_flip": {"days": {"2026-07-15": 2}, "hits": 2, "last_ts": "b"}}
         with _now_patch():
             assert self._state(stats)["promise_stats"] == stats
 
@@ -421,10 +421,10 @@ class TestPersistence:
         )
 
         stats: dict = {}
-        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", NOW, 42.0, new_run=True)
+        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", NOW, 42.0, new_run=True, now=NOW)
         with _now_patch():
             saved = json.loads(json.dumps(self._state(stats)["promise_stats"]))
-        restored = sanitize_promise_stats(saved, {p.key for p in PROMISES})
+        restored = sanitize_promise_stats(saved, {p.key for p in PROMISES}, NOW)
         assert restored == stats
         assert restored["comfort_kept"]["hits"] == 0
         assert restored["comfort_kept"]["excused"]["thermostat_deadband"]["minutes"] == 42.0

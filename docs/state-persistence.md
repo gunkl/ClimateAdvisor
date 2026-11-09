@@ -217,7 +217,7 @@ Audit of every store (#1438), verdict for a real restart before 0.9.8:
 | v4 backtest file | never by the integration (written by `tools/predict_backtest.py --publish`) | no (read-only) | unchanged |
 | Per-zone investigation reports (#1415) | right after each report is stored | no | unchanged |
 | Operation-timeline latch | not persisted on either path (rebuilt from the live plan each cycle) | no data to lose | unchanged |
-| Promise journal | in memory only (a rolling window); its counters (`promise_stats`) are in the state file | the window is transient by design; the counters were up to one cycle stale | the counters are saved with the state file |
+| Promise journal | in memory only (a rolling window); its counters (`promise_stats`, the last 30 days in per-day buckets, Issue #1490) are in the state file | the window is transient by design; the counters were up to one cycle stale | the counters are saved with the state file |
 
 ### Not persisted: the memory of CA's own setpoint writes (Issue #1232)
 

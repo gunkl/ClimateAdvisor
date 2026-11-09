@@ -1697,7 +1697,7 @@
                 const when = p.last_hit ? new Date(p.last_hit).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}) : '';
                 return escapeHtml(String(p.label || p.promise || '?')) + ' &times;' + escapeHtml(String(p.hits)) + (when ? ' (last ' + escapeHtml(when) + ')' : '');
               });
-              return '<tr><td>Household Promises Missed</td><td>' + parts.join('; ') + '<span class="kv-desc">Things Climate Advisor promises the household, counted when a check found one broken (log-only today)</span></td></tr>';
+              return '<tr><td>Household Promises Missed (last 30 days)</td><td>' + parts.join('; ') + '<span class="kv-desc">Things Climate Advisor promises the household, counted when a check found one broken (log-only today)</span></td></tr>';
             })()}
             ${data.comfort_family_hold ? '<tr><td>Comfort Switch Hold</td><td>' + escapeHtml(String(data.comfort_family_hold)) + '<span class="kv-desc">The thermostat is deliberately not flipping heat/cool yet: the house is only slightly past an edge shortly after the other side ran</span></td></tr>' : ''}
           </table>

@@ -75,7 +75,7 @@ Decisions (user, 2026-10-29): promise 1 follows the user's configured settling t
 
 Promise 4 exceptions. Fan override: natural grace expiry, dashboard cancel, bedtime, wake-up, occupancy away/vacation, a newer occupant action, supersede, adoption, restart. Thermostat override: the same list **minus bedtime and wake-up** (a command that undoes a thermostat override at bedtime or wake-up is the #1119 defect shape). `stuck_grace_recovered` is never an excuse. Fan-off grace: natural expiry, dashboard cancel, supersede, restart, indoor above the comfort ceiling.
 
-Journal: readings, commands and marks are kept 3 h (caps 400/128/128); episode marks are kept as long as the episode is open; dedup LRU 256; the per-promise `promise_stats` helpers are validated and capped. The journal is not persisted: after a restart every history-needing check sees no data and reports nothing.
+Journal: readings, commands and marks are kept 3 h (caps 400/128/128); episode marks are kept as long as the episode is open; dedup LRU 256; the per-promise `promise_stats` helpers are validated and capped, and count the last 30 days only in per-local-date buckets (Issue #1490). The journal is not persisted: after a restart every history-needing check sees no data and reports nothing.
 
 Issue #1260 (owner sign-off in the issue, 2026-11-02): promise 7 has ONE named, narrow exception, the thermostat's own deadband (`P7_THERMOSTAT_DEADBAND_F` = 2.5°F). It reads ground truth only (`hvac_mode`, `hvac_action`, `setpoint_f`, `setpoint_low_f`, `setpoint_high_f`, `indoor_f`); see `household-promises-spec.md`.
 
@@ -112,7 +112,7 @@ No persistence — violations are transient per-cycle findings, surfaced via the
 | `Hit` | `invariant_watchdog.py` | One broken promise: stable key, plain-English detail, evidence in F |
 | `equipment()`, `occupant_actions()` | `invariant_watchdog.py` | Ground-truth helpers shared by several promises (an occupant action is derived from readings + commands, not from CA's override detection) |
 | `PromiseJournal`, `derive_episodes()`, `EVENT_MARK_MAP` | `promise_journal.py` | Bounded evidence store, episode derivation, and the CA events it reads |
-| `sanitize_promise_stats()`, `bump_promise_stats()` | `promise_journal.py` | Validated, capped per-promise counters for the future persisted `promise_stats` |
+| `sanitize_promise_stats()`, `bump_promise_stats()`, `bump_promise_excused()`, `prune_promise_stats()` | `promise_journal.py` | Validated, capped per-promise counters for the persisted `promise_stats`: per-day buckets over the last 30 days (Issue #1490) |
 
 ## Disclosure Path
 

@@ -59,7 +59,7 @@
   }
 
   function renderAll() {
-    renderKpis(); renderDays(); renderModel(); renderControl(); renderSuggestions(); renderAiLine(); loadHistory();
+    renderKpis(); renderDays(); renderModel(); renderControl(); renderSuggestions(); renderAiLine(); renderAccuracy(); loadHistory();
   }
 
   // ---------- headline numbers ----------
@@ -83,7 +83,9 @@
       { l: 'Runtime per day', v: active ? Math.round(c.avg_daily_hvac_runtime_minutes || 0) + ' min' : '—', n: 'average HVAC, ' + last +
         (active && c.avg_daily_thermostat_fan_only_runtime_minutes ? ', fan-only ' + Math.round(c.avg_daily_thermostat_fan_only_runtime_minutes) + ' min' : '') },
       { l: 'Manual changes', v: active ? String(c.total_manual_overrides || 0) : '—', n: last + ' · ' + today + ' today' },
-      { l: 'Promises missed', v: ps ? String(ps.total_hits || 0) : '0', n: ps && lastHit ? 'in total · last ' + ND.fmtDateTime(lastHit) : 'none so far' },
+      // Issue #1490: misses over the last 30 days only (older misses age out), not a lifetime total
+      { l: 'Promises missed', v: ps ? String(ps.total_hits || 0) : '0', n: ps && ps.total_hits ? 'last 30 days' + (lastHit ? ' · last ' + ND.fmtDateTime(lastHit) : '') : 'none in the last 30 days',
+        t: 'Times a household promise was found broken over the last 30 days; each miss drops off 30 days after the day it happened' },
       { l: 'Prediction error, 4 h', v: pe ? ND.num(pe.mae, 1) + '°' : '—',
         n: pe ? pe.engine + ', last 24 h · runs ' + (pe.bias > 0 ? '+' : '') + ND.num(pe.bias, 1) + '° ' + (pe.bias > 0 ? 'warm' : 'cool') : 'not enough data yet',
         t: 'How far the main prediction 4 hours ahead was from what happened, over the last 24 hours (Debug > Backtest for more)' }
@@ -280,7 +282,7 @@
     pr.innerHTML = ps && ps.promises && ps.promises.length ? ps.promises.map(function (p) {
       return '<div style="font-size:13px;display:flex;justify-content:space-between;gap:8px;border-top:1px solid var(--rule);padding-top:5px;margin-bottom:5px"><span>' +
         esc(String(p.label || p.promise).replace(/^(\d+): /, '#$1 ')) + '</span><span style="color:var(--ink2)">×' + p.hits + (p.last_hit ? ' · last ' + esc(ND.fmtDateTime(p.last_hit)) : '') + '</span></div>';
-    }).join('') : '<div class="empty">None missed so far.</div>';
+    }).join('') : '<div class="empty">None missed in the last 30 days.</div>';
   }
 
   // ---------- suggestions (respond_suggestion, exactly as classic) ----------
@@ -522,24 +524,32 @@
     }
   }
 
-  // ---------- prediction accuracy (R1's page, embedded) ----------
+  // ---------- prediction accuracy (Issue #1491: a summary and a same-frame link, never an embedded page) ----------
+  // The dashboard already sits in Home Assistant's panel frame; a page framed inside it cannot reach HA's login
+  // (no token in the iOS app -> 401), and a new tab has no HA around it at all. So the card summarises the request
+  // load() already makes (prediction_accuracy, 4 h ahead, last 24 h) and the link opens the full page in this frame.
   function loadAccuracy() {
-    var fr = $('pa-frame'), url = 'prediction_accuracy.html' + (ND.zone ? '?zone=' + encodeURIComponent(ND.zone) : '');
-    $('prediction-accuracy-link').href = url;
-    if (fr.getAttribute('data-src') === url) return;
-    fr.setAttribute('data-src', url);
-    fr.addEventListener('load', function fit() {
-      try { // same origin: hide the page's own header and size the frame to its content
-        var doc = fr.contentDocument, top = doc.querySelector('header.top'); if (top) top.style.display = 'none';
-        var resize = function () { fr.style.height = Math.max(600, doc.documentElement.scrollHeight + 4) + 'px'; };
-        resize(); if (window.ResizeObserver) new ResizeObserver(resize).observe(doc.body);
-      } catch (e) { fr.style.height = '1100px'; }
-    });
-    fr.src = url;
+    $('prediction-accuracy-link').href = 'prediction_accuracy.html' + (ND.zone ? '?zone=' + encodeURIComponent(ND.zone) : '');
+  }
+  function renderAccuracy() {
+    var host = $('an-pa-summary'), a = D.acc, s = a && a.stats;
+    if (!a) { err(host, D.errs[6] || 'no data'); return; }
+    var u = a.unit || ND.sym(ND.unit), prim = a.primary_engine || 'v4', shad = a.shadow_engine;
+    var names = { v4: 'v4', v3: 'v3', flat: '“no change”' };
+    var order = [prim].concat(['v4', 'v3', 'flat'].filter(function (k) { return k !== prim; }));
+    var rows = order.map(function (k) {
+      var mae = s ? s[k + '_mae'] : null; if (mae == null) return null;
+      var role = k === prim ? ' (main engine)' : k === shad ? ' (comparison)' : k === 'flat' ? ' (baseline)' : '';
+      return '<li>' + esc(names[k] + role) + ': <b>' + esc(ND.num(mae, 1) + u) + '</b> average miss</li>';
+    }).filter(Boolean);
+    host.innerHTML = rows.length
+      ? '<div class="small">4 hours ahead, last 24 hours:</div><ul class="small">' + rows.join('') + '</ul>'
+      : '<div class="empty">Not enough data yet for the last 24 hours.</div>';
   }
 
   // ---------- wiring ----------
   function init() {
+    $('prediction-accuracy-link').addEventListener('click', function () { loadAccuracy(); ND.rememberReturnTab('analysis'); });
     $('report-type').addEventListener('change', updateReportType);
     $('run-report-btn').addEventListener('click', function () { return $('report-type').value === 'activity_record' ? runActivity() : runInvestigation(); });
     $('rep-copy').addEventListener('click', function () { var t = repText(); if (t) ND.copy(t); });

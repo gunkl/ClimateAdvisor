@@ -192,11 +192,19 @@ class TestPromiseStatsExcusedTime:
     def test_excused_time_is_carried_apart_from_hits(self):
         coord = _coordinator(_engine())
         excused = {"thermostat_deadband": {"runs": 2, "minutes": 75.0, "last_ts": "2026-11-02T10:00:00"}}
+        days = {"2026-11-02": {"runs": 2, "minutes": 75.0}}
         coord._promise_stats = {
-            "comfort_kept": {"hits": 0, "first_ts": None, "last_ts": None, "excused": excused},
-            "settling_flip": {"hits": 3, "first_ts": "a", "last_ts": "b"},
+            "comfort_kept": {
+                "days": {},
+                "hits": 0,
+                "last_ts": None,
+                "excused": {"thermostat_deadband": {"days": days, **excused["thermostat_deadband"]}},
+            },
+            "settling_flip": {"days": {"2026-11-02": 3}, "hits": 3, "last_ts": "b"},
         }
         snap = build_diagnostic_snapshot(_hass_with(_SENSI_ATTRS), coord, include_control_quality=False)
         ps = snap["promise_stats"]
-        assert ps["comfort_kept"] == {"hits": 0, "first_ts": None, "last_ts": None, "excused": excused}
-        assert ps["settling_flip"] == {"hits": 3, "first_ts": "a", "last_ts": "b"}  # no empty excused key
+        # Issue #1490: 30-day sums only -- no per-day buckets and no lifetime first_ts in the snapshot
+        assert ps["comfort_kept"] == {"hits": 0, "last_ts": None, "excused": excused}
+        assert ps["settling_flip"] == {"hits": 3, "last_ts": "b"}  # no empty excused key
+        assert "misses in the last 30 days" in render_diagnostic_snapshot_text(snap)

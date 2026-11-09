@@ -332,37 +332,39 @@ class TestEpisodes:
 
 
 class TestPromiseStats:
+    """Shape and validation of the persisted counters; the 30-day window itself is in test_promise_stats_30d_1490."""
+
     ALLOWED = frozenset({"settling_flip", "ac_whf_mutex"})
+    D = T0.date().isoformat()
 
     def test_non_dict_is_dropped(self):
-        assert sanitize_promise_stats(["x"], self.ALLOWED) == {}
+        assert sanitize_promise_stats(["x"], self.ALLOWED, T0) == {}
 
     def test_unknown_keys_and_bad_values_are_dropped(self):
         raw = {
-            "settling_flip": {"hits": 3, "first_ts": "a", "last_ts": "b"},
-            "evil": {"hits": 1},
-            "ac_whf_mutex": {"hits": "many"},
+            "settling_flip": {"days": {self.D: 3}, "last_ts": at(-5).isoformat()},
+            "evil": {"days": {self.D: 1}},
+            "ac_whf_mutex": {"days": "many"},
         }
-        assert sanitize_promise_stats(raw, self.ALLOWED) == {
-            "settling_flip": {"hits": 3, "first_ts": "a", "last_ts": "b"}
+        assert sanitize_promise_stats(raw, self.ALLOWED, T0) == {
+            "settling_flip": {"days": {self.D: 3}, "hits": 3, "last_ts": at(-5).isoformat()}
         }
 
-    def test_bool_hits_rejected(self):
-        assert sanitize_promise_stats({"settling_flip": {"hits": True}}, self.ALLOWED) == {}
+    def test_bool_counts_rejected(self):
+        assert sanitize_promise_stats({"settling_flip": {"days": {self.D: True}}}, self.ALLOWED, T0) == {}
 
-    def test_bump_counts_and_tracks_first_and_last(self):
+    def test_bump_counts_and_tracks_last(self):
         stats: dict = {}
-        bump_promise_stats(stats, "settling_flip", at(0))
-        bump_promise_stats(stats, "settling_flip", at(5))
-        assert stats["settling_flip"]["hits"] == 2
-        assert stats["settling_flip"]["first_ts"] == at(0).isoformat()
-        assert stats["settling_flip"]["last_ts"] == at(5).isoformat()
+        bump_promise_stats(stats, "settling_flip", at(0), at(0))
+        bump_promise_stats(stats, "settling_flip", at(5), at(5))
+        assert stats["settling_flip"] == {"days": {self.D: 2}, "hits": 2, "last_ts": at(5).isoformat()}
 
 
 class TestExcusedStatsRoundTrip:
     """Issue #1260: excused time survives save -> JSON -> restore, apart from hits; bad rows are dropped."""
 
     ALLOWED = frozenset({"comfort_kept", "settling_flip"})
+    D = T0.date().isoformat()
 
     def test_save_and_restore_keep_the_excused_counts(self):
         import json  # noqa: PLC0415
@@ -370,14 +372,14 @@ class TestExcusedStatsRoundTrip:
         from custom_components.climate_advisor.promise_journal import bump_promise_excused  # noqa: PLC0415
 
         stats: dict = {}
-        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(10), 10.0, new_run=True)
-        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(40), 30.0, new_run=False)
-        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(200), 20.0, new_run=True)
-        bump_promise_stats(stats, "settling_flip", at(5))
-        restored = sanitize_promise_stats(json.loads(json.dumps(stats)), self.ALLOWED)
+        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(10), 10.0, new_run=True, now=at(10))
+        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(40), 30.0, new_run=False, now=at(40))
+        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(200), 20.0, new_run=True, now=at(200))
+        bump_promise_stats(stats, "settling_flip", at(5), at(5))
+        restored = sanitize_promise_stats(json.loads(json.dumps(stats)), self.ALLOWED, at(200))
         assert restored == stats
         row = restored["comfort_kept"]["excused"]["thermostat_deadband"]
-        assert row == {"runs": 2, "minutes": 60.0, "last_ts": at(200).isoformat()}
+        assert (row["runs"], row["minutes"], row["last_ts"]) == (2, 60.0, at(200).isoformat())
         assert restored["comfort_kept"]["hits"] == 0  # excused-only: never a hit
         assert "excused" not in restored["settling_flip"]
 
@@ -385,59 +387,50 @@ class TestExcusedStatsRoundTrip:
         from custom_components.climate_advisor.promise_journal import bump_promise_excused  # noqa: PLC0415
 
         stats: dict = {}
-        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(10), 10.0, new_run=True)
-        restored = sanitize_promise_stats(stats, self.ALLOWED)
-        bump_promise_excused(restored, "comfort_kept", "thermostat_deadband", at(20), 5.0, new_run=True)
+        bump_promise_excused(stats, "comfort_kept", "thermostat_deadband", at(10), 10.0, new_run=True, now=at(10))
+        restored = sanitize_promise_stats(stats, self.ALLOWED, at(10))
+        bump_promise_excused(restored, "comfort_kept", "thermostat_deadband", at(20), 5.0, new_run=True, now=at(20))
         assert restored["comfort_kept"]["excused"]["thermostat_deadband"]["runs"] == 2
         assert restored["comfort_kept"]["excused"]["thermostat_deadband"]["minutes"] == 15.0
 
     def test_malformed_excused_rows_are_dropped_and_the_hits_kept(self):
-        good = {"runs": 1, "minutes": 5.0, "last_ts": "t"}
-        raw = {
-            "comfort_kept": {
-                "hits": 3,
-                "first_ts": "a",
-                "last_ts": "b",
-                "excused": {
-                    "thermostat_deadband": good,
-                    "bool_runs": {"runs": True, "minutes": 1.0},
-                    "neg_runs": {"runs": -1, "minutes": 1.0},
-                    "str_minutes": {"runs": 1, "minutes": "lots"},
-                    "neg_minutes": {"runs": 1, "minutes": -2.0},
-                    "nan_minutes": {"runs": 1, "minutes": float("nan")},
-                    "inf_minutes": {"runs": 1, "minutes": float("inf")},
-                    "not_a_row": 7,
-                    5: good,
-                },
-            },
-        }
-        out = sanitize_promise_stats(raw, self.ALLOWED)
+        good = {"runs": 1, "minutes": 5.0}
+        bad_buckets = [
+            {"runs": True, "minutes": 1.0},
+            {"runs": -1, "minutes": 1.0},
+            {"runs": 1, "minutes": "lots"},
+            {"runs": 1, "minutes": -2.0},
+            {"runs": 1, "minutes": float("nan")},
+            {"runs": 1, "minutes": float("inf")},
+            7,
+        ]
+        excused = {"thermostat_deadband": {"days": {self.D: good}, "last_ts": at(-1).isoformat()}, 5: {"days": {}}}
+        excused.update({f"bad_{i}": {"days": {self.D: b}} for i, b in enumerate(bad_buckets)})
+        raw = {"comfort_kept": {"days": {self.D: 3}, "last_ts": at(-2).isoformat(), "excused": excused}}
+        out = sanitize_promise_stats(raw, self.ALLOWED, T0)
         assert out == {
-            "comfort_kept": {"hits": 3, "first_ts": "a", "last_ts": "b", "excused": {"thermostat_deadband": good}}
+            "comfort_kept": {
+                "days": {self.D: 3},
+                "hits": 3,
+                "last_ts": at(-2).isoformat(),
+                "excused": {
+                    "thermostat_deadband": {
+                        "days": {self.D: good},
+                        "runs": 1,
+                        "minutes": 5.0,
+                        "last_ts": at(-1).isoformat(),
+                    }
+                },
+            }
         }
-        assert sanitize_promise_stats({"comfort_kept": {"hits": 1, "excused": ["x"]}}, self.ALLOWED) == {
-            "comfort_kept": {"hits": 1, "first_ts": None, "last_ts": None}
+        assert sanitize_promise_stats({"comfort_kept": {"days": {self.D: 1}, "excused": ["x"]}}, self.ALLOWED, T0) == {
+            "comfort_kept": {"days": {self.D: 1}, "hits": 1, "last_ts": None}
         }
-        bad_ts = {
-            "comfort_kept": {"hits": 0, "excused": {"thermostat_deadband": {"runs": 1, "minutes": 2, "last_ts": 9}}}
-        }
-        assert sanitize_promise_stats(bad_ts, self.ALLOWED)["comfort_kept"]["excused"]["thermostat_deadband"] == {
-            "runs": 1,
-            "minutes": 2.0,
-            "last_ts": None,
-        }
-
-    def test_the_number_of_excused_reasons_is_bounded(self):
-        from custom_components.climate_advisor.promise_journal import MAX_EXCUSED_REASONS  # noqa: PLC0415
-
-        rows = {f"reason_{i}": {"runs": 1, "minutes": 1.0, "last_ts": None} for i in range(MAX_EXCUSED_REASONS + 5)}
-        out = sanitize_promise_stats({"comfort_kept": {"hits": 0, "excused": rows}}, self.ALLOWED)
-        assert len(out["comfort_kept"]["excused"]) == MAX_EXCUSED_REASONS
-        assert list(out["comfort_kept"]["excused"]) == [f"reason_{i}" for i in range(MAX_EXCUSED_REASONS)]
 
     def test_the_excused_rows_cannot_smuggle_an_unknown_promise_in(self):
-        raw = {"evil": {"hits": 0, "excused": {"thermostat_deadband": {"runs": 1, "minutes": 1.0}}}}
-        assert sanitize_promise_stats(raw, self.ALLOWED) == {}
+        row = {"days": {self.D: {"runs": 1, "minutes": 1.0}}}
+        raw = {"evil": {"days": {}, "excused": {"thermostat_deadband": row}}}
+        assert sanitize_promise_stats(raw, self.ALLOWED, T0) == {}
 
 
 class TestObserveOnlySealedNotices:

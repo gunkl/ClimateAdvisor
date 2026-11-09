@@ -362,7 +362,11 @@
       var again = $('dbg-ev-types').querySelector('[data-type="' + k + '"]'); if (again) again.focus();
     });
     $('dbg-bt').addEventListener('click', function (e) { if (e.target.id === 'bt-run') loadBacktest($('bt-lead').value, $('bt-range').value); });
-    $('dbg-bt-link').addEventListener('click', function () { var z = ND.zone; if (z) this.href = 'prediction_accuracy.html?zone=' + encodeURIComponent(z); });
+    // Issue #1491: same frame, never a new tab (a new tab has no Home Assistant login around it); Back returns here
+    $('dbg-bt-link').addEventListener('click', function () {
+      var z = ND.zone; if (z) this.href = 'prediction_accuracy.html?zone=' + encodeURIComponent(z);
+      ND.rememberReturnTab('debug');
+    });
   }
 
   function startTimer() { stopTimer(); timer = setInterval(function () { if (ND.active === 'debug' && !document.hidden) load(); }, 60000); }

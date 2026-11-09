@@ -12,6 +12,16 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **v3 at more look-aheads:** v3 used to be recorded only 4 hours ahead. It is now also recorded 1, 12 and 24 hours ahead (its forecast reaches about 47 hours), in a new file per zone, `climate_advisor_v3_archive_<zone>.json`, deleted with the zone. Until there is some of it, those v3 cells read "collecting". v3 is recorded only while it is the main or the comparison engine; otherwise the cells read "v3 off".
   - **Seasons:** a day counts as heating or summer by what the heating, the AC and the whole-house fan actually did that day. The backtest tool now uses the same rule from the integration, so the two can't drift apart.
   - **Still information only:** nothing in the table switches an engine or changes what the house does. The backtest still runs at deploy, but only to fill the chart's history from before live v4 was recorded. Its own scores no longer feed the table.
+## [0.9.20] — 2026-11-09
+
+- Fix #1490: "Promises missed" now counts the last 30 days, not every miss since install.
+  - **What you'll notice:** the Analysis tile reads "last 30 days" (or "none in the last 30 days"), and the Household promises list and the Status banner say the same. A miss counts for 30 days after the day it happened, then drops off, so the number tells you how the house has been doing lately. The Status banner used to say "missed in 24 h" over the lifetime count; it now says "in the last 30 days".
+  - **Excused time** (the thermostat's own deadband) follows the same 30-day rule.
+  - **After updating:** the old lifetime totals are cleared and counting starts fresh. Diagnostics show the 30-day counts.
+- Fix #1491: on a phone, the new dashboard's Prediction accuracy no longer shows a 401 with no data.
+  - **What you'll notice:** the Analysis tab's Prediction accuracy card now shows a short summary: each engine's average miss 4 hours ahead over the last 24 hours. "Open on its own page" opens the full page in the same view, not a new tab, and so does Debug's "Open the full accuracy view". "Back to dashboard" brings you back to the tab you came from.
+  - **Why it broke:** the card showed the full accuracy page inside the dashboard, which is itself inside Home Assistant's frame. One frame deeper, the page couldn't find your Home Assistant login. Desktop browsers have a saved copy to fall back on; the iOS app doesn't, so it sent no login. A new tab has no Home Assistant around it at all.
+  - **What the house does is unchanged:** this is display only.
 
 ## [0.9.19] — 2026-11-08
 
@@ -32,9 +42,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **How good is it that far out?** v4 now also records what it said 2, 3 and 5 days ahead, and the Prediction accuracy page and the chart's past-line buttons offer those look-aheads. They fill from the live record only: the 2-day line has data 2 days after this update, the 5-day line after 5 days.
   - **Plan list:** with v4 as the main engine, day two of the Next 48 hours list now has v4's temperature path behind it (it used to end at 24 hours). A plan list that runs as far as the forecast is the next step.
   - **Storage:** v4's prediction record grows to about 1.1 MB per room line after 400 days (was about 0.75 MB). The weather forecast record is unchanged.
-## [0.9.18] — 2026-11-08
 
-Developer tooling only: nothing changes in the home, and Climate Advisor behaves exactly as in 0.9.17.
+Developer tooling (nothing changes in the home):
 
 - Fix #1480: `python scripts/test.py ha` can now run all of CI's real-HA slices at once with `CA_HA_SHARDS=N` (one pytest process per slice, each with `CA_HA_WORKERS` workers, output prefixed `[K/N]`, each slice's time at the end, a failure if any slice fails). The slices are the same as CI's `ha-real (K/4)` jobs. The recommended local run is `CA_HA_SHARDS=4 CA_HA_WORKERS=2`: CI's four slices in about 90 s on the 24-core dev machine, against 103-155 s for one `CA_HA_WORKERS=auto` process. Setting both `CA_HA_SHARDS` and `CA_HA_SHARD` (or `CA_UNIT_SHARDS` and `CA_UNIT_SHARD`) is now refused instead of one being silently ignored.
 - Fix #1481: the repository no longer tracks a `node_modules` link that pointed into one developer's worktree, and `.gitignore` now ignores `node_modules` when it is a link. A checkout that had its own `node_modules` link can merge `main` again. A checkout that only had the tracked link loses it when it updates: re-create it (`ln -s <your node_modules> node_modules`) or run `npm install`.

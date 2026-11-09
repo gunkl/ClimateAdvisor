@@ -400,13 +400,15 @@ from .override_confirm_split import ca_expected_mode
 from .prediction_accuracy import RANGES as CHART_RANGE_DAYS
 from .prediction_accuracy import build_chart_v4, ca_swap_epochs, load_backtest
 from .promise_journal import (
-    Command as _PromiseCommand,
-)
-from .promise_journal import (
+    PROMISE_STATS_WINDOW_DAYS,
     PromiseJournal,
     bump_promise_excused,
     bump_promise_stats,
+    prune_promise_stats,
     sanitize_promise_stats,
+)
+from .promise_journal import (
+    Command as _PromiseCommand,
 )
 from .promise_journal import (
     Reading as _PromiseReading,
@@ -2256,7 +2258,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # and that question doesn't respect the day boundary the rest of this
         # function gates on.
         # Issue #1128: per-promise counters live across days (the "two quiet weeks" evidence).
-        self._promise_stats = sanitize_promise_stats(state.get("promise_stats"), {p.key for p in PROMISES})
+        # Issue #1490: only the last 30 days are kept; pre-#1490 lifetime totals are discarded here.
+        self._promise_stats = sanitize_promise_stats(
+            state.get("promise_stats"), {p.key for p in PROMISES}, dt_util.now()
+        )
         # Issue #1181: restored regardless of date, like the health fields below -- a sensor that has been
         # dark since yesterday still holds whatever it last read.
         _persisted_readings = state.get("sensor_last_real_reading")
@@ -12569,11 +12574,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Compact, display-safe digest of the household-promise counters (Issue #1128 I8).
 
         Counts per promise and the last-hit time only -- no evidence, entity ids or settings.
-        ``None`` when no promise has ever missed, so the Debug tab shows nothing (not a row of zeros).
+        Issue #1490: counts cover the last ``PROMISE_STATS_WINDOW_DAYS`` (30) days; the stats are pruned
+        here first. ``None`` when nothing missed in that window, so the Debug tab shows nothing.
         """
         stats = getattr(self, "_promise_stats", None)
         if not isinstance(stats, dict) or not stats:
             return None
+        prune_promise_stats(stats, dt_util.now())
         rows = []
         for spec in PROMISES:
             entry = stats.get(spec.key)
@@ -12591,7 +12598,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         if not rows:
             return None
-        return {"promises": rows, "total_hits": sum(r["hits"] for r in rows)}
+        return {
+            "promises": rows,
+            "total_hits": sum(r["hits"] for r in rows),
+            "window_days": PROMISE_STATS_WINDOW_DAYS,
+        }
 
     def _tick_household_promises(self) -> None:
         """5-minute heartbeat: record a reading, then evaluate (never raises)."""
@@ -12629,7 +12640,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             for ex in run_promise_excused(window, cfg, scope=SCOPE_HOME):
                 new_run, added = journal.excused_progress(ex.key, ex.intervals)
                 if new_run or added > 0:
-                    bump_promise_excused(self._promise_stats, ex.promise, ex.excused_by, ex.ts, added, new_run=new_run)
+                    bump_promise_excused(
+                        self._promise_stats, ex.promise, ex.excused_by, ex.ts, added, new_run=new_run, now=now
+                    )
                     if new_run:
                         excused_changed = True  # persist when a run opens; its growth rides along with later saves
                         _LOGGER.info(
@@ -12655,7 +12668,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 hit.promise,
                 evidence,
             )
-            bump_promise_stats(self._promise_stats, hit.promise, hit.ts)
+            bump_promise_stats(self._promise_stats, hit.promise, hit.ts, now)
             self._emit_event(
                 "invariant_violation",
                 {

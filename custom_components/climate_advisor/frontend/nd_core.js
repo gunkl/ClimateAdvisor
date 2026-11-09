@@ -91,11 +91,17 @@
   };
 
   // ---------- auth (as classic) ----------
+  // HA's <home-assistant> element is normally the parent (the panel frame); Issue #1491: also look in the top window,
+  // in case this page ends up one frame deeper. Without it the only fallback is localStorage 'hassTokens', which the
+  // iOS app (external auth) never writes.
   function haAuth() {
-    try {
-      var ha = window.parent.document.querySelector('home-assistant');
-      if (ha && ha.hass && ha.hass.auth) return ha.hass.auth;
-    } catch (e) { /* cross-origin or not ready */ }
+    var wins = [window.parent, window.top];
+    for (var i = 0; i < wins.length; i++) {
+      try {
+        var ha = wins[i].document.querySelector('home-assistant');
+        if (ha && ha.hass && ha.hass.auth) return ha.hass.auth;
+      } catch (e) { /* cross-origin or not ready */ }
+    }
     return null;
   }
   async function getToken() {
@@ -315,7 +321,7 @@
     });
     var ps = s.promise_summary;
     if (ps && ps.total_hits) {
-      b.push(banner('info', ps.total_hits + ' household promise' + (ps.total_hits === 1 ? '' : 's') + ' missed in 24 h',
+      b.push(banner('info', ps.total_hits + ' household promise' + (ps.total_hits === 1 ? '' : 's') + ' missed in the last 30 days',  // Issue #1490 (was mislabelled '24 h')
         (ps.promises || []).map(function (p) { return String(p.label || p.promise).replace(/^\d+: /, '') + ' ×' + p.hits; }).join(' · '),
         [{ label: 'Open in Analysis', href: '#analysis' }], ['status'], 'promises'));
     }
@@ -459,14 +465,28 @@
     ND.$('back-classic').addEventListener('click', function () { ND.ls.set(PREF_KEY, 'classic'); });
   }
 
+  // ---------- return tab (Issue #1491) ----------
+  // The accuracy page opens in this same frame; its "Back to dashboard" goes to entry.html, which carries no #tab.
+  // A link that leaves the dashboard remembers its tab for this browsing session; the next boot with no #tab opens
+  // it. Every boot (and a back/forward cache restore) clears it, so it is used at most once.
+  var RETURN_KEY = 'climate_advisor_return_tab';
+  ND.rememberReturnTab = function (tab) { try { sessionStorage.setItem(RETURN_KEY, tab); } catch (e) { /* private mode */ } };
+  function takeReturnTab() {
+    var t = null;
+    try { t = sessionStorage.getItem(RETURN_KEY); sessionStorage.removeItem(RETURN_KEY); } catch (e) { t = null; }
+    return TABS.indexOf(t) >= 0 ? t : null;
+  }
+  window.addEventListener('pageshow', function (ev) { if (ev.persisted) takeReturnTab(); });
+
   // ---------- boot ----------
   ND.start = async function () {
     ND._booting = true;
     ND.zone = ND.ls.get(ZONE_KEY) || null;
     initMenu(); initTabs(); initZone(); initSwitch();
     ND.emit('init');
-    var p = parseHash();
-    ND.showTab(p.tab || 'status', p.section, true);
+    var p = parseHash(), back = takeReturnTab(), fromBack = !p.tab && !!back;
+    if (fromBack) p.tab = back;
+    ND.showTab(p.tab || 'status', p.section, !fromBack); // a returned-to tab writes its #hash, as a click would
     var token = null;
     for (var i = 0; i < 20 && !token; i++) { token = await getToken(); if (!token) await new Promise(function (r) { setTimeout(r, 250); }); }
     await ND.loadStatus();

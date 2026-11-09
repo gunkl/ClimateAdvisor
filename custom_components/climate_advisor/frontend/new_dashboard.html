@@ -165,7 +165,6 @@
   .hist-row { display: flex; gap: 8px; align-items: flex-start; border-top: 1px solid var(--rule); padding: 8px 0; }
   .hist-row .body { flex: 1 1 0; min-width: 0; }
   .hist-row .acts { display: flex; gap: 4px; flex-wrap: wrap; }
-  iframe.pa { width: 100%; border: 1px solid var(--rule); border-radius: 12px; background: var(--bg); min-height: 900px; }
   dialog { background: var(--panel); color: var(--ink); border: 1px solid var(--rule); border-radius: 12px; padding: 16px; width: min(560px, calc(100vw - 32px)); }
   dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
   dialog label { display: block; font-size: 12px; margin: 8px 0 3px; color: var(--ink2); }
@@ -340,7 +339,7 @@
         <div id="an-cq"><div class="empty">Loading...</div></div>
         <h3>Prediction error by look-ahead <span class="sub" id="an-pe-src"></span></h3>
         <div id="an-pe"></div>
-        <h3>Household promises missed <span class="sub">all time</span></h3>
+        <h3>Household promises missed <span class="sub">last 30 days</span></h3>
         <div id="an-promises"></div>
       </section>
     </div>
@@ -386,9 +385,12 @@
     </section>
 
     <section class="card" aria-labelledby="an-pa-h">
-      <div class="card-head"><h2 id="an-pa-h">Prediction accuracy</h2><a id="prediction-accuracy-link" href="prediction_accuracy.html" target="_blank" rel="noopener">Open on its own page</a></div>
+      <!-- Issue #1491: no frame inside a frame. The dashboard is already inside Home Assistant's panel frame; an
+           embedded accuracy page could not reach HA's login (401 in the iOS app). The card shows a summary and the
+           link opens the full page in this same frame ("Back to dashboard" returns to this tab). -->
+      <div class="card-head"><h2 id="an-pa-h">Prediction accuracy</h2><a id="prediction-accuracy-link" href="prediction_accuracy.html">Open on its own page</a></div>
       <div class="sub">How well each prediction engine guessed this home: its past predictions next to what the sensor then read. The main engine (Settings, Prediction engine) times Climate Advisor&#8217;s decisions; the comparison engine only draws a line.</div>
-      <iframe class="pa" id="pa-frame" title="Prediction accuracy" loading="lazy"></iframe>
+      <div id="an-pa-summary" role="status"><div class="empty">Loading...</div></div>
     </section>
   </div>
 
@@ -416,7 +418,7 @@
     </section>
 
     <section class="card" aria-labelledby="dbg-bt-h">
-      <div class="card-head"><h2 id="dbg-bt-h">Backtest lab</h2><a href="prediction_accuracy.html" id="dbg-bt-link" target="_blank" rel="noopener">Open the full accuracy view</a></div>
+      <div class="card-head"><h2 id="dbg-bt-h">Backtest lab</h2><a href="prediction_accuracy.html" id="dbg-bt-link">Open the full accuracy view</a></div>
       <div id="dbg-bt"><div class="empty">Loading...</div></div>
     </section>
     <div class="sub">Every automation-state field is listed once, in its group. Download diagnostics has the full raw data. Daily records and promises moved to Analysis.</div>

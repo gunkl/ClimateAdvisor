@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections import OrderedDict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 Scalar = str | float | int | bool | None
@@ -33,6 +33,7 @@ MAX_NOTICES = 16
 MAX_OPEN_EPISODES = 8
 MAX_SEEN_KEYS = 256
 MAX_EXCUSED_REASONS = 4  # excused_by reasons kept per promise in the persisted stats
+PROMISE_STATS_WINDOW_DAYS = 30  # Issue #1490: misses and excused time count over the last 30 days only
 # A reading is stored when a discrete field changed, indoor moved this far, or this long passed.
 READING_STORE_DELTA_F = 0.5
 READING_STORE_INTERVAL = timedelta(minutes=5)
@@ -663,72 +664,155 @@ class PromiseJournal:
         }
 
 
-# ── persisted per-promise counters ──────────────────────────────────────────────
-def sanitize_promise_stats(raw: Any, allowed_keys: frozenset[str] | set[str]) -> dict[str, dict[str, Any]]:
-    """Type-validate persisted ``promise_stats``: dict of allowed key -> {hits:int, first_ts, last_ts}."""
+# ── persisted per-promise counters (Issue #1490: last 30 days, per local-date bucket) ─────────────
+# Shape: {key: {"days": {"YYYY-MM-DD": count}, "hits": <30-day sum>, "last_ts": iso|None,
+#               "excused": {by: {"days": {"YYYY-MM-DD": {"runs", "minutes"}}, "runs", "minutes", "last_ts"}}}}
+# ``hits``/``runs``/``minutes`` are derived from the buckets every time the stats are pruned (bump, load,
+# summary) and never trusted from disk. A bucket counts while (today - its date) <= PROMISE_STATS_WINDOW_DAYS,
+# so a miss counts for 30 full days after the day it happened. Pre-#1490 lifetime totals (no ``days``) are
+# discarded on load, by owner decision.
+def _local_date(ts: datetime, now: datetime) -> date:
+    """The date of ``ts`` in ``now``'s timezone (the household's local date when ``now`` is local)."""
+    if ts.tzinfo is not None and now.tzinfo is not None:
+        ts = ts.astimezone(now.tzinfo)
+    return ts.date()
+
+
+def _bucket_in_window(key: Any, today: date) -> bool:
+    """True for an ISO date string inside the window (a day of clock skew ahead is tolerated)."""
+    if not isinstance(key, str) or len(key) != 10:
+        return False
+    try:
+        d = date.fromisoformat(key)
+    except ValueError:
+        return False
+    return -1 <= (today - d).days <= PROMISE_STATS_WINDOW_DAYS
+
+
+def _ts_in_window(raw: Any, now: datetime) -> str | None:
+    """``raw`` when it is an ISO timestamp whose local date is inside the window, else None."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return raw if _bucket_in_window(_local_date(ts, now).isoformat(), now.date()) else None
+
+
+def _is_count(v: Any, *, allow_zero: bool = False) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and (0 if allow_zero else 1) <= v < 1_000_000
+
+
+def _is_minutes(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < 1e9
+
+
+def sanitize_promise_stats(
+    raw: Any, allowed_keys: frozenset[str] | set[str], now: datetime
+) -> dict[str, dict[str, Any]]:
+    """Type-validate persisted ``promise_stats`` and keep only the last 30 days (Issue #1490).
+
+    An entry with nothing left in the window (no hit day, no excused row) is dropped, so an empty window
+    reads as ``{}``. Old lifetime-format entries carry no ``days`` and are dropped.
+    """
     out: dict[str, dict[str, Any]] = {}
     if not isinstance(raw, dict):
         return out
+    today = now.date()
     for key, val in raw.items():
         if key not in allowed_keys or not isinstance(val, dict) or len(out) >= len(allowed_keys):
             continue
-        hits = val.get("hits")
-        first_ts = val.get("first_ts")
-        last_ts = val.get("last_ts")
-        if not isinstance(hits, int) or isinstance(hits, bool) or hits < 0:
-            continue
-        out[key] = {
-            "hits": hits,
-            "first_ts": first_ts if isinstance(first_ts, str) else None,
-            "last_ts": last_ts if isinstance(last_ts, str) else None,
+        days_raw = val.get("days")
+        if not isinstance(days_raw, dict):
+            continue  # pre-#1490 lifetime totals: discarded
+        days = {d: n for d, n in days_raw.items() if _bucket_in_window(d, today) and _is_count(n)}
+        days = dict(sorted(days.items())[-(PROMISE_STATS_WINDOW_DAYS + 2) :])
+        entry: dict[str, Any] = {
+            "days": days,
+            "hits": sum(days.values()),
+            "last_ts": _ts_in_window(val.get("last_ts"), now) if days else None,
         }
-        excused = _sanitize_excused(val.get("excused"))
+        excused = _sanitize_excused(val.get("excused"), now)
         if excused:
-            out[key]["excused"] = excused
+            entry["excused"] = excused
+        if days or excused:
+            out[key] = entry
     return out
 
 
-def _sanitize_excused(raw: Any) -> dict[str, dict[str, Any]]:
-    """Type-validate ``{excused_by: {runs:int, minutes:float, last_ts}}`` (Issue #1260); bad rows are dropped."""
+def _sanitize_excused(raw: Any, now: datetime) -> dict[str, dict[str, Any]]:
+    """Type-validate ``{excused_by: {days: {date: {runs, minutes}}, last_ts}}`` (Issues #1260, #1490)."""
     out: dict[str, dict[str, Any]] = {}
     if not isinstance(raw, dict):
         return out
+    today = now.date()
     for by, row in raw.items():
         if not isinstance(by, str) or not isinstance(row, dict) or len(out) >= MAX_EXCUSED_REASONS:
             continue
-        runs, minutes, last_ts = row.get("runs"), row.get("minutes"), row.get("last_ts")
-        if not isinstance(runs, int) or isinstance(runs, bool) or runs < 0:
-            continue
-        if not isinstance(minutes, (int, float)) or isinstance(minutes, bool) or not 0 <= minutes < 1e9:
+        days_raw = row.get("days")
+        if not isinstance(days_raw, dict):
+            continue  # pre-#1490 lifetime totals: discarded
+        days: dict[str, dict[str, Any]] = {}
+        for d, b in sorted(days_raw.items(), key=lambda kv: str(kv[0])):
+            if not _bucket_in_window(d, today) or not isinstance(b, dict):
+                continue
+            runs, minutes = b.get("runs"), b.get("minutes")
+            if not _is_count(runs, allow_zero=True) or not _is_minutes(minutes):
+                continue
+            if runs or minutes:
+                days[d] = {"runs": runs, "minutes": round(float(minutes), 1)}
+        days = dict(list(days.items())[-(PROMISE_STATS_WINDOW_DAYS + 2) :])
+        if not days:
             continue
         out[by] = {
-            "runs": runs,
-            "minutes": round(float(minutes), 1),
-            "last_ts": last_ts if isinstance(last_ts, str) else None,
+            "days": days,
+            "runs": sum(b["runs"] for b in days.values()),
+            "minutes": round(sum(b["minutes"] for b in days.values()), 1),
+            "last_ts": _ts_in_window(row.get("last_ts"), now),
         }
     return out
 
 
-def bump_promise_stats(stats: dict[str, dict[str, Any]], key: str, ts: datetime) -> None:
-    """Count one hit for ``key`` (in place)."""
-    entry = stats.setdefault(key, {"hits": 0, "first_ts": None, "last_ts": None})
-    entry["hits"] = int(entry.get("hits", 0)) + 1
-    iso = ts.isoformat()
-    if entry.get("first_ts") is None:
-        entry["first_ts"] = iso
-    entry["last_ts"] = iso
+def prune_promise_stats(stats: dict[str, dict[str, Any]], now: datetime) -> dict[str, dict[str, Any]]:
+    """Drop days older than the window and re-derive the sums, in place; returns ``stats``."""
+    fresh = sanitize_promise_stats(stats, set(stats), now)
+    stats.clear()
+    stats.update(fresh)
+    return stats
+
+
+def bump_promise_stats(stats: dict[str, dict[str, Any]], key: str, ts: datetime, now: datetime) -> None:
+    """Count one hit for ``key`` on ``ts``'s local date (in place), then prune to the window."""
+    entry = stats.setdefault(key, {"days": {}, "hits": 0, "last_ts": None})
+    days = entry.setdefault("days", {})
+    day = _local_date(ts, now).isoformat()
+    days[day] = int(days.get(day, 0)) + 1
+    entry["last_ts"] = ts.isoformat()
+    prune_promise_stats(stats, now)
 
 
 def bump_promise_excused(
-    stats: dict[str, dict[str, Any]], key: str, excused_by: str, ts: datetime, minutes: float, *, new_run: bool
+    stats: dict[str, dict[str, Any]],
+    key: str,
+    excused_by: str,
+    ts: datetime,
+    minutes: float,
+    *,
+    new_run: bool,
+    now: datetime,
 ) -> None:
-    """Count excused time for ``key`` under ``excused_by`` (in place), apart from hits (Issue #1260).
+    """Count excused time for ``key`` under ``excused_by`` (in place), apart from hits (Issues #1260, #1490).
 
-    Never touches ``hits``: an entry that was only ever excused has ``hits == 0``.
+    Never adds a hit: an entry that was only ever excused has ``hits == 0``. The run and the minutes land
+    on ``ts``'s local date; the growth of a run that spans midnight lands on the day it was counted.
     """
-    entry = stats.setdefault(key, {"hits": 0, "first_ts": None, "last_ts": None})
-    row = entry.setdefault("excused", {}).setdefault(excused_by, {"runs": 0, "minutes": 0.0, "last_ts": None})
+    entry = stats.setdefault(key, {"days": {}, "hits": 0, "last_ts": None})
+    entry.setdefault("days", {})
+    row = entry.setdefault("excused", {}).setdefault(excused_by, {"days": {}, "runs": 0, "minutes": 0.0})
+    bucket = row.setdefault("days", {}).setdefault(_local_date(ts, now).isoformat(), {"runs": 0, "minutes": 0.0})
     if new_run:
-        row["runs"] = int(row.get("runs", 0)) + 1
-    row["minutes"] = round(float(row.get("minutes", 0.0)) + max(0.0, minutes), 1)
+        bucket["runs"] = int(bucket.get("runs", 0)) + 1
+    bucket["minutes"] = round(float(bucket.get("minutes", 0.0)) + max(0.0, minutes), 1)
     row["last_ts"] = ts.isoformat()
+    prune_promise_stats(stats, now)

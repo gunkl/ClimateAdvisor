@@ -1158,7 +1158,7 @@ class TestP7ThermostatDeadband:
         for upto in (30, 60):
             (x,) = _excused(make_input(_db_house(upto)))
             new_run, added = j.excused_progress(x.key, x.intervals)
-            _pj.bump_promise_excused(stats, x.promise, x.excused_by, x.ts, added, new_run=new_run)
+            _pj.bump_promise_excused(stats, x.promise, x.excused_by, x.ts, added, new_run=new_run, now=x.ts)
         e = stats["comfort_kept"]["excused"]["thermostat_deadband"]
         assert e["runs"] == 1 and e["minutes"] == pytest.approx(60.0)
         assert stats["comfort_kept"]["hits"] == 0

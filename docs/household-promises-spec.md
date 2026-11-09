@@ -100,12 +100,23 @@ Tunable numbers live in `PromiseNumbers` (e.g. `P5_BLIND_CONTINUE_MIN=35`, `P6_M
 
 `ClimateAdvisorCoordinator._tick_household_promises()` runs on a 5-minute heartbeat: record a reading, then `_evaluate_household_promises()` runs `run_promise_checks(..., scope="home")`. For each new hit (P2 is skipped; it keeps its existing alert path in `_run_invariant_watchdog`): WARNING `Household promise missed (log only)` (`(alert)` for P9), `bump_promise_stats`, an `invariant_violation` event (`severity="log"`, or `"alert"` for P9, which also sends one push notification per episode), and a state save. A check that raises is logged and skipped at home but re-raised in tests.
 
-- **Occupant/operator view:** the AI Investigator shows these as "Noted, not alerted" lines (`ai_skills_context.py`); diagnostics show per-promise hit counts and last timestamps (`diagnostic_snapshot.py`, `promise_stats`, counts and timestamps only).
+- **Occupant/operator view:** the AI Investigator shows these as "Noted, not alerted" lines (`ai_skills_context.py`, from the events, not the counters); diagnostics show per-promise 30-day hit counts and last timestamps (`diagnostic_snapshot.py`, `promise_stats`, counts and timestamps only); the dashboard's "Promises missed" tile, the Analysis list, the Status banner and the classic Debug row show `_promise_summary()` (30-day counts, see [Counters](#counters-last-30-days-issue-1490)).
 - **Dedup:** event promises use the journal's `seen_keys` LRU (256); long-running hits (P5b, P7) use `RunKey` so a sliding window does not re-report the same run.
+
+## Counters: last 30 days (Issue #1490)
+
+Occupant first: the "Promises missed" tile used to count every miss since install, so one bad week months ago stayed in the number for good and could not say whether the house is fine now. Owner decision 2026-11-09: count the last 30 days only.
+
+- **Shape** (`promise_journal.py`): `promise_stats[key] = {"days": {"YYYY-MM-DD": count}, "hits": <sum of days>, "last_ts": iso|None, "excused": {by: {"days": {"YYYY-MM-DD": {"runs", "minutes"}}, "runs", "minutes", "last_ts"}}}`. The date is the household's local date of the miss (the timestamp converted to `now`'s timezone, `dt_util.now()` at home).
+- **Window** (`PROMISE_STATS_WINDOW_DAYS` = 30): a bucket counts while `today - its date <= 30` days, so a miss counts for 30 full days after the day it happened (a miss on day 0 still counts on day 30 and is gone on day 31). A bucket more than one day in the future (clock trouble) is dropped.
+- **Pruned** on every bump (`bump_promise_stats`, `bump_promise_excused`), on load (`sanitize_promise_stats(raw, keys, now)` in the coordinator's restore) and whenever the summary is built (`prune_promise_stats` in `_promise_summary()`, every update cycle). `hits`, `runs` and `minutes` are re-derived from the buckets each time and never trusted from disk. `last_ts` is kept only while its date is inside the window. An entry with no hit day and no excused row left is removed, so an empty window gives `_promise_summary() == None` and the tile reads "none in the last 30 days".
+- **Excused time** follows the same rule: a run counts on the day it opened, and minutes on the day they were counted (a run across midnight splits its minutes across both days).
+- **Upgrade:** pre-#1490 lifetime totals (entries or excused rows without `days`) are discarded on load. No legacy field, no diagnostics copy; counting starts fresh.
+- **Readers:** `_promise_summary()` (`promises[].hits`, `total_hits`, `window_days`), `diagnostic_snapshot.py` (`hits`, `last_ts`, excused `runs`/`minutes`/`last_ts`; no buckets, no `first_ts`), `nd_analysis.js` tile and list, `nd_core.js` Status banner ("missed in the last 30 days"; it used to say "in 24 h" over the lifetime count), `index.html` Debug row. Tests: `tests/test_promise_stats_30d_1490.py`.
 
 ## The journal
 
-`PromiseJournal` is a pure leaf (no HA imports, no I/O), in-memory only, fed by production hooks and by test adapters. Retention `JOURNAL_MAX_AGE` 3 h; caps: 400 readings, 128 commands, 128 marks, 64 episode marks, 8 open episodes, 256 seen keys. A reading is stored when a discrete field changed, indoor moved 0.5 F, or 5 min passed. After a restart it is empty, so history-needing checks see no data and report nothing (a blind window, never a false alarm). Only `promise_stats` is persisted (capped to the promise keys, type-validated by `sanitize_promise_stats`). Commands are journaled through `AutomationEngine._command_observer` and, for the coordinator's own fan reconcile command, `_promise_observe_command` directly (Issue #1129: that command carries no Context by design; investigated, not a defect, locked by tests).
+`PromiseJournal` is a pure leaf (no HA imports, no I/O), in-memory only, fed by production hooks and by test adapters. Retention `JOURNAL_MAX_AGE` 3 h; caps: 400 readings, 128 commands, 128 marks, 64 episode marks, 8 open episodes, 256 seen keys. A reading is stored when a discrete field changed, indoor moved 0.5 F, or 5 min passed. After a restart it is empty, so history-needing checks see no data and report nothing (a blind window, never a false alarm). Only `promise_stats` is persisted (capped to the promise keys, type-validated and pruned to the last 30 days by `sanitize_promise_stats`; see [Counters](#counters-last-30-days-issue-1490)). Commands are journaled through `AutomationEngine._command_observer` and, for the coordinator's own fan reconcile command, `_promise_observe_command` directly (Issue #1129: that command carries no Context by design; investigated, not a defect, locked by tests).
 
 ## P4 listed exceptions
 
@@ -162,7 +173,7 @@ Occupant first: the person reads the Status card, chart, briefing and Next User 
 
 ## Promotion to alert policy
 
-1. `promise_stats[key]` tracks `hits`, `first_ts`, `last_ts`; "two quiet weeks" means about 14 days without a hit on the live install.
+1. `promise_stats[key]` tracks per-day hits over the last 30 days and `last_ts` (Issue #1490); "two quiet weeks" means no hit day in the last 14 days on the live install (`last_ts` older than 14 days, or none). The 30-day window always covers those 14 days.
 2. Every hit seen meanwhile is fixed (issue plus regression test) or its `PromiseNumbers` value is tuned with a note. Never silently waived.
 3. Promotion is a one-line `home_level` change in `PROMISES`, shipped as a normal patch release (version bump, `add_fix_entry.py`, CHANGELOG). The design names P1, P3, P4 and P5 as candidates; P5b, P6, P7 and P10 stay log. Changing `PROMISES` needs human sign-off.
 
@@ -172,7 +183,8 @@ Occupant first: the person reads the Status card, chart, briefing and Next User 
 |---|---|
 | A check raises at home | WARNING `Household promise check failed`, check skipped |
 | Reading/command/event hook raises | DEBUG log, skipped; never reaches the update cycle |
-| Corrupt persisted `promise_stats` | Sanitized to the known keys on load |
+| Corrupt persisted `promise_stats` | Sanitized to the known keys on load; bad day buckets dropped |
+| Pre-#1490 lifetime `promise_stats` (no `days`) | Discarded on load; counting starts fresh |
 
 ## Code Reference
 

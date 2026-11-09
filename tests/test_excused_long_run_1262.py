@@ -58,7 +58,7 @@ class _Home:
         for ex in iw.run_promise_excused(self.journal.window(r.ts), CFG, scope=iw.SCOPE_HOME):
             new_run, added = self.journal.excused_progress(ex.key, ex.intervals)
             if new_run or added > 0:
-                bump_promise_excused(self.stats, ex.promise, ex.excused_by, ex.ts, added, new_run=new_run)
+                bump_promise_excused(self.stats, ex.promise, ex.excused_by, ex.ts, added, new_run=new_run, now=ex.ts)
 
     def run_for(self, minutes: int, start: int = 0) -> None:
         for m in range(start, minutes + 1, STEP):

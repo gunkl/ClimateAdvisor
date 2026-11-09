@@ -11081,6 +11081,22 @@ class AutomationEngine:
             )
             _turn_off_reason = f"{trigger} reconcile — fan running without CA warrant"
 
+            if self.dry_run and not self._fan_active:
+                # Issue #1499: observe-only, and CA does not own this fan. The stop below would come back DRY_RUN, and
+                # since #1304 a DRY_RUN stop keeps the session flags, so the temporary _fan_active = True further down
+                # would be left set: the fan "running" on paper (fan card "active", a false sealed-house alert, a
+                # needless turn-off on re-enable), plus a nat_vent_reconcile_exit row, the #790 lockout and the #446
+                # cooldown for a stop that was never sent. Nothing is sent, so nothing is recorded (#1304, same shape
+                # as #1311's observed-off branch). A session CA really started is still handed to _exit_nat_vent()
+                # below, which keeps it while its fan runs. On re-enable the WHF safety check decides afresh.
+                _LOGGER.info(
+                    "[DRY RUN] Fan reconcile: would stop a fan Climate Advisor does not own -- nothing sent,"
+                    " nothing recorded (trigger=%s) role=%s",
+                    trigger,
+                    self.role,
+                )
+                return
+
             # Issue #446: reconcile_fan_on_startup() is called from 4 different sites
             # (startup coalesce, 30-min backstop, thermostat state-change, post-grace-expiry)
             # with no rate limit — a fan that keeps re-appearing as "unwarranted" (e.g. a

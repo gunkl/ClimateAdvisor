@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [Unreleased]
+
+- Fix #1491: on a phone, the new dashboard's Prediction accuracy no longer shows a 401 with no data.
+  - **What you'll notice:** the Analysis tab's Prediction accuracy card now shows a short summary: each engine's average miss 4 hours ahead over the last 24 hours. "Open on its own page" opens the full page in the same view, not a new tab, and so does Debug's "Open the full accuracy view". "Back to dashboard" brings you back to the tab you came from.
+  - **Why it broke:** the card showed the full accuracy page inside the dashboard, which is itself inside Home Assistant's frame. One frame deeper, the page couldn't find your Home Assistant login. Desktop browsers have a saved copy to fall back on; the iOS app doesn't, so it sent no login. A new tab has no Home Assistant around it at all.
+  - **What the house does is unchanged:** this is display only.
+
 ## [0.9.19] — 2026-11-08
 
 - Fix #1483 (part 2): the plan now looks ahead as far as your forecast goes, up to a week.

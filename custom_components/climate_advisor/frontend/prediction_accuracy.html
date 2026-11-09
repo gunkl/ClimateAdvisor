@@ -200,11 +200,16 @@
   function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 
   // ---------- auth (same approach as index.html) ----------
+  // Issue #1491: HA's <home-assistant> is normally the parent (the panel frame); also look in the top window in case
+  // this page is ever one frame deeper. The localStorage 'hassTokens' fallback is never written by the iOS app.
   function hassAuth() {
-    try {
-      var ha = window.parent.document.querySelector('home-assistant');
-      if (ha && ha.hass && ha.hass.auth) return ha.hass.auth;
-    } catch (e) { /* not embedded or cross-origin */ }
+    var wins = [window.parent, window.top];
+    for (var i = 0; i < wins.length; i++) {
+      try {
+        var ha = wins[i].document.querySelector('home-assistant');
+        if (ha && ha.hass && ha.hass.auth) return ha.hass.auth;
+      } catch (e) { /* not embedded or cross-origin */ }
+    }
     return null;
   }
   async function getAuthToken() {

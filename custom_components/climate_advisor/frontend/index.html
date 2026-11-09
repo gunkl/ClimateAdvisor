@@ -770,11 +770,14 @@
   });
 
   // --- Auth: extract HA token from parent window ---
+  // Issue #1491: the parent first (the panel frame), then the top window in case this page is ever one frame deeper
   function _getHassAuth() {
-    try {
-      const ha = window.parent.document.querySelector('home-assistant');
-      if (ha && ha.hass && ha.hass.auth) return ha.hass.auth;
-    } catch (e) { /* cross-origin or not ready */ }
+    for (const w of [window.parent, window.top]) {
+      try {
+        const ha = w.document.querySelector('home-assistant');
+        if (ha && ha.hass && ha.hass.auth) return ha.hass.auth;
+      } catch (e) { /* cross-origin or not ready */ }
+    }
     return null;
   }
 

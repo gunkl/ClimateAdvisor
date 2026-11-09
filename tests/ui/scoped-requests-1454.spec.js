@@ -7,7 +7,7 @@ const { test, expect } = require('@playwright/test');
 // comes from GET /zones (names no zone by design, raises nothing) and a failed scoped call is retried, scoped, after a
 // back-off (2 s, 5 s, 10 s), then the page says "Climate Advisor is starting".
 //
-// Every page here records every request it (and its iframes) makes; ZERO Climate Advisor requests other than /zones
+// Every page here records every request it makes; ZERO Climate Advisor requests other than /zones
 // may lack entry_id / zone, and the page must end up showing the zone's data.
 
 const ZONES = [
@@ -77,7 +77,7 @@ async function mockCA(page, { down = 0 } = {}) {
 const storeZone = (page, z) => page.addInitScript((zone) => { localStorage.setItem('climate_advisor_selected_zone', zone); }, z);
 const stored = (page) => page.evaluate(() => localStorage.getItem('climate_advisor_selected_zone'));
 
-async function visitNewTabs(page) { // fire every tab's own fetches (Analysis embeds the accuracy page)
+async function visitNewTabs(page) { // fire every tab's own fetches (Analysis summarises prediction_accuracy, Issue #1491)
   for (const tab of ['analysis', 'debug', 'settings', 'status']) {
     await page.locator('#tab-btn-' + tab).click();
     await page.waitForTimeout(400);
@@ -109,7 +109,7 @@ test.describe('Issue #1454: the dashboards never send an unscoped request', () =
     await expect(page.locator('#zone-select')).toHaveValue('zone-b');
     await visitNewTabs(page);
     await page.locator('#tab-btn-analysis').click();
-    await expect(page.frameLocator('#pa-frame').locator('#tiles')).toContainText('average miss');
+    await expect(page.locator('#an-pa-summary')).toContainText('average miss'); // Issue #1491: a summary, no frame
     expect(ca.unscoped()).toEqual([]);
     // the Status chart's request (temperature, and the #1414 humidity / feels-like series) names the zone
     expect(ca.urls.some((u) => u.includes('chart_data') && u.includes('entry_id=zone-b'))).toBe(true);
@@ -142,7 +142,7 @@ test.describe('Issue #1454: the dashboards never send an unscoped request', () =
     await expect(page.locator('#health-text')).toContainText('Healthy');
     await visitNewTabs(page);
     await page.locator('#tab-btn-analysis').click();
-    await expect(page.frameLocator('#pa-frame').locator('#tiles')).toContainText('average miss');
+    await expect(page.locator('#an-pa-summary')).toContainText('average miss'); // Issue #1491: a summary, no frame
     expect(ca.urls[0]).toContain('/api/climate_advisor/zones');
     expect(ca.unscoped()).toEqual([]);
     expect(await stored(page)).toBe('zone-a');

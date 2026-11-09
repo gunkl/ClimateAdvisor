@@ -342,15 +342,26 @@ def build_diagnostic_snapshot(hass: Any, coordinator: Any, *, include_control_qu
         snapshot["control_quality"] = _build_control_quality_section(coordinator, config)
 
     # Issue #1128: per-promise hit counters (counts and timestamps only, no entity ids).
+    # Issue #1490: the counts are the last 30 days (the coordinator prunes on every bump, load and status
+    # build); the per-day buckets stay in the state file and are not repeated here.
     promise_stats = getattr(coordinator, "_promise_stats", None)
     if isinstance(promise_stats, dict) and promise_stats:
         snapshot["promise_stats"] = {
             str(k): {
                 "hits": v.get("hits"),
-                "first_ts": v.get("first_ts"),
                 "last_ts": v.get("last_ts"),
                 # Issue #1260: time excused by a named exception, counted apart from hits.
-                **({"excused": v["excused"]} if isinstance(v.get("excused"), dict) else {}),
+                **(
+                    {
+                        "excused": {
+                            str(by): {"runs": r.get("runs"), "minutes": r.get("minutes"), "last_ts": r.get("last_ts")}
+                            for by, r in v["excused"].items()
+                            if isinstance(r, dict)
+                        }
+                    }
+                    if isinstance(v.get("excused"), dict)
+                    else {}
+                ),
             }
             for k, v in promise_stats.items()
             if isinstance(v, dict)
@@ -405,7 +416,7 @@ def render_diagnostic_snapshot_text(snapshot: dict[str, Any]) -> str:
 
     ps = snapshot.get("promise_stats")
     if isinstance(ps, dict) and ps:
-        lines.append("  household_promises (hits since first seen):")
+        lines.append("  household_promises (misses in the last 30 days):")
         for key in sorted(ps):
             lines.append(f"    {key}: hits={ps[key].get('hits')} last={ps[key].get('last_ts')}")
 

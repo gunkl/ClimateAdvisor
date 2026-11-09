@@ -315,7 +315,7 @@
     });
     var ps = s.promise_summary;
     if (ps && ps.total_hits) {
-      b.push(banner('info', ps.total_hits + ' household promise' + (ps.total_hits === 1 ? '' : 's') + ' missed in 24 h',
+      b.push(banner('info', ps.total_hits + ' household promise' + (ps.total_hits === 1 ? '' : 's') + ' missed in the last 30 days',  // Issue #1490 (was mislabelled '24 h')
         (ps.promises || []).map(function (p) { return String(p.label || p.promise).replace(/^\d+: /, '') + ' ×' + p.hits; }).join(' · '),
         [{ label: 'Open in Analysis', href: '#analysis' }], ['status'], 'promises'));
     }

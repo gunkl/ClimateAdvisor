@@ -31,14 +31,18 @@ def _coord(stats):
     return coord
 
 
-_STATS = {
-    "observe_only_silence": {
-        "hits": 2,
-        "first_ts": "2026-10-30T08:00:00+00:00",
-        "last_ts": "2026-10-30T09:30:00+00:00",
-    },
-    "settling_flip": {"hits": 1, "first_ts": "2026-10-29T08:00:00+00:00", "last_ts": "2026-10-29T08:00:00+00:00"},
-}
+def _stats():
+    """Issue #1490: day-bucketed counters dated relative to today, so the summary's 30-day prune keeps them."""
+    from datetime import timedelta  # noqa: PLC0415
+
+    from homeassistant.util import dt as dt_util  # noqa: PLC0415
+
+    now = dt_util.now()
+    yday = now - timedelta(days=1)
+    return {
+        "observe_only_silence": {"days": {now.date().isoformat(): 2}, "last_ts": now.isoformat()},
+        "settling_flip": {"days": {yday.date().isoformat(): 1}, "last_ts": yday.isoformat()},
+    }
 
 
 class TestPromiseSummary:
@@ -46,17 +50,20 @@ class TestPromiseSummary:
         assert _coord({})._promise_summary() is None
         assert _coord(None)._promise_summary() is None
         assert _coord({"settling_flip": {"hits": 0, "first_ts": None, "last_ts": None}})._promise_summary() is None
+        assert _coord({"settling_flip": {"days": {"2020-01-01": 4}, "hits": 4}})._promise_summary() is None
 
     def test_garbage_and_unknown_keys_are_ignored(self):
         stats = {"not_a_promise": {"hits": 9}, "settling_flip": "bad", "observe_only_silence": {"hits": True}}
         assert _coord(stats)._promise_summary() is None
 
     def test_counts_per_promise_and_last_hit_only(self):
-        summary = _coord(_STATS)._promise_summary()
+        stats = _stats()
+        summary = _coord(stats)._promise_summary()
         assert summary["total_hits"] == 3
+        assert summary["window_days"] == 30  # Issue #1490: the counts are the last 30 days
         rows = {r["promise"]: r for r in summary["promises"]}
         assert rows["observe_only_silence"]["hits"] == 2
-        assert rows["observe_only_silence"]["last_hit"] == "2026-10-30T09:30:00+00:00"
+        assert rows["observe_only_silence"]["last_hit"] == stats["observe_only_silence"]["last_ts"]
         assert rows["settling_flip"]["hits"] == 1
         # compact: counts, a label and the last-hit time -- no evidence, no first-seen time, no entity ids
         assert all(set(r) == {"promise", "label", "hits", "last_hit"} for r in summary["promises"])
@@ -65,7 +72,7 @@ class TestPromiseSummary:
 
 class TestPromiseSummaryThroughTheRealApi:
     def test_debug_view_returns_the_summary(self):
-        coord = _coord(_STATS)
+        coord = _coord(_stats())
         request = _make_view_request(coord)
         body = asyncio.run(ClimateAdvisorAutomationStateView().get(request)).json_data
         assert body["promise_summary"]["total_hits"] == 3
@@ -96,7 +103,7 @@ class TestPromiseSummaryThroughTheRealApi:
         return _simulate_status_get(coord, None)
 
     def test_status_api_carries_the_coordinator_data_summary(self):
-        summary = _coord(_STATS)._promise_summary()
+        summary = _coord(_stats())._promise_summary()
         assert self._status({"promise_summary": summary})["promise_summary"] == summary
 
     def test_status_api_is_null_without_a_summary(self):

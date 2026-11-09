@@ -57,12 +57,12 @@ const tile = (page, label) => page.locator('#an-kpis .tile').filter({ has: page.
 const cells = (page, label) => page.locator('#an-days tr').filter({ has: page.locator('th', { hasText: new RegExp('^' + label + '$') }) }).locator('td');
 
 test.describe('Analysis tab in words (#1475)', () => {
-  test('headline tiles: the 14-day window, all-time promises, and the main engine\'s own 4 h miss', async ({ page }) => {
+  test('headline tiles: the 14-day window, 30-day promises (#1490), and the main engine\'s own 4 h miss', async ({ page }) => {
     await openAnalysis(page);
     await expect(tile(page, 'Comfort score').locator('.n')).toHaveText('last 14 days (91 recorded)');
     await expect(tile(page, 'Window advice followed').locator('.n')).toHaveText('13 days with advice, last 14 days');
     await expect(tile(page, 'Manual changes').locator('.n')).toHaveText('last 14 days · 0 today');
-    await expect(tile(page, 'Promises missed').locator('.n')).toHaveText(/^in total · last /);
+    await expect(tile(page, 'Promises missed').locator('.n')).toHaveText(/^last 30 days · last /);
     await expect(tile(page, 'Promises missed').locator('.n')).not.toContainText('24 h');
     await expect(tile(page, 'Prediction error, 4 h').locator('.v')).toHaveText('0.5°');
     await expect(tile(page, 'Prediction error, 4 h').locator('.n')).toHaveText('v4, last 24 h · runs +0.2° warm');
@@ -112,10 +112,10 @@ test.describe('Analysis tab in words (#1475)', () => {
     await expect(cells(page, 'Estimated cost').nth(1)).toHaveText('after the day ends');
   });
 
-  test('the look-ahead bars say they are v3\'s log when v4 is the main engine; promises are all time', async ({ page }) => {
+  test('the look-ahead bars say they are v3\'s log when v4 is the main engine; promises are the last 30 days (#1490)', async ({ page }) => {
     await openAnalysis(page, { promises: null });
-    await expect(page.locator('#an-promises')).toHaveText('None missed so far.');
-    await expect(page.locator('h3', { hasText: 'Household promises missed' })).toContainText('all time');
-    await expect(tile(page, 'Promises missed').locator('.n')).toHaveText('none so far');
+    await expect(page.locator('#an-promises')).toHaveText('None missed in the last 30 days.');
+    await expect(page.locator('h3', { hasText: 'Household promises missed' })).toContainText('last 30 days');
+    await expect(tile(page, 'Promises missed').locator('.n')).toHaveText('none in the last 30 days');
   });
 });

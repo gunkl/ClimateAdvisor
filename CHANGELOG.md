@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.20] — 2026-11-09
+
+- Fix #1490: "Promises missed" now counts the last 30 days, not every miss since install.
+  - **What you'll notice:** the Analysis tile reads "last 30 days" (or "none in the last 30 days"), and the Household promises list and the Status banner say the same. A miss counts for 30 days after the day it happened, then drops off, so the number tells you how the house has been doing lately. The Status banner used to say "missed in 24 h" over the lifetime count; it now says "in the last 30 days".
+  - **Excused time** (the thermostat's own deadband) follows the same 30-day rule.
+  - **After updating:** the old lifetime totals are cleared and counting starts fresh. Diagnostics show the 30-day counts.
+
 ## [0.9.19] — 2026-11-08
 
 - Fix #1483 (part 2): the plan now looks ahead as far as your forecast goes, up to a week.

@@ -3,22 +3,6 @@
  "description": "Real-HA golden divergence ledger (Step 2 #1127). A golden that fails on real Home Assistant must be listed with a class (E environment, F fake artifact, T trigger, P production bug, G golden premise), the failing assertion indexes (-1 = an exception Climate Advisor logged, -2 = a timer left armed after unload) and evidence. An unlisted failure fails; an entry whose scenario now passes, or fails differently, fails. Never edit a golden to remove an entry. failing_outcomes pins WHAT each failing assertion actually produced (assertion index -> actual outcome; -1 -> exception:<types>, -2 -> timer:<callback>), so a worse or different failure of a ledgered assertion fails.",
  "entries": [
   {
-   "scenario": "733_restart_reconcile_clobbers_fresh_nat_vent",
-   "failing_assertions": [
-    0
-   ],
-   "first_difference": "a0@2026-08-21T23:19 expected nat_vent_still_active, real natural_ventilation (sensor_opened emitted twice: 23:15 and 23:19)",
-   "evidence": "The golden's sensor_open carries seed:true, which FakeHass applies with a silent state set so no listener runs and only the 23:19 startup_coalesce sees the open window. Real HA has no silent write: states.async_set always notifies, so the real door/window listener activates nat-vent at 23:15 and the later coalesce re-activates it. The adapter records note 'seed/seed_fresh' on the run. Dump: .pytest_cache/realha/733_restart_reconcile_clobbers_fresh_nat_vent.real.json",
-   "occupant_view": "Same end state for the person (fan on, window open); only the path to it differs. No occupant impact found.",
-   "issue_or_justification": "Trigger divergence. The real analog of 'window was already open before HA started' is a state that exists before the listener subscribes, i.e. a real restart with the sensor open; model it with house.restart in a dedicated real-HA test, not by editing this golden.",
-   "class": "T",
-   "reviewer": "Craftsman triage 2026-10-30 (awaiting human review)",
-   "date": "2026-10-30",
-   "failing_outcomes": {
-    "0": "natural_ventilation"
-   }
-  },
-  {
    "scenario": "cool_all_day_heat_all_day",
    "failing_assertions": [
     1

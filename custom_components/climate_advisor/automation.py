@@ -10978,6 +10978,19 @@ class AutomationEngine:
         if nat_vent_eligible:
             # Adopt the running fan as CA-owned nat-vent
             decision = "adopt-on"
+            if self.dry_run and not self._natural_vent_active:
+                # Issue #1501 (mirror of #1499): observe-only starts no session it did not send (#1304, "no paper
+                # sessions"). Adopting here would record a nat-vent session, a "Fan activated" row and the backstop
+                # for a fan CA is not managing. A session CA really started is re-confirmed below as before. After
+                # re-enable the next reconcile adopts the fan for real.
+                _LOGGER.info(
+                    "[DRY RUN] Fan reconcile: would adopt the running fan as a nat-vent session -- nothing"
+                    " recorded (trigger=%s archetype=%s) role=%s",
+                    trigger,
+                    archetype,
+                    self.role,
+                )
+                return
             # Issue #600: this method has 4 independent callers (ha_restart,
             # backstop_30min, post_grace_expiry, thermostat_state_change) with no
             # coordination between sequential (non-overlapping) triggers — the Issue #561
@@ -11080,6 +11093,22 @@ class AutomationEngine:
                 self._fan_override_active,
             )
             _turn_off_reason = f"{trigger} reconcile — fan running without CA warrant"
+
+            if self.dry_run and not self._fan_active:
+                # Issue #1499: observe-only, and CA does not own this fan. The stop below would come back DRY_RUN, and
+                # since #1304 a DRY_RUN stop keeps the session flags, so the temporary _fan_active = True further down
+                # would be left set: the fan "running" on paper (fan card "active", a false sealed-house alert, a
+                # needless turn-off on re-enable), plus a nat_vent_reconcile_exit row, the #790 lockout and the #446
+                # cooldown for a stop that was never sent. Nothing is sent, so nothing is recorded (#1304, same shape
+                # as #1311's observed-off branch). A session CA really started is still handed to _exit_nat_vent()
+                # below, which keeps it while its fan runs. On re-enable the WHF safety check decides afresh.
+                _LOGGER.info(
+                    "[DRY RUN] Fan reconcile: would stop a fan Climate Advisor does not own -- nothing sent,"
+                    " nothing recorded (trigger=%s) role=%s",
+                    trigger,
+                    self.role,
+                )
+                return
 
             # Issue #446: reconcile_fan_on_startup() is called from 4 different sites
             # (startup coalesce, 30-min backstop, thermostat state-change, post-grace-expiry)

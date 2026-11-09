@@ -3,6 +3,18 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.23] — 2026-11-09
+
+- Fix #1500: on a whole-house fan with no state feedback, the thermostat's own blower is no longer mistaken for the whole-house fan.
+  - **What you'll notice:** when the AC or heat finishes a cycle with the thermostat blower set to "on", Climate Advisor no longer sends a turn-off to the whole-house fan (which it had already turned off), no longer writes "fan running without CA warrant" in the Activity Report, and no longer holds off natural ventilation afterwards.
+  - **Why:** with no reading of the whole-house fan, the fan check used the thermostat's blower as a stand-in. Under the whole-house fan setup the blower is your equipment, not Climate Advisor's fan (#1197). The check now uses Climate Advisor's own record of the fan: a run it started, or your recorded fan run. A ventilation run of Climate Advisor's own is no longer stopped and restarted by a Home Assistant restart.
+  - **Unchanged:** fans that report their state, and the `hvac_fan` (thermostat blower) setup.
+- Fix #1499: with automation switched off, the fan check no longer leaves the whole-house fan "running" on paper.
+  - **What you'll notice:** no more false "the whole-house fan is running while every door and window is closed" alert for a fan that is off, the fan card reads "inactive", and no "ventilation ended" row for ventilation that never ran. Switching automation back on no longer logs "sealed house — stopping whole-house fan" for a fan that was already off.
+  - **Why:** to stop a fan, the check briefly marked it as Climate Advisor's own. With automation off the stop isn't sent, and that mark stayed. Observe-only now sends nothing and records nothing for a fan Climate Advisor doesn't own. After automation is switched back on, the usual safety check still stops a fan left running in a closed-up house.
+- Fix #1501: with automation switched off, a whole-house fan you start is no longer recorded as Climate Advisor's natural-ventilation session.
+  - **What you'll notice:** no "Fan activated: adopting as CA-owned" row and no natural-ventilation session on Status for a fan Climate Advisor isn't managing. Once automation is back on, the next fan check takes the fan over as before when ventilating is worthwhile.
+
 ## [0.9.22] — 2026-11-09
 
 - Fix #1497: the full Prediction accuracy view is now right on the new dashboard's Analysis tab.

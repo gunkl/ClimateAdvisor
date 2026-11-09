@@ -54,7 +54,14 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .const import V4_ARCHIVE_FILE, V4_ARCHIVE_LEADS, V4_ARCHIVE_MAX_DAYS, V4_MODEL_FILE
+from .const import (
+    V3_ARCHIVE_FILE,
+    V3_ARCHIVE_LEADS,
+    V4_ARCHIVE_FILE,
+    V4_ARCHIVE_LEADS,
+    V4_ARCHIVE_MAX_DAYS,
+    V4_MODEL_FILE,
+)
 from .storage_paths import resolve_entry_scoped_path
 
 _LOGGER = logging.getLogger(__name__)
@@ -76,9 +83,9 @@ class _Line:
 
     __slots__ = ("base", "cols")
 
-    def __init__(self) -> None:
+    def __init__(self, leads: tuple[str, ...] = V4_ARCHIVE_LEADS) -> None:
         self.base: int | None = None
-        self.cols: dict[str, array] = {lead: array("f") for lead in V4_ARCHIVE_LEADS}
+        self.cols: dict[str, array] = {lead: array("f") for lead in leads}
 
     def __len__(self) -> int:
         return len(next(iter(self.cols.values()))) if self.cols else 0
@@ -162,17 +169,26 @@ class _Line:
 
 
 class V4Archive:
-    """Rolling, persisted, first-write-wins archive of v4 predictions."""
+    """Rolling, persisted, first-write-wins archive of v4 predictions.
+
+    ``leads`` / ``path`` let another engine keep the same kind of archive in its own file (``V3Archive``, Issue
+    #1492); the defaults are v4's.
+    """
 
     def __init__(
         self,
         config_dir: Path,
         max_days: int = V4_ARCHIVE_MAX_DAYS,
         entry_id: str = "",
+        *,
+        leads: tuple[str, ...] = V4_ARCHIVE_LEADS,
+        path: Path | None = None,
     ) -> None:
         self._entry_id = entry_id
+        self._leads = tuple(leads)
         # Entry-scoped like the other zone files (Issue #796); a brand-new file, so no legacy file to migrate.
-        self._path = resolve_entry_scoped_path(config_dir, V4_ARCHIVE_FILE, entry_id)
+        self._path = path if path is not None else resolve_entry_scoped_path(config_dir, V4_ARCHIVE_FILE, entry_id)
+        self._file_prefix = self._path.stem + "_"
         self._max_days = max_days
         self._lines: dict[str, _Line] = {}
         self.ca: dict[str, str | None] = {}  # how "_ca" is derived (see module docstring)
@@ -287,14 +303,14 @@ class V4Archive:
     def data(self, value: dict[str, dict[int, dict[str, float]]]) -> None:
         self._lines = {}
         for sensor, rows in value.items():
-            line = self._lines.setdefault(sensor, _Line())
+            line = self._lines.setdefault(sensor, _Line(self._leads))
             for epoch, vals in rows.items():
                 for lead, v in vals.items():
                     line.put_if_absent(int(epoch), lead, float(v))
 
     def put(self, sensor: str, epoch: int, lead: str, value: float) -> bool:
         """Store one value (first write wins); True when new. For tools and tests (``record`` is the live path)."""
-        added = self._lines.setdefault(sensor, _Line()).put_if_absent(int(epoch), lead, float(value))
+        added = self._lines.setdefault(sensor, _Line(self._leads)).put_if_absent(int(epoch), lead, float(value))
         self.dirty = self.dirty or added
         return added
 
@@ -302,7 +318,7 @@ class V4Archive:
         rows: dict[int, dict[str, float]] = {}
         for epoch in slots:
             vals = {}
-            for lead in V4_ARCHIVE_LEADS:
+            for lead in self._leads:
                 derived = sensor == CA_LINE and self._ca_active()
                 v = self._ca_value(epoch, lead) if derived else self._lines[sensor].get(epoch, lead)
                 if v is not None:
@@ -349,7 +365,7 @@ class V4Archive:
         for sensor, rows in sensors.items():
             if not isinstance(sensor, str) or not isinstance(rows, dict):
                 continue
-            line = _Line()
+            line = _Line(self._leads)
             for key, vals in rows.items():
                 try:
                     epoch = int(key)
@@ -370,7 +386,7 @@ class V4Archive:
     def save(self) -> bool:
         """Atomic write to disk (tempfile + os.replace), 0o600 on non-Windows. True on success. Never raises."""
         try:
-            leads = list(V4_ARCHIVE_LEADS)
+            leads = list(self._leads)
             sensors = {}
             for sensor, line in list(self._lines.items()):
                 sensors[sensor] = {str(epoch): [line.get(epoch, lead) for lead in leads] for epoch in line.slots()}
@@ -390,9 +406,7 @@ class V4Archive:
 
         tmp_path_str: str | None = None
         try:
-            tmp_fd, tmp_path_str = tempfile.mkstemp(
-                dir=self._path.parent, prefix="climate_advisor_v4_archive_", suffix=".tmp"
-            )
+            tmp_fd, tmp_path_str = tempfile.mkstemp(dir=self._path.parent, prefix=self._file_prefix, suffix=".tmp")
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 f.write(serialized)
             os.replace(tmp_path_str, str(self._path))
@@ -450,12 +464,12 @@ class V4Archive:
         prev_ok = prev is not None and 0 < now_ts - prev[0] <= _FILL_MAX_GAP_S
         for sensor, curve in curves.items():
             prev_curve = prev[1].get(sensor) if prev_ok and prev is not None else None
-            for lead in V4_ARCHIVE_LEADS:
+            for lead in self._leads:
                 lead_s = _lead_seconds(lead)
                 target = now_ts + lead_s
                 near = _nearest(curve, target, 600)
                 if near is not None:
-                    line = self._lines.setdefault(sensor, _Line())
+                    line = self._lines.setdefault(sensor, _Line(self._leads))
                     if line.put_if_absent(_slot_of(near[0]), lead, near[1]):
                         added += 1
                 if prev_curve:
@@ -506,7 +520,7 @@ class V4Archive:
             if (
                 best is not None
                 and best[0] <= tol
-                and self._lines.setdefault(sensor, _Line()).put_if_absent(slot, lead, best[2])
+                and self._lines.setdefault(sensor, _Line(self._leads)).put_if_absent(slot, lead, best[2])
             ):
                 added += 1
         return added
@@ -575,6 +589,25 @@ class V4Archive:
     def snapshot(self) -> dict[str, dict[int, dict[str, float]]]:
         """A copy of the archive in the legacy dict shape that is safe to read from another thread."""
         return self.data
+
+
+class V3Archive(V4Archive):
+    """What v3 (today's ODE prediction) said 1/4/12/24 h ahead for the reading Climate Advisor uses (Issue #1492).
+
+    Occupant view: lets the Prediction accuracy scorecard compare v4 with v3 at every look-ahead; before, only v3's 4 h
+    value was kept (chart-log ``pred_indoor``). Same format, first-write-wins rule, gap fill, retention and
+    persistence contract as ``V4Archive``, in its own entry-scoped ``V3_ARCHIVE_FILE``; one stored line, ``"_ca"``.
+    Record-only: no decision reads it.
+    """
+
+    def __init__(self, config_dir: Path, max_days: int = V4_ARCHIVE_MAX_DAYS, entry_id: str = "") -> None:
+        super().__init__(
+            config_dir,
+            max_days,
+            entry_id,
+            leads=V3_ARCHIVE_LEADS,
+            path=resolve_entry_scoped_path(config_dir, V3_ARCHIVE_FILE, entry_id),
+        )
 
 
 def _lead_seconds(lead: str) -> float:

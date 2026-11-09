@@ -291,6 +291,7 @@ from .const import (
     THRESHOLD_WARM,
     TREND_THRESHOLD_MODERATE,
     TREND_THRESHOLD_SIGNIFICANT,
+    V3_ARCHIVE_SAVE_MIN_INTERVAL_S,
     V4_ARCHIVE_SAVE_MIN_INTERVAL_S,
     V4_CONTROL_HORIZON_HOURS,
     V4_FIT_HOUR,
@@ -471,7 +472,7 @@ from .timeline_surfaces import (
     tou_bank_end_label,
     window_card_text,
 )
-from .v4_archive import V4Archive, V4ModelStore
+from .v4_archive import V3Archive, V4Archive, V4ModelStore
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
     WHF_OWN_COMMAND_ECHO_S,
@@ -947,6 +948,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R1: prediction engine v4 in shadow. The archive keeps what v4 said 1/4/12/24 h ahead (first write
         # wins); load() is blocking -> async_restore_state(). Nothing on a decision path reads any of these.
         self._v4_archive = V4Archive(Path(hass.config.config_dir), entry_id=self._entry_id)
+        # Issue #1492: what v3 said 1/4/12/24 h ahead, same first-write-wins format in its own file, so the live
+        # scorecard can compare v3 at every look-ahead. Written only while v3's curve is built; read by nothing that
+        # decides. load() is blocking -> async_restore_state().
+        self._v3_archive = V3Archive(Path(hass.config.config_dir), entry_id=self._entry_id)
+        self._v3_last_archive_save: float | None = None
         self._v4_store = V4ModelStore(Path(hass.config.config_dir), entry_id=self._entry_id)
         self._v4_fit_running = False
         self._v4_fit_task: asyncio.Task[Any] | None = None
@@ -2187,6 +2193,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R1: same contract for the v4 predictions archive (load() never raises).
         if getattr(self, "_v4_archive", None) is not None:
             await self._executor_job(self._v4_archive.load)
+        if getattr(self, "_v3_archive", None) is not None:  # Issue #1492: same contract (load() never raises)
+            await self._executor_job(self._v3_archive.load)
         if getattr(self, "_v4_store", None) is not None:
             await self._executor_job(self._v4_store.load)
             self._v4_last_fit = dict(self._v4_store.last_fit or {})
@@ -4445,6 +4453,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if _ae_dt > _archive_cutoff:
                     break
                 self._pred_archive.setdefault(self._pred_archive_key(_ae_dt), _ae["temp"])
+            await self._record_v3_archive(dt_util.now())
 
             self._check_stuck_grace()
 
@@ -7367,6 +7376,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "v4 shadow: predicted=%s inputs=%d archived=%d cost=%.1fms", bool(predictions), len(inputs), added, cost_ms
         )
 
+    async def _record_v3_archive(self, now: datetime) -> None:
+        """Archive v3's curve 1/4/12/24 h ahead (Issue #1492), first write wins; save at most hourly. Never raises.
+
+        Occupant view: the scorecard on the Prediction accuracy page compares v4 against v3 at each look-ahead; before
+        this only the 4 h value was kept, so v3's 1, 12 and 24 h cells could never fill in. Record-only: no decision
+        reads this archive. Nothing is written while v3's curve is not built (v3 neither primary nor shadow).
+        """
+        archive = getattr(self, "_v3_archive", None)
+        if archive is None or not self._last_predicted_indoor:
+            return
+        try:
+            curve: list[tuple[datetime, float]] = []
+            for entry in self._last_predicted_indoor:
+                try:
+                    curve.append((datetime.fromisoformat(entry["ts"]), float(entry["temp"])))
+                except KeyError, TypeError, ValueError:
+                    continue
+            if curve:
+                archive.record(now, {"_ca": curve}, "_ca")
+            mono = _monotonic()
+            last = self._v3_last_archive_save
+            if archive.dirty and (last is None or mono - last >= V3_ARCHIVE_SAVE_MIN_INTERVAL_S):
+                self._v3_last_archive_save = mono
+                await self._executor_job(self._v3_archive.save)
+        except Exception:  # noqa: BLE001 - record-only data must never break a coordinator cycle
+            _LOGGER.warning("v3 archive: could not record this cycle's curve", exc_info=True)
+
     async def _v4_flush_on_shutdown(self) -> None:
         """Write the v4 archive and model file once more on unload if they changed. Never raises.
 
@@ -7374,7 +7410,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         archive = getattr(self, "_v4_archive", None)
         store = getattr(self, "_v4_store", None)
+        v3_archive = getattr(self, "_v3_archive", None)  # Issue #1492: v3's look-ahead archive, same once-more write
         try:
+            if v3_archive is not None and v3_archive.dirty and not await self._executor_job(self._v3_archive.save):
+                _LOGGER.warning("v3 archive: could not be written at shutdown; the last hour of v3 predictions is lost")
             for attempt in (1, 2):
                 if archive is not None and archive.dirty and not await self._executor_job(self._v4_archive.save):
                     if attempt == 2:
@@ -7419,6 +7458,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "config_dir": Path(self.hass.config.config_dir),
             "chart_rows": self._chart_log.raw_entries(),
             "archive": self._v4_archive,
+            "v3_archive": getattr(self, "_v3_archive", None),  # Issue #1492: v3 at 1/4/12/24 h for the scorecard
             "model": self.v4_model_summary(),
             "sensors_meta": meta,
             "primary_engine": self.primary_engine_id(),

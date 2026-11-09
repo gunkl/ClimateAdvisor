@@ -3,6 +3,16 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.21] — 2026-11-09
+
+- Fix #1492: the Prediction accuracy page's "How each model has scored" table now follows the last 30 days of live predictions. It used to change only when a new version was deployed.
+  - **What you'll notice:** the table is headed "Last 30 days, live" with the dates it covers, and its numbers are worked out again each time the page loads, from the predictions Climate Advisor records every 30 minutes. A week where v4 did better or worse shows up straight away, and misses older than 30 days drop out.
+  - **Rows:** the reading Climate Advisor uses, for heating days and summer days, 1, 4, 12 and 24 hours ahead. Each row shows v4's, v3's and the "no change" guess's average miss, v4's bias, how many points it was scored on, and whether v4 beat v3 and "no change". The rule is the same as before: v4 has to beat both, stay within ±0.5 °F on average, have 72 points, and have answered at least 80% of them.
+  - **Not enough data yet:** a row with fewer than 72 points says so instead of showing a verdict.
+  - **v3 at more look-aheads:** v3 used to be recorded only 4 hours ahead. It is now also recorded 1, 12 and 24 hours ahead (its forecast reaches about 47 hours), in a new file per zone, `climate_advisor_v3_archive_<zone>.json`, deleted with the zone. Until there is some of it, those v3 cells read "collecting". v3 is recorded only while it is the main or the comparison engine; otherwise the cells read "v3 off".
+  - **Seasons:** a day counts as heating or summer by what the heating, the AC and the whole-house fan actually did that day. The backtest tool now uses the same rule from the integration, so the two can't drift apart.
+  - **Still information only:** nothing in the table switches an engine or changes what the house does. The backtest still runs at deploy, but only to fill the chart's history from before live v4 was recorded. Its own scores no longer feed the table.
+
 ## [0.9.19] — 2026-11-08
 
 - Fix #1483 (part 2): the plan now looks ahead as far as your forecast goes, up to a week.

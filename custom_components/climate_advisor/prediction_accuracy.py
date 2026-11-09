@@ -12,12 +12,16 @@ Sources, merged with live data preferred:
 * live: the v4 archive (``v4_archive.V4Archive``, first write wins) scored against the chart log;
 * backtest: ``climate_advisor_v4_backtest_<entry_id>.json`` written by ``tools/predict_backtest.py --publish``
   (history from before the shadow ran). Shape used (lane B): ``points`` = sensor -> lead ->
-  [{t, actual, flat, v4, v3}]; ``gate`` rows (sensor, season, lead, v4, v3, flat, bias, n, pass, scored) and
-   ``gate_summary``. Every key is optional. A backtest point is used only for a 30-minute slot the live archive
-  does not cover.
+  [{t, actual, flat, v4, v3}]. Every key is optional. A backtest point is used only for a 30-minute slot the live
+  archive does not cover. The file's own ``gate`` / ``gate_summary`` are NOT read here any more (Issue #1492).
 
-v3 exists only for look-ahead 4 h of the reading Climate Advisor uses (``_ca``): its first-write-wins archive is
-written 4 h ahead and stored as chart-log ``pred_indoor``.
+The "How each model has scored" table (payload ``gate`` / ``gate_summary``) is computed live on every request by
+``live_scorecard`` over the last ``SCORECARD_WINDOW_DAYS`` (30) days ending now, from the live v4 archive, v3's logs and
+the chart log; it no longer changes only when the owner deploys (Issue #1492). Information only: it switches nothing.
+
+v3 exists only for the reading Climate Advisor uses (``_ca``): at 4 h its first-write-wins archive stored as chart-log
+``pred_indoor``; at 1/4/12/24 h its own ``V3_ARCHIVE_FILE`` archive (Issue #1492, filled from 0.9.x on), read where the
+chart log has no 4 h value.
 
 Each engine is scored on its own points (Issue #1400): v3 from its logged ``pred_indoor``, the "no change" baseline
 from the chart log's own readings, v4 from its archive and the backtest. A zone whose v4 archive is still empty
@@ -36,7 +40,17 @@ from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
-from .const import V4_ARCHIVE_LEADS, V4_BACKTEST_FILE
+from . import hvac_season
+from .const import (
+    ENGINE_V3,
+    SCORECARD_BIAS_LIMIT_F,
+    SCORECARD_LEADS,
+    SCORECARD_MIN_COVERAGE,
+    SCORECARD_MIN_N,
+    SCORECARD_WINDOW_DAYS,
+    V4_ARCHIVE_LEADS,
+    V4_BACKTEST_FILE,
+)
 from .storage_paths import resolve_entry_scoped_path
 from .temperature import UNIT_SYMBOL, display_delta, display_temp
 from .v4_archive import V4Archive, lead_hours, slot_key
@@ -204,6 +218,7 @@ def build_prediction_accuracy(
     sleep_sensor: str | None = None,
     sleep_time: Any = None,
     wake_time: Any = None,
+    v3_archive: V4Archive | None = None,
 ) -> dict[str, Any]:
     """The endpoint payload. ``lead``/``range_str`` must already be valid (the view resets bad values to defaults).
 
@@ -234,6 +249,14 @@ def build_prediction_accuracy(
     actual = _row_series(chart_rows, actual_of, start - lead_s - _MATCH_TOLERANCE_S, end + _MATCH_TOLERANCE_S)
     has_v3 = sensor == CA_SENSOR and lead == DEFAULT_LEAD
     v3_series = _row_series(chart_rows, lambda r: r.get("pred_indoor"), start, end) if has_v3 else None
+    # Issue #1492: v3's own look-ahead archive answers the leads the chart log never had (and 4 h slots it lacks).
+    v3_extra: dict[int, float] = {}
+    if sensor == CA_SENSOR and v3_archive is not None:
+        try:
+            v3_extra = v3_archive.series(CA_SENSOR, lead, start, end)
+        except Exception:  # noqa: BLE001 - a missing comparison line beats no page
+            _LOGGER.debug("prediction accuracy: v3 archive read failed", exc_info=True)
+    has_v3 = has_v3 or bool(v3_extra)
 
     # One point per 30-minute slot. Every chart row in the window gives one (its actual, v3's logged value, the "no
     # change" value), so v3 and the baseline are scored even while v4 has nothing (Issue #1400); v4 joins its slots.
@@ -242,7 +265,7 @@ def build_prediction_accuracy(
         t = _epoch(row.get("ts"))
         if t is None or not (start <= t < end) or row.get("event") is not None:
             continue
-        if _num(actual_of(row)) is None and not (has_v3 and _num(row.get("pred_indoor")) is not None):
+        if _num(actual_of(row)) is None and not (v3_series is not None and _num(row.get("pred_indoor")) is not None):
             continue
         points.setdefault(float(slot_key(datetime.fromtimestamp(t, tz))), {})
     # v4: live archive first, then backtest points for slots the live archive does not cover.
@@ -288,6 +311,8 @@ def build_prediction_accuracy(
             row["actual"] = a
         if has_v3:
             v3 = v3_series.nearest(t) if v3_series is not None else None
+            if v3 is None:
+                v3 = v3_extra.get(int(t))
             if v3 is None:
                 v3 = p.get("_bt_v3")
             if v3 is not None:
@@ -370,16 +395,21 @@ def build_prediction_accuracy(
             _LOGGER.debug("prediction accuracy: sensor swap times failed", exc_info=True)
             swaps = []
 
+    # Issue #1492: the scorecard is live (last 30 days ending now, whatever window the chart above shows).
     gate_out: list[dict[str, Any]] = []
-    raw_gate = backtest.get("gate") if isinstance(backtest, Mapping) else None
-    for g in raw_gate if isinstance(raw_gate, list) else []:
-        if not isinstance(g, Mapping):
-            continue
-        item = dict(g)
-        for field in ("v4", "v3", "flat", "bias"):
-            if _num(item.get(field)) is not None:
-                item[field] = display_delta(float(item[field]), unit, 2)
-        gate_out.append(item)
+    gate_summary: dict[str, Any] | None = None
+    try:
+        gate_out, gate_summary = live_scorecard(
+            zone=zone,
+            now=now,
+            unit=unit,
+            chart_rows=chart_rows,
+            archive=archive,
+            v3_archive=v3_archive,
+            v3_running=ENGINE_V3 in (primary_engine, shadow_engine),
+        )
+    except Exception:  # noqa: BLE001 - information only: an empty table beats no page
+        _LOGGER.warning("prediction accuracy: the live scorecard failed; the table is empty", exc_info=True)
 
     model_out = {"confidence": "none", "fitted_at": None, "span_days": None}
     if isinstance(model, Mapping) and model.get("has_model"):
@@ -409,9 +439,175 @@ def build_prediction_accuracy(
         "primary_engine": primary_engine,
         "shadow_engine": shadow_engine,
         "ca_swaps": [_iso(t, tz) for t in swaps],
-        "gate_summary": dict(backtest["gate_summary"])
-        if isinstance(backtest, Mapping) and isinstance(backtest.get("gate_summary"), Mapping)
-        else None,
+        "gate_summary": gate_summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Live scorecard: "How each model has scored" (Issue #1492)
+# ---------------------------------------------------------------------------
+
+
+def live_scorecard(
+    *,
+    zone: str,
+    now: datetime,
+    unit: str,
+    chart_rows: Sequence[Mapping[str, Any]],
+    archive: V4Archive,
+    v3_archive: V4Archive | None = None,
+    v3_running: bool = True,
+    window_days: float = SCORECARD_WINDOW_DAYS,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """DP-8 rows for the reading Climate Advisor uses (``_ca``), scored live over ``window_days`` ending ``now``.
+
+    Occupant view: the table on the Prediction accuracy page shows how each prediction engine has done lately; before
+    this it changed only when a new version was deployed (it was copied from the deploy-time backtest). Information
+    only: nothing reads it to switch an engine or a decision.
+
+    One row per scored season (``hvac_season.SCORED_SEASONS``: heating, summer) and look-ahead (``SCORECARD_LEADS``).
+    A point is a 30-minute slot ``t`` inside the window with an actual reading at ``t`` and at ``t - lead`` (the "no
+    change" guess); its season is that of the local day the prediction was made (``t - lead``), by what the HVAC did
+    that day (``hvac_season.day_seasons``, the backtest's own rule). Engines:
+
+    * v4: the live archive (``archive``), value written ``lead`` ahead;
+    * v3: at 4 h the chart log's ``pred_indoor`` (its first-write-wins 4 h archive), else / at other leads its own
+      look-ahead archive (``v3_archive``). With no v3 point at all in the row the row is scored on v4 and "no change"
+      only and v3 reads ``collecting`` (``off`` when v3 is neither the main nor the comparison engine).
+
+    As in the backtest, a row's MAEs are taken over the SAME points (v4, v3 and "no change" all present, or v4 and
+    "no change" while v3 is collecting); ``coverage`` is the share of the row's points v4 answered. ``pass`` =
+    scored AND v4 < v3 AND v4 < "no change" AND |bias| <= ``SCORECARD_BIAS_LIMIT_F`` AND coverage >=
+    ``SCORECARD_MIN_COVERAGE``; ``scored`` needs n >= ``SCORECARD_MIN_N`` and all three MAEs, else ``reasons`` says
+    why ("not enough data yet", "v3 still collecting"). Errors are predicted - actual (positive = too warm); the
+    row values are converted to ``unit`` here, the pass rule is judged in degrees F. Pure; never reads a file.
+    """
+    tz = now.tzinfo or datetime.now().astimezone().tzinfo
+    assert tz is not None
+    end = now.timestamp()
+    start = end - window_days * 86400
+    max_lead_s = max(lead_hours(ld) for ld in SCORECARD_LEADS) * 3600
+    lo = start - max_lead_s - _MATCH_TOLERANCE_S
+    actual = _row_series(chart_rows, lambda r: r.get("indoor"), lo, end + _MATCH_TOLERANCE_S)
+    logged_v3 = _row_series(chart_rows, lambda r: r.get("pred_indoor"), start - _MATCH_TOLERANCE_S, end)
+    window_rows = [r for r in chart_rows if (t := _epoch(r.get("ts"))) is not None and lo - 86400 <= t <= end]
+    seasons = hvac_season.day_seasons(window_rows, tz)
+    slots = sorted(
+        {
+            slot_key(datetime.fromtimestamp(t, tz))
+            for r in window_rows
+            if r.get("event") is None
+            and (t := _epoch(r.get("ts"))) is not None
+            and start <= t < end
+            and _num(r.get("indoor")) is not None
+        }
+    )
+    slots = [s for s in slots if start <= s < end]  # a row a few seconds before the window can round into it
+
+    by_key: dict[tuple[str, str], list[tuple[float, float, float | None, float | None]]] = {
+        (season, lead): [] for season in hvac_season.SCORED_SEASONS for lead in SCORECARD_LEADS
+    }
+    for lead in SCORECARD_LEADS:
+        lead_s = lead_hours(lead) * 3600
+        v4_line = archive.series(CA_SENSOR, lead, start, end)
+        v3_line: dict[int, float] = {}
+        if v3_archive is not None:
+            v3_line = v3_archive.series(CA_SENSOR, lead, start, end)
+        for t in slots:
+            season = seasons.get(datetime.fromtimestamp(t - lead_s, tz).date(), hvac_season.SHOULDER)
+            key = (season, lead)
+            if key not in by_key:
+                continue
+            a = actual.nearest(t)
+            flat = actual.nearest(t - lead_s)
+            if a is None or flat is None:
+                continue
+            v3 = logged_v3.nearest(t) if lead == "4h" else None
+            if v3 is None:
+                v3 = v3_line.get(t)
+            by_key[key].append((a, flat, v4_line.get(t), v3))
+    rows = [_score_row(zone, season, lead, by_key[(season, lead)], v3_running) for season, lead in by_key]
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for field in ("v4", "v3", "flat", "bias"):
+            if item.get(field) is not None:
+                item[field] = display_delta(float(item[field]), unit, 2)
+        out.append(item)
+    summary = {
+        "live": True,
+        "window_days": window_days,
+        "start": _iso(start, tz),
+        "end": _iso(end, tz),
+        "min_n": SCORECARD_MIN_N,
+        "passed": sum(1 for r in rows if r["pass"]),
+        "scored": sum(1 for r in rows if r["scored"]),
+        "total": len(rows),
+    }
+    return out, summary
+
+
+def _score_row(
+    zone: str,
+    season: str,
+    lead: str,
+    points: list[tuple[float, float, float | None, float | None]],
+    v3_running: bool,
+) -> dict[str, Any]:
+    """One DP-8 row from ``(actual, flat, v4, v3)`` points (degrees F); see ``live_scorecard``."""
+    with_v3 = [p for p in points if p[3] is not None]
+    v3_state = "ok" if with_v3 else ("collecting" if v3_running else "off")
+    base = with_v3 if with_v3 else points
+    common = [p for p in base if p[2] is not None]
+    n = len(common)
+    coverage = round(n / len(base), 3) if base else None
+
+    def mae(idx: int) -> float | None:
+        errs = [abs(p[idx] - p[0]) for p in common if p[idx] is not None]  # type: ignore[operator]
+        return round(sum(errs) / len(errs), 3) if errs else None
+
+    v4, flat = mae(2), mae(1)
+    v3 = mae(3) if with_v3 else None
+    bias = round(sum(p[2] - p[0] for p in common) / n, 3) if n else None  # type: ignore[operator]
+    beats_v3 = (v4 < v3) if v4 is not None and v3 is not None else None
+    beats_flat = (v4 < flat) if v4 is not None and flat is not None else None
+    bias_ok = abs(bias) <= SCORECARD_BIAS_LIMIT_F if bias is not None else None
+    scored = n >= SCORECARD_MIN_N and v4 is not None and flat is not None and v3 is not None
+    reasons: list[str] = []
+    if n < SCORECARD_MIN_N:
+        reasons.append(f"not enough data yet (n={n}, need {SCORECARD_MIN_N})")
+    if v3_state == "collecting":
+        reasons.append("v3 predictions at this look-ahead are still being collected")
+    elif v3_state == "off":
+        reasons.append("v3 is not running (neither the main nor the comparison engine)")
+    if scored:
+        if not beats_v3:
+            reasons.append("v4 not better than v3")
+        if not beats_flat:
+            reasons.append("v4 not better than no-change")
+        if not bias_ok:
+            reasons.append(f"|bias| {abs(bias or 0.0):.2f} > {SCORECARD_BIAS_LIMIT_F}")
+        if coverage is not None and coverage < SCORECARD_MIN_COVERAGE:
+            reasons.append(f"coverage {coverage:.2f} < {SCORECARD_MIN_COVERAGE}")
+    return {
+        "zone": zone,
+        "sensor": CA_SENSOR,
+        "season": season,
+        "lead": lead,
+        "v4": v4,
+        "v3": v3,
+        "flat": flat,
+        "bias": bias,
+        "n": n,
+        "coverage": coverage,
+        "v3_state": v3_state,
+        "beats_v3": beats_v3,
+        "beats_flat": beats_flat,
+        "bias_ok": bias_ok,
+        "scored": scored,
+        "pass": scored and not reasons,
+        "reasons": reasons,
     }
 
 

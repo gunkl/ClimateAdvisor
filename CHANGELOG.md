@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.22] — 2026-11-09
+
+- Fix #1497: the full Prediction accuracy view is now right on the new dashboard's Analysis tab.
+  - **What you'll notice:** the Analysis tab's Prediction accuracy card shows the chart, the score tiles and "How each model has scored", with the same Sensor, Predicted and range buttons as the stand-alone page. Drag or pinch to zoom works there too. It follows the zone you pick at the top of the dashboard. "Open on its own page" still opens the full-width page in the same view.
+  - **Why it works on a phone now:** the view is drawn straight into the dashboard, not in a frame inside it, so it uses the same Home Assistant login as the rest of the dashboard (the #1491 problem stays fixed).
+  - **What the house does is unchanged:** this is display only.
+
 ## [0.9.21] — 2026-11-09
 
 - Fix #1492: the Prediction accuracy page's "How each model has scored" table now follows the last 30 days of live predictions. It used to change only when a new version was deployed.

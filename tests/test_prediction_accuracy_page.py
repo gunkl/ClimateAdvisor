@@ -14,7 +14,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "custom_components" / "climate_advisor" / "frontend"
-PAGE = (FRONTEND / "prediction_accuracy.html").read_text(encoding="utf-8")
+# Issue #1497: the view (controls, chart, tiles, scorecard, auth, requests) is the shared pa_view.js, which the page
+# and the new dashboard's Analysis tab both mount; the page adds its header. PAGE is the two together.
+PAGE_HTML = (FRONTEND / "prediction_accuracy.html").read_text(encoding="utf-8")
+VIEW = (FRONTEND / "pa_view.js").read_text(encoding="utf-8")
+PAGE = PAGE_HTML + "\n" + VIEW
 INDEX = (
     (FRONTEND / "index.html").read_text(encoding="utf-8")
     + "\n"
@@ -172,7 +176,7 @@ def test_units_come_from_response():
 
 def test_only_bundled_libraries():
     srcs = re.findall(r'<script[^>]+src="([^"]+)"', PAGE)
-    assert sorted(srcs) == ["chart.umd.min.js", "chartjs-plugin-zoom.min.js", "hammer.min.js"]
+    assert sorted(srcs) == ["chart.umd.min.js", "chartjs-plugin-zoom.min.js", "hammer.min.js", "pa_view.js"]
     for s in srcs:
         assert (FRONTEND / s).is_file()
     assert "http://" not in PAGE and "https://" not in PAGE
@@ -263,3 +267,30 @@ def test_sensor_buttons_without_data_are_labelled_or_disabled():
     assert "has_v4 === false" in av and "has_readings === false" in av
     assert "'no v4 data yet'" in av and "#1422" in av
     assert "aria-disabled" in _func("renderControls")
+
+
+# ---- Issue #1497 -------------------------------------------------------------------------------
+
+
+def test_page_mounts_the_shared_view_and_keeps_its_own_header():
+    """The page is its header (zone picker, Back to dashboard) around the shared view; the view's markup, styles and
+    code live once, in pa_view.js."""
+    assert PAGE_HTML.index('<script src="chartjs-plugin-zoom.min.js">') < PAGE_HTML.index('<script src="pa_view.js">')
+    assert "CAPredictionAccuracy.mount($('pa-root'), { zone: zone, onZones: onZones })" in PAGE_HTML
+    assert "CAPredictionAccuracy.setZone(ev.target.value)" in PAGE_HTML
+    for header_id in ('id="zone-select"', 'id="zone-wrap"', 'id="back-link"'):
+        assert header_id in PAGE_HTML and header_id not in VIEW, header_id
+    # nothing of the view is left inline in the page
+    for view_bit in (
+        'id="pa-chart"',
+        'id="gate-table"',
+        "function renderTiles",
+        "function authedFetch",
+        ".tile {",
+        "How well each prediction engine has forecast this house",  # the closing note, once
+    ):
+        assert view_bit not in PAGE_HTML and view_bit in VIEW, view_bit
+    # the view's styles are scoped, so mounting it never restyles the dashboard around it
+    css = re.search(r"var CSS = \[(.*?)\]\.join", VIEW, re.DOTALL).group(1)
+    rules = re.findall(r"'([^']*)\{", css)
+    assert rules and all(all(sel.strip().startswith(".pa-view") for sel in r.split(",")) for r in rules), rules

@@ -451,8 +451,8 @@ PARITY = [
     (
         ["prediction-accuracy-link"],
         "prediction-accuracy-link",
-        "Analysis 'Prediction accuracy': a summary and a same-frame link to R1's page (Issue #1491: never embedded)",
-        ['id="an-pa-summary"', 'id="prediction-accuracy-link"'],
+        "Analysis 'Prediction accuracy': R1's view drawn in the card (shared pa_view.js, Issue #1497) and a same-frame link (Issue #1491: never framed)",
+        ['id="an-pa-view"', "CAPredictionAccuracy", 'id="prediction-accuracy-link"'],
         "placed",
         "",
     ),
@@ -682,6 +682,7 @@ def test_no_page_has_an_unscoped_request_path():
         **JS,
         "index.html": INDEX,
         "prediction_accuracy.html": (FE / "prediction_accuracy.html").read_text("utf-8"),
+        "pa_view.js": (FE / "pa_view.js").read_text("utf-8"),  # Issue #1497: the accuracy view, shared
     }
     for name, src in pages.items():
         assert "noZone" not in src, name
@@ -824,9 +825,7 @@ def test_accuracy_page_is_never_framed_or_opened_in_a_new_tab_1491():
         assert tag, link_id
         assert "target=" not in tag.group(0), link_id
         assert 'href="prediction_accuracy.html"' in tag.group(0), link_id
-    # the card keeps a summary of the request load() already makes (it works on the phone)
     js = JS["nd_analysis.js"]
-    assert 'id="an-pa-summary"' in HTML and "function renderAccuracy()" in js and "renderAccuracy();" in js
     # each link remembers the tab it left, so "Back to dashboard" (entry.html, no #tab) returns to it
     assert "ND.rememberReturnTab('analysis')" in js
     assert "ND.rememberReturnTab('debug')" in JS["nd_debug.js"]
@@ -837,12 +836,34 @@ def test_ha_login_lookup_also_reaches_the_top_window_1491():
     """Issue #1491 belt and braces: each page's HA-login lookup tries the parent, then the top window."""
     pages = {
         "nd_core.js": JS["nd_core.js"],
-        "prediction_accuracy.html": (FE / "prediction_accuracy.html").read_text("utf-8"),
+        "pa_view.js": (FE / "pa_view.js").read_text("utf-8"),  # Issue #1497: the accuracy page's view and auth
         "index.html": (FE / "index.html").read_text("utf-8"),
     }
     for name, src in pages.items():
         assert "[window.parent, window.top]" in src, name
         assert "window.parent.document" not in src, name
+
+
+def test_analysis_draws_the_shared_accuracy_view_in_the_card_1497():
+    """Issue #1497: the full Prediction accuracy view (chart, tiles, "How each model has scored") on the Analysis tab,
+    drawn by the same pa_view.js the stand-alone page mounts, straight into the card (no frame, Issue #1491). Behaviour:
+    tests/ui/accuracy-analysis-tab-1497.spec.js."""
+    assert HTML.index('<script src="chartjs-plugin-zoom.min.js">') < HTML.index('<script src="pa_view.js">')
+    assert HTML.index('<script src="pa_view.js">') < HTML.index('<script src="nd_analysis.js">')
+    card = HTML[
+        HTML.index('aria-labelledby="an-pa-h"') : HTML.index("</section>", HTML.index('aria-labelledby="an-pa-h"'))
+    ]
+    assert 'id="an-pa-view"' in card and "<iframe" not in card
+    js = JS["nd_analysis.js"]
+    fn = js[js.index("function loadAccuracy()") : js.index("// ---------- wiring")]
+    # mounted once (lazily, on first show) on the dashboard's zone; later shows / zone changes switch its zone
+    assert "PA.mount($('an-pa-view'), { zone: ND.zone, embedded: true })" in fn
+    assert "PA.setZone(ND.zone)" in fn
+    assert "loadAccuracy();" in js[js.index("ND.register('analysis'") :]
+    # no copy of the view in the dashboard: its ids exist only in pa_view.js
+    for view_id in ('id="pa-chart"', 'id="gate-table"', 'id="tiles"'):
+        assert view_id not in HTML, view_id
+    assert 'id="pa-chart"' in (FE / "pa_view.js").read_text("utf-8")
 
 
 def test_days_table_tomorrow_blank_until_the_plan_provides_it():

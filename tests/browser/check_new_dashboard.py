@@ -555,12 +555,14 @@ def behaviour(browser):
     pg.select_option("#report-type", "investigation")
     if not pg.locator("#investigation-focus-controls").is_visible():
         problems.append("investigation controls hidden")
-    # Issue #1491: no frame inside a frame; the card summarises prediction_accuracy and links in the same frame
+    # Issue #1491/#1497: no frame inside a frame; the card draws the shared accuracy view and links in the same frame
     pg.wait_for_timeout(800)
     if pg.locator("iframe").count() != 0:
         problems.append("the Analysis tab still frames a page")
     if pg.locator("#prediction-accuracy-link").get_attribute("target"):
         problems.append("Open on its own page still opens a new tab")
+    if pg.locator("#an-pa-view #pa-chart").count() != 1:
+        problems.append("the accuracy chart is not drawn in the Analysis card")
     # debug: search + event filter
     pg.goto(f"{BASE}#debug")
     pg.reload()
@@ -709,10 +711,10 @@ def accuracy_1431(browser):
     ctx, pg = new_page(browser, {"width": 1280, "height": 900}, "light", name="pa-1431:analysis")
     pg.goto(f"{BASE}#analysis")
     pg.wait_for_timeout(1500)
-    sub = pg.locator('section[aria-labelledby="an-pa-h"] .sub').inner_text()
+    sub = pg.locator('section[aria-labelledby="an-pa-h"] > .sub').inner_text()
     if "Preview" in sub or "shadow" in sub:
         problems.append(f"analysis accuracy subtitle still pre-O3: {sub!r}")
-    pg.locator("#an-pa-summary").scroll_into_view_if_needed()
+    pg.locator("#an-pa-view").scroll_into_view_if_needed()
     pg.wait_for_timeout(800)
     pg.screenshot(path=str(OUT / "pa-1431-analysis-card.png"), full_page=True)
     ctx.close()

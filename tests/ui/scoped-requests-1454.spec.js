@@ -109,7 +109,7 @@ test.describe('Issue #1454: the dashboards never send an unscoped request', () =
     await expect(page.locator('#zone-select')).toHaveValue('zone-b');
     await visitNewTabs(page);
     await page.locator('#tab-btn-analysis').click();
-    await expect(page.locator('#an-pa-summary')).toContainText('average miss'); // Issue #1491: a summary, no frame
+    await expect(page.locator('#an-pa-view #tiles')).toContainText('average miss'); // Issue #1497: the view, drawn in the card
     expect(ca.unscoped()).toEqual([]);
     // the Status chart's request (temperature, and the #1414 humidity / feels-like series) names the zone
     expect(ca.urls.some((u) => u.includes('chart_data') && u.includes('entry_id=zone-b'))).toBe(true);
@@ -142,7 +142,7 @@ test.describe('Issue #1454: the dashboards never send an unscoped request', () =
     await expect(page.locator('#health-text')).toContainText('Healthy');
     await visitNewTabs(page);
     await page.locator('#tab-btn-analysis').click();
-    await expect(page.locator('#an-pa-summary')).toContainText('average miss'); // Issue #1491: a summary, no frame
+    await expect(page.locator('#an-pa-view #tiles')).toContainText('average miss'); // Issue #1497: the view, drawn in the card
     expect(ca.urls[0]).toContain('/api/climate_advisor/zones');
     expect(ca.unscoped()).toEqual([]);
     expect(await stored(page)).toBe('zone-a');

@@ -89,7 +89,7 @@ test.describe('Prediction accuracy (Issue #1431)', () => {
 
   test('1. the dashboards no longer call it a preview of a shadow engine', async ({ page }) => {
     await page.goto('/new_dashboard.html');
-    const sub = page.locator('#panel-analysis section[aria-labelledby="an-pa-h"] .sub');
+    const sub = page.locator('#panel-analysis section[aria-labelledby="an-pa-h"] > .sub'); // the card's own line (the view inside has its own)
     const text = await sub.textContent();
     expect(text).not.toMatch(/Preview|shadow/);
     expect(text).toContain('main engine');

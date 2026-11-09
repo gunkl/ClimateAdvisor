@@ -21,6 +21,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from homeassistant.components.climate import FAN_ON, HVACAction
+
+from tests_ha.house.builder import SIM_DOMAIN
 
 pytestmark = pytest.mark.house
 
@@ -60,18 +63,37 @@ def _fan_commands(house, since: int) -> list:
     return [c for c in house.calls[since:] if c.origin.startswith("ca:") and c.domain == "fan"]
 
 
+def _thermostat_reports_its_running_blower(house, monkeypatch) -> None:
+    """A real thermostat in cool mode reports ``fan`` while its blower runs with the compressor off (the generated
+    days model this, #1500's nightly day). The dev sim reports ``idle`` there; this test models the real reading."""
+    ent = house.hass.data[SIM_DOMAIN][house.sim_entry.entry_id]["thermostat_entity"]
+    cls = type(ent)
+    base = cls.hvac_action.fget
+
+    def _action(self):
+        action = base(self)
+        return HVACAction.FAN if action == HVACAction.IDLE and self._fan_mode == FAN_ON else action
+
+    monkeypatch.setattr(cls, "hvac_action", property(_action))
+
+
 async def _ac_cycle_ends_with_blower_on(house) -> None:
     """The occupant sets the blower on; the AC cools to its setpoint and the thermostat reports cooling -> fan."""
+    assert house.thermostat.action == "cooling", "precondition: the AC is cooling"
     await house.advance(minutes=6)  # past the 300 s start-up window
     await house.occupant_sets_fan_mode("on")
     await house.advance(minutes=6)  # past the 30 s fresh-command guard and the toggle floor
     house.set_indoor(70.0)  # well below any cool setpoint: the compressor stops, the blower runs on
     await house.advance(minutes=2)
+    assert house.thermostat.action == "fan", "precondition: the thermostat reports its blower (cooling -> fan)"
 
 
 @pytest.mark.parametrize("automation_on", [True, False], ids=["automation_on", "observe_only"])
-async def test_command_only_blower_is_not_read_as_the_whole_house_fan(make_house, automation_on: bool) -> None:
+async def test_command_only_blower_is_not_read_as_the_whole_house_fan(
+    make_house, monkeypatch, automation_on: bool
+) -> None:
     house = await make_house(**_closed_warm_evening("whf_command_only"))
+    _thermostat_reports_its_running_blower(house, monkeypatch)
     engine = house.coordinator.automation_engine
     if not automation_on:
         await house.set_automation(False)
@@ -144,3 +166,50 @@ async def test_control_automation_on_reconcile_still_stops_the_unwarranted_fan(m
     assert "nat_vent_reconcile_exit" in [n for n, _ in events]
     await house.advance(seconds=30)
     assert not house.fan.is_on
+
+
+def _open_cool_evening() -> dict:
+    return {
+        "fan": "whf",
+        "profile": "scripted",
+        "contacts": ["window"],
+        "startup": "settled",
+        "start": datetime(2026, 7, 15, 21, 0, tzinfo=UTC),
+        "initial_indoor_f": 78.0,
+        "outdoor_f": 62.0,
+        "high_f": 88.0,
+        "low_f": 58.0,
+        "initial_hvac_mode": "cool",
+        "ca_config": {"fan_min_runtime_per_hour": 0, "sensor_debounce_seconds": 60},
+    }
+
+
+async def test_mirror_observe_only_reconcile_does_not_adopt_a_fan_as_a_paper_session(make_house) -> None:
+    """Mirror of #1499: the adopt branch (fan running, nat-vent warranted) in observe-only."""
+    house = await make_house(**_open_cool_evening())
+    engine = house.coordinator.automation_engine
+    await house.advance(minutes=6)
+    await house.set_automation(False)
+    await house.open("window")
+    await house.advance(minutes=2)
+    real_override = engine.handle_fan_manual_override
+    engine.handle_fan_manual_override = lambda *a, **k: None  # its start went unseen (no override on record)
+    try:
+        await house.occupant_presses_fan(True)
+    finally:
+        engine.handle_fan_manual_override = real_override
+    await house.advance(minutes=6)
+    assert house.fan.is_on and not engine._fan_active and not engine._natural_vent_active, "precondition"
+
+    events = _record_events(house)
+    calls_before = len(house.calls)
+    await engine.reconcile_fan_on_startup(
+        indoor=78.0, outdoor=62.0, thermostat_fan_running=True, any_sensor_open=True, trigger="backstop_30min"
+    )
+    await house.advance(seconds=1)
+
+    assert not _fan_commands(house, calls_before)
+    assert engine._natural_vent_active is False, "observe-only recorded a nat-vent session it never started"
+    assert engine._fan_active is False, "observe-only adopted the fan as Climate Advisor's"
+    rows = [n for n, _ in events if n in ("fan_activated", "nat_vent_started")]
+    assert not rows, f"observe-only wrote a start row for a session it did not start: {rows}"

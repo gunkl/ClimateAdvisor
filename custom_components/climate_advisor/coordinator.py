@@ -13018,9 +13018,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # Issue #1500: CA's own record, never the blower -- a run CA started or the occupant's recorded run
                 # (live, or persisted across a restart and waiting to be re-armed by this reconcile, #1045).
                 ae = self.automation_engine
-                return bool(
-                    ae._fan_active or ae._fan_override_active or ae._pending_override_rearm_end is not None
-                )
+                return bool(ae._fan_active or ae._fan_override_active or ae._pending_override_rearm_end is not None)
             return thermostat_signal  # unsupported `both` (#1175): unchanged
         return thermostat_signal
 

@@ -10978,6 +10978,19 @@ class AutomationEngine:
         if nat_vent_eligible:
             # Adopt the running fan as CA-owned nat-vent
             decision = "adopt-on"
+            if self.dry_run and not self._natural_vent_active:
+                # Issue #1501 (mirror of #1499): observe-only starts no session it did not send (#1304, "no paper
+                # sessions"). Adopting here would record a nat-vent session, a "Fan activated" row and the backstop
+                # for a fan CA is not managing. A session CA really started is re-confirmed below as before. After
+                # re-enable the next reconcile adopts the fan for real.
+                _LOGGER.info(
+                    "[DRY RUN] Fan reconcile: would adopt the running fan as a nat-vent session -- nothing"
+                    " recorded (trigger=%s archetype=%s) role=%s",
+                    trigger,
+                    archetype,
+                    self.role,
+                )
+                return
             # Issue #600: this method has 4 independent callers (ha_restart,
             # backstop_30min, post_grace_expiry, thermostat_state_change) with no
             # coordination between sequential (non-overlapping) triggers — the Issue #561

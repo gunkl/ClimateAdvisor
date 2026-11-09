@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.20"
+VERSION = "0.9.21"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -584,6 +584,19 @@ V4_MODEL_FILE = "climate_advisor_v4_model.json"  # the fitted v4 model + hidden-
 # Issue #1483: 48/72/120 h (2, 3, 5 days) score the week-long display line; only a prediction that reached that far
 # writes them (the forecast must go that far), so a short forecast leaves those columns empty.
 V4_ARCHIVE_LEADS: tuple[str, ...] = ("1h", "4h", "12h", "24h", "48h", "72h", "120h")
+# Issue #1492: v3's own first-write-wins archive (same format as v4's) at 1/4/12/24 h, so the live scorecard can compare
+# v3 at every look-ahead. The 4 h chart-log ``pred_indoor`` (``_pred_archive``) stays, read first at 4 h.
+# Live evidence 2026-11-09: v3's curve had 95 points from a 48-entry hourly forecast (~47 h), so 24 h is reached while
+# the weather source forecasts at least that far; a shorter forecast simply leaves the longer columns empty.
+V3_ARCHIVE_FILE = "climate_advisor_v3_archive.json"
+V3_ARCHIVE_LEADS: tuple[str, ...] = ("1h", "4h", "12h", "24h")
+V3_ARCHIVE_SAVE_MIN_INTERVAL_S = 3600  # rewrite at most hourly (and once on shutdown), like the v4 archive
+# Issue #1492: the "How each model has scored" table is computed live over this many days (the DP-8 row rule).
+SCORECARD_WINDOW_DAYS = 30
+SCORECARD_LEADS: tuple[str, ...] = ("1h", "4h", "12h", "24h")
+SCORECARD_MIN_N = 72  # points a row needs before it is scored ("not enough data yet" below)
+SCORECARD_MIN_COVERAGE = 0.8  # share of the row's points v4 must have answered
+SCORECARD_BIAS_LIMIT_F = 0.5  # |average error| allowed, degrees F
 V4_ARCHIVE_SAVE_MIN_INTERVAL_S = 3600  # the file is a few MB: rewrite at most hourly (and once on shutdown)
 V4_FIT_HOUR = 3  # nightly fit, local time, after midnight bookkeeping
 V4_FIT_MINUTE = 15
@@ -616,6 +629,7 @@ ENTRY_SCOPED_FILES: tuple[str, ...] = (
     LEARNING_DB_FILE,
     FORECAST_ARCHIVE_FILE,
     V4_ARCHIVE_FILE,
+    V3_ARCHIVE_FILE,
     V4_BACKTEST_FILE,
     V4_MODEL_FILE,
     INVESTIGATION_REPORTS_FILE,

@@ -4,7 +4,9 @@
 WHY: the owner sees v4's line on the dashboard only once this tool shows, over all recorded
 history, that v4 predicts the room better than today's (v3) line and better than "nothing will
 change", in the heating season AND in summer, with an average bias inside +-0.5 F. A house whose
-v4 line is not proven keeps showing v3 only.
+v4 line is not proven keeps showing v3 only. (Since 0.9.4 it decides nothing; since Issue #1492 the
+Prediction accuracy page's table is scored live over 30 days and the published file only fills
+the chart's history from before live v4. The ``gate`` rows stay in this tool's report.)
 
 HOW (walk-forward, no future leakage)
   * Test weeks start Monday 00:00 local. Before each test week the v4 model is fitted on chart_log
@@ -128,30 +130,19 @@ class LeakageError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def season_of_day(heating: bool, cooling_or_fan: bool) -> str:
-    if heating:
-        return "heating"
-    return "summer" if cooling_or_fan else "shoulder"
+def _load_pure_module(name: str) -> Any:
+    """A stdlib-only integration module loaded by path (no Home Assistant, no package import)."""
+    spec = importlib.util.spec_from_file_location(f"_ca_{name}_standalone", _PKG_DIR / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def day_seasons(rows: list[dict], tz: tzinfo) -> dict:
-    """{local date: season} from what the HVAC did that day (see module docstring)."""
-    heat: set = set()
-    cool: set = set()
-    for r in rows:
-        try:
-            d = parse_ts(r.get("ts"), tz).astimezone(tz).date()
-        except TypeError, ValueError:
-            continue
-        hv = str(r.get("hvac") or "").lower()
-        fan_season = r.get("fan_running", r.get("fan")) is True and (
-            r.get("nat_vent_active") is True or hv.startswith("fan")
-        )
-        if hv == "heating":
-            heat.add(d)
-        elif hv == "cooling" or fan_season:
-            cool.add(d)
-    return {d: season_of_day(d in heat, d in cool) for d in heat | cool}
+# One season rule for the backtest and the live scorecard (Issue #1492): ``hvac_season`` in the integration.
+_HVAC_SEASON = _load_pure_module("hvac_season")
+season_of_day = _HVAC_SEASON.season_of_day
+day_seasons = _HVAC_SEASON.day_seasons
 
 
 def prepare_rows(rows: list[dict]) -> list[dict]:

@@ -157,10 +157,11 @@
       <h2 id="gate-title">How each model has scored</h2>
       <span class="verdict" id="gate-verdict"></span>
     </div>
-    <div class="sub" id="gate-sub">Average miss over all recorded history, for information. Nothing here switches a model on or off: which one the Status chart shows is your choice under Settings, Prediction engine. Rows are scored at 1, 4 and 12 h; 24 h is shown for information.</div>
+    <div class="sub"><strong id="gate-window">Last 30 days, live</strong></div>
+    <div class="sub" id="gate-sub">Average miss of each engine 1, 4, 12 and 24 hours ahead, worked out again from the predictions Climate Advisor records every 30 minutes each time this page loads (it no longer waits for an update). For information only: nothing here switches a model on or off; which one the Status chart shows is your choice under Settings, Prediction engine. A row needs 72 points before it is judged. v3 is recorded 1, 12 and 24 hours ahead only since this update, so those cells read &#8220;collecting&#8221; until it has some.</div>
     <div class="scroll-x">
       <table id="gate-table">
-        <thead><tr><th>Zone</th><th>Season</th><th>Look-ahead</th><th>v4</th><th>v3</th><th>&#8220;No change&#8221; guess</th><th>v4 runs warm/cold</th><th>v4 beats v3</th><th>v4 beats no change</th><th id="th-bias">Bias within limit</th></tr></thead>
+        <thead><tr><th>Zone</th><th>Season</th><th>Look-ahead</th><th>v4</th><th>v3</th><th>&#8220;No change&#8221; guess</th><th>v4 runs warm/cold</th><th>Points</th><th>v4 beats v3</th><th>v4 beats no change</th><th id="th-bias">Bias within limit</th></tr></thead>
         <tbody id="gate-body"></tbody>
       </table>
     </div>
@@ -182,7 +183,7 @@
     '6h': 6 * 3600e3, '12h': 12 * 3600e3, '24h': 24 * 3600e3, '3d': 72 * 3600e3,
     '7d': 168 * 3600e3, '30d': 720 * 3600e3, '1y': 8760 * 3600e3
   };
-  var GATE_LEADS = ['1h', '4h', '12h'];
+  var GATE_MIN_N = 72;  // Issue #1492: points a live scorecard row needs before it is judged (the server's min_n wins)
   var BIAS_LIMIT_F = 0.5;
 
   var S = {
@@ -826,33 +827,49 @@
     return m ? (m.title || z) : z;
   }
   function renderGate() {
+    // Issue #1492: the rows are the LIVE scorecard (last 30 days ending now), not the deploy-time backtest.
     var rows = (S.data && Array.isArray(S.data.gate)) ? S.data.gate : [];
     var gateSummary = (S.data && S.data.gate_summary) || null;
     var lim = isC() ? +(BIAS_LIMIT_F * 5 / 9).toFixed(2) : BIAS_LIMIT_F;
+    var minN = (gateSummary && gateSummary.min_n) || GATE_MIN_N;
     $('th-bias').textContent = 'Bias within ±' + lim + ' ' + unit();
+    var win = 'Last ' + ((gateSummary && gateSummary.window_days) || 30) + ' days, live';
+    if (gateSummary && gateSummary.start && gateSummary.end) {
+      var day = function (iso) { return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); };
+      win += ' (' + day(gateSummary.start) + ' to ' + day(gateSummary.end) + ')';
+    }
+    $('gate-window').textContent = win;
     var body = $('gate-body');
     if (!rows.length) {
-      body.innerHTML = '<tr><td colspan="10" class="na">No scored results yet.</td></tr>';
+      body.innerHTML = '<tr><td colspan="11" class="na">No scored results yet.</td></tr>';
       $('gate-verdict').textContent = 'Nothing scored yet';
       $('gate-verdict').className = 'verdict';
       return;
     }
-    var unscored = 0, failed = 0, seasons = {};
+    var unscored = 0;
+    function cell(ok) {
+      if (ok == null) return '<td class="na">—</td>';
+      return '<td class="' + (ok ? 'yes' : 'no') + '">' + (ok ? 'Yes' : 'No') + '</td>';
+    }
     body.innerHTML = rows.map(function (r) {
-      var info = GATE_LEADS.indexOf(r.lead) < 0;
       var season = r.season === 'summer' ? 'Summer' : (r.season === 'heating' ? 'Heating' : esc(r.season || ''));
-      var head = '<td>' + esc(zoneName(r.zone)) + '</td><td>' + season + '</td><td>' + esc(leadText(r.lead)) + (info ? ' (info)' : '') + '</td>';
-      if (r.scored === false) {
-        if (!info) unscored++;
-        return '<tr>' + head + '<td>—</td><td>—</td><td>—</td><td>—</td><td class="na" colspan="3">Not scored yet</td></tr>';
+      var head = '<td>' + esc(zoneName(r.zone)) + '</td><td>' + season + '</td><td>' + esc(leadText(r.lead)) + '</td>';
+      var why = (r.reasons && r.reasons.length) ? ' title="' + esc(r.reasons.join('; ')) + '"' : '';
+      var n = r.n == null ? 0 : r.n;
+      if (r.scored === false) unscored++;
+      if (r.scored === false && n < minN) {
+        return '<tr' + why + '>' + head + '<td class="na" colspan="8">Not enough data yet (' + n + ' of ' + minN + ' points)</td></tr>';
       }
-      var c1 = r.v4 < r.v3, c2 = r.v4 < r.flat, c3 = Math.abs(r.bias) <= lim;
-      // The server's verdict is authoritative (it also checks sample size and v4 coverage); the cells explain it.
-      var rowOk = (typeof r.pass === 'boolean') ? r.pass : (c1 && c2 && c3);
-      if (!info) { seasons[r.season] = true; if (!rowOk) failed++; }
-      function cell(ok) { return '<td class="' + (ok ? 'yes' : 'no') + '">' + (ok ? 'Yes' : 'No') + '</td>'; }
-      var why = (!rowOk && c1 && c2 && c3 && r.reasons && r.reasons.length) ? ' title="' + esc(r.reasons.join('; ')) + '"' : '';
-      return '<tr' + why + '>' + head + '<td style="font-weight:600">' + fnum(r.v4) + '</td><td>' + fnum(r.v3) + '</td><td>' + fnum(r.flat) + '</td><td>' + fbias(r.bias).replace(' ' + unit(), '') + '</td>' + cell(c1) + cell(c2) + cell(c3) + '</tr>';
+      var v3 = r.v3_state === 'collecting' ? '<td class="na">collecting</td>'
+        : r.v3_state === 'off' ? '<td class="na">v3 off</td>' : '<td>' + fnum(r.v3) + '</td>';
+      if (r.scored === false && r.v3_state !== 'collecting' && r.v3_state !== 'off') {
+        return '<tr' + why + '>' + head + '<td>—</td><td>—</td><td>—</td><td>—</td><td>' + n + '</td><td class="na" colspan="3">Not scored yet</td></tr>';
+      }
+      // The server's judgement (beats_v3 / beats_flat / bias_ok) is authoritative; an older payload falls back here.
+      var c1 = r.beats_v3 !== undefined ? r.beats_v3 : (r.v3 == null ? null : r.v4 < r.v3);
+      var c2 = r.beats_flat !== undefined ? r.beats_flat : r.v4 < r.flat;
+      var c3 = r.bias_ok !== undefined ? r.bias_ok : Math.abs(r.bias) <= lim;
+      return '<tr' + why + '>' + head + '<td style="font-weight:600">' + fnum(r.v4) + '</td>' + v3 + '<td>' + fnum(r.flat) + '</td><td>' + fbias(r.bias).replace(' ' + unit(), '') + '</td><td>' + n + '</td>' + cell(c1) + cell(c2) + cell(c3) + '</tr>';
     }).join('');
     // Descriptive only: how many scored rows v4 beats both v3 and "no change" on. No ready / not-ready language.
     var v = $('gate-verdict');

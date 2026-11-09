@@ -103,7 +103,11 @@ def test_response_shape_matches_the_contract(tmp_path: Path) -> None:
     }
     assert set(out["stats"]) == {"n", "n_v3", "n_flat", "v4_mae", "v3_mae", "flat_mae", "v4_bias", "v3_bias"}
     assert out["model"] == {"confidence": "ok", "fitted_at": "2026-11-06T03:15:00+00:00", "span_days": 30.0}
-    assert out["gate"] == []
+    # Issue #1492: the scorecard is live: heating + summer x 1/4/12/24 h, always present (unscored rows say why).
+    assert [(g["season"], g["lead"]) for g in out["gate"]] == [
+        (s, ld) for s in ("heating", "summer") for ld in ("1h", "4h", "12h", "24h")
+    ]
+    assert out["gate_summary"]["live"] is True and out["gate_summary"]["window_days"] == 30
     p = out["points"][-1]
     assert set(p) == {"t", "actual", "v4", "v3", "flat"}
     datetime.fromisoformat(out["start"]), datetime.fromisoformat(out["end"]), datetime.fromisoformat(p["t"])
@@ -231,10 +235,9 @@ def test_backtest_fills_history_and_live_is_preferred(tmp_path: Path) -> None:
     )  # backtest value (its own actual 66.0 used: no chart row there? chart has rows)
     assert not any(p.get("v4", 0) >= 90 for p in out["points"]), "a backtest point overrode the live archive"
     assert len(by_t) == len(out["points"])
-    # the gate is passed through, errors converted
-    assert out["gate"][0]["season"] == "heating" and out["gate"][0]["pass"] is True and out["gate"][0]["v4"] == 0.5
-    cel = _build(tmp_path, archive=live, backtest=backtest, range_str="30d", unit="celsius")
-    assert cel["gate"][0]["v4"] == pytest.approx(0.28, abs=0.01)  # 0.5 F error in C
+    # Issue #1492: the backtest's own gate rows are no longer read; the table is the live scorecard.
+    assert out["gate_summary"]["live"] is True
+    assert not any(g["v3"] == 1.8 for g in out["gate"]), "a backtest gate row reached the live table"
 
 
 def test_backtest_actual_is_used_when_the_chart_log_has_no_row(tmp_path: Path) -> None:
@@ -251,7 +254,10 @@ def test_backtest_actual_is_used_when_the_chart_log_has_no_row(tmp_path: Path) -
 
 def test_no_data_at_all_is_an_empty_state_not_an_error(tmp_path: Path) -> None:
     out = _build(tmp_path, archive=V4Archive(tmp_path, entry_id="zoneA"), chart_rows=[], model=None)
-    assert out["points"] == [] and out["heat_runs"] == [] and out["gate"] == []
+    assert out["points"] == [] and out["heat_runs"] == []
+    # Issue #1492: the live table still lists every row, each unscored with "not enough data yet".
+    assert len(out["gate"]) == 8 and not any(g["scored"] for g in out["gate"])
+    assert all(g["n"] == 0 and g["reasons"][0].startswith("not enough data yet") for g in out["gate"])
     assert out["stats"] == {
         "n": 0, "n_v3": 0, "n_flat": 0, "v4_mae": None, "v3_mae": None, "flat_mae": None, "v4_bias": None,
         "v3_bias": None,
@@ -406,5 +412,5 @@ def test_page_fixture_has_exactly_the_endpoint_keys(tmp_path: Path) -> None:
 def test_malformed_backtest_points_never_break_the_page(tmp_path: Path, bad) -> None:
     """A hand-edited or truncated backtest file must degrade to "no backtest", never to a 500."""
     out = _build(tmp_path, backtest={"points": bad, "gate": "nope", "gate_summary": [1]})
-    assert out["points"] and out["gate"] == [] and out["gate_summary"] is None
+    assert out["points"] and len(out["gate"]) == 8 and out["gate_summary"]["live"] is True  # Issue #1492: live
     json.dumps(out)

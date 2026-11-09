@@ -576,7 +576,8 @@ def backtest_command() -> list[str]:
 def publish_backtest(run=subprocess.run) -> bool:
     """Issue #1400: refresh the v4 backtest file on the host after a deploy. Never fails the deploy.
 
-    Occupant view: the Prediction accuracy page reads its history, gate rows and ``gate_summary`` from this file; the
+    Occupant view: the Prediction accuracy page reads its chart history from before live v4 (pre-0.9.4) from this file;
+    its "How each model has scored" table is scored live and no longer reads the file's gate rows (Issue #1492). The
     integration only reads it (the backtest replays production v3 with HA stubbed and refits v4 once per test week,
     minutes of CPU that must not run on the HA host). Reversal: ``--no-backtest``, or drop this step.
     """

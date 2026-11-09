@@ -165,10 +165,19 @@ class V3Engine:
         return self.future_path(source)  # the cycle's own curve, rebuilt before the decisions
 
     def past(self, source: Any, sensor: str, lead: str, start: float, end: float) -> dict[int, float]:
-        if sensor != CA_LINE or lead != "4h":  # v3 logs one line, made about 4 h ahead
+        """v3's one line (``_ca``): at 4 h the chart-log ``_pred_archive`` (its long history) first; every look-ahead
+        it reached also from its own ``_v3_archive`` (1/4/12/24 h, Issue #1492) for the slots the former lacks."""
+        if sensor != CA_LINE:
             return {}
-        archive = getattr(source, "_pred_archive", None) or {}
-        return {int(k): float(v) for k, v in archive.items() if start <= k < end}
+        out: dict[int, float] = {}
+        if lead == "4h":
+            archive = getattr(source, "_pred_archive", None) or {}
+            out = {int(k): float(v) for k, v in archive.items() if start <= k < end}
+        v3_archive = getattr(source, "_v3_archive", None)
+        if v3_archive is not None:
+            for slot, v in v3_archive.series(CA_LINE, lead, start, end).items():
+                out.setdefault(int(slot), v)
+        return out
 
 
 class V4Engine:

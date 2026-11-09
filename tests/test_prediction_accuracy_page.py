@@ -146,7 +146,7 @@ def test_fixture_matches_contract_shape():
     ):
         assert k in FIXTURE, k
     assert FIXTURE["sensors"][0]["id"] == "_ca" and FIXTURE["sensor"] == "_ca"  # the endpoint lists `_ca` first
-    assert {"ready", "passed", "scored", "total"} <= set(FIXTURE["gate_summary"])
+    assert {"live", "window_days", "passed", "scored", "total"} <= set(FIXTURE["gate_summary"])  # Issue #1492
     assert {"t", "actual", "v4", "v3"} <= set(FIXTURE["points"][0])
     assert {"n", "v4_mae", "v3_mae", "flat_mae", "v4_bias", "v3_bias"} <= set(FIXTURE["stats"])
     assert {"zone", "season", "lead", "v4", "v3", "flat", "bias", "pass", "scored"} <= set(FIXTURE["gate"][0])

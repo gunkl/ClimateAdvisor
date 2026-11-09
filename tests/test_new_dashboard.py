@@ -451,8 +451,8 @@ PARITY = [
     (
         ["prediction-accuracy-link"],
         "prediction-accuracy-link",
-        "Analysis 'Prediction accuracy' (R1's page embedded)",
-        ['id="pa-frame"', 'id="prediction-accuracy-link"'],
+        "Analysis 'Prediction accuracy': a summary and a same-frame link to R1's page (Issue #1491: never embedded)",
+        ['id="an-pa-summary"', 'id="prediction-accuracy-link"'],
         "placed",
         "",
     ),
@@ -808,6 +808,41 @@ def test_analysis_sections_exist():
         assert tile in js, tile
     assert "fToDisp" in js and "dFToDisp" in js  # records are internal degF; shown in the install's unit
     assert "prediction_accuracy.html" in js and "?zone=" in js  # R1's page, reused
+
+
+def test_accuracy_page_is_never_framed_or_opened_in_a_new_tab_1491():
+    """Issue #1491: on a phone (iOS HA app, Safari) the Analysis 'Prediction accuracy' card showed a 401 and no data.
+    The dashboard already sits in HA's panel frame; the page embedded one frame deeper could not reach HA's login,
+    and a new tab has no HA around it at all. Owner decision: no frame inside a frame, and both links stay in this
+    frame. The behaviour (same-frame navigation, Back to the tab, a top-window login) is in
+    tests/ui/accuracy-same-frame-1491.spec.js."""
+    corpus = HTML + "\n".join(JS.values())
+    assert "<iframe" not in HTML
+    assert "pa-frame" not in corpus and "contentDocument" not in corpus
+    for link_id in ("prediction-accuracy-link", "dbg-bt-link"):
+        tag = re.search(r"<a[^>]*\bid=\"" + link_id + r"\"[^>]*>", HTML)
+        assert tag, link_id
+        assert "target=" not in tag.group(0), link_id
+        assert 'href="prediction_accuracy.html"' in tag.group(0), link_id
+    # the card keeps a summary of the request load() already makes (it works on the phone)
+    js = JS["nd_analysis.js"]
+    assert 'id="an-pa-summary"' in HTML and "function renderAccuracy()" in js and "renderAccuracy();" in js
+    # each link remembers the tab it left, so "Back to dashboard" (entry.html, no #tab) returns to it
+    assert "ND.rememberReturnTab('analysis')" in js
+    assert "ND.rememberReturnTab('debug')" in JS["nd_debug.js"]
+    assert "takeReturnTab()" in JS["nd_core.js"]
+
+
+def test_ha_login_lookup_also_reaches_the_top_window_1491():
+    """Issue #1491 belt and braces: each page's HA-login lookup tries the parent, then the top window."""
+    pages = {
+        "nd_core.js": JS["nd_core.js"],
+        "prediction_accuracy.html": (FE / "prediction_accuracy.html").read_text("utf-8"),
+        "index.html": (FE / "index.html").read_text("utf-8"),
+    }
+    for name, src in pages.items():
+        assert "[window.parent, window.top]" in src, name
+        assert "window.parent.document" not in src, name
 
 
 def test_days_table_tomorrow_blank_until_the_plan_provides_it():

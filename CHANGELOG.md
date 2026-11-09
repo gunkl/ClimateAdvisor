@@ -9,6 +9,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **What you'll notice:** the Analysis tile reads "last 30 days" (or "none in the last 30 days"), and the Household promises list and the Status banner say the same. A miss counts for 30 days after the day it happened, then drops off, so the number tells you how the house has been doing lately. The Status banner used to say "missed in 24 h" over the lifetime count; it now says "in the last 30 days".
   - **Excused time** (the thermostat's own deadband) follows the same 30-day rule.
   - **After updating:** the old lifetime totals are cleared and counting starts fresh. Diagnostics show the 30-day counts.
+- Fix #1491: on a phone, the new dashboard's Prediction accuracy no longer shows a 401 with no data.
+  - **What you'll notice:** the Analysis tab's Prediction accuracy card now shows a short summary: each engine's average miss 4 hours ahead over the last 24 hours. "Open on its own page" opens the full page in the same view, not a new tab, and so does Debug's "Open the full accuracy view". "Back to dashboard" brings you back to the tab you came from.
+  - **Why it broke:** the card showed the full accuracy page inside the dashboard, which is itself inside Home Assistant's frame. One frame deeper, the page couldn't find your Home Assistant login. Desktop browsers have a saved copy to fall back on; the iOS app doesn't, so it sent no login. A new tab has no Home Assistant around it at all.
+  - **What the house does is unchanged:** this is display only.
 
 ## [0.9.19] — 2026-11-08
 

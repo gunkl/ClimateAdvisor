@@ -555,11 +555,12 @@ def behaviour(browser):
     pg.select_option("#report-type", "investigation")
     if not pg.locator("#investigation-focus-controls").is_visible():
         problems.append("investigation controls hidden")
-    # prediction accuracy iframe loads and its header is hidden
+    # Issue #1491: no frame inside a frame; the card summarises prediction_accuracy and links in the same frame
     pg.wait_for_timeout(800)
-    fr = pg.frame_locator("#pa-frame")
-    if fr.locator("#pa-chart").count() != 1:
-        problems.append("embedded prediction accuracy chart missing")
+    if pg.locator("iframe").count() != 0:
+        problems.append("the Analysis tab still frames a page")
+    if pg.locator("#prediction-accuracy-link").get_attribute("target"):
+        problems.append("Open on its own page still opens a new tab")
     # debug: search + event filter
     pg.goto(f"{BASE}#debug")
     pg.reload()
@@ -711,9 +712,9 @@ def accuracy_1431(browser):
     sub = pg.locator('section[aria-labelledby="an-pa-h"] .sub').inner_text()
     if "Preview" in sub or "shadow" in sub:
         problems.append(f"analysis accuracy subtitle still pre-O3: {sub!r}")
-    pg.locator("#pa-frame").scroll_into_view_if_needed()
+    pg.locator("#an-pa-summary").scroll_into_view_if_needed()
     pg.wait_for_timeout(800)
-    pg.screenshot(path=str(OUT / "pa-1431-analysis-embedded.png"), full_page=True)
+    pg.screenshot(path=str(OUT / "pa-1431-analysis-card.png"), full_page=True)
     ctx.close()
 
 

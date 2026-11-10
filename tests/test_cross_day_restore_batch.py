@@ -49,6 +49,7 @@ _BACKFILL_FLAGS = (
     "passive_k_backfill_v2",
     "vent_window_k_backfill_v2",
     "vent_fan_k_backfill_v2",
+    "vent_k_relearn_1505",
     "solar_phase_backfill",
     "solar_phase_ac_backfill",
 )

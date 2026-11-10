@@ -374,3 +374,141 @@ class TestOLSCommitRoutingSplit:
         assert model["k_vent_window"] is not None
         assert model["k_vent_fan"] is not None
         assert model["k_solar"] is not None, "k_solar should be updated by either 2-param commit"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1505: physical fan, paused sessions and settle times in the chart_log extractors
+# ---------------------------------------------------------------------------
+
+
+def _rows(spec: list[tuple[float, dict]], t0: datetime | None = None, interval_minutes: int = 15) -> list[dict]:
+    """``spec``: (hours, fields) runs of rows; indoor decays toward a 50 F outdoor so every stretch is fittable."""
+    t0 = t0 or datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    out, i = [], 0
+    for hours, fields in spec:
+        for _ in range(int(hours * 60 / interval_minutes)):
+            t = t0 + timedelta(minutes=i * interval_minutes)
+            out.append(
+                {
+                    "ts": t.isoformat(),
+                    "indoor": 50.0 + 20.0 * math.exp(-0.1 * i * interval_minutes / 60.0),
+                    "outdoor": 50.0,
+                    "hvac": "idle",
+                    **fields,
+                }
+            )
+            i += 1
+    return out
+
+
+WIN = {"windows_open": True, "fan": False, "fan_running": False, "nat_vent_active": False}
+FAN = {"windows_open": True, "fan": True, "fan_running": True, "nat_vent_active": True}
+PAUSED = {"windows_open": True, "fan": True, "fan_running": False, "nat_vent_active": True}
+CLOSED = {"windows_open": False, "fan": False, "fan_running": False, "nat_vent_active": False}
+
+
+class TestVentilationRowStates1505:
+    def test_paused_session_is_neither_and_legacy_rows_fall_back(self):
+        states = _coord_mod._ventilation_row_states(
+            [
+                {"ts": "2026-01-01T00:00:00+00:00", **PAUSED},
+                {"ts": "2026-01-01T00:15:00+00:00", "windows_open": True, "fan": True},  # pre-#331: no fan_running
+                {"ts": "2026-01-01T00:30:00+00:00", "windows_open": False, "fan": "off"},  # old text form
+                {"ts": "2026-01-01T00:45:00+00:00", "windows_open": False, "fan": "on"},
+            ]
+        )
+        assert states[0]["paused"] and not states[0]["running"]
+        assert states[1]["running"] and not states[1]["paused"]
+        assert not states[2]["running"] and states[3]["running"]
+
+    def test_settle_after_fan_stop_and_after_windows_close(self):
+        rows = _rows([(1, FAN), (3, WIN), (1, CLOSED)])
+        states = _coord_mod._ventilation_row_states(rows)
+        t = [datetime.fromisoformat(r["ts"]) for r in rows]
+        stop = t[3]  # last fan row
+        for ts, st in zip(t, states, strict=True):
+            mins = (ts - stop).total_seconds() / 60
+            if 0 < mins < 120:
+                assert st["settling_fan"], ts
+            if mins >= 120:
+                assert not st["settling_fan"], ts
+        # rows[16] is the first closed row
+        assert states[16]["settling_close"] and states[17]["settling_close"]
+        assert not states[18]["settling_close"]  # 30 min after the close
+
+
+class TestExtractorsUseRowStates1505:
+    def _coord(self, rows):
+        coord = _make_coord_with_chart_log(rows)
+        import types
+
+        coord._extract_passive_windows = types.MethodType(ClimateAdvisorCoordinator._extract_passive_windows, coord)
+        return coord
+
+    def test_windows_only_starts_after_the_fan_settle_time(self):
+        rows = _rows([(2, FAN), (5, WIN)])
+        coord = self._coord(rows)
+        with patch.object(_coord_mod, "dt_util", _make_dt_mock(datetime(2026, 1, 1, 12, tzinfo=UTC))):
+            wins = coord._extract_ventilated_windows(rows, days=30, fan_state=False)
+        assert len(wins) == 1
+        first = datetime.fromisoformat(wins[0][0]["ts"])
+        last_fan = datetime.fromisoformat(rows[7]["ts"])
+        assert (first - last_fan).total_seconds() / 60 >= 120
+
+    def test_paused_rows_split_the_fan_stretch_and_are_not_windows_only(self):
+        rows = _rows([(3, FAN), (0.5, PAUSED), (3, FAN)])
+        coord = self._coord(rows)
+        with patch.object(_coord_mod, "dt_util", _make_dt_mock(datetime(2026, 1, 1, 12, tzinfo=UTC))):
+            fan_w = coord._extract_ventilated_windows(rows, days=30, fan_state=True)
+            win_w = coord._extract_ventilated_windows(rows, days=30, fan_state=False)
+        assert len(fan_w) == 2  # was one window spanning the pause (legacy ``fan`` stays True while paused)
+        assert all(r["ts"] not in {x["ts"] for x in rows[12:14]} for w in fan_w for r in w)
+        assert win_w == []
+
+    def test_passive_waits_after_the_windows_close(self):
+        rows = _rows([(1, WIN), (6, CLOSED)])
+        coord = self._coord(rows)
+        with patch.object(_coord_mod, "dt_util", _make_dt_mock(datetime(2026, 1, 1, 12, tzinfo=UTC))):
+            wins = coord._extract_passive_windows(rows, days=30)
+        assert wins, "a settled closed-up stretch is still learned from"
+        first = datetime.fromisoformat(wins[0][0]["ts"])
+        close = datetime.fromisoformat(rows[4]["ts"])
+        assert (first - close).total_seconds() / 60 >= 30
+
+    def test_live_fit_fits_every_recent_window_once(self):
+        rows = _rows([(3, FAN), (0.5, PAUSED), (3, FAN)])
+        coord = self._coord(rows)
+        with patch.object(_coord_mod, "dt_util", _make_dt_mock(datetime(2026, 1, 1, 7, tzinfo=UTC))):
+            coord._run_vent_fan_chart_log_fit(backfill=False)
+        assert coord.learning.record_thermal_observation.call_count == 2
+
+
+class TestVentRelearn1505:
+    def test_reset_drops_vent_fits_and_seed_takes_the_median(self, tmp_path: Path):
+        engine = LearningEngine(tmp_path)
+        st = engine._state
+        st.thermal_model_cache = {
+            "k_passive": -0.05,
+            "k_vent_window": -0.15,
+            "k_vent_fan": -0.15,
+            "observation_count_vent_window": 82,
+            "observation_count_vent_fan": 189,
+        }
+        st.thermal_observations = [
+            {"date": "2026-11-01", "hvac_mode": "passive", "k_passive": -0.03},
+            {"date": "2026-11-01", "hvac_mode": "vent_window", "k_passive": -0.37},
+            {"date": "2026-11-01", "hvac_mode": "vent_fan", "k_passive": -0.02},
+        ]
+        assert engine.reset_vent_rates() == 2
+        assert [o["hvac_mode"] for o in st.thermal_observations] == ["passive"]
+        assert st.thermal_model_cache["k_vent_window"] is None and st.thermal_model_cache["k_vent_fan"] is None
+        assert st.thermal_model_cache["observation_count_vent_fan"] == 0
+        assert st.thermal_model_cache["k_passive"] == -0.05  # the envelope rate is untouched
+        # the re-learn's own fits, in arrival order: an EWMA from empty would sit near the FIRST (-0.167)
+        for k in (-0.167, -0.131, -0.06, -0.054, -0.112):
+            st.thermal_observations.append({"date": "2026-11-09", "hvac_mode": "vent_fan", "k_passive": k})
+        st.thermal_observations.append({"date": "2026-11-09", "hvac_mode": "vent_window", "k_passive": -0.0235})
+        engine.seed_vent_rates_from_fits()
+        assert st.thermal_model_cache["k_vent_fan"] == pytest.approx(-0.112)
+        assert st.thermal_model_cache["observation_count_vent_fan"] == 5
+        assert st.thermal_model_cache["k_vent_window"] == pytest.approx(-0.0235)

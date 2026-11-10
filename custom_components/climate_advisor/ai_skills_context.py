@@ -1071,6 +1071,24 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
     except Exception:
         lines.append("  unavailable")
 
+    # Issue #1505: on a v4 zone the timeline and decisions read v4's own rates (window and fan included), not the v3
+    # learner's above; say which value is in use and where it comes from.
+    try:
+        rows = (
+            coordinator.decision_rates_summary()
+            if callable(getattr(coordinator, "decision_rates_summary", None))
+            else []
+        )
+        vent = [r for r in rows if r.get("key") in ("k_passive", "k_vent_window", "k_vent_fan")]
+        if vent:
+            lines.append("Rates in use (decisions and timeline):")
+            for r in vent:
+                v = r.get("value")
+                v_str = f"{v:.4f} hr^-1" if isinstance(v, (int, float)) and not isinstance(v, bool) else "not learned"
+                lines.append(f"  {r.get('key')}: {v_str} (source {r.get('source')})")
+    except Exception:  # noqa: BLE001 - context building never fails the investigator
+        pass
+
     lines.append("")
     return "\n".join(lines)
 

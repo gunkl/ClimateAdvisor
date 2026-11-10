@@ -215,8 +215,22 @@
         var peak = new Date(2000, 0, 1, 13 + Math.floor(ph), Math.round((ph % 1) * 60)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
         row('Sun adds up to ' + Number(ks.value).toFixed(1) + eu + ' an hour, strongest around ' + peak, 'k_solar ' + Number(ks.value).toFixed(3) + ' · phase +' + Number(ph).toFixed(2) + ' h', 'calibration: ' + (ks.confidence || 'n/a'));
       }
-      if (kp && kw && kf) row('Open windows move it toward outdoors ' + (kw.value / kp.value).toFixed(1) + '× faster; with the fan, ' + (kf.value / kp.value).toFixed(1) + '× faster',
-        'k_vent_window ' + Number(kw.value).toFixed(3) + ' · k_vent_fan ' + Number(kf.value).toFixed(3) + ' /h', '');
+      // Issue #1505: the window and fan line uses the rates the decisions and the timeline read (``decisions``: v4's own
+      // on a v4 zone, v3's learner otherwise), all three from that one source so the ratios compare like with like.
+      var dr = {};
+      (E.decisions || []).forEach(function (r) { if (r && typeof r.value === 'number') dr[r.key] = r; });
+      var dp = dr.k_passive || (kp ? { value: kp.value, source: 'v3' } : null);
+      var dw = dr.k_vent_window || (kw ? { value: kw.value, source: 'v3' } : null), df = dr.k_vent_fan || (kf ? { value: kf.value, source: 'v3' } : null);
+      if (dp && dp.value && (dw || df)) {
+        var x = function (r) { return (Math.abs(r.value) / Math.abs(dp.value)).toFixed(1) + '×'; };
+        var parts = [];
+        if (dw) parts.push('with windows open it moves toward outdoors ' + x(dw) + ' as fast as closed up');
+        if (df) parts.push('with the fan running, ' + x(df));
+        var txt = parts.join('; ');
+        row(txt.charAt(0).toUpperCase() + txt.slice(1),
+          (dw ? 'k_vent_window ' + Number(dw.value).toFixed(3) : 'k_vent_window not learned') + ' · ' + (df ? 'k_vent_fan ' + Number(df.value).toFixed(3) : 'k_vent_fan not learned') +
+          ' · closed ' + Number(dp.value).toFixed(3) + ' /h', 'from ' + (dw || df).source);
+      }
       var s = $('an-model-status');
       s.textContent = E.physics_eligible ? 'Predictions use the physics model' : 'Predictions use the schedule fallback';
     }

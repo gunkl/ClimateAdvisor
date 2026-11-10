@@ -31,6 +31,7 @@ from __future__ import annotations
 import bisect
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
@@ -67,6 +68,9 @@ CONTROL_BLANK_MODEL: dict[str, Any] = {
     "k_active_cool": None,
     "heating_rate_f_per_hour": None,
     "cooling_rate_f_per_hour": None,
+    "k_vent_window": None,  # Issue #1505: v4 supplies these too, so they are blanked with the rest while it learns
+    "k_vent_fan": None,
+    "confidence_k_vent": "none",
 }
 
 
@@ -443,6 +447,44 @@ def control_ready(source: Any, config: Mapping[str, Any] | None) -> bool:
     """True when the PRIMARY engine has a usable fit and can drive decisions; False = today's learning defaults."""
     engine = _control_engine(config)
     return control_capable(engine) and usable(engine, source)
+
+
+@dataclass(frozen=True)
+class HouseStepper:
+    """The primary engine's own house model, one 15-min step at a time (Issue #1505), for the operation timeline.
+
+    ``step(t, mass, outdoor, windows, fan, local_hour) -> (t_next, mass_next)`` with the equipment off;
+    ``heat_gain`` / ``cool_gain`` (F/h on the room) are what one hour of full heating / cooling adds in that step
+    (the step is linear in duty). Engine-neutral, so the decision-path timeline never names an engine."""
+
+    step: Callable[[float, float, float, float, float, float], tuple[float, float]]
+    heat_gain: float
+    cool_gain: float
+
+
+def control_stepper(source: Any, config: Mapping[str, Any] | None) -> HouseStepper | None:
+    """The primary's house model as a ``HouseStepper`` when it has one and a usable fit (v4 today), else None.
+
+    Issue #1505: the operation timeline simulates window plans with the primary's own model, so its window times tell
+    the same story as the engine's nat-vent close (a single-node rate taken out of v4 ignores the house's mass)."""
+    try:
+        engine = _control_engine(config)
+        if engine.id != ENGINE_V4 or not control_ready(source, config):
+            return None
+        from . import predictor_v4  # noqa: PLC0415
+
+        model = predictor_v4.from_dict(dict(engine.state_of(source) or {}))
+        if model is None:
+            return None
+        house = tuple(float(model.house[k]) for k in predictor_v4.HOUSE_KEYS)
+
+        def _step(t: float, mass: float, outdoor: float, win: float, fan: float, hour: float) -> tuple[float, float]:
+            return predictor_v4.free_step(house, t, mass, out=outdoor, win=win, fan=fan, hour=hour)
+
+        return HouseStepper(step=_step, heat_gain=max(house[7], 0.0), cool_gain=max(house[8], 0.0))
+    except Exception:  # noqa: BLE001 - the timeline falls back to the rate simulation
+        _LOGGER.debug("control_stepper failed", exc_info=True)
+        return None
 
 
 def control_model(source: Any, config: Mapping[str, Any] | None, base: Any) -> Any:

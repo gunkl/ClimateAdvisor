@@ -1269,6 +1269,48 @@ class LearningEngine:
         self._update_thermal_model_cache(obs)
         return True
 
+    def reset_vent_rates(self) -> int:
+        """Forget the windows-only and fan rates and the fits behind them, for a one-time re-learn (Issue #1505).
+
+        Returns how many vent fits were dropped. ``k_solar`` keeps any two-param update those fits made: it is
+        learned from every regime and the re-learn's own fits update it again.
+        """
+        before = len(self._state.thermal_observations)
+        self._state.thermal_observations = [
+            o for o in self._state.thermal_observations if o.get("hvac_mode") not in ("vent_window", "vent_fan")
+        ]
+        cache = self._state.thermal_model_cache
+        if isinstance(cache, dict):
+            for key in ("k_vent_window", "k_vent_fan"):
+                cache[key] = None
+            for key in ("observation_count_vent_window", "observation_count_vent_fan"):
+                cache[key] = 0
+        return before - len(self._state.thermal_observations)
+
+    def seed_vent_rates_from_fits(self) -> None:
+        """After the Issue #1505 re-learn: each vent rate = the median of its fits, count = how many.
+
+        The EWMA initialises on its FIRST fit and moves 5-15 % a fit after that, so a batch replayed from empty is
+        mostly its first window (Zone 1: EWMA -0.147/h from a -0.167 first fit, median of the 30 fits -0.108/h). The
+        median is the batch's own central value; later fits update it through the normal EWMA.
+        """
+        cache = self._state.thermal_model_cache
+        if not isinstance(cache, dict):
+            return
+        for mode, field_name, count_field in (
+            ("vent_window", "k_vent_window", "observation_count_vent_window"),
+            ("vent_fan", "k_vent_fan", "observation_count_vent_fan"),
+        ):
+            ks = sorted(
+                float(o["k_passive"])
+                for o in self._state.thermal_observations
+                if o.get("hvac_mode") == mode and isinstance(o.get("k_passive"), (int, float))
+            )
+            if ks:
+                mid = len(ks) // 2
+                cache[field_name] = ks[mid] if len(ks) % 2 else (ks[mid - 1] + ks[mid]) / 2.0
+                cache[count_field] = len(ks)
+
     def _drop_duplicate_chart_log_fits(self) -> None:
         """Remove repeated chart_log fits of one window and undo their pull on the cache (Issue #1476).
 

@@ -111,7 +111,11 @@ class TestDecisionRates:
         rows = self._rows(monkeypatch, primary="v4", ready=False)
         assert rows["k_passive"] == (None, "default")
         assert rows["confidence"][1] == "default"
-        assert rows["k_vent_window"] == (-0.138, "v3")  # the observations are not blanked
+        # Issue #1505: v4 supplies the window and fan rates too, so while it learns they are blanked with the rest. The
+        # old expectation (v3's -0.138 shown as in use) put a v3 windows rate beside a v4/default envelope rate: two
+        # models in one comparison, the defect behind Zone 1's "windows and fan 3.1x faster" line.
+        assert rows["k_vent_window"] == (None, "default")
+        assert rows["k_vent_fan"][1] == "default"
 
     def test_v3_primary_is_all_v3(self, monkeypatch):
         rows = self._rows(monkeypatch, primary="v3", ready=True)

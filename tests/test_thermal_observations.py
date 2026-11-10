@@ -95,8 +95,12 @@ def _make_obs_coord(
     nat_vent_active: bool = False,
     any_sensor_open: bool = False,
     learning_enabled: bool = True,
+    fan_running: bool | None = None,
 ):
-    """Build a minimal coordinator stub with the v3 observation methods bound."""
+    """Build a minimal coordinator stub with the v3 observation methods bound.
+
+    ``fan_running``: the PHYSICAL fan the vent split keys on (Issue #1505); default = CA's ``fan_active`` flag.
+    """
     ClimateAdvisorCoordinator = _get_coordinator_class()
     coord = object.__new__(ClimateAdvisorCoordinator)
 
@@ -180,6 +184,7 @@ def _make_obs_coord(
         return_value=IndoorTempReading(indoor_temp, "climate.test", indoor_temp)
     )
     coord._any_sensor_open = MagicMock(return_value=any_sensor_open)
+    coord._fan_physically_running = MagicMock(return_value=fan_active if fan_running is None else fan_running)
     coord._async_save_state = AsyncMock()
 
     def _get_current_sample(elapsed: float) -> dict:
@@ -1010,10 +1015,8 @@ class TestWallClockTimeout:
             f"(between THERMAL_ROLLING_MIN_WINDOW_MINUTES={THERMAL_ROLLING_MIN_WINDOW_MINUTES} "
             f"and THERMAL_ROLLING_MAX_WINDOW_MINUTES={THERMAL_ROLLING_MAX_WINDOW_MINUTES})"
         )
-        # The coordinator should log a "keeping alive" message
-        assert any("keeping alive" in r.message for r in caplog.records), (
-            "Expected INFO log indicating observation is being kept alive"
-        )
+        # Issue #1505: a vent observation only marks the stretch (the chart_log fit learns from it at the end), so the
+        # rolling window's "keeping alive" log no longer applies; being kept is the behaviour that matters.
 
     def test_ventilated_decay_abandons_at_max_window_low_signal(self, caplog):
         """ventilated_decay started 241 min ago (past 240-min cap), low |ΔT| → abandoned with max_window_exceeded."""
@@ -1049,11 +1052,12 @@ class TestWallClockTimeout:
             "Expected log with reason 'max_window_exceeded'"
         )
 
-    def test_ventilated_decay_commits_at_max_window_sufficient_signal(self):
-        """ventilated_decay started 61 min ago, sensor open, indoor has moved → commit triggered.
+    def test_ventilated_decay_with_signal_mid_stretch_is_not_fitted_from_live_samples(self):
+        """ventilated_decay 61 min in, sensor open, indoor has moved: nothing is committed from the live samples.
 
-        Signal check uses indoor sample range (max-min), not snapshot differential.
-        indoor_start=72.0 → indoor_end=74.0 gives range=2.0 >= THERMAL_ROLLING_MIN_DELTA_T_F (0.2).
+        Issue #1505: the old assertion (commit triggered) pinned the second, live-sample learner that put Zone 1's
+        windows-only rate at 0.150/h against a measured ~0.02; the stretch is now learned by the chart_log fit when it
+        ends, so mid-stretch the observation simply keeps marking it.
         """
         indoor_start, indoor_end, outdoor = 72.0, 74.0, 70.0
         coord = _make_obs_coord(
@@ -1062,6 +1066,7 @@ class TestWallClockTimeout:
             outdoor_temp=outdoor,
             any_sensor_open=True,
         )
+        coord._run_vent_window_chart_log_fit = MagicMock()
         coord._pending_observations[OBS_TYPE_VENT_WINDOW_DECAY] = _make_stale_obs_rising_temps(
             OBS_TYPE_VENT_WINDOW_DECAY,
             n_samples=THERMAL_VENT_MIN_SAMPLES + 5,
@@ -1087,11 +1092,8 @@ class TestWallClockTimeout:
         was_committed_status = obs_still_present is not None and obs_still_present.get("status") == "committing"
         was_queued = len(committed_obs_types) > 0
 
-        assert was_committed_status or was_queued, (
-            "ventilated_decay with sufficient signal at max window should trigger commit "
-            f"(status={obs_still_present.get('status') if obs_still_present else 'popped'}, "
-            f"queued={was_queued})"
-        )
+        assert not was_committed_status and not was_queued, "the live samples must not be fitted (Issue #1505)"
+        assert obs_still_present is not None and obs_still_present.get("status") == "monitoring"
 
     def test_ventilated_decay_kept_alive_flat_indoor_large_snapshot_diff(self, caplog):
         """Regression: ventilated_decay with flat indoor temps kept alive even when snapshot diff is large.
@@ -1128,9 +1130,7 @@ class TestWallClockTimeout:
             "even when indoor-outdoor snapshot diff is large (12°F). "
             "Signal check must use indoor sample range, not snapshot differential."
         )
-        assert any("keeping alive" in r.message for r in caplog.records), (
-            "Expected 'keeping alive' log — flat indoor means signal_sufficient=False"
-        )
+        # Issue #1505: no rolling-window log for vent observations any more (see the 61-min test above).
 
 
 # Issue #587: the two fan_only_decay wall-clock tests formerly here were removed —
@@ -1637,10 +1637,13 @@ class TestNatVentAndVentilatedDecay:
         solar_gain is blocked (HVAC idle + nat_vent means the solar_gain guard also
         blocks it, since it requires not _fan_active).
         """
+        # Issue #1505: the vent split keys on the PHYSICAL fan, so the session's fan is running here; an armed session
+        # with the fan paused starts neither type (tests/test_thermal_vent_split.py::TestVentSplitPhysicalFan1505).
         coord = _make_obs_coord(
             indoor_temp=72.0,
             outdoor_temp=68.0,  # delta = 4.0 >= 1.0
             nat_vent_active=True,
+            fan_running=True,
             any_sensor_open=True,
             hvac_action="idle",
         )

@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.23"
+VERSION = "0.9.24"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1774,6 +1774,12 @@ THERMAL_CHART_LOG_VENT_MIN_MINUTES: int = 120  # 2h minimum for overnight ventil
 # Ventilated decay observation thresholds (shared by vent_window_decay and vent_fan_decay)
 THERMAL_VENT_MIN_SAMPLES = 20
 THERMAL_VENT_MIN_SIGNAL_F = 0.3
+# Issue #1505: a fit only uses a stretch once the house has settled after the last ventilation change. Measured on
+# Zone 1's chart log (Jun-Nov 2026, nights, HVAC idle, gap >= 3 F): after the fan stops the house moves AWAY from
+# outdoor for the first 30 min (its own mass: k -0.25/h) and reaches the windows-only level by 90-120 min; after the
+# windows close the closed-up rate reads about 2x for the first 30 min (0.053 vs 0.024/h), then settles.
+THERMAL_VENT_POST_FAN_SETTLE_MINUTES: int = 120
+THERMAL_POST_WINDOW_CLOSE_SETTLE_MINUTES: int = 30
 # Lower trigger delta for the vent split: k_vent_window/k_vent_fan are measurable at 1°F differential.
 # passive_decay needs 3°F for sufficient envelope-decay SNR; vent obs measures a different
 # phenomenon (air exchange rate) where smaller differentials still carry useful signal.

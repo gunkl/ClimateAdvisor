@@ -35,12 +35,16 @@ from enum import StrEnum
 from typing import Any
 
 from .const import (
+    DEFAULT_NATURAL_VENT_DELTA,
+    FAN_MODE_DISABLED,
+    NAT_VENT_HYSTERESIS_F,
     OCCUPANCY_AWAY,
     OCCUPANCY_VACATION,
     THERMAL_SOLAR_DAYTIME_END_H,
     THERMAL_SOLAR_DAYTIME_START_H,
     THERMAL_SWING_DEFAULT_F,
 )
+from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .temperature import format_temp, outdoor_direction_ok_for_thermostat
 from .thermal_confidence import grade_hvac_confidence, grade_solar_confidence
 
@@ -562,6 +566,15 @@ class TimelineSnapshot:
     wake_time: time | None = None
     sleep_time: time | None = None
     fan_mode: str = "disabled"  # whole_house_fan | hvac_fan | disabled (never "both": Issue #1175)
+    # Issue #1505: the nat-vent gate's settings, so the plan simulation runs the fan in a window hour exactly when the
+    # live gate would (``decide_nat_vent_gate``); None = the segment's ceiling stands in for the comfort ceiling.
+    comfort_cool: float | None = None
+    nat_vent_delta: float = DEFAULT_NATURAL_VENT_DELTA
+    nat_vent_hysteresis_f: float = NAT_VENT_HYSTERESIS_F
+    aggressive_savings: bool = False
+    # Issue #1505: the primary engine's own house model (``prediction_engines.HouseStepper``) when it has one and a
+    # usable fit; the plan simulation then steps it (mass, windows, fan) instead of the single-node rate ODE.
+    house_stepper: Any = None
     sleep_sensor_label: str | None = None  # e.g. "bedroom sensor"; None = no sleep sensor configured
     primary_sensor_label: str = "thermostat"
     can_heat: bool = True
@@ -1039,14 +1052,23 @@ class ModelRates:
     swing_cool: float | None
     window_obs: int
     hvac_grade: str
+    k_vent_fan: float | None = None  # Issue #1505: windows open AND the fan running
+    vent_grade: str | None = (
+        None  # Issue #1505: the primary engine's own grade for the two rates (v4); None = v3 counts
+    )
 
 
 def model_rates(model: Mapping[str, Any] | None) -> ModelRates | None:
-    """Rates from the v3 thermal-model cache, or None when the envelope rate is not learned (no simulation)."""
+    """Rates from the decisions' thermal model, or None when the envelope rate is not learned (no simulation).
+
+    On a v4 zone ``control_thermal_model`` lays v4's own window and fan rates (``k_vent_window`` / ``k_vent_fan``,
+    ``confidence_k_vent``) over the v3 cache, the way it already does the envelope rate (Issue #1505)."""
     if not model:
         return None
     k_passive = model.get("k_passive")
     k_vent = model.get("k_vent_window")
+    k_fan = model.get("k_vent_fan")
+    vent_grade = model.get("confidence_k_vent")
     if not isinstance(k_passive, (int, float)) or k_passive >= 0:
         # Same bridge the v3 curve uses: a learned ventilated rate stands in for an unlearned envelope rate.
         if isinstance(k_vent, (int, float)) and k_vent < 0:
@@ -1069,7 +1091,45 @@ def model_rates(model: Mapping[str, Any] | None) -> ModelRates | None:
         swing_cool=num("swing_cool_f"),
         window_obs=int(model.get("observation_count_vent_window", 0) or 0),
         hvac_grade=grade_hvac_confidence(dict(model)),
+        k_vent_fan=float(k_fan)
+        if isinstance(k_fan, (int, float)) and not isinstance(k_fan, bool) and k_fan < 0
+        else None,
+        vent_grade=vent_grade if isinstance(vent_grade, str) else None,
     )
+
+
+def fan_configured(fan_mode: str) -> bool:
+    """A fan CA can run for ventilation (whole-house fan or HVAC blower)."""
+    return fan_mode not in ("", FAN_MODE_DISABLED)
+
+
+def fan_would_run(snap: TimelineSnapshot, seg: Segment, outdoor: float, indoor: float) -> bool:
+    """Whether the live nat-vent gate (``decide_nat_vent_gate``) would run this home's fan at these temperatures."""
+    if not fan_configured(snap.fan_mode):
+        return False
+    return decide_nat_vent_gate(
+        NatVentGateInputs(
+            outdoor=outdoor,
+            indoor=indoor,
+            comfort_heat_raw=seg.floor,
+            sleep_heat=seg.floor,
+            in_sleep_window=False,
+            comfort_cool=snap.comfort_cool if snap.comfort_cool is not None else seg.ceiling,
+            nat_vent_delta=snap.nat_vent_delta,
+            hysteresis=snap.nat_vent_hysteresis_f,
+            fan_mode=snap.fan_mode,
+            aggressive_savings=snap.aggressive_savings,
+        )
+    )
+
+
+def open_hour_rate(snap: TimelineSnapshot, rates: ModelRates, seg: Segment, outdoor: float, indoor: float) -> float:
+    """The rate toward outdoor for one simulated window-open step of the single-node simulation (Issue #1505).
+
+    The fan rate when the nat-vent gate would run the fan, else the windows-only rate, else the envelope rate."""
+    if rates.k_vent_fan is not None and fan_would_run(snap, seg, outdoor, indoor):
+        return rates.k_vent_fan
+    return rates.k_vent_window if rates.k_vent_window is not None else rates.k_passive
 
 
 def solar_factor(local_hour: int, phase_offset_h: float) -> float:
@@ -1131,6 +1191,8 @@ class _Simulator:
         last_fc = self.pts[-1][0] + 1800
         dt_h = SIM_STEP_MINUTES / 60.0
         t = float(self.start_t)
+        stepper = snap.house_stepper
+        mass = t  # the model's hidden mass starts settled at the room
         ts = snap.now
         steps: list[SimStep] = []
         hvac_total = 0.0
@@ -1146,9 +1208,20 @@ class _Simulator:
             assert seg is not None
             mid = ts.timestamp() + SIM_STEP_MINUTES * 30
             open_ = any(a <= mid < b for a, b in span_pts)
-            k = r.k_vent_window if (open_ and r.k_vent_window is not None) else r.k_passive
-            q_sun = (r.k_solar or 0.0) * solar_factor(ts.hour, r.phase_h)
-            free = ode_step(t, out, k, q_sun, dt_h)
+            if stepper is not None:
+                # the primary's own model: windows and the fan are inputs to its leak, the mass carries step to step
+                fan_on = open_ and fan_would_run(snap, seg, out, t)
+                local = ts_next.astimezone(snap.now.tzinfo) if snap.now.tzinfo is not None else ts_next
+                hour = local.hour + local.minute / 60.0
+                free, mass = stepper.step(t, mass, out, 1.0 if open_ else 0.0, 1.0 if fan_on else 0.0, hour)
+                heat_rate: float | None = stepper.heat_gain or None
+                cool_rate: float | None = stepper.cool_gain or None
+            else:
+                k = open_hour_rate(snap, r, seg, out, t) if open_ else r.k_passive
+                q_sun = (r.k_solar or 0.0) * solar_factor(ts.hour, r.phase_h)
+                free = ode_step(t, out, k, q_sun, dt_h)
+                heat_rate = abs(r.k_active_heat) if r.k_active_heat else None
+                cool_rate = abs(r.k_active_cool) if r.k_active_cool else None
             nxt = free
             hvac_min = 0.0
             hvac_mode: str | None = None
@@ -1156,12 +1229,12 @@ class _Simulator:
                 # The thermostat holds whichever edge the house would otherwise cross (both armed; an away or
                 # vacation band is just a wider band). The equipment rate is the learned one; the run is the
                 # fraction of the step needed to get back to the edge.
-                if free < seg.floor and snap.can_heat and r.k_active_heat:
-                    rate = abs(r.k_active_heat)
+                if free < seg.floor and snap.can_heat and heat_rate:
+                    rate = heat_rate
                     gain = min(seg.floor - free, rate * dt_h)
                     nxt, hvac_min, hvac_mode = free + gain, gain / rate * 60.0, "heat"
-                elif free > seg.ceiling and snap.can_cool and r.k_active_cool:
-                    rate = abs(r.k_active_cool)
+                elif free > seg.ceiling and snap.can_cool and cool_rate:
+                    rate = cool_rate
                     gain = min(free - seg.ceiling, rate * dt_h)
                     nxt, hvac_min, hvac_mode = free - gain, gain / rate * 60.0, "cool"
             # Issue #1477: an unlearned swing is THERMAL_SWING_DEFAULT_F (1.5 F), as everywhere else (was 1.0 here)
@@ -1181,12 +1254,24 @@ class _Simulator:
 # ---------------------------------------------------------------------------
 
 
-def window_effect_grade(rates: ModelRates | None) -> str:
-    """Confidence in the learned window effect: ``none`` unless it is both measured and distinguishable (gate)."""
-    if rates is None or rates.k_vent_window is None:
+def window_effect_grade(rates: ModelRates | None, fan_mode: str = FAN_MODE_DISABLED) -> str:
+    """Confidence in the learned window effect: ``none`` unless it is both measured and distinguishable (gate).
+
+    Issue #1505: in a home with a fan the effect is the larger of the windows-only and the fan rate (window periods
+    there run the fan whenever the nat-vent gate allows; each hour is still simulated with its own rate). On a v4 zone
+    the grade is v4's own (``confidence_k_vent``); a v3 zone keeps the ventilated-observation count tiers."""
+    if rates is None:
         return "none"
-    if abs(rates.k_vent_window) < WINDOW_MIN_RATIO * abs(rates.k_passive):
+    candidates = [rates.k_vent_window]
+    if fan_configured(fan_mode):
+        candidates.append(rates.k_vent_fan)
+    measured = [abs(k) for k in candidates if k is not None]
+    if not measured:
         return "none"
+    if max(measured) < WINDOW_MIN_RATIO * abs(rates.k_passive):
+        return "none"
+    if rates.vent_grade is not None:
+        return rates.vent_grade if rates.vent_grade in ("none", "low", "medium", "high") else "low"
     grade = grade_solar_confidence(rates.window_obs)  # same 20 / 50 / 100 tiers as the other learned effects
     return grade if grade in ("none", "low") else ("medium" if grade == "medium" else "high")
 
@@ -1437,7 +1522,7 @@ def evaluate_windows(
     snap: TimelineSnapshot, sim: _Simulator, base: Sim, rates: ModelRates, end: datetime
 ) -> tuple[list[WindowCandidate], list[Span]]:
     """Candidates (planned + scanned), each judged by simulating the plan with and without it; greedy by benefit."""
-    grade = window_effect_grade(rates)
+    grade = window_effect_grade(rates, snap.fan_mode)
     raw: list[tuple[str, datetime, datetime]] = [*_planned_spans(snap, end), *_scan_candidates(snap, base, rates, end)]
     raw.sort(key=lambda c: c[1])
     # drop exact duplicates of a scanned span inside a planned one: planned wins

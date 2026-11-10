@@ -77,7 +77,13 @@ def test_control_model_v4_lays_its_scalars_over_v3_and_keeps_v3_observations() -
     model = v4_model_from_spec({"confidence": "ok", "house": {"a_o": 0.06, "q_h": 10.0, "q_c": 10.0}})
     out = pe.control_model(_src(model), {"primary_engine": "v4"}, V3_MODEL)
     assert out["k_passive"] == pytest.approx(-0.06) and out["k_active_heat"] != V3_MODEL["k_active_heat"]
-    assert out["swing_heat_f"] == 1.25 and out["k_vent_window"] == -0.4  # observations stay v3's
+    assert out["swing_heat_f"] == 1.25  # observations stay v3's
+    # Issue #1505: the window and fan rates are v4's own now (a_o + a_w / a_f), not v3's learner's. The old assertion
+    # (``k_vent_window == -0.4``, v3's) pinned a v3 windows rate next to v4's envelope rate: the timeline's
+    # windows-vs-envelope check then compared two different models, and on Zone 1 passed on an inflated v3 rate.
+    house = model["house"]
+    assert out["k_vent_window"] == pytest.approx(-(0.06 + house["a_w"]))
+    assert out["k_vent_fan"] == pytest.approx(-(0.06 + house["a_f"]))
     assert V3_MODEL["k_passive"] == -0.15  # the input is not mutated
 
 
@@ -289,3 +295,23 @@ def test_the_pre_decision_prediction_writes_no_shadow_state_and_costs_millisecon
     assert (store.v4_mass_f, store.v4_mass_at, store.dirty, coord._v4_last_future, coord._v4_archive.dirty) == before
     assert per_cycle_ms < 150.0, f"control refresh cost {per_cycle_ms:.1f} ms per cycle"
     print(f"control refresh: {per_cycle_ms:.1f} ms per cycle (headless, real predictor)")
+
+
+def test_control_rates_export_v4s_window_and_fan_rates_in_v3s_keys_1505() -> None:
+    """Issue #1505: v4 fits the window and fan leak with everything else; the timeline reads them like k_passive."""
+    spec = {"confidence": "ok", "house": {"a_o": 0.05, "a_w": 0.013, "a_f": 0.18}}
+    rates = p4.control_rates(p4.from_dict(v4_model_from_spec(spec)))
+    assert rates["k_vent_window"] == pytest.approx(-(0.05 + 0.013))
+    assert rates["k_vent_fan"] == pytest.approx(-(0.05 + 0.18))
+    assert rates["confidence_k_vent"] == "medium"
+
+
+def test_a_frozen_window_or_fan_term_is_not_exported_1505() -> None:
+    """A term v4 never saw data for keeps its start value: that is not a measurement, so it is not handed on."""
+    model = v4_model_from_spec({"confidence": "ok", "house": {"a_o": 0.05, "a_w": 0.1, "a_f": 0.3}})
+    model.setdefault("fit", {})["frozen"] = ["a_w", "a_f"]
+    rates = p4.control_rates(p4.from_dict(model))
+    assert rates["k_vent_window"] is None and rates["k_vent_fan"] is None
+    assert rates["confidence_k_vent"] == "none"
+    blank = pe.CONTROL_BLANK_MODEL
+    assert blank["k_vent_window"] is None and blank["k_vent_fan"] is None and blank["confidence_k_vent"] == "none"

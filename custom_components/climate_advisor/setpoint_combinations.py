@@ -191,3 +191,26 @@ def setpoint_combination_findings(
             add(CONF_VACATION_COOL, WARN_VACATION_COOL_BELOW_AWAY)
 
     return {field: min(keys, key=WARNING_PRIORITY.index) for field, keys in found.items()}
+
+
+# Issue #1514: the band each heat/cool finding is keyed on, as the runtime log names it.
+BAND_LABELS: dict[str, str] = {
+    "comfort_heat": "home",
+    "setback_heat": "away",
+    "sleep_heat": "sleep",
+    CONF_VACATION_HEAT: "vacation",
+    CONF_VACATION_COOL: "vacation",
+}
+
+
+def narrow_band_findings(
+    values_f: dict[str, Any], *, supports_heat: bool | None = None, supports_cool: bool | None = None
+) -> dict[str, str]:
+    """The bands setup warns are narrow or inverted, ``{heat field: warning key}`` (Issue #1514).
+
+    Exactly setup's rule (:func:`setpoint_combination_findings`), filtered to the two band warnings; they rank first in
+    ``WARNING_PRIORITY``, so another warning on the same field never hides them. Outcomes that follow from such a band
+    are expected (owner ruling 2026-11-10): the runtime log names the gap as their cause, and P8 excuses them.
+    """
+    found = setpoint_combination_findings(values_f, supports_heat=supports_heat, supports_cool=supports_cool)
+    return {f: k for f, k in found.items() if k in (WARN_BAND_INVERTED, WARN_BAND_NARROW)}

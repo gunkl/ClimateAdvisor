@@ -648,6 +648,8 @@ class SurfaceProbe(PromiseProbe):
         self._last_sample: datetime | None = None
         self.samples = 0
         self.compared: dict[str, int] = {}
+        # Issue #1514: samples whose out-of-band result a narrow/inverted setpoint band explains, by "surface:reason".
+        self.excused: dict[str, int] = {}
         self.divergences: list[Divergence] = []
         self._seen: set[tuple[str, str, str]] = set()
         self._strips_last: datetime | None = None
@@ -694,6 +696,23 @@ class SurfaceProbe(PromiseProbe):
             return "sleep" if _in_sleep_window(now, self._session.coordinator.config) else "awake"
         except Exception:  # noqa: BLE001 - an unreadable schedule must not hide the divergence
             return "awake"
+
+    def _narrow_band_in_force(self, now: datetime, armed: Armed) -> bool:
+        """Issue #1514: the band the thermostat is held to is one setup warns is narrow or inverted.
+
+        Both must hold: the armed range is narrower than setup's gap, AND the configured band in force (sleep in the
+        sleep window, else home) is flagged by setup's own rule (``setpoint_combinations.narrow_band_findings``). A
+        range the engine narrowed by itself on a normal band is not excused -- that would be a real divergence.
+        """
+        from custom_components.climate_advisor.setpoint_combinations import (  # noqa: PLC0415
+            MIN_HEAT_COOL_GAP_F,
+            narrow_band_findings,
+        )
+
+        if armed.ceiling - armed.floor >= MIN_HEAT_COOL_GAP_F:
+            return False
+        field = "sleep_heat" if self._time_band(now) == "sleep" else "comfort_heat"
+        return field in narrow_band_findings(dict(self._session.coordinator.config))
 
     def _record(self, surface: str, step: str, now: datetime, detail: str, armed: Armed, shown: Shown) -> None:
         band = self._time_band(now)
@@ -776,6 +795,11 @@ class SurfaceProbe(PromiseProbe):
             )
         hold_now: set[str] = set()
         for sh, detail in check_surfaces(armed, shown, tol):
+            if sh.surface == "nat_vent_target" and self._narrow_band_in_force(now, armed):
+                # Issue #1514 (owner ruling 2026-11-10): on a band setup warns is narrow or inverted, the overnight
+                # target sleep_heat + hysteresis can sit outside it; that is the expected result of the setting.
+                self.excused["nat_vent_target:narrow_gap"] = self.excused.get("nat_vent_target:narrow_gap", 0) + 1
+                continue
             if sh.surface == "thermostat_hold":
                 # settling allowance: a looser-than-armed hold only counts once it has persisted
                 first = self._hold_first.setdefault(sh.note, now)
@@ -847,6 +871,7 @@ class SurfaceRun:
     divergences: list[Divergence]
     callback_errors: int = 0
     error: str | None = None
+    excused: dict[str, int] = field(default_factory=dict)  # Issue #1514
 
 
 def run_golden_surfaces(path: Path) -> SurfaceRun:
@@ -867,7 +892,12 @@ def run_scenario_surfaces(scenario: dict, name: str) -> SurfaceRun:
     except Exception as exc:  # noqa: BLE001 - a scenario the coordinator cannot host is reported, not fatal
         return SurfaceRun(name, probe.samples, probe.compared, probe.divergences, error=f"{type(exc).__name__}: {exc}")
     return SurfaceRun(
-        name, probe.samples, probe.compared, probe.divergences, callback_errors=len(result.callback_errors)
+        name,
+        probe.samples,
+        probe.compared,
+        probe.divergences,
+        callback_errors=len(result.callback_errors),
+        excused=dict(probe.excused),
     )
 
 
@@ -900,7 +930,9 @@ def run_generated_surfaces(
                     continue
                 p = holder.get("p")
                 if p is not None:
-                    runs.append(SurfaceRun(f"generated:{ds}", p.samples, p.compared, p.divergences))
+                    runs.append(
+                        SurfaceRun(f"generated:{ds}", p.samples, p.compared, p.divergences, excused=dict(p.excused))
+                    )
     return runs, errors
 
 
@@ -931,6 +963,7 @@ def cli_surfaces(seeds: list[int], days: int, profile: str) -> int:
         if r.error:
             print(f"  [skipped] {r.name}: {r.error}")
     bad = 0
+    all_runs = list(runs)
     if days:
         gruns, gerrors = run_generated_surfaces(seeds, days, profile)
         gfound = collapse(gruns, context="generated")
@@ -941,6 +974,17 @@ def cli_surfaces(seeds: list[int], days: int, profile: str) -> int:
         unlisted += gunlisted
         stale += gstale
         print(f"  generated: {len(gruns)} days, {sum(r.samples for r in gruns)} samples, {len(gerrors)} errors")
+        all_runs += gruns
+    # Issue #1514: excused samples are reported, never silently dropped (an excuse is not a pass).
+    excused: dict[str, tuple[int, int]] = {}
+    for r in all_runs:
+        for k, n in r.excused.items():
+            samples, days = excused.get(k, (0, 0))
+            excused[k] = (samples + n, days + 1)
+    for k, (n, d) in sorted(excused.items()):
+        surface, reason = k.split(":", 1)
+        why = reason.replace("_", " ")
+        print(f"  excused: {surface} {why} -- {n} sample(s) on {d} run(s) (setup warns about this band)")
     for (surface, where), rows in unlisted:
         bad += 1
         print(f"UNLISTED divergence: {surface} in {where}")

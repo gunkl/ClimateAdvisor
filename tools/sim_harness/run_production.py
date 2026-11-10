@@ -1167,6 +1167,14 @@ def _dispatch_event(
         engine._paused_entity = None
         engine._paused_since = None
         engine._natural_vent_active = False
+        # Issue #1513 (test-infrastructure change): the observe-only WHF notice flags are not persisted, so a real
+        # restart's new engine starts with both False and notifies again for a fan still running on a sealed house,
+        # which opens a fresh P9/P2 notice span after the journal reset. Keeping the old engine's True here modelled a
+        # restart production cannot produce: no second notice, so P9 reported a false miss (nightly 42838336649,
+        # day 16007000162). Could it hide a real failure? No: a run with no notice at all is still a miss, and the
+        # flags are __init__ defaults, which is exactly what production restarts with.
+        engine._whf_observe_notified = False
+        engine._whf_observe_rule2_notified = False
 
     elif etype == "automation_toggle":
         # Issue #1128 I3 (additive): the occupant flips the "automation" switch.  Coordinator mode

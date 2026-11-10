@@ -1758,6 +1758,7 @@ class AutomationEngine:
     # When the occupant last pressed the WHOLE-HOUSE fan (not the thermostat blower); None = no WHF press.
     _whf_press_time: str | None = None
     _whf_observe_notified: bool = False
+    _narrow_sleep_vent_logged_on: str | None = None  # Issue #1514: the night the narrow-band note was logged
     _whf_observe_rule2_notified: bool = False  # Issue #1288: observe-only rule-2 notice sent for this overlap
 
     # Issue #1049: class-level defaults for attributes first read by the climate-command
@@ -9655,6 +9656,8 @@ class AutomationEngine:
                 hysteresis=hysteresis,
             )
             _context = "sleep" if in_sleep_window else "daytime"
+            if in_sleep_window:
+                self._note_sleep_vent_target_above_band(nat_vent_target, sleep_heat)
             # Hard exit floor — single source of truth in resolve_hard_exit_floor() (Issue #456),
             # also used by fan_thermostat_check()/check_natural_vent_conditions(). In the sleep
             # branch this is one hysteresis step below the cycling-off threshold above, so the
@@ -14787,6 +14790,30 @@ class AutomationEngine:
             hysteresis=hysteresis,
         )
         return nat_vent_target - hysteresis
+
+    def _note_sleep_vent_target_above_band(self, target: float, sleep_heat: float) -> None:
+        """Log once per night that the overnight nat-vent target sits above ``sleep_cool`` and why (Issue #1514).
+
+        ``sleep_heat + hysteresis`` lands above ``sleep_cool`` only on a sleep band narrower than the hysteresis, which
+        setup warns about (narrow or inverted gap). That is the expected result of the occupant's setting (owner ruling
+        2026-11-10), not something to correct: the log names the narrow sleep band as the cause.
+        """
+        sleep_cool = float(self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
+        if target <= sleep_cool + 0.05:
+            return
+        night = dt_util.now().date().isoformat()
+        if self._narrow_sleep_vent_logged_on == night:
+            return
+        self._narrow_sleep_vent_logged_on = night
+        _LOGGER.info(
+            "Nat-vent overnight target %s is above sleep cool %s because the sleep band (%s to %s) is narrower than"
+            " the cycling step -- the narrow gap setup warns about; expected, nothing is changed role=%s",
+            self._t(target),
+            self._t(sleep_cool),
+            self._t(sleep_heat),
+            self._t(sleep_cool),
+            self.role,
+        )
 
     def _build_nat_vent_fsm_inputs(
         self,

@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.26] — 2026-11-10
+
+- Fix #1514: a setpoint band whose heat and cool are less than 4 °F apart (or the wrong way round) is now named in the log as the cause of what follows from it.
+  - **What you'll notice:** if you saved such a band after setup's warning, the log has a warning at start-up naming the band (home, away, sleep or vacation) and what to expect: the heat and AC may take turns, and with the sleep band, overnight natural ventilation may aim above your sleep cool setting. On a night it does, the log says so once and names the narrow sleep band.
+  - **Unchanged:** what the house does. These outcomes are the expected result of the setting, so nothing corrects them.
+- Fix #1513 (test tooling): the nightly no longer reports a false whole-house-fan safety failure after a simulated restart with automation switched off. Nothing changes in the house.
+
 ## [0.9.25] — 2026-11-10
 
 ### Internal

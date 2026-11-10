@@ -88,6 +88,11 @@ HARNESS_ALLOWLIST: dict[tuple[str, str], str] = {
         )
     },
     **{
+        ("tools/sim_harness/run_production.py", a): "simulate_restart on a reused engine: un-persisted observe-only "
+        "WHF notice flags back to __init__ defaults, so the restart notifies again as a new engine does (#1513)"
+        for a in ("_whf_observe_notified", "_whf_observe_rule2_notified")
+    },
+    **{
         ("tools/sim_harness/_smoke_test.py", a): "infrastructure smoke-test fixture, not a scenario run"
         for a in ("_current_classification", "_paused_by_door", "_pre_pause_mode", "_revisit_callback")
     },

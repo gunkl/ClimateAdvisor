@@ -422,7 +422,13 @@ from .scheduler import (
     resolve_tou_away_vacation_phase,
     resolve_tou_phase,
 )
-from .setpoint_combinations import vacation_edges
+from .setpoint_combinations import (
+    BAND_LABELS,
+    MIN_HEAT_COOL_GAP_F,
+    WARN_BAND_INVERTED,
+    narrow_band_findings,
+    vacation_edges,
+)
 from .state import StatePersistence
 from .storage_paths import resolve_entry_scoped_path, split_shared_list_file
 from .swing import (
@@ -1871,7 +1877,38 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         self._unsub_listeners.append(self.hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _on_homeassistant_stop))
 
+        self._log_narrow_setpoint_bands()
         _LOGGER.info("Climate Advisor v%s coordinator setup complete", VERSION)
+
+    def _log_narrow_setpoint_bands(self) -> None:
+        """Name a narrow or inverted setpoint band as the cause of what follows from it (Issue #1514).
+
+        Setup warns about these (``setpoint_combinations``, Issue #1347) and saves them on a second submit. What follows
+        from them is expected (owner ruling 2026-11-10): heat and AC taking turns, and at night natural ventilation
+        aiming at ``sleep_heat + hysteresis``, which a sleep band narrower than that puts outside the band. Logged once
+        per start (a reload re-runs setup) so the cause is in the log next to the behaviour.
+        """
+        state = self.hass.states.get(self.config.get("climate_entity", ""))
+        modes = (state.attributes or {}).get("hvac_modes") if state is not None else None
+        supports_heat = supports_cool = None
+        if isinstance(modes, (list, tuple)) and modes:
+            supports_heat = any(m in modes for m in ("heat", "heat_cool", "auto"))
+            supports_cool = any(m in modes for m in ("cool", "heat_cool", "auto"))
+        values = {k: self.config.get(k) for k in BAND_LABELS} | {
+            k: self.config.get(k) for k in ("comfort_cool", "setback_cool", "sleep_cool")
+        }
+        for field, key in narrow_band_findings(
+            values, supports_heat=supports_heat, supports_cool=supports_cool
+        ).items():
+            label = BAND_LABELS.get(field, field)
+            _LOGGER.warning(
+                "Setpoint band '%s' is %s (setup warns under a %.0f F gap; it was saved after that warning). Expected "
+                "while it is in force: the heat and AC may take turns%s",
+                label,
+                "inverted: heat at or above cool" if key == WARN_BAND_INVERTED else "narrow",
+                MIN_HEAT_COOL_GAP_F,
+                ", and overnight natural ventilation may aim outside the sleep band" if label == "sleep" else "",
+            )
 
     @callback
     def _async_whf_safety_tick(self, now: datetime) -> None:

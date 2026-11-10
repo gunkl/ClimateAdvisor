@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.25] — 2026-11-10
+
+### Internal
+- Fix #1508: the nightly generated-days run no longer keeps every simulated day in memory. A test stub recorded each call with its arguments, and that kept each day's simulated home alive until the job ended (about 550 MB per seed). Memory now stays flat across seeds and the results are identical. Home behavior is unchanged: this touches only the test harness.
+
 ## [0.9.24] — 2026-11-09
 
 ### Fixed

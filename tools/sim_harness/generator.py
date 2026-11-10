@@ -28,6 +28,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from tools.sim_harness.ha_stubs import clear_stub_call_history
+
 # promise_probe installs the Home Assistant stubs that the production imports below need.
 from tools.sim_harness.promise_probe import PromiseProbe, PromiseReport
 from tools.sim_harness.session import make_session
@@ -574,6 +576,8 @@ def own_thermostat(session: Any) -> None:
 
 def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
     """Drive one planned day closed-loop against the production engine; return the record."""
+    # Issue #1508: the previous day's FakeHass must not stay reachable from the process-wide HA stubs.
+    clear_stub_call_history()
     t_wall = time.perf_counter()
     scenario = skeleton_scenario(plan)
     house = ToyHouse(HouseParams(**plan.house), plan.indoor_start_f)
@@ -916,6 +920,7 @@ def replay_scenario(scenario: dict) -> PromiseReport:
     """Play a saved scenario through the standard runner with the promise probe attached."""
     from tools.sim_harness.session import drive_scenario  # noqa: PLC0415
 
+    clear_stub_call_history()  # Issue #1508: shrink replays a day up to 150 times in one process
     probe = PromiseProbe(scenario_name=str(scenario.get("name", "replay")))
     session = make_session(
         scenario, engine="fakehass", probe=probe, use_coordinator=bool(scenario.get("use_coordinator", False))

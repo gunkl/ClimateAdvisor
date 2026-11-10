@@ -62,3 +62,26 @@ def test_generated_days_do_not_accumulate_recorded_mock_calls():
     finally:
         logging.disable(logging.NOTSET)
     assert calls() - before < 1000
+
+
+def test_generated_days_do_not_keep_earlier_days_alive():
+    """Issue #1508: a recorded stub call holds its arguments, and ``er.async_get(hass)`` runs on every chart-log row,
+    so each day's FakeHass (and through it the day's coordinator, engine and promise journal) stayed reachable from
+    the process-wide ``homeassistant.helpers.entity_registry`` MagicMock: ~550 MB per 250-day nightly seed. Only a few
+    dozen ``_Call`` objects per day did it, under the guard above, so this counts whole days kept alive instead."""
+    from tools.sim_harness import replay
+    from tools.sim_harness.fake_hass import FakeHass
+    from tools.sim_harness.generator import day_seed_of, run_day
+
+    def live_hasses() -> int:
+        gc.collect()
+        return sum(1 for o in gc.get_objects() if type(o) is FakeHass)
+
+    replay._quiet()
+    try:
+        for i in range(3):
+            run_day(day_seed_of(1508, i), "coordinator")
+    finally:
+        logging.disable(logging.NOTSET)
+    # The latest day may still be pinned until the next one starts; no earlier day may be.
+    assert live_hasses() <= 1

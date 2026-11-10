@@ -728,3 +728,92 @@ def test_latched_and_regen_reason_follow_the_contract() -> None:
     changed = latch.update(make_snapshot("mild", now=NOON + timedelta(minutes=60), occupancy="away")).timeline
     assert changed.regen_reason is not None and "occupancy" in changed.regen_reason
     assert not build_timeline(make_snapshot("mild", now=NOON)).latched  # a raw build is not the day's latched plan
+
+
+# ---------------------------------------------------------------------------
+# Issue #1505: the fan rate in window hours, the v4 vent grade
+# ---------------------------------------------------------------------------
+
+
+def test_a_fan_home_is_validated_by_its_fan_rate_when_windows_alone_barely_matter() -> None:
+    """Zone 1's shape: windows alone barely beat the envelope, the whole-house fan does the work. The fixture's evening
+    needs the fixture's breathing rate (-0.5, as ``_evening_cooling``) to save >= 10 min: here only the FAN has it."""
+    model = dict(MODEL, k_vent_window=-0.04, k_vent_fan=-0.5)
+    tl = build_timeline(_evening_cooling(thermal_model=model))
+    cooling = [c for c in tl.candidates if c.accepted and c.kind == "free_cooling"]
+    assert cooling and cooling[0].hvac_saved_min >= ot.WINDOW_MIN_HVAC_SAVED_MIN
+    # the same house without a fan: windows alone are not distinguishable from the envelope
+    tl_nofan = build_timeline(_evening_cooling("disabled", thermal_model=model))
+    assert all(s.confidence == "low" for s in tl_nofan.steps if s.actor == "you")
+
+
+def test_a_window_hour_uses_the_fan_rate_only_when_the_nat_vent_gate_would_run_the_fan() -> None:
+    snap = _evening_cooling(thermal_model=dict(MODEL, k_vent_window=-0.04, k_vent_fan=-0.15))
+    rates = ot.model_rates(snap.thermal_model)
+    seg = ot.Segment(
+        start=snap.now,
+        end=snap.now + timedelta(hours=1),
+        floor=68.0,
+        ceiling=74.0,
+        active="cool",
+        context="comfort",
+        mode="cool",
+        asleep=False,
+        occupancy="home",
+    )
+    assert ot.open_hour_rate(snap, rates, seg, outdoor=60.0, indoor=76.0) == -0.15  # cooler outside: fan runs
+    assert ot.open_hour_rate(snap, rates, seg, outdoor=80.0, indoor=70.0) == -0.04  # warmer outside: windows only
+    assert ot.open_hour_rate(snap, rates, seg, outdoor=60.0, indoor=67.0) == -0.04  # at the floor: the gate refuses
+    no_fan = replace(snap, fan_mode="disabled")
+    assert ot.open_hour_rate(no_fan, rates, seg, outdoor=60.0, indoor=76.0) == -0.04
+
+
+def test_a_v4_vent_grade_replaces_the_v3_observation_count() -> None:
+    model = dict(MODEL, k_vent_fan=-0.15, confidence_k_vent="low")  # v4 still low: only the engine's advice stands
+    tl = build_timeline(_evening_cooling(thermal_model=model))
+    assert all(s.confidence == "low" for s in tl.steps if s.actor == "you")
+    assert (
+        ot.window_effect_grade(ot.model_rates(dict(MODEL, confidence_k_vent="medium")), "whole_house_fan") == "medium"
+    )
+
+
+ZONE1_HOUSE = (0.052, 0.0127, 0.182, 0.6, 0.2, 1.04, 3.2, 7.1, 0.5)  # Zone 1's v4 fit, 2026-11-09 (HOUSE_KEYS order)
+
+
+def test_on_a_v4_zone_the_plan_is_simulated_with_v4s_own_model() -> None:
+    """Issue #1505: a window hour steps v4 (leak a_o + a_w [+ a_f], hidden mass), the same model the engine's v4
+    nat-vent close comes from, so the timeline's close and the engine's agree (golden r6b..._v4)."""
+    from custom_components.climate_advisor import predictor_v4 as p4
+    from custom_components.climate_advisor.prediction_engines import HouseStepper
+
+    stepper = HouseStepper(
+        step=lambda t, m, o, w, f, hr: p4.free_step(ZONE1_HOUSE, t, m, out=o, win=w, fan=f, hour=hr),
+        heat_gain=ZONE1_HOUSE[7],
+        cool_gain=ZONE1_HOUSE[8],
+    )
+    snap = replace(_evening_cooling(thermal_model=dict(MODEL)), house_stepper=stepper)
+    rates = ot.model_rates(snap.thermal_model)
+    sim = ot._Simulator(
+        snap,
+        rates,
+        ot._SegmentIndex(ot.build_segments(snap, snap.now + timedelta(hours=12))),
+        snap.now + timedelta(hours=12),
+    )
+    start, end = snap.now, snap.now + timedelta(hours=3)
+    run = sim.run([(start, end)])
+    # replay the same three hours with v4's own rollout: same inputs, windows open, fan where the gate runs it
+    h, m = float(sim.start_t), float(sim.start_t)
+    for step in run.steps[:12]:
+        out = step.out
+        fan = 1.0 if ot.fan_would_run(snap, step.seg, out, h) else 0.0
+        local = step.ts.astimezone(TZ)
+        h, m = p4.free_step(ZONE1_HOUSE, h, m, out=out, win=1.0, fan=fan, hour=local.hour + local.minute / 60.0)
+        assert step.window_open and step.hvac_min == 0.0
+        assert step.temp == pytest.approx(h)
+
+
+def test_the_house_stepper_exists_only_for_a_usable_v4_primary() -> None:
+    from custom_components.climate_advisor import prediction_engines as pe
+
+    assert pe.control_stepper(object(), {"primary_engine": "v3"}) is None
+    assert pe.control_stepper(object(), {"primary_engine": "v4"}) is None  # no fit: the rate simulation stands

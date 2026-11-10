@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.24] — 2026-11-09
+
+### Fixed
+- **Window and whole-house-fan rates (Issue #1505).** The Analysis tab said open windows and windows plus the whole-house fan moved the house toward the outdoor temperature equally fast ("3.1× faster" for both). Measured on Zone 1's chart log, the fan closes the gap about 4× faster than windows alone, and windows alone barely beat a closed-up house. On a v4 zone, v4's own window and fan rates (fitted together with the envelope, thermal mass, sun and equipment) now feed the operation timeline, the Analysis line, Debug and the AI Investigator, through the same control feed as its envelope rate. On a v4 zone the timeline now simulates window plans with v4's own model (windows and fan as inputs, the house's thermal mass carried), so its window times agree with the engine's v4 nat-vent close; elsewhere it uses the fan rate for window hours where the nat-vent gate would run the fan. Window periods in a fan home are validated on the fan rate. v3's learner, the fallback, now reads the physical fan state (a session paused between fan cycles is neither windows-only nor fan), waits 120 min after the fan stops and 30 min after the windows close, learns only through the chart_log fit (the live samples are no longer fitted separately), reads old chart_log rows' text `fan` values correctly, applies the same row rule to the solar-phase fit, and re-learns both rates once from 90 days of chart_log, seeded with the median of the clean fits. Decisions on a v4 zone are unchanged.
+
 ## [0.9.23] — 2026-11-09
 
 - Fix #1500: on a whole-house fan with no state feedback, the thermostat's own blower is no longer mistaken for the whole-house fan.

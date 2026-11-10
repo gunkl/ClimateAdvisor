@@ -260,12 +260,12 @@ from .const import (
     THERMAL_PASSIVE_MIN_SAMPLES,
     THERMAL_PASSIVE_SAMPLE_INTERVAL_S,
     THERMAL_POST_HEAT_TIMEOUT_MINUTES,
+    THERMAL_POST_WINDOW_CLOSE_SETTLE_MINUTES,
     THERMAL_ROLLING_MAX_WINDOW_MINUTES,
     THERMAL_ROLLING_MIN_DELTA_T_F,
     THERMAL_ROLLING_MIN_WINDOW_MINUTES,
     THERMAL_SOLAR_DAYTIME_END_H,
     THERMAL_SOLAR_DAYTIME_START_H,
-    THERMAL_SOLAR_FACTOR_MIN_RANGE,
     THERMAL_SOLAR_MIN_RATE_F_PER_HR,
     THERMAL_SOLAR_MIN_SAMPLES,
     THERMAL_SOLAR_PHASE_AC_MIN_COOL_ENTRIES,
@@ -284,7 +284,7 @@ from .const import (
     THERMAL_SOLAR_PHASE_OFFSET_MIN,
     THERMAL_SOLAR_SAMPLE_INTERVAL_S,
     THERMAL_VENT_MIN_SAMPLES,
-    THERMAL_VENT_MIN_SIGNAL_F,
+    THERMAL_VENT_POST_FAN_SETTLE_MINUTES,
     THERMAL_VENTILATED_MIN_DELTA_F,
     THRESHOLD_HOT,
     THRESHOLD_MILD,
@@ -647,6 +647,69 @@ _VACATION_ACTION_MESSAGES: tuple[str, ...] = (
     "Vacation temperatures engaged. The house is basically hibernating politely.",
     "Vacation: lights out, temps relaxed, wallet happy.",
 )
+
+
+def _ventilation_row_states(entries: list[dict]) -> list[dict[str, bool]]:
+    """Per chart_log row: is the fan physically running, is a session armed with the fan paused, is the house still
+    settling after the fan stopped or the windows closed (Issue #1505).
+
+    The one rule both chart_log decay extractors read, so the passive, windows-only and fan fits agree on what each
+    row was. ``fan_running`` is the physical state (``_fan_physically_running``); rows written before it existed
+    (Issue #331) fall back to the legacy ``fan`` flag. The legacy ``fan`` flag, and ``nat_vent_active``, stay True while
+    a session is paused between fan cycles: such a row is neither windows-only nor fan. Settle times:
+    ``THERMAL_VENT_POST_FAN_SETTLE_MINUTES`` after the fan stops, ``THERMAL_POST_WINDOW_CLOSE_SETTLE_MINUTES`` after
+    the windows close.
+    """
+
+    def _flag(value: Any) -> bool:
+        # the legacy ``fan`` field is a bool on recent rows and "on"/"off" text on old ones (the solar extractor's
+        # reading); bool("off") would be True
+        if isinstance(value, str):
+            return value.strip().lower() in ("on", "true", "1")
+        return bool(value)
+
+    out: list[dict[str, bool]] = []
+    last_running: datetime | None = None
+    last_close: datetime | None = None
+    prev_open: bool | None = None
+    for entry in entries:
+        has_physical = "fan_running" in entry
+        running = _flag(entry.get("fan_running")) if has_physical else _flag(entry.get("fan"))
+        armed = _flag(entry.get("nat_vent_active")) or (has_physical and _flag(entry.get("fan")))
+        win_open = bool(entry.get("windows_open"))
+        ts: datetime | None
+        try:
+            ts = datetime.fromisoformat(entry.get("ts", ""))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+        except ValueError, TypeError:
+            ts = None
+        if ts is not None and prev_open and not win_open:
+            last_close = ts
+        settling_fan = (
+            not running
+            and ts is not None
+            and last_running is not None
+            and (ts - last_running).total_seconds() < THERMAL_VENT_POST_FAN_SETTLE_MINUTES * 60
+        )
+        settling_close = (
+            not win_open
+            and ts is not None
+            and last_close is not None
+            and (ts - last_close).total_seconds() < THERMAL_POST_WINDOW_CLOSE_SETTLE_MINUTES * 60
+        )
+        out.append(
+            {
+                "running": running,
+                "paused": armed and not running,
+                "settling_fan": settling_fan,
+                "settling_close": settling_close,
+            }
+        )
+        if running and ts is not None:
+            last_running = ts
+        prev_open = win_open
+    return out
 
 
 def _swing_debug_for_display(summary: dict[str, Any], unit: str) -> dict[str, Any]:
@@ -1291,6 +1354,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._passive_k_backfill_v2: bool = False
         self._vent_window_k_backfill_v2: bool = False
         self._vent_fan_k_backfill_v2: bool = False
+        # Issue #1505: one-time re-learn of both vent rates under the physical-fan / settle rules
+        self._vent_k_relearn_1505: bool = False
         # Solar phase offset (Issue #147)
         self._solar_phase_offset: float = THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
         self._solar_phase_backfill: bool = False
@@ -2366,6 +2431,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._passive_k_backfill_v2 = bool(state.get("passive_k_backfill_v2", False))
         self._vent_window_k_backfill_v2 = bool(state.get("vent_window_k_backfill_v2", False))
         self._vent_fan_k_backfill_v2 = bool(state.get("vent_fan_k_backfill_v2", False))
+        self._vent_k_relearn_1505 = bool(state.get("vent_k_relearn_1505", False))
         # Solar phase offset backfill flag (Issue #147)
         self._solar_phase_backfill = bool(state.get("solar_phase_backfill", False))
         self._solar_phase_ac_backfill = bool(state.get("solar_phase_ac_backfill", False))  # Issue #312
@@ -2655,6 +2721,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "passive_k_backfill_v2": self._passive_k_backfill_v2,
             "vent_window_k_backfill_v2": self._vent_window_k_backfill_v2,
             "vent_fan_k_backfill_v2": self._vent_fan_k_backfill_v2,
+            "vent_k_relearn_1505": getattr(self, "_vent_k_relearn_1505", False),
             "solar_phase_backfill": self._solar_phase_backfill,
             "solar_phase_ac_backfill": self._solar_phase_ac_backfill,  # Issue #312
             "last_solar_phase_fit_date": (
@@ -3989,6 +4056,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._vent_fan_k_backfill_v2 = True
                     _LOGGER.info(
                         "chart_log_endpoint v2: vent_fan k_vent_fan dual-estimator backfill complete (Issue #587)"
+                    )
+                if not self._vent_k_relearn_1505:
+                    # Issue #1505: the stored windows-only and fan rates were learned with a paused session counted
+                    # as "fan on", from daytime stretches and the hour after the fan stopped, then only nudged 5% a
+                    # fit, so they never recover on their own. Drop those fits and re-learn both rates once from the
+                    # chart log the observations' own 90-day retention covers.
+                    dropped = self.learning.reset_vent_rates()
+                    self._run_vent_window_chart_log_fit(backfill=True, days=90)
+                    self._run_vent_fan_chart_log_fit(backfill=True, days=90)
+                    self.learning.seed_vent_rates_from_fits()
+                    self._vent_k_relearn_1505 = True
+                    _cache = self.learning.get_thermal_model() or {}
+                    _LOGGER.info(
+                        "Vent rates re-learned (Issue #1505): dropped %d old fits; k_vent_window=%s k_vent_fan=%s",
+                        dropped,
+                        _cache.get("k_vent_window"),
+                        _cache.get("k_vent_fan"),
                     )
                 if not self._solar_phase_backfill:
                     self._run_solar_phase_chart_log_fit(backfill=True)
@@ -6662,6 +6746,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             wake_time=_parse_time(self.config.get("wake_time", "06:30")),
             sleep_time=_parse_time(self.config.get("sleep_time", "22:30")),
             fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+            comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            nat_vent_delta=float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
+            nat_vent_hysteresis_f=float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F)),
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+            house_stepper=prediction_engines.control_stepper(self, self.config),
             sleep_sensor_label="bedroom sensor" if sleep_entity else None,
             primary_sensor_label="thermostat",
             band_at=band_resolver_for(c, self.config),
@@ -13669,6 +13758,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # before section A, and reused here (Issue #1009 dedup).
         _is_heating_cooling = is_hvac_compressor_active(_hvac_action_str)
         _fan_active = ae._fan_active or ae._natural_vent_active
+        # Issue #1505: the vent split keys on the PHYSICAL fan (the same read the chart log's ``fan_running`` uses);
+        # a session armed with the fan paused between cycles is neither windows-only nor fan.
+        _fan_running = bool(self._fan_physically_running())
+        _vent_paused = _fan_active and not _fan_running
         _sensor_open = self._any_sensor_open()
 
         if indoor is not None and outdoor is not None:
@@ -13709,7 +13802,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if (
                     _vt_type not in self._pending_observations
                     and _sensor_open
-                    and _fan_active == _vt_fan_state
+                    and not _vent_paused
+                    and _fan_running == _vt_fan_state
                     and not _is_heating_cooling
                     and _delta >= THERMAL_VENTILATED_MIN_DELTA_F
                 ):
@@ -13769,8 +13863,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     samples_list,
                     now,
                     indoor,
-                    outdoor,
-                    _fan_active,
+                    _fan_running,
+                    _vent_paused,
                     _sensor_open,
                     _is_heating_cooling,
                     _hvac_active,
@@ -13809,6 +13903,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             if mean_rate >= THERMAL_SOLAR_MIN_RATE_F_PER_HR:
                                 self._commit_observation_if_sufficient(obs_type, "insufficient_rate")
 
+    @staticmethod
+    def _obs_elapsed_minutes(obs: dict, now: datetime) -> float:
+        """Minutes since an observation started (0 when its start is missing or unreadable)."""
+        try:
+            start = dt_util.parse_datetime(obs.get("start_time") or "")
+        except Exception:  # noqa: BLE001 - a bad stamp reads as "just started"
+            return 0.0
+        return (now - start).total_seconds() / 60.0 if start else 0.0
+
     def _evaluate_vent_split_observation(
         self,
         obs_type: str,
@@ -13816,68 +13919,44 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         samples_list: list[dict],
         now: datetime,
         indoor: float | None,
-        outdoor: float | None,
-        _fan_active: bool,
+        _fan_running: bool,
+        _vent_paused: bool,
         _sensor_open: bool,
         _is_heating_cooling: bool,
         _hvac_active: bool,
     ) -> None:
-        """Shared commit/abandon evaluation for both vent_window_decay and vent_fan_decay.
+        """Shared end-of-stretch evaluation for both vent_window_decay and vent_fan_decay.
 
-        Single source of truth for the split's commit/abandon logic (Issue #587) — do
-        not reimplement this per-type; see the nat-vent parallel-function drift this
-        pattern avoids (this codebase's own documented history of exactly that failure
-        mode when two near-identical trigger/commit blocks are written separately).
+        Single source of truth for the split (Issue #587) — do not reimplement this per-type.
+        Issue #1505: like passive_decay since Issue #137, the live observation only marks the
+        ventilated stretch; when the stretch ends (fan state flipped or paused, windows closed,
+        heating/cooling started, the rolling-window cap) the chart_log fit learns from it, with
+        the one regime rule (``_ventilation_row_states``: physical fan, settle times, solar
+        guard). The live samples are no longer fitted on their own: that second learner counted a
+        paused session as "fan on", fitted daytime stretches and the hour after the fan stopped,
+        and is what put Zone 1's windows-only rate at 0.150/h against a measured ~0.02.
         """
         my_fan_state = dict(_VENT_SPLIT_TYPES)[obs_type]
         run_chart_log_fit = (
             self._run_vent_window_chart_log_fit if not my_fan_state else self._run_vent_fan_chart_log_fit
         )
-
-        # Two-threshold accumulation: signal = indoor sample range (max-min).
-        # Uses indoor movement, not snapshot differential, so keep-alive fires when
-        # the integer thermostat is flat even with a large indoor-outdoor gap.
-        _temps = [s["indoor_temp_f"] for s in samples_list if "indoor_temp_f" in s]
-        _signal_sufficient = (max(_temps) - min(_temps)) >= THERMAL_ROLLING_MIN_DELTA_T_F if _temps else False
-        # Solar accumulation guard: during daytime, suppress early commit if sf_range
-        # has not yet reached the 2-param OLS threshold.  Without this, obs commits at
-        # 30 min (sf_range ≈ 0.05–0.15) before 2-param can fire, producing
-        # ols_wrong_sign rejections on solar-gain mornings.  The 240-min hard cap in
-        # _evaluate_rolling_window fires normally.
-        _sf_vals = [s.get("solar_factor", 0.0) for s in samples_list if "solar_factor" in s]
-        _sf_range = max(_sf_vals) - min(_sf_vals) if len(_sf_vals) >= 2 else 0.0
-        if 8 <= now.hour < 18 and _sf_range < THERMAL_SOLAR_FACTOR_MIN_RANGE:
-            _signal_sufficient = False
-        if self._evaluate_rolling_window(obs_type, obs, _signal_sufficient, skip_delta_guard=True):
-            return
-
-        if _fan_active != my_fan_state:
-            # Regime flipped to the sibling's — commit what's accumulated (valid data
-            # for the regime it was collected under), let the sibling's trigger (same
-            # poll cycle) pick up the continuation. Not a discard: samples collected
-            # before the toggle are genuinely valid data for the regime they were
-            # collected under — discarding would starve whichever type has the
-            # shorter typical dwell time. Symmetric with the retired fan_only_decay's
-            # own "fan_stopped → commit" convention. _commit_observation_if_sufficient
-            # already falls back to _abandon_observation internally when the
-            # accumulated count is below minimum, so short toggles are naturally
-            # discarded via the existing mechanism.
-            toggle_reason = "fan_activated" if not my_fan_state else "fan_stopped"
-            self._commit_observation_if_sufficient(obs_type, toggle_reason)
-            run_chart_log_fit(backfill=False)
+        reason: str | None = None
+        if _vent_paused:
+            reason = "fan_paused"
+        elif _fan_running != my_fan_state:
+            reason = "fan_activated" if not my_fan_state else "fan_stopped"
         elif not _sensor_open:
-            self._commit_observation_if_sufficient(obs_type, "sensors_closed")
-            run_chart_log_fit(backfill=False)
+            reason = "sensors_closed"
         elif _is_heating_cooling or _hvac_active:
+            reason = "hvac_started"
+        elif self._obs_elapsed_minutes(obs, now) >= THERMAL_ROLLING_MAX_WINDOW_MINUTES:
+            # The stretch is still going: no fit yet (its chart_log window is still growing, and a fit now plus one
+            # at the real end would record two overlapping windows). The next trigger re-opens the observation.
+            self._abandon_observation(obs_type, "max_window_exceeded")
+            return
+        if reason is not None:
             run_chart_log_fit(backfill=False)
-            self._abandon_observation(obs_type, "hvac_started")
-        elif (
-            len(samples_list) >= THERMAL_VENT_MIN_SAMPLES
-            and indoor is not None
-            and outdoor is not None
-            and abs(indoor - outdoor) >= THERMAL_VENT_MIN_SIGNAL_F
-        ):
-            self._commit_observation_if_sufficient(obs_type, "insufficient_signal")
+            self._abandon_observation(obs_type, reason)
 
     # ------------------------------------------------------------------
     # Chart-log dual-estimator helpers
@@ -13975,7 +14054,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _extract_passive_windows(self, entries: list[dict], days: int) -> list[list[dict]]:
         """Extract passive decay windows from chart_log entries.
 
-        Regime: HVAC=off/idle, fan=off, windows=closed.
+        Regime: HVAC=off/idle, fan=off, windows=closed, and the house settled after the last fan run / window close
+        (``_ventilation_row_states``, Issue #1505).
         Solar guard: rejects any window whose start OR end timestamp falls in local hours 08–19.
         """
         cutoff = dt_util.now() - timedelta(days=days)
@@ -14005,7 +14085,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 pass
             current.clear()
 
-        for entry in entries:
+        states = _ventilation_row_states(entries)
+        for entry, vstate in zip(entries, states, strict=True):
             ts_str = entry.get("ts", "")
             if not ts_str:
                 continue
@@ -14021,7 +14102,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             indoor = entry.get("indoor")
             outdoor = entry.get("outdoor")
             hvac = entry.get("hvac", "")
-            fan = entry.get("fan")
             windows_open = entry.get("windows_open")
 
             if indoor is None or outdoor is None:
@@ -14031,10 +14111,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             hvac_idle = hvac in ("idle", "off", "", "fan") or (
                 "heat" not in (hvac or "") and "cool" not in (hvac or "")
             )
-            fan_off = fan is False or fan is None
+            fan_off = not vstate["running"] and not vstate["paused"]
             win_closed = not windows_open
+            settled = not vstate["settling_fan"] and not vstate["settling_close"]
 
-            if not hvac_idle or not fan_off or not win_closed:
+            if not hvac_idle or not fan_off or not win_closed or not settled:
                 _flush()
                 continue
 
@@ -14193,7 +14274,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Regime: HVAC=off/idle, windows=open, T_out < T_in throughout, fan/WHF state ==
         fan_state (Issue #587 — one parameterized function serving both vent_window_decay
         (fan_state=False) and vent_fan_decay (fan_state=True) call sites, rather than two
-        near-duplicate bodies).
+        near-duplicate bodies). Issue #1505: the fan state is the PHYSICAL one; a session paused
+        between fan cycles is neither, and a windows-only stretch starts only once the house has
+        settled after the fan stopped (``_ventilation_row_states``).
         Solar guard: rejects any window whose start OR end timestamp falls in local hours 08–19.
         """
         cutoff = dt_util.now() - timedelta(days=days)
@@ -14224,7 +14307,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 pass
             current.clear()
 
-        for entry in entries:
+        states = _ventilation_row_states(entries)
+        for entry, vstate in zip(entries, states, strict=True):
             ts_str = entry.get("ts", "")
             if not ts_str:
                 continue
@@ -14241,7 +14325,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             outdoor = entry.get("outdoor")
             hvac = entry.get("hvac", "")
             windows_open = entry.get("windows_open")
-            fan_on = bool(entry.get("fan"))
+            fan_on = vstate["running"]
+            unsettled = vstate["paused"] or (not fan_state and vstate["settling_fan"])
 
             if indoor is None or outdoor is None:
                 _flush()
@@ -14252,7 +14337,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             win_open = bool(windows_open)
 
-            if not hvac_idle or not win_open or fan_on != fan_state:
+            if not hvac_idle or not win_open or fan_on != fan_state or unsettled:
                 _flush()
                 continue
 
@@ -14299,15 +14384,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         return {"k": k, "r_squared": None, "source": "endpoint", "grade": "low"}
 
-    def _run_vent_window_chart_log_fit(self, *, backfill: bool = False) -> None:
+    def _run_vent_window_chart_log_fit(self, *, backfill: bool = False, days: int | None = None) -> None:
         """Thin wrapper: vent_window_decay (fan off) chart_log dual-estimator fit."""
-        self._run_vent_chart_log_fit_impl(fan_state=False, hvac_mode_tag="vent_window", backfill=backfill)
+        self._run_vent_chart_log_fit_impl(fan_state=False, hvac_mode_tag="vent_window", backfill=backfill, days=days)
 
-    def _run_vent_fan_chart_log_fit(self, *, backfill: bool = False) -> None:
+    def _run_vent_fan_chart_log_fit(self, *, backfill: bool = False, days: int | None = None) -> None:
         """Thin wrapper: vent_fan_decay (fan/WHF on) chart_log dual-estimator fit."""
-        self._run_vent_chart_log_fit_impl(fan_state=True, hvac_mode_tag="vent_fan", backfill=backfill)
+        self._run_vent_chart_log_fit_impl(fan_state=True, hvac_mode_tag="vent_fan", backfill=backfill, days=days)
 
-    def _run_vent_chart_log_fit_impl(self, *, fan_state: bool, hvac_mode_tag: str, backfill: bool) -> None:
+    def _run_vent_chart_log_fit_impl(
+        self, *, fan_state: bool, hvac_mode_tag: str, backfill: bool, days: int | None = None
+    ) -> None:
         """Estimate k_vent_window/k_vent_fan from ventilated chart_log windows (dual-estimator).
 
         Endpoint estimator (A) and block-OLS estimator (B) are both computed for each
@@ -14333,12 +14420,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not entries:
             return
 
-        days = 30 if backfill else 2
+        if days is None:
+            days = 30 if backfill else 2
         windows = self._extract_ventilated_windows(entries, days, fan_state=fan_state)
         if not windows:
             return
 
-        target_windows = windows if backfill else windows[-1:]
+        # Issue #1505: a night is now split wherever the fan pauses or the house is still settling, so the last
+        # two days can hold several windows; each is fitted once (``record_thermal_observation`` skips a window it
+        # already holds, Issue #1476).
+        target_windows = windows
         committed = 0
         today_str = dt_util.now().strftime("%Y-%m-%d")
 
@@ -14498,7 +14589,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 pass
             current.clear()
 
-        for entry in entries:
+        states = _ventilation_row_states(entries)  # Issue #1505: one row rule with the decay extractors
+        for entry, vstate in zip(entries, states, strict=True):
             ts_str = entry.get("ts", "")
             if not ts_str:
                 continue
@@ -14523,8 +14615,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             # Regime: HVAC off, fan off, windows closed
             _hvac_off = hvac in ("off", "idle", "")
-            _fan_off = fan in ("off", "false", "")
-            if not (_hvac_off and _fan_off and not windows_open):
+            _fan_off = fan in ("off", "false", "") and not vstate["running"] and not vstate["paused"]
+            _settled = not vstate["settling_fan"] and not vstate["settling_close"]
+            if not (_hvac_off and _fan_off and not windows_open and _settled):
                 _flush_solar()
                 continue
 

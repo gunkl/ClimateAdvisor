@@ -345,6 +345,20 @@ def rollout(
     return V4Roll(primary=hs, nodes=node_traj, heat_duty=uh, cool_duty=uc, sun=sun, mass_end=mass_end)
 
 
+def free_step(
+    house: Sequence[float], h: float, m: float, *, out: float, win: float, fan: float, hour: float
+) -> tuple[float, float]:
+    """One 15-min step of the primary node and hidden mass with the equipment off: ``(h_next, m_next)``.
+
+    Issue #1505: the operation timeline steps v4's own model when it tries window plans on a v4 zone. Equipment is
+    linear in this Euler step (``h_next = free + dt * (q_h * u_h - q_c * u_c)``) and the mass update does not see it,
+    so the caller adds exactly the duty it needs to hold a band edge. ``hour`` is the local clock hour (fractional) at
+    the end of the step, as ``rollout``'s ``hours``.
+    """
+    roll = rollout(house, [], h0=h, m0=m, b0=[], out=[out], win=[win], fan=[fan], hours=[hour])
+    return roll.primary[0], roll.mass_end
+
+
 def _roll_house(
     hp: Sequence[float],
     h0: float,
@@ -2877,7 +2891,7 @@ def control_rates(model: V4Model) -> dict[str, Any]:
     k_cool = min(0.0, (cool.primary[-1] - h0) / hours)
     grade = CONTROL_CONFIDENCE.get(model.confidence, "low")
     a_o = min(max(float(model.house["a_o"]), 0.001), 0.5)
-    return {
+    out: dict[str, Any] = {
         "k_active_heat": k_heat,
         "k_active_cool": k_cool,
         "heating_rate_f_per_hour": round(k_heat, 2),
@@ -2886,4 +2900,18 @@ def control_rates(model: V4Model) -> dict[str, Any]:
         "k_passive_via_bridge": False,
         "confidence": grade,
         "confidence_k_passive": grade,
+        "k_vent_window": None,
+        "k_vent_fan": None,
+        "confidence_k_vent": "none",
     }
+    # Issue #1505: the window and fan leak v4 fitted together with the envelope, mass, sun and equipment, in v3's
+    # keys and sign (the total rate toward outdoor with windows open, without / with the fan running). A term with no
+    # data behind it (``fit["frozen"]``) is not exported: its start value is not a measurement.
+    frozen = set((model.fit or {}).get("frozen") or ())
+    if "a_w" not in frozen:
+        out["k_vent_window"] = -(a_o + max(float(model.house["a_w"]), 0.0))
+        out["confidence_k_vent"] = grade
+    if "a_f" not in frozen:
+        out["k_vent_fan"] = -(a_o + max(float(model.house["a_f"]), 0.0))
+        out["confidence_k_vent"] = grade
+    return out

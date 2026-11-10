@@ -81,8 +81,13 @@ def _make_obs_coord(
     nat_vent_active: bool = False,
     any_sensor_open: bool = False,
     learning_enabled: bool = True,
+    fan_running: bool | None = None,
 ):
-    """Build a minimal coordinator stub with the v3 observation methods bound."""
+    """Build a minimal coordinator stub with the v3 observation methods bound.
+
+    ``fan_running`` is the PHYSICAL fan (Issue #1505); default: running exactly when CA's fan flag is set, so a
+    ``nat_vent_active`` session without ``fan_active`` is a session paused between fan cycles.
+    """
     ClimateAdvisorCoordinator = _get_coordinator_class()
     coord = object.__new__(ClimateAdvisorCoordinator)
 
@@ -156,6 +161,7 @@ def _make_obs_coord(
         return_value=IndoorTempReading(indoor_temp, "climate.test", indoor_temp)
     )
     coord._any_sensor_open = MagicMock(return_value=any_sensor_open)
+    coord._fan_physically_running = MagicMock(return_value=fan_active if fan_running is None else fan_running)
     coord._async_save_state = AsyncMock()
 
     def _get_current_sample(elapsed: float) -> dict:
@@ -296,9 +302,10 @@ class TestVentSplitTrigger:
 
 
 class TestVentSplitToggle:
-    def test_fan_toggle_mid_window_commits_and_retriggers(self):
-        """Fan activating mid-vent_window_decay commits accumulated samples (not discard),
-        and the same poll cycle starts vent_fan_decay to continue under the new regime.
+    def test_fan_toggle_mid_window_fits_chart_log_and_retriggers(self):
+        """Fan activating mid-vent_window_decay ends the windows-only stretch: the chart_log fit learns from it
+        (Issue #1505: the live samples are no longer fitted on their own), and the same poll cycle starts
+        vent_fan_decay for the new regime.
         """
         # Enough samples + enough indoor movement to satisfy _evaluate_rolling_window's
         # min-window/signal gates and _commit_observation_if_sufficient's min_samples,
@@ -352,17 +359,15 @@ class TestVentSplitToggle:
         coord.hass.async_create_task = _fake_async_create_task
 
         dt_mock = _make_dt_mock()
+        coord._run_vent_window_chart_log_fit = MagicMock()
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
 
-        # vent_window_decay must have been committed (queued) or already popped as
-        # "committing" — either way, not silently discarded.
+        # The stretch ended: its chart_log window is fitted, nothing is committed from the live samples.
+        coord._run_vent_window_chart_log_fit.assert_called_once_with(backfill=False)
+        assert committed_types == [], "the live samples must not be fitted on their own (Issue #1505)"
         vw_obs = coord._pending_observations.get(OBS_TYPE_VENT_WINDOW_DECAY)
-        was_committing = vw_obs is not None and vw_obs.get("status") == "committing"
-        was_queued = len(committed_types) > 0
-        assert was_committing or was_queued, (
-            "vent_window_decay should commit (not discard) accumulated samples on fan-state toggle"
-        )
+        assert vw_obs is None or vw_obs.get("status") != "monitoring"
 
         # vent_fan_decay should start on the SAME poll cycle to continue the observation
         # under the new (fan-on) regime.
@@ -411,3 +416,77 @@ def test_constants_sanity():
     assert THERMAL_VENTILATED_MIN_DELTA_F == 1.0
     assert THERMAL_MIN_DECAY_SAMPLES == 4
     assert THERMAL_ROLLING_MIN_DELTA_T_F == 0.2
+
+
+# ---------------------------------------------------------------------------
+# Issue #1505: physical fan, paused sessions, the cap
+# ---------------------------------------------------------------------------
+
+
+def _vent_obs(obs_type: str, n: int = 25) -> dict:
+    from datetime import timedelta
+
+    return {
+        "obs_type": obs_type,
+        "obs_id": "1505",
+        "start_time": (_FAKE_NOW - timedelta(minutes=THERMAL_ROLLING_MIN_WINDOW_MINUTES + 5)).isoformat(),
+        "status": "monitoring",
+        "samples": [
+            {
+                "timestamp": _FAKE_NOW.isoformat(),
+                "indoor_temp_f": 74.0,
+                "outdoor_temp_f": 60.0,
+                "elapsed_minutes": 5.0 * i,
+            }
+            for i in range(n)
+        ],
+        "flags_at_start": {},
+        "schema_version": 1,
+    }
+
+
+class TestVentSplitPhysicalFan1505:
+    def test_paused_session_starts_neither_vent_type(self):
+        """Nat-vent armed with the fan paused between cycles: neither windows-only nor fan (was counted as fan)."""
+        coord = _make_obs_coord(indoor_temp=74.0, outdoor_temp=60.0, nat_vent_active=True, any_sensor_open=True)
+        with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_mock()):
+            coord._sample_all_observations()
+        assert OBS_TYPE_VENT_WINDOW_DECAY not in coord._pending_observations
+        assert OBS_TYPE_VENT_FAN_DECAY not in coord._pending_observations
+
+    def test_running_whf_starts_vent_fan_even_without_ca_flag(self):
+        """The trigger reads the physical fan: running (e.g. a manual whole-house fan) is the fan regime."""
+        coord = _make_obs_coord(
+            indoor_temp=74.0, outdoor_temp=60.0, fan_active=False, fan_running=True, any_sensor_open=True
+        )
+        with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_mock()):
+            coord._sample_all_observations()
+        assert OBS_TYPE_VENT_FAN_DECAY in coord._pending_observations
+        assert OBS_TYPE_VENT_WINDOW_DECAY not in coord._pending_observations
+
+    def test_fan_pausing_ends_the_fan_stretch_with_a_fit(self):
+        coord = _make_obs_coord(indoor_temp=74.0, outdoor_temp=60.0, nat_vent_active=True, any_sensor_open=True)
+        coord._pending_observations[OBS_TYPE_VENT_FAN_DECAY] = _vent_obs(OBS_TYPE_VENT_FAN_DECAY)
+        coord._run_vent_fan_chart_log_fit = MagicMock()
+        coord._abandon_observation = MagicMock()
+        with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_mock()):
+            coord._sample_all_observations()
+        coord._run_vent_fan_chart_log_fit.assert_called_once_with(backfill=False)
+        coord._abandon_observation.assert_any_call(OBS_TYPE_VENT_FAN_DECAY, "fan_paused")
+
+    def test_cap_restarts_without_fitting_a_growing_stretch(self):
+        """At the rolling-window cap the stretch is still going: no fit (its window is still growing), restart."""
+        from datetime import timedelta
+
+        from custom_components.climate_advisor.const import THERMAL_ROLLING_MAX_WINDOW_MINUTES
+
+        coord = _make_obs_coord(indoor_temp=74.0, outdoor_temp=60.0, any_sensor_open=True)
+        obs = _vent_obs(OBS_TYPE_VENT_WINDOW_DECAY, n=48)
+        obs["start_time"] = (_FAKE_NOW - timedelta(minutes=THERMAL_ROLLING_MAX_WINDOW_MINUTES + 1)).isoformat()
+        coord._pending_observations[OBS_TYPE_VENT_WINDOW_DECAY] = obs
+        coord._run_vent_window_chart_log_fit = MagicMock()
+        coord._abandon_observation = MagicMock()
+        with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_mock()):
+            coord._sample_all_observations()
+        coord._run_vent_window_chart_log_fit.assert_not_called()
+        coord._abandon_observation.assert_any_call(OBS_TYPE_VENT_WINDOW_DECAY, "max_window_exceeded")

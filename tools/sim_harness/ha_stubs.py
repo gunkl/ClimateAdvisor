@@ -629,6 +629,24 @@ class _EntityCategory(_enum.StrEnum):
     DIAGNOSTIC = "diagnostic"
 
 
+def clear_stub_call_history() -> None:
+    """Forget every call recorded on the auto-mocked ``homeassistant.*`` modules (Issue #1508).
+
+    The stubs are module-level ``MagicMock``s that live for the whole process, and a MagicMock records
+    each call with its arguments.  Production calls ``er.async_get(hass)`` on every chart-log row
+    (``indoor_temp.discover_companion_sensors``, #1230 R1), so each record pinned that day's FakeHass and
+    with it the day's coordinator, engine and promise journal: a 250-day nightly seed grew ~550 MB.
+    ``reset_mock()`` drops only the call records; configured return values and side effects stay, and
+    production never reads mock call history, so no decision or verdict can change.  Callers that run
+    many sessions in one process call this before each one (``generator.run_plan`` /
+    ``replay_scenario``), so at most the latest session stays reachable.
+    """
+    for mod_name in _HA_MODULES:
+        mod = sys.modules.get(mod_name)
+        if isinstance(mod, MagicMock):
+            mod.reset_mock()
+
+
 def install_ha_stubs() -> None:
     """Install homeassistant.* mock modules into sys.modules (idempotent).
 

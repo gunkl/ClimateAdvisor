@@ -336,7 +336,7 @@ class TestCoordinatorSuppliesTheStepper:
             now = datetime(2026, 1, 5, 15, 30)
             with (
                 patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now),
-                patch("custom_components.climate_advisor.coordinator._control_stepper") as cs,
+                patch("custom_components.climate_advisor.coordinator.prediction_engines.control_stepper") as cs,
                 patch(f"custom_components.climate_advisor.coordinator.{name}") as resolver,
             ):
                 cs.return_value = sentinel

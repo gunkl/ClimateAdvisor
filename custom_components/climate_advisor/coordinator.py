@@ -399,7 +399,6 @@ from .operation_timeline import to_dict as timeline_to_dict
 from .override_confirm_split import ca_expected_mode
 from .prediction_accuracy import RANGES as CHART_RANGE_DAYS
 from .prediction_accuracy import build_chart_v4, ca_swap_epochs, load_backtest
-from .prediction_engines import control_stepper as _control_stepper
 from .promise_journal import (
     PROMISE_STATS_WINDOW_DAYS,
     PromiseJournal,
@@ -7726,7 +7725,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def control_house_stepper(self) -> Any:
         """The primary engine's own house model for lead times (Issue #1517): an engine-neutral ``HouseStepper``, or
         None on a v3 zone or while the primary is still learning (the leak-aware formula then applies). Never raises."""
-        return _control_stepper(self, self.config)
+        return prediction_engines.control_stepper(self, self.config)
 
     def control_thermal_model(self, base: dict | None) -> dict | None:
         """The thermal-model dict the RATE decisions read (``base`` = the v3 model the learning engine holds).
@@ -9811,6 +9810,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
         _stepper = self.control_house_stepper()  # Issue #1517: the primary's house model for the pre-cool lead
+        # Issue #1519: the plan pre-cool lead used to get no cooling rate (always the 120-min fallback); hand it
+        # the decisions' cooling rate and closed-house rate (the stepper above takes precedence on a v4 zone).
+        _rates = self.control_thermal_model(dict(self._thermal_model or {})) or {}
+        _k_cool = _rates.get("k_active_cool")
+        _k_passive = _rates.get("k_passive")
         # Issue #1093: the plan's AC-handoff time measures against the ceiling the thermostat is armed
         # with (Prefer savings widens it) -- the engine's single source, not comfort_cool + a margin here.
         _, _armed_ceiling = awake_comfort_edges(
@@ -9829,6 +9833,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ceiling=_armed_ceiling,
                 window_open_time=c.window_opportunity_morning_start,
                 house_stepper=_stepper,
+                k_active_cool=_k_cool,
+                k_passive=_k_passive,
             )
         else:
             _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
@@ -9843,6 +9849,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
                 window_open_time=c.window_open_time,
                 house_stepper=_stepper,
+                k_active_cool=_k_cool,
+                k_passive=_k_passive,
             )
         self._nat_vent_plan = self._stabilize_nat_vent_cutoff_reason(raw_plan)
 

@@ -346,10 +346,19 @@ _SELECTION_COORDINATOR_METHODS = {
     "control_thermal_model",
     "control_predicted_indoor",
     "_refresh_control_prediction",
+    "control_house_stepper",  # Issue #1517: hands the primary's own house model to the lead-time decisions
     "_v3_curve_wanted",
 }
 # The control feed: the only coordinator methods that decide which engine's numbers the decisions read.
-_CONTROL_FEED_METHODS = {"control_thermal_model", "control_predicted_indoor", "_refresh_control_prediction"}
+# Issue #1517: control_house_stepper joins the feed. It hands the primary's house model (an engine-neutral HouseStepper)
+# to the lead-time decisions exactly as control_thermal_model hands its rates; listing it keeps that read visible (the
+# first #1517 commit hid it behind an import alias, which this rule would not have caught).
+_CONTROL_FEED_METHODS = {
+    "control_thermal_model",
+    "control_predicted_indoor",
+    "_refresh_control_prediction",
+    "control_house_stepper",
+}
 _SHADOW_NAMES = {"shadow_id", "shadow_engine_id", "shadow_engine", "CONF_SHADOW_ENGINE", "DEFAULT_SHADOW_ENGINE"}
 
 

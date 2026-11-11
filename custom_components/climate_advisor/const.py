@@ -1604,13 +1604,9 @@ CONFIG_METADATA = {
 MIN_THERMAL_SESSION_MINUTES = 5  # ignore sessions shorter than this (was 10; Ecobee cycles 7-9 min)
 MIN_THERMAL_OBSERVATIONS = 5  # min obs before model is trusted
 THERMAL_MODEL_MAX_OBS = 30  # use only most recent N observations
-THERMAL_POST_HEAT_TIMEOUT_MINUTES = 45  # abandon post_heat phase after this long
-THERMAL_FAN_PULSE_GRACE_MINUTES = 3  # Issue #1009: tolerate a brief thermostat blower pulse
 # (e.g. a post-compressor coil-clear cycle) during post_heat without abandoning the
 # observation — only abandon if the live hvac_action/fan_mode read shows the fan still
 # running at or beyond this many minutes (genuinely sustained fan-only contamination).
-THERMAL_STABILIZATION_THRESHOLD_F = 0.3  # |dT| < this over window → stabilized
-THERMAL_STABILIZATION_WINDOW_MINUTES = 5  # window length for stabilization check
 THERMAL_K_PASSIVE_MIN = -0.5  # reject k_passive outside this range (hr⁻¹)
 THERMAL_K_PASSIVE_MAX = -0.001  # upper bound: near-zero decay (extremely well-insulated house)
 THERMAL_K_ACTIVE_HEAT_MIN = 0.5  # reject k_active_heat outside this range (°F/hr)
@@ -1619,10 +1615,8 @@ THERMAL_K_ACTIVE_COOL_MIN = -15.0  # reject k_active_cool outside this range (°
 THERMAL_K_ACTIVE_COOL_MAX = -0.5  # upper bound (least negative): minimal cooling effect
 THERMAL_MIN_R_SQUARED = 0.2  # reject observation if R² below this
 THERMAL_MIN_POST_HEAT_SAMPLES = 4  # min post-heat samples to commit (Issue #130: lowered from 10, enables short cycles)
-THERMAL_PRE_HEAT_BUFFER_MINUTES = 15  # rolling pre-heat buffer length
 THERMAL_SAMPLE_INTERVAL_SECONDS = 60  # sampling cadence during active/post_heat
 THERMAL_MAX_ACTIVE_SAMPLES = 120  # cap on active_samples list per event
-THERMAL_MAX_POST_HEAT_SAMPLES = 45  # cap on post_heat_samples list per event
 DEFAULT_PREHEAT_MINUTES = 120  # fallback when no model data
 MIN_PREHEAT_MINUTES = 30  # clamp floor
 DEFAULT_TOU_LEAD_MINUTES = 45  # fallback lead time when k_active_heat/k_active_cool not yet learned (Issue #797)
@@ -1694,7 +1688,6 @@ REJECT_FAN_ACTIVATED = "fan_activated"  # the fan started and contaminated the o
 REJECT_HVAC_MODE_SWITCH = "hvac_mode_switch"  # heat <-> cool switched mid-observation
 
 # Reduced plateau guard (was THERMAL_MIN_DECAY_F = 1.0)
-THERMAL_HVAC_MIN_DECAY_F = 0.3
 # Minimum ΔT for single-point k_active estimate (filters sensor noise / no-effect cycles)
 THERMAL_HVAC_MIN_SIGNAL_F: float = 0.5
 # Issue #1512: HVAC run-edge estimator. Minimum run length to learn a rate from (minutes).

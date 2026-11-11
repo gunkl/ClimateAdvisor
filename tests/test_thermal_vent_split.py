@@ -185,7 +185,6 @@ def _make_obs_coord(
         "_abandon_observation",
         "_commit_observation_if_sufficient",
         "_commit_observation",
-        "_check_hvac_stabilization",
         "_end_hvac_active_phase",
         "_run_vent_window_chart_log_fit",
         "_run_vent_fan_chart_log_fit",

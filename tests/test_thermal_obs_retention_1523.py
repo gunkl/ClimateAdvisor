@@ -194,8 +194,10 @@ class TestCapSharedPerKind:
             assert e._state.thermal_observations[0]["n"] == 1  # only the oldest left
             assert e._state.thermal_model_cache["k_passive"] == pytest.approx(-0.04)
 
-    def test_load_prunes_nothing(self, tmp_path):
-        with _engine(tmp_path) as (e, _clock):
+    def test_load_and_the_next_commit_prune_nothing(self, tmp_path):
+        """Observations two years old survive a reload and the next commit of another kind (old behaviour: that
+        commit trimmed everything dated more than 90 days before today, so 151 -> 1)."""
+        with _engine(tmp_path) as (e, clock):
             e._state.thermal_observations = [
                 {"hvac_mode": "passive", "k_passive": -0.04, "date": "2024-01-01", "n": i} for i in range(150)
             ] + [{"hvac_mode": "heat", "k_active": 5.0, "date": "2024-01-01", "method": "run_edge"}]
@@ -203,6 +205,8 @@ class TestCapSharedPerKind:
             again = LearningEngine(tmp_path)
             again.load_state()
             assert len(again._state.thermal_observations) == 151
+            _record(again, clock, "vent_fan", 0, k_passive=-0.3)
+            assert len(again._state.thermal_observations) == 152
 
     def test_trim_leaves_other_kinds_untouched(self):
         obs = [{"hvac_mode": "passive", "n": i} for i in range(3)] + [

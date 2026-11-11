@@ -81,11 +81,24 @@ class TestEvidenceSwitch:
         _ac_days(e, ac_offset, 7 * int(half), first=date(2026, 8, 1))
         assert _resolved(e) == pytest.approx(ac_offset, abs=0.01 * gap)
 
-    def test_a_new_passive_window_restores_the_primary(self, tmp_path, ac_offset, half):
+    def test_new_passive_windows_restore_the_primary_gradually(self, tmp_path, ac_offset, half):
+        """Symmetric with the displacement: each new passive window halves the secondary's share per `half` windows
+        (5 when the window is 1 h or more from the secondary, else 20). Old behaviour: one window put the primary
+        back at once, so the expected solar peak could jump back by up to ~1.5 h in a day."""
         e = _engine(tmp_path)
         _ac_days(e, ac_offset, int(half))
-        assert e.update_solar_phase_offset(PRIMARY, 0.1, window_end="2026-09-01T15:00:00+00:00")
-        assert _resolved(e) == pytest.approx(PRIMARY)
+        displaced = _resolved(e)
+        assert displaced == pytest.approx(PRIMARY - (PRIMARY - ac_offset) / 2)  # keep 0.5
+        path = []
+        for i in range(int(half)):
+            assert e.update_solar_phase_offset(PRIMARY, 0.1, window_end=f"2026-09-{1 + i:02d}T15:00:00+00:00")
+            path.append(_resolved(e))
+        gap = PRIMARY - ac_offset
+        # one window: a small step
+        assert path[0] - displaced == pytest.approx(gap / 2 * (1 - 0.5 ** (1 / half)), abs=1e-5)
+        assert path[0] - displaced < 0.15 * gap
+        assert path[-1] == pytest.approx(PRIMARY - gap / 4, abs=1e-5)  # `half` windows: the secondary's half halved
+        assert path == sorted(path)  # monotone back toward the primary
 
 
 def test_contradicting_days_switch_faster_than_agreeing_ones(tmp_path):
@@ -152,3 +165,36 @@ class TestUpgradeContinuity:
         again.load_state()
         assert again._state.thermal_model_cache["solar_phase_offset_keep"] == 0.0
         assert _resolve_solar_phase_offset(again._state.thermal_model_cache) == pytest.approx(1.5)
+
+
+class TestOnlyCompleteAcDaysCount:
+    def test_todays_partial_day_is_not_counted(self, tmp_path):
+        """The AC-duty fit runs at startup and each morning; today's day is not over, and a day is counted once,
+        so counting it early would shut the complete day out for good."""
+        from datetime import datetime
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+        from tests.test_solar_ac_phase import _make_entries
+
+        def day(d: str) -> list[dict]:
+            rows = _make_entries({11: "cool", 12: "cool", 13: "cool", 14: "cool"}, setpoint=74.0, indoor_base=75.5)
+            return [{**r, "ts": r["ts"].replace("2026-06-13", d)} for r in rows]
+
+        e = LearningEngine(tmp_path)
+        e.load_state()
+        stub = SimpleNamespace(
+            _chart_log=SimpleNamespace(_entries=day("2026-06-12") + day("2026-06-13")),
+            learning=e,
+            _solar_phase_ac_backfill=False,
+        )
+        run = ClimateAdvisorCoordinator._run_ac_duty_solar_phase_fit
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now") as now:
+            now.return_value = datetime.fromisoformat("2026-06-13T22:00:00-07:00")
+            run(stub)
+            c = e._state.thermal_model_cache
+            assert (c["solar_phase_offset_ac_obs_count"], c["solar_phase_offset_ac_last_obs_date"]) == (1, "2026-06-12")
+            now.return_value = datetime.fromisoformat("2026-06-14T07:00:00-07:00")
+            run(stub)
+            assert (c["solar_phase_offset_ac_obs_count"], c["solar_phase_offset_ac_last_obs_date"]) == (2, "2026-06-13")

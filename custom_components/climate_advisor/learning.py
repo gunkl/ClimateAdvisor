@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -227,11 +228,12 @@ CYCLE_FIT_KEYS = (
     "prior_sd_q",
     "ne_w",
     "entity",
+    "t_first",
     "t_last",
 )
 # The fields of a usable fit kept as ``cycle_fit_<mode>["held"]`` once its cycles leave the pool (finding 4); plus
 # ``at`` (when it was fitted) and ``keep`` (the share of its evidence newer cycles left it).
-_HELD_KEYS = ("q", "sd_q", "ne_w", "entity", "t_last", "applied", "grade")
+_HELD_KEYS = ("q", "sd_q", "ne_w", "entity", "t_first", "t_last", "applied", "grade")
 
 
 def _same_chart_log_fit(a: dict, b: dict) -> bool:
@@ -324,9 +326,11 @@ def _resolve_solar_phase_offset(cache: dict) -> float:
 
     The primary (passive-decay fit) gives way to the secondary (AC duty cycle) only as newer secondary evidence
     replaces or contradicts it, never with the passage of time (owner decision 2026-11-11, "fade only on new
-    evidence"): ``solar_phase_offset_keep`` is the primary's share, 1.0 after each new primary observation and halved
-    every THERMAL_EVIDENCE_HALF_N new AC-duty days that agree with it (every THERMAL_EVIDENCE_HALF_N_CONTRADICT that
-    contradict it, ``update_ac_duty_solar_phase_offset``). The value is ``keep * primary + (1 - keep) * secondary``.
+    evidence"): ``solar_phase_offset_keep`` is the primary's share (1.0 at first), halved every
+    THERMAL_EVIDENCE_HALF_N new AC-duty days that agree with it (every THERMAL_EVIDENCE_HALF_N_CONTRADICT that
+    contradict it, ``update_ac_duty_solar_phase_offset``) and restored the same way by new passive windows (the
+    secondary's share ``1 - keep`` halved per window count, ``update_solar_phase_offset``). The value is
+    ``keep * primary + (1 - keep) * secondary``.
 
       * primary and a qualified secondary (obs >= THERMAL_SOLAR_PHASE_AC_MIN_OBS): the blend above
       * primary only: the primary;  qualified secondary only: the secondary
@@ -1595,8 +1599,14 @@ class LearningEngine:
         # that the store let the old ones go (it keeps CYCLE_RETENTION_DAYS back from the newest cycle). The prior
         # of this fit was then the previous fit itself (``cycle_model.held_candidate``); keep it as held.
         # (Not when a full pool of newer cycles pushed them out: newer evidence then replaced them outright.)
+        # Issue #1512 final verification: "gone" means none of the cycles it was fitted on (t_first .. t_last) is in
+        # this fit. A crash loses at most the newest few cycles (the learning file is saved after every refit, the
+        # cycle file periodically); the survivors are in this fit, so this is a normal refit: no hold, nothing counted
+        # twice (the lost cycles' share of the evidence went with them, t_seen keeps the survivors from counting
+        # as new). It used to test the newest cycle only, so a crash held the fit and double-counted the survivors.
+        prev_lo = float(prev["t_first"]) if _num(prev.get("t_first")) else -math.inf
         prev_gone = not _num(prev.get("t_last")) or (
-            not any(abs(t - prev["t_last"]) < 1.0 for t in t_elig)
+            not any(prev_lo - 1.0 <= t <= prev["t_last"] + 1.0 for t in t_elig)
             and not (len(t_elig) >= CYCLE_MAX_CYCLES and min(t_elig) > prev["t_last"])
         )
         if prev_usable and (not usable or result.get("entity") != prev.get("entity") or prev_gone):
@@ -1904,11 +1914,19 @@ class LearningEngine:
                 is already counted (the daily re-fit scans the last two days) and is skipped (Issue #1524).
 
         A new primary observation is new evidence for the primary: its share against the AC-duty secondary
-        (``solar_phase_offset_keep``) returns to 1.0. Returns False when the window was already counted.
+        (``solar_phase_offset_keep``) moves back toward 1.0 the same way the AC-duty days moved it away (symmetric,
+        Issue #1512 final verification): the secondary's share ``1 - keep`` halves per THERMAL_EVIDENCE_HALF_N
+        windows, or per THERMAL_EVIDENCE_HALF_N_CONTRADICT when the window is THERMAL_SOLAR_PHASE_CONTRADICT_H or more
+        from the secondary. (It used to return to 1.0 at once, so the expected solar peak could jump back by up to
+        about 1.5 h in a day.) Returns False when the window was already counted.
         """
         from datetime import date as _date
 
-        from .const import THERMAL_SOLAR_PHASE_OFFSET_MAX, THERMAL_SOLAR_PHASE_OFFSET_MIN
+        from .const import (
+            THERMAL_SOLAR_PHASE_CONTRADICT_H,
+            THERMAL_SOLAR_PHASE_OFFSET_MAX,
+            THERMAL_SOLAR_PHASE_OFFSET_MIN,
+        )
 
         cache = self._state.thermal_model_cache
         if cache is None:
@@ -1927,7 +1945,15 @@ class LearningEngine:
 
         cache["solar_phase_offset_h"] = new_val
         cache["solar_phase_offset_last_obs_date"] = _date.today().isoformat()
-        cache["solar_phase_offset_keep"] = 1.0
+        secondary = cache.get("solar_phase_offset_ac_h")
+        keep = _evidence_keep({"keep": cache.get("solar_phase_offset_keep")})
+        if keep < 1.0:
+            contradicts = (
+                isinstance(secondary, (int, float))
+                and not isinstance(secondary, bool)
+                and abs(obs_clamped - float(secondary)) >= THERMAL_SOLAR_PHASE_CONTRADICT_H
+            )
+            cache["solar_phase_offset_keep"] = round(1.0 - _displaced_keep(1.0 - keep, 1, bool(contradicts)), 6)
         if window_end:
             cache["solar_phase_offset_last_window_end"] = str(window_end)
         self._state.thermal_model_cache = cache

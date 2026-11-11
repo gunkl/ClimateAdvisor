@@ -35,7 +35,7 @@
 
 ## Relationship to the cycle file
 
-The chart_log is a ~30-minute record for charts and chart-log fits. The pooled heating/cooling cycle model (Issues #1512/#1516) does **not** read it: it needs the thermostat's edges and every sensor reading with its seconds, which a 30-minute row cannot carry, so it keeps its own per-zone file, `climate_advisor_cycles.json` (`cycle_store.py`, 90 days, at most 3000 cycles; see [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md#parameter-extraction)). The two files are independent: deleting one never affects the other, and a zone removal deletes both (`ENTRY_SCOPED_FILES`). The duty-balance fit that used to read chart_log rows for heating/cooling rates is retired.
+The chart_log is a ~30-minute record for charts and chart-log fits. The pooled heating/cooling cycle model (Issues #1512/#1516) does **not** read it: it needs the thermostat's edges and every sensor reading with its seconds, which a 30-minute row cannot carry, so it keeps its own per-zone file, `climate_advisor_cycles.json` (`cycle_store.py`, 90 days back from the newest cycle of the same mode, at most 3000 cycles, half per mode; see [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md#parameter-extraction)). The two files are independent: deleting one never affects the other, and a zone removal deletes both (`ENTRY_SCOPED_FILES`). The duty-balance fit that used to read chart_log rows for heating/cooling rates is retired.
 
 ## Scope
 

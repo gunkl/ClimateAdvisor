@@ -6,10 +6,11 @@ time (a refit after a restart needs no in-flight state, and a better estimator c
 Persistence contract mirrors ``V4Archive`` / ``ChartStateLog``: ``load()`` / ``save()`` are blocking (the coordinator
 MUST run them via its executor), ``save()`` is an atomic tempfile + ``os.replace`` with ``chmod 0o600`` on non-Windows,
 retention is ``CYCLE_RETENTION_DAYS`` counted back from the newest cycle of the same mode (pruned at most hourly), plus
-a hard cap (``CYCLE_MAX_STORED``, oldest dropped first), a corrupt or unreadable file starts empty and is logged ONCE,
-and no public method raises. Retention is anchored on the newest cycle, not on today (owner decision 2026-11-11,
-"Fade only on new evidence"): a summer with no heating keeps last winter's heating cycles, so the first refit in
-autumn starts from them instead of from nothing; old cycles leave only as newer ones of the same mode arrive.
+a hard cap (``CYCLE_MAX_STORED``, half of it per mode, each mode's oldest dropped first), a corrupt or unreadable file
+starts empty and is logged ONCE, and no public method raises. Retention is anchored on the newest cycle, not on today
+(owner decision 2026-11-11, "Fade only on new evidence"): a summer with no heating keeps last winter's heating cycles,
+so the first refit in autumn starts from them instead of from nothing; old cycles leave only as newer ones of the same
+mode arrive.
 
 Occupant effect: none directly; this is the memory behind the heating/cooling rate the house is judged by.
 
@@ -39,9 +40,11 @@ way (``op`` places). A version-1 file (fixed centi-degree ``y``, deci-degree ``o
 ``p = 2`` / ``op = 1`` and written back as version 2. (Downgrades are not supported.)
 
 Saving is periodic (``CYCLE_STORE_SAVE_INTERVAL_S``) plus at Home Assistant stop / unload: a crash may lose the most
-recent cycles, which are simply learned again from the next ones. A missing, partial or corrupt file loads as far as
-it is readable (unreadable rows dropped, duplicate ids kept once), never raises, and nothing is counted twice: the
-learning engine counts a cycle as new evidence only when it is newer than any an earlier fit saw (``t_seen``).
+recent cycles; the next refit works from the saved ones as a normal refit (the learning engine holds a fit only when
+all the cycles it was fitted on are gone, so the survivors are not counted a second time through the prior). A
+missing, partial or corrupt file loads as far as it is readable (unreadable rows dropped, duplicate ids kept once),
+never raises, and nothing is counted twice: the learning engine counts a cycle as new evidence only when it is newer
+than any an earlier fit saw (``t_seen``).
 """
 
 from __future__ import annotations
@@ -297,13 +300,28 @@ class CycleStore:
         self._by_id = {c.id: c for c in cycles}
 
     def _enforce_cap(self) -> int:
-        extra = len(self._cycles) - self._max_cycles
-        if extra > 0:
-            for c in self._cycles[:extra]:
+        """Each mode keeps at most half of ``max_cycles``, its own oldest dropped first (Issue #1512 final
+        verification, the #1523 rule): a busy cooling summer can never push last winter's heating cycles out (it used
+        to drop the oldest cycles whatever their mode: 0 of 3000 heat cycles left after a summer at 60 cycles a day).
+        Caller holds the lock."""
+        share = max(1, self._max_cycles // 2)
+        counts: dict[str, int] = {}
+        for c in self._cycles:
+            counts[c.mode] = counts.get(c.mode, 0) + 1
+        extra = {m: n - share for m, n in counts.items() if n > share}
+        if not extra:
+            return 0
+        keep: list[_Cycle] = []
+        for c in self._cycles:
+            if extra.get(c.mode, 0) > 0:
+                extra[c.mode] -= 1
                 self._by_id.pop(c.id, None)
-            del self._cycles[:extra]
-            del self._keys[:extra]
-        return max(extra, 0)
+                continue
+            keep.append(c)
+        dropped = len(self._cycles) - len(keep)
+        self._cycles = keep
+        self._keys = [c.t_on for c in keep]
+        return dropped
 
     def add(self, cycle: dict[str, Any], now: float | None = None) -> bool:
         """Keep a closed cycle (rounded as it will be stored). False when it was unusable. Never raises."""

@@ -330,17 +330,26 @@ def held_candidate(fit: Any, cycles: Sequence[dict[str, Any]], mode: str) -> dic
 
 
 def _held_in_pool(held: dict[str, Any], cycles: Sequence[dict[str, Any]], mode: str) -> bool:
-    """True when the cycles that produced ``held`` are still in the pool a fit would use (a sensor swapped back).
+    """True when cycles that produced ``held`` are still in the pool a fit would use (a sensor swapped back, or a
+    crash that lost only the newest cycles).
 
-    The pool is the newest sensor's cycles (``fit_cycles``); held's newest eligible cycle in it means its evidence is
-    already in the data, so it must not be counted a second time as the prior."""
+    The pool is the newest sensor's cycles (``fit_cycles``). Any cycle of held's sensor between held's first and last
+    eligible cycle (``t_first`` .. ``t_last``) means its evidence is already in the data, so it must not be counted a
+    second time as the prior. Issue #1512 final verification: this used to look for held's NEWEST cycle only, so a
+    crash that lost the newest cycle or two (the learning file is saved after every refit, the cycle file every
+    ``CYCLE_STORE_SAVE_INTERVAL_S``) made the current fit the prior of a refit over the same surviving cycles, held at
+    keep 1.0: their evidence counted twice (40.75 instead of 22.0) and the rate answered a real change about half as
+    fast. A fit has left the pool only when the cycles it was fitted on are gone (sensor swap, retention). A record
+    without ``t_first`` (stored before it existed) counts any older cycle of its sensor."""
     mine = [c for c in cycles if c.get("mode") == mode and _num(c.get("t_on"))]
     if not mine:
         return False
     ent = max(mine, key=lambda c: c["t_on"]).get("entity")
     if ent != held.get("entity") or not _num(held.get("t_last")):
         return False
-    return any(c.get("entity") == ent and abs(c["t_on"] - held["t_last"]) < 1.0 for c in mine)
+    lo = float(held["t_first"]) if _num(held.get("t_first")) else -math.inf
+    hi = float(held["t_last"])
+    return any(c.get("entity") == ent and lo - 1.0 <= c["t_on"] <= hi + 1.0 for c in mine)
 
 
 def prior_from_cache(
@@ -763,6 +772,7 @@ def _prior_result(
         "prior_sd_q": prior["q"][1],
         "ne_w": 0.0,
         "entity": entity,
+        "t_first": None,
         "t_last": None,
         "t_eligible": [],
     }
@@ -783,8 +793,8 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
     ``resolution_f`` and ``reasons`` (counts per rejection code of the cycles that did not qualify). Also the
     evidence bookkeeping the learning engine needs (Issue #1512 verifier findings 2 and 4): ``prior_q`` /
     ``prior_sd_q`` (the prior the data was weighed against), ``ne_w`` (the eligible cycles' summed weights),
-    ``entity`` (the pool's sensor), ``t_last`` (``t_on`` of the newest eligible cycle) and ``t_eligible`` (the
-    eligible cycles' ``t_on``, so the caller can tell which of them are new; not stored).
+    ``entity`` (the pool's sensor), ``t_first`` / ``t_last`` (``t_on`` of the oldest / newest eligible cycle) and
+    ``t_eligible`` (the eligible cycles' ``t_on``, so the caller can tell which of them are new; not stored).
     No eligible cycle returns the prior unchanged (grade ``none``). Never worse than the prior by construction
     (ridge toward it). Pure and deterministic.
     """
@@ -866,6 +876,7 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
         "prior_sd_q": prior["q"][1],
         "ne_w": sum(pc["w"] for pc in eligible),
         "entity": ent,
+        "t_first": min(pc["ton"] for pc in eligible) * 60.0,
         "t_last": max(pc["ton"] for pc in eligible) * 60.0,
         "t_eligible": [pc["ton"] * 60.0 for pc in eligible],
     }

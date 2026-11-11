@@ -1705,7 +1705,7 @@ CYCLE_MAX_OUTDOOR: int = 200  # outdoor points kept per cycle
 # Stored cycles more than this many days older than the NEWEST cycle of the same mode are pruned (a quiet season
 # prunes nothing: the clock is new evidence, owner decision 2026-11-11).
 CYCLE_RETENTION_DAYS: int = 90
-CYCLE_MAX_STORED: int = 3000  # hard cap on stored cycles (oldest dropped first)
+CYCLE_MAX_STORED: int = 3000  # hard cap on stored cycles: half per mode, each mode's oldest dropped first
 CYCLE_STORE_PRUNE_INTERVAL_S: float = 3600  # pruning runs at most this often
 CYCLE_STORE_VERSION: int = 2  # "v" key of the cycle file (2: per-cycle decimal places; a v1 file is migrated on load)
 CYCLE_STORE_SAVE_INTERVAL_S: float = 1800  # the cycle file is written at most this often (+ at HA stop / unload)

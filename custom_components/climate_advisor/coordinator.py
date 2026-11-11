@@ -14821,9 +14821,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 continue
             days[day_str].append(entry)
 
+        # Only complete days count (Issue #1512 final verification): each day is counted once, so today's partial
+        # day counted at startup or at the morning re-fit would shut out the complete day for good. "Today" is taken
+        # in the zone of the newest row's stamp, the zone the day keys above are written in.
+        try:
+            _newest = datetime.fromisoformat(entries[-1]["ts"])
+            _now = dt_util.now()
+            today_key = (_now.astimezone(_newest.tzinfo) if _newest.tzinfo else _now).strftime("%Y-%m-%d")
+        except KeyError, ValueError, TypeError:
+            today_key = None
+
         committed = 0
         rejected = 0
         for day_str, day_entries in sorted(days.items()):
+            if today_key is not None and day_str >= today_key:
+                continue  # today's day is not over yet
             ok, reason = _is_ac_duty_solar_day(day_entries)
             if not ok:
                 rejected += 1

@@ -122,11 +122,26 @@ def test_load_prunes_expired(tmp_path: Path) -> None:
 
 
 def test_cap_drops_oldest_first(tmp_path: Path) -> None:
-    s = CycleStore(tmp_path / "c.json", max_cycles=5)
+    """Each mode keeps half the cap, its own oldest dropped first."""
+    s = CycleStore(tmp_path / "c.json", max_cycles=10)
     for i in range(8):
         s.add(_cycle(T0 + i * 3600, n=4), now=T0 + 100)
     assert [c["t_on"] for c in s.cycles()] == [T0 + i * 3600 for i in range(3, 8)]
     assert CYCLE_MAX_STORED == 3000
+
+
+def test_a_busy_cooling_summer_keeps_last_winters_heating_cycles(tmp_path: Path) -> None:
+    """Issue #1512 final verification (the #1523 rule for the cycle file): the cap used to drop the oldest cycles
+    whatever their mode, so a summer of cooling cycles left none of the winter's heating cycles for the first refit
+    in autumn (0 of 3000 at 60 cycles a day). Each mode now keeps its own half."""
+    s = CycleStore(tmp_path / "c.json", max_cycles=20)
+    for i in range(10):
+        s.add(_cycle(T0 + i * 3600, "heat", n=4), now=T0 + i * 3600)
+    for i in range(10, 60):
+        s.add(_cycle(T0 + i * 3600, "cool", n=4), now=T0 + i * 3600)
+    assert len(s.cycles("heat")) == 10  # old behaviour: 0
+    assert [c["t_on"] for c in s.cycles("cool")] == [T0 + i * 3600 for i in range(50, 60)]
+    assert len(s) <= 20
 
 
 def test_cycles_filters_by_mode_and_since(tmp_path: Path) -> None:
@@ -288,7 +303,8 @@ def test_save_failure_never_raises_and_cleans_up(tmp_path: Path, monkeypatch) ->
 
 
 def test_size_budget_3000_cycles(tmp_path: Path) -> None:
-    """3000 realistic cycles (about 40 readings with seconds, outdoor, flags) stay well under 3 MB."""
+    """3000 realistic cycles (about 40 readings with seconds, outdoor, flags; half heat, half cool, the full cap)
+    stay well under 3 MB."""
     rng = random.Random(7)
     s = CycleStore(tmp_path / "c.json")
     t = T0
@@ -303,7 +319,7 @@ def test_size_budget_3000_cycles(tmp_path: Path) -> None:
         s.add(
             {
                 "id": f"heat-{i}",
-                "mode": "heat" if i % 3 else "cool",
+                "mode": "heat" if i % 2 else "cool",  # a full store: each mode holds its half of the cap
                 "t_on": t,
                 "t_off": samples[n // 2][0],
                 "cut": None,

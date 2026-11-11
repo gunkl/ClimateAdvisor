@@ -115,6 +115,10 @@ CARRY_HALF_RUNS = 20.0
 CARRY_HALF_RUNS_CONTRADICT = 5.0
 CARRY_CONTRADICT_REL = 0.25
 CARRY_MIN_KEEP = 0.05
+# Release is smooth: below CARRY_MIN_KEEP the blend goes on until the gain would step by at most this (F/h) when the
+# carried share is dropped. The offsets' last step is then at most CARRY_MIN_KEEP x 2.5 F (the calibration grid's
+# span) = 0.125 F, a quarter of the grid's own 0.5 F step.
+CARRY_RELEASE_STEP = 0.02
 CARRY_REASON = "carried from last season"
 _MODE_GAIN = {"heat": "q_h", "cool": "q_c"}
 # Parameters that stay at the previous model's learned value while the window has no data for them (#1525): the
@@ -1199,8 +1203,16 @@ def runs_after(samples: Sequence[V4Sample], *, heat: bool, after_epoch: float | 
     """Runs (starts) of heating (cooling) in ``samples`` that began after ``after_epoch`` (``None``: every run).
 
     The unit of new evidence for a carried mode (Issue #1525): one thermostat run of that mode."""
+    return _runs_after_detail(samples, heat=heat, after_epoch=after_epoch)[0]
+
+
+def _runs_after_detail(
+    samples: Sequence[V4Sample], *, heat: bool, after_epoch: float | None
+) -> tuple[int, float | None]:
+    """``(runs that began after after_epoch, epoch of the newest such start or None)``."""
     u_of = _heat_u if heat else _cool_u
     n = 0
+    last: float | None = None
     prev = False
     for k, s in enumerate(samples):
         if k > 0 and not _contiguous(samples[k - 1].ts, s.ts):
@@ -1208,8 +1220,9 @@ def runs_after(samples: Sequence[V4Sample], *, heat: bool, after_epoch: float | 
         act = u_of(s) > 0.0
         if act and not prev and (after_epoch is None or s.ts.timestamp() > after_epoch):
             n += 1
+            last = s.ts.timestamp()
         prev = act
-    return n
+    return n, last
 
 
 def displaced_keep(keep: float, n_new: float, contradicts: bool) -> float:
@@ -1238,6 +1251,7 @@ def _carry_record(raw: Any) -> dict[str, Any] | None:
             "keep": float(raw.get("keep", 1.0)),
             "since": str(raw.get("since") or ""),
             "calibrated": bool(raw.get("calibrated", False)),
+            "counted_through": None if raw.get("counted_through") is None else float(raw["counted_through"]),
         }
     except KeyError, TypeError, ValueError:
         return None
@@ -1247,6 +1261,8 @@ def _carry_record(raw: Any) -> dict[str, Any] | None:
     for k in ("min_run_min", "burst_min"):
         if rec[k] is not None and (not _finite(rec[k]) or rec[k] <= 0):
             rec[k] = None
+    if rec["counted_through"] is not None and not _finite(rec["counted_through"]):
+        rec["counted_through"] = None
     if rec["grade"] not in ("ok", "low"):
         rec["grade"] = "low"
     rec["keep"] = min(1.0, max(0.0, rec["keep"]))
@@ -1297,18 +1313,22 @@ def _mode_window_graded(fit_info: Mapping[str, Any], mode: str) -> bool:
     if not _mode_window_ok(fit_info, mode):
         return False
     rec = (fit_info.get("modes") or {}).get(mode)
-    if not isinstance(rec, Mapping) or rec.get("carried") and rec.get("reason") == CARRY_REASON:
+    if not isinstance(rec, Mapping) or rec.get("carried_grade"):
         return not isinstance(rec, Mapping)
     reason = str(rec.get("reason") or "")
     return rec.get("grade") == "ok" or (rec.get("grade") == "low" and not any(w in reason for w in _THIN_GRADE_WORDS))
 
 
 def _carry_source(prev: V4Model | None, primary: str) -> bool:
+    """``prev`` can be carried from. Its primary node need not be this fit's (Issue #1525 verification): a switch
+    between the stitched and the per-room control model (#1432) changes the primary node, not the furnace, the AC,
+    the thermostat or the house, so the mode gains, offsets and grades and the house's window / fan rates carry across
+    it; per-node rates carry only for the same sensor id (``_carried_params``). ``primary`` is accepted for callers."""
+    del primary
     return (
         prev is not None
         and prev.schema_version == V4_SCHEMA_VERSION
         and prev.confidence != "none"
-        and prev.primary == primary
         and isinstance(prev.fit, Mapping)
     )
 
@@ -1317,17 +1337,21 @@ def _start_carries(
     prev: V4Model | None,
     *,
     primary: str,
+    seen: Mapping[str, bool],
     graded: Mapping[str, bool],
-    new_runs: Mapping[str, int],
     fitted_at: str,
 ) -> dict[str, dict[str, Any]]:
     """Per mode, the carry this fit starts with (before the window's own evidence is weighed), Issue #1525.
 
     A mode ``prev`` LEARNED - its own window graded it (``_mode_window_graded``), or it was carrying it - is carried:
 
-    * while this window cannot grade it (unseen, or too few accepted starts / anchors of it: a season's last or first
-      runs), exactly what ``prev`` used, share 1.0 - a thin window's fit of the mode is not usable evidence;
-    * once this window grades it, ``prev``'s record goes on and this fit's new runs displace it (``displaced_keep``).
+    * unseen in this window (the season has left it): a fresh record at exactly what ``prev`` used, share 1.0;
+    * seen but too thin to grade (too few accepted starts / anchors of it) and ``prev`` had a record: that record goes
+      on UNCHANGED (its carried value and share; runs on such nights are counted on the next graded night through
+      ``counted_through``), and the fit holds the gain and offsets ``prev`` used (``pin``) - a thin night neither
+      displaces the carry nor undoes the displacement so far;
+    * seen but thin, no record, ``prev`` graded it (a season's first or last runs): a fresh record at what it used;
+    * graded and ``prev`` had a record: the record goes on and this window's new runs displace it.
 
     A mode ``prev`` never learned is not carried: the window's fit stands, and an unseen mode keeps the production
     ratio as before. That includes a mode the home used but v4 never graded (Zone 1's spring heating: no usable start,
@@ -1338,22 +1362,26 @@ def _start_carries(
         return out
     pfit = prev.fit
     pcarried = pfit.get("carried") if isinstance(pfit.get("carried"), Mapping) else {}
+    prev_epoch = _iso_epoch(prev.fitted_at)
     for mode in _MODE_GAIN:
         rec_prev = _carry_record(pcarried.get(mode))
         if not (_mode_window_graded(pfit, mode) or rec_prev is not None):
             continue
-        if not graded[mode]:
+        used = _mode_values(prev, mode)
+        if rec_prev is not None and seen[mode]:
+            ct = rec_prev["counted_through"] if rec_prev["counted_through"] is not None else prev_epoch
+            out[mode] = {**rec_prev, "counted_through": ct, "pin": used}
+        elif not graded[mode]:
             out[mode] = {
-                **_mode_values(prev, mode),
+                **used,
                 "trusted": _mode_window_ok(pfit, mode) or bool(rec_prev and rec_prev["trusted"]),
                 "grade": _mode_grade_of(prev, mode),
                 "keep": 1.0,
                 "since": rec_prev["since"] if rec_prev is not None and rec_prev["since"] else fitted_at,
                 "calibrated": bool(prev.thermostat.calibrated),
-                "new_runs": 0,
+                "counted_through": prev_epoch,
+                "pin": used,
             }
-        elif rec_prev is not None:
-            out[mode] = {**rec_prev, "new_runs": int(new_runs[mode])}
     return out
 
 
@@ -1407,17 +1435,19 @@ def _with_mode_values(th: V4Thermostat, mode: str, rec: Mapping[str, Any], *, sh
 
 def _carry_mode_grades(modes: dict[str, dict[str, Any]], carried: Mapping[str, Mapping[str, Any]]) -> None:
     """Per-mode grades of a carried mode (Issue #1525): the carried grade while the window has no usable evidence of
-    the mode ("unseen", or too few starts / anchors of it), reason CARRY_REASON; the window's grade otherwise (a skill
+    the mode ("unseen", or too few starts / anchors / days: ``_THIN_GRADE_WORDS``, the same test as
+    ``_mode_window_graded``), reason CARRY_REASON and ``carried_grade`` true; the window's grade otherwise (a skill
     failure on the mode's own anchors is new evidence and speaks). Every carried mode is marked with its share."""
     for mode, rec in carried.items():
         g = modes.get(mode)
         if not isinstance(g, dict) or g.get("grade") == "none":
             continue
         reason = str(g.get("reason") or "")
-        thin = g.get("grade") == "unseen" or (g.get("grade") == "low" and ("starts" in reason or "anchors" in reason))
+        thin = g.get("grade") == "unseen" or (g.get("grade") == "low" and any(w in reason for w in _THIN_GRADE_WORDS))
         if thin:
             g["grade"] = rec["grade"]
             g["reason"] = CARRY_REASON
+            g["carried_grade"] = True  # the grade shown is the carried one (read by v4_shadow and the Debug tab)
         g["carried"] = True
         g["keep"] = rec["keep"]
 
@@ -1642,11 +1672,16 @@ def _fit_problem(
     }
     mode_anchors = prob.mode_anchor_counts(16)
     graded = {m: window_ok[m] and mode_anchors[m] >= GATE_MIN_ANCHORS for m in _MODE_GAIN}
-    after = _iso_epoch(carry_from.fitted_at) if carry_from is not None else None
-    new_runs = {m: runs_after(samples, heat=m == "heat", after_epoch=after) for m in _MODE_GAIN}
-    carries = _start_carries(
-        carry_from, primary=sensor_list[0], graded=graded, new_runs=new_runs, fitted_at=base.fitted_at
-    )
+    carries = _start_carries(carry_from, primary=sensor_list[0], seen=seen, graded=graded, fitted_at=base.fitted_at)
+    # New evidence of a carried mode: its runs after the last one already counted (thin nights count nothing, so their
+    # runs are counted on the next graded night; nothing is counted twice and no clock is read).
+    for mode, rec in carries.items():
+        n_new, last = (0, None)
+        if graded[mode]:
+            n_new, last = _runs_after_detail(samples, heat=mode == "heat", after_epoch=rec["counted_through"])
+        rec["new_runs"] = int(n_new)
+        if last is not None:
+            rec["counted_through"] = last
     # parameters with no data behind them stay at their start value
     frozen: set[tuple[Any, ...]] = set()
     if prob.win_steps < GATE_MIN_MODE_STEPS:
@@ -1670,7 +1705,7 @@ def _fit_problem(
     }
     for mode, rec in carries.items():
         if not graded[mode]:
-            pinned[("h", _MODE_GAIN[mode])] = float(rec["q"])
+            pinned[("h", _MODE_GAIN[mode])] = float(rec["pin"]["q"])
     frozen |= set(pinned)  # held in the fit; the public list below names only what has no data behind it
 
     def pin_and_tie(hd: dict[str, float], ndd: Sequence[dict[str, float]]) -> None:
@@ -1844,10 +1879,10 @@ def _fit_problem(
             q_fit = hp[gi]
             contradicted = bool(window_ok[mode]) and abs(q_fit - rec["q"]) > CARRY_CONTRADICT_REL * rec["q"]
             keep = displaced_keep(keep, rec["new_runs"], contradicted)
-            if graded[mode] and keep < CARRY_MIN_KEEP:
-                continue  # released: the window grades the mode on its own and holds nearly all the evidence
+            if keep < CARRY_MIN_KEEP and keep * abs(rec["q"] - q_fit) <= CARRY_RELEASE_STEP:
+                continue  # released: the window holds nearly all the evidence and the last step is negligible
             hp[gi] = keep * rec["q"] + (1.0 - keep) * q_fit
-        carried[mode] = {**rec, "keep": round(keep, 6), "contradicted": contradicted}
+        carried[mode] = {k: v for k, v in {**rec, "keep": round(keep, 6), "contradicted": contradicted}.items()}
     if carried:
         hd = dict(zip(HOUSE_KEYS, hp, strict=True))
         if not cool_seen and ("h", "q_c") not in pinned:
@@ -1871,7 +1906,7 @@ def _fit_problem(
     # a carried mode the window cannot grade keeps the carried offsets, not the defaults or a thin calibration (#1525)
     for mode, rec in carried.items():
         if not graded[mode]:
-            thermostat = _with_mode_values(thermostat, mode, rec, share=1.0)
+            thermostat = _with_mode_values(thermostat, mode, rec["pin"], share=1.0)
     calibrate = {m: window_ok[m] and (graded[m] or m not in carried) for m in _MODE_GAIN}
     thermostat, cal_info = _calibrate_thermostat(
         prob, samples, hp, thermostat, heat=calibrate["heat"], cool=calibrate["cool"]
@@ -1921,7 +1956,7 @@ def _fit_problem(
     present = {m: seen[m] or m in carried for m in _MODE_GAIN}
     known = {m: window_ok[m] or bool(m in carried and carried[m]["trusted"]) for m in _MODE_GAIN}
     info["thermostat_defaults_used"] = any(seen[m] and not known[m] for m in _MODE_GAIN)
-    info["carried"] = carried
+    info["carried"] = {m: {k: v for k, v in rec.items() if k != "pin"} for m, rec in carried.items()}
     if sample_days < GATE_MIN_DAYS_NONE:
         confidence, info["reason"] = "none", "under 3 days of samples"
     elif not values_ok or not math.isfinite(cost):

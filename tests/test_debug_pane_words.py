@@ -54,7 +54,7 @@ class TestV4GradeWords:
         assert s["confidence_reason"] == _LIVE_FIT["reason"]
         assert s["modes"]["cool"] == {
             "seen": True, "starts": 2, "accepted": 0, "grade": None, "reason": None,
-            "carried": False, "keep": None,  # Issue #1525: not carried from an earlier season
+            "carried": False, "carried_grade": False, "keep": None,  # Issue #1525: not carried
         }  # fmt: skip
 
     def test_a_home_that_never_cooled_says_cooling_not_seen(self):

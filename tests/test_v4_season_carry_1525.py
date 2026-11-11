@@ -196,6 +196,57 @@ class TestReleaseAndContradiction:
         assert rec["keep"] == pytest.approx(0.5 ** (rec["new_runs"] / p4.CARRY_HALF_RUNS_CONTRADICT), abs=1e-6)
         assert nxt.house[GAIN[mode]] < wrong
 
+    def test_release_waits_until_the_last_step_is_negligible(self, chain):
+        """Below CARRY_MIN_KEEP the blend goes on while dropping the carried share would still move the gain."""
+        mode, back7 = chain["mode"], chain["back7"]
+        far = 1.8 * back7.house[GAIN[mode]]
+        prev = self._with_record(back7, mode, q=far, keep=p4.CARRY_MIN_KEEP * 1.01)
+        nxt = _fit(chain["samples"], RETURN + 11.0, warm=prev)
+        rec = nxt.fit["carried"][mode]
+        assert rec["keep"] < p4.CARRY_MIN_KEEP
+        assert rec["keep"] * abs(far - nxt.house[GAIN[mode]]) > 0  # still blending: no step at release
+
+
+class TestThinNightFlip:
+    """Verification finding 1: a thin night between graded nights neither displaces the carry nor undoes it."""
+
+    def test_seen_thin_seen_keeps_the_displacement(self, chain):
+        mode, back1, back7 = chain["mode"], chain["back1"], chain["back7"]
+        rec7 = back7.fit["carried"][mode]
+        assert rec7["keep"] < 1.0
+        thin = _fit(chain["samples"], RETURN + 3.0, warm=back7)  # a window that has the mode but cannot grade it
+        assert thin.fit[f"{mode}_seen"] is True and thin.fit["modes"][mode]["reason"] == p4.CARRY_REASON
+        rec = thin.fit["carried"][mode]
+        assert rec["keep"] == rec7["keep"] and rec["q"] == rec7["q"]  # not rebased to 1.0 at the used value
+        assert rec["counted_through"] == rec7["counted_through"] and rec["new_runs"] == 0
+        assert thin.house[GAIN[mode]] == back7.house[GAIN[mode]]  # held at what the previous night used
+        assert _on_off(thin, mode) == _on_off(back7, mode)
+        graded = _fit(chain["samples"], RETURN + 11.0, warm=thin)
+        direct = _fit(chain["samples"], RETURN + 11.0, warm=back7)  # the same graded night with no thin night before
+        rec_g, rec_d = graded.fit["carried"][mode], direct.fit["carried"][mode]
+        assert rec_g["keep"] == rec_d["keep"] < rec7["keep"]  # displacement continues as if the thin night never was
+        n = p4.runs_after(
+            _window(chain["samples"], RETURN + 11.0), heat=mode == "heat", after_epoch=rec7["counted_through"]
+        )
+        assert rec_g["new_runs"] == n > 0
+        assert back1.fit["carried"][mode]["keep"] == 1.0
+
+
+class TestNodeSwitch:
+    """Verification finding 2: a switch between the stitched and the per-room model keeps what the house learned."""
+
+    def test_the_carry_crosses_a_primary_node_change(self, chain):
+        mode, first, summer = chain["mode"], chain["first"], chain["summer"]
+        renamed = [
+            dataclasses.replace(s, readings={p4.CA_NODE: s.readings[HALL]}) for s in _window(chain["samples"], 50.0)
+        ]
+        other = p4.fit(renamed, primary=p4.CA_NODE, sensors=[p4.CA_NODE], tz=TZ,
+                       now=renamed[-1].ts + timedelta(minutes=1), warm_start=summer)  # fmt: skip
+        assert other.primary != summer.primary
+        assert other.house[GAIN[mode]] == summer.house[GAIN[mode]] == first.house[GAIN[mode]]
+        assert _on_off(other, mode) == _on_off(summer, mode)
+        assert other.fit["modes"][mode]["grade"] == "ok" and other.confidence == "ok"
+
 
 class TestNeverSeenAndUpgrade:
     def test_a_home_that_never_used_the_mode_keeps_the_ratio(self, chain):
@@ -350,6 +401,22 @@ class TestNightReplayCarry:
         rec = night_replay.validation_record(_report({}), new, previous=prev)
         ev = night_replay.evidence_from_record(rec)
         assert ev == ns.Evidence(30.0, 20.0, 70.0, 10.0, {"s.bed": 700.0})
+
+    def test_provisional_is_judged_per_class(self):
+        """A class final on its own (10+ nights on ok fits) is not held provisional by another class's old record."""
+        prev = night_replay.validation_record(
+            {**_report({"fan": _cls(12)}), "classes_ok_fits_only": {"fan": _cls(4)}}, None
+        )
+        assert prev["provisional"] is True and prev["ok_nights"] == {"fan": 4}
+        new = {"closed": _cls(20)}
+        rec = night_replay.validation_record(_report(new), None, previous=prev)
+        assert rec["carried_classes"] == ["fan"] and rec["provisional"] is True  # the carried class is not final
+        prev2 = night_replay.validation_record(_report({"fan": _cls(12), "closed": _cls(2)}), None)
+        assert prev2["provisional"] is True  # closed has too few ok nights
+        rec2 = night_replay.validation_record(_report({"closed": _cls(20)}), None, previous=prev2)
+        assert rec2["carried_classes"] == ["fan"] and rec2["ok_nights"]["fan"] == 12
+        assert rec2["provisional"] is False  # closed is final now, fan carries its own final count
+        assert ns.validation_status(ns.NightValidation.from_dict(rec2), "fan")[0] == "high"
 
     def test_no_previous_record_is_unchanged(self):
         rec = night_replay.validation_record(_report({"fan": _cls(2)}), None)

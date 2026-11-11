@@ -30,7 +30,8 @@ def learned() -> dict:
     samples, _t, _ = simulate(T0, 13, noise=0.03)
     m = p4.fit(samples, primary=HALL, sensors=[HALL], tz=TZ, now=samples[-1].ts + timedelta(minutes=1))
     assert m.confidence != "none"
-    return p4.to_dict(m)
+    # stored as the headless zone's own primary (its thermostat), the primary an unusable refit is compared with
+    return {**p4.to_dict(m), "primary": "climate.test_thermostat", "sensors": ["climate.test_thermostat"]}
 
 
 @pytest.fixture
@@ -125,3 +126,69 @@ def test_the_pure_rule() -> None:
         v4_shadow.describe_unusable_fit(rec)
         == "last refit unusable (too few anchors); keeping the model from 2026-11-09"
     )
+
+
+def test_three_unusable_refits_in_a_row_warn_and_reach_status_and_ai(fake, learned, caplog) -> None:
+    """Verification item 4: after V4_UNUSABLE_WARN_REFITS unusable refits the log WARNs, and the Status chart note and
+    the AI context say the decisions still use the model from <date>; one bad night stays on the Debug tab."""
+    from custom_components.climate_advisor import ai_skills_context
+    from custom_components.climate_advisor.const import V4_UNUSABLE_WARN_REFITS
+
+    coord, _hass, scheduler = _build()
+    _v4_primary(coord)
+    _seed_cycle_inputs(coord, scheduler)
+    coord._v4_store.v4_model = dict(learned)
+    fake.confidence = "none"
+    date = learned["fitted_at"][:10]
+    for n in range(1, V4_UNUSABLE_WARN_REFITS + 1):
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            _refit(coord, scheduler)
+        assert coord._v4_store.unusable_fit["count"] == n
+        warned = [r for r in caplog.records if r.levelno == logging.WARNING and "unusable" in r.getMessage()]
+        notice = pe.engine_state(coord, coord.config)["notice"]
+        if n < V4_UNUSABLE_WARN_REFITS:
+            assert not warned and notice == ""
+        else:
+            assert warned and f"keeping the model from {date}" in warned[0].getMessage()
+            assert f"still use the model from {date}" in notice
+    from tools.sim_harness._loop import run_coro
+
+    text = run_coro(ai_skills_context.build_thermal_pipeline_context(coord.hass, coord))
+    assert f"keeping the model from {date}" in text and "decisions still use that model" in text
+    fake.confidence = "ok"
+    _refit(coord, scheduler)
+    assert coord._v4_store.unusable_fit is None and pe.engine_state(coord, coord.config)["notice"] == ""
+
+
+def test_a_model_for_a_sensor_no_longer_configured_is_not_kept(fake, learned) -> None:
+    """A reconfigured zone: the old model's primary is neither "_ca" nor the configured sensor, so an unusable refit is
+    stored as before (no stale model in use); the next usable fit carries what the old model learned."""
+    coord, _hass, scheduler = _build()
+    _seed_cycle_inputs(coord, scheduler)
+    old = dict(learned, primary="sensor.removed", sensors=["sensor.removed"])
+    coord._v4_store.v4_model = old
+    fake.confidence = "none"
+    _refit(coord, scheduler)
+    assert coord._v4_store.v4_model["confidence"] == "none" and coord._v4_store.unusable_fit is None
+    assert not v4_shadow.keep_previous_model(old, {"confidence": "none"}, primaries=("_ca", "sensor.hall"))
+    assert v4_shadow.keep_previous_model(dict(learned, primary="_ca"), {"confidence": "none"}, primaries=("_ca", "x"))
+
+
+def test_an_unusable_refit_is_retried_like_a_missing_model(fake, learned) -> None:
+    """While the last refit was unusable the cycle retries it at most every 6 h, not only at 03:15."""
+    from .test_v4_shadow_wiring import _cycle
+
+    coord, _hass, scheduler = _build()
+    _seed_cycle_inputs(coord, scheduler)
+    coord._v4_store.v4_model = dict(learned)
+    coord._startup_coalesce_active = False
+    fake.confidence = "none"
+    _refit(coord, scheduler)
+    calls = len(fake.fit_calls)
+    _cycle(coord, scheduler, drain=True)
+    assert len(fake.fit_calls) == calls  # backed off
+    coord._v4_last_fit_attempt -= 7 * 3600
+    _cycle(coord, scheduler, drain=True)
+    assert len(fake.fit_calls) == calls + 1 and coord._v4_last_fit["reason"] == "retry"
+    assert coord._v4_store.v4_model == learned and coord._v4_store.unusable_fit["count"] == 2

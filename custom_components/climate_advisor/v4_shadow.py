@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta, tzinfo
 from datetime import time as dtime
 from typing import Any
 
-from .const import V4_PREDICT_HORIZON_HOURS
+from .const import V4_PREDICT_HORIZON_HOURS, V4_UNUSABLE_WARN_REFITS
 from .window_span import (  # noqa: F401 - the shared rule lives in the engine-neutral module; re-exported here
     WINDOW_PLAN_FALLBACK_HOURS,
     planned_window_span,
@@ -203,21 +203,43 @@ def model_usable(model_dict: Mapping[str, Any] | None) -> bool:
     return isinstance(model_dict, Mapping) and model_dict.get("confidence", "none") != "none"
 
 
-def keep_previous_model(previous: Mapping[str, Any] | None, new: Mapping[str, Any] | None) -> bool:
+def keep_previous_model(
+    previous: Mapping[str, Any] | None,
+    new: Mapping[str, Any] | None,
+    primaries: Sequence[str] | None = None,
+) -> bool:
     """True when ``new`` (a refit) is unusable and ``previous`` is usable: the previous model stays in use.
+
+    ``primaries`` (the primary nodes the current configuration can fit: ``"_ca"`` and the configured primary entity):
+    a previous model on any other primary was fitted for a sensor the zone no longer reads (a reconfiguration), so it
+    is not kept; the unusable refit is stored as before and the next usable fit carries what the old model learned
+    across the node change (``predictor_v4`` season carry: gains, offsets and grades are the HVAC's and the house's,
+    not the sensor's).
 
     Occupant view: one night with too little data (a sensor outage, a gap in the chart log) or a calm week where the
     refit cannot beat "no change" used to replace the learned model, so pre-heat, the time-of-use bank, setback depth
     and the ceiling guard fell back to the "not learned yet" defaults until a usable fit came back. An unusable fit is
     not evidence against the model (owner rule, D35: learned values give way only to new measured evidence). A home
     that never had a usable model stores the refit as before."""
-    return model_usable(previous) and not model_usable(new)
+    if not (model_usable(previous) and not model_usable(new)):
+        return False
+    return primaries is None or (isinstance(previous, Mapping) and previous.get("primary") in tuple(primaries))
 
 
-def unusable_fit_record(new: Mapping[str, Any], *, at: str, reason: str, kept: Mapping[str, Any]) -> dict[str, Any]:
-    """The diagnostic record of an unusable refit kept beside the model in use (``V4ModelStore.unusable_fit``)."""
+def unusable_fit_record(
+    new: Mapping[str, Any],
+    *,
+    at: str,
+    reason: str,
+    kept: Mapping[str, Any],
+    previous_record: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The diagnostic record of an unusable refit kept beside the model in use (``V4ModelStore.unusable_fit``);
+    ``count`` = unusable refits in a row (``previous_record``'s count + 1)."""
     fit = new.get("fit") if isinstance(new.get("fit"), Mapping) else {}
+    prev_n = previous_record.get("count") if isinstance(previous_record, Mapping) else None
     return {
+        "count": (prev_n if isinstance(prev_n, int) and prev_n > 0 else 0) + 1,
         "at": at,
         "reason": reason,
         "fit_reason": str(fit.get("reason") or "confidence none"),
@@ -231,7 +253,20 @@ def describe_unusable_fit(rec: Mapping[str, Any] | None) -> str:
     if not isinstance(rec, Mapping):
         return ""
     kept = str(rec.get("kept_fitted_at") or "")[:10] or "an earlier fit"
-    return f"last refit unusable ({rec.get('fit_reason') or 'confidence none'}); keeping the model from {kept}"
+    n = rec.get("count") if isinstance(rec.get("count"), int) else 1
+    head = "last refit unusable" if n <= 1 else f"last {n} refits unusable"
+    return f"{head} ({rec.get('fit_reason') or 'confidence none'}); keeping the model from {kept}"
+
+
+def unusable_fit_notice(rec: Mapping[str, Any] | None) -> str:
+    """The occupant-facing sentence once V4_UNUSABLE_WARN_REFITS refits in a row were unusable; "" before that."""
+    if not isinstance(rec, Mapping) or not isinstance(rec.get("count"), int) or rec["count"] < V4_UNUSABLE_WARN_REFITS:
+        return ""
+    kept = str(rec.get("kept_fitted_at") or "")[:10] or "an earlier fit"
+    return (
+        f"v4 could not refit your home the last {rec['count']} times ({rec.get('fit_reason') or 'confidence none'}); "
+        f"pre-heat, pre-cool and the other decisions still use the model from {kept}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +300,6 @@ def node_choice_changed(previous: Mapping[str, Any] | None, new: Mapping[str, An
 
 
 _MODE_WORD = {"heat": "heating", "cool": "cooling"}
-_CARRY_REASON = "carried from last season"  # predictor_v4.CARRY_REASON (Issue #1525)
 
 
 def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
@@ -285,10 +319,10 @@ def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
     def mode_txt(mode: str) -> str:
         m = modes.get(mode) if isinstance(modes.get(mode), Mapping) else {}
         word, acc, tot, grade = _MODE_WORD[mode], m.get("accepted"), m.get("starts"), m.get("grade")
-        if m.get("carried") and m.get("reason") == _CARRY_REASON:
+        if m.get("carried_grade"):
             # Issue #1525: what the house learned about this mode stands until new runs of it displace it
             new = "not seen" if m.get("seen") is False else f"{acc if isinstance(acc, int) else 0} usable new starts"
-            return f"{word} {grade}: carried from last season ({new})"
+            return f"{word} {grade}: {m.get('reason')} ({new})"
         if grade == "unseen" or m.get("seen") is False or (not tot and m.get("seen") is None):
             return f"{word} not seen"
         if not isinstance(acc, int):
@@ -307,10 +341,16 @@ def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
     days = summary.get("sample_days")
     days_w = f"{float(days):.1f} days" if isinstance(days, (int, float)) else "too few days"
     code = summary.get("confidence_reason") or ""
+    carried_reason = next(
+        (
+            str(modes[m].get("reason"))
+            for m in ("heat", "cool")
+            if isinstance(modes.get(m), Mapping) and modes[m].get("carried_grade")
+        ),
+        "",
+    )
     carried = [
-        _MODE_WORD[m]
-        for m in ("heat", "cool")
-        if isinstance(modes.get(m), Mapping) and modes[m].get("carried") and modes[m].get("reason") == _CARRY_REASON
+        _MODE_WORD[m] for m in ("heat", "cool") if isinstance(modes.get(m), Mapping) and modes[m].get("carried_grade")
     ]
     short = [
         _MODE_WORD[m]
@@ -325,7 +365,7 @@ def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
         if isinstance(modes.get(m), Mapping) and not modes[m].get("seen") and not modes[m].get("carried")
     ]
     why = {
-        "": ("every check passes" + (f"; {' and '.join(carried)} carried from last season" if carried else ""))
+        "": ("every check passes" + (f"; {' and '.join(carried)} {carried_reason}" if carried else ""))
         if summary.get("confidence") == "ok"
         else "",
         "under 3 days of samples": f"only {days_w} of history (needs 3)",
@@ -891,6 +931,7 @@ def model_summary(model_dict: Mapping[str, Any] | None) -> dict[str, Any]:
                 "reason": _mode_fit(fit, mode).get("reason"),
                 # Issue #1525: the mode's learned values are carried from an earlier window (share ``keep`` left)
                 "carried": bool(_mode_fit(fit, mode).get("carried")),
+                "carried_grade": bool(_mode_fit(fit, mode).get("carried_grade")),  # the grade shown is the carried one
                 "keep": _mode_fit(fit, mode).get("keep"),
             }
             for mode in ("heat", "cool")

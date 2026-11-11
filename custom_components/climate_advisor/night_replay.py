@@ -386,22 +386,34 @@ def validation_record(
         {"schema_version": ns.NIGHT_STRATEGY_SCHEMA_VERSION, "classes": report.get("classes") or {}}
     )
     classes = dict(val.classes) if val else {}
-    provisional = is_provisional(report)
+    ok_report = report.get("classes_ok_fits_only") or {}
+    # Issue #1525 verification: "final" is judged per class (its own nights on ok fits), so a class carried from an
+    # older record carries its own count, and one provisional class cannot hold another for a season.
+    ok_nights = {c: int((ok_report.get(c) or {}).get("n_nights") or 0) for c in classes}
     prev_val = ns.NightValidation.from_dict(previous) if isinstance(previous, Mapping) else None
+    prev_ok = previous.get("ok_nights") if isinstance(previous, Mapping) else None
     carried: list[str] = []
     if prev_val is not None:
         for cls, old in prev_val.classes.items():
             if _carry_class(classes.get(cls), old):
                 classes[cls] = old
                 carried.append(cls)
-        if carried:
-            fresh = {c: v for c, v in (report.get("classes") or {}).items() if c not in carried}
-            provisional = (is_provisional({**report, "classes": fresh}) if fresh else False) or prev_val.provisional
+                if isinstance(prev_ok, Mapping) and isinstance(prev_ok.get(cls), int):
+                    ok_nights[cls] = int(prev_ok[cls])
+                else:  # a record from before per-class counts: final only if that whole record was final
+                    ok_nights[cls] = 0 if prev_val.provisional else ns.VALIDATION_HIGH_NIGHTS
+    params = report.get("params") or {}
+    provisional = (
+        int(params.get("train_days") or 0) != int(V4_FIT_TRAIN_DAYS)
+        or not classes
+        or any(ok_nights.get(cls, 0) < ns.VALIDATION_HIGH_NIGHTS for cls in classes)
+    )
     out = ns.NightValidation(
         classes=classes,
         provisional=provisional,
         generated=str(report.get("generated") or ""),
     ).to_dict()
+    out["ok_nights"] = ok_nights
     ev = _carry_evidence(evidence, evidence_from_record(previous)) if previous is not None else evidence
     out["evidence"] = None if ev is None else _evidence_dict(ev)
     out["carried_classes"] = sorted(carried)

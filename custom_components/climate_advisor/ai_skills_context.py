@@ -1151,6 +1151,15 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
     except Exception:
         lines.append("  unavailable")
 
+    # Issue #1529: the primary prediction engine's refits came back unusable while its learned model stays in use
+    try:
+        fn = getattr(coordinator, "prediction_refit_note", None)
+        note = fn() if callable(fn) else ""
+        if note:
+            lines.append(f"Prediction model: {note}")
+    except Exception:  # noqa: BLE001 - context building never fails the investigator
+        pass
+
     # Issue #1505: on a v4 zone the timeline and decisions read v4's own rates (window and fan included), not the v3
     # learner's above; say which value is in use and where it comes from.
     try:

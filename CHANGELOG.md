@@ -3,7 +3,7 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.9.27] — 2026-11-11
+## [0.9.28] — 2026-11-11
 
 - Fix #1517: the time-of-use bank, the ceiling guard and the nat-vent pre-cool now start early enough to reach the target, because the lead time allows for the house drifting toward the outdoor temperature while the equipment runs.
   - **What you'll notice:** on cold or hot days the bank and the ceiling guard start earlier (a few minutes to tens of minutes) so the house is at the target when the period starts; before, about 1 recovery in 5 was more than 5 minutes late. On mild days the start can be a little later. A target the equipment cannot reach at the current outdoor temperature starts at the maximum lead (4 hours). The 4-hour maximum stays (longer pre-conditioning is beyond any realistic time-of-use use); when the target looks out of reach even with a full 4-hour run, Climate Advisor now logs a warning (at most once every 6 hours per target) saying the house may not reach it by the window start.

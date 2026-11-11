@@ -235,3 +235,15 @@ def test_model_summary_warns_on_unmigrated_swing(capsys):
     assert "RETIRED definition" not in capsys.readouterr().out
     _ldb._print_model_summary({"thermal_model_cache": {"k_passive": -0.1}})  # fresh, no swing data: no warning
     assert "RETIRED definition" not in capsys.readouterr().out
+
+
+def test_model_summary_shows_the_cycle_fit_with_grade_and_coast(capsys):
+    """Issues #1512/#1516: --model shows each mode's cycle fit: rate, how sure, coast, cycle counts."""
+    cache = {
+        "k_passive": -0.1,
+        "cycle_fit_heat": {"q": 7.25, "sd_q": 1.1, "grade": "medium", "coast_area_f": 0.3, "ne": 5, "n_cycles": 9},
+    }
+    _ldb._print_model_summary({"thermal_model_cache": cache})
+    out = capsys.readouterr().out
+    assert "cycle_fit_heat: q=+7.25 +/- 1.10 F/hr  grade=medium  coast=+0.30 F  (5 informative of 9 cycles)" in out
+    assert "cycle_fit_cool" not in out  # no cool fit stored: no line

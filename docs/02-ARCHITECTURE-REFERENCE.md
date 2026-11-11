@@ -62,6 +62,9 @@ custom_components/climate_advisor/
 ├── claude_api.py        # Centralized Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking. Provides async_request() for all AI features.
 ├── ai_skills.py         # AI skills framework: lightweight registry for pluggable AI analysis capabilities. Skills register a context builder, response parser, and optional fallback.
 ├── chart_log.py         # Chart state log: persistent 1-year ring buffer of HVAC/fan/temp data points and event markers, used by the Temperature Forecast chart.
+├── cycle_model.py       # Pooled heating/cooling cycle model (Issues #1512/#1516): fit_cycles, clean_series, infer_resolution, grade, typical_prior, prior_from_cache. Pure math, no HA imports; shared with tools/thermal_replay.py and tools/predict_backtest.py. See 05-LEARNING-ENGINE-DESIGN.md.
+├── cycle_recorder.py    # CycleRecorder: pure state machine turning thermostat edges, band-sensor readings, flags, setpoint changes and gaps into closed cycle dicts.
+├── cycle_store.py       # CycleStore: per-zone climate_advisor_cycles.json (90 days, cap 3000 cycles, compact centi-degree deltas, atomic 0600 write). Separate from the chart_log (chart-log-spec.md).
 ├── feels_like.py        # Issue #1414: pure NWS heat index / wind chill (feels_like_f) and weather wind-unit -> mph, chart display only. See chart-log-spec.md "Humidity and Feels-Like Fields".
 ├── humidity_sources.py  # Issue #1414: one humidity resolver, three roles (indoor_day, indoor_sleep, outdoor); chart display only, never the climate TARGET humidity.
 ├── forecast_archive.py  # Forecast archive (Issue #1230 R0): persisted hourly-forecast snapshots, one per local hour, for forecast-error scoring. Record-only; entry-scoped JSON. See forecast-archive-spec.md.
@@ -216,9 +219,8 @@ These methods on `ClimateAdvisorCoordinator` implement the Issue #121 v3 concurr
 | `_start_hvac_observation(session_mode)` | Begins an HVAC (heat or cool) observation; records the on-edge indoor reading |
 | `_start_decay_observation(obs_type)` | Begins one of the four rolling-decay observation types |
 | `_sample_all_observations()` | Per-tick: samples all active observations in `_pending_observations`; starts new decay types when trigger conditions first become true |
-| `_end_hvac_active_phase(obs_type)` | At the HVAC off edge builds the run record and calls `learning.record_hvac_run()` (run-edge estimator, Issues #1512/#1516); commits, or rejects with a persisted code; removes the pending observation either way. There is no post-heat phase or stabilization wait |
-| `_closed_house_rate()` | Resolves the closed-house `k_passive` a run uses: primary engine's, else v3 cache's, else none (`no_k_passive`) |
-| `_run_duty_balance_chart_log_fit(days)` | Duty-balance fit over chart_log (`hvac_rate_fit.fit_duty_balance`) for short-cycling and no-closed-house-rate homes; `learning.record_duty_balance_fit` stores it |
+| `_end_hvac_active_phase(obs_type)` | At the HVAC off edge closes the pending HVAC observation (swing/settle bookkeeping); no rate is committed here, the cycle recorder closes the cycle and the cycle model refits (Issues #1512/#1516) |
+| `_on_cycle_closed(cycle)` (cycle path) | Stores the closed cycle in `CycleStore`, refits that mode with `cycle_model.fit_cycles` in the executor, then `learning.apply_cycle_fit(mode, result, primary_is_v3)`; an ineligible or excluded cycle records a `cycle_*` rejection code |
 | `_evaluate_rolling_window(obs_type)` | Commit/keep-alive decision for rolling-window decay types (30-min min, 240-min cap) |
 | `_commit_rolling_window_obs(obs_type)` | Calls `_commit_observation()` for a rolling obs that has passed the signal check |
 | `_commit_observation_if_sufficient(obs_type)` | Commits if `len(samples) >= min_samples`, else abandons — used on HVAC-start contamination flush |
@@ -415,7 +417,7 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 - Storage: JSON file in HA config dir
 
 ### Thermal Model Parameters (Issue #114)
-- HVAC run minimum: 5 min (`THERMAL_HVAC_RUN_MIN_MINUTES`, Issue #1512); signal gate `max(0.5°F, 2 × sensor resolution)`
+- Cycle model gates (Issues #1512/#1516): cycle ≥ 3 min and readings moved ≥ 3 resolution steps; prior from the typical house or the stored rate by evidence; 21-day half-life; at most the last 60 eligible cycles (`cycle_model.py`, see 05-LEARNING-ENGINE-DESIGN.md § Parameter Extraction)
 - Rate ageing: weighted median of retained observations, half-life 21 days (`THERMAL_RATE_HALF_LIFE_DAYS`), legacy-method weight 0.25 (`THERMAL_LEGACY_OBS_WEIGHT`)
 - Sample interval: 60 seconds (`THERMAL_SAMPLE_INTERVAL_SECONDS`)
 - Minimum R² for k_passive acceptance: 0.2 (`THERMAL_MIN_R_SQUARED`)

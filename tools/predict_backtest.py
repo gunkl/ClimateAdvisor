@@ -101,7 +101,7 @@ _TOOLS_DIR = Path(__file__).resolve().parent
 _ROOT = _TOOLS_DIR.parent
 _PKG_DIR = _ROOT / "custom_components" / "climate_advisor"
 sys.path.insert(0, str(_TOOLS_DIR))
-from _zone_storage import CHART_LOG_FILE, LEARNING_DB_FILE, discover_entry_ids, remote_path  # noqa: E402
+from _zone_storage import CHART_LOG_FILE, CYCLE_FILE, LEARNING_DB_FILE, discover_entry_ids, remote_path  # noqa: E402
 
 BACKTEST_FILE = "climate_advisor_v4_backtest.json"  # entry-scoped: climate_advisor_v4_backtest_<entry_id>.json
 FORECAST_ARCHIVE_FILE = "climate_advisor_forecast_archive.json"
@@ -536,10 +536,48 @@ def prod_model_from_cache(cache: dict) -> dict:
     return _learning_module().LearningEngine.get_thermal_model(stub)
 
 
-def prod_rebuild_cache(observations: list[dict]) -> dict | None:
+def _cycle_model_module() -> Any:
+    _install_ha_stubs()
+    return importlib.import_module("custom_components.climate_advisor.cycle_model")
+
+
+def decode_cycles(raw: Any) -> list[dict]:
+    """Cycle dicts from a parsed ``climate_advisor_cycles.json``, decoded by production's ``CycleStore`` (compact
+    delta encoding: this tool never keeps its own copy of the format). ``[]`` for a missing or unreadable file."""
+    if not isinstance(raw, dict):
+        return []
+    import tempfile  # noqa: PLC0415
+
+    try:
+        _install_ha_stubs()
+        store_mod = importlib.import_module("custom_components.climate_advisor.cycle_store")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / CYCLE_FILE
+            path.write_text(json.dumps(raw))
+            store = store_mod.CycleStore(path)
+            store.load()
+            return list(store.cycles("heat", 0.0)) + list(store.cycles("cool", 0.0))
+    except Exception:  # noqa: BLE001 - a backtest input must not abort the run; the as-of model just has no cycles
+        return []
+
+
+def attach_cycles(db: dict | None, raw: Any) -> dict | None:
+    """Put the decoded cycles on the learning DB dict (in memory only) so ``V3Models`` can rebuild as-of."""
+    if isinstance(db, dict):
+        db["_cycles"] = decode_cycles(raw)
+    return db
+
+
+def prod_rebuild_cache(
+    observations: list[dict], cycles: list[dict] | None = None, as_of_ts: float | None = None
+) -> dict | None:
     """Rebuild the v3 cache from these observations as production does: fold them (oldest first) through
     ``_update_thermal_model_cache`` (counts, solar, vent, swing), then set the three aged rates with production's
-    ``aged_rates`` as of the newest observation's date (Issue #1512: the rates are no longer folded one by one)."""
+    ``aged_rates`` as of the newest observation's date (Issue #1512: the rates are no longer folded one by one).
+
+    Issues #1512/#1516: with ``cycles``, the heating and cooling rates are then refitted from the cycles that began
+    before ``as_of_ts`` by production's ``cycle_model.fit_cycles`` (the prior is the aged cache, as live), exactly as
+    ``apply_cycle_fit`` does for a v3-primary zone: the rate is q once the fit has any evidence (grade above none)."""
     learning = _learning_module()
     engine = learning.LearningEngine
     stub = SimpleNamespace(_state=SimpleNamespace(thermal_model_cache=None))
@@ -554,6 +592,16 @@ def prod_rebuild_cache(observations: list[dict]) -> dict | None:
     except ValueError:
         return cache
     cache.update(learning.aged_rates(ordered, as_of, cache.get("rate_prior")))
+    if cycles and as_of_ts is not None:
+        cm = _cycle_model_module()
+        for mode in ("heat", "cool"):
+            mine = [c for c in cycles if c.get("mode") == mode and float(c.get("t_on", 0)) < as_of_ts]
+            if not mine:
+                continue
+            fit = cm.fit_cycles(mine, mode, cm.prior_from_cache(cache, mode, as_of_ts), now_ts=as_of_ts)
+            if fit.get("grade") not in (None, "none") and isinstance(fit.get("q"), (int, float)):
+                cache[f"cycle_fit_{mode}"] = dict(fit)
+                cache[f"k_active_{mode}"] = float(fit["q"])
     return cache
 
 
@@ -571,6 +619,7 @@ class V3Models:
         self.cache = self.db.get("thermal_model_cache") or {}
         self.current = prod_model_from_cache(self.cache) if self.cache else None
         self.obs = [o for o in self.db.get("thermal_observations") or [] if isinstance(o, dict) and o.get("date")]
+        self.cycles: list[dict] = list(self.db.get("_cycles") or [])  # decoded cycle file (Issues #1512/#1516)
         self.used: dict[str, int] = {}
 
     @property
@@ -588,7 +637,8 @@ class V3Models:
         prior = [o for o in self.obs if str(o["date"])[:10] < day]
         model: dict | None = None
         if len(prior) >= self.min_obs:
-            model = prod_model_from_cache(prod_rebuild_cache(prior) or {}) or None
+            as_of_ts = datetime.combine(anchor.date(), dtime(0), tzinfo=anchor.tzinfo).timestamp()
+            model = prod_model_from_cache(prod_rebuild_cache(prior, self.cycles, as_of_ts) or {}) or None
         self._asof_cache[day] = model
         return model
 
@@ -598,7 +648,10 @@ class V3Models:
             prior = [o for o in self.obs if str(o["date"])[:10] < cutoff]
             if prior:
                 self.used["asof"] = self.used.get("asof", 0) + 1
-                return prod_model_from_cache(prod_rebuild_cache(prior) or {}), f"asof({len(prior)} obs)"
+                as_of_ts = week_start.timestamp()
+                return prod_model_from_cache(
+                    prod_rebuild_cache(prior, self.cycles, as_of_ts) or {}
+                ), f"asof({len(prior)} obs)"
         self.used["current"] = self.used.get("current", 0) + 1
         return (self.current or {}), "current" if self.current else "none"
 
@@ -1690,7 +1743,12 @@ def publish_remote(config: dict, entry_id: str, payload: dict) -> str:
 _BATCH_ZONE = "___CA_ZONE "
 _BATCH_FILE = "___CA_FILE "
 _BATCH_TZ = "___CA_TZ"
-_BATCH_KINDS = {"chart": CHART_LOG_FILE, "learning": LEARNING_DB_FILE, "archive": FORECAST_ARCHIVE_FILE}
+_BATCH_KINDS = {
+    "chart": CHART_LOG_FILE,
+    "learning": LEARNING_DB_FILE,
+    "archive": FORECAST_ARCHIVE_FILE,
+    "cycles": CYCLE_FILE,  # Issues #1512/#1516: the as-of v3 rebuild refits heat/cool rates from these
+}
 
 
 def batch_fetch_script(zone: str | None) -> str:
@@ -1909,6 +1967,9 @@ def main(argv: list[str] | None = None) -> int:
             data = _load_local_json(str(path))
             snaps = decode_archive(_load_local_json(str(arch))) if arch.exists() and not args.no_archive else None
             db = _load_local_json(str(ldb)) if ldb.exists() and not args.no_v3 else None
+            cyc = path.with_name(f"climate_advisor_cycles_{entry}.json")
+            if db is not None and cyc.exists():
+                attach_cycles(db, _load_local_json(str(cyc)))
             jobs.append((entry, data.get("entries", []), db, snaps, None))
     elif args.chart_log:
         data = _load_local_json(args.chart_log)
@@ -1930,7 +1991,7 @@ def main(argv: list[str] | None = None) -> int:
                 log(f"zone {z or 'default'}: no readable chart log; skipped")
                 continue
             raw = None if args.no_archive else files.get("archive")
-            db = None if args.no_v3 else files.get("learning")
+            db = None if args.no_v3 else attach_cycles(files.get("learning"), files.get("cycles"))
             jobs.append((z, data.get("entries", []), db, decode_archive(raw) if raw else None, args.tz or tz_name))
     else:
         config = load_config()
@@ -1946,6 +2007,8 @@ def main(argv: list[str] | None = None) -> int:
             data = ssh_cat_json(config, remote_path(CHART_LOG_FILE, z), required=True)
             rows = data.get("entries", [])
             db = None if args.no_v3 else ssh_cat_json(config, remote_path(LEARNING_DB_FILE, z), required=False)
+            if db is not None:
+                attach_cycles(db, ssh_cat_json(config, remote_path(CYCLE_FILE, z), required=False))
             snaps = None
             if not args.no_archive:
                 raw = ssh_cat_json(config, remote_path(FORECAST_ARCHIVE_FILE, z), required=False)

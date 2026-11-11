@@ -17,6 +17,7 @@ import pytest
 from custom_components.climate_advisor.chart_log import ChartStateLog
 from custom_components.climate_advisor.const import (
     CHART_LOG_FILE,
+    CYCLE_FILE,
     ENTRY_SCOPED_FILES,
     FORECAST_ARCHIVE_FILE,
     INVESTIGATION_REPORTS_FILE,
@@ -44,6 +45,7 @@ _ALL_BASES = (
     V4_ARCHIVE_FILE,
     V4_BACKTEST_FILE,
     V4_MODEL_FILE,
+    CYCLE_FILE,  # Issue #1512: the recorded heat/cool cycles
 )
 
 
@@ -150,3 +152,25 @@ def test_every_entry_scoped_file_in_the_package_is_cleaned_up() -> None:
     assert found, "no resolve_entry_scoped_path() callers found; the guard is not looking at the package"
     missing = {where: base for where, base in found.items() if base not in ENTRY_SCOPED_FILES}
     assert not missing, f"entry-scoped files a removed zone would leave behind: {missing}"
+
+
+def test_cycle_file_is_cleaned_up_and_only_for_its_own_zone(tmp_path: Path) -> None:
+    """Issue #1512: the cycle store file is per zone; deleting zone A removes A's cycles and leaves B's."""
+    from custom_components.climate_advisor.cycle_store import CycleStore
+
+    cycle = {
+        "id": "heat-1000",
+        "mode": "heat",
+        "t_on": 1000.0,
+        "t_off": 1300.0,
+        "samples": [[1000.0, 68.0, 1], [1300.0, 69.0, 0]],
+    }
+    stores = {}
+    for zone in ("zoneA", "zoneB"):
+        stores[zone] = CycleStore(resolve_entry_scoped_path(tmp_path, CYCLE_FILE, zone))
+        assert stores[zone].add(cycle, now=1300.0)
+        assert stores[zone].save()
+    assert CYCLE_FILE in ENTRY_SCOPED_FILES
+    removed = remove_entry_scoped_files(tmp_path, "zoneA", ENTRY_SCOPED_FILES)
+    assert removed == [resolve_entry_scoped_path(tmp_path, CYCLE_FILE, "zoneA").name]
+    assert resolve_entry_scoped_path(tmp_path, CYCLE_FILE, "zoneB").exists()

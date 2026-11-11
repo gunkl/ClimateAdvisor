@@ -122,9 +122,10 @@ class TestRepeatsStoredBefore1476AreUndoneOnLoad:
         obs, cache = self._stored()
         cache["k_passive"] = -0.08
         engine = _engine(tmp_path, obs, cache)
-        # Old expectation (stored -0.08 kept verbatim) was wrong: k_passive is re-derived from retained
-        # observations on load, with the stored value kept only as an ageing prior (Issue #1512).
-        assert -0.08 < engine._state.thermal_model_cache["k_passive"] <= -0.0144
+        # Issue #1512 (owner decision: nothing jumps, old values age out): the stored value becomes the ageing prior,
+        # weighted by the evidence behind it (observation counts), so on load it is kept and newer fits pull it
+        # gradually. The interim expectation of an immediate re-derivation was the jump the owner ruled out.
+        assert abs(engine._state.thermal_model_cache["k_passive"] - (-0.08)) < 1e-9
         assert engine._state.thermal_model_cache["rate_prior"]["k_passive"]["value"] == -0.08
         assert engine._state.thermal_model_cache["observation_count_passive"] == 126 - 18
 

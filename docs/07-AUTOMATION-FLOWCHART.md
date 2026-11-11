@@ -624,7 +624,7 @@ flowchart TD
 
 **Stateless design:** Neither guard uses a flag or scheduled callback. Each 30-min cycle re-evaluates from the latest ODE curve and current sensor readings. If the forecast improves (predicted breach disappears), the ceiling guard goes dormant automatically on the next cycle without any cancellation logic.
 
-**Bridge homes** (`k_passive_via_bridge=True`): the ceiling guard scans for `temp > comfort_cool + 1.0°F` (tolerance = `CEILING_BRIDGE_TOLERANCE_F`). Standard homes use tolerance = 0.0.
+**Bridge homes** (`k_passive_via_bridge=True`) no longer exist: Issue #1512 removed the gate bridge, so the flag is always False and the tolerance is always 0.0 (the `CEILING_BRIDGE_TOLERANCE_F` branch is inert).
 
 **`k_active_cool = None`** (first cooling season, any home): the 120-min fallback replaces the lead-time formula. This is the normal case for new installs and all homes before their first cooling cycle is learned.
 

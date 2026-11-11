@@ -3,6 +3,18 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [Unreleased]
+
+The version number will be set at merge.
+
+### Fixed
+- **Heating and cooling rates are learned from the run itself, in every home (Issues #1512, #1516).**
+  - **What you'll notice:** homes whose furnace keeps warming the room after it stops (#1512), and homes where the room warms after an AC run (#1516), now learn their heating and cooling rates; before, those runs were rejected or mis-measured because the learner asked what the room did *after* the equipment stopped. Homes that short-cycle, have no window sensors, or report whole-degree temperatures also learn, from hours of night-time history (a closed-house fit) when single runs are too short to read. The Analysis tab, Debug, the AI Investigator and `tools/learning_db.py` / `tools/thermal_health.py` now say why a run was skipped: too short, the room moved less than the sensor can show, no closed-house leak rate yet, a new run started, the fan started, or heat and cool switched.
+  - **Why:** the rate is now read at the moment the equipment stops (room change over the run, minus the house's own leak), so a furnace's coast or an AC rebound can no longer enter it. The old post-run check, the 30-minute stabilization wait and the "room must fall afterwards" plateau guard are gone.
+  - **The open-window rate no longer stands in for the closed-house rate.** Heat-rate learning and the forecast bridge no longer borrow the window-open rate when the closed-house leak rate is unknown; the forecast uses the schedule fallback until the leak rate is learned from closed-up stretches (which no longer start while the house is still coasting after a heat or cool run).
+  - **Old values age out instead of being wiped.** Heat, cool and leak rates are now recency-weighted medians of the retained observations (21-day half-life; observations made by the old method count a quarter as much), so old values fade over about 90 days. Nothing resets and nothing falls to defaults; your current values are kept as the starting point.
+  - `tools/thermal_replay.py --hvac` now uses the same rules as the live learner instead of its own copy.
+
 ## [0.9.26] — 2026-11-10
 
 - Fix #1514: a setpoint band whose heat and cool are less than 4 °F apart (or the wrong way round) is now named in the log as the cause of what follows from it.

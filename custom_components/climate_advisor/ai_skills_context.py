@@ -582,7 +582,7 @@ fan_status values explained:
   active                    — CA commanded the fan on (natural vent or HVAC fan-only)
   running (manual override) — fan running; user overrode CA's command at the thermostat
   running (untracked)       — thermostat reports fan on but CA's _fan_active=False;
-                             typical after HA restart, or post-heat blowdown transient
+                             typical after HA restart, or a short blower run-on transient
   running (thermostat)      — the thermostat's own schedule/circulation blower (hvac_action=fan, fan_mode
                              attr auto) that CA did not command and does not own; shown instead of
                              'running (untracked)' (see fan_observed_started/stopped events)
@@ -967,7 +967,14 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
     ]
 
     # Reason codes that indicate the observation was interrupted by normal system operation.
-    _OPERATIONAL_CODES = {"abandoned", "indoor_unavailable"}
+    # Issues #1512/#1516: a new session, fan start or mode switch ends a run early by design.
+    _OPERATIONAL_CODES = {
+        "abandoned",
+        "indoor_unavailable",
+        "new_session_started",
+        "fan_activated",
+        "hvac_mode_switch",
+    }
 
     # Reason codes that indicate a signal quality problem worth flagging.
     _QUALITY_FAILURE_CODES = {
@@ -979,6 +986,10 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
         "ols_bounds",
         "window_too_short",
         "no_interior_peak",
+        # Issues #1512/#1516: reasons a heating or cooling run was not used to learn a rate.
+        "hvac_run_too_short",
+        "hvac_signal_below_resolution",
+        "no_k_passive",
     }
 
     lines.append("Per-type rejection summary:")
@@ -1038,6 +1049,14 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
             elif total_rejected > 0:
                 lines.append("    — no quality failures")
 
+    # Issues #1512/#1516: say how heating/cooling rates are learned so the AI does not assume the old post-run fit.
+    lines.append(
+        "How heat/cool rates are learned: from the run itself at the moment the equipment stops"
+        " (room change over the run, minus the house's own leak); whatever the room does afterwards"
+        " (furnace coast, AC rebound) is not used. The closed-house leak rate comes only from closed-up"
+        " stretches (passive windows, plus a night-time fit over hours of history for short-cycling homes);"
+        " the open-window rate never stands in for it. Old values age out over about 90 days."
+    )
     # Pipeline failure detection
     hvac_total_committed = hvac_heat_committed + hvac_cool_committed
     hvac_total_rejected = hvac_heat_total_rejected + hvac_cool_total_rejected

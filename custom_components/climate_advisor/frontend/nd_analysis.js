@@ -14,7 +14,10 @@
     indoor_unavailable: 'Indoor sensor was unavailable', insufficient_samples: 'Window ended before enough samples collected',
     window_elapsed_too_few_samples: 'Window closed before enough samples collected', insufficient_decay: "Temperature didn't move enough to measure",
     ols_bad_fit: 'Reading was too noisy to trust', poor_fit: 'Reading was too noisy to trust', state_changed: 'HVAC, fan, or window state changed mid-window',
-    outlier: 'Result was an outlier vs prior measurements', abandoned: 'Measurement interrupted'
+    outlier: 'Result was an outlier vs prior measurements', abandoned: 'Measurement interrupted',
+    hvac_run_too_short: 'Heating or cooling run was too short to measure', hvac_signal_below_resolution: 'Room temperature moved less than the sensor can reliably show',
+    no_k_passive: 'House leak rate not learned yet, so this run\'s rate could not be separated', new_session_started: 'A new run started before this one could be measured',
+    fan_activated: 'The fan started during the run', hvac_mode_switch: 'Heat and cool switched during the run', ols_bounds: 'Result was outside the believable range'
   };
   var OBS = {
     passive_decay: 'Passive windows', vent_window_decay: 'Window ventilation', vent_fan_decay: 'Fan/WHF ventilation', solar_gain: 'Solar readings',

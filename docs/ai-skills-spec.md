@@ -256,7 +256,9 @@ Builds the `=== THERMAL OBSERVATION PIPELINE ===` section. Purpose: let the AI d
 
 **Committed/rejected scope (Issue #586):** `committed` here is a live count of `thermal_observations`, windowed to 90 days and hard-capped at `THERMAL_OBS_CAP` (200); `rejected` is a live count of `_rejection_log[obs_type]`, capped at 100 per type (FIFO-evicted, rendered as `"100+ (capped)"` once at the cap). Both are intentionally different in scope from `observation_count_heat`/`observation_count_cool` in the `LEARNING — THERMAL MODEL` section, which are all-time cumulative counters that drive confidence grading and are never trimmed. A large gap between the two (e.g. cumulative 24 vs. windowed 0 committed) is expected on installs with enough history and does not indicate lost data — the section now carries an explicit NOTE to this effect rather than leaving the two numbers unexplained.
 
-**Pending observations:** Any in-flight observations from `coordinator._pending_observations` are listed with type, phase (`active`/`post_heat`), elapsed minutes, and sample count.
+**Pending observations:** in-flight observations from `coordinator._pending_observations` (type, elapsed minutes, sample count). Heating and cooling runs have only an active phase: since Issues #1512/#1516 a run is committed or rejected with a reason code at the off edge and there is no `post_heat` phase.
+
+**Rejection codes (Issues #1512/#1516):** the per-type summary splits rejections into operational interruptions (`abandoned`, `indoor_unavailable`, `new_session_started`, `fan_activated`, `hvac_mode_switch`) and quality failures (`too_few_samples`, `too_few_blocks`, `small_delta`, `ols_*`, `window_too_short`, `no_interior_peak`, `hvac_run_too_short`, `hvac_signal_below_resolution`, `no_k_passive`). The investigator and the Analysis/Debug panes show them in plain words, with the run's signal, minutes and `k_passive` source when stored. The AI is told heat/cool rates are learned from the run itself at the off edge, and that the open-window rate never stands in for the closed-house rate.
 
 **Engine status:** `get_engine_status()` output is appended via `format_engine_status_for_ai()`.
 

@@ -7,11 +7,11 @@
 |---|---|---|
 | What are the five parallel observation types and what does each measure? | `hvac_heat` → k_active_heat; `hvac_cool` → k_active_cool; `passive_decay` → k_passive; `vent_window_decay` → k_vent_window (windows open, fan/WHF physically off); `vent_fan_decay` → k_vent_fan (windows open, fan/WHF physically running; a session paused between fan cycles is neither, Issue #1505); `solar_gain` → k_solar. All five can run concurrently. `fan_only_decay`/`k_vent` retired (Issue #587) — confirmed dead code, never affected a live forecast. | [§v3 Parallel Observation Architecture](05-LEARNING-ENGINE-DESIGN.md#v3-parallel-observation-architecture-issue-121) |
 | What is the v3 ODE formula and what does each parameter mean? | `dT/dt = (k_passive + k_vent_eff)*(T_out − T_in) + k_solar*solar_factor + Q_hvac`; k_passive (hr⁻¹, negative) is envelope decay rate, k_active is HVAC contribution (°F/hr). Forecast-time `k_vent_eff` substitution still keys on `k_vent_window` only (windows open) — `k_vent_fan` is learned/displayed but not yet wired into per-hour forecast selection (Issue #587 scope boundary, not an oversight). | [§Physics Model](05-LEARNING-ENGINE-DESIGN.md#physics-model-issue-114-v2--issue-121-v3) |
-| How are k_passive and k_active extracted from observations? | OLS regression over post-heat decay samples: `rate_i = k_passive × delta_i`; k_active is then `rate_i − k_passive × delta_i` averaged across active-phase samples. Minimum R² 0.2; minimum 4 post-heat samples (reduced from 10 in Issue #130). `k_solar` uses the identical per-interval-subtraction pattern (`compute_k_solar`, Issue #587 Defect B). | [§Parameter Extraction](05-LEARNING-ENGINE-DESIGN.md#parameter-extraction) |
+| How are k_passive and k_active extracted from observations? | `k_active` (steady heating or cooling per hour) is learned from the heating or cooling run itself, at the moment the equipment stops (Issues #1512, #1516): `k_active = (T_off − T_on)/hours − k_passive × avg(T_in − T_out)`, where `T_off` is the indoor reading AT the off edge, never a later peak, so a furnace that keeps warming the room after it stops, or an AC after which the room warms, cannot distort it. The run needs ≥ 5 min and a net room change of at least `max(0.5 °F, 2 × sensor resolution)`. `k_passive` (the closed-house leak rate) is learned only from closed-house data (passive windows, and the duty-balance fit for short-cycling homes). `k_solar` uses the same per-interval-subtraction pattern (`compute_k_solar`, Issue #587 Defect B). | [§Parameter Extraction](05-LEARNING-ENGINE-DESIGN.md#parameter-extraction) |
 | What does `get_thermal_model()` return and how is confidence graded? | Returns k_passive, k_active_heat, k_active_cool, k_vent_window, k_vent_fan, k_solar, plus confidence grades ("none"/"low"/"medium"/"high") graded independently for HVAC (heat+cool count) and passive obs (vent/solar counts explicitly excluded from passive confidence, Issue #587). Physics activates when either > "none". | [§get_thermal_model() → dict](05-LEARNING-ENGINE-DESIGN.md#get_thermal_model---dict) |
-| What is the gate bridge self-healing mechanism and which homes need it? | Homes with only vent-window observations (no HVAC/passive cycles) get `k_vent_window` promoted as a proxy `k_passive` when `confidence_k_passive == "none"`, bypassing the physics eligibility guard without data loss. Never uses `k_vent_fan` as the proxy — it mixes in forced air exchange, a worse envelope proxy. | [§Adaptive 2-Param Ventilated OLS — Gate Bridge Self-Healing](05-LEARNING-ENGINE-DESIGN.md#adaptive-2-param-ventilated-ols-issue-126) |
+| Is there a gate bridge (`k_vent_window` standing in for `k_passive`)? | No. It was removed in Issue #1512: the open-window rate is a different physical quantity from the closed-house rate, so using it as a stand-in mis-sized every heat-rate calculation and the forecast of homes that had only window data. Physics prediction needs a real closed-house `k_passive` (from passive windows or the duty-balance fit); until then the forecast uses the schedule fallback. | [§Gate Bridge (removed)](05-LEARNING-ENGINE-DESIGN.md#gate-bridge-self-healing-issue-126-phase-a--removed-in-issue-1512) |
 | What patterns trigger learning suggestions and how many days of data are required? | Six patterns (low window compliance, frequent overrides, high runtime, short departures, comfort violations, frequent door pauses) are evaluated after 14+ days; suggestions repeat unless dismissed, with a 7-day cooldown. | [§Suggestion Generation](05-LEARNING-ENGINE-DESIGN.md#suggestion-generation) |
-| Where is the full Tier 3 spec for the v3 thermal model — pre/post/invariants, OLS contracts, EWMA table? | The Territory spec covers all observation lifecycles, all OLS solvers (including `compute_k_passive_endpoint`/`compute_k_solar`), commit routing, EWMA alpha table, rolling window constraints, gate bridge, swing detection, and the Issue #587 vent-split/retirement rationale. | [Thermal Model v3 — Territory Spec](thermal-model-v3-spec.md) |
+| Where is the full Tier 3 spec for the v3 thermal model — pre/post/invariants, OLS contracts, EWMA table? | The Territory spec covers all observation lifecycles, all OLS solvers (including `compute_k_passive_endpoint`/`compute_k_solar`), commit routing, EWMA alpha table, rolling window constraints, the run-edge HVAC estimator and duty-balance fit (Issues #1512/#1516), swing detection, and the Issue #587 vent-split/retirement rationale. | [Thermal Model v3 — Territory Spec](thermal-model-v3-spec.md) |
 
 ## Purpose
 
@@ -133,7 +133,7 @@ where:
 T(t+dt) = T_outdoor + (T - T_outdoor) * exp(k_p * dt) + (Q/k_p) * (exp(k_p * dt) - 1)
 ```
 
-**Why OLS regression over single-point delta:** The original scalar model computed `end_temp – start_temp` at the moment HVAC stopped. Thermostat sensor lag (15–30 s) means those two temperatures are often equal, yielding `rate = 0°F/hr` and causing the observation to be dropped. The OLS architecture builds the model from the full post-heat decay curve and the active-phase samples together, eliminating the lag problem.
+**Why the run's own edges (Issues #1512, #1516):** The post-heat decay fit this model once used asked what the room does AFTER the equipment stops. That is wrong for the occupant's questions. A furnace keeps pushing warm air (and the plenum keeps radiating) for minutes after it shuts off, so the room often keeps warming; after an AC run the room warms. A "decay" requirement therefore rejected or mis-fitted exactly the furnaces and cooling runs that matter. The rate is now read from the run itself, in one line of arithmetic at the off edge (see [§Parameter Extraction](#parameter-extraction)), so what happens after the equipment stops is excluded by construction.
 
 ### v3 Parallel Observation Architecture (Issue #121)
 
@@ -145,8 +145,8 @@ The v2 architecture had a single `PendingThermalEvent` state machine — only on
 
 | Type | Trigger conditions | Target parameter | Min samples |
 |---|---|---|---|
-| `hvac_heat` | `hvac_action = "heating"` | `k_active_heat`, `k_passive` (via pre-heat buffer) | 10 post-heat |
-| `hvac_cool` | `hvac_action = "cooling"` | `k_active_cool` | 10 post-heat |
+| `hvac_heat` | `hvac_action = "heating"` | `k_active_heat` (run-edge estimator, committed or rejected at the off edge; never `k_passive`) | run ≥ 5 min |
+| `hvac_cool` | `hvac_action = "cooling"` | `k_active_cool` (same estimator) | run ≥ 5 min |
 | `passive_decay` | HVAC off, fan off, windows closed, `\|ΔT\|` ≥ 3°F (indoor vs outdoor) | `k_passive` | 30 |
 | `vent_window_decay` | Window/door sensor open, fan/WHF **off**, HVAC off | `k_vent_window` | 20 |
 | `vent_fan_decay` | Window/door sensor open, fan/WHF **on**, HVAC off | `k_vent_fan` | 20 |
@@ -154,7 +154,7 @@ The v2 architecture had a single `PendingThermalEvent` state machine — only on
 
 **HVAC contamination rule:** When HVAC starts, all non-HVAC observations in progress are committed (if sufficient samples) or abandoned. HVAC operation contaminates passive/vent/solar signals.
 
-**HVAC plateau guard:** After the HVAC active phase ends, the observation is committed only if `peak_indoor_f − end_indoor_f ≥ THERMAL_HVAC_MIN_DECAY_F (0.3°F)`. The guard was reduced from 1.0°F in v3 — the old threshold rejected all observations on short-cycling thermostats.
+**No plateau guard, no post-run window (Issue #1512):** the old guard (commit only if the room fell ≥ 0.3 °F after the peak) and the 30-minute post-heat stabilization wait are gone. The run is committed, or rejected with a stated reason code, at the off edge. The committed `peak_indoor_f` is the run's extremum (highest reading for heat, lowest for cool).
 
 #### Sampling Cadence (Issue #122 H1 — Decimation)
 
@@ -163,7 +163,6 @@ The coordinator polls every 30 seconds. Sampling all slow decay phenomena at pol
 | Type | Sample interval | Rationale |
 |---|---|---|
 | `hvac_heat` / `hvac_cool` (active phase) | Every poll (no gate) | Active HVAC is fast; all samples needed |
-| `hvac_heat` / `hvac_cool` (post-heat phase) | 5 min (`THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S`) | Post-heat decay is passive dynamics |
 | `passive_decay` | 5 min (`THERMAL_PASSIVE_SAMPLE_INTERVAL_S`) | Slow drift; 5-min samples give clean signal |
 | `vent_window_decay` | 5 min (`THERMAL_PASSIVE_SAMPLE_INTERVAL_S`) | Window-open drift is slow |
 | `vent_fan_decay` | 5 min (`THERMAL_PASSIVE_SAMPLE_INTERVAL_S`) | Same rationale as vent_window_decay; retired `fan_only_decay`'s separate 2-min gate is not carried over |
@@ -194,36 +193,52 @@ Rolling commit rules (in `_commit_rolling_window_obs()`):
 
 | Method | Owner | Role |
 |---|---|---|
-| `_start_hvac_observation(session_mode)` | `coordinator.py` | Begins `hvac_heat` or `hvac_cool`; abandons/commits non-HVAC obs; attaches pre-heat buffer |
+| `_start_hvac_observation(session_mode)` | `coordinator.py` | Begins `hvac_heat` or `hvac_cool`; abandons/commits non-HVAC obs; records the on-edge indoor reading |
 | `_start_decay_observation(obs_type)` | `coordinator.py` | Creates `passive_decay`, `vent_window_decay`, `vent_fan_decay`, or `solar_gain` observation dict |
 | `_sample_all_observations()` | `coordinator.py` | Section A: samples all active obs with per-type decimation gate. Section B: checks trigger conditions (vent split via `_VENT_SPLIT_TYPES` table) and starts new non-HVAC obs. Section C: evaluates exit conditions and calls commit/abandon per type (`_evaluate_vent_split_observation` for both vent types) |
-| `_end_hvac_active_phase(obs_type)` | `coordinator.py` | Transitions HVAC obs `active → post_heat` when `hvac_action` leaves heating/cooling |
-| `_check_hvac_stabilization(obs_type)` | `coordinator.py` | Evaluates stabilization criterion for HVAC post-heat; applies plateau guard; commits or abandons |
+| `_end_hvac_active_phase(obs_type)` | `coordinator.py` | At the off edge builds the run record and calls `learning.record_hvac_run()`; success logs the committed rate, rejection is persisted with its code, signal, minutes and k_passive source; the pending observation is removed either way (Issue #1512) |
+| `_closed_house_rate()` | `coordinator.py` | Resolves the closed-house `k_passive` for a run: the primary engine's, else the v3 cache's, else none (Issue #1512) |
+| `_run_duty_balance_chart_log_fit(days)` | `coordinator.py` | Duty-balance fit over chart_log (see below); runs with the periodic chart_log fits and at startup |
 | `_commit_observation(obs_type)` | `coordinator.py` | Passes observation dict to `learning._commit_event_from_dict()`; pops from `_pending_observations` |
 | `_commit_observation_if_sufficient(obs_type, abandon_reason)` | `coordinator.py` | Commits if `len(samples) >= min_samples` (with short-window ΔT guard), else abandons |
 | `_commit_rolling_window_obs(obs_type, obs)` | `coordinator.py` | Commits a 30-min rolling window slice; pops observation so it can be restarted |
 | `_abandon_observation(obs_type, reason)` | `coordinator.py` | Discards pending observation; logs WARNING with type, reason, sample count, and ΔT |
 | `_update_thermal_model_cache(obs)` | `learning.py` | Applies committed observation to EWMA cache; routes each mode to the correct parameter |
 
-**Pre-heat buffer:** `_pre_heat_sample_buffer` is sampled every coordinator poll regardless of HVAC state, except while the indoor (or outdoor) reading is unavailable: `_get_current_sample()` returns `None` then and nothing is appended (Issue #1035; stale entries are still pruned). A heating/cooling session that starts during such an outage is not started at all and records an `indoor_unavailable` rejection — see [thermal-model-v3-spec.md](thermal-model-v3-spec.md#indoor-sensor-outage-handling-issue-1035). Holds at most `THERMAL_PRE_HEAT_BUFFER_MINUTES (15)` entries. When `_start_hvac_observation()` fires, these samples are included in the HVAC observation's `pre_heat_samples` list and contribute to the OLS regression for `k_passive`.
+**Pre-heat buffer (removed, Issue #1512):** it existed to feed a closed-house fit from the minutes before a run and a post-run decay fit. With the run-edge estimator the only readings used are the on-edge and off-edge samples, so nothing consumes it. A heating/cooling session that starts while the indoor (or outdoor) reading is unavailable is still not started and records an `indoor_unavailable` rejection (Issue #1035) — see [thermal-model-v3-spec.md](thermal-model-v3-spec.md#indoor-sensor-outage-handling-issue-1035).
 
 ### Parameter Extraction
 
-`k_passive` is estimated from OLS regression over post-heat decay samples (plus pre-heat buffer for HVAC obs):
+**`k_active` — the run-edge estimator (Issues #1512, #1516).** At the HVAC off edge:
 
 ```
-rate_i = k_passive * delta_i
+k_active = (T_off − T_on) / hours − k_passive × avg(T_in − T_out over the run)
 ```
 
-where `rate_i = ΔT/Δt` (°F/hr) and `delta_i = T_indoor − T_outdoor` for each sample pair. Minimum: 10 post-heat samples, R² ≥ 0.2.
+(`learning.compute_hvac_run_rate`, which reuses `compute_k_active_single_point`; heat and cool are the same arithmetic, cooling just comes out negative.) `T_off` is the indoor reading at the off edge (the final active sample), never a post-run peak. The rate is the steady heating/cooling per hour — the same quantity v4's `control_rates` uses. A run is rejected, with a persisted code, when:
 
-`k_active` is extracted from active-phase HVAC samples:
+| Code | Occupant-level meaning |
+|---|---|
+| `hvac_run_too_short` | The run lasted under `THERMAL_HVAC_RUN_MIN_MINUTES` (5 min); too short to measure a rate |
+| `hvac_signal_below_resolution` | The room moved less than `max(THERMAL_HVAC_MIN_SIGNAL_F, 2 × sensor resolution)` (or the wrong way): on a 1 °F sensor a one-degree step is not a measurement |
+| `no_k_passive` | No closed-house leak rate is known yet; the duty-balance fit covers the home |
+| `ols_bounds` | The rate fell outside the believable range (`THERMAL_K_ACTIVE_*`) |
+| `new_session_started`, `fan_activated`, `hvac_mode_switch` | Something ended the run's observation early (a new session, the fan, a heat/cool switch) |
+
+**Which `k_passive` a run uses.** The coordinator resolves it in order: (1) the primary prediction engine's closed-house rate (v4's `-a_o`, or v3's `k_passive`) when < 0; (2) the v3 cache's `k_passive` when < 0; (3) none, and the run is rejected `no_k_passive`. The committed observation carries `"k_passive": None` — a run only USES the closed-house rate, it never feeds it — plus `k_passive_used`, `k_passive_source`, `signal_f`, `session_minutes` and `"method": "run_edge"`. Grade: `medium` for runs ≥ 15 min, else `low`.
+
+**`k_passive` — the closed-house rate** comes only from closed-house data: passive-window fits (endpoint and block-OLS over chart_log, `THERMAL_MIN_*`, R² ≥ 0.2) and the duty-balance fit below. Chart_log passive stretches only start after the house has settled from HVAC: `_ventilation_row_states` carries `settling_hvac` (a row within `THERMAL_COAST_MAX_S` after a heating/cooling row), and the passive, windows-only and solar extractors treat it as not settled.
+
+**Duty-balance fit (Issue #1512; `hvac_rate_fit.py`, pure).** For short-cycling, well-sealed homes and homes with no learned closed-house rate, hours of chart_log history beat any single run. Over the last N days, consecutive rows ≤ 35 min apart, closed-house settled stretches only, local night hours only (08:00–19:59 excluded):
 
 ```
-k_active_i = rate_i - k_passive * delta_i
+rate_i = (T_{i+1} − T_i) / dt_h ;   x_i = [ mean(T_in − T_out), heat_frac_i, cool_frac_i ]
+least squares, no intercept  →  k_passive (<0), k_active_heat (>0), k_active_cool (<0)
 ```
 
-Mean of per-sample estimates; out-of-bounds values rejected by sanity bounds.
+A term with under 1.0 h of duty in the window is not identified and is dropped. Valid with ≥ 24 intervals and inside the sanity bounds; `r_squared` is returned. Coast is averaged inside the duty hours, so the estimand is close to the steady rate; a small residual bias remains (a little extra warming credited to the heating hours). `learning.record_duty_balance_fit` stores up to three observations (`method: "duty_balance"`, modes heat, cool, passive), deduplicated by window.
+
+**Ageing instead of EWMA-forever (Issue #1512).** `k_active_heat`, `k_active_cool` and `k_passive` are recomputed from the retained `thermal_observations` (90-day retention, cap 200) after every commit and on load: a weighted median with weight = grade weight (high 1.0, medium 0.6, low 0.3) × method weight × `0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS)` (21 days). New-method observations (`run_edge`, `duty_balance`, and chart_log passive fits from `endpoint`/`block_ols`) weigh 1.0; legacy observations (no `method`: the old post-fit and proxy commits) weigh `THERMAL_LEGACY_OBS_WEIGHT` (0.25). Nothing is wiped and nothing resets: the first load stores the current cached values as `rate_prior`, which counts as one legacy-weight observation aged from that moment, so old values fade over roughly 90 days instead of jumping or falling to defaults. With no observations and no prior the cached value is kept. The other EWMA fields (solar, vent, swing) are unchanged; `observation_count_heat/cool` still count committed runs.
 
 **Issue #1505: the live vent observations no longer fit their own samples.** Like `passive_decay` since Issue #137, `vent_window_decay` / `vent_fan_decay` only mark the stretch: when it ends (fan started, stopped or paused, windows closed, heating/cooling started) the chart_log fit (`_run_vent_*_chart_log_fit`, endpoint + block-OLS) learns from every window of the last two days not already recorded (#1476 dedupe); at the rolling-window cap the observation restarts without a fit (its window is still growing). Both chart_log extractors read one row rule, `_ventilation_row_states`: the physical fan (`fan_running`, legacy `fan` only on pre-#331 rows), a paused session is neither regime, and a stretch starts only after `THERMAL_VENT_POST_FAN_SETTLE_MINUTES` (120) after the fan stops and `THERMAL_POST_WINDOW_CLOSE_SETTLE_MINUTES` (30, closed-up fits) after the windows close; the solar guard (no window starting or ending 08:00-19:59) applies to both. Why: on Zone 1 the live learner had stored windows-only -0.150/h against a measured ~-0.02 (paused sessions counted as fan, daytime and post-fan-stop stretches fitted, 5 % EWMA never recovering). A one-time re-learn (`vent_k_relearn_1505`) drops the old vent fits, re-fits 90 days of chart_log and seeds each rate with the median of its fits (`LearningEngine.seed_vent_rates_from_fits`; an EWMA replayed from empty is mostly its first fit).
 
@@ -244,7 +259,7 @@ averaged across intervals, bounded to `[0.0, THERMAL_K_SOLAR_MAX_F_PER_HR]`. Thi
 | `"low"` | R² ≥ 0.2 (minimum) | any passing sanity bounds | 0.05 |
 | rejected | R² < 0.2 or < 10 post samples | — | observation discarded |
 
-Rolling-window commits are always committed with `force_grade="low"` (α = 0.05), reflecting the shorter sample window.
+Rolling-window commits are always committed with `force_grade="low"` (α = 0.05), reflecting the shorter sample window. (The EWMA alpha applies to the non-HVAC fields; heating, cooling and closed-house rates use the ageing weighted median above, Issue #1512, and the grade weight there is high 1.0 / medium 0.6 / low 0.3.)
 
 ### `_update_thermal_model_cache()` Routing (Issue #122 E6 fix)
 
@@ -252,8 +267,8 @@ Each committed observation updates the EWMA cache in `learning.py`. The routing 
 
 | `hvac_mode` value | Updates | Counter incremented |
 |---|---|---|
-| `"heat"` | `k_active_heat` (if `k_active` present), `k_passive` (always if present) | `observation_count_heat` |
-| `"cool"` | `k_active_cool` (if `k_active` present), `k_passive` (always if present) | `observation_count_cool` |
+| `"heat"` | `k_active_heat` (if `k_active` present; ageing weighted median, Issue #1512). Legacy `k_passive` values on old observations age out at the legacy weight; new run-edge observations carry `k_passive: None` | `observation_count_heat` |
+| `"cool"` | `k_active_cool` (same; Issue #1516) | `observation_count_cool` |
 | `"passive"` | `k_passive` only | `observation_count_passive` |
 | `"vent_window"` | `k_vent_window` (from `k_passive` field of the obs); `k_solar` too when `two_param=True` | `observation_count_vent_window` |
 | `"vent_fan"` | `k_vent_fan` (from `k_passive` field of the obs); `k_solar` too when `two_param=True` | `observation_count_vent_fan` |
@@ -291,33 +306,13 @@ condition, no new lifecycle complexity.
 | D2 | Record solar_factor at collection time vs. compute at commit | Collect at sample time | Ensures samples reflect actual solar conditions during collection; commit-time computation would use a different clock position |
 | D3 | Hard day/night trigger gate (only run 2-param after 8 AM) | No gate | sf_range check is self-gating: nighttime-only windows have sf=0 throughout → range=0 → 1-param fallback fires automatically |
 | D4 | Clock-based solar_factor vs. cloud-aware/lag-corrected | Clock-based accepted | Adequate as approximation; lag averages out over hour-long prediction periods; EWMA smoothing attenuates single-obs error; cloud-aware model deferred |
-| D5 | Self-healing via conf_passive guard vs. data wipe | Guard (non-destructive) | Wipe loses accumulated k_vent_window and solar history; guard promotes k_vent_window to proxy without touching stored data |
+| D5 | Self-healing via conf_passive guard vs. data wipe | Guard (non-destructive) — **the bridge half was removed in Issue #1512** (see D27); the no-wipe principle stands | Wipe loses accumulated k_vent_window and solar history |
 | D6 | 2-param result writes k_solar only vs. also k_vent_window | Both updated | k_env_vent is a cleaner estimate of ventilated decay (solar contamination removed); discarding it in favour of the 1-param result would lose information |
 | D7 | k_solar from ventilated 2-param usable in all prediction paths | Yes | k_solar is a model parameter, not obs-type-specific; the ODE applies it whenever solar conditions and window state warrant |
 
-#### Gate Bridge Self-Healing (Issue #126 Phase A)
+#### Gate Bridge Self-Healing (Issue #126 Phase A) — removed in Issue #1512
 
-The gate bridge handles homes where only ventilated observations have accumulated (no
-passive decay, no HVAC cycles). Without the bridge, those homes would never get physics
-prediction because `confidence_k_passive == "none"` blocks `_physics_eligible()`.
-
-**Three install states:**
-
-1. **Fresh:** `k_passive = None`, `k_vent_window = None` → bridge has nothing to promote;
-   ramp interpolation used. Correct behaviour.
-2. **Contaminated** (pre-Issue #126 installs with the original bug): `k_passive = None`,
-   `confidence = "none"`, `k_vent_window` has a valid value → bridge detects
-   `_conf_k_passive == "none"` (Bug A fix) and promotes `k_vent_window` as proxy
-   k_passive. `_k_passive_via_bridge = True` flag bypasses the `_physics_eligible()`
-   confidence guard (Bug B fix). Physics prediction activates automatically on next
-   coordinator update — no user action, no data wipe.
-3. **Healed / normal:** k_passive is set (either via bridge promotion or real HVAC/passive
-   obs) → bridge does not fire; normal physics path.
-
-**H1 confirmed in production:** Logs from the affected install show
-`"using physics model (conf=none conf_k_passive=low k_passive=-0.2813)"` after the
-bridge runs — confirming that `conf=none` does not block physics when the bridge flag is
-set.
+This section described promoting `k_vent_window` to a stand-in `k_passive` for homes with only ventilated observations. It is **gone**: the open-window rate is a different physical quantity from the closed-house leak rate, and borrowing it mis-sized both the heat-rate calculation (the old D17 proxy) and the forecast (`physics_eligibility`, `operation_timeline.model_rates`, `_build_predicted_indoor_future`). `physics_eligibility` now needs a real closed-house `k_passive`; `via_bridge` is always False (the return shape is kept for callers). Window-open forecast hours still use `k_vent_window` as the window rate, as before. For a home with no closed-house rate yet, the occupant gets the schedule fallback until passive windows or the duty-balance fit learn one; the duty-balance fit is what now covers short-cycling and window-sensor-less homes.
 
 #### Future Scope (Deferred)
 
@@ -333,79 +328,35 @@ set.
 Issue #130 fixed zero `k_active_heat` / `k_active_cool` observations despite 60 days of
 heat cycles. The root causes and their fixes determine how HVAC observations now commit.
 
-#### Root Causes Confirmed
+#### History (Issue #130) and what replaced it (Issues #1512, #1516)
 
-| # | Root Cause | Fix |
-|---|---|---|
-| RC1 | Post-heat OLS required 10 samples (50 min) — systematic timeout on 5–30 min cycles | D14: lower `THERMAL_MIN_POST_HEAT_SAMPLES` 10 → 4 |
-| RC2 | Most cycles never produced a logged rejection — observation start was invisible | Phase A: INFO log at observation start, abandon, and commit |
-| RC3 | `outdoor=None` at HVAC state transitions blocked post-heat sample collection | D16: `_last_known_outdoor_f` 30-min fallback |
-| RC4 | Bridge homes: `k_passive=None` prevented `compute_k_active()` from running | D17: use `k_vent_window` as proxy k_passive in hvac commit path |
-| RC5 | No backfill mechanism for historical heat cycles | D18: `thermal_replay --hvac` mode |
+Issue #130 fixed zero `k_active_heat` / `k_active_cool` observations by lowering the post-heat sample minimum, adding a single-point estimator and a `k_vent_window` proxy. Issues #1512/#1516 replaced the whole post-run machinery with the run-edge estimator (see [§Parameter Extraction](#parameter-extraction)). What this means for each former decision:
 
-#### Decision Points (D14–D26, Issue #130)
+| Old decision (Issue #130) | Status | Why |
+|----|----|----|
+| D14 `THERMAL_MIN_POST_HEAT_SAMPLES` 10 → 4 | Removed | There is no post-heat phase to sample |
+| D15 remove stabilization variance gate | Moot | No stabilization wait at all; the run commits at the off edge |
+| D16 30-min outdoor fallback (`_last_known_outdoor_f`) | Kept | The run's `avg_delta_t` still needs an outdoor value at the edges |
+| D17 / D21 / D22 / D24 / D25 / D26 `k_vent_window` proxy, proxy-aware `n_post` and plateau-guard bypass | Removed | The proxy is gone (D27); the plateau guard and `n_post` gating are gone (D28) |
+| D18 `thermal_replay --hvac` | Kept, rewritten | Now calls production `compute_hvac_run_rate` and shows the duty-balance fit; no second copy of the rules |
+| D19 / D20 single-point estimator, `post[0].ts` as end | Generalised | The run-edge estimator is the single-point estimator at the off edge; it is now the only path |
+| D23 `THERMAL_HVAC_MIN_SIGNAL_F = 0.5 °F` | Kept, raised for coarse sensors | Gate is `max(0.5 °F, 2 × sensor resolution)` (D29) |
+
+#### Decision Points (D27–D33, Issues #1512/#1516)
 
 | D# | Decision | Rationale |
 |----|----------|-----------|
-| D14 | `THERMAL_MIN_POST_HEAT_SAMPLES`: 10 → 4 | Aligns with rolling obs min; enables short-cycle commits |
-| D15 | Remove stabilization variance gate from `_check_hvac_stabilization()` | OLS R² is the quality gate; waiting for ±0.3°F stability over 5 min was redundant and blocked all short cycles |
-| D16 | 30-min outdoor temp fallback (`_last_known_outdoor_f`) | `outdoor=None` at HVAC state transitions was blocking post-heat sample collection |
-| D17 | Use `k_vent_window` as k_passive proxy in hvac commit path | Bridge homes: enables `k_active` commit without `k_passive` from passive_decay or HVAC obs |
-| D18 | `thermal_replay --hvac` mode (`run_hvac_replay_ols()`) | Backfill historical heat/cool cycles from chart_log |
-| D19 | Single-point `k_active` estimator when `n_active < 2` | Physics valid with 1 active sample if timestamps give true elapsed |
-| D20 | Use `post[0].ts` as cycle end timestamp when `n_act=1` | State-change entry gives exact HVAC-off time |
-| D21 | Emit `k_passive=None` in obs dict when bridge proxy was used | Prevents proxy value from contaminating k_passive EWMA |
-| D22 | Load `k_vent_window` proxy in dry-run mode for `thermal_replay` | Proxy needed for single-point path regardless of write mode |
-| D23 | `THERMAL_HVAC_MIN_SIGNAL_F = 0.5°F` | Minimum ΔT threshold; filters noise and setpoint-maintenance cycles where heater ran but temperature barely moved |
-| D24 | `n_post` minimum drops 4 → 1 when proxy available | Post-heat OLS is not needed when proxy provides k_passive; single-point only needs `post[0]` for the HVAC-off timestamp |
-| D25 | Plateau guard bypassed when proxy available | The plateau guard validates OLS decay quality; irrelevant for the single-point path |
-| D26 | Proxy check via `model_cache.k_vent_window` in `coordinator.py` | Consistent with `learning.py` proxy detection pattern |
+| D27 | Remove the `k_vent_window` → `k_passive` bridge everywhere (learning, `physics_eligibility`, `operation_timeline.model_rates`, the forecast) | The open-window rate is not the closed-house rate; a stand-in mis-sized heat rates and forecasts. Owner decision |
+| D28 | Learn the rate from the run itself at the off edge; delete the post-heat phase, plateau guard, 30-min stabilization wait, `THERMAL_HVAC_MIN_DECAY_F`, `THERMAL_MIN_DECAY_F`, `THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S`, the pre-heat buffer and the post-heat fan-pulse grace | Furnaces coast and AC runs are followed by warming; "decay after the run" rejected or mis-fit the homes that matter (#1512, #1516). Rate definition = steady heating/cooling per hour |
+| D29 | Signal gate `max(THERMAL_HVAC_MIN_SIGNAL_F, 2 × resolution_f)` and minimum run `THERMAL_HVAC_RUN_MIN_MINUTES` (5) | A 1.0 °F sensor cannot show a half-degree; a run of a minute or two carries no rate |
+| D30 | A run never writes `k_passive` (`"k_passive": None`) | The closed-house rate must come only from closed-house data |
+| D31 | Duty-balance fit (`hvac_rate_fit.py`) for homes without a closed-house rate and for short cycles | Hours of night-time history identify leak, heating and cooling together; works with no window sensors and 1.0 °F sensors |
+| D32 | Ageing: recompute the three rates from retained observations (weighted median, 21-day half-life, legacy weight 0.25); current values kept as an aging prior; no wipe, no one-time re-learn | Old values fade over ~90 days instead of jumping; nothing falls to defaults |
+| D33 | Every rejection carries a persisted code (`hvac_run_too_short`, `hvac_signal_below_resolution`, `new_session_started`, `fan_activated`, `hvac_mode_switch`, `no_k_passive`) plus `signal_f`, `minutes`, `k_passive_source` | "Rejected runs say why" — surfaces (Analysis, Debug, AI, `tools/learning_db.py`, `tools/thermal_health.py`) show them |
 
-#### Single-Point `k_active` Estimator (`compute_k_active_single_point()`)
+#### The run-edge estimator and the old single-point estimator
 
-When `n_active < 2` (the HVAC cycle is shorter than the 5-min sampling interval so only
-one active-phase data point was recorded), OLS cannot produce a heating rate. The
-single-point estimator uses exact HVAC on/off timestamps from state-change chart_log
-entries to compute `k_active` directly from physics:
-
-```
-k_active = (T_peak − T_start) / elapsed_hours − k_passive × avg(T_in − T_out)
-```
-
-where:
-- `T_start` = indoor temperature at HVAC start
-- `T_peak` = peak indoor temperature during or after the cycle
-- `elapsed_hours` = true HVAC-on duration from timestamps (not sample interval)
-- `k_passive` = envelope decay rate or proxy (from `k_vent_window` on bridge homes)
-- `avg(T_in − T_out)` = mean indoor-outdoor differential across available samples
-
-The estimator is called from `_commit_event_from_dict()` in `learning.py` when OLS
-returns `None` (insufficient active samples). It is also used by
-`run_hvac_replay_ols()` in `tools/thermal_replay.py` with the same fallthrough logic.
-
-**Signal guard:** `THERMAL_HVAC_MIN_SIGNAL_F = 0.5°F` — if `|T_peak − T_start| < 0.5°F`
-the cycle is treated as a setpoint-maintenance run (heater ran briefly but temperature
-barely moved at chart_log 1°F resolution). The observation is rejected to avoid
-fitting noise.
-
-**Implementation:** `learning.py` ~line 401. Fallthrough in `_commit_event_from_dict()`
-~line 1145.
-
-#### Proxy-Aware `n_post` Gating
-
-`_check_hvac_stabilization()` in `coordinator.py` applies different commit thresholds
-depending on whether a `k_vent_window` proxy is available in the model cache:
-
-| Condition | `n_post` minimum | Plateau guard |
-|---|---|---|
-| No proxy (normal home, fresh install) | `THERMAL_MIN_POST_HEAT_SAMPLES` (4) | Active: rejects if `peak − end < THERMAL_HVAC_MIN_DECAY_F` |
-| Proxy available (`k_vent_window < 0`) | 1 | Bypassed |
-
-When the proxy is available, `post[0]` provides the HVAC-off timestamp for the
-single-point estimator — no OLS decay curve is needed. The same proxy-aware logic
-applies in `run_hvac_replay_ols()` in `thermal_replay.py`.
-
-**Implementation:** `coordinator.py` ~line 2951–2979.
+`compute_k_active_single_point()` is still the arithmetic; `compute_hvac_run_rate()` wraps it with the minimum-run, signal and `k_passive` gates and returns a reject code. `THERMAL_HVAC_MIN_SIGNAL_F = 0.5 °F` stays the floor of the signal gate.
 
 #### Phase A Diagnostic Logging
 
@@ -421,6 +372,8 @@ This makes the observation pipeline auditable from HA logs without SSH access to
 learning DB.
 
 #### Backfill Results (Phase D)
+
+*Historical (Issue #130, post-heat era): these counts measured the old estimator. The run-edge estimator (Issue #1512) rejects with named codes instead; `thermal_replay --hvac` prints them.*
 
 After Phases A–D, `thermal_replay --hvac --days 60` committed 24/47 detected cycles (51%).
 The 23 remaining rejections are data-quality limits of chart_log 1°F resolution:
@@ -677,7 +630,7 @@ Returns the current accumulated thermal model from `thermal_model_cache`.
 
 `confidence` (HVAC) is graded by `observation_count_heat + observation_count_cool`: `"none"` (< 5, `MIN_THERMAL_OBSERVATIONS`), `"low"` (5–9), `"medium"` (10–19, `THERMAL_HVAC_CONF_MEDIUM`), `"high"` (20+, `THERMAL_HVAC_CONF_HIGH`).
 
-`confidence_k_passive` is graded by `observation_count_passive + observation_count_heat + observation_count_cool`: `"none"` (< 5), `"low"` (5–14), `"medium"` (15–29), `"high"` (30+) (`THERMAL_PASSIVE_CONF_*`). Physics prediction activates when either confidence is > `"none"` (or the gate bridge applies) — enabling prediction on homes with zero HVAC cycles recorded (passive-only households).
+`confidence_k_passive` is graded by `observation_count_passive + observation_count_heat + observation_count_cool`: `"none"` (< 5), `"low"` (5–14), `"medium"` (15–29), `"high"` (30+) (`THERMAL_PASSIVE_CONF_*`). Physics prediction activates when either confidence is > `"none"` and a real closed-house `k_passive` < 0 exists (the gate bridge was removed in Issue #1512, so `k_vent_window` no longer stands in for it) — enabling prediction on homes with zero HVAC cycles recorded (passive-only households).
 
 **Single implementation (Issue #1277):** the grades and the physics-eligibility rule live in the pure module `thermal_confidence.py` (no Home Assistant import), used by `learning.py`, `coordinator._build_predicted_indoor_future` and, loaded by path, by `tools/engine_status.py`, `tools/learning_db.py --model` and `tools/thermal_replay.py`. They are always computed live from the counts; the persisted `thermal_model_cache` no longer stores `confidence_k_passive` / `confidence_k_hvac` (they were seeded `"none"` and never refreshed, so the tools reported physics ineligible while the engine used it; `load_state()` drops them).
 

@@ -597,10 +597,14 @@ python3 tools/learning_db.py --model
 | `--rejections --type hvac_cool` shows | Likely cause | Action |
 |---|---|---|
 | `n=0` entries with `elapsed > 0 min` on coordinator < v0.3.50 | Key-shadow bug: `"samples": []` shadowed `active_samples` | Upgrade to v0.3.50 — all HVAC obs discarded before fix |
-| `new_session_started` repeated many times | Short-cycling thermostat: post-heat window interrupted by next HVAC start | Event-driven sampling (v0.3.50+) improves this; single-point fallback may commit |
-| `plateau_guard: insufficient post-heat decay` repeated | Indoor temp didn't drop ≥ 0.3°F in post-heat phase | Efficient/short-cycle system; normal if occasional |
-| `n=0, delta_t=0.00°F` on coordinator ≥ v0.3.50 | Sensor quantization: 1°F thermostat can't see 0.3–0.8°F HVAC effect | Single-point fallback kicks in if `T_start` vs `T_peak` delta ≥ `THERMAL_HVAC_MIN_SIGNAL_F (0.5°F)` |
-| `--pending` shows obs with samples but `--committed` = 0 | Observation accumulated but commit path failed (OLS returning None) | Check `--model` for `k_passive` — if absent, bridge proxy not available; commit may be deferred |
+| `new_session_started` repeated many times | Short-cycling thermostat: the next HVAC start arrived before this run's observation finished (operational, Issue #1512) | Expected; the duty-balance fit learns short-cycling homes from hours of history |
+| `hvac_run_too_short` | Run under `THERMAL_HVAC_RUN_MIN_MINUTES` (5 min) | Normal for short cycles; shown with `minutes=` |
+| `hvac_signal_below_resolution` | The room moved less than `max(0.5 °F, 2 × sensor resolution)` over the run (or the wrong way): on a 1 °F sensor a one-degree step is not a measurement | Normal for short runs on whole-degree thermostats; shown with `signal_f=`. If every run is rejected, check `swing_*_resolution_f` in `--model` |
+| `no_k_passive` | No closed-house leak rate known yet (`k_passive_source` empty) | Clears once passive windows or the duty-balance fit learn one; `python tools/learning_db.py --model` shows `k_passive` |
+| `fan_activated`, `hvac_mode_switch` | The fan started, or heat/cool switched, during the run | Operational; expected occasionally |
+| `ols_bounds` | The run's rate fell outside the believable range | Check `signal_f` and `minutes`: a very short run with a large step |
+| `plateau_guard` / `post_heat` reasons on old entries | Pre-Issue #1512 pipeline (removed): old entries age out of the 100-entry log | None |
+| `--pending` shows obs with samples but `--committed` = 0 | A run still in progress, or its off edge was missed | Check `--model` for `k_passive`; a run is only learned from if a closed-house rate exists (else `no_k_passive`) |
 
 **Step 5 — Check in-flight observations (v0.3.50+):**
 ```bash

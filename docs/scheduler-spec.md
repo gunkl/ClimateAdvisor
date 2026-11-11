@@ -194,14 +194,16 @@ widening since Issue #1080: they all resolve the band through `automation.resolv
 
 ## Lead-Time Computation
 
-`thermal_lead_time.compute_lead_minutes_from_rate(delta_t, rate, *, min_minutes, max_minutes, safety_multiplier, fallback_minutes)` (`thermal_lead_time.py:21`) — the one shared implementation of a formula independently duplicated 3 times before this feature existed:
+`thermal_lead_time.compute_lead_minutes_from_rate(delta_t, rate, *, min_minutes, max_minutes, safety_multiplier, fallback_minutes, start_temp=None, target_temp=None, outdoor_temp=None, k_passive=None, cooling=..., confidence=None, house_stepper=None, outdoor_at=None, ...)` (`thermal_lead_time.py:21`) — the one shared implementation of a formula independently duplicated 3 times before this feature existed:
 
 | Caller | `min`/`max` | `safety_multiplier` | `fallback_minutes` |
 |---|---|---|---|
 | `scheduler.py::resolve_tou_phase()` | 30 / 240 | 1.3 | configurable, default 45 (`default_tou_lead_minutes` config key, Issue #797; falls back to `_TOU_LEAD_MIN_FALLBACK`=45.0 if the key is absent from an older config entry) |
 | ~~`automation.py::_schedule_pre_condition()` (adaptive pre-heat)~~ removed in Issue #1371 (a stub nothing read; its options-page settings are #1377) | config `CONF_MIN_PREHEAT_MINUTES`/`CONF_MAX_PREHEAT_MINUTES` | config `CONF_PREHEAT_SAFETY_MARGIN` | clamped `default_preheat_minutes` |
 | `ode_ceiling_guard.py` (ceiling-guard escalation) | `_LEAD_MIN_FLOOR`/`_LEAD_MIN_CEIL` (30/240) | `_LEAD_MIN_LOOKAHEAD_MULTIPLIER` (1.3) | `_CEILING_PRECOOL_FALLBACK_MIN` (120) |
-| `briefing.py::_derive_warm_day_events()` (warm-day pre-cool lead) | 30 / 240 | 1.3 | `const.CEILING_PRECOOL_FALLBACK_MIN` (120) — previously a locally-redefined duplicate constant, now imported directly |
+| `scheduler.py::resolve_tou_away_vacation_phase()` | 30 / 240 | 1.3 | as `resolve_tou_phase()` |
+| `nat_vent_plan.py::compute_nat_vent_plan()` (pre-cool start, display) | 30 / 240 | 1.3 | `const.CEILING_PRECOOL_FALLBACK_MIN` (120) |
+| ~~`briefing.py::_derive_warm_day_events()`~~ no longer computes a lead: it reads the cached nat-vent plan (its standalone fallback calls `compute_nat_vent_plan()` with no rates, so the plain lead) | — | — | — |
 
 **Leak-aware (Issue #1517).** The four live callers (`resolve_tou_phase()`, `resolve_tou_away_vacation_phase()`, `ode_ceiling_guard.decide_ode_ceiling_guard()`, plus `nat_vent_plan.compute_nat_vent_plan()`) also pass `start_temp`, `target_temp`, `outdoor_temp`, `k_passive` and `cooling`; the function then returns the closed-form time for the house to reach the target while leaking toward the outdoor temperature, times 1.15 instead of 1.3 (unreachable target: the 240 ceiling). Without `k_passive` or an outdoor value it is the plain formula. It is also the plain formula unless the caller's `confidence_k_passive` is `medium`/`high` (`confidence=` argument; the same gate as the away/vacation depth, applied to the stepper below too). The scheduler functions take `outdoor_at(when)` (the coordinator's forecast at the schedule start, else the current reading). Formula and rationale: [08 §5b](08-COMPUTATION-REFERENCE.md).
 

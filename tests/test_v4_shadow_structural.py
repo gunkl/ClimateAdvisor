@@ -498,12 +498,26 @@ def test_the_shadow_is_never_read_by_a_decision_path() -> None:
 
 
 def _registry_from_imports(tree: ast.AST) -> list[str]:
-    """Every ``from .prediction_engines import X`` (alias or not) in a module, as ``line: names``."""
-    return [
-        f"line {n.lineno}: from {'.' * n.level}{n.module} import {', '.join(a.name for a in n.names)}"
-        for n in ast.walk(tree)
-        if isinstance(n, ast.ImportFrom) and n.module is not None and n.module.split(".")[-1] == "prediction_engines"
-    ]
+    """Every import of ``prediction_engines`` other than the plain module import, as ``line: ...``.
+
+    Flags ``from .prediction_engines import X`` (alias or not), a module alias
+    (``from . import prediction_engines as _pe``) and an absolute import of the module
+    (``import custom_components.climate_advisor.prediction_engines``): each hides a registry
+    read from ``_selection_refs``, which only sees the bare name ``prediction_engines``."""
+    found: list[str] = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            if n.module is not None and n.module.split(".")[-1] == "prediction_engines":
+                names = ", ".join(a.name for a in n.names)
+                found.append(f"line {n.lineno}: from {'.' * n.level}{n.module} import {names}")
+            for a in n.names:
+                if a.name == "prediction_engines" and a.asname not in (None, "prediction_engines"):
+                    found.append(f"line {n.lineno}: import prediction_engines as {a.asname}")
+        elif isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name.split(".")[-1] == "prediction_engines":
+                    found.append(f"line {n.lineno}: import {a.name}")
+    return found
 
 
 def test_the_coordinator_imports_the_registry_only_as_a_module() -> None:
@@ -515,6 +529,10 @@ def test_the_coordinator_imports_the_registry_only_as_a_module() -> None:
     # the check itself: a synthetic alias import in an unlisted method is caught
     synthetic = ast.parse("from .prediction_engines import control_stepper as _cs\n")
     assert _registry_from_imports(synthetic) == ["line 1: from .prediction_engines import control_stepper"]
+    module_alias = ast.parse("from . import prediction_engines as _pe\n")
+    assert _registry_from_imports(module_alias) == ["line 1: import prediction_engines as _pe"]
+    absolute = ast.parse("import custom_components.climate_advisor.prediction_engines as _pe2\n")
+    assert _registry_from_imports(absolute) == ["line 1: import custom_components.climate_advisor.prediction_engines"]
 
 
 def test_the_registry_and_the_timeline_selection_are_display_inputs_only() -> None:

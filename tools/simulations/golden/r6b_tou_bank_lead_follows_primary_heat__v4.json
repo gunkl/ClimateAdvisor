@@ -106,6 +106,15 @@
     },
     {
       "at": "2026-01-13T14:33:00",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T14:20:00",
+      "values": [
+        76.0
+      ],
+      "reason": "The 14:30 cycle inside the open bank re-asserts the 76 F bank setpoint once, without the 68 F comfort setpoint first (issue #1393; the heating mirror)."
+    },
+    {
+      "at": "2026-01-13T14:33:00",
       "expect": "tou_precondition_applied",
       "tou_precondition": {
         "schedule_id": "peak1",

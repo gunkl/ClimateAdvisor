@@ -12,6 +12,8 @@ Kept dependency-free (no Home Assistant import) and loadable as a standalone fil
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 try:
     from .const import (
         MIN_THERMAL_OBSERVATIONS,
@@ -20,6 +22,7 @@ try:
         THERMAL_PASSIVE_CONF_HIGH,
         THERMAL_PASSIVE_CONF_LOW,
         THERMAL_PASSIVE_CONF_MEDIUM,
+        THERMAL_RATE_HALF_LIFE_DAYS,
     )
 except ImportError:  # loaded by path from tools/ (no package)
     import importlib.util as _ilu
@@ -34,6 +37,7 @@ except ImportError:  # loaded by path from tools/ (no package)
     THERMAL_PASSIVE_CONF_HIGH = _const.THERMAL_PASSIVE_CONF_HIGH
     THERMAL_PASSIVE_CONF_LOW = _const.THERMAL_PASSIVE_CONF_LOW
     THERMAL_PASSIVE_CONF_MEDIUM = _const.THERMAL_PASSIVE_CONF_MEDIUM
+    THERMAL_RATE_HALF_LIFE_DAYS = _const.THERMAL_RATE_HALF_LIFE_DAYS
 
 
 # Grades the engine once persisted in thermal_model_cache but never refreshed (Issue #1277): they are
@@ -51,18 +55,43 @@ def drop_stored_grades(cache: dict) -> bool:
     return found
 
 
-def grade_passive_confidence(cache: dict) -> str:
-    """Confidence tier for k_passive from the observation types that write to it.
+def _num(v: object) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
-    Only passive_decay, hvac_heat and hvac_cool update k_passive. vent_window/vent_fan write
-    k_vent_window/k_vent_fan and solar writes k_solar, so their counts are excluded (Issue #587:
-    window-open or fan-driven decay measures a materially larger rate than the envelope alone).
+
+def passive_evidence_count(cache: dict, now: datetime | None = None) -> float:
+    """Effective evidence count behind k_passive.
+
+    Heat/cool runs never write k_passive any more (Issue #1512): it is an aged median of passive observations
+    (chart_log passive fits, duty_balance passive estimates) plus, on an upgraded cache, the ``rate_prior``
+    pseudo-observation that carries the ``n`` observations behind the pre-upgrade value. That prior fades with the
+    same half-life as the value itself, so confidence neither cliffs on upgrade nor stays inflated forever. A cache
+    with no prior yet (pre-upgrade shape) keeps counting passive + heat + cool, as those fed the old value.
     """
-    count = (
-        cache.get("observation_count_passive", 0)
-        + cache.get("observation_count_heat", 0)
-        + cache.get("observation_count_cool", 0)
-    )
+    passive = cache.get("observation_count_passive", 0)
+    prior = (cache.get("rate_prior") or {}).get("k_passive") if isinstance(cache.get("rate_prior"), dict) else None
+    if not isinstance(prior, dict):
+        return passive + cache.get("observation_count_heat", 0) + cache.get("observation_count_cool", 0)
+    n = prior.get("n")
+    n = float(n) if _num(n) and n > 0 else 1.0
+    try:
+        stamp = datetime.fromisoformat(str(prior.get("ts")))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        age_days = max(0.0, ((now or datetime.now(UTC)) - stamp).total_seconds() / 86400.0)
+    except ValueError, TypeError:
+        age_days = 0.0
+    return passive + n * 0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS)
+
+
+def grade_passive_confidence(cache: dict, now: datetime | None = None) -> str:
+    """Confidence tier for k_passive from the evidence that still backs it (see ``passive_evidence_count``).
+
+    Counts passive observations (chart_log and duty_balance passive fits) plus the fading evidence of the pre-upgrade
+    value. vent_window/vent_fan write k_vent_window/k_vent_fan and solar writes k_solar, so their counts are excluded
+    (Issue #587: window-open or fan-driven decay measures a materially larger rate than the envelope alone).
+    """
+    count = passive_evidence_count(cache, now)
     if count < THERMAL_PASSIVE_CONF_LOW:
         return "none"
     if count < THERMAL_PASSIVE_CONF_MEDIUM:

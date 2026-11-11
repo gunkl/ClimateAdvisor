@@ -146,7 +146,6 @@ def _make_thermostat_coord(*, hvac_on_since=None):
     coord._thermostat_fan_only_on_since = None
     coord._hvac_session_mode = None
     coord._pending_thermal_event = None
-    coord._pre_heat_sample_buffer = []
     coord._flush_hvac_runtime = MagicMock()
     coord._start_hvac_observation = AsyncMock()
     coord._end_hvac_active_phase = MagicMock()
@@ -332,10 +331,7 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
     coord._startup_hvac_initialized = False
     coord._pending_thermal_event = None
     coord._pending_observations = {}
-    coord._pre_heat_sample_buffer = []
-    coord._update_pre_heat_buffer = MagicMock()
     coord._sample_all_observations = MagicMock()
-    coord._check_hvac_stabilization = AsyncMock()
 
     coord._pre_cool_trigger_scheduled = False
     coord._pre_cool_trigger_cancel = None

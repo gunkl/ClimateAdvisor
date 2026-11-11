@@ -1055,7 +1055,9 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
         " (room change over the run, minus the house's own leak); whatever the room does afterwards"
         " (furnace coast, AC rebound) is not used. The closed-house leak rate comes only from closed-up"
         " stretches (passive windows, plus a night-time fit over hours of history for short-cycling homes);"
-        " the open-window rate never stands in for it. Old values age out over about 90 days."
+        " the open-window rate never stands in for it."
+        " Old evidence fades gradually: each observation's weight halves every 21 days (the half-life),"
+        " so new runs take over without any reset."
     )
     # Pipeline failure detection
     hvac_total_committed = hvac_heat_committed + hvac_cool_committed

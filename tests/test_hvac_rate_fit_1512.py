@@ -217,3 +217,48 @@ def test_post_off_coast_bias(capsys):
     assert -0.35 < b_un < 0.0
     assert abs(b_ma) < 0.10
     assert math.isfinite(masked["k_passive"])
+
+
+def _as_real_chart_log(rows):
+    """Real chart_log shape: the row written at every hvac action change is an event row with ``outdoor: None``."""
+    out, prev = [], None
+    for r in rows:
+        r = dict(r)
+        if prev is not None and r["hvac"] != prev:
+            r["outdoor"] = None
+            r["event"] = "hvac_action_change"
+        prev = r["hvac"]
+        out.append(r)
+    return out
+
+
+def test_event_rows_without_outdoor_still_identify_duty():
+    """Every run edge is an event row with outdoor None; dropping those intervals dropped all heating duty."""
+    rows = _as_real_chart_log(simulate(qh=8.0, res=0.1, days=20, on_min=45, off_min=135))
+    assert sum(r["outdoor"] is None for r in rows) > 50
+    f = fit(rows)
+    assert f is not None and f["heat_hours"] > 1.0
+    assert _err(f["k_passive"], -0.1) < 0.2 and _err(f["k_active_heat"], 8.0) < 0.2
+
+
+def test_event_rows_without_outdoor_cool_house():
+    f = fit(_as_real_chart_log(simulate(kp=-0.08, qc=-9.0, season="cool", days=20, on_min=45, off_min=135)))
+    assert f is not None and f["cool_hours"] > 1.0
+    assert _err(f["k_active_cool"], -9.0) < 0.2
+
+
+def test_outdoor_fill_does_not_cross_more_than_an_hour():
+    """A row whose nearest outdoor reading is over 60 min away stays unfilled and its intervals are dropped."""
+    from custom_components.climate_advisor.hvac_rate_fit import _filled
+
+    t = lambda m: (_T0 + timedelta(minutes=m)).isoformat()  # noqa: E731
+    rows = [{"ts": t(0), "outdoor": 40.0}, {"ts": t(30), "outdoor": None}, {"ts": t(61), "outdoor": None}]
+    assert _filled(rows, "outdoor") == [40.0, 40.0, None]
+    rows = [{"ts": t(0), "outdoor": None}, {"ts": t(20), "outdoor": 41.0}, {"ts": t(100), "outdoor": None}]
+    assert _filled(rows, "outdoor") == [41.0, 41.0, None]  # back-filled from the next row; 80 min is too far forward
+
+
+def test_failed_fit_explains_why():
+    why: list[str] = []
+    assert fit(simulate(qh=8.0, days=1)[:20], reason=why) is None
+    assert why and "too few" in why[0]

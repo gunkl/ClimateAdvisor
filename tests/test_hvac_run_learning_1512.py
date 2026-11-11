@@ -254,7 +254,8 @@ class TestAgeing:
         stamp = e._state.thermal_model_cache["rate_prior"]["k_active_heat"]["ts"]
         e._state.thermal_model_cache["k_active_heat"] = 9.9
         e._ensure_rate_prior()
-        assert e._state.thermal_model_cache["rate_prior"]["k_active_heat"] == {"value": 4.2, "ts": stamp}
+        # old expectation had no "n": the prior must carry the evidence count behind the value (1 when none known)
+        assert e._state.thermal_model_cache["rate_prior"]["k_active_heat"] == {"value": 4.2, "ts": stamp, "n": 1}
 
     def test_prior_ages_out_behind_new_observations(self, tmp_path):
         e = _engine(tmp_path)
@@ -308,13 +309,71 @@ class TestAgeing:
     def test_load_recomputes_and_keeps_prior(self, tmp_path):
         e = _engine(tmp_path)
         e._state.thermal_observations = [_obs("heat", 5.0, method="run_edge")]
-        e._state.thermal_model_cache = {"k_active_heat": 2.0, "observation_count_heat": 1}
+        e._state.thermal_model_cache = {"k_active_heat": 2.0, "observation_count_heat": 20}
         e.save_state()
         again = LearningEngine(tmp_path)
         again.load_state()
         c = again._state.thermal_model_cache
         assert c["rate_prior"]["k_active_heat"]["value"] == 2.0
-        assert c["k_active_heat"] == 5.0  # 0.6 new vs 0.25 prior
+        assert c["rate_prior"]["k_active_heat"]["n"] == 20
+        # Old expectation (5.0) jumped to the single retained observation on first load because the prior weighed
+        # 0.25 however many observations stood behind the cached value; 20 observations (weight 5.0) outweigh it (0.6).
+        assert c["k_active_heat"] == 2.0
+
+    def test_prior_carries_the_evidence_count_per_field(self, tmp_path):
+        e = _engine(tmp_path)
+        e._state.thermal_model_cache = {
+            "k_active_heat": 5.0,
+            "k_active_cool": -6.0,
+            "k_passive": -0.05,
+            "observation_count_heat": 65,
+            "observation_count_cool": 286,
+            "observation_count_passive": 35,
+        }
+        e._ensure_rate_prior()
+        prior = e._state.thermal_model_cache["rate_prior"]
+        assert prior["k_active_heat"]["n"] == 65
+        assert prior["k_active_cool"]["n"] == 286
+        assert prior["k_passive"]["n"] == 35 + 65 + 286  # passive, heat and cool all fed the old k_passive EWMA
+
+    def test_upgrade_does_not_jump_and_then_fades(self, tmp_path):
+        """A few new fits cannot yank a value backed by hundreds of observations; the prior fades with the half-life."""
+        e = _engine(tmp_path)
+        e._state.thermal_model_cache = {
+            "k_passive": -0.0482,
+            "observation_count_passive": 35,
+            "observation_count_heat": 65,
+            "observation_count_cool": 286,
+        }
+        e._state.thermal_observations = [_obs("passive", -0.0264, grade="high") for _ in range(10)]
+        e._ensure_rate_prior()
+        e._recompute_aged_rates()
+        assert e._state.thermal_model_cache["k_passive"] == pytest.approx(-0.0482)  # old behaviour: -0.0264
+        # a long time later with no fresh evidence the prior (96.5 -> ~0.4) has faded below the observations
+        from custom_components.climate_advisor.learning import aged_rates
+
+        prior = e._state.thermal_model_cache["rate_prior"]
+        late = dt_util.now().date() + timedelta(days=int(THERMAL_RATE_HALF_LIFE_DAYS * 8))
+        obs = [_obs("passive", -0.0264, grade="high")]
+        obs[0]["date"] = late.isoformat()
+        assert aged_rates(obs, late, prior)["k_passive"] == pytest.approx(-0.0264)
+
+    def test_k_passive_confidence_fades_instead_of_a_cliff(self, tmp_path):
+        from datetime import UTC, datetime
+
+        from custom_components.climate_advisor.thermal_confidence import grade_passive_confidence
+
+        now = datetime.now(UTC)
+        stamp = now.isoformat()
+        base = {"observation_count_passive": 3, "observation_count_heat": 100, "observation_count_cool": 100}
+        # pre-upgrade shape (no prior yet): heat/cool runs fed k_passive, so they still count
+        assert grade_passive_confidence(dict(base), now) == "high"
+        # upgraded: the prior's evidence (n=203) counts at full weight on day 0 ...
+        up = {**base, "rate_prior": {"k_passive": {"value": -0.05, "ts": stamp, "n": 203}}}
+        assert grade_passive_confidence(up, now) == "high"
+        # ... and fades with the rate's own half-life; new heat/cool runs never add to it
+        later = now + timedelta(days=THERMAL_RATE_HALF_LIFE_DAYS * 8)
+        assert grade_passive_confidence(up, later) == "none"
 
 
 class TestDutyBalanceFit:
@@ -329,6 +388,12 @@ class TestDutyBalanceFit:
         "window_start": "2026-10-01 00:00",
         "window_end": "2026-10-30 23:30",
     }
+
+    def test_fit_below_the_r2_floor_records_nothing(self, tmp_path):
+        e = _engine(tmp_path)
+        assert e.record_duty_balance_fit({**self.FIT, "r_squared": 0.0653}) == 0
+        assert e.record_duty_balance_fit({**self.FIT, "r_squared": None}) == 0
+        assert e._state.thermal_observations == []
 
     def test_records_three_observations(self, tmp_path):
         e = _engine(tmp_path)

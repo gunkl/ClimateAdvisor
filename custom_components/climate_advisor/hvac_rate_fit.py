@@ -14,7 +14,8 @@ which is excluded (``settling_hvac``) when the caller's row states mark it, so t
 falls inside the interval whose start row is still active. The estimand is therefore close to the steady rate.
 
 Intervals are excluded when: windows open, fan running/paused, any settling flag, a gap > ``max_gap_min``, a solar
-hour at either end, a missing reading, or ``|dT| > 3 F`` in one step (sensor swap/jump, as in Issue #1505).
+hour at either end, a missing reading (event rows borrow outdoor/indoor from a neighbour within 60 min), or
+``|dT| > 3 F`` in one step (sensor swap/jump, as in Issue #1505).
 """
 
 from __future__ import annotations
@@ -64,6 +65,51 @@ def _solve(a: list[list[float]], b: list[float]) -> list[float] | None:
     return x
 
 
+_FILL_MAX_MIN = 60.0
+
+
+def _filled(rows: Sequence[Mapping], key: str) -> list[float | None]:
+    """Per-row ``key`` value, forward-filled from the latest earlier row that has it (within 60 min).
+
+    The chart_log writes an event row at every hvac action change; those rows usually carry no outdoor reading, and
+    they are exactly the run edges the duty-balance intervals start and end on. A row still missing after the
+    forward fill is back-filled from the next row that has it (within 60 min); otherwise it stays None.
+    """
+    times = [_parse(r.get("ts")) for r in rows]
+    raw: list[float | None] = []
+    for r in rows:
+        try:
+            raw.append(float(r[key]))
+        except KeyError, TypeError, ValueError:
+            raw.append(None)
+    out = list(raw)
+    last: tuple[datetime, float] | None = None
+    for i, v in enumerate(raw):
+        t = times[i]
+        if v is not None and t is not None:
+            last = (t, v)
+        elif (
+            v is None
+            and last is not None
+            and t is not None
+            and 0 <= (t - last[0]).total_seconds() <= _FILL_MAX_MIN * 60
+        ):
+            out[i] = last[1]
+    nxt: tuple[datetime, float] | None = None
+    for i in range(len(rows) - 1, -1, -1):
+        t = times[i]
+        if raw[i] is not None and t is not None:
+            nxt = (t, raw[i])  # type: ignore[assignment]
+        elif (
+            out[i] is None
+            and nxt is not None
+            and t is not None
+            and 0 <= (nxt[0] - t).total_seconds() <= _FILL_MAX_MIN * 60
+        ):
+            out[i] = nxt[1]
+    return out
+
+
 def _intervals(
     rows: Sequence[Mapping],
     states: Sequence[Mapping[str, bool]],
@@ -71,6 +117,8 @@ def _intervals(
     max_gap_min: float,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    indoor = _filled(rows, "indoor")
+    outdoor = _filled(rows, "outdoor")
     for i in range(min(len(rows), len(states)) - 1):
         r0, r1, s0, s1 = rows[i], rows[i + 1], states[i], states[i + 1]
         if r0.get("windows_open") or r1.get("windows_open"):
@@ -85,10 +133,8 @@ def _intervals(
             continue
         if is_solar_hour(str(r0.get("ts"))) or is_solar_hour(str(r1.get("ts"))):
             continue
-        try:
-            a0, a1 = float(r0["indoor"]), float(r1["indoor"])
-            o0, o1 = float(r0["outdoor"]), float(r1["outdoor"])
-        except KeyError, TypeError, ValueError:
+        a0, a1, o0, o1 = indoor[i], indoor[i + 1], outdoor[i], outdoor[i + 1]
+        if a0 is None or a1 is None or o0 is None or o1 is None:
             continue
         if abs(a1 - a0) > _MAX_STEP_DELTA_F:
             continue
@@ -120,14 +166,23 @@ def fit_duty_balance(
     max_gap_min: float = 35.0,
     min_intervals: int = 24,
     min_duty_h: float = 1.0,
+    reason: list[str] | None = None,
 ) -> dict | None:
     """Fit k_passive, k_active_heat and k_active_cool from chart_log rows; None when not identifiable or invalid.
 
     ``r_squared`` is *centered* on the mean temperature change (1 - SSres/SStot over ``dT``): with no intercept the
     uncentered form is inflated by the mean and would look good for a model that explains nothing.
+
+    When the fit is rejected and ``reason`` is a list, a short human-readable cause is appended to it.
     """
+
+    def _no(why: str) -> None:
+        if reason is not None:
+            reason.append(why)
+
     ivs = _intervals(rows, states, is_solar_hour, max_gap_min)
     if len(ivs) < min_intervals:
+        _no(f"too few settled night intervals ({len(ivs)} < {min_intervals})")
         return None
 
     heat_h = sum(v["heat"] * v["dt_h"] for v in ivs)
@@ -147,6 +202,7 @@ def fit_duty_balance(
     atb = [sum(feat(v, a) * v["d_t"] for v in ivs) for a in terms]
     coef = _solve(ata, atb)
     if coef is None:
+        _no("singular system (no identifiable variation)")
         return None
     k = dict(zip(terms, coef, strict=True))
 
@@ -157,10 +213,13 @@ def fit_duty_balance(
 
     kp, kh, kc = k.get("p"), k.get("h"), k.get("c")
     if kp is None or not (THERMAL_K_PASSIVE_MIN <= kp <= THERMAL_K_PASSIVE_MAX):
+        _no(f"k_passive out of bounds ({kp})")
         return None
     if kh is not None and not (THERMAL_K_ACTIVE_HEAT_MIN <= kh <= THERMAL_K_ACTIVE_HEAT_MAX):
+        _no(f"k_active_heat out of bounds ({kh:.3f})")
         return None
     if kc is not None and not (THERMAL_K_ACTIVE_COOL_MIN <= kc <= THERMAL_K_ACTIVE_COOL_MAX):
+        _no(f"k_active_cool out of bounds ({kc:.3f})")
         return None
     return {
         "k_passive": round(kp, 5),

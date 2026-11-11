@@ -553,7 +553,7 @@ def prod_rebuild_cache(observations: list[dict]) -> dict | None:
         as_of = date.fromisoformat(str(ordered[-1].get("date") or ordered[-1].get("timestamp"))[:10])
     except ValueError:
         return cache
-    cache.update(learning.aged_rates(ordered, as_of))
+    cache.update(learning.aged_rates(ordered, as_of, cache.get("rate_prior")))
     return cache
 
 

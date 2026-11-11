@@ -535,7 +535,10 @@ class TestPerHourVentilationWiring:
         )
 
     def test_gate_bridge_home_no_double_counting(self):
-        """When gate bridge is active (k_passive=None), per-hour k_vent_window substitution must NOT fire.
+        """HISTORICAL (the gate bridge was removed in Issue #1512; no bridge exists any more).
+
+        Old premise, kept for context: when the gate bridge was active (k_passive=None), per-hour k_vent_window
+        substitution must NOT fire.
 
         After the bridge window guard fix (Issue #130):
         - Bridge guard fires only when classification has windows_recommended=True AND the hour
@@ -603,7 +606,9 @@ class TestPerHourVentilationWiring:
 
 
 class TestBridgeWindowGuard:
-    """Bridge guard: when _k_passive_via_bridge=True, physics only runs during window-open hours.
+    """HISTORICAL: the gate bridge and its window guard were removed in Issue #1512 (the bridge is never active).
+
+    Old premise, kept for context: when _k_passive_via_bridge=True, physics only ran during window-open hours.
 
     k_vent_window = envelope k + ventilation k.  Applying it to window-CLOSED hours
     overpredicts decay (τ≈7h vs true envelope τ≈50h).  The guard falls back to ramp
@@ -720,8 +725,8 @@ class TestBridgeWindowGuard:
     def test_non_bridge_home_unaffected_by_guard(self):
         """Normal home with real k_passive: guard never fires, physics runs for all hours.
 
-        k_passive=-0.025 (real learned value), confidence_k_passive='low' → bridge does NOT activate
-        (_k_passive_via_bridge=False).  Guard condition requires _k_passive_via_bridge=True → skipped.
+        k_passive=-0.025 (real learned value), confidence_k_passive='low'. Since Issue #1512 there is no bridge
+        (_k_passive_via_bridge is always False), so this is simply the normal path.
         Physics runs via real k_passive → temps decay (lower than indoor seed after several hours).
         """
         now = self._NOW_BG
@@ -803,7 +808,9 @@ class TestBridgeWindowGuard:
 
 
 class TestGateBridgeSelfHealing:
-    """Gate bridge fires for contaminated installs (k_passive stale, conf_passive='none').
+    """HISTORICAL: the gate bridge was removed in Issue #1512; these tests now prove it no longer fires.
+
+    Old premise, kept for context: the bridge fired for contaminated installs (k_passive stale, conf_passive='none').
 
     Bug A: Bridge previously only fired when k_passive is None.  It must also
            fire when k_passive is present but confidence_k_passive='none'
@@ -936,7 +943,9 @@ class TestGateBridgeSelfHealing:
         )
 
     def test_physics_eligible_with_bridge_bypasses_confidence_check(self):
-        """Bug B: bridge-provided k_passive enables physics even when conf='none' and conf_k_passive='none'.
+        """HISTORICAL (bridge removed in Issue #1512; physics now stays off here, see the assertion).
+
+        Old premise: bridge-provided k_passive enabled physics even when conf='none' and conf_k_passive='none'.
 
         Before Bug B fix: _physics_eligible required (_conf != 'none' OR conf_k_passive not none).
         When both are 'none' and bridge is active, the confidence gate blocked physics.

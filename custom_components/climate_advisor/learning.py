@@ -159,8 +159,9 @@ class ThermalObservation:
 def _grade_passive_confidence(cache: dict) -> str:
     """Compute confidence tier for k_passive based on combined observation count.
 
-    Only observation types that write to k_passive are counted:
-      - passive_decay, hvac_heat, hvac_cool
+    Counts passive observations (chart_log and duty_balance passive fits) plus the fading evidence behind the
+    pre-upgrade value (``rate_prior["k_passive"]["n"]``, halved every THERMAL_RATE_HALF_LIFE_DAYS). Heat/cool runs
+    no longer write k_passive (Issue #1512), so they are counted only for a cache that has no prior yet.
 
     Excluded types (they write to different cache fields):
       - observation_count_vent_window / observation_count_vent_fan → write to
@@ -1004,8 +1005,9 @@ def aged_rates(observations: list[dict], today: Any, prior: Any = None) -> dict[
     """The three aged rates from these observations as of ``today`` (Issue #1512): weighted medians.
 
     weight = grade_w x method_w x 0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS); legacy heat/cool commits (no
-    ``method`` key) weigh THERMAL_LEGACY_OBS_WEIGHT. ``prior`` (the cache's ``rate_prior``) adds one aged legacy-weight
-    pseudo-observation per field. Only fields with at least one usable value are returned, so a caller never sets a
+    ``method`` key) weigh THERMAL_LEGACY_OBS_WEIGHT. ``prior`` (the cache's ``rate_prior``) adds one aged
+    pseudo-observation per field weighing THERMAL_LEGACY_OBS_WEIGHT x its evidence count ``n`` (the observations
+    behind the cached value). Only fields with at least one usable value are returned, so a caller never sets a
     rate to None through ageing. vent_window/vent_fan never feed ``k_passive``; run-edge HVAC runs carry no
     ``k_passive``. One definition for the live engine and the backtest's as-of rebuild (tools/predict_backtest.py).
     """
@@ -1030,7 +1032,15 @@ def aged_rates(observations: list[dict], today: Any, prior: Any = None) -> dict[
     if isinstance(prior, dict):
         for f, rec in prior.items():
             if f in pairs and isinstance(rec, dict) and _num(rec.get("value")):
-                w = THERMAL_LEGACY_OBS_WEIGHT * 0.5 ** (_age_days(rec.get("ts"), today) / THERMAL_RATE_HALF_LIFE_DAYS)
+                # The prior carries the evidence behind it: ``n`` observations fed the cached value before the upgrade,
+                # so one pseudo-observation weighing 0.25 would let a handful of new fits yank it (it must not jump).
+                n = rec.get("n")
+                n = float(n) if _num(n) and n > 0 else 1.0
+                w = (
+                    THERMAL_LEGACY_OBS_WEIGHT
+                    * n
+                    * 0.5 ** (_age_days(rec.get("ts"), today) / THERMAL_RATE_HALF_LIFE_DAYS)
+                )
                 pairs[f].append((float(rec["value"]), w))
     out: dict[str, float] = {}
     for f, plist in pairs.items():
@@ -1415,11 +1425,28 @@ class LearningEngine:
         if not isinstance(cache, dict) or "rate_prior" in cache:
             return
         now_iso = dt_util.now().isoformat()
+
+        def _cnt(key: str) -> int:
+            v = cache.get(key)
+            return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else 0
+
+        # Evidence behind each cached value: every passive, heat and cool observation fed the old k_passive EWMA.
+        evidence = {
+            "k_active_heat": _cnt("observation_count_heat"),
+            "k_active_cool": _cnt("observation_count_cool"),
+            "k_passive": _cnt("observation_count_passive")
+            + _cnt("observation_count_heat")
+            + _cnt("observation_count_cool"),
+        }
         cache["rate_prior"] = {
-            f: {"value": cache[f], "ts": now_iso}
+            f: {"value": cache[f], "ts": now_iso, "n": max(1, evidence[f])}
             for f in self._AGED_RATE_FIELDS
             if isinstance(cache.get(f), (int, float)) and not isinstance(cache.get(f), bool)
         }
+        _LOGGER.info(
+            "Thermal rate prior stored (Issue #1512): %s",
+            ", ".join(f"{f}={r['value']} (n={r['n']})" for f, r in cache["rate_prior"].items()) or "no cached rates",
+        )
 
     def _recompute_aged_rates(self) -> None:
         """Recompute the three rates as weighted medians of the retained observations (Issue #1512).
@@ -1436,8 +1463,21 @@ class LearningEngine:
             cache = _new_thermal_cache()
             self._state.thermal_model_cache = cache
         self._ensure_rate_prior()
+        before = {f: cache.get(f) for f in self._AGED_RATE_FIELDS}
         rates = aged_rates(self._state.thermal_observations, dt_util.now().date(), cache.get("rate_prior"))
         cache.update(rates)
+        for f, new in rates.items():
+            old = before.get(f)
+            moved = (
+                isinstance(old, (int, float))
+                and not isinstance(old, bool)
+                and old != 0
+                and abs(new - old) / abs(old) > 0.05
+            )
+            if moved:
+                _LOGGER.info("Thermal rate %s aged: %.4f -> %.4f (more than 5%% change)", f, old, new)
+            elif old != new:
+                _LOGGER.debug("Thermal rate %s aged: %s -> %.4f", f, old, new)
 
     def record_hvac_run(self, run: dict) -> tuple[dict | None, str | None]:
         """Learn one HVAC run's steady rate from its own edges and record it (Issue #1512).
@@ -1481,7 +1521,7 @@ class LearningEngine:
             "confidence_grade": "medium" if minutes >= 15 else "low",
             "schema_version": 2,
         }
-        _LOGGER.info(
+        _LOGGER.debug(
             "Thermal HVAC run recorded: zone=%s mode=%s k_active=%.3f k_p=%.4f (%s) signal=%.2f min=%.1f",
             self._zone_log_id(),
             mode,
@@ -1505,6 +1545,9 @@ class LearningEngine:
         if not isinstance(fit, dict):
             return 0
         r2 = fit.get("r_squared")
+        if not isinstance(r2, (int, float)) or isinstance(r2, bool) or r2 < THERMAL_MIN_R_SQUARED:
+            # a poorly-fitting model's coefficients are noise: record nothing (the coordinator logs the rejection)
+            return 0
         grade = "high" if (r2 or 0.0) >= 0.7 else "medium" if (r2 or 0.0) >= 0.4 else "low"
         stamp = dt_util.now().isoformat()
         recorded = 0

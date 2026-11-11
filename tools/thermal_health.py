@@ -32,17 +32,8 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _reject_labels import REJECT_LABELS  # noqa: E402
 from _zone_storage import ZoneSelectionRequired, format_zone_choices, resolve_api_zone, with_zone  # noqa: E402
-
-# Issues #1512/#1516: plain-English meaning of the heating/cooling run rejection codes.
-REJECT_LABELS = {
-    "hvac_run_too_short": "run too short to measure",
-    "hvac_signal_below_resolution": "room moved less than the sensor can reliably show",
-    "no_k_passive": "house leak rate not learned yet",
-    "new_session_started": "a new run began before this one finished",
-    "fan_activated": "fan started during the run",
-    "hvac_mode_switch": "heat/cool switched during the run",
-}
 
 
 def _load_dotenv() -> None:

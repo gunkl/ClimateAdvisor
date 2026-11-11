@@ -682,7 +682,8 @@ def _ventilation_row_states(entries: list[dict]) -> list[dict[str, bool]]:
     out: list[dict[str, bool]] = []
     last_running: datetime | None = None
     last_close: datetime | None = None
-    last_active: datetime | None = None
+    off_edge: datetime | None = None  # ts of the first row after a heating/cooling row (the off edge)
+    prev_active = False
     prev_open: bool | None = None
     for entry in entries:
         has_physical = "fan_running" in entry
@@ -712,11 +713,18 @@ def _ventilation_row_states(entries: list[dict]) -> list[dict[str, bool]]:
         )
         _hvac_txt = str(entry.get("hvac") or "").lower()
         hvac_active = "heat" in _hvac_txt or "cool" in _hvac_txt
+        # The coast window is timed from the off edge, not from the last active row: a long run's last row can be
+        # many minutes before the equipment actually stopped being logged as off.
+        if hvac_active:
+            off_edge = None
+        elif prev_active and ts is not None:
+            off_edge = ts
+        prev_active = hvac_active
         settling_hvac = (
             not hvac_active
             and ts is not None
-            and last_active is not None
-            and (ts - last_active).total_seconds() < THERMAL_COAST_MAX_S
+            and off_edge is not None
+            and (ts - off_edge).total_seconds() < THERMAL_COAST_MAX_S
         )
         out.append(
             {
@@ -729,8 +737,6 @@ def _ventilation_row_states(entries: list[dict]) -> list[dict[str, bool]]:
         )
         if running and ts is not None:
             last_running = ts
-        if hvac_active and ts is not None:
-            last_active = ts
         prev_open = win_open
     return out
 
@@ -1395,6 +1401,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._solar_phase_ac_backfill: bool = False  # Issue #312: AC duty cycle estimator
         # Periodic daily re-fit tracker (Issue #310): date of last incremental fit
         self._last_solar_phase_fit_date: date | None = None
+        self._last_duty_balance_fit_date: date | None = None
 
         # GitHub issues cache — separate TTL for open vs closed issues
         self._github_open_cache: list[dict] | None = None
@@ -14752,17 +14759,37 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not rows:
             return
         states = _ventilation_row_states(rows)
-        fit = hvac_rate_fit.fit_duty_balance(rows, states, is_solar_hour=self._is_solar_hour)
+        why: list[str] = []
+        fit = hvac_rate_fit.fit_duty_balance(rows, states, is_solar_hour=self._is_solar_hour, reason=why)
         if fit is None:
-            _LOGGER.debug("chart_log duty balance: no identifiable fit over %d rows (%d days)", len(rows), days)
+            _LOGGER.info(
+                "chart_log duty balance: no usable fit over %d rows (%d days): %s",
+                len(rows),
+                days,
+                "; ".join(why) or "not identifiable",
+            )
+            return
+        r2 = fit.get("r_squared")
+        if not isinstance(r2, int | float) or r2 < THERMAL_MIN_R_SQUARED:
+            _LOGGER.info(
+                "chart_log duty balance: fit rejected, r2=%s below the %s floor (k_p=%s heat=%s cool=%s n=%s)",
+                r2,
+                THERMAL_MIN_R_SQUARED,
+                fit.get("k_passive"),
+                fit.get("k_active_heat"),
+                fit.get("k_active_cool"),
+                fit.get("n_intervals"),
+            )
             return
         n = self.learning.record_duty_balance_fit(fit)
         _LOGGER.info(
-            "chart_log duty balance: recorded %s observations (k_p=%s heat=%s cool=%s n=%s r2=%s)",
+            "chart_log duty balance: recorded %s observations (k_p=%s heat=%s cool=%s heat_h=%s cool_h=%s n=%s r2=%s)",
             n,
             fit.get("k_passive"),
             fit.get("k_active_heat"),
             fit.get("k_active_cool"),
+            fit.get("heat_hours"),
+            fit.get("cool_hours"),
             fit.get("n_intervals"),
             fit.get("r_squared"),
         )
@@ -14823,7 +14850,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """The closed-house leak rate the HVAC run-edge estimator subtracts, and where it came from (Issue #1512).
 
         Order: (1) the decisions' model (``control_thermal_model``: v4's -a_o on a v4 zone, v3's k_passive on a v3 zone)
-        when it is a real leak rate (< 0) -> the primary engine id; (2) the v3 cache's ``k_passive`` when < 0 -> "v3";
+        when it is a real leak rate (< 0) -> "primary" (the label never reads the engine
+        setting); (2) the v3 cache's ``k_passive`` when < 0 -> "v3";
         (3) ``(None, "none")``: the run is rejected with ``REJECT_NO_K_PASSIVE``; the duty-balance fit covers the home.
         Never the window-open rate (k_vent_window): that is not a closed-house rate.
         """
@@ -14832,7 +14860,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             model = self.control_thermal_model(base) or {}
             k_model = model.get("k_passive")
             if isinstance(k_model, int | float) and not isinstance(k_model, bool) and k_model < 0:
-                return float(k_model), str(prediction_engines.primary_id(self.config))
+                return float(k_model), "primary"
         except Exception:  # noqa: BLE001 - a rate lookup never breaks the off-edge handler
             _LOGGER.debug("_closed_house_rate: control model lookup failed", exc_info=True)
         cache = getattr(getattr(self.learning, "_state", None), "thermal_model_cache", None)

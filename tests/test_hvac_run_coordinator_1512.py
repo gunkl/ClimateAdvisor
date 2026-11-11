@@ -25,7 +25,7 @@ if "homeassistant" not in sys.modules:
     _install_ha_stubs()
 
 from custom_components.climate_advisor import coordinator as _coord_mod  # noqa: E402
-from custom_components.climate_advisor import hvac_rate_fit, prediction_engines  # noqa: E402
+from custom_components.climate_advisor import hvac_rate_fit  # noqa: E402
 from custom_components.climate_advisor.const import (  # noqa: E402
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
@@ -188,7 +188,9 @@ class TestClosedHouseRateOrder:
         coord = self._coord_with(-0.031, -0.05)
         k, source = coord._closed_house_rate()
         assert k == -0.031
-        assert source == prediction_engines.primary_id(coord.config)
+        # old expectation read the engine setting only to label the source (the v4 shadow structural test forbids
+        # that in the coordinator); the label is now the engine-agnostic "primary"
+        assert source == "primary"
 
     def test_v3_cache_is_the_fallback(self):
         assert self._coord_with(None, -0.05)._closed_house_rate() == (-0.05, "v3")
@@ -221,7 +223,7 @@ class TestClosedHouseRateOrder:
         _off_edge(coord, OBS_TYPE_HVAC_HEAT, _T0 + timedelta(minutes=30))
         run = coord.learning.record_hvac_run.call_args[0][0]
         assert run["k_passive"] == -0.04
-        assert run["k_passive_source"] == prediction_engines.primary_id(coord.config)
+        assert run["k_passive_source"] == "primary"  # old: the engine id read from the setting (see above)
 
 
 class TestTickSamplerPeak:
@@ -274,16 +276,20 @@ class TestSettlingHvac:
     def _spec():
         return [(0, "heating"), (10, "heating")] + [(m, "idle") for m in range(20, 320, 10)]
 
-    def test_flag_is_true_only_in_the_window_after_the_last_active_row(self):
+    def test_flag_is_true_only_in_the_window_after_the_off_edge(self):
         spec = self._spec()
         states = _coord_mod._ventilation_row_states(_rows(spec))
         by_min = {m: st["settling_hvac"] for (m, _), st in zip(spec, states, strict=True)}
         assert by_min[0] is False  # a heating row is never "settling"
         assert by_min[10] is False
         assert THERMAL_COAST_MAX_S == 1800
+        # the window runs from the off edge (the first idle row, minute 20), not from the last heating row (minute 10):
+        # the old expectation (minute 40 settled) shortened the window by the gap between the last active row and
+        # the off edge
         assert by_min[20] is True
         assert by_min[30] is True
-        assert by_min[40] is False  # exactly the window later: settled
+        assert by_min[40] is True
+        assert by_min[50] is False  # exactly the window after the off edge: settled
         assert by_min[100] is False
 
     def test_cooling_is_the_mirror(self):
@@ -291,6 +297,9 @@ class TestSettlingHvac:
         states = _coord_mod._ventilation_row_states(_rows(spec))
         assert [st["settling_hvac"] for st in states[:2]] == [False, False]
         assert states[2]["settling_hvac"] is True
+        assert (
+            states[4]["settling_hvac"] is True
+        )  # old: False, window was timed from the last cooling row, not the off edge
         assert states[5]["settling_hvac"] is False
 
     def test_passive_windows_start_after_the_settle_window(self):
@@ -299,7 +308,8 @@ class TestSettlingHvac:
         windows = coord._extract_passive_windows(_rows(self._spec()), 3650)
         assert windows
         first = datetime.fromisoformat(windows[0][0]["ts"])
-        assert first == datetime(2026, 1, 1, 1, 40, tzinfo=UTC)
+        # old: 01:40, ten minutes early (window timed from the last heating row instead of the off edge)
+        assert first == datetime(2026, 1, 1, 1, 50, tzinfo=UTC)
 
     def test_vent_window_windows_exclude_the_settle_window(self):
         coord = object.__new__(ClimateAdvisorCoordinator)
@@ -334,7 +344,7 @@ class TestDutyBalanceWiring:
         rows = self._recent_rows(6)
         old = self._recent_rows(4, days_ago=45.0)  # outside the 30-day window
         coord = self._coord_with_rows(old + rows)
-        fit = {"k_passive": -0.04, "k_active_heat": 3.0, "k_active_cool": None, "n_intervals": 30}
+        fit = {"k_passive": -0.04, "k_active_heat": 3.0, "k_active_cool": None, "n_intervals": 30, "r_squared": 0.5}
         with patch.object(hvac_rate_fit, "fit_duty_balance", return_value=fit) as mocked:
             coord._run_duty_balance_chart_log_fit(days=30)
         mocked.assert_called_once()
@@ -350,6 +360,20 @@ class TestDutyBalanceWiring:
         with patch.object(hvac_rate_fit, "fit_duty_balance", return_value=None):
             coord._run_duty_balance_chart_log_fit()
         coord.learning.record_duty_balance_fit.assert_not_called()
+
+    def test_fit_below_the_r2_floor_is_not_recorded_and_logs_at_info(self, caplog):
+        coord = self._coord_with_rows(self._recent_rows(6))
+        fit = {"k_passive": -0.04, "k_active_heat": 3.0, "k_active_cool": None, "n_intervals": 30, "r_squared": 0.05}
+        with caplog.at_level("INFO"), patch.object(hvac_rate_fit, "fit_duty_balance", return_value=fit):
+            coord._run_duty_balance_chart_log_fit()
+        coord.learning.record_duty_balance_fit.assert_not_called()
+        assert any("below the" in r.message and r.levelname == "INFO" for r in caplog.records)
+
+    def test_failed_fit_logs_the_reason_at_info(self, caplog):
+        coord = self._coord_with_rows(self._recent_rows(6))
+        with caplog.at_level("INFO"):
+            coord._run_duty_balance_chart_log_fit()
+        assert any("too few settled night intervals" in r.message and r.levelname == "INFO" for r in caplog.records)
 
     def test_periodic_wrapper_runs_once_per_day(self):
         coord = self._coord_with_rows(self._recent_rows(6))

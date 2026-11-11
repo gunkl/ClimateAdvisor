@@ -36,6 +36,7 @@ from .const import (
     REJECT_TOO_FEW_SAMPLES,
     THERMAL_BLOCK_OLS_BLOCK_MINUTES,
     THERMAL_BLOCK_OLS_MIN_BLOCKS,
+    THERMAL_EVIDENCE_HALF_N,
     THERMAL_HVAC_MIN_SIGNAL_F,
     THERMAL_K_ACTIVE_COOL_MAX,
     THERMAL_K_ACTIVE_COOL_MIN,
@@ -48,8 +49,7 @@ from .const import (
     THERMAL_MIN_DECAY_SAMPLES,
     THERMAL_MIN_POST_HEAT_SAMPLES,
     THERMAL_MIN_R_SQUARED,
-    THERMAL_OBS_CAP,
-    THERMAL_RATE_HALF_LIFE_DAYS,
+    THERMAL_OBS_KIND_CAPS,
     THERMAL_SOLAR_FACTOR_MIN_RANGE,
     THERMAL_SWING_CONF_HIGH,
     THERMAL_SWING_CONF_LOW,
@@ -970,54 +970,86 @@ def weighted_median(pairs: list[tuple[float, float]]) -> float | None:
     return pts[-1][0]
 
 
-def _age_days(stamp: Any, today: Any) -> float:
-    """Whole days from an ISO date/datetime stamp to ``today`` (a date); 0 when unparseable or in the future."""
-    try:
-        d = datetime.fromisoformat(str(stamp)[:10]).date()
-    except ValueError, TypeError:
-        return 0.0
-    return max(0.0, float((today - d).days))
-
-
-def _obs_rate_weight(obs: dict, today: Any, *, legacy: bool) -> float:
-    """Ageing weight of one observation: grade weight x method weight x 0.5 ** (age / half-life)."""
+def _obs_rate_weight(obs: dict, *, legacy: bool) -> float:
+    """Base weight of one observation: grade weight x method weight (the newer-evidence share is applied after)."""
     grade_w = _GRADE_WEIGHT.get(obs.get("confidence_grade", "low"), _GRADE_WEIGHT["low"])
-    method_w = THERMAL_LEGACY_OBS_WEIGHT if legacy else 1.0
-    age = _age_days(obs.get("date") or obs.get("timestamp"), today)
-    return grade_w * method_w * 0.5 ** (age / THERMAL_RATE_HALF_LIFE_DAYS)
+    return grade_w * (THERMAL_LEGACY_OBS_WEIGHT if legacy else 1.0)
+
+
+def _newer_share(n_newer: float) -> float:
+    """The share of its weight an observation keeps once ``n_newer`` newer ones feed the same rate (Issue #1523)."""
+    return 0.5 ** (n_newer / THERMAL_EVIDENCE_HALF_N)
+
+
+def thermal_obs_kind(obs: dict) -> str:
+    """The retention kind of an observation (Issue #1523): its ``hvac_mode`` when it has a share, else ``other``."""
+    mode = obs.get("hvac_mode") if isinstance(obs, dict) else None
+    return mode if isinstance(mode, str) and mode != "other" and mode in THERMAL_OBS_KIND_CAPS else "other"
+
+
+def trim_thermal_observations(observations: list[dict], kind: str, held: int = 0) -> list[dict]:
+    """Drop the oldest observations of ``kind`` beyond its share of the cap (Issue #1523); other kinds untouched.
+
+    The share is ``THERMAL_OBS_KIND_CAPS[kind]``, or ``held`` when the kind already held more than that (a list
+    stored before the shares existed): such a kind keeps its size, one in, one out, and is never cut at once, so the
+    rates it feeds do not step. List order is the order of arrival (oldest first). Time never prunes: an observation
+    leaves only when newer ones of its own kind take its place (owner decision 2026-11-11).
+    """
+    limit = max(THERMAL_OBS_KIND_CAPS[kind], int(held))
+    excess = sum(1 for o in observations if thermal_obs_kind(o) == kind) - limit
+    if excess <= 0:
+        return observations
+    out: list[dict] = []
+    for o in observations:
+        if excess > 0 and thermal_obs_kind(o) == kind:
+            excess -= 1
+            continue
+        out.append(o)
+    return out
 
 
 _AGED_RATE_FIELDS = ("k_active_heat", "k_active_cool", "k_passive")
 
 
-def aged_rates(observations: list[dict], today: Any, prior: Any = None) -> dict[str, float]:
-    """The three aged rates from these observations as of ``today`` (Issue #1512): weighted medians.
+def aged_rates(observations: list[dict], prior: Any = None) -> dict[str, float]:
+    """The three aged rates from these observations (Issues #1512, #1523): weighted medians.
 
-    weight = grade_w x method_w x 0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS); legacy heat/cool commits (no
-    ``method`` key) weigh THERMAL_LEGACY_OBS_WEIGHT. ``prior`` (the cache's ``rate_prior``) adds one aged
-    pseudo-observation per field weighing THERMAL_LEGACY_OBS_WEIGHT x its evidence count ``n`` (the observations
-    behind the cached value). Only fields with at least one usable value are returned, so a caller never sets a
-    rate to None through ageing. vent_window/vent_fan never feed ``k_passive``; run-edge HVAC runs carry no
-    ``k_passive``. One definition for the live engine and the backtest's as-of rebuild (tools/predict_backtest.py).
+    weight = grade_w x method_w x 0.5 ** (newer / THERMAL_EVIDENCE_HALF_N), where ``newer`` counts the observations
+    after this one in the list (the order of arrival) that feed the same rate: an observation yields only to newer
+    evidence of its own rate, never to the calendar (owner decision 2026-11-11), so a season with no passive window
+    leaves ``k_passive`` exactly where it was and the first fits after it move it gradually, not in one step. Legacy
+    heat/cool commits (no ``method`` key) weigh THERMAL_LEGACY_OBS_WEIGHT. ``prior`` (the cache's ``rate_prior``)
+    adds one pseudo-observation per field weighing THERMAL_LEGACY_OBS_WEIGHT x its evidence count ``n`` (the
+    observations behind the cached value) x its newer-evidence share: for ``k_passive`` the prior's ``keep`` (halved
+    per THERMAL_EVIDENCE_HALF_N new passive observations, also those the cap has since let go), for heat/cool the
+    same halving per retained observation of that rate stamped after the prior. Only fields with at least one usable
+    value are returned, so a caller never sets a rate to None through ageing. vent_window/vent_fan never feed
+    ``k_passive``; run-edge HVAC runs carry no ``k_passive``. One definition for the live engine and the backtest's
+    as-of rebuild (tools/predict_backtest.py).
     """
-    pairs: dict[str, list[tuple[float, float]]] = {f: [] for f in _AGED_RATE_FIELDS}
+    entries: dict[str, list[tuple[float, float, str]]] = {f: [] for f in _AGED_RATE_FIELDS}
 
     def _num(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool)
 
     for o in observations:
         mode = o.get("hvac_mode")
+        stamp = str(o.get("timestamp") or o.get("date") or "")
         has_method = "method" in o
         if mode in ("heat", "cool"):
             field_name = "k_active_heat" if mode == "heat" else "k_active_cool"
+            w = _obs_rate_weight(o, legacy=not has_method)
             if _num(o.get("k_active")):
-                pairs[field_name].append((float(o["k_active"]), _obs_rate_weight(o, today, legacy=not has_method)))
+                entries[field_name].append((float(o["k_active"]), w, stamp))
             if _num(o.get("k_passive")):
-                pairs["k_passive"].append((float(o["k_passive"]), _obs_rate_weight(o, today, legacy=not has_method)))
+                entries["k_passive"].append((float(o["k_passive"]), w, stamp))
         elif mode == "passive" and _num(o.get("k_passive")):
             # Passive fits are the closed-house learner itself (live decay commits, chart_log endpoint/block_ols,
             # duty_balance): full method weight, not the legacy HVAC post-fit.
-            pairs["k_passive"].append((float(o["k_passive"]), _obs_rate_weight(o, today, legacy=False)))
+            entries["k_passive"].append((float(o["k_passive"]), _obs_rate_weight(o, legacy=False), stamp))
+    pairs: dict[str, list[tuple[float, float]]] = {
+        f: [(v, w * _newer_share(len(lst) - 1 - i)) for i, (v, w, _s) in enumerate(lst)] for f, lst in entries.items()
+    }
     if isinstance(prior, dict):
         for f, rec in prior.items():
             if f in pairs and isinstance(rec, dict) and _num(rec.get("value")):
@@ -1025,12 +1057,12 @@ def aged_rates(observations: list[dict], today: Any, prior: Any = None) -> dict[
                 # so one pseudo-observation weighing 0.25 would let a handful of new fits yank it (it must not jump).
                 n = rec.get("n")
                 n = float(n) if _num(n) and n > 0 else 1.0
-                w = (
-                    THERMAL_LEGACY_OBS_WEIGHT
-                    * n
-                    * 0.5 ** (_age_days(rec.get("ts"), today) / THERMAL_RATE_HALF_LIFE_DAYS)
-                )
-                pairs[f].append((float(rec["value"]), w))
+                if f == "k_passive":
+                    share = _evidence_keep(rec)
+                else:
+                    ts = str(rec.get("ts") or "")
+                    share = _newer_share(sum(1 for _v, _w, s in entries[f] if ts and s > ts))
+                pairs[f].append((float(rec["value"]), THERMAL_LEGACY_OBS_WEIGHT * n * share))
     out: dict[str, float] = {}
     for f, plist in pairs.items():
         med = weighted_median(plist)
@@ -1147,7 +1179,7 @@ class LearningState:
     active_suggestions: list[dict] = field(default_factory=list)
     dismissed_suggestions: list[str] = field(default_factory=list)
     settings_history: list[dict] = field(default_factory=list)
-    thermal_observations: list[dict] = field(default_factory=list)  # cap: THERMAL_OBS_CAP
+    thermal_observations: list[dict] = field(default_factory=list)  # per-kind caps: THERMAL_OBS_KIND_CAPS
     thermal_model_cache: dict | None = None  # EWMA-accumulated k_passive, k_active_heat/cool
     rejection_log: dict = field(default_factory=dict)  # keyed by obs_type; each list capped at 100 entries
     # Restart-cause diagnostics (Issue #403)
@@ -1370,7 +1402,8 @@ class LearningEngine:
         """Record a thermal observation and update the EWMA thermal model cache.
 
         obs must be a dict representation of a committed ThermalObservation (v2).
-        Trims to 90-day rolling window and enforces THERMAL_OBS_CAP.
+        Keeps at most this kind's share of THERMAL_OBS_CAP (``THERMAL_OBS_KIND_CAPS``; Issue #1523): when the kind
+        is full, its own oldest observation leaves. Nothing leaves with time and no kind evicts another.
         Also updates thermal_model_cache via EWMA using obs.confidence_grade.
 
         Returns False (nothing recorded) for an invalid obs or a chart_log fit of a window that is
@@ -1386,13 +1419,12 @@ class LearningEngine:
                 obs.get("k_passive"),
             )
             return False
+        # Issue #1523: only this kind's own oldest observation can make room for it (one in, one out), so a kind that
+        # has gone quiet (no passive window all summer) keeps its observations however long the gap.
+        kind = thermal_obs_kind(obs)
+        held = sum(1 for o in self._state.thermal_observations if thermal_obs_kind(o) == kind)
         self._state.thermal_observations.append(obs)
-        # 90-day rolling trim
-        cutoff = (dt_util.now().date() - timedelta(days=90)).isoformat()
-        self._state.thermal_observations = [o for o in self._state.thermal_observations if o.get("date", "") >= cutoff]
-        # Hard cap
-        if len(self._state.thermal_observations) > THERMAL_OBS_CAP:
-            self._state.thermal_observations = self._state.thermal_observations[-THERMAL_OBS_CAP:]
+        self._state.thermal_observations = trim_thermal_observations(self._state.thermal_observations, kind, held)
 
         # Update EWMA cache (swing/solar/vent/counts), then re-derive the three aged rates (Issue #1512)
         self._update_thermal_model_cache(obs)
@@ -1438,12 +1470,13 @@ class LearningEngine:
         )
 
     def _recompute_aged_rates(self) -> None:
-        """Recompute the three rates as weighted medians of the retained observations (Issue #1512).
+        """Recompute the three rates as weighted medians of the retained observations (Issues #1512, #1523).
 
-        weight = grade_w x method_w x 0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS); legacy heat/cool commits
-        (no ``method`` key) weigh THERMAL_LEGACY_OBS_WEIGHT. The ``rate_prior`` pseudo-observations take part, so a
-        field with no usable observation keeps its value (never falls to None through ageing). vent_window/vent_fan
-        observations never feed ``k_passive``; run-edge HVAC runs carry no ``k_passive`` so they never do either.
+        weight = grade_w x method_w x 0.5 ** (newer observations of the same rate / THERMAL_EVIDENCE_HALF_N)
+        (``aged_rates``; no clock); legacy heat/cool commits (no ``method`` key) weigh THERMAL_LEGACY_OBS_WEIGHT.
+        The ``rate_prior`` pseudo-observations take part, so a field with no usable observation keeps its value
+        (never falls to None through ageing). vent_window/vent_fan observations never feed ``k_passive``; run-edge
+        HVAC runs carry no ``k_passive`` so they never do either.
         """
         cache = self._state.thermal_model_cache
         if not isinstance(cache, dict):
@@ -1453,7 +1486,7 @@ class LearningEngine:
             self._state.thermal_model_cache = cache
         self._ensure_rate_prior()
         before = {f: cache.get(f) for f in self._AGED_RATE_FIELDS}
-        rates = aged_rates(self._state.thermal_observations, dt_util.now().date(), cache.get("rate_prior"))
+        rates = aged_rates(self._state.thermal_observations, cache.get("rate_prior"))
         # Issue #1512: a rate the pooled cycle model applied (v3-primary zone) is that fit's own q, not an aged median
         # of the retired run-edge observations: ageing must not pull it back to them. A fit held after its cycles
         # left the pool (sensor swap; verifier finding 4) stays the rate until new cycles displace it.

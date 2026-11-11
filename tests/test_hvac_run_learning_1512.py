@@ -14,8 +14,8 @@ import pytest
 from homeassistant.util import dt as dt_util
 
 from custom_components.climate_advisor.const import (
+    THERMAL_EVIDENCE_HALF_N,
     THERMAL_LEGACY_OBS_WEIGHT,
-    THERMAL_RATE_HALF_LIFE_DAYS,
 )
 from custom_components.climate_advisor.learning import (
     LearningEngine,
@@ -77,16 +77,24 @@ class TestAgeing:
         assert e._state.thermal_model_cache["k_active_heat"] == 6.0
         assert THERMAL_LEGACY_OBS_WEIGHT < 1.0
 
-    def test_old_observations_decay(self, tmp_path):
+    def test_old_observations_yield_to_newer_evidence_not_to_time(self, tmp_path):
+        """Issue #1523 (owner decision 2026-11-11): an observation's weight halves per THERMAL_EVIDENCE_HALF_N newer
+        observations of its rate, never with the calendar. Old expectation: three 63-day-old observations lost to one
+        fresh one (3/8 of its weight) on age alone; that is the step a season with no new evidence produced."""
         e = _engine(tmp_path)
-        age = int(THERMAL_RATE_HALF_LIFE_DAYS) * 3
         e._state.thermal_observations = [
+            *[_obs("heat", 6.0, days_ago=63, method="run_edge") for _ in range(3)],
             _obs("heat", 2.0, days_ago=0, method="run_edge"),
-            *[_obs("heat", 6.0, days_ago=age, method="run_edge") for _ in range(3)],
         ]
         e._state.thermal_model_cache = {}
         e._recompute_aged_rates()
-        # three 3-half-life-old obs weigh 3/8 of one fresh one: the fresh value wins
+        # one newer observation barely dents three older ones, however old they are
+        assert e._state.thermal_model_cache["k_active_heat"] == 6.0
+        # three half-lives of newer evidence (60 observations): the old three weigh 3/8 of one fresh one in total
+        e._state.thermal_observations += [
+            _obs("heat", 2.0, method="run_edge") for _ in range(3 * int(THERMAL_EVIDENCE_HALF_N) - 1)
+        ]
+        e._recompute_aged_rates()
         assert e._state.thermal_model_cache["k_active_heat"] == 2.0
 
     def test_new_run_edge_dominates_within_a_few_commits(self, tmp_path):
@@ -200,7 +208,8 @@ class TestAgeing:
         assert prior["k_passive"]["n"] == 35 + 65 + 286  # passive, heat and cool all fed the old k_passive EWMA
 
     def test_upgrade_does_not_jump_and_then_fades(self, tmp_path):
-        """A few new fits cannot yank a value backed by hundreds of observations; the prior fades with the half-life."""
+        """A few new fits cannot yank a value backed by hundreds of observations; the prior gives way only as new
+        passive observations arrive (its keep halves per THERMAL_EVIDENCE_HALF_N of them), never with time alone."""
         e = _engine(tmp_path)
         e._state.thermal_model_cache = {
             "k_passive": -0.0482,
@@ -212,14 +221,18 @@ class TestAgeing:
         e._ensure_rate_prior()
         e._recompute_aged_rates()
         assert e._state.thermal_model_cache["k_passive"] == pytest.approx(-0.0482)  # old behaviour: -0.0264
-        # a long time later with no fresh evidence the prior (96.5 -> ~0.4) has faded below the observations
         from custom_components.climate_advisor.learning import aged_rates
 
         prior = e._state.thermal_model_cache["rate_prior"]
-        late = dt_util.now().date() + timedelta(days=int(THERMAL_RATE_HALF_LIFE_DAYS * 8))
-        obs = [_obs("passive", -0.0264, grade="high")]
-        obs[0]["date"] = late.isoformat()
-        assert aged_rates(obs, late, prior)["k_passive"] == pytest.approx(-0.0264)
+        # Issue #1523: one fit after a long quiet spell does not yank it either (old expectation: one fit dated
+        # 168 days later took over, because the prior had aged 96.5 -> ~0.4 on the calendar alone)
+        late = (dt_util.now().date() + timedelta(days=168)).isoformat()
+        obs = [{**_obs("passive", -0.0264, grade="high"), "date": late}]
+        assert aged_rates(obs, prior)["k_passive"] == pytest.approx(-0.0482)
+        # new passive observations displace it: after 8 x THERMAL_EVIDENCE_HALF_N of them (keep 1/256) it has gone
+        for _ in range(8 * int(THERMAL_EVIDENCE_HALF_N)):
+            e.record_thermal_observation(_obs("passive", -0.0264, grade="high"))
+        assert e._state.thermal_model_cache["k_passive"] == pytest.approx(-0.0264)
 
     def test_k_passive_confidence_gives_way_only_to_new_passive_observations(self, tmp_path):
         """Owner decision 2026-11-11 ("fade only on new evidence"). Occupant: a closed-house leak rate learned before
@@ -242,7 +255,7 @@ class TestAgeing:
         up = {**base, "rate_prior": {"k_passive": {"value": -0.05, "ts": stamp, "n": 203}}}
         assert grade_passive_confidence(up, now) == "high"
         # ... and time alone changes nothing (was: "none" after 8 half-lives with no new observation)
-        later = now + timedelta(days=THERMAL_RATE_HALF_LIFE_DAYS * 8)
+        later = now + timedelta(days=168)
         assert grade_passive_confidence(up, later) == "high"
         assert passive_evidence_count(up, later) == pytest.approx(3 + 203)
         # new passive observations displace it: keep halves every THERMAL_EVIDENCE_HALF_N of them

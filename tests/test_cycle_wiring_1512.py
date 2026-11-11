@@ -148,7 +148,7 @@ class TestApplyCycleFit:
         e._recompute_aged_rates()
         assert e._state.thermal_model_cache["k_active_heat"] == pytest.approx(6.5)
         # the stored old observation still ages (it is read by aged_rates), it just does not override an applied q
-        assert aged_rates(e._state.thermal_observations, datetime.now(UTC).date())["k_active_heat"] == 2.0
+        assert aged_rates(e._state.thermal_observations)["k_active_heat"] == 2.0
 
     @pytest.mark.parametrize(("grade", "expected"), [("low", "low"), ("medium", "medium"), ("high", "high")])
     def test_grade_mapping_takes_the_better_mode(self, grade, expected):

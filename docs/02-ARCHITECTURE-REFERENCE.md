@@ -418,7 +418,7 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 
 ### Thermal Model Parameters (Issue #114)
 - Cycle model gates (Issues #1512/#1516): cycle ≥ 3 min and readings moved ≥ 3 resolution steps; prior from the typical house or the stored rate by evidence; evidence gives way only to newer cycles (`THERMAL_EVIDENCE_HALF_N` 20, contradicting 5; never with time); at most the last 60 eligible cycles (`cycle_model.py`, see 05-LEARNING-ENGINE-DESIGN.md § Parameter Extraction)
-- Rate ageing: weighted median of retained observations, half-life 21 days (`THERMAL_RATE_HALF_LIFE_DAYS`), legacy-method weight 0.25 (`THERMAL_LEGACY_OBS_WEIGHT`)
+- Rate ageing: weighted median of retained observations, each weight halved per 20 newer observations of its rate (`THERMAL_EVIDENCE_HALF_N`; no calendar clock, Issue #1523), legacy-method weight 0.25 (`THERMAL_LEGACY_OBS_WEIGHT`); observations kept per kind (`THERMAL_OBS_KIND_CAPS`, sharing `THERMAL_OBS_CAP` 200), none leaves with time
 - Sample interval: 60 seconds (`THERMAL_SAMPLE_INTERVAL_SECONDS`)
 - Minimum R² for k_passive acceptance: 0.2 (`THERMAL_MIN_R_SQUARED`)
 - Default sample floor of the passive `compute_k_passive` regression: 4 (`THERMAL_MIN_POST_HEAT_SAMPLES`); heating/cooling runs no longer use a post-heat regression (Issue #1512)

@@ -1778,16 +1778,17 @@ THERMAL_CYCLE_GRADE_HIGH_NE: int = 4
 THERMAL_CYCLE_SOLAR_REGRESSOR: bool = False
 
 # Rate ageing: k_active_heat/cool and k_passive are weighted medians of retained observations; each
-# observation's weight halves every THERMAL_RATE_HALF_LIFE_DAYS, and legacy-method observations
-# (no "method" key: the pre-#1512 post-fit / proxy commits) count THERMAL_LEGACY_OBS_WEIGHT as much.
-THERMAL_RATE_HALF_LIFE_DAYS: float = 21
+# observation's weight halves for every THERMAL_EVIDENCE_HALF_N newer observations of the same rate (Issue #1523:
+# no calendar clock), and legacy-method observations (no "method" key: the pre-#1512 post-fit / proxy commits)
+# count THERMAL_LEGACY_OBS_WEIGHT as much.
 THERMAL_LEGACY_OBS_WEIGHT: float = 0.25
 # Evidence is displaced only by newer evidence, never by the passage of time alone (owner decision 2026-11-11,
 # "Fade only on new evidence"). The evidence carried behind a learned rate (the pre-upgrade ``rate_prior`` count, a
 # held cycle fit) keeps a share ``keep`` that halves for every THERMAL_EVIDENCE_HALF_N new informative (eligible)
 # cycles that agree with it, for every THERMAL_EVIDENCE_HALF_N_CONTRADICT that contradict it, and (k_passive) for
 # every THERMAL_EVIDENCE_HALF_N new passive observations. A held fit whose share fell below
-# THERMAL_EVIDENCE_MIN_KEEP is dropped. The pooled cycle model weighs its cycles by the same rule.
+# THERMAL_EVIDENCE_MIN_KEEP is dropped. The pooled cycle model weighs its cycles by the same rule, and the rate
+# ageing its observations (Issue #1523).
 THERMAL_EVIDENCE_HALF_N: float = 20
 THERMAL_EVIDENCE_HALF_N_CONTRADICT: float = 5
 THERMAL_EVIDENCE_MIN_KEEP: float = 0.01
@@ -1978,7 +1979,24 @@ HOT_DAY_PRE_COOL_MODIFIER: float = -2.0
 # for sleep-window fan cycling. Replaces the old comfort_heat + 2F floor (architecture-reset
 # session), which left little to no headroom once DEFAULT_SLEEP_COOL was reformatted to a flat,
 # cooler-than-daytime default (Issue #436).
-THERMAL_OBS_CAP = 200  # max observations in LearningState
+# Retained thermal observations (Issue #1523). The 200 are shared out per kind (the observation's ``hvac_mode``), so
+# one kind can never push another out: an observation leaves only when a newer observation of its OWN kind takes its
+# place, never with time (owner decision 2026-11-11, "fade only on new evidence"; a quiet season of one kind prunes
+# nothing). passive feeds the decisions' closed-house leak rate (k_passive), so it holds the largest share: 80 = 4 x
+# THERMAL_EVIDENCE_HALF_N, by which point an observation weighs 1/16 and the 80 kept hold ~94 % of the weight.
+# vent_window / vent_fan / solar rates are EWMAs in the cache (their lists are diagnostics and the #1505 re-seed);
+# heat / cool observations are no longer written (the pooled cycle model learns those rates), the stored ones stay.
+# A kind that held more than its share when this rule arrived keeps that many (one in, one out), never cut at once.
+THERMAL_OBS_CAP = 200  # the total of THERMAL_OBS_KIND_CAPS
+THERMAL_OBS_KIND_CAPS: dict[str, int] = {
+    "passive": 80,
+    "vent_window": 40,
+    "vent_fan": 30,
+    "solar": 20,
+    "heat": 10,
+    "cool": 10,
+    "other": 10,  # any other hvac_mode (none is written today)
+}
 
 # ---------------------------------------------------------------------------
 # ODE Ceiling Guard (Issue #136)

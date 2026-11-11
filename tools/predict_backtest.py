@@ -91,7 +91,7 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import UTC, date, datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from datetime import time as dtime
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -585,7 +585,8 @@ def prod_rebuild_cache(
 ) -> dict | None:
     """Rebuild the v3 cache from these observations as production does: fold them (oldest first) through
     ``_update_thermal_model_cache`` (counts, solar, vent, swing), then set the three aged rates with production's
-    ``aged_rates`` as of the newest observation's date (Issue #1512: the rates are no longer folded one by one).
+    ``aged_rates`` over them (Issue #1512: the rates are no longer folded one by one; #1523: each observation's
+    weight halves per THERMAL_EVIDENCE_HALF_N newer observations of its rate, no calendar clock).
 
     Issues #1512/#1516: with ``cycles``, the heating and cooling rates are then refitted from the cycles that began
     before ``as_of_ts`` by production's ``cycle_model.fit_cycles`` (the prior is the aged cache, as live), exactly as
@@ -599,11 +600,7 @@ def prod_rebuild_cache(
     cache = stub._state.thermal_model_cache
     if cache is None or not ordered:
         return cache
-    try:
-        as_of = date.fromisoformat(str(ordered[-1].get("date") or ordered[-1].get("timestamp"))[:10])
-    except ValueError:
-        return cache
-    cache.update(learning.aged_rates(ordered, as_of, cache.get("rate_prior")))
+    cache.update(learning.aged_rates(ordered, cache.get("rate_prior")))
     if cycles and as_of_ts is not None:
         cm = _cycle_model_module()
         for mode in ("heat", "cool"):
@@ -645,8 +642,8 @@ class V3Models:
     def for_anchor(self, anchor: datetime) -> dict | None:
         """The v3 thermal model AS IT WAS at ``anchor`` (``--v3-model honest``): production's EWMA rebuilt from the
         retained observations dated before the anchor's day, cached per day. ``None`` when fewer than ``min_obs``
-        retained observations precede the anchor (the DB keeps only ~200, about two weeks, so older anchors cannot
-        be rebuilt) - the caller excludes those anchors; it never falls back to today's model."""
+        retained observations precede the anchor (the DB keeps at most 200, shared out per kind since Issue #1523,
+        so older anchors cannot be rebuilt); the caller excludes those anchors; it never falls back to today's model."""
         day = anchor.date().isoformat()
         if day in self._asof_cache:
             return self._asof_cache[day]

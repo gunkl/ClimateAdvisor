@@ -381,8 +381,8 @@ class TestThermalPipelineSection:
 
 class TestCumulativeVsWindowedCountScope:
     """Issue #586: observation_count_heat/cool (all-time cumulative) and committed/rejected
-    (90-day windowed, capped) must never appear unlabeled — a large gap between them looks
-    like a bug/data-loss without an explicit scope note."""
+    (the observations still kept per type, capped; Issue #1523) must never appear unlabeled: a large gap between
+    them looks like a bug/data-loss without an explicit scope note."""
 
     def test_thermal_model_block_labels_cumulative_counters(self):
         """LEARNING — THERMAL MODEL must carry a NOTE explaining observation_count_heat/cool
@@ -407,8 +407,10 @@ class TestCumulativeVsWindowedCountScope:
         )
 
     def test_pipeline_section_labels_windowed_committed_count(self):
-        """THERMAL OBSERVATION PIPELINE must carry a scope note distinguishing its windowed/
-        capped committed/rejected counts from the cumulative observation_count_heat/cool."""
+        """THERMAL OBSERVATION PIPELINE must carry a scope note distinguishing its kept/capped
+        committed/rejected counts from the evidence counts observation_count_heat/cool. Issue #1523: committed is no
+        longer windowed to 90 days (each type keeps its own newest, none leaves with time), so the note says "still
+        kept" instead of "windowed"."""
         coord = _make_coordinator()
         hass = _make_hass()
 
@@ -421,7 +423,7 @@ class TestCumulativeVsWindowedCountScope:
         pipeline_start = ctx.find("THERMAL OBSERVATION PIPELINE")
         assert pipeline_start != -1, "THERMAL OBSERVATION PIPELINE section not found"
         pipeline_excerpt = ctx[pipeline_start : pipeline_start + 600]
-        assert "windowed" in pipeline_excerpt and "capped" in pipeline_excerpt, (
+        assert "still kept" in pipeline_excerpt and "capped" in pipeline_excerpt, (
             f"Expected a scope note distinguishing committed/rejected from observation_count_heat/cool; "
             f"excerpt: {pipeline_excerpt}"
         )

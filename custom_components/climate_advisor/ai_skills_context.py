@@ -52,7 +52,6 @@ from .const import (
     OBS_TYPE_SOLAR_GAIN,
     OBS_TYPE_VENT_FAN_DECAY,
     OBS_TYPE_VENT_WINDOW_DECAY,
-    THERMAL_OBS_CAP,
 )
 from .coordinator import _REJECTION_LOG_CAP
 from .fan_status import is_ca_fan_running
@@ -851,9 +850,9 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                 "  only as newer informative cycles replace or contradict it (never with time alone),",
                 "  plus the cycle model's weighted informative cycles (Issue #1512). They can fall",
                 "  when new cycles arrive and stay unchanged through a quiet season. They are not the",
-                "  live committed/rejected counts shown in THERMAL OBSERVATION PIPELINE below, which are",
-                "  windowed to 90 days and capped; a gap between them is expected and does not indicate",
-                "  lost data (Issue #586).",
+                "  live committed/rejected counts shown in THERMAL OBSERVATION PIPELINE below, which count",
+                "  the observations still kept (capped per type, none leaves with time); a gap between them",
+                "  is expected and does not indicate lost data (Issues #586, #1523).",
                 *_swing_context_lines(thermal, getattr(coordinator, "config", None) or {}),
                 "",
             ]
@@ -1016,7 +1015,7 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
 
     lines.append("Per-type rejection summary:")
     lines.append(
-        f"  (committed is windowed to 90 days and capped at {THERMAL_OBS_CAP}; rejected is capped at"
+        "  (committed = still kept, capped per type, none leaves with time (#1523); rejected is capped at"
         f" {_REJECTION_LOG_CAP} per type — compare against observation_count_heat/cool in LEARNING —"
         " THERMAL MODEL above only as a floor, not an exact match; Issue #586)"
     )

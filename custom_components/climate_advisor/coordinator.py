@@ -4199,7 +4199,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     # Issue #1505: the stored windows-only and fan rates were learned with a paused session counted
                     # as "fan on", from daytime stretches and the hour after the fan stopped, then only nudged 5% a
                     # fit, so they never recover on their own. Drop those fits and re-learn both rates once from the
-                    # chart log the observations' own 90-day retention covers.
+                    # last 90 days of the chart log.
                     dropped = self.learning.reset_vent_rates()
                     self._run_vent_window_chart_log_fit(backfill=True, days=90)
                     self._run_vent_fan_chart_log_fit(backfill=True, days=90)

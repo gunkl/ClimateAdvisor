@@ -465,7 +465,25 @@ _confidence = _load_confidence_module()
 # ---------------------------------------------------------------------------
 
 _ALPHA_MAP = {"high": 0.3, "medium": 0.15, "low": 0.05}
-_THERMAL_OBS_CAP = 500
+
+
+def retain_like_production(existing: list[dict], merged: list[dict]) -> list[dict]:
+    """The merged observations (oldest first) kept as production keeps them (Issue #1523).
+
+    Each kind keeps its share of ``THERMAL_OBS_KIND_CAPS`` (or what it already held in ``existing``, one in, one
+    out), its own oldest leaving first; nothing leaves with time and no kind pushes another out. Was: 90 days back
+    from today and the newest 500 overall, which dropped a kind that had gone quiet for a season (e.g. every passive
+    fit after a summer with the windows open) the moment this tool wrote the DB.
+    """
+    learning = _production()
+    held: dict[str, int] = {}
+    for o in existing:
+        if isinstance(o, dict):
+            held[learning.thermal_obs_kind(o)] = held.get(learning.thermal_obs_kind(o), 0) + 1
+    out = [o for o in merged if isinstance(o, dict)]
+    for kind in {learning.thermal_obs_kind(o) for o in out}:
+        out = learning.trim_thermal_observations(out, kind, held.get(kind, 0))
+    return out
 
 
 def _ewma(old: float | None, new: float, alpha: float) -> float:
@@ -516,7 +534,7 @@ def rebuild_model_cache(all_obs: list[dict], existing_cache: dict | None = None)
     ``swing.apply_swing_samples``. A rebuild can therefore never re-poison or wipe it.
 
     A seed only (Issue #1512): production recomputes ``k_active_heat``, ``k_active_cool`` and ``k_passive``
-    from the retained observations with recency weighting (half-life ``THERMAL_RATE_HALF_LIFE_DAYS``) after
+    from the retained observations, each weighing less per newer observation of its rate (Issue #1523), after
     every commit and on load, so these EWMA values are replaced the next time the engine loads. The older
     EWMA cache logic, kept for the non-HVAC fields:
     - passive/heat/cool modes update k_passive
@@ -1989,10 +2007,7 @@ def main() -> None:
         merged = existing_obs + new_obs
         merged.sort(key=lambda o: o.get("timestamp", ""))
 
-        cutoff_str = (datetime.now().date() - timedelta(days=90)).isoformat()
-        merged = [o for o in merged if o.get("date", "") >= cutoff_str]
-        if len(merged) > _THERMAL_OBS_CAP:
-            merged = merged[-_THERMAL_OBS_CAP:]
+        merged = retain_like_production(existing_obs, merged)
 
         print("\nRebuilding EWMA model cache from all obs...")
         new_model = rebuild_model_cache(merged, existing_cache=db.get("thermal_model_cache"))
@@ -2142,13 +2157,8 @@ def main() -> None:
     merged = existing_obs + new_obs
     merged.sort(key=lambda o: o.get("timestamp", ""))
 
-    # 90-day rolling trim
-    cutoff = (datetime.now().date() - timedelta(days=90)).isoformat()
-    merged = [o for o in merged if o.get("date", "") >= cutoff]
-
-    # Hard cap
-    if len(merged) > _THERMAL_OBS_CAP:
-        merged = merged[-_THERMAL_OBS_CAP:]
+    # Retention as production (Issue #1523): per-kind shares, nothing leaves with time
+    merged = retain_like_production(existing_obs, merged)
 
     # Rebuild EWMA model cache from all obs
     print("\nRebuilding EWMA model cache from all obs...")

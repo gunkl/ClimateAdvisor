@@ -424,3 +424,26 @@ class TestSwingBackfill:
         tr._swing.apply_swing_samples(cache, "heat", [live])
         tr._swing.apply_swing_samples(cache, "heat", [replay])
         assert cache["observation_count_swing_heat"] == 1 and len(cache["swing_heat_samples"]) == 1
+
+
+class TestWriteRetentionLikeProduction:
+    """Issue #1523 mirror: the --write paths used to keep 90 days back from today and the newest 500, so writing the
+    DB after a summer of vent fits dropped every closed-house fit (the leak rate then fell back to its pre-upgrade
+    value). They now keep what production keeps: per-kind shares, nothing leaves with time."""
+
+    def test_a_quiet_kind_survives_the_write(self):
+        old_passive = [{"hvac_mode": "passive", "k_passive": -0.04, "date": "2025-01-01", "n": i} for i in range(20)]
+        recent = [{"hvac_mode": "vent_window", "k_passive": -0.3, "date": "2026-11-01", "n": i} for i in range(10)]
+        new = [{"hvac_mode": "passive", "k_passive": -0.04, "date": "2026-11-02", "source": "replay"}]
+        existing = old_passive + recent
+        kept = tr.retain_like_production(existing, existing + new)
+        assert sum(1 for o in kept if o["hvac_mode"] == "passive") == 21
+
+    def test_each_kind_keeps_its_share_or_what_it_held(self):
+        learning = tr._production()
+        share = learning.THERMAL_OBS_KIND_CAPS["vent_fan"]
+        existing = [{"hvac_mode": "vent_fan", "date": "2026-01-01", "n": i} for i in range(share + 5)]
+        new = [{"hvac_mode": "vent_fan", "date": "2026-02-01", "n": 100 + i} for i in range(3)]
+        kept = tr.retain_like_production(existing, existing + new)
+        assert len(kept) == share + 5  # held above its share: one in, one out
+        assert [o["n"] for o in kept][-3:] == [100, 101, 102]

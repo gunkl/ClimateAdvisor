@@ -614,7 +614,7 @@ flowchart TD
     D{ODE ceiling guard §6c:\npredicted_indoor available\nAND k_passive < 0\nAND confidence != none\nAND outdoor > indoor?} -->|Any condition false| Z[Guard dormant\nno further HVAC action]
     D -->|All conditions true| F{Find first breach:\npredicted temp > comfort_cool + tolerance?}
     F -->|None found| Z
-    F -->|Breach found at T_breach| G["Compute lead_time_min:\nif k_active_cool known:\n  ((comfort_cool − indoor) / |k_active_cool|) × 60 × 1.3\nelse: 120 min fallback\nclamp [30, 240]"]
+    F -->|Breach found at T_breach| G["Compute lead_time_min:\nif k_active_cool known:\n  ((comfort_cool − indoor) / |k_active_cool|) × 60 × 1.3\nelse: 120 min fallback\nclamp [30, 240]\n(leak-aware with k_passive + outdoor: Issue #1517)"]
     G --> H{"hours_to_breach\n≤ lead_time_min / 60?"}
     H -->|No — too far away| I[Standing by\nLog breach time + lead window\nno HVAC change]
     H -->|Yes — within lead window| J[ODE ceiling guard fires\nSet HVAC cool\ntarget = comfort_cool\nEmit ceiling_guard_fired]

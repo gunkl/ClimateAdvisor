@@ -126,6 +126,10 @@ jobs:
         uses: astral-sh/setup-uv@v10.3.3
 
       - name: Run real-HA lifecycle tests
+        env:
+          # Issue #1518: with timeout_method = thread a timed-out test ends its process; under xdist the worker is
+          # replaced and the run goes on (a serial run would abort at the first timeout). Same as validate.yml.
+          CA_HA_WORKERS: "4"
         run: python3 scripts/test.py ha  # uv run --locked --only-group test-ha (own venv)
 
   # Issue #1278: the nightly failed four nights running and nobody noticed, because a failed scheduled

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -232,8 +231,8 @@ class TestDarkSensorKeepsThePauseItCaused:
 
 
 class TestLastReadingIsPersisted:
-    def test_a_restart_during_the_outage_keeps_holding(self):
-        config_dir = tempfile.mkdtemp(prefix="ca_1181_")
+    def test_a_restart_during_the_outage_keeps_holding(self, tmp_path):
+        config_dir = str(tmp_path)  # Issue #1518: pytest removes it (mkdtemp leaked one folder per run)
         with _session() as s1:
             s1.coordinator._state_persistence = type(s1.coordinator._state_persistence)(
                 Path(config_dir), getattr(s1.coordinator, "_entry_id", "")

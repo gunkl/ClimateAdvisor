@@ -43,10 +43,12 @@ numeric shift.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from datetime import time as dt_time
 from enum import Enum
+from typing import Any
 
 from .automation import _in_sleep_window
 from .const import (
@@ -294,6 +296,8 @@ def resolve_tou_phase(
     hvac_mode: str,
     thermal_model: dict | None,
     config: dict,
+    outdoor_at: Callable[[datetime], float | None] | None = None,
+    house_stepper: Any = None,
 ) -> TOUPhaseResolution:
     """Should the home start pre-conditioning right now for an upcoming ``high``-tagged
     schedule?
@@ -311,6 +315,14 @@ def resolve_tou_phase(
 
     Returns the EARLIEST qualifying upcoming ``high`` schedule's decision (schedules are
     evaluated in list order; ties resolve to whichever starts soonest).
+
+    ``outdoor_at`` (Issue #1517): maps the schedule start to the outdoor temperature expected then (the caller's
+    forecast, else the current reading). With it and a negative ``k_passive`` in ``thermal_model`` the lead time is
+    leak-aware (``thermal_lead_time``); without either it is the plain ``delta / rate`` formula.
+
+    ``house_stepper`` (Issue #1517): the primary prediction engine's own house model (engine-neutral
+    ``HouseStepper``; ``None`` while it is still learning or for a first-order primary). With ``outdoor_at`` the lead
+    time is then stepped through that model (thermal mass and sun) instead of either formula.
     """
     if current_indoor_temp is None or hvac_mode not in ("heat", "cool"):
         return TOUPhaseResolution(TOUPhase.NONE, None, None, None, None, None)
@@ -357,6 +369,16 @@ def resolve_tou_phase(
         max_minutes=_TOU_LEAD_MIN_CEIL,
         safety_multiplier=_TOU_LEAD_MIN_SAFETY_MULTIPLIER,
         fallback_minutes=fallback_minutes,
+        start_temp=current_indoor_temp,
+        target_temp=target,
+        outdoor_temp=outdoor_at(schedule_start) if outdoor_at is not None else None,
+        k_passive=thermal_model.get("k_passive"),
+        cooling=mode == "cool",
+        house_stepper=house_stepper,
+        outdoor_at=outdoor_at,
+        event_ts=schedule_start,
+        confidence=thermal_model.get("confidence_k_passive", thermal_model.get("confidence", "none")),
+        warn_label="Time-of-use bank",
     )
 
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)
@@ -376,6 +398,8 @@ def resolve_tou_away_vacation_phase(
     *,
     target_temp_step: object = None,
     frozen: TOUPhaseResolution | None = None,
+    outdoor_at: Callable[[datetime], float | None] | None = None,
+    house_stepper: Any = None,
 ) -> TOUPhaseResolution:
     """Away/Vacation TOU pre-conditioning (Issue #899, grounded in Issue #892).
 
@@ -514,6 +538,13 @@ def resolve_tou_away_vacation_phase(
     target, expansion = quantize_split_delta(edge, half, mode, step, unit)
 
     fallback_minutes = float(config.get("default_tou_lead_minutes", _TOU_LEAD_MIN_FALLBACK))
+    _outdoor_start = outdoor_at(schedule_start) if outdoor_at is not None else None
+
+    def _outdoor_for_stepper(when: datetime) -> float | None:
+        # the forecast at the step; the current reading when the caller has no forecast there
+        got = outdoor_at(when) if outdoor_at is not None else None
+        return got if got is not None else current_outdoor_temp
+
     lead_minutes = compute_lead_minutes_from_rate(
         delta_t=abs(target - edge),
         rate=rate,
@@ -521,6 +552,18 @@ def resolve_tou_away_vacation_phase(
         max_minutes=_TOU_LEAD_MIN_CEIL,
         safety_multiplier=_TOU_LEAD_MIN_SAFETY_MULTIPLIER,
         fallback_minutes=fallback_minutes,
+        # Issue #1517: the bank runs from the setback edge to the split target while the house leaks toward the
+        # outdoor temperature at the window start (forecast when the caller has one, else the current reading).
+        start_temp=edge,
+        target_temp=target,
+        outdoor_temp=_outdoor_start if _outdoor_start is not None else current_outdoor_temp,
+        k_passive=k_passive,
+        cooling=mode == "cool",
+        house_stepper=house_stepper,
+        outdoor_at=_outdoor_for_stepper,
+        event_ts=schedule_start,
+        confidence=confidence,  # the same gate as the depth above
+        warn_label="Time-of-use bank (away/vacation)",
     )
 
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)

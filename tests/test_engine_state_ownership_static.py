@@ -49,6 +49,10 @@ PRODUCTION_ALLOWLIST: dict[tuple[str, str], str] = {
     ): "read-only provider install, once in __init__ (#1230 R6b): the primary engine's model scalars",
     (
         "custom_components/climate_advisor/coordinator.py",
+        "_control_stepper_provider",
+    ): "read-only provider install, once in __init__ (#1517): the primary engine's house model for lead times",
+    (
+        "custom_components/climate_advisor/coordinator.py",
         "_command_observer",
     ): "observer install, once in __init__ (#1128 promises): sees every command, changes nothing",
     (

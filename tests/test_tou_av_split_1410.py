@@ -157,6 +157,9 @@ class TestCoordinatorFreeze:
 
     def test_not_frozen_before_the_window_opens(self):
         coord = _coord()
+        # Issue #1517: the leak-aware lead needs a cooling rate that beats the leak (the old plain formula never
+        # noticed 1 F/h could not hold 77 F against a 90 F outdoor); at 3 F/h the lead is ~77 min, so 12:00 is early.
+        coord.control_thermal_model = lambda _m: {**_MODEL, "k_active_cool": -3.0}
         assert _cycle(coord, _dt(12), 79.0).phase == TOUPhase.NONE
         assert coord._tou_av_frozen is None
 

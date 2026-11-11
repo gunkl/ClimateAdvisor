@@ -72,6 +72,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from .desired_state import ScheduledBandGate, decide_scheduled_band_gate
 from .ode_ceiling_guard import OdeCeilingGuardDecision, OdeCeilingGuardInputs, decide_ode_ceiling_guard
@@ -146,6 +147,8 @@ class ClassificationFsmInputs:
     ceiling_threshold: float | None
 
     now: datetime
+    # Issue #1517: the primary engine's own house model (engine-neutral) for the ceiling guard's lead, or None.
+    house_stepper: Any = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +187,7 @@ def _ceiling_guard_inputs(inputs: ClassificationFsmInputs) -> OdeCeilingGuardInp
         natural_vent_active=inputs.natural_vent_active,
         ceiling_threshold=inputs.ceiling_threshold,
         now=inputs.now,
+        house_stepper=inputs.house_stepper,
     )
 
 

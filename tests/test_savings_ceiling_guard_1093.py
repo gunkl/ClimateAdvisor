@@ -93,7 +93,7 @@ def _make_engine(
     engine._whf_safety_snapshot_callback = lambda: WhfSafetySnapshot(
         fan_on=None, fan_on_for_s=None, sensors=tuple(SensorReading(is_open=sensor_open) for _ in sensors or [])
     )
-    engine.inputs.thermal = {"k_passive": -0.5, "confidence_k_passive": "high", "k_active_cool": -2.0}
+    engine.inputs.thermal = {"k_passive": -0.05, "confidence_k_passive": "high", "k_active_cool": -2.0}
     engine._natural_vent_active = False
     engine._last_outdoor_temp = 90.0
     engine._get_indoor_temp_f = lambda: 74.0
@@ -141,10 +141,11 @@ class TestSavingsOnGuardDefendsTheSavingsCeiling:
         engine._set_temperature.assert_not_awaited()
 
     def test_lead_time_is_measured_from_the_savings_ceiling(self):
-        # indoor 74, ceiling 77, k_active_cool -2.0 F/h: (3 / 2) * 60 * 1.3 = 117 min.
+        # Issue #1517: leak-aware. The old (3 / 2) * 60 * 1.3 = 117 min ignored the house leaking toward the 90 F
+        # outdoor while the AC runs (k_passive -0.05): pulling 77 -> 74 takes longer, 162.5 min.
         engine = _make_engine(savings=True)
         decision, _events = asyncio.run(_run(engine, _BREACH_77))
-        assert decision.lead_min == pytest.approx(117.0)
+        assert decision.lead_min == pytest.approx(162.54, abs=0.01)
 
 
 class TestSavingsOffControlStaysAt75:
@@ -158,10 +159,10 @@ class TestSavingsOffControlStaysAt75:
         assert fired[0]["new_setpoint_f"] == 75.0
 
     def test_lead_time_is_measured_from_the_plain_ceiling(self):
-        # indoor 74, ceiling 75: (1 / 2) * 60 * 1.3 = 39 min (above the 30 min floor).
+        # Issue #1517: leak-aware (the old (1 / 2) * 60 * 1.3 = 39 min ignored the leak toward the 90 F outdoor).
         engine = _make_engine(savings=False)
         decision, _events = asyncio.run(_run(engine, _BREACH_75_ONLY))
-        assert decision.lead_min == pytest.approx(39.0)
+        assert decision.lead_min == pytest.approx(56.33, abs=0.01)
 
 
 class TestWholeHouseFanHomeFollowsTheSealedState:

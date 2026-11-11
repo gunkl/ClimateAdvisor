@@ -3,7 +3,7 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [Unreleased]
+## [0.9.29] — 2026-11-11
 
 The version number will be set at merge.
 
@@ -30,6 +30,21 @@ The version number will be set at merge.
 - **Fix #1524: the hour the forecast expects the sun's heat no longer jumps on a calendar date.**
   - **What you'll notice:** the solar peak hour behind pre-cooling and the predicted indoor curve stays where your home's closed-house measurements put it until newer air-conditioning days say otherwise. It used to switch to the air-conditioning estimate on the 91st day after the last closed-house measurement, with nothing new measured, which could move the expected peak by an hour or more overnight. Now each new air-conditioning day moves it a little (about halfway after 20 days that roughly agree, after 5 that disagree by an hour or more), and new closed-house measurements bring it back the same gradual way, never in one jump. The value in use does not change at the upgrade.
   - **Also fixed:** each air-conditioning day is counted once. The estimator re-reads the whole log every day and used to count every day again each time, so the count grew daily and the estimate leaned on the oldest days. Only complete days count: today's day is read once it is over. A closed-house window re-read by the next day's check is no longer counted twice either.
+
+## [0.9.28] — 2026-11-11
+
+- Fix #1517: the time-of-use bank, the ceiling guard and the nat-vent pre-cool now start early enough to reach the target, because the lead time allows for the house drifting toward the outdoor temperature while the equipment runs.
+  - **What you'll notice:** on cold or hot days the bank and the ceiling guard start earlier (a few minutes to tens of minutes) so the house is at the target when the period starts; before, about 1 recovery in 5 was more than 5 minutes late. On mild days the start can be a little later. A target the equipment cannot reach at the current outdoor temperature starts at the maximum lead (4 hours). The 4-hour maximum stays (longer pre-conditioning is beyond any realistic time-of-use use); when the target looks out of reach even with a full 4-hour run, Climate Advisor now logs a warning (at most once every 6 hours per target) saying the house may not reach it by the window start.
+  - **Unchanged:** with no learned house leak or no outdoor reading, or a leak rate graded below medium confidence, the lead is exactly what it was (a noisy rate can no longer stretch a lead to the 4-hour cap on a mild day).
+  - **Internal:** one shared function (`thermal_lead_time.compute_lead_minutes_from_rate`) now carries the leak term for the TOU bank (Home/Guest and Away/Vacation), the ODE ceiling guard and the nat-vent plan.
+  - **House model on v4 zones:** where the prediction engine in Settings is v4 and has learned your house, the lead comes from v4's own house model (it also counts the walls' thermal mass and the sun) stepped with the equipment fully on against the forecast, not from the leak formula. A heavy, sunny house needs much longer than the formula says, so the bank, the ceiling guard and the pre-cool start earlier there (up to the 4-hour cap). On v3, or while v4 is still learning, the leak formula applies when the house's leak rate has medium or high confidence; below that (including a v4 fit graded low) the lead is the plain formula, exactly as before.
+  - **Internal:** `thermal_lead_time.stepper_lead_minutes` / `stepper_lead_minutes_before` take an engine-neutral `HouseStepper` (`prediction_engines.control_stepper`, supplied by the coordinator as the optional `house_stepper` argument). The goldens `r6b_tou_bank_lead_follows_primary__v4` and `..._heat__v4` were re-derived a third time with different house inputs so the stepped lead lands inside the run and tells v3, the first-order formula and the plain formula apart (cooling window 13:40, heating 14:14; owner approved 2026-11-11).
+- Fix #1519: the nat-vent plan's "start pre-cool at" time now uses your AC's learned cooling rate and the house's leak (on a v4 zone, v4's own house model) instead of always showing a fixed 2-hour lead. Display only; no decision reads it.
+
+## [0.9.27] — 2026-11-11
+
+### Internal
+- **The simulation test harness no longer fills `/tmp` (Issue #1518).** Every headless coordinator built without a `config_dir` left a `ca_sim_coordinator_*` / `ca_sim_multi_zone_*` folder behind; a development container collected about 581,000 of them. The harness now removes each folder with the simulated Home Assistant it belongs to, at process exit at the latest (also at the end of each test session, as a backstop), and sweeps its own folders older than 6 hours that a killed run left; the real-HA test conftest sweeps stale `ca_sim_portion_*` copies the same way, and two unit tests use pytest's temporary folders. The real-HA test tier's 60-second per-test timeout now uses pytest-timeout's `thread` method, so a test that hangs where the default signal cannot reach (seen under heavy load) ends its worker instead of stalling the run for hours (the nightly real-HA job now runs with workers too, so a timeout replaces one worker rather than ending the run). Development and CI hosts only; no change for Home Assistant installs.
 
 ## [0.9.26] — 2026-11-10
 

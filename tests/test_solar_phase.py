@@ -171,12 +171,17 @@ def _indoor_rising_peak_at(
     return values
 
 
+# Issue #1518: one folder for the module's learning stores, removed when the module is torn down (was one leaked
+# mkdtemp per call).
+_TMP_ROOT = __import__("tempfile").TemporaryDirectory(prefix="ca_test_solar_phase_")
+
+
 def _make_learning() -> LearningEngine:
     """Return a fresh LearningEngine instance backed by a temp directory."""
     import tempfile
     from pathlib import Path
 
-    tmp = Path(tempfile.mkdtemp())
+    tmp = Path(tempfile.mkdtemp(dir=_TMP_ROOT.name))
     return LearningEngine(storage_path=tmp)
 
 
@@ -649,7 +654,7 @@ class TestEngineStatus:
         import tempfile
         from pathlib import Path
 
-        tmp = Path(tempfile.mkdtemp())
+        tmp = Path(tempfile.mkdtemp(dir=_TMP_ROOT.name))
         learning = LearningEngine(storage_path=tmp)
 
         # Inject a k_active_heat value directly into the thermal cache
@@ -682,7 +687,7 @@ class TestEngineStatus:
             format_engine_status_for_ai as _format_engine_status_for_ai,
         )
 
-        tmp = Path(tempfile.mkdtemp())
+        tmp = Path(tempfile.mkdtemp(dir=_TMP_ROOT.name))
         learning = LearningEngine(storage_path=tmp)
 
         if learning._state.thermal_model_cache is None:

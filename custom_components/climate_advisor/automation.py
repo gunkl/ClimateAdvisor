@@ -2566,6 +2566,9 @@ class AutomationEngine:
         # prediction-dependent decisions read (the primary prediction engine's; see ``_control_model``). None on a bare
         # engine: the decisions then read the provider's ``thermal_model()`` itself.
         self._control_model_provider: Callable[[dict | None], dict | None] | None = None
+        # Issue #1517: likewise the primary engine's house model (an engine-neutral ``HouseStepper``) for the ceiling
+        # guard's lead time; None on a bare engine or while the primary is still learning.
+        self._control_stepper_provider: Callable[[], Any] | None = None
 
         # Issue #899: away/vacation TOU pre-conditioning — the coordinator's live window
         # (_sync_tou_away_vacation_state(), each cycle), passed in with each decision's facts
@@ -15126,6 +15129,16 @@ class AutomationEngine:
             return base
         return provider(base) or {}
 
+    def _control_stepper(self) -> Any:
+        """The primary engine's house model for lead times (Issue #1517), or None (no provider / still learning)."""
+        provider = getattr(self, "_control_stepper_provider", None)  # getattr: tests build engines via __new__
+        if provider is None:
+            return None
+        try:
+            return provider()
+        except Exception:  # noqa: BLE001 - a lead time never crashes a decision: the formula applies
+            return None
+
     def _build_nat_vent_start_veto_inputs(
         self, *, now: datetime, indoor: float | None, outdoor: float | None
     ) -> NatVentStartVetoInputs:
@@ -17179,6 +17192,7 @@ class AutomationEngine:
                 comfort_cool, house_sealed=self._whf_house_sealed_with_known_sensors()
             ),
             now=dt_util.now(),
+            house_stepper=self._control_stepper(),
         )
         event = ClassificationFsmEvent(kind=ClassificationFsmEventKind.CYCLE_EVALUATED, inputs=inputs)
         return _classification_fsm_transition(event)

@@ -14914,7 +14914,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _cycle_collect(self, closed: list[dict] | None) -> None:
         """Hand cycles the recorder closed to the async processor (store, rejection, refit, save)."""
         if closed:
-            self._spawn(self._cycle_process(list(closed)))
+            coro = self._cycle_process(list(closed))
+            try:
+                self._spawn(coro)
+            except Exception:  # noqa: BLE001 - e.g. no running loop / shutting down: drop, never leak the coroutine
+                coro.close()
+                _LOGGER.debug("cycle processing not scheduled (%d closed cycle(s) dropped)", len(closed), exc_info=True)
 
     def _cycle_flags(self) -> None:
         """Stamp the window/fan/nat-vent state on the open cycles (the recorder keeps only changes). Never raises."""

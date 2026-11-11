@@ -1681,8 +1681,6 @@ REJECT_WINDOW_TOO_SHORT = "window_too_short"
 REJECT_NO_INTERIOR_PEAK = "no_interior_peak"
 REJECT_NO_K_PASSIVE = "no_k_passive"  # no closed-house k_passive yet (solar_gain subtract, HVAC run-edge; #587, #1512)
 # Issue #1512: reasons that used to be free text (or a generic "abandoned"), now real persisted codes.
-REJECT_HVAC_RUN_TOO_SHORT = "hvac_run_too_short"  # run shorter than THERMAL_HVAC_RUN_MIN_MINUTES
-REJECT_HVAC_SIGNAL_BELOW_RESOLUTION = "hvac_signal_below_resolution"  # |T_off - T_on| < max(min signal, 2 x resolution)
 REJECT_NEW_SESSION = "new_session_started"  # another observation session began before this one committed
 REJECT_FAN_ACTIVATED = "fan_activated"  # the fan started and contaminated the observation
 REJECT_HVAC_MODE_SWITCH = "hvac_mode_switch"  # heat <-> cool switched mid-observation
@@ -1697,7 +1695,6 @@ REJECT_CYCLE_THERMOSTAT_UNAVAILABLE = "cycle_thermostat_unavailable"  # thermost
 # Minimum ΔT for single-point k_active estimate (filters sensor noise / no-effect cycles)
 THERMAL_HVAC_MIN_SIGNAL_F: float = 0.5
 # Issue #1512: HVAC run-edge estimator. Minimum run length to learn a rate from (minutes).
-THERMAL_HVAC_RUN_MIN_MINUTES: float = 5
 # Issue #1512/#1516: cycle recorder + store (cycle_recorder.py, cycle_store.py).
 CYCLE_POST_OFF_WINDOW_S: float = (
     45 * 60

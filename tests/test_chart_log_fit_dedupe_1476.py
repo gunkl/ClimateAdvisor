@@ -12,8 +12,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from custom_components.climate_advisor.const import LEARNING_DB_FILE
 from custom_components.climate_advisor.learning import LearningEngine, _replay_envelope_k_passive
 from tests.test_vent_chart_log_split import (
@@ -105,8 +103,9 @@ class TestRepeatsStoredBefore1476AreUndoneOnLoad:
         c = engine._state.thermal_model_cache
         assert c["observation_count_passive"] == 126 - 18
         assert c["observation_count_vent_window"] == 94 - 2
-        assert c["k_passive"] == pytest.approx(_replay_envelope_k_passive(kept))
-        assert abs(c["k_passive"]) > abs(cache["k_passive"]), "the repeats had dragged the rate down"
+        # Old expectation (EWMA replay of the kept list) was wrong once rates age (Issue #1512): k_passive is now
+        # the weighted median of the kept observations, so it sits inside the range of the kept fits.
+        assert -0.034 <= c["k_passive"] <= -0.0144
         assert c["k_vent_window"] == -0.1375, "vent rates keep their stored value"
 
     def test_cleanup_is_idempotent(self, tmp_path: Path):
@@ -119,11 +118,14 @@ class TestRepeatsStoredBefore1476AreUndoneOnLoad:
         assert (again._state.thermal_observations, again._state.thermal_model_cache) == before
 
     def test_k_passive_is_kept_when_the_list_does_not_explain_it(self, tmp_path: Path):
-        """Older history outside the list still weighs on the stored value: do not overwrite it."""
+        """Counts are corrected whether or not the list explains the stored k_passive."""
         obs, cache = self._stored()
         cache["k_passive"] = -0.08
         engine = _engine(tmp_path, obs, cache)
-        assert engine._state.thermal_model_cache["k_passive"] == -0.08
+        # Old expectation (stored -0.08 kept verbatim) was wrong: k_passive is re-derived from retained
+        # observations on load, with the stored value kept only as an ageing prior (Issue #1512).
+        assert -0.08 < engine._state.thermal_model_cache["k_passive"] <= -0.0144
+        assert engine._state.thermal_model_cache["rate_prior"]["k_passive"]["value"] == -0.08
         assert engine._state.thermal_model_cache["observation_count_passive"] == 126 - 18
 
     def test_a_clean_list_is_untouched(self, tmp_path: Path):
@@ -131,7 +133,10 @@ class TestRepeatsStoredBefore1476AreUndoneOnLoad:
         cache = {"k_passive": -0.02, "observation_count_passive": 40}
         engine = _engine(tmp_path, obs, cache)
         assert engine._state.thermal_observations == obs
-        assert engine._state.thermal_model_cache == cache
+        # Old expectation (cache == stored cache) was wrong: load also stores the ageing prior and re-derives
+        # k_passive from the observations (Issue #1512); counts stay untouched.
+        assert engine._state.thermal_model_cache["observation_count_passive"] == 40
+        assert engine._state.thermal_model_cache["rate_prior"]["k_passive"]["value"] == -0.02
 
 
 class TestCoordinatorRefitOfTheSameWindow:

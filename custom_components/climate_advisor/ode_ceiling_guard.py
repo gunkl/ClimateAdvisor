@@ -273,6 +273,7 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
         house_stepper=inputs.house_stepper,
         outdoor_at=lambda _when: inputs.outdoor,
         event_ts=breach_ts,
+        confidence=inputs.confidence_k_passive,  # leak term / house model only on a medium+ fit
     )
 
     if hours_to_breach <= lead_min / 60:

@@ -9815,6 +9815,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _rates = self.control_thermal_model(dict(self._thermal_model or {})) or {}
         _k_cool = _rates.get("k_active_cool")
         _k_passive = _rates.get("k_passive")
+        _conf = _rates.get("confidence_k_passive", _rates.get("confidence", "none"))
         # Issue #1093: the plan's AC-handoff time measures against the ceiling the thermostat is armed
         # with (Prefer savings widens it) -- the engine's single source, not comfort_cool + a margin here.
         _, _armed_ceiling = awake_comfort_edges(
@@ -9835,6 +9836,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 house_stepper=_stepper,
                 k_active_cool=_k_cool,
                 k_passive=_k_passive,
+                confidence_k_passive=_conf,
             )
         else:
             _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
@@ -9851,6 +9853,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 house_stepper=_stepper,
                 k_active_cool=_k_cool,
                 k_passive=_k_passive,
+                confidence_k_passive=_conf,
             )
         self._nat_vent_plan = self._stabilize_nat_vent_cutoff_reason(raw_plan)
 

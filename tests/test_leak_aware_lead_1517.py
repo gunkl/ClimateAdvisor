@@ -38,7 +38,7 @@ def _lead_of(res) -> float:
 
 class TestResolveTouPhase:
     def test_heat_bank_uses_the_leak_at_the_schedule_start(self):
-        model = {"k_active_heat": 3.0, "k_passive": -0.03}
+        model = {"k_active_heat": 3.0, "k_passive": -0.03, "confidence_k_passive": "medium"}
         seen = []
 
         def outdoor_at(when):
@@ -49,16 +49,24 @@ class TestResolveTouPhase:
         assert seen == [_START]  # the forecast is asked for at the period start
         # target is comfort_cool 76, indoor 70 -> 6 F
         expect = compute_lead_minutes_from_rate(
-            6.0, 3.0, **_KW, start_temp=70.0, target_temp=76.0, outdoor_temp=40.0, k_passive=-0.03
+            6.0, 3.0, **_KW, start_temp=70.0, target_temp=76.0, outdoor_temp=40.0, k_passive=-0.03, confidence="medium"
         )
         assert _lead_of(res) == pytest.approx(expect)
         assert expect > compute_lead_minutes_from_rate(6.0, 3.0, **_KW)  # cold outdoor: starts earlier than plain
 
     def test_cool_bank_uses_the_leak(self):
-        model = {"k_active_cool": -4.0, "k_passive": -0.02}
+        model = {"k_active_cool": -4.0, "k_passive": -0.02, "confidence_k_passive": "high"}
         res = resolve_tou_phase([_SCHED], _NOW, 76.0, "cool", model, _CFG, outdoor_at=lambda _w: 95.0)
         expect = compute_lead_minutes_from_rate(
-            8.0, -4.0, **_KW, start_temp=76.0, target_temp=68.0, outdoor_temp=95.0, k_passive=-0.02, cooling=True
+            8.0,
+            -4.0,
+            **_KW,
+            start_temp=76.0,
+            target_temp=68.0,
+            outdoor_temp=95.0,
+            k_passive=-0.02,
+            cooling=True,
+            confidence="high",
         )
         assert _lead_of(res) == pytest.approx(expect)
 
@@ -82,7 +90,15 @@ class TestAwayVacationPhase:
         res = self._resolve("cool", 70.0, outdoor_at=lambda _w: 90.0)
         edge, depth = 80.0, abs(res.target - 80.0)
         expect = compute_lead_minutes_from_rate(
-            depth, -3.0, **_KW, start_temp=edge, target_temp=res.target, outdoor_temp=90.0, k_passive=-0.1, cooling=True
+            depth,
+            -3.0,
+            **_KW,
+            start_temp=edge,
+            target_temp=res.target,
+            outdoor_temp=90.0,
+            k_passive=-0.1,
+            cooling=True,
+            confidence="high",
         )
         assert _lead_of(res) == pytest.approx(expect)
 
@@ -102,6 +118,7 @@ class TestAwayVacationPhase:
             target_temp=res.target,
             outdoor_temp=50.0,
             k_passive=-0.1,
+            confidence="high",
         )
         assert _lead_of(res) == pytest.approx(expect)
 
@@ -128,7 +145,15 @@ class TestOdeCeilingGuard:
     def test_lead_is_leak_aware(self):
         d = decide_ode_ceiling_guard(_guard_inputs())
         expect = compute_lead_minutes_from_rate(
-            4.0, -2.0, **_KW, start_temp=76.0, target_temp=72.0, outdoor_temp=85.0, k_passive=-0.05, cooling=True
+            4.0,
+            -2.0,
+            **_KW,
+            start_temp=76.0,
+            target_temp=72.0,
+            outdoor_temp=85.0,
+            k_passive=-0.05,
+            cooling=True,
+            confidence="medium",
         )
         assert d.lead_min == pytest.approx(expect)
         assert d.lead_min != pytest.approx(4.0 / 2.0 * 60 * 1.3)
@@ -153,9 +178,19 @@ class TestNatVentPlan:
 
     def test_precool_lead_is_leak_aware_and_uses_the_outdoor_at_the_breach(self):
         indoor, outdoor = self._curves(95.0)
-        plan = compute_nat_vent_plan(indoor, outdoor, 76.0, k_active_cool=-2.0, k_passive=-0.05)
+        plan = compute_nat_vent_plan(
+            indoor, outdoor, 76.0, k_active_cool=-2.0, k_passive=-0.05, confidence_k_passive="medium"
+        )
         expect = compute_lead_minutes_from_rate(
-            4.0, -2.0, **_KW, start_temp=76.0, target_temp=72.0, outdoor_temp=95.0, k_passive=-0.05, cooling=True
+            4.0,
+            -2.0,
+            **_KW,
+            start_temp=76.0,
+            target_temp=72.0,
+            outdoor_temp=95.0,
+            k_passive=-0.05,
+            cooling=True,
+            confidence="medium",
         )
         assert (plan["ceiling_breach_time"] - plan["precool_start_time"]).total_seconds() / 60 == pytest.approx(expect)
 

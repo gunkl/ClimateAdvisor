@@ -330,13 +330,19 @@ def compute_nat_vent_plan(
     ceiling: float | None = None,
     k_passive: float | None = None,
     house_stepper: Any = None,
+    confidence_k_passive: str | None = None,
 ) -> dict:
     """Derive warm/mild-day timing events from ODE predicted curves.
 
     Args:
         k_passive: optional (Issue #1517) -- the closed-house rate per hour (negative). With ``k_active_cool`` it
-            makes the pre-cool lead leak-aware, using the forecast outdoor temperature at the breach (the first
-            outdoor entry when the curve has none that late). ``None`` keeps the plain ``delta / rate`` lead.
+            makes the pre-cool lead leak-aware, using the outdoor curve entry NEAREST the breach in time (the
+            first or last entry when the breach lies beyond the curve). ``None`` keeps the plain ``delta / rate``
+            lead. Issue #1519: the coordinator passes the decisions' ``k_active_cool`` / ``k_passive`` /
+            ``confidence_k_passive``; ``briefing.py``'s standalone fallback calls (production hands it the cached
+            plan) pass none of them and so keep the plain lead.
+        confidence_k_passive: optional (Issue #1517) -- the decisions' grade for ``k_passive``. The leak term and the
+            house model are used only when it is ``"medium"`` / ``"high"``; ``None`` = the plain formula.
         house_stepper: optional (Issue #1517) -- the primary engine's own house model (engine-neutral
             ``HouseStepper``). With it the pre-cool lead is stepped through that model (thermal mass, sun) against
             the forecast outdoor curve, ending at the ceiling breach, instead of either formula.
@@ -557,6 +563,7 @@ def compute_nat_vent_plan(
             house_stepper=house_stepper,
             outdoor_at=lambda when: _outdoor_at(predicted_outdoor, when),
             event_ts=result["ceiling_breach_time"],
+            confidence=confidence_k_passive,
         )
         result["precool_start_time"] = result["ceiling_breach_time"] - timedelta(minutes=lead_min)
 

@@ -33,11 +33,16 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
+from homeassistant.util import dt as dt_util
+
 # Issue #1517: safety factor used INSTEAD of the caller's multiplier when the leak term is used. The leak model
 # already covers what the fixed 1.3 was guarding against, so a smaller margin suffices.
 LEAK_SAFETY_MULTIPLIER = 1.15
 # Issue #1517: with an uncertainty (sd) on the rate, plan on |q| - this many sd (a slower rate = an earlier start).
 CAUTIOUS_RATE_SD_FRACTION = 0.5
+# Issue #1517: the leak term and the house-model stepper are only trusted on a model graded at least this ("medium" is
+# v4's "ok"): the same confidence_k_passive gate the away/vacation depth uses. Below it, today's plain formula applies.
+LEAD_MODEL_CONFIDENCES = ("medium", "high")
 # Never plan on less than this share of the learned rate, however large the stated uncertainty.
 _MIN_RATE_SHARE = 0.25
 
@@ -133,7 +138,8 @@ def stepper_lead_minutes(
             out = float(here) if here is not None else out
             if out is None:
                 return None
-            hour = ts.hour + ts.minute / 60.0
+            local = dt_util.as_local(ts)  # the sun term follows the home's clock, not the forecast's UTC
+            hour = local.hour + local.minute / 60.0
             free, mass = stepper.step(t, mass, out, 0.0, 0.0, hour)
             nxt = free + signed
             if (nxt <= target_temp) if cooling else (nxt >= target_temp):
@@ -200,6 +206,7 @@ def compute_lead_minutes_from_rate(
     house_stepper: Any = None,
     outdoor_at: Callable[[datetime], float | None] | None = None,
     event_ts: datetime | None = None,
+    confidence: str | None = None,
 ) -> float:
     """Minutes needed to close ``delta_t`` degrees at the learned ``rate`` (degF/hr).
 
@@ -216,7 +223,16 @@ def compute_lead_minutes_from_rate(
     ``outdoor_at`` (forecast outdoor at a time), ``event_ts`` (when the target must be reached), ``start_temp`` and
     ``target_temp`` are all given, the time comes from stepping that model (``stepper_lead_minutes_before``) instead
     of either formula above, with its own thermal mass and sun; if that cannot be computed the formulas apply.
+
+    Confidence gate (Issue #1517): ``confidence`` is the decision's ``confidence_k_passive`` (the same value the
+    away/vacation depth gates on). Only ``"medium"`` / ``"high"`` (v4's ``ok``) lets the leak term and the house-model
+    stepper run; ``None``, ``"none"`` or ``"low"`` gives exactly the plain formula, so a noisy leak rate or a weak fit
+    can never stretch a lead time on a mild day. This is the one place every consumer (time-of-use bank, ceiling
+    guard, nat-vent plan) takes the rule from.
     """
+    if confidence not in LEAD_MODEL_CONFIDENCES:
+        house_stepper = None
+        k_passive = None
     if (
         house_stepper is not None
         and outdoor_at is not None

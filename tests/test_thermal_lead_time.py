@@ -152,7 +152,7 @@ class TestLeakAwareMinutes:
 
 
 class TestComputeLeadLeakAware:
-    _LEAK = {"start_temp": 62.0, "target_temp": 66.0, "outdoor_temp": 30.0, "k_passive": -0.03}
+    _LEAK = {"start_temp": 62.0, "target_temp": 66.0, "outdoor_temp": 30.0, "k_passive": -0.03, "confidence": "high"}
 
     def test_uses_the_leak_model_and_the_smaller_safety_factor(self):
         raw = leak_aware_minutes(62.0, 66.0, 3.0, -0.03, 30.0)
@@ -160,10 +160,16 @@ class TestComputeLeadLeakAware:
         assert LEAK_SAFETY_MULTIPLIER == 1.15
 
     def test_unreachable_target_returns_the_ceiling(self):
-        assert _lead(21.0, 1.0, start_temp=45.0, target_temp=66.0, outdoor_temp=40.0, k_passive=-0.1) == 240.0
+        assert (
+            _lead(21.0, 1.0, start_temp=45.0, target_temp=66.0, outdoor_temp=40.0, k_passive=-0.1, confidence="high")
+            == 240.0
+        )
 
     def test_floor_applies(self):
-        assert _lead(0.5, 3.0, start_temp=65.5, target_temp=66.0, outdoor_temp=70.0, k_passive=-0.1) == 30.0
+        assert (
+            _lead(0.5, 3.0, start_temp=65.5, target_temp=66.0, outdoor_temp=70.0, k_passive=-0.1, confidence="high")
+            == 30.0
+        )
 
     @pytest.mark.parametrize("missing", ["start_temp", "target_temp", "outdoor_temp", "k_passive"])
     def test_a_missing_input_falls_back_exactly_to_the_plain_formula(self, missing):
@@ -177,7 +183,14 @@ class TestComputeLeadLeakAware:
         assert _lead(4.0, None, **self._LEAK) == 45.0
 
     def test_cooling_flag_selects_the_direction(self):
-        leak = {"start_temp": 98.0, "target_temp": 94.0, "outdoor_temp": 130.0, "k_passive": -0.03, "cooling": True}
+        leak = {
+            "start_temp": 98.0,
+            "target_temp": 94.0,
+            "outdoor_temp": 130.0,
+            "k_passive": -0.03,
+            "cooling": True,
+            "confidence": "high",
+        }
         assert _lead(4.0, -3.0, **leak) == pytest.approx(_lead(4.0, 3.0, **self._LEAK))
 
 
@@ -206,6 +219,7 @@ class TestSimulatedRecoveries:
                             target_temp=start + delta,
                             outdoor_temp=float(outdoor),
                             k_passive=k,
+                            confidence="high",
                         )
                         < true - 5.0
                     )

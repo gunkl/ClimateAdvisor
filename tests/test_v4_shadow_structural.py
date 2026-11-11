@@ -485,6 +485,7 @@ def test_the_shadow_is_never_read_by_a_decision_path() -> None:
             "control_path",
             "control_ready",
             "control_capable",
+            "control_stepper",  # Issue #1517: the house model the lead times step
             "_control_engine",
             "resample_path",
         }:
@@ -494,6 +495,26 @@ def test_the_shadow_is_never_read_by_a_decision_path() -> None:
                 if isinstance(n, ast.Call)
             }
             assert not (called & {"shadow_id", "running_ids"}), f"{fn.name} reads the shadow ({called})"
+
+
+def _registry_from_imports(tree: ast.AST) -> list[str]:
+    """Every ``from .prediction_engines import X`` (alias or not) in a module, as ``line: names``."""
+    return [
+        f"line {n.lineno}: from {'.' * n.level}{n.module} import {', '.join(a.name for a in n.names)}"
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ImportFrom) and n.module is not None and n.module.split(".")[-1] == "prediction_engines"
+    ]
+
+
+def test_the_coordinator_imports_the_registry_only_as_a_module() -> None:
+    """Issue #1517: ``prediction_engines`` is reached as ``prediction_engines.<fn>``, never by a from-import.
+
+    An alias (``from .prediction_engines import control_stepper as _cs``) hides a registry read from
+    ``_selection_refs``, which only sees the module name; 73d1af9 removed exactly that pattern."""
+    assert _registry_from_imports(_tree(_PKG / "coordinator.py")) == []
+    # the check itself: a synthetic alias import in an unlisted method is caught
+    synthetic = ast.parse("from .prediction_engines import control_stepper as _cs\n")
+    assert _registry_from_imports(synthetic) == ["line 1: from .prediction_engines import control_stepper"]
 
 
 def test_the_registry_and_the_timeline_selection_are_display_inputs_only() -> None:

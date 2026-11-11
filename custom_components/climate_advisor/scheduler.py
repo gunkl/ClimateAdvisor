@@ -377,6 +377,7 @@ def resolve_tou_phase(
         house_stepper=house_stepper,
         outdoor_at=outdoor_at,
         event_ts=schedule_start,
+        confidence=thermal_model.get("confidence_k_passive", thermal_model.get("confidence", "none")),
     )
 
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)
@@ -560,6 +561,7 @@ def resolve_tou_away_vacation_phase(
         house_stepper=house_stepper,
         outdoor_at=_outdoor_for_stepper,
         event_ts=schedule_start,
+        confidence=confidence,  # the same gate as the depth above
     )
 
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)

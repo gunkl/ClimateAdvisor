@@ -1,6 +1,6 @@
 {
   "name": "r6b_tou_bank_lead_follows_primary__v4",
-  "description": "A time-of-use peak starts at 16:15. The house is at 72 F and banking toward 68 F means 4 F of cooling. v3's learned rate is slow (1 F per hour); v4's fitted AC is a realistic 3.5 F per hour (2.8 F in the first hour through the house's hidden mass), and on a 90 F afternoon the house leaks heat back in at 0.05 of the gap per hour. Primary engine v4 (v3 is the live comparison engine): the lead comes from v4's OWN house model (thermal mass and sun included), stepped with the AC fully on against the forecast, not from a first-order formula (Issue #1517). That model needs about 289 minutes (332 with the 1.15 safety factor), so the lead hits the 240-minute cap and the bank window opens at 12:15, before this scenario's 13:00 start. The bank is on from the first moment: the thermostat is told 68 F at 13:00 with no 76 F comfort write first, the plan names the 12:15 window, and the 13:05 check and the 14:00 and 14:20 cycles re-assert 68 F.",
+  "description": "A time-of-use peak starts at 16:15. The house is at 72 F and banking toward 68 F means 4 F of cooling. v3's learned rate is slow (1 F per hour); v4's fitted AC is a realistic 3.5 F per hour (3.1 F in the first hour through the house's hidden mass), and on a 90 F afternoon the house leaks heat back in at 0.05 of the gap per hour. Primary engine v4 (v3 is the live comparison engine): the lead comes from v4's OWN house model (thermal mass and a modest sun term included), stepped with the AC fully on against the forecast, not from a first-order formula (Issue #1517). That model needs about 135 minutes (155 with the 1.15 safety factor), so the bank window opens at 13:40, 40 minutes after this scenario starts and 155 minutes before the peak. The same house gives a different start under every other lead: v3's slow rate 12:15 (the 240-minute cap), the first-order leak formula on v4's rates 14:06, the plain delta/rate formula 14:36. Nothing is banked before 13:40, and the thermostat is told 68 F at the 13:44:59 check (the first 5-minute check at or after the window start), not at the 14:00 half-hour cycle.",
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 76,
@@ -40,12 +40,20 @@
       "windows_recommended": false
     },
     {
+      "time": "2026-07-13T13:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "The 13:30 plan cycle (the bank window has not started)."
+    },
+    {
       "time": "2026-07-13T14:00:00",
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "The 14:00 plan cycle."
+      "note": "The 14:00 plan cycle (the bank window opened at 13:40 and is running)."
     },
     {
       "time": "2026-07-13T14:20:00",
@@ -53,7 +61,7 @@
       "day_type": "hot",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "The 14:20 plan cycle (the bank window opened at 12:15 and is still running)."
+      "note": "The 14:20 plan cycle."
     },
     {
       "time": "2026-07-13T14:28:00",
@@ -65,39 +73,35 @@
   ],
   "assertions": [
     {
-      "at": "2026-07-13T13:01:00",
-      "expect": "tou_precondition_applied",
-      "tou_precondition": {
-        "schedule_id": "peak1",
-        "target": 68.0,
-        "mode": "cool"
-      },
-      "reason": "The window (12:15) is already open when the scenario starts, so the bank applies at once."
+      "at": "2026-07-13T13:39:00",
+      "expect": "tou_precondition_not_applied",
+      "reason": "Before the window opens nothing is banked."
     },
     {
-      "at": "2026-07-13T13:01:00",
+      "at": "2026-07-13T13:39:00",
       "expect": "setpoint_writes",
       "since": "2026-07-13T12:59:00",
       "values": [
-        68.0
+        76.0,
+        76.0
       ],
-      "reason": "The 13:00 setup tells the thermostat the 68 F bank setpoint, with no 76 F comfort write before the bank (issue #1393)."
-    },
-    {
-      "at": "2026-07-13T14:00:30",
-      "expect": "setpoint_writes",
-      "since": "2026-07-13T13:59:59",
-      "values": [
-        68.0
-      ],
-      "reason": "The 14:00 cycle inside the open bank re-asserts the 68 F bank setpoint once, without the 76 F comfort setpoint first."
+      "reason": "Until the window opens the thermostat is only told the comfort setpoint (the 13:00 setup and the 13:30 cycle)."
     },
     {
       "at": "2026-07-13T14:28:00",
       "expect": "field_equals",
       "field": "engine_state._next_action.tou_window.start",
-      "value": "12:15",
-      "reason": "The window the plan shows starts at the 240-minute cap: v4's own house model needs about 289 minutes (332 with the safety factor) to bank 4 F on this 90 F afternoon (Issue #1517; the first-order leak lead said 13:42, the leak-unaware lead 14:24, a v3 rate 12:15, the 45-minute default 15:30)."
+      "value": "13:40",
+      "reason": "The window the plan shows starts 155 minutes before the 16:15 peak, from v4's own house model: v3's rate would start at 12:15 (240-minute cap), the first-order leak lead at 14:06, the plain formula at 14:36, the 45-minute default at 15:30."
+    },
+    {
+      "at": "2026-07-13T13:50:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-13T13:40:00",
+      "values": [
+        68.0
+      ],
+      "reason": "The thermostat is told 68 F at the first 5-minute check at or after the window start (13:44:59), with no comfort write before it, not at the 14:00 half-hour cycle."
     },
     {
       "at": "2026-07-13T14:28:00",
@@ -114,6 +118,7 @@
       "expect": "field_equals",
       "field": "engine_state._next_action.timeline.ca_steps",
       "value": [
+        "13:40 precool_start",
         "22:30 sleep_band",
         "02:30 precool_start",
         "06:00 briefing_send",
@@ -122,14 +127,14 @@
         "06:30 mode_change",
         "06:30 wake_band"
       ],
-      "reason": "The plan list has no pre-cool step: the window opened at 12:15, before now, so it is already running."
+      "reason": "The plan list names the same 13:40 start the thermostat acted on."
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "The time-of-use bank opens by the primary engine (v4) house model, and the plan and the thermostat agree on when",
-    "observed_behavior": "Window 12:15 (the 240-minute cap; v4's model needs about 289 min raw, 332 min with the safety factor); 68 F written at 13:00 and re-asserted at 13:04:59, 14:00 and 14:20, with no 76 F comfort write before the bank.",
-    "expected_behavior": "The house is banked when the peak starts: the lead is v4's own house model (thermal mass, sun, leak), which sees what a first-order formula misses on a hot afternoon (Issue #1517). Re-derived 2026-11-11 with the owner's approval (second re-derivation for #1517): the previous 13:42 start (153 min, first-order leak formula) was too late for v4's model, which needs about 289 min raw / 332 min with the 1.15 safety factor; the 240-minute cap now applies (the owner estimated about 315). Even the cap is shorter than the model's need - tracked separately."
+    "observed_behavior": "Window 13:40 (v4's house model needs about 135 min raw, 155 min with the 1.15 safety factor); nothing banked before it; first 68 F written at the 13:44:59 check, not at the 14:00 cycle.",
+    "expected_behavior": "The AC is not run for hours more than the house needs before a peak price period, and the house is banked when the peak starts: the lead is v4's own house model (thermal mass, sun, leak), which sees what a first-order formula misses on a hot afternoon (Issue #1517). Re-derived 2026-11-11 with the owner's approval (third re-derivation for #1517): the inputs changed (hidden-mass coupling 0.6 to 0.3, sun 0.7 to 0.2) so that v4's stepped lead lands inside the run, below the 240-minute cap, and this golden tells the engines apart again. The earlier inputs put every lead at the cap, identical to the v3 twin, so a regression to v3's rate or to the first-order formula would have passed."
   },
   "thermal_model": {
     "confidence": "high",
@@ -143,7 +148,8 @@
     "house": {
       "a_o": 0.05,
       "q_c": 3.5,
-      "q_h": 3.5
+      "c_hm": 0.3,
+      "s": 0.2
     }
   },
   "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions), redesigned per the independent review; DP-11 pending, unsigned",

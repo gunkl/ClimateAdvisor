@@ -162,6 +162,7 @@ class TestComputeLeadUsesStepper:
             "target_temp": 66.0,
             "outdoor_temp": 40.0,
             "k_passive": -0.03,
+            "confidence": "medium",
             "house_stepper": self._STEP,
             "outdoor_at": lambda _w: 40.0,
             "event_ts": _START,
@@ -187,7 +188,14 @@ class TestComputeLeadUsesStepper:
     def test_missing_outdoor_forecast_keeps_the_formula(self):
         plain = compute_lead_minutes_from_rate(6.0, 3.0, **_KW)
         got = compute_lead_minutes_from_rate(
-            6.0, 3.0, **_KW, start_temp=60.0, target_temp=66.0, house_stepper=self._STEP, event_ts=_START
+            6.0,
+            3.0,
+            **_KW,
+            start_temp=60.0,
+            target_temp=66.0,
+            house_stepper=self._STEP,
+            event_ts=_START,
+            confidence="high",
         )
         assert got == pytest.approx(plain)
 
@@ -200,7 +208,7 @@ class TestSchedulerConsumers:
     _STEP = make_stepper(k=0.0)
 
     def test_tou_phase_uses_the_stepper_when_supplied(self):
-        model = {"k_active_heat": 3.0, "k_passive": -0.03}
+        model = {"k_active_heat": 3.0, "k_passive": -0.03, "confidence_k_passive": "medium"}
         with_s = resolve_tou_phase(
             [_SCHED], _NOW, 70.0, "heat", model, _CFG, outdoor_at=lambda _w: 40.0, house_stepper=self._STEP
         )
@@ -208,7 +216,14 @@ class TestSchedulerConsumers:
         assert _lead_of(with_s) == pytest.approx(90.0 * 1.15)  # 70 -> 76 at 1 F per step
         assert _lead_of(without) == pytest.approx(
             compute_lead_minutes_from_rate(
-                6.0, 3.0, **_KW, start_temp=70.0, target_temp=76.0, outdoor_temp=40.0, k_passive=-0.03
+                6.0,
+                3.0,
+                **_KW,
+                start_temp=70.0,
+                target_temp=76.0,
+                outdoor_temp=40.0,
+                k_passive=-0.03,
+                confidence="medium",
             )
         )
 
@@ -218,7 +233,7 @@ class TestSchedulerConsumers:
             _NOW,
             76.0,
             "cool",
-            {"k_active_cool": -4.0, "k_passive": -0.02},
+            {"k_active_cool": -4.0, "k_passive": -0.02, "confidence_k_passive": "medium"},
             _CFG,
             outdoor_at=lambda _w: 95.0,
             house_stepper=self._STEP,
@@ -283,7 +298,15 @@ class TestOdeCeilingGuardConsumer:
         assert with_s == pytest.approx(60.0 * 1.15)
         assert without == pytest.approx(
             compute_lead_minutes_from_rate(
-                4.0, -2.0, **_KW, start_temp=76.0, target_temp=72.0, outdoor_temp=85.0, k_passive=-0.05, cooling=True
+                4.0,
+                -2.0,
+                **_KW,
+                start_temp=76.0,
+                target_temp=72.0,
+                outdoor_temp=85.0,
+                k_passive=-0.05,
+                cooling=True,
+                confidence="medium",
             )
         )
         assert with_s != pytest.approx(without)
@@ -313,15 +336,31 @@ class TestNatVentPlanConsumer:
     def test_precool_lead_is_stepped_when_a_stepper_is_supplied(self):
         indoor, outdoor = self._curves()
         plan = compute_nat_vent_plan(
-            indoor, outdoor, 76.0, k_active_cool=-2.0, k_passive=-0.05, house_stepper=make_stepper(k=0.0)
+            indoor,
+            outdoor,
+            76.0,
+            k_active_cool=-2.0,
+            k_passive=-0.05,
+            house_stepper=make_stepper(k=0.0),
+            confidence_k_passive="medium",
         )
         assert self._gap(plan) == pytest.approx(60.0 * 1.15)  # 76 -> 72 at 1 F per step
 
     def test_without_a_stepper_the_leak_aware_lead_stands(self):
         indoor, outdoor = self._curves()
-        plan = compute_nat_vent_plan(indoor, outdoor, 76.0, k_active_cool=-2.0, k_passive=-0.05)
+        plan = compute_nat_vent_plan(
+            indoor, outdoor, 76.0, k_active_cool=-2.0, k_passive=-0.05, confidence_k_passive="medium"
+        )
         expect = compute_lead_minutes_from_rate(
-            4.0, -2.0, **_KW, start_temp=76.0, target_temp=72.0, outdoor_temp=90.0, k_passive=-0.05, cooling=True
+            4.0,
+            -2.0,
+            **_KW,
+            start_temp=76.0,
+            target_temp=72.0,
+            outdoor_temp=90.0,
+            k_passive=-0.05,
+            cooling=True,
+            confidence="medium",
         )
         assert self._gap(plan) == pytest.approx(expect)
 

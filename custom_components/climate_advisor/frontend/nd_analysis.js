@@ -16,8 +16,9 @@
     ols_bad_fit: 'Reading was too noisy to trust', poor_fit: 'Reading was too noisy to trust', state_changed: 'HVAC, fan, or window state changed mid-window',
     outlier: 'Result was an outlier vs prior measurements', abandoned: 'Measurement interrupted',
     cycle_too_short: 'Heating or cooling cycle was too short to measure', cycle_signal_below_resolution: 'Room moved fewer than three sensor steps, too little to show a rate',
-    cycle_excluded_window_fan: 'A window was open or the fan ran during the cycle', cycle_setpoint_change: 'The setpoint changed during the cycle',
+    cycle_excluded_window_fan: 'A window was open or the fan ran during the cycle', cycle_setpoint_change: 'The setpoint changed and the run before the change was too short to measure',
     cycle_gap_restart: 'A restart cut the cycle short', cycle_thermostat_unavailable: 'The thermostat was unavailable during the cycle',
+    cycle_no_off_edge: 'The cycle had no end to measure to', cycle_sensor_swap: 'Recorded on an earlier indoor sensor than the one in use now',
     hvac_run_too_short: 'Heating or cooling run was too short to measure (old method)', hvac_signal_below_resolution: 'Room temperature moved less than the sensor can reliably show (old method)',
     no_k_passive: 'House leak rate not learned yet, so this run\'s rate could not be separated', new_session_started: 'A new run started before this one could be measured',
     fan_activated: 'The fan started during the run', hvac_mode_switch: 'Heat and cool switched during the run', ols_bounds: 'Result was outside the believable range'

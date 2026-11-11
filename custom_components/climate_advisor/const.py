@@ -1688,13 +1688,14 @@ REJECT_HVAC_MODE_SWITCH = "hvac_mode_switch"  # heat <-> cool switched mid-obser
 REJECT_CYCLE_TOO_SHORT = "cycle_too_short"  # run shorter than THERMAL_CYCLE_MIN_RUN_MIN
 REJECT_CYCLE_SIGNAL_BELOW_RESOLUTION = "cycle_signal_below_resolution"  # reading moved < 3 resolution steps
 REJECT_CYCLE_EXCLUDED_WINDOW_FAN = "cycle_excluded_window_fan"  # window open / fan / nat-vent during the cycle
-REJECT_CYCLE_SETPOINT_CHANGE = "cycle_setpoint_change"  # setpoint changed inside the cycle window
+REJECT_CYCLE_SETPOINT_CHANGE = "cycle_setpoint_change"  # setpoint changed: the run portion was too short to qualify
 REJECT_CYCLE_GAP_RESTART = "cycle_gap_restart"  # Home Assistant restarted mid-cycle (only the pre-gap part is usable)
 REJECT_CYCLE_THERMOSTAT_UNAVAILABLE = "cycle_thermostat_unavailable"  # thermostat unavailable/unknown mid-cycle
+REJECT_CYCLE_NO_OFF_EDGE = "cycle_no_off_edge"  # no off edge and no usable run portion to end the cycle on
+REJECT_CYCLE_SENSOR_SWAP = "cycle_sensor_swap"  # recorded on an earlier indoor sensor than the pool's current one
 
 # Minimum ΔT for single-point k_active estimate (filters sensor noise / no-effect cycles)
 THERMAL_HVAC_MIN_SIGNAL_F: float = 0.5
-# Issue #1512: HVAC run-edge estimator. Minimum run length to learn a rate from (minutes).
 # Issue #1512/#1516: cycle recorder + store (cycle_recorder.py, cycle_store.py).
 CYCLE_POST_OFF_WINDOW_S: float = (
     45 * 60
@@ -1704,7 +1705,14 @@ CYCLE_MAX_OUTDOOR: int = 200  # outdoor points kept per cycle
 CYCLE_RETENTION_DAYS: int = 90  # stored cycles older than this are pruned
 CYCLE_MAX_STORED: int = 3000  # hard cap on stored cycles (oldest dropped first)
 CYCLE_STORE_PRUNE_INTERVAL_S: float = 3600  # pruning runs at most this often
-CYCLE_STORE_VERSION: int = 1  # "v" key of the cycle file
+CYCLE_STORE_VERSION: int = 2  # "v" key of the cycle file (2: per-cycle decimal places; a v1 file is migrated on load)
+CYCLE_STORE_SAVE_INTERVAL_S: float = 1800  # the cycle file is written at most this often (+ at HA stop / unload)
+# A setpoint change during a run ends the run; an off edge (or mode switch) this soon after it is the run's real end.
+CYCLE_SETPOINT_OFF_WINDOW_S: float = 60
+# Refit throttle (Pi CPU): a mode is refitted at most this often, sooner once this many new eligible cycles wait or
+# when it has nothing learned yet; always once at startup (stored cycles, current prior).
+CYCLE_REFIT_MIN_INTERVAL_S: float = 1800
+CYCLE_REFIT_MIN_NEW_ELIGIBLE: int = 3
 CYCLE_FLAG_RUNNING = 1  # sample flag bits (cycle dict contract, SPEC2 Components 1)
 CYCLE_FLAG_WINDOWS = 2
 CYCLE_FLAG_FAN = 4
@@ -1719,7 +1727,6 @@ THERMAL_CYCLE_MOVE_STEPS: float = 3.0  # ... and the robust reading movement >= 
 THERMAL_CYCLE_MOVE_WINDOW_AFTER_OFF_MIN: float = 3.0  # movement is measured in [on, off + this] (minutes)
 THERMAL_CYCLE_COARSE_RES_F: float = 0.5  # pools with resolution >= this are "coarse" (k pinned, never grade high)
 THERMAL_CYCLE_K_FREE_AFTER: int = 3  # fine pools: k pinned at the prior until this many eligible cycles
-THERMAL_CYCLE_K_SD_PINNED: float = 0.004  # prior sd on k while pinned
 THERMAL_CYCLE_COARSE_EVID_N: int = 3  # coarse pools: variance inflated by (this/ne)^2 when ne is smaller
 THERMAL_CYCLE_DEFF_FINE_MULT: float = 0.5  # calibrated deff multiplier, fine pools (coarse: 1.0)
 THERMAL_CYCLE_PLATEAU_MIN: float = 10.0  # final level held >= this long before off -> effective off = first reached
@@ -1732,7 +1739,6 @@ THERMAL_CYCLE_HUBER_K: float = 1.345  # Huber threshold in sigmas
 THERMAL_CYCLE_SIGMA_FLOOR_RES_FRAC: float = 0.3  # sigma floor = max(this * res, THERMAL_CYCLE_SIGMA_FLOOR_MIN_F)
 THERMAL_CYCLE_SIGMA_FLOOR_MIN_F: float = 0.05
 THERMAL_CYCLE_SIGMA_INIT_ADD_F: float = 0.1  # initial sigma = max(floor, 0.3 * res + this)
-THERMAL_CYCLE_ROBUST_RES_FRAC: float = 0.6  # robust scale = max(MAD, this * res)
 THERMAL_CYCLE_MAD_SCALE: float = 1.4826
 # Honest-variance inflation (deff) d = a + b / (1 + (L / c) ** p), L = total run hours (p 2) / longest run hours (p 3).
 THERMAL_CYCLE_DEFF_L_Q: tuple[float, float, float] = (2.0, 6.0, 0.35)

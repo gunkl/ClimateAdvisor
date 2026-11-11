@@ -60,7 +60,14 @@ from .hvac_action import is_hvac_action_active
 from .remote_offset import remote_offset_lines, remote_offset_view_for
 from .setpoint_combinations import vacation_edges
 from .swing import swing_tolerance, thermostat_holds_direction, within_thermostat_hysteresis
-from .temperature import UNIT_SYMBOL, display_temp, format_temp, format_temp_delta, read_attribute_temp_f
+from .temperature import (
+    UNIT_SYMBOL,
+    convert_delta,
+    display_temp,
+    format_temp,
+    format_temp_delta,
+    read_attribute_temp_f,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -839,10 +846,12 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                 f"  confidence:                {thermal.get('confidence', 'unknown')}",
                 f"  observation_count_heat:    {thermal.get('observation_count_heat', 'unknown')}",
                 f"  observation_count_cool:    {thermal.get('observation_count_cool', 'unknown')}",
-                "  NOTE — these are all-time cumulative counters (confidence-grading input), not",
-                "  the live committed/rejected counts shown in THERMAL OBSERVATION PIPELINE below,",
-                "  which are windowed to 90 days and capped. A large gap between them is expected",
-                "  on installs with enough history and does not indicate lost data (Issue #586).",
+                "  NOTE — these are the evidence behind the heating/cooling rates (the confidence-",
+                "  grading input): the cumulative pre-upgrade count, fading by half every 21 days,",
+                "  plus the cycle model's informative cycles (Issue #1512). They are not the live",
+                "  committed/rejected counts shown in THERMAL OBSERVATION PIPELINE below, which are",
+                "  windowed to 90 days and capped. A large gap between them is expected on installs",
+                "  with enough history and does not indicate lost data (Issue #586).",
                 *_swing_context_lines(thermal, getattr(coordinator, "config", None) or {}),
                 "",
             ]
@@ -996,6 +1005,8 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
         "cycle_setpoint_change",
         "cycle_gap_restart",
         "cycle_thermostat_unavailable",
+        "cycle_no_off_edge",
+        "cycle_sensor_swap",
         "hvac_run_too_short",  # historical (retired per-run estimator)
         "hvac_signal_below_resolution",  # historical (retired per-run estimator)
         "no_k_passive",  # historical
@@ -1083,6 +1094,9 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
             )
             if isinstance(r, dict) and r.get("source") == "cycle"
         ]
+        # rows carry q / sd_q in the display unit per hour and coast_area_f as a degF delta (_cycle_model_rows)
+        _unit = (getattr(coordinator, "config", None) or {}).get("temp_unit", "fahrenheit")
+        _sym = UNIT_SYMBOL.get(_unit, "°F")
         for r in crow:
             val = r.get("value") if isinstance(r.get("value"), dict) else r
             mode = r.get("mode") or ("cool" if "cool" in str(r.get("key", "")) else "heat")
@@ -1093,9 +1107,10 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
             parts = [f"{mode} rate {q:.2f}"]
             if isinstance(sd, (int, float)) and not isinstance(sd, bool):
                 parts[0] += f" +/- {sd:.2f}"
+            parts[0] += f" {_sym}/h"
             parts.append(f"grade {grade or 'none'}")
             if isinstance(area, (int, float)) and not isinstance(area, bool):
-                parts.append(f"coast after a run {area:+.2f} deg")
+                parts.append(f"coast after a run {convert_delta(area, _unit):+.2f} {_sym}")
             if val.get("ne") is not None:
                 parts.append(f"{val.get('ne')} informative cycles")
             lines.append("  cycle model: " + ", ".join(parts))

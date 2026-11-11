@@ -5,9 +5,11 @@ REJECT_LABELS = {
     "cycle_too_short": "cycle too short to measure",
     "cycle_signal_below_resolution": "room moved fewer than three sensor steps",
     "cycle_excluded_window_fan": "a window was open or the fan ran during the cycle",
-    "cycle_setpoint_change": "the setpoint changed during the cycle",
+    "cycle_setpoint_change": "the setpoint changed and the run before the change was too short to measure",
     "cycle_gap_restart": "a restart cut the cycle",
     "cycle_thermostat_unavailable": "the thermostat was unavailable during the cycle",
+    "cycle_no_off_edge": "the cycle had no end to measure to (no off edge and no usable run part)",
+    "cycle_sensor_swap": "recorded on an earlier indoor sensor than the one in use now",
     # Historical: the per-run estimator that wrote these is retired; old entries keep them until they age out.
     "hvac_run_too_short": "run too short to measure (historical)",
     "hvac_signal_below_resolution": "room moved less than the sensor can reliably show (historical)",

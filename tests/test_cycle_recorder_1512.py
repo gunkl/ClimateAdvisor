@@ -107,15 +107,76 @@ def test_mode_switch_while_running_closes_with_no_off(mode: str) -> None:
 
 
 @MODES
-def test_setpoint_change_closes_running_and_coasting_cycles(mode: str) -> None:
+def test_setpoint_change_keeps_the_run_that_continues_through_it(mode: str) -> None:
+    """Issue #1512 finding 3: a run that goes on after a setpoint change keeps its part up to the change (no off
+    edge, no coast invented) and the rest is a continuation cycle chasing the new setpoint. The old recorder threw
+    the whole run away as "setpoint_change", so every commanded change mid-run lost a cycle."""
     rec = CycleRecorder(True)
     rec.on_edge(T0, mode, 68.0, 40.0, 70.0)
-    (c,) = rec.setpoint_change(T0 + 100)
-    assert (c["t_off"], c["cut"]) == (None, "setpoint_change")
+    for m in range(1, 6):
+        rec.reading(T0 + 60 * m, 68.0 + SIGN[mode] * 0.1 * m, "sensor.hall")
+    assert rec.setpoint_change(T0 + 330, 72.0) == []  # nothing closes inside the window
+    rec.reading(T0 + 360, 68.0 + SIGN[mode] * 0.6, "sensor.hall")
+    (first,) = rec.reading(T0 + 420, 68.0 + SIGN[mode] * 0.7, "sensor.hall")  # window over: the split happens
+    assert (first["t_on"], first["t_off"], first["cut"]) == (T0, None, "setpoint_change")
+    assert first["samples"][-1][0] == T0 + 330 and len(first["samples"]) == 7
+    assert rec.is_running(mode)
+    rec.off_edge(T0 + 600, 68.0 + SIGN[mode] * 1.0)
+    (cont,) = rec.tick(T0 + 600 + CYCLE_POST_OFF_WINDOW_S)
+    assert (cont["t_on"], cont["t_off"], cont["cut"], cont["setpoint_f"]) == (T0 + 330, T0 + 600, None, 72.0)
+    assert [s[0] for s in cont["samples"]][:3] == [T0 + 330, T0 + 360, T0 + 420]
+    assert cont["samples"][0][2] & CYCLE_FLAG_RUNNING and cont["entity"] == "sensor.hall"
+    assert cont["id"] != first["id"]
+
+
+@MODES
+@pytest.mark.parametrize("delay", [0.0, 20.0, 60.0])
+def test_setpoint_then_action_keeps_the_run_to_the_action_edge(mode: str, delay: float) -> None:
+    """The normal order of a commanded stop: the setpoint first, the equipment stops seconds later (0 = one event)."""
+    rec = CycleRecorder(True)
+    rec.on_edge(T0, mode, 68.0, 40.0, 70.0)
+    for m in range(1, 6):
+        rec.reading(T0 + 60 * m, 68.0 + SIGN[mode] * 0.1 * m, "sensor.hall")
+    rec.setpoint_change(T0 + 330, 66.0)
+    (c,) = rec.off_edge(T0 + 330 + delay, 68.0 + SIGN[mode] * 0.55)
+    assert (c["t_on"], c["t_off"], c["cut"]) == (T0, T0 + 330 + delay, "setpoint_change")
+    assert c["samples"][-1][0] == T0 + 330 + delay and not c["samples"][-1][2] & CYCLE_FLAG_RUNNING
+    assert rec.open_modes == []  # the post-change coast is not recorded
+
+
+@MODES
+def test_action_then_setpoint_and_later_coast_changes_keep_run_and_coast_so_far(mode: str) -> None:
+    rec = CycleRecorder(True)
+    _run(rec, mode, T0)
+    rec.reading(T0 + 380, 68.0 + SIGN[mode] * 0.65, "sensor.hall")
+    (c,) = rec.setpoint_change(T0 + 380)  # 20 s after the off edge
+    assert (c["t_off"], c["cut"]) == (T0 + 360, "setpoint_change") and c["samples"][-1][0] == T0 + 380
     _run(rec, mode, T0 + 1000)
-    (c2,) = rec.setpoint_change(T0 + 1000 + 360 + 600)
+    (c2,) = rec.setpoint_change(T0 + 1000 + 360 + 600)  # well into the coast: closes there (coast so far kept)
     assert (c2["t_off"], c2["cut"]) == (T0 + 1360, "setpoint_change")
     assert rec.setpoint_change(T0 + 99999) == []
+
+
+@MODES
+def test_setpoint_change_then_mode_switch_ends_the_run_at_the_switch(mode: str) -> None:
+    other = "cool" if mode == "heat" else "heat"
+    rec = CycleRecorder(True)
+    rec.on_edge(T0, mode, 68.0, 40.0, 70.0)
+    rec.setpoint_change(T0 + 300)
+    (c,) = rec.on_edge(T0 + 310, other, 68.4, 40.0, 70.0)
+    assert (c["mode"], c["t_off"], c["cut"]) == (mode, T0 + 310, "setpoint_change")
+    assert rec.open_modes == [other]
+
+
+@MODES
+def test_gap_inside_the_setpoint_window_keeps_the_run_up_to_the_change(mode: str) -> None:
+    rec = CycleRecorder(True)
+    rec.on_edge(T0, mode, 68.0, 40.0, 70.0)
+    rec.reading(T0 + 60, 68.0 + SIGN[mode] * 0.1, "sensor.hall")
+    rec.setpoint_change(T0 + 300)
+    (c,) = rec.gap(T0 + 320, "restart")
+    assert (c["t_off"], c["cut"]) == (None, "setpoint_change") and c["samples"][-1][0] == T0 + 300
+    assert rec.open_modes == []
 
 
 @MODES

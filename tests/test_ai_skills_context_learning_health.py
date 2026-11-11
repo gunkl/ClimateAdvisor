@@ -140,8 +140,24 @@ class TestRunRejectionCodesClassified:
             },
             {"key": "k_passive", "source": "v3", "value": -0.1},
         ]
+        coord.config = {"temp_unit": "fahrenheit"}
         ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
+        # Issue #1512 verifier nit: units named (the old "deg" left the reader guessing which scale)
         assert (
-            "cycle model: heat rate 7.50 +/- 1.20, grade medium, coast after a run +0.40 deg, 6 informative cycles"
+            "cycle model: heat rate 7.50 +/- 1.20 °F/h, grade medium, coast after a run +0.40 °F, 6 informative cycles"
             in ctx
         )
+
+    def test_cycle_rows_coast_follows_the_display_unit(self):
+        """The rows carry q in the display unit already but the coast as a degF delta: the coast is converted."""
+        coord = _make_coordinator({})
+        coord.config = {"temp_unit": "celsius"}
+        coord.decision_rates_summary.return_value = [
+            {
+                "key": "cycle_heat",
+                "source": "cycle",
+                "value": {"q": 4.17, "sd_q": 0.67, "grade": "medium", "coast_area_f": 0.9, "ne": 6},
+            },
+        ]
+        ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
+        assert "heat rate 4.17 +/- 0.67 °C/h, grade medium, coast after a run +0.50 °C" in ctx

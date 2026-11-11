@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 
 try:
     from .const import (
+        CYCLE_RETENTION_DAYS,
         MIN_THERMAL_OBSERVATIONS,
         THERMAL_HVAC_CONF_HIGH,
         THERMAL_HVAC_CONF_MEDIUM,
@@ -31,6 +32,7 @@ except ImportError:  # loaded by path from tools/ (no package)
     _spec = _ilu.spec_from_file_location("_ca_const_standalone", _Path(__file__).with_name("const.py"))
     _const = _ilu.module_from_spec(_spec)  # type: ignore[arg-type]
     _spec.loader.exec_module(_const)  # type: ignore[union-attr]
+    CYCLE_RETENTION_DAYS = _const.CYCLE_RETENTION_DAYS
     MIN_THERMAL_OBSERVATIONS = _const.MIN_THERMAL_OBSERVATIONS
     THERMAL_HVAC_CONF_HIGH = _const.THERMAL_HVAC_CONF_HIGH
     THERMAL_HVAC_CONF_MEDIUM = _const.THERMAL_HVAC_CONF_MEDIUM
@@ -57,6 +59,83 @@ def drop_stored_grades(cache: dict) -> bool:
 
 def _num(v: object) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _fade(stamp: object, now: datetime | None) -> float:
+    """``0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS)`` of an ISO stamp (an unreadable stamp is age 0)."""
+    try:
+        then = datetime.fromisoformat(str(stamp))
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=UTC)
+        age_days = max(0.0, ((now or datetime.now(UTC)) - then).total_seconds() / 86400.0)
+    except ValueError, TypeError:
+        age_days = 0.0
+    return 0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS)
+
+
+def _legacy_hvac_evidence(cache: dict, mode: str, now: datetime | None) -> float:
+    """Evidence behind the pre-upgrade heat/cool rate: ``rate_prior`` n, fading on the 21-day schedule (#1512).
+
+    A mode with no prior entry (a pre-upgrade cache, or no cached rate at upgrade) reads its observation counter."""
+    rp = cache.get("rate_prior")
+    rec = rp.get(f"k_active_{mode}") if isinstance(rp, dict) else None
+    if not isinstance(rec, dict) or not _num(rec.get("value")):
+        v = cache.get(f"observation_count_{mode}", 0)
+        return float(v) if _num(v) and v > 0 else 0.0
+    n = rec.get("n")
+    n = float(n) if _num(n) and n > 0 else 1.0
+    return n * _fade(rec.get("ts"), now)
+
+
+def _cycle_hvac_evidence(cache: dict, mode: str, now: datetime | None) -> float:
+    """Evidence the pooled cycle model adds: its eligible cycles' age weights, fading since the fit (#1512).
+
+    A held fit (its cycles left the pool: a sensor swap, or they aged past the retention) still counts, fading, while
+    no fit has replaced it (no eligible cycle now) or while it is the prior the current fit was weighed against."""
+    fit = cache.get(f"cycle_fit_{mode}")
+    if not isinstance(fit, dict):
+        return 0.0
+    ne = fit.get("ne")
+    ne = float(ne) if _num(ne) and ne > 0 else 0.0
+    w = fit.get("ne_w")
+    w = float(w) if _num(w) and w >= 0 else ne
+    out = w * _fade(fit.get("fitted_at"), now) if ne else 0.0
+    held = fit.get("held")
+    if isinstance(held, dict) and (not ne or fit.get("prior_source") == "held"):
+        hw = held.get("ne_w")
+        out += (float(hw) if _num(hw) and hw >= 0 else 1.0) * _fade(held.get("at"), now)
+    return out
+
+
+def hvac_evidence_count(cache: dict, mode: str, now: datetime | None = None) -> float:
+    """Effective evidence behind the ``mode`` ("heat"/"cool") rate (Issue #1512 verifier finding 2).
+
+    The legacy evidence carried at upgrade (``rate_prior["k_active_<mode>"]["n"]``, halved every
+    THERMAL_RATE_HALF_LIFE_DAYS) plus the cycle model's eligible cycles (``_cycle_hvac_evidence``). Nothing is
+    reset: at upgrade the evidence equals the old observation count, and it declines only as the old evidence ages
+    out without new cycles replacing it. ``observation_count_<mode>`` is the legacy counter (the cycle model never
+    rewrites it); it is the legacy evidence only for a mode with no ``rate_prior`` entry."""
+    if not isinstance(cache, dict):
+        return 0.0
+    return _legacy_hvac_evidence(cache, mode, now) + _cycle_hvac_evidence(cache, mode, now)
+
+
+def _count_tier(total: float) -> str:
+    if total < MIN_THERMAL_OBSERVATIONS:
+        return "none"
+    if total < THERMAL_HVAC_CONF_MEDIUM:
+        return "low"
+    if total < THERMAL_HVAC_CONF_HIGH:
+        return "medium"
+    return "high"
+
+
+def _fit_agrees_with_prior(fit: dict) -> bool:
+    """The data did not move q more than two prior sds: the carried evidence still backs the rate."""
+    q, pq, psd = fit.get("q"), fit.get("prior_q"), fit.get("prior_sd_q")
+    if not (_num(q) and _num(pq) and _num(psd)) or psd <= 0:
+        return True  # nothing to compare against: keep the carried evidence (never a drop from bookkeeping)
+    return abs(float(q) - float(pq)) <= 2.0 * float(psd)
 
 
 def passive_evidence_count(cache: dict, now: datetime | None = None) -> float:
@@ -106,27 +185,39 @@ def grade_passive_confidence(cache: dict, now: datetime | None = None) -> str:
 _CYCLE_GRADE_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
 
 
-def grade_hvac_confidence(cache: dict) -> str:
-    """Confidence tier for the HVAC rates (k_active_heat/k_active_cool).
+def grade_hvac_confidence(cache: dict, now: datetime | None = None) -> str:
+    """Confidence tier for the HVAC rates (k_active_heat/k_active_cool), from the evidence the rates carry.
 
-    Issue #1512: when the pooled cycle model's fit is what the rates hold (``cycle_fit_heat|cool["applied"]``, a
-    v3-primary zone) the tier IS the fit's grade (the better of heat and cool: a home that only heats is graded on
-    its heating). Otherwise the legacy tier from the heat + cool observation counts."""
+    Issue #1512 (verifier finding 2: confidence must never drop at upgrade, only age out). One rule for both engines:
+
+    * the count tier (MIN_THERMAL_OBSERVATIONS / THERMAL_HVAC_CONF_MEDIUM / _HIGH) of the evidence summed over heat
+      and cool: each mode's legacy evidence (``rate_prior`` n, fading on the 21-day schedule) plus, for a mode
+      whose rate is NOT the cycle model's applied fit (a v4 zone, or no eligible cycle yet), the cycle model's
+      eligible cycles (``hvac_evidence_count``);
+    * a mode whose rate IS the applied fit (v3 primary) is graded by the fit's calibrated grade, and the tier never
+      falls below what the carried legacy evidence justifies while the data agrees with it (q within two prior sds
+      of the prior it was weighed against: a small er_q against a strong, agreeing prior is not low confidence).
+      Data that contradicts the old value drops that mode's legacy evidence: the fit's own grade then speaks.
+
+    The result is the better of the two (a home that only heats is graded on its heating). An applied fit older than
+    the cycle retention (``CYCLE_RETENTION_DAYS``: its cycles are gone from the store, no refit since) no longer
+    grades on its own; its evidence keeps fading through the count tier like everything else."""
+    if not isinstance(cache, dict):
+        return "none"
     best = -1
+    total = 0.0
+    stale_below = 0.5 ** (CYCLE_RETENTION_DAYS / THERMAL_RATE_HALF_LIFE_DAYS)
     for mode in ("heat", "cool"):
         fit = cache.get(f"cycle_fit_{mode}")
-        if isinstance(fit, dict) and fit.get("applied"):
+        applied = isinstance(fit, dict) and bool(fit.get("applied")) and _fade(fit.get("fitted_at"), now) >= stale_below
+        if applied:
             best = max(best, _CYCLE_GRADE_RANK.get(str(fit.get("grade")), 0))
-    if best >= 0:
-        return next(g for g, r in _CYCLE_GRADE_RANK.items() if r == best)
-    total = cache.get("observation_count_heat", 0) + cache.get("observation_count_cool", 0)
-    if total < MIN_THERMAL_OBSERVATIONS:
-        return "none"
-    if total < THERMAL_HVAC_CONF_MEDIUM:
-        return "low"
-    if total < THERMAL_HVAC_CONF_HIGH:
-        return "medium"
-    return "high"
+            if _fit_agrees_with_prior(fit):
+                total += _legacy_hvac_evidence(cache, mode, now)
+        else:
+            total += hvac_evidence_count(cache, mode, now)
+    tier = _count_tier(total)
+    return tier if _CYCLE_GRADE_RANK[tier] >= best else next(g for g, r in _CYCLE_GRADE_RANK.items() if r == best)
 
 
 def grade_solar_confidence(count: int) -> str:

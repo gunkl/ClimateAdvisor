@@ -16,6 +16,18 @@ One open cycle per mode (in practice at most one at a time: a mode switch closes
   gap (Home Assistant restart / thermostat unavailable). A gap is NOT an off edge: the cycle is closed with ``t_off``
   unset (if it was still running) and ``cut`` naming the reason, and the next samples carry ``gap_before``.
 
+A setpoint change keeps the run (Issue #1512 verifier finding 3): a commanded change normally reaches HA as the
+setpoint first and the equipment's action a few seconds later, and CA's own moves arrive the same way. So a setpoint
+change during a run ENDS the run at that moment and keeps the run portion; only what follows the change is left out:
+
+* the off edge (or a mode switch) arrives within ``CYCLE_SETPOINT_OFF_WINDOW_S`` -> ``t_off`` is that action edge and
+  the cycle closes there (``cut="setpoint_change"``; no coast after a commanded stop is recorded);
+* the equipment keeps running past the window -> the cycle closes at the change with ``t_off`` unset (its run ends
+  at its last sample, the change; no coast and no off-edge tail is invented) and a continuation cycle opens AT the
+  change, already running, carrying the readings since (it chases the new setpoint);
+* the change arrives while the cycle is coasting (after its off edge) -> the cycle closes at the change: run and
+  coast so far kept, the post-change coast left out.
+
 ``cut`` is ``None`` for a natural close (next on edge, or the window after off), else ``"mode_switch"``,
 ``"setpoint_change"``, ``"restart"`` or ``"unavailable"``.
 
@@ -49,6 +61,7 @@ from .const import (
     CYCLE_MAX_OUTDOOR,
     CYCLE_MAX_SAMPLES,
     CYCLE_POST_OFF_WINDOW_S,
+    CYCLE_SETPOINT_OFF_WINDOW_S,
 )
 
 MODES: tuple[str, str] = ("heat", "cool")
@@ -87,6 +100,7 @@ class CycleRecorder:
         mode_capable: Iterable[str] | bool = True,
         *,
         window_s: float = CYCLE_POST_OFF_WINDOW_S,
+        setpoint_window_s: float = CYCLE_SETPOINT_OFF_WINDOW_S,
         max_samples: int = CYCLE_MAX_SAMPLES,
         max_outdoor: int = CYCLE_MAX_OUTDOOR,
     ) -> None:
@@ -96,6 +110,7 @@ class CycleRecorder:
         else:
             self._modes = {m for m in mode_capable if m in MODES}
         self._window_s = float(window_s)
+        self._sp_window_s = float(setpoint_window_s)
         self._max_samples = max(8, int(max_samples))
         self._max_outdoor = max(2, int(max_outdoor))
         self._open: dict[str, dict[str, Any]] = {}
@@ -122,13 +137,55 @@ class CycleRecorder:
 
     def _close(self, mode: str, cut: str | None) -> dict[str, Any]:
         c = self._open.pop(mode)
+        c.pop("_sp", None)
+        c.pop("_sp_new", None)
         c["cut"] = cut
         c["res"] = _infer_step([s[1] for s in c["samples"]])
         return c
 
+    def _close_at_setpoint(self, mode: str, *, keep_running: bool) -> dict[str, Any]:
+        """A run whose setpoint changed and whose equipment did not stop within the window: close it AT the change.
+
+        The run portion (samples up to the change) is kept with ``t_off`` unset; with ``keep_running`` a
+        continuation cycle opens at the change carrying the readings since (the equipment is chasing the new target).
+        """
+        c = self._open[mode]
+        t_sp = c["_sp"]
+        new_sp = c.get("_sp_new")
+        after = [s for s in c["samples"] if s[0] >= t_sp]
+        c["samples"] = [s for s in c["samples"] if s[0] <= t_sp]
+        out_after = [o for o in c["outdoor"] if o[0] >= t_sp]
+        out_before = [o for o in c["outdoor"] if o[0] < t_sp]
+        c["outdoor"] = [o for o in c["outdoor"] if o[0] <= t_sp]
+        closed = self._close(mode, CUT_SETPOINT_CHANGE)
+        if keep_running:
+            outdoor = [list(o) for o in out_after]
+            if out_before and (not outdoor or outdoor[0][0] > t_sp):
+                outdoor.insert(0, [t_sp, out_before[-1][1]])  # the outdoor level at the change
+            cont: dict[str, Any] = {
+                "id": f"{mode}-{int(t_sp)}",
+                "mode": mode,
+                "t_on": t_sp,
+                "t_off": None,
+                "cut": None,
+                "res": None,
+                "samples": [list(s) for s in after],
+                "outdoor": outdoor,
+                "setpoint_f": new_sp if new_sp is not None else closed.get("setpoint_f"),
+                "entity": closed.get("entity"),
+            }
+            if cont["id"] == closed["id"]:
+                cont["id"] = f"{mode}-{int(t_sp)}-sp"
+            self._open[mode] = cont
+        return closed
+
     def _expire(self, ts: float) -> list[dict[str, Any]]:
-        """Close every cycle whose post-off window has elapsed at ``ts``."""
+        """Close every cycle whose post-off window has elapsed at ``ts`` (and settle a setpoint change's window)."""
         out = []
+        for mode in list(self._open):
+            c = self._open[mode]
+            if c.get("_sp") is not None and c["t_off"] is None and ts > c["_sp"] + self._sp_window_s:
+                out.append(self._close_at_setpoint(mode, keep_running=True))
         for mode in list(self._open):
             t_off = self._open[mode]["t_off"]
             if t_off is not None and ts >= t_off + self._window_s:
@@ -184,7 +241,16 @@ class CycleRecorder:
             closed.append(self._close(mode, None))  # the next on edge ends the previous cycle's coast
         for other in list(self._open):
             if other != mode:
-                closed.append(self._close(other, CUT_MODE_SWITCH))
+                oc = self._open[other]
+                if oc.get("_sp") is not None and oc["t_off"] is None:
+                    # the setpoint change switched the mode: that switch is the run's end (kept, cut by the change)
+                    oc["t_off"] = round(ts, 3)
+                    temp_sw = _num(T)
+                    if temp_sw is not None:
+                        self._append(oc, ts, temp_sw, force=True)
+                    closed.append(self._close(other, CUT_SETPOINT_CHANGE))
+                else:
+                    closed.append(self._close(other, CUT_MODE_SWITCH))
         c: dict[str, Any] = {
             "id": f"{mode}-{int(ts)}",
             "mode": mode,
@@ -212,12 +278,16 @@ class CycleRecorder:
         if ts is None:
             return []
         closed = self._expire(ts)
-        for c in self._open.values():
+        for mode in list(self._open):
+            c = self._open[mode]
             if c["t_off"] is None:
                 c["t_off"] = round(ts, 3)
                 temp = _num(T)
                 if temp is not None:
                     self._append(c, ts, temp, force=True)
+                if c.get("_sp") is not None:
+                    # the stop a setpoint change commanded: the run is kept up to this edge, the coast is not
+                    closed.append(self._close(mode, CUT_SETPOINT_CHANGE))
         return closed
 
     def reading(self, ts: float, T: float | None, entity: str | None = None) -> list[dict[str, Any]]:
@@ -286,18 +356,36 @@ class CycleRecorder:
         reason = CUT_RESTART if reason == CUT_RESTART else CUT_UNAVAILABLE
         closed = self._expire(ts)
         for mode in list(self._open):
-            closed.append(self._close(mode, reason))
+            c = self._open[mode]
+            if c.get("_sp") is not None and c["t_off"] is None:
+                closed.append(self._close_at_setpoint(mode, keep_running=False))  # run kept up to the change
+            else:
+                closed.append(self._close(mode, reason))
         self._gap_bits = CYCLE_FLAG_GAP_BEFORE | (CYCLE_FLAG_UNAVAILABLE if reason == CUT_UNAVAILABLE else 0)
         return closed
 
-    def setpoint_change(self, ts: float) -> list[dict[str, Any]]:
-        """The setpoint changed: the room is now chasing a different target, so open cycles close."""
+    def setpoint_change(self, ts: float, setpoint: float | None = None) -> list[dict[str, Any]]:
+        """The setpoint changed (``setpoint``: the new one, for a continuation cycle). Returns closed cycles.
+
+        A running cycle is not closed yet: the change is remembered and the run ends at the off edge (or mode switch)
+        if one arrives within ``CYCLE_SETPOINT_OFF_WINDOW_S``, else at the change itself (module docs). A coasting
+        cycle closes now (``cut="setpoint_change"``): its run and the coast so far are kept, the rest is not recorded.
+        A second change inside the window keeps the first change's time.
+        """
         ts = _num(ts)  # type: ignore[assignment]
         if ts is None:
             return []
         closed = self._expire(ts)
         for mode in list(self._open):
-            closed.append(self._close(mode, CUT_SETPOINT_CHANGE))
+            c = self._open[mode]
+            if c["t_off"] is None:
+                if c.get("_sp") is None:
+                    c["_sp"] = round(ts, 3)
+                    c["_sp_new"] = _num(setpoint)
+                    if c["samples"]:  # the level at the change, so both halves of a split run have it
+                        self._append(c, ts, c["samples"][-1][1], force=True)
+            else:
+                closed.append(self._close(mode, CUT_SETPOINT_CHANGE))
         return closed
 
     def tick(self, ts: float) -> list[dict[str, Any]]:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import dataclasses
 import functools
 import hashlib
@@ -162,7 +163,10 @@ from .const import (
     CONF_VACATION_TOGGLE_INVERT,
     CONF_WEATHER_BIAS,
     CYCLE_FILE,
+    CYCLE_REFIT_MIN_INTERVAL_S,
+    CYCLE_REFIT_MIN_NEW_ELIGIBLE,
     CYCLE_RETENTION_DAYS,
+    CYCLE_STORE_SAVE_INTERVAL_S,
     DAY_TYPE_COLD,
     DAY_TYPE_HOT,
     DAY_TYPE_MILD,
@@ -223,6 +227,8 @@ from .const import (
     REJECT_AC_SETPOINT_UNSTABLE,
     REJECT_CYCLE_EXCLUDED_WINDOW_FAN,
     REJECT_CYCLE_GAP_RESTART,
+    REJECT_CYCLE_NO_OFF_EDGE,
+    REJECT_CYCLE_SENSOR_SWAP,
     REJECT_CYCLE_SETPOINT_CHANGE,
     REJECT_CYCLE_SIGNAL_BELOW_RESOLUTION,
     REJECT_CYCLE_THERMOSTAT_UNAVAILABLE,
@@ -776,7 +782,7 @@ def _cycle_values(cycle: dict, resolution_f: float | None = None) -> dict:
     res = cycle.get("res") or resolution_f
     window_end = end + THERMAL_CYCLE_MOVE_WINDOW_AFTER_OFF_MIN * 60.0
     readings = sorted(s[1] for s in samples if t_on <= s[0] <= window_end)
-    if len(readings) >= 5:
+    if len(readings) >= 6:  # the model's own rule (cycle_model._moved_steps): one extreme each side from 6 readings
         readings = readings[1:-1]
     signal = (readings[-1] - readings[0]) if readings else 0.0
     return {
@@ -1104,6 +1110,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             resolve_entry_scoped_path(Path(hass.config.config_dir), CYCLE_FILE, self._entry_id)
         )
         self._cycle_fit_lock: asyncio.Lock | None = None
+        # Refit throttle and save debounce (Issue #1512 verifier findings 5 and 7): per-mode new cycles waiting for a
+        # refit and the last refit time; the last cycle-file save. Event loop only.
+        self._cycle_pending: dict[str, dict[str, int]] = {}
+        self._cycle_last_refit: dict[str, float] = {}
+        self._cycle_last_save: float | None = None
+        # Finding 1: the climate-fallback companion sensors the recorder listens to (entity ids, unsubscribe).
+        self._cycle_companion_entities: tuple[str, ...] = ()
+        self._cycle_companion_unsub: Any = None
         self._v4_fit_task: asyncio.Task[Any] | None = None
         self._v4_last_fit_attempt: float | None = None
         self._v4_last_display_check: float | None = None  # Issue #1422: newly qualified display nodes, every 6 h
@@ -1709,6 +1723,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._stamp_setpoint_change_at_startup(dt_util.now())
         # Issue #1512 (#1437): in-flight cycles are not persisted; the first reading after startup carries gap_before.
         self._cycle_gap("restart")
+        # Issue #1512 finding 7: one refit of each mode with stored cycles at startup (the current prior, the stored
+        # cycles), then refits are throttled. Finding 1: listen to the companion sensor when it is the band reading.
+        self._cycle_spawn_refit(startup=True)
+        self._cycle_sync_companion_listener()
+        self._unsub_listeners.append(self._cycle_unsub_companion)
 
         # Listeners: thermostat state (for tracking manual overrides and runtime)
         self._unsub_listeners.append(
@@ -14891,14 +14910,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return getattr(self, "_cycle_recorder", None) is not None and bool(self.config.get("learning_enabled", True))
 
     def _cycle_primary_is_v3(self) -> bool:
-        """True when v3 is the primary engine, read through the control feed (R6b: no engine-setting read here).
+        """True when v3 is the primary engine: the cycle model's fit is then what the decisions' rates hold.
 
-        ``control_thermal_model`` returns the very object it was given while v3 is primary (``control_model``'s
-        documented identity contract) and a new dict for any other primary, usable or not. A failure reads as not v3, so
-        the decisions' rates are never overwritten on doubt."""
-        probe: dict = {}
+        Read from the engine setting the way ``decision_rates_summary`` does (Issue #1512 finding 8: the old identity
+        probe of ``control_thermal_model`` depended on an undocumented object-identity detail). A failure reads as not
+        v3, so the decisions' rates are never overwritten on doubt."""
         try:
-            return self.control_thermal_model(probe) is probe
+            return prediction_engines.primary_id(self.config) == ENGINE_V3
         except Exception:  # noqa: BLE001
             return False
 
@@ -14936,11 +14954,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if isinstance(out, int | float) and not isinstance(out, bool):
             self._cycle_collect(self._cycle_recorder.outdoor(ts, float(out)))
 
-    def _cycle_reading(self) -> None:
-        """The band sensor changed: record the reading with its seconds (flags first). Never raises."""
+    def _cycle_reading(self, source: str | None = None) -> None:
+        """The band sensor changed: record the reading with its seconds (flags first). Never raises.
+
+        ``source``: the entity whose change triggered this. Recorded only when it IS the band reading's entity
+        (``_primary_indoor_entity``), so the thermostat's attribute updates and a companion sensor's changes never
+        double-record or mix (Issue #1512 finding 1). None: the caller already knows it is (sensor/input_number)."""
         if not self._cycles_enabled():
             return
         try:
+            if source is not None and source != self._primary_indoor_entity():
+                return
             ts = dt_util.now().timestamp()
             self._cycle_flags()
             self._cycle_collect(
@@ -14960,8 +14984,61 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._cycle_flags()
             self._cycle_outdoor(ts)
             self._cycle_collect(self._cycle_recorder.tick(ts))
+            self._cycle_sync_companion_listener()
+            if self._cycle_refit_due_modes(ts) or self._cycle_save_due(ts):
+                self._cycle_spawn_refit()
         except Exception:  # noqa: BLE001
             _LOGGER.debug("cycle recorder tick failed", exc_info=True)
+
+    def _cycle_companion_wanted(self) -> tuple[str, ...]:
+        """Companion temperature sensors the recorder must hear in climate-fallback mode (Issue #1512 finding 1).
+
+        In climate-fallback mode the band reading is the thermostat's finer companion sensor whenever the resolver
+        uses it (#1230 R1b), and that sensor ticks between thermostat events: its changes are the readings a cycle
+        is made of. Every candidate is subscribed (the resolver can switch between them); ``_cycle_reading`` keeps
+        only the one in use. Empty for sensor/input_number sources (their own listener feeds the recorder) or with
+        the companion option Off."""
+        if self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK) != TEMP_SOURCE_CLIMATE_FALLBACK:
+            return ()
+        if self._companion_for_resolver() is None:
+            return ()
+        return tuple(sorted(self._companion_temp_sensors()))
+
+    def _cycle_sync_companion_listener(self) -> None:
+        """(Re)subscribe the recorder to the companion sensors when the set changed (setup, then every 5 minutes)."""
+        if getattr(self, "_shut_down", False) is True or not self._cycles_enabled():
+            return
+        try:
+            wanted = self._cycle_companion_wanted()
+            if wanted == getattr(self, "_cycle_companion_entities", ()):
+                return
+            self._cycle_unsub_companion()
+            self._cycle_companion_entities = wanted
+            if wanted:
+
+                @callback
+                def _companion_changed(event: Any) -> None:
+                    self._cycle_companion_changed(event)
+
+                self._cycle_companion_unsub = async_track_state_change_event(
+                    self.hass, list(wanted), self._zone_scoped_sync(_companion_changed)
+                )
+                _LOGGER.debug("cycle recorder listens to companion sensor(s) %s", ", ".join(wanted))
+        except Exception:  # noqa: BLE001 - a listener problem must never break the tick
+            _LOGGER.debug("cycle recorder companion listener sync failed", exc_info=True)
+
+    def _cycle_companion_changed(self, event: Any) -> None:
+        """A companion sensor changed: a band reading when it is the one the resolver uses now (finding 1)."""
+        self._cycle_reading((getattr(event, "data", None) or {}).get("entity_id") or "")
+
+    def _cycle_unsub_companion(self) -> None:
+        """Drop the companion-sensor subscription (unload; or before re-subscribing a changed set)."""
+        unsub = getattr(self, "_cycle_companion_unsub", None)
+        self._cycle_companion_unsub = None
+        self._cycle_companion_entities = ()
+        if unsub is not None:
+            with contextlib.suppress(Exception):
+                unsub()
 
     def _cycle_gap(self, reason: str) -> None:
         """A gap (``"restart"`` | ``"unavailable"``) is NOT an off edge: open cycles close with ``cut=reason``."""
@@ -15008,9 +15085,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _cycle_thermostat_event(self, old_state: Any, new_state: Any, was_running: bool, is_running: bool) -> None:
         """Feed one thermostat state change to the recorder. Never raises.
 
-        ``unavailable``/``unknown`` is a gap, never an off edge. A setpoint change closes a cycle only when the
-        equipment keeps running through it (a run that starts or stops at the change is still a valid run). The
-        thermostat's own reading is a band reading when it is the indoor source."""
+        ``unavailable``/``unknown`` is a gap, never an off edge. A setpoint change is passed to the recorder BEFORE the
+        edge of the same event (Issue #1512 finding 3): it ends a run at the change and keeps the run portion, the
+        action edge arriving with it or within ``CYCLE_SETPOINT_OFF_WINDOW_S`` being the run's real end (the
+        recorder's module docs); a run that starts with the change is a valid new cycle. The thermostat's own reading
+        is a band reading when it is the indoor source."""
         if not self._cycles_enabled():
             return
         try:
@@ -15025,15 +15104,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             old_dir = None if unavail_old else self._cycle_dir(old_state, was_running)
             new_dir = self._cycle_dir(new_state, is_running)
             rec = self._cycle_recorder
-            if (
-                old_dir is not None
-                and old_dir == new_dir
-                and any(
-                    old_state.attributes.get(a) != new_state.attributes.get(a)
-                    for a in ("temperature", "target_temp_low", "target_temp_high")
-                )
+            if not unavail_old and any(
+                old_state.attributes.get(a) != new_state.attributes.get(a)
+                for a in ("temperature", "target_temp_low", "target_temp_high")
             ):
-                self._cycle_collect(rec.setpoint_change(ts))
+                sp_dir = new_dir or old_dir
+                self._cycle_collect(
+                    rec.setpoint_change(ts, self._read_thermostat_setpoint_f(new_state, sp_dir) if sp_dir else None)
+                )
             if old_dir != new_dir:
                 if new_dir is None:
                     self._cycle_collect(rec.off_edge(ts, self._get_indoor_temp_with_provenance().primary_value))
@@ -15050,7 +15128,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK) == TEMP_SOURCE_CLIMATE_FALLBACK and (
                 new_state.attributes.get("current_temperature") != old_state.attributes.get("current_temperature")
             ):
-                self._cycle_reading()
+                # recorded only while the thermostat's own reading IS the band reading (a finer companion sensor in
+                # use is recorded from its own listener instead; finding 1)
+                self._cycle_reading(self.config.get("climate_entity"))
         except Exception:  # noqa: BLE001 - recording must never break override detection
             _LOGGER.debug("cycle recorder thermostat event failed", exc_info=True)
 
@@ -15060,10 +15140,58 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             lock = self._cycle_fit_lock = asyncio.Lock()
         return lock
 
-    async def _cycle_process(self, closed: list[dict]) -> None:
-        """Store each closed cycle, refit its modes, record why a cycle did not qualify, apply, save (never raises)."""
+    def _cycle_refit_due_modes(self, now_ts: float) -> list[str]:
+        """Modes whose waiting cycles are due a full refit (Issue #1512 finding 7: Pi CPU).
+
+        A mode is refitted when cycles wait and either ``CYCLE_REFIT_MIN_NEW_ELIGIBLE`` new eligible cycles wait, or
+        nothing is learned for it yet (its first eligible cycle is used at once), or ``CYCLE_REFIT_MIN_INTERVAL_S``
+        passed since its last refit. Between refits the rate is the last fit's, and every waiting cycle is in the
+        next refit."""
+        out = []
+        cache = getattr(getattr(self.learning, "_state", None), "thermal_model_cache", None)
+        for mode, pend in (getattr(self, "_cycle_pending", None) or {}).items():
+            if not pend.get("n"):
+                continue
+            fit = cache.get(f"cycle_fit_{mode}") if isinstance(cache, dict) else None
+            learned = isinstance(fit, dict) and (fit.get("ne") or 0) > 0
+            last = (getattr(self, "_cycle_last_refit", None) or {}).get(mode)
+            if (
+                pend.get("eligible", 0) >= CYCLE_REFIT_MIN_NEW_ELIGIBLE
+                or (pend.get("eligible", 0) > 0 and not learned)
+                or last is None
+                or now_ts - last >= CYCLE_REFIT_MIN_INTERVAL_S
+            ):
+                out.append(mode)
+        return out
+
+    def _cycle_save_due(self, now_ts: float) -> bool:
+        """The cycle file is written at most every ``CYCLE_STORE_SAVE_INTERVAL_S`` (and at HA stop / unload)."""
+        store = getattr(self, "_cycle_store", None)
+        if store is None or not store.dirty:
+            return False
+        last = getattr(self, "_cycle_last_save", None)
+        return last is None or now_ts - last >= CYCLE_STORE_SAVE_INTERVAL_S
+
+    def _cycle_spawn_refit(self, *, startup: bool = False) -> None:
+        """Schedule the due refits / save (``_cycle_process`` with no new cycle). Never raises."""
+        if not self._cycles_enabled():
+            return
+        coro = self._cycle_process([], startup=startup)
+        try:
+            self._spawn(coro)
+        except Exception:  # noqa: BLE001 - no running loop / shutting down: nothing to do, never leak the coroutine
+            coro.close()
+
+    async def _cycle_process(self, closed: list[dict], *, startup: bool = False) -> None:
+        """Store each closed cycle, judge it, refit the modes that are due, apply, save when due (never raises).
+
+        Each closed cycle is judged alone at once (its rejection reason, and whether it is eligible); the full refit
+        of its mode is throttled (``_cycle_refit_due_modes``) and always runs once at ``startup`` for every mode with
+        stored cycles. The cycle file is saved on its own cadence (``_cycle_save_due``; Issue #1512 finding 5), and
+        learning.json only after a refit."""
         try:
             async with self._cycle_lock():
+                now_ts = dt_util.now().timestamp()
                 by_mode: dict[str, list[dict]] = {}
                 for cycle in closed:
                     mode = cycle.get("mode")
@@ -15071,10 +15199,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         continue
                     self._cycle_store.add(cycle)
                     by_mode.setdefault(mode, []).append(cycle)
+                if not isinstance(getattr(self, "_cycle_pending", None), dict):  # bare test coordinators
+                    self._cycle_pending, self._cycle_last_refit = {}, {}
+                pending = self._cycle_pending
                 for mode, new in by_mode.items():
-                    await self._cycle_refit(mode, new)
-                await self._executor_job(self._cycle_store.save)
-                await self._executor_job(self.learning.save_state)
+                    eligible = await self._cycle_judge(mode, new, now_ts)
+                    pend = pending.setdefault(mode, {"n": 0, "eligible": 0})
+                    pend["n"] += len(new)
+                    pend["eligible"] += eligible
+                due = set(self._cycle_refit_due_modes(now_ts))
+                if startup:
+                    since = now_ts - CYCLE_RETENTION_DAYS * 86400
+                    due.update(m for m in ("heat", "cool") if self._cycle_store.has_cycles(m, since))
+                for mode in sorted(due):
+                    await self._cycle_refit(mode, now_ts)
+                    pending.pop(mode, None)
+                    self._cycle_last_refit[mode] = now_ts
+                if self._cycle_save_due(now_ts) and await self._executor_job(self._cycle_store.save):
+                    self._cycle_last_save = now_ts
+                if due:
+                    await self._executor_job(self.learning.save_state)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a failed fit keeps the previous rates
@@ -15085,33 +15229,57 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         res = cache.get(f"swing_{mode}_resolution_f") if isinstance(cache, dict) else None
         return float(res) if isinstance(res, int | float) and not isinstance(res, bool) and res > 0 else None
 
-    async def _cycle_refit(self, mode: str, new_cycles: list[dict]) -> None:
-        """Refit ``mode`` from the last 90 days of stored cycles (executor), apply it (v3 primary: decisions).
-
-        Each just-closed cycle is also judged alone by the model (``reasons`` of a one-cycle fit): a cycle that did not
-        qualify records a rejection with the model's own code and the values behind it (no second eligibility rule)."""
-        now_ts = dt_util.now().timestamp()
+    def _cycle_prior_snapshot(self, mode: str) -> dict:
+        """The cache parts ``cycle_model.prior_from_cache`` reads, copied on the event loop for the executor job."""
         cache = self.learning._state.thermal_model_cache
-        prior = cycle_model.prior_from_cache(cache if isinstance(cache, dict) else {}, mode, now_ts)
-        cycles = self._cycle_store.cycles(mode, now_ts - CYCLE_RETENTION_DAYS * 86400)
+        if not isinstance(cache, dict):
+            return {}
+        return copy.deepcopy({k: cache[k] for k in ("rate_prior", f"cycle_fit_{mode}") if k in cache})
 
-        def _job() -> tuple[dict, list[dict]]:
-            solo = [cycle_model.fit_cycles([c], mode, prior, now_ts=now_ts) for c in new_cycles]
-            return cycle_model.fit_cycles(cycles, mode, prior, now_ts=now_ts), solo
+    async def _cycle_judge(self, mode: str, new_cycles: list[dict], now_ts: float) -> int:
+        """Judge each just-closed cycle alone (the model's own ``reasons``; no second eligibility rule).
 
-        result, solo = await self._executor_job(_job)
+        A cycle that did not qualify records a rejection with the model's code and the values behind it. Returns how
+        many were eligible (each counts as a thermal session)."""
+        snap = self._cycle_prior_snapshot(mode)
+
+        def _job() -> list[dict]:
+            prior = cycle_model.prior_from_cache(snap, mode, now_ts)
+            return [cycle_model.fit_cycles([c], mode, prior, now_ts=now_ts) for c in new_cycles]
+
+        solo = await self._executor_job(_job)
         res_f = self._cycle_resolution(mode)
+        eligible = 0
         for cycle, one in zip(new_cycles, solo, strict=True):
             reasons = one.get("reasons") or {}
             if one.get("ne", 0) > 0 and not reasons:
+                eligible += 1
                 if getattr(self, "_today_record", None) is not None:
                     self._today_record.thermal_session_count += 1
                 continue
             code = next(iter(reasons), None) or REJECT_CYCLE_SIGNAL_BELOW_RESOLUTION
             self._cycle_record_rejection(mode, cycle, code, _cycle_values(cycle, res_f))
+        return eligible
+
+    async def _cycle_refit(self, mode: str, now_ts: float) -> None:
+        """Refit ``mode`` from the last 90 days of stored cycles and apply it (v3 primary: the decisions' rate).
+
+        The pool is built, the prior computed and the model fitted in the executor (finding 7: nothing heavy on the
+        event loop); the prior sees the pool, so a held fit is its prior only when its cycles left it (finding 4)."""
+        snap = self._cycle_prior_snapshot(mode)
+        store = self._cycle_store
+        since = now_ts - CYCLE_RETENTION_DAYS * 86400
+
+        def _job() -> dict:
+            cycles = store.cycles(mode, since)
+            prior = cycle_model.prior_from_cache(snap, mode, now_ts, cycles=cycles)
+            return cycle_model.fit_cycles(cycles, mode, prior, now_ts=now_ts)
+
+        result = await self._executor_job(_job)
         applied = self.learning.apply_cycle_fit(mode, result, self._cycle_primary_is_v3())
         _LOGGER.info(
-            "Cycle model fit: zone=%s mode=%s q=%s sd=%s k_p_cycle=%s coast=%sF grade=%s eligible=%s/%s applied=%s",
+            "Cycle model fit: zone=%s mode=%s q=%s sd=%s k_p_cycle=%s coast=%sF grade=%s eligible=%s/%s prior=%s "
+            "applied=%s",
             self._zone_log_id(),
             mode,
             result.get("q"),
@@ -15121,6 +15289,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             result.get("grade"),
             result.get("ne"),
             result.get("n_cycles"),
+            result.get("prior_source"),
             applied,
         )
 
@@ -15161,14 +15330,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
     async def _persist_cycles(self) -> None:
-        """Shutdown / HA stop: close open cycles as a restart gap (their clean pre-gap part is kept) and save."""
+        """Shutdown / HA stop: close open cycles as a restart gap (their clean pre-gap part is kept) and save.
+
+        Under the cycle lock (Issue #1512 finding 5): a save inside a running ``_cycle_process`` can never finish
+        after this one with an older snapshot. The cycles the debounced save was still holding are written here."""
         store = getattr(self, "_cycle_store", None)
         rec = getattr(self, "_cycle_recorder", None)
         if store is None or rec is None:
             return
-        for cycle in rec.gap(dt_util.now().timestamp(), "restart"):
-            store.add(cycle)
-        await self._executor_job(store.save)
+        async with self._cycle_lock():
+            for cycle in rec.gap(dt_util.now().timestamp(), "restart"):
+                store.add(cycle)
+            if await self._executor_job(store.save):
+                self._cycle_last_save = dt_util.now().timestamp()
 
     async def _commit_observation(self, obs_type: str, force_grade: str | None = None) -> None:
         """Commit a pending observation to the learning engine."""
@@ -15357,8 +15531,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             REJECT_NEW_SESSION,
             REJECT_FAN_ACTIVATED,
             REJECT_HVAC_MODE_SWITCH,
-            "cycle_no_off_edge",  # cycle_model.fit_cycles reason codes without a const (R's const has six)
-            "cycle_sensor_swap",
+            REJECT_CYCLE_NO_OFF_EDGE,
+            REJECT_CYCLE_SENSOR_SWAP,
         ]
         _hvac_mode_to_obs_type = {
             "passive": OBS_TYPE_PASSIVE_DECAY,

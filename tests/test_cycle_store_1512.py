@@ -59,8 +59,10 @@ def test_round_trip_is_exact_after_rounding(tmp_path: Path) -> None:
     # recorded -> stored differs only by the documented rounding
     raw_s = a["samples"][7]
     got = r.cycles("heat")[0]["samples"][7]
-    assert abs(got[0] - raw_s[0]) <= 0.5 and abs(got[1] - raw_s[1]) <= 0.005 + 1e-9 and got[2] == raw_s[2]
-    assert r.cycles("heat")[0]["outdoor"] == [[T0, 41.3], [T0 + 600, 41.5]]
+    # Issue #1512 finding 6: readings keep their native resolution (0.013 F steps here; was rounded to 0.01 F, which
+    # coarsened a fine sensor's steps and could mislead the model's resolution inference); times to the second
+    assert abs(got[0] - raw_s[0]) <= 0.5 and abs(got[1] - raw_s[1]) <= 1e-9 and got[2] == raw_s[2]
+    assert r.cycles("heat")[0]["outdoor"] == [[T0, 41.34], [T0 + 600, 41.5]]
 
 
 def test_file_is_compact_versioned_and_delta_encoded(tmp_path: Path) -> None:
@@ -71,10 +73,12 @@ def test_file_is_compact_versioned_and_delta_encoded(tmp_path: Path) -> None:
     text = path.read_text()
     assert " " not in text and "\n" not in text  # compact separators
     raw = json.loads(text)
-    assert raw["v"] == 1
+    # v2 (Issue #1512 finding 6): each series stores its own native decimal places instead of fixed centi-degrees
+    assert raw["v"] == 2
     (row,) = raw["cycles"]
     assert row["t"][0] == int(T0) and max(abs(x) for x in row["t"][1:]) < 100  # second deltas
-    assert row["y"][0] == 6800 and max(abs(x) for x in row["y"][1:]) < 10  # centi-degree deltas
+    assert row["p"] == 3 and row["y"][0] == 68000 and max(abs(x) for x in row["y"][1:]) < 20  # milli-degree deltas
+    assert row["op"] == 2 and row["oy"][0] == 4134
     assert row["f"] == [[1, 16], [0, 14]]  # run-length flags
 
 
@@ -164,12 +168,108 @@ def test_bad_rows_are_dropped_good_rows_kept(tmp_path: Path, caplog) -> None:
     assert [c["id"] for c in r.cycles()] == [f"heat-{int(T0)}"]
 
 
-def test_newer_file_version_is_not_misread(tmp_path: Path) -> None:
+def test_newer_file_version_is_not_misread_nor_overwritten(tmp_path: Path, caplog) -> None:
+    """A downgrade: the newer version's file stays exactly as it is on disk (logged once); learning runs in memory."""
     path = tmp_path / "c.json"
-    path.write_text(json.dumps({"v": 99, "cycles": [{"i": "x"}]}))
+    text = json.dumps({"v": 99, "cycles": [{"i": "x"}]})
+    path.write_text(text)
     s = CycleStore(path)
-    s.load()
+    with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.cycle_store"):
+        s.load()
+        s.load()
     assert len(s) == 0
+    assert len([r for r in caplog.records if "newer version" in r.getMessage()]) == 1
+    assert s.add(_cycle(T0), now=T0) and len(s) == 1
+    assert s.save() is False
+    assert path.read_text() == text
+
+
+def test_version_1_file_is_migrated_on_load(tmp_path: Path) -> None:
+    """A v1 file (fixed centi-degree indoor, deci-degree outdoor, no places) reads unchanged and is saved as v2."""
+    path = tmp_path / "c.json"
+    v1 = {
+        "v": 1,
+        "cycles": [
+            {
+                "i": "heat-1",
+                "m": "h",
+                "a": int(T0),
+                "b": int(T0) + 600,
+                "x": None,
+                "r": 0.1,
+                "s": 70.0,
+                "e": "sensor.hall",
+                "t": [int(T0), 60, 60, 480],
+                "y": [6810, 10, 10, 0],
+                "f": [[1, 3], [0, 1]],
+                "ot": [int(T0)],
+                "oy": [413],
+            }
+        ],
+    }
+    path.write_text(json.dumps(v1))
+    s = CycleStore(path)
+    s.load(now=T0 + 3600)
+    (c,) = s.cycles()
+    assert [x[1] for x in c["samples"]] == [68.1, 68.2, 68.3, 68.3] and c["outdoor"] == [[T0, 41.3]]
+    assert s.dirty and s.save()
+    raw = json.loads(path.read_text())
+    assert raw["v"] == 2 and raw["cycles"][0]["p"] == 1 and raw["cycles"][0]["y"][0] == 681
+    r = CycleStore(path)
+    r.load(now=T0 + 3600)
+    assert r.cycles() == s.cycles()
+
+
+@pytest.mark.parametrize(
+    ("values", "places"),
+    [
+        ([68.0, 69.0, 70.0], 0),  # a whole-degree thermostat stores whole degrees
+        ([68.0, 68.5, 69.0], 1),
+        ([68.018, 68.036, 68.054], 3),  # 0.01 C steps (0.018 F) are kept, never rounded to 0.01 F
+        ([20.1 * 9 / 5 + 32, 20.2 * 9 / 5 + 32], 2),  # float noise from the C->F conversion is not "resolution"
+    ],
+)
+def test_native_resolution_is_kept(tmp_path: Path, values: list, places: int) -> None:
+    path = tmp_path / "c.json"
+    s = CycleStore(path)
+    cyc = _cycle(T0, n=len(values))
+    cyc["samples"] = [[T0 + 60 * i, v, 1] for i, v in enumerate(values)]
+    assert s.add(cyc, now=T0) and s.save()
+    assert json.loads(path.read_text())["cycles"][0]["p"] == places
+    got = [x[1] for x in s.cycles()[0]["samples"]]
+    assert got == pytest.approx(values, abs=1e-9)
+
+
+def test_replacing_a_cycle_among_many_with_the_same_start(tmp_path: Path) -> None:
+    """add() finds the replaced cycle through its id (O(1)) and the t_on bisect, never a scan of the whole store."""
+    s = CycleStore(tmp_path / "c.json")
+    for i in range(5):
+        c = _cycle(T0)
+        c["id"] = f"heat-x{i}"
+        s.add(c, now=T0)
+    c = _cycle(T0)
+    c["id"] = "heat-x2"
+    c["setpoint_f"] = 75.0
+    s.add(c, now=T0)
+    assert len(s) == 5 and sorted(x["id"] for x in s.cycles()) == [f"heat-x{i}" for i in range(5)]
+    assert [x["setpoint_f"] for x in s.cycles() if x["id"] == "heat-x2"] == [75.0]
+
+
+def test_compact_memory_per_reading(tmp_path: Path) -> None:
+    """Each stored reading costs about 9 bytes in memory (int32 offset, int32 value, one flag byte)."""
+    import tracemalloc
+
+    s = CycleStore(tmp_path / "c.json")
+    tracemalloc.start()
+    base = tracemalloc.get_traced_memory()[0]
+    n = 0
+    for i in range(200):
+        c = _cycle(T0 + i * 3600, n=100)
+        n += len(c["samples"])
+        s.add(c, now=T0 + i * 3600)
+    used = tracemalloc.get_traced_memory()[0] - base
+    tracemalloc.stop()
+    assert used / n < 30, used / n
 
 
 def test_missing_file_starts_empty(tmp_path: Path) -> None:

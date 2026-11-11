@@ -1187,6 +1187,8 @@ def test_cycle_model_surfaces_1512():
         "cycle_setpoint_change",
         "cycle_gap_restart",
         "cycle_thermostat_unavailable",
+        "cycle_no_off_edge",  # Issue #1512 verifier nit: the model's two other codes had no label
+        "cycle_sensor_swap",
     )
     for code in codes:
         assert code + ":" in an, code

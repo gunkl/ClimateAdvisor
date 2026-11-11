@@ -38,7 +38,10 @@ from custom_components.climate_advisor.learning import (  # noqa: E402
     LearningEngine,
     aged_rates,
 )
-from custom_components.climate_advisor.thermal_confidence import grade_hvac_confidence  # noqa: E402
+from custom_components.climate_advisor.thermal_confidence import (  # noqa: E402
+    grade_hvac_confidence,
+    hvac_evidence_count,
+)
 
 Coord = _coord_mod.ClimateAdvisorCoordinator
 _COORD_MOD = "custom_components.climate_advisor.coordinator"
@@ -91,9 +94,14 @@ class TestApplyCycleFit:
         assert c[field] == pytest.approx(q)
         assert c["k_passive"] == -0.05  # the closed-house leak rate is never the cycle model's
         assert c[f"cycle_fit_{mode}"]["k_p_cycle"] == -0.03 and c[f"cycle_fit_{mode}"]["applied"] is True
-        assert c[f"observation_count_{mode}"] == 5  # eligible cycles counted
+        # Issue #1512 finding 2: the legacy counter is no longer overwritten with ne (5), which dropped an established
+        # home's confidence on its first post-upgrade cycles; the model reports the evidence (40 carried + 5 cycles)
+        assert c[f"observation_count_{mode}"] == 40
         model = e.get_thermal_model()
-        assert model["confidence"] == "medium"
+        assert model[f"observation_count_{mode}"] == 45
+        # the fit's own grade is medium, but the carried evidence it agrees with justifies high (was "medium": the
+        # old rule graded an upgraded home only by the er_q against its own strong prior)
+        assert model["confidence"] == "high"
         assert model["heating_rate_f_per_hour" if mode == "heat" else "cooling_rate_f_per_hour"] == round(abs(q), 2)
         assert set(CYCLE_FIT_KEYS) <= set(c[f"cycle_fit_{mode}"])
 
@@ -106,12 +114,24 @@ class TestApplyCycleFit:
         assert c["k_active_heat"] == before["k_active_heat"] and c["k_active_cool"] == before["k_active_cool"]
         assert c[f"cycle_fit_{mode}"]["applied"] is False and c[f"cycle_fit_{mode}"]["q"] is not None
 
-    def test_a_fit_with_no_eligible_cycle_never_overwrites_the_rates(self, tmp_path):
-        """Grade none (ne 0, the prior returned unchanged): stored for display, not applied even on v3."""
-        e = _engine(tmp_path)
-        assert e.apply_cycle_fit("heat", _fit(q=8.0, grade="none", ne=0), primary_is_v3=True) is False
-        assert e._state.thermal_model_cache["k_active_heat"] == 3.0
-        assert grade_hvac_confidence(e._state.thermal_model_cache) != "none"  # legacy count grade still reads
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    def test_a_fit_with_no_eligible_cycle_never_overwrites_the_rates_or_the_confidence(self, tmp_path, mode):
+        """Grade none (ne 0, the prior returned unchanged): stored for display, not applied even on v3, and the
+        confidence the mode's own carried evidence gives is kept. The old version of this test only passed because
+        the OTHER mode's untouched count (40) still graded the home; a heat-only home fell to none."""
+        e = LearningEngine(tmp_path)
+        e.load_state()
+        field = f"k_active_{mode}"
+        e._state.thermal_model_cache = {"k_passive": -0.05, field: 3.0 if mode == "heat" else -3.5}
+        e._state.thermal_model_cache[f"observation_count_{mode}"] = 40
+        before = grade_hvac_confidence(dict(e._state.thermal_model_cache))
+        assert before == "high"
+        q = 8.0 if mode == "heat" else -8.0
+        assert e.apply_cycle_fit(mode, _fit(q=q, grade="none", ne=0), primary_is_v3=True) is False
+        c = e._state.thermal_model_cache
+        assert c[field] == (3.0 if mode == "heat" else -3.5)
+        assert c[f"observation_count_{mode}"] == 40
+        assert grade_hvac_confidence(c) == before == e.get_thermal_model()["confidence"]
 
     def test_ageing_does_not_pull_an_applied_rate_back_to_the_retired_observations(self, tmp_path):
         e = _engine(tmp_path)
@@ -144,6 +164,143 @@ class TestApplyCycleFit:
         cache = {"cycle_fit_heat": {"applied": False, "grade": "high"}, "observation_count_heat": 0}
         assert grade_hvac_confidence(cache) == "none"
 
+
+# ---------------------------------------------------------------------------------------------------------------
+# Issue #1512 verifier finding 2: confidence at upgrade (age out, never reset)
+# ---------------------------------------------------------------------------------------------------------------
+
+_DAY0 = datetime(2026, 11, 10, 12, 0, 0, tzinfo=UTC)
+
+
+def _real_shape_engine(tmp_path, now) -> LearningEngine:
+    """The verified install's shape at upgrade: heat 5.58 F/h from 65 runs, cool -6.13 from 286, k_p from 386."""
+    e = LearningEngine(tmp_path)
+    e.load_state()
+    e._state.thermal_model_cache = {
+        "k_passive": -0.048,
+        "k_active_heat": 5.583,
+        "k_active_cool": -6.129,
+        "observation_count_heat": 65,
+        "observation_count_cool": 286,
+        "observation_count_passive": 386,
+    }
+    with patch("custom_components.climate_advisor.learning.dt_util") as dt:
+        dt.now.return_value = now
+        e._ensure_rate_prior()
+    return e
+
+
+def _first_cycles(e: LearningEngine, now, v3: bool) -> None:
+    """The first post-upgrade cycles of the real data: heat none eligible, cool one (a small move it agrees with)."""
+    with patch("custom_components.climate_advisor.learning.dt_util") as dt:
+        dt.now.return_value = now
+        e.apply_cycle_fit("heat", _fit(q=5.62, grade="none", ne=0, er_q=0.0, prior_q=5.62, prior_sd_q=0.61), v3)
+        e.apply_cycle_fit(
+            "cool", _fit(q=-6.16, grade="low", ne=1, er_q=0.02, prior_q=-6.15, prior_sd_q=0.53, ne_w=1.0), v3
+        )
+
+
+class TestConfidenceAtUpgrade:
+    @pytest.mark.parametrize("v3", [True, False])
+    def test_no_tier_drop_on_day_one_and_a_gradual_decline_without_cycles(self, tmp_path, v3):
+        """Occupant: a home whose heating/cooling was well learned keeps adaptive thermal behaviour (pre-heat
+        timing, the nat-vent thermal-floor veto, the ODE curve) through the upgrade; its confidence fades only as
+        the old evidence ages out over months with no new cycles, never at once. v3 (applied) and v4 (count) alike."""
+        e = _real_shape_engine(tmp_path, _DAY0)
+        before = grade_hvac_confidence(
+            {"observation_count_heat": 65, "observation_count_cool": 286}
+        )  # the pre-upgrade grade
+        assert before == "high"
+        _first_cycles(e, _DAY0, v3)
+        c = e._state.thermal_model_cache
+        assert grade_hvac_confidence(c, now=_DAY0) == "high"
+        assert hvac_evidence_count(c, "heat", _DAY0) == pytest.approx(65)
+        assert hvac_evidence_count(c, "cool", _DAY0) == pytest.approx(286 + 1)
+        rank = {"none": 0, "low": 1, "medium": 2, "high": 3}
+        tiers = [grade_hvac_confidence(c, now=_DAY0 + timedelta(days=d)) for d in range(0, 200, 5)]
+        assert all(rank[a] >= rank[b] for a, b in zip(tiers, tiers[1:], strict=False))  # never rises, never jumps
+        assert all(rank[a] - rank[b] <= 1 for a, b in zip(tiers, tiers[1:], strict=False))
+        # 352 observations of evidence, halved every 21 days: high for about 12 weeks, gone after about 4.5 months
+        assert grade_hvac_confidence(c, now=_DAY0 + timedelta(days=60)) == "high"
+        assert grade_hvac_confidence(c, now=_DAY0 + timedelta(days=95)) == "medium"
+        assert grade_hvac_confidence(c, now=_DAY0 + timedelta(days=115)) == "low"
+        assert grade_hvac_confidence(c, now=_DAY0 + timedelta(days=150)) == "none"
+
+    def test_new_cycles_replace_the_ageing_evidence(self, tmp_path):
+        e = _real_shape_engine(tmp_path, _DAY0)
+        later = _DAY0 + timedelta(days=120)
+        with patch("custom_components.climate_advisor.learning.dt_util") as dt:
+            dt.now.return_value = later
+            e.apply_cycle_fit(
+                "cool",
+                _fit(q=-6.2, grade="medium", ne=25, er_q=0.7, prior_q=-6.3, prior_sd_q=1.5, ne_w=20.0),
+                False,
+            )
+        assert grade_hvac_confidence(e._state.thermal_model_cache, now=later) == "high"
+
+    def test_a_fit_that_contradicts_the_carried_value_is_graded_on_its_own(self, tmp_path):
+        """Data that moved q more than two prior sds away: the old evidence no longer backs the rate."""
+        e = _real_shape_engine(tmp_path, _DAY0)
+        e._state.thermal_model_cache["rate_prior"].pop("k_active_cool")  # a heat-only home
+        e._state.thermal_model_cache["observation_count_cool"] = 0
+        with patch("custom_components.climate_advisor.learning.dt_util") as dt:
+            dt.now.return_value = _DAY0
+            e.apply_cycle_fit("heat", _fit(q=9.0, grade="low", ne=6, prior_q=5.6, prior_sd_q=0.6), True)
+        assert grade_hvac_confidence(e._state.thermal_model_cache, now=_DAY0) == "low"
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Issue #1512 verifier finding 4: a held fit never snaps back to the legacy value
+# ---------------------------------------------------------------------------------------------------------------
+
+
+class TestHeldFit:
+    @pytest.mark.parametrize(("mode", "q_new", "legacy"), [("heat", 6.5, 3.0), ("cool", -7.0, -3.5)])
+    def test_sensor_swap_holds_the_applied_rate_and_it_ages_out(self, tmp_path, mode, q_new, legacy):
+        """Occupant: swapping the indoor sensor does not make the house's heating/cooling rate jump back to the
+        months-old value overnight (pre-heat suddenly far too early or late); the learned rate fades over weeks."""
+        e = _engine(tmp_path)
+        field = f"k_active_{mode}"
+        with patch("custom_components.climate_advisor.learning.dt_util") as dt:
+            dt.now.return_value = _DAY0
+            e.apply_cycle_fit(mode, _fit(q=q_new, ne=8, ne_w=8.0, entity="sensor.old", t_last=1.0e9), True)
+            assert e._state.thermal_model_cache[field] == pytest.approx(q_new)
+            # the next refit sees only the new sensor's cycles: none eligible yet
+            e.apply_cycle_fit(mode, _fit(q=legacy, grade="none", ne=0, entity="sensor.new"), True)
+            c = e._state.thermal_model_cache
+            assert c[f"cycle_fit_{mode}"]["held"]["q"] == pytest.approx(q_new)
+            assert c[field] == pytest.approx(q_new)  # held, not snapped back to the legacy value
+            e._recompute_aged_rates()
+            assert c[field] == pytest.approx(q_new, abs=1e-3)
+            assert grade_hvac_confidence(c, now=_DAY0) != "none"
+            dt.now.return_value = _DAY0 + timedelta(days=21)
+            e._recompute_aged_rates()
+            assert c[field] == pytest.approx(0.5 * q_new + 0.5 * legacy, abs=0.05)  # half-way after one half-life
+            dt.now.return_value = _DAY0 + timedelta(days=200)
+            e._recompute_aged_rates()
+            assert c[field] == pytest.approx(legacy, abs=0.05)
+
+    @pytest.mark.parametrize(("mode", "q_held"), [("heat", 6.5), ("cool", -7.0)])
+    def test_held_fit_is_the_prior_of_the_new_sensor_but_never_counted_twice(self, mode, q_held):
+        from custom_components.climate_advisor import cycle_model
+
+        held = {"q": q_held, "sd_q": 0.3, "ne_w": 8.0, "entity": "sensor.old", "t_last": 1000.0, "applied": True}
+        held["at"] = _DAY0.isoformat()
+        cache = {"rate_prior": {}, f"cycle_fit_{mode}": {"ne": 0, "held": held}}
+        new_pool = [{"mode": mode, "t_on": 5000.0, "entity": "sensor.new"}]
+        pr = cycle_model.prior_from_cache(cache, mode, _DAY0, cycles=new_pool)
+        assert pr["source"] == "held" and pr["q"][0] == pytest.approx(q_held, abs=0.05)
+        # the old sensor swapped back: its cycles (held's newest among them) are in the pool -> not counted again
+        back = [
+            {"mode": mode, "t_on": 1000.0, "entity": "sensor.old"},
+            {"mode": mode, "t_on": 6000.0, "entity": "sensor.old"},
+        ]
+        assert cycle_model.prior_from_cache(cache, mode, _DAY0, cycles=back)["source"] == "typical"
+        # tools replaying a store (no pool given) never use it; and it ages out
+        assert cycle_model.prior_from_cache(cache, mode, _DAY0)["source"] == "typical"
+        aged = cycle_model.prior_from_cache(cache, mode, _DAY0 + timedelta(days=150), cycles=new_pool)
+        assert aged["source"] == "typical"
+
     def test_retired_writers_are_gone(self, tmp_path):
         e = _engine(tmp_path)
         assert not hasattr(e, "record_hvac_run") and not hasattr(e, "record_duty_balance_fit")
@@ -174,13 +331,23 @@ class _Rig:
         self.tasks: list = []
         c = object.__new__(Coord)
         self.c = c
-        c.config = {"learning_enabled": True, "temp_unit": "fahrenheit", **(config or {})}
+        c.config = {
+            "learning_enabled": True,
+            "temp_unit": "fahrenheit",
+            "primary_engine": "v3" if v3_primary else "v4",
+            **(config or {}),
+        }
         c.learning = LearningEngine(tmp_path)
         c.learning.load_state()
         c.learning._state.thermal_model_cache = {"k_passive": -0.05}
         c._cycle_recorder = CycleRecorder(True)
         c._cycle_store = CycleStore(tmp_path / "cycles.json")
         c._cycle_fit_lock = None
+        c._cycle_pending = {}
+        c._cycle_last_refit = {}
+        c._cycle_last_save = None
+        c._cycle_companion_entities = ()
+        c._cycle_companion_unsub = None
         c._rejection_log = {}
         c._today_record = SimpleNamespace(thermal_session_count=0)
         c._last_outdoor_temp = 40.0
@@ -188,7 +355,8 @@ class _Rig:
         c._any_sensor_open = lambda: self.windows
         self.windows = False
         c._get_indoor_temp_with_provenance = lambda: SimpleNamespace(primary_value=self.indoor)
-        c._primary_indoor_entity = lambda: "sensor.hall"
+        self.primary = "sensor.hall"
+        c._primary_indoor_entity = lambda: self.primary
         c._read_thermostat_setpoint_f = lambda state, mode: state.attributes.get("temperature")
         c._zone_log_id = lambda: "z1"
         c._spawn = lambda coro: self.tasks.append(coro)
@@ -197,7 +365,6 @@ class _Rig:
             return fn(*args)
 
         c._executor_job = _job
-        c.control_thermal_model = (lambda base: base) if v3_primary else (lambda base: dict(base or {}))
         for name in (
             "_cycles_enabled",
             "_cycle_primary_is_v3",
@@ -214,6 +381,15 @@ class _Rig:
             "_cycle_process",
             "_cycle_resolution",
             "_cycle_refit",
+            "_cycle_refit_due_modes",
+            "_cycle_save_due",
+            "_cycle_spawn_refit",
+            "_cycle_prior_snapshot",
+            "_cycle_judge",
+            "_cycle_companion_wanted",
+            "_cycle_sync_companion_listener",
+            "_cycle_unsub_companion",
+            "_cycle_companion_changed",
             "_cycle_record_rejection",
             "_persist_cycles",
             "_append_rejection",
@@ -228,6 +404,8 @@ class _Rig:
         self.patch.start()
 
     def close(self):
+        for coro in self.tasks:  # undrained work of a test that did not need it
+            coro.close()
         self.patch.stop()
 
     def at(self, minutes: float):
@@ -354,11 +532,63 @@ class TestRecorderFeed:
         # three minutes with one reading after the gap: the model's own verdict names why it is not usable evidence
         assert rig.c._rejection_log[OBS_TYPE_HVAC_HEAT][0]["reason_code"] in ("cycle_gap_restart", "cycle_too_short")
 
-    def test_setpoint_change_closes_only_a_run_that_continues_through_it(self, rig):
+    def test_a_run_that_continues_through_a_setpoint_change_keeps_both_parts(self, rig):
+        """Issue #1512 finding 3: the run up to the change and the run after it (chasing the new setpoint) are both
+        evidence. The old wiring excluded the whole run as "setpoint_change"."""
         _heat_cycle(rig, setpoint_change_at=10.0, coast=False)
-        (cyc,) = rig.c._cycle_store.cycles("heat")
-        assert cyc["cut"] == "setpoint_change"
-        assert rig.c._rejection_log[OBS_TYPE_HVAC_HEAT][-1]["reason_code"] == "cycle_setpoint_change"
+        first, cont = rig.c._cycle_store.cycles("heat")
+        assert (first["cut"], first["t_off"]) == ("setpoint_change", None)
+        assert cont["t_on"] == first["samples"][-1][0] and cont["cut"] is None and cont["t_off"] is not None
+        assert rig.c._rejection_log.get(OBS_TYPE_HVAC_HEAT, []) == []
+        assert rig.c._today_record.thermal_session_count == 2  # both judged eligible at once
+        rig.at(30 + 46 + 31)  # the throttled refit of the second one runs on the next due tick
+        rig.c._cycle_tick()
+        rig.drain()
+        assert rig.c.learning._state.thermal_model_cache["cycle_fit_heat"]["ne"] == 2
+
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    @pytest.mark.parametrize("order", ["setpoint_then_action", "action_then_setpoint", "same_event"])
+    def test_a_commanded_stop_keeps_the_run(self, rig, mode, order):
+        """The normal order of a commanded change (CA's own moves too): the setpoint and the action edge arrive
+        seconds apart or in one event. The run is kept up to the action edge; the post-change coast is not used."""
+        action = "heating" if mode == "heat" else "cooling"
+        sign = 1.0 if mode == "heat" else -1.0
+        sp_old, sp_new = (70.0, 66.0) if mode == "heat" else (72.0, 76.0)
+        running = _state(mode, action, setpoint=sp_old)
+        rig.at(0)
+        rig.indoor = 66.0
+        rig.thermostat(_state(mode, "idle", setpoint=sp_old), running, False, True)
+        for i in range(1, 41):
+            rig.at(i * 0.5)
+            rig.indoor = round(66.0 + sign * 6.0 * i * 0.5 / 60.0, 2)
+            rig.c._cycle_reading()
+        rig.at(20)
+        if order == "same_event":
+            rig.thermostat(running, _state(mode, "idle", setpoint=sp_new), True, False)
+        elif order == "setpoint_then_action":
+            rig.thermostat(running, _state(mode, action, setpoint=sp_new), True, True)
+            rig.at(20 + 20 / 60)
+            rig.thermostat(_state(mode, action, setpoint=sp_new), _state(mode, "idle", setpoint=sp_new), True, False)
+        else:
+            rig.thermostat(running, _state(mode, "idle", setpoint=sp_old), True, False)
+            rig.at(20 + 20 / 60)
+            rig.thermostat(_state(mode, "idle", setpoint=sp_old), _state(mode, "idle", setpoint=sp_new), False, False)
+        for i in range(1, 30):  # the post-change coast
+            rig.at(20.5 + i * 0.5)
+            rig.indoor = round(rig.indoor + sign * 0.02, 2)
+            rig.c._cycle_reading()
+        rig.at(70)
+        rig.c._cycle_tick()
+        rig.drain()
+        (cyc,) = rig.c._cycle_store.cycles(mode)
+        off = _T0.timestamp() + (20 + (20 / 60 if order == "setpoint_then_action" else 0)) * 60
+        assert cyc["cut"] == "setpoint_change" and cyc["t_off"] == pytest.approx(off, abs=1)
+        assert cyc["samples"][-1][0] <= off + 21  # nothing after the change is recorded
+        fit = rig.c.learning._state.thermal_model_cache[f"cycle_fit_{mode}"]
+        assert (
+            fit["ne"] == 1
+            and rig.c._rejection_log.get(OBS_TYPE_HVAC_HEAT if mode == "heat" else OBS_TYPE_HVAC_COOL) is None
+        )
 
     def test_a_run_that_starts_with_the_setpoint_change_is_a_valid_cycle(self, rig):
         """Raising the setpoint starts the furnace in the same event: that is the cycle, not an excluded one."""
@@ -427,6 +657,142 @@ class TestRecorderFeed:
         assert cyc["cut"] == "restart" and cyc["t_off"] is None
 
 
+class TestCompanionSensor:
+    """Issue #1512 finding 1: the readings a cycle is made of come from the entity the band reading uses now."""
+
+    def _rig(self, tmp_path, source, companions=("sensor.companion",)):
+        r = _Rig(tmp_path, config={"indoor_temp_source": source, "climate_entity": "climate.t"})
+        r.c._companion_temp_sensors = lambda: companions
+        r.c._companion_for_resolver = lambda: object()
+        r.c._zone_scoped_sync = lambda fn: fn
+        r.c.hass = MagicMock()
+        return r
+
+    def _open_heat(self, r):
+        r.thermostat(_state("heat", "idle"), _state("heat", "heating"), False, True)
+
+    def _samples(self, r):
+        return r.c._cycle_recorder._open["heat"]["samples"]
+
+    def test_climate_fallback_with_a_finer_companion_records_the_companion(self, tmp_path):
+        """Occupant: a thermostat whose own display is whole degrees but whose finer companion sensor is the band
+        reading learns from every companion tick, not only when the coarse thermostat attribute happens to change."""
+        r = self._rig(tmp_path, "climate_fallback")
+        try:
+            r.primary = "sensor.companion"
+            with patch(f"{_COORD_MOD}.async_track_state_change_event") as track:
+                track.return_value = MagicMock()
+                r.c._cycle_sync_companion_listener()
+                (args, _kw) = track.call_args
+                assert list(args[1]) == ["sensor.companion"]
+                r.c._cycle_sync_companion_listener()  # same set: no second subscription
+                assert track.call_count == 1
+            r.at(0)
+            self._open_heat(r)
+            for i, v in enumerate((66.1, 66.2, 66.3), start=1):
+                r.at(i * 0.5)
+                r.indoor = v
+                r.c._cycle_companion_changed(SimpleNamespace(data={"entity_id": "sensor.companion"}))
+            # the thermostat's own (coarse) attribute change is not a band reading while the companion is in use
+            r.at(2)
+            r.indoor = 66.35
+            r.thermostat(_state("heat", "heating", temp=66.0), _state("heat", "heating", temp=67.0), True, True)
+            # another companion candidate the resolver does not use is not recorded either
+            r.c._cycle_companion_changed(SimpleNamespace(data={"entity_id": "sensor.other"}))
+            assert [s[1] for s in self._samples(r)][1:] == [66.1, 66.2, 66.3]
+            # the companion drops out mid-cycle: the thermostat's reading is the band reading again, but one cycle
+            # never mixes two sensors' series (the recorder keeps the cycle's first entity)
+            r.primary = "climate.t"
+            r.at(3)
+            r.indoor = 67.0
+            r.thermostat(_state("heat", "heating", temp=66.0), _state("heat", "heating", temp=67.0), True, True)
+            assert self._samples(r)[-1][1] == 66.3
+            r.thermostat(_state("heat", "heating"), _state("heat", "idle"), True, False)
+            r.at(60)
+            r.c._cycle_tick()
+            self._open_heat(r)  # the next cycle is the thermostat's
+            r.at(61)
+            r.indoor = 67.5
+            r.thermostat(_state("heat", "heating", temp=67.0), _state("heat", "heating", temp=68.0), True, True)
+            assert self._samples(r)[-1][1] == 67.5
+            r.c._cycle_unsub_companion()
+            assert r.c._cycle_companion_entities == ()
+        finally:
+            r.close()
+
+    @pytest.mark.parametrize("source", ["sensor", "input_number"])
+    def test_sensor_and_input_number_sources_record_their_own_listener_only(self, tmp_path, source):
+        r = self._rig(tmp_path, source)
+        try:
+            assert r.c._cycle_companion_wanted() == ()  # no companion subscription for a dedicated sensor
+            r.at(0)
+            self._open_heat(r)
+            r.at(0.5)
+            r.indoor = 66.4
+            r.c._cycle_reading()  # the indoor-entity listener
+            r.at(1)
+            r.indoor = 66.6
+            r.thermostat(_state("heat", "heating", temp=66.0), _state("heat", "heating", temp=67.0), True, True)
+            assert [s[1] for s in self._samples(r)][1:] == [66.4]
+        finally:
+            r.close()
+
+    def test_climate_only_records_the_thermostat_attribute(self, tmp_path):
+        r = self._rig(tmp_path, "climate_fallback", companions=())
+        try:
+            r.primary = "climate.t"
+            assert r.c._cycle_companion_wanted() == ()
+            r.at(0)
+            self._open_heat(r)
+            r.at(1)
+            r.indoor = 67.0
+            r.thermostat(_state("heat", "heating", temp=66.0), _state("heat", "heating", temp=67.0), True, True)
+            assert self._samples(r)[-1][1] == 67.0
+        finally:
+            r.close()
+
+
+class TestThrottleAndSave:
+    def test_refits_are_throttled_and_the_file_save_is_debounced(self, rig):
+        """Finding 5/7: one cycle file write per 30 minutes (plus HA stop), a full refit at most every 30 minutes
+        once a mode has learned something (sooner after 3 new eligible cycles); every cycle is still judged at once."""
+        calls = []
+        orig = rig.c._cycle_refit
+
+        async def _counting(mode, now_ts):
+            calls.append(mode)
+            await orig(mode, now_ts)
+
+        rig.c._cycle_refit = _counting
+        saves = []
+        real_save = rig.c._cycle_store.save
+        rig.c._cycle_store.save = lambda: saves.append(1) or real_save()
+        _heat_cycle(rig, start_min=0.0)  # first eligible cycle: refit at once, first save
+        assert calls == ["heat"] and saves == [1]
+        _heat_cycle(rig, start_min=80.0)  # 2nd: within 30 min of the last refit? no - 80 min later: refit
+        _heat_cycle(rig, start_min=100.0, run_min=10.0)
+        n_after = len(calls)
+        assert len(rig.c._cycle_store.cycles("heat")) == 3
+        assert rig.c._today_record.thermal_session_count == 3  # judged at once regardless of the throttle
+        assert n_after <= 3 and len(saves) <= n_after
+        # a waiting cycle is refitted by the 5-minute tick once due, and HA stop saves what is still dirty
+        rig.at(400)
+        rig.c._cycle_tick()
+        rig.drain()
+        assert rig.c._cycle_pending == {}
+        asyncio.run(rig.c._persist_cycles())
+        assert not rig.c._cycle_store.dirty
+
+    def test_startup_refits_each_mode_with_stored_cycles(self, rig):
+        _heat_cycle(rig)
+        rig.c.learning._state.thermal_model_cache.pop("cycle_fit_heat")
+        rig.c._cycle_last_refit.clear()
+        rig.c._cycle_spawn_refit(startup=True)
+        rig.drain()
+        c = rig.c.learning._state.thermal_model_cache
+        assert c["cycle_fit_heat"]["ne"] == 1 and "cycle_fit_cool" not in c
+
+
 class TestSurfaces:
     def test_learning_health_lists_cycle_codes_and_the_fit(self, rig):
         _heat_cycle(rig)
@@ -461,19 +827,17 @@ class TestSurfaces:
 
 
 class TestStructure:
-    def test_primary_is_read_through_the_control_feed_not_the_engine_setting(self):
-        """R6b: _cycle_primary_is_v3 names no engine selection; v3 primary is control_thermal_model's identity."""
-        import inspect
-
-        src = inspect.getsource(Coord._cycle_primary_is_v3)
-        for banned in (
-            "primary_engine_id",
-            "primary_id",
-            "CONF_PRIMARY_ENGINE",
-            "prediction_engines",
-            "engine_running",
-        ):
-            assert banned not in src.replace('"""', "").split("probe")[1]
+    @pytest.mark.parametrize(("engine", "expected"), [("v3", True), ("v4", False), ("bogus", False)])
+    def test_primary_is_read_from_the_engine_setting(self, tmp_path, engine, expected):
+        """Finding 8: read as decision_rates_summary does (prediction_engines.primary_id). The old test required an
+        identity probe of control_thermal_model, an undocumented detail that a harmless refactor of the control feed
+        (returning a copy) would silently turn into "never v3" and stop the v3 decisions from learning."""
+        r = _Rig(tmp_path, config={"primary_engine": engine})
+        try:
+            # an unknown value reads as the default engine (v4), exactly like the rest of the integration
+            assert r.c._cycle_primary_is_v3() is expected
+        finally:
+            r.close()
 
     def test_retired_coordinator_symbols_are_gone(self):
         for name in (

@@ -70,7 +70,6 @@ CYCLE_SOLAR_REGRESSOR: bool = _k("THERMAL_CYCLE_SOLAR_REGRESSOR", False)  # OFF:
 CYCLE_TAUS: tuple[float, ...] = _k("THERMAL_CYCLE_TAUS", (1.5, 2.5, 4.0, 6.0, 8.0, 11.0, 15.0, 20.0))
 CYCLE_IRLS_ITERS: int = _k("THERMAL_CYCLE_IRLS_ITERS", 5)
 CYCLE_HUBER_K: float = _k("THERMAL_CYCLE_HUBER_K", 1.345)
-CYCLE_K_SD_PINNED: float = _k("THERMAL_CYCLE_K_SD_PINNED", 0.004)
 CYCLE_GRADE_MED_ER: float = _k("THERMAL_CYCLE_GRADE_MED_ER", 0.6)
 CYCLE_GRADE_HIGH_ER: float = _k("THERMAL_CYCLE_GRADE_HIGH_ER", 0.95)
 CYCLE_GRADE_MED_NE: int = _k("THERMAL_CYCLE_GRADE_MED_NE", 2)
@@ -99,7 +98,8 @@ _BOUNDS = {
     "cool": _k("THERMAL_CYCLE_Q_BOUNDS_COOL", (-15.0, -0.5)),
 }
 _K_BOUNDS = _k("THERMAL_CYCLE_K_BOUNDS", (-0.5, -0.001))
-CYCLE_TAIL_MIN = 45.0  # samples after the off edge that still belong to the cycle (minutes; recorder closes at off+45)
+# samples after the off edge that still belong to the cycle (minutes): the recorder's post-off window, one definition
+CYCLE_TAIL_MIN: float = _k("CYCLE_POST_OFF_WINDOW_S", 45 * 60) / 60.0
 CYCLE_SOLAR_PRIOR_SD = 3.0  # F/h per unit solar factor, only used when the regressor is on
 
 FLAG_RUNNING = _k("CYCLE_FLAG_RUNNING", 1)
@@ -132,7 +132,12 @@ REASON_GAP_RESTART = "cycle_gap_restart"
 REASON_UNAVAILABLE = "cycle_thermostat_unavailable"
 REASON_SENSOR_SWAP = "cycle_sensor_swap"
 REASON_NO_OFF = "cycle_no_off_edge"
-_CUT_REASON = {"restart": REASON_GAP_RESTART, "unavailable": REASON_UNAVAILABLE}
+_CUT_REASON = {
+    "restart": REASON_GAP_RESTART,
+    "unavailable": REASON_UNAVAILABLE,
+    "setpoint_change": REASON_SETPOINT,
+}
+HELD_MIN_FADE = 0.01  # a held fit (see ``prior_from_cache``) whose fade fell below this has aged out
 
 
 # --------------------------------------------------------------------------- small numeric helpers
@@ -297,7 +302,30 @@ def _n_eff(rec: dict[str, Any], now: datetime) -> float:
     return max(n * THERMAL_LEGACY_OBS_WEIGHT * 0.5 ** (age / THERMAL_RATE_HALF_LIFE_DAYS), 1e-9)
 
 
-def prior_from_cache(cache: Any, mode: str, now: Any) -> dict[str, Any]:
+def held_fade(held: Any, now: Any) -> float:
+    """``0.5 ** (age_d / THERMAL_RATE_HALF_LIFE_DAYS)`` of a held fit (its ``at`` stamp); 0.0 when unusable."""
+    if not isinstance(held, dict) or not _num(held.get("q")):
+        return 0.0
+    return 0.5 ** (_age_days(held.get("at"), _as_naive_dt(now)) / THERMAL_RATE_HALF_LIFE_DAYS)
+
+
+def _held_in_pool(held: dict[str, Any], cycles: Sequence[dict[str, Any]], mode: str) -> bool:
+    """True when the cycles that produced ``held`` are still in the pool a fit would use (a sensor swapped back).
+
+    The pool is the newest sensor's cycles (``fit_cycles``); held's newest eligible cycle in it means its evidence is
+    already in the data, so it must not be counted a second time as the prior."""
+    mine = [c for c in cycles if c.get("mode") == mode and _num(c.get("t_on"))]
+    if not mine:
+        return False
+    ent = max(mine, key=lambda c: c["t_on"]).get("entity")
+    if ent != held.get("entity") or not _num(held.get("t_last")):
+        return False
+    return any(c.get("entity") == ent and abs(c["t_on"] - held["t_last"]) < 1.0 for c in mine)
+
+
+def prior_from_cache(
+    cache: Any, mode: str, now: Any, *, cycles: Sequence[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """Prior of an existing home: its stored rates weighted by their evidence, ageing with a 21-day half-life.
 
     Reads ``cache["rate_prior"]`` (``{"k_active_heat"|"k_active_cool"|"k_passive": {"value", "ts", "n"}}``, written
@@ -307,11 +335,19 @@ def prior_from_cache(cache: Any, mode: str, now: Any) -> dict[str, Any]:
     poc2 ``legacy_prior``. It is then combined with the typical-house prior by precision, so as ``n_eff`` -> 0 the
     prior hands over smoothly to the typical house (old values age out, nothing jumps at upgrade). Missing /
     wrong-signed / non-numeric fields fall back to the typical value. ``now``: datetime, date or epoch seconds.
+
+    Held fit (Issue #1512 verifier finding 4): when the cycles behind the last usable fit left the pool (a sensor
+    swap, or they aged past the retention) ``cache["cycle_fit_<mode>"]["held"]`` keeps that fit's ``q`` /
+    ``sd_q``. Given the ``cycles`` the fit will see, and when held's own cycles are not among them, the q prior is
+    the held fit (its variance inflated by ``1 / fade``, the same 21-day half-life) combined with the typical house:
+    the held posterior already carries the legacy evidence, so the legacy value is not counted twice. The rate the
+    house is judged by therefore never snaps back to the old value when a sensor changes; it ages out instead.
+    Without ``cycles`` (tools replaying a store) held is not used.
     """
     pr = typical_prior(mode)
     rp = cache.get("rate_prior") if isinstance(cache, dict) else None
     if not isinstance(rp, dict):
-        return pr
+        rp = {}
     now_dt = _as_naive_dt(now)
     out = dict(pr)
     n_eff_q = 0.0
@@ -334,6 +370,22 @@ def prior_from_cache(cache: Any, mode: str, now: Any) -> dict[str, Any]:
     if n_eff_q:
         out["source"] = "cache"
         out["n_eff"] = n_eff_q
+    fit = cache.get(f"cycle_fit_{mode}") if isinstance(cache, dict) else None
+    held = fit.get("held") if isinstance(fit, dict) else None
+    fade = held_fade(held, now_dt)
+    if (
+        cycles is not None
+        and fade >= HELD_MIN_FADE
+        and isinstance(held, dict)
+        and (held["q"] > 0) == (mode == "heat")
+        and _num(held.get("sd_q"))
+        and held["sd_q"] > 0
+        and not _held_in_pool(held, cycles, mode)
+    ):
+        out["q"] = _combine(float(held["q"]), float(held["sd_q"]) / math.sqrt(fade), *pr["q"])
+        out["source"] = "held"
+        ne_w = held.get("ne_w")
+        out["n_eff"] = (float(ne_w) if _num(ne_w) else 1.0) * fade
     return out
 
 
@@ -358,6 +410,9 @@ def _prepare(cyc: dict[str, Any], res: float, prior_offs: list[float]) -> tuple[
     cut = cyc.get("cut")
     if cut:
         # a restart / unavailable cut: only the clean pre-gap part counts, and there is no usable off edge after it.
+        # A setpoint cut (Issue #1512 finding 3) has no gap flag: the recorder stopped recording at the change, so the
+        # run portion is kept as recorded - with its off edge when the equipment stopped within the window, else
+        # (the run went on chasing the new setpoint) ending at its last sample with no off edge and no coast.
         for s in samples:
             if s[0] / 60.0 > ton and _flags(s) & (FLAG_GAP_BEFORE | FLAG_UNAVAILABLE):
                 cut_t = s[0] / 60.0
@@ -673,7 +728,9 @@ def grade(result: dict[str, Any]) -> str:
     return "low"
 
 
-def _prior_result(prior: dict[str, Any], res: float, n_cycles: int, reasons: dict[str, int]) -> dict[str, Any]:
+def _prior_result(
+    prior: dict[str, Any], res: float, n_cycles: int, reasons: dict[str, int], entity: Any = None
+) -> dict[str, Any]:
     out: dict[str, Any] = {
         "q": prior["q"][0],
         "sd_q": prior["q"][1],
@@ -688,6 +745,11 @@ def _prior_result(prior: dict[str, Any], res: float, n_cycles: int, reasons: dic
         "k_pinned": True,
         "reasons": dict(reasons),
         "prior_source": prior.get("source", "given"),
+        "prior_q": prior["q"][0],
+        "prior_sd_q": prior["q"][1],
+        "ne_w": 0.0,
+        "entity": entity,
+        "t_last": None,
     }
     out["grade"] = grade(out)
     return out
@@ -701,7 +763,10 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
     cool < 0), ``sd_q``, ``k_p_cycle`` / ``sd_k`` (diagnostic leak rate; pinned at the prior when
     ``k_pinned``), ``coast_area_f`` (= c*tau/60, post-off drift in F; signed, 0 none), ``tau`` (min),
     ``ne`` (eligible cycles used), ``n_cycles`` (same-mode, same-sensor cycles seen), ``er_q``, ``grade``,
-    ``resolution_f`` and ``reasons`` (counts per rejection code of the cycles that did not qualify).
+    ``resolution_f`` and ``reasons`` (counts per rejection code of the cycles that did not qualify). Also the
+    evidence bookkeeping the learning engine needs (Issue #1512 verifier findings 2 and 4): ``prior_q`` /
+    ``prior_sd_q`` (the prior the data was weighed against), ``ne_w`` (the eligible cycles' summed age weights at
+    ``now_ts``), ``entity`` (the pool's sensor) and ``t_last`` (``t_on`` of the newest eligible cycle).
     No eligible cycle returns the prior unchanged (grade ``none``). Never worse than the prior by construction
     (ridge toward it). Pure and deterministic.
     """
@@ -713,6 +778,7 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
 
     # sensor swap: the pool is the newest sensor's cycles; resolution of an older sensor does not carry over
     pool = mine
+    ent = None
     if mine:
         ent = mine[-1].get("entity")
         pool = [c for c in mine if c.get("entity") == ent]
@@ -730,12 +796,11 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
 
     prepared: list[dict[str, Any]] = []
     for c in pool:
-        if str(c.get("cut") or "").startswith("setpoint"):
-            _count(REASON_SETPOINT)
-            continue
         pc, why = _prepare(c, res, prior_offs)
         if pc is None:
-            _count(why or REASON_TOO_SHORT)
+            why = why or REASON_TOO_SHORT
+            # a cut cycle whose kept part is too short is reported as the cut (as in the eligibility gate below)
+            _count(_CUT_REASON.get(str(c.get("cut") or ""), why) if why == REASON_TOO_SHORT else why)
             continue
         prepared.append(pc)
     eligible: list[dict[str, Any]] = []
@@ -751,7 +816,7 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
         eligible.append(pc)
     n_seen = len(pool)
     if not eligible:
-        return _prior_result(prior, res, n_seen, reasons)
+        return _prior_result(prior, res, n_seen, reasons, ent)
     eligible = eligible[-CYCLE_MAX_CYCLES:]
     for pc in eligible:
         age_d = max(0.0, (now_ts - pc["ton"] * 60.0) / 86400.0)
@@ -763,7 +828,7 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
     use_solar = CYCLE_SOLAR_REGRESSOR and all("X" in pc for pc in eligible)
     fit = _fit_core(eligible, prior, mode, res, free_k, deff_mult, use_solar)
     if fit is None:
-        return _prior_result(prior, res, n_seen, reasons)
+        return _prior_result(prior, res, n_seen, reasons, ent)
     out: dict[str, Any] = {
         "q": fit["q"],
         "sd_q": fit["sd_q"],
@@ -779,6 +844,11 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
         "sigma": fit["sigma"],
         "reasons": reasons,
         "prior_source": prior.get("source", "given"),
+        "prior_q": prior["q"][0],
+        "prior_sd_q": prior["q"][1],
+        "ne_w": sum(pc["w"] for pc in eligible),
+        "entity": ent,
+        "t_last": max(pc["ton"] for pc in eligible) * 60.0,
     }
     if use_solar:
         out["solar_coeff"] = fit["solar_coeff"]

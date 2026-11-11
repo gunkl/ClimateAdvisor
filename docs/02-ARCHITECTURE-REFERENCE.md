@@ -64,7 +64,7 @@ custom_components/climate_advisor/
 ├── chart_log.py         # Chart state log: persistent 1-year ring buffer of HVAC/fan/temp data points and event markers, used by the Temperature Forecast chart.
 ├── cycle_model.py       # Pooled heating/cooling cycle model (Issues #1512/#1516): fit_cycles, clean_series, infer_resolution, grade, typical_prior, prior_from_cache. Pure math, no HA imports; shared with tools/thermal_replay.py and tools/predict_backtest.py. See 05-LEARNING-ENGINE-DESIGN.md.
 ├── cycle_recorder.py    # CycleRecorder: pure state machine turning thermostat edges, band-sensor readings, flags, setpoint changes and gaps into closed cycle dicts.
-├── cycle_store.py       # CycleStore: per-zone climate_advisor_cycles.json (90 days, cap 3000 cycles, compact centi-degree deltas, atomic 0600 write). Separate from the chart_log (chart-log-spec.md).
+├── cycle_store.py       # CycleStore: per-zone climate_advisor_cycles.json (90 days, cap 3000 cycles, native-resolution integer deltas (v2; v1 migrated), compact in memory, saved at most every 30 min + at HA stop, atomic 0600 write). Separate from the chart_log (chart-log-spec.md).
 ├── feels_like.py        # Issue #1414: pure NWS heat index / wind chill (feels_like_f) and weather wind-unit -> mph, chart display only. See chart-log-spec.md "Humidity and Feels-Like Fields".
 ├── humidity_sources.py  # Issue #1414: one humidity resolver, three roles (indoor_day, indoor_sleep, outdoor); chart display only, never the climate TARGET humidity.
 ├── forecast_archive.py  # Forecast archive (Issue #1230 R0): persisted hourly-forecast snapshots, one per local hour, for forecast-error scoring. Record-only; entry-scoped JSON. See forecast-archive-spec.md.

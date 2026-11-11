@@ -366,10 +366,25 @@ def test_window_fan_natvent_flags_exclude_cycle() -> None:
 
 def test_setpoint_cut_and_cut_cycles() -> None:
     cyc = synth(q=7.0, seed=11, n=6, lag=1.5)
+    # Issue #1512 finding 3: a setpoint cut keeps its run portion (it used to be excluded, losing the normal
+    # commanded-stop cycle); with an off edge it is an ordinary cycle whose recording ended at the change
     mod = [dict(c) for c in cyc]
     mod[1]["cut"] = "setpoint_change"
     r = fit(mod)
-    assert r["reasons"].get(cm.REASON_SETPOINT) == 1 and r["ne"] == 5
+    assert not r["reasons"] and r["ne"] == 6
+    # the run went on past the change: the part up to the change (no off edge, no coast) still counts
+    sp = dict(cyc[2])
+    sp["cut"], sp["t_off"] = "setpoint_change", None
+    sp["samples"] = [list(s) for s in cyc[2]["samples"] if s[0] <= cyc[2]["t_on"] + 8 * 60]
+    mod[2] = sp
+    r = fit(mod)
+    assert r["ne"] == 6
+    # too short a run portion is reported as the setpoint change that cut it
+    sp2 = dict(sp)
+    sp2["samples"] = [list(s) for s in cyc[2]["samples"] if s[0] <= cyc[2]["t_on"] + 60]
+    mod[2] = sp2
+    r = fit(mod)
+    assert r["reasons"] == {cm.REASON_SETPOINT: 1} and r["ne"] == 5
     # a restart that cut the cycle mid-run with no off edge: only the clean pre-gap part counts
     mod = [dict(c) for c in cyc]
     cut_cycle = dict(cyc[3])

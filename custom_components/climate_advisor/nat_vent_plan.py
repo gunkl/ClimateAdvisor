@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import datetime, time, timedelta
+from typing import Any
 
 from .const import CEILING_PRECOOL_FALLBACK_MIN
 from .nat_vent_gate import resolve_comfort_heat
@@ -328,6 +329,7 @@ def compute_nat_vent_plan(
     window_open_time: time | None = None,
     ceiling: float | None = None,
     k_passive: float | None = None,
+    house_stepper: Any = None,
 ) -> dict:
     """Derive warm/mild-day timing events from ODE predicted curves.
 
@@ -335,6 +337,9 @@ def compute_nat_vent_plan(
         k_passive: optional (Issue #1517) -- the closed-house rate per hour (negative). With ``k_active_cool`` it
             makes the pre-cool lead leak-aware, using the forecast outdoor temperature at the breach (the first
             outdoor entry when the curve has none that late). ``None`` keeps the plain ``delta / rate`` lead.
+        house_stepper: optional (Issue #1517) -- the primary engine's own house model (engine-neutral
+            ``HouseStepper``). With it the pre-cool lead is stepped through that model (thermal mass, sun) against
+            the forecast outdoor curve, ending at the ceiling breach, instead of either formula.
         ceiling: optional (Issue #1093) -- the ceiling the thermostat/ODE ceiling guard actually
             holds, i.e. ``awake_comfort_edges()``' ceiling (``comfort_cool`` plus the Prefer savings
             margin). ``ceiling_breach_time`` and ``precool_start_time`` -- the plan's twin of the
@@ -549,6 +554,9 @@ def compute_nat_vent_plan(
             outdoor_temp=_outdoor_at(predicted_outdoor, result["ceiling_breach_time"]),
             k_passive=k_passive,
             cooling=True,
+            house_stepper=house_stepper,
+            outdoor_at=lambda when: _outdoor_at(predicted_outdoor, when),
+            event_ts=result["ceiling_breach_time"],
         )
         result["precool_start_time"] = result["ceiling_breach_time"] - timedelta(minutes=lead_min)
 

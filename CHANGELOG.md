@@ -9,6 +9,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **What you'll notice:** on cold or hot days the bank and the ceiling guard start earlier (a few minutes to tens of minutes) so the house is at the target when the period starts; before, about 1 recovery in 5 was more than 5 minutes late. On mild days the start can be a little later. A target the equipment cannot reach at the current outdoor temperature starts at the maximum lead (4 hours).
   - **Unchanged:** with no learned house leak or no outdoor reading the lead is exactly what it was.
   - **Internal:** one shared function (`thermal_lead_time.compute_lead_minutes_from_rate`) now carries the leak term for the TOU bank (Home/Guest and Away/Vacation), the ODE ceiling guard and the nat-vent plan.
+  - **House model on v4 zones:** where the prediction engine in Settings is v4 and has learned your house, the lead comes from v4's own house model (it also counts the walls' thermal mass and the sun) stepped with the equipment fully on against the forecast, not from the leak formula. A heavy, sunny house needs much longer than the formula says, so the bank, the ceiling guard and the pre-cool start earlier there (up to the 4-hour cap). Homes on v3, or while v4 is still learning, keep the leak formula.
+  - **Internal:** `thermal_lead_time.stepper_lead_minutes` / `stepper_lead_minutes_before` take an engine-neutral `HouseStepper` (`prediction_engines.control_stepper`, supplied by the coordinator as the optional `house_stepper` argument). The goldens `r6b_tou_bank_lead_follows_primary__v4` and `..._heat__v4` were re-derived again (window 12:15, the cap; owner approved 2026-11-11).
 
 ## [0.9.26] — 2026-11-10
 

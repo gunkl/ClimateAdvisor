@@ -48,6 +48,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from datetime import time as dt_time
 from enum import Enum
+from typing import Any
 
 from .automation import _in_sleep_window
 from .const import (
@@ -296,6 +297,7 @@ def resolve_tou_phase(
     thermal_model: dict | None,
     config: dict,
     outdoor_at: Callable[[datetime], float | None] | None = None,
+    house_stepper: Any = None,
 ) -> TOUPhaseResolution:
     """Should the home start pre-conditioning right now for an upcoming ``high``-tagged
     schedule?
@@ -317,6 +319,10 @@ def resolve_tou_phase(
     ``outdoor_at`` (Issue #1517): maps the schedule start to the outdoor temperature expected then (the caller's
     forecast, else the current reading). With it and a negative ``k_passive`` in ``thermal_model`` the lead time is
     leak-aware (``thermal_lead_time``); without either it is the plain ``delta / rate`` formula.
+
+    ``house_stepper`` (Issue #1517): the primary prediction engine's own house model (engine-neutral
+    ``HouseStepper``; ``None`` while it is still learning or for a first-order primary). With ``outdoor_at`` the lead
+    time is then stepped through that model (thermal mass and sun) instead of either formula.
     """
     if current_indoor_temp is None or hvac_mode not in ("heat", "cool"):
         return TOUPhaseResolution(TOUPhase.NONE, None, None, None, None, None)
@@ -368,6 +374,9 @@ def resolve_tou_phase(
         outdoor_temp=outdoor_at(schedule_start) if outdoor_at is not None else None,
         k_passive=thermal_model.get("k_passive"),
         cooling=mode == "cool",
+        house_stepper=house_stepper,
+        outdoor_at=outdoor_at,
+        event_ts=schedule_start,
     )
 
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)
@@ -388,6 +397,7 @@ def resolve_tou_away_vacation_phase(
     target_temp_step: object = None,
     frozen: TOUPhaseResolution | None = None,
     outdoor_at: Callable[[datetime], float | None] | None = None,
+    house_stepper: Any = None,
 ) -> TOUPhaseResolution:
     """Away/Vacation TOU pre-conditioning (Issue #899, grounded in Issue #892).
 
@@ -527,6 +537,12 @@ def resolve_tou_away_vacation_phase(
 
     fallback_minutes = float(config.get("default_tou_lead_minutes", _TOU_LEAD_MIN_FALLBACK))
     _outdoor_start = outdoor_at(schedule_start) if outdoor_at is not None else None
+
+    def _outdoor_for_stepper(when: datetime) -> float | None:
+        # the forecast at the step; the current reading when the caller has no forecast there
+        got = outdoor_at(when) if outdoor_at is not None else None
+        return got if got is not None else current_outdoor_temp
+
     lead_minutes = compute_lead_minutes_from_rate(
         delta_t=abs(target - edge),
         rate=rate,
@@ -541,6 +557,9 @@ def resolve_tou_away_vacation_phase(
         outdoor_temp=_outdoor_start if _outdoor_start is not None else current_outdoor_temp,
         k_passive=k_passive,
         cooling=mode == "cool",
+        house_stepper=house_stepper,
+        outdoor_at=_outdoor_for_stepper,
+        event_ts=schedule_start,
     )
 
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)

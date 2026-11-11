@@ -53,6 +53,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Any
 
 from .thermal_lead_time import compute_lead_minutes_from_rate
 
@@ -161,6 +162,9 @@ class OdeCeilingGuardInputs:
     natural_vent_active: bool
     ceiling_threshold: float | None
     now: datetime
+    # Issue #1517: the primary engine's own house model (engine-neutral ``HouseStepper``) or None. With it the
+    # pre-cool lead is stepped through that model (thermal mass, sun) from the breach time instead of a formula.
+    house_stepper: Any = None
 
 
 def _model_eligible(inputs: OdeCeilingGuardInputs) -> bool:
@@ -265,6 +269,10 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
         outdoor_temp=inputs.outdoor,
         k_passive=inputs.k_passive,
         cooling=True,
+        # the guard holds one outdoor reading (no forecast here): the house model runs against that from the breach
+        house_stepper=inputs.house_stepper,
+        outdoor_at=lambda _when: inputs.outdoor,
+        event_ts=breach_ts,
     )
 
     if hours_to_breach <= lead_min / 60:

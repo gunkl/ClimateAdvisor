@@ -276,6 +276,19 @@ def _apply_whf_hazard(
     return record
 
 
+def strip_occupant_seconds(plan_dict: dict) -> dict:
+    """Undo Issue #1527's off-the-minute seconds in a ``DayPlan.to_dict()`` (for the pinned earlier-draws digests).
+
+    The seconds are the plan's last draw, so with them back on the whole minute (and the events re-sorted by minute,
+    stable) a plan is byte-identical to the one built before #1527.
+    """
+    plan_dict["timed"] = sorted(
+        ([int(m), k, a] if k == "thermostat_state_changed" else [m, k, a] for m, k, a in plan_dict["timed"]),
+        key=lambda t: t[0],
+    )
+    return plan_dict
+
+
 def strip_whf_hazard(plan_dict: dict) -> dict:
     """Undo the fan hazard in a ``DayPlan.to_dict()`` (for the pinned earlier-draws digest)."""
     whf = plan_dict.pop("whf", None)

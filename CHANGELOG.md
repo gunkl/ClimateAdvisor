@@ -7,6 +7,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ### Internal
 - Fix #1527 (test tooling): the nightly no longer reports a false "heat started right after the AC" failure when a simulated person changes the thermostat in the same second Climate Advisor does. Generated occupant thermostat changes now happen at a random second of their minute, as a real person's would. Climate Advisor ignores a mode change within 3 seconds of its own write, treating it as that write reporting back; this is documented and accepted. Nothing changes in the house.
+- Test fix (found while verifying #1527): the #1508 memory guard now counts only the simulated days it runs itself, tracked by identity. In a full parallel test run it could count leftovers from earlier tests in the same worker and fail at random.
 
 ## [0.9.29] — 2026-11-11
 

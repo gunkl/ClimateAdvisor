@@ -3,7 +3,7 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.9.30] — 2026-11-11
+## [0.9.31] — 2026-11-11
 
 ### Fixed
 - **Fix #1525: a season without heating (or cooling) no longer replaces what v4 learned about it.**
@@ -17,6 +17,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 - **Fix #1529: one bad night no longer makes v4 forget the house.**
   - **What you'll notice:** when a nightly v4 refit cannot produce a usable model (a sensor outage or a gap in the history left too little data, or a calm week it could not learn from), pre-heat, the time-of-use bank, setback depth and the ceiling guard keep using the model learned before, instead of falling back to the "still learning" defaults until a good fit returns. The Debug tab shows "Last refit: last refit unusable (reason); keeping the model from <date>". After three unusable refits in a row (Climate Advisor retries every 6 hours) the Status chart note, the log and the AI investigator also say that the decisions are still using the model from that date. The next usable refit takes over as before. If you change the zone's temperature sensor, an unusable refit no longer keeps a model made for the old sensor; the next good refit starts from what that model learned. A new home that has never had a usable model behaves as before.
 - **Fix #1528: a winter with the windows shut no longer resets the learned window and whole-house-fan rates to the defaults.** v4's second fit attempt started from the typical-house values and could put them back on a night with no window or fan use; the learned values now hold until the windows or the fan are used again.
+
+## [0.9.30] — 2026-11-11
+
+### Internal
+- Fix #1527 (test tooling): the nightly no longer reports a false "heat started right after the AC" failure when a simulated person changes the thermostat in the same second Climate Advisor does. Generated occupant thermostat changes now happen at a random second of their minute, as a real person's would. Climate Advisor ignores a mode change within 3 seconds of its own write, treating it as that write reporting back; this is documented and accepted. Nothing changes in the house.
+- Test fix (found while verifying #1527): the #1508 memory guard now counts only the simulated days it runs itself, tracked by identity. In a full parallel test run it could count leftovers from earlier tests in the same worker and fail at random.
 
 ## [0.9.29] — 2026-11-11
 

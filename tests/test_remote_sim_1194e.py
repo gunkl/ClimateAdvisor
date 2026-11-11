@@ -22,7 +22,7 @@ import pytest
 from tools.sim_harness import outcomes
 from tools.sim_harness.fake_hass import FakeHass
 from tools.sim_harness.fake_scheduler import FakeScheduler
-from tools.sim_harness.generator import build_plan
+from tools.sim_harness.generator import build_plan, strip_occupant_seconds
 from tools.sim_harness.world import BedroomNode, BedroomParams, HouseParams, ToyHouse
 
 # sha256 of json.dumps(build_plan(seed, profile).to_dict(), sort_keys=True) for seeds 0..59 x 3 profiles, taken on
@@ -38,7 +38,8 @@ def test_every_generated_plan_is_byte_identical_without_the_bedroom_node() -> No
     h = hashlib.sha256()
     for i in range(60):
         for profile in ("coordinator", "engine", "mixed"):
-            h.update(json.dumps(build_plan(i, profile).to_dict(), sort_keys=True).encode())
+            # Issue #1527: the occupant's off-the-minute seconds are the plan's last draw; hash them on the minute
+            h.update(json.dumps(strip_occupant_seconds(build_plan(i, profile).to_dict()), sort_keys=True).encode())
     assert h.hexdigest() == _PLANS_DIGEST_BEFORE_BEDROOM
 
 

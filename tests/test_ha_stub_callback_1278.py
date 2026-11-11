@@ -13,6 +13,7 @@ from __future__ import annotations
 import gc
 import inspect
 import logging
+import weakref
 from unittest import mock
 
 import tools.sim_harness.ha_stubs  # noqa: F401  (installs the stubs via tests/conftest.py)
@@ -73,10 +74,15 @@ def test_generated_days_do_not_keep_earlier_days_alive():
     from tools.sim_harness.fake_hass import FakeHass
     from tools.sim_harness.generator import day_seed_of, run_day
 
-    def live_hasses() -> int:
+    def live_hasses() -> list:
         gc.collect()
-        return sum(1 for o in gc.get_objects() if type(o) is FakeHass)
+        return [o for o in gc.get_objects() if type(o) is FakeHass]
 
+    # Issue #1527: count only the days this test runs. Under xdist the worker may already hold FakeHass instances from
+    # tests that ran before this one in the same process (seen in a 4-shard run: 2 alive), which says nothing about
+    # whether a generated day keeps the previous one alive. Tracked by identity (a WeakSet), not by count, so earlier
+    # instances freed during the loop cannot offset a leak.
+    before = weakref.WeakSet(live_hasses())
     replay._quiet()
     try:
         for i in range(3):
@@ -84,4 +90,4 @@ def test_generated_days_do_not_keep_earlier_days_alive():
     finally:
         logging.disable(logging.NOTSET)
     # The latest day may still be pinned until the next one starts; no earlier day may be.
-    assert live_hasses() <= 1
+    assert len([h for h in live_hasses() if h not in before]) <= 1

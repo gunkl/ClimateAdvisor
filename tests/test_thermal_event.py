@@ -36,7 +36,6 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
 )
-from custom_components.climate_advisor.indoor_temp import IndoorTempReading  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -136,8 +135,8 @@ def _make_v3_coord(
     learning.set_pending_thermal_event = MagicMock()
     learning.save_state = MagicMock()
     learning._commit_event_from_dict = MagicMock(return_value=({"hvac_mode": "heat"}, None, 0.9))
-    # Issue #1512: an HVAC run is committed at the off edge through record_hvac_run -> (obs, reject_code)
-    learning.record_hvac_run = MagicMock(return_value=({"hvac_mode": "heat", "k_active": 2.0}, None))
+    # Issue #1512: HVAC rates come from the pooled cycle model (apply_cycle_fit), not from a per-run commit
+    learning.apply_cycle_fit = MagicMock(return_value=True)
     # _abandon_observation writes to learning._state.rejection_log — must not be None
     learning._state = MagicMock()
     learning._state.rejection_log = {}
@@ -164,8 +163,6 @@ def _make_v3_coord(
         "_ensure_pending_observations",
         "_start_hvac_observation",
         "_end_hvac_active_phase",
-        "_closed_house_rate",
-        "_reject_hvac_run",
         "_commit_observation",
         "_commit_observation_if_sufficient",
         "_abandon_observation",
@@ -199,105 +196,20 @@ class TestCoolModeEndToEndCommit:
         assert obs["hvac_mode"] == "cool"
         assert obs["session_mode"] == "cool"
 
-    def test_cool_observation_commits_with_correct_mode(self):
-        """A cool run commits at the off edge: record_hvac_run gets mode 'cool' and the off-edge reading.
+    def test_cool_off_edge_removes_the_pending_observation_only(self):
+        """A cool run's off edge no longer commits a per-run rate (old: record_hvac_run got the off-edge reading).
 
-        Issue #1516: the old test faked a post-run decay window and judged "peak - end >= 0.3" for COOLING, which
-        is backwards (a cooling run's extremum is a trough, and a room that warms after the compressor stops is
-        the normal case). The run is now judged by the run itself at the off edge, mirror of heating.
-        """
+        The pooled cycle model learns cooling from the recorded cycle (tests/test_cycle_wiring_1512.py); the off
+        edge only tidies the pending observation, mirror of heating."""
         coord = _make_v3_coord(indoor_temp=70.0)
         dt_mock_start = _make_dt_mock(datetime(2026, 4, 19, 12, 0, 0, tzinfo=UTC))
         dt_mock_end = _make_dt_mock(datetime(2026, 4, 19, 12, 20, 0, tzinfo=UTC))
-
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_start):
             asyncio.run(coord._start_hvac_observation("cool"))
-        # the room cooled during the run: the off-edge reading is 68.0
-        coord._get_indoor_temp_with_provenance = MagicMock(return_value=IndoorTempReading(68.0, "climate.test", 68.0))
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_end):
             coord._end_hvac_active_phase(OBS_TYPE_HVAC_COOL)
-
-        coord.learning.record_hvac_run.assert_called_once()
-        run = coord.learning.record_hvac_run.call_args[0][0]
-        assert run["mode"] == "cool"
-        assert run["start_f"] == 70.0
-        assert run["off_f"] == 68.0
-        assert run["minutes"] == 20.0
+        coord.learning.apply_cycle_fit.assert_not_called()
         assert OBS_TYPE_HVAC_COOL not in coord._pending_observations
-
-    def test_cool_observation_removed_at_off_edge(self):
-        """The off edge commits and removes the pending obs; there is no post_heat phase any more (Issue #1512)."""
-        coord = _make_v3_coord()
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._start_hvac_observation("cool"))
-            coord._end_hvac_active_phase(OBS_TYPE_HVAC_COOL)
-        assert OBS_TYPE_HVAC_COOL not in coord._pending_observations
-
-
-# ---------------------------------------------------------------------------
-# Gap scenario 2 — Fan-only session lifecycle
-# ---------------------------------------------------------------------------
-
-
-class TestFanOnlySessionLifecycle:
-    """Fan-only observation starts, reaches a terminal state without errors."""
-
-    def test_fan_only_observation_created_on_start(self):
-        """_start_hvac_observation('fan_only') creates fan_only_decay entry."""
-        coord = _make_v3_coord()
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._start_hvac_observation("fan_only"))
-        # fan_only maps to OBS_TYPE_FAN_ONLY_DECAY or to hvac_cool — verify whichever key
-        # the coordinator actually uses is present
-        assert len(coord._pending_observations) >= 1
-        # The key must be fan_only_decay (OBS_TYPE_FAN_ONLY_DECAY) or
-        # one of the HVAC types — not an empty dict
-        present_keys = list(coord._pending_observations.keys())
-        assert len(present_keys) > 0
-
-    def test_fan_only_abandon_clears_entry(self):
-        """Abandoning the fan_only obs removes it from _pending_observations."""
-        coord = _make_v3_coord()
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._start_hvac_observation("fan_only"))
-
-        obs_keys = list(coord._pending_observations.keys())
-        assert len(obs_keys) >= 1
-        fan_key = obs_keys[0]
-
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._abandon_observation(fan_key, "test abandon fan_only")
-
-        assert fan_key not in coord._pending_observations
-
-    def test_fan_only_does_not_raise(self):
-        """Complete fan_only lifecycle (start → end active) is error-free."""
-        coord = _make_v3_coord()
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._start_hvac_observation("fan_only"))
-
-        obs_keys = list(coord._pending_observations.keys())
-        if not obs_keys:
-            return  # nothing to test if start was no-op
-        fan_key = obs_keys[0]
-
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._end_hvac_active_phase(fan_key)
-
-        # terminal state: committed or rejected (key absent) — only that it ran cleanly
-
-
-# ---------------------------------------------------------------------------
-# Gap scenario 3 — Pre-heat buffer snapshot in v3 obs
-# ---------------------------------------------------------------------------
-
-
-class TestHvacObsShape:
-    """The HVAC observation carries only the run's own samples (Issue #1512: no pre-heat buffer, no post-heat phase)."""
 
     def test_obs_has_no_pre_or_post_heat_samples(self):
         coord = _make_v3_coord()
@@ -316,39 +228,19 @@ class TestHvacObsShape:
 
 
 class TestSessionCountTracking:
-    """thermal_session_count increments when an HVAC run commits at the off edge (Issue #1512)."""
+    """The off edge no longer counts a session: the cycle path counts eligible cycles (Issue #1512)."""
 
-    @staticmethod
-    def _run(coord, mode: str, obs_type: str) -> None:
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._start_hvac_observation(mode))
-            coord._end_hvac_active_phase(obs_type)
-
-    def test_session_count_increments_on_heat_commit(self):
-        """Successful heat commit increments _today_record.thermal_session_count by 1."""
-        coord = _make_v3_coord()
-        assert coord._today_record.thermal_session_count == 0
-        self._run(coord, "heat", OBS_TYPE_HVAC_HEAT)
-        assert coord._today_record.thermal_session_count == 1
-
-    def test_session_count_increments_on_cool_commit(self):
-        """Successful cool commit also increments the session count."""
-        coord = _make_v3_coord()
-        coord.learning.record_hvac_run.return_value = ({"hvac_mode": "cool", "k_active": -2.0}, None)
-        self._run(coord, "cool", OBS_TYPE_HVAC_COOL)
-        assert coord._today_record.thermal_session_count == 1
-
-    def test_session_count_not_incremented_on_reject(self):
-        """A rejected run (record_hvac_run returns a code) does not count, is logged with its code, and is gone."""
-        coord = _make_v3_coord()
-        coord._rejection_log = {}
-        coord.learning.record_hvac_run.return_value = (None, "hvac_signal_below_resolution")
-        self._run(coord, "heat", OBS_TYPE_HVAC_HEAT)
-        assert coord._today_record.thermal_session_count == 0
-        (event,) = coord._rejection_log[OBS_TYPE_HVAC_HEAT]
-        assert event["reason_code"] == "hvac_signal_below_resolution"
-        assert OBS_TYPE_HVAC_HEAT not in coord._pending_observations
+    def test_off_edge_does_not_count_or_record_a_rejection(self):
+        """Old: a committed run incremented thermal_session_count and a rejected one logged a code at the off edge."""
+        for mode, obs_type in (("heat", OBS_TYPE_HVAC_HEAT), ("cool", OBS_TYPE_HVAC_COOL)):
+            coord = _make_v3_coord()
+            coord._rejection_log = {}
+            with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_mock()):
+                asyncio.run(coord._start_hvac_observation(mode))
+                coord._end_hvac_active_phase(obs_type)
+            assert coord._today_record.thermal_session_count == 0
+            assert coord._rejection_log == {}
+            assert obs_type not in coord._pending_observations
 
 
 # ---------------------------------------------------------------------------

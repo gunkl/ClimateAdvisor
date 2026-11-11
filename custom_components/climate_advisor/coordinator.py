@@ -42,7 +42,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import hvac_rate_fit, log_capture, prediction_engines, v4_shadow, window_span
+from . import cycle_model, log_capture, prediction_engines, v4_shadow, window_span
 from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
@@ -161,6 +161,8 @@ from .const import (
     CONF_VACATION_TOGGLE,
     CONF_VACATION_TOGGLE_INVERT,
     CONF_WEATHER_BIAS,
+    CYCLE_FILE,
+    CYCLE_RETENTION_DAYS,
     DAY_TYPE_COLD,
     DAY_TYPE_HOT,
     DAY_TYPE_MILD,
@@ -219,10 +221,14 @@ from .const import (
     REJECT_AC_NO_SETPOINT_BREACH,
     REJECT_AC_SETPOINT_OUT_OF_RANGE,
     REJECT_AC_SETPOINT_UNSTABLE,
+    REJECT_CYCLE_EXCLUDED_WINDOW_FAN,
+    REJECT_CYCLE_GAP_RESTART,
+    REJECT_CYCLE_SETPOINT_CHANGE,
+    REJECT_CYCLE_SIGNAL_BELOW_RESOLUTION,
+    REJECT_CYCLE_THERMOSTAT_UNAVAILABLE,
+    REJECT_CYCLE_TOO_SHORT,
     REJECT_FAN_ACTIVATED,
     REJECT_HVAC_MODE_SWITCH,
-    REJECT_HVAC_RUN_TOO_SHORT,
-    REJECT_HVAC_SIGNAL_BELOW_RESOLUTION,
     REJECT_INDOOR_UNAVAILABLE,
     REJECT_NEW_SESSION,
     REJECT_NO_INTERIOR_PEAK,
@@ -249,6 +255,7 @@ from .const import (
     THERMAL_CHART_LOG_VENT_MIN_MINUTES,
     THERMAL_COAST_MAX_S,
     THERMAL_COLD_BUCKET_LIMIT_F,
+    THERMAL_CYCLE_MOVE_WINDOW_AFTER_OFF_MIN,
     THERMAL_DUAL_AGREE_REL,
     THERMAL_DUAL_OLS_GOOD,
     THERMAL_DUAL_OLS_OK,
@@ -309,6 +316,8 @@ from .const import (
     is_availability_recovery,
     is_unavailable_state,
 )
+from .cycle_recorder import CycleRecorder
+from .cycle_store import CycleStore
 from .engine_inputs import (
     TOU_AV_INACTIVE,
     CoordinatorEngineInputs,
@@ -752,6 +761,33 @@ def _run_extremum(obs_type: str, current: float | None, reading: float | None) -
     return min(current, reading) if obs_type == OBS_TYPE_HVAC_COOL else max(current, reading)
 
 
+def _cycle_values(cycle: dict, resolution_f: float | None = None) -> dict:
+    """The numbers behind a cycle's exclusion record: run minutes, robust reading movement and its resolution steps.
+
+    Movement is measured in [on, off + ``THERMAL_CYCLE_MOVE_WINDOW_AFTER_OFF_MIN``] with one extreme dropped each
+    side. Only labelling values: WHY a cycle did not qualify comes from ``cycle_model.fit_cycles``' own ``reasons``.
+    """
+    samples = cycle.get("samples") or []
+    t_on = cycle.get("t_on")
+    t_off = cycle.get("t_off")
+    if t_on is None or not samples:
+        return {"minutes": 0.0, "signal_f": 0.0, "steps": None, "resolution_f": None, "cut": cycle.get("cut")}
+    end = t_off if t_off is not None else samples[-1][0]
+    res = cycle.get("res") or resolution_f
+    window_end = end + THERMAL_CYCLE_MOVE_WINDOW_AFTER_OFF_MIN * 60.0
+    readings = sorted(s[1] for s in samples if t_on <= s[0] <= window_end)
+    if len(readings) >= 5:
+        readings = readings[1:-1]
+    signal = (readings[-1] - readings[0]) if readings else 0.0
+    return {
+        "minutes": round(max(0.0, (end - t_on) / 60.0), 1),
+        "signal_f": round(signal, 2),
+        "steps": round(signal / res, 1) if res else None,
+        "resolution_f": res,
+        "cut": cycle.get("cut"),
+    }
+
+
 def _swing_debug_for_display(summary: dict[str, Any], unit: str) -> dict[str, Any]:
     """The learning engine's swing audit summary (all degF) in the user's display unit (Issue #1233)."""
     out: dict[str, Any] = {"definition": summary.get("definition")}
@@ -1060,6 +1096,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v3_last_archive_save: float | None = None
         self._v4_store = V4ModelStore(Path(hass.config.config_dir), entry_id=self._entry_id)
         self._v4_fit_running = False
+        # Issue #1512/#1516: the pooled cycle model's raw material. The recorder is a pure state machine fed from the
+        # thermostat/sensor listeners and the 5-minute tick; the store keeps the closed cycles (90 days) so every
+        # closed cycle refits the heat/cool rate from all of them. load() is blocking -> async_restore_state().
+        self._cycle_recorder = CycleRecorder(True)
+        self._cycle_store = CycleStore(
+            resolve_entry_scoped_path(Path(hass.config.config_dir), CYCLE_FILE, self._entry_id)
+        )
+        self._cycle_fit_lock: asyncio.Lock | None = None
         self._v4_fit_task: asyncio.Task[Any] | None = None
         self._v4_last_fit_attempt: float | None = None
         self._v4_last_display_check: float | None = None  # Issue #1422: newly qualified display nodes, every 6 h
@@ -1401,7 +1445,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._solar_phase_ac_backfill: bool = False  # Issue #312: AC duty cycle estimator
         # Periodic daily re-fit tracker (Issue #310): date of last incremental fit
         self._last_solar_phase_fit_date: date | None = None
-        self._last_duty_balance_fit_date: date | None = None
 
         # GitHub issues cache — separate TTL for open vs closed issues
         self._github_open_cache: list[dict] | None = None
@@ -1664,6 +1707,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Issue #1256: startup counts as a setpoint change for swing sampling (before the listener exists).
         self._stamp_setpoint_change_at_startup(dt_util.now())
+        # Issue #1512 (#1437): in-flight cycles are not persisted; the first reading after startup carries gap_before.
+        self._cycle_gap("restart")
 
         # Listeners: thermostat state (for tracking manual overrides and runtime)
         self._unsub_listeners.append(
@@ -1751,6 +1796,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self._spawn(self._save_learning_state())
                 except Exception:  # noqa: BLE001
                     _LOGGER.warning("Coast tracking on indoor sensor change failed", exc_info=True)
+                self._cycle_reading()  # Issue #1512: every band-sensor change, with seconds
                 ae = self.automation_engine
                 if ae._fan_active or ae._natural_vent_active:
                     self.hass.async_create_task(
@@ -2191,6 +2237,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.automation_engine.note_indoor_available(_indoor_now)
         except Exception:
             _LOGGER.warning("Blind-fan recovery check failed on thermal tick; sampling continues", exc_info=True)
+        self._cycle_tick()  # Issue #1512: coast windows that elapsed, outdoor, flags
         self._sample_all_observations()
 
     def _refresh_outdoor_temp(self, min_delta_f: float = 0.0) -> None:
@@ -2333,6 +2380,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await self._executor_job(self._v4_archive.load)
         if getattr(self, "_v3_archive", None) is not None:  # Issue #1492: same contract (load() never raises)
             await self._executor_job(self._v3_archive.load)
+        if getattr(self, "_cycle_store", None) is not None:  # Issue #1512: same contract (load() never raises)
+            await self._executor_job(self._cycle_store.load)
         if getattr(self, "_v4_store", None) is not None:
             await self._executor_job(self._v4_store.load)
             self._v4_last_fit = dict(self._v4_store.last_fit or {})
@@ -4145,8 +4194,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         _cache.get("k_vent_window"),
                         _cache.get("k_vent_fan"),
                     )
-                # Issue #1512: the duty-balance fit, once per startup (no persisted relearn flag: it is a pure refit)
-                self._maybe_run_periodic_duty_balance_fit()
                 if not self._solar_phase_backfill:
                     self._run_solar_phase_chart_log_fit(backfill=True)
                     self._solar_phase_backfill = True
@@ -7802,10 +7849,39 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 else:
                     source = ENGINE_V3
                 rows.append({"key": key, "kind": kind, "value": value, "source": source})
+            rows.extend(self._cycle_model_rows(unit))
             return rows
         except Exception:  # noqa: BLE001 - a debug field must never break the debug payload
             _LOGGER.debug("decision_rates_summary failed", exc_info=True)
             return []
+
+    def _cycle_model_rows(self, unit: str) -> list[dict[str, Any]]:
+        """The pooled cycle model's rows for the Debug/Analysis/AI surfaces, source ``"cycle"`` (Issue #1512).
+
+        One row per mode, every field on the row and ``mode`` set. ``q`` / ``sd_q`` are rates in the user's DISPLAY
+        unit (``display_delta``, like the other rate rows here); ``coast_area_f`` stays a degF delta (the front end
+        converts it) and ``k_p_cycle`` is per hour. Shown whichever engine is primary (v3 primary: ``q`` IS the
+        decisions' ``k_active_*``). Never raises."""
+        cache = getattr(getattr(getattr(self, "learning", None), "_state", None), "thermal_model_cache", None)
+        rows: list[dict[str, Any]] = []
+        if not isinstance(cache, dict):
+            return rows
+
+        def _num(v: Any) -> bool:
+            return isinstance(v, int | float) and not isinstance(v, bool)
+
+        for mode in ("heat", "cool"):
+            fit = cache.get(f"cycle_fit_{mode}")
+            if not isinstance(fit, dict):
+                continue
+            row: dict[str, Any] = {"key": f"cycle_{mode}", "mode": mode, "kind": "cycle", "source": "cycle"}
+            for field in ("q", "sd_q"):
+                raw = fit.get(field)
+                row[field] = display_delta(raw, unit, 3) if _num(raw) else None
+            for field in ("grade", "coast_area_f", "k_p_cycle", "ne", "n_cycles", "resolution_f", "applied"):
+                row[field] = fit.get(field)
+            rows.append(row)
+        return rows
 
     def control_predicted_indoor(self) -> list[dict] | None:
         """The predicted indoor curve every decision reads (``predicted_indoor=``): the primary engine's, this cycle's.
@@ -7985,6 +8061,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
         else:
             self._engine_fallback_logged = False
+        # Issue #1512: the pooled cycle model's fit beside the engines (source "cycle"); display only.
+        try:
+            cache = self.learning._state.thermal_model_cache
+            out["cycle_model"] = {
+                "source": "cycle",
+                "heat": dict(cache["cycle_fit_heat"])
+                if isinstance(cache, dict) and cache.get("cycle_fit_heat")
+                else None,
+                "cool": dict(cache["cycle_fit_cool"])
+                if isinstance(cache, dict) and cache.get("cycle_fit_cool")
+                else None,
+            }
+        except Exception:  # noqa: BLE001 - display only
+            out["cycle_model"] = {"source": "cycle", "heat": None, "cool": None}
         return out
 
     def chart_capabilities(self) -> dict[str, bool]:
@@ -10380,6 +10470,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Issue #1215: a promise reading at the transition, so a sealed-house run (P9) ends where the window opened.
         self._record_promise_reading()
+        self._cycle_flags()  # Issue #1512: windows are an exclusion flag on the open cycles
 
         # Issue #489: refresh immediately on every raw transition (open or closed) so
         # contact_status/contact_sensors reflect live sensor state right away. It does not
@@ -10691,6 +10782,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             was_running,
             is_running,
         )
+        self._cycle_thermostat_event(old_state, new_state, was_running, is_running)  # Issue #1512
 
         if not was_running and is_running:
             # HVAC just turned on — determine session_mode from hvac_action or hvac_mode
@@ -11658,6 +11750,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # whole-house-fan sealed-house promise (P9) sees when a run starts and when it ends, not only the last
         # periodic sample inside it (on 2026-11-01 it reported 87 s for a fan that ran 177 s).
         self._record_promise_reading()
+        self._cycle_flags()  # Issue #1512: a fan run is an exclusion flag on the open cycles
         # Issue #361: command-only mode — entity state changes are command echoes, not physical signals.
         if not self._fan_state_feedback_enabled():
             _LOGGER.debug(
@@ -13219,6 +13312,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if session_mode in self._RUNTIME_TRACKING:
             self._start_runtime_timer(session_mode)
         if session_mode in ("heat", "cool"):
+            self._cycle_start_midrun(session_mode, climate_state)
             await self._start_hvac_observation(session_mode)
 
     # ------------------------------------------------------------------
@@ -14732,76 +14826,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         self._solar_phase_ac_backfill = True
 
-    def _run_duty_balance_chart_log_fit(self, days: int = 30) -> None:
-        """Fit k_passive / k_active_heat / k_active_cool by duty balance over the last ``days`` of chart_log and
-        record the result (Issue #1512): the learner for homes with no closed-house rate and for short cycles.
-
-        Closed-house, settled, night rows only: the row states (``_ventilation_row_states``, incl. ``settling_hvac``)
-        and the solar-hour rule are handed to the pure fit. Nothing is recorded when the data cannot identify it.
-        """
-        chart_log = getattr(self, "_chart_log", None)
-        if chart_log is None or not hasattr(self, "learning"):
-            return
-        entries = list(getattr(chart_log, "_entries", []))
-        if not entries:
-            return
-        cutoff = dt_util.now() - timedelta(days=days)
-        rows: list[dict] = []
-        for entry in entries:
-            try:
-                ts = datetime.fromisoformat(entry.get("ts", ""))
-            except ValueError, TypeError:
-                continue
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=UTC)
-            if ts >= cutoff:
-                rows.append(entry)
-        if not rows:
-            return
-        states = _ventilation_row_states(rows)
-        why: list[str] = []
-        fit = hvac_rate_fit.fit_duty_balance(rows, states, is_solar_hour=self._is_solar_hour, reason=why)
-        if fit is None:
-            _LOGGER.info(
-                "chart_log duty balance: no usable fit over %d rows (%d days): %s",
-                len(rows),
-                days,
-                "; ".join(why) or "not identifiable",
-            )
-            return
-        r2 = fit.get("r_squared")
-        if not isinstance(r2, int | float) or r2 < THERMAL_MIN_R_SQUARED:
-            _LOGGER.info(
-                "chart_log duty balance: fit rejected, r2=%s below the %s floor (k_p=%s heat=%s cool=%s n=%s)",
-                r2,
-                THERMAL_MIN_R_SQUARED,
-                fit.get("k_passive"),
-                fit.get("k_active_heat"),
-                fit.get("k_active_cool"),
-                fit.get("n_intervals"),
-            )
-            return
-        n = self.learning.record_duty_balance_fit(fit)
-        _LOGGER.info(
-            "chart_log duty balance: recorded %s observations (k_p=%s heat=%s cool=%s heat_h=%s cool_h=%s n=%s r2=%s)",
-            n,
-            fit.get("k_passive"),
-            fit.get("k_active_heat"),
-            fit.get("k_active_cool"),
-            fit.get("heat_hours"),
-            fit.get("cool_hours"),
-            fit.get("n_intervals"),
-            fit.get("r_squared"),
-        )
-
-    def _maybe_run_periodic_duty_balance_fit(self) -> None:
-        """Run the duty-balance fit at most once per calendar day, with the periodic chart_log fits (Issue #1512)."""
-        _today = dt_util.now().date()
-        if getattr(self, "_last_duty_balance_fit_date", None) == _today:
-            return
-        self._last_duty_balance_fit_date = _today
-        self._run_duty_balance_chart_log_fit()
-
     def _maybe_run_periodic_solar_phase_fit(self) -> None:
         """Run the incremental daily solar phase re-fit if due (Issue #310/#312).
 
@@ -14813,7 +14837,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         No-ops until the initial backfill has been run at least once
         (_solar_phase_backfill must be True).
         """
-        self._maybe_run_periodic_duty_balance_fit()
         if not self._solar_phase_backfill:
             return
         _today = dt_util.now().date()
@@ -14846,156 +14869,301 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pending_observations[obs_type] = obs
         _LOGGER.debug("Thermal decay observation started: obs_id=%s type=%s", obs["obs_id"], obs_type)
 
-    def _closed_house_rate(self) -> tuple[float | None, str]:
-        """The closed-house leak rate the HVAC run-edge estimator subtracts, and where it came from (Issue #1512).
-
-        Order: (1) the decisions' model (``control_thermal_model``: v4's -a_o on a v4 zone, v3's k_passive on a v3 zone)
-        when it is a real leak rate (< 0) -> "primary" (the label never reads the engine
-        setting); (2) the v3 cache's ``k_passive`` when < 0 -> "v3";
-        (3) ``(None, "none")``: the run is rejected with ``REJECT_NO_K_PASSIVE``; the duty-balance fit covers the home.
-        Never the window-open rate (k_vent_window): that is not a closed-house rate.
-        """
-        try:
-            base = dict(getattr(self, "_thermal_model", None) or {})
-            model = self.control_thermal_model(base) or {}
-            k_model = model.get("k_passive")
-            if isinstance(k_model, int | float) and not isinstance(k_model, bool) and k_model < 0:
-                return float(k_model), "primary"
-        except Exception:  # noqa: BLE001 - a rate lookup never breaks the off-edge handler
-            _LOGGER.debug("_closed_house_rate: control model lookup failed", exc_info=True)
-        cache = getattr(getattr(self.learning, "_state", None), "thermal_model_cache", None)
-        k_v3 = cache.get("k_passive") if isinstance(cache, dict) else None
-        if isinstance(k_v3, int | float) and not isinstance(k_v3, bool) and k_v3 < 0:
-            return float(k_v3), ENGINE_V3
-        return None, "none"
-
     def _end_hvac_active_phase(self, obs_type: str) -> None:
-        """Commit (or reject with a code) an HVAC run at its off edge (Issue #1512).
+        """Drop the pending HVAC observation at the equipment's off edge (Issue #1512).
 
-        The off reading is the final active sample: the rate is learned from the run itself (heat or cool, the same
-        arithmetic), so whatever the room does after the equipment stops (furnace coast, AC rebound) can never
-        enter it. The pending observation is removed either way. A no-op if there is no active observation.
+        The heating/cooling rate is no longer learned from this observation: the pooled cycle model fits it from the
+        recorded cycles (``_cycle_process``). What stays here is the bookkeeping the pipeline relies on: the pending
+        active-phase observation is removed so the next run starts clean. A no-op if there is none.
         """
         self._ensure_pending_observations()
         obs = self._pending_observations.get(obs_type)
         if obs is None or obs.get("_phase") != "active":
             return
-        now = dt_util.now()
         self._pending_observations.pop(obs_type, None)
-        if not self.config.get("learning_enabled", True) or not hasattr(self, "learning"):
-            return
 
-        mode = "cool" if obs_type == OBS_TYPE_HVAC_COOL else "heat"
-        active_start_str = obs.get("active_start")
+    # ------------------------------------------------------------------
+    # Issue #1512 / #1516: pooled cycle model wiring (recorder -> store -> fit -> learning)
+    # ------------------------------------------------------------------
+
+    def _cycles_enabled(self) -> bool:
+        """The recorder exists (partially built test coordinators have none) and learning is on."""
+        return getattr(self, "_cycle_recorder", None) is not None and bool(self.config.get("learning_enabled", True))
+
+    def _cycle_primary_is_v3(self) -> bool:
+        """True when v3 is the primary engine, read through the control feed (R6b: no engine-setting read here).
+
+        ``control_thermal_model`` returns the very object it was given while v3 is primary (``control_model``'s
+        documented identity contract) and a new dict for any other primary, usable or not. A failure reads as not v3, so
+        the decisions' rates are never overwritten on doubt."""
+        probe: dict = {}
         try:
-            active_start = dt_util.parse_datetime(active_start_str) if active_start_str else now
-        except Exception:
-            active_start = now
-        minutes = (now - (active_start or now)).total_seconds() / 60.0
+            return self.control_thermal_model(probe) is probe
+        except Exception:  # noqa: BLE001
+            return False
 
-        # The indoor reading AT the off edge (the final active sample); never a later reading.
-        # Issue #895: .primary_value, not .value — see _get_current_sample()'s docstring.
-        off_f = self._get_indoor_temp_with_provenance().primary_value
-        active_samples = obs.get("active_samples", [])
-        if off_f is not None:
-            end_sample = self._get_current_sample(minutes)
-            if end_sample is not None and len(active_samples) < THERMAL_MAX_ACTIVE_SAMPLES:
-                active_samples.append(end_sample)
-            obs["peak_indoor_f"] = _run_extremum(obs_type, obs.get("peak_indoor_f"), off_f)
-        start_f = obs.get("start_indoor_f")
-        k_p, k_p_source = self._closed_house_rate()
+    def _cycle_flag_state(self) -> tuple[bool, bool, bool]:
+        """(window open, fan running, nat-vent active) now: the exclusion flags stamped on open cycles."""
+        ae = self.automation_engine
+        return (
+            bool(self._any_sensor_open()),
+            bool(ae._fan_active or ae._fan_override_active),
+            bool(ae._natural_vent_active),
+        )
+
+    def _cycle_collect(self, closed: list[dict] | None) -> None:
+        """Hand cycles the recorder closed to the async processor (store, rejection, refit, save)."""
+        if closed:
+            self._spawn(self._cycle_process(list(closed)))
+
+    def _cycle_flags(self) -> None:
+        """Stamp the window/fan/nat-vent state on the open cycles (the recorder keeps only changes). Never raises."""
+        if not self._cycles_enabled():
+            return
+        try:
+            win, fan, nat = self._cycle_flag_state()
+            self._cycle_collect(self._cycle_recorder.flags(dt_util.now().timestamp(), win, fan, nat))
+        except Exception:  # noqa: BLE001 - recording must never break a listener
+            _LOGGER.debug("cycle recorder flags failed", exc_info=True)
+
+    def _cycle_outdoor(self, ts: float) -> None:
+        out = getattr(self, "_last_outdoor_temp", None)
+        if isinstance(out, int | float) and not isinstance(out, bool):
+            self._cycle_collect(self._cycle_recorder.outdoor(ts, float(out)))
+
+    def _cycle_reading(self) -> None:
+        """The band sensor changed: record the reading with its seconds (flags first). Never raises."""
+        if not self._cycles_enabled():
+            return
+        try:
+            ts = dt_util.now().timestamp()
+            self._cycle_flags()
+            self._cycle_collect(
+                self._cycle_recorder.reading(
+                    ts, self._get_indoor_temp_with_provenance().primary_value, self._primary_indoor_entity()
+                )
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("cycle recorder reading failed", exc_info=True)
+
+    def _cycle_tick(self) -> None:
+        """5-minute tick: flags, outdoor, and close coast windows that elapsed. Never raises."""
+        if not self._cycles_enabled():
+            return
+        try:
+            ts = dt_util.now().timestamp()
+            self._cycle_flags()
+            self._cycle_outdoor(ts)
+            self._cycle_collect(self._cycle_recorder.tick(ts))
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("cycle recorder tick failed", exc_info=True)
+
+    def _cycle_gap(self, reason: str) -> None:
+        """A gap (``"restart"`` | ``"unavailable"``) is NOT an off edge: open cycles close with ``cut=reason``."""
+        if not self._cycles_enabled():
+            return
+        try:
+            self._cycle_collect(self._cycle_recorder.gap(dt_util.now().timestamp(), reason))
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("cycle recorder gap failed", exc_info=True)
+
+    @staticmethod
+    def _cycle_dir(state: Any, running: bool) -> str | None:
+        """``"heat"`` / ``"cool"`` for a running thermostat state (action first, then the hvac mode), else None."""
+        if not running:
+            return None
+        action = str(state.attributes.get("hvac_action", "")).lower()
+        if action == "heating":
+            return "heat"
+        if action == "cooling":
+            return "cool"
+        if state.state in ("heat", "cool"):
+            return str(state.state)
+        return None
+
+    def _cycle_start_midrun(self, mode: str, climate_state: Any) -> None:
+        """HA restarted while the equipment ran (#1437): record the post-restart part as a cycle (gap flagged)."""
+        if not self._cycles_enabled():
+            return
+        try:
+            ts = dt_util.now().timestamp()
+            self._cycle_flags()
+            self._cycle_collect(
+                self._cycle_recorder.on_edge(
+                    ts,
+                    mode,
+                    self._get_indoor_temp_with_provenance().primary_value,
+                    getattr(self, "_last_outdoor_temp", None),
+                    self._read_thermostat_setpoint_f(climate_state, mode),
+                )
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("cycle recorder mid-run start failed", exc_info=True)
+
+    def _cycle_thermostat_event(self, old_state: Any, new_state: Any, was_running: bool, is_running: bool) -> None:
+        """Feed one thermostat state change to the recorder. Never raises.
+
+        ``unavailable``/``unknown`` is a gap, never an off edge. A setpoint change closes a cycle only when the
+        equipment keeps running through it (a run that starts or stops at the change is still a valid run). The
+        thermostat's own reading is a band reading when it is the indoor source."""
+        if not self._cycles_enabled():
+            return
+        try:
+            ts = dt_util.now().timestamp()
+            unavail_new = is_unavailable_state(new_state.state)
+            unavail_old = is_unavailable_state(old_state.state)
+            if unavail_new:
+                if not unavail_old:
+                    self._cycle_gap("unavailable")
+                return
+            self._cycle_flags()
+            old_dir = None if unavail_old else self._cycle_dir(old_state, was_running)
+            new_dir = self._cycle_dir(new_state, is_running)
+            rec = self._cycle_recorder
+            if (
+                old_dir is not None
+                and old_dir == new_dir
+                and any(
+                    old_state.attributes.get(a) != new_state.attributes.get(a)
+                    for a in ("temperature", "target_temp_low", "target_temp_high")
+                )
+            ):
+                self._cycle_collect(rec.setpoint_change(ts))
+            if old_dir != new_dir:
+                if new_dir is None:
+                    self._cycle_collect(rec.off_edge(ts, self._get_indoor_temp_with_provenance().primary_value))
+                else:
+                    self._cycle_collect(
+                        rec.on_edge(
+                            ts,
+                            new_dir,
+                            self._get_indoor_temp_with_provenance().primary_value,
+                            getattr(self, "_last_outdoor_temp", None),
+                            self._read_thermostat_setpoint_f(new_state, new_dir),
+                        )
+                    )
+            if self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK) == TEMP_SOURCE_CLIMATE_FALLBACK and (
+                new_state.attributes.get("current_temperature") != old_state.attributes.get("current_temperature")
+            ):
+                self._cycle_reading()
+        except Exception:  # noqa: BLE001 - recording must never break override detection
+            _LOGGER.debug("cycle recorder thermostat event failed", exc_info=True)
+
+    def _cycle_lock(self) -> asyncio.Lock:
+        lock = getattr(self, "_cycle_fit_lock", None)
+        if lock is None:
+            lock = self._cycle_fit_lock = asyncio.Lock()
+        return lock
+
+    async def _cycle_process(self, closed: list[dict]) -> None:
+        """Store each closed cycle, refit its modes, record why a cycle did not qualify, apply, save (never raises)."""
+        try:
+            async with self._cycle_lock():
+                by_mode: dict[str, list[dict]] = {}
+                for cycle in closed:
+                    mode = cycle.get("mode")
+                    if mode not in ("heat", "cool"):
+                        continue
+                    self._cycle_store.add(cycle)
+                    by_mode.setdefault(mode, []).append(cycle)
+                for mode, new in by_mode.items():
+                    await self._cycle_refit(mode, new)
+                await self._executor_job(self._cycle_store.save)
+                await self._executor_job(self.learning.save_state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a failed fit keeps the previous rates
+            _LOGGER.warning("Cycle model update failed; the previous heating/cooling rates stay", exc_info=True)
+
+    def _cycle_resolution(self, mode: str) -> float | None:
         cache = getattr(getattr(self.learning, "_state", None), "thermal_model_cache", None)
         res = cache.get(f"swing_{mode}_resolution_f") if isinstance(cache, dict) else None
-        resolution_f = float(res) if isinstance(res, int | float) and not isinstance(res, bool) and res > 0 else None
-        deltas = [
-            s["indoor_temp_f"] - s["outdoor_temp_f"]
-            for s in active_samples
-            if s.get("indoor_temp_f") is not None and s.get("outdoor_temp_f") is not None
-        ]
-        outs = [s["outdoor_temp_f"] for s in active_samples if s.get("outdoor_temp_f") is not None]
-        signal_f = abs(off_f - start_f) if off_f is not None and start_f is not None else None
+        return float(res) if isinstance(res, int | float) and not isinstance(res, bool) and res > 0 else None
 
-        if off_f is None or start_f is None:
-            self._reject_hvac_run(obs_type, obs, REJECT_INDOOR_UNAVAILABLE, minutes, signal_f, k_p_source)
-            return
-        run = {
-            "obs_id": obs.get("obs_id"),
-            "mode": mode,
-            "start_ts": obs.get("active_start"),
-            "off_ts": now.isoformat(),
-            "start_f": start_f,
-            "off_f": off_f,
-            "peak_f": obs.get("peak_indoor_f"),
-            "minutes": minutes,
-            "avg_delta_t": sum(deltas) / len(deltas) if deltas else 0.0,
-            "avg_outdoor_f": sum(outs) / len(outs) if outs else obs.get("start_outdoor_f"),
-            "k_passive": k_p,
-            "k_passive_source": k_p_source,
-            "resolution_f": resolution_f,
-            "n_active": len(active_samples),
-        }
-        committed, reject_code = self.learning.record_hvac_run(run)
-        if committed is not None:
-            if self._today_record is not None:
-                self._today_record.thermal_session_count += 1
-            _LOGGER.info(
-                "Thermal HVAC run committed: mode=%s k_active=%s k_p=%s (%s) signal=%.2fF min=%.1f",
-                mode,
-                f"{committed.get('k_active'):.3f}" if isinstance(committed.get("k_active"), int | float) else "?",
-                f"{k_p:.4f}" if k_p is not None else "None",
-                k_p_source,
-                signal_f if signal_f is not None else 0.0,
-                minutes,
-            )
-            self._executor_job(self.learning.save_state)
-            return
-        self._reject_hvac_run(obs_type, obs, reject_code or REJECT_ABANDONED, minutes, signal_f, k_p_source)
+    async def _cycle_refit(self, mode: str, new_cycles: list[dict]) -> None:
+        """Refit ``mode`` from the last 90 days of stored cycles (executor), apply it (v3 primary: decisions).
 
-    def _reject_hvac_run(
-        self,
-        obs_type: str,
-        obs: dict,
-        reason_code: str,
-        minutes: float,
-        signal_f: float | None,
-        k_passive_source: str,
-    ) -> None:
-        """Record why an HVAC run produced no rate (Issue #1512): code, signal, minutes and the k_passive source."""
-        samples = obs.get("active_samples", [])
-        temps = [s["indoor_temp_f"] for s in samples if "indoor_temp_f" in s]
+        Each just-closed cycle is also judged alone by the model (``reasons`` of a one-cycle fit): a cycle that did not
+        qualify records a rejection with the model's own code and the values behind it (no second eligibility rule)."""
+        now_ts = dt_util.now().timestamp()
+        cache = self.learning._state.thermal_model_cache
+        prior = cycle_model.prior_from_cache(cache if isinstance(cache, dict) else {}, mode, now_ts)
+        cycles = self._cycle_store.cycles(mode, now_ts - CYCLE_RETENTION_DAYS * 86400)
+
+        def _job() -> tuple[dict, list[dict]]:
+            solo = [cycle_model.fit_cycles([c], mode, prior, now_ts=now_ts) for c in new_cycles]
+            return cycle_model.fit_cycles(cycles, mode, prior, now_ts=now_ts), solo
+
+        result, solo = await self._executor_job(_job)
+        res_f = self._cycle_resolution(mode)
+        for cycle, one in zip(new_cycles, solo, strict=True):
+            reasons = one.get("reasons") or {}
+            if one.get("ne", 0) > 0 and not reasons:
+                if getattr(self, "_today_record", None) is not None:
+                    self._today_record.thermal_session_count += 1
+                continue
+            code = next(iter(reasons), None) or REJECT_CYCLE_SIGNAL_BELOW_RESOLUTION
+            self._cycle_record_rejection(mode, cycle, code, _cycle_values(cycle, res_f))
+        applied = self.learning.apply_cycle_fit(mode, result, self._cycle_primary_is_v3())
         _LOGGER.info(
-            "Thermal HVAC run rejected: type=%s reason=%s signal=%s min=%.1f k_p_source=%s",
-            obs_type,
-            reason_code,
-            f"{signal_f:.2f}F" if signal_f is not None else "?",
-            minutes,
-            k_passive_source,
+            "Cycle model fit: zone=%s mode=%s q=%s sd=%s k_p_cycle=%s coast=%sF grade=%s eligible=%s/%s applied=%s",
+            self._zone_log_id(),
+            mode,
+            result.get("q"),
+            result.get("sd_q"),
+            result.get("k_p_cycle"),
+            result.get("coast_area_f"),
+            result.get("grade"),
+            result.get("ne"),
+            result.get("n_cycles"),
+            applied,
+        )
+
+    def _cycle_record_rejection(self, mode: str, cycle: dict, code: str, values: dict) -> None:
+        """Record why a cycle did not feed the fit: its code and the values behind it (learning_health lists them)."""
+        obs_type = OBS_TYPE_HVAC_COOL if mode == "cool" else OBS_TYPE_HVAC_HEAT
+        minutes = values.get("minutes")
+        _LOGGER.info(
+            "Thermal HVAC cycle excluded: zone=%s mode=%s reason=%s %s",
+            self._zone_log_id(),
+            mode,
+            code,
+            " ".join(f"{k}={v}" for k, v in values.items()),
         )
         self._append_rejection(
             obs_type,
             {
                 "obs_type": obs_type,
-                "reason_code": reason_code,
-                "n_samples": len(samples),
+                "reason_code": code,
+                "n_samples": len(cycle.get("samples") or []),
                 "n_required": None,
                 "r_squared": None,
                 "r_squared_required": THERMAL_MIN_R_SQUARED,
-                "delta_t_f": round(signal_f, 2) if signal_f is not None else 0.0,
+                "delta_t_f": values.get("signal_f") or 0.0,
                 "delta_t_required": None,
-                "elapsed_minutes": int(minutes),
+                "elapsed_minutes": int(minutes) if isinstance(minutes, int | float) else None,
                 "sf_range": 0.0,
-                "indoor_direction": "rising"
-                if len(temps) >= 2 and temps[-1] > temps[0] + 0.1
-                else "falling"
-                if len(temps) >= 2 and temps[-1] < temps[0] - 0.1
-                else "flat",
-                "signal_f": round(signal_f, 3) if signal_f is not None else None,
-                "minutes": round(minutes, 1),
-                "k_passive_source": k_passive_source,
+                "indoor_direction": "flat",
+                "signal_f": values.get("signal_f"),
+                "minutes": minutes,
+                "k_passive_source": None,
+                "cycle_id": cycle.get("id"),
+                "cut": cycle.get("cut"),
+                "steps": values.get("steps"),
+                "resolution_f": values.get("resolution_f"),
                 "timestamp": dt_util.now().isoformat(),
             },
         )
-        self._executor_job(self.learning.save_state)
+
+    async def _persist_cycles(self) -> None:
+        """Shutdown / HA stop: close open cycles as a restart gap (their clean pre-gap part is kept) and save."""
+        store = getattr(self, "_cycle_store", None)
+        rec = getattr(self, "_cycle_recorder", None)
+        if store is None or rec is None:
+            return
+        for cycle in rec.gap(dt_util.now().timestamp(), "restart"):
+            store.add(cycle)
+        await self._executor_job(store.save)
 
     async def _commit_observation(self, obs_type: str, force_grade: str | None = None) -> None:
         """Commit a pending observation to the learning engine."""
@@ -15175,11 +15343,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             REJECT_WINDOW_TOO_SHORT,
             REJECT_NO_INTERIOR_PEAK,
             REJECT_NO_K_PASSIVE,
-            REJECT_HVAC_RUN_TOO_SHORT,
-            REJECT_HVAC_SIGNAL_BELOW_RESOLUTION,
+            REJECT_CYCLE_TOO_SHORT,
+            REJECT_CYCLE_SIGNAL_BELOW_RESOLUTION,
+            REJECT_CYCLE_EXCLUDED_WINDOW_FAN,
+            REJECT_CYCLE_SETPOINT_CHANGE,
+            REJECT_CYCLE_GAP_RESTART,
+            REJECT_CYCLE_THERMOSTAT_UNAVAILABLE,
             REJECT_NEW_SESSION,
             REJECT_FAN_ACTIVATED,
             REJECT_HVAC_MODE_SWITCH,
+            "cycle_no_off_edge",  # cycle_model.fit_cycles reason codes without a const (R's const has six)
+            "cycle_sensor_swap",
         ]
         _hvac_mode_to_obs_type = {
             "passive": OBS_TYPE_PASSIVE_DECAY,
@@ -15215,6 +15389,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "rejections": rejection_counts,
                 "last_rejection": last,
             }
+
+        # Issue #1512: the pooled cycle model's current fit per mode (the codes above count what it excluded)
+        _cache = getattr(self.learning._state, "thermal_model_cache", None)
+        for _m in ("heat", "cool"):
+            _fit = _cache.get(f"cycle_fit_{_m}") if isinstance(_cache, dict) else None
+            health[f"cycle_fit_{_m}"] = dict(_fit) if isinstance(_fit, dict) else None
 
         # Per-source observation counts (dual-estimator instrumentation)
         if isinstance(thermal_observations, list):
@@ -18484,6 +18664,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         steps: list[tuple[str, Any]] = [
             ("runtime and state", self._persist_runtime_and_state),
             ("chart log", self._persist_chart_log),
+            ("heat/cool cycles", self._persist_cycles),
             ("v4 archive", self._v4_flush_on_shutdown),
             ("diagnostics", functools.partial(self._persist_shutdown_diagnostics, kind=SHUTDOWN_KIND_HA_STOP)),
         ]
@@ -18551,6 +18732,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # _flush_hvac_runtime() so an in-progress fan_only session isn't lost on shutdown.
             await self._persist_runtime_and_state()
             await self._persist_chart_log()  # Issue #1438: event rows since the last 30-minute save
+            await self._persist_cycles()  # Issue #1512: the open cycle's pre-restart part
             await self._v4_flush_on_shutdown()
         finally:
             # Issue #1102: release always runs, even if a save above raised.

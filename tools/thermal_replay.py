@@ -1732,7 +1732,8 @@ def run_cycle_replay(cycles: list[dict], cache: dict | None, now_ts: float, days
     Arguments:
         cycles: cycle dicts (as ``CycleStore.cycles`` returns them).
         cache: the learning DB's ``thermal_model_cache`` (None for a fresh home: the typical-house prior).
-        now_ts: epoch seconds the age weights count from.
+        now_ts: epoch seconds of the replay (the ``days`` cut-off counts back from it; the cycle weights count newer
+            eligible cycles, not days, as live).
         days: keep only cycles that began in the last N days (None keeps all).
     """
     cm = _production_cycle_model()
@@ -1741,7 +1742,8 @@ def run_cycle_replay(cycles: list[dict], cache: dict | None, now_ts: float, days
         mine = [
             c for c in cycles if c.get("mode") == mode and (days is None or c.get("t_on", 0) >= now_ts - days * 86400)
         ]
-        prior = cm.prior_from_cache(cache or {}, mode, now_ts)
+        # the prior sees the pool, as the live refit's does (a held fit is the prior only when its cycles are not in it)
+        prior = cm.prior_from_cache(cache or {}, mode, now_ts, cycles=mine)
         out[mode] = cm.fit_cycles(mine, mode, prior, now_ts=now_ts)
     return out
 

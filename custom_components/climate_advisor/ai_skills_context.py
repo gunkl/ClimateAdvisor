@@ -847,11 +847,13 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                 f"  observation_count_heat:    {thermal.get('observation_count_heat', 'unknown')}",
                 f"  observation_count_cool:    {thermal.get('observation_count_cool', 'unknown')}",
                 "  NOTE — these are the evidence behind the heating/cooling rates (the confidence-",
-                "  grading input): the cumulative pre-upgrade count, fading by half every 21 days,",
-                "  plus the cycle model's informative cycles (Issue #1512). They are not the live",
-                "  committed/rejected counts shown in THERMAL OBSERVATION PIPELINE below, which are",
-                "  windowed to 90 days and capped. A large gap between them is expected on installs",
-                "  with enough history and does not indicate lost data (Issue #586).",
+                "  grading input), not cumulative counters: the pre-upgrade count, which gives way",
+                "  only as newer informative cycles replace or contradict it (never with time alone),",
+                "  plus the cycle model's weighted informative cycles (Issue #1512). They can fall",
+                "  when new cycles arrive and stay unchanged through a quiet season. They are not the",
+                "  live committed/rejected counts shown in THERMAL OBSERVATION PIPELINE below, which are",
+                "  windowed to 90 days and capped; a gap between them is expected and does not indicate",
+                "  lost data (Issue #586).",
                 *_swing_context_lines(thermal, getattr(coordinator, "config", None) or {}),
                 "",
             ]
@@ -1079,7 +1081,8 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
         " evidence there is, so it is never worse than the default and improves with each informative cycle."
         " A cycle only counts when the room moved by at least three sensor steps; on a whole-degree sensor"
         " short cycles cannot identify the rate, so the model says so (grade low, never high) instead of"
-        " guessing. Old cycles fade: their weight halves every 21 days (the half-life), so there is no reset."
+        " guessing. Old cycles give way only to newer ones: a cycle's weight halves for every 20 newer"
+        " informative cycles, never with time alone, so a quiet season changes nothing and there is no reset."
         " The closed-house leak rate comes only from closed-up stretches (passive windows); the open-window"
         " rate never stands in for it. On a v4 zone decisions use v4's own control rate; the cycle model's"
         " measurement is shown beside it."

@@ -169,8 +169,9 @@ class _FakeCycleModel:
         self.fit_calls = []
         self.prior_calls = []
 
-    def prior_from_cache(self, cache, mode, now):
+    def prior_from_cache(self, cache, mode, now, *, cycles=None):
         self.prior_calls.append((cache, mode, now))
+        self.prior_pools = [*getattr(self, "prior_pools", []), cycles]
         return {"mode": mode, "from": "cache"}
 
     def fit_cycles(self, cycles, mode, prior, *, now_ts):
@@ -212,6 +213,9 @@ class TestCycleReplay:
         # the prior is production's prior_from_cache over the learning DB's cache, not a second copy
         assert by_mode["heat"][1] == {"mode": "heat", "from": "cache"}
         assert fake.prior_calls[0][0] == {"k_active_heat": 6.0}
+        # N5 (Issue #1512): the prior sees the same pool as the fit (a held fit is the prior only when its cycles are
+        # not in it), as the live refit does
+        assert [[c["id"] for c in pool] for pool in fake.prior_pools] == [["h1", "h2"], ["c1"]]
 
     def test_days_limits_the_cycles_used(self, monkeypatch):
         fake = _FakeCycleModel()

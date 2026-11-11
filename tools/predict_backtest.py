@@ -561,6 +561,18 @@ def decode_cycles(raw: Any) -> list[dict]:
         return []
 
 
+_CYCLE_RETENTION_S = 90 * 86400  # const.CYCLE_RETENTION_DAYS (the store's retention, counted from the newest cycle)
+
+
+def _cycle_end(c: dict) -> float:
+    """The last sample time of a stored cycle (the store's retention reads it), else its t_on."""
+    samples = c.get("samples") or []
+    try:
+        return float(samples[-1][0])
+    except IndexError, TypeError, ValueError:
+        return float(c.get("t_on", 0))
+
+
 def attach_cycles(db: dict | None, raw: Any) -> dict | None:
     """Put the decoded cycles on the learning DB dict (in memory only) so ``V3Models`` can rebuild as-of."""
     if isinstance(db, dict):
@@ -598,7 +610,11 @@ def prod_rebuild_cache(
             mine = [c for c in cycles if c.get("mode") == mode and float(c.get("t_on", 0)) < as_of_ts]
             if not mine:
                 continue
-            fit = cm.fit_cycles(mine, mode, cm.prior_from_cache(cache, mode, as_of_ts), now_ts=as_of_ts)
+            # the live pool: the store keeps CYCLE_RETENTION_DAYS back from the mode's newest cycle (not from today)
+            newest = max(float(c["t_on"]) for c in mine)
+            mine = [c for c in mine if _cycle_end(c) >= newest - _CYCLE_RETENTION_S]
+            prior = cm.prior_from_cache(cache, mode, as_of_ts, cycles=mine)
+            fit = cm.fit_cycles(mine, mode, prior, now_ts=as_of_ts)
             if fit.get("grade") not in (None, "none") and isinstance(fit.get("q"), (int, float)):
                 cache[f"cycle_fit_{mode}"] = dict(fit)
                 cache[f"k_active_{mode}"] = float(fit["q"])

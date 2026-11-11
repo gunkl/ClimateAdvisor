@@ -58,8 +58,7 @@ from .const import (
     THERMAL_SWING_DEFINITION_VERSION,
     WEATHER_BIAS_MAX_OBS,
 )
-from .cycle_model import HELD_MIN_FADE
-from .cycle_model import held_fade as cycle_held_fade
+from .cycle_model import CYCLE_MAX_CYCLES, HELD_MIN_KEEP
 from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
 from .swing import (
     SWING_DEFINITION_TEXT,
@@ -71,6 +70,7 @@ from .swing import (
     swing_debug_summary,
 )
 from .temperature import format_temp_delta
+from .thermal_confidence import displaced_keep as _displaced_keep
 from .thermal_confidence import (
     drop_stored_grades,
     explain_physics_eligibility,
@@ -79,6 +79,8 @@ from .thermal_confidence import (
     grade_solar_confidence,
     hvac_evidence_count,
 )
+from .thermal_confidence import evidence_keep as _evidence_keep
+from .thermal_confidence import fit_agrees_with_prior as _fit_agrees_with_prior
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -159,8 +161,9 @@ class ThermalObservation:
 def _grade_passive_confidence(cache: dict) -> str:
     """Compute confidence tier for k_passive based on combined observation count.
 
-    Counts passive observations (chart_log and duty_balance passive fits) plus the fading evidence behind the
-    pre-upgrade value (``rate_prior["k_passive"]["n"]``, halved every THERMAL_RATE_HALF_LIFE_DAYS). Heat/cool runs
+    Counts passive observations (chart_log and duty_balance passive fits) plus the evidence behind the pre-upgrade
+    value (``rate_prior["k_passive"]["n"] * keep``, halved for every THERMAL_EVIDENCE_HALF_N new passive observations,
+    never by time alone). Heat/cool runs
     no longer write k_passive (Issue #1512), so they are counted only for a cache that has no prior yet.
 
     Excluded types (they write to different cache fields):
@@ -226,7 +229,8 @@ CYCLE_FIT_KEYS = (
     "entity",
     "t_last",
 )
-# The fields of a usable fit kept as ``cycle_fit_<mode>["held"]`` once its cycles leave the pool (finding 4).
+# The fields of a usable fit kept as ``cycle_fit_<mode>["held"]`` once its cycles leave the pool (finding 4); plus
+# ``at`` (when it was fitted) and ``keep`` (the share of its evidence newer cycles left it).
 _HELD_KEYS = ("q", "sd_q", "ne_w", "entity", "t_last", "applied", "grade")
 
 
@@ -1452,7 +1456,7 @@ class LearningEngine:
         rates = aged_rates(self._state.thermal_observations, dt_util.now().date(), cache.get("rate_prior"))
         # Issue #1512: a rate the pooled cycle model applied (v3-primary zone) is that fit's own q, not an aged median
         # of the retired run-edge observations: ageing must not pull it back to them. A fit held after its cycles
-        # left the pool (sensor swap; verifier finding 4) hands over to the aged median on the same 21-day fade.
+        # left the pool (sensor swap; verifier finding 4) stays the rate until new cycles displace it.
         for _mode, _field in (("heat", "k_active_heat"), ("cool", "k_active_cool")):
             _fit = cache.get(f"cycle_fit_{_mode}")
             if isinstance(_fit, dict) and _fit.get("applied"):
@@ -1479,24 +1483,33 @@ class LearningEngine:
         """Store one pooled cycle-model fit (``cycle_model.fit_cycles``) and, on a v3-primary zone, apply it (#1512).
 
         Always: ``thermal_model_cache["cycle_fit_heat"|"cycle_fit_cool"]`` = the fit's outputs + ``fitted_at`` +
-        ``applied`` (+ ``held``, below). ``observation_count_heat|cool`` is NOT touched (Issue #1512 verifier finding
-        2: it was overwritten with ``ne``, so a home with high confidence fell to none/low on its first post-upgrade
-        cycles); the confidence and the reported counts read the evidence the rate carries instead
-        (``thermal_confidence.hvac_evidence_count``: the legacy count carried at upgrade, fading on the 21-day
-        schedule, plus the cycles).
+        ``applied`` + ``t_seen`` (+ ``held``, below). ``observation_count_heat|cool`` is NOT touched (Issue #1512
+        verifier finding 2: it was overwritten with ``ne``, so a home with high confidence fell to none/low on its
+        first post-upgrade cycles); the confidence and the reported counts read the evidence the rate carries instead
+        (``thermal_confidence.hvac_evidence_count``: the legacy count carried at upgrade times its ``keep`` share,
+        plus the cycles).
 
         v3 primary and at least one eligible cycle (grade above ``none``): also ``k_active_heat|cool`` := the cycle
         model's ``q`` (``heating_rate_f_per_hour`` / ``cooling_rate_f_per_hour`` derive from it in
-        ``get_thermal_model``) and the HVAC confidence reads the fit's grade (``grade_hvac_confidence``). On a v4
-        zone ``k_active_*`` keep their aged values (v4 drives the decisions; the fit is shown beside it).
+        ``get_thermal_model``). On a v4 zone ``k_active_*`` keep their aged values (v4 drives the decisions; the fit
+        is shown beside it). The HVAC confidence reads the fit's grade on both (``grade_hvac_confidence``).
         ``k_passive`` is never touched: the decisions' leak rate stays the closed-house fit, the model's own ``k`` is
         stored as ``k_p_cycle`` for display only. Returns True when ``k_active_*`` was written.
 
-        Held fit (verifier finding 4): when this fit has no eligible cycle but the previous one did (its cycles left
-        the pool: a sensor swap, or they aged past the retention), the previous fit is kept as ``held``; on a v3 zone
-        the rate then stays at that fit's q and hands over to the aged median on the 21-day fade (``_held_rate``),
-        never snapping back. ``held`` is carried until it ages out, because the refits that follow use it as their
-        prior (``cycle_model.prior_from_cache``).
+        Evidence displacement (owner decision 2026-11-11, "Fade only on new evidence"): the eligible cycles newer
+        than ``t_seen`` (the newest eligible cycle any earlier fit saw) are the new evidence. Each of them lowers the
+        ``keep`` share of the evidence carried into this fit's prior: the legacy ``rate_prior`` entry of the mode and
+        a held fit, halved every THERMAL_EVIDENCE_HALF_N new cycles, or every THERMAL_EVIDENCE_HALF_N_CONTRADICT when
+        the fit contradicts the prior it was weighed against (``fit_agrees_with_prior``; only the record that WAS
+        that prior is judged contradicted). No new eligible cycle changes no share, however much time passed.
+
+        Held fit (verifier finding 4): when the previous fit had eligible cycles and this one has none, or this one
+        is on another sensor (the pool is the newest sensor's cycles), or its newest eligible cycle is not in this
+        pool any more (the first cycle after a season longer than the store's retention, which counts back from the
+        newest cycle, so the old ones left with it), the previous fit is kept as ``held`` with
+        ``keep`` 1.0: it is the prior of the new sensor's fits (``cycle_model.prior_from_cache``) and, on a v3 zone
+        while no new fit is usable, the rate stays at its q (``_held_rate``), never snapping back to the legacy
+        value. It is dropped only when new cycles have displaced it below THERMAL_EVIDENCE_MIN_KEEP.
         """
         if mode not in ("heat", "cool") or not isinstance(result, dict):
             return False
@@ -1514,28 +1527,58 @@ class LearningEngine:
         usable = _num(q) and _num(ne) and ne > 0 and result.get("grade", "none") != "none"
         applied = bool(primary_is_v3 and usable)
         now = dt_util.now()
+        field_name = "k_active_heat" if mode == "heat" else "k_active_cool"
         prev = cache.get(f"cycle_fit_{mode}")
-        held = prev.get("held") if isinstance(prev, dict) else None
-        if not usable and isinstance(prev, dict) and _num(prev.get("ne")) and prev["ne"] > 0 and _num(prev.get("q")):
+        if not isinstance(prev, dict):
+            prev = {}
+        held = prev.get("held") if isinstance(prev.get("held"), dict) else None
+        prev_usable = _num(prev.get("ne")) and prev["ne"] > 0 and _num(prev.get("q"))
+        t_elig = [t for t in (result.get("t_eligible") or []) if _num(t)]
+        # The previous fit's cycles are gone from this pool: a sensor swap, or the first cycle after a season so long
+        # that the store let the old ones go (it keeps CYCLE_RETENTION_DAYS back from the newest cycle). The prior
+        # of this fit was then the previous fit itself (``cycle_model.held_candidate``); keep it as held.
+        # (Not when a full pool of newer cycles pushed them out: newer evidence then replaced them outright.)
+        prev_gone = not _num(prev.get("t_last")) or (
+            not any(abs(t - prev["t_last"]) < 1.0 for t in t_elig)
+            and not (len(t_elig) >= CYCLE_MAX_CYCLES and min(t_elig) > prev["t_last"])
+        )
+        if prev_usable and (not usable or result.get("entity") != prev.get("entity") or prev_gone):
             held = {k: prev.get(k) for k in _HELD_KEYS}
             held["at"] = prev.get("fitted_at")
+            held["keep"] = 1.0
             _LOGGER.info(
-                "Cycle model %s: no eligible cycle in the pool any more (sensor %s); the last fit q=%s is held and "
-                "ages out over the %s-day half-life",
+                "Cycle model %s: the cycles behind the last fit are not in the pool any more (sensor %s -> %s); "
+                "its q=%s is held and yields only as new cycles arrive",
                 mode,
+                prev.get("entity"),
                 result.get("entity"),
                 prev.get("q"),
-                THERMAL_RATE_HALF_LIFE_DAYS,
             )
-        if isinstance(held, dict) and cycle_held_fade(held, now) < HELD_MIN_FADE:
-            held = None  # aged out
+        # The new evidence: eligible cycles newer than any an earlier fit saw.
+        t_seen = prev.get("t_seen", prev.get("t_last"))
+        t_new = [t for t in t_elig if not _num(t_seen) or t > t_seen]
+        if t_new:
+            contradicts = usable and not _fit_agrees_with_prior(result)
+            from_held = result.get("prior_source") == "held"
+            rp = cache.get("rate_prior")
+            legacy = rp.get(field_name) if isinstance(rp, dict) else None
+            if isinstance(legacy, dict):
+                legacy["keep"] = round(
+                    _displaced_keep(_evidence_keep(legacy), len(t_new), contradicts and not from_held), 6
+                )
+            if held is not None:
+                held = dict(held)
+                held["keep"] = round(_displaced_keep(_evidence_keep(held), len(t_new), contradicts and from_held), 6)
+                if held["keep"] < HELD_MIN_KEEP:
+                    held = None  # displaced by the new sensor's cycles
+            t_seen = max([t for t in (t_seen, *t_new) if _num(t)])
         rec = {k: result.get(k) for k in CYCLE_FIT_KEYS}
         rec["fitted_at"] = now.isoformat()
         rec["applied"] = applied
-        if isinstance(held, dict):
+        rec["t_seen"] = t_seen if _num(t_seen) else None
+        if held is not None:
             rec["held"] = held
         cache[f"cycle_fit_{mode}"] = rec
-        field_name = "k_active_heat" if mode == "heat" else "k_active_cool"
         if applied:
             cache[field_name] = round(float(q), 4)
         elif primary_is_v3:
@@ -1546,17 +1589,19 @@ class LearningEngine:
 
     @staticmethod
     def _held_rate(cache: dict, mode: str, aged: float | None) -> float | None:
-        """The rate of a held applied fit, handing over to ``aged`` (or the current value) on the 21-day fade.
+        """The rate of a held applied fit while no new fit is usable: ``keep * held_q + (1 - keep) * aged``.
 
-        ``fade * held_q + (1 - fade) * aged``: equal to the held q the moment it is held (nothing snaps), the aged
-        median once it has aged out. None when there is no held applied fit (or it aged out)."""
+        ``keep`` is the share of its evidence newer cycles left it (1.0 when it was held), so the rate equals the held
+        q the moment it is held and stays there through any quiet period (nothing snaps, nothing fades with time);
+        ``aged`` (or the legacy value) takes over only as far as new cycles displaced it. None when there is no
+        held applied fit."""
         fit = cache.get(f"cycle_fit_{mode}")
         held = fit.get("held") if isinstance(fit, dict) else None
         if not isinstance(held, dict) or not held.get("applied"):
             return None
-        fade = cycle_held_fade(held, dt_util.now())
+        keep = _evidence_keep(held)
         q = held.get("q")
-        if fade < HELD_MIN_FADE or not isinstance(q, (int, float)) or isinstance(q, bool):
+        if keep < HELD_MIN_KEEP or not isinstance(q, (int, float)) or isinstance(q, bool):
             return None
         field_name = "k_active_heat" if mode == "heat" else "k_active_cool"
         base = aged
@@ -1566,7 +1611,7 @@ class LearningEngine:
             base = rec.get("value") if isinstance(rec, dict) else None
         if not isinstance(base, (int, float)) or isinstance(base, bool):
             return round(float(q), 4)
-        return round(fade * float(q) + (1.0 - fade) * float(base), 4)
+        return round(keep * float(q) + (1.0 - keep) * float(base), 4)
 
     def reset_vent_rates(self) -> int:
         """Forget the windows-only and fan rates and the fits behind them, for a one-time re-learn (Issue #1505).
@@ -1711,6 +1756,12 @@ class LearningEngine:
             cache["observation_count_cool"] = cache.get("observation_count_cool", 0) + 1
         elif mode == "passive":
             cache["observation_count_passive"] = cache.get("observation_count_passive", 0) + 1
+            # Owner decision 2026-11-11: the pre-upgrade evidence behind k_passive yields to each new passive
+            # observation (a single noisy fit: always the agreeing rate), never to time alone.
+            _rp = cache.get("rate_prior")
+            _prior = _rp.get("k_passive") if isinstance(_rp, dict) else None
+            if isinstance(_prior, dict):
+                _prior["keep"] = round(_displaced_keep(_evidence_keep(_prior), 1, False), 6)
         elif mode in ("vent_window", "vent_fan"):
             # Issue #587: one DRY'd branch resolving the target field/count names once,
             # rather than two near-duplicate branches (the same drift risk 2.2/2.3's
@@ -1928,8 +1979,8 @@ class LearningEngine:
                 Defaults to 0.0 (night or no solar data).
         """
         cache = self._state.thermal_model_cache or {}
-        # Issue #1512 (verifier finding 2): the evidence the rates carry now, fading between fits the way the grade
-        # does (a pre-upgrade cache, with no rate_prior yet, reads its stored counts unchanged).
+        # Issue #1512: the evidence the rates carry now, displaced only by newer cycles (owner decision 2026-11-11; a
+        # pre-upgrade cache, with no rate_prior yet, reads its stored counts unchanged).
         count_heat = int(round(hvac_evidence_count(cache, "heat")))
         count_cool = int(round(hvac_evidence_count(cache, "cool")))
         total = count_heat + count_cool

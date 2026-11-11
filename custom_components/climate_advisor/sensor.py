@@ -291,6 +291,8 @@ class ClimateAdvisorComplianceSensor(ClimateAdvisorBaseSensor):
         attrs[ATTR_THERMAL_HEATING_RATE] = convert_delta(heat_rate_f, unit) if heat_rate_f is not None else None
         attrs[ATTR_THERMAL_COOLING_RATE] = convert_delta(cool_rate_f, unit) if cool_rate_f is not None else None
         attrs[ATTR_THERMAL_CONFIDENCE] = thermal.get("confidence", "none")
+        # Issue #1512: the evidence behind the heat + cool rates (older evidence gives way as new cycles replace it,
+        # never with time alone), not a cumulative counter.
         attrs["thermal_observation_count"] = thermal.get("observation_count_heat", 0) + thermal.get(
             "observation_count_cool", 0
         )

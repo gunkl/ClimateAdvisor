@@ -1454,6 +1454,8 @@
     `</section>`;
 
   // --- HVAC rail ---
+  // Issue #1512: the evidence behind the heating/cooling rates, not a running total: older measurements give way as
+  // new cycles replace them (so it can go down), and it never drops just because time passes.
   const hvacCount = (tm.observation_count_heat || 0) + (tm.observation_count_cool || 0);
   const hvacParamRows = [];
   if (tm.heating_rate != null) hvacParamRows.push({ label: 'Heating', value: `+${tm.heating_rate.toFixed(1)} ${unitLabel}/hr` });
@@ -1483,7 +1485,7 @@
   const hvacRail =
     `<section class="tm-rail">` +
     `<header class="tm-rail-head"><span class="tm-rail-title">HVAC response</span>${makePill(hvacConf)}</header>` +
-    `<div class="tm-dots">${makeDots(hvacConf)}<span class="tm-meas-count">${hvacCount} measurement${hvacCount !== 1 ? 's' : ''}</span></div>` +
+    `<div class="tm-dots">${makeDots(hvacConf)}<span class="tm-meas-count" title="Evidence behind the heating and cooling rates: older measurements give way as new cycles replace them; it never drops just because time passes">${hvacCount} measurement${hvacCount !== 1 ? 's' : ''} of evidence</span></div>` +
     makeParams(hvacParamRows) +
     hvacHint +
     `</section>`;

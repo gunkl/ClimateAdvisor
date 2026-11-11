@@ -12,18 +12,18 @@ Kept dependency-free (no Home Assistant import) and loadable as a standalone fil
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 try:
     from .const import (
-        CYCLE_RETENTION_DAYS,
         MIN_THERMAL_OBSERVATIONS,
+        THERMAL_EVIDENCE_HALF_N,
+        THERMAL_EVIDENCE_HALF_N_CONTRADICT,
         THERMAL_HVAC_CONF_HIGH,
         THERMAL_HVAC_CONF_MEDIUM,
         THERMAL_PASSIVE_CONF_HIGH,
         THERMAL_PASSIVE_CONF_LOW,
         THERMAL_PASSIVE_CONF_MEDIUM,
-        THERMAL_RATE_HALF_LIFE_DAYS,
     )
 except ImportError:  # loaded by path from tools/ (no package)
     import importlib.util as _ilu
@@ -32,14 +32,14 @@ except ImportError:  # loaded by path from tools/ (no package)
     _spec = _ilu.spec_from_file_location("_ca_const_standalone", _Path(__file__).with_name("const.py"))
     _const = _ilu.module_from_spec(_spec)  # type: ignore[arg-type]
     _spec.loader.exec_module(_const)  # type: ignore[union-attr]
-    CYCLE_RETENTION_DAYS = _const.CYCLE_RETENTION_DAYS
     MIN_THERMAL_OBSERVATIONS = _const.MIN_THERMAL_OBSERVATIONS
     THERMAL_HVAC_CONF_HIGH = _const.THERMAL_HVAC_CONF_HIGH
     THERMAL_HVAC_CONF_MEDIUM = _const.THERMAL_HVAC_CONF_MEDIUM
     THERMAL_PASSIVE_CONF_HIGH = _const.THERMAL_PASSIVE_CONF_HIGH
     THERMAL_PASSIVE_CONF_LOW = _const.THERMAL_PASSIVE_CONF_LOW
     THERMAL_PASSIVE_CONF_MEDIUM = _const.THERMAL_PASSIVE_CONF_MEDIUM
-    THERMAL_RATE_HALF_LIFE_DAYS = _const.THERMAL_RATE_HALF_LIFE_DAYS
+    THERMAL_EVIDENCE_HALF_N = _const.THERMAL_EVIDENCE_HALF_N
+    THERMAL_EVIDENCE_HALF_N_CONTRADICT = _const.THERMAL_EVIDENCE_HALF_N_CONTRADICT
 
 
 # Grades the engine once persisted in thermal_model_cache but never refreshed (Issue #1277): they are
@@ -61,20 +61,30 @@ def _num(v: object) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def _fade(stamp: object, now: datetime | None) -> float:
-    """``0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS)`` of an ISO stamp (an unreadable stamp is age 0)."""
-    try:
-        then = datetime.fromisoformat(str(stamp))
-        if then.tzinfo is None:
-            then = then.replace(tzinfo=UTC)
-        age_days = max(0.0, ((now or datetime.now(UTC)) - then).total_seconds() / 86400.0)
-    except ValueError, TypeError:
-        age_days = 0.0
-    return 0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS)
+_CYCLE_GRADE_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
 
 
-def _legacy_hvac_evidence(cache: dict, mode: str, now: datetime | None) -> float:
-    """Evidence behind the pre-upgrade heat/cool rate: ``rate_prior`` n, fading on the 21-day schedule (#1512).
+def evidence_keep(rec: object) -> float:
+    """The share of its evidence a carried record still holds (``rec["keep"]``, 1.0 when absent; Issue #1512).
+
+    Owner decision 2026-11-11 ("Fade only on new evidence"): evidence behind a learned rate shrinks only when newer
+    measured evidence replaces or contradicts it, never with the passage of time alone. ``keep`` is lowered only by
+    ``displaced_keep`` when new evidence arrives; nothing reads a clock."""
+    k = rec.get("keep") if isinstance(rec, dict) else None
+    return min(1.0, float(k)) if _num(k) and k >= 0 else 1.0
+
+
+def displaced_keep(keep: float, n_new: float, contradicts: bool) -> float:
+    """``keep`` after ``n_new`` new pieces of evidence: halved every THERMAL_EVIDENCE_HALF_N of them (agreeing) or
+    every THERMAL_EVIDENCE_HALF_N_CONTRADICT (contradicting). No new evidence leaves it unchanged."""
+    if not _num(n_new) or n_new <= 0:
+        return keep
+    half = THERMAL_EVIDENCE_HALF_N_CONTRADICT if contradicts else THERMAL_EVIDENCE_HALF_N
+    return keep * 0.5 ** (float(n_new) / float(half))
+
+
+def _legacy_hvac_evidence(cache: dict, mode: str) -> float:
+    """Evidence behind the pre-upgrade heat/cool rate: ``rate_prior`` n times the share new cycles left it (#1512).
 
     A mode with no prior entry (a pre-upgrade cache, or no cached rate at upgrade) reads its observation counter."""
     rp = cache.get("rate_prior")
@@ -84,14 +94,20 @@ def _legacy_hvac_evidence(cache: dict, mode: str, now: datetime | None) -> float
         return float(v) if _num(v) and v > 0 else 0.0
     n = rec.get("n")
     n = float(n) if _num(n) and n > 0 else 1.0
-    return n * _fade(rec.get("ts"), now)
+    return n * evidence_keep(rec)
 
 
-def _cycle_hvac_evidence(cache: dict, mode: str, now: datetime | None) -> float:
-    """Evidence the pooled cycle model adds: its eligible cycles' age weights, fading since the fit (#1512).
+def _usable(fit: object) -> bool:
+    """A fit with eligible cycles (its grade is above ``none``; ``cycle_model.grade`` is ``none`` iff ne == 0)."""
+    return isinstance(fit, dict) and _CYCLE_GRADE_RANK.get(str(fit.get("grade")), 0) > 0
 
-    A held fit (its cycles left the pool: a sensor swap, or they aged past the retention) still counts, fading, while
-    no fit has replaced it (no eligible cycle now) or while it is the prior the current fit was weighed against."""
+
+def _cycle_hvac_evidence(cache: dict, mode: str) -> float:
+    """Evidence the pooled cycle model adds: its eligible cycles' weights (``ne_w``), plus a held fit's share (#1512).
+
+    The weights count newer eligible cycles, not days (``cycle_model.fit_cycles``), so a quiet season changes nothing.
+    A held fit (its cycles left the pool: a sensor swap) counts ``ne_w * keep`` while no fit has replaced it (no
+    eligible cycle now) or while it is the prior the current fit was weighed against."""
     fit = cache.get(f"cycle_fit_{mode}")
     if not isinstance(fit, dict):
         return 0.0
@@ -99,25 +115,27 @@ def _cycle_hvac_evidence(cache: dict, mode: str, now: datetime | None) -> float:
     ne = float(ne) if _num(ne) and ne > 0 else 0.0
     w = fit.get("ne_w")
     w = float(w) if _num(w) and w >= 0 else ne
-    out = w * _fade(fit.get("fitted_at"), now) if ne else 0.0
+    out = w if ne else 0.0
     held = fit.get("held")
     if isinstance(held, dict) and (not ne or fit.get("prior_source") == "held"):
         hw = held.get("ne_w")
-        out += (float(hw) if _num(hw) and hw >= 0 else 1.0) * _fade(held.get("at"), now)
+        out += (float(hw) if _num(hw) and hw >= 0 else 1.0) * evidence_keep(held)
     return out
 
 
 def hvac_evidence_count(cache: dict, mode: str, now: datetime | None = None) -> float:
-    """Effective evidence behind the ``mode`` ("heat"/"cool") rate (Issue #1512 verifier finding 2).
+    """Effective evidence behind the ``mode`` ("heat"/"cool") rate (Issue #1512).
 
-    The legacy evidence carried at upgrade (``rate_prior["k_active_<mode>"]["n"]``, halved every
-    THERMAL_RATE_HALF_LIFE_DAYS) plus the cycle model's eligible cycles (``_cycle_hvac_evidence``). Nothing is
-    reset: at upgrade the evidence equals the old observation count, and it declines only as the old evidence ages
-    out without new cycles replacing it. ``observation_count_<mode>`` is the legacy counter (the cycle model never
-    rewrites it); it is the legacy evidence only for a mode with no ``rate_prior`` entry."""
+    The legacy evidence carried at upgrade (``rate_prior["k_active_<mode>"]["n"] * keep``) plus the cycle model's
+    eligible cycles (``_cycle_hvac_evidence``). Nothing is reset and nothing fades with time (owner decision
+    2026-11-11): at upgrade the evidence equals the old observation count; the legacy share ``keep`` falls only as
+    new eligible cycles displace it (``learning.apply_cycle_fit``). ``now`` is accepted for callers and ignored.
+    ``observation_count_<mode>`` is the legacy counter (the cycle model never rewrites it); it is the legacy evidence
+    only for a mode with no ``rate_prior`` entry."""
+    del now  # evidence has no clock
     if not isinstance(cache, dict):
         return 0.0
-    return _legacy_hvac_evidence(cache, mode, now) + _cycle_hvac_evidence(cache, mode, now)
+    return _legacy_hvac_evidence(cache, mode) + _cycle_hvac_evidence(cache, mode)
 
 
 def _count_tier(total: float) -> str:
@@ -130,8 +148,9 @@ def _count_tier(total: float) -> str:
     return "high"
 
 
-def _fit_agrees_with_prior(fit: dict) -> bool:
-    """The data did not move q more than two prior sds: the carried evidence still backs the rate."""
+def fit_agrees_with_prior(fit: dict) -> bool:
+    """The data did not move q more than two prior sds (``|q - prior_q| <= 2 * prior_sd_q``): the evidence carried
+    into that prior still backs the rate. False = the new cycles contradict it."""
     q, pq, psd = fit.get("q"), fit.get("prior_q"), fit.get("prior_sd_q")
     if not (_num(q) and _num(pq) and _num(psd)) or psd <= 0:
         return True  # nothing to compare against: keep the carried evidence (never a drop from bookkeeping)
@@ -144,24 +163,20 @@ def passive_evidence_count(cache: dict, now: datetime | None = None) -> float:
     Heat/cool runs never write k_passive any more (Issue #1512): it is an aged median of passive observations
     (chart_log passive fits and the retired duty_balance passive estimates still stored) plus, on an
     upgraded cache, the ``rate_prior`` pseudo-observation that carries the ``n`` observations behind the
-    pre-upgrade value. That prior fades with the
-    same half-life as the value itself, so confidence neither cliffs on upgrade nor stays inflated forever. A cache
-    with no prior yet (pre-upgrade shape) keeps counting passive + heat + cool, as those fed the old value.
+    pre-upgrade value. That prior's evidence is ``n * keep``: ``keep`` halves for every THERMAL_EVIDENCE_HALF_N new
+    passive observations (``learning._update_thermal_model_cache``) and never with time alone (owner decision
+    2026-11-11), so confidence neither cliffs on upgrade nor fades over a season with no passive window. A cache
+    with no prior yet (pre-upgrade shape) keeps counting passive + heat + cool, as those fed the old value. ``now``
+    is accepted for callers and ignored.
     """
+    del now  # evidence has no clock
     passive = cache.get("observation_count_passive", 0)
     prior = (cache.get("rate_prior") or {}).get("k_passive") if isinstance(cache.get("rate_prior"), dict) else None
     if not isinstance(prior, dict):
         return passive + cache.get("observation_count_heat", 0) + cache.get("observation_count_cool", 0)
     n = prior.get("n")
     n = float(n) if _num(n) and n > 0 else 1.0
-    try:
-        stamp = datetime.fromisoformat(str(prior.get("ts")))
-        if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=UTC)
-        age_days = max(0.0, ((now or datetime.now(UTC)) - stamp).total_seconds() / 86400.0)
-    except ValueError, TypeError:
-        age_days = 0.0
-    return passive + n * 0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS)
+    return passive + n * evidence_keep(prior)
 
 
 def grade_passive_confidence(cache: dict, now: datetime | None = None) -> str:
@@ -182,40 +197,42 @@ def grade_passive_confidence(cache: dict, now: datetime | None = None) -> str:
     return "high"
 
 
-_CYCLE_GRADE_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
-
-
 def grade_hvac_confidence(cache: dict, now: datetime | None = None) -> str:
     """Confidence tier for the HVAC rates (k_active_heat/k_active_cool), from the evidence the rates carry.
 
-    Issue #1512 (verifier finding 2: confidence must never drop at upgrade, only age out). One rule for both engines:
+    Issue #1512, one rule for heat and cool, v3 and v4 zones (owner decision 2026-11-11: evidence gives way only to
+    newer evidence, never to time alone; ``now`` is accepted for callers and ignored):
 
-    * the count tier (MIN_THERMAL_OBSERVATIONS / THERMAL_HVAC_CONF_MEDIUM / _HIGH) of the evidence summed over heat
-      and cool: each mode's legacy evidence (``rate_prior`` n, fading on the 21-day schedule) plus, for a mode
-      whose rate is NOT the cycle model's applied fit (a v4 zone, or no eligible cycle yet), the cycle model's
-      eligible cycles (``hvac_evidence_count``);
-    * a mode whose rate IS the applied fit (v3 primary) is graded by the fit's calibrated grade, and the tier never
-      falls below what the carried legacy evidence justifies while the data agrees with it (q within two prior sds
-      of the prior it was weighed against: a small er_q against a strong, agreeing prior is not low confidence).
-      Data that contradicts the old value drops that mode's legacy evidence: the fit's own grade then speaks.
+    * per mode, the cycle model's evidence speaks through its calibrated grade: the current fit's grade when it has
+      eligible cycles, else a held fit's grade while it stands in (a sensor swap), and also while it is the prior of
+      a current fit that agrees with it (a few new cycles against a strong held prior give a small ``er_q``; that
+      is not low confidence). So a whole-degree sensor's own cycles never reach ``high`` (``cycle_model.grade``);
+    * the count tier (MIN_THERMAL_OBSERVATIONS / THERMAL_HVAC_CONF_MEDIUM / _HIGH) of the legacy evidence summed over
+      heat and cool (``rate_prior`` n times the share new cycles left it): a mode's legacy evidence counts while its
+      current fit agrees with the prior it was weighed against (``fit_agrees_with_prior``) or it has no eligible
+      cycle; data that contradicts the old value drops it, and that mode's fit grade speaks.
 
-    The result is the better of the two (a home that only heats is graded on its heating). An applied fit older than
-    the cycle retention (``CYCLE_RETENTION_DAYS``: its cycles are gone from the store, no refit since) no longer
-    grades on its own; its evidence keeps fading through the count tier like everything else."""
+    The result is the better of the two (a home that only heats is graded on its heating). With no new eligible
+    cycle nothing here changes, however long the house is quiet."""
+    del now  # evidence has no clock
     if not isinstance(cache, dict):
         return "none"
-    best = -1
+    best = 0
     total = 0.0
-    stale_below = 0.5 ** (CYCLE_RETENTION_DAYS / THERMAL_RATE_HALF_LIFE_DAYS)
     for mode in ("heat", "cool"):
         fit = cache.get(f"cycle_fit_{mode}")
-        applied = isinstance(fit, dict) and bool(fit.get("applied")) and _fade(fit.get("fitted_at"), now) >= stale_below
-        if applied:
+        held = fit.get("held") if isinstance(fit, dict) else None
+        if _usable(fit):
             best = max(best, _CYCLE_GRADE_RANK.get(str(fit.get("grade")), 0))
-            if _fit_agrees_with_prior(fit):
-                total += _legacy_hvac_evidence(cache, mode, now)
-        else:
-            total += hvac_evidence_count(cache, mode, now)
+            if fit_agrees_with_prior(fit):
+                total += _legacy_hvac_evidence(cache, mode)
+                if fit.get("prior_source") == "held" and _usable(held):
+                    # the held fit is this fit's prior and the new cycles agree with it: its grade still stands
+                    best = max(best, _CYCLE_GRADE_RANK.get(str(held.get("grade")), 0))
+            continue
+        if _usable(held):
+            best = max(best, _CYCLE_GRADE_RANK.get(str(held.get("grade")), 0))
+        total += _legacy_hvac_evidence(cache, mode)
     tier = _count_tier(total)
     return tier if _CYCLE_GRADE_RANK[tier] >= best else next(g for g, r in _CYCLE_GRADE_RANK.items() if r == best)
 

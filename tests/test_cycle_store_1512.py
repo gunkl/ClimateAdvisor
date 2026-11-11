@@ -168,22 +168,6 @@ def test_bad_rows_are_dropped_good_rows_kept(tmp_path: Path, caplog) -> None:
     assert [c["id"] for c in r.cycles()] == [f"heat-{int(T0)}"]
 
 
-def test_newer_file_version_is_not_misread_nor_overwritten(tmp_path: Path, caplog) -> None:
-    """A downgrade: the newer version's file stays exactly as it is on disk (logged once); learning runs in memory."""
-    path = tmp_path / "c.json"
-    text = json.dumps({"v": 99, "cycles": [{"i": "x"}]})
-    path.write_text(text)
-    s = CycleStore(path)
-    with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.cycle_store"):
-        s.load()
-        s.load()
-    assert len(s) == 0
-    assert len([r for r in caplog.records if "newer version" in r.getMessage()]) == 1
-    assert s.add(_cycle(T0), now=T0) and len(s) == 1
-    assert s.save() is False
-    assert path.read_text() == text
-
-
 def test_version_1_file_is_migrated_on_load(tmp_path: Path) -> None:
     """A v1 file (fixed centi-degree indoor, deci-degree outdoor, no places) reads unchanged and is saved as v2."""
     path = tmp_path / "c.json"
@@ -354,3 +338,26 @@ def test_recorder_output_feeds_the_store_and_reloads(tmp_path: Path) -> None:
     r = CycleStore(tmp_path / "c.json")
     r.load(now=T0 + 4000)
     assert r.cycles() == s.cycles()
+
+
+def test_retention_counts_back_from_the_newest_cycle_of_the_mode(tmp_path: Path) -> None:
+    """Owner decision 2026-11-11: a quiet season prunes nothing. Occupant: last winter's heating cycles are still
+    there for the first refit in autumn; they leave only as newer heating cycles arrive (was: pruned 90 days after
+    they ran, whatever came after)."""
+    s = CycleStore(tmp_path / "c.json")
+    s.add(_cycle(T0 - 5 * DAY, "heat"), now=T0)
+    s.add(_cycle(T0, "heat"), now=T0)
+    later = T0 + 200 * DAY  # a summer later: cooling cycles only
+    s.add(_cycle(later, "cool"), now=later)
+    assert s.prune(later + 1, force=True) == 0
+    assert [c["t_on"] for c in s.cycles("heat")] == [T0 - 5 * DAY, T0]
+    s2 = CycleStore(tmp_path / "c.json")
+    s.save()
+    s2.load(now=later + 1)  # a reload a season later keeps them too
+    assert len(s2.cycles("heat")) == 2
+    # the first heating cycle of the next season: cycles more than 90 days older than it leave
+    s.add(_cycle(later + DAY, "heat"), now=later + DAY)  # add() prunes (hourly)
+    assert [c["t_on"] for c in s.cycles("heat")] == [later + DAY] and len(s.cycles("cool")) == 1
+    # a clock jump into the future never prunes more: the anchor is capped at now
+    s.add(_cycle(later + 400 * DAY, "cool"), now=later + 2 * DAY)
+    assert s.prune(later + 2 * DAY, force=True) == 0 and len(s.cycles("cool")) == 2

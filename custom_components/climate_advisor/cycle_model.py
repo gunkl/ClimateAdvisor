@@ -3,7 +3,8 @@
 What the occupant gets: every home has a heating / cooling rate that is never worse than the typical-house
 default, improves with every informative HVAC cycle, says honestly how sure it is (a grade), survives sensor
 spikes, thermostat restarts, the post-off coast (or immediate drop) and both short (5-8 min) and long
-(recovery) runs, and never jumps when an existing home upgrades (its old values age out).
+(recovery) runs, and never jumps when an existing home upgrades (its old values age out as new cycles replace
+them; never with the passage of time alone, owner decision 2026-11-11).
 
 This module is a port of the validated proof of concept "R2F" (poc2 ``est4.fit_final`` / ``grade`` / ``infer_res``
 on the ridge core ``est5.fit_core``, with the poc ``pooled.py`` level-mode machinery and ``shrink.py`` design-effect
@@ -22,8 +23,8 @@ home, ``prior_from_cache`` for an existing one), so the first cycle already give
 
 Pipeline (``fit_cycles``): exclusions -> per-pool resolution (``infer_resolution``) -> ``clean_series`` (Hampel +
 restart rule) -> plateau trim -> eligibility gate (run >= 3 min AND >= 3 resolution steps of robust movement) ->
-last 60 eligible cycles, age-weighted 0.5 ** (age_d / 21) -> ridge fit (Huber IRLS, calibrated design effect) ->
-bounds -> ``grade``. No eligible cycle returns the prior unchanged (grade ``none``).
+last 60 eligible cycles, weighted 0.5 ** (newer eligible cycles / 20) -> ridge fit (Huber IRLS, calibrated design
+effect) -> bounds -> ``grade``. No eligible cycle returns the prior unchanged (grade ``none``).
 
 Cycle dict: ``{"id", "mode", "t_on", "t_off"|None, "cut", "res", "samples": [[t_epoch_s, T_f, flags]],
 "outdoor": [[t, T_out]], "setpoint_f", "entity"}``; flags bit0 running, bit1 windows, bit2 fan, bit3 nat_vent,
@@ -52,7 +53,11 @@ def _k(name: str, default: Any) -> Any:
 
 
 THERMAL_LEGACY_OBS_WEIGHT: float = _k("THERMAL_LEGACY_OBS_WEIGHT", 0.25)
-THERMAL_RATE_HALF_LIFE_DAYS: float = _k("THERMAL_RATE_HALF_LIFE_DAYS", 21.0)
+# Evidence yields to newer evidence, never to the calendar (owner decision 2026-11-11): a cycle's weight halves for
+# every EVIDENCE_HALF_N newer eligible cycles, and the evidence carried into a prior (``rate_prior`` n, a held fit)
+# is scaled by its ``keep`` share, which only ``learning.apply_cycle_fit`` lowers as new cycles arrive.
+EVIDENCE_HALF_N: float = _k("THERMAL_EVIDENCE_HALF_N", 20.0)
+HELD_MIN_KEEP: float = _k("THERMAL_EVIDENCE_MIN_KEEP", 0.01)  # a held fit whose share fell below this is dropped
 
 # --------------------------------------------------------------------------- constants (const.py THERMAL_CYCLE_*)
 CYCLE_MIN_RUN_MIN: float = _k("THERMAL_CYCLE_MIN_RUN_MIN", 3.0)
@@ -62,7 +67,6 @@ CYCLE_COARSE_RES_F: float = _k("THERMAL_CYCLE_COARSE_RES_F", 0.5)
 CYCLE_K_FREE_AFTER: int = _k("THERMAL_CYCLE_K_FREE_AFTER", 3)
 CYCLE_PLATEAU_MIN: float = _k("THERMAL_CYCLE_PLATEAU_MIN", 10.0)
 CYCLE_MAX_CYCLES: int = _k("THERMAL_CYCLE_MAX_FIT_CYCLES", 60)
-CYCLE_WEIGHT_HALF_LIFE_DAYS: float = _k("THERMAL_CYCLE_AGE_HALF_LIFE_DAYS", 21.0)
 CYCLE_SUPERPOSE_MIN: float = _k("THERMAL_CYCLE_TAIL_BACK_MIN", 120.0)
 CYCLE_COARSE_EVID_N: float = _k("THERMAL_CYCLE_COARSE_EVID_N", 3)
 CYCLE_FINE_DEFF_MULT: float = _k("THERMAL_CYCLE_DEFF_FINE_MULT", 0.5)
@@ -137,7 +141,6 @@ _CUT_REASON = {
     "unavailable": REASON_UNAVAILABLE,
     "setpoint_change": REASON_SETPOINT,
 }
-HELD_MIN_FADE = 0.01  # a held fit (see ``prior_from_cache``) whose fade fell below this has aged out
 
 
 # --------------------------------------------------------------------------- small numeric helpers
@@ -282,31 +285,48 @@ def _as_naive_dt(now: Any) -> datetime:
     raise TypeError(f"now must be datetime/date/epoch seconds, got {type(now).__name__}")
 
 
-def _age_days(ts: Any, now: datetime) -> float:
-    try:
-        then = datetime.fromisoformat(str(ts)).replace(tzinfo=None)
-    except ValueError, TypeError:
-        return 0.0
-    return max(0.0, (now - then).total_seconds() / 86400.0)
-
-
 def _combine(mean_a: float, sd_a: float, mean_b: float, sd_b: float) -> tuple[float, float]:
     """Precision-weighted product of two Gaussians (an aged-out legacy prior hands over to the typical house)."""
     pa, pb = 1.0 / (sd_a * sd_a), 1.0 / (sd_b * sd_b)
     return (mean_a * pa + mean_b * pb) / (pa + pb), math.sqrt(1.0 / (pa + pb))
 
 
-def _n_eff(rec: dict[str, Any], now: datetime) -> float:
+def evidence_keep(rec: Any) -> float:
+    """The share of its evidence a carried record still holds (``rec["keep"]``, 1.0 when absent): lowered only by
+    newer evidence (``learning.apply_cycle_fit``), never by time (owner decision 2026-11-11)."""
+    k = rec.get("keep") if isinstance(rec, dict) else None
+    return min(1.0, float(k)) if _num(k) and k >= 0 else 1.0
+
+
+def _n_eff(rec: dict[str, Any]) -> float:
     n = float(rec["n"]) if _num(rec.get("n")) and rec["n"] > 0 else 1.0
-    age = _age_days(rec.get("ts"), now)
-    return max(n * THERMAL_LEGACY_OBS_WEIGHT * 0.5 ** (age / THERMAL_RATE_HALF_LIFE_DAYS), 1e-9)
+    return max(n * THERMAL_LEGACY_OBS_WEIGHT * evidence_keep(rec), 1e-9)
 
 
-def held_fade(held: Any, now: Any) -> float:
-    """``0.5 ** (age_d / THERMAL_RATE_HALF_LIFE_DAYS)`` of a held fit (its ``at`` stamp); 0.0 when unusable."""
-    if not isinstance(held, dict) or not _num(held.get("q")):
-        return 0.0
-    return 0.5 ** (_age_days(held.get("at"), _as_naive_dt(now)) / THERMAL_RATE_HALF_LIFE_DAYS)
+def held_candidate(fit: Any, cycles: Sequence[dict[str, Any]], mode: str) -> dict[str, Any] | None:
+    """The fit a new sensor's pool should start from, or None (Issue #1512 verifier finding 4).
+
+    The current fit itself when it has eligible cycles but they are not in ``cycles`` (the sensor was swapped and the
+    new sensor's first cycle is being fitted), else the stored ``held`` fit when its cycles are not in ``cycles``.
+    A candidate needs a right-signed ``q``, a positive ``sd_q`` and a ``keep`` share of at least HELD_MIN_KEEP."""
+    if not isinstance(fit, dict):
+        return None
+    cands = []
+    if _num(fit.get("ne")) and fit["ne"] > 0:
+        cands.append(fit)
+    if isinstance(fit.get("held"), dict):
+        cands.append(fit["held"])
+    for c in cands:
+        if (
+            _num(c.get("q"))
+            and (c["q"] > 0) == (mode == "heat")
+            and _num(c.get("sd_q"))
+            and c["sd_q"] > 0
+            and evidence_keep(c) >= HELD_MIN_KEEP
+            and not _held_in_pool(c, cycles, mode)
+        ):
+            return c
+    return None
 
 
 def _held_in_pool(held: dict[str, Any], cycles: Sequence[dict[str, Any]], mode: str) -> bool:
@@ -326,29 +346,31 @@ def _held_in_pool(held: dict[str, Any], cycles: Sequence[dict[str, Any]], mode: 
 def prior_from_cache(
     cache: Any, mode: str, now: Any, *, cycles: Sequence[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
-    """Prior of an existing home: its stored rates weighted by their evidence, ageing with a 21-day half-life.
+    """Prior of an existing home: its stored rates weighted by the evidence still behind them.
 
-    Reads ``cache["rate_prior"]`` (``{"k_active_heat"|"k_active_cool"|"k_passive": {"value", "ts", "n"}}``, written
-    once at upgrade by ``learning._ensure_rate_prior``). The evidence is
-    ``n_eff = n * THERMAL_LEGACY_OBS_WEIGHT * 0.5 ** (age_d / THERMAL_RATE_HALF_LIFE_DAYS)``; the stored value
+    Reads ``cache["rate_prior"]`` (``{"k_active_heat"|"k_active_cool"|"k_passive": {"value", "ts", "n", "keep"}}``,
+    written once at upgrade by ``learning._ensure_rate_prior``). The evidence is
+    ``n_eff = n * THERMAL_LEGACY_OBS_WEIGHT * keep``, ``keep`` (1.0 at upgrade) the share newer evidence left it
+    (owner decision 2026-11-11: never lowered by time alone, so a quiet season changes nothing); the stored value
     is a pseudo-measurement with sd ``sqrt((0.30*|q|)^2 / n_eff + (0.08*|q|)^2)`` (k: 0.40 / 0.08), the
     poc2 ``legacy_prior``. It is then combined with the typical-house prior by precision, so as ``n_eff`` -> 0 the
-    prior hands over smoothly to the typical house (old values age out, nothing jumps at upgrade). Missing /
-    wrong-signed / non-numeric fields fall back to the typical value. ``now``: datetime, date or epoch seconds.
+    prior hands over smoothly to the typical house as new cycles displace the old evidence (nothing jumps at
+    upgrade). Missing / wrong-signed / non-numeric fields fall back to the typical value. ``now`` (datetime, date or
+    epoch seconds) is validated and otherwise unused: the prior has no clock.
 
-    Held fit (Issue #1512 verifier finding 4): when the cycles behind the last usable fit left the pool (a sensor
-    swap, or they aged past the retention) ``cache["cycle_fit_<mode>"]["held"]`` keeps that fit's ``q`` /
-    ``sd_q``. Given the ``cycles`` the fit will see, and when held's own cycles are not among them, the q prior is
-    the held fit (its variance inflated by ``1 / fade``, the same 21-day half-life) combined with the typical house:
-    the held posterior already carries the legacy evidence, so the legacy value is not counted twice. The rate the
-    house is judged by therefore never snaps back to the old value when a sensor changes; it ages out instead.
-    Without ``cycles`` (tools replaying a store) held is not used.
+    Held fit (Issue #1512 verifier finding 4): when the cycles behind the last usable fit are not in the pool (a
+    sensor swap: the pool is the newest sensor's cycles) that fit (``held_candidate``: the current
+    ``cycle_fit_<mode>`` itself, or the ``held`` copy kept from it) is the q prior, its variance inflated by
+    ``1 / keep``, combined with the typical house: the held posterior already carries the legacy evidence, so the
+    legacy value is not counted twice. The rate the house is judged by therefore never snaps back to the old value
+    when a sensor changes; it yields as the new sensor's cycles arrive. Without ``cycles`` (a tool that cannot say
+    which pool the fit will see) held is not used.
     """
     pr = typical_prior(mode)
     rp = cache.get("rate_prior") if isinstance(cache, dict) else None
     if not isinstance(rp, dict):
         rp = {}
-    now_dt = _as_naive_dt(now)
+    _as_naive_dt(now)  # validates the argument (TypeError on an unusable value); the prior has no clock
     out = dict(pr)
     n_eff_q = 0.0
     rec = rp.get("k_active_heat" if mode == "heat" else "k_active_cool")
@@ -359,33 +381,25 @@ def prior_from_cache(
         and rec["value"] != 0
     ):
         q_old = float(rec["value"])
-        n_eff_q = _n_eff(rec, now_dt)
+        n_eff_q = _n_eff(rec)
         sd_old = math.sqrt((0.30 * abs(q_old)) ** 2 / n_eff_q + (0.08 * abs(q_old)) ** 2)
         out["q"] = _combine(q_old, sd_old, *pr["q"])
     rec = rp.get("k_passive")
     if isinstance(rec, dict) and _num(rec.get("value")) and rec["value"] < 0:
         k_old = float(rec["value"])
-        sd_old = math.sqrt((0.40 * abs(k_old)) ** 2 / _n_eff(rec, now_dt) + (0.08 * abs(k_old)) ** 2)
+        sd_old = math.sqrt((0.40 * abs(k_old)) ** 2 / _n_eff(rec) + (0.08 * abs(k_old)) ** 2)
         out["k"] = _combine(k_old, sd_old, *pr["k"])
     if n_eff_q:
         out["source"] = "cache"
         out["n_eff"] = n_eff_q
     fit = cache.get(f"cycle_fit_{mode}") if isinstance(cache, dict) else None
-    held = fit.get("held") if isinstance(fit, dict) else None
-    fade = held_fade(held, now_dt)
-    if (
-        cycles is not None
-        and fade >= HELD_MIN_FADE
-        and isinstance(held, dict)
-        and (held["q"] > 0) == (mode == "heat")
-        and _num(held.get("sd_q"))
-        and held["sd_q"] > 0
-        and not _held_in_pool(held, cycles, mode)
-    ):
-        out["q"] = _combine(float(held["q"]), float(held["sd_q"]) / math.sqrt(fade), *pr["q"])
+    held = held_candidate(fit, cycles, mode) if cycles is not None else None
+    if held is not None:
+        keep = evidence_keep(held)
+        out["q"] = _combine(float(held["q"]), float(held["sd_q"]) / math.sqrt(keep), *pr["q"])
         out["source"] = "held"
         ne_w = held.get("ne_w")
-        out["n_eff"] = (float(ne_w) if _num(ne_w) else 1.0) * fade
+        out["n_eff"] = (float(ne_w) if _num(ne_w) else 1.0) * keep
     return out
 
 
@@ -750,6 +764,7 @@ def _prior_result(
         "ne_w": 0.0,
         "entity": entity,
         "t_last": None,
+        "t_eligible": [],
     }
     out["grade"] = grade(out)
     return out
@@ -759,14 +774,17 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
     """Fit the heating or cooling rate of ``mode`` from the stored cycles (poc2 R2F; Issue #1512).
 
     ``cycles``: public cycle dicts (see module docs; other-mode cycles are ignored). ``prior``: ``typical_prior``
-    or ``prior_from_cache``. ``now_ts`` (epoch s) sets the age weights. Returns ``q`` (signed F/h: heat > 0,
-    cool < 0), ``sd_q``, ``k_p_cycle`` / ``sd_k`` (diagnostic leak rate; pinned at the prior when
-    ``k_pinned``), ``coast_area_f`` (= c*tau/60, post-off drift in F; signed, 0 none), ``tau`` (min),
+    or ``prior_from_cache``. ``now_ts`` (epoch s) is accepted for the callers and does not weigh anything: a cycle's
+    weight is ``0.5 ** (newer eligible cycles in the pool / EVIDENCE_HALF_N)`` (owner decision 2026-11-11, evidence
+    yields to newer evidence, never to the calendar: a refit after a quiet season gives the same answer).
+    Returns ``q`` (signed F/h: heat > 0, cool < 0), ``sd_q``, ``k_p_cycle`` / ``sd_k`` (diagnostic leak rate; pinned at
+    the prior when ``k_pinned``), ``coast_area_f`` (= c*tau/60, post-off drift in F; signed, 0 none), ``tau`` (min),
     ``ne`` (eligible cycles used), ``n_cycles`` (same-mode, same-sensor cycles seen), ``er_q``, ``grade``,
     ``resolution_f`` and ``reasons`` (counts per rejection code of the cycles that did not qualify). Also the
     evidence bookkeeping the learning engine needs (Issue #1512 verifier findings 2 and 4): ``prior_q`` /
-    ``prior_sd_q`` (the prior the data was weighed against), ``ne_w`` (the eligible cycles' summed age weights at
-    ``now_ts``), ``entity`` (the pool's sensor) and ``t_last`` (``t_on`` of the newest eligible cycle).
+    ``prior_sd_q`` (the prior the data was weighed against), ``ne_w`` (the eligible cycles' summed weights),
+    ``entity`` (the pool's sensor), ``t_last`` (``t_on`` of the newest eligible cycle) and ``t_eligible`` (the
+    eligible cycles' ``t_on``, so the caller can tell which of them are new; not stored).
     No eligible cycle returns the prior unchanged (grade ``none``). Never worse than the prior by construction
     (ridge toward it). Pure and deterministic.
     """
@@ -818,9 +836,9 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
     if not eligible:
         return _prior_result(prior, res, n_seen, reasons, ent)
     eligible = eligible[-CYCLE_MAX_CYCLES:]
-    for pc in eligible:
-        age_d = max(0.0, (now_ts - pc["ton"] * 60.0) / 86400.0)
-        pc["w"] = 0.5 ** (age_d / CYCLE_WEIGHT_HALF_LIFE_DAYS)
+    del now_ts  # no clock: weights count newer eligible cycles
+    for newer, pc in enumerate(sorted(eligible, key=lambda p: p["ton"], reverse=True)):
+        pc["w"] = 0.5 ** (newer / EVIDENCE_HALF_N)
     ne = len(eligible)
     coarse = res >= CYCLE_COARSE_RES_F
     free_k = (not coarse) and ne >= CYCLE_K_FREE_AFTER
@@ -849,6 +867,7 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
         "ne_w": sum(pc["w"] for pc in eligible),
         "entity": ent,
         "t_last": max(pc["ton"] for pc in eligible) * 60.0,
+        "t_eligible": [pc["ton"] * 60.0 for pc in eligible],
     }
     if use_solar:
         out["solar_coeff"] = fit["solar_coeff"]

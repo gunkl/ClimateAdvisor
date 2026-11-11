@@ -1,12 +1,15 @@
 """Per-zone store of recorded heat/cool cycles (Issues #1512 / #1516): ``climate_advisor_cycles[_<entry_id>].json``.
 
-Holds the raw cycles ``cycle_recorder.py`` produces so the pooled cycle model can refit from the last 90 days at any
+Holds the raw cycles ``cycle_recorder.py`` produces so the pooled cycle model can refit from the stored cycles at any
 time (a refit after a restart needs no in-flight state, and a better estimator can re-read the same evidence).
 
 Persistence contract mirrors ``V4Archive`` / ``ChartStateLog``: ``load()`` / ``save()`` are blocking (the coordinator
 MUST run them via its executor), ``save()`` is an atomic tempfile + ``os.replace`` with ``chmod 0o600`` on non-Windows,
-retention is time-based (``CYCLE_RETENTION_DAYS``, pruned at most hourly) plus a hard cap (``CYCLE_MAX_STORED``, oldest
-dropped first), a corrupt or unreadable file starts empty and is logged ONCE, and no public method raises.
+retention is ``CYCLE_RETENTION_DAYS`` counted back from the newest cycle of the same mode (pruned at most hourly), plus
+a hard cap (``CYCLE_MAX_STORED``, oldest dropped first), a corrupt or unreadable file starts empty and is logged ONCE,
+and no public method raises. Retention is anchored on the newest cycle, not on today (owner decision 2026-11-11,
+"Fade only on new evidence"): a summer with no heating keeps last winter's heating cycles, so the first refit in
+autumn starts from them instead of from nothing; old cycles leave only as newer ones of the same mode arrive.
 
 Occupant effect: none directly; this is the memory behind the heating/cooling rate the house is judged by.
 
@@ -18,7 +21,9 @@ is float noise and is rounded to 0.001 F. ``add()`` applies the same rounding, s
 exactly what a reload returns.
 
 In memory each cycle is one ``_Cycle`` (``__slots__``) holding its series as ``array('i')`` offsets / scaled values
-and its flags as ``bytes``: about 9 bytes per reading instead of ~130 for a list of three Python objects.
+and its flags as ``bytes``: 9 bytes of payload per reading (4 time + 4 value + 1 flag), about 29 bytes per reading
+measured including the per-cycle object and array overhead (a typical cycle), instead of ~175 for a list of three
+Python objects.
 ``cycles()`` builds the public dicts on demand (call it in the executor for a full pool).
 
 On disk (compact JSON, delta-encoded; ``v`` is ``CYCLE_STORE_VERSION``)::
@@ -31,8 +36,12 @@ On disk (compact JSON, delta-encoded; ``v`` is ``CYCLE_STORE_VERSION``)::
 ``t`` is the first sample's epoch then the second-deltas, ``y`` the first scaled value (``value * 10**p``) then the
 deltas, ``f`` the sample flags run-length encoded as ``[flags, count]``, ``ot`` / ``oy`` the outdoor series the same
 way (``op`` places). A version-1 file (fixed centi-degree ``y``, deci-degree ``oy``, no ``p`` / ``op``) is read as
-``p = 2`` / ``op = 1`` and written back as version 2. A file from a NEWER version is left untouched on disk (never
-overwritten by this version) and logged once; the store then runs empty in memory.
+``p = 2`` / ``op = 1`` and written back as version 2. (Downgrades are not supported.)
+
+Saving is periodic (``CYCLE_STORE_SAVE_INTERVAL_S``) plus at Home Assistant stop / unload: a crash may lose the most
+recent cycles, which are simply learned again from the next ones. A missing, partial or corrupt file loads as far as
+it is readable (unreadable rows dropped, duplicate ids kept once), never raises, and nothing is counted twice: the
+learning engine counts a cycle as new evidence only when it is newer than any an earlier fit saw (``t_seen``).
 """
 
 from __future__ import annotations
@@ -253,8 +262,6 @@ class CycleStore:
         self._lock = threading.Lock()
         self._last_prune: float | None = None
         self._corrupt_logged = False
-        self._newer_file: int | None = None  # the version of a newer file on disk: never overwritten by this version
-        self._newer_logged = False
         self.dirty = False
 
     def __len__(self) -> int:
@@ -332,7 +339,11 @@ class CycleStore:
             return any(mode is None or c.mode == mode for c in self._cycles[i:])
 
     def prune(self, now: float, *, force: bool = False) -> int:
-        """Drop cycles older than the retention (by their last sample) and over the cap. Hourly unless ``force``."""
+        """Drop cycles over the retention and the cap. Hourly unless ``force``.
+
+        A cycle is over the retention when its last sample is more than ``max_days`` older than the newest cycle of
+        the same mode began (``now`` caps that anchor, so a clock jump into the future prunes nothing extra): a mode
+        with no new cycles keeps all of its cycles, whatever the date."""
         try:
             if (
                 not force
@@ -341,9 +352,12 @@ class CycleStore:
             ):
                 return 0
             self._last_prune = now
-            cutoff = now - self._max_days * 86400
+            span = self._max_days * 86400
             with self._lock:
-                keep = [c for c in self._cycles if c.end >= cutoff]
+                newest: dict[str, float] = {}
+                for c in self._cycles:
+                    newest[c.mode] = max(newest.get(c.mode, c.t_on), c.t_on)
+                keep = [c for c in self._cycles if c.end >= min(newest[c.mode], now) - span]
                 dropped = len(self._cycles) - len(keep)
                 if dropped:
                     self._set_all(keep)
@@ -379,7 +393,6 @@ class CycleStore:
         with self._lock:
             self._set_all([])
         self.dirty = False
-        self._newer_file = None
         if not self._path.exists():
             _LOGGER.info("cycle_store: no cycle file yet, starting empty")
             return
@@ -393,18 +406,6 @@ class CycleStore:
             self._log_corrupt("the cycle file has an unexpected shape, starting empty")
             return
         version = raw.get("v")
-        if isinstance(version, int) and not isinstance(version, bool) and version > CYCLE_STORE_VERSION:
-            # A newer Climate Advisor wrote it (a downgrade): keep it on disk for that version, learn in memory only.
-            self._newer_file = version
-            if not self._newer_logged:
-                self._newer_logged = True
-                _LOGGER.warning(
-                    "cycle_store: the cycle file is from a newer version (v%s > v%s); it is kept as it is and not "
-                    "overwritten, and this version starts with no stored cycles",
-                    version,
-                    CYCLE_STORE_VERSION,
-                )
-            return
         ver = version if isinstance(version, int) and not isinstance(version, bool) else 1
         decoded = [c for c in (_decode(r, ver) for r in rows) if c is not None and c.t]
         decoded.sort(key=lambda c: c.t_on)
@@ -427,11 +428,7 @@ class CycleStore:
         _LOGGER.info("cycle_store: loaded %d cycles", len(self._cycles))
 
     def save(self) -> bool:
-        """Atomic write (tempfile + os.replace), 0o600 on non-Windows. True on success. Never raises.
-
-        A newer version's file found at load is never overwritten (False, nothing written)."""
-        if self._newer_file is not None:
-            return False
+        """Atomic write (tempfile + os.replace), 0o600 on non-Windows. True on success. Never raises."""
         try:
             with self._lock:
                 snap = list(self._cycles)

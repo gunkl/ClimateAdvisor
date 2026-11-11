@@ -125,7 +125,8 @@ class TestRunRejectionCodesClassified:
     def test_cycle_model_is_described_in_plain_words_with_its_honesty(self):
         ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), _make_coordinator({})))
         assert "the cycle model" in ctx
-        assert "21 days" in ctx and "half-life" in ctx
+        # owner decision 2026-11-11: old cycles give way to newer ones, never to time alone
+        assert "20 newer" in ctx and "never with time alone" in ctx and "21 days" not in ctx
         assert "whole-degree" in ctx and "never high" in ctx
         assert "never worse than the default" in ctx
         assert "night-time fit" not in ctx  # the duty-balance description is retired
@@ -161,3 +162,14 @@ class TestRunRejectionCodesClassified:
         ]
         ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
         assert "heat rate 4.17 +/- 0.67 °C/h, grade medium, coast after a run +0.50 °C" in ctx
+
+
+def test_investigator_rule_9_reads_the_counts_as_carried_evidence():
+    """Issue #1512 (S2): observation_count_heat/cool are the evidence behind the rates, displaced by new cycles and
+    flat through a quiet season; the investigator must not compare them with the pipeline's committed counts or treat
+    a decrease as lost data (the old rule treated them as cumulative counters off by EWMA lag)."""
+    from custom_components.climate_advisor import ai_skills_investigator as inv
+
+    prompt = inv._SYSTEM_PROMPT
+    assert "EWMA flush lag" not in prompt
+    assert "NOT cumulative counters" in prompt and "can go down" in prompt

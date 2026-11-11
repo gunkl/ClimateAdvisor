@@ -221,10 +221,17 @@ class TestAgeing:
         obs[0]["date"] = late.isoformat()
         assert aged_rates(obs, late, prior)["k_passive"] == pytest.approx(-0.0264)
 
-    def test_k_passive_confidence_fades_instead_of_a_cliff(self, tmp_path):
+    def test_k_passive_confidence_gives_way_only_to_new_passive_observations(self, tmp_path):
+        """Owner decision 2026-11-11 ("fade only on new evidence"). Occupant: a closed-house leak rate learned before
+        the upgrade keeps the bedtime-setback and forecast physics on through a summer with no passive window; the old
+        evidence yields only as new passive observations replace it."""
         from datetime import UTC, datetime
 
-        from custom_components.climate_advisor.thermal_confidence import grade_passive_confidence
+        from custom_components.climate_advisor.const import THERMAL_EVIDENCE_HALF_N
+        from custom_components.climate_advisor.thermal_confidence import (
+            grade_passive_confidence,
+            passive_evidence_count,
+        )
 
         now = datetime.now(UTC)
         stamp = now.isoformat()
@@ -234,9 +241,28 @@ class TestAgeing:
         # upgraded: the prior's evidence (n=203) counts at full weight on day 0 ...
         up = {**base, "rate_prior": {"k_passive": {"value": -0.05, "ts": stamp, "n": 203}}}
         assert grade_passive_confidence(up, now) == "high"
-        # ... and fades with the rate's own half-life; new heat/cool runs never add to it
+        # ... and time alone changes nothing (was: "none" after 8 half-lives with no new observation)
         later = now + timedelta(days=THERMAL_RATE_HALF_LIFE_DAYS * 8)
-        assert grade_passive_confidence(up, later) == "none"
+        assert grade_passive_confidence(up, later) == "high"
+        assert passive_evidence_count(up, later) == pytest.approx(3 + 203)
+        # new passive observations displace it: keep halves every THERMAL_EVIDENCE_HALF_N of them
+        e = LearningEngine(tmp_path)
+        e.load_state()
+        e._state.thermal_model_cache = {
+            "k_passive": -0.05,
+            **up,
+            "rate_prior": {"k_passive": dict(up["rate_prior"]["k_passive"])},
+        }
+        for i in range(int(THERMAL_EVIDENCE_HALF_N)):
+            e._update_thermal_model_cache(
+                {"hvac_mode": "passive", "k_passive": -0.05, "date": f"2026-11-{1 + i % 9:02d}"}
+            )
+        c = e._state.thermal_model_cache
+        assert c["rate_prior"]["k_passive"]["keep"] == pytest.approx(0.5, abs=1e-4)
+        assert passive_evidence_count(c, later) == pytest.approx(3 + THERMAL_EVIDENCE_HALF_N + 203 * 0.5, abs=0.1)
+        # heat/cool observations never displace the leak rate's evidence
+        e._update_thermal_model_cache({"hvac_mode": "heat", "k_active": 6.0, "date": "2026-11-10"})
+        assert c["rate_prior"]["k_passive"]["keep"] == pytest.approx(0.5, abs=1e-4)
 
 
 class TestGateBridgeRemoved:

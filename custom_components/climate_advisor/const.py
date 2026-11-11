@@ -1702,7 +1702,9 @@ CYCLE_POST_OFF_WINDOW_S: float = (
 )  # a cycle keeps recording this long after the off edge (the coast), then closes
 CYCLE_MAX_SAMPLES: int = 400  # readings kept per cycle (interior readings are thinned beyond this)
 CYCLE_MAX_OUTDOOR: int = 200  # outdoor points kept per cycle
-CYCLE_RETENTION_DAYS: int = 90  # stored cycles older than this are pruned
+# Stored cycles more than this many days older than the NEWEST cycle of the same mode are pruned (a quiet season
+# prunes nothing: the clock is new evidence, owner decision 2026-11-11).
+CYCLE_RETENTION_DAYS: int = 90
 CYCLE_MAX_STORED: int = 3000  # hard cap on stored cycles (oldest dropped first)
 CYCLE_STORE_PRUNE_INTERVAL_S: float = 3600  # pruning runs at most this often
 CYCLE_STORE_VERSION: int = 2  # "v" key of the cycle file (2: per-cycle decimal places; a v1 file is migrated on load)
@@ -1731,7 +1733,8 @@ THERMAL_CYCLE_COARSE_EVID_N: int = 3  # coarse pools: variance inflated by (this
 THERMAL_CYCLE_DEFF_FINE_MULT: float = 0.5  # calibrated deff multiplier, fine pools (coarse: 1.0)
 THERMAL_CYCLE_PLATEAU_MIN: float = 10.0  # final level held >= this long before off -> effective off = first reached
 THERMAL_CYCLE_MAX_FIT_CYCLES: int = 60  # at most the last N eligible cycles are fitted
-THERMAL_CYCLE_AGE_HALF_LIFE_DAYS: float = 21.0  # cycle weight 0.5 ** (age_d / this)
+# Cycle weight 0.5 ** (newer eligible cycles in the pool / THERMAL_EVIDENCE_HALF_N): a cycle yields to newer
+# evidence, never to the calendar (owner decision 2026-11-11, "fade only on new evidence").
 THERMAL_CYCLE_TAIL_BACK_MIN: float = 120.0  # superpose earlier off-edge tails this far back (minutes)
 THERMAL_CYCLE_TAUS: tuple[float, ...] = (1.5, 2.5, 4.0, 6.0, 8.0, 11.0, 15.0, 20.0)  # coast time-constant grid (min)
 THERMAL_CYCLE_IRLS_ITERS: int = 5
@@ -1779,6 +1782,15 @@ THERMAL_CYCLE_SOLAR_REGRESSOR: bool = False
 # (no "method" key: the pre-#1512 post-fit / proxy commits) count THERMAL_LEGACY_OBS_WEIGHT as much.
 THERMAL_RATE_HALF_LIFE_DAYS: float = 21
 THERMAL_LEGACY_OBS_WEIGHT: float = 0.25
+# Evidence is displaced only by newer evidence, never by the passage of time alone (owner decision 2026-11-11,
+# "Fade only on new evidence"). The evidence carried behind a learned rate (the pre-upgrade ``rate_prior`` count, a
+# held cycle fit) keeps a share ``keep`` that halves for every THERMAL_EVIDENCE_HALF_N new informative (eligible)
+# cycles that agree with it, for every THERMAL_EVIDENCE_HALF_N_CONTRADICT that contradict it, and (k_passive) for
+# every THERMAL_EVIDENCE_HALF_N new passive observations. A held fit whose share fell below
+# THERMAL_EVIDENCE_MIN_KEEP is dropped. The pooled cycle model weighs its cycles by the same rule.
+THERMAL_EVIDENCE_HALF_N: float = 20
+THERMAL_EVIDENCE_HALF_N_CONTRADICT: float = 5
+THERMAL_EVIDENCE_MIN_KEEP: float = 0.01
 
 # Thermostat swing = the thermostat's OWN hysteresis (Issue #1234): how far past the setpoint the
 # room is allowed to drift before the equipment starts (heat: setpoint - indoor at the heat-on

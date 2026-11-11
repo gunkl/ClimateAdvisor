@@ -485,11 +485,18 @@ def test_prior_from_cache_evidence_and_ageing() -> None:
     assert p0["q"][1] < 1.0  # strong evidence -> tight
     few = cm.prior_from_cache(_cache(n=3), "heat", NOW)
     assert few["q"][1] > p0["q"][1]
-    aged = cm.prior_from_cache(_cache(n=65, age_days=60), "heat", NOW)
-    assert aged["q"][1] > p0["q"][1] * 1.5  # looser as the evidence fades (21-day half-life)
-    assert aged["n_eff"] == pytest.approx(p0["n_eff"] * 0.5 ** (60 / 21), rel=1e-6)
-    ancient = cm.prior_from_cache(_cache(n=65, age_days=400), "heat", NOW)
-    assert abs(ancient["q"][0] - 8.0) < 0.2  # aged out: back to the typical house
+    # owner decision 2026-11-11: time alone changes nothing (was: looser after 60 days, typical after 400)
+    aged = cm.prior_from_cache(_cache(n=65, age_days=400), "heat", NOW)
+    assert aged["q"] == p0["q"] and aged["n_eff"] == p0["n_eff"]
+    # new evidence displaces it: the carried share ``keep`` scales the evidence
+    half = _cache(n=65)
+    half["rate_prior"]["k_active_heat"]["keep"] = 0.5
+    ph = cm.prior_from_cache(half, "heat", NOW)
+    assert ph["n_eff"] == pytest.approx(p0["n_eff"] * 0.5, rel=1e-6) and ph["q"][1] > p0["q"][1]
+    gone = _cache(n=65)
+    gone["rate_prior"]["k_active_heat"]["keep"] = 1e-6
+    ancient = cm.prior_from_cache(gone, "heat", NOW)
+    assert abs(ancient["q"][0] - 8.0) < 0.2  # displaced: back to the typical house
     assert ancient["q"][1] == pytest.approx(5.0, rel=0.05)
     # date / epoch accepted for ``now``
     assert cm.prior_from_cache(_cache(), "heat", NOW.date())["q"][1] > 0
@@ -651,4 +658,27 @@ def test_importable_standalone_without_package() -> None:
     finally:
         sys.modules.pop("cycle_model_standalone", None)
     assert mod.typical_prior("heat")["q"] == (8.0, 5.0)
-    assert mod.THERMAL_RATE_HALF_LIFE_DAYS == 21
+    assert mod.EVIDENCE_HALF_N == 20 and mod.HELD_MIN_KEEP == 0.01
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Owner decision 2026-11-11 ("Fade only on new evidence"): no clock in the fit
+# ---------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["heat", "cool"])
+def test_a_refit_after_a_quiet_season_gives_the_same_answer(mode: str) -> None:
+    """Occupant: a home that does not heat (cool) for months keeps its learned rate and its grade; a restart's
+    refit of the same cycles 1, 30, 89 or 400 days later is identical (was: every cycle's weight halved per 21 days,
+    so the prior took over and the grade fell with time alone)."""
+    cyc = synth(mode, q=7.0 if mode == "heat" else -7.0, n=20)
+    base_ts = cyc[-1]["t_off"] + 3600
+    prior = cm.typical_prior(mode)
+    first = cm.fit_cycles(cyc, mode, prior, now_ts=base_ts)
+    for days in (1, 30, 89, 400):
+        again = cm.fit_cycles(cyc, mode, prior, now_ts=base_ts + days * 86400)
+        assert again == first
+    # weights count newer eligible cycles: 0.5 ** (j / EVIDENCE_HALF_N), j = 0 for the newest
+    ne = first["ne"]
+    assert first["ne_w"] == pytest.approx(sum(0.5 ** (j / cm.EVIDENCE_HALF_N) for j in range(ne)))
+    assert len(first["t_eligible"]) == ne and max(first["t_eligible"]) == first["t_last"]

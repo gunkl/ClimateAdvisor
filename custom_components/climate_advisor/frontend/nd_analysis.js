@@ -281,7 +281,9 @@
         (tm.swing_heat_measured && tm.swing_cool_measured ? '' : ' (partly estimated)'), 'swing_heat ' + ND.num(sh, 2) + ' · swing_cool ' + ND.num(sc, 2) + ' ' + ND.sym(tm.unit || ND.unit), '');
       var envN = (tm.observation_count_passive || 0) + (tm.observation_count_vent_window || 0) + (tm.observation_count_vent_fan || 0) + (tm.observation_count_solar || 0);
       var hvN = (tm.observation_count_heat || 0) + (tm.observation_count_cool || 0);
-      row('Measurements kept: ' + envN + ' for the house, ' + hvN + ' for the heating and cooling', 'calibration: house ' + (tm.confidence_k_passive || 'none') + ' · HVAC ' + (tm.confidence || 'none'),
+      // Issue #1512: hvN is the evidence behind the heating/cooling rates (older measurements give way to new cycles,
+      // never to time alone), not a running total
+      row('Measurements kept: ' + envN + ' for the house; evidence behind the heating and cooling rates: ' + hvN + ' measurements', 'calibration: house ' + (tm.confidence_k_passive || 'none') + ' · HVAC ' + (tm.confidence || 'none'),
         tm.last_observation_date ? 'last: ' + new Date(tm.last_observation_date).toLocaleDateString() : 'none yet');
     }
     if (!rows.length) rows.push('<div class="empty">Nothing learned yet. It needs a few hours of HVAC-off time with a clear indoor-outdoor difference.</div>');

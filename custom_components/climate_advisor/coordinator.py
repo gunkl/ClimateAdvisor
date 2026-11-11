@@ -165,7 +165,6 @@ from .const import (
     CYCLE_FILE,
     CYCLE_REFIT_MIN_INTERVAL_S,
     CYCLE_REFIT_MIN_NEW_ELIGIBLE,
-    CYCLE_RETENTION_DAYS,
     CYCLE_STORE_SAVE_INTERVAL_S,
     DAY_TYPE_COLD,
     DAY_TYPE_HOT,
@@ -15104,11 +15103,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             old_dir = None if unavail_old else self._cycle_dir(old_state, was_running)
             new_dir = self._cycle_dir(new_state, is_running)
             rec = self._cycle_recorder
+            sp_dir = new_dir or old_dir
+            # Only the setpoint that governs a cycle being recorded counts (heat: ``temperature`` else
+            # ``target_temp_low``; cool: ``temperature`` else ``target_temp_high``): on a heat_cool thermostat a
+            # change of the cooling target does not cut a heating run, and the mirror.
+            sp_modes = set(rec.open_modes) | ({sp_dir} if sp_dir else set())
             if not unavail_old and any(
-                old_state.attributes.get(a) != new_state.attributes.get(a)
-                for a in ("temperature", "target_temp_low", "target_temp_high")
+                self._read_thermostat_setpoint_f(old_state, m) != self._read_thermostat_setpoint_f(new_state, m)
+                for m in sorted(sp_modes)
             ):
-                sp_dir = new_dir or old_dir
                 self._cycle_collect(
                     rec.setpoint_change(ts, self._read_thermostat_setpoint_f(new_state, sp_dir) if sp_dir else None)
                 )
@@ -15209,8 +15212,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     pend["eligible"] += eligible
                 due = set(self._cycle_refit_due_modes(now_ts))
                 if startup:
-                    since = now_ts - CYCLE_RETENTION_DAYS * 86400
-                    due.update(m for m in ("heat", "cool") if self._cycle_store.has_cycles(m, since))
+                    due.update(m for m in ("heat", "cool") if self._cycle_store.has_cycles(m))
                 for mode in sorted(due):
                     await self._cycle_refit(mode, now_ts)
                     pending.pop(mode, None)
@@ -15262,16 +15264,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return eligible
 
     async def _cycle_refit(self, mode: str, now_ts: float) -> None:
-        """Refit ``mode`` from the last 90 days of stored cycles and apply it (v3 primary: the decisions' rate).
+        """Refit ``mode`` from its stored cycles and apply it (v3 primary: the decisions' rate).
 
-        The pool is built, the prior computed and the model fitted in the executor (finding 7: nothing heavy on the
-        event loop); the prior sees the pool, so a held fit is its prior only when its cycles left it (finding 4)."""
+        The pool is every stored cycle of the mode (the store keeps CYCLE_RETENTION_DAYS back from the mode's newest
+        cycle, not from today: a quiet season removes nothing, owner decision 2026-11-11). Built, prior computed and
+        fitted in the executor (finding 7: nothing heavy on the event loop); the prior sees the pool, so a held fit
+        is its prior only when its cycles left it (finding 4)."""
         snap = self._cycle_prior_snapshot(mode)
         store = self._cycle_store
-        since = now_ts - CYCLE_RETENTION_DAYS * 86400
 
         def _job() -> dict:
-            cycles = store.cycles(mode, since)
+            cycles = store.cycles(mode)
             prior = cycle_model.prior_from_cache(snap, mode, now_ts, cycles=cycles)
             return cycle_model.fit_cycles(cycles, mode, prior, now_ts=now_ts)
 

@@ -19298,8 +19298,8 @@ def _find_ceiling_breach_time(
     Args:
         predicted_indoor: List of {"ts": ISO-string, "temp": float} dicts from ODE curve.
         comfort_cool: Upper comfort bound (°F).
-        tolerance: Additional threshold buffer (°F). Use CEILING_BRIDGE_TOLERANCE_F for
-            bridge homes where k_vent_window proxy is less accurate for closed-window phase.
+        tolerance: Additional threshold buffer (°F); 0.0 by default. (The gate-bridge tolerance that
+            used it was removed in Issue #1512.)
 
     Returns:
         datetime of first breach entry, or None if no breach or empty curve.
@@ -19516,7 +19516,7 @@ def _build_predicted_indoor_future(
         _phase_offset = float(_raw_phase) if _raw_phase is not None else 0.0
         # Issue #1512: no gate bridge. A home with no closed-house k_passive is not physics-eligible; the
         # window-open hours below still use k_vent_window, but it never stands in for k_passive.
-        _physics_eligible, _k_passive, _ = physics_eligibility(_conf, _conf_k_passive, _k_passive, _k_vent_window)
+        _physics_eligible, _k_passive = physics_eligibility(_conf, _conf_k_passive, _k_passive, _k_vent_window)
         if _physics_eligible:
             _use_physics = True
             _LOGGER.debug(
@@ -20572,7 +20572,6 @@ def _walk_forward_regime(
     _tm = thermal_model or {}
     k_passive = _tm.get("k_passive")
     confidence_k_passive = _tm.get("confidence_k_passive") or _tm.get("confidence", "none")
-    k_passive_via_bridge = bool(_tm.get("k_passive_via_bridge"))
     k_active_cool = _tm.get("k_active_cool")
 
     result: dict[str, dict] = {}
@@ -20743,7 +20742,6 @@ def _walk_forward_regime(
                     hvac_mode=day_mode,
                     k_passive=k_passive,
                     confidence_k_passive=confidence_k_passive,
-                    k_passive_via_bridge=k_passive_via_bridge,
                     k_active_cool=k_active_cool,
                     comfort_cool=comfort_cool,
                     outdoor=outdoor,

@@ -290,13 +290,11 @@ def _set_thermal_model(
     k_passive: float = -0.05,
     conf: str = "medium",
     k_active_cool: float | None = None,
-    bridge: bool = False,
 ) -> None:
     engine.inputs.thermal = {
         "k_passive": k_passive,
         "confidence_k_passive": conf,
         "k_active_cool": k_active_cool,
-        "k_passive_via_bridge": bridge,
         "confidence": conf,
     }
 
@@ -659,11 +657,12 @@ class TestCeilingGuardSkips:
         calls = engine.hass.services.async_call.call_args_list
         assert not _guard_cool_calls(calls)
 
-    def test_bridge_tolerance_suppresses_near_miss(self):
-        """Bridge home: breach at comfort_cool+0.5 (below bridge threshold of +1.0) → guard skips."""
+    def test_conf_none_home_is_ineligible_so_guard_skips(self):
+        """The bridge tolerance was removed in #1512 (k_vent_window is a windows-open rate): a home with
+        confidence "none" is model-ineligible, so the guard skips a near-miss breach."""
         engine = _make_cg_engine(comfort_cool=74.0, indoor_temp=73.0)
         engine._last_outdoor_temp = 76.0
-        _set_thermal_model(engine, k_passive=-0.05, conf="none", bridge=True)
+        _set_thermal_model(engine, k_passive=-0.05, conf="none")
 
         now = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
         curve = _make_predicted_indoor(start_hour_utc=10, temps=[73.0, 74.4])

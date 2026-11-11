@@ -56,11 +56,10 @@ from enum import Enum
 
 from .thermal_lead_time import compute_lead_minutes_from_rate
 
-# Mirrors const.py's CEILING_PRECOOL_FALLBACK_MIN / CEILING_BRIDGE_TOLERANCE_F —
+# Mirrors const.py's CEILING_PRECOOL_FALLBACK_MIN —
 # duplicated here (plain scalar constants, not logic), matching every other pure
 # leaf module's own "never import from const.py or automation.py" convention.
 _CEILING_PRECOOL_FALLBACK_MIN = 120.0
-_CEILING_BRIDGE_TOLERANCE_F = 1.0
 
 _LEAD_MIN_FLOOR = 30.0
 _LEAD_MIN_CEIL = 240.0
@@ -81,7 +80,7 @@ class OdeCeilingGuardOutcome(Enum):
         "no_ceiling_threshold"  # WHF/BOTH home not known sealed (window open / sensor unknown / none) — no handoff
     )
     DORMANT = "dormant"  # free cooling viable (Issue #247's 3-condition dormancy test)
-    NO_BREACH_PREDICTED = "no_breach_predicted"  # curve never crosses ceiling_threshold + tolerance
+    NO_BREACH_PREDICTED = "no_breach_predicted"  # curve never crosses ceiling_threshold
     STANDING_BY = "standing_by"  # breach predicted, but outside the lead-time window
     ESCALATE = "escalate"  # breach within lead time — shell must switch to active cooling
 
@@ -129,7 +128,6 @@ class OdeCeilingGuardInputs:
       k_passive                 -> (self._thermal_model or {}).get("k_passive")
       confidence_k_passive       -> (self._thermal_model or {}).get("confidence_k_passive")
                                     or .get("confidence", "none")
-      k_passive_via_bridge        -> bool((self._thermal_model or {}).get("k_passive_via_bridge"))
       k_active_cool                 -> (self._thermal_model or {}).get("k_active_cool")
       comfort_cool                   -> config comfort_cool
       outdoor                          -> self._last_outdoor_temp
@@ -153,7 +151,6 @@ class OdeCeilingGuardInputs:
     hvac_mode: str | None
     k_passive: float | None
     confidence_k_passive: str
-    k_passive_via_bridge: bool
     k_active_cool: float | None
     comfort_cool: float | None
     outdoor: float | None
@@ -167,7 +164,7 @@ def _model_eligible(inputs: OdeCeilingGuardInputs) -> bool:
     return (
         inputs.k_passive is not None
         and inputs.k_passive < 0
-        and (inputs.confidence_k_passive != "none" or inputs.k_passive_via_bridge)
+        and inputs.confidence_k_passive != "none"
         and inputs.comfort_cool is not None
     )
 
@@ -236,10 +233,9 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
             ceiling=inputs.ceiling_threshold,
         )
 
-    tolerance = _CEILING_BRIDGE_TOLERANCE_F if inputs.k_passive_via_bridge else 0.0
     # Issue #1093: breach scan and lead time measure against the SAME resolved ceiling the
     # dormancy test above uses (savings-adjusted), not the plain comfort_cool.
-    threshold = inputs.ceiling_threshold + tolerance
+    threshold = inputs.ceiling_threshold
     breach_ts = _scan_for_breach(inputs.predicted_indoor, threshold)
     if breach_ts is None:
         return OdeCeilingGuardDecision(

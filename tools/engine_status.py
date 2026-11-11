@@ -98,7 +98,7 @@ def build_engine_status(cache: dict) -> dict:
     )
     ode_version = "v3" if has_v3 else "basic"
 
-    # Physics eligible: the rule _build_predicted_indoor_future applies (either grade, or the gate bridge)
+    # Physics eligible: the rule _build_predicted_indoor_future applies (grade plus a closed-house k_passive).
     physics_eligible, eligible_reason = conf.explain_physics_eligibility(
         conf_hvac, conf_passive, cache.get("k_passive"), cache.get("k_vent_window")
     )

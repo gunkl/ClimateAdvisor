@@ -1,4 +1,4 @@
-"""Tests for Phase 1 (ramp anchor), Phase 2B (gate bridge), and Phase 2C
+"""Tests for Phase 1 (ramp anchor), Phase 2B (gate bridge, REMOVED in #1512), and Phase 2C
 (per-hour ventilation wiring) fixes in _build_predicted_indoor_future()
 (Issue #126).
 
@@ -7,18 +7,16 @@ Phase 1 — Ramp anchor fix (coordinator.py line ~4339):
   available, rather than outdoor+2°F.  The off-day branch triggers when
   THRESHOLD_MILD (60°F) <= forecast high < THRESHOLD_WARM (75°F).
 
-Phase 2B — Gate bridge (coordinator.py lines ~4196-4214):
-  When k_passive is absent but k_vent_window is learned, the ODE activates
-  using k_vent_window as a proxy, so thermally inert homes get physics
-  prediction instead of the ramp fallback.
+Phase 2B — Gate bridge: REMOVED in #1512 (k_vent_window is a windows-open rate, not a
+  closed-house rate). A home without a closed-house k_passive stays on the ramp
+  fallback; the tests below assert that. Historical description: k_vent_window
+  used to stand in for an absent k_passive.
 
 Phase 2C — Per-hour ventilation wiring (coordinator.py _build_predicted_indoor_future):
   For forecast hours where classification recommends windows open, k_vent_window
   is substituted as the effective k_passive in the ODE (replacement semantics —
   k_vent_window is the total measured k during ventilated conditions).
-  Gate bridge guard: when _k_passive_via_bridge=True (k_passive was None,
-  k_vent_window already used as proxy for all hours), per-hour substitution does
-  not fire to avoid double-counting.
+  (The former gate-bridge double-counting guard went away with the bridge, #1512.)
 """
 
 from __future__ import annotations

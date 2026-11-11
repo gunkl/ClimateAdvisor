@@ -117,7 +117,7 @@ class TestToolMatchesEngine:
         assert tool["k_active_hvac"]["confidence"] == model["confidence"] == rest["k_active_hvac"]["confidence"]
         assert tool["k_solar"]["confidence"] == model["confidence_k_solar"] == rest["k_solar"]["confidence"]
         # The predicted-indoor curve's own gate, fed from get_thermal_model() exactly as the coordinator does.
-        ode_eligible, _, _ = physics_eligibility(
+        ode_eligible, _ = physics_eligibility(
             model["confidence"], model["confidence_k_passive"], model["k_passive"], model["k_vent_window"]
         )
         assert tool["physics_eligible"] == rest["physics_eligible"] == ode_eligible

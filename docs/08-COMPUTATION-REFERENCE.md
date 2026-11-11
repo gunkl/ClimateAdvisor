@@ -312,7 +312,7 @@ T(t+dt) = T_outdoor + (T - T_outdoor) * exp(k_p * dt) + (Q/k_p) * (exp(k_p * dt)
 
 **Nearest-edge arming in the predicted curve (Issue #1067), heating direction only:** the real thermostat defends whichever comfort edge the house is outside of (`decide_comfort_family()`, `docs/comfort-edge-selection-spec.md`), not just the day-level mode. On a cool mild morning (day mode `off`) that starts under the floor, the engine heats; before #1067 the curve instead drifted down with `Q=0`. Per forecast hour on the **physics path** (hours that use the ODE; the leaf is not called on setpoint-schedule fallback hours), `_build_predicted_indoor_future()` calls the same pure leaf with the running ODE state (`_t_current`), that hour's band edges from the displayed band schedule (no band math duplicated), and `COMFORT_MIN_ARMING_MARGIN_F`. Only a **below-floor breach** overrides the day mode: heat mode, the floor setpoint and `k_active_heat` are used. Inside the band the day-mode behaviour is unchanged (an armed edge exerts no force there in the ODE). **The above-ceiling (cooling) direction of this function is deliberately unchanged and stays day-mode driven** (the curve is never clamped at the ceiling). **However, downstream outcomes are NOT unchanged:** after a morning floor-heating the curve's later hours start from the floor instead of drifting below it, so they are higher. The same curve (`_last_predicted_indoor`) feeds the ODE ceiling guard (`decide_ode_ceiling_guard`, with the 1.0 F bridge tolerance, section 6c), which may therefore predict an afternoon ceiling breach sooner or for the first time (measured example: band 70/75, k_passive -0.12, k_solar 0.3, outdoor peak 78, mild `off` day starting below the floor: before, `NO_BREACH_PREDICTED` with max about 74 F; after, `STANDING_BY` with max 75.6 F; hotter days breach roughly 1.5-2 h earlier). This is deliberate and more realistic (the real thermostat does heat). It also shifts the nat-vent plan cutoff, the briefing, the chart-log archive and control_quality `prediction_error`. Pinned by `tests/test_predicted_indoor_arming.py::TestCeilingGuardOutcomeShift`. The leaf is not applicable, so the day mode stands, in open-window (nat-vent) hours and during an active TOU precondition window. Documented divergences: (a) the **settling guard** (Issue #1073) is left disabled (`recency_window_min=0`), because a forecast has no equipment-run clock; (b) the setpoint-schedule **fallback** path (no calibrated model) is unchanged. Mirror not yet fixed (tracked in Issue #1079): `_walk_forward_regime()` still uses the day-mode-only shape.
 
-**No gate bridge (removed in Issue #1512):** earlier versions promoted `k_vent_window` to stand in for an unlearned `k_passive` (Issue #126 Phase A). The open-window rate is not the closed-house leak rate, so that stand-in overstated the leak and mis-shaped the forecast. `physics_eligibility` now needs a real closed-house `k_passive < 0`; `via_bridge` is always False (the return shape is kept for callers). `_build_predicted_indoor_future` has no bridge branch and `operation_timeline.model_rates` does not promote `k_vent_window`. Window-open forecast hours still use `k_vent_window` as the window rate. A home without a closed-house rate yet uses the ramp fallback below until passive windows or the duty-balance fit (§5e-vi) learn one.
+**No gate bridge (removed in Issue #1512):** earlier versions promoted `k_vent_window` to stand in for an unlearned `k_passive` (Issue #126 Phase A). The open-window rate is not the closed-house leak rate, so that stand-in overstated the leak and mis-shaped the forecast. `physics_eligibility` now needs a real closed-house `k_passive < 0`; it returns `(eligible, k_passive)` (the `via_bridge` third value and the `k_passive_via_bridge` flag were removed in Issue #1512). `_build_predicted_indoor_future` has no bridge branch and `operation_timeline.model_rates` does not promote `k_vent_window`. Window-open forecast hours still use `k_vent_window` as the window rate. A home without a closed-house rate yet uses the ramp fallback below until passive windows or the duty-balance fit (§5e-vi) learn one.
 
 | Install state | k_passive | Physics eligible? |
 |---|---|---|
@@ -999,7 +999,7 @@ If any condition fails, the guard **evaluates** (and fires if the breach scan co
 | Use | Value |
 |---|---|
 | Dormancy condition 3 (`indoor <= ceiling`) | guard ceiling |
-| Breach scan (`temp > ceiling + bridge tolerance`) | guard ceiling |
+| Breach scan (`temp > ceiling`) | guard ceiling |
 | Lead-time `delta_t` (`ceiling - indoor`) | guard ceiling |
 | Cool setpoint the guard writes (and the `ceiling_guard_fired.new_setpoint_f` / `nat_vent_ceiling_escalation.ceiling` event values; the same value is also written under the legacy key `comfort_cool` for persisted events and older readers) | guard ceiling (`OdeCeilingGuardDecision.ceiling`) |
 
@@ -1062,7 +1062,7 @@ The ODE ceiling guard's dormancy check (condition 3, above) treats `ceiling_thre
 | Outdoor temp unavailable or missing | Skip |
 | `outdoor <= indoor` **AND** `_natural_vent_active` **AND** `indoor <= ceiling threshold` | Dormant — free cooling is actually viable; guard defers to nat-vent (see 3-condition dormancy below) |
 | `_find_ceiling_breach_time()` returns None | Dormant — no breach predicted above threshold |
-| Bridge home (`k_passive_via_bridge=True`) — never true since Issue #1512 removed the gate bridge; the branch is inert | Would apply `+CEILING_BRIDGE_TOLERANCE_F (1.0°F)` tolerance; guard fires at `ceiling + 1.0°F` (`ceiling` = `comfort_cool`, or `comfort_cool + 2 F` with Prefer savings, Issue #1093) |
+| Breach threshold | Guard fires at the plain ceiling (`comfort_cool`, or `comfort_cool + 2 F` with Prefer savings, Issue #1093); the former bridge-home `+1.0°F` tolerance was removed in Issue #1512 |
 | `k_active_cool` not learned (None) | Guard fires with `CEILING_PRECOOL_FALLBACK_MIN = 120` min lead time |
 | All conditions met | Evaluate lead time; fire if breach is within window |
 
@@ -1121,19 +1121,18 @@ The guard is fully stateless — no `_ceiling_precool_scheduled` flag. On each 3
 - **Forecast worsens** (heat dome arrives): breach crosses into the lead time window → guard fires on the cycle when it first qualifies.
 - **HVAC already cooling** (guard or band put it there): the guard sends nothing while the thermostat cools at or below the guard ceiling (above). Warm-day classification (`hvac_mode="off"`) will naturally stop cooling on the next cycle once indoor drops below `comfort_cool`, because the comfort-floor guard (§6b) will not re-heat at that point.
 
-#### Bridge home behavior
+#### Bridge homes (removed)
 
-Bridge homes (`k_vent_window` standing in for `k_passive`) no longer exist: Issue #1512 removed the gate bridge, so `k_passive_via_bridge` is always False and the `CEILING_BRIDGE_TOLERANCE_F` widening below never applies. The input and constant are kept so callers keep their shape.
+Bridge homes (`k_vent_window` standing in for `k_passive`) and their breach tolerance were removed in Issue #1512: the `k_passive_via_bridge` input and `CEILING_BRIDGE_TOLERANCE_F` constant no longer exist.
 
 #### Constants
 
 | Constant | Value | Purpose |
 |---|---|---|
 | `CEILING_PRECOOL_FALLBACK_MIN` | `120` | Lead time (minutes) when `k_active_cool` is not learned |
-| `CEILING_BRIDGE_TOLERANCE_F` | `1.0` | Extra °F threshold for bridge homes |
 | `CEILING_ESCALATION_SAVINGS_MARGIN_F` | `2.0` | Overshoot tolerated above `comfort_cool` before escalating in `aggressive_savings` mode (Issue #247) |
 
-All three are defined in `const.py`.
+Both are defined in `const.py`.
 
 #### Interaction with §6b comfort-floor guard
 
@@ -1147,7 +1146,7 @@ In practice the two guards do not conflict: if indoor is below `comfort_heat` (f
 
 **Observe-only (Issue #1301).** With automation switched off the guard still decides, but its `set_hvac_mode`/`set_temperature` writes come back `DRY_RUN` (nothing reaches the thermostat). Then no `ceiling_guard_fired` is emitted (before, the row claimed `mode: off->cool` for a switch that never happened); the decision is logged at INFO as `[DRY RUN] ODE ceiling guard would switch to cool at <ceiling> (breach predicted at HH:MM, ...)`. Nothing is stamped as commanded and no `ode_guard` mode change is recorded, so the selector's "cool ran recently" clock does not move. The `_arm_comfort_family("cooling")` call (Issue #843) still runs: `_comfort_mode_family` is a compatibility attribute that no production decision reads (the selector reads the thermostat's real mode, and in observe-only `_last_resolved_family`, Issue #1066 F2c), and the selector itself writes it in observe-only too; the harness `comfort_family` assertion reads it. Tests: `tests/test_ceiling_guard_observe_only_1301.py`.
 
-**Test coverage:** `tests/test_warm_day_comfort_gap.py` — `TestCeilingDefenseActive`, `TestCeilingPreCoolFallback`, `TestCeilingWeatherChange`, `TestCeilingBridgeTolerance`, `TestCeilingDefenseManualOverride`. `tests/test_prediction.py` — `TestFindCeilingBreachTime`.
+**Test coverage:** `tests/test_warm_day_comfort_gap.py` — `TestCeilingDefenseActive`, `TestCeilingPreCoolFallback`, `TestCeilingWeatherChange`, `TestCeilingDefenseManualOverride`. `tests/test_prediction.py` — `TestFindCeilingBreachTime`.
 
 ---
 

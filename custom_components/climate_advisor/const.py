@@ -1890,7 +1890,6 @@ THERMAL_OBS_CAP = 200  # max observations in LearningState
 # ODE Ceiling Guard (Issue #136)
 # ---------------------------------------------------------------------------
 CEILING_PRECOOL_FALLBACK_MIN: int = 120  # fallback lead time when k_active_cool not learned
-CEILING_BRIDGE_TOLERANCE_F: float = 1.0  # bridge homes: require breach > comfort_cool + this
 # Issue #247: in aggressive_savings mode, tolerate this much overshoot above comfort_cool before
 # the ceiling guard escalates nat-vent -> AC (savings homes accept a small overshoot before paying
 # for cooling; normal mode escalates at comfort_cool).

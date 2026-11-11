@@ -175,7 +175,7 @@ def _grade_passive_confidence(cache: dict) -> str:
     rather than replaced with observation_count_vent_window/observation_count_vent_fan:
     window-open decay (and especially fan-driven ventilation) are NOT close proxies for
     envelope-only decay — they measure a materially larger, different rate (the same
-    premise behind the existing gate-bridge guard's own over-prediction concern).
+    premise behind the over-prediction concern that removed the forecast gate bridge in Issue #1512).
     Folding either into *envelope* confidence would be scientifically wrong in a way
     the original fan_only inclusion was not. This is a real, intentional behavior
     change: houses previously getting confidence credit from fan_only_decay will show
@@ -1872,7 +1872,7 @@ class LearningEngine:
         has_solar = k_solar_val is not None or k_vent_window_val is not None or k_vent_fan_val is not None
         status["ode_version"] = "v3" if has_solar else "basic"
 
-        # Issue #1277: the same rule _build_predicted_indoor_future applies (either grade, or the gate bridge).
+        # Issue #1277: the same rule _build_predicted_indoor_future applies (grade plus a closed-house k_passive).
         physics_eligible, eligible_reason = explain_physics_eligibility(
             _conf_hvac, conf_k_passive, k_passive_val, k_vent_window_val
         )

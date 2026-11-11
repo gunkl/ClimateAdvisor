@@ -68,11 +68,11 @@
 | Outcome | Condition | Shell action |
 |---|---|---|
 | `NOT_APPLICABLE` | `predicted_indoor` empty/None, or `classification.hvac_mode != "off"` | None — matches production's outer `if predicted_indoor and hvac_mode == "off":` guard |
-| `MODEL_INELIGIBLE` | `k_passive` missing/non-negative, or confidence is `"none"` without bridge, or `comfort_cool` missing | DEBUG log only (carries the `indoor`/`outdoor` readings, either may be `None`) |
+| `MODEL_INELIGIBLE` | `k_passive` missing/non-negative, or confidence is `"none"`, or `comfort_cool` missing | DEBUG log only (carries the `indoor`/`outdoor` readings, either may be `None`) |
 | `MISSING_TEMPS` | `outdoor` or `indoor` unavailable | DEBUG log only (carries the `indoor`/`outdoor` readings; the unavailable one is `None`) |
 | `NO_CEILING_THRESHOLD` | Archetype is WHOLE_HOUSE/BOTH (Issue #402) | DEBUG log only — never escalates for this archetype |
 | `DORMANT` | Issue #247's 3-condition dormancy test: `outdoor <= indoor` AND `natural_vent_active` AND `indoor <= ceiling_threshold` | DEBUG log only |
-| `NO_BREACH_PREDICTED` | Predicted curve never crosses `comfort_cool (+ bridge tolerance)` | DEBUG log only |
+| `NO_BREACH_PREDICTED` | Predicted curve never crosses `ceiling_threshold` | DEBUG log only |
 | `STANDING_BY` | Breach predicted, but `hours_to_breach > lead_min / 60` | INFO breach log, then DEBUG standing-by log |
 | `ESCALATE` | Breach predicted within lead time | INFO breach log, INFO escalation log, deactivates fan if nat-vent was active, sets HVAC to `cool` + `comfort_cool`, emits `nat_vent_ceiling_escalation` (if fan deactivated and the deactivation wasn't a `RATE_LIMITED_DUP` no-op — Issue #934) and `ceiling_guard_fired` |
 

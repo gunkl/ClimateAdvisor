@@ -100,20 +100,20 @@ def physics_eligibility(
     confidence_k_passive: str | None,
     k_passive: float | None,
     k_vent_window: float | None,
-) -> tuple[bool, float | None, bool]:
+) -> tuple[bool, float | None]:
     """Whether the predicted-indoor curve uses the physics ODE (``_build_predicted_indoor_future``).
 
-    Returns ``(eligible, k_passive_used, via_bridge)``. A real closed-house rate is required: either grade
-    above ``none`` plus a negative ``k_passive``. The old gate bridge (``k_vent_window`` standing in for an
-    unlearned ``k_passive``) is gone (Issue #1512), so ``via_bridge`` is always False; ``k_vent_window`` is
-    accepted only to keep callers' signatures and is never promoted. The return shape is kept for callers.
+    Returns ``(eligible, k_passive_used)``. A real closed-house rate is required: either grade above
+    ``none`` plus a negative ``k_passive``. The old gate bridge (``k_vent_window`` standing in for an unlearned
+    ``k_passive``) was removed in Issue #1512 (k_vent_window is a windows-open rate, not a closed-house rate);
+    ``k_vent_window`` is accepted only to keep callers' signatures and is never promoted.
     """
     eligible = (
         (confidence_hvac != "none" or confidence_k_passive not in (None, "none"))
         and k_passive is not None
         and k_passive < 0
     )
-    return eligible, k_passive, False
+    return eligible, k_passive
 
 
 def explain_physics_eligibility(
@@ -123,9 +123,7 @@ def explain_physics_eligibility(
     k_vent_window: float | None,
 ) -> tuple[bool, str]:
     """``physics_eligibility`` plus the human-readable reason the engine status reports."""
-    eligible, _k_used, _via_bridge = physics_eligibility(
-        confidence_hvac, confidence_k_passive, k_passive, k_vent_window
-    )
+    eligible, _k_used = physics_eligibility(confidence_hvac, confidence_k_passive, k_passive, k_vent_window)
     if eligible:
         return True, f"k_passive + confidence (passive={confidence_k_passive}, hvac={confidence_hvac})"
     if k_passive is None:

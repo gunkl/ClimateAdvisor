@@ -24,7 +24,6 @@ from homeassistant.util import dt as dt_util
 
 from .classifier import DayClassification
 from .const import (
-    CEILING_BRIDGE_TOLERANCE_F,
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
     CLIMATE_FEATURE_TARGET_TEMP_RANGE,
     COMFORT_DEADBAND_COLD_MAX_F,
@@ -17172,7 +17171,6 @@ class AutomationEngine:
             hvac_mode=classification.hvac_mode,
             k_passive=_thermal.get("k_passive"),
             confidence_k_passive=_thermal.get("confidence_k_passive") or _thermal.get("confidence", "none"),
-            k_passive_via_bridge=bool(_thermal.get("k_passive_via_bridge")),
             k_active_cool=_thermal.get("k_active_cool"),
             comfort_cool=comfort_cool,
             outdoor=self._last_outdoor_temp,
@@ -17219,7 +17217,6 @@ class AutomationEngine:
         _thermal = self._control_model()
         _k_passive = _thermal.get("k_passive")
         _conf = _thermal.get("confidence_k_passive") or _thermal.get("confidence", "none")
-        _k_via_bridge = bool(_thermal.get("k_passive_via_bridge"))
         _k_active_cool = _thermal.get("k_active_cool")
         _comfort_cool_cg = self.config.get("comfort_cool")
         # Issue #1093: the ceiling the decision was made against (savings-adjusted awake ceiling);
@@ -17234,7 +17231,7 @@ class AutomationEngine:
 
         _LOGGER.debug(
             "ODE ceiling guard eval: %d points, comfort_cool=%s, ceiling=%s, house_sealed=%s, outdoor=%s,"
-            " indoor=%s, k_passive=%s, conf=%s, bridge=%s",
+            " indoor=%s, k_passive=%s, conf=%s",
             len(predicted_indoor) if predicted_indoor else 0,
             _comfort_cool_cg,
             _ceiling_cg,
@@ -17243,7 +17240,6 @@ class AutomationEngine:
             _indoor_cg,
             _k_passive,
             _conf,
-            _k_via_bridge,
         )
 
         outcome = outcome_obj.outcome
@@ -17271,8 +17267,7 @@ class AutomationEngine:
             )
             return
         if outcome is OdeCeilingGuardOutcome.NO_BREACH_PREDICTED:
-            _tolerance = CEILING_BRIDGE_TOLERANCE_F if _k_via_bridge else 0.0
-            _threshold = _ceiling_cg + _tolerance
+            _threshold = _ceiling_cg
             _LOGGER.debug("ODE ceiling guard: dormant — no breach above %.1f°F predicted", _threshold)
             return
 

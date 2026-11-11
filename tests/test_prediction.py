@@ -785,16 +785,16 @@ class TestFindCeilingBreachTime:
         assert _find_ceiling_breach_time(None, comfort_cool=74.0) is None
 
     def test_tolerance_shifts_threshold(self):
-        """With tolerance=1.0 (bridge home), threshold is comfort_cool + 1.0.
+        """With tolerance=1.0 (generic buffer), threshold is comfort_cool + 1.0.
         temp=74.5 is above comfort_cool=74.0 but below 74.0+1.0=75.0 → None.
         temp=75.5 is above 75.0 → breach returned.
         """
         # Only 74.5 and 75.5 exceed comfort_cool=74.0
         # With tolerance=1.0, only 75.5 exceeds 75.0
-        curve_no_bridge = self._make_curve([72.0, 74.5])
-        curve_with_bridge = self._make_curve([72.0, 74.5, 75.5])
-        assert _find_ceiling_breach_time(curve_no_bridge, comfort_cool=74.0, tolerance=1.0) is None
-        result = _find_ceiling_breach_time(curve_with_bridge, comfort_cool=74.0, tolerance=1.0)
+        curve_below = self._make_curve([72.0, 74.5])
+        curve_above = self._make_curve([72.0, 74.5, 75.5])
+        assert _find_ceiling_breach_time(curve_below, comfort_cool=74.0, tolerance=1.0) is None
+        result = _find_ceiling_breach_time(curve_above, comfort_cool=74.0, tolerance=1.0)
         assert result is not None
         expected = datetime(2026, 5, 11, 12, 0, 0, tzinfo=UTC)  # hour 12 = index 2
         assert result == expected

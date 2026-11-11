@@ -367,12 +367,12 @@ class TestDutyBalanceFit:
 
 class TestGateBridgeRemoved:
     def test_physics_eligibility_never_promotes_k_vent_window(self):
-        assert physics_eligibility("none", "none", None, -0.2) == (False, None, False)
-        eligible, _k, via_bridge = physics_eligibility("high", "none", None, -0.2)
-        assert eligible is False and via_bridge is False
+        assert physics_eligibility("none", "none", None, -0.2) == (False, None)
+        eligible, _k = physics_eligibility("high", "none", None, -0.2)
+        assert eligible is False and _k is None
 
     def test_real_k_passive_still_eligible(self):
-        assert physics_eligibility("low", "none", -0.05, -0.2) == (True, -0.05, False)
+        assert physics_eligibility("low", "none", -0.05, -0.2) == (True, -0.05)
 
     def test_reason_text_names_the_missing_closed_house_rate(self):
         ok, reason = explain_physics_eligibility("none", "none", None, -0.2)

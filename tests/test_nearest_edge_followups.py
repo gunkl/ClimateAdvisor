@@ -524,7 +524,6 @@ class TestOdeGuardSkipsWhileSelectorGuardsFloor:
             "k_passive": -0.05,
             "confidence_k_passive": "medium",
             "k_active_cool": None,
-            "k_passive_via_bridge": False,
             "confidence": "medium",
         }
         return engine
@@ -899,7 +898,6 @@ class TestOdeGuardUsesTheGuardsIndoor:
             "k_passive": -0.05,
             "confidence_k_passive": "medium",
             "k_active_cool": None,
-            "k_passive_via_bridge": False,
             "confidence": "medium",
         }
         curve = TestOdeGuardSkipsWhileSelectorGuardsFloor()._curve()

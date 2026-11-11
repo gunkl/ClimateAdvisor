@@ -213,11 +213,12 @@ These methods on `ClimateAdvisorCoordinator` implement the Issue #121 v3 concurr
 
 | Method | Role |
 |--------|------|
-| `_start_hvac_observation(session_mode)` | Begins an HVAC (heat or cool) observation; pre-loads the pre-heat buffer |
+| `_start_hvac_observation(session_mode)` | Begins an HVAC (heat or cool) observation; records the on-edge indoor reading |
 | `_start_decay_observation(obs_type)` | Begins one of the four rolling-decay observation types |
 | `_sample_all_observations()` | Per-tick: samples all active observations in `_pending_observations`; starts new decay types when trigger conditions first become true |
-| `_end_hvac_active_phase(obs_type)` | Transitions HVAC obs from `active` to `post_heat` when HVAC stops |
-| `_check_hvac_stabilization(obs_type)` | Tests for post-heat stabilization; triggers commit or continues polling |
+| `_end_hvac_active_phase(obs_type)` | At the HVAC off edge builds the run record and calls `learning.record_hvac_run()` (run-edge estimator, Issues #1512/#1516); commits, or rejects with a persisted code; removes the pending observation either way. There is no post-heat phase or stabilization wait |
+| `_closed_house_rate()` | Resolves the closed-house `k_passive` a run uses: primary engine's, else v3 cache's, else none (`no_k_passive`) |
+| `_run_duty_balance_chart_log_fit(days)` | Duty-balance fit over chart_log (`hvac_rate_fit.fit_duty_balance`) for short-cycling and no-closed-house-rate homes; `learning.record_duty_balance_fit` stores it |
 | `_evaluate_rolling_window(obs_type)` | Commit/keep-alive decision for rolling-window decay types (30-min min, 240-min cap) |
 | `_commit_rolling_window_obs(obs_type)` | Calls `_commit_observation()` for a rolling obs that has passed the signal check |
 | `_commit_observation_if_sufficient(obs_type)` | Commits if `len(samples) >= min_samples`, else abandons — used on HVAC-start contamination flush |
@@ -226,7 +227,7 @@ These methods on `ClimateAdvisorCoordinator` implement the Issue #121 v3 concurr
 
 All six concurrent types are tracked in `_pending_observations: dict[str, PendingObservation]`. Observations are never persisted: after an HA restart or zone reload the Issue #96 late start opens a fresh HVAC observation, and the pre-restart part of the run is not learned from, by design (Issue #1437: a fit across the blind gap would be invalid). See [Thermal Model v3 Spec](thermal-model-v3-spec.md) for the full observation-type matrix and lifecycle.
 
-> **v2 pipeline coexistence note:** The v2 HVAC-specific methods (`_start_thermal_event`, `_sample_thermal_event`, `_end_active_phase`, `_check_stabilization`, `_commit_thermal_event`, `_abandon_thermal_event`, `_update_pre_heat_buffer`) remain in the codebase as a **parallel, independent pipeline** — they are not internal helpers of the v3 methods. On every HVAC start, `_async_thermostat_changed` calls both `_start_thermal_event` and `_start_hvac_observation`, and the 30-minute tick calls both `_sample_thermal_event`/`_check_stabilization` (v2) and `_sample_all_observations`/`_check_hvac_stabilization` (v3). The v2 pipeline has not been retired. `_update_pre_heat_buffer` is shared infrastructure used by both paths.
+> **v2 pipeline (retired):** the v2 HVAC-specific methods (`_start_thermal_event`, `_sample_thermal_event`, `_end_active_phase`, `_check_stabilization`, `_commit_thermal_event`, `_abandon_thermal_event`) no longer exist, and since Issue #1512 neither do the pre-heat buffer (`_update_pre_heat_buffer`) and the v3 `_check_hvac_stabilization`: a heating/cooling run is committed or rejected at its off edge (`_end_hvac_active_phase`), so nothing after the off edge is sampled.
 
 ## FSM Decision Layer
 
@@ -414,12 +415,11 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 - Storage: JSON file in HA config dir
 
 ### Thermal Model Parameters (Issue #114)
-- Post-heat timeout: 45 min (`THERMAL_POST_HEAT_TIMEOUT_MINUTES`)
-- Stabilization threshold: 0.3°F over 5 consecutive minutes (`THERMAL_STABILIZATION_THRESHOLD_F`, `THERMAL_STABILIZATION_WINDOW_MINUTES`)
+- HVAC run minimum: 5 min (`THERMAL_HVAC_RUN_MIN_MINUTES`, Issue #1512); signal gate `max(0.5°F, 2 × sensor resolution)`
+- Rate ageing: weighted median of retained observations, half-life 21 days (`THERMAL_RATE_HALF_LIFE_DAYS`), legacy-method weight 0.25 (`THERMAL_LEGACY_OBS_WEIGHT`)
 - Sample interval: 60 seconds (`THERMAL_SAMPLE_INTERVAL_SECONDS`)
-- Pre-heat buffer window: 15 min / max 15 entries (`THERMAL_PRE_HEAT_BUFFER_MINUTES`)
 - Minimum R² for k_passive acceptance: 0.2 (`THERMAL_MIN_R_SQUARED`)
-- Minimum post-heat samples for regression: 4 (`THERMAL_MIN_POST_HEAT_SAMPLES`)
+- Default sample floor of the passive `compute_k_passive` regression: 4 (`THERMAL_MIN_POST_HEAT_SAMPLES`); heating/cooling runs no longer use a post-heat regression (Issue #1512)
 - k_passive sanity bounds: −0.5 to −0.001 hr⁻¹
 - k_active_heat sanity bounds: 0.5 to 15.0 °F/hr
 - k_active_cool sanity bounds: −15.0 to −0.5 °F/hr

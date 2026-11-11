@@ -35,6 +35,7 @@ import sys
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -515,7 +516,10 @@ def rebuild_model_cache(all_obs: list[dict], existing_cache: dict | None = None)
     that cache still holds the retired definition) and extended by the caller with
     ``swing.apply_swing_samples``. A rebuild can therefore never re-poison or wipe it.
 
-    Mirrors _update_thermal_model_cache logic exactly:
+    A seed only (Issue #1512): production recomputes ``k_active_heat``, ``k_active_cool`` and ``k_passive``
+    from the retained observations with recency weighting (half-life ``THERMAL_RATE_HALF_LIFE_DAYS``) after
+    every commit and on load, so these EWMA values are replaced the next time the engine loads. The older
+    EWMA cache logic, kept for the non-HVAC fields:
     - passive/heat/cool modes update k_passive
     - fan_only updates k_vent
     - ventilated updates k_vent_window (and k_solar when two_param=True)
@@ -1397,18 +1401,68 @@ def build_windows_from_chart_log(
 # HVAC cycle detection (--hvac mode, Issue #130 Phase C)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Production learning rules, loaded by path (Issues #1512, #1516)
+# ---------------------------------------------------------------------------
+
+_PROD_PKG = "_ca_production_pkg"
+
+
+def _load_production_package():
+    """Make ``custom_components/climate_advisor`` importable as a bare package, without Home Assistant.
+
+    The real package ``__init__`` imports Home Assistant, which this tool must not require. A stand-in package
+    object (same directory, no ``__init__`` run) lets ``learning.py`` and ``hvac_rate_fit.py`` import their
+    siblings with relative imports. ``learning.py`` itself only needs ``homeassistant.util.dt``; a minimal stub
+    is installed only when Home Assistant is not importable.
+    """
+    if _PROD_PKG in sys.modules:
+        return sys.modules[_PROD_PKG]
+    try:
+        import homeassistant.util.dt  # noqa: F401
+    except ImportError:
+        import types
+
+        stub_root = types.ModuleType("homeassistant")
+        stub_util = types.ModuleType("homeassistant.util")
+        stub_dt = types.ModuleType("homeassistant.util.dt")
+        stub_dt.now = lambda *a, **k: datetime.now(UTC)
+        stub_dt.utcnow = lambda: datetime.now(UTC)
+        stub_dt.as_local = lambda value: value
+        stub_dt.parse_datetime = lambda value: datetime.fromisoformat(value)
+        stub_root.util = stub_util
+        stub_util.dt = stub_dt
+        sys.modules.update(
+            {"homeassistant": stub_root, "homeassistant.util": stub_util, "homeassistant.util.dt": stub_dt}
+        )
+    import types
+
+    pkg = types.ModuleType(_PROD_PKG)
+    pkg.__path__ = [str(Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor")]
+    sys.modules[_PROD_PKG] = pkg
+    return pkg
+
+
+def _production():
+    """``learning.py`` (``compute_hvac_run_rate`` and the REJECT_* codes it returns)."""
+    _load_production_package()
+    return importlib.import_module(f"{_PROD_PKG}.learning")
+
+
+def _production_fit():
+    """``hvac_rate_fit.py``: the production duty-balance fit."""
+    _load_production_package()
+    return importlib.import_module(f"{_PROD_PKG}.hvac_rate_fit")
+
+
+def _production_const(name: str, default):
+    _load_production_package()
+    return getattr(importlib.import_module(f"{_PROD_PKG}.const"), name, default)
+
+
 _HVAC_HEAT_VALS: frozenset[str] = frozenset({"heating", "heat"})
 _HVAC_COOL_VALS: frozenset[str] = frozenset({"cooling", "cool"})
 _HVAC_IDLE_VALS: frozenset[str | None] = frozenset({"idle", "off", "", None})
-
-# Bounds mirroring const.py (standalone tool — no HA import)
-_K_ACTIVE_HEAT_MIN = 0.5
-_K_ACTIVE_HEAT_MAX = 15.0
-_K_ACTIVE_COOL_MIN = -15.0
-_K_ACTIVE_COOL_MAX = -0.5
-_THERMAL_MIN_POST_HEAT_SAMPLES = 4  # mirrors THERMAL_MIN_POST_HEAT_SAMPLES (Phase B: was 10)
-_THERMAL_HVAC_MIN_DECAY_F = 0.3  # mirrors THERMAL_HVAC_MIN_DECAY_F
-_THERMAL_HVAC_MIN_SIGNAL_F = 0.5  # mirrors THERMAL_HVAC_MIN_SIGNAL_F — min ΔT for single-point
 
 
 def _hvac_category(hvac_str: str | None) -> str:
@@ -1433,7 +1487,8 @@ def detect_hvac_cycles(
       mode: "heat" or "cool"
       pre_samples: chart_log entries within pre_window_minutes before HVAC start
       active_samples: chart_log entries where HVAC was active
-      post_samples: chart_log entries within post_window_minutes after HVAC stop
+      post_samples: chart_log entries within post_window_minutes after HVAC stop (only the first, the off-edge
+                    row, is used to time the run's end; nothing after the off edge feeds the rate - Issue #1512)
       start_ts: ISO timestamp of first active entry
 
     Entries with outdoor=None are included — outdoor fallback is applied later
@@ -1501,49 +1556,6 @@ def detect_hvac_cycles(
             )
 
     return cycles
-
-
-def _chart_entries_to_ols_samples(
-    entries: list[dict],
-    elapsed_start_ts: datetime,
-) -> list[dict]:
-    """Convert chart_log entries to OLS-compatible sample dicts.
-
-    Applies outdoor fallback: when a sample has outdoor=None, propagate the
-    last known valid outdoor value.  Entries where outdoor remains None after
-    fallback (i.e., no prior outdoor ever seen in this sequence) are skipped.
-
-    Returns a list of dicts with keys: indoor_temp_f, outdoor_temp_f,
-    elapsed_minutes, solar_factor, timestamp.
-    """
-    result: list[dict] = []
-    last_outdoor: float | None = None
-    for entry in entries:
-        indoor = entry.get("indoor")
-        if indoor is None:
-            continue
-        outdoor = entry.get("outdoor")
-        if outdoor is not None:
-            last_outdoor = float(outdoor)
-        elif last_outdoor is not None:
-            outdoor = last_outdoor
-        else:
-            continue  # no outdoor at all yet — skip
-
-        ts_str = entry.get("ts", "")
-        entry_dt = _parse_ts(ts_str)
-        elapsed_min = (entry_dt - elapsed_start_ts).total_seconds() / 60.0
-        sf = _solar_factor(entry_dt.hour + entry_dt.minute / 60.0)
-        result.append(
-            {
-                "indoor_temp_f": float(indoor),
-                "outdoor_temp_f": float(outdoor),
-                "elapsed_minutes": elapsed_min,
-                "solar_factor": sf,
-                "timestamp": ts_str,
-            }
-        )
-    return result
 
 
 def _local_reading_resolution(readings: list, log_has_finer: bool) -> float | None:
@@ -1677,220 +1689,129 @@ def _setpoint_confirmed_steady(rows: list[dict], idx: int) -> bool:
     return False
 
 
-def run_hvac_replay_ols(
+def _cycle_resolution_f(cycle: dict, cache: dict | None) -> float | None:
+    """Reading resolution for the run's signal gate: the cache's learned ``swing_<mode>_resolution_f`` when set."""
+    key = "swing_heat_resolution_f" if cycle.get("mode") == "heat" else "swing_cool_resolution_f"
+    value = (cache or {}).get(key)
+    return float(value) if isinstance(value, (int, float)) and value > 0 else None
+
+
+def run_hvac_replay(
     cycle: dict,
-    k_vent_window_proxy: float | None = None,
-) -> dict | None:
-    """Run OLS on a detected HVAC cycle and return an observation dict or None.
+    k_passive: float | None,
+    resolution_f: float | None = None,
+) -> tuple[dict | None, str | None]:
+    """Replay one detected heating/cooling run through production's run-edge estimator (Issues #1512, #1516).
+
+    The rate comes from the run itself: indoor at the on edge, indoor at the off edge, and the run's length, handed
+    to ``learning.compute_hvac_run_rate`` - the same function the live coordinator calls at the off edge. Nothing
+    after the off edge is used, so a furnace that keeps warming the room (or an AC after which the room warms) can
+    no longer distort the rate. There is no second copy of the rules here.
 
     Arguments:
-        cycle: dict from detect_hvac_cycles(), with keys:
-               mode, pre_samples, active_samples, post_samples, start_ts
-        k_vent_window_proxy: If not None and k_passive OLS fails, use this
-               value as a proxy (bridge-home path, D17).  Forces grade="low".
+        cycle: dict from ``detect_hvac_cycles()`` (``post_samples[0]`` is the first row after the off edge).
+        k_passive: the closed-house leak rate (hr^-1, < 0) or None. None rejects ``no_k_passive``; the duty-balance
+            view (``run_duty_balance_replay``) covers homes without one.
+        resolution_f: the thermostat reading resolution for the signal gate, or None.
 
-    Returns the observation dict on success, None on rejection.
-    The observation dict mirrors the schema used by existing ventilated_decay
-    replay obs so it can be merged into the learning DB directly.
+    Returns ``(observation, None)`` on success, ``(None, reject_code)`` otherwise.
     """
-    mode = cycle.get("mode", "heat")  # "heat" or "cool"
+    mode = cycle.get("mode", "heat")
+    active = cycle.get("active_samples") or []
+    post = cycle.get("post_samples") or []
+    if not active:
+        return None, _production_const("REJECT_ABANDONED", "abandoned")
+    start_f = active[0].get("indoor")
+    off_row = post[0] if post else active[-1]
+    off_f = off_row.get("indoor")
+    if start_f is None or off_f is None:
+        return None, _production_const("REJECT_INDOOR_UNAVAILABLE", "indoor_unavailable")
+    minutes = (_parse_ts(off_row["ts"]) - _parse_ts(active[0]["ts"])).total_seconds() / 60.0
+    rows = active + ([post[0]] if post else [])
+    deltas = [e["indoor"] - e["outdoor"] for e in rows if e.get("indoor") is not None and e.get("outdoor") is not None]
+    avg_delta_t = sum(deltas) / len(deltas) if deltas else 0.0
 
-    # Establish a common elapsed origin from the earliest entry across all phases
-    all_entries = cycle.get("pre_samples", []) + cycle.get("active_samples", []) + cycle.get("post_samples", [])
-    if not all_entries:
-        return None
-    origin_ts = _parse_ts(all_entries[0]["ts"])
-
-    pre_entries = cycle.get("pre_samples", [])
-    active_entries = cycle.get("active_samples", [])
-    post_entries = cycle.get("post_samples", [])
-
-    pre_samples = _chart_entries_to_ols_samples(pre_entries, origin_ts)
-    active_samples = _chart_entries_to_ols_samples(active_entries, origin_ts)
-    post_samples = _chart_entries_to_ols_samples(post_entries, origin_ts)
-
-    # Minimum post samples gate (mirrors THERMAL_MIN_POST_HEAT_SAMPLES).
-    # When a k_vent_window proxy is available the post-heat OLS path is not used —
-    # k_passive comes from the proxy and k_active from a single-point estimator that
-    # only needs post[0] for the HVAC-off timestamp.  Drop the minimum to 1.
-    _min_post = 1 if k_vent_window_proxy is not None else _THERMAL_MIN_POST_HEAT_SAMPLES
-    if len(post_samples) < _min_post:
-        return None
-
-    # Plateau guard: reject if post-phase shows essentially no decay.
-    # This guard validates post-heat decay quality for k_passive OLS and is
-    # irrelevant when k_passive comes from the proxy (single-point path).
-    if k_vent_window_proxy is None and post_samples:
-        post_peak = max(s["indoor_temp_f"] for s in post_samples)
-        post_end = post_samples[-1]["indoor_temp_f"]
-        if (post_peak - post_end) < _THERMAL_HVAC_MIN_DECAY_F and (
-            active_samples and post_samples[0]["indoor_temp_f"] >= active_samples[-1]["indoor_temp_f"]
-        ):
-            # No meaningful decay — skip (plateau guard)
-            return None
-
-    # Compute k_passive from post (+ pre) samples
-    k_p, r2_p, _reject = compute_k_passive(post_samples, pre_samples if pre_samples else None)
-
-    k_passive_from_proxy = False
-    if k_p is None:
-        # Bridge proxy: use k_vent_window if caller supplies it
-        if k_vent_window_proxy is not None and k_vent_window_proxy < 0:
-            k_p = k_vent_window_proxy
-            k_passive_from_proxy = True
-            force_grade = "low"
-        else:
-            return None
-    else:
-        force_grade = "low"  # all replay obs are low-confidence by policy
-
-    # Compute k_active: OLS when ≥ 2 active samples, single-point fallback for n_act=1
-    k_a: float | None = None
-    if len(active_samples) >= 2:
-        k_a, _r2_a = _compute_k_active_standalone(active_samples, k_p, mode)
-
-    if k_a is None:
-        # Try single-point estimator from timestamps (handles n_act=1)
-        k_a = _compute_k_active_single_point_from_cycle(cycle, k_p)
-        if k_a is not None:
-            print(
-                f"  [single-point] k_active={k_a:.3f} "
-                f"(n_act={len(active_samples)}, k_passive={'proxy' if k_passive_from_proxy else 'ols'}={k_p:.4f})"
-            )
-
-    if k_a is None:
-        return None
-
-    # Build timestamp/date from start_ts
-    ts_str = cycle.get("start_ts", all_entries[0]["ts"])
-    date_str = ts_str[:10]
-
-    # When k_passive came from the proxy (not OLS), emit k_passive=None in the obs so
-    # rebuild_model_cache does NOT update the k_passive EWMA with the proxy value.
-    # Only k_active EWMA is updated for these cycles.
-    k_passive_out = None if k_passive_from_proxy else round(k_p, 5)
-
+    k_active, code = _production().compute_hvac_run_rate(
+        mode=mode,
+        start_f=float(start_f),
+        off_f=float(off_f),
+        minutes=minutes,
+        avg_delta_t=avg_delta_t,
+        k_passive=k_passive,
+        resolution_f=resolution_f,
+    )
+    if k_active is None:
+        return None, code
+    ts_str = cycle.get("start_ts", active[0]["ts"])
     return {
         "event_id": str(uuid.uuid4()),
         "timestamp": ts_str,
-        "date": date_str,
+        "date": ts_str[:10],
         "hvac_mode": mode,
-        "k_passive": k_passive_out,
-        "k_active": round(k_a, 3),
-        "r_squared_passive": None if k_passive_from_proxy else (round(r2_p, 3) if r2_p else None),
-        "r_squared_active": None,
-        "sample_count_pre": len(pre_samples),
-        "sample_count_active": len(active_samples),
-        "sample_count_post": len(post_samples),
-        "confidence_grade": force_grade,
+        "method": "run_edge",
+        "k_active": round(k_active, 3),
+        "k_passive": None,  # a run never feeds the closed-house rate (Issue #1512)
+        "k_passive_used": round(k_passive, 5),
+        "signal_f": round(float(off_f) - float(start_f), 2),
+        "session_minutes": round(minutes, 1),
+        "start_indoor_f": float(start_f),
+        "end_indoor_f": float(off_f),
+        "delta_t_avg": round(avg_delta_t, 2),
+        "confidence_grade": "medium" if minutes >= 15 else "low",
         "schema_version": 2,
         "source": "replay",
-    }
+    }, None
 
 
-def _compute_k_active_single_point_from_cycle(
-    cycle: dict,
-    k_passive: float,
-) -> float | None:
-    """Single-point k_active from chart_log cycle timestamps.
+def _duty_row_states(rows: list[dict]) -> list[dict[str, bool]]:
+    """Closed-house row states for the duty-balance view: windows closed, fan off, and not settling after HVAC.
 
-    For n_act=1: uses active[0].ts (HVAC on) and post[0].ts (HVAC off)
-    as the true start/end of the active phase.
-
-    Physics: k_active = (T_peak - T_start) / elapsed_hours - k_passive * avg_delta
-    where avg_delta = avg(T_in - T_out) across all available readings.
+    A viewing aid for this tool only. The live fit takes its row states from the coordinator's
+    ``_ventilation_row_states``; this drops the post-fan and post-window settle times in favour of excluding any
+    row whose fan or window flag is set or that sits within the coast window after a heating/cooling row.
     """
-    active = cycle["active_samples"]
-    pre = cycle["pre_samples"]
-    post = cycle["post_samples"]
-    mode = cycle["mode"]
-
-    if not active:
-        return None
-
-    # T_start: last pre-heat indoor (most recent reading before HVAC on)
-    T_start = pre[-1].get("indoor") if pre else active[0].get("indoor")
-    if T_start is None:
-        return None
-
-    # T_peak: max indoor across active + first two post entries (heat) / min (cool)
-    candidates = active + post[:2]
-    indoors = [e.get("indoor") for e in candidates if e.get("indoor") is not None]
-    if not indoors:
-        return None
-    T_peak = max(indoors) if mode == "heat" else min(indoors)
-
-    # elapsed: HVAC on → off, using exact state-change timestamps
-    start_dt = _parse_ts(active[0]["ts"])
-    end_dt = _parse_ts(post[0]["ts"]) if post else _parse_ts(active[-1]["ts"])
-    if start_dt is None or end_dt is None:
-        return None
-    elapsed_hours = (end_dt - start_dt).total_seconds() / 3600.0
-    if elapsed_hours <= 0 or elapsed_hours > 2.0:
-        return None
-
-    # avg delta_T from available readings (indoor - outdoor)
-    all_entries = (pre[-3:] if pre else []) + active + (post[:2] if post else [])
-    pairs = [
-        (e["indoor"], e["outdoor"]) for e in all_entries if e.get("indoor") is not None and e.get("outdoor") is not None
-    ]
-    if not pairs:
-        return None
-    avg_delta = sum(i - o for i, o in pairs) / len(pairs)
-
-    signal = T_peak - T_start
-    if mode == "heat" and signal < _THERMAL_HVAC_MIN_SIGNAL_F:
-        return None
-    if mode == "cool" and signal > -_THERMAL_HVAC_MIN_SIGNAL_F:
-        return None
-
-    gross_rate = signal / elapsed_hours
-    k_active = gross_rate - k_passive * avg_delta
-
-    if mode == "heat" and not (_K_ACTIVE_HEAT_MIN <= k_active <= _K_ACTIVE_HEAT_MAX):
-        return None
-    if mode == "cool" and not (_K_ACTIVE_COOL_MIN <= k_active <= _K_ACTIVE_COOL_MAX):
-        return None
-    return k_active
+    coast_s = _production_const("THERMAL_COAST_MAX_S", 1800.0)
+    out: list[dict[str, bool]] = []
+    last_active: datetime | None = None
+    for row in rows:
+        ts = _parse_ts(row["ts"]) if row.get("ts") else None
+        cat = _hvac_category(row.get("hvac"))
+        if cat != "idle" and ts is not None:
+            last_active = ts
+        settling = bool(
+            cat == "idle"
+            and ts is not None
+            and last_active is not None
+            and (ts - last_active).total_seconds() < coast_s
+        )
+        fan = bool(row.get("fan_running", row.get("fan")))
+        out.append(
+            {
+                "fan_running": fan,
+                "fan_armed": bool(row.get("nat_vent_active")),
+                "windows_open": bool(row.get("windows_open")),
+                "settling": settling or bool(row.get("windows_open")) or fan,
+                "settling_hvac": settling,
+            }
+        )
+    return out
 
 
-def _compute_k_active_standalone(
-    active_samples: list[dict],
-    k_passive: float,
-    session_mode: str,
-) -> tuple[float | None, float]:
-    """Pure-Python mirror of learning.py compute_k_active() — no HA imports."""
-    if len(active_samples) < 2:
-        return None, 0.0
+def run_duty_balance_replay(entries: list[dict], local_hour_of: Callable[[str], float] | None = None) -> dict | None:
+    """Duty-balance view (Issue #1512): ``hvac_rate_fit.fit_duty_balance`` over chart_log rows, night hours only.
 
-    indoor_raw = [s["indoor_temp_f"] for s in active_samples]
-    outdoor = [s["outdoor_temp_f"] for s in active_samples]
-    elapsed = [s["elapsed_minutes"] for s in active_samples]
-    indoor = _smooth_temps(indoor_raw)
+    Fits the leak rate, heating rate and cooling rate together over closed-house night rows, so it covers homes
+    with short cycles or no learned leak rate. ``local_hour_of`` maps a row timestamp to its local hour (default:
+    the timestamp's own hour); 08:00-19:59 counts as sun and is left out, as in production.
+    """
 
-    k_actives: list[float] = []
-    for i in range(len(indoor) - 1):
-        dt_hours = (elapsed[i + 1] - elapsed[i]) / 60.0
-        if dt_hours <= 0:
-            continue
-        rate = (indoor[i + 1] - indoor[i]) / dt_hours
-        delta = ((indoor[i] + indoor[i + 1]) / 2.0) - ((outdoor[i] + outdoor[i + 1]) / 2.0)
-        k_actives.append(rate - k_passive * delta)
+    def hour_of(ts_str: str) -> float:
+        return local_hour_of(ts_str) if local_hour_of else _parse_ts(ts_str).hour
 
-    if not k_actives:
-        return None, 0.0
+    def is_solar_hour(ts_str: str) -> bool:
+        return 8 <= hour_of(ts_str) < 20
 
-    k_active = sum(k_actives) / len(k_actives)
-
-    if session_mode == "heat" and not (_K_ACTIVE_HEAT_MIN <= k_active <= _K_ACTIVE_HEAT_MAX):
-        return None, 0.0
-    if session_mode == "cool" and not (_K_ACTIVE_COOL_MIN <= k_active <= _K_ACTIVE_COOL_MAX):
-        return None, 0.0
-
-    var_res = sum((k_a - k_active) ** 2 for k_a in k_actives)
-    var_tot = sum(k_a**2 for k_a in k_actives)
-    r2 = max(0.0, 1.0 - var_res / var_tot) if var_tot > 0 else 0.0
-    return k_active, r2
+    return _production_fit().fit_duty_balance(entries, _duty_row_states(entries), is_solar_hour=is_solar_hour)
 
 
 # ---------------------------------------------------------------------------
@@ -2053,47 +1974,49 @@ def main() -> None:
         n_cool = sum(1 for c in cycles if c["mode"] == "cool")
         print(f"  Found {len(cycles)} cycles ({n_heat} heat, {n_cool} cool)")
 
-        # Check for bridge proxy: use k_vent_window from existing DB if present.
-        # Load regardless of --dry-run/--write — proxy is needed for single-point
-        # k_active estimation in both modes (D22).
-        k_vent_proxy: float | None = None
+        # The closed-house leak rate comes from the existing learning DB (the live order's v3 cache step); without
+        # one, a run is rejected no_k_passive and the duty-balance view below covers the home (Issue #1512).
+        k_passive: float | None = None
+        cache_for_gate: dict = {}
         try:
             db_check = fetch_learning_json_ssh(config)
-            _cache = db_check.get("thermal_model_cache", {})
-            _kv = _cache.get("k_vent_window")
-            if isinstance(_kv, float) and _kv < 0:
-                k_vent_proxy = _kv
-                print(f"  Bridge proxy: k_vent_window={k_vent_proxy:.4f} available for fallback")
+            cache_for_gate = db_check.get("thermal_model_cache", {}) or {}
+            _kp = cache_for_gate.get("k_passive")
+            if isinstance(_kp, (int, float)) and _kp < 0:
+                k_passive = float(_kp)
+                print(f"  Closed-house k_passive={k_passive:.4f} from the learning DB")
         except Exception:
-            pass  # proxy unavailable; not fatal
+            pass  # DB unavailable; not fatal
 
-        print("\nRunning HVAC OLS...")
+        print("\nReplaying runs through the run-edge estimator (production compute_hvac_run_rate)...")
         obs_list = []
         rejected = 0
         reject_reasons: dict[str, int] = {}
         for cycle in cycles:
-            obs = run_hvac_replay_ols(cycle, k_vent_window_proxy=k_vent_proxy)
+            obs, code = run_hvac_replay(cycle, k_passive, _cycle_resolution_f(cycle, cache_for_gate))
             mode_tag = cycle["mode"]
             ts_short = cycle.get("start_ts", "?")[:16].replace("T", " ")
-            n_pre = len(cycle["pre_samples"])
-            n_act = len(cycle["active_samples"])
-            n_post = len(cycle["post_samples"])
             if obs:
-                k_p_str = f"{obs['k_passive']:+.4f}" if obs["k_passive"] is not None else "proxy"
-                k_a_str = f"{obs['k_active']:+.4f}" if obs["k_active"] is not None else "None"
-                r2_p_val = obs.get("r_squared_passive")
-                r2_str = f"{r2_p_val:.3f}" if r2_p_val is not None else "n/a"
                 print(
-                    f"  [{mode_tag}] {ts_short}  "
-                    f"n_pre={n_pre} n_act={n_act} n_post={n_post}  "
-                    f"k_passive={k_p_str} k_active={k_a_str} R²={r2_str}  COMMITTED [low]"
+                    f"  [{mode_tag}] {ts_short}  signal={obs['signal_f']:+.2f}F minutes={obs['session_minutes']}  "
+                    f"k_active={obs['k_active']:+.4f} COMMITTED [{obs['confidence_grade']}]"
                 )
                 obs_list.append(obs)
             else:
                 rejected += 1
-                reason = "rejected"
-                print(f"  [{mode_tag}] {ts_short}  n_pre={n_pre} n_act={n_act} n_post={n_post}  rejected")
+                reason = code or "rejected"
+                print(f"  [{mode_tag}] {ts_short}  rejected: {reason}")
                 reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+
+        # Duty-balance view: fits leak + heating + cooling rates together over closed-house night rows.
+        fit = run_duty_balance_replay(filtered)
+        if fit:
+            print(
+                f"  duty_balance: k_passive={fit['k_passive']} k_active_heat={fit['k_active_heat']} "
+                f"k_active_cool={fit['k_active_cool']} (n={fit['n_intervals']}, R2={fit['r_squared']})"
+            )
+        else:
+            print("  duty_balance: not enough closed-house night data to fit")
 
         print(f"\nSummary: {len(obs_list)} committed / {rejected} rejected")
         if reject_reasons:

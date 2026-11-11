@@ -302,6 +302,14 @@ class ClimateAdvisorComplianceSensor(ClimateAdvisorBaseSensor):
                     "committed": h.get("committed", 0),
                     "rejections": h.get("rejections", {}),
                     "last_rejection_reason": (h["last_rejection"]["reason_code"] if h.get("last_rejection") else None),
+                    # Issues #1512/#1516: why the latest heating/cooling run was not used (None when not recorded).
+                    "last_rejection_signal_f": (
+                        h["last_rejection"].get("signal_f") if h.get("last_rejection") else None
+                    ),
+                    "last_rejection_minutes": (h["last_rejection"].get("minutes") if h.get("last_rejection") else None),
+                    "last_rejection_k_passive_source": (
+                        h["last_rejection"].get("k_passive_source") if h.get("last_rejection") else None
+                    ),
                 }
                 for obs_type, h in health.items()
                 if isinstance(h, dict)

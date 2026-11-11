@@ -71,3 +71,30 @@ class TestBuildThermalPipelineContextThreadsLearningHealth:
         asyncio.run(build_thermal_pipeline_context(hass, coord))
 
         coord.learning.get_thermal_model.assert_called_once_with(learning_health=_health)
+
+
+class TestRunRejectionCodesClassified:
+    """Issues #1512/#1516: every code a heating/cooling run can be rejected with is labelled, not lumped in."""
+
+    def test_quality_and_operational_codes_are_split(self):
+        _health = {
+            "hvac_heat": {
+                "attempts": 6,
+                "committed": 0,
+                "rejections": {
+                    "hvac_run_too_short": 2,
+                    "hvac_signal_below_resolution": 1,
+                    "no_k_passive": 1,
+                    "new_session_started": 1,
+                    "fan_activated": 1,
+                },
+            }
+        }
+        coord = _make_coordinator(_health)
+        ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
+
+        assert "quality failures: 4" in ctx
+        assert "hvac_run_too_short x2" in ctx
+        assert "hvac_signal_below_resolution x1" in ctx
+        assert "no_k_passive x1" in ctx
+        assert "operational interruptions: 2" in ctx

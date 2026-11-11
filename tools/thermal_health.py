@@ -34,6 +34,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _zone_storage import ZoneSelectionRequired, format_zone_choices, resolve_api_zone, with_zone  # noqa: E402
 
+# Issues #1512/#1516: plain-English meaning of the heating/cooling run rejection codes.
+REJECT_LABELS = {
+    "hvac_run_too_short": "run too short to measure",
+    "hvac_signal_below_resolution": "room moved less than the sensor can reliably show",
+    "no_k_passive": "house leak rate not learned yet",
+    "new_session_started": "a new run began before this one finished",
+    "fan_activated": "fan started during the run",
+    "hvac_mode_switch": "heat/cool switched during the run",
+}
+
 
 def _load_dotenv() -> None:
     """Load HA_URL and HA_TOKEN from .env file if not already set in environment."""
@@ -306,8 +316,21 @@ def _print_report(health: dict) -> None:
                 print("Rejection breakdown:")
                 any_rejections = True
             counts = sorted(rejections.items(), key=lambda x: -x[1])
-            reasons_str = ", ".join(f"{code}: {count}" for code, count in counts)
+            reasons_str = ", ".join(
+                f"{code}: {count}" + (f" ({REJECT_LABELS[code]})" if code in REJECT_LABELS else "")
+                for code, count in counts
+            )
             print(f"  {obs_type}: {reasons_str}")
+            last = h.get("last_rejection")
+            if isinstance(last, dict):
+                # Issues #1512/#1516: the numbers behind the most recent heating/cooling run rejection.
+                bits = [
+                    f"{key}={last[key]}"
+                    for key in ("signal_f", "minutes", "k_passive_source")
+                    if last.get(key) is not None
+                ]
+                if bits:
+                    print(f"    last rejection: {', '.join(bits)}")
 
     if any_rejections:
         print()

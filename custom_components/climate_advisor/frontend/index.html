@@ -1333,6 +1333,13 @@
     state_changed: 'HVAC, fan, or window state changed mid-window',
     outlier: 'Result was an outlier vs prior measurements',
     abandoned: 'Measurement interrupted',
+    hvac_run_too_short: 'Heating or cooling run was too short to measure',
+    hvac_signal_below_resolution: 'Room temperature moved less than the sensor can reliably show',
+    no_k_passive: "House leak rate not learned yet, so this run's rate could not be separated",
+    new_session_started: 'A new run started before this one could be measured',
+    fan_activated: 'The fan started during the run',
+    hvac_mode_switch: 'Heat and cool switched during the run',
+    ols_bounds: 'Result was outside the believable range',
   };
   const TYPE_LABELS = {
     passive_decay: 'Passive windows',
@@ -1389,10 +1396,8 @@
   function makeStatusLine(eConf, hConf) {
     const eHas = eConf !== 'none';
     const hHas = hConf !== 'none';
-    const bridgeActive = !eHas && (tm.k_vent_window != null || tm.k_vent_fan != null || tm.k_solar != null);
-    if (bridgeActive && !hHas) return 'Active via ventilation learning — house envelope calibration in progress.';
-    if (bridgeActive && hHas) return 'Active — using HVAC response and ventilation learning; envelope calibration in progress.';
-    if (!eHas && !hHas) return 'Falling back to schedule until first measurements land.';
+    // Issue #1512: open-window learning no longer stands in for the closed-house rate, so there is no bridge state.
+    if (!eHas && !hHas) return 'Falling back to schedule until the closed-up house response and first HVAC runs are measured.';
     if (!eHas && hHas) return 'Active — using HVAC response; house response on schedule fallback.';
     if (eHas && !hHas) return 'Active — using house response; HVAC predictions on schedule fallback.';
     const bothGood = (eConf === 'medium' || eConf === 'high') && (hConf === 'medium' || hConf === 'high');

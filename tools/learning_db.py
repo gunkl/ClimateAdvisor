@@ -63,6 +63,17 @@ DEBUG_STATE_URL_PATH = "/api/climate_advisor/automation_state"
 # ---------------------------------------------------------------------------
 
 
+# Issues #1512/#1516: plain-English meaning of the heating/cooling run rejection codes.
+REJECT_LABELS = {
+    "hvac_run_too_short": "run too short to measure",
+    "hvac_signal_below_resolution": "room moved less than the sensor can reliably show",
+    "no_k_passive": "house leak rate not learned yet",
+    "new_session_started": "a new run began before this one finished",
+    "fan_activated": "fan started during the run",
+    "hvac_mode_switch": "heat/cool switched during the run",
+}
+
+
 def _load_dotenv() -> None:
     """Load HA_URL and HA_TOKEN from .env file if not already set in environment."""
     env_path = Path(__file__).parent.parent / ".env"
@@ -608,6 +619,16 @@ def _print_rejection_log(db: dict, last_n: int, filter_type: str | None = None) 
                 f"elapsed={elapsed:<7} delta_t={float(delta_t) if delta_t is not None else 0.0:.2f}F  "
                 f"r2={r2_str}  sf_range={sf_range_str}  indoor={indoor_dir}"
             )
+            # Issues #1512/#1516: heating/cooling run rejections carry the numbers that explain them.
+            extras = []
+            if entry.get("signal_f") is not None:
+                extras.append(f"signal={entry['signal_f']}F (room change over the run)")
+            if entry.get("minutes") is not None:
+                extras.append(f"run={entry['minutes']}min")
+            if entry.get("k_passive_source"):
+                extras.append(f"k_passive_source={entry['k_passive_source']}")
+            if extras:
+                print("      " + REJECT_LABELS.get(str(reason), str(reason)) + ": " + ", ".join(extras))
         any_printed = True
 
     # Also print any obs_types in the log that aren't in our canonical list (when not filtered)

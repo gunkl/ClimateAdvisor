@@ -98,3 +98,50 @@ class TestRunRejectionCodesClassified:
         assert "hvac_signal_below_resolution x1" in ctx
         assert "no_k_passive x1" in ctx
         assert "operational interruptions: 2" in ctx
+
+    def test_cycle_codes_are_quality_failures_and_old_run_codes_stay_labelled(self):
+        """Issues #1512/#1516: the cycle model's rejection codes are quality failures; the retired per-run codes
+        still in stored history keep counting (they age out, no wipe)."""
+        _health = {
+            "hvac_cool": {
+                "attempts": 9,
+                "committed": 0,
+                "rejections": {
+                    "cycle_too_short": 3,
+                    "cycle_signal_below_resolution": 2,
+                    "cycle_excluded_window_fan": 1,
+                    "cycle_setpoint_change": 1,
+                    "cycle_gap_restart": 1,
+                    "cycle_thermostat_unavailable": 1,
+                    "hvac_run_too_short": 1,
+                },
+            }
+        }
+        ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), _make_coordinator(_health)))
+        assert "quality failures: 10" in ctx
+        for code in ("cycle_too_short x3", "cycle_signal_below_resolution x2", "cycle_gap_restart x1"):
+            assert code in ctx
+
+    def test_cycle_model_is_described_in_plain_words_with_its_honesty(self):
+        ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), _make_coordinator({})))
+        assert "the cycle model" in ctx
+        assert "21 days" in ctx and "half-life" in ctx
+        assert "whole-degree" in ctx and "never high" in ctx
+        assert "never worse than the default" in ctx
+        assert "night-time fit" not in ctx  # the duty-balance description is retired
+
+    def test_cycle_rows_from_the_decision_summary_are_listed(self):
+        coord = _make_coordinator({})
+        coord.decision_rates_summary.return_value = [
+            {
+                "key": "cycle_heat",
+                "source": "cycle",
+                "value": {"q": 7.5, "sd_q": 1.2, "grade": "medium", "coast_area_f": 0.4, "ne": 6},
+            },
+            {"key": "k_passive", "source": "v3", "value": -0.1},
+        ]
+        ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
+        assert (
+            "cycle model: heat rate 7.50 +/- 1.20, grade medium, coast after a run +0.40 deg, 6 informative cycles"
+            in ctx
+        )

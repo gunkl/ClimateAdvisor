@@ -24,6 +24,7 @@ REMOTE_CONFIG_DIR = PurePosixPath("/config")
 LEARNING_DB_FILE = "climate_advisor_learning.json"
 STATE_FILE = "climate_advisor_state.json"
 CHART_LOG_FILE = "climate_advisor_chart_log.json"
+CYCLE_FILE = "climate_advisor_cycles.json"  # Issues #1512/#1516: the pooled cycle model's per-zone cycle file
 
 
 def remote_path(base_filename: str, entry_id: str | None) -> str:

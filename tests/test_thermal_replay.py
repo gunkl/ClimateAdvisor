@@ -2,8 +2,8 @@
 
 Tests cover:
   - detect_hvac_cycles(): cycle detection, window sizing, sample caps
-  - run_hvac_replay(): the run-edge estimator through production compute_hvac_run_rate (Issues #1512/#1516)
-  - run_duty_balance_replay(): production hvac_rate_fit over chart_log rows
+  - run_cycle_replay(): the pooled cycle model through production cycle_model.fit_cycles (Issues #1512/#1516);
+    the per-run run-edge replay and the duty-balance replay are retired
 """
 
 from __future__ import annotations
@@ -11,8 +11,6 @@ from __future__ import annotations
 import sys
 import types
 from datetime import UTC, datetime, timedelta
-
-import pytest
 
 # ---------------------------------------------------------------------------
 # Minimal sys.modules stubs so thermal_replay can be imported without SSH or
@@ -160,130 +158,82 @@ class TestHvacCycleDetection:
 
 
 # ===========================================================================
-# TestHvacRunEdgeReplay
+# TestCycleReplay
 # ===========================================================================
 
 
-def _run_cycle(
-    mode: str = "heat",
-    start_f: float = 68.0,
-    off_f: float = 69.5,
-    minutes: float = 20.0,
-    outdoor: float = 50.0,
-    coast_f: float | None = None,
-) -> dict:
-    """A cycle with one active row at the on edge and post rows from the off edge.
+class _FakeCycleModel:
+    """Stands in for production cycle_model: records what the replay hands it (the DRY contract)."""
 
-    ``coast_f`` is where the room goes AFTER the off edge (furnace coast / AC rebound); the rate must not see it.
-    """
-    on = datetime(2026, 5, 3, 7, 0, 0, tzinfo=UTC)
-    off = on + timedelta(minutes=minutes)
-    post_indoor = [off_f] + ([coast_f, coast_f] if coast_f is not None else [off_f - 0.2, off_f - 0.4])
-    return {
-        "mode": mode,
-        "pre_samples": [{"ts": (on - timedelta(minutes=30)).isoformat(), "indoor": start_f, "outdoor": outdoor}],
-        "active_samples": [{"ts": on.isoformat(), "indoor": start_f, "outdoor": outdoor}],
-        "post_samples": [
-            {"ts": (off + timedelta(minutes=30 * i)).isoformat(), "indoor": t, "outdoor": outdoor}
-            for i, t in enumerate(post_indoor)
-        ],
-        "start_ts": on.isoformat(),
-    }
+    def __init__(self):
+        self.fit_calls = []
+        self.prior_calls = []
 
+    def prior_from_cache(self, cache, mode, now):
+        self.prior_calls.append((cache, mode, now))
+        return {"mode": mode, "from": "cache"}
 
-class TestHvacRunEdgeReplay:
-    """run_hvac_replay(): the run-edge estimator via production compute_hvac_run_rate (Issues #1512, #1516)."""
-
-    def test_heat_run_learns_rate_from_the_run_itself(self):
-        obs, code = tr.run_hvac_replay(_run_cycle(), k_passive=-0.14)
-        assert code is None and obs is not None
-        # (69.5-68)/(1/3 h) = 4.5 F/hr gross; + 0.14 * (68.75-50) = 2.6 -> ~7.1 steady heating
-        assert 6.5 < obs["k_active"] < 7.7
-        assert obs["method"] == "run_edge"
-        assert obs["source"] == "replay"
-        assert obs["confidence_grade"] == "medium"  # 20 min >= 15
-
-    def test_run_never_carries_a_closed_house_rate(self):
-        obs, _ = tr.run_hvac_replay(_run_cycle(), k_passive=-0.14)
-        # Old behaviour wrote the post-run fit's k_passive (or the open-window proxy) into the observation, so
-        # a heating run could move the closed-house rate. A run now only USES k_passive, never feeds it.
-        assert obs["k_passive"] is None
-        assert obs["k_passive_used"] == -0.14
-
-    def test_furnace_coast_after_off_edge_does_not_change_the_rate(self):
-        # Old expectation was wrong: the old estimator took T_peak from active + the first two post rows, so a
-        # furnace that kept warming the room after it stopped inflated the rate (#1512).
-        plain, _ = tr.run_hvac_replay(_run_cycle(coast_f=None), k_passive=-0.14)
-        coasting, _ = tr.run_hvac_replay(_run_cycle(coast_f=71.5), k_passive=-0.14)
-        assert coasting["k_active"] == plain["k_active"]
-
-    def test_cool_run_followed_by_rebound_still_learns(self):
-        # Old expectation was wrong: the post-run "decay" check assumed the room cools after a run, which rejects
-        # (or mis-fits) an AC run after which the room warms (#1516).
-        cycle = _run_cycle(mode="cool", start_f=78.0, off_f=76.5, minutes=20.0, outdoor=88.0, coast_f=79.0)
-        obs, code = tr.run_hvac_replay(cycle, k_passive=-0.14)
-        assert code is None and obs is not None
-        assert obs["hvac_mode"] == "cool"
-        assert obs["k_active"] < 0
-
-    def test_no_closed_house_rate_rejects_with_a_code(self):
-        # Old behaviour borrowed the open-window rate (k_vent_window) here; owner decision: no stand-in.
-        obs, code = tr.run_hvac_replay(_run_cycle(), k_passive=None)
-        assert obs is None
-        assert code == "no_k_passive"
-
-    def test_short_run_rejects_with_a_code(self):
-        obs, code = tr.run_hvac_replay(_run_cycle(minutes=3.0), k_passive=-0.14)
-        assert obs is None
-        assert code == "hvac_run_too_short"
-
-    def test_signal_below_sensor_resolution_rejects(self):
-        # 1.0 F steps: 2 x 1.0 = 2.0 F gate, a 1.5 F rise is not a real signal.
-        obs, code = tr.run_hvac_replay(_run_cycle(), k_passive=-0.14, resolution_f=1.0)
-        assert obs is None
-        assert code == "hvac_signal_below_resolution"
-
-    def test_flat_run_rejects(self):
-        obs, code = tr.run_hvac_replay(_run_cycle(off_f=68.0), k_passive=-0.14)
-        assert obs is None
-        assert code == "hvac_signal_below_resolution"
-
-    def test_replay_has_no_plateau_guard_or_proxy(self):
-        # The drifted plateau guard and k_vent_window proxy branch are gone: nothing after the off edge gates a run.
-        assert not hasattr(tr, "run_hvac_replay_ols")
-        assert not hasattr(tr, "_THERMAL_HVAC_MIN_DECAY_F")
-        flat_post = _run_cycle(coast_f=69.5)  # post rows never decay
-        obs, code = tr.run_hvac_replay(flat_post, k_passive=-0.14)
-        assert obs is not None and code is None
+    def fit_cycles(self, cycles, mode, prior, *, now_ts):
+        self.fit_calls.append((cycles, mode, prior, now_ts))
+        return {
+            "q": 7.5 if mode == "heat" else -8.0,
+            "sd_q": 1.0,
+            "grade": "medium",
+            "coast_area_f": 0.4,
+            "tau": 5.0,
+            "ne": len(cycles),
+            "n_cycles": len(cycles),
+            "resolution_f": 0.1,
+            "k_p_cycle": -0.05,
+        }
 
 
-class TestDutyBalanceReplay:
-    """run_duty_balance_replay(): production hvac_rate_fit over chart_log night rows (Issue #1512)."""
+class TestCycleReplay:
+    """run_cycle_replay(): production cycle_model.fit_cycles over the stored cycles (Issues #1512/#1516)."""
 
-    def test_too_little_data_returns_none(self):
-        rows = [{"ts": _ts(i * 30), "indoor": 68.0, "outdoor": 50.0, "hvac": "idle"} for i in range(5)]
-        assert tr.run_duty_balance_replay(rows) is None
+    NOW = 1_800_000_000.0
 
-    def test_night_rows_with_heat_duty_fit_all_three_rates(self):
-        # Synthesise 3 nights of 30-min rows from known rates and let production's fit recover them.
-        k_p, k_h = -0.15, 6.0
-        rows = []
-        t = 68.0
-        base = datetime(2026, 4, 1, 20, 0, tzinfo=UTC)
-        for i in range(160):
-            ts = base + timedelta(minutes=30 * i)
-            # night only: 20:00-07:59 in each day (rows stay inside the non-solar hours)
-            hvac = "heating" if i % 5 == 0 else "idle"
-            rows.append(
-                {"ts": ts.isoformat(), "indoor": round(t, 3), "outdoor": 45.0 + 3 * ((i % 8) / 8), "hvac": hvac}
-            )
-            rate = k_p * (t - rows[-1]["outdoor"]) + (k_h if hvac == "heating" else 0.0)
-            t += rate * 0.5
-        fit = tr.run_duty_balance_replay(rows, local_hour_of=lambda s: 0)  # treat every row as night
-        assert fit is not None
-        assert fit["k_passive"] == pytest.approx(-0.15, abs=0.03)
-        assert fit["k_active_heat"] == pytest.approx(6.0, abs=0.6)
-        assert fit["k_active_cool"] is None  # no cooling duty in the window: not identified
+    def _cycles(self):
+        day = 86400
+        return [
+            {"id": "h1", "mode": "heat", "t_on": self.NOW - 2 * day},
+            {"id": "h2", "mode": "heat", "t_on": self.NOW - 40 * day},
+            {"id": "c1", "mode": "cool", "t_on": self.NOW - 1 * day},
+        ]
+
+    def test_replay_calls_the_production_functions_per_mode(self, monkeypatch):
+        fake = _FakeCycleModel()
+        monkeypatch.setattr(tr, "_production_cycle_model", lambda: fake)
+        out = tr.run_cycle_replay(self._cycles(), {"k_active_heat": 6.0}, self.NOW)
+        assert set(out) == {"heat", "cool"}
+        by_mode = {m: (c, p) for c, m, p, _ in fake.fit_calls}
+        assert [c["id"] for c in by_mode["heat"][0]] == ["h1", "h2"]
+        assert [c["id"] for c in by_mode["cool"][0]] == ["c1"]
+        # the prior is production's prior_from_cache over the learning DB's cache, not a second copy
+        assert by_mode["heat"][1] == {"mode": "heat", "from": "cache"}
+        assert fake.prior_calls[0][0] == {"k_active_heat": 6.0}
+
+    def test_days_limits_the_cycles_used(self, monkeypatch):
+        fake = _FakeCycleModel()
+        monkeypatch.setattr(tr, "_production_cycle_model", lambda: fake)
+        tr.run_cycle_replay(self._cycles(), None, self.NOW, days=30)
+        heat = next(c for c, m, _, _ in fake.fit_calls if m == "heat")
+        assert [c["id"] for c in heat] == ["h1"]  # the 40-day-old cycle is outside --days 30
+
+    def test_report_lines_say_rate_grade_and_coast(self, monkeypatch):
+        fake = _FakeCycleModel()
+        monkeypatch.setattr(tr, "_production_cycle_model", lambda: fake)
+        lines = tr.format_cycle_replay(tr.run_cycle_replay(self._cycles(), None, self.NOW))
+        assert "[heat] q=+7.50" in lines[0] and "grade=medium" in lines[0] and "coast_area=+0.40" in lines[0]
+        assert "(diagnostic only)" in lines[0]
+        assert "[cool] q=-8.00" in lines[1]
+
+    def test_old_run_edge_and_duty_balance_replays_are_gone(self):
+        # Old expectation was wrong to exist: the per-run run-edge estimator and the duty-balance fit are retired
+        # (the cycle model supersedes both; poc2 showed whole-degree short cycles cannot identify a rate per run).
+        assert not hasattr(tr, "run_hvac_replay")
+        assert not hasattr(tr, "run_duty_balance_replay")
+        assert not hasattr(tr, "_production_fit")
 
 
 # ===========================================================================

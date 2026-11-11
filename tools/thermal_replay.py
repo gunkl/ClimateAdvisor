@@ -35,7 +35,6 @@ import sys
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -620,7 +619,7 @@ def rebuild_model_cache(all_obs: list[dict], existing_cache: dict | None = None)
 # ---------------------------------------------------------------------------
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _zone_storage import CHART_LOG_FILE, LEARNING_DB_FILE, resolve_remote_path_with_discovery  # noqa: E402
+from _zone_storage import CHART_LOG_FILE, CYCLE_FILE, LEARNING_DB_FILE, resolve_remote_path_with_discovery  # noqa: E402
 
 # Set once in main() from --entry-id (or auto-discovery); read by the three
 # SSH helpers below so their existing call sites don't all need an entry_id
@@ -640,6 +639,12 @@ def _learning_db_remote(config: dict) -> str:
 def _chart_log_remote(config: dict) -> str:
     return resolve_remote_path_with_discovery(
         config, CHART_LOG_FILE, _ENTRY_ID, lambda cfg, remote_cmd: _ssh_args(cfg) + [remote_cmd]
+    )
+
+
+def _cycles_remote(config: dict) -> str:
+    return resolve_remote_path_with_discovery(
+        config, CYCLE_FILE, _ENTRY_ID, lambda cfg, remote_cmd: _ssh_args(cfg) + [remote_cmd]
     )
 
 
@@ -1412,7 +1417,8 @@ def _load_production_package():
     """Make ``custom_components/climate_advisor`` importable as a bare package, without Home Assistant.
 
     The real package ``__init__`` imports Home Assistant, which this tool must not require. A stand-in package
-    object (same directory, no ``__init__`` run) lets ``learning.py`` and ``hvac_rate_fit.py`` import their
+    object (same directory, no ``__init__`` run) lets ``learning.py``, ``cycle_model.py`` and
+    ``cycle_store.py`` import their
     siblings with relative imports. ``learning.py`` itself only needs ``homeassistant.util.dt``; a minimal stub
     is installed only when Home Assistant is not importable.
     """
@@ -1444,15 +1450,21 @@ def _load_production_package():
 
 
 def _production():
-    """``learning.py`` (``compute_hvac_run_rate`` and the REJECT_* codes it returns)."""
+    """``learning.py`` (the REJECT_* codes and the learning rules)."""
     _load_production_package()
     return importlib.import_module(f"{_PROD_PKG}.learning")
 
 
-def _production_fit():
-    """``hvac_rate_fit.py``: the production duty-balance fit."""
+def _production_cycle_model():
+    """``cycle_model.py``: the production pooled cycle model (Issues #1512/#1516), pure math, no second copy."""
     _load_production_package()
-    return importlib.import_module(f"{_PROD_PKG}.hvac_rate_fit")
+    return importlib.import_module(f"{_PROD_PKG}.cycle_model")
+
+
+def _production_cycle_store():
+    """``cycle_store.py``: the production reader of ``climate_advisor_cycles.json`` (compact encoding)."""
+    _load_production_package()
+    return importlib.import_module(f"{_PROD_PKG}.cycle_store")
 
 
 def _production_const(name: str, default):
@@ -1689,129 +1701,65 @@ def _setpoint_confirmed_steady(rows: list[dict], idx: int) -> bool:
     return False
 
 
-def _cycle_resolution_f(cycle: dict, cache: dict | None) -> float | None:
-    """Reading resolution for the run's signal gate: the cache's learned ``swing_<mode>_resolution_f`` when set."""
-    key = "swing_heat_resolution_f" if cycle.get("mode") == "heat" else "swing_cool_resolution_f"
-    value = (cache or {}).get(key)
-    return float(value) if isinstance(value, (int, float)) and value > 0 else None
+def fetch_cycles_ssh(config: dict) -> list[dict]:
+    """SSH into HA, read the zone's ``climate_advisor_cycles.json`` and decode it with production's ``CycleStore``.
+
+    Same entry-scoped discovery as the learning DB. The file is compact (delta-encoded centi-degrees), so the
+    production reader decodes it: this tool never keeps its own copy of the format. Returns every stored cycle.
+    """
+    import tempfile
+
+    remote = _cycles_remote(config)
+    result = subprocess.run([*_ssh_args(config), f"cat {remote}"], capture_output=True, timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError(f"SSH read failed: {result.stderr.decode()}")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "climate_advisor_cycles.json"
+        path.write_bytes(result.stdout)
+        store = _production_cycle_store().CycleStore(path)
+        store.load()
+        return list(store.cycles("heat", 0.0)) + list(store.cycles("cool", 0.0))
 
 
-def run_hvac_replay(
-    cycle: dict,
-    k_passive: float | None,
-    resolution_f: float | None = None,
-) -> tuple[dict | None, str | None]:
-    """Replay one detected heating/cooling run through production's run-edge estimator (Issues #1512, #1516).
+def run_cycle_replay(cycles: list[dict], cache: dict | None, now_ts: float, days: float | None = None) -> dict:
+    """Fit every stored cycle with the production cycle model, per mode (Issues #1512/#1516).
 
-    The rate comes from the run itself: indoor at the on edge, indoor at the off edge, and the run's length, handed
-    to ``learning.compute_hvac_run_rate`` - the same function the live coordinator calls at the off edge. Nothing
-    after the off edge is used, so a furnace that keeps warming the room (or an AC after which the room warms) can
-    no longer distort the rate. There is no second copy of the rules here.
+    The prior is the cache's stored rate weighted by its evidence (``cycle_model.prior_from_cache``), exactly as
+    the live refit builds it, and ``cycle_model.fit_cycles`` is the production function: the replay and the
+    live coordinator cannot disagree. Returns ``{"heat": result, "cool": result}`` (a mode with no cycles gets the
+    prior unchanged, grade ``none``, as the live model does).
 
     Arguments:
-        cycle: dict from ``detect_hvac_cycles()`` (``post_samples[0]`` is the first row after the off edge).
-        k_passive: the closed-house leak rate (hr^-1, < 0) or None. None rejects ``no_k_passive``; the duty-balance
-            view (``run_duty_balance_replay``) covers homes without one.
-        resolution_f: the thermostat reading resolution for the signal gate, or None.
-
-    Returns ``(observation, None)`` on success, ``(None, reject_code)`` otherwise.
+        cycles: cycle dicts (as ``CycleStore.cycles`` returns them).
+        cache: the learning DB's ``thermal_model_cache`` (None for a fresh home: the typical-house prior).
+        now_ts: epoch seconds the age weights count from.
+        days: keep only cycles that began in the last N days (None keeps all).
     """
-    mode = cycle.get("mode", "heat")
-    active = cycle.get("active_samples") or []
-    post = cycle.get("post_samples") or []
-    if not active:
-        return None, _production_const("REJECT_ABANDONED", "abandoned")
-    start_f = active[0].get("indoor")
-    off_row = post[0] if post else active[-1]
-    off_f = off_row.get("indoor")
-    if start_f is None or off_f is None:
-        return None, _production_const("REJECT_INDOOR_UNAVAILABLE", "indoor_unavailable")
-    minutes = (_parse_ts(off_row["ts"]) - _parse_ts(active[0]["ts"])).total_seconds() / 60.0
-    rows = active + ([post[0]] if post else [])
-    deltas = [e["indoor"] - e["outdoor"] for e in rows if e.get("indoor") is not None and e.get("outdoor") is not None]
-    avg_delta_t = sum(deltas) / len(deltas) if deltas else 0.0
-
-    k_active, code = _production().compute_hvac_run_rate(
-        mode=mode,
-        start_f=float(start_f),
-        off_f=float(off_f),
-        minutes=minutes,
-        avg_delta_t=avg_delta_t,
-        k_passive=k_passive,
-        resolution_f=resolution_f,
-    )
-    if k_active is None:
-        return None, code
-    ts_str = cycle.get("start_ts", active[0]["ts"])
-    return {
-        "event_id": str(uuid.uuid4()),
-        "timestamp": ts_str,
-        "date": ts_str[:10],
-        "hvac_mode": mode,
-        "method": "run_edge",
-        "k_active": round(k_active, 3),
-        "k_passive": None,  # a run never feeds the closed-house rate (Issue #1512)
-        "k_passive_used": round(k_passive, 5),
-        "signal_f": round(float(off_f) - float(start_f), 2),
-        "session_minutes": round(minutes, 1),
-        "start_indoor_f": float(start_f),
-        "end_indoor_f": float(off_f),
-        "delta_t_avg": round(avg_delta_t, 2),
-        "confidence_grade": "medium" if minutes >= 15 else "low",
-        "schema_version": 2,
-        "source": "replay",
-    }, None
-
-
-def _duty_row_states(rows: list[dict]) -> list[dict[str, bool]]:
-    """Closed-house row states for the duty-balance view: windows closed, fan off, and not settling after HVAC.
-
-    A viewing aid for this tool only. The live fit takes its row states from the coordinator's
-    ``_ventilation_row_states``; this drops the post-fan and post-window settle times in favour of excluding any
-    row whose fan or window flag is set or that sits within the coast window after a heating/cooling row.
-    """
-    coast_s = _production_const("THERMAL_COAST_MAX_S", 1800.0)
-    out: list[dict[str, bool]] = []
-    last_active: datetime | None = None
-    for row in rows:
-        ts = _parse_ts(row["ts"]) if row.get("ts") else None
-        cat = _hvac_category(row.get("hvac"))
-        if cat != "idle" and ts is not None:
-            last_active = ts
-        settling = bool(
-            cat == "idle"
-            and ts is not None
-            and last_active is not None
-            and (ts - last_active).total_seconds() < coast_s
-        )
-        fan = bool(row.get("fan_running", row.get("fan")))
-        out.append(
-            {
-                "fan_running": fan,
-                "fan_armed": bool(row.get("nat_vent_active")),
-                "windows_open": bool(row.get("windows_open")),
-                "settling": settling or bool(row.get("windows_open")) or fan,
-                "settling_hvac": settling,
-            }
-        )
+    cm = _production_cycle_model()
+    out: dict[str, dict] = {}
+    for mode in ("heat", "cool"):
+        mine = [
+            c for c in cycles if c.get("mode") == mode and (days is None or c.get("t_on", 0) >= now_ts - days * 86400)
+        ]
+        prior = cm.prior_from_cache(cache or {}, mode, now_ts)
+        out[mode] = cm.fit_cycles(mine, mode, prior, now_ts=now_ts)
     return out
 
 
-def run_duty_balance_replay(entries: list[dict], local_hour_of: Callable[[str], float] | None = None) -> dict | None:
-    """Duty-balance view (Issue #1512): ``hvac_rate_fit.fit_duty_balance`` over chart_log rows, night hours only.
-
-    Fits the leak rate, heating rate and cooling rate together over closed-house night rows, so it covers homes
-    with short cycles or no learned leak rate. ``local_hour_of`` maps a row timestamp to its local hour (default:
-    the timestamp's own hour); 08:00-19:59 counts as sun and is left out, as in production.
-    """
-
-    def hour_of(ts_str: str) -> float:
-        return local_hour_of(ts_str) if local_hour_of else _parse_ts(ts_str).hour
-
-    def is_solar_hour(ts_str: str) -> bool:
-        return 8 <= hour_of(ts_str) < 20
-
-    return _production_fit().fit_duty_balance(entries, _duty_row_states(entries), is_solar_hour=is_solar_hour)
+def format_cycle_replay(results: dict) -> list[str]:
+    """Plain lines for the console: per mode the rate, how sure it is, and the coast after a run."""
+    lines = []
+    for mode, r in results.items():
+        q, sd = r.get("q"), r.get("sd_q")
+        lines.append(
+            f"  [{mode}] q={q:+.2f} +/- {sd:.2f} F/h  grade={r.get('grade')}  "
+            f"coast_area={r.get('coast_area_f', 0.0):+.2f} F  tau={r.get('tau')} min  "
+            f"eligible={r.get('ne')}/{r.get('n_cycles')} cycles  resolution={r.get('resolution_f')} F  "
+            f"k_p_cycle={r.get('k_p_cycle')} (diagnostic only)"
+            if isinstance(q, (int, float)) and isinstance(sd, (int, float))
+            else f"  [{mode}] no result"
+        )
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -1844,8 +1792,17 @@ def main() -> None:
     parser.add_argument(
         "--hvac",
         action="store_true",
-        help="Detect and replay HVAC heat/cool cycles from chart_log (Issue #130 Phase C). "
+        help="Detect HVAC heat/cool cycles in chart_log and replay the thermostat swing (Issue #130 Phase C). "
+        "Heating/cooling RATES are no longer replayed here: use --cycles (the production cycle model). "
         "Requires SSH access (same as --chart-log). Use with --days and --dry-run/--write.",
+    )
+    parser.add_argument(
+        "--cycles",
+        action="store_true",
+        help="Fit every stored heating/cooling cycle with the production cycle model (Issues #1512/#1516). "
+        "Reads the zone's climate_advisor_cycles.json and learning DB over SSH (same discovery as the learning DB), "
+        "prints the rate, how sure it is, the coast after a run and the informative-cycle count per mode. "
+        "Read-only; --days limits the cycles used.",
     )
     parser.add_argument(
         "--chart-log",
@@ -1887,19 +1844,20 @@ def main() -> None:
     global _ENTRY_ID
     _ENTRY_ID = args.entry_id
 
-    _read_only_mode = args.passive_only or args.vent_overnight
+    _read_only_mode = args.passive_only or args.vent_overnight or args.cycles
     if not _read_only_mode and not args.dry_run and not args.write:
         parser.error("Specify --dry-run to preview or --write to commit. Start with --dry-run.")
 
     if (
         not args.chart_log
         and not args.hvac
+        and not args.cycles
         and not args.passive_only
         and not args.vent_overnight
         and not (args.climate_entity and args.outdoor_entity and args.window_entities)
     ):
         parser.error(
-            "Either --chart-log, --hvac, --passive-only, --vent-overnight, or all of "
+            "Either --chart-log, --hvac, --cycles, --passive-only, --vent-overnight, or all of "
             "--climate-entity, --outdoor-entity, --window-entities are required."
         )
 
@@ -1947,6 +1905,24 @@ def main() -> None:
         run_vent_overnight_analysis(chart_entries, learning_db, days=args.days)
         return
 
+    if args.cycles:
+        # --- Pooled cycle model replay (Issues #1512/#1516): read-only, production fit_cycles ---
+        print("\nFetching the cycle file from HA via SSH...")
+        cycles = fetch_cycles_ssh(config)
+        print(
+            f"  {len(cycles)} stored cycles ({sum(1 for c in cycles if c.get('mode') == 'heat')} heat, "
+            f"{sum(1 for c in cycles if c.get('mode') == 'cool')} cool)"
+        )
+        try:
+            cache = fetch_learning_json_ssh(config).get("thermal_model_cache", {}) or {}
+        except Exception as exc:
+            print(f"  WARNING: Could not fetch learning DB ({exc}) - using the typical-house prior")
+            cache = {}
+        print("\nFitting with production cycle_model.fit_cycles...")
+        for line in format_cycle_replay(run_cycle_replay(cycles, cache, datetime.now(UTC).timestamp(), days=args.days)):
+            print(line)
+        return
+
     if args.hvac:
         # --- HVAC heat/cool cycle replay path (Issue #130 Phase C) ---
         print(f"\nFetching chart_log from HA via SSH ({args.days} days) for HVAC replay...")
@@ -1974,54 +1950,8 @@ def main() -> None:
         n_cool = sum(1 for c in cycles if c["mode"] == "cool")
         print(f"  Found {len(cycles)} cycles ({n_heat} heat, {n_cool} cool)")
 
-        # The closed-house leak rate comes from the existing learning DB (the live order's v3 cache step); without
-        # one, a run is rejected no_k_passive and the duty-balance view below covers the home (Issue #1512).
-        k_passive: float | None = None
-        cache_for_gate: dict = {}
-        try:
-            db_check = fetch_learning_json_ssh(config)
-            cache_for_gate = db_check.get("thermal_model_cache", {}) or {}
-            _kp = cache_for_gate.get("k_passive")
-            if isinstance(_kp, (int, float)) and _kp < 0:
-                k_passive = float(_kp)
-                print(f"  Closed-house k_passive={k_passive:.4f} from the learning DB")
-        except Exception:
-            pass  # DB unavailable; not fatal
-
-        print("\nReplaying runs through the run-edge estimator (production compute_hvac_run_rate)...")
-        obs_list = []
-        rejected = 0
-        reject_reasons: dict[str, int] = {}
-        for cycle in cycles:
-            obs, code = run_hvac_replay(cycle, k_passive, _cycle_resolution_f(cycle, cache_for_gate))
-            mode_tag = cycle["mode"]
-            ts_short = cycle.get("start_ts", "?")[:16].replace("T", " ")
-            if obs:
-                print(
-                    f"  [{mode_tag}] {ts_short}  signal={obs['signal_f']:+.2f}F minutes={obs['session_minutes']}  "
-                    f"k_active={obs['k_active']:+.4f} COMMITTED [{obs['confidence_grade']}]"
-                )
-                obs_list.append(obs)
-            else:
-                rejected += 1
-                reason = code or "rejected"
-                print(f"  [{mode_tag}] {ts_short}  rejected: {reason}")
-                reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
-
-        # Duty-balance view: fits leak + heating + cooling rates together over closed-house night rows.
-        fit = run_duty_balance_replay(filtered)
-        if fit:
-            print(
-                f"  duty_balance: k_passive={fit['k_passive']} k_active_heat={fit['k_active_heat']} "
-                f"k_active_cool={fit['k_active_cool']} (n={fit['n_intervals']}, R2={fit['r_squared']})"
-            )
-        else:
-            print("  duty_balance: not enough closed-house night data to fit")
-
-        print(f"\nSummary: {len(obs_list)} committed / {rejected} rejected")
-        if reject_reasons:
-            for reason, count in sorted(reject_reasons.items()):
-                print(f"  {reason}: {count}")
+        print("  (rates: python tools/thermal_replay.py --cycles fits them with the production cycle model)")
+        obs_list: list[dict] = []
 
         # Thermostat swing (Issue #1234): independent of the k fits above. Same pure rules as production.
         swing_samples = compute_swing_samples_from_chart_log(filtered)

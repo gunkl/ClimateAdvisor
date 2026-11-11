@@ -165,12 +165,31 @@
     if (!Array.isArray(list) || !list.length) return [];
     var u = ND.sym(ND.unit), prim = (pe && pe.primary) || 'the primary engine';
     var from = { v3: 'from v3\u2019s learned observations', v4: 'from v4', default: 'default (' + prim + ' still learning)', none: 'not learned yet (decisions use their defaults)' };
-    return list.map(function (d) {
+    return list.filter(function (d) { return d && d.source !== 'cycle'; }).map(function (d) {
       var val = d.value;
       if (d.source === 'none' || d.source === 'default') val = null;
       var txt = val == null ? '' : d.kind === 'rate' ? fmt(val) + ' ' + u + '/h' : d.kind === 'per_hour' ? fmt(val) + ' /h' : d.kind === 'hours' ? fmt(val) + ' h' : String(val);
       return { k: DEC_LABEL[d.key] || d.key, v: (txt ? txt + ' · ' : '') + (from[d.source] || d.source), hint: d.key === 'confidence' ? HINTS['Decision grade'] : 'The value the decisions read now (' + d.key + ')' };
     });
+  }
+
+  // Issues #1512/#1516: the cycle model's measurement (decisions rows with source "cycle"), shown beside what the decisions read.
+  // Fields sit on the row or in an object ``value``; q and sd_q arrive in the user's unit, coast_area_f is a Fahrenheit delta.
+  function cycleModelRows(list) {
+    var u = ND.sym(ND.unit), rows = [];
+    (Array.isArray(list) ? list : []).forEach(function (d) {
+      if (!d || d.source !== 'cycle') return;
+      var f = d.value && typeof d.value === 'object' ? d.value : d, m = d.mode || (String(d.key || '').indexOf('cool') >= 0 ? 'cool' : 'heat');
+      if (typeof f.q !== 'number') return;
+      var parts = [fmt(f.q) + (typeof f.sd_q === 'number' ? ' \u00b1 ' + fmt(f.sd_q) : '') + ' ' + u + '/h', 'grade ' + (f.grade || 'none')];
+      if (typeof f.coast_area_f === 'number') parts.push('coast ' + fmt(ND.dFToDisp(f.coast_area_f)) + u);
+      if (typeof f.k_p_cycle === 'number') parts.push('its own leak ' + fmt(f.k_p_cycle) + ' /h (diagnostic only)');
+      if (f.ne != null) parts.push(f.ne + ' informative cycles' + (f.n_cycles != null ? ' of ' + f.n_cycles : ''));
+      if (typeof f.resolution_f === 'number') parts.push('sensor steps ' + fmt(f.resolution_f) + '\u00b0F');
+      rows.push({ k: 'Cycle model: ' + (m === 'cool' ? 'cooling' : 'heating'), v: parts.join(' \u00b7 '),
+        hint: 'What the pooled cycle model measures from every informative cycle. A v4 zone\u2019s decisions keep v4\u2019s own control rate; this is shown beside it.' });
+    });
+    return rows;
   }
 
   // ---------- today's classification, in words, with the thresholds each row is judged on ----------
@@ -242,6 +261,7 @@
         rows = rows.concat(rowsOf(engineRows(v4s, v4s && v4s.prediction_engines, A && A.control_feed)));
         if (E) {
           rows = rows.concat(decisionRows(E.decisions, v4s && v4s.prediction_engines));
+          rows = rows.concat(cycleModelRows(E.decisions));
           // v3's learned values (the learning observations): always collected, whichever engine is primary
           ['k_passive', 'k_solar', 'solar_phase_offset_h', 'k_vent_window', 'k_vent_fan'].forEach(function (k) {
             var e = E[k]; if (e) rows.push(row('v3 ' + k, e.active ? fmt(e.value) + (e.confidence ? ' (' + e.confidence + ')' : '') : '(not yet active)', 'v3 learned'));

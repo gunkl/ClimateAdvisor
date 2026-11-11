@@ -597,10 +597,12 @@ python3 tools/learning_db.py --model
 | `--rejections --type hvac_cool` shows | Likely cause | Action |
 |---|---|---|
 | `n=0` entries with `elapsed > 0 min` on coordinator < v0.3.50 | Key-shadow bug: `"samples": []` shadowed `active_samples` | Upgrade to v0.3.50 — all HVAC obs discarded before fix |
-| `new_session_started` repeated many times | Short-cycling thermostat: the next HVAC start arrived before this run's observation finished (operational, Issue #1512) | Expected; the duty-balance fit learns short-cycling homes from hours of history |
-| `hvac_run_too_short` | Run under `THERMAL_HVAC_RUN_MIN_MINUTES` (5 min) | Normal for short cycles; shown with `minutes=` |
-| `hvac_signal_below_resolution` | The room moved less than `max(0.5 °F, 2 × sensor resolution)` over the run (or the wrong way): on a 1 °F sensor a one-degree step is not a measurement | Normal for short runs on whole-degree thermostats; shown with `signal_f=`. If every run is rejected, check `swing_*_resolution_f` in `--model` |
-| `no_k_passive` | No closed-house leak rate known yet (`k_passive_source` empty) | Clears once passive windows or the duty-balance fit learn one; `python tools/learning_db.py --model` shows `k_passive` |
+| `new_session_started` repeated many times | Short-cycling thermostat: the next HVAC start arrived before this run's observation finished (operational, Issue #1512) | Expected: the cycle model records every cycle regardless |
+| `cycle_too_short` | The cycle ran under 3 minutes | Normal for very short cycles; shown with its values |
+| `cycle_signal_below_resolution` | The room moved fewer than three sensor steps: on a 1 °F sensor a short cycle is not a measurement | Expected on whole-degree thermostats (the model stays on its prior and grades `low`, never `high`). If every cycle is rejected and the sensor is fine, check `resolution_f` in `thermal_replay.py --cycles` |
+| `cycle_excluded_window_fan`, `cycle_setpoint_change` | A window or fan, or a setpoint change, confounded the cycle | Expected occasionally; the cycle is skipped |
+| `cycle_gap_restart`, `cycle_thermostat_unavailable` | A restart or an unavailable thermostat cut the cycle | Operational; the clean pre-gap part is still fitted |
+| `hvac_run_too_short`, `hvac_signal_below_resolution`, `no_k_passive` | Historical: the retired per-run estimator's codes, still in stored history | Ignore on new data; they age out |
 | `fan_activated`, `hvac_mode_switch` | The fan started, or heat/cool switched, during the run | Operational; expected occasionally |
 | `ols_bounds` | The run's rate fell outside the believable range | Check `signal_f` and `minutes`: a very short run with a large step |
 | `plateau_guard` / `post_heat` reasons on old entries | Pre-Issue #1512 pipeline (removed): old entries age out of the 100-entry log | None |

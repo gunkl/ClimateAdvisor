@@ -113,8 +113,13 @@ def run_fit(
     in_sleep: Callable[[datetime], bool] | None = None,
     train_days: float | None = None,
     sleep_sensor: str | None = None,
+    climate_entity: str | None = None,
 ) -> tuple[dict, float, str]:
     """Fit a model from the retained history. Blocking and CPU-bound: run via the executor only.
+
+    ``climate_entity`` (the configured thermostat, Issue #1525): stored in ``fit["climate_entity"]``; a previous model
+    fitted for a DIFFERENT thermostat is neither a warm start nor a carry source (``same_equipment``): another HVAC's
+    gains, offsets and grades are not evidence about this one, so the fit starts like a home that never saw a mode.
 
     Returns ``(model_dict, seconds, summary_line)``. The previous stored model warm-starts the refit.
     Raises on any failure; the caller keeps the previous model.
@@ -145,6 +150,14 @@ def run_fit(
         entries = rows_in_window(entries, now, train_days)
     entity_primary = primary
     warm = p.from_dict(dict(previous_model)) if previous_model else None
+    if warm is not None and climate_entity:
+        resolve = getattr(p, "carry_source", None)
+        src = resolve(warm) if resolve is not None else warm
+        if not (same_equipment(p.to_dict(warm), climate_entity) and same_equipment(p.to_dict(src), climate_entity)):
+            _LOGGER.info(
+                "v4 fit: the stored model was fitted for another thermostat; fitting from this one's history alone"
+            )
+            warm = None
     choose = getattr(p, "choose_control_model", None)
     if choose is not None:
         # Issue #1432: A (stitched ``_ca``) or B (a node per room), the rule and backtest gate the backtest shares.
@@ -190,7 +203,30 @@ def run_fit(
         extra: dict[str, Any] = {"display_sensors": display} if display else {}
         model = p.fit(samples, primary=primary, sensors=ordered, tz=tz, now=now, warm_start=warm, **extra)
     line = p.summary_line(model) if hasattr(p, "summary_line") else ""
-    return p.to_dict(model), time.perf_counter() - t0, line
+    out = p.to_dict(model)
+    if climate_entity and isinstance(out.get("fit"), dict):
+        out["fit"]["climate_entity"] = climate_entity  # Issue #1525: which HVAC this model learned
+    return out, time.perf_counter() - t0, line
+
+
+def model_climate_entity(model_dict: Mapping[str, Any] | None) -> str | None:
+    """The thermostat a stored model learned (Issue #1525): ``fit["climate_entity"]``, else the one ``climate.*``
+    sensor among its ``sensors`` (the thermostat's own reading as a node), else ``None`` (unknown)."""
+    if not isinstance(model_dict, Mapping):
+        return None
+    fit = model_dict.get("fit")
+    rec = fit.get("climate_entity") if isinstance(fit, Mapping) else None
+    if isinstance(rec, str) and rec:
+        return rec
+    climates = [s for s in (model_dict.get("sensors") or ()) if isinstance(s, str) and s.startswith("climate.")]
+    return climates[0] if len(climates) == 1 else None
+
+
+def same_equipment(model_dict: Mapping[str, Any] | None, climate_entity: str | None) -> bool:
+    """False only when the model provably learned another thermostat; unknown (an older model, no configured entity)
+    counts as the same, so nothing jumps at the upgrade (Issue #1525). A new sensor on the same HVAC is the same."""
+    known = model_climate_entity(model_dict)
+    return not (known and climate_entity) or known == climate_entity
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +243,7 @@ def keep_previous_model(
     previous: Mapping[str, Any] | None,
     new: Mapping[str, Any] | None,
     primaries: Sequence[str] | None = None,
+    climate_entity: str | None = None,
 ) -> bool:
     """True when ``new`` (a refit) is unusable and ``previous`` is usable: the previous model stays in use.
 
@@ -223,6 +260,8 @@ def keep_previous_model(
     that never had a usable model stores the refit as before."""
     if not (model_usable(previous) and not model_usable(new)):
         return False
+    if climate_entity and not same_equipment(previous, climate_entity):
+        return False  # learned for another thermostat: not kept for this one (Issue #1525)
     return primaries is None or (isinstance(previous, Mapping) and previous.get("primary") in tuple(primaries))
 
 

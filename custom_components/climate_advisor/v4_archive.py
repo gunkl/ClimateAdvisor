@@ -676,7 +676,7 @@ class V4ModelStore:
         {"v": 1, "model": <predictor_v4.to_dict(...)> | null, "mass_f": 66.2 | null, "mass_at": iso | null,
          "last_fit": {"at", "reason", "seconds", "ok"} | null, "last_fit_error": str | null,
          "night_validation": <night_replay.validation_record(...)> | null,
-         "unusable_fit": {"at", "reason", "fit_reason", "fitted_at", "kept_fitted_at"} | null}
+         "unusable_fit": {"count", "at", "reason", "fit_reason", "fitted_at", "kept_fitted_at"} | null}
 
     ``night_validation`` (Issue #1230 R6) is the nightly recorded-night replay that gates the bedroom night strategy
     (``night_strategy.NightValidation`` + the evidence hours); an older file without it simply reads as ``null``.

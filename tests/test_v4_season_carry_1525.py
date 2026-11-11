@@ -421,3 +421,97 @@ class TestNightReplayCarry:
     def test_no_previous_record_is_unchanged(self):
         rec = night_replay.validation_record(_report({"fan": _cls(2)}), None)
         assert rec["classes"]["fan"]["n_nights"] == 2 and rec["carried_classes"] == []
+
+
+# --------------------------------------------------------------------------- the same HVAC only (Issue #1525 round 3)
+_THERMO = "climate.hvac_a"
+
+
+def _rows(samples: list[p4.V4Sample]) -> list[dict]:
+    """Chart-log rows of the synthetic house as the live fit reads them (the thermostat's reading as its own sensor)."""
+    return [
+        {
+            "ts": s.ts.isoformat(), "hvac": s.hvac_action, "fan": False, "windows_open": False,
+            "indoor": s.readings[HALL], "outdoor": s.outdoor_f, "lower": s.heat_sp_f, "upper": s.cool_sp_f,
+            "indoor_sensors": {_THERMO: s.readings[HALL]},
+        }
+        for s in samples
+    ]  # fmt: skip
+
+
+def _live_fit(samples, end_day, previous, climate, days=30.0):
+    win = _window(samples, end_day, days)
+    md, _secs, _line = v4_shadow.run_fit(
+        chart_entries=_rows(win), snapshots_fn=None, tz=TZ, now=win[-1].ts + timedelta(minutes=1), primary=_THERMO,
+        sensors=[_THERMO], previous_model=previous, train_days=days, climate_entity=climate,
+    )  # fmt: skip
+    return md
+
+
+@pytest.fixture(scope="module", params=["heat", "cool"])
+def live(request):
+    mode = request.param
+    smp = _history(mode)
+    first = _live_fit(smp, FIRST_END, None, _THERMO, days=FIRST_END)
+    return mode, smp, first
+
+
+class TestSameHvacOnly:
+    def test_the_model_records_its_thermostat(self, live):
+        _mode, _smp, first = live
+        assert first["fit"]["climate_entity"] == _THERMO and first["confidence"] != "none"
+
+    def test_same_thermostat_carries(self, live):
+        mode, smp, first = live
+        summer = _live_fit(smp, 50.0, first, _THERMO)
+        assert summer["fit"][f"{mode}_seen"] is False
+        assert summer["house"][GAIN[mode]] == first["house"][GAIN[mode]]
+        assert summer["fit"]["modes"][mode]["reason"] == p4.CARRY_REASON
+
+    def test_another_thermostat_does_not_carry(self, live):
+        """A zone re-pointed to another HVAC: the old equipment's rates are not evidence about this one."""
+        mode, smp, first = live
+        summer = _live_fit(smp, 50.0, first, "climate.hvac_b")
+        cold = _live_fit(smp, 50.0, None, "climate.hvac_b")
+        assert not summer["fit"]["carried"] and summer["house"][GAIN[mode]] == pytest.approx(cold["house"][GAIN[mode]])
+        assert summer["fit"]["modes"][mode]["grade"] == "unseen" and summer["fit"]["climate_entity"] == "climate.hvac_b"
+
+    def test_an_older_model_without_the_field_counts_as_the_same(self, live):
+        """Upgrade continuity: a model stored before the field existed (and no thermostat among its sensors) carries."""
+        mode, smp, first = live
+        old = {**first, "fit": {k: v for k, v in first["fit"].items() if k != "climate_entity"}}
+        old["sensors"] = [s for s in old["sensors"] if not s.startswith("climate.")] or ["_ca"]
+        old["primary"] = old["sensors"][0]
+        assert v4_shadow.model_climate_entity(old) is None and v4_shadow.same_equipment(old, "climate.hvac_b")
+        assert v4_shadow.same_equipment(first, _THERMO) and not v4_shadow.same_equipment(first, "climate.hvac_b")
+        stored = {**first, "fit": {k: v for k, v in first["fit"].items() if k != "climate_entity"}}
+        summer = _live_fit(smp, 50.0, stored, _THERMO)  # end to end: the first fit after the upgrade still carries
+        assert summer["house"][GAIN[mode]] == first["house"][GAIN[mode]]
+
+    def test_an_unusable_refit_keeps_no_model_of_another_thermostat(self, live):
+        _mode, _smp, first = live
+        none = {"confidence": "none"}
+        assert v4_shadow.keep_previous_model(first, none, climate_entity=_THERMO)
+        assert not v4_shadow.keep_previous_model(first, none, climate_entity="climate.hvac_b")
+
+
+class TestNightRecordMigration:
+    """A night-replay record written before per-class counts (no ``ok_nights``): a carried class is final only if that
+    whole record was final."""
+
+    @staticmethod
+    def _old(provisional: bool) -> dict:
+        rec = night_replay.validation_record(_report({"fan": _cls(12)}), None)
+        rec.pop("ok_nights")
+        rec["provisional"] = provisional
+        return rec
+
+    def test_a_final_old_record_carries_a_final_class(self):
+        rec = night_replay.validation_record(_report({"closed": _cls(20)}), None, previous=self._old(False))
+        assert rec["carried_classes"] == ["fan"] and rec["ok_nights"]["fan"] == ns.VALIDATION_HIGH_NIGHTS
+        assert rec["provisional"] is False
+
+    def test_a_provisional_old_record_carries_a_provisional_class(self):
+        rec = night_replay.validation_record(_report({"closed": _cls(20)}), None, previous=self._old(True))
+        assert rec["carried_classes"] == ["fan"] and rec["ok_nights"]["fan"] == 0
+        assert rec["provisional"] is True

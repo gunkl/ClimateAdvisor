@@ -6489,6 +6489,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             in_sleep=in_sleep,
                             train_days=V4_FIT_TRAIN_DAYS,
                             sleep_sensor=node.get("sleep_sensor"),
+                            climate_entity=self.config.get("climate_entity") or None,
                         )
                     )
                 if getattr(self, "_shut_down", False) is True:
@@ -6496,7 +6497,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 state = self._v4_store
                 previous = state.v4_model if isinstance(state.v4_model, dict) else None
                 if previous is not None and v4_shadow.keep_previous_model(
-                    previous, model_dict, primaries=("_ca", primary)
+                    previous,
+                    model_dict,
+                    primaries=("_ca", primary),
+                    climate_entity=self.config.get("climate_entity") or None,
                 ):
                     # Issue #1529: an unusable refit is not evidence against the model in use (D35). Keep it for the
                     # decisions; record the refit for the Debug tab and the log; the next usable fit replaces it.

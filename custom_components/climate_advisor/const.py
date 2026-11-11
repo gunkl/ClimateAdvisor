@@ -607,7 +607,8 @@ V4_FIT_STAGGER_S = 30 * 60  # each zone fits at 03:15 + a stable per-entry offse
 V4_FIT_RETRY_MIN_INTERVAL_S = 6 * 3600  # a first fit that failed is retried by the cycle at most this often
 # Issue #1529: after this many unusable refits in a row (nightly and the 6 h retries) while a usable model stays in use,
 # the log WARNs and the Status tab and the AI context say so (one bad night is only on the Debug tab). Three refits is
-# about half a day of retries: long enough that a brief outage stays quiet, short enough to surface a dead sensor.
+# the 03:15 refit plus two 6 h retries, about 12 h: long enough that a brief outage stays quiet, short enough to surface
+# a dead sensor. A restart retries at once (no retry clock survives it), so restarts can reach three sooner.
 V4_UNUSABLE_WARN_REFITS = 3
 # Issue #1483: the DISPLAY prediction (Status chart, plan list path, archive) runs up to a week, as far as the forecast
 # goes: the real hourly forecast first, then the hourly curve built from the daily highs and lows (#906). The prediction

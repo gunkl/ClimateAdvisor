@@ -6397,6 +6397,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         wake=(wake_t.hour, wake_t.minute),
                         train_days=V4_FIT_TRAIN_DAYS,
                         model_fitted_at=str(model_dict.get("fitted_at") or ""),
+                        # Issue #1525: what newer nights have not displaced carries over (never fades with time)
+                        previous=state.night_validation if isinstance(state.night_validation, dict) else None,
                     )
                 )
             if getattr(self, "_shut_down", False) is True:
@@ -6487,13 +6489,46 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             in_sleep=in_sleep,
                             train_days=V4_FIT_TRAIN_DAYS,
                             sleep_sensor=node.get("sleep_sensor"),
+                            climate_entity=self.config.get("climate_entity") or None,
                         )
                     )
                 if getattr(self, "_shut_down", False) is True:
                     return  # unloaded while fitting: drop the result
                 state = self._v4_store
                 previous = state.v4_model if isinstance(state.v4_model, dict) else None
+                if previous is not None and v4_shadow.keep_previous_model(
+                    previous,
+                    model_dict,
+                    primaries=("_ca", primary),
+                    climate_entity=self.config.get("climate_entity") or None,
+                ):
+                    # Issue #1529: an unusable refit is not evidence against the model in use (D35). Keep it for the
+                    # decisions; record the refit for the Debug tab and the log; the next usable fit replaces it.
+                    state.unusable_fit = v4_shadow.unusable_fit_record(
+                        model_dict, at=now.isoformat(), reason=reason, kept=previous, previous_record=state.unusable_fit
+                    )
+                    state.dirty = True
+                    self._v4_last_fit = {
+                        "at": now.isoformat(),
+                        "reason": reason,
+                        "seconds": round(seconds, 1),
+                        "ok": True,
+                        "unusable": True,
+                    }
+                    state.last_fit = dict(self._v4_last_fit)
+                    state.last_fit_error = None
+                    notice = v4_shadow.unusable_fit_notice(state.unusable_fit)
+                    (_LOGGER.warning if notice else _LOGGER.info)(
+                        "v4 fit (%s): %s (%s) took %.1fs",
+                        reason,
+                        v4_shadow.describe_unusable_fit(state.unusable_fit),
+                        fit_line,
+                        seconds,
+                    )
+                    await self._executor_job(self._v4_store.save)
+                    return
                 state.v4_model = model_dict
+                state.unusable_fit = None
                 if previous is None or previous.get("primary") != model_dict.get("primary"):
                     state.v4_mass_f = None  # a different primary node: re-seed the hidden node from the reading
                     state.v4_mass_at = None
@@ -7490,7 +7525,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return  # a partially built coordinator (tests via __new__, headless tools): the shadow is simply off
         model_dict = state.v4_model
         has_model = isinstance(model_dict, dict)
-        if not has_model or model_dict.get("confidence", "none") == "none":
+        # Issue #1529: while the last refit was unusable (a usable model kept in use) it is retried the same way.
+        if not has_model or model_dict.get("confidence", "none") == "none" or isinstance(state.unusable_fit, dict):
             # First fit once startup coalescing is over (the chart log and forecast archive are loaded by then). A
             # stored "none" model (too little history yet) counts as no model here: retried at most every 6 h instead
             # of waiting for the 03:15 refit.
@@ -8169,6 +8205,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 out[key] = True
         return out
 
+    def prediction_refit_note(self) -> str:
+        """Issue #1529, for the AI investigator: the primary engine's last refit(s) came back unusable while its learned
+        model stays in use ("" otherwise). Read-only diagnostics; the engine block computes it. Never raises."""
+        try:
+            return str(self.prediction_engines_payload().get("refit_note") or "")
+        except Exception:  # noqa: BLE001 - diagnostics only
+            return ""
+
     def v4_model_summary(self) -> dict[str, Any]:
         """Debug/diagnostics view of the v4 shadow: model confidence, fit time, span, per-lead training MAE.
 
@@ -8187,6 +8231,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             out["last_fit"] = dict(self._v4_last_fit)
             out["last_cycle"] = dict(self._v4_last_cycle)
             out["archive_slots"] = self._v4_archive.slot_count()
+            # Issue #1529: the last refit was unusable and the model from an earlier fit is still in use
+            unusable = getattr(state, "unusable_fit", None)
+            out["unusable_refit"] = (
+                {**unusable, "text": v4_shadow.describe_unusable_fit(unusable)} if isinstance(unusable, dict) else None
+            )
             # Issue #1399: what the Debug tab needs to say it in words: when the archive starts, the modelled sensors'
             # friendly names, and the primary/shadow engine status (the chart payload's block, display only). Cosmetic,
             # so a failure here only drops these fields.

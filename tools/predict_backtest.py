@@ -85,6 +85,7 @@ import contextlib
 import copy
 import importlib
 import importlib.util
+import inspect
 import json
 import math
 import shlex
@@ -927,12 +928,16 @@ def fit_week_shared(
     tz: tzinfo,
     min_train_days: float,
     info: dict[str, Any],
+    carry_from: Any = None,
 ) -> tuple[Any, str, list[str]] | None:
     """One week's fit through ``predictor_v4.choose_control_model`` - the live fit's own rule and gate (Issue #1432):
     A (the stitched ``_ca`` reading) or B (the primary entity + the inferred sleep sensor as a node), B only once both
     have 3+ days of their own readings and its ``_ca`` replay on the training rows is no worse than A's. Display-only
     nodes are added after, the same way the live fit adds them. ``(model, primary, nodes)``, or ``None`` when the
-    week is skipped (too little history: ``info["skipped"]``) or the fit failed (``info["fit_error"]``)."""
+    week is skipped (too little history: ``info["skipped"]``) or the fit failed (``info["fit_error"]``).
+
+    ``carry_from`` (Issue #1525) is the previous week's model: a mode or a window / fan rate this week's 30 days do not
+    show carries over from it, the live fit's own season carry (the live fit gets it from the previous night's)."""
     W_ep = W.timestamp()
 
     def no_leak(smp: list[Any]) -> list[Any]:
@@ -962,6 +967,7 @@ def fit_week_shared(
             archive_snapshots=snaps or None,
             horizon_h=12,
             sample_filter=no_leak,
+            **_carry_kw(pred.choose_control_model, carry_from),
         )
         model, primary, nodes = chosen.model, chosen.primary, list(chosen.nodes)
         info["primary"], info["nodes"] = primary, list(nodes)
@@ -982,6 +988,17 @@ def fit_week_shared(
         info["fit_error"] = f"{type(exc).__name__}: {exc}"
         return None
     return model, primary, nodes
+
+
+def _carry_kw(fn: Any, carry_from: Any) -> dict[str, Any]:
+    """``{"carry_from": model}`` when there is one and ``fn`` takes it (an older predictor module does not)."""
+    if carry_from is None:
+        return {}
+    try:
+        params = inspect.signature(fn).parameters
+    except TypeError, ValueError:
+        return {}
+    return {"carry_from": carry_from} if "carry_from" in params else {}
 
 
 def grid_steps(anchor: datetime, count: int) -> list[datetime]:
@@ -1068,6 +1085,8 @@ def run_backtest(
         t_week = time.monotonic()
         # ---- fit on data strictly before the week
         if model is None or (wi - last_fit_week) >= args.refit_every_weeks:
+            # Issue #1525: the previous fit carries what this window does not show (the live nightly fit's rule)
+            carry_from = model if not getattr(args, "no_carry", False) else None
             lo_ep = W_ep - args.train_days * 86400 if args.train_days else -1e18
             train_rows = [r for t, r in zip(idx.t, idx.rows, strict=True) if lo_ep <= t < W_ep]
             snaps = [s for s in snaps_sorted if parse_ts(s["issued"], tz).timestamp() < W_ep]
@@ -1090,6 +1109,7 @@ def run_backtest(
                     tz=tz,
                     min_train_days=args.min_train_days,
                     info=info,
+                    carry_from=carry_from,
                 )
                 if fitted is None:
                     if info.get("fit_error"):
@@ -1141,7 +1161,16 @@ def run_backtest(
                     continue
                 try:
                     disp_kw = {"display_sensors": display} if display else {}
-                    model = pred.fit(kept, primary=primary, sensors=list(nodes), tz=tz, now=W, horizon_h=12, **disp_kw)
+                    model = pred.fit(
+                        kept,
+                        primary=primary,
+                        sensors=list(nodes),
+                        tz=tz,
+                        now=W,
+                        horizon_h=12,
+                        **disp_kw,
+                        **_carry_kw(pred.fit, carry_from),
+                    )
                     seen_nodes.update(dict.fromkeys(getattr(model, "display_nodes", None) or {}))
                     last_fit_week = wi
                     info["fitted"] = True
@@ -1159,6 +1188,7 @@ def run_backtest(
         info["confidence"] = getattr(model, "confidence", None)
         info["fitted_at"] = getattr(model, "fitted_at", None)
         info["train_fit"] = _jsonable(getattr(model, "fit", None))
+        info["house"] = _jsonable(dict(getattr(model, "house", None) or {}))  # Issue #1525: the gains each week used
         v3_model, v3_src = v3_models.for_week(W) if v3_enabled else ({}, "off")
         info["v3_model"] = v3_src
 
@@ -1457,6 +1487,7 @@ def run_backtest(
                 "window_plan_hours": args.window_plan_hours,
                 "window_plan_source": getattr(args, "window_plan_source", "record"),
                 "train_days": args.train_days,
+                "season_carry": not getattr(args, "no_carry", False),
                 "refit_every_weeks": args.refit_every_weeks,
                 "anchor_step_hours": args.anchor_step_hours,
             },
@@ -1942,6 +1973,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="diagnostic: also score anchors whose setpoint in force is unknown (no logged setpoint, no target band); "
         "by default they are excluded for every model",
+    )
+    p.add_argument(
+        "--no-carry",
+        action="store_true",
+        help="diagnostic (Issue #1525): fit each week from its window alone, without the previous week's season carry",
     )
     p.add_argument("--no-v3", action="store_true")
     p.add_argument("--no-diagnostic", action="store_true", help="skip the v4-with-actual-inputs variant")

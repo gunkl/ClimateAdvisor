@@ -52,7 +52,10 @@ class TestV4GradeWords:
     def test_summary_carries_the_reason_and_mode_counts(self):
         s = _summary(_LIVE_FIT)
         assert s["confidence_reason"] == _LIVE_FIT["reason"]
-        assert s["modes"]["cool"] == {"seen": True, "starts": 2, "accepted": 0, "grade": None, "reason": None}
+        assert s["modes"]["cool"] == {
+            "seen": True, "starts": 2, "accepted": 0, "grade": None, "reason": None,
+            "carried": False, "carried_grade": False, "keep": None,  # Issue #1525: not carried
+        }  # fmt: skip
 
     def test_a_home_that_never_cooled_says_cooling_not_seen(self):
         fit = dict(_LIVE_FIT, cool_seen=False, starts_total={"heat": 61, "cool": 0}, starts_accepted={"heat": 45})

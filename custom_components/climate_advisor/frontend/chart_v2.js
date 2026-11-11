@@ -926,10 +926,15 @@
     const note = document.getElementById('chart-v4-note');
     if (note) {
       const show = !!eng.fallback && !!eng.text;
-      note.hidden = !show;
+      // Issue #1529: several unusable refits in a row while the learned model stays in use: say so, and which model
+      const stale = !show && !!eng.notice;
+      note.hidden = !(show || stale);
       if (show) {
         note.textContent = eng.text + (eng.control && eng.control.text ? ' ' + eng.control.text : '');
         note.setAttribute('data-engine-state', eng.fitting ? 'fitting' : 'learning');
+      } else if (stale) {
+        note.textContent = eng.notice + '.';
+        note.setAttribute('data-engine-state', 'stale');
       }
     }
     // The one-line summary of what is drawn (shown while the key is folded): the lines on, then the overlays on.

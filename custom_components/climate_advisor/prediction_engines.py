@@ -400,7 +400,24 @@ def engine_state(source: Any, config: Mapping[str, Any] | None) -> dict[str, Any
     else:
         text = ""
     ready = (not fallback) and control_capable(ENGINES[primary])
+    # Issue #1529: refits that keep coming back unusable while the learned model stays in use (display only)
+    notice = refit_note = ""
+    if primary == ENGINE_V4 and not fallback:
+        try:
+            from . import v4_shadow  # noqa: PLC0415
+
+            rec = getattr(getattr(source, "_v4_store", None), "unusable_fit", None)
+            notice = v4_shadow.unusable_fit_notice(rec)  # Status chart note: from V4_UNUSABLE_WARN_REFITS in a row
+            if isinstance(rec, dict):  # AI context: from the first one, with the count
+                refit_note = (
+                    f"{ENGINES[primary].label}: {v4_shadow.describe_unusable_fit(rec)} (decisions still use that "
+                    f"model; {rec.get('count', 1)} unusable refit(s) in a row)"
+                )
+        except Exception:  # noqa: BLE001 - display only
+            notice = refit_note = ""
     return {
+        "notice": notice,
+        "refit_note": refit_note,
         "primary": primary,
         "shadow": shadow,
         "engines": catalogue,

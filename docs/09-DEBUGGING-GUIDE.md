@@ -485,6 +485,7 @@ SSH mode needs `tools/.deploy.env` (never printed) and discovers files like `the
 | `--primary ENTITY` | sensor tracking chart-log `indoor`, else `_ca` | The thermostat's room reading, the primary node |
 | `--since YYYY-MM-DD` / `--max-weeks N` | all | First test week on/after a date; only the newest N weeks |
 | `--train-days N` / `--min-train-days N` / `--refit-every-weeks N` | 30 / 5 / 1 | Training window (0 = all history); no test week without that much training data; refit cadence |
+| `--no-carry` | off | Issue #1525 diagnostic: fit each week from its window alone. By default each week's fit carries what the previous week's fit learned about a mode or a window / fan rate the window does not show (the live nightly fit's rule, [Season carry](predictor-v4-spec.md#season-carry-issue-1525)); each week's record lists its gains (`house`) and `train_fit.carried` |
 | `--anchor-step-hours H` | 1 | Spacing of anchors inside a week |
 | `--setpoints {scheduled,hold}` / `--setpoint-source {band,commanded}` / `--window-plan-hours H` / `--window-plan-source {record,fallback}` | scheduled / band / 4 / record | Planned-input choices above |
 | `--v3-model {honest,asof,current}` / `--v3-asof-min-obs N` | honest / 30 | v3 comparator (above); observations needed before an anchor to rebuild its as-of model |

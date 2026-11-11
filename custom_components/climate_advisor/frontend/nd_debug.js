@@ -107,7 +107,8 @@
     function conf(e) { return e.confidence && e.confidence !== 'none' ? e.confidence + ' confidence' : ''; }
     var prim = pe ? find(pe.primary) : null, sh = pe && pe.shadow && pe.shadow !== 'none' ? find(pe.shadow) : null;
     // Issue #1469: v4 grades heating and cooling apart; the row names both (a mode the home has not used: "not used")
-    var md = (v && v.modes) || {}, modeG = function (m, w) { var g = md[m] && md[m].grade; return g ? w + ' ' + (g === 'unseen' ? 'not used' : g) : ''; };
+    // Issue #1525: a mode whose learned values are carried from last season reads "(carried)"
+    var md = (v && v.modes) || {}, modeG = function (m, w) { var g = md[m] && md[m].grade; return g ? w + ' ' + (g === 'unseen' ? 'not used' : g) + (md[m].carried_grade ? ' (carried)' : '') : ''; };
     var perMode = [modeG('heat', 'heating'), modeG('cool', 'cooling')].filter(Boolean).join(' · ');
     rows.push(['Primary engine', !pe || !pe.primary ? DASH : !prim ? pe.primary : prim.label + ': ' + (prim.usable ? (prim.id === 'v4' && perMode ? 'usable · ' + perMode : ['usable', conf(prim)].filter(Boolean).join(', ')) : 'still learning')]);
     var gr = (v && v.grade) || {};
@@ -115,6 +116,8 @@
       if (gr.why) rows.push(['Grade reason', (v.confidence || 'none') + ': ' + gr.why]);
       if (gr.by_mode) rows.push(['By mode', gr.by_mode]);
     }
+    // Issue #1529: an unusable refit never replaces the model in use; say so
+    if (v && v.unusable_refit && v.unusable_refit.text) rows.push(['Last refit', v.unusable_refit.text + (pe && pe.shadow === 'v4' ? ' (v4 is the comparison engine)' : '')]);
     rows.push(['Shadow engine', !pe ? DASH : !pe.shadow || pe.shadow === 'none' ? 'none' : !sh ? pe.shadow : sh.label + ': ' + (sh.usable ? conf(sh) || 'usable' : 'still learning')]);
     var dec = DASH;
     if (cf && cf.mode) {

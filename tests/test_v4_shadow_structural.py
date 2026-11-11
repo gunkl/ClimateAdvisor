@@ -339,6 +339,9 @@ _SELECTION_COORDINATOR_METHODS = {
     "get_chart_data",
     "chart_capabilities",  # Issue #1459: display only (the chart key's v4_running flag)
     "decision_rates_summary",  # Issue #1468: Debug tab only (which engine each decision rate comes from)
+    # Issue #1529: AI investigator only - the engine block's read-only "last refit unusable; decisions still use the
+    # model from <date>" line. No decision reads it.
+    "prediction_refit_note",
     # Issue #1512 finding 8: learning bookkeeping, not a decision - whether the cycle model's fit is written into the
     # rates v3 reads (on a v4 zone v4's own rates drive the decisions and the fit is only shown), read the way
     # decision_rates_summary reads it instead of an identity probe of control_thermal_model.

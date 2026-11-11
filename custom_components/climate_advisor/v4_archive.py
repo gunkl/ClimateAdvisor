@@ -675,10 +675,13 @@ class V4ModelStore:
 
         {"v": 1, "model": <predictor_v4.to_dict(...)> | null, "mass_f": 66.2 | null, "mass_at": iso | null,
          "last_fit": {"at", "reason", "seconds", "ok"} | null, "last_fit_error": str | null,
-         "night_validation": <night_replay.validation_record(...)> | null}
+         "night_validation": <night_replay.validation_record(...)> | null,
+         "unusable_fit": {"count", "at", "reason", "fit_reason", "fitted_at", "kept_fitted_at"} | null}
 
     ``night_validation`` (Issue #1230 R6) is the nightly recorded-night replay that gates the bedroom night strategy
     (``night_strategy.NightValidation`` + the evidence hours); an older file without it simply reads as ``null``.
+    ``unusable_fit`` (Issue #1529) records the last refit that came back unusable (confidence ``none``) while a usable
+    ``model`` was kept for the decisions; ``null`` once a usable fit replaces the model (and in older files).
 
     Same persistence contract as ``V4Archive``: blocking load/save via the executor, atomic, 0o600, never raise.
     """
@@ -691,12 +694,14 @@ class V4ModelStore:
         self.last_fit: dict | None = None
         self.last_fit_error: str | None = None
         self.night_validation: dict | None = None
+        self.unusable_fit: dict | None = None
         self.dirty = False
 
     def load(self) -> None:
         """Load from disk; missing, corrupt or odd content means no model. Never raises."""
         self.v4_model = self.v4_mass_f = self.v4_mass_at = self.last_fit = self.last_fit_error = None
         self.night_validation = None
+        self.unusable_fit = None
         self.dirty = False
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
@@ -724,6 +729,8 @@ class V4ModelStore:
         self.last_fit_error = err if isinstance(err, str) else None
         night = raw.get("night_validation")
         self.night_validation = night if isinstance(night, dict) else None
+        unusable = raw.get("unusable_fit")
+        self.unusable_fit = unusable if isinstance(unusable, dict) else None
 
     def save(self) -> bool:
         """Atomic write (tempfile + os.replace), 0o600 on non-Windows. True on success. Never raises."""
@@ -738,6 +745,7 @@ class V4ModelStore:
                     "last_fit": self.last_fit,
                     "last_fit_error": self.last_fit_error,
                     "night_validation": self.night_validation,
+                    "unusable_fit": self.unusable_fit,
                 },
                 separators=(",", ":"),
                 allow_nan=False,

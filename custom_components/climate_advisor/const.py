@@ -1651,8 +1651,6 @@ THERMAL_MILD_BUCKET_LIMIT_F: float = 70.0  # below this (≥ cold limit) → "mi
 # Eliminates hard jumps when outdoor temp crosses a threshold.
 THERMAL_BUCKET_INTERP_HALF_F: float = 2.0
 
-THERMAL_MIN_DECAY_F = 1.0  # min total post-heat decay required to commit (°F)
-
 # --- v3 Observation Type string constants ---
 OBS_TYPE_PASSIVE_DECAY = "passive_decay"
 # Issue #587: OBS_TYPE_VENTILATED_DECAY ("ventilated_decay") renamed to
@@ -1687,12 +1685,25 @@ REJECT_INDOOR_UNAVAILABLE = "indoor_unavailable"
 REJECT_TOO_FEW_BLOCKS = "too_few_blocks"
 REJECT_WINDOW_TOO_SHORT = "window_too_short"
 REJECT_NO_INTERIOR_PEAK = "no_interior_peak"
-REJECT_NO_K_PASSIVE = "no_k_passive"  # solar_gain commit: no cached k_passive yet to subtract (Issue #587, Defect B)
+REJECT_NO_K_PASSIVE = "no_k_passive"  # no closed-house k_passive yet (solar_gain subtract, HVAC run-edge; #587, #1512)
+# Issue #1512: reasons that used to be free text (or a generic "abandoned"), now real persisted codes.
+REJECT_HVAC_RUN_TOO_SHORT = "hvac_run_too_short"  # run shorter than THERMAL_HVAC_RUN_MIN_MINUTES
+REJECT_HVAC_SIGNAL_BELOW_RESOLUTION = "hvac_signal_below_resolution"  # |T_off - T_on| < max(min signal, 2 x resolution)
+REJECT_NEW_SESSION = "new_session_started"  # another observation session began before this one committed
+REJECT_FAN_ACTIVATED = "fan_activated"  # the fan started and contaminated the observation
+REJECT_HVAC_MODE_SWITCH = "hvac_mode_switch"  # heat <-> cool switched mid-observation
 
 # Reduced plateau guard (was THERMAL_MIN_DECAY_F = 1.0)
 THERMAL_HVAC_MIN_DECAY_F = 0.3
 # Minimum ΔT for single-point k_active estimate (filters sensor noise / no-effect cycles)
 THERMAL_HVAC_MIN_SIGNAL_F: float = 0.5
+# Issue #1512: HVAC run-edge estimator. Minimum run length to learn a rate from (minutes).
+THERMAL_HVAC_RUN_MIN_MINUTES: float = 5
+# Rate ageing: k_active_heat/cool and k_passive are weighted medians of retained observations; each
+# observation's weight halves every THERMAL_RATE_HALF_LIFE_DAYS, and legacy-method observations
+# (no "method" key: the pre-#1512 post-fit / proxy commits) count THERMAL_LEGACY_OBS_WEIGHT as much.
+THERMAL_RATE_HALF_LIFE_DAYS: float = 21
+THERMAL_LEGACY_OBS_WEIGHT: float = 0.25
 
 # Thermostat swing = the thermostat's OWN hysteresis (Issue #1234): how far past the setpoint the
 # room is allowed to drift before the equipment starts (heat: setpoint - indoor at the heat-on
@@ -1840,7 +1851,6 @@ THERMAL_PASSIVE_SAMPLE_INTERVAL_S: int = 300  # 5 min — passive/vent slow deca
 # THERMAL_FAN_SAMPLE_INTERVAL_S retired (Issue #587) with fan_only_decay — vent_window_decay
 # and vent_fan_decay both use THERMAL_PASSIVE_SAMPLE_INTERVAL_S.
 THERMAL_SOLAR_SAMPLE_INTERVAL_S: int = 300  # 5 min — solar gain slow trend
-THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S: int = 300  # 5 min — post-heat is passive dynamics
 
 # Per-type passive confidence count thresholds
 THERMAL_PASSIVE_CONF_LOW = 5

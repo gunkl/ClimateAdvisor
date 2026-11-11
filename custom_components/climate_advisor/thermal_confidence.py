@@ -103,21 +103,17 @@ def physics_eligibility(
 ) -> tuple[bool, float | None, bool]:
     """Whether the predicted-indoor curve uses the physics ODE (``_build_predicted_indoor_future``).
 
-    Returns ``(eligible, k_passive_used, via_bridge)``. Gate bridge: when k_passive is absent or
-    ungraded but k_vent_window is learned (always <= 0 when valid), it stands in for k_passive so
-    thermally inert homes with only ventilated observations still get the ODE; a bridged k needs
-    no confidence count. Otherwise either grade above ``none`` plus a negative k_passive is enough.
+    Returns ``(eligible, k_passive_used, via_bridge)``. A real closed-house rate is required: either grade
+    above ``none`` plus a negative ``k_passive``. The old gate bridge (``k_vent_window`` standing in for an
+    unlearned ``k_passive``) is gone (Issue #1512), so ``via_bridge`` is always False; ``k_vent_window`` is
+    accepted only to keep callers' signatures and is never promoted. The return shape is kept for callers.
     """
-    via_bridge = False
-    if (k_passive is None or confidence_k_passive == "none") and k_vent_window is not None and k_vent_window <= 0:
-        k_passive = k_vent_window
-        via_bridge = True
     eligible = (
-        (confidence_hvac != "none" or confidence_k_passive not in (None, "none") or via_bridge)
+        (confidence_hvac != "none" or confidence_k_passive not in (None, "none"))
         and k_passive is not None
-        and (k_passive < 0 or via_bridge)
+        and k_passive < 0
     )
-    return eligible, k_passive, via_bridge
+    return eligible, k_passive, False
 
 
 def explain_physics_eligibility(
@@ -127,13 +123,13 @@ def explain_physics_eligibility(
     k_vent_window: float | None,
 ) -> tuple[bool, str]:
     """``physics_eligibility`` plus the human-readable reason the engine status reports."""
-    eligible, _k_used, via_bridge = physics_eligibility(confidence_hvac, confidence_k_passive, k_passive, k_vent_window)
-    if eligible and via_bridge:
-        return True, "gate bridge: k_vent_window stands in for k_passive"
+    eligible, _k_used, _via_bridge = physics_eligibility(
+        confidence_hvac, confidence_k_passive, k_passive, k_vent_window
+    )
     if eligible:
         return True, f"k_passive + confidence (passive={confidence_k_passive}, hvac={confidence_hvac})"
     if k_passive is None:
-        return False, "k_passive not yet learned"
+        return False, "k_passive not yet learned (needs a closed-house rate; no k_vent_window substitute)"
     if k_passive >= 0:
         return False, "k_passive has wrong sign"
     return False, "confidence insufficient (none)"

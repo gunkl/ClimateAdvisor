@@ -1,6 +1,6 @@
 {
   "name": "r6b_tou_bank_lead_follows_primary__v4",
-  "description": "A time-of-use peak starts at 16:15. The house is at 72 F and banking toward 68 F means 4 F of cooling. v3's learned rate is slow (1 F per hour); v4's fitted AC is a realistic 3.5 F per hour (2.8 F in the first hour through the house's hidden mass). Primary engine v4 (v3 is the live comparison engine): the bank window opens at 14:24 (111 minutes before the peak), the plan says so, and the thermostat is told 68 F at the 14:25 check, not at the next half-hour cycle.",
+  "description": "A time-of-use peak starts at 16:15. The house is at 72 F and banking toward 68 F means 4 F of cooling. v3's learned rate is slow (1 F per hour); v4's fitted AC is a realistic 3.5 F per hour (2.8 F in the first hour through the house's hidden mass), and on a 90 F afternoon the house leaks heat back in at 0.05 of the gap per hour. Primary engine v4 (v3 is the live comparison engine): since Issue #1517 the lead accounts for that leak, so the bank window opens at 13:42 (153 minutes before the peak; the leak-unaware formula said 14:24), the plan says so, and the thermostat is told 68 F at the 13:45 check, not at the next half-hour cycle.",
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 76,
@@ -65,35 +65,32 @@
   ],
   "assertions": [
     {
-      "at": "2026-07-13T14:23:00",
+      "at": "2026-07-13T13:41:00",
       "expect": "tou_precondition_not_applied",
       "reason": "Before the window opens nothing is banked."
     },
     {
-      "at": "2026-07-13T14:24:00",
+      "at": "2026-07-13T13:42:00",
       "expect": "setpoint_writes",
       "since": "2026-07-13T13:00:30",
-      "values": [
-        76.0,
-        76.0
-      ],
-      "reason": "Until the window opens the thermostat is only told the comfort setpoint (the 14:00 and 14:20 cycles)."
+      "values": [],
+      "reason": "Between the 13:00 setup and the window start nothing more is written (the comfort setpoint 76 F was told at 13:00)."
     },
     {
       "at": "2026-07-13T14:28:00",
       "expect": "field_equals",
       "field": "engine_state._next_action.tou_window.start",
-      "value": "14:24",
-      "reason": "The window the plan shows starts 111 minutes before the 16:15 peak on v4's rate (a v3 rate would start at 12:15, the 45-minute default at 15:30)."
+      "value": "13:42",
+      "reason": "The window the plan shows starts 153 minutes before the 16:15 peak on v4's rate with the house's leak (Issue #1517; the leak-unaware lead said 14:24, a v3 rate 12:15, the 45-minute default 15:30)."
     },
     {
-      "at": "2026-07-13T14:28:00",
+      "at": "2026-07-13T13:46:00",
       "expect": "setpoint_writes",
-      "since": "2026-07-13T14:24:00",
+      "since": "2026-07-13T13:42:00",
       "values": [
         68.0
       ],
-      "reason": "The thermostat is told 68 F at the first 5-minute check at or after the window start (14:24:59), with no comfort write before it, not at the 14:30 half-hour cycle."
+      "reason": "The thermostat is told 68 F at the first 5-minute check at or after the window start (13:44:59), with no comfort write before it, not at the 14:00 half-hour cycle."
     },
     {
       "at": "2026-07-13T14:28:00",
@@ -110,7 +107,7 @@
       "expect": "field_equals",
       "field": "engine_state._next_action.timeline.ca_steps",
       "value": [
-        "14:24 precool_start",
+        "13:42 precool_start",
         "22:30 sleep_band",
         "02:30 precool_start",
         "06:00 briefing_send",
@@ -119,14 +116,14 @@
         "06:30 mode_change",
         "06:30 wake_band"
       ],
-      "reason": "The plan list names the same 14:24 start the thermostat acted on."
+      "reason": "The plan list names the same 13:42 start the thermostat acted on."
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "The time-of-use bank opens by the primary engine (v4) rate, and the plan and the thermostat agree on when",
-    "observed_behavior": "Window 14:24; first 68 F written 14:24:59.",
-    "expected_behavior": "The AC is not run for hours more than the house needs before a peak price period, and the house is banked when the peak starts."
+    "observed_behavior": "Window 13:42; first 68 F written 13:44:59.",
+    "expected_behavior": "The house is banked when the peak starts: the lead covers the heat leaking in while the AC runs (Issue #1517). Re-derived 2026-11-11 with the owner's approval: the old 14:24 start (111 min) under-estimated the time on a 90 F afternoon; v4's own model of this house needs about 315 min (it also counts mass and sun), so 13:42 is closer but still not early enough - tracked separately."
   },
   "thermal_model": {
     "confidence": "high",

@@ -1,6 +1,6 @@
 {
   "name": "r6b_tou_bank_lead_follows_primary_heat__v4",
-  "description": "Heating mirror of r6b_tou_bank_lead_follows_primary__v4: a winter peak starts at 16:15, the house is at 71 F and banking toward the 76 F comfort ceiling means 5 F of heat. Primary engine v4 (v3 live as the comparison engine), a realistic 3.5 F per hour furnace: the window opens when v4's rate says (not v3's 240-minute cap), the plan names it, and the thermostat is told 76 F at the first 5-minute check at or after it.",
+  "description": "Heating mirror of r6b_tou_bank_lead_follows_primary__v4: a winter peak starts at 16:15, the house is at 71 F and banking toward the 76 F comfort ceiling means 5 F of heat. Primary engine v4 (v3 live as the comparison engine), a realistic 3.5 F per hour furnace, 30 F outside and a 0.05 leak: near 76 F the house loses about 2 F per hour, so since Issue #1517 the lead hits the 240-minute cap and the window opens at 12:15, before this scenario's 13:00 start. The bank is on from the first moment: the thermostat is told 76 F at 13:00 with no 68 F comfort write first, the plan names the 12:15 window, and the half-hour cycles re-assert 76 F.",
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 76,
@@ -65,16 +65,23 @@
   ],
   "assertions": [
     {
-      "at": "2026-01-13T13:55:00",
-      "expect": "tou_precondition_not_applied",
-      "reason": "Before the window opens nothing is banked."
+      "at": "2026-01-13T13:01:00",
+      "expect": "tou_precondition_applied",
+      "tou_precondition": {
+        "schedule_id": "peak1",
+        "target": 76.0,
+        "mode": "heat"
+      },
+      "reason": "The window (12:15) is already open when the scenario starts, so the bank applies at once."
     },
     {
-      "at": "2026-01-13T13:59:00",
+      "at": "2026-01-13T13:01:00",
       "expect": "setpoint_writes",
-      "since": "2026-01-13T13:30:30",
-      "values": [],
-      "reason": "Nothing is written between the 13:30 cycle and the window start."
+      "since": "2026-01-13T12:59:00",
+      "values": [
+        76.0
+      ],
+      "reason": "The 13:00 setup tells the thermostat the 76 F bank setpoint, without the 68 F comfort setpoint first (issue #1393; the heating mirror)."
     },
     {
       "at": "2026-01-13T14:00:30",
@@ -83,23 +90,14 @@
       "values": [
         76.0
       ],
-      "reason": "The 14:00 cycle inside the open bank re-asserts the 76 F bank setpoint once, without the 68 F comfort setpoint first (issue #1393; the heating mirror)."
+      "reason": "The 14:00 cycle inside the open bank re-asserts the 76 F bank setpoint once, without the 68 F comfort setpoint first."
     },
     {
       "at": "2026-01-13T14:03:00",
       "expect": "field_equals",
       "field": "engine_state._next_action.tou_window.start",
-      "value": "13:56",
-      "reason": "The window the plan shows starts on v4's heating rate (v3's slow rate would hit the 240-minute cap at 12:15)."
-    },
-    {
-      "at": "2026-01-13T13:59:59",
-      "expect": "setpoint_writes",
-      "since": "2026-01-13T13:59:00",
-      "values": [
-        76.0
-      ],
-      "reason": "The thermostat is told the 76 F bank setpoint within five minutes of the 1:56 PM window start (the first 5-minute check at or after it)."
+      "value": "12:15",
+      "reason": "The window the plan shows starts at the 240-minute cap: with the house's leak the furnace needs longer than that (Issue #1517; the leak-unaware lead said 13:56)."
     },
     {
       "at": "2026-01-13T14:03:00",
@@ -116,7 +114,6 @@
       "expect": "field_equals",
       "field": "engine_state._next_action.timeline.ca_steps",
       "value": [
-        "13:56 preheat_start",
         "22:30 sleep_band",
         "06:00 briefing_send",
         "06:30 wake_band",
@@ -124,14 +121,14 @@
         "06:30 mode_change",
         "06:30 wake_band"
       ],
-      "reason": "The plan list names the same 13:56 start the thermostat acted on."
+      "reason": "The plan list has no pre-heat step: the window opened at 12:15, before now, so it is already running."
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "The heating bank opens by the primary engine (v4) rate, and the plan and thermostat agree on when",
-    "observed_behavior": "Window 13:56; first 76 F written 13:59:59.",
-    "expected_behavior": "Mirror of the cooling bank: the furnace is not run for hours more than the house needs before a peak price period."
+    "observed_behavior": "Window 12:15 (cap); 76 F written at 13:00 and re-asserted at the half-hour cycles.",
+    "expected_behavior": "Mirror of the cooling bank: the lead covers the heat the house loses while the furnace runs (Issue #1517). Re-derived 2026-11-11 with the owner's approval: the old 13:56 start (139 min) left the house near 73 F at the peak; v4's own model needs about 450 min, so even the 240-minute cap is short - tracked separately."
   },
   "thermal_model": {
     "confidence": "high",

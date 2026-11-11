@@ -14,7 +14,14 @@
     indoor_unavailable: 'Indoor sensor was unavailable', insufficient_samples: 'Window ended before enough samples collected',
     window_elapsed_too_few_samples: 'Window closed before enough samples collected', insufficient_decay: "Temperature didn't move enough to measure",
     ols_bad_fit: 'Reading was too noisy to trust', poor_fit: 'Reading was too noisy to trust', state_changed: 'HVAC, fan, or window state changed mid-window',
-    outlier: 'Result was an outlier vs prior measurements', abandoned: 'Measurement interrupted'
+    outlier: 'Result was an outlier vs prior measurements', abandoned: 'Measurement interrupted',
+    cycle_too_short: 'Heating or cooling cycle was too short to measure', cycle_signal_below_resolution: 'Room moved fewer than three sensor steps, too little to show a rate',
+    cycle_excluded_window_fan: 'A window was open or the fan ran during the cycle', cycle_setpoint_change: 'The setpoint changed and the run before the change was too short to measure',
+    cycle_gap_restart: 'A restart cut the cycle short', cycle_thermostat_unavailable: 'The thermostat was unavailable during the cycle',
+    cycle_no_off_edge: 'The cycle had no end to measure to', cycle_sensor_swap: 'Recorded on an earlier indoor sensor than the one in use now',
+    hvac_run_too_short: 'Heating or cooling run was too short to measure (old method)', hvac_signal_below_resolution: 'Room temperature moved less than the sensor can reliably show (old method)',
+    no_k_passive: 'House leak rate not learned yet, so this run\'s rate could not be separated', new_session_started: 'A new run started before this one could be measured',
+    fan_activated: 'The fan started during the run', hvac_mode_switch: 'Heat and cool switched during the run', ols_bounds: 'Result was outside the believable range'
   };
   var OBS = {
     passive_decay: 'Passive windows', vent_window_decay: 'Window ventilation', vent_fan_decay: 'Fan/WHF ventilation', solar_gain: 'Solar readings',
@@ -197,6 +204,20 @@
       ' min/day, comfort score ' + pct(c.comfort_score) + ', ' + (c.total_manual_overrides || 0) + ' manual overrides.' : 'Compliance summary appears once a few days are recorded.';
   }
 
+  // Issues #1512/#1516: the cycle model's rows (engines payload ``decisions`` entries with source "cycle"), by mode.
+  // A row carries its fields either on itself or in an object ``value``; mode comes from ``mode`` or the key.
+  // q and sd_q arrive in the user's unit like every decisions row; coast_area_f is a Fahrenheit delta, converted here.
+  var GRADE_WORDS = { none: 'not enough yet', low: 'rough', medium: 'fairly sure', high: 'sure' };
+  function cycleRows(list) {
+    var out = {};
+    (list || []).forEach(function (r) {
+      if (!r || r.source !== 'cycle') return;
+      var f = r.value && typeof r.value === 'object' ? r.value : r, m = r.mode || (String(r.key || '').indexOf('cool') >= 0 ? 'cool' : 'heat');
+      out[m] = f;
+    });
+    return out;
+  }
+
   // ---------- the house model in plain language ----------
   function renderModel() {
     var E = D.engines, tm = D.chart && D.chart.thermal_model, host = $('an-model');
@@ -204,12 +225,28 @@
     var rows = [], eu = E ? ND.sym(E.unit) : ND.sym(ND.unit);
     function row(plain, raw, conf) { rows.push('<div class="kv"><div>' + esc(plain) + '</div><div class="conf">' + esc(conf || '') + '</div><div class="raw">' + esc(raw) + '</div></div>'); }
     if (E) {
+      var dr = {};
+      (E.decisions || []).forEach(function (r) { if (r && typeof r.value === 'number') dr[r.key] = r; });
       var kp = E.k_passive && E.k_passive.active ? E.k_passive : null, hv = E.k_active_hvac && E.k_active_hvac.active ? E.k_active_hvac : null;
       var ks = E.k_solar && E.k_solar.active ? E.k_solar : null, kw = E.k_vent_window && E.k_vent_window.active ? E.k_vent_window : null, kf = E.k_vent_fan && E.k_vent_fan.active ? E.k_vent_fan : null;
       if (kp) row('Holds heat ' + (Math.abs(kp.value) < 0.05 ? 'well' : 'moderately') + ': it closes half the indoor–outdoor gap in about ' + Math.round(Math.log(2) / Math.abs(kp.value)) + ' hours',
         'k_passive ' + Number(kp.value).toFixed(4) + ' /h · time constant ' + Math.round(1 / Math.abs(kp.value)) + ' h', 'calibration: ' + (kp.confidence || 'n/a'));
       if (hv && hv.value) row('Heating adds about ' + Number(hv.value.heat).toFixed(1) + eu + ' an hour; cooling removes ' + Math.abs(hv.value.cool).toFixed(1) + eu,
         'k_active heat ' + Number(hv.value.heat).toFixed(2) + ' · cool ' + Number(hv.value.cool).toFixed(2) + ' ' + eu + '/h', 'calibration: ' + (hv.confidence || 'n/a'));
+      // Issues #1512/#1516: the cycle model's measured heating and cooling rate, how sure it is, and the coast after a run.
+      // Rows come from the engines payload (``decisions`` rows with source "cycle"); on a v4 zone decisions keep v4's rate.
+      var cyc = cycleRows(E.decisions);
+      ['heat', 'cool'].forEach(function (m) {
+        var c = cyc[m]; if (!c || typeof c.q !== 'number') return;
+        var word = m === 'heat' ? 'Heating' : 'Cooling';
+        var line = word + ' measures ' + Math.abs(c.q).toFixed(1) + eu + ' an hour (' + GRADE_WORDS[c.grade || 'none'] + ')';
+        if (typeof c.coast_area_f === 'number' && Math.abs(c.coast_area_f) >= 0.05)
+          line += '; after a run the room ' + (c.coast_area_f * c.q > 0 ? 'keeps ' + (m === 'heat' ? 'warming' : 'cooling') + ' about ' : 'gives back about ') + Math.abs(ND.dFToDisp(c.coast_area_f)).toFixed(1) + eu;
+        var cd = dr['k_active_' + m], onV4 = cd && cd.source && cd.source !== 'v3' && cd.source !== 'cycle' && typeof cd.value === 'number';
+        if (onV4) line += '. Decisions use ' + cd.source + '\u2019s ' + Math.abs(cd.value).toFixed(1) + eu + '; the cycle model measures ' + Math.abs(c.q).toFixed(1) + eu;
+        row(line, 'cycle q ' + Number(c.q).toFixed(2) + (typeof c.sd_q === 'number' ? ' \u00b1 ' + Number(c.sd_q).toFixed(2) : '') + ' ' + eu + '/h \u00b7 coast ' +
+          (typeof c.coast_area_f === 'number' ? Number(ND.dFToDisp(c.coast_area_f)).toFixed(2) : '\u2014') + ' ' + eu + ' \u00b7 ' + (c.ne != null ? c.ne : 0) + ' informative cycles', 'sure: ' + (c.grade || 'none'));
+      });
       if (ks) {
         var ph = E.solar_phase_offset_h && E.solar_phase_offset_h.active ? E.solar_phase_offset_h.value : 0;
         var peak = new Date(2000, 0, 1, 13 + Math.floor(ph), Math.round((ph % 1) * 60)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -217,8 +254,6 @@
       }
       // Issue #1505: the window and fan line uses the rates the decisions and the timeline read (``decisions``: v4's own
       // on a v4 zone, v3's learner otherwise), all three from that one source so the ratios compare like with like.
-      var dr = {};
-      (E.decisions || []).forEach(function (r) { if (r && typeof r.value === 'number') dr[r.key] = r; });
       var dp = dr.k_passive || (kp ? { value: kp.value, source: 'v3' } : null);
       var dw = dr.k_vent_window || (kw ? { value: kw.value, source: 'v3' } : null), df = dr.k_vent_fan || (kf ? { value: kf.value, source: 'v3' } : null);
       if (dp && dp.value && (dw || df)) {
@@ -246,7 +281,9 @@
         (tm.swing_heat_measured && tm.swing_cool_measured ? '' : ' (partly estimated)'), 'swing_heat ' + ND.num(sh, 2) + ' · swing_cool ' + ND.num(sc, 2) + ' ' + ND.sym(tm.unit || ND.unit), '');
       var envN = (tm.observation_count_passive || 0) + (tm.observation_count_vent_window || 0) + (tm.observation_count_vent_fan || 0) + (tm.observation_count_solar || 0);
       var hvN = (tm.observation_count_heat || 0) + (tm.observation_count_cool || 0);
-      row('Measurements kept: ' + envN + ' for the house, ' + hvN + ' for the heating and cooling', 'calibration: house ' + (tm.confidence_k_passive || 'none') + ' · HVAC ' + (tm.confidence || 'none'),
+      // Issue #1512: hvN is the evidence behind the heating/cooling rates (older measurements give way to new cycles,
+      // never to time alone), not a running total
+      row('Measurements kept: ' + envN + ' for the house; evidence behind the heating and cooling rates: ' + hvN + ' measurements', 'calibration: house ' + (tm.confidence_k_passive || 'none') + ' · HVAC ' + (tm.confidence || 'none'),
         tm.last_observation_date ? 'last: ' + new Date(tm.last_observation_date).toLocaleDateString() : 'none yet');
     }
     if (!rows.length) rows.push('<div class="empty">Nothing learned yet. It needs a few hours of HVAC-off time with a clear indoor-outdoor difference.</div>');

@@ -1,4 +1,4 @@
-"""Tests for Phase 1 (ramp anchor), Phase 2B (gate bridge), and Phase 2C
+"""Tests for Phase 1 (ramp anchor), Phase 2B (gate bridge, REMOVED in #1512), and Phase 2C
 (per-hour ventilation wiring) fixes in _build_predicted_indoor_future()
 (Issue #126).
 
@@ -7,18 +7,16 @@ Phase 1 — Ramp anchor fix (coordinator.py line ~4339):
   available, rather than outdoor+2°F.  The off-day branch triggers when
   THRESHOLD_MILD (60°F) <= forecast high < THRESHOLD_WARM (75°F).
 
-Phase 2B — Gate bridge (coordinator.py lines ~4196-4214):
-  When k_passive is absent but k_vent_window is learned, the ODE activates
-  using k_vent_window as a proxy, so thermally inert homes get physics
-  prediction instead of the ramp fallback.
+Phase 2B — Gate bridge: REMOVED in #1512 (k_vent_window is a windows-open rate, not a
+  closed-house rate). A home without a closed-house k_passive stays on the ramp
+  fallback; the tests below assert that. Historical description: k_vent_window
+  used to stand in for an absent k_passive.
 
 Phase 2C — Per-hour ventilation wiring (coordinator.py _build_predicted_indoor_future):
   For forecast hours where classification recommends windows open, k_vent_window
   is substituted as the effective k_passive in the ODE (replacement semantics —
   k_vent_window is the total measured k during ventilated conditions).
-  Gate bridge guard: when _k_passive_via_bridge=True (k_passive was None,
-  k_vent_window already used as proxy for all hours), per-hour substitution does
-  not fire to avoid double-counting.
+  (The former gate-bridge double-counting guard went away with the bridge, #1512.)
 """
 
 from __future__ import annotations
@@ -537,7 +535,10 @@ class TestPerHourVentilationWiring:
         )
 
     def test_gate_bridge_home_no_double_counting(self):
-        """When gate bridge is active (k_passive=None), per-hour k_vent_window substitution must NOT fire.
+        """HISTORICAL (the gate bridge was removed in Issue #1512; no bridge exists any more).
+
+        Old premise, kept for context: when the gate bridge was active (k_passive=None), per-hour k_vent_window
+        substitution must NOT fire.
 
         After the bridge window guard fix (Issue #130):
         - Bridge guard fires only when classification has windows_recommended=True AND the hour
@@ -589,10 +590,12 @@ class TestPerHourVentilationWiring:
         open_hours = [h for h in range(10, 17) if h in temps_by_h]
         assert len(open_hours) >= 4, "Need at least 4 window-open hours to observe physics decay"
         last_open = max(open_hours)
-        assert temps_by_h[last_open] < self._INDOOR, (
-            f"Bridge open hours: physics with k_vent_window=-0.20 should cool below {self._INDOOR}°F; "
-            f"got {temps_by_h[last_open]:.2f}°F "
-            f"(no double-counting: per-hour substitution blocked by _k_passive_via_bridge)"
+        # Issue #1512 (D4): the gate bridge is gone. The old expectation (physics driven by k_vent_window as
+        # a k_passive stand-in) was wrong: k_vent_window is a window-open rate, not a leak rate. A home with no
+        # closed-house k_passive is not physics-eligible and shows the flat setpoint-schedule ramp.
+        assert temps_by_h[last_open] == pytest.approx(self._INDOOR, abs=1.0), (
+            f"No bridge: a home without a closed-house k_passive stays on the ramp (~{self._INDOOR}°F); "
+            f"got {temps_by_h[last_open]:.2f}°F"
         )
 
 
@@ -603,7 +606,9 @@ class TestPerHourVentilationWiring:
 
 
 class TestBridgeWindowGuard:
-    """Bridge guard: when _k_passive_via_bridge=True, physics only runs during window-open hours.
+    """HISTORICAL: the gate bridge and its window guard were removed in Issue #1512 (the bridge is never active).
+
+    Old premise, kept for context: when _k_passive_via_bridge=True, physics only ran during window-open hours.
 
     k_vent_window = envelope k + ventilation k.  Applying it to window-CLOSED hours
     overpredicts decay (τ≈7h vs true envelope τ≈50h).  The guard falls back to ramp
@@ -709,16 +714,19 @@ class TestBridgeWindowGuard:
         assert len(open_hours) >= 4, "Need at least 4 window-open hours in result to validate physics"
         # By the end of the open window, decay with k=-0.20 over several hours should drop below 69°F
         last_open = max(open_hours)
-        assert temps_by_h[last_open] < 69.0, (
-            f"Bridge home, window-open hours: physics with k=-0.20 should cool below 69°F by hour {last_open}; "
-            f"got {temps_by_h[last_open]:.2f}°F"
+        # Issue #1512 (D4): the gate bridge is gone. The old expectation (physics driven by k_vent_window as
+        # a k_passive stand-in) was wrong: k_vent_window is a window-open rate, not a leak rate. A home with no
+        # closed-house k_passive is not physics-eligible and shows the flat setpoint-schedule ramp.
+        assert temps_by_h[last_open] == pytest.approx(self._INDOOR, abs=1.0), (
+            f"No bridge: window-open hours of a home without k_passive stay on the ramp; "
+            f"got {temps_by_h[last_open]:.2f}°F at hour {last_open}"
         )
 
     def test_non_bridge_home_unaffected_by_guard(self):
         """Normal home with real k_passive: guard never fires, physics runs for all hours.
 
-        k_passive=-0.025 (real learned value), confidence_k_passive='low' → bridge does NOT activate
-        (_k_passive_via_bridge=False).  Guard condition requires _k_passive_via_bridge=True → skipped.
+        k_passive=-0.025 (real learned value), confidence_k_passive='low'. Since Issue #1512 there is no bridge
+        (_k_passive_via_bridge is always False), so this is simply the normal path.
         Physics runs via real k_passive → temps decay (lower than indoor seed after several hours).
         """
         now = self._NOW_BG
@@ -786,9 +794,11 @@ class TestBridgeWindowGuard:
         temps = [r["temp"] for r in result]
         # Bridge physics runs (guard skipped because _windows_recommended=False).
         # indoor=70°F, outdoor=50°F, k=-0.20 → meaningful decay expected over 12 hours.
-        assert temps[-1] < self._INDOOR - 1.0, (
-            f"Bridge home, no window schedule: physics should run and show decay; "
-            f"got {temps[-1]:.2f}°F (guard must NOT fire when windows_recommended=False)"
+        # Issue #1512 (D4): the gate bridge is gone. The old expectation (physics driven by k_vent_window as
+        # a k_passive stand-in) was wrong: k_vent_window is a window-open rate, not a leak rate. A home with no
+        # closed-house k_passive is not physics-eligible and shows the flat setpoint-schedule ramp.
+        assert temps[-1] == pytest.approx(self._INDOOR, abs=1.0), (
+            f"No bridge, no window schedule: no physics without k_passive; got {temps[-1]:.2f}°F"
         )
 
 
@@ -798,7 +808,9 @@ class TestBridgeWindowGuard:
 
 
 class TestGateBridgeSelfHealing:
-    """Gate bridge fires for contaminated installs (k_passive stale, conf_passive='none').
+    """HISTORICAL: the gate bridge was removed in Issue #1512; these tests now prove it no longer fires.
+
+    Old premise, kept for context: the bridge fired for contaminated installs (k_passive stale, conf_passive='none').
 
     Bug A: Bridge previously only fired when k_passive is None.  It must also
            fire when k_passive is present but confidence_k_passive='none'
@@ -858,8 +870,11 @@ class TestGateBridgeSelfHealing:
         for t in temps:
             assert t > self._OUTDOOR, f"Physics should keep indoor above outdoor 65°F; got {t:.2f}°F"
         # At least the 4-hour mark should show some decay from seed
-        assert temps[-1] < self._INDOOR, (
-            f"Physics should show some cooling from seed {self._INDOOR}°F after 4h; got {temps[-1]:.2f}°F"
+        # Issue #1512 (D4): the gate bridge is gone. The old expectation (physics driven by k_vent_window as
+        # a k_passive stand-in) was wrong: k_vent_window is a window-open rate, not a leak rate. A home with no
+        # closed-house k_passive is not physics-eligible and shows the flat setpoint-schedule ramp.
+        assert temps[-1] == pytest.approx(self._INDOOR, abs=1.0), (
+            f"No bridge: stale k_passive with no confidence stays on the ramp; got {temps[-1]:.2f}°F"
         )
 
     def test_bridge_fires_when_k_passive_none(self):
@@ -886,8 +901,11 @@ class TestGateBridgeSelfHealing:
         # Physics with k=-0.25 and indoor=69°F above outdoor=65°F: indoor cools slowly.
         for t in temps:
             assert t > self._OUTDOOR, f"Physics: indoor should remain above outdoor; got {t:.2f}°F"
-        assert temps[-1] < self._INDOOR, (
-            f"Physics: should show cooling from seed {self._INDOOR}°F after 4h; got {temps[-1]:.2f}°F"
+        # Issue #1512 (D4): the gate bridge is gone. The old expectation (physics driven by k_vent_window as
+        # a k_passive stand-in) was wrong: k_vent_window is a window-open rate, not a leak rate. A home with no
+        # closed-house k_passive is not physics-eligible and shows the flat setpoint-schedule ramp.
+        assert temps[-1] == pytest.approx(self._INDOOR, abs=1.0), (
+            f"No bridge: k_passive=None stays on the ramp; got {temps[-1]:.2f}°F"
         )
 
     def test_bridge_does_not_fire_when_conf_passive_has_value(self):
@@ -925,7 +943,9 @@ class TestGateBridgeSelfHealing:
         )
 
     def test_physics_eligible_with_bridge_bypasses_confidence_check(self):
-        """Bug B: bridge-provided k_passive enables physics even when conf='none' and conf_k_passive='none'.
+        """HISTORICAL (bridge removed in Issue #1512; physics now stays off here, see the assertion).
+
+        Old premise: bridge-provided k_passive enabled physics even when conf='none' and conf_k_passive='none'.
 
         Before Bug B fix: _physics_eligible required (_conf != 'none' OR conf_k_passive not none).
         When both are 'none' and bridge is active, the confidence gate blocked physics.
@@ -950,9 +970,11 @@ class TestGateBridgeSelfHealing:
         temps = [r["temp"] for r in result]
         # Physics with bridge: indoor=69°F, outdoor=65°F, k=-0.25.
         # After 6h the decay is significant — expect last temp noticeably below 69°F.
-        assert temps[-1] < self._INDOOR - 0.3, (
-            f"Bug B: physics must activate (bridge bypasses confidence); "
-            f"expected cooling below {self._INDOOR - 0.3:.1f}°F at 6h; got {temps[-1]:.2f}°F"
+        # Issue #1512 (D4): the gate bridge is gone. The old expectation (physics driven by k_vent_window as
+        # a k_passive stand-in) was wrong: k_vent_window is a window-open rate, not a leak rate. A home with no
+        # closed-house k_passive is not physics-eligible and shows the flat setpoint-schedule ramp.
+        assert temps[-1] == pytest.approx(self._INDOOR, abs=1.0), (
+            f"No bridge: no confidence and no closed-house rate stays on the ramp; got {temps[-1]:.2f}°F"
         )
 
     def test_physics_not_eligible_without_bridge_and_no_confidence(self):
@@ -1173,19 +1195,11 @@ class TestEndpointEstimatorForecastRegressionPinned:
 
         assert len(result) == 11
 
-        pinned_temps = [
-            69.8,
-            69.7,
-            69.5,
-            69.4,
-            69.3,
-            69.2,
-            69.1,
-            69.0,
-            68.9,
-            68.8,
-            68.7,
-        ]
+        # Issue #1512 (D4): the gate bridge is gone, so a home with only k_vent_window (no closed-house k_passive)
+        # is not physics-eligible and the forecast is the flat schedule ramp at the indoor seed. The old pin
+        # (69.8 ... 68.7) was the bridge's decay with k_vent_window standing in for k_passive: wrong, k_vent_window
+        # is a window-open rate.
+        pinned_temps = [70.0] * 11
 
         actual_temps = [r["temp"] for r in result]
         for i, (actual, expected) in enumerate(zip(actual_temps, pinned_temps, strict=True)):

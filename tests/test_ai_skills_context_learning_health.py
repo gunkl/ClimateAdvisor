@@ -71,3 +71,105 @@ class TestBuildThermalPipelineContextThreadsLearningHealth:
         asyncio.run(build_thermal_pipeline_context(hass, coord))
 
         coord.learning.get_thermal_model.assert_called_once_with(learning_health=_health)
+
+
+class TestRunRejectionCodesClassified:
+    """Issues #1512/#1516: every code a heating/cooling run can be rejected with is labelled, not lumped in."""
+
+    def test_quality_and_operational_codes_are_split(self):
+        _health = {
+            "hvac_heat": {
+                "attempts": 6,
+                "committed": 0,
+                "rejections": {
+                    "hvac_run_too_short": 2,
+                    "hvac_signal_below_resolution": 1,
+                    "no_k_passive": 1,
+                    "new_session_started": 1,
+                    "fan_activated": 1,
+                },
+            }
+        }
+        coord = _make_coordinator(_health)
+        ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
+
+        assert "quality failures: 4" in ctx
+        assert "hvac_run_too_short x2" in ctx
+        assert "hvac_signal_below_resolution x1" in ctx
+        assert "no_k_passive x1" in ctx
+        assert "operational interruptions: 2" in ctx
+
+    def test_cycle_codes_are_quality_failures_and_old_run_codes_stay_labelled(self):
+        """Issues #1512/#1516: the cycle model's rejection codes are quality failures; the retired per-run codes
+        still in stored history keep counting (they age out, no wipe)."""
+        _health = {
+            "hvac_cool": {
+                "attempts": 9,
+                "committed": 0,
+                "rejections": {
+                    "cycle_too_short": 3,
+                    "cycle_signal_below_resolution": 2,
+                    "cycle_excluded_window_fan": 1,
+                    "cycle_setpoint_change": 1,
+                    "cycle_gap_restart": 1,
+                    "cycle_thermostat_unavailable": 1,
+                    "hvac_run_too_short": 1,
+                },
+            }
+        }
+        ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), _make_coordinator(_health)))
+        assert "quality failures: 10" in ctx
+        for code in ("cycle_too_short x3", "cycle_signal_below_resolution x2", "cycle_gap_restart x1"):
+            assert code in ctx
+
+    def test_cycle_model_is_described_in_plain_words_with_its_honesty(self):
+        ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), _make_coordinator({})))
+        assert "the cycle model" in ctx
+        # owner decision 2026-11-11: old cycles give way to newer ones, never to time alone
+        assert "20 newer" in ctx and "never with time alone" in ctx and "21 days" not in ctx
+        assert "whole-degree" in ctx and "never high" in ctx
+        assert "never worse than the default" in ctx
+        assert "night-time fit" not in ctx  # the duty-balance description is retired
+
+    def test_cycle_rows_from_the_decision_summary_are_listed(self):
+        coord = _make_coordinator({})
+        coord.decision_rates_summary.return_value = [
+            {
+                "key": "cycle_heat",
+                "source": "cycle",
+                "value": {"q": 7.5, "sd_q": 1.2, "grade": "medium", "coast_area_f": 0.4, "ne": 6},
+            },
+            {"key": "k_passive", "source": "v3", "value": -0.1},
+        ]
+        coord.config = {"temp_unit": "fahrenheit"}
+        ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
+        # Issue #1512 verifier nit: units named (the old "deg" left the reader guessing which scale)
+        assert (
+            "cycle model: heat rate 7.50 +/- 1.20 °F/h, grade medium, coast after a run +0.40 °F, 6 informative cycles"
+            in ctx
+        )
+
+    def test_cycle_rows_coast_follows_the_display_unit(self):
+        """The rows carry q in the display unit already but the coast as a degF delta: the coast is converted."""
+        coord = _make_coordinator({})
+        coord.config = {"temp_unit": "celsius"}
+        coord.decision_rates_summary.return_value = [
+            {
+                "key": "cycle_heat",
+                "source": "cycle",
+                "value": {"q": 4.17, "sd_q": 0.67, "grade": "medium", "coast_area_f": 0.9, "ne": 6},
+            },
+        ]
+        ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
+        assert "heat rate 4.17 +/- 0.67 °C/h, grade medium, coast after a run +0.50 °C" in ctx
+
+
+def test_investigator_rule_9_reads_the_counts_as_carried_evidence():
+    """Issue #1512 (S2): observation_count_heat/cool are the evidence behind the rates, displaced by new cycles and
+    flat through a quiet season; the investigator must not compare them with the pipeline's committed counts or treat
+    a decrease as lost data (the old rule treated them as cumulative counters off by EWMA lag)."""
+    from custom_components.climate_advisor import ai_skills_investigator as inv
+
+    prompt = inv._SYSTEM_PROMPT
+    assert "EWMA flush lag" not in prompt
+    assert "NOT cumulative counters" in prompt and "can go down" in prompt

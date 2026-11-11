@@ -256,22 +256,7 @@ class TestEngineStatusChain:
 
 
 class TestHvacPeakCapture:
-    """H4 determination: does _end_hvac_active_phase append a final active_sample?
-
-    These tests call _end_hvac_active_phase on a stub coordinator with 2 existing
-    active_samples and verify whether the method appends a 3rd final sample.
-
-    Per the coordinator.py source (line 3445-3466), _end_hvac_active_phase:
-    - Transitions _phase from "active" to "post_heat"
-    - Sets active_end and session_minutes
-    - Does NOT append to active_samples
-
-    Therefore: test 16 is expected to PASS (3rd sample not appended),
-    tests 17-18 are expected to FAIL (peak update logic not present in unmodified code).
-
-    This class determines H4: whether Bug D (missing final sample / peak update)
-    actually exists in the unmodified codebase.
-    """
+    """The off edge of an HVAC run (Issue #1512): pending observation removed, nothing learned per run."""
 
     def _make_coord_with_obs(
         self,
@@ -299,7 +284,9 @@ class TestHvacPeakCapture:
 
         coord._pending_observations = {}
         coord._pending_thermal_event = None
-        coord._pre_heat_sample_buffer = []
+        coord._today_record = None
+        coord.learning = MagicMock()
+        coord._executor_job = MagicMock()
 
         # Build synthetic active samples
         active_samples = []
@@ -354,73 +341,28 @@ class TestHvacPeakCapture:
 
         return coord
 
-    def test_end_hvac_active_phase_appends_final_sample(self):
-        """After _end_hvac_active_phase, active_samples has 3 entries (was 2 + 1 final).
-
-        H4 DETERMINATION TEST — run on unmodified code and report result.
-
-        If this test PASSES: _end_hvac_active_phase already appends a final sample
-        → Bug D does NOT exist → no fix needed for D.
-        If this test FAILS: the method does NOT append → Bug D is confirmed.
-
-        Based on source review (coordinator.py line 3445-3466), the method only
-        transitions phase and sets active_end/session_minutes. Expected: PASS
-        (final sample not appended = no Bug D).
-        """
-        coord = self._make_coord_with_obs(indoor_temp=70.5, prior_peak=69.0, n_active_samples=2)
+    def _end(self, coord, obs_type=OBS_TYPE_HVAC_HEAT) -> None:
+        """Run the real off-edge handler."""
         dt_mock = MagicMock()
         dt_mock.now.return_value = _FAKE_NOW
         dt_mock.parse_datetime.side_effect = lambda s: datetime.fromisoformat(s) if s else None
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._end_hvac_active_phase(OBS_TYPE_HVAC_HEAT)
+            coord._end_hvac_active_phase(obs_type)
 
-        obs = coord._pending_observations[OBS_TYPE_HVAC_HEAT]
-        n_samples = len(obs["active_samples"])
-        assert n_samples == 3, (
-            f"Expected 3 active_samples after _end_hvac_active_phase (2 prior + 1 final), "
-            f"got {n_samples}.\n"
-            "H4 determination: if this fails, Bug D is confirmed (method does not append "
-            "a final sample at HVAC-off moment). If it passes, Bug D does not exist."
-        )
+    def test_off_edge_removes_the_pending_observation_and_learns_nothing(self):
+        """Old: the off edge appended a final sample and handed learning a run dict with peak_f / n_active.
 
-    def test_peak_updated_if_final_temp_is_higher(self):
-        """Prior peak=69.0, final indoor=71.0 → peak_indoor_f becomes 71.0 after call.
+        The per-run estimator is retired (pooled cycle model, Issue #1512): the run's extremum is tracked by the
+        tick sampler (tests/test_hvac_run_coordinator_1512.py::TestTickSamplerPeak) and the off edge only tidies up."""
+        from custom_components.climate_advisor.const import OBS_TYPE_HVAC_COOL
 
-        If _end_hvac_active_phase does not update the peak, this test FAILS.
-        This determines whether peak capture at HVAC-off time is implemented.
-        """
-        coord = self._make_coord_with_obs(indoor_temp=71.0, prior_peak=69.0)
-        dt_mock = MagicMock()
-        dt_mock.now.return_value = _FAKE_NOW
-        dt_mock.parse_datetime.side_effect = lambda s: datetime.fromisoformat(s) if s else None
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._end_hvac_active_phase(OBS_TYPE_HVAC_HEAT)
-
-        obs = coord._pending_observations[OBS_TYPE_HVAC_HEAT]
-        assert obs["peak_indoor_f"] == pytest.approx(71.0), (
-            f"Expected peak_indoor_f=71.0 after _end_hvac_active_phase with final indoor=71.0, "
-            f"got {obs['peak_indoor_f']}.\n"
-            "Bug D: peak is not updated at HVAC-off time when final temp exceeds prior peak."
-        )
-
-    def test_peak_not_lowered_at_hvac_off(self):
-        """Prior peak=72.0, final indoor=70.0 → peak_indoor_f stays 72.0.
-
-        Regression guard: the peak must not decrease at HVAC-off.
-        If peak update logic is added, it must use max(prior, final).
-        """
-        coord = self._make_coord_with_obs(indoor_temp=70.0, prior_peak=72.0)
-        dt_mock = MagicMock()
-        dt_mock.now.return_value = _FAKE_NOW
-        dt_mock.parse_datetime.side_effect = lambda s: datetime.fromisoformat(s) if s else None
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._end_hvac_active_phase(OBS_TYPE_HVAC_HEAT)
-
-        obs = coord._pending_observations[OBS_TYPE_HVAC_HEAT]
-        assert obs["peak_indoor_f"] == pytest.approx(72.0), (
-            f"Expected peak_indoor_f=72.0 (peak must not decrease), got {obs['peak_indoor_f']}.\n"
-            "Bug D regression guard: max(prior_peak, final) — never lower the peak."
-        )
+        for obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):  # mirror: cool behaves the same
+            coord = self._make_coord_with_obs(indoor_temp=70.5, prior_peak=69.0, n_active_samples=2)
+            if obs_type == OBS_TYPE_HVAC_COOL:
+                coord._pending_observations[OBS_TYPE_HVAC_COOL] = coord._pending_observations.pop(OBS_TYPE_HVAC_HEAT)
+            self._end(coord, obs_type)
+            assert obs_type not in coord._pending_observations
+            coord.learning.apply_cycle_fit.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

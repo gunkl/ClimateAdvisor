@@ -1070,11 +1070,8 @@ def model_rates(model: Mapping[str, Any] | None) -> ModelRates | None:
     k_fan = model.get("k_vent_fan")
     vent_grade = model.get("confidence_k_vent")
     if not isinstance(k_passive, (int, float)) or k_passive >= 0:
-        # Same bridge the v3 curve uses: a learned ventilated rate stands in for an unlearned envelope rate.
-        if isinstance(k_vent, (int, float)) and k_vent < 0:
-            k_passive = k_vent
-        else:
-            return None
+        # No k_vent_window -> k_passive substitution (Issue #1512): without a closed-house rate there is no simulation.
+        return None
 
     def num(key: str) -> float | None:
         v = model.get(key)

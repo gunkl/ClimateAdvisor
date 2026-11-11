@@ -465,7 +465,25 @@ _confidence = _load_confidence_module()
 # ---------------------------------------------------------------------------
 
 _ALPHA_MAP = {"high": 0.3, "medium": 0.15, "low": 0.05}
-_THERMAL_OBS_CAP = 500
+
+
+def retain_like_production(existing: list[dict], merged: list[dict]) -> list[dict]:
+    """The merged observations (oldest first) kept as production keeps them (Issue #1523).
+
+    Each kind keeps its share of ``THERMAL_OBS_KIND_CAPS`` (or what it already held in ``existing``, one in, one
+    out), its own oldest leaving first; nothing leaves with time and no kind pushes another out. Was: 90 days back
+    from today and the newest 500 overall, which dropped a kind that had gone quiet for a season (e.g. every passive
+    fit after a summer with the windows open) the moment this tool wrote the DB.
+    """
+    learning = _production()
+    held: dict[str, int] = {}
+    for o in existing:
+        if isinstance(o, dict):
+            held[learning.thermal_obs_kind(o)] = held.get(learning.thermal_obs_kind(o), 0) + 1
+    out = [o for o in merged if isinstance(o, dict)]
+    for kind in {learning.thermal_obs_kind(o) for o in out}:
+        out = learning.trim_thermal_observations(out, kind, held.get(kind, 0))
+    return out
 
 
 def _ewma(old: float | None, new: float, alpha: float) -> float:
@@ -515,7 +533,10 @@ def rebuild_model_cache(all_obs: list[dict], existing_cache: dict | None = None)
     that cache still holds the retired definition) and extended by the caller with
     ``swing.apply_swing_samples``. A rebuild can therefore never re-poison or wipe it.
 
-    Mirrors _update_thermal_model_cache logic exactly:
+    A seed only (Issue #1512): production recomputes ``k_active_heat``, ``k_active_cool`` and ``k_passive``
+    from the retained observations, each weighing less per newer observation of its rate (Issue #1523), after
+    every commit and on load, so these EWMA values are replaced the next time the engine loads. The older
+    EWMA cache logic, kept for the non-HVAC fields:
     - passive/heat/cool modes update k_passive
     - fan_only updates k_vent
     - ventilated updates k_vent_window (and k_solar when two_param=True)
@@ -616,7 +637,7 @@ def rebuild_model_cache(all_obs: list[dict], existing_cache: dict | None = None)
 # ---------------------------------------------------------------------------
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _zone_storage import CHART_LOG_FILE, LEARNING_DB_FILE, resolve_remote_path_with_discovery  # noqa: E402
+from _zone_storage import CHART_LOG_FILE, CYCLE_FILE, LEARNING_DB_FILE, resolve_remote_path_with_discovery  # noqa: E402
 
 # Set once in main() from --entry-id (or auto-discovery); read by the three
 # SSH helpers below so their existing call sites don't all need an entry_id
@@ -636,6 +657,12 @@ def _learning_db_remote(config: dict) -> str:
 def _chart_log_remote(config: dict) -> str:
     return resolve_remote_path_with_discovery(
         config, CHART_LOG_FILE, _ENTRY_ID, lambda cfg, remote_cmd: _ssh_args(cfg) + [remote_cmd]
+    )
+
+
+def _cycles_remote(config: dict) -> str:
+    return resolve_remote_path_with_discovery(
+        config, CYCLE_FILE, _ENTRY_ID, lambda cfg, remote_cmd: _ssh_args(cfg) + [remote_cmd]
     )
 
 
@@ -1397,18 +1424,75 @@ def build_windows_from_chart_log(
 # HVAC cycle detection (--hvac mode, Issue #130 Phase C)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Production learning rules, loaded by path (Issues #1512, #1516)
+# ---------------------------------------------------------------------------
+
+_PROD_PKG = "_ca_production_pkg"
+
+
+def _load_production_package():
+    """Make ``custom_components/climate_advisor`` importable as a bare package, without Home Assistant.
+
+    The real package ``__init__`` imports Home Assistant, which this tool must not require. A stand-in package
+    object (same directory, no ``__init__`` run) lets ``learning.py``, ``cycle_model.py`` and
+    ``cycle_store.py`` import their
+    siblings with relative imports. ``learning.py`` itself only needs ``homeassistant.util.dt``; a minimal stub
+    is installed only when Home Assistant is not importable.
+    """
+    if _PROD_PKG in sys.modules:
+        return sys.modules[_PROD_PKG]
+    try:
+        import homeassistant.util.dt  # noqa: F401
+    except ImportError:
+        import types
+
+        stub_root = types.ModuleType("homeassistant")
+        stub_util = types.ModuleType("homeassistant.util")
+        stub_dt = types.ModuleType("homeassistant.util.dt")
+        stub_dt.now = lambda *a, **k: datetime.now(UTC)
+        stub_dt.utcnow = lambda: datetime.now(UTC)
+        stub_dt.as_local = lambda value: value
+        stub_dt.parse_datetime = lambda value: datetime.fromisoformat(value)
+        stub_root.util = stub_util
+        stub_util.dt = stub_dt
+        sys.modules.update(
+            {"homeassistant": stub_root, "homeassistant.util": stub_util, "homeassistant.util.dt": stub_dt}
+        )
+    import types
+
+    pkg = types.ModuleType(_PROD_PKG)
+    pkg.__path__ = [str(Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor")]
+    sys.modules[_PROD_PKG] = pkg
+    return pkg
+
+
+def _production():
+    """``learning.py`` (the REJECT_* codes and the learning rules)."""
+    _load_production_package()
+    return importlib.import_module(f"{_PROD_PKG}.learning")
+
+
+def _production_cycle_model():
+    """``cycle_model.py``: the production pooled cycle model (Issues #1512/#1516), pure math, no second copy."""
+    _load_production_package()
+    return importlib.import_module(f"{_PROD_PKG}.cycle_model")
+
+
+def _production_cycle_store():
+    """``cycle_store.py``: the production reader of ``climate_advisor_cycles.json`` (compact encoding)."""
+    _load_production_package()
+    return importlib.import_module(f"{_PROD_PKG}.cycle_store")
+
+
+def _production_const(name: str, default):
+    _load_production_package()
+    return getattr(importlib.import_module(f"{_PROD_PKG}.const"), name, default)
+
+
 _HVAC_HEAT_VALS: frozenset[str] = frozenset({"heating", "heat"})
 _HVAC_COOL_VALS: frozenset[str] = frozenset({"cooling", "cool"})
 _HVAC_IDLE_VALS: frozenset[str | None] = frozenset({"idle", "off", "", None})
-
-# Bounds mirroring const.py (standalone tool — no HA import)
-_K_ACTIVE_HEAT_MIN = 0.5
-_K_ACTIVE_HEAT_MAX = 15.0
-_K_ACTIVE_COOL_MIN = -15.0
-_K_ACTIVE_COOL_MAX = -0.5
-_THERMAL_MIN_POST_HEAT_SAMPLES = 4  # mirrors THERMAL_MIN_POST_HEAT_SAMPLES (Phase B: was 10)
-_THERMAL_HVAC_MIN_DECAY_F = 0.3  # mirrors THERMAL_HVAC_MIN_DECAY_F
-_THERMAL_HVAC_MIN_SIGNAL_F = 0.5  # mirrors THERMAL_HVAC_MIN_SIGNAL_F — min ΔT for single-point
 
 
 def _hvac_category(hvac_str: str | None) -> str:
@@ -1433,7 +1517,8 @@ def detect_hvac_cycles(
       mode: "heat" or "cool"
       pre_samples: chart_log entries within pre_window_minutes before HVAC start
       active_samples: chart_log entries where HVAC was active
-      post_samples: chart_log entries within post_window_minutes after HVAC stop
+      post_samples: chart_log entries within post_window_minutes after HVAC stop (only the first, the off-edge
+                    row, is used to time the run's end; nothing after the off edge feeds the rate - Issue #1512)
       start_ts: ISO timestamp of first active entry
 
     Entries with outdoor=None are included — outdoor fallback is applied later
@@ -1501,49 +1586,6 @@ def detect_hvac_cycles(
             )
 
     return cycles
-
-
-def _chart_entries_to_ols_samples(
-    entries: list[dict],
-    elapsed_start_ts: datetime,
-) -> list[dict]:
-    """Convert chart_log entries to OLS-compatible sample dicts.
-
-    Applies outdoor fallback: when a sample has outdoor=None, propagate the
-    last known valid outdoor value.  Entries where outdoor remains None after
-    fallback (i.e., no prior outdoor ever seen in this sequence) are skipped.
-
-    Returns a list of dicts with keys: indoor_temp_f, outdoor_temp_f,
-    elapsed_minutes, solar_factor, timestamp.
-    """
-    result: list[dict] = []
-    last_outdoor: float | None = None
-    for entry in entries:
-        indoor = entry.get("indoor")
-        if indoor is None:
-            continue
-        outdoor = entry.get("outdoor")
-        if outdoor is not None:
-            last_outdoor = float(outdoor)
-        elif last_outdoor is not None:
-            outdoor = last_outdoor
-        else:
-            continue  # no outdoor at all yet — skip
-
-        ts_str = entry.get("ts", "")
-        entry_dt = _parse_ts(ts_str)
-        elapsed_min = (entry_dt - elapsed_start_ts).total_seconds() / 60.0
-        sf = _solar_factor(entry_dt.hour + entry_dt.minute / 60.0)
-        result.append(
-            {
-                "indoor_temp_f": float(indoor),
-                "outdoor_temp_f": float(outdoor),
-                "elapsed_minutes": elapsed_min,
-                "solar_factor": sf,
-                "timestamp": ts_str,
-            }
-        )
-    return result
 
 
 def _local_reading_resolution(readings: list, log_has_finer: bool) -> float | None:
@@ -1677,220 +1719,67 @@ def _setpoint_confirmed_steady(rows: list[dict], idx: int) -> bool:
     return False
 
 
-def run_hvac_replay_ols(
-    cycle: dict,
-    k_vent_window_proxy: float | None = None,
-) -> dict | None:
-    """Run OLS on a detected HVAC cycle and return an observation dict or None.
+def fetch_cycles_ssh(config: dict) -> list[dict]:
+    """SSH into HA, read the zone's ``climate_advisor_cycles.json`` and decode it with production's ``CycleStore``.
+
+    Same entry-scoped discovery as the learning DB. The file is compact (delta-encoded centi-degrees), so the
+    production reader decodes it: this tool never keeps its own copy of the format. Returns every stored cycle.
+    """
+    import tempfile
+
+    remote = _cycles_remote(config)
+    result = subprocess.run([*_ssh_args(config), f"cat {remote}"], capture_output=True, timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError(f"SSH read failed: {result.stderr.decode()}")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "climate_advisor_cycles.json"
+        path.write_bytes(result.stdout)
+        store = _production_cycle_store().CycleStore(path)
+        store.load()
+        return list(store.cycles("heat", 0.0)) + list(store.cycles("cool", 0.0))
+
+
+def run_cycle_replay(cycles: list[dict], cache: dict | None, now_ts: float, days: float | None = None) -> dict:
+    """Fit every stored cycle with the production cycle model, per mode (Issues #1512/#1516).
+
+    The prior is the cache's stored rate weighted by its evidence (``cycle_model.prior_from_cache``), exactly as
+    the live refit builds it, and ``cycle_model.fit_cycles`` is the production function: the replay and the
+    live coordinator cannot disagree. Returns ``{"heat": result, "cool": result}`` (a mode with no cycles gets the
+    prior unchanged, grade ``none``, as the live model does).
 
     Arguments:
-        cycle: dict from detect_hvac_cycles(), with keys:
-               mode, pre_samples, active_samples, post_samples, start_ts
-        k_vent_window_proxy: If not None and k_passive OLS fails, use this
-               value as a proxy (bridge-home path, D17).  Forces grade="low".
-
-    Returns the observation dict on success, None on rejection.
-    The observation dict mirrors the schema used by existing ventilated_decay
-    replay obs so it can be merged into the learning DB directly.
+        cycles: cycle dicts (as ``CycleStore.cycles`` returns them).
+        cache: the learning DB's ``thermal_model_cache`` (None for a fresh home: the typical-house prior).
+        now_ts: epoch seconds of the replay (the ``days`` cut-off counts back from it; the cycle weights count newer
+            eligible cycles, not days, as live).
+        days: keep only cycles that began in the last N days (None keeps all).
     """
-    mode = cycle.get("mode", "heat")  # "heat" or "cool"
-
-    # Establish a common elapsed origin from the earliest entry across all phases
-    all_entries = cycle.get("pre_samples", []) + cycle.get("active_samples", []) + cycle.get("post_samples", [])
-    if not all_entries:
-        return None
-    origin_ts = _parse_ts(all_entries[0]["ts"])
-
-    pre_entries = cycle.get("pre_samples", [])
-    active_entries = cycle.get("active_samples", [])
-    post_entries = cycle.get("post_samples", [])
-
-    pre_samples = _chart_entries_to_ols_samples(pre_entries, origin_ts)
-    active_samples = _chart_entries_to_ols_samples(active_entries, origin_ts)
-    post_samples = _chart_entries_to_ols_samples(post_entries, origin_ts)
-
-    # Minimum post samples gate (mirrors THERMAL_MIN_POST_HEAT_SAMPLES).
-    # When a k_vent_window proxy is available the post-heat OLS path is not used —
-    # k_passive comes from the proxy and k_active from a single-point estimator that
-    # only needs post[0] for the HVAC-off timestamp.  Drop the minimum to 1.
-    _min_post = 1 if k_vent_window_proxy is not None else _THERMAL_MIN_POST_HEAT_SAMPLES
-    if len(post_samples) < _min_post:
-        return None
-
-    # Plateau guard: reject if post-phase shows essentially no decay.
-    # This guard validates post-heat decay quality for k_passive OLS and is
-    # irrelevant when k_passive comes from the proxy (single-point path).
-    if k_vent_window_proxy is None and post_samples:
-        post_peak = max(s["indoor_temp_f"] for s in post_samples)
-        post_end = post_samples[-1]["indoor_temp_f"]
-        if (post_peak - post_end) < _THERMAL_HVAC_MIN_DECAY_F and (
-            active_samples and post_samples[0]["indoor_temp_f"] >= active_samples[-1]["indoor_temp_f"]
-        ):
-            # No meaningful decay — skip (plateau guard)
-            return None
-
-    # Compute k_passive from post (+ pre) samples
-    k_p, r2_p, _reject = compute_k_passive(post_samples, pre_samples if pre_samples else None)
-
-    k_passive_from_proxy = False
-    if k_p is None:
-        # Bridge proxy: use k_vent_window if caller supplies it
-        if k_vent_window_proxy is not None and k_vent_window_proxy < 0:
-            k_p = k_vent_window_proxy
-            k_passive_from_proxy = True
-            force_grade = "low"
-        else:
-            return None
-    else:
-        force_grade = "low"  # all replay obs are low-confidence by policy
-
-    # Compute k_active: OLS when ≥ 2 active samples, single-point fallback for n_act=1
-    k_a: float | None = None
-    if len(active_samples) >= 2:
-        k_a, _r2_a = _compute_k_active_standalone(active_samples, k_p, mode)
-
-    if k_a is None:
-        # Try single-point estimator from timestamps (handles n_act=1)
-        k_a = _compute_k_active_single_point_from_cycle(cycle, k_p)
-        if k_a is not None:
-            print(
-                f"  [single-point] k_active={k_a:.3f} "
-                f"(n_act={len(active_samples)}, k_passive={'proxy' if k_passive_from_proxy else 'ols'}={k_p:.4f})"
-            )
-
-    if k_a is None:
-        return None
-
-    # Build timestamp/date from start_ts
-    ts_str = cycle.get("start_ts", all_entries[0]["ts"])
-    date_str = ts_str[:10]
-
-    # When k_passive came from the proxy (not OLS), emit k_passive=None in the obs so
-    # rebuild_model_cache does NOT update the k_passive EWMA with the proxy value.
-    # Only k_active EWMA is updated for these cycles.
-    k_passive_out = None if k_passive_from_proxy else round(k_p, 5)
-
-    return {
-        "event_id": str(uuid.uuid4()),
-        "timestamp": ts_str,
-        "date": date_str,
-        "hvac_mode": mode,
-        "k_passive": k_passive_out,
-        "k_active": round(k_a, 3),
-        "r_squared_passive": None if k_passive_from_proxy else (round(r2_p, 3) if r2_p else None),
-        "r_squared_active": None,
-        "sample_count_pre": len(pre_samples),
-        "sample_count_active": len(active_samples),
-        "sample_count_post": len(post_samples),
-        "confidence_grade": force_grade,
-        "schema_version": 2,
-        "source": "replay",
-    }
+    cm = _production_cycle_model()
+    out: dict[str, dict] = {}
+    for mode in ("heat", "cool"):
+        mine = [
+            c for c in cycles if c.get("mode") == mode and (days is None or c.get("t_on", 0) >= now_ts - days * 86400)
+        ]
+        # the prior sees the pool, as the live refit's does (a held fit is the prior only when its cycles are not in it)
+        prior = cm.prior_from_cache(cache or {}, mode, now_ts, cycles=mine)
+        out[mode] = cm.fit_cycles(mine, mode, prior, now_ts=now_ts)
+    return out
 
 
-def _compute_k_active_single_point_from_cycle(
-    cycle: dict,
-    k_passive: float,
-) -> float | None:
-    """Single-point k_active from chart_log cycle timestamps.
-
-    For n_act=1: uses active[0].ts (HVAC on) and post[0].ts (HVAC off)
-    as the true start/end of the active phase.
-
-    Physics: k_active = (T_peak - T_start) / elapsed_hours - k_passive * avg_delta
-    where avg_delta = avg(T_in - T_out) across all available readings.
-    """
-    active = cycle["active_samples"]
-    pre = cycle["pre_samples"]
-    post = cycle["post_samples"]
-    mode = cycle["mode"]
-
-    if not active:
-        return None
-
-    # T_start: last pre-heat indoor (most recent reading before HVAC on)
-    T_start = pre[-1].get("indoor") if pre else active[0].get("indoor")
-    if T_start is None:
-        return None
-
-    # T_peak: max indoor across active + first two post entries (heat) / min (cool)
-    candidates = active + post[:2]
-    indoors = [e.get("indoor") for e in candidates if e.get("indoor") is not None]
-    if not indoors:
-        return None
-    T_peak = max(indoors) if mode == "heat" else min(indoors)
-
-    # elapsed: HVAC on → off, using exact state-change timestamps
-    start_dt = _parse_ts(active[0]["ts"])
-    end_dt = _parse_ts(post[0]["ts"]) if post else _parse_ts(active[-1]["ts"])
-    if start_dt is None or end_dt is None:
-        return None
-    elapsed_hours = (end_dt - start_dt).total_seconds() / 3600.0
-    if elapsed_hours <= 0 or elapsed_hours > 2.0:
-        return None
-
-    # avg delta_T from available readings (indoor - outdoor)
-    all_entries = (pre[-3:] if pre else []) + active + (post[:2] if post else [])
-    pairs = [
-        (e["indoor"], e["outdoor"]) for e in all_entries if e.get("indoor") is not None and e.get("outdoor") is not None
-    ]
-    if not pairs:
-        return None
-    avg_delta = sum(i - o for i, o in pairs) / len(pairs)
-
-    signal = T_peak - T_start
-    if mode == "heat" and signal < _THERMAL_HVAC_MIN_SIGNAL_F:
-        return None
-    if mode == "cool" and signal > -_THERMAL_HVAC_MIN_SIGNAL_F:
-        return None
-
-    gross_rate = signal / elapsed_hours
-    k_active = gross_rate - k_passive * avg_delta
-
-    if mode == "heat" and not (_K_ACTIVE_HEAT_MIN <= k_active <= _K_ACTIVE_HEAT_MAX):
-        return None
-    if mode == "cool" and not (_K_ACTIVE_COOL_MIN <= k_active <= _K_ACTIVE_COOL_MAX):
-        return None
-    return k_active
-
-
-def _compute_k_active_standalone(
-    active_samples: list[dict],
-    k_passive: float,
-    session_mode: str,
-) -> tuple[float | None, float]:
-    """Pure-Python mirror of learning.py compute_k_active() — no HA imports."""
-    if len(active_samples) < 2:
-        return None, 0.0
-
-    indoor_raw = [s["indoor_temp_f"] for s in active_samples]
-    outdoor = [s["outdoor_temp_f"] for s in active_samples]
-    elapsed = [s["elapsed_minutes"] for s in active_samples]
-    indoor = _smooth_temps(indoor_raw)
-
-    k_actives: list[float] = []
-    for i in range(len(indoor) - 1):
-        dt_hours = (elapsed[i + 1] - elapsed[i]) / 60.0
-        if dt_hours <= 0:
-            continue
-        rate = (indoor[i + 1] - indoor[i]) / dt_hours
-        delta = ((indoor[i] + indoor[i + 1]) / 2.0) - ((outdoor[i] + outdoor[i + 1]) / 2.0)
-        k_actives.append(rate - k_passive * delta)
-
-    if not k_actives:
-        return None, 0.0
-
-    k_active = sum(k_actives) / len(k_actives)
-
-    if session_mode == "heat" and not (_K_ACTIVE_HEAT_MIN <= k_active <= _K_ACTIVE_HEAT_MAX):
-        return None, 0.0
-    if session_mode == "cool" and not (_K_ACTIVE_COOL_MIN <= k_active <= _K_ACTIVE_COOL_MAX):
-        return None, 0.0
-
-    var_res = sum((k_a - k_active) ** 2 for k_a in k_actives)
-    var_tot = sum(k_a**2 for k_a in k_actives)
-    r2 = max(0.0, 1.0 - var_res / var_tot) if var_tot > 0 else 0.0
-    return k_active, r2
+def format_cycle_replay(results: dict) -> list[str]:
+    """Plain lines for the console: per mode the rate, how sure it is, and the coast after a run."""
+    lines = []
+    for mode, r in results.items():
+        q, sd = r.get("q"), r.get("sd_q")
+        lines.append(
+            f"  [{mode}] q={q:+.2f} +/- {sd:.2f} F/h  grade={r.get('grade')}  "
+            f"coast_area={r.get('coast_area_f', 0.0):+.2f} F  tau={r.get('tau')} min  "
+            f"eligible={r.get('ne')}/{r.get('n_cycles')} cycles  resolution={r.get('resolution_f')} F  "
+            f"k_p_cycle={r.get('k_p_cycle')} (diagnostic only)"
+            if isinstance(q, (int, float)) and isinstance(sd, (int, float))
+            else f"  [{mode}] no result"
+        )
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -1923,8 +1812,17 @@ def main() -> None:
     parser.add_argument(
         "--hvac",
         action="store_true",
-        help="Detect and replay HVAC heat/cool cycles from chart_log (Issue #130 Phase C). "
+        help="Detect HVAC heat/cool cycles in chart_log and replay the thermostat swing (Issue #130 Phase C). "
+        "Heating/cooling RATES are no longer replayed here: use --cycles (the production cycle model). "
         "Requires SSH access (same as --chart-log). Use with --days and --dry-run/--write.",
+    )
+    parser.add_argument(
+        "--cycles",
+        action="store_true",
+        help="Fit every stored heating/cooling cycle with the production cycle model (Issues #1512/#1516). "
+        "Reads the zone's climate_advisor_cycles.json and learning DB over SSH (same discovery as the learning DB), "
+        "prints the rate, how sure it is, the coast after a run and the informative-cycle count per mode. "
+        "Read-only; --days limits the cycles used.",
     )
     parser.add_argument(
         "--chart-log",
@@ -1966,19 +1864,20 @@ def main() -> None:
     global _ENTRY_ID
     _ENTRY_ID = args.entry_id
 
-    _read_only_mode = args.passive_only or args.vent_overnight
+    _read_only_mode = args.passive_only or args.vent_overnight or args.cycles
     if not _read_only_mode and not args.dry_run and not args.write:
         parser.error("Specify --dry-run to preview or --write to commit. Start with --dry-run.")
 
     if (
         not args.chart_log
         and not args.hvac
+        and not args.cycles
         and not args.passive_only
         and not args.vent_overnight
         and not (args.climate_entity and args.outdoor_entity and args.window_entities)
     ):
         parser.error(
-            "Either --chart-log, --hvac, --passive-only, --vent-overnight, or all of "
+            "Either --chart-log, --hvac, --cycles, --passive-only, --vent-overnight, or all of "
             "--climate-entity, --outdoor-entity, --window-entities are required."
         )
 
@@ -2026,6 +1925,24 @@ def main() -> None:
         run_vent_overnight_analysis(chart_entries, learning_db, days=args.days)
         return
 
+    if args.cycles:
+        # --- Pooled cycle model replay (Issues #1512/#1516): read-only, production fit_cycles ---
+        print("\nFetching the cycle file from HA via SSH...")
+        cycles = fetch_cycles_ssh(config)
+        print(
+            f"  {len(cycles)} stored cycles ({sum(1 for c in cycles if c.get('mode') == 'heat')} heat, "
+            f"{sum(1 for c in cycles if c.get('mode') == 'cool')} cool)"
+        )
+        try:
+            cache = fetch_learning_json_ssh(config).get("thermal_model_cache", {}) or {}
+        except Exception as exc:
+            print(f"  WARNING: Could not fetch learning DB ({exc}) - using the typical-house prior")
+            cache = {}
+        print("\nFitting with production cycle_model.fit_cycles...")
+        for line in format_cycle_replay(run_cycle_replay(cycles, cache, datetime.now(UTC).timestamp(), days=args.days)):
+            print(line)
+        return
+
     if args.hvac:
         # --- HVAC heat/cool cycle replay path (Issue #130 Phase C) ---
         print(f"\nFetching chart_log from HA via SSH ({args.days} days) for HVAC replay...")
@@ -2053,52 +1970,8 @@ def main() -> None:
         n_cool = sum(1 for c in cycles if c["mode"] == "cool")
         print(f"  Found {len(cycles)} cycles ({n_heat} heat, {n_cool} cool)")
 
-        # Check for bridge proxy: use k_vent_window from existing DB if present.
-        # Load regardless of --dry-run/--write — proxy is needed for single-point
-        # k_active estimation in both modes (D22).
-        k_vent_proxy: float | None = None
-        try:
-            db_check = fetch_learning_json_ssh(config)
-            _cache = db_check.get("thermal_model_cache", {})
-            _kv = _cache.get("k_vent_window")
-            if isinstance(_kv, float) and _kv < 0:
-                k_vent_proxy = _kv
-                print(f"  Bridge proxy: k_vent_window={k_vent_proxy:.4f} available for fallback")
-        except Exception:
-            pass  # proxy unavailable; not fatal
-
-        print("\nRunning HVAC OLS...")
-        obs_list = []
-        rejected = 0
-        reject_reasons: dict[str, int] = {}
-        for cycle in cycles:
-            obs = run_hvac_replay_ols(cycle, k_vent_window_proxy=k_vent_proxy)
-            mode_tag = cycle["mode"]
-            ts_short = cycle.get("start_ts", "?")[:16].replace("T", " ")
-            n_pre = len(cycle["pre_samples"])
-            n_act = len(cycle["active_samples"])
-            n_post = len(cycle["post_samples"])
-            if obs:
-                k_p_str = f"{obs['k_passive']:+.4f}" if obs["k_passive"] is not None else "proxy"
-                k_a_str = f"{obs['k_active']:+.4f}" if obs["k_active"] is not None else "None"
-                r2_p_val = obs.get("r_squared_passive")
-                r2_str = f"{r2_p_val:.3f}" if r2_p_val is not None else "n/a"
-                print(
-                    f"  [{mode_tag}] {ts_short}  "
-                    f"n_pre={n_pre} n_act={n_act} n_post={n_post}  "
-                    f"k_passive={k_p_str} k_active={k_a_str} R²={r2_str}  COMMITTED [low]"
-                )
-                obs_list.append(obs)
-            else:
-                rejected += 1
-                reason = "rejected"
-                print(f"  [{mode_tag}] {ts_short}  n_pre={n_pre} n_act={n_act} n_post={n_post}  rejected")
-                reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
-
-        print(f"\nSummary: {len(obs_list)} committed / {rejected} rejected")
-        if reject_reasons:
-            for reason, count in sorted(reject_reasons.items()):
-                print(f"  {reason}: {count}")
+        print("  (rates: python tools/thermal_replay.py --cycles fits them with the production cycle model)")
+        obs_list: list[dict] = []
 
         # Thermostat swing (Issue #1234): independent of the k fits above. Same pure rules as production.
         swing_samples = compute_swing_samples_from_chart_log(filtered)
@@ -2134,10 +2007,7 @@ def main() -> None:
         merged = existing_obs + new_obs
         merged.sort(key=lambda o: o.get("timestamp", ""))
 
-        cutoff_str = (datetime.now().date() - timedelta(days=90)).isoformat()
-        merged = [o for o in merged if o.get("date", "") >= cutoff_str]
-        if len(merged) > _THERMAL_OBS_CAP:
-            merged = merged[-_THERMAL_OBS_CAP:]
+        merged = retain_like_production(existing_obs, merged)
 
         print("\nRebuilding EWMA model cache from all obs...")
         new_model = rebuild_model_cache(merged, existing_cache=db.get("thermal_model_cache"))
@@ -2287,13 +2157,8 @@ def main() -> None:
     merged = existing_obs + new_obs
     merged.sort(key=lambda o: o.get("timestamp", ""))
 
-    # 90-day rolling trim
-    cutoff = (datetime.now().date() - timedelta(days=90)).isoformat()
-    merged = [o for o in merged if o.get("date", "") >= cutoff]
-
-    # Hard cap
-    if len(merged) > _THERMAL_OBS_CAP:
-        merged = merged[-_THERMAL_OBS_CAP:]
+    # Retention as production (Issue #1523): per-kind shares, nothing leaves with time
+    merged = retain_like_production(existing_obs, merged)
 
     # Rebuild EWMA model cache from all obs
     print("\nRebuilding EWMA model cache from all obs...")

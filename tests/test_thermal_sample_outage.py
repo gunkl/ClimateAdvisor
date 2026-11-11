@@ -2,7 +2,6 @@
 
 Exercises the REAL coordinator methods (bound onto partial stubs) — never a copy of the logic:
   - ``_get_current_sample`` returns None when indoor is unreadable
-  - ``_update_pre_heat_buffer`` skips on None but still prunes stale entries
   - ``_start_hvac_observation`` refuses to start (INFO + structured ``indoor_unavailable`` rejection)
   - the event-driven sample in ``_async_thermostat_changed`` skips on None
   - ``_build_learning_health`` / AI context register the new reason code
@@ -95,36 +94,6 @@ class TestGetCurrentSample:
         assert sample["elapsed_minutes"] == 3.0
 
 
-class TestPreHeatBuffer:
-    def test_no_append_on_none_and_stale_entries_pruned(self, caplog):
-        coord = _make_outage_coord()
-        _blank_indoor(coord)
-        stale = (_FAKE_NOW - timedelta(hours=3)).isoformat()
-        fresh = (_FAKE_NOW - timedelta(minutes=1)).isoformat()
-        coord._pre_heat_sample_buffer = [
-            {"timestamp": stale, "indoor_temp_f": 60.0, "outdoor_temp_f": 40.0, "elapsed_minutes": 0.0},
-            {"timestamp": fresh, "indoor_temp_f": 61.0, "outdoor_temp_f": 40.0, "elapsed_minutes": 0.0},
-        ]
-        with (
-            patch(f"{_COORD_MOD}.dt_util", _make_dt_mock()),
-            caplog.at_level(logging.DEBUG, logger=_COORD_MOD),
-        ):
-            coord._update_pre_heat_buffer()
-        assert [s["timestamp"] for s in coord._pre_heat_sample_buffer] == [fresh]
-        assert all(s["indoor_temp_f"] != 0.0 for s in coord._pre_heat_sample_buffer)
-        skip = [r for r in caplog.records if "Pre-heat sample skipped" in r.getMessage()]
-        assert len(skip) == 1
-        assert skip[0].levelno == logging.DEBUG
-        assert "indoor_unavailable" in skip[0].getMessage()
-
-    def test_appends_when_readable(self):
-        coord = _make_outage_coord(indoor_temp=67.5)
-        with patch(f"{_COORD_MOD}.dt_util", _make_dt_mock()):
-            coord._update_pre_heat_buffer()
-        assert len(coord._pre_heat_sample_buffer) == 1
-        assert coord._pre_heat_sample_buffer[0]["indoor_temp_f"] == 67.5
-
-
 class TestStartHvacObservation:
     def test_indoor_none_does_not_start_and_records_rejection(self, caplog):
         coord = _make_outage_coord()
@@ -205,6 +174,11 @@ class TestAppendRejection:
             "sf_range",
             "indoor_direction",
             "timestamp",
+            # Issue #1512: HVAC rejections always carry signal_f / minutes / k_passive_source (None when unknown);
+            # the old exact set predates those fields.
+            "signal_f",
+            "minutes",
+            "k_passive_source",
         }
         assert event["reason_code"] == REJECT_ABANDONED
         assert event["n_samples"] == 2

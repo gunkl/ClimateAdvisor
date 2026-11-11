@@ -52,7 +52,6 @@ from .const import (
     OBS_TYPE_SOLAR_GAIN,
     OBS_TYPE_VENT_FAN_DECAY,
     OBS_TYPE_VENT_WINDOW_DECAY,
-    THERMAL_OBS_CAP,
 )
 from .coordinator import _REJECTION_LOG_CAP
 from .fan_status import is_ca_fan_running
@@ -60,7 +59,14 @@ from .hvac_action import is_hvac_action_active
 from .remote_offset import remote_offset_lines, remote_offset_view_for
 from .setpoint_combinations import vacation_edges
 from .swing import swing_tolerance, thermostat_holds_direction, within_thermostat_hysteresis
-from .temperature import UNIT_SYMBOL, display_temp, format_temp, format_temp_delta, read_attribute_temp_f
+from .temperature import (
+    UNIT_SYMBOL,
+    convert_delta,
+    display_temp,
+    format_temp,
+    format_temp_delta,
+    read_attribute_temp_f,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -582,7 +588,7 @@ fan_status values explained:
   active                    — CA commanded the fan on (natural vent or HVAC fan-only)
   running (manual override) — fan running; user overrode CA's command at the thermostat
   running (untracked)       — thermostat reports fan on but CA's _fan_active=False;
-                             typical after HA restart, or post-heat blowdown transient
+                             typical after HA restart, or a short blower run-on transient
   running (thermostat)      — the thermostat's own schedule/circulation blower (hvac_action=fan, fan_mode
                              attr auto) that CA did not command and does not own; shown instead of
                              'running (untracked)' (see fan_observed_started/stopped events)
@@ -839,10 +845,14 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                 f"  confidence:                {thermal.get('confidence', 'unknown')}",
                 f"  observation_count_heat:    {thermal.get('observation_count_heat', 'unknown')}",
                 f"  observation_count_cool:    {thermal.get('observation_count_cool', 'unknown')}",
-                "  NOTE — these are all-time cumulative counters (confidence-grading input), not",
-                "  the live committed/rejected counts shown in THERMAL OBSERVATION PIPELINE below,",
-                "  which are windowed to 90 days and capped. A large gap between them is expected",
-                "  on installs with enough history and does not indicate lost data (Issue #586).",
+                "  NOTE — these are the evidence behind the heating/cooling rates (the confidence-",
+                "  grading input), not cumulative counters: the pre-upgrade count, which gives way",
+                "  only as newer informative cycles replace or contradict it (never with time alone),",
+                "  plus the cycle model's weighted informative cycles (Issue #1512). They can fall",
+                "  when new cycles arrive and stay unchanged through a quiet season. They are not the",
+                "  live committed/rejected counts shown in THERMAL OBSERVATION PIPELINE below, which count",
+                "  the observations still kept (capped per type, none leaves with time); a gap between them",
+                "  is expected and does not indicate lost data (Issues #586, #1523).",
                 *_swing_context_lines(thermal, getattr(coordinator, "config", None) or {}),
                 "",
             ]
@@ -967,9 +977,20 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
     ]
 
     # Reason codes that indicate the observation was interrupted by normal system operation.
-    _OPERATIONAL_CODES = {"abandoned", "indoor_unavailable"}
+    # Issues #1512/#1516: a new session, fan start or mode switch ends a run early by design.
+    _OPERATIONAL_CODES = {
+        "abandoned",
+        "indoor_unavailable",
+        "new_session_started",
+        "fan_activated",
+        "hvac_mode_switch",
+    }
 
     # Reason codes that indicate a signal quality problem worth flagging.
+    # Issues #1512/#1516: the cycle model's codes say why a heating or cooling cycle taught the rate model
+    # nothing (too short, room moved less than the sensor can show, setpoint changed, a restart or an unavailable
+    # thermostat cut it, a window or fan was involved). The two ``hvac_*`` run codes are HISTORICAL: the per-run
+    # estimator that wrote them is retired, but old entries stay in the stored history until they age out.
     _QUALITY_FAILURE_CODES = {
         "too_few_samples",
         "too_few_blocks",
@@ -979,11 +1000,22 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
         "ols_bounds",
         "window_too_short",
         "no_interior_peak",
+        "cycle_too_short",
+        "cycle_signal_below_resolution",
+        "cycle_excluded_window_fan",
+        "cycle_setpoint_change",
+        "cycle_gap_restart",
+        "cycle_thermostat_unavailable",
+        "cycle_no_off_edge",
+        "cycle_sensor_swap",
+        "hvac_run_too_short",  # historical (retired per-run estimator)
+        "hvac_signal_below_resolution",  # historical (retired per-run estimator)
+        "no_k_passive",  # historical
     }
 
     lines.append("Per-type rejection summary:")
     lines.append(
-        f"  (committed is windowed to 90 days and capped at {THERMAL_OBS_CAP}; rejected is capped at"
+        "  (committed = still kept, capped per type, none leaves with time (#1523); rejected is capped at"
         f" {_REJECTION_LOG_CAP} per type — compare against observation_count_heat/cool in LEARNING —"
         " THERMAL MODEL above only as a floor, not an exact match; Issue #586)"
     )
@@ -1038,6 +1070,54 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
             elif total_rejected > 0:
                 lines.append("    — no quality failures")
 
+    # Issues #1512/#1516: say how heating/cooling rates are learned so the AI does not assume a per-run or
+    # post-run fit, and does not over-trust a rate learned from whole-degree short cycles.
+    lines.append(
+        "How heat/cool rates are learned (the cycle model): every heating or cooling cycle is recorded with the"
+        " room readings around it, and all recent cycles are fitted together (the rate, the leak and the coast"
+        " after the equipment stops) so the room's drift after a run is modelled, not mistaken for the rate."
+        " It uses the home's typical-house default or its stored rate as a starting guess, pulled by how much"
+        " evidence there is, so it is never worse than the default and improves with each informative cycle."
+        " A cycle only counts when the room moved by at least three sensor steps; on a whole-degree sensor"
+        " short cycles cannot identify the rate, so the model says so (grade low, never high) instead of"
+        " guessing. Old cycles give way only to newer ones: a cycle's weight halves for every 20 newer"
+        " informative cycles, never with time alone, so a quiet season changes nothing and there is no reset."
+        " The closed-house leak rate comes only from closed-up stretches (passive windows); the open-window"
+        " rate never stands in for it. On a v4 zone decisions use v4's own control rate; the cycle model's"
+        " measurement is shown beside it."
+    )
+    try:
+        crow = [
+            r
+            for r in (
+                coordinator.decision_rates_summary()
+                if callable(getattr(coordinator, "decision_rates_summary", None))
+                else []
+            )
+            if isinstance(r, dict) and r.get("source") == "cycle"
+        ]
+        # rows carry q / sd_q in the display unit per hour and coast_area_f as a degF delta (_cycle_model_rows)
+        _unit = (getattr(coordinator, "config", None) or {}).get("temp_unit", "fahrenheit")
+        _sym = UNIT_SYMBOL.get(_unit, "°F")
+        for r in crow:
+            val = r.get("value") if isinstance(r.get("value"), dict) else r
+            mode = r.get("mode") or ("cool" if "cool" in str(r.get("key", "")) else "heat")
+            q, grade = val.get("q"), val.get("grade")
+            if not isinstance(q, (int, float)) or isinstance(q, bool):
+                continue
+            sd, area = val.get("sd_q"), val.get("coast_area_f")
+            parts = [f"{mode} rate {q:.2f}"]
+            if isinstance(sd, (int, float)) and not isinstance(sd, bool):
+                parts[0] += f" +/- {sd:.2f}"
+            parts[0] += f" {_sym}/h"
+            parts.append(f"grade {grade or 'none'}")
+            if isinstance(area, (int, float)) and not isinstance(area, bool):
+                parts.append(f"coast after a run {convert_delta(area, _unit):+.2f} {_sym}")
+            if val.get("ne") is not None:
+                parts.append(f"{val.get('ne')} informative cycles")
+            lines.append("  cycle model: " + ", ".join(parts))
+    except Exception:  # noqa: BLE001 - context building never fails the investigator
+        pass
     # Pipeline failure detection
     hvac_total_committed = hvac_heat_committed + hvac_cool_committed
     hvac_total_rejected = hvac_heat_total_rejected + hvac_cool_total_rejected

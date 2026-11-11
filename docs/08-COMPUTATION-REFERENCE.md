@@ -48,7 +48,7 @@ The automation logic table and all threshold constants in this document are expr
 | What does the `comfort_family_switch` event carry, and where is the mode-change history kept? | Payload `resolved_family`, `reason`, `margin_applied_f`, `indoor_f`, `floor_f`, `ceiling_f`, `breach` (retired: `deadband_applied_f`, `minutes_since_*_ended`). Since #1073 a held switch emits `comfort_switch_held` and every actual mode write emits `thermostat_mode_set`. Every commanded-mode change is also appended to a 200-entry ring buffer (`AutomationEngine.comfort_mode_changes`) that feeds the `control_quality` report and is the one persisted mode-change clock. | [§6f Events and observability](08-COMPUTATION-REFERENCE.md#events-and-observability) |
 | Why does nat-vent no longer set HVAC off when windows open (Issue #249)? | The band stays armed when nat-vent activates; the thermostat self-arbitrates — free cooling is free, AC kicks in only if the breeze can't hold the ceiling. Turning HVAC off also disarmed the floor, making cold-snap escalation impossible. Fix #338 adds: when nat-vent activates (or re-activates from paused), `_apply_nat_vent_hvac_state()` immediately re-arms the appropriate band (full or floor-only per `aggressive_savings`), closing a gap where Path B re-activation deferred re-arming up to 30 min. | [§6e — Nat-vent and economizer with the band armed](08-COMPUTATION-REFERENCE.md#nat-vent-and-economizer-with-the-band-armed) |
 | What band does `_apply_nat_vent_hvac_state()` arm when nat-vent activates, and how does `aggressive_savings` affect it? | `FAN_MODE_WHOLE_HOUSE`/`DISABLED` → no-op. `FAN_MODE_HVAC` + `aggressive_savings=False` → full band `[comfort_heat, comfort_cool]`. `FAN_MODE_HVAC` + `aggressive_savings=True` → floor-only (heat @ `comfort_heat`, ceiling disarmed — no compressor through open windows). Called at initial activation, paused re-activation, and every 30-min `apply_classification()` cycle. | [§6e — `_apply_nat_vent_hvac_state()`](08-COMPUTATION-REFERENCE.md#_apply_nat_vent_hvac_state--thermostat-off-while-the-blower-ventilates-fix-338-replaced-by-issue-1142-d7) |
-| How does the solar phase offset resolver decide which EWMA to use, and what is the fallback? | Fresh primary wins; fresh secondary (≥ 3 obs) next; then stale primary; stale secondary; generic default only when nothing has ever been learned. Staleness = last_obs_date absent or > 90 days old (`THERMAL_PARAM_STALE_DAYS`). | [§5e-viii Two-EWMA Solar Phase Architecture](08-COMPUTATION-REFERENCE.md#5e-viii-solar-phase-offset--two-ewma-architecture-issue-312) |
+| How does the solar phase offset resolver decide which EWMA to use, and what is the fallback? | By evidence, never by date (Issue #1524): with both learned and the secondary qualified (≥ 3 AC-duty days), `keep × primary + (1 − keep) × secondary`, where the primary's share `keep` halves every 20 new AC-duty days that agree with it (every 5 that are ≥ 1 h away from it) and is restored the same way by new passive windows (the secondary's share halved per 20, or 5 when the window is ≥ 1 h from it). Only complete AC-duty days count, each once. One learned → that one; nothing learned → the default (2 h). | [§5e-viii Two-EWMA Solar Phase Architecture](08-COMPUTATION-REFERENCE.md#5e-viii-solar-phase-offset--two-ewma-architecture-issue-312) |
 | What quality gates must a chart_log day pass before the AC duty cycle solar phase method estimates an offset? | Five gates: setpoint_cool field present; setpoint in [68, 80]°F; spread < 1.5°F over 11:00–18:00; ≥ 4 cool entries in 11:00–16:00; at least one 11:00–16:00 entry has indoor > median setpoint. | [§5e-viii AC duty cycle quality filter](08-COMPUTATION-REFERENCE.md#5e-viii-solar-phase-offset--two-ewma-architecture-issue-312) |
 | What are the two fan archetypes and how does each affect HVAC mode and fan-stops-on-close behavior? | `FAN_MODE_HVAC` (HVAC blower): band stays armed, HVAC unchanged when fan activates, fan does NOT stop when windows close unless `_natural_vent_active=True`. `FAN_MODE_WHOLE_HOUSE` (exhaust fan): HVAC set to off on activation (mode captured in `_pre_fan_hvac_mode`), restored on deactivation, fan stops when ALL sensors close even if `_natural_vent_active=False`. | [§9 Fan Archetype Behavioral Contract](08-COMPUTATION-REFERENCE.md#fan-archetype-behavioral-contract-issue-277) |
 | Why does `_set_hvac_mode("off")` also set `_fan_command_time` (Issue #277 Bug A1)? | The `set_fan_mode(auto)` assertion inside `_set_hvac_mode("off")` sets `_fan_command_time = dt_util.now()` before the service call, so cloud thermostat echoes of the fan_mode attribute change are suppressed within the `_is_recent_fan_command` window instead of triggering a false manual override. | [§9b Race Guard — `_set_hvac_mode("off")` fan_command_time](08-COMPUTATION-REFERENCE.md#_set_hvac_modeoff-fan_command_time-guard-issue-277-bug-a1) |
@@ -320,28 +320,13 @@ T(t+dt) = T_outdoor + (T - T_outdoor) * exp(k_p * dt) + (Q/k_p) * (exp(k_p * dt)
 
 **Nearest-edge arming in the predicted curve (Issue #1067), heating direction only:** the real thermostat defends whichever comfort edge the house is outside of (`decide_comfort_family()`, `docs/comfort-edge-selection-spec.md`), not just the day-level mode. On a cool mild morning (day mode `off`) that starts under the floor, the engine heats; before #1067 the curve instead drifted down with `Q=0`. Per forecast hour on the **physics path** (hours that use the ODE; the leaf is not called on setpoint-schedule fallback hours), `_build_predicted_indoor_future()` calls the same pure leaf with the running ODE state (`_t_current`), that hour's band edges from the displayed band schedule (no band math duplicated), and `COMFORT_MIN_ARMING_MARGIN_F`. Only a **below-floor breach** overrides the day mode: heat mode, the floor setpoint and `k_active_heat` are used. Inside the band the day-mode behaviour is unchanged (an armed edge exerts no force there in the ODE). **The above-ceiling (cooling) direction of this function is deliberately unchanged and stays day-mode driven** (the curve is never clamped at the ceiling). **However, downstream outcomes are NOT unchanged:** after a morning floor-heating the curve's later hours start from the floor instead of drifting below it, so they are higher. The same curve (`_last_predicted_indoor`) feeds the ODE ceiling guard (`decide_ode_ceiling_guard`, with the 1.0 F bridge tolerance, section 6c), which may therefore predict an afternoon ceiling breach sooner or for the first time (measured example: band 70/75, k_passive -0.12, k_solar 0.3, outdoor peak 78, mild `off` day starting below the floor: before, `NO_BREACH_PREDICTED` with max about 74 F; after, `STANDING_BY` with max 75.6 F; hotter days breach roughly 1.5-2 h earlier). This is deliberate and more realistic (the real thermostat does heat). It also shifts the nat-vent plan cutoff, the briefing, the chart-log archive and control_quality `prediction_error`. Pinned by `tests/test_predicted_indoor_arming.py::TestCeilingGuardOutcomeShift`. The leaf is not applicable, so the day mode stands, in open-window (nat-vent) hours and during an active TOU precondition window. Documented divergences: (a) the **settling guard** (Issue #1073) is left disabled (`recency_window_min=0`), because a forecast has no equipment-run clock; (b) the setpoint-schedule **fallback** path (no calibrated model) is unchanged. Mirror not yet fixed (tracked in Issue #1079): `_walk_forward_regime()` still uses the day-mode-only shape.
 
-**Gate bridge self-healing (Issue #126 Phase A):** When `k_passive` is `None` but
-`k_vent_window` is available (homes with ventilated-only observations and no passive or
-HVAC cycles), the coordinator promotes `k_vent_window` to stand in as the proxy decay
-rate. Two bugs fixed:
+**No gate bridge (removed in Issue #1512):** earlier versions promoted `k_vent_window` to stand in for an unlearned `k_passive` (Issue #126 Phase A). The open-window rate is not the closed-house leak rate, so that stand-in overstated the leak and mis-shaped the forecast. `physics_eligibility` now needs a real closed-house `k_passive < 0`; it returns `(eligible, k_passive)` (the `via_bridge` third value and the `k_passive_via_bridge` flag were removed in Issue #1512). `_build_predicted_indoor_future` has no bridge branch and `operation_timeline.model_rates` does not promote `k_vent_window`. Window-open forecast hours still use `k_vent_window` as the window rate. A home without a closed-house rate yet uses the ramp fallback below until passive windows or the duty-balance fit (§5e-vi) learn one.
 
-- **Bug A:** The bridge now fires when `_conf_k_passive == "none"` (string equality), not
-  only when `k_passive is None`. Pre-Issue #126 installs that stored `k_passive=None` with
-  `confidence="none"` self-heal automatically on the next coordinator update — the bridge
-  detects the "none" string and promotes `k_vent_window`.
-- **Bug B:** The `_k_passive_via_bridge=True` flag bypasses the `_physics_eligible()`
-  confidence check. Without this flag, bridge-provided k_passive would still fail the
-  `conf != "none"` guard and fall through to the ramp path, defeating the purpose of the
-  bridge.
-
-Install states handled:
-
-| Install state | k_passive | confidence | k_vent_window | Bridge fires? | Physics eligible? |
-|---|---|---|---|---|---|
-| Fresh — no data | `None` | `"none"` | `None` | No (nothing to promote) | No — ramp |
-| Contaminated — old bug | `None` | `"none"` | valid | Yes — promotes k_vent_window | Yes — physics |
-| Healed — bridge ran | promoted value | `"none"` (unchanged) | valid | Not needed (k_passive set) | Yes — bypass flag |
-| Normal — HVAC obs | valid | `"low"`/`"medium"`/`"high"` | any | Not needed | Yes — normal path |
+| Install state | k_passive | Physics eligible? |
+|---|---|---|
+| Fresh — no data | `None` | No — ramp |
+| Only ventilated observations | `None` | No — ramp (no bridge) |
+| Closed-house rate learned (passive windows) | valid, `< 0` | Yes — when either grade is above `"none"` |
 
 **Fallback (ramp interpolation):** When model confidence is `"none"` or `k_passive` is unavailable/non-negative, the legacy ramp path runs:
 
@@ -403,8 +388,8 @@ HVAC heat/cool cycles. Multiple observation types can run concurrently in a
 
 | Type | Trigger | Measures | Min samples |
 |------|---------|----------|-------------|
-| `hvac_heat` | hvac_action=heating | k_active_heat, k_passive (via pre-heat buffer) | 10 post-heat |
-| `hvac_cool` | hvac_action=cooling | k_active_cool | 10 post-heat |
+| `hvac_heat` | hvac_action=heating | k_active_heat (pooled cycle model; never k_passive) | cycle ≥ 3 min, ≥ 3 sensor steps |
+| `hvac_cool` | hvac_action=cooling | k_active_cool (same) | same gate |
 | `passive_decay` | HVAC off, fan off, windows closed, \|ΔT\| ≥ 3°F | k_passive | 30 |
 | `vent_window_decay` | Window open, fan/WHF off, HVAC off | k_vent_window | 20 |
 | `vent_fan_decay` | Window open, fan/WHF on, HVAC off | k_vent_fan | 20 |
@@ -417,8 +402,7 @@ HVAC heat/cool cycles. Multiple observation types can run concurrently in a
 > `THERMAL_VENT_MIN_SIGNAL_F = 0.3` (`const.py`), driven by a single shared
 > `_VENT_SPLIT_TYPES` table in `coordinator.py` rather than parallel per-type logic.
 
-**HVAC plateau guard**: reduced from 1.0°F to 0.3°F (`THERMAL_HVAC_MIN_DECAY_F`). The 1.0°F
-guard rejected all observations on short-cycling thermostats (avg cycle < 1°F rise).
+**No plateau guard (Issue #1512):** the old post-run decay requirement is gone; a run is committed or rejected with a code at the off edge (§5e-vi).
 
 **ODE (v3)**: `dT/dt = (k_passive + k_vent_eff)*(T_out - T_in) + k_solar*solar_factor + Q_hvac`
 where `k_vent_eff = k_vent_window` when a window is open, `solar_factor` = sinusoidal 0→1→0
@@ -427,7 +411,7 @@ over daylight hours (8–18 local), `Q_hvac = ±k_active` when HVAC is driving t
 **not** wired into this ODE — a deliberate Issue #587 scope boundary, not an oversight; see
 the Engine Visibility section of `docs/thermal-model-v3-spec.md`.
 
-**Confidence grades**: `confidence_k_passive` is graded independently of `confidence_k_hvac`.
+**Confidence grades**: `confidence_k_passive` is graded independently of `confidence_k_hvac`, from `observation_count_passive` plus the pre-upgrade evidence `rate_prior["k_passive"]["n"] × keep` (`keep` halves per 20 new passive observations, never with time alone) (passive + heat + cool counts for a cache with no prior yet): heat/cool runs never write `k_passive`.
 Physics prediction activates when either confidence is > "none", enabling prediction on
 homes with passive-only observations (zero HVAC cycles recorded). Grades and the eligibility
 rule are computed live from the observation counts by `thermal_confidence.py` (shared with the
@@ -454,7 +438,6 @@ often a sample is appended to each observation's `samples` list:
 | Type | Sample interval | Constant |
 |------|----------------|----------|
 | `hvac_heat` / `hvac_cool` active phase | Every poll (no gate) | — |
-| `hvac_heat` / `hvac_cool` post-heat phase | 5 min | `THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S` |
 | `passive_decay` | 5 min | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` |
 | `vent_window_decay` | 5 min | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` |
 | `vent_fan_decay` | 5 min | `THERMAL_PASSIVE_SAMPLE_INTERVAL_S` |
@@ -506,12 +489,12 @@ window length naturally.
 #### 5e-iv. `_update_thermal_model_cache()` — E6 Parameter Routing Fix (Issue #122; obs types renamed in #587)
 
 Each committed observation updates the EWMA cache via `learning._update_thermal_model_cache()`.
-The observation type determines which cache field is updated:
+The observation type determines which cache field is updated. `k_active_heat`, `k_active_cool` and `k_passive` are the exception to "EWMA": since Issue #1512 they are recomputed after every commit and on load as a weighted median of the retained observations (§5e-vi), each weighing half as much per 20 newer observations of its rate, so old values give way to new evidence instead of persisting forever, and never to time alone (Issue #1523). The other fields keep the EWMA:
 
 | Obs type | Updates cache field | Count field |
 |---|---|---|
-| `hvac_heat` | `k_active_heat`, `k_passive` | `observation_count_heat` |
-| `hvac_cool` | `k_active_cool`, `k_passive` | `observation_count_cool` |
+| `hvac_heat` | `k_active_heat` (ageing weighted median, Issue #1512; old run-edge observations carry no `k_passive`) | `observation_count_heat` |
+| `hvac_cool` | `k_active_cool` (same, Issue #1516) | `observation_count_cool` |
 | `passive_decay` | `k_passive` only | `observation_count_passive` |
 | `vent_window_decay` | `k_vent_window`; also `k_solar` when 2-param OLS fires (see §5e-v) | `observation_count_vent_window` |
 | `vent_fan_decay` | `k_vent_fan` | `observation_count_vent_fan` |
@@ -598,71 +581,66 @@ Individual window rejections are logged at DEBUG level with the reject reason.
 
 The two-tier design avoids re-scanning months of history on every coordinator cycle while ensuring that a newly deployed instance learns a reasonable phase offset from its first day of data.
 
-#### 5e-vi. HVAC Commit Path — Single-Point Estimator and Proxy-Aware Gating (Issue #130)
+#### 5e-vi. HVAC Rates — the Pooled Cycle Model and Ageing (Issues #1512, #1516)
 
-Issue #130 fixed HVAC observations producing zero commits despite 60 days of heat cycles.
-The root causes were: (RC1) 10-sample post-heat minimum requiring 50 min — too long for
-5–30 min cycles; (RC3) `outdoor=None` at state transitions blocking sample collection;
-(RC4) bridge homes with `k_passive=None` blocking `k_active` computation; (RC5) no
-backfill tool.
+*Replaces the Issue #130 commit path (post-heat OLS, stabilization wait, plateau guard, `k_vent_window` proxy), which asked what the room does after the equipment stops, and then a short-lived per-run estimator and a duty-balance fit, both retired. Occupant outcome: every home gets a heating and cooling rate that is never worse than the typical-house default, improves with every informative cycle, says honestly how sure it is, and does not jump at upgrade. Evidence (poc2 backtests): whole-degree sensors with 5-8 minute cycles cannot identify a rate from one run; pooled and gated, they can say "rough" and still beat the default.*
 
-**Fixes applied:**
-
-| Fix | Mechanism |
-|---|---|
-| D14: Lower post-heat minimum | `THERMAL_MIN_POST_HEAT_SAMPLES`: 10 → 4 |
-| D15: Remove stabilization gate | `_check_hvac_stabilization()` commits as soon as min samples reached; no ±0.3°F stability wait |
-| D16: Outdoor temp fallback | `_last_known_outdoor_f` caches the last non-None outdoor reading; used within a 30-min window when current reading is `None` |
-| D17: k_vent_window proxy | `_commit_event_from_dict()` uses `k_vent_window` as k_passive when `k_passive=None` (bridge homes); marks grade `"low"` |
-
-**Single-point `k_active` estimator (`compute_k_active_single_point()`):**
-
-When `n_active < 2` (cycle is shorter than the 5-min sampling interval), OLS cannot fit a
-heating rate. The single-point estimator uses exact HVAC on/off timestamps:
+**Model** (`cycle_model.fit_cycles(cycles, mode, prior, now_ts)`, pure; used by the coordinator, `tools/thermal_replay.py --cycles` and `tools/predict_backtest.py`). Per mode, level-mode joint fit over the stored cycles:
 
 ```
-k_active = (T_peak − T_start) / elapsed_hours − k_passive × avg(T_in − T_out)
+T_j = a_cycle + q·Q_j + k·K_j + c·C_j(tau)
+q            heating/cooling rate while the equipment runs (°F/h; cooling is negative)
+k            leak (1/h), reported as k_p_cycle: a diagnostic, never read by a decision
+c·tau/60     coast_area_f: °F the room keeps moving after the equipment stops (+ continues, − gives back)
+tau          coast timescale, grid 1.5-20 min, profiled
+a_cycle      each cycle's own starting level
 ```
 
-`elapsed_hours` comes from state-change timestamps, not sample spacing, so it reflects the
-true HVAC-on duration. `post[0].ts` is used as the HVAC-off timestamp when `n_active=1`.
+Earlier off-edge tails are superposed back 120 min. Robust loss: Huber IRLS (threshold 1.345·scale), scale `max(1.4826·MAD/√max(dof, 0.2), max(0.3·res, 0.05 °F))` with MAD = median |residual| and `dof = max(N − cycles − parameters, 1) / N` over the N readings (`cycle_model._fit_core`; poc2 `est5`; this line said `0.6·res`, which the code never used). Hampel cleaning: half-window 5 min, at least 5 readings, threshold `max(3.5·1.4826·MAD, 2·res, 0.5 °F)`. Restart rule: after a gap longer than `max(2.5 min, 2.5 × median dt)` drop leading readings deviating more than `max(2·res, 0.8 °F)` from the following 8-min median. Ridge prior on `(q, k, c|tau)`; deff 0.5 (fine sensor), 1.0 (coarse); bounds after the fit.
 
-**Signal guard (`THERMAL_HVAC_MIN_SIGNAL_F = 0.5°F`):** If `|T_peak − T_start| < 0.5°F`,
-the cycle is rejected as a setpoint-maintenance run — no learnable k_active information.
+**Prior** (`typical_prior`, `prior_from_cache`): fresh home `q_heat 8 ± 5 °F/h`, `q_cool −8.83 ± 5.5`, `k −0.03 ± 0.06`, coast area `0 ± 2 °F`. Existing home: its stored rates weighted by their evidence, `n_eff = 0.25 · n · keep` (`rate_prior`; `keep` below). Held fit (Issue #1512 finding 4): when the cycles behind the last usable fit are not in the pool (sensor swap, or the first cycle after a season longer than the store's 90 days), that fit (`cycle_model.held_candidate`: the current `cycle_fit_<mode>` or its `held` copy) is the q prior: `N(q_held, sd_held² / keep)` combined with the typical house, dropped once `keep < 0.01`.
 
-**Call path:** `_commit_event_from_dict()` first attempts OLS via `compute_k_active()`.
-If OLS returns `None` (insufficient samples), it falls through to
-`compute_k_active_single_point()`. When bridge proxy was used for k_passive, the obs dict
-emits `k_passive=None` to prevent the proxy value from contaminating the k_passive EWMA
-(D21).
+**Evidence displacement** (owner decision 2026-11-11, "Fade only on new evidence"; `learning.apply_cycle_fit`, `thermal_confidence.displaced_keep`): no clock anywhere. `new` = eligible cycles of this fit with `t_on > t_seen` (the newest any earlier fit saw). For the record that was this fit's prior (legacy `rate_prior["k_active_<mode>"]` or `held`): `keep ← keep · 0.5 ** (new / 20)`, or `/ 5` when `|q − prior_q| > 2·prior_sd_q` (contradiction); the other record at `/ 20`. k_passive: `keep ← keep · 0.5 ** (1/20)` per new passive observation. Cycle weight in the fit: `0.5 ** (newer eligible cycles / 20)`. Store retention: 90 days back from the mode's newest cycle (capped at now).
 
-**Proxy-aware `n_post` gating:** `_check_hvac_stabilization()` reads `k_vent_window` from
-`thermal_model_cache` at commit time. When `k_vent_window` is available and negative
-(proxy present), the `n_post` minimum drops from `THERMAL_MIN_POST_HEAT_SAMPLES` (4) to 1
-and the plateau guard is bypassed. For all other homes, the thresholds are unchanged.
+**Gates:** resolution per entity = most common non-zero step between consecutive readings. Eligible cycle: run ≥ 3 min **and** robust reading movement ≥ 3 resolution steps within `[on, off + 3 min]` (one extreme dropped each side). No eligible cycle → the prior unchanged, grade `none`. `k` pinned at the prior for coarse pools (res ≥ 0.5 °F); for fine pools pinned until 3 eligible cycles, then prior sd 0.06. Plateau trim: reading at its final level ≥ 10 min before off → effective off is when it reached it. Coarse pools with `ne` < 3: variance × `(3/ne)²`. At most the last 60 eligible cycles, weight `0.5 ** (newer eligible cycles / 20)` (no clock). Excluded: windows open, fan running or paused, nat-vent, sensor swap. A setpoint change ends the cycle and keeps the run portion (Issue #1512 finding 3: off edge within 60 s of the change = the run's end; else the run ends at the change with no off edge and continues as a new cycle; nothing after the change is recorded). Not excluded: solar (the optional solar regressor is OFF behind a constant).
 
-| Condition | `n_post` minimum | Plateau guard |
+**Grade** (`er_q = 1 − postvar/priorvar`):
+
+| Sensor | ne | Grade |
 |---|---|---|
-| No proxy (normal or fresh install) | 4 | Active — rejects if `peak − end < 0.3°F` |
-| Proxy available (`k_vent_window < 0`) | 1 | Bypassed |
+| any | 0 | `none` |
+| coarse (≥ 0.5 °F) | any | `low`; `medium` when `er_q ≥ 0.95` and `ne ≥ 2`; never `high` |
+| fine | any | `low`; `medium` when `er_q ≥ 0.6` and `ne ≥ 2`; `high` when `er_q ≥ 0.95` and `ne ≥ 4` |
 
-**`thermal_replay --hvac` mode:** `run_hvac_replay_ols()` in `tools/thermal_replay.py`
-applies the same OLS → single-point fallback and proxy-aware gating to historical chart_log
-data. Use for backfilling HVAC observations after deploying Issue #130 fixes.
+**Outputs per mode** in `thermal_model_cache["cycle_fit_heat" | "cycle_fit_cool"]`: `q`, `sd_q`, `k_p_cycle`, `sd_k`, `coast_area_f`, `tau`, `ne`, `n_cycles`, `er_q`, `grade`, `resolution_f`, `prior_q`, `prior_sd_q`, `ne_w` (Σ weights of the eligible cycles), `entity`, `t_last`, `t_seen`, `fitted_at`, `applied`, `held` (with `keep`). On a v3-primary zone `learning.apply_cycle_fit` writes `q` into `k_active_heat`/`k_active_cool` (a held fit standing in: `keep·q_held + (1−keep)·aged`, i.e. q_held until new cycles displace it) and the grade feeds the HVAC confidence; on a v4-primary zone decisions keep v4's control rates and the fit is only shown (Analysis, Debug, AI, engines `decisions` rows with `source: "cycle"`). `k_passive` is never touched.
+
+**HVAC confidence** (`thermal_confidence.grade_hvac_confidence`; one function for heat/cool, v3/v4; no clock): per mode the fit grade (current fit with eligible cycles; else a held fit standing in; plus the held grade while it is the prior of an agreeing fit) and the count tier of `Σ L` over the modes, `L = n_prior · keep` (`observation_count_<mode>` for a mode with no prior entry), a mode's `L` counted only when its current fit agrees (`|q − prior_q| ≤ 2·prior_sd_q`) or it has no eligible cycle: none < 5 ≤ low < 10 ≤ medium < 20 ≤ high. Result = max(count tier, best fit grade). Reported evidence (`hvac_evidence_count`) = `L + ne_w` (+ held `ne_w · keep` while it stands in or is the prior). Verified with the production recorder/store/model (synthetic home, 65 heat + 286 cool at upgrade): whole-degree short cycles (no eligible cycle) stay `high` with evidence 351 for 220 days, v3 and v4; a fine sensor idle 120 days stays `high` and resumes with no step.
+
+**Refit cadence** (finding 7): every closed cycle is judged alone at once; the full refit of a mode runs on 3 new eligible cycles, the first eligible cycle of an unlearned mode, 30 min after the last refit (5-minute tick), and at startup; the cycle file is written periodically and at HA stop / unload (a crash may lose the most recent cycles; the next refit uses the survivors as a normal refit: the fit is held only when all the cycles it was fitted on are gone, `t_first`..`t_last`, and `t_seen` keeps the survivors from counting as new).
+
+**Rejections** (persisted, shown on all surfaces): `cycle_too_short`, `cycle_signal_below_resolution`, `cycle_excluded_window_fan`, `cycle_setpoint_change` (the run before the change too short), `cycle_gap_restart`, `cycle_thermostat_unavailable`, `cycle_no_off_edge`, `cycle_sensor_swap`, `ols_bounds`. The old `hvac_run_too_short`, `hvac_signal_below_resolution`, `no_k_passive` remain in stored history only and age out.
+
+**Worked example (why short whole-degree cycles are "low").** A 6-minute heat cycle on a 1 °F sensor moves the reading 0 or 1 step. That is under the 3-step gate, so it is `cycle_signal_below_resolution`: it does not move the rate, it is not an error. A 40-minute recovery run moving 4 steps is eligible; with the prior `8 ± 5 °F/h` it pulls `q` toward the measured value by how much more certain the data is than the prior, and the grade says how far (`low` until `er_q` reaches 0.95 with two eligible cycles on a coarse sensor).
+
+**Ageing of the stored observations** (`aged_rates`): the three rates are weighted medians over the retained `thermal_observations`: weight = grade weight (high 1.0, medium 0.6, low 0.3) × method weight (1.0 for `run_edge`, `duty_balance` (both retired methods whose old observations age out) and chart_log passive fits; `THERMAL_LEGACY_OBS_WEIGHT` 0.25 for legacy observations with no `method`) × `0.5 ** (newer / THERMAL_EVIDENCE_HALF_N)` (20), where `newer` counts the observations after this one in the list (the order of arrival) that feed the same rate (Issue #1523: was `0.5 ** (age_days / 21)`; a calendar clock let one fit after a quiet season replace the whole season-old value in one step). The current cached value is kept as a `rate_prior` pseudo-observation weighted `THERMAL_LEGACY_OBS_WEIGHT × n × share`, where `n` is the number of observations behind that value at upgrade (`observation_count_heat` / `observation_count_cool`; passive + heat + cool for `k_passive`) and `share` is its newer-evidence share: for `k_passive` the prior's `keep` (halved per 20 new passive observations, also those the cap has since let go), for heat/cool `0.5 ** (retained observations of that rate stamped after the prior / 20)` (none are written any more, so 1). It carries its evidence, so the first load changes nothing; with no new observation of a rate nothing moves however long the gap; nothing falls to defaults; no wipe.
+
+**Which observations are kept** (Issue #1523; `trim_thermal_observations`): the 200 (`THERMAL_OBS_CAP`) are shared out per kind (`hvac_mode`; `THERMAL_OBS_KIND_CAPS`: passive 80, vent_window 40, vent_fan 30, solar 20, heat 10, cool 10, other 10). A new observation can make room only by its own kind's oldest leaving; nothing leaves with time; a kind stored above its share before this rule keeps that many (one in, one out, never cut at once); loading prunes nothing. Was: 90 days back from today and the newest 200 overall on every commit of any kind, so a summer of vent fits evicted every closed-house fit and `k_passive` fell back to its pre-upgrade `rate_prior` value (on v4, `k_active_*` likewise lost its stored run-edge observations). What the occupant gets: after a season without closed-house windows, setback depth, pre-heat timing and the nat-vent thermal-floor check use the leak rate learned before it, and autumn's fits move it over about 20 fits, not one. The cycle model's prior reads the same `rate_prior` with `n × keep`, so a home's old value gives way to the new fit as new cycles arrive.
+
+**`thermal_replay --cycles` mode:** `run_cycle_replay()` in `tools/thermal_replay.py` reads `climate_advisor_cycles.json` over SSH (same entry-scoped discovery as the learning DB), decodes it with production's `CycleStore`, builds the prior with `prior_from_cache` from the learning DB's cache and calls production `fit_cycles` per mode; there is no second copy of the math. `--hvac` keeps only the thermostat-swing replay. `predict_backtest`'s as-of v3 rebuild refits heat/cool from the cycles that began before each anchor with the same function.
 
 ```bash
-python tools/thermal_replay.py --hvac --days 60 --dry-run   # inspect without writing
-python tools/thermal_replay.py --hvac --days 60             # commit to learning DB
+python tools/thermal_replay.py --cycles --days 60   # fit the stored cycles, read-only
 ```
 
 **Implementation references:**
 
 | Component | Location |
 |---|---|
-| `compute_k_active_single_point()` | `learning.py` ~line 401 |
-| Single-point fallthrough in `_commit_event_from_dict()` | `learning.py` ~line 1145 |
-| Proxy-aware gate in `_check_hvac_stabilization()` | `coordinator.py` ~line 2951 |
-| `run_hvac_replay_ols()` | `tools/thermal_replay.py` ~line 817 |
+| `fit_cycles()`, `clean_series()`, `infer_resolution()`, `grade()`, `typical_prior()`, `prior_from_cache()` | `cycle_model.py` |
+| `CycleRecorder` | `cycle_recorder.py` |
+| `CycleStore` (`climate_advisor_cycles.json`) | `cycle_store.py` |
+| `LearningEngine.apply_cycle_fit()`, `aged_rates()`, `compute_k_active_single_point()` | `learning.py` |
+| `run_cycle_replay()`, `fetch_cycles_ssh()` | `tools/thermal_replay.py` |
 
 #### 5e-vii. Thermostat Swing - the thermostat's own hysteresis (Issue #102, redefined by Issue #1234)
 
@@ -753,26 +731,22 @@ The two EWMAs never cross-update: `update_solar_phase_offset()` in `learning.py`
 
 **Resolver — `_resolve_solar_phase_offset(cache)` (`learning.py`):**
 
-Each EWMA stores a `last_obs_date` field (`solar_phase_offset_last_obs_date`, `solar_phase_offset_ac_last_obs_date`). A parameter is **stale** if its date is absent or older than `THERMAL_PARAM_STALE_DAYS` (90 days). Stale home-specific data is still preferred over a generic default — the default is only used when nothing has ever been learned.
+**Evidence, not dates (Issue #1524, owner decision 2026-11-11 "fade only on new evidence").** The primary gives way to the secondary only as newer AC-duty days replace or contradict it. `solar_phase_offset_keep` is the primary's share (1.0 at first). Each new AC-duty day (`update_ac_duty_solar_phase_offset`) lowers it with `thermal_confidence.displaced_keep`: halved every `THERMAL_EVIDENCE_HALF_N` (20) days that agree with the primary, every `THERMAL_EVIDENCE_HALF_N_CONTRADICT` (5) days that are `THERMAL_SOLAR_PHASE_CONTRADICT_H` (1 h) or more away from it. Each new passive window (`update_solar_phase_offset`) restores it the same way: `keep ← 1 − (1 − keep) · 0.5 ** (1 / N)`, N = 20, or 5 when the window is 1 h or more from the secondary (Issue #1512 final verification: it used to return to 1.0 at once, so the expected peak could jump back by up to ~1.5 h in a day).
 
 ```
-1. primary = cache["solar_phase_offset_h"]
-   if primary is not None AND fresh (within 90 days) → return primary   ← preferred
-
-2. secondary = cache["solar_phase_offset_ac_h"]
-   ac_obs = cache["solar_phase_offset_ac_obs_count"]
-   if secondary is not None AND ac_obs >= 3 AND fresh → return secondary
-
-3. if primary is not None (stale) → return primary                       ← best stale data
-
-4. if secondary is not None AND ac_obs >= 3 (stale) → return secondary  ← next best stale
-
-5. return THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT (2)                       ← nothing ever learned
+1. primary and secondary (ac_obs >= 3) → keep × primary + (1 − keep) × secondary
+2. primary only                         → primary
+3. secondary only (ac_obs >= 3)          → secondary
+4. nothing learned                      → THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT (2)
 ```
 
-The secondary requires at least 3 accepted observations (`THERMAL_SOLAR_PHASE_AC_MIN_OBS`) before it is trusted in either the fresh or stale tier. The default prior (`THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT = 2`, peak at 3 pm local) is only returned when both EWMAs have never received an accepted observation.
+Each piece of evidence counts once: the AC-duty estimator re-scans the whole chart log every day, so a day no later than `solar_phase_offset_ac_last_obs_date` is skipped (it used to be folded into the EWMA and the count again every day), and today's day, not over yet, is not read at all (counted early, it would shut the complete day out), and a passive window ending no later than `solar_phase_offset_last_window_end` is skipped (the daily re-fit scans two days). The `last_obs_date` fields are kept for diagnostics only.
 
-**Staleness principle (applies to all computed thermal parameters — see Issue #314):** A learned value is only "current" if it was recently observed. An EWMA frozen by seasonal inactivity is stale, but it still encodes home-specific geometry and is a better estimate than a generic prior. The resolver prefers fresh > stale > default, with primary (passive method) winning within each tier.
+Was (Issue #312): a parameter not observed for `THERMAL_PARAM_STALE_DAYS` (90) was "stale" and a fresh secondary beat a stale primary, so on the 91st day after the last passive window the expected solar peak moved to the AC-duty hour with no new measurement. Upgrade: a cache without `solar_phase_offset_keep` gets it once at load (`migrate_solar_phase_keep`): 0.0 when the old rule was already using the secondary, else 1.0, so the offset in use does not change at the upgrade; `THERMAL_PARAM_STALE_DAYS` is read only there.
+
+The secondary requires at least 3 accepted observations (`THERMAL_SOLAR_PHASE_AC_MIN_OBS`) before it is used at all. The default prior (`THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT = 2`, peak at 3 pm local) is only returned when neither EWMA has an accepted observation.
+
+**Learned values give way only to new evidence (Issues #314, #1524):** an EWMA frozen by seasonal inactivity is not stale; it still encodes the home's geometry and stays in use until newer measurements replace or contradict it.
 
 `get_thermal_model()` returns `solar_phase_offset_h` as the **resolved** value — call sites (ODE, chart) receive the best available estimate without needing to know which source was used. The raw secondary EWMA is also exposed as `solar_phase_offset_ac_h` for diagnostic inspection.
 
@@ -808,6 +782,7 @@ Called once per coordinator update cycle (inside the `_run_solar_phase_chart_log
 |---|---|---|
 | `THERMAL_SOLAR_PHASE_AC_ALPHA` | 0.07 | Secondary EWMA smoothing factor |
 | `THERMAL_SOLAR_PHASE_AC_MIN_OBS` | 3 | Minimum observations before secondary is trusted by resolver |
+| `THERMAL_SOLAR_PHASE_CONTRADICT_H` | 1.0 | Issue #1524: an AC-duty day this far (h) from the primary contradicts it (primary share halves per 5 such days, else per 20) |
 | `THERMAL_SOLAR_PHASE_AC_SETPOINT_MIN_F` | 68.0 | Setpoint range lower bound |
 | `THERMAL_SOLAR_PHASE_AC_SETPOINT_MAX_F` | 80.0 | Setpoint range upper bound |
 | `THERMAL_SOLAR_PHASE_AC_SETPOINT_STABILITY_F` | 1.5 | Max allowed setpoint spread across 11:00–18:00 |
@@ -816,7 +791,7 @@ Called once per coordinator update cycle (inside the `_run_solar_phase_chart_log
 | `THERMAL_SOLAR_PHASE_OFFSET_MIN` | 0 | Offset clamp lower bound |
 | `THERMAL_SOLAR_PHASE_OFFSET_MAX` | 4 | Offset clamp upper bound (5 pm peak) |
 
-**Test coverage:** `tests/test_solar_phase.py` — `TestAcDutySolarPhase` (quality filter reject paths, estimation, EWMA update, resolver priority).
+**Test coverage:** `tests/test_solar_phase.py` — `TestAcDutySolarPhase` (quality filter reject paths, estimation, EWMA update, resolver priority)); `tests/test_solar_phase_evidence_1524.py` (no calendar switch, evidence switch, each day counted once, upgrade continuity).
 
 ---
 
@@ -1048,7 +1023,7 @@ If any condition fails, the guard **evaluates** (and fires if the breach scan co
 | Use | Value |
 |---|---|
 | Dormancy condition 3 (`indoor <= ceiling`) | guard ceiling |
-| Breach scan (`temp > ceiling + bridge tolerance`) | guard ceiling |
+| Breach scan (`temp > ceiling`) | guard ceiling |
 | Lead-time `delta_t` (`ceiling - indoor`) | guard ceiling |
 | Cool setpoint the guard writes (and the `ceiling_guard_fired.new_setpoint_f` / `nat_vent_ceiling_escalation.ceiling` event values; the same value is also written under the legacy key `comfort_cool` for persisted events and older readers) | guard ceiling (`OdeCeilingGuardDecision.ceiling`) |
 
@@ -1105,13 +1080,13 @@ The ODE ceiling guard's dormancy check (condition 3, above) treats `ceiling_thre
 | Condition | Action |
 |---|---|
 | `k_passive is None` OR `k_passive >= 0` | Skip — no calibrated passive model |
-| `confidence_k_passive == "none"` AND NOT bridge home | Skip — model not yet trustworthy |
+| `confidence_k_passive == "none"` | Skip — model not yet trustworthy (the bridge exception was removed in Issue #1512) |
 | Occupancy away or vacation | Skip — handled by upstream occupancy guards (§6a) |
 | `predicted_indoor` is empty or None | Skip — no ODE curve available (fresh install, no physics gate) |
 | Outdoor temp unavailable or missing | Skip |
 | `outdoor <= indoor` **AND** `_natural_vent_active` **AND** `indoor <= ceiling threshold` | Dormant — free cooling is actually viable; guard defers to nat-vent (see 3-condition dormancy below) |
 | `_find_ceiling_breach_time()` returns None | Dormant — no breach predicted above threshold |
-| Bridge home (`k_passive_via_bridge=True`) | Apply `+CEILING_BRIDGE_TOLERANCE_F (1.0°F)` tolerance; guard fires at `ceiling + 1.0°F` (`ceiling` = `comfort_cool`, or `comfort_cool + 2 F` with Prefer savings, Issue #1093) |
+| Breach threshold | Guard fires at the plain ceiling (`comfort_cool`, or `comfort_cool + 2 F` with Prefer savings, Issue #1093); the former bridge-home `+1.0°F` tolerance was removed in Issue #1512 |
 | `k_active_cool` not learned (None) | Guard fires with `CEILING_PRECOOL_FALLBACK_MIN = 120` min lead time |
 | All conditions met | Evaluate lead time; fire if breach is within window |
 
@@ -1171,19 +1146,18 @@ The guard is fully stateless — no `_ceiling_precool_scheduled` flag. On each 3
 - **Forecast worsens** (heat dome arrives): breach crosses into the lead time window → guard fires on the cycle when it first qualifies.
 - **HVAC already cooling** (guard or band put it there): the guard sends nothing while the thermostat cools at or below the guard ceiling (above). Warm-day classification (`hvac_mode="off"`) will naturally stop cooling on the next cycle once indoor drops below `comfort_cool`, because the comfort-floor guard (§6b) will not re-heat at that point.
 
-#### Bridge home behavior
+#### Bridge homes (removed)
 
-Bridge homes use `k_vent_window` as a proxy for `k_passive`. The `k_passive_via_bridge=True` flag causes the guard to apply `CEILING_BRIDGE_TOLERANCE_F = 1.0°F` tolerance, requiring the predicted curve to exceed `comfort_cool + 1.0°F` before the breach is recorded. This accounts for the proxy being measured under ventilated conditions, which is less accurate for the closed-window heat-approach phase.
+Bridge homes (`k_vent_window` standing in for `k_passive`) and their breach tolerance were removed in Issue #1512: the `k_passive_via_bridge` input and `CEILING_BRIDGE_TOLERANCE_F` constant no longer exist.
 
 #### Constants
 
 | Constant | Value | Purpose |
 |---|---|---|
 | `CEILING_PRECOOL_FALLBACK_MIN` | `120` | Lead time (minutes) when `k_active_cool` is not learned |
-| `CEILING_BRIDGE_TOLERANCE_F` | `1.0` | Extra °F threshold for bridge homes |
 | `CEILING_ESCALATION_SAVINGS_MARGIN_F` | `2.0` | Overshoot tolerated above `comfort_cool` before escalating in `aggressive_savings` mode (Issue #247) |
 
-All three are defined in `const.py`.
+Both are defined in `const.py`.
 
 #### Interaction with §6b comfort-floor guard
 
@@ -1197,7 +1171,7 @@ In practice the two guards do not conflict: if indoor is below `comfort_heat` (f
 
 **Observe-only (Issue #1301).** With automation switched off the guard still decides, but its `set_hvac_mode`/`set_temperature` writes come back `DRY_RUN` (nothing reaches the thermostat). Then no `ceiling_guard_fired` is emitted (before, the row claimed `mode: off->cool` for a switch that never happened); the decision is logged at INFO as `[DRY RUN] ODE ceiling guard would switch to cool at <ceiling> (breach predicted at HH:MM, ...)`. Nothing is stamped as commanded and no `ode_guard` mode change is recorded, so the selector's "cool ran recently" clock does not move. The `_arm_comfort_family("cooling")` call (Issue #843) still runs: `_comfort_mode_family` is a compatibility attribute that no production decision reads (the selector reads the thermostat's real mode, and in observe-only `_last_resolved_family`, Issue #1066 F2c), and the selector itself writes it in observe-only too; the harness `comfort_family` assertion reads it. Tests: `tests/test_ceiling_guard_observe_only_1301.py`.
 
-**Test coverage:** `tests/test_warm_day_comfort_gap.py` — `TestCeilingDefenseActive`, `TestCeilingPreCoolFallback`, `TestCeilingWeatherChange`, `TestCeilingBridgeTolerance`, `TestCeilingDefenseManualOverride`. `tests/test_prediction.py` — `TestFindCeilingBreachTime`.
+**Test coverage:** `tests/test_warm_day_comfort_gap.py` — `TestCeilingDefenseActive`, `TestCeilingPreCoolFallback`, `TestCeilingWeatherChange`, `TestCeilingDefenseManualOverride`. `tests/test_prediction.py` — `TestFindCeilingBreachTime`.
 
 ---
 
@@ -3408,16 +3382,14 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `DEFAULT_PREHEAT_MINUTES` | `120` | minutes | Pre-heat lead time fallback when no thermal model data |
 | `MIN_PREHEAT_MINUTES` | `30` | minutes | Minimum clamped pre-heat lead time |
 | `MAX_PREHEAT_MINUTES` | `240` | minutes | Maximum clamped pre-heat lead time |
-| `THERMAL_POST_HEAT_TIMEOUT_MINUTES` | `45` | minutes | Maximum post-heat observation window before abandoning |
-| `THERMAL_STABILIZATION_THRESHOLD_F` | `0.3` | °F | |ΔT| threshold for stabilization criterion |
-| `THERMAL_STABILIZATION_WINDOW_MINUTES` | `5` | minutes | Duration |ΔT| must remain below threshold to count as stabilized |
+| cycle model constants (`THERMAL_CYCLE_*` in `const.py`) | see §5e-vi | — | Issues #1512/#1516: the pooled cycle model's gates, prior and evidence displacement (`THERMAL_EVIDENCE_*`), listed in the §5e-vi tables; the per-run `THERMAL_HVAC_RUN_MIN_MINUTES` is retired |
+| `THERMAL_OBS_KIND_CAPS` | passive 80, vent_window 40, vent_fan 30, solar 20, heat 10, cool 10, other 10 | observations | Issue #1523: each kind's share of `THERMAL_OBS_CAP` (200); only a kind's own newer observations push its oldest out, nothing leaves with time. (`THERMAL_RATE_HALF_LIFE_DAYS`, 21 days, retired by #1523: the ageing weight halves per `THERMAL_EVIDENCE_HALF_N` newer observations instead) |
+| `THERMAL_LEGACY_OBS_WEIGHT` | `0.25` | — | Added Issue #1512: weight multiplier of legacy observations (no `method` key) in the ageing median |
 | `THERMAL_SAMPLE_INTERVAL_SECONDS` | `60` | seconds | Active-phase HVAC sampling cadence (ungated; all polls recorded) |
-| `THERMAL_PRE_HEAT_BUFFER_MINUTES` | `15` | minutes | Rolling pre-HVAC sample window included in k_passive regression |
 | `THERMAL_MAX_ACTIVE_SAMPLES` | `120` | samples | Cap on active-phase samples (2 hours at 60s cadence) |
-| `THERMAL_MAX_POST_HEAT_SAMPLES` | `45` | samples | Cap on post-heat samples (45 min at 60s cadence) |
 | `THERMAL_MIN_R_SQUARED` | `0.2` | — | Minimum R² for k_passive OLS regression to accept an observation |
-| `THERMAL_MIN_POST_HEAT_SAMPLES` | `4` | samples | Minimum post-heat samples required before committing an HVAC observation (Issue #130 D14: lowered from 10; enables short 5–30 min cycles) |
-| `THERMAL_HVAC_MIN_SIGNAL_F` | `0.5` | °F | Minimum `|T_peak − T_start|` for a heating/cooling cycle to be treated as meaningful signal. Below this the cycle is a setpoint-maintenance run and is rejected (Issue #130 D23) |
+| `THERMAL_MIN_POST_HEAT_SAMPLES` | `4` | samples | Only the default sample floor of `compute_k_passive` now (Issue #1512: HVAC runs have no post-heat phase) |
+| `THERMAL_HVAC_MIN_SIGNAL_F` | `0.5` | °F | Retired as a rate gate (Issues #1512/#1516): the cycle model's gate is three sensor steps of reading movement. Kept for older callers (Issue #130 D23) |
 | `THERMAL_K_PASSIVE_MIN` | `-0.5` | hr⁻¹ | Sanity lower bound for k_passive (very leaky envelope) |
 | `THERMAL_K_PASSIVE_MAX` | `-0.001` | hr⁻¹ | Sanity upper bound for k_passive (very well insulated) |
 | `THERMAL_K_ACTIVE_HEAT_MIN` | `0.5` | °F/hr | Minimum credible HVAC heating contribution |
@@ -3431,7 +3403,6 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `THERMAL_VENT_MIN_SAMPLES` | `20` | observations | Min committed samples for `vent_window_decay` / `vent_fan_decay` to populate `k_vent_window` / `k_vent_fan` (Issue #587) |
 | `THERMAL_VENT_MIN_SIGNAL_F` | `0.3` | °F | Min \|T_indoor − T_outdoor\| for `vent_window_decay` / `vent_fan_decay` commit (Issue #587) |
 | `THERMAL_SOLAR_SAMPLE_INTERVAL_S` | `300` | seconds (5 min) | Sample gate for `solar_gain` (H1) |
-| `THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S` | `300` | seconds (5 min) | Sample gate for HVAC post-heat phase — passive dynamics (H1) |
 | `THERMAL_SOLAR_FACTOR_MIN_RANGE` | `0.30` | — | Minimum solar_factor range (max−min) across vent_window_decay samples to trigger 2-param OLS (Issue #126) |
 
 **User-facing config keys** (set via config flow, stored in the config entry):
@@ -4627,7 +4598,7 @@ hallway, is cooled by outdoors, puts a register plume on its SENSOR while the fu
 | `TestSelectPredIndoor` (archive wins, warm-up fallback, none, archived 0.0 still archive) | `tests/test_pred_archive.py` |
 | `test_pred_indoor_warmup_fallback_uses_real_select_pred_indoor` | `tests/test_coordinator_chart.py` |
 | `TestChartLogAppendIndoorNone` (`pred_indoor` written with null indoor, accurate DEBUG text, written with indoor present) | `tests/test_temperature_sensors.py` |
-| Issue #1035 thermal outage: `_get_current_sample` None, pre-heat prune/skip, HVAC start skipped + `indoor_unavailable` rejection, learning-health and AI-context registries, event-driven skip | `tests/test_thermal_sample_outage.py` |
+| Issue #1035 thermal outage: `_get_current_sample` None, HVAC start skipped + `indoor_unavailable` rejection, learning-health and AI-context registries, event-driven skip | `tests/test_thermal_sample_outage.py` |
 | Issue #1036 snapshots: `HomeDecision.indoor_temp_f`, `OdeCeilingGuardDecision.indoor/outdoor`, no crash when indoor vanishes | `tests/test_indoor_snapshot_decisions.py` |
 | Issue #1038 engine event indoor: Celsius conversion, sensor source, implausible readings | `tests/test_engine_event_indoor_unit.py` |
 | Issue #1037 blind-fan safety: detection, once-per-episode alert, 30-min stop through the real `_exit_nat_vent`, cycling-off stop, override/economizer alert-only, min-runtime ignored, rate-limited retry, stale-episode gap, recovery before/after stop, backstop wiring + failure isolation, coordinator recovery hook, Fan-card suffix | `tests/test_indoor_blind_fan_stop.py` |
@@ -4709,7 +4680,7 @@ All callers in `coordinator.py` unpack the 3-tuple and use the `reason_code` to 
 
 The coordinator pre-gates on `THERMAL_MIN_DECAY_SAMPLES + 1 = 5` pairs before calling OLS. This guarantees that at least 4 pairs are available for rate-pair construction inside `compute_k_passive()`. The inner function's own floor check (`_min_s = THERMAL_MIN_DECAY_SAMPLES`) is therefore never reached unless the outer gate logic is bypassed.
 
-`THERMAL_MIN_POST_HEAT_SAMPLES = 10` governs HVAC post-heat events and is a separate, independent constant. Do not change either constant independently — the `+1` offset between the outer gate and the inner floor is intentional and must be preserved.
+`THERMAL_MIN_POST_HEAT_SAMPLES` (4) is only `compute_k_passive`'s default floor now; heating/cooling runs no longer have a post-heat phase (Issue #1512). Do not change `THERMAL_MIN_DECAY_SAMPLES` independently — the `+1` offset between the outer gate and the inner floor is intentional and must be preserved.
 
 ### 21.6 `learning_health` Dict in `get_thermal_model()`
 

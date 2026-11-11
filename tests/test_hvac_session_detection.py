@@ -146,7 +146,6 @@ def _make_thermostat_coord(*, hvac_on_since=None):
     coord._thermostat_fan_only_on_since = None
     coord._hvac_session_mode = None
     coord._pending_thermal_event = None
-    coord._pre_heat_sample_buffer = []
     coord._flush_hvac_runtime = MagicMock()
     coord._start_hvac_observation = AsyncMock()
     coord._end_hvac_active_phase = MagicMock()
@@ -332,10 +331,7 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
     coord._startup_hvac_initialized = False
     coord._pending_thermal_event = None
     coord._pending_observations = {}
-    coord._pre_heat_sample_buffer = []
-    coord._update_pre_heat_buffer = MagicMock()
     coord._sample_all_observations = MagicMock()
-    coord._check_hvac_stabilization = AsyncMock()
 
     coord._pre_cool_trigger_scheduled = False
     coord._pre_cool_trigger_cancel = None
@@ -1046,15 +1042,18 @@ def _make_glide_continuity_coord():
     )
     coord._get_outdoor_temp = MagicMock(return_value=60.0)
     coord._start_hvac_observation = AsyncMock()
+    coord.learning = MagicMock()
+    coord._executor_job = MagicMock()
 
     return coord
 
 
 class TestObservationContinuityAcrossGlide:
-    def test_glide_out_of_heat_ends_active_phase_as_post_heat(self):
-        """Gliding out of heat must transition the in-progress observation's phase
-        from 'active' to 'post_heat' — same treatment as a real turn-off — not
-        leave it stuck at 'active' (which would silently drop the observation)."""
+    def test_glide_out_of_heat_ends_the_pending_run_at_the_glide(self):
+        """Gliding out of heat is the off edge for the heat run: it commits (or rejects with a code) there, the same
+        as a real turn-off, instead of leaving the observation stuck 'active' (which would silently drop it).
+        Issue #1512: no post_heat phase any more, so the old expectation of '_phase == post_heat' was a state that
+        no longer exists."""
         from custom_components.climate_advisor.const import OBS_TYPE_HVAC_HEAT
 
         coord = _make_glide_continuity_coord()
@@ -1064,6 +1063,7 @@ class TestObservationContinuityAcrossGlide:
             "_phase": "active",
             "active_start": datetime(2026, 4, 8, 6, 0, 0).isoformat(),
             "active_samples": [],
+            "start_indoor_f": 68.0,
             "peak_indoor_f": None,
         }
 
@@ -1072,7 +1072,9 @@ class TestObservationContinuityAcrossGlide:
             mock_dt.parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
             coord._glide_hvac_session_mode("fan_only")
 
-        assert coord._pending_observations[OBS_TYPE_HVAC_HEAT]["_phase"] == "post_heat"
+        # Old: record_hvac_run got the heat run; the per-run commit is retired (the cycle recorder closes the cycle
+        # on the real thermostat edge) so the glide only removes the pending observation.
+        assert OBS_TYPE_HVAC_HEAT not in coord._pending_observations
         assert coord._hvac_session_mode == "fan_only"
         coord._start_hvac_observation.assert_not_called()
 

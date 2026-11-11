@@ -280,7 +280,6 @@ class TestOdeCeilingGuardConsumer:
             "hvac_mode": "off",
             "k_passive": -0.05,
             "confidence_k_passive": "medium",
-            "k_passive_via_bridge": False,
             "k_active_cool": -2.0,
             "comfort_cool": 76.0,
             "outdoor": 85.0,

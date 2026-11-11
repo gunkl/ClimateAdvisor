@@ -291,6 +291,8 @@ class ClimateAdvisorComplianceSensor(ClimateAdvisorBaseSensor):
         attrs[ATTR_THERMAL_HEATING_RATE] = convert_delta(heat_rate_f, unit) if heat_rate_f is not None else None
         attrs[ATTR_THERMAL_COOLING_RATE] = convert_delta(cool_rate_f, unit) if cool_rate_f is not None else None
         attrs[ATTR_THERMAL_CONFIDENCE] = thermal.get("confidence", "none")
+        # Issue #1512: the evidence behind the heat + cool rates (older evidence gives way as new cycles replace it,
+        # never with time alone), not a cumulative counter.
         attrs["thermal_observation_count"] = thermal.get("observation_count_heat", 0) + thermal.get(
             "observation_count_cool", 0
         )
@@ -302,6 +304,14 @@ class ClimateAdvisorComplianceSensor(ClimateAdvisorBaseSensor):
                     "committed": h.get("committed", 0),
                     "rejections": h.get("rejections", {}),
                     "last_rejection_reason": (h["last_rejection"]["reason_code"] if h.get("last_rejection") else None),
+                    # Issues #1512/#1516: why the latest heating/cooling run was not used (None when not recorded).
+                    "last_rejection_signal_f": (
+                        h["last_rejection"].get("signal_f") if h.get("last_rejection") else None
+                    ),
+                    "last_rejection_minutes": (h["last_rejection"].get("minutes") if h.get("last_rejection") else None),
+                    "last_rejection_k_passive_source": (
+                        h["last_rejection"].get("k_passive_source") if h.get("last_rejection") else None
+                    ),
                 }
                 for obs_type, h in health.items()
                 if isinstance(h, dict)

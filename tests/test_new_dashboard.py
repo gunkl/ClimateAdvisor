@@ -1171,3 +1171,27 @@ def test_both_color_schemes_and_units_are_handled():
     assert "prefers-color-scheme: dark" in HTML and 'data-theme="dark"' in HTML
     assert "isC" in JS["nd_core.js"] and "celsius" in JS["nd_core.js"]
     assert "unit" in JS["nd_night_card.js"]
+
+
+def test_cycle_model_surfaces_1512():
+    """Issues #1512/#1516: Analysis shows the cycle model's rate, grade, coast and the v4-vs-cycle line; Debug has
+    its rows; every cycle rejection code has a label in the new and classic dashboards (old codes stay, marked)."""
+    an, dbg = JS["nd_analysis.js"], JS["nd_debug.js"]
+    assert "cycleRows(E.decisions)" in an and "coast_area_f" in an
+    assert "the cycle model measures" in an and "Decisions use" in an
+    assert "Cycle model: " in dbg and "k_p_cycle" in dbg and "diagnostic only" in dbg
+    codes = (
+        "cycle_too_short",
+        "cycle_signal_below_resolution",
+        "cycle_excluded_window_fan",
+        "cycle_setpoint_change",
+        "cycle_gap_restart",
+        "cycle_thermostat_unavailable",
+        "cycle_no_off_edge",  # Issue #1512 verifier nit: the model's two other codes had no label
+        "cycle_sensor_swap",
+    )
+    for code in codes:
+        assert code + ":" in an, code
+        assert code + ":" in INDEX, code
+    # the retired per-run codes remain for old history, marked as the old method
+    assert "hvac_run_too_short: 'Heating or cooling run was too short to measure (old method)'" in an

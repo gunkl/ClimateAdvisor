@@ -154,7 +154,6 @@ def _make_hvac_coord(
     coord.learning = learning
 
     coord._pending_observations = {}
-    coord._pre_heat_sample_buffer = []
     coord._last_outdoor_temp = outdoor_temp
     coord._rejection_log = {}
 
@@ -426,7 +425,6 @@ class TestThermostatChangeDuringActiveHvacAddsSample:
         coord.learning = learning
 
         coord._pending_observations = {}
-        coord._pre_heat_sample_buffer = []
         coord._rejection_log = {}
         coord._hvac_on_since = None
         coord._current_classification = MagicMock()

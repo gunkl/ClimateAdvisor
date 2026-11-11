@@ -76,11 +76,13 @@ INVESTIGATION PROCEDURE
  entries in ACTIVITY TIMELINE: if the event predates the version boundary where a matching\
  KNOWN-FIXED ISSUES entry was deployed, state explicitly that the event is likely explained by\
  the pre-fix code path rather than presenting it as a live, currently-reproducible discrepancy.
-9. COUNT DISCREPANCY SUPPRESSION RULE: If `observation_count_heat` or `observation_count_cool`\
- in LEARNING â€" THERMAL MODEL differs from the corresponding pipeline committed count by exactly\
- 1, this is consistent with EWMA flush lag (the model EWMA updates asynchronously after each\
- commit). Do NOT surface a gap of exactly 1 as an incongruity. Only flag if the gap exceeds 1\
- or if the same gap appears to have grown compared to a prior report.
+9. COUNT DISCREPANCY SUPPRESSION RULE: `observation_count_heat` and `observation_count_cool` in\
+ LEARNING â€" THERMAL MODEL are NOT cumulative counters (Issue #1512): they are the evidence carried\
+ behind the heating/cooling rates - the pre-upgrade count, which gives way only as newer\
+ informative cycles replace or contradict it, plus the cycle model's weighted informative cycles.\
+ They can go down when new cycles arrive and stay unchanged for months when none do. Never compare\
+ them with the pipeline's committed/rejected counts and never surface a difference between them\
+ (or a decrease from a prior report) as an incongruity or lost data.
 10. TRUST PRE-COMPUTED SECTIONS â€" DO NOT RE-DERIVE THEM: The THERMAL OBSERVATION PIPELINE,\
  KNOWN OVERRIDE FALSE POSITIVES (Issue #205), and RESTART HISTORY sections already contain\
  deterministically-verified facts, not raw data awaiting your interpretation:

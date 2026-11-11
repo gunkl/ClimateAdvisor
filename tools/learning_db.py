@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _reject_labels import REJECT_LABELS  # noqa: E402
 from _zone_storage import (  # noqa: E402
     LEARNING_DB_FILE,
     ZoneSelectionRequired,
@@ -249,6 +250,19 @@ def _print_model_summary(db: dict) -> None:
     print(f"k_passive:     {_model_field('k_passive', 'hr^-1', 'n_passive')}")
     print(f"k_active_heat: {_model_field('k_active_heat', 'F/hr', 'n_hvac_heat')}")
     print(f"k_active_cool: {_model_field('k_active_cool', 'F/hr', 'n_hvac_cool')}")
+    # Issues #1512/#1516: the pooled cycle model's fit per mode (stored beside the rates the decisions may read).
+    for _mode in ("heat", "cool"):
+        _fit = cache.get(f"cycle_fit_{_mode}")
+        if isinstance(_fit, dict) and isinstance(_fit.get("q"), (int, float)):
+            _sd = _fit.get("sd_q")
+            _area = _fit.get("coast_area_f")
+            print(
+                f"cycle_fit_{_mode}: q={_fit['q']:+.2f}"
+                + (f" +/- {_sd:.2f}" if isinstance(_sd, (int, float)) else "")
+                + f" F/hr  grade={_fit.get('grade', 'none')}"
+                + (f"  coast={_area:+.2f} F" if isinstance(_area, (int, float)) else "")
+                + f"  ({_fit.get('ne', 0)} informative of {_fit.get('n_cycles', 0)} cycles)"
+            )
     print(f"k_vent_window: {_model_field('k_vent_window', 'hr^-1', 'observation_count_vent_window')}")
     print(f"k_vent_fan:    {_model_field('k_vent_fan', 'hr^-1', 'observation_count_vent_fan')}")
     print(f"k_solar:       {_model_field('k_solar', 'F/hr', 'n_solar')}")
@@ -608,6 +622,16 @@ def _print_rejection_log(db: dict, last_n: int, filter_type: str | None = None) 
                 f"elapsed={elapsed:<7} delta_t={float(delta_t) if delta_t is not None else 0.0:.2f}F  "
                 f"r2={r2_str}  sf_range={sf_range_str}  indoor={indoor_dir}"
             )
+            # Issues #1512/#1516: heating/cooling run rejections carry the numbers that explain them.
+            extras = []
+            if entry.get("signal_f") is not None:
+                extras.append(f"signal={entry['signal_f']}F (room change over the run)")
+            if entry.get("minutes") is not None:
+                extras.append(f"run={entry['minutes']}min")
+            if entry.get("k_passive_source"):
+                extras.append(f"k_passive_source={entry['k_passive_source']}")
+            if extras:
+                print("      " + REJECT_LABELS.get(str(reason), str(reason)) + ": " + ", ".join(extras))
         any_printed = True
 
     # Also print any obs_types in the log that aren't in our canonical list (when not filtered)

@@ -81,13 +81,17 @@ class TestToolsIgnoreStaleStoredGrades:
         assert "conf_passive:  high" in out
         assert "conf_hvac:     low" in out
 
-    def test_gate_bridge_zone_is_reported_eligible(self):
-        """No k_passive but a learned k_vent_window: the ODE runs on the bridge, so the tool must say so."""
+    def test_gate_bridge_zone_is_reported_not_eligible(self):
+        """No k_passive but a learned k_vent_window: NOT eligible.
+
+        The old expectation (eligible via a gate bridge) was wrong: k_vent_window includes ventilation, so it
+        is not a closed-house rate and must never stand in for k_passive (Issue #1512, owner decision 2).
+        """
         cache = _stale_cache(0, 0, 0, k_vent_window=-0.2)
         cache["k_passive"] = None
         status = _es.build_engine_status(cache)
-        assert status["physics_eligible"] is True
-        assert "gate bridge" in status["physics_eligible_reason"]
+        assert status["physics_eligible"] is False
+        assert "no k_vent_window substitute" in status["physics_eligible_reason"]
 
 
 _GRID = [
@@ -113,7 +117,7 @@ class TestToolMatchesEngine:
         assert tool["k_active_hvac"]["confidence"] == model["confidence"] == rest["k_active_hvac"]["confidence"]
         assert tool["k_solar"]["confidence"] == model["confidence_k_solar"] == rest["k_solar"]["confidence"]
         # The predicted-indoor curve's own gate, fed from get_thermal_model() exactly as the coordinator does.
-        ode_eligible, _, _ = physics_eligibility(
+        ode_eligible, _ = physics_eligibility(
             model["confidence"], model["confidence_k_passive"], model["k_passive"], model["k_vent_window"]
         )
         assert tool["physics_eligible"] == rest["physics_eligible"] == ode_eligible

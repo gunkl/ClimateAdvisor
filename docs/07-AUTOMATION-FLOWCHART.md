@@ -611,7 +611,7 @@ flowchart TD
     B -->|No or temp unavailable| E[Set HVAC off\nor setback as per classification]
     C --> D
     E --> D
-    D{ODE ceiling guard §6c:\npredicted_indoor available\nAND k_passive < 0\nAND confidence != none OR bridge\nAND outdoor > indoor?} -->|Any condition false| Z[Guard dormant\nno further HVAC action]
+    D{ODE ceiling guard §6c:\npredicted_indoor available\nAND k_passive < 0\nAND confidence != none\nAND outdoor > indoor?} -->|Any condition false| Z[Guard dormant\nno further HVAC action]
     D -->|All conditions true| F{Find first breach:\npredicted temp > comfort_cool + tolerance?}
     F -->|None found| Z
     F -->|Breach found at T_breach| G["Compute lead_time_min:\nif k_active_cool known:\n  ((comfort_cool − indoor) / |k_active_cool|) × 60 × 1.3\nelse: 120 min fallback\nclamp [30, 240]\n(leak-aware with k_passive + outdoor: Issue #1517)"]
@@ -624,7 +624,7 @@ flowchart TD
 
 **Stateless design:** Neither guard uses a flag or scheduled callback. Each 30-min cycle re-evaluates from the latest ODE curve and current sensor readings. If the forecast improves (predicted breach disappears), the ceiling guard goes dormant automatically on the next cycle without any cancellation logic.
 
-**Bridge homes** (`k_passive_via_bridge=True`): the ceiling guard scans for `temp > comfort_cool + 1.0°F` (tolerance = `CEILING_BRIDGE_TOLERANCE_F`). Standard homes use tolerance = 0.0.
+The former bridge-home tolerance (`k_passive_via_bridge`, `CEILING_BRIDGE_TOLERANCE_F`) was removed in Issue #1512; the breach threshold is the plain ceiling.
 
 **`k_active_cool = None`** (first cooling season, any home): the 120-min fallback replaces the lead-time formula. This is the normal case for new installs and all homes before their first cooling cycle is learned.
 

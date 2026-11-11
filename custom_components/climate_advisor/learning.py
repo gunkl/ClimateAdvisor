@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from .const import (
     MIN_DATA_POINTS_FOR_SUGGESTION,
     MIN_WEATHER_BIAS_OBSERVATIONS,
     OBS_TYPE_HVAC_HEAT,
+    REJECT_ABANDONED,
     REJECT_NO_K_PASSIVE,
     REJECT_OLS_BAD_FIT,
     REJECT_OLS_BOUNDS,
@@ -35,6 +37,7 @@ from .const import (
     REJECT_TOO_FEW_SAMPLES,
     THERMAL_BLOCK_OLS_BLOCK_MINUTES,
     THERMAL_BLOCK_OLS_MIN_BLOCKS,
+    THERMAL_EVIDENCE_HALF_N,
     THERMAL_HVAC_MIN_SIGNAL_F,
     THERMAL_K_ACTIVE_COOL_MAX,
     THERMAL_K_ACTIVE_COOL_MIN,
@@ -43,10 +46,11 @@ from .const import (
     THERMAL_K_PASSIVE_MAX,
     THERMAL_K_PASSIVE_MIN,
     THERMAL_K_SOLAR_MAX_F_PER_HR,
+    THERMAL_LEGACY_OBS_WEIGHT,
     THERMAL_MIN_DECAY_SAMPLES,
     THERMAL_MIN_POST_HEAT_SAMPLES,
     THERMAL_MIN_R_SQUARED,
-    THERMAL_OBS_CAP,
+    THERMAL_OBS_KIND_CAPS,
     THERMAL_SOLAR_FACTOR_MIN_RANGE,
     THERMAL_SWING_CONF_HIGH,
     THERMAL_SWING_CONF_LOW,
@@ -55,6 +59,7 @@ from .const import (
     THERMAL_SWING_DEFINITION_VERSION,
     WEATHER_BIAS_MAX_OBS,
 )
+from .cycle_model import CYCLE_MAX_CYCLES, HELD_MIN_KEEP
 from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
 from .swing import (
     SWING_DEFINITION_TEXT,
@@ -66,13 +71,17 @@ from .swing import (
     swing_debug_summary,
 )
 from .temperature import format_temp_delta
+from .thermal_confidence import displaced_keep as _displaced_keep
 from .thermal_confidence import (
     drop_stored_grades,
     explain_physics_eligibility,
     grade_hvac_confidence,
     grade_passive_confidence,
     grade_solar_confidence,
+    hvac_evidence_count,
 )
+from .thermal_confidence import evidence_keep as _evidence_keep
+from .thermal_confidence import fit_agrees_with_prior as _fit_agrees_with_prior
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -153,8 +162,10 @@ class ThermalObservation:
 def _grade_passive_confidence(cache: dict) -> str:
     """Compute confidence tier for k_passive based on combined observation count.
 
-    Only observation types that write to k_passive are counted:
-      - passive_decay, hvac_heat, hvac_cool
+    Counts passive observations (chart_log and duty_balance passive fits) plus the evidence behind the pre-upgrade
+    value (``rate_prior["k_passive"]["n"] * keep``, halved for every THERMAL_EVIDENCE_HALF_N new passive observations,
+    never by time alone). Heat/cool runs
+    no longer write k_passive (Issue #1512), so they are counted only for a cache that has no prior yet.
 
     Excluded types (they write to different cache fields):
       - observation_count_vent_window / observation_count_vent_fan → write to
@@ -169,7 +180,7 @@ def _grade_passive_confidence(cache: dict) -> str:
     rather than replaced with observation_count_vent_window/observation_count_vent_fan:
     window-open decay (and especially fan-driven ventilation) are NOT close proxies for
     envelope-only decay — they measure a materially larger, different rate (the same
-    premise behind the existing gate-bridge guard's own over-prediction concern).
+    premise behind the over-prediction concern that removed the forecast gate bridge in Issue #1512).
     Folding either into *envelope* confidence would be scientifically wrong in a way
     the original fan_only inclusion was not. This is a real, intentional behavior
     change: houses previously getting confidence credit from fan_only_decay will show
@@ -194,7 +205,35 @@ def _ewma_update_field(cache: dict, field_name: str, value: float, alpha: float)
         cache[field_name] = (1.0 - alpha) * cache[field_name] + alpha * value
 
 
-_CHART_LOG_FIT_SOURCES = ("endpoint", "block_ols")
+# "duty_balance" observations are no longer written (Issue #1512: retired); stored ones stay and age out.
+_CHART_LOG_FIT_SOURCES = ("endpoint", "block_ols", "duty_balance")
+
+# The cycle-model outputs kept in thermal_model_cache["cycle_fit_<mode>"] (SPEC2 Estimator, outputs per mode).
+CYCLE_FIT_KEYS = (
+    "q",
+    "sd_q",
+    "k_p_cycle",
+    "sd_k",
+    "coast_area_f",
+    "tau",
+    "ne",
+    "n_cycles",
+    "er_q",
+    "grade",
+    "resolution_f",
+    "k_pinned",
+    "reasons",
+    "prior_source",
+    "prior_q",
+    "prior_sd_q",
+    "ne_w",
+    "entity",
+    "t_first",
+    "t_last",
+)
+# The fields of a usable fit kept as ``cycle_fit_<mode>["held"]`` once its cycles leave the pool (finding 4); plus
+# ``at`` (when it was fitted) and ``keep`` (the share of its evidence newer cycles left it).
+_HELD_KEYS = ("q", "sd_q", "ne_w", "entity", "t_first", "t_last", "applied", "grade")
 
 
 def _same_chart_log_fit(a: dict, b: dict) -> bool:
@@ -267,6 +306,7 @@ def _new_thermal_cache() -> dict:
         "swing_definition_version": THERMAL_SWING_DEFINITION_VERSION,
         "last_observation_date": None,
         "avg_r_squared_passive": None,
+        "rate_prior": {},
     }
 
 
@@ -282,43 +322,32 @@ def _grade_swing_confidence(count: int) -> str:
 
 
 def _resolve_solar_phase_offset(cache: dict) -> float:
-    """Return the best current solar phase offset.
+    """Return the best current solar phase offset (Issues #312, #1524).
 
-    A parameter is stale if its last_obs_date is absent or older than THERMAL_PARAM_STALE_DAYS.
-    Stale home-specific measurements are always preferred over a generic default prior —
-    the default is only returned when nothing has ever been observed.
+    The primary (passive-decay fit) gives way to the secondary (AC duty cycle) only as newer secondary evidence
+    replaces or contradicts it, never with the passage of time (owner decision 2026-11-11, "fade only on new
+    evidence"): ``solar_phase_offset_keep`` is the primary's share (1.0 at first), halved every
+    THERMAL_EVIDENCE_HALF_N new AC-duty days that agree with it (every THERMAL_EVIDENCE_HALF_N_CONTRADICT that
+    contradict it, ``update_ac_duty_solar_phase_offset``) and restored the same way by new passive windows (the
+    secondary's share ``1 - keep`` halved per window count, ``update_solar_phase_offset``). The value is
+    ``keep * primary + (1 - keep) * secondary``.
 
-    Priority:
-      1. Fresh primary (passive-decay fit, within THERMAL_PARAM_STALE_DAYS)
-      2. Fresh secondary (AC duty cycle, within THERMAL_PARAM_STALE_DAYS, obs >= min)
-      3. Stale primary (EWMA value preserved in cache — better than a generic prior)
-      4. Stale secondary (obs >= min — better than a generic prior)
-      5. Default prior (THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT) — only when nothing learned
+      * primary and a qualified secondary (obs >= THERMAL_SOLAR_PHASE_AC_MIN_OBS): the blend above
+      * primary only: the primary;  qualified secondary only: the secondary
+      * nothing learned: THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
+    (Was: a primary not observed for THERMAL_PARAM_STALE_DAYS lost to a fresher secondary on day 91 with no new
+    measurement arriving.)
     """
-    from datetime import date as _date
-
-    from .const import THERMAL_PARAM_STALE_DAYS, THERMAL_SOLAR_PHASE_AC_MIN_OBS, THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
-
-    def _is_stale(last_obs_date_str: str | None) -> bool:
-        if last_obs_date_str is None:
-            return True
-        try:
-            return (_date.today() - _date.fromisoformat(last_obs_date_str)).days > THERMAL_PARAM_STALE_DAYS
-        except ValueError, TypeError:
-            return True
+    from .const import THERMAL_SOLAR_PHASE_AC_MIN_OBS, THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
 
     primary = cache.get("solar_phase_offset_h")
     secondary = cache.get("solar_phase_offset_ac_h")
     ac_obs = cache.get("solar_phase_offset_ac_obs_count", 0)
     secondary_qualified = secondary is not None and ac_obs >= THERMAL_SOLAR_PHASE_AC_MIN_OBS
 
-    # Fresh data first
-    if primary is not None and not _is_stale(cache.get("solar_phase_offset_last_obs_date")):
-        return float(primary)
-    if secondary_qualified and not _is_stale(cache.get("solar_phase_offset_ac_last_obs_date")):
-        return float(secondary)
-
-    # Stale home-specific data beats a generic prior
+    if primary is not None and secondary_qualified:
+        keep = _evidence_keep({"keep": cache.get("solar_phase_offset_keep")})
+        return keep * float(primary) + (1.0 - keep) * float(secondary)
     if primary is not None:
         return float(primary)
     if secondary_qualified:
@@ -326,6 +355,36 @@ def _resolve_solar_phase_offset(cache: dict) -> float:
 
     # Nothing has ever been learned — use configured default
     return float(THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT)
+
+
+def migrate_solar_phase_keep(cache: dict, today: Any) -> bool:
+    """Give a cache from before Issue #1524 the primary's share once, so the offset in use does not change.
+
+    The old resolver dropped a primary not observed for THERMAL_PARAM_STALE_DAYS in favour of a qualified secondary
+    observed within them; such a cache starts with ``keep`` 0.0 (the secondary already replaced it), any other with
+    1.0. Read once, at load, when the key is absent; from then on only new evidence moves it. Returns True when set.
+    """
+    from .const import THERMAL_PARAM_STALE_DAYS, THERMAL_SOLAR_PHASE_AC_MIN_OBS
+
+    if not isinstance(cache, dict) or "solar_phase_offset_keep" in cache:
+        return False
+    if cache.get("solar_phase_offset_h") is None:
+        return False
+
+    def _old_stale(stamp: Any) -> bool:
+        try:
+            return (today - datetime.fromisoformat(str(stamp)[:10]).date()).days > THERMAL_PARAM_STALE_DAYS
+        except ValueError, TypeError:
+            return True
+
+    secondary_fresh = (
+        cache.get("solar_phase_offset_ac_h") is not None
+        and cache.get("solar_phase_offset_ac_obs_count", 0) >= THERMAL_SOLAR_PHASE_AC_MIN_OBS
+        and not _old_stale(cache.get("solar_phase_offset_ac_last_obs_date"))
+    )
+    displaced = _old_stale(cache.get("solar_phase_offset_last_obs_date")) and secondary_fresh
+    cache["solar_phase_offset_keep"] = 0.0 if displaced else 1.0
+    return True
 
 
 def _smooth_temps(temps: list[float]) -> list[float]:
@@ -913,6 +972,126 @@ def compute_k_active_single_point(
     return k_active
 
 
+_GRADE_WEIGHT = {"high": 1.0, "medium": 0.6, "low": 0.3}
+
+
+def weighted_median(pairs: list[tuple[float, float]]) -> float | None:
+    """Median of ``(value, weight)`` pairs; the midpoint of the two values when the weight splits exactly."""
+    pts = sorted((v, w) for v, w in pairs if w > 0)
+    if not pts:
+        return None
+    half = sum(w for _, w in pts) / 2.0
+    cum = 0.0
+    for i, (v, w) in enumerate(pts):
+        cum += w
+        if cum > half + 1e-12:
+            return v
+        if abs(cum - half) <= 1e-12 and i + 1 < len(pts):
+            return (v + pts[i + 1][0]) / 2.0
+    return pts[-1][0]
+
+
+def _obs_rate_weight(obs: dict, *, legacy: bool) -> float:
+    """Base weight of one observation: grade weight x method weight (the newer-evidence share is applied after)."""
+    grade_w = _GRADE_WEIGHT.get(obs.get("confidence_grade", "low"), _GRADE_WEIGHT["low"])
+    return grade_w * (THERMAL_LEGACY_OBS_WEIGHT if legacy else 1.0)
+
+
+def _newer_share(n_newer: float) -> float:
+    """The share of its weight an observation keeps once ``n_newer`` newer ones feed the same rate (Issue #1523)."""
+    return 0.5 ** (n_newer / THERMAL_EVIDENCE_HALF_N)
+
+
+def thermal_obs_kind(obs: dict) -> str:
+    """The retention kind of an observation (Issue #1523): its ``hvac_mode`` when it has a share, else ``other``."""
+    mode = obs.get("hvac_mode") if isinstance(obs, dict) else None
+    return mode if isinstance(mode, str) and mode != "other" and mode in THERMAL_OBS_KIND_CAPS else "other"
+
+
+def trim_thermal_observations(observations: list[dict], kind: str, held: int = 0) -> list[dict]:
+    """Drop the oldest observations of ``kind`` beyond its share of the cap (Issue #1523); other kinds untouched.
+
+    The share is ``THERMAL_OBS_KIND_CAPS[kind]``, or ``held`` when the kind already held more than that (a list
+    stored before the shares existed): such a kind keeps its size, one in, one out, and is never cut at once, so the
+    rates it feeds do not step. List order is the order of arrival (oldest first). Time never prunes: an observation
+    leaves only when newer ones of its own kind take its place (owner decision 2026-11-11).
+    """
+    limit = max(THERMAL_OBS_KIND_CAPS[kind], int(held))
+    excess = sum(1 for o in observations if thermal_obs_kind(o) == kind) - limit
+    if excess <= 0:
+        return observations
+    out: list[dict] = []
+    for o in observations:
+        if excess > 0 and thermal_obs_kind(o) == kind:
+            excess -= 1
+            continue
+        out.append(o)
+    return out
+
+
+_AGED_RATE_FIELDS = ("k_active_heat", "k_active_cool", "k_passive")
+
+
+def aged_rates(observations: list[dict], prior: Any = None) -> dict[str, float]:
+    """The three aged rates from these observations (Issues #1512, #1523): weighted medians.
+
+    weight = grade_w x method_w x 0.5 ** (newer / THERMAL_EVIDENCE_HALF_N), where ``newer`` counts the observations
+    after this one in the list (the order of arrival) that feed the same rate: an observation yields only to newer
+    evidence of its own rate, never to the calendar (owner decision 2026-11-11), so a season with no passive window
+    leaves ``k_passive`` exactly where it was and the first fits after it move it gradually, not in one step. Legacy
+    heat/cool commits (no ``method`` key) weigh THERMAL_LEGACY_OBS_WEIGHT. ``prior`` (the cache's ``rate_prior``)
+    adds one pseudo-observation per field weighing THERMAL_LEGACY_OBS_WEIGHT x its evidence count ``n`` (the
+    observations behind the cached value) x its newer-evidence share: for ``k_passive`` the prior's ``keep`` (halved
+    per THERMAL_EVIDENCE_HALF_N new passive observations, also those the cap has since let go), for heat/cool the
+    same halving per retained observation of that rate stamped after the prior. Only fields with at least one usable
+    value are returned, so a caller never sets a rate to None through ageing. vent_window/vent_fan never feed
+    ``k_passive``; run-edge HVAC runs carry no ``k_passive``. One definition for the live engine and the backtest's
+    as-of rebuild (tools/predict_backtest.py).
+    """
+    entries: dict[str, list[tuple[float, float, str]]] = {f: [] for f in _AGED_RATE_FIELDS}
+
+    def _num(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    for o in observations:
+        mode = o.get("hvac_mode")
+        stamp = str(o.get("timestamp") or o.get("date") or "")
+        has_method = "method" in o
+        if mode in ("heat", "cool"):
+            field_name = "k_active_heat" if mode == "heat" else "k_active_cool"
+            w = _obs_rate_weight(o, legacy=not has_method)
+            if _num(o.get("k_active")):
+                entries[field_name].append((float(o["k_active"]), w, stamp))
+            if _num(o.get("k_passive")):
+                entries["k_passive"].append((float(o["k_passive"]), w, stamp))
+        elif mode == "passive" and _num(o.get("k_passive")):
+            # Passive fits are the closed-house learner itself (live decay commits, chart_log endpoint/block_ols,
+            # duty_balance): full method weight, not the legacy HVAC post-fit.
+            entries["k_passive"].append((float(o["k_passive"]), _obs_rate_weight(o, legacy=False), stamp))
+    pairs: dict[str, list[tuple[float, float]]] = {
+        f: [(v, w * _newer_share(len(lst) - 1 - i)) for i, (v, w, _s) in enumerate(lst)] for f, lst in entries.items()
+    }
+    if isinstance(prior, dict):
+        for f, rec in prior.items():
+            if f in pairs and isinstance(rec, dict) and _num(rec.get("value")):
+                # The prior carries the evidence behind it: ``n`` observations fed the cached value before the upgrade,
+                # so one pseudo-observation weighing 0.25 would let a handful of new fits yank it (it must not jump).
+                n = rec.get("n")
+                n = float(n) if _num(n) and n > 0 else 1.0
+                if f == "k_passive":
+                    share = _evidence_keep(rec)
+                else:
+                    ts = str(rec.get("ts") or "")
+                    share = _newer_share(sum(1 for _v, _w, s in entries[f] if ts and s > ts))
+                pairs[f].append((float(rec["value"]), THERMAL_LEGACY_OBS_WEIGHT * n * share))
+    out: dict[str, float] = {}
+    for f, plist in pairs.items():
+        med = weighted_median(plist)
+        if med is not None:
+            out[f] = med
+    return out
+
+
 def estimate_daily_cost(
     heat_minutes: float,
     cool_minutes: float,
@@ -1021,7 +1200,7 @@ class LearningState:
     active_suggestions: list[dict] = field(default_factory=list)
     dismissed_suggestions: list[str] = field(default_factory=list)
     settings_history: list[dict] = field(default_factory=list)
-    thermal_observations: list[dict] = field(default_factory=list)  # cap: THERMAL_OBS_CAP
+    thermal_observations: list[dict] = field(default_factory=list)  # per-kind caps: THERMAL_OBS_KIND_CAPS
     thermal_model_cache: dict | None = None  # EWMA-accumulated k_passive, k_active_heat/cool
     rejection_log: dict = field(default_factory=dict)  # keyed by obs_type; each list capped at 100 entries
     # Restart-cause diagnostics (Issue #403)
@@ -1153,8 +1332,18 @@ class LearningEngine:
                 # never refreshed and misled the diagnostic tools, so drop them.
                 if isinstance(_cache_mig, dict) and drop_stored_grades(_cache_mig):
                     _LOGGER.debug("Thermal model cache: dropped stale stored confidence grades (Issue #1277)")
+                # Issue #1524: the primary solar phase offset's share against the AC-duty secondary, set once.
+                if isinstance(_cache_mig, dict) and migrate_solar_phase_keep(_cache_mig, dt_util.now().date()):
+                    _LOGGER.info(
+                        "Solar phase offset: primary share set to %s (Issue #1524: it now gives way only to newer "
+                        "AC-duty evidence)",
+                        _cache_mig.get("solar_phase_offset_keep"),
+                    )
                 # Issue #1476: undo repeated chart_log fits of one window.
                 self._drop_duplicate_chart_log_fits()
+                # Issue #1512: keep the cached rates as an ageing prior, then age them against retained observations.
+                self._ensure_rate_prior()
+                self._recompute_aged_rates()
                 # Validate rejection_log is a dict; apply per-obs-type cap on load
                 if not isinstance(self._state.rejection_log, dict):
                     self._state.rejection_log = {}
@@ -1241,7 +1430,8 @@ class LearningEngine:
         """Record a thermal observation and update the EWMA thermal model cache.
 
         obs must be a dict representation of a committed ThermalObservation (v2).
-        Trims to 90-day rolling window and enforces THERMAL_OBS_CAP.
+        Keeps at most this kind's share of THERMAL_OBS_CAP (``THERMAL_OBS_KIND_CAPS``; Issue #1523): when the kind
+        is full, its own oldest observation leaves. Nothing leaves with time and no kind evicts another.
         Also updates thermal_model_cache via EWMA using obs.confidence_grade.
 
         Returns False (nothing recorded) for an invalid obs or a chart_log fit of a window that is
@@ -1257,17 +1447,238 @@ class LearningEngine:
                 obs.get("k_passive"),
             )
             return False
+        # Issue #1523: only this kind's own oldest observation can make room for it (one in, one out), so a kind that
+        # has gone quiet (no passive window all summer) keeps its observations however long the gap.
+        kind = thermal_obs_kind(obs)
+        held = sum(1 for o in self._state.thermal_observations if thermal_obs_kind(o) == kind)
         self._state.thermal_observations.append(obs)
-        # 90-day rolling trim
-        cutoff = (dt_util.now().date() - timedelta(days=90)).isoformat()
-        self._state.thermal_observations = [o for o in self._state.thermal_observations if o.get("date", "") >= cutoff]
-        # Hard cap
-        if len(self._state.thermal_observations) > THERMAL_OBS_CAP:
-            self._state.thermal_observations = self._state.thermal_observations[-THERMAL_OBS_CAP:]
+        self._state.thermal_observations = trim_thermal_observations(self._state.thermal_observations, kind, held)
 
-        # Update EWMA cache
+        # Update EWMA cache (swing/solar/vent/counts), then re-derive the three aged rates (Issue #1512)
         self._update_thermal_model_cache(obs)
+        self._recompute_aged_rates()
         return True
+
+    # ------------------------------------------------------------------
+    # Issue #1512: ageing of k_active_heat / k_active_cool / k_passive
+    # ------------------------------------------------------------------
+    _AGED_RATE_FIELDS = _AGED_RATE_FIELDS
+
+    def _ensure_rate_prior(self) -> None:
+        """Store the current cached rates once as the ageing prior (an upgrade never jumps or falls to defaults).
+
+        Only when the cache has no ``rate_prior`` key yet; the prior is then one legacy-weight pseudo-observation
+        per field, aged from the stamp stored here.
+        """
+        cache = self._state.thermal_model_cache
+        if not isinstance(cache, dict) or "rate_prior" in cache:
+            return
+        now_iso = dt_util.now().isoformat()
+
+        def _cnt(key: str) -> int:
+            v = cache.get(key)
+            return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else 0
+
+        # Evidence behind each cached value: every passive, heat and cool observation fed the old k_passive EWMA.
+        evidence = {
+            "k_active_heat": _cnt("observation_count_heat"),
+            "k_active_cool": _cnt("observation_count_cool"),
+            "k_passive": _cnt("observation_count_passive")
+            + _cnt("observation_count_heat")
+            + _cnt("observation_count_cool"),
+        }
+        cache["rate_prior"] = {
+            f: {"value": cache[f], "ts": now_iso, "n": max(1, evidence[f])}
+            for f in self._AGED_RATE_FIELDS
+            if isinstance(cache.get(f), (int, float)) and not isinstance(cache.get(f), bool)
+        }
+        _LOGGER.info(
+            "Thermal rate prior stored (Issue #1512): %s",
+            ", ".join(f"{f}={r['value']} (n={r['n']})" for f, r in cache["rate_prior"].items()) or "no cached rates",
+        )
+
+    def _recompute_aged_rates(self) -> None:
+        """Recompute the three rates as weighted medians of the retained observations (Issues #1512, #1523).
+
+        weight = grade_w x method_w x 0.5 ** (newer observations of the same rate / THERMAL_EVIDENCE_HALF_N)
+        (``aged_rates``; no clock); legacy heat/cool commits (no ``method`` key) weigh THERMAL_LEGACY_OBS_WEIGHT.
+        The ``rate_prior`` pseudo-observations take part, so a field with no usable observation keeps its value
+        (never falls to None through ageing). vent_window/vent_fan observations never feed ``k_passive``; run-edge
+        HVAC runs carry no ``k_passive`` so they never do either.
+        """
+        cache = self._state.thermal_model_cache
+        if not isinstance(cache, dict):
+            if not self._state.thermal_observations:
+                return
+            cache = _new_thermal_cache()
+            self._state.thermal_model_cache = cache
+        self._ensure_rate_prior()
+        before = {f: cache.get(f) for f in self._AGED_RATE_FIELDS}
+        rates = aged_rates(self._state.thermal_observations, cache.get("rate_prior"))
+        # Issue #1512: a rate the pooled cycle model applied (v3-primary zone) is that fit's own q, not an aged median
+        # of the retired run-edge observations: ageing must not pull it back to them. A fit held after its cycles
+        # left the pool (sensor swap; verifier finding 4) stays the rate until new cycles displace it.
+        for _mode, _field in (("heat", "k_active_heat"), ("cool", "k_active_cool")):
+            _fit = cache.get(f"cycle_fit_{_mode}")
+            if isinstance(_fit, dict) and _fit.get("applied"):
+                rates.pop(_field, None)
+            else:
+                held_rate = self._held_rate(cache, _mode, rates.get(_field))
+                if held_rate is not None:
+                    rates[_field] = held_rate
+        cache.update(rates)
+        for f, new in rates.items():
+            old = before.get(f)
+            moved = (
+                isinstance(old, (int, float))
+                and not isinstance(old, bool)
+                and old != 0
+                and abs(new - old) / abs(old) > 0.05
+            )
+            if moved:
+                _LOGGER.info("Thermal rate %s aged: %.4f -> %.4f (more than 5%% change)", f, old, new)
+            elif old != new:
+                _LOGGER.debug("Thermal rate %s aged: %s -> %.4f", f, old, new)
+
+    def apply_cycle_fit(self, mode: str, result: dict, primary_is_v3: bool) -> bool:
+        """Store one pooled cycle-model fit (``cycle_model.fit_cycles``) and, on a v3-primary zone, apply it (#1512).
+
+        Always: ``thermal_model_cache["cycle_fit_heat"|"cycle_fit_cool"]`` = the fit's outputs + ``fitted_at`` +
+        ``applied`` + ``t_seen`` (+ ``held``, below). ``observation_count_heat|cool`` is NOT touched (Issue #1512
+        verifier finding 2: it was overwritten with ``ne``, so a home with high confidence fell to none/low on its
+        first post-upgrade cycles); the confidence and the reported counts read the evidence the rate carries instead
+        (``thermal_confidence.hvac_evidence_count``: the legacy count carried at upgrade times its ``keep`` share,
+        plus the cycles).
+
+        v3 primary and at least one eligible cycle (grade above ``none``): also ``k_active_heat|cool`` := the cycle
+        model's ``q`` (``heating_rate_f_per_hour`` / ``cooling_rate_f_per_hour`` derive from it in
+        ``get_thermal_model``). On a v4 zone ``k_active_*`` keep their aged values (v4 drives the decisions; the fit
+        is shown beside it). The HVAC confidence reads the fit's grade on both (``grade_hvac_confidence``).
+        ``k_passive`` is never touched: the decisions' leak rate stays the closed-house fit, the model's own ``k`` is
+        stored as ``k_p_cycle`` for display only. Returns True when ``k_active_*`` was written.
+
+        Evidence displacement (owner decision 2026-11-11, "Fade only on new evidence"): the eligible cycles newer
+        than ``t_seen`` (the newest eligible cycle any earlier fit saw) are the new evidence. Each of them lowers the
+        ``keep`` share of the evidence carried into this fit's prior: the legacy ``rate_prior`` entry of the mode and
+        a held fit, halved every THERMAL_EVIDENCE_HALF_N new cycles, or every THERMAL_EVIDENCE_HALF_N_CONTRADICT when
+        the fit contradicts the prior it was weighed against (``fit_agrees_with_prior``; only the record that WAS
+        that prior is judged contradicted). No new eligible cycle changes no share, however much time passed.
+
+        Held fit (verifier finding 4): when the previous fit had eligible cycles and this one has none, or this one
+        is on another sensor (the pool is the newest sensor's cycles), or its newest eligible cycle is not in this
+        pool any more (the first cycle after a season longer than the store's retention, which counts back from the
+        newest cycle, so the old ones left with it), the previous fit is kept as ``held`` with
+        ``keep`` 1.0: it is the prior of the new sensor's fits (``cycle_model.prior_from_cache``) and, on a v3 zone
+        while no new fit is usable, the rate stays at its q (``_held_rate``), never snapping back to the legacy
+        value. It is dropped only when new cycles have displaced it below THERMAL_EVIDENCE_MIN_KEEP.
+        """
+        if mode not in ("heat", "cool") or not isinstance(result, dict):
+            return False
+        cache = self._state.thermal_model_cache
+        if not isinstance(cache, dict):
+            cache = _new_thermal_cache()
+            self._state.thermal_model_cache = cache
+        self._ensure_rate_prior()  # the evidence carried at upgrade must exist before the counts are rewritten
+
+        def _num(v: Any) -> bool:
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+        q = result.get("q")
+        ne = result.get("ne")
+        usable = _num(q) and _num(ne) and ne > 0 and result.get("grade", "none") != "none"
+        applied = bool(primary_is_v3 and usable)
+        now = dt_util.now()
+        field_name = "k_active_heat" if mode == "heat" else "k_active_cool"
+        prev = cache.get(f"cycle_fit_{mode}")
+        if not isinstance(prev, dict):
+            prev = {}
+        held = prev.get("held") if isinstance(prev.get("held"), dict) else None
+        prev_usable = _num(prev.get("ne")) and prev["ne"] > 0 and _num(prev.get("q"))
+        t_elig = [t for t in (result.get("t_eligible") or []) if _num(t)]
+        # The previous fit's cycles are gone from this pool: a sensor swap, or the first cycle after a season so long
+        # that the store let the old ones go (it keeps CYCLE_RETENTION_DAYS back from the newest cycle). The prior
+        # of this fit was then the previous fit itself (``cycle_model.held_candidate``); keep it as held.
+        # (Not when a full pool of newer cycles pushed them out: newer evidence then replaced them outright.)
+        # Issue #1512 final verification: "gone" means none of the cycles it was fitted on (t_first .. t_last) is in
+        # this fit. A crash loses at most the newest few cycles (the learning file is saved after every refit, the
+        # cycle file periodically); the survivors are in this fit, so this is a normal refit: no hold, nothing counted
+        # twice (the lost cycles' share of the evidence went with them, t_seen keeps the survivors from counting
+        # as new). It used to test the newest cycle only, so a crash held the fit and double-counted the survivors.
+        prev_lo = float(prev["t_first"]) if _num(prev.get("t_first")) else -math.inf
+        prev_gone = not _num(prev.get("t_last")) or (
+            not any(prev_lo - 1.0 <= t <= prev["t_last"] + 1.0 for t in t_elig)
+            and not (len(t_elig) >= CYCLE_MAX_CYCLES and min(t_elig) > prev["t_last"])
+        )
+        if prev_usable and (not usable or result.get("entity") != prev.get("entity") or prev_gone):
+            held = {k: prev.get(k) for k in _HELD_KEYS}
+            held["at"] = prev.get("fitted_at")
+            held["keep"] = 1.0
+            _LOGGER.info(
+                "Cycle model %s: the cycles behind the last fit are not in the pool any more (sensor %s -> %s); "
+                "its q=%s is held and yields only as new cycles arrive",
+                mode,
+                prev.get("entity"),
+                result.get("entity"),
+                prev.get("q"),
+            )
+        # The new evidence: eligible cycles newer than any an earlier fit saw.
+        t_seen = prev.get("t_seen", prev.get("t_last"))
+        t_new = [t for t in t_elig if not _num(t_seen) or t > t_seen]
+        if t_new:
+            contradicts = usable and not _fit_agrees_with_prior(result)
+            from_held = result.get("prior_source") == "held"
+            rp = cache.get("rate_prior")
+            legacy = rp.get(field_name) if isinstance(rp, dict) else None
+            if isinstance(legacy, dict):
+                legacy["keep"] = round(
+                    _displaced_keep(_evidence_keep(legacy), len(t_new), contradicts and not from_held), 6
+                )
+            if held is not None:
+                held = dict(held)
+                held["keep"] = round(_displaced_keep(_evidence_keep(held), len(t_new), contradicts and from_held), 6)
+                if held["keep"] < HELD_MIN_KEEP:
+                    held = None  # displaced by the new sensor's cycles
+            t_seen = max([t for t in (t_seen, *t_new) if _num(t)])
+        rec = {k: result.get(k) for k in CYCLE_FIT_KEYS}
+        rec["fitted_at"] = now.isoformat()
+        rec["applied"] = applied
+        rec["t_seen"] = t_seen if _num(t_seen) else None
+        if held is not None:
+            rec["held"] = held
+        cache[f"cycle_fit_{mode}"] = rec
+        if applied:
+            cache[field_name] = round(float(q), 4)
+        elif primary_is_v3:
+            held_rate = self._held_rate(cache, mode, None)
+            if held_rate is not None:
+                cache[field_name] = held_rate
+        return applied
+
+    @staticmethod
+    def _held_rate(cache: dict, mode: str, aged: float | None) -> float | None:
+        """The rate of a held applied fit while no new fit is usable: ``keep * held_q + (1 - keep) * aged``.
+
+        ``keep`` is the share of its evidence newer cycles left it (1.0 when it was held), so the rate equals the held
+        q the moment it is held and stays there through any quiet period (nothing snaps, nothing fades with time);
+        ``aged`` (or the legacy value) takes over only as far as new cycles displaced it. None when there is no
+        held applied fit."""
+        fit = cache.get(f"cycle_fit_{mode}")
+        held = fit.get("held") if isinstance(fit, dict) else None
+        if not isinstance(held, dict) or not held.get("applied"):
+            return None
+        keep = _evidence_keep(held)
+        q = held.get("q")
+        if keep < HELD_MIN_KEEP or not isinstance(q, (int, float)) or isinstance(q, bool):
+            return None
+        field_name = "k_active_heat" if mode == "heat" else "k_active_cool"
+        base = aged
+        if not isinstance(base, (int, float)) or isinstance(base, bool):
+            rp = cache.get("rate_prior")
+            rec = rp.get(field_name) if isinstance(rp, dict) else None
+            base = rec.get("value") if isinstance(rec, dict) else None
+        if not isinstance(base, (int, float)) or isinstance(base, bool):
+            return round(float(q), 4)
+        return round(keep * float(q) + (1.0 - keep) * float(base), 4)
 
     def reset_vent_rates(self) -> int:
         """Forget the windows-only and fan rates and the fits behind them, for a one-time re-learn (Issue #1505).
@@ -1396,8 +1807,8 @@ class LearningEngine:
         # bedtime-setback predictions. (Issue #587: fan_only_decay/"fan_only" retired —
         # it used to write k_vent, a separate now-removed cache field.)
         _envelope_modes = mode not in ("vent_window", "vent_fan")
-        if k_p is not None and _envelope_modes:
-            _ewma_update_field(cache, "k_passive", k_p, alpha)
+        # Issue #1512: k_passive / k_active_heat / k_active_cool are no longer EWMA-blended here; they are
+        # recomputed as aged weighted medians of the retained observations (_recompute_aged_rates).
 
         # Update avg_r_squared_passive (simple EWMA) — same guard as k_passive.
         # Vent-split R² reflects fit quality of a different physical regime and must
@@ -1407,13 +1818,17 @@ class LearningEngine:
             _ewma_update_field(cache, "avg_r_squared_passive", r2_p, alpha)
         k_a = obs.get("k_active")
         if mode == "heat" and k_a is not None:
-            _ewma_update_field(cache, "k_active_heat", k_a, alpha)
             cache["observation_count_heat"] = cache.get("observation_count_heat", 0) + 1
         elif mode == "cool" and k_a is not None:
-            _ewma_update_field(cache, "k_active_cool", k_a, alpha)
             cache["observation_count_cool"] = cache.get("observation_count_cool", 0) + 1
         elif mode == "passive":
             cache["observation_count_passive"] = cache.get("observation_count_passive", 0) + 1
+            # Owner decision 2026-11-11: the pre-upgrade evidence behind k_passive yields to each new passive
+            # observation (a single noisy fit: always the agreeing rate), never to time alone.
+            _rp = cache.get("rate_prior")
+            _prior = _rp.get("k_passive") if isinstance(_rp, dict) else None
+            if isinstance(_prior, dict):
+                _prior["keep"] = round(_displaced_keep(_evidence_keep(_prior), 1, False), 6)
         elif mode in ("vent_window", "vent_fan"):
             # Issue #587: one DRY'd branch resolving the target field/count names once,
             # rather than two near-duplicate branches (the same drift risk 2.2/2.3's
@@ -1489,34 +1904,62 @@ class LearningEngine:
             return
         apply_coast_samples(self._swing_cache(), mode, [sample])
 
-    def update_solar_phase_offset(self, observed_h: float, alpha: float) -> None:
+    def update_solar_phase_offset(self, observed_h: float, alpha: float, window_end: str | None = None) -> bool:
         """EWMA update for solar_phase_offset_h from a phase observation.
 
         Args:
             observed_h: Observed solar peak offset in hours (raw, will be clamped).
             alpha: EWMA smoothing factor (use THERMAL_SOLAR_PHASE_ALPHA = 0.10).
+            window_end: ISO timestamp of the window's last row. A window ending no later than the last one applied
+                is already counted (the daily re-fit scans the last two days) and is skipped (Issue #1524).
+
+        A new primary observation is new evidence for the primary: its share against the AC-duty secondary
+        (``solar_phase_offset_keep``) moves back toward 1.0 the same way the AC-duty days moved it away (symmetric,
+        Issue #1512 final verification): the secondary's share ``1 - keep`` halves per THERMAL_EVIDENCE_HALF_N
+        windows, or per THERMAL_EVIDENCE_HALF_N_CONTRADICT when the window is THERMAL_SOLAR_PHASE_CONTRADICT_H or more
+        from the secondary. (It used to return to 1.0 at once, so the expected solar peak could jump back by up to
+        about 1.5 h in a day.) Returns False when the window was already counted.
         """
         from datetime import date as _date
 
-        from .const import THERMAL_SOLAR_PHASE_OFFSET_MAX, THERMAL_SOLAR_PHASE_OFFSET_MIN
+        from .const import (
+            THERMAL_SOLAR_PHASE_CONTRADICT_H,
+            THERMAL_SOLAR_PHASE_OFFSET_MAX,
+            THERMAL_SOLAR_PHASE_OFFSET_MIN,
+        )
+
+        cache = self._state.thermal_model_cache
+        if cache is None:
+            cache = _new_thermal_cache()
+        last_end = cache.get("solar_phase_offset_last_window_end")
+        if window_end and isinstance(last_end, str) and str(window_end) <= last_end:
+            return False
 
         obs_clamped = max(
             float(THERMAL_SOLAR_PHASE_OFFSET_MIN),
             min(float(THERMAL_SOLAR_PHASE_OFFSET_MAX), float(observed_h)),
         )
 
-        cache = self._state.thermal_model_cache
-        if cache is None:
-            cache = _new_thermal_cache()
-
         current = cache.get("solar_phase_offset_h")
         new_val = obs_clamped if current is None else (1.0 - alpha) * float(current) + alpha * obs_clamped
 
         cache["solar_phase_offset_h"] = new_val
         cache["solar_phase_offset_last_obs_date"] = _date.today().isoformat()
+        secondary = cache.get("solar_phase_offset_ac_h")
+        keep = _evidence_keep({"keep": cache.get("solar_phase_offset_keep")})
+        if keep < 1.0:
+            contradicts = (
+                isinstance(secondary, (int, float))
+                and not isinstance(secondary, bool)
+                and abs(obs_clamped - float(secondary)) >= THERMAL_SOLAR_PHASE_CONTRADICT_H
+            )
+            cache["solar_phase_offset_keep"] = round(1.0 - _displaced_keep(1.0 - keep, 1, bool(contradicts)), 6)
+        if window_end:
+            cache["solar_phase_offset_last_window_end"] = str(window_end)
         self._state.thermal_model_cache = cache
+        return True
 
-    def update_ac_duty_solar_phase_offset(self, observed_offset_h: float, today_str: str) -> None:
+    def update_ac_duty_solar_phase_offset(self, observed_offset_h: float, today_str: str) -> bool:
         """Update the secondary (AC duty cycle) solar phase EWMA.
 
         Never called by the primary passive-decay path. Called by the coordinator's
@@ -1525,10 +1968,20 @@ class LearningEngine:
         Args:
             observed_offset_h: Estimated offset from AC duty peak (peak_hour - 13).
             today_str: ISO date string (YYYY-MM-DD) for the observation date.
+
+        Issue #1524: a day is counted once. The estimator re-scans the whole chart log every day, so a day no later
+        than the last one counted is skipped (it used to be folded in again every day, inflating the count and
+        pulling the EWMA toward the oldest days). Each new day is new evidence against the primary offset: its share
+        ``solar_phase_offset_keep`` halves every THERMAL_EVIDENCE_HALF_N agreeing days, or every
+        THERMAL_EVIDENCE_HALF_N_CONTRADICT days that are THERMAL_SOLAR_PHASE_CONTRADICT_H or more from it.
+        Returns False when the day was already counted.
         """
-        from .const import THERMAL_SOLAR_PHASE_AC_ALPHA
+        from .const import THERMAL_SOLAR_PHASE_AC_ALPHA, THERMAL_SOLAR_PHASE_CONTRADICT_H
 
         cache = self._state.thermal_model_cache or {}
+        last = cache.get("solar_phase_offset_ac_last_obs_date")
+        if isinstance(last, str) and last and str(today_str) <= last:
+            return False
         current = cache.get("solar_phase_offset_ac_h")
         if current is None:
             cache["solar_phase_offset_ac_h"] = observed_offset_h
@@ -1538,7 +1991,13 @@ class LearningEngine:
             )
         cache["solar_phase_offset_ac_obs_count"] = cache.get("solar_phase_offset_ac_obs_count", 0) + 1
         cache["solar_phase_offset_ac_last_obs_date"] = today_str
+        primary = cache.get("solar_phase_offset_h")
+        if isinstance(primary, (int, float)) and not isinstance(primary, bool):
+            contradicts = abs(float(observed_offset_h) - float(primary)) >= THERMAL_SOLAR_PHASE_CONTRADICT_H
+            keep = _evidence_keep({"keep": cache.get("solar_phase_offset_keep")})
+            cache["solar_phase_offset_keep"] = round(_displaced_keep(keep, 1, contradicts), 6)
         self._state.thermal_model_cache = cache
+        return True
 
     def get_engine_status(self) -> dict:
         """Return structured engine status for each thermal parameter.
@@ -1598,7 +2057,7 @@ class LearningEngine:
         has_solar = k_solar_val is not None or k_vent_window_val is not None or k_vent_fan_val is not None
         status["ode_version"] = "v3" if has_solar else "basic"
 
-        # Issue #1277: the same rule _build_predicted_indoor_future applies (either grade, or the gate bridge).
+        # Issue #1277: the same rule _build_predicted_indoor_future applies (grade plus a closed-house k_passive).
         physics_eligible, eligible_reason = explain_physics_eligibility(
             _conf_hvac, conf_k_passive, k_passive_val, k_vent_window_val
         )
@@ -1631,8 +2090,10 @@ class LearningEngine:
                 Defaults to 0.0 (night or no solar data).
         """
         cache = self._state.thermal_model_cache or {}
-        count_heat = cache.get("observation_count_heat", 0)
-        count_cool = cache.get("observation_count_cool", 0)
+        # Issue #1512: the evidence the rates carry now, displaced only by newer cycles (owner decision 2026-11-11; a
+        # pre-upgrade cache, with no rate_prior yet, reads its stored counts unchanged).
+        count_heat = int(round(hvac_evidence_count(cache, "heat")))
+        count_cool = int(round(hvac_evidence_count(cache, "cool")))
         total = count_heat + count_cool
 
         confidence = grade_hvac_confidence(cache)
@@ -1936,169 +2397,10 @@ class LearningEngine:
             self.record_thermal_observation(obs)
             return obs, None, None
 
-        # Default: hvac_heat / hvac_cool — original two-parameter path
-        post_samples = event.get("post_heat_samples", [])
-        pre_samples = event.get("pre_heat_samples", [])
-        active_samples = event.get("active_samples", [])
-        session_mode = event.get("session_mode") or event.get("hvac_mode") or "heat"
-
-        k_p, r2_p, _reject_code = compute_k_passive(post_samples, pre_samples)
-        _k_p_from_proxy = False  # D21: track whether k_p came from bridge proxy
-        if k_p is None:
-            _LOGGER.info(
-                "Thermal event commit failed: k_passive rejected (R²=%.3f, post_n=%d)",
-                r2_p,
-                len(post_samples),
-            )
-            # Issue #130 D17: Bridge-home proxy.
-            # If the home has k_vent_window (measured via ventilated_decay obs) but no
-            # envelope-only k_passive (common when windows are always open = no passive obs),
-            # use k_vent_window as a proxy.  k_vent_window overestimates passive loss because
-            # it includes ventilation, so force confidence to "low".
-            _cache = self._state.thermal_model_cache
-            _kv = _cache.get("k_vent_window") if isinstance(_cache, dict) else None
-            if _kv is not None and _kv < 0:
-                k_p = _kv
-                _k_p_from_proxy = True
-                force_grade = "low"
-                _LOGGER.debug(
-                    "_commit_event_from_dict: k_passive None, using k_vent_window=%.4f as proxy (bridge home)",
-                    k_p,
-                )
-            else:
-                return None, _reject_code, r2_p
-
-        k_a, r2_a = compute_k_active(active_samples, k_p, session_mode)
-        # k_a may be None for fan_only — that is acceptable
-
-        # Issue #130 D19: Single-point fallthrough when OLS returned None due to n_active < 2.
-        # Uses T_start, T_peak, and session_minutes (true elapsed from timestamps) so one
-        # chart_log entry is sufficient.  Only fires when k_p is available (proxy or real)
-        # so fresh installs (no k_passive estimate yet) skip gracefully.
-        if k_a is None and active_samples:
-            _start_f = event.get("start_indoor_f")
-            _peak_f = event.get("peak_indoor_f")
-            _session_min = event.get("session_minutes", 0.0)
-            _all_samps = (event.get("pre_heat_samples") or []) + list(active_samples)
-            _deltas = [
-                s["indoor_temp_f"] - s["outdoor_temp_f"]
-                for s in _all_samps
-                if s.get("indoor_temp_f") is not None and s.get("outdoor_temp_f") is not None
-            ]
-            _avg_dt = sum(_deltas) / len(_deltas) if _deltas else 0.0
-            if _start_f is not None and _peak_f is not None and _session_min > 0 and k_p is not None:
-                _k_a_sp = compute_k_active_single_point(
-                    T_start=_start_f,
-                    T_peak=_peak_f,
-                    elapsed_hours=_session_min / 60.0,
-                    k_passive=k_p,
-                    avg_delta_t=_avg_dt,
-                    session_mode=session_mode,
-                )
-                if _k_a_sp is not None:
-                    k_a = _k_a_sp
-                    force_grade = "low"
-                    _LOGGER.debug(
-                        "_commit_event_from_dict: single-point k_active=%.3f (n_active=%d elapsed=%.1fmin)",
-                        k_a,
-                        len(active_samples),
-                        _session_min,
-                    )
-
-        # Passive baseline rate (mean of pre-heat rates)
-        passive_baseline = 0.0
-        if pre_samples and len(pre_samples) >= 2:
-            indoor_pre = [s["indoor_temp_f"] for s in pre_samples]
-            elapsed_pre = [s["elapsed_minutes"] for s in pre_samples]
-            rates_pre: list[float] = []
-            for i in range(len(indoor_pre) - 1):
-                dt_h = (elapsed_pre[i + 1] - elapsed_pre[i]) / 60.0
-                if dt_h > 0:
-                    rates_pre.append((indoor_pre[i + 1] - indoor_pre[i]) / dt_h)
-            if rates_pre:
-                passive_baseline = sum(rates_pre) / len(rates_pre)
-
-        # Aggregate outdoor temps
-        all_samples = pre_samples + active_samples + post_samples
-        outdoor_temps = [s["outdoor_temp_f"] for s in all_samples if s.get("outdoor_temp_f") is not None]
-        avg_outdoor = sum(outdoor_temps) / len(outdoor_temps) if outdoor_temps else 0.0
-
-        # Indoor stats
-        all_indoor = [s["indoor_temp_f"] for s in all_samples if s.get("indoor_temp_f") is not None]
-        peak_indoor = max(all_indoor) if all_indoor else (event.get("start_indoor_f") or 0.0)
-
-        start_indoor = event.get("start_indoor_f") or (active_samples[0]["indoor_temp_f"] if active_samples else 0.0)
-        end_indoor_samples = post_samples if post_samples else active_samples
-        end_indoor = end_indoor_samples[-1]["indoor_temp_f"] if end_indoor_samples else start_indoor
-        start_outdoor = active_samples[0]["outdoor_temp_f"] if active_samples else avg_outdoor
-        delta_t_avg = (
-            sum(s["indoor_temp_f"] - s["outdoor_temp_f"] for s in all_samples) / len(all_samples)
-            if all_samples
-            else 0.0
-        )
-
-        session_minutes = event.get("session_minutes") or 0.0
-        if not session_minutes and active_samples and len(active_samples) >= 2:
-            session_minutes = active_samples[-1]["elapsed_minutes"] - active_samples[0]["elapsed_minutes"]
-
-        # Confidence grade
-        if force_grade is not None:
-            grade = force_grade
-        else:
-            n_post = len(post_samples)
-            r2_thresh_high = 0.7
-            r2_thresh_med = 0.4
-            r2_ok_active = (r2_a is not None and r2_a >= r2_thresh_high) or session_mode == "fan_only"
-            r2_ok_active_med = (r2_a is not None and r2_a >= r2_thresh_med) or session_mode == "fan_only"
-            # TODO: 10/5 are separate grade thresholds distinct from THERMAL_MIN_POST_HEAT_SAMPLES (4).
-            #       Consider naming them (e.g. THERMAL_HVAC_GRADE_HIGH_SAMPLES / _MED_SAMPLES) in const.py.
-            if r2_p >= r2_thresh_high and r2_ok_active and n_post >= 10:
-                grade = "high"
-            elif r2_p >= r2_thresh_med and r2_ok_active_med and n_post >= 5:
-                grade = "medium"
-            else:
-                grade = "low"
-
-        now_str = dt_util.now().isoformat()
-        date_str = dt_util.now().date().isoformat()
-        obs = {
-            "event_id": event.get("event_id", str(uuid.uuid4())),
-            "timestamp": now_str,
-            "date": date_str,
-            "hvac_mode": session_mode,
-            "session_minutes": round(session_minutes, 1),
-            "start_indoor_f": start_indoor,
-            "end_indoor_f": end_indoor,
-            "peak_indoor_f": peak_indoor,
-            "start_outdoor_f": start_outdoor,
-            "avg_outdoor_f": round(avg_outdoor, 1),
-            "delta_t_avg": round(delta_t_avg, 2),
-            # D21: when k_p came from the bridge proxy, write k_passive=None so
-            # _update_thermal_model_cache does NOT update the envelope k_passive EWMA
-            # with a ventilated-decay proxy value.  Only k_active EWMA is updated.
-            "k_passive": None if _k_p_from_proxy else round(k_p, 5),
-            "k_active": round(k_a, 3) if k_a is not None else None,
-            "passive_baseline_rate": round(passive_baseline, 3),
-            "r_squared_passive": None if _k_p_from_proxy else round(r2_p, 3),
-            "r_squared_active": round(r2_a, 3) if r2_a is not None else None,
-            "sample_count_pre": len(pre_samples),
-            "sample_count_active": len(active_samples),
-            "sample_count_post": len(post_samples),
-            "confidence_grade": grade,
-            "schema_version": 2,
-        }
-
-        _LOGGER.info(
-            "Thermal observation committed: zone=%s mode=%s grade=%s k_passive=%.4f k_active=%s R²_p=%.3f",
-            self._zone_log_id(),
-            session_mode,
-            grade,
-            k_p,
-            f"{k_a:.3f}" if k_a is not None else "None",
-            r2_p,
-        )
-        self.record_thermal_observation(obs)
-        return obs, None, None
+        # hvac_heat / hvac_cool are learned by the pooled cycle model (apply_cycle_fit, Issue #1512); the old post-run
+        # fit (and its k_vent_window -> k_passive proxy) is gone, so no HVAC obs_type commits through this path.
+        _LOGGER.warning("_commit_event_from_dict: obs_type %r is not committed here (use apply_cycle_fit)", obs_type)
+        return None, REJECT_ABANDONED, None
 
     def get_weather_bias(self) -> dict:
         """Compute the weather forecast bias from recent daily records.

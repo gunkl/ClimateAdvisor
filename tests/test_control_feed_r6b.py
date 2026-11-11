@@ -62,7 +62,8 @@ def test_control_rates_are_the_net_gain_of_one_hour_of_heat_through_the_hidden_m
     assert rates["k_active_cool"] < 0 and abs(rates["k_active_cool"]) < 11.0
     assert rates["heating_rate_f_per_hour"] == round(rates["k_active_heat"], 2)
     assert rates["k_passive"] == pytest.approx(-0.06)
-    assert rates["k_passive_via_bridge"] is False
+    # The gate bridge was removed in #1512 (k_vent_window is a windows-open rate, not a closed-house rate).
+    assert "k_passive_via_bridge" not in rates
     assert (rates["confidence"], rates["confidence_k_passive"]) == ("medium", "medium")
     assert p4.control_rates(p4.from_dict(v4_model_from_spec({"confidence": "low"})))["confidence"] == "low"
     assert p4.control_rates(p4.from_dict(v4_model_from_spec({"confidence": "none"}))) == {}

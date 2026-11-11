@@ -62,6 +62,9 @@ custom_components/climate_advisor/
 ├── claude_api.py        # Centralized Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking. Provides async_request() for all AI features.
 ├── ai_skills.py         # AI skills framework: lightweight registry for pluggable AI analysis capabilities. Skills register a context builder, response parser, and optional fallback.
 ├── chart_log.py         # Chart state log: persistent 1-year ring buffer of HVAC/fan/temp data points and event markers, used by the Temperature Forecast chart.
+├── cycle_model.py       # Pooled heating/cooling cycle model (Issues #1512/#1516): fit_cycles, clean_series, infer_resolution, grade, typical_prior, prior_from_cache. Pure math, no HA imports; shared with tools/thermal_replay.py and tools/predict_backtest.py. See 05-LEARNING-ENGINE-DESIGN.md.
+├── cycle_recorder.py    # CycleRecorder: pure state machine turning thermostat edges, band-sensor readings, flags, setpoint changes and gaps into closed cycle dicts.
+├── cycle_store.py       # CycleStore: per-zone climate_advisor_cycles.json (90 days back from the mode's newest cycle, cap 3000 cycles (1500 per mode), native-resolution integer deltas (v2; v1 migrated), compact in memory, saved periodically + at HA stop, atomic 0600 write). Separate from the chart_log (chart-log-spec.md).
 ├── feels_like.py        # Issue #1414: pure NWS heat index / wind chill (feels_like_f) and weather wind-unit -> mph, chart display only. See chart-log-spec.md "Humidity and Feels-Like Fields".
 ├── humidity_sources.py  # Issue #1414: one humidity resolver, three roles (indoor_day, indoor_sleep, outdoor); chart display only, never the climate TARGET humidity.
 ├── forecast_archive.py  # Forecast archive (Issue #1230 R0): persisted hourly-forecast snapshots, one per local hour, for forecast-error scoring. Record-only; entry-scoped JSON. See forecast-archive-spec.md.
@@ -213,11 +216,11 @@ These methods on `ClimateAdvisorCoordinator` implement the Issue #121 v3 concurr
 
 | Method | Role |
 |--------|------|
-| `_start_hvac_observation(session_mode)` | Begins an HVAC (heat or cool) observation; pre-loads the pre-heat buffer |
+| `_start_hvac_observation(session_mode)` | Begins an HVAC (heat or cool) observation; records the on-edge indoor reading |
 | `_start_decay_observation(obs_type)` | Begins one of the four rolling-decay observation types |
 | `_sample_all_observations()` | Per-tick: samples all active observations in `_pending_observations`; starts new decay types when trigger conditions first become true |
-| `_end_hvac_active_phase(obs_type)` | Transitions HVAC obs from `active` to `post_heat` when HVAC stops |
-| `_check_hvac_stabilization(obs_type)` | Tests for post-heat stabilization; triggers commit or continues polling |
+| `_end_hvac_active_phase(obs_type)` | At the HVAC off edge closes the pending HVAC observation (swing/settle bookkeeping); no rate is committed here, the cycle recorder closes the cycle and the cycle model refits (Issues #1512/#1516) |
+| `_on_cycle_closed(cycle)` (cycle path) | Stores the closed cycle in `CycleStore`, refits that mode with `cycle_model.fit_cycles` in the executor, then `learning.apply_cycle_fit(mode, result, primary_is_v3)`; an ineligible or excluded cycle records a `cycle_*` rejection code |
 | `_evaluate_rolling_window(obs_type)` | Commit/keep-alive decision for rolling-window decay types (30-min min, 240-min cap) |
 | `_commit_rolling_window_obs(obs_type)` | Calls `_commit_observation()` for a rolling obs that has passed the signal check |
 | `_commit_observation_if_sufficient(obs_type)` | Commits if `len(samples) >= min_samples`, else abandons — used on HVAC-start contamination flush |
@@ -226,7 +229,7 @@ These methods on `ClimateAdvisorCoordinator` implement the Issue #121 v3 concurr
 
 All six concurrent types are tracked in `_pending_observations: dict[str, PendingObservation]`. Observations are never persisted: after an HA restart or zone reload the Issue #96 late start opens a fresh HVAC observation, and the pre-restart part of the run is not learned from, by design (Issue #1437: a fit across the blind gap would be invalid). See [Thermal Model v3 Spec](thermal-model-v3-spec.md) for the full observation-type matrix and lifecycle.
 
-> **v2 pipeline coexistence note:** The v2 HVAC-specific methods (`_start_thermal_event`, `_sample_thermal_event`, `_end_active_phase`, `_check_stabilization`, `_commit_thermal_event`, `_abandon_thermal_event`, `_update_pre_heat_buffer`) remain in the codebase as a **parallel, independent pipeline** — they are not internal helpers of the v3 methods. On every HVAC start, `_async_thermostat_changed` calls both `_start_thermal_event` and `_start_hvac_observation`, and the 30-minute tick calls both `_sample_thermal_event`/`_check_stabilization` (v2) and `_sample_all_observations`/`_check_hvac_stabilization` (v3). The v2 pipeline has not been retired. `_update_pre_heat_buffer` is shared infrastructure used by both paths.
+> **v2 pipeline (retired):** the v2 HVAC-specific methods (`_start_thermal_event`, `_sample_thermal_event`, `_end_active_phase`, `_check_stabilization`, `_commit_thermal_event`, `_abandon_thermal_event`) no longer exist, and since Issue #1512 neither do the pre-heat buffer (`_update_pre_heat_buffer`) and the v3 `_check_hvac_stabilization`: a heating/cooling run is committed or rejected at its off edge (`_end_hvac_active_phase`), so nothing after the off edge is sampled.
 
 ## FSM Decision Layer
 
@@ -414,12 +417,11 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 - Storage: JSON file in HA config dir
 
 ### Thermal Model Parameters (Issue #114)
-- Post-heat timeout: 45 min (`THERMAL_POST_HEAT_TIMEOUT_MINUTES`)
-- Stabilization threshold: 0.3°F over 5 consecutive minutes (`THERMAL_STABILIZATION_THRESHOLD_F`, `THERMAL_STABILIZATION_WINDOW_MINUTES`)
+- Cycle model gates (Issues #1512/#1516): cycle ≥ 3 min and readings moved ≥ 3 resolution steps; prior from the typical house or the stored rate by evidence; evidence gives way only to newer cycles (`THERMAL_EVIDENCE_HALF_N` 20, contradicting 5; never with time); at most the last 60 eligible cycles (`cycle_model.py`, see 05-LEARNING-ENGINE-DESIGN.md § Parameter Extraction)
+- Rate ageing: weighted median of retained observations, each weight halved per 20 newer observations of its rate (`THERMAL_EVIDENCE_HALF_N`; no calendar clock, Issue #1523), legacy-method weight 0.25 (`THERMAL_LEGACY_OBS_WEIGHT`); observations kept per kind (`THERMAL_OBS_KIND_CAPS`, sharing `THERMAL_OBS_CAP` 200), none leaves with time
 - Sample interval: 60 seconds (`THERMAL_SAMPLE_INTERVAL_SECONDS`)
-- Pre-heat buffer window: 15 min / max 15 entries (`THERMAL_PRE_HEAT_BUFFER_MINUTES`)
 - Minimum R² for k_passive acceptance: 0.2 (`THERMAL_MIN_R_SQUARED`)
-- Minimum post-heat samples for regression: 4 (`THERMAL_MIN_POST_HEAT_SAMPLES`)
+- Default sample floor of the passive `compute_k_passive` regression: 4 (`THERMAL_MIN_POST_HEAT_SAMPLES`); heating/cooling runs no longer use a post-heat regression (Issue #1512)
 - k_passive sanity bounds: −0.5 to −0.001 hr⁻¹
 - k_active_heat sanity bounds: 0.5 to 15.0 °F/hr
 - k_active_cool sanity bounds: −15.0 to −0.5 °F/hr

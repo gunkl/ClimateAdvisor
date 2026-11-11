@@ -192,7 +192,6 @@ class TestCeilingGuardOutcomeShift:
                 hvac_mode="off",
                 k_passive=-0.12,
                 confidence_k_passive="low",
-                k_passive_via_bridge=False,
                 k_active_cool=-2.5,
                 comfort_cool=75.0,
                 outdoor=55.0,

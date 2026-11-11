@@ -240,5 +240,9 @@ class TestLearningEngineEntryScoping:
         e2_reload = LearningEngine(tmp_path, entry_id="zone2")
         e2_reload.load_state()
 
-        assert e1_reload._state.thermal_model_cache == {"k_passive": -0.5}
-        assert e2_reload._state.thermal_model_cache == {"k_passive": -0.9}
+        # Old expectation compared the whole dict; load now also stores the Issue #1512 ageing prior ("rate_prior") for
+        # each cached rate, so the dict is no longer exactly what was saved. Independence is about the rate values.
+        assert e1_reload._state.thermal_model_cache["k_passive"] == -0.5
+        assert e2_reload._state.thermal_model_cache["k_passive"] == -0.9
+        assert e1_reload._state.thermal_model_cache["rate_prior"]["k_passive"]["value"] == -0.5
+        assert e2_reload._state.thermal_model_cache["rate_prior"]["k_passive"]["value"] == -0.9

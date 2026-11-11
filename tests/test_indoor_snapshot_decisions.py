@@ -95,7 +95,6 @@ def _ceiling_inputs(**overrides) -> OdeCeilingGuardInputs:
         "hvac_mode": "off",
         "k_passive": -0.1,
         "confidence_k_passive": "high",
-        "k_passive_via_bridge": False,
         "k_active_cool": 4.0,
         "comfort_cool": 74.0,
         "outdoor": 90.0,

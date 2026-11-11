@@ -40,7 +40,6 @@ def _inputs(
     hvac_mode: str | None = "off",
     k_passive: float | None = -0.5,
     confidence_k_passive: str = "medium",
-    k_passive_via_bridge: bool = False,
     k_active_cool: float | None = -2.0,
     comfort_cool: float | None = 76.0,
     outdoor: float | None = 85.0,
@@ -54,7 +53,6 @@ def _inputs(
         hvac_mode=hvac_mode,
         k_passive=k_passive,
         confidence_k_passive=confidence_k_passive,
-        k_passive_via_bridge=k_passive_via_bridge,
         k_active_cool=k_active_cool,
         comfort_cool=comfort_cool,
         outdoor=outdoor,
@@ -100,25 +98,22 @@ class TestModelIneligible:
         assert decision.outcome == OdeCeilingGuardOutcome.MODEL_INELIGIBLE
 
     def test_confidence_none_and_no_bridge(self) -> None:
-        decision = decide_ode_ceiling_guard(
-            _inputs(predicted_indoor=_CURVE, confidence_k_passive="none", k_passive_via_bridge=False)
-        )
+        decision = decide_ode_ceiling_guard(_inputs(predicted_indoor=_CURVE, confidence_k_passive="none"))
         assert decision.outcome == OdeCeilingGuardOutcome.MODEL_INELIGIBLE
 
-    def test_confidence_none_but_bridge_true_is_eligible(self) -> None:
-        # Bridge homes are eligible even at confidence="none" — model_eligible
-        # is `(conf != "none" or via_bridge)`.
+    def test_confidence_none_is_ineligible_without_a_bridge(self) -> None:
+        # The gate bridge was removed in #1512 because k_vent_window is a windows-open rate, not a
+        # closed-house rate: confidence "none" is now always MODEL_INELIGIBLE (was eligible via bridge).
         decision = decide_ode_ceiling_guard(
             _inputs(
                 predicted_indoor=_CURVE,
                 confidence_k_passive="none",
-                k_passive_via_bridge=True,
                 outdoor=60.0,
                 indoor=74.0,
                 natural_vent_active=False,
             )
         )
-        assert decision.outcome != OdeCeilingGuardOutcome.MODEL_INELIGIBLE
+        assert decision.outcome == OdeCeilingGuardOutcome.MODEL_INELIGIBLE
 
     def test_comfort_cool_none(self) -> None:
         decision = decide_ode_ceiling_guard(_inputs(predicted_indoor=_CURVE, comfort_cool=None))
@@ -252,8 +247,9 @@ class TestNoBreachPredicted:
         )
         assert decision.outcome == OdeCeilingGuardOutcome.NO_BREACH_PREDICTED
 
-    def test_bridge_tolerance_widens_threshold(self) -> None:
-        # comfort_cool=76, bridge tolerance=1.0 -> threshold=77; 76.5 does not breach.
+    def test_no_bridge_tolerance_any_overshoot_breaches(self) -> None:
+        # The bridge tolerance was removed in #1512 (k_vent_window is a windows-open rate, not a
+        # closed-house rate): threshold is the plain ceiling 76, so 76.5 now counts as a breach.
         decision = decide_ode_ceiling_guard(
             _inputs(
                 predicted_indoor=_curve(("2026-07-15T18:00:00+00:00", 76.5)),
@@ -262,10 +258,9 @@ class TestNoBreachPredicted:
                 natural_vent_active=False,
                 ceiling_threshold=76.0,
                 comfort_cool=76.0,
-                k_passive_via_bridge=True,
             )
         )
-        assert decision.outcome == OdeCeilingGuardOutcome.NO_BREACH_PREDICTED
+        assert decision.outcome != OdeCeilingGuardOutcome.NO_BREACH_PREDICTED
 
     def test_malformed_timestamp_treated_as_no_breach(self) -> None:
         decision = decide_ode_ceiling_guard(

@@ -2,8 +2,8 @@
 
 Tests cover:
   - detect_hvac_cycles(): cycle detection, window sizing, sample caps
-  - run_hvac_replay_ols(): OLS dispatch for heat/cool cycles, bridge proxy,
-    flat-signal rejection, outdoor-None handling
+  - run_cycle_replay(): the pooled cycle model through production cycle_model.fit_cycles (Issues #1512/#1516);
+    the per-run run-edge replay and the duty-balance replay are retired
 """
 
 from __future__ import annotations
@@ -158,380 +158,86 @@ class TestHvacCycleDetection:
 
 
 # ===========================================================================
-# TestHvacReplayOls
+# TestCycleReplay
 # ===========================================================================
 
 
-class TestHvacReplayOls:
-    """Tests for run_hvac_replay_ols() — cycle OLS dispatch."""
+class _FakeCycleModel:
+    """Stands in for production cycle_model: records what the replay hands it (the DRY contract)."""
 
-    def _make_cycle(
-        self,
-        n_pre: int = 3,
-        n_active: int = 4,
-        n_post: int = 5,
-        pre_indoor: float = 65.0,
-        active_indoor_end: float = 70.0,
-        post_indoor_end: float = 67.0,
-        outdoor: float = 50.0,
-        mode: str = "heat",
-        outdoor_for_active: float | None = None,
-    ) -> dict:
-        """Build a synthetic cycle dict with simple linear indoor profiles."""
-        # timestamps: 30-min spacing throughout
-        offset = 0
-        pre_samples = []
-        for _i in range(n_pre):
-            pre_samples.append(
-                {
-                    "ts": _ts(offset),
-                    "indoor": pre_indoor,
-                    "outdoor": outdoor,
-                }
-            )
-            offset += 30
+    def __init__(self):
+        self.fit_calls = []
+        self.prior_calls = []
 
-        active_samples = []
-        for _i in range(n_active):
-            frac = _i / max(n_active - 1, 1)
-            indoor_val = pre_indoor + frac * (active_indoor_end - pre_indoor)
-            out = outdoor if outdoor_for_active is None else outdoor_for_active
-            active_samples.append(
-                {
-                    "ts": _ts(offset),
-                    "indoor": indoor_val,
-                    "outdoor": out,
-                }
-            )
-            offset += 30
+    def prior_from_cache(self, cache, mode, now, *, cycles=None):
+        self.prior_calls.append((cache, mode, now))
+        self.prior_pools = [*getattr(self, "prior_pools", []), cycles]
+        return {"mode": mode, "from": "cache"}
 
-        post_samples = []
-        for i in range(n_post):
-            frac = i / max(n_post - 1, 1)
-            indoor_val = active_indoor_end + frac * (post_indoor_end - active_indoor_end)
-            post_samples.append(
-                {
-                    "ts": _ts(offset),
-                    "indoor": indoor_val,
-                    "outdoor": outdoor,
-                }
-            )
-            offset += 30
-
+    def fit_cycles(self, cycles, mode, prior, *, now_ts):
+        self.fit_calls.append((cycles, mode, prior, now_ts))
         return {
-            "mode": mode,
-            "pre_samples": pre_samples,
-            "active_samples": active_samples,
-            "post_samples": post_samples,
-            "start_ts": pre_samples[0]["ts"] if pre_samples else active_samples[0]["ts"],
+            "q": 7.5 if mode == "heat" else -8.0,
+            "sd_q": 1.0,
+            "grade": "medium",
+            "coast_area_f": 0.4,
+            "tau": 5.0,
+            "ne": len(cycles),
+            "n_cycles": len(cycles),
+            "resolution_f": 0.1,
+            "k_p_cycle": -0.05,
         }
 
-    def test_successful_heat_cycle_produces_k_active(self):
-        """A clear heat cycle should commit with k_active > 0 and k_passive < 0."""
-        cycle = self._make_cycle(
-            n_pre=3,
-            n_active=4,
-            n_post=5,
-            pre_indoor=65.0,
-            active_indoor_end=70.0,
-            post_indoor_end=66.0,
-            outdoor=50.0,
-            mode="heat",
-        )
-        result = tr.run_hvac_replay_ols(cycle)
-        assert result is not None, "Expected commit but got None (rejected)"
-        assert result["hvac_mode"] == "heat"
-        assert result["k_active"] is not None
-        assert result["k_active"] > 0, f"Expected k_active > 0, got {result['k_active']}"
-        assert result["k_passive"] < 0, f"Expected k_passive < 0, got {result['k_passive']}"
-        assert result["confidence_grade"] == "low"
-        assert result.get("source") == "replay"
 
-    def test_flat_cycle_rejected(self):
-        """Indoor stays flat — no thermal signal — should be rejected (returns None)."""
-        # Build cycle where all indoor temps are identical
-        cycle = self._make_cycle(
-            n_pre=3,
-            n_active=3,
-            n_post=5,
-            pre_indoor=68.0,
-            active_indoor_end=68.0,  # flat
-            post_indoor_end=68.0,  # flat
-            outdoor=50.0,
-            mode="heat",
-        )
-        result = tr.run_hvac_replay_ols(cycle)
-        assert result is None, "Expected rejection for flat signal but got a commit"
+class TestCycleReplay:
+    """run_cycle_replay(): production cycle_model.fit_cycles over the stored cycles (Issues #1512/#1516)."""
 
-    def test_missing_outdoor_uses_fallback(self):
-        """post_samples with outdoor=None should use last valid outdoor (not crash)."""
-        # Start with valid outdoor in pre/active, then None in post
-        cycle = self._make_cycle(
-            n_pre=2,
-            n_active=3,
-            n_post=5,
-            pre_indoor=65.0,
-            active_indoor_end=70.0,
-            post_indoor_end=66.0,
-            outdoor=50.0,
-            mode="heat",
-        )
-        # Wipe outdoor from some post samples
-        for s in cycle["post_samples"][:2]:
-            s["outdoor"] = None
-        # Should not crash; may commit or reject but must return dict or None
-        result = tr.run_hvac_replay_ols(cycle)
-        # No assertion on commit/reject — just verify no exception and correct type
-        assert result is None or isinstance(result, dict)
+    NOW = 1_800_000_000.0
 
-    def test_cool_cycle_produces_negative_k_active(self):
-        """A cooling cycle should produce k_active < 0."""
-        cycle = self._make_cycle(
-            n_pre=3,
-            n_active=4,
-            n_post=5,
-            pre_indoor=78.0,
-            active_indoor_end=72.0,  # drops during cooling
-            post_indoor_end=75.0,  # rebounds
-            outdoor=85.0,
-            mode="cool",
-        )
-        result = tr.run_hvac_replay_ols(cycle)
-        if result is not None:
-            assert result["hvac_mode"] == "cool"
-            if result["k_active"] is not None:
-                assert result["k_active"] < 0, f"Expected k_active < 0 for cool, got {result['k_active']}"
-
-    def test_too_few_post_samples_rejected(self):
-        """Only 2 post samples — below min 4 — should be rejected."""
-        cycle = self._make_cycle(
-            n_pre=2,
-            n_active=3,
-            n_post=2,  # too few
-            pre_indoor=65.0,
-            active_indoor_end=70.0,
-            post_indoor_end=67.0,
-            outdoor=50.0,
-            mode="heat",
-        )
-        result = tr.run_hvac_replay_ols(cycle)
-        assert result is None, "Expected rejection for too few post samples"
-
-    def test_bridge_proxy_used_when_k_passive_fails_but_k_vent_window_available(self):
-        """When post_samples give no valid k_passive but a k_vent_window proxy is
-        supplied, OLS should use proxy and return confidence_grade='low'."""
-        # Flat post samples → k_passive will fail OLS
-        cycle = self._make_cycle(
-            n_pre=0,
-            n_active=3,
-            n_post=5,
-            pre_indoor=65.0,
-            active_indoor_end=70.0,
-            post_indoor_end=70.0,  # flat post → k_passive fails
-            outdoor=50.0,
-            mode="heat",
-        )
-        proxy = -0.05  # k_vent_window substitute
-        result = tr.run_hvac_replay_ols(cycle, k_vent_window_proxy=proxy)
-        # If k_active bounds are satisfied the cycle may commit or reject
-        # depending on the signal quality; the important thing is it does NOT
-        # crash, and if committed grade is "low"
-        if result is not None:
-            assert result["confidence_grade"] == "low"
-
-    # ------------------------------------------------------------------
-    # Single-point estimator tests (Issue #130 Phase C-revised)
-    # ------------------------------------------------------------------
-
-    def _make_single_point_cycle(
-        self,
-        active_ts: str = "2026-05-03T07:14:52+00:00",
-        post_ts: str = "2026-05-03T07:24:34+00:00",
-        pre_indoor: float = 68.0,
-        active_indoor: float = 68.0,
-        post_indoor: float = 69.0,
-        outdoor: float = 54.0,
-        mode: str = "heat",
-    ) -> dict:
-        """Build a cycle with exactly 1 active sample and exact timestamps.
-
-        The elapsed time comes from post[0].ts - active[0].ts, matching the
-        real chart_log behavior for short HVAC cycles.
-        """
-        pre_samples = [
-            {"ts": "2026-05-03T07:00:00+00:00", "indoor": pre_indoor, "outdoor": outdoor},
-            {"ts": "2026-05-03T07:07:00+00:00", "indoor": pre_indoor, "outdoor": outdoor},
-        ]
-        active_samples = [
-            {"ts": active_ts, "indoor": active_indoor, "outdoor": outdoor},
-        ]
-        post_samples = [
-            {"ts": post_ts, "indoor": post_indoor, "outdoor": outdoor},
-            {"ts": "2026-05-03T07:54:34+00:00", "indoor": post_indoor - 0.5, "outdoor": outdoor},
-            {"ts": "2026-05-03T08:24:34+00:00", "indoor": post_indoor - 1.0, "outdoor": outdoor},
-            {"ts": "2026-05-03T08:54:34+00:00", "indoor": post_indoor - 1.5, "outdoor": outdoor},
-        ]
-        return {
-            "mode": mode,
-            "pre_samples": pre_samples,
-            "active_samples": active_samples,
-            "post_samples": post_samples,
-            "start_ts": active_ts,
-        }
-
-    def test_single_point_used_when_n_act_1(self):
-        """n_act=1 cycle with 10-min timestamps and 1°F rise should produce a
-        valid k_active estimate via the single-point path.
-
-        Physics: elapsed=9m42s=0.162hr, T_start=68, T_peak=69, signal=1°F
-        gross_rate = 1/0.162 ≈ 6.2 °F/hr
-        avg_delta ≈ 68-54 = 14 (indoor warmer)
-        k_active = 6.2 - (-0.14 * 14) ≈ 8.2  → within [0.5, 15.0]
-        """
-        cycle = self._make_single_point_cycle(
-            active_ts="2026-05-03T07:14:52+00:00",
-            post_ts="2026-05-03T07:24:34+00:00",
-            pre_indoor=68.0,
-            active_indoor=68.0,
-            post_indoor=69.0,
-            outdoor=54.0,
-            mode="heat",
-        )
-        result = tr.run_hvac_replay_ols(cycle, k_vent_window_proxy=-0.14)
-        assert result is not None, "Expected single-point estimator to produce a result for n_act=1 cycle"
-        assert result["k_active"] is not None
-        assert 0.5 <= result["k_active"] <= 15.0, f"k_active={result['k_active']} out of expected [0.5, 15.0]"
-        assert result["confidence_grade"] == "low"
-        assert result.get("source") == "replay"
-
-    def test_ols_preferred_when_n_act_2plus(self):
-        """n_act >= 2 with clear thermal signal should go through OLS path and
-        return a non-None result (no regression on multi-sample cycles)."""
-        cycle = self._make_cycle(
-            n_pre=3,
-            n_active=4,
-            n_post=5,
-            pre_indoor=65.0,
-            active_indoor_end=70.0,
-            post_indoor_end=66.0,
-            outdoor=50.0,
-            mode="heat",
-        )
-        result = tr.run_hvac_replay_ols(cycle)
-        assert result is not None, "Expected OLS path to commit for n_act=4 cycle with clear temperature rise"
-        assert result["k_active"] is not None
-        assert result["k_active"] > 0
-
-    def test_dry_run_loads_proxy_for_single_point(self):
-        """Single-point path fires when a k_vent_window proxy is provided, even in
-        dry-run context.  run_hvac_replay_ols() is the unit being tested; main()
-        is responsible for loading the proxy regardless of --dry-run/--write.
-        This test verifies that passing the proxy to run_hvac_replay_ols() with a
-        n_act=1 cycle produces a committed result (k_active not None).
-        """
-        # Decaying post profile → k_passive OLS may succeed on its own.
-        # The key invariant being tested: with a proxy and n_act=1, the single-point
-        # estimator produces a committed result (k_active is set).
-        cycle = self._make_single_point_cycle(
-            active_ts="2026-05-03T07:14:52+00:00",
-            post_ts="2026-05-03T07:24:34+00:00",
-            pre_indoor=68.0,
-            active_indoor=68.0,
-            post_indoor=69.0,
-            outdoor=54.0,
-            mode="heat",
-        )
-        result = tr.run_hvac_replay_ols(cycle, k_vent_window_proxy=-0.14)
-        assert result is not None, "Expected non-None result when proxy is supplied for n_act=1 cycle"
-        assert result["k_active"] is not None, "k_active must be set when single-point commits"
-        assert result["confidence_grade"] == "low"
-
-    # ------------------------------------------------------------------
-    # Proxy-aware n_post gating and plateau guard tests (Issue #130 Phase D)
-    # ------------------------------------------------------------------
-
-    def _make_proxy_cycle(
-        self,
-        n_post: int,
-        post_flat: bool = False,
-        t_start: float = 68.0,
-        t_peak: float = 69.0,
-        outdoor: float = 54.0,
-    ) -> dict:
-        """Build a minimal cycle for proxy-path gating tests.
-
-        n_act=1, timestamps 10 min apart.  If post_flat=True, all post samples
-        hold indoor at t_peak (no decay), triggering the plateau guard.
-        Otherwise post decays linearly from t_peak toward t_start.
-        """
-        active_ts = "2026-05-03T07:14:52+00:00"
-        post_base = datetime(2026, 5, 3, 7, 24, 34, tzinfo=UTC)
-
-        pre_samples = [
-            {"ts": "2026-05-03T07:00:00+00:00", "indoor": t_start, "outdoor": outdoor},
-            {"ts": "2026-05-03T07:07:00+00:00", "indoor": t_start, "outdoor": outdoor},
-        ]
-        active_samples = [
-            {"ts": active_ts, "indoor": t_start, "outdoor": outdoor},
+    def _cycles(self):
+        day = 86400
+        return [
+            {"id": "h1", "mode": "heat", "t_on": self.NOW - 2 * day},
+            {"id": "h2", "mode": "heat", "t_on": self.NOW - 40 * day},
+            {"id": "c1", "mode": "cool", "t_on": self.NOW - 1 * day},
         ]
 
-        post_samples = []
-        for i in range(n_post):
-            ts_i = (post_base + timedelta(minutes=30 * i)).isoformat()
-            if post_flat:
-                indoor_i = t_peak  # no decay — plateau
-            else:
-                # linear decay from t_peak toward t_start
-                frac = i / max(n_post - 1, 1)
-                indoor_i = t_peak - frac * (t_peak - t_start) * 0.8
-            post_samples.append({"ts": ts_i, "indoor": indoor_i, "outdoor": outdoor})
+    def test_replay_calls_the_production_functions_per_mode(self, monkeypatch):
+        fake = _FakeCycleModel()
+        monkeypatch.setattr(tr, "_production_cycle_model", lambda: fake)
+        out = tr.run_cycle_replay(self._cycles(), {"k_active_heat": 6.0}, self.NOW)
+        assert set(out) == {"heat", "cool"}
+        by_mode = {m: (c, p) for c, m, p, _ in fake.fit_calls}
+        assert [c["id"] for c in by_mode["heat"][0]] == ["h1", "h2"]
+        assert [c["id"] for c in by_mode["cool"][0]] == ["c1"]
+        # the prior is production's prior_from_cache over the learning DB's cache, not a second copy
+        assert by_mode["heat"][1] == {"mode": "heat", "from": "cache"}
+        assert fake.prior_calls[0][0] == {"k_active_heat": 6.0}
+        # N5 (Issue #1512): the prior sees the same pool as the fit (a held fit is the prior only when its cycles are
+        # not in it), as the live refit does
+        assert [[c["id"] for c in pool] for pool in fake.prior_pools] == [["h1", "h2"], ["c1"]]
 
-        return {
-            "mode": "heat",
-            "pre_samples": pre_samples,
-            "active_samples": active_samples,
-            "post_samples": post_samples,
-            "start_ts": active_ts,
-        }
+    def test_days_limits_the_cycles_used(self, monkeypatch):
+        fake = _FakeCycleModel()
+        monkeypatch.setattr(tr, "_production_cycle_model", lambda: fake)
+        tr.run_cycle_replay(self._cycles(), None, self.NOW, days=30)
+        heat = next(c for c, m, _, _ in fake.fit_calls if m == "heat")
+        assert [c["id"] for c in heat] == ["h1"]  # the 40-day-old cycle is outside --days 30
 
-    def test_n_post_1_commits_with_proxy(self):
-        """n_post=1 + proxy supplied → n_post gate drops to 1, single-point fires,
-        result commits with k_active in valid range [0.5, 15.0].
-        Physics: elapsed≈10min, T_start=68, T_peak=69, signal=1°F, outdoor=54."""
-        cycle = self._make_proxy_cycle(n_post=1)
-        result = tr.run_hvac_replay_ols(cycle, k_vent_window_proxy=-0.14)
-        assert result is not None, "Expected commit for n_post=1 with proxy (gate should drop to 1)"
-        assert result["k_active"] is not None
-        assert 0.5 <= result["k_active"] <= 15.0, f"k_active={result['k_active']} out of [0.5, 15.0]"
+    def test_report_lines_say_rate_grade_and_coast(self, monkeypatch):
+        fake = _FakeCycleModel()
+        monkeypatch.setattr(tr, "_production_cycle_model", lambda: fake)
+        lines = tr.format_cycle_replay(tr.run_cycle_replay(self._cycles(), None, self.NOW))
+        assert "[heat] q=+7.50" in lines[0] and "grade=medium" in lines[0] and "coast_area=+0.40" in lines[0]
+        assert "(diagnostic only)" in lines[0]
+        assert "[cool] q=-8.00" in lines[1]
 
-    def test_n_post_3_commits_with_proxy(self):
-        """n_post=3 with proxy → previously hard-rejected at n_post < 4, should now commit."""
-        cycle = self._make_proxy_cycle(n_post=3)
-        result = tr.run_hvac_replay_ols(cycle, k_vent_window_proxy=-0.14)
-        assert result is not None, "Expected commit for n_post=3 with proxy (was previously gated at < 4)"
-        assert result["k_active"] is not None
-
-    def test_n_post_3_rejects_without_proxy(self):
-        """n_post=3 without proxy → OLS path requires 4 post samples, must return None."""
-        cycle = self._make_proxy_cycle(n_post=3)
-        result = tr.run_hvac_replay_ols(cycle, k_vent_window_proxy=None)
-        assert result is None, "Expected rejection for n_post=3 without proxy (OLS path needs >= 4)"
-
-    def test_plateau_guard_bypassed_with_proxy(self):
-        """Flat post-heat (no decay from peak) + proxy → plateau guard bypassed, cycle commits.
-        T_start=68, T_peak=69 → 1°F signal satisfies single-point; flat post should not gate."""
-        cycle = self._make_proxy_cycle(n_post=4, post_flat=True, t_start=68.0, t_peak=69.0)
-        result = tr.run_hvac_replay_ols(cycle, k_vent_window_proxy=-0.14)
-        assert result is not None, (
-            "Expected commit despite flat post-heat when proxy supplied (plateau guard should be bypassed)"
-        )
-
-    def test_plateau_guard_active_without_proxy(self):
-        """Flat post-heat (no decay) without proxy → plateau guard fires, returns None.
-        n_post=4 to clear the n_post gate; guard is the only rejection path."""
-        cycle = self._make_proxy_cycle(n_post=4, post_flat=True, t_start=68.0, t_peak=69.0)
-        result = tr.run_hvac_replay_ols(cycle, k_vent_window_proxy=None)
-        assert result is None, "Expected rejection due to plateau guard when no proxy (flat post-heat, no OLS)"
+    def test_old_run_edge_and_duty_balance_replays_are_gone(self):
+        # Old expectation was wrong to exist: the per-run run-edge estimator and the duty-balance fit are retired
+        # (the cycle model supersedes both; poc2 showed whole-degree short cycles cannot identify a rate per run).
+        assert not hasattr(tr, "run_hvac_replay")
+        assert not hasattr(tr, "run_duty_balance_replay")
+        assert not hasattr(tr, "_production_fit")
 
 
 # ===========================================================================
@@ -718,3 +424,26 @@ class TestSwingBackfill:
         tr._swing.apply_swing_samples(cache, "heat", [live])
         tr._swing.apply_swing_samples(cache, "heat", [replay])
         assert cache["observation_count_swing_heat"] == 1 and len(cache["swing_heat_samples"]) == 1
+
+
+class TestWriteRetentionLikeProduction:
+    """Issue #1523 mirror: the --write paths used to keep 90 days back from today and the newest 500, so writing the
+    DB after a summer of vent fits dropped every closed-house fit (the leak rate then fell back to its pre-upgrade
+    value). They now keep what production keeps: per-kind shares, nothing leaves with time."""
+
+    def test_a_quiet_kind_survives_the_write(self):
+        old_passive = [{"hvac_mode": "passive", "k_passive": -0.04, "date": "2025-01-01", "n": i} for i in range(20)]
+        recent = [{"hvac_mode": "vent_window", "k_passive": -0.3, "date": "2026-11-01", "n": i} for i in range(10)]
+        new = [{"hvac_mode": "passive", "k_passive": -0.04, "date": "2026-11-02", "source": "replay"}]
+        existing = old_passive + recent
+        kept = tr.retain_like_production(existing, existing + new)
+        assert sum(1 for o in kept if o["hvac_mode"] == "passive") == 21
+
+    def test_each_kind_keeps_its_share_or_what_it_held(self):
+        learning = tr._production()
+        share = learning.THERMAL_OBS_KIND_CAPS["vent_fan"]
+        existing = [{"hvac_mode": "vent_fan", "date": "2026-01-01", "n": i} for i in range(share + 5)]
+        new = [{"hvac_mode": "vent_fan", "date": "2026-02-01", "n": 100 + i} for i in range(3)]
+        kept = tr.retain_like_production(existing, existing + new)
+        assert len(kept) == share + 5  # held above its share: one in, one out
+        assert [o["n"] for o in kept][-3:] == [100, 101, 102]

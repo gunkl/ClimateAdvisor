@@ -50,7 +50,12 @@ def test_batch_fetch_reads_every_zone_and_the_time_zone_in_one_connection(tmp_pa
     assert len(calls) == 1
     assert tz == "America/Los_Angeles"
     assert set(zones) == {"aaa", "bbb"}
-    assert zones["aaa"] == {"chart": {"entries": [{"ts": "aaa"}]}, "learning": {"db": 1}, "archive": None}
+    assert zones["aaa"] == {
+        "chart": {"entries": [{"ts": "aaa"}]},
+        "learning": {"db": 1},
+        "archive": None,
+        "cycles": None,
+    }  # Issues #1512/#1516: the batch also reads the cycle file
     assert zones["bbb"]["learning"] is None
     _, one = pb.batch_fetch({}, "bbb")
     assert set(one) == {"bbb"}
@@ -62,13 +67,17 @@ def test_batch_fetch_falls_back_to_the_legacy_unscoped_files(tmp_path, monkeypat
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(pb, "ssh_cmd", lambda cfg, remote: ["ssh", "host", remote])
     tz, zones = pb.batch_fetch({}, None)
-    assert tz is None and zones == {"": {"chart": {"entries": []}, "learning": None, "archive": None}}
+    assert tz is None and zones == {
+        "": {"chart": {"entries": []}, "learning": None, "archive": None, "cycles": None}
+    }  # the cycles kind is part of every zone
 
 
 def test_parse_ignores_garbage_blobs():
     blob = base64.b64encode(b"not json").decode()
     tz, zones = pb.parse_batch_output(f"___CA_ZONE z\n___CA_FILE chart\n{blob}\n___CA_TZ\n\n")
-    assert tz is None and zones == {"z": {"chart": None, "learning": None, "archive": None}}
+    assert tz is None and zones == {
+        "z": {"chart": None, "learning": None, "archive": None, "cycles": None}
+    }  # the cycles kind is part of every zone
 
 
 def test_batch_publish_writes_every_zone_private_in_one_connection(tmp_path, monkeypatch):

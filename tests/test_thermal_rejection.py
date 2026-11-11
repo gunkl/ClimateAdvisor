@@ -435,8 +435,18 @@ class TestSensorAttributes:
         assert OBS_TYPE_PASSIVE_DECAY in tlh
         pd = tlh[OBS_TYPE_PASSIVE_DECAY]
 
-        # Only these four keys are allowed
-        allowed_keys = {"attempts", "committed", "rejections", "last_rejection_reason"}
+        # Only counts and short scalars about the last rejection are allowed. Old expectation (four keys) predates
+        # Issue #1512, which exposes the last rejection's signal/minutes/k_passive source: numbers and a label,
+        # still never the raw event dict.
+        allowed_keys = {
+            "attempts",
+            "committed",
+            "rejections",
+            "last_rejection_reason",
+            "last_rejection_signal_f",
+            "last_rejection_minutes",
+            "last_rejection_k_passive_source",
+        }
         assert set(pd.keys()) == allowed_keys
 
         # last_rejection_reason must be a string (the reason_code), not a dict

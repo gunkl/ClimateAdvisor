@@ -140,7 +140,6 @@ class ClassificationFsmInputs:
     hvac_mode: str | None
     k_passive: float | None
     confidence_k_passive: str
-    k_passive_via_bridge: bool
     k_active_cool: float | None
     comfort_cool: float | None
     outdoor: float | None
@@ -181,7 +180,6 @@ def _ceiling_guard_inputs(inputs: ClassificationFsmInputs) -> OdeCeilingGuardInp
         hvac_mode=inputs.hvac_mode,
         k_passive=inputs.k_passive,
         confidence_k_passive=inputs.confidence_k_passive,
-        k_passive_via_bridge=inputs.k_passive_via_bridge,
         k_active_cool=inputs.k_active_cool,
         comfort_cool=inputs.comfort_cool,
         outdoor=inputs.outdoor,

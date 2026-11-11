@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.28"
+VERSION = "0.9.29"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -618,6 +618,8 @@ V4_MASS_MAX_GAP_S = 7200  # a hidden-node state older than this is re-seeded fro
 LEARNING_DB_FILE = "climate_advisor_learning.json"
 # AI investigation history (Issue #82). Per zone since Issue #1415: one shared file let one zone erase another's.
 INVESTIGATION_REPORTS_FILE = "climate_advisor_investigation_reports.json"
+# Issue #1512/#1516: the raw heat/cool cycles (readings in seconds, outdoor, flags) the pooled cycle model fits.
+CYCLE_FILE = "climate_advisor_cycles.json"
 # Every per-zone file Climate Advisor writes in the HA config dir, by its unscoped base name (Issue #1375).
 # async_remove_entry deletes each one's entry-scoped copy when a zone is deleted. A new entry-scoped file must be
 # listed here, or a removed zone leaves it on disk forever: tests/test_zone_removal_cleanup.py fails if any
@@ -633,6 +635,7 @@ ENTRY_SCOPED_FILES: tuple[str, ...] = (
     V4_BACKTEST_FILE,
     V4_MODEL_FILE,
     INVESTIGATION_REPORTS_FILE,
+    CYCLE_FILE,
 )
 SUGGESTION_COOLDOWN_DAYS = 7  # Don't repeat the same suggestion within a week
 MIN_DATA_POINTS_FOR_SUGGESTION = 14  # Need 2 weeks of data before suggesting changes
@@ -1604,13 +1607,6 @@ CONFIG_METADATA = {
 MIN_THERMAL_SESSION_MINUTES = 5  # ignore sessions shorter than this (was 10; Ecobee cycles 7-9 min)
 MIN_THERMAL_OBSERVATIONS = 5  # min obs before model is trusted
 THERMAL_MODEL_MAX_OBS = 30  # use only most recent N observations
-THERMAL_POST_HEAT_TIMEOUT_MINUTES = 45  # abandon post_heat phase after this long
-THERMAL_FAN_PULSE_GRACE_MINUTES = 3  # Issue #1009: tolerate a brief thermostat blower pulse
-# (e.g. a post-compressor coil-clear cycle) during post_heat without abandoning the
-# observation — only abandon if the live hvac_action/fan_mode read shows the fan still
-# running at or beyond this many minutes (genuinely sustained fan-only contamination).
-THERMAL_STABILIZATION_THRESHOLD_F = 0.3  # |dT| < this over window → stabilized
-THERMAL_STABILIZATION_WINDOW_MINUTES = 5  # window length for stabilization check
 THERMAL_K_PASSIVE_MIN = -0.5  # reject k_passive outside this range (hr⁻¹)
 THERMAL_K_PASSIVE_MAX = -0.001  # upper bound: near-zero decay (extremely well-insulated house)
 THERMAL_K_ACTIVE_HEAT_MIN = 0.5  # reject k_active_heat outside this range (°F/hr)
@@ -1619,10 +1615,8 @@ THERMAL_K_ACTIVE_COOL_MIN = -15.0  # reject k_active_cool outside this range (°
 THERMAL_K_ACTIVE_COOL_MAX = -0.5  # upper bound (least negative): minimal cooling effect
 THERMAL_MIN_R_SQUARED = 0.2  # reject observation if R² below this
 THERMAL_MIN_POST_HEAT_SAMPLES = 4  # min post-heat samples to commit (Issue #130: lowered from 10, enables short cycles)
-THERMAL_PRE_HEAT_BUFFER_MINUTES = 15  # rolling pre-heat buffer length
-THERMAL_SAMPLE_INTERVAL_SECONDS = 60  # sampling cadence during active/post_heat
+THERMAL_SAMPLE_INTERVAL_SECONDS = 60  # sampling cadence during an active HVAC run
 THERMAL_MAX_ACTIVE_SAMPLES = 120  # cap on active_samples list per event
-THERMAL_MAX_POST_HEAT_SAMPLES = 45  # cap on post_heat_samples list per event
 DEFAULT_PREHEAT_MINUTES = 120  # fallback when no model data
 MIN_PREHEAT_MINUTES = 30  # clamp floor
 DEFAULT_TOU_LEAD_MINUTES = 45  # fallback lead time when k_active_heat/k_active_cool not yet learned (Issue #797)
@@ -1650,8 +1644,6 @@ THERMAL_MILD_BUCKET_LIMIT_F: float = 70.0  # below this (≥ cold limit) → "mi
 # Thermal factor interpolation zone half-width (°F either side of each bucket boundary)
 # Eliminates hard jumps when outdoor temp crosses a threshold.
 THERMAL_BUCKET_INTERP_HALF_F: float = 2.0
-
-THERMAL_MIN_DECAY_F = 1.0  # min total post-heat decay required to commit (°F)
 
 # --- v3 Observation Type string constants ---
 OBS_TYPE_PASSIVE_DECAY = "passive_decay"
@@ -1687,12 +1679,119 @@ REJECT_INDOOR_UNAVAILABLE = "indoor_unavailable"
 REJECT_TOO_FEW_BLOCKS = "too_few_blocks"
 REJECT_WINDOW_TOO_SHORT = "window_too_short"
 REJECT_NO_INTERIOR_PEAK = "no_interior_peak"
-REJECT_NO_K_PASSIVE = "no_k_passive"  # solar_gain commit: no cached k_passive yet to subtract (Issue #587, Defect B)
+REJECT_NO_K_PASSIVE = "no_k_passive"  # no closed-house k_passive yet (solar_gain subtract, HVAC run-edge; #587, #1512)
+# Issue #1512: reasons that used to be free text (or a generic "abandoned"), now real persisted codes.
+REJECT_NEW_SESSION = "new_session_started"  # another observation session began before this one committed
+REJECT_FAN_ACTIVATED = "fan_activated"  # the fan started and contaminated the observation
+REJECT_HVAC_MODE_SWITCH = "hvac_mode_switch"  # heat <-> cool switched mid-observation
+# Issue #1512/#1516: why a recorded heat/cool cycle did not (fully) feed the pooled cycle model.
+REJECT_CYCLE_TOO_SHORT = "cycle_too_short"  # run shorter than THERMAL_CYCLE_MIN_RUN_MIN
+REJECT_CYCLE_SIGNAL_BELOW_RESOLUTION = "cycle_signal_below_resolution"  # reading moved < 3 resolution steps
+REJECT_CYCLE_EXCLUDED_WINDOW_FAN = "cycle_excluded_window_fan"  # window open / fan / nat-vent during the cycle
+REJECT_CYCLE_SETPOINT_CHANGE = "cycle_setpoint_change"  # setpoint changed: the run portion was too short to qualify
+REJECT_CYCLE_GAP_RESTART = "cycle_gap_restart"  # Home Assistant restarted mid-cycle (only the pre-gap part is usable)
+REJECT_CYCLE_THERMOSTAT_UNAVAILABLE = "cycle_thermostat_unavailable"  # thermostat unavailable/unknown mid-cycle
+REJECT_CYCLE_NO_OFF_EDGE = "cycle_no_off_edge"  # no off edge and no usable run portion to end the cycle on
+REJECT_CYCLE_SENSOR_SWAP = "cycle_sensor_swap"  # recorded on an earlier indoor sensor than the pool's current one
 
-# Reduced plateau guard (was THERMAL_MIN_DECAY_F = 1.0)
-THERMAL_HVAC_MIN_DECAY_F = 0.3
 # Minimum ΔT for single-point k_active estimate (filters sensor noise / no-effect cycles)
 THERMAL_HVAC_MIN_SIGNAL_F: float = 0.5
+# Issue #1512/#1516: cycle recorder + store (cycle_recorder.py, cycle_store.py).
+CYCLE_POST_OFF_WINDOW_S: float = (
+    45 * 60
+)  # a cycle keeps recording this long after the off edge (the coast), then closes
+CYCLE_MAX_SAMPLES: int = 400  # readings kept per cycle (interior readings are thinned beyond this)
+CYCLE_MAX_OUTDOOR: int = 200  # outdoor points kept per cycle
+# Stored cycles more than this many days older than the NEWEST cycle of the same mode are pruned (a quiet season
+# prunes nothing: the clock is new evidence, owner decision 2026-11-11).
+CYCLE_RETENTION_DAYS: int = 90
+CYCLE_MAX_STORED: int = 3000  # hard cap on stored cycles: half per mode, each mode's oldest dropped first
+CYCLE_STORE_PRUNE_INTERVAL_S: float = 3600  # pruning runs at most this often
+CYCLE_STORE_VERSION: int = 2  # "v" key of the cycle file (2: per-cycle decimal places; a v1 file is migrated on load)
+CYCLE_STORE_SAVE_INTERVAL_S: float = 1800  # the cycle file is written at most this often (+ at HA stop / unload)
+# A setpoint change during a run ends the run; an off edge (or mode switch) this soon after it is the run's real end.
+CYCLE_SETPOINT_OFF_WINDOW_S: float = 60
+# Refit throttle (Pi CPU): a mode is refitted at most this often, sooner once this many new eligible cycles wait or
+# when it has nothing learned yet; always once at startup (stored cycles, current prior).
+CYCLE_REFIT_MIN_INTERVAL_S: float = 1800
+CYCLE_REFIT_MIN_NEW_ELIGIBLE: int = 3
+CYCLE_FLAG_RUNNING = 1  # sample flag bits (cycle dict contract, SPEC2 Components 1)
+CYCLE_FLAG_WINDOWS = 2
+CYCLE_FLAG_FAN = 4
+CYCLE_FLAG_NAT_VENT = 8
+CYCLE_FLAG_GAP_BEFORE = 16
+CYCLE_FLAG_UNAVAILABLE = 32
+
+# Issue #1512/#1516: constants of the pooled cycle model (cycle_model.py), ported from the validated poc2
+# (est4.py / est5.py / pooled.py / shrink.py).
+THERMAL_CYCLE_MIN_RUN_MIN: float = 3.0  # eligible cycle: run at least this long (minutes) ...
+THERMAL_CYCLE_MOVE_STEPS: float = 3.0  # ... and the robust reading movement >= this many resolution steps
+THERMAL_CYCLE_MOVE_WINDOW_AFTER_OFF_MIN: float = 3.0  # movement is measured in [on, off + this] (minutes)
+THERMAL_CYCLE_COARSE_RES_F: float = 0.5  # pools with resolution >= this are "coarse" (k pinned, never grade high)
+THERMAL_CYCLE_K_FREE_AFTER: int = 3  # fine pools: k pinned at the prior until this many eligible cycles
+THERMAL_CYCLE_COARSE_EVID_N: int = 3  # coarse pools: variance inflated by (this/ne)^2 when ne is smaller
+THERMAL_CYCLE_DEFF_FINE_MULT: float = 0.5  # calibrated deff multiplier, fine pools (coarse: 1.0)
+THERMAL_CYCLE_PLATEAU_MIN: float = 10.0  # final level held >= this long before off -> effective off = first reached
+THERMAL_CYCLE_MAX_FIT_CYCLES: int = 60  # at most the last N eligible cycles are fitted
+# Cycle weight 0.5 ** (newer eligible cycles in the pool / THERMAL_EVIDENCE_HALF_N): a cycle yields to newer
+# evidence, never to the calendar (owner decision 2026-11-11, "fade only on new evidence").
+THERMAL_CYCLE_TAIL_BACK_MIN: float = 120.0  # superpose earlier off-edge tails this far back (minutes)
+THERMAL_CYCLE_TAUS: tuple[float, ...] = (1.5, 2.5, 4.0, 6.0, 8.0, 11.0, 15.0, 20.0)  # coast time-constant grid (min)
+THERMAL_CYCLE_IRLS_ITERS: int = 5
+THERMAL_CYCLE_HUBER_K: float = 1.345  # Huber threshold in sigmas
+THERMAL_CYCLE_SIGMA_FLOOR_RES_FRAC: float = 0.3  # sigma floor = max(this * res, THERMAL_CYCLE_SIGMA_FLOOR_MIN_F)
+THERMAL_CYCLE_SIGMA_FLOOR_MIN_F: float = 0.05
+THERMAL_CYCLE_SIGMA_INIT_ADD_F: float = 0.1  # initial sigma = max(floor, 0.3 * res + this)
+THERMAL_CYCLE_MAD_SCALE: float = 1.4826
+# Honest-variance inflation (deff) d = a + b / (1 + (L / c) ** p), L = total run hours (p 2) / longest run hours (p 3).
+THERMAL_CYCLE_DEFF_L_Q: tuple[float, float, float] = (2.0, 6.0, 0.35)
+THERMAL_CYCLE_DEFF_L_K: tuple[float, float, float] = (3.0, 12.0, 1.5)
+THERMAL_CYCLE_DEFF_MAX_Q: tuple[float, float, float] = (2.0, 25.0, 0.2)
+THERMAL_CYCLE_DEFF_MAX_K: tuple[float, float, float] = (3.5, 10.0, 0.2)
+# Hampel cleaning and the restart rule.
+THERMAL_CYCLE_HAMPEL_HALF_MIN: float = 5.0  # half-window (minutes)
+THERMAL_CYCLE_HAMPEL_MIN_READINGS: int = 5
+THERMAL_CYCLE_HAMPEL_SIGMAS: float = 3.5  # threshold = max(this * 1.4826 * MAD, 2 * res, 0.5 F)
+THERMAL_CYCLE_HAMPEL_RES_MULT: float = 2.0
+THERMAL_CYCLE_HAMPEL_FLOOR_F: float = 0.5
+THERMAL_CYCLE_RESTART_GAP_MIN: float = 2.5  # a gap is > max(this minutes, 2.5 x median dt)
+THERMAL_CYCLE_RESTART_GAP_DT_MULT: float = 2.5
+THERMAL_CYCLE_RESTART_EARLY_MIN: float = 6.0  # leading readings considered after a gap (minutes)
+THERMAL_CYCLE_RESTART_LATE_MIN: float = 8.0  # reference median window after the early window (minutes)
+THERMAL_CYCLE_RESTART_RES_MULT: float = 2.0  # drop if deviation > max(this * res, THERMAL_CYCLE_RESTART_FLOOR_F)
+THERMAL_CYCLE_RESTART_FLOOR_F: float = 0.8
+# Bounds applied after the fit.
+THERMAL_CYCLE_Q_BOUNDS_HEAT: tuple[float, float] = (0.5, 15.0)  # F/h
+THERMAL_CYCLE_Q_BOUNDS_COOL: tuple[float, float] = (-15.0, -0.5)
+THERMAL_CYCLE_K_BOUNDS: tuple[float, float] = (-0.5, -0.001)  # 1/h
+# Typical-house prior (fresh home): (mean, sd).
+THERMAL_CYCLE_PRIOR_Q_HEAT: tuple[float, float] = (8.0, 5.0)
+THERMAL_CYCLE_PRIOR_Q_COOL: tuple[float, float] = (-8.83, 5.5)
+THERMAL_CYCLE_PRIOR_K: tuple[float, float] = (-0.03, 0.06)
+THERMAL_CYCLE_PRIOR_COAST_AREA_F: tuple[float, float] = (0.0, 2.0)
+# Grades (poc2 table E); er_q = 1 - postvar / priorvar.
+THERMAL_CYCLE_GRADE_MED_ER: float = 0.6  # fine pools: medium needs er_q >= this and ne >= 2
+THERMAL_CYCLE_GRADE_HIGH_ER: float = 0.95  # fine: high needs this and ne >= 4; coarse: medium needs this and ne >= 2
+THERMAL_CYCLE_GRADE_MED_NE: int = 2
+THERMAL_CYCLE_GRADE_HIGH_NE: int = 4
+# Solar regressor: tested in poc round 1, not shipped; OFF.
+THERMAL_CYCLE_SOLAR_REGRESSOR: bool = False
+
+# Rate ageing: k_active_heat/cool and k_passive are weighted medians of retained observations; each
+# observation's weight halves for every THERMAL_EVIDENCE_HALF_N newer observations of the same rate (Issue #1523:
+# no calendar clock), and legacy-method observations (no "method" key: the pre-#1512 post-fit / proxy commits)
+# count THERMAL_LEGACY_OBS_WEIGHT as much.
+THERMAL_LEGACY_OBS_WEIGHT: float = 0.25
+# Evidence is displaced only by newer evidence, never by the passage of time alone (owner decision 2026-11-11,
+# "Fade only on new evidence"). The evidence carried behind a learned rate (the pre-upgrade ``rate_prior`` count, a
+# held cycle fit) keeps a share ``keep`` that halves for every THERMAL_EVIDENCE_HALF_N new informative (eligible)
+# cycles that agree with it, for every THERMAL_EVIDENCE_HALF_N_CONTRADICT that contradict it, and (k_passive) for
+# every THERMAL_EVIDENCE_HALF_N new passive observations. A held fit whose share fell below
+# THERMAL_EVIDENCE_MIN_KEEP is dropped. The pooled cycle model weighs its cycles by the same rule, and the rate
+# ageing its observations (Issue #1523).
+THERMAL_EVIDENCE_HALF_N: float = 20
+THERMAL_EVIDENCE_HALF_N_CONTRADICT: float = 5
+THERMAL_EVIDENCE_MIN_KEEP: float = 0.01
 
 # Thermostat swing = the thermostat's OWN hysteresis (Issue #1234): how far past the setpoint the
 # room is allowed to drift before the equipment starts (heat: setpoint - indoor at the heat-on
@@ -1799,7 +1898,14 @@ THERMAL_SOLAR_PHASE_MIN_ENTRIES = 3  # Min chart_log entries in window
 THERMAL_SOLAR_PHASE_MIN_WINDOW_H = 4  # Min window span (hours)
 THERMAL_SOLAR_PHASE_MIN_DT_F = 1.5  # Min indoor ΔT for visible peak
 THERMAL_SOLAR_PHASE_ALPHA = 0.10  # EWMA alpha (slow — stable building physics)
-THERMAL_PARAM_STALE_DAYS = 90  # days — parameter older than this treated as None at resolver
+# Issue #1524: retired as a resolver rule (the primary solar phase offset gives way only to newer AC-duty evidence,
+# never to the calendar). Read once, when a cache from before #1524 is loaded, so the offset in use does not change
+# at the upgrade (a primary already older than this with a qualified, fresher secondary starts fully displaced).
+THERMAL_PARAM_STALE_DAYS = 90
+# Issue #1524: an AC-duty phase day contradicts the primary offset when it is at least this far from it (hours);
+# such a day halves the primary's share every THERMAL_EVIDENCE_HALF_N_CONTRADICT days, an agreeing one every
+# THERMAL_EVIDENCE_HALF_N days.
+THERMAL_SOLAR_PHASE_CONTRADICT_H = 1.0
 
 # AC duty-cycle secondary solar phase estimator (Issue #312)
 THERMAL_SOLAR_PHASE_AC_ALPHA = 0.07  # EWMA alpha (slower — less reliable signal)
@@ -1840,7 +1946,6 @@ THERMAL_PASSIVE_SAMPLE_INTERVAL_S: int = 300  # 5 min — passive/vent slow deca
 # THERMAL_FAN_SAMPLE_INTERVAL_S retired (Issue #587) with fan_only_decay — vent_window_decay
 # and vent_fan_decay both use THERMAL_PASSIVE_SAMPLE_INTERVAL_S.
 THERMAL_SOLAR_SAMPLE_INTERVAL_S: int = 300  # 5 min — solar gain slow trend
-THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S: int = 300  # 5 min — post-heat is passive dynamics
 
 # Per-type passive confidence count thresholds
 THERMAL_PASSIVE_CONF_LOW = 5
@@ -1881,13 +1986,29 @@ HOT_DAY_PRE_COOL_MODIFIER: float = -2.0
 # for sleep-window fan cycling. Replaces the old comfort_heat + 2F floor (architecture-reset
 # session), which left little to no headroom once DEFAULT_SLEEP_COOL was reformatted to a flat,
 # cooler-than-daytime default (Issue #436).
-THERMAL_OBS_CAP = 200  # max observations in LearningState
+# Retained thermal observations (Issue #1523). The 200 are shared out per kind (the observation's ``hvac_mode``), so
+# one kind can never push another out: an observation leaves only when a newer observation of its OWN kind takes its
+# place, never with time (owner decision 2026-11-11, "fade only on new evidence"; a quiet season of one kind prunes
+# nothing). passive feeds the decisions' closed-house leak rate (k_passive), so it holds the largest share: 80 = 4 x
+# THERMAL_EVIDENCE_HALF_N, by which point an observation weighs 1/16 and the 80 kept hold ~94 % of the weight.
+# vent_window / vent_fan / solar rates are EWMAs in the cache (their lists are diagnostics and the #1505 re-seed);
+# heat / cool observations are no longer written (the pooled cycle model learns those rates), the stored ones stay.
+# A kind that held more than its share when this rule arrived keeps that many (one in, one out), never cut at once.
+THERMAL_OBS_CAP = 200  # the total of THERMAL_OBS_KIND_CAPS
+THERMAL_OBS_KIND_CAPS: dict[str, int] = {
+    "passive": 80,
+    "vent_window": 40,
+    "vent_fan": 30,
+    "solar": 20,
+    "heat": 10,
+    "cool": 10,
+    "other": 10,  # any other hvac_mode (none is written today)
+}
 
 # ---------------------------------------------------------------------------
 # ODE Ceiling Guard (Issue #136)
 # ---------------------------------------------------------------------------
 CEILING_PRECOOL_FALLBACK_MIN: int = 120  # fallback lead time when k_active_cool not learned
-CEILING_BRIDGE_TOLERANCE_F: float = 1.0  # bridge homes: require breach > comfort_cool + this
 # Issue #247: in aggressive_savings mode, tolerate this much overshoot above comfort_cool before
 # the ceiling guard escalates nat-vent -> AC (savings homes accept a small overshoot before paying
 # for cooling; normal mode escalates at comfort_cool).

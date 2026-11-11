@@ -32,6 +32,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _reject_labels import REJECT_LABELS  # noqa: E402
 from _zone_storage import ZoneSelectionRequired, format_zone_choices, resolve_api_zone, with_zone  # noqa: E402
 
 
@@ -306,8 +307,21 @@ def _print_report(health: dict) -> None:
                 print("Rejection breakdown:")
                 any_rejections = True
             counts = sorted(rejections.items(), key=lambda x: -x[1])
-            reasons_str = ", ".join(f"{code}: {count}" for code, count in counts)
+            reasons_str = ", ".join(
+                f"{code}: {count}" + (f" ({REJECT_LABELS[code]})" if code in REJECT_LABELS else "")
+                for code, count in counts
+            )
             print(f"  {obs_type}: {reasons_str}")
+            last = h.get("last_rejection")
+            if isinstance(last, dict):
+                # Issues #1512/#1516: the numbers behind the most recent heating/cooling run rejection.
+                bits = [
+                    f"{key}={last[key]}"
+                    for key in ("signal_f", "minutes", "k_passive_source")
+                    if last.get(key) is not None
+                ]
+                if bits:
+                    print(f"    last rejection: {', '.join(bits)}")
 
     if any_rejections:
         print()

@@ -2897,7 +2897,6 @@ def control_rates(model: V4Model) -> dict[str, Any]:
         "heating_rate_f_per_hour": round(k_heat, 2),
         "cooling_rate_f_per_hour": round(abs(k_cool), 2),
         "k_passive": -a_o,
-        "k_passive_via_bridge": False,
         "confidence": grade,
         "confidence_k_passive": grade,
         "k_vent_window": None,

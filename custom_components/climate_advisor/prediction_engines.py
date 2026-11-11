@@ -63,7 +63,6 @@ CONTROL_BLANK_MODEL: dict[str, Any] = {
     "confidence": "none",
     "confidence_k_passive": "none",
     "k_passive": None,
-    "k_passive_via_bridge": False,
     "k_active_heat": None,
     "k_active_cool": None,
     "heating_rate_f_per_hour": None,

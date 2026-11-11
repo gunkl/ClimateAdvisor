@@ -21,7 +21,11 @@ from custom_components.climate_advisor.classification_fsm import (
     transition,
 )
 from custom_components.climate_advisor.nat_vent_plan import compute_nat_vent_plan
-from custom_components.climate_advisor.ode_ceiling_guard import OdeCeilingGuardInputs, decide_ode_ceiling_guard
+from custom_components.climate_advisor.ode_ceiling_guard import (
+    OdeCeilingGuardInputs,
+    OdeCeilingGuardOutcome,
+    decide_ode_ceiling_guard,
+)
 from custom_components.climate_advisor.scheduler import (
     COST_TAG_HIGH,
     Schedule,
@@ -151,7 +155,6 @@ class TestOdeCeilingGuard:
             "hvac_mode": "off",
             "k_passive": -0.2,
             "confidence_k_passive": conf,
-            "k_passive_via_bridge": True,  # lets the guard evaluate when the grade is "low"
             "k_active_cool": -3.0,
             "comfort_cool": 76.0,
             "outdoor": 80.0,
@@ -163,11 +166,16 @@ class TestOdeCeilingGuard:
         base["predicted_indoor"] = [{"ts": "2026-07-15T17:00:00+00:00", "temp": 90.0}]
         return OdeCeilingGuardInputs(**{**base, **over})
 
-    @pytest.mark.parametrize("conf", ["none", "low"])
-    def test_weak_is_plain_with_or_without_a_stepper(self, conf):
+    def test_weak_is_plain_with_or_without_a_stepper(self):
         for stepper in (None, _STEP):
-            got = decide_ode_ceiling_guard(self._inputs(conf, house_stepper=stepper)).lead_min
+            got = decide_ode_ceiling_guard(self._inputs("low", house_stepper=stepper)).lead_min
             assert got == pytest.approx(104.0)  # 4 F / 3 F/h x 60 x 1.3, no leak, no stepper
+
+    def test_an_unlearned_leak_rate_does_not_run_the_guard(self):
+        # Issue #1512 removed the bridge that let a "none" grade evaluate: no closed-house rate, no guard
+        for stepper in (None, _STEP):
+            got = decide_ode_ceiling_guard(self._inputs("none", house_stepper=stepper))
+            assert got.outcome == OdeCeilingGuardOutcome.MODEL_INELIGIBLE
 
     @pytest.mark.parametrize("conf", _TRUSTED)
     def test_trusted_uses_leak_and_stepper(self, conf):
@@ -246,7 +254,6 @@ class TestHouseStepperReachesTheGuard:
             hvac_mode="off",
             k_passive=-0.2,
             confidence_k_passive="high",
-            k_passive_via_bridge=False,
             k_active_cool=-3.0,
             comfort_cool=76.0,
             outdoor=80.0,

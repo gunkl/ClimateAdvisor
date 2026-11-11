@@ -11,7 +11,6 @@ import gc
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -51,8 +50,8 @@ def test_a_caller_supplied_config_dir_is_never_removed(tmp_path):
     assert tmp_path.is_dir()
 
 
-def test_stale_harness_folders_are_swept_and_fresh_or_foreign_ones_are_kept(monkeypatch):
-    base = Path(tempfile.mkdtemp(prefix="ca_test_sweep_1518_"))
+def test_stale_harness_folders_are_swept_and_fresh_or_foreign_ones_are_kept(monkeypatch, tmp_path):
+    base = tmp_path
     monkeypatch.setattr(bc.tempfile, "gettempdir", lambda: str(base))
     monkeypatch.setattr(bc, "_swept_stale_sim_dirs", False)
     old = base / "ca_sim_coordinator_old"
@@ -65,13 +64,10 @@ def test_stale_harness_folders_are_swept_and_fresh_or_foreign_ones_are_kept(monk
     os.utime(foreign, (stale, stale))
     bc._sweep_stale_sim_dirs()
     assert not old.exists() and fresh.is_dir() and foreign.is_dir()
-    for p in (fresh, foreign):
-        p.rmdir()
-    base.rmdir()
 
 
 def test_cleanup_owned_sim_dirs_removes_folders_still_in_use():
-    """The end-of-session hook removes folders whose FakeHass is still referenced (xdist workers skip exit hooks)."""
+    """The end-of-session backstop removes folders whose FakeHass is still referenced."""
     coordinator, fake_hass, scheduler, _log = bc.build_headless_coordinator({})
     path = Path(fake_hass.config.config_dir)
     assert path.is_dir()

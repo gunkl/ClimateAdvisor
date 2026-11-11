@@ -87,8 +87,8 @@ def _owned_sim_dir(prefix: str, owner: Any) -> str:
 def cleanup_owned_sim_dirs() -> int:
     """Remove every temp config_dir this process created that is still on disk; returns how many were removed.
 
-    pytest-xdist workers end without running interpreter-exit finalizers, so the test session calls this at its end
-    (tests/conftest.py pytest_sessionfinish); the stale sweep catches anything a killed run still leaves.
+    The test session calls this at its end (tests/conftest.py pytest_sessionfinish) as a backstop to the at-exit
+    finalizers; the stale sweep catches anything a killed run still leaves.
     """
     removed = 0
     for path, fin in list(_owned_sim_dirs.items()):
@@ -124,7 +124,8 @@ def build_headless_coordinator(
                     scenario runs never read stale state left by a prior run
                     (each coordinator gets an isolated directory, matching the
                     ``tmp_path`` fixture pattern already used by
-                    ``test_occupancy.py`` etc.).
+                    ``test_occupancy.py`` etc.). A folder the harness creates is
+                    removed again (Issue #1518); a caller's folder is never touched.
         skip_startup_coalesce: When True, clears ``_startup_coalesce_active``
             right after construction. **Default False is the honest default**
             — a freshly built coordinator genuinely has this 5-minute
@@ -430,7 +431,7 @@ def build_headless_multi_zone(
             B", ...).
         start_time: Shared virtual clock start time for all zones.
         config_dir: Shared StatePersistence/ChartStateLog/LearningEngine
-            directory. Defaults to a fresh ``tempfile.mkdtemp()`` — **shared
+            directory. Defaults to a fresh ``tempfile.mkdtemp()`` (removed again, Issue #1518) — **shared
             across zones on purpose**, since each zone's persistence
             filenames are expected to be entry-scoped in production (that
             expectation is exactly what a ``teardown_cleanup``/

@@ -63,8 +63,9 @@ def passive_evidence_count(cache: dict, now: datetime | None = None) -> float:
     """Effective evidence count behind k_passive.
 
     Heat/cool runs never write k_passive any more (Issue #1512): it is an aged median of passive observations
-    (chart_log passive fits, duty_balance passive estimates) plus, on an upgraded cache, the ``rate_prior``
-    pseudo-observation that carries the ``n`` observations behind the pre-upgrade value. That prior fades with the
+    (chart_log passive fits and the retired duty_balance passive estimates still stored) plus, on an
+    upgraded cache, the ``rate_prior`` pseudo-observation that carries the ``n`` observations behind the
+    pre-upgrade value. That prior fades with the
     same half-life as the value itself, so confidence neither cliffs on upgrade nor stays inflated forever. A cache
     with no prior yet (pre-upgrade shape) keeps counting passive + heat + cool, as those fed the old value.
     """
@@ -87,8 +88,9 @@ def passive_evidence_count(cache: dict, now: datetime | None = None) -> float:
 def grade_passive_confidence(cache: dict, now: datetime | None = None) -> str:
     """Confidence tier for k_passive from the evidence that still backs it (see ``passive_evidence_count``).
 
-    Counts passive observations (chart_log and duty_balance passive fits) plus the fading evidence of the pre-upgrade
-    value. vent_window/vent_fan write k_vent_window/k_vent_fan and solar writes k_solar, so their counts are excluded
+    Counts passive observations (chart_log passive fits and the retired duty_balance ones still stored) plus
+    the fading evidence of the pre-upgrade value. vent_window/vent_fan write k_vent_window/k_vent_fan and
+    solar writes k_solar, so their counts are excluded
     (Issue #587: window-open or fan-driven decay measures a materially larger rate than the envelope alone).
     """
     count = passive_evidence_count(cache, now)
@@ -101,8 +103,22 @@ def grade_passive_confidence(cache: dict, now: datetime | None = None) -> str:
     return "high"
 
 
+_CYCLE_GRADE_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
+
+
 def grade_hvac_confidence(cache: dict) -> str:
-    """Confidence tier for the HVAC rates (k_active_heat/k_active_cool) from heat + cool counts."""
+    """Confidence tier for the HVAC rates (k_active_heat/k_active_cool).
+
+    Issue #1512: when the pooled cycle model's fit is what the rates hold (``cycle_fit_heat|cool["applied"]``, a
+    v3-primary zone) the tier IS the fit's grade (the better of heat and cool: a home that only heats is graded on
+    its heating). Otherwise the legacy tier from the heat + cool observation counts."""
+    best = -1
+    for mode in ("heat", "cool"):
+        fit = cache.get(f"cycle_fit_{mode}")
+        if isinstance(fit, dict) and fit.get("applied"):
+            best = max(best, _CYCLE_GRADE_RANK.get(str(fit.get("grade")), 0))
+    if best >= 0:
+        return next(g for g, r in _CYCLE_GRADE_RANK.items() if r == best)
     total = cache.get("observation_count_heat", 0) + cache.get("observation_count_cool", 0)
     if total < MIN_THERMAL_OBSERVATIONS:
         return "none"

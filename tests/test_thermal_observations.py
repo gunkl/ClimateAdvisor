@@ -203,8 +203,6 @@ def _make_obs_coord(
         "_abandon_observation",
         "_commit_observation_if_sufficient",
         "_commit_observation",
-        "_closed_house_rate",
-        "_reject_hvac_run",
         "_end_hvac_active_phase",
     ):
         method = getattr(ClimateAdvisorCoordinator, method_name)
@@ -2600,62 +2598,6 @@ class TestHvacShortCycle:
         cache.update(overrides)
         engine._state.thermal_model_cache = cache
 
-    def test_bridge_home_no_longer_uses_k_vent_proxy_when_k_passive_none(self, tmp_path):
-        """Issue #1512: a windows-open rate is not a closed-house rate, so a run with no k_passive is rejected
-        (no_k_passive) even when k_vent_window exists. The old expectation (commit via the k_vent_window proxy)
-        inflated the learned heat rate by the window-ventilation term."""
-        from custom_components.climate_advisor.const import REJECT_NO_K_PASSIVE
-        from custom_components.climate_advisor.learning import LearningEngine
-
-        engine = LearningEngine(tmp_path)
-        engine._state.thermal_model_cache = {"k_vent_window": -0.15}
-        run = {
-            "obs_id": "r1",
-            "mode": "heat",
-            "start_ts": "2026-04-28T06:00:00+00:00",
-            "off_ts": "2026-04-28T06:20:00+00:00",
-            "start_f": 66.0,
-            "off_f": 68.0,
-            "peak_f": 68.0,
-            "minutes": 20.0,
-            "avg_delta_t": 12.0,
-            "avg_outdoor_f": 55.0,
-            "k_passive": None,
-            "k_passive_source": "none",
-            "resolution_f": 0.1,
-            "n_active": 3,
-        }
-        with patch("custom_components.climate_advisor.learning.dt_util", _make_dt_mock()):
-            result, reject_code = engine.record_hvac_run(run)
-        assert result is None and reject_code == REJECT_NO_K_PASSIVE
-
-    def test_normal_home_uses_real_k_passive(self, tmp_path):
-        """Issue #1512: a run with a closed-house k_passive commits at the off edge (run-edge method); the old path
-        through _commit_event_from_dict and a post-heat fit is retired."""
-        from custom_components.climate_advisor.learning import LearningEngine
-
-        engine = LearningEngine(tmp_path)
-        run = {
-            "obs_id": "r1",
-            "mode": "heat",
-            "start_ts": "2026-04-28T06:00:00+00:00",
-            "off_ts": "2026-04-28T06:20:00+00:00",
-            "start_f": 66.0,
-            "off_f": 68.0,
-            "peak_f": 68.0,
-            "minutes": 20.0,
-            "avg_delta_t": 12.0,
-            "avg_outdoor_f": 55.0,
-            "k_passive": -0.05,
-            "k_passive_source": "v3",
-            "resolution_f": 0.1,
-            "n_active": 3,
-        }
-        with patch("custom_components.climate_advisor.learning.dt_util", _make_dt_mock()):
-            result, reject_code = engine.record_hvac_run(run)
-        assert reject_code is None and result is not None
-        assert result["k_passive_used"] == -0.05 and result["k_passive"] is None
-
 
 class TestSinglePointKActive:
     """D19: Single-point k_active estimator for short HVAC cycles (n_active < 2).
@@ -2843,32 +2785,6 @@ class TestSinglePointKActive:
         cache.update(overrides)
         engine._state.thermal_model_cache = cache
 
-    def test_commit_falls_through_to_single_point(self, tmp_path):
-        """Issue #1512: a run with a single active sample commits from its edges (the run-edge method is the
-        single-point estimator for every run); the old proxy-backed single-point fallthrough is retired."""
-        from custom_components.climate_advisor.learning import LearningEngine
-
-        engine = LearningEngine(tmp_path)
-        run = {
-            "obs_id": "r1",
-            "mode": "heat",
-            "start_ts": "2026-04-28T06:00:00+00:00",
-            "off_ts": "2026-04-28T06:20:00+00:00",
-            "start_f": 66.0,
-            "off_f": 68.0,
-            "peak_f": 68.0,
-            "minutes": 20.0,
-            "avg_delta_t": 12.0,
-            "avg_outdoor_f": 55.0,
-            "k_passive": -0.05,
-            "k_passive_source": "v3",
-            "resolution_f": 0.1,
-            "n_active": 1,
-        }
-        with patch("custom_components.climate_advisor.learning.dt_util", _make_dt_mock()):
-            result, reject_code = engine.record_hvac_run(run)
-        assert reject_code is None and result is not None and result["k_active"] > 0
-
     def test_commit_skip_when_no_k_passive_available(self, tmp_path):
         """D19: n_active=1, no k_passive and no proxy → single-point cannot fire → k_active=None.
 
@@ -2925,30 +2841,6 @@ class TestSwingComputation:
     @staticmethod
     def _sample(i: int, value: float, **extra) -> dict:
         return {"ts": f"2026-11-0{1 + i // 20}T{i % 20:02d}:00:00", "value_f": value, "resolution_f": 0.0, **extra}
-
-    def test_commit_path_no_longer_produces_a_swing(self, tmp_path):
-        """A committed k_active observation carries no swing_f: the old |end-start|/2 is retired (run-edge path,
-        Issue #1512)."""
-        engine = self._make_engine(tmp_path)
-        run = {
-            "obs_id": "r1",
-            "mode": "heat",
-            "start_ts": "2026-04-28T06:00:00+00:00",
-            "off_ts": "2026-04-28T06:20:00+00:00",
-            "start_f": 66.0,
-            "off_f": 68.0,
-            "peak_f": 68.0,
-            "minutes": 20.0,
-            "avg_delta_t": 12.0,
-            "avg_outdoor_f": 55.0,
-            "k_passive": -0.05,
-            "k_passive_source": "v3",
-            "resolution_f": 0.1,
-            "n_active": 3,
-        }
-        with patch("custom_components.climate_advisor.learning.dt_util", _make_dt_mock()):
-            result, _code = engine.record_hvac_run(run)
-        assert result is not None and "swing_f" not in result
 
     def test_estimator_is_the_median_of_the_last_k_samples(self, tmp_path):
         from custom_components.climate_advisor.const import THERMAL_SWING_ESTIMATOR_WINDOW

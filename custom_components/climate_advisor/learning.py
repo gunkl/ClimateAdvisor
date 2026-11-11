@@ -27,8 +27,6 @@ from .const import (
     MIN_WEATHER_BIAS_OBSERVATIONS,
     OBS_TYPE_HVAC_HEAT,
     REJECT_ABANDONED,
-    REJECT_HVAC_RUN_TOO_SHORT,
-    REJECT_HVAC_SIGNAL_BELOW_RESOLUTION,
     REJECT_NO_K_PASSIVE,
     REJECT_OLS_BAD_FIT,
     REJECT_OLS_BOUNDS,
@@ -39,7 +37,6 @@ from .const import (
     THERMAL_BLOCK_OLS_BLOCK_MINUTES,
     THERMAL_BLOCK_OLS_MIN_BLOCKS,
     THERMAL_HVAC_MIN_SIGNAL_F,
-    THERMAL_HVAC_RUN_MIN_MINUTES,
     THERMAL_K_ACTIVE_COOL_MAX,
     THERMAL_K_ACTIVE_COOL_MIN,
     THERMAL_K_ACTIVE_HEAT_MAX,
@@ -201,7 +198,26 @@ def _ewma_update_field(cache: dict, field_name: str, value: float, alpha: float)
         cache[field_name] = (1.0 - alpha) * cache[field_name] + alpha * value
 
 
+# "duty_balance" observations are no longer written (Issue #1512: retired); stored ones stay and age out.
 _CHART_LOG_FIT_SOURCES = ("endpoint", "block_ols", "duty_balance")
+
+# The cycle-model outputs kept in thermal_model_cache["cycle_fit_<mode>"] (SPEC2 Estimator, outputs per mode).
+CYCLE_FIT_KEYS = (
+    "q",
+    "sd_q",
+    "k_p_cycle",
+    "sd_k",
+    "coast_area_f",
+    "tau",
+    "ne",
+    "n_cycles",
+    "er_q",
+    "grade",
+    "resolution_f",
+    "k_pinned",
+    "reasons",
+    "prior_source",
+)
 
 
 def _same_chart_log_fit(a: dict, b: dict) -> bool:
@@ -921,47 +937,6 @@ def compute_k_active_single_point(
     return k_active
 
 
-def compute_hvac_run_rate(
-    *,
-    mode: str,
-    start_f: float,
-    off_f: float,
-    minutes: float,
-    avg_delta_t: float,
-    k_passive: float | None,
-    resolution_f: float | None,
-) -> tuple[float | None, str | None]:
-    """Steady heating/cooling rate (F/hr) from one HVAC run's own edges (Issue #1512, run-edge estimator).
-
-    ``k_active = (T_off - T_on)/hours - k_passive * avg(T_in - T_out)`` where ``T_off`` is the indoor reading AT
-    the off edge, never a post-run peak: whatever the room does after the equipment stops (furnace coast, an AC
-    run followed by the room warming) is excluded by construction. Reuses ``compute_k_active_single_point``.
-
-    Returns ``(k_active, None)`` or ``(None, reject_code)``: too-short run, no closed-house ``k_passive``,
-    net change below ``max(THERMAL_HVAC_MIN_SIGNAL_F, 2 x resolution_f)`` (wrong direction included), or a rate
-    outside the physical bounds.
-    """
-    if minutes < THERMAL_HVAC_RUN_MIN_MINUTES:
-        return None, REJECT_HVAC_RUN_TOO_SHORT
-    if k_passive is None or k_passive >= 0:
-        return None, REJECT_NO_K_PASSIVE
-    gate = max(THERMAL_HVAC_MIN_SIGNAL_F, 2.0 * resolution_f if resolution_f and resolution_f > 0 else 0.0)
-    signal = off_f - start_f
-    if (mode == "heat" and signal < gate) or (mode == "cool" and -signal < gate) or mode not in ("heat", "cool"):
-        return None, REJECT_HVAC_SIGNAL_BELOW_RESOLUTION
-    k_active = compute_k_active_single_point(
-        T_start=start_f,
-        T_peak=off_f,
-        elapsed_hours=minutes / 60.0,
-        k_passive=k_passive,
-        avg_delta_t=avg_delta_t,
-        session_mode=mode,
-    )
-    if k_active is None:
-        return None, REJECT_OLS_BOUNDS
-    return k_active, None
-
-
 _GRADE_WEIGHT = {"high": 1.0, "medium": 0.6, "low": 0.3}
 
 
@@ -1465,6 +1440,12 @@ class LearningEngine:
         self._ensure_rate_prior()
         before = {f: cache.get(f) for f in self._AGED_RATE_FIELDS}
         rates = aged_rates(self._state.thermal_observations, dt_util.now().date(), cache.get("rate_prior"))
+        # Issue #1512: a rate the pooled cycle model applied (v3-primary zone) is that fit's own q, not an aged median
+        # of the retired run-edge observations: ageing must not pull it back to them.
+        for _mode, _field in (("heat", "k_active_heat"), ("cool", "k_active_cool")):
+            _fit = cache.get(f"cycle_fit_{_mode}")
+            if isinstance(_fit, dict) and _fit.get("applied"):
+                rates.pop(_field, None)
         cache.update(rates)
         for f, new in rates.items():
             old = before.get(f)
@@ -1479,126 +1460,42 @@ class LearningEngine:
             elif old != new:
                 _LOGGER.debug("Thermal rate %s aged: %s -> %.4f", f, old, new)
 
-    def record_hvac_run(self, run: dict) -> tuple[dict | None, str | None]:
-        """Learn one HVAC run's steady rate from its own edges and record it (Issue #1512).
+    def apply_cycle_fit(self, mode: str, result: dict, primary_is_v3: bool) -> bool:
+        """Store one pooled cycle-model fit (``cycle_model.fit_cycles``) and, on a v3-primary zone, apply it (#1512).
 
-        Returns ``(obs, None)`` when committed, else ``(None, reject_code)``. The observation never carries an
-        envelope ``k_passive`` (``None``), so HVAC runs never feed the closed-house rate.
+        Always: ``thermal_model_cache["cycle_fit_heat"|"cycle_fit_cool"]`` = the fit's outputs + ``fitted_at`` +
+        ``applied``, and ``observation_count_heat|cool`` = the eligible cycles counted (``ne``).
+
+        v3 primary and at least one eligible cycle (grade above ``none``): also ``k_active_heat|cool`` := the cycle
+        model's ``q`` (``heating_rate_f_per_hour`` / ``cooling_rate_f_per_hour`` derive from it in
+        ``get_thermal_model``) and the HVAC confidence reads the fit's grade (``grade_hvac_confidence``). On a v4
+        zone ``k_active_*`` keep their aged values (v4 drives the decisions; the fit is shown beside it).
+        ``k_passive`` is never touched: the decisions' leak rate stays the closed-house fit, the model's own ``k`` is
+        stored as ``k_p_cycle`` for display only. Returns True when ``k_active_*`` was written.
         """
-        mode = run.get("mode")
-        k_active, code = compute_hvac_run_rate(
-            mode=mode,
-            start_f=run["start_f"],
-            off_f=run["off_f"],
-            minutes=run["minutes"],
-            avg_delta_t=run.get("avg_delta_t") or 0.0,
-            k_passive=run.get("k_passive"),
-            resolution_f=run.get("resolution_f"),
-        )
-        if k_active is None:
-            return None, code or REJECT_OLS_BOUNDS
-        minutes = float(run["minutes"])
-        stamp = run.get("off_ts") or dt_util.now().isoformat()
-        if not isinstance(stamp, str):
-            stamp = stamp.isoformat()
-        obs = {
-            "event_id": run.get("obs_id") or str(uuid.uuid4()),
-            "timestamp": stamp,
-            "date": stamp[:10],
-            "hvac_mode": mode,
-            "method": "run_edge",
-            "k_active": round(k_active, 3),
-            "k_passive": None,
-            "k_passive_used": run.get("k_passive"),
-            "k_passive_source": run.get("k_passive_source"),
-            "signal_f": round(abs(run["off_f"] - run["start_f"]), 2),
-            "session_minutes": round(minutes, 1),
-            "start_indoor_f": run["start_f"],
-            "end_indoor_f": run["off_f"],
-            "peak_indoor_f": run.get("peak_f", run["off_f"]),
-            "delta_t_avg": round(run.get("avg_delta_t") or 0.0, 2),
-            "avg_outdoor_f": run.get("avg_outdoor_f"),
-            "confidence_grade": "medium" if minutes >= 15 else "low",
-            "schema_version": 2,
-        }
-        _LOGGER.debug(
-            "Thermal HVAC run recorded: zone=%s mode=%s k_active=%.3f k_p=%.4f (%s) signal=%.2f min=%.1f",
-            self._zone_log_id(),
-            mode,
-            k_active,
-            run.get("k_passive"),
-            run.get("k_passive_source"),
-            obs["signal_f"],
-            minutes,
-        )
-        self.record_thermal_observation(obs)
-        return obs, None
+        if mode not in ("heat", "cool") or not isinstance(result, dict):
+            return False
+        cache = self._state.thermal_model_cache
+        if not isinstance(cache, dict):
+            cache = _new_thermal_cache()
+            self._state.thermal_model_cache = cache
 
-    def record_duty_balance_fit(self, fit: dict) -> int:
-        """Record a ``hvac_rate_fit.fit_duty_balance`` result as up to three observations (Issue #1512).
+        def _num(v: Any) -> bool:
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
 
-        ``heat`` (k_active), ``cool`` (k_active) and ``passive`` (k_passive), method/source ``duty_balance``. Fits
-        re-run on a rolling window, so a fit of an already-recorded window is skipped (``_same_chart_log_fit``) and a
-        fit of a newer window replaces the previous duty_balance observation of that mode rather than piling up.
-        Returns how many observations were recorded.
-        """
-        if not isinstance(fit, dict):
-            return 0
-        r2 = fit.get("r_squared")
-        if not isinstance(r2, (int, float)) or isinstance(r2, bool) or r2 < THERMAL_MIN_R_SQUARED:
-            # a poorly-fitting model's coefficients are noise: record nothing (the coordinator logs the rejection)
-            return 0
-        grade = "high" if (r2 or 0.0) >= 0.7 else "medium" if (r2 or 0.0) >= 0.4 else "low"
-        stamp = dt_util.now().isoformat()
-        recorded = 0
-        for mode, key, out_key in (
-            ("heat", "k_active_heat", "k_active"),
-            ("cool", "k_active_cool", "k_active"),
-            ("passive", "k_passive", "k_passive"),
-        ):
-            val = fit.get(key)
-            if not isinstance(val, (int, float)) or isinstance(val, bool):
-                continue
-            obs = {
-                "event_id": str(uuid.uuid4()),
-                "timestamp": stamp,
-                "date": stamp[:10],
-                "hvac_mode": mode,
-                "method": "duty_balance",
-                "source": "duty_balance",
-                "k_active": round(float(val), 3) if out_key == "k_active" else None,
-                "k_passive": round(float(val), 5) if out_key == "k_passive" else None,
-                "r_squared": r2,
-                "r_squared_passive": r2 if mode == "passive" else None,
-                "n_intervals": fit.get("n_intervals"),
-                "heat_hours": fit.get("heat_hours"),
-                "cool_hours": fit.get("cool_hours"),
-                "window_start": fit.get("window_start"),
-                "window_end": fit.get("window_end"),
-                "confidence_grade": grade,
-                "schema_version": 2,
-            }
-            if any(_same_chart_log_fit(obs, o) for o in self._state.thermal_observations):
-                continue
-            old = [
-                o
-                for o in self._state.thermal_observations
-                if o.get("source") == "duty_balance" and o.get("hvac_mode") == mode
-            ]
-            if old:
-                self._state.thermal_observations = [o for o in self._state.thermal_observations if o not in old]
-            if self.record_thermal_observation(obs):
-                recorded += 1
-                cache = self._state.thermal_model_cache
-                count_field = {
-                    "heat": "observation_count_heat",
-                    "cool": "observation_count_cool",
-                    "passive": "observation_count_passive",
-                }[mode]
-                if old and isinstance(cache, dict):
-                    # a refit of a rolling window replaces its predecessor: the evidence count does not grow
-                    cache[count_field] = max(0, cache.get(count_field, 0) - len(old))
-        return recorded
+        q = result.get("q")
+        ne = result.get("ne")
+        usable = _num(q) and _num(ne) and ne > 0 and result.get("grade", "none") != "none"
+        applied = bool(primary_is_v3 and usable)
+        rec = {k: result.get(k) for k in CYCLE_FIT_KEYS}
+        rec["fitted_at"] = dt_util.now().isoformat()
+        rec["applied"] = applied
+        cache[f"cycle_fit_{mode}"] = rec
+        if _num(ne):
+            cache["observation_count_heat" if mode == "heat" else "observation_count_cool"] = int(ne)
+        if applied:
+            cache["k_active_heat" if mode == "heat" else "k_active_cool"] = round(float(q), 4)
+        return applied
 
     def reset_vent_rates(self) -> int:
         """Forget the windows-only and fan rates and the fits behind them, for a one-time re-learn (Issue #1505).
@@ -2265,9 +2162,9 @@ class LearningEngine:
             self.record_thermal_observation(obs)
             return obs, None, None
 
-        # hvac_heat / hvac_cool are learned at the run's off edge (record_hvac_run, Issue #1512); the old post-run
+        # hvac_heat / hvac_cool are learned by the pooled cycle model (apply_cycle_fit, Issue #1512); the old post-run
         # fit (and its k_vent_window -> k_passive proxy) is gone, so no HVAC obs_type commits through this path.
-        _LOGGER.warning("_commit_event_from_dict: obs_type %r is not committed here (use record_hvac_run)", obs_type)
+        _LOGGER.warning("_commit_event_from_dict: obs_type %r is not committed here (use apply_cycle_fit)", obs_type)
         return None, REJECT_ABANDONED, None
 
     def get_weather_bias(self) -> dict:

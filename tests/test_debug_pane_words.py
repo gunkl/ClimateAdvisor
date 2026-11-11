@@ -91,6 +91,8 @@ class TestDecisionRates:
     def _rows(self, monkeypatch, *, primary: str, ready: bool) -> dict:
         coord = SimpleNamespace(config={"primary_engine": primary, "temp_unit": "fahrenheit"}, _thermal_model=self._V3)
         coord.control_thermal_model = lambda base: ClimateAdvisorCoordinator.control_thermal_model(coord, base)
+        # Issue #1512: decision_rates_summary also appends the cycle model's rows (real method, no learning on the stub)
+        coord._cycle_model_rows = lambda unit: ClimateAdvisorCoordinator._cycle_model_rows(coord, unit)
         monkeypatch.setattr(prediction_engines, "control_ready", lambda source, config: ready)
         v4 = prediction_engines.ENGINES["v4"]
         monkeypatch.setattr(v4, "state_of", lambda source: {})

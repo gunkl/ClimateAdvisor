@@ -224,6 +224,7 @@ def node_choice_changed(previous: Mapping[str, Any] | None, new: Mapping[str, An
 
 
 _MODE_WORD = {"heat": "heating", "cool": "cooling"}
+_CARRY_REASON = "carried from last season"  # predictor_v4.CARRY_REASON (Issue #1525)
 
 
 def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
@@ -243,6 +244,10 @@ def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
     def mode_txt(mode: str) -> str:
         m = modes.get(mode) if isinstance(modes.get(mode), Mapping) else {}
         word, acc, tot, grade = _MODE_WORD[mode], m.get("accepted"), m.get("starts"), m.get("grade")
+        if m.get("carried") and m.get("reason") == _CARRY_REASON:
+            # Issue #1525: what the house learned about this mode stands until new runs of it displace it
+            new = "not seen" if m.get("seen") is False else f"{acc if isinstance(acc, int) else 0} usable new starts"
+            return f"{word} {grade}: carried from last season ({new})"
         if grade == "unseen" or m.get("seen") is False or (not tot and m.get("seen") is None):
             return f"{word} not seen"
         if not isinstance(acc, int):
@@ -261,14 +266,27 @@ def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
     days = summary.get("sample_days")
     days_w = f"{float(days):.1f} days" if isinstance(days, (int, float)) else "too few days"
     code = summary.get("confidence_reason") or ""
+    carried = [
+        _MODE_WORD[m]
+        for m in ("heat", "cool")
+        if isinstance(modes.get(m), Mapping) and modes[m].get("carried") and modes[m].get("reason") == _CARRY_REASON
+    ]
     short = [
         _MODE_WORD[m]
         for m in ("heat", "cool")
-        if isinstance(modes.get(m), Mapping) and (modes[m].get("accepted") or 0) < need_starts
+        if isinstance(modes.get(m), Mapping)
+        and (modes[m].get("accepted") or 0) < need_starts
+        and _MODE_WORD[m] not in carried
     ]
-    unseen = [_MODE_WORD[m] for m in ("heat", "cool") if isinstance(modes.get(m), Mapping) and not modes[m].get("seen")]
+    unseen = [
+        _MODE_WORD[m]
+        for m in ("heat", "cool")
+        if isinstance(modes.get(m), Mapping) and not modes[m].get("seen") and not modes[m].get("carried")
+    ]
     why = {
-        "": "every check passes" if summary.get("confidence") == "ok" else "",
+        "": ("every check passes" + (f"; {' and '.join(carried)} carried from last season" if carried else ""))
+        if summary.get("confidence") == "ok"
+        else "",
         "under 3 days of samples": f"only {days_w} of history (needs 3)",
         "fit diverged": "the last fit did not settle on a model",
         "does not beat no-change at 4 h by 10 %": 'it does not yet beat "no change" by 10 % at 4 h ahead',
@@ -830,6 +848,9 @@ def model_summary(model_dict: Mapping[str, Any] | None) -> dict[str, Any]:
                 # Issue #1469: the mode's own grade ("none" | "unseen" | "low" | "ok"; None before per-mode grades)
                 "grade": _mode_fit(fit, mode).get("grade"),
                 "reason": _mode_fit(fit, mode).get("reason"),
+                # Issue #1525: the mode's learned values are carried from an earlier window (share ``keep`` left)
+                "carried": bool(_mode_fit(fit, mode).get("carried")),
+                "keep": _mode_fit(fit, mode).get("keep"),
             }
             for mode in ("heat", "cool")
         },

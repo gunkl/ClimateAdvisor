@@ -6397,6 +6397,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         wake=(wake_t.hour, wake_t.minute),
                         train_days=V4_FIT_TRAIN_DAYS,
                         model_fitted_at=str(model_dict.get("fitted_at") or ""),
+                        # Issue #1525: what newer nights have not displaced carries over (never fades with time)
+                        previous=state.night_validation if isinstance(state.night_validation, dict) else None,
                     )
                 )
             if getattr(self, "_shut_down", False) is True:

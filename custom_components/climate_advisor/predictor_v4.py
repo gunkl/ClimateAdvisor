@@ -102,6 +102,27 @@ GATE_MIN_MODE_STEPS = 8  # >= 2 h of heating (or cooling) to call the mode "seen
 
 CONFIDENCE_VALUES = ("none", "low", "ok")
 
+# Season carry (Issue #1525). The fit trains on the last 30 days (R1b), so a mode the home did not use for a season
+# would otherwise lose what the house learned about it: its gain re-derived from the other mode by the production ratio,
+# its thermostat offsets back at the defaults and the grade "low: not yet observed". Owner rule (2026-11-11, D35):
+# learned values give way only to new measured evidence, never to time alone. So a mode the previous model knew keeps
+# that model's values while the window holds no usable evidence of it, and new runs of the mode displace them: the
+# carried share ``keep`` halves for every CARRY_HALF_RUNS new runs of that mode (CARRY_HALF_RUNS_CONTRADICT when the
+# window's own fit of the mode contradicts the carried gain by more than CARRY_CONTRADICT_REL). The numbers are D35's
+# (const.THERMAL_EVIDENCE_HALF_N / THERMAL_EVIDENCE_HALF_N_CONTRADICT; this module is pure and does not import const).
+# Below CARRY_MIN_KEEP, once the window grades the mode on its own, the carry is released.
+CARRY_HALF_RUNS = 20.0
+CARRY_HALF_RUNS_CONTRADICT = 5.0
+CARRY_CONTRADICT_REL = 0.25
+CARRY_MIN_KEEP = 0.05
+CARRY_REASON = "carried from last season"
+_MODE_GAIN = {"heat": "q_h", "cool": "q_c"}
+# Parameters that stay at the previous model's learned value while the window has no data for them (#1525): the
+# window and fan leaks and, per extra node, the window leak and the HVAC share. They are never blended: once the
+# window has data for them, the window alone fits them (R1b: older rows are not evidence for the fan rate).
+_CARRY_HOUSE_PARAMS = ("a_w", "a_f")
+_CARRY_NODE_PARAMS = ("b_w", "q_b")
+
 # Display-only sensor nodes (Issue #1422). A sensor whose per-sensor history began recently (``indoor_sensors``) is
 # judged over the span since ITS first row, not the whole training window, so it draws its own line within days. It
 # is fitted AFTER the control fit with the house parameters held, and kept in ``V4Model.display_nodes`` - never in
@@ -1076,6 +1097,18 @@ class _Problem:
                         out[mode][1].append(abs(a.h0 - v))
         return out
 
+    def mode_anchor_counts(self, step: int) -> dict[str, int]:
+        """Anchors :meth:`mode_errors` would score per mode at lead ``step`` (no rollout needed; Issue #1525)."""
+        out = {"heat": 0, "cool": 0}
+        for a in self.anchors:
+            if not any(k + 1 == step for k, _v, _w in a.targets[0]):
+                continue
+            if any(u > 0 for u in a.uh[:step]):
+                out["heat"] += 1
+            if any(u > 0 for u in a.uc[:step]):
+                out["cool"] += 1
+        return out
+
     def lead_errors(
         self, hp: Sequence[float], nodes: Sequence[Sequence[float]]
     ) -> tuple[dict[int, list[float]], dict[int, list[float]], list[dict[int, list[float]]]]:
@@ -1154,6 +1187,286 @@ def _mae(vals: Sequence[float] | None) -> float | None:
     return None if not vals else sum(vals) / len(vals)
 
 
+# ------------------------------------------------------------------------------- season carry (Issue #1525)
+def _iso_epoch(raw: Any) -> float | None:
+    try:
+        return datetime.fromisoformat(str(raw)).timestamp()
+    except TypeError, ValueError:
+        return None
+
+
+def runs_after(samples: Sequence[V4Sample], *, heat: bool, after_epoch: float | None) -> int:
+    """Runs (starts) of heating (cooling) in ``samples`` that began after ``after_epoch`` (``None``: every run).
+
+    The unit of new evidence for a carried mode (Issue #1525): one thermostat run of that mode."""
+    u_of = _heat_u if heat else _cool_u
+    n = 0
+    prev = False
+    for k, s in enumerate(samples):
+        if k > 0 and not _contiguous(samples[k - 1].ts, s.ts):
+            prev = False
+        act = u_of(s) > 0.0
+        if act and not prev and (after_epoch is None or s.ts.timestamp() > after_epoch):
+            n += 1
+        prev = act
+    return n
+
+
+def displaced_keep(keep: float, n_new: float, contradicts: bool) -> float:
+    """``keep`` after ``n_new`` new runs: halved every CARRY_HALF_RUNS (CARRY_HALF_RUNS_CONTRADICT when contradicted).
+
+    No new run leaves it unchanged: nothing here reads a clock (D35, Issue #1525)."""
+    if n_new <= 0:
+        return keep
+    half = CARRY_HALF_RUNS_CONTRADICT if contradicts else CARRY_HALF_RUNS
+    return keep * 0.5 ** (float(n_new) / half)
+
+
+def _carry_record(raw: Any) -> dict[str, Any] | None:
+    """A stored mode carry record (``fit["carried"][mode]``), validated; ``None`` when absent or malformed."""
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        rec = {
+            "q": float(raw["q"]),
+            "on_f": float(raw["on_f"]),
+            "off_f": float(raw["off_f"]),
+            "min_run_min": None if raw.get("min_run_min") is None else float(raw["min_run_min"]),
+            "burst_min": None if raw.get("burst_min") is None else float(raw["burst_min"]),
+            "trusted": bool(raw.get("trusted", False)),
+            "grade": str(raw.get("grade") or "low"),
+            "keep": float(raw.get("keep", 1.0)),
+            "since": str(raw.get("since") or ""),
+            "calibrated": bool(raw.get("calibrated", False)),
+        }
+    except KeyError, TypeError, ValueError:
+        return None
+    lo, hi = HOUSE_BOUNDS["q_h"]
+    if not all(_finite(rec[k]) for k in ("q", "on_f", "off_f", "keep")) or not lo <= rec["q"] <= hi:
+        return None
+    for k in ("min_run_min", "burst_min"):
+        if rec[k] is not None and (not _finite(rec[k]) or rec[k] <= 0):
+            rec[k] = None
+    if rec["grade"] not in ("ok", "low"):
+        rec["grade"] = "low"
+    rec["keep"] = min(1.0, max(0.0, rec["keep"]))
+    return rec
+
+
+def _mode_values(model: V4Model, mode: str) -> dict[str, Any]:
+    """What ``model`` used for one mode: gain, start / stop offsets, minimum run and run length."""
+    th = model.thermostat
+    if mode == "heat":
+        return {
+            "q": float(model.house["q_h"]),
+            "on_f": float(th.on_below_f),
+            "off_f": float(th.off_above_f),
+            "min_run_min": th.min_run_heat_min,
+            "burst_min": th.burst_minutes,
+        }
+    return {
+        "q": float(model.house["q_c"]),
+        "on_f": float(th.on_above_f),
+        "off_f": float(th.off_below_f),
+        "min_run_min": th.min_run_cool_min,
+        "burst_min": th.burst_cool_minutes,
+    }
+
+
+def _mode_grade_of(model: V4Model, mode: str) -> str:
+    rec = (model.fit.get("modes") or {}).get(mode) if isinstance(model.fit, Mapping) else None
+    g = rec.get("grade") if isinstance(rec, Mapping) else None
+    if g in ("ok", "low"):
+        return str(g)
+    return "ok" if model.confidence == "ok" else "low"
+
+
+def _mode_window_ok(fit_info: Mapping[str, Any], mode: str) -> bool:
+    """The model's own window learned the mode's thermostat (seen, and enough accepted starts)."""
+    acc = (fit_info.get("starts_accepted") or {}).get(mode) if isinstance(fit_info, Mapping) else None
+    return bool(fit_info.get(f"{mode}_seen")) and isinstance(acc, int) and acc >= GATE_MIN_ACCEPTED_STARTS
+
+
+_THIN_GRADE_WORDS = ("starts", "anchors", "under 10 days")
+
+
+def _mode_window_graded(fit_info: Mapping[str, Any], mode: str) -> bool:
+    """The model's own window had enough evidence of the mode to grade it (Issue #1525): its thermostat learned and
+    its per-mode grade not held back by thin data (too few starts / anchors / days). A grade "low" because the mode's
+    own forecasts miss is evidence too, so it counts as graded. A model from before per-mode grades: thermostat only."""
+    if not _mode_window_ok(fit_info, mode):
+        return False
+    rec = (fit_info.get("modes") or {}).get(mode)
+    if not isinstance(rec, Mapping) or rec.get("carried") and rec.get("reason") == CARRY_REASON:
+        return not isinstance(rec, Mapping)
+    reason = str(rec.get("reason") or "")
+    return rec.get("grade") == "ok" or (rec.get("grade") == "low" and not any(w in reason for w in _THIN_GRADE_WORDS))
+
+
+def _carry_source(prev: V4Model | None, primary: str) -> bool:
+    return (
+        prev is not None
+        and prev.schema_version == V4_SCHEMA_VERSION
+        and prev.confidence != "none"
+        and prev.primary == primary
+        and isinstance(prev.fit, Mapping)
+    )
+
+
+def _start_carries(
+    prev: V4Model | None,
+    *,
+    primary: str,
+    graded: Mapping[str, bool],
+    new_runs: Mapping[str, int],
+    fitted_at: str,
+) -> dict[str, dict[str, Any]]:
+    """Per mode, the carry this fit starts with (before the window's own evidence is weighed), Issue #1525.
+
+    A mode ``prev`` LEARNED - its own window graded it (``_mode_window_graded``), or it was carrying it - is carried:
+
+    * while this window cannot grade it (unseen, or too few accepted starts / anchors of it: a season's last or first
+      runs), exactly what ``prev`` used, share 1.0 - a thin window's fit of the mode is not usable evidence;
+    * once this window grades it, ``prev``'s record goes on and this fit's new runs displace it (``displaced_keep``).
+
+    A mode ``prev`` never learned is not carried: the window's fit stands, and an unseen mode keeps the production
+    ratio as before. That includes a mode the home used but v4 never graded (Zone 1's spring heating: no usable start,
+    its gain at the lower bound) - a value with no graded evidence behind it is not something the house learned.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    if prev is None or not _carry_source(prev, primary):
+        return out
+    pfit = prev.fit
+    pcarried = pfit.get("carried") if isinstance(pfit.get("carried"), Mapping) else {}
+    for mode in _MODE_GAIN:
+        rec_prev = _carry_record(pcarried.get(mode))
+        if not (_mode_window_graded(pfit, mode) or rec_prev is not None):
+            continue
+        if not graded[mode]:
+            out[mode] = {
+                **_mode_values(prev, mode),
+                "trusted": _mode_window_ok(pfit, mode) or bool(rec_prev and rec_prev["trusted"]),
+                "grade": _mode_grade_of(prev, mode),
+                "keep": 1.0,
+                "since": rec_prev["since"] if rec_prev is not None and rec_prev["since"] else fitted_at,
+                "calibrated": bool(prev.thermostat.calibrated),
+                "new_runs": 0,
+            }
+        elif rec_prev is not None:
+            out[mode] = {**rec_prev, "new_runs": int(new_runs[mode])}
+    return out
+
+
+def _blend(carried: float | None, own: float | None, share: float) -> float | None:
+    if carried is None:
+        return own
+    if own is None:
+        return carried
+    return share * carried + (1.0 - share) * own
+
+
+def _mode_values_th(th: V4Thermostat, mode: str) -> dict[str, Any]:
+    if mode == "heat":
+        return {
+            "on_f": th.on_below_f,
+            "off_f": th.off_above_f,
+            "min_run_min": th.min_run_heat_min,
+            "burst_min": th.burst_minutes,
+        }
+    return {
+        "on_f": th.on_above_f,
+        "off_f": th.off_below_f,
+        "min_run_min": th.min_run_cool_min,
+        "burst_min": th.burst_cool_minutes,
+    }
+
+
+def _with_mode_values(th: V4Thermostat, mode: str, rec: Mapping[str, Any], *, share: float) -> V4Thermostat:
+    """``th`` with one mode's offsets, minimum run and run length moved to the carried record by ``share``."""
+    cur = _mode_values_th(th, mode)
+    on = round(float(_blend(rec["on_f"], cur["on_f"], share)), 2)  # type: ignore[arg-type]
+    off = round(float(_blend(rec["off_f"], cur["off_f"], share)), 2)  # type: ignore[arg-type]
+    mr = _blend(rec.get("min_run_min"), cur["min_run_min"], share)
+    burst = _blend(rec.get("burst_min"), cur["burst_min"], share)
+    mr = None if mr is None else round(mr, 1)
+    burst = None if burst is None else round(burst, 1)
+    calibrated = th.calibrated or bool(rec.get("calibrated"))
+    if mode == "heat":
+        return dataclasses.replace(
+            th,
+            on_below_f=on,
+            off_above_f=off,
+            min_run_heat_min=mr,
+            burst_minutes=burst if burst is not None else th.burst_minutes,
+            calibrated=calibrated,
+        )
+    return dataclasses.replace(
+        th, on_above_f=on, off_below_f=off, min_run_cool_min=mr, burst_cool_minutes=burst, calibrated=calibrated
+    )
+
+
+def _carry_mode_grades(modes: dict[str, dict[str, Any]], carried: Mapping[str, Mapping[str, Any]]) -> None:
+    """Per-mode grades of a carried mode (Issue #1525): the carried grade while the window has no usable evidence of
+    the mode ("unseen", or too few starts / anchors of it), reason CARRY_REASON; the window's grade otherwise (a skill
+    failure on the mode's own anchors is new evidence and speaks). Every carried mode is marked with its share."""
+    for mode, rec in carried.items():
+        g = modes.get(mode)
+        if not isinstance(g, dict) or g.get("grade") == "none":
+            continue
+        reason = str(g.get("reason") or "")
+        thin = g.get("grade") == "unseen" or (g.get("grade") == "low" and ("starts" in reason or "anchors" in reason))
+        if thin:
+            g["grade"] = rec["grade"]
+            g["reason"] = CARRY_REASON
+        g["carried"] = True
+        g["keep"] = rec["keep"]
+
+
+def carry_source(prev: V4Model | None) -> V4Model | None:
+    """The model whose learned values a fit may carry (Issue #1525): ``prev``, or - when ``prev`` is an unusable
+    (confidence ``none``) fit - the last usable model it kept in ``fit["carry_source"]``. A night with too little data
+    to fit is not evidence, so it must not cost the house what it learned."""
+    if prev is None or prev.confidence != "none":
+        return prev
+    raw = prev.fit.get("carry_source") if isinstance(prev.fit, Mapping) else None
+    kept = from_dict(raw) if isinstance(raw, Mapping) else None
+    return kept if kept is not None and kept.confidence != "none" else prev
+
+
+def _keep_carry_source(model: V4Model, source: V4Model | None) -> V4Model:
+    """An unusable fit keeps the last usable model (without its own kept source) for the next fit's carry."""
+    if source is None or source.confidence == "none" or not isinstance(model.fit, Mapping):
+        return model
+    kept = to_dict(source)
+    kept_fit = dict(kept.get("fit") or {})
+    kept_fit.pop("carry_source", None)
+    kept["fit"] = kept_fit
+    kept["display_nodes"] = {}
+    return dataclasses.replace(model, fit={**dict(model.fit), "carry_source": kept})
+
+
+def _carried_params(prev: V4Model | None, primary: str, extra: Sequence[str]) -> dict[tuple[Any, ...], float]:
+    """Window / fan / node parameters ``prev`` had learned (not in its ``frozen`` list), by this fit's parameter keys.
+
+    Only these may be pinned at ``prev``'s value when this window has no data for them (Issue #1525)."""
+    out: dict[tuple[Any, ...], float] = {}
+    if prev is None or not _carry_source(prev, primary):
+        return out
+    pfrozen = {str(x) for x in (prev.fit.get("frozen") or ())}
+    for k in _CARRY_HOUSE_PARAMS:
+        if f"h/{k}" not in pfrozen and k in prev.house:
+            out[("h", k)] = float(prev.house[k])
+    prev_extra = [s for s in prev.sensors if s != prev.primary]
+    for j, sid in enumerate(extra):
+        if sid not in prev_extra or sid not in prev.nodes:
+            continue
+        jp = prev_extra.index(sid)
+        for k in _CARRY_NODE_PARAMS:
+            if f"n/{jp}/{k}" not in pfrozen:
+                out[("n", j, k)] = float(prev.nodes[sid][k])
+    return out
+
+
 def _default_model(
     primary: str,
     sensors: Sequence[str],
@@ -1190,8 +1503,13 @@ def fit(
     max_anchors: int = 160,
     warm_start: V4Model | None = None,
     display_sensors: Sequence[str] = (),
+    carry_from: V4Model | None = None,
 ) -> V4Model:
     """Fit the model by bounded Levenberg-Marquardt on multi-step rollout residuals.
+
+    ``carry_from`` (Issue #1525; default: ``warm_start``) is the previous model whose learned modes and window / fan
+    rates carry through a window with no evidence of them (see CARRY_HALF_RUNS). The backtest passes the previous
+    week's model here without warm-starting from it.
 
     ``display_sensors`` (Issue #1422, from :func:`resolve_display_nodes`) are fitted AFTER the model, house held, by
     :func:`fit_display_nodes` into ``display_nodes``; the rest of the model is exactly what it is without them.
@@ -1206,6 +1524,7 @@ def fit(
     sensor_list = [primary, *[s for s in sensors if s != primary]]
     extra = sensor_list[1:]
     fitted_at = now.isoformat()
+    source = carry_source(carry_from if carry_from is not None else warm_start)
     thermostat, tstats = learn_thermostat_detail(samples, primary=primary)
     forecast = learn_forecast_correction(samples, tz=tz)
     openness = learn_openness(samples, tz=tz)
@@ -1238,7 +1557,7 @@ def fit(
     horizon_steps = max(4, int(horizon_h * 60 / V4_STEP_MINUTES))
     if n_samples < 16:
         base.fit["reason"] = "too few samples"  # ``base`` holds a copy of ``info``: record the reason on the model
-        return base
+        return _keep_carry_source(base, source)
     try:
         prob = _Problem(
             samples, primary=primary, extra=extra, tz=tz, horizon_steps=horizon_steps, max_anchors=max_anchors
@@ -1246,7 +1565,7 @@ def fit(
         if len(prob.anchors) < GATE_MIN_ANCHORS:
             base.fit["n_anchors"] = len(prob.anchors)
             base.fit["reason"] = "too few anchors"
-            return base
+            return _keep_carry_source(base, source)
         model = _fit_problem(
             prob,
             base,
@@ -1260,10 +1579,13 @@ def fit(
             samples=samples,
             tstats=tstats,
             openness=openness,
+            carry_from=source,
         )
     except (ArithmeticError, ValueError, TypeError, IndexError, OverflowError) as exc:  # pragma: no cover
         base.fit["reason"] = f"fit failed: {type(exc).__name__}"
-        return base
+        return _keep_carry_source(base, source)
+    if model.confidence == "none":
+        return _keep_carry_source(model, source)
     if display_sensors and model.confidence != "none":
         model = with_display_nodes(
             model,
@@ -1290,6 +1612,7 @@ def _fit_problem(
     samples: Sequence[V4Sample],
     tstats: _ThermostatStats,
     openness: V4Openness,
+    carry_from: V4Model | None = None,
 ) -> V4Model:
     extra = sensor_list[1:]
     heat_seen = prob.heat_steps >= GATE_MIN_MODE_STEPS
@@ -1311,6 +1634,19 @@ def _fit_problem(
         for j, sid in enumerate(extra):
             if sid in warm_start.nodes:
                 nd0[j].update({k: float(v) for k, v in warm_start.nodes[sid].items() if k in NODE_BOUNDS})
+    # Issue #1525: what the previous model learned carries through a window that holds no evidence of it
+    seen = {"heat": heat_seen, "cool": cool_seen}
+    window_ok = {
+        "heat": heat_seen and tstats.heat_accepted >= GATE_MIN_ACCEPTED_STARTS,
+        "cool": cool_seen and tstats.cool_accepted >= GATE_MIN_ACCEPTED_STARTS,
+    }
+    mode_anchors = prob.mode_anchor_counts(16)
+    graded = {m: window_ok[m] and mode_anchors[m] >= GATE_MIN_ANCHORS for m in _MODE_GAIN}
+    after = _iso_epoch(carry_from.fitted_at) if carry_from is not None else None
+    new_runs = {m: runs_after(samples, heat=m == "heat", after_epoch=after) for m in _MODE_GAIN}
+    carries = _start_carries(
+        carry_from, primary=sensor_list[0], graded=graded, new_runs=new_runs, fitted_at=base.fitted_at
+    )
     # parameters with no data behind them stay at their start value
     frozen: set[tuple[Any, ...]] = set()
     if prob.win_steps < GATE_MIN_MODE_STEPS:
@@ -1327,13 +1663,38 @@ def _fit_problem(
     if not heat_seen and not cool_seen:
         for j in range(len(extra)):
             frozen.add(("n", j, "q_b"))
-    if not cool_seen:
-        hp0["q_c"] = min(HOUSE_BOUNDS["q_c"][1], hp0["q_h"] * _COOL_HEAT_RATIO)
+    # A frozen parameter the previous model had learned is pinned at that value (Issue #1525): an unseen mode's gain
+    # (not re-derived by the ratio), and the window / fan / node rates. Pinned values hold through the restart too.
+    pinned: dict[tuple[Any, ...], float] = {
+        p: v for p, v in _carried_params(carry_from, sensor_list[0], extra).items() if p in frozen
+    }
+    for mode, rec in carries.items():
+        if not graded[mode]:
+            pinned[("h", _MODE_GAIN[mode])] = float(rec["q"])
+    frozen |= set(pinned)  # held in the fit; the public list below names only what has no data behind it
+
+    def pin_and_tie(hd: dict[str, float], ndd: Sequence[dict[str, float]]) -> None:
+        for p, v in pinned.items():
+            if p[0] == "h":
+                hd[p[1]] = v
+            else:
+                ndd[p[1]][p[2]] = v
+        # heat and cool gains are tied by the production ratio when a mode was never learned
+        if not cool_seen and ("h", "q_c") not in pinned:
+            hd["q_c"] = min(HOUSE_BOUNDS["q_c"][1], hd["q_h"] * _COOL_HEAT_RATIO)
+        elif not heat_seen and ("h", "q_h") not in pinned:
+            # mirror: only cooling observed -> heating gain follows the fitted cooling gain
+            lo_h, hi_h = HOUSE_BOUNDS["q_h"]
+            hd["q_h"] = min(hi_h, max(lo_h, hd["q_c"] / _COOL_HEAT_RATIO))
+
+    pin_and_tie(hp0, nd0)
 
     free: list[tuple[Any, ...]] = [("h", k) for k in HOUSE_KEYS if ("h", k) not in frozen]
     for j in range(len(extra)):
         free.extend(("n", j, k) for k in NODE_KEYS if ("n", j, k) not in frozen)
-    info["frozen"] = sorted("/".join(str(p) for p in f) for f in frozen)
+    # ``frozen`` (public) = no data behind the value; a pinned value has the previous model's data behind it
+    info["frozen"] = sorted("/".join(str(p) for p in f) for f in frozen if f not in pinned)
+    info["carried_params"] = sorted("/".join(str(p) for p in f) for f in pinned)
 
     def bounds(p: tuple[Any, ...]) -> tuple[float, float]:
         return HOUSE_BOUNDS[p[1]] if p[0] == "h" else NODE_BOUNDS[p[2]]
@@ -1365,12 +1726,7 @@ def _fit_problem(
                 hd[p[1]] = v
             else:
                 ndd[p[1]][p[2]] = v
-        if ("h", "q_c") in frozen and not cool_seen:
-            hd["q_c"] = min(HOUSE_BOUNDS["q_c"][1], hd["q_h"] * _COOL_HEAT_RATIO)
-        elif ("h", "q_h") in frozen and not heat_seen:
-            # mirror: only cooling observed -> heating gain follows the fitted cooling gain
-            lo_h, hi_h = HOUSE_BOUNDS["q_h"]
-            hd["q_h"] = min(hi_h, max(lo_h, hd["q_c"] / _COOL_HEAT_RATIO))
+        pin_and_tie(hd, ndd)
         return [hd[k] for k in HOUSE_KEYS], [[d[k] for k in NODE_KEYS] for d in ndd]
 
     def run_lm(max_it: int):
@@ -1447,8 +1803,7 @@ def _fit_problem(
         hp0.update(house)
         for d, src in zip(nd0, node_params, strict=True):
             d.update(src)
-        if not cool_seen:
-            hp0["q_c"] = min(HOUSE_BOUNDS["q_c"][1], hp0["q_h"] * _COOL_HEAT_RATIO)
+        pin_and_tie(hp0, nd0)
         clamp_all()
 
     warm_started = warm_applied
@@ -1477,10 +1832,34 @@ def _fit_problem(
     info["converged"] = converged
     info["restarts"] = restarts
 
+    # Issue #1525: a carried mode the window saw is displaced by its new runs (share ``keep``, D35's halving); the
+    # gain the model uses is the carried gain weighted by ``keep`` plus the window's own fit weighted by the rest.
+    hp = list(hp)
+    carried: dict[str, dict[str, Any]] = {}
+    for mode, rec in carries.items():
+        gi = HOUSE_KEYS.index(_MODE_GAIN[mode])
+        keep = float(rec["keep"])
+        contradicted = False
+        if graded[mode]:
+            q_fit = hp[gi]
+            contradicted = bool(window_ok[mode]) and abs(q_fit - rec["q"]) > CARRY_CONTRADICT_REL * rec["q"]
+            keep = displaced_keep(keep, rec["new_runs"], contradicted)
+            if graded[mode] and keep < CARRY_MIN_KEEP:
+                continue  # released: the window grades the mode on its own and holds nearly all the evidence
+            hp[gi] = keep * rec["q"] + (1.0 - keep) * q_fit
+        carried[mode] = {**rec, "keep": round(keep, 6), "contradicted": contradicted}
+    if carried:
+        hd = dict(zip(HOUSE_KEYS, hp, strict=True))
+        if not cool_seen and ("h", "q_c") not in pinned:
+            hd["q_c"] = min(HOUSE_BOUNDS["q_c"][1], hd["q_h"] * _COOL_HEAT_RATIO)
+        elif not heat_seen and ("h", "q_h") not in pinned:
+            hd["q_h"] = min(HOUSE_BOUNDS["q_h"][1], max(HOUSE_BOUNDS["q_h"][0], hd["q_c"] / _COOL_HEAT_RATIO))
+        hp = [hd[k] for k in HOUSE_KEYS]
+
     # Closed-loop thermostat calibration (R1b): choose the start / stop offsets of each mode that the training data
     # shows (enough accepted starts) by rolling the EMULATOR, not the replay, from the training anchors.
-    heat_ok = heat_seen and tstats.heat_accepted >= GATE_MIN_ACCEPTED_STARTS
-    cool_ok = cool_seen and tstats.cool_accepted >= GATE_MIN_ACCEPTED_STARTS
+    heat_ok = window_ok["heat"]
+    cool_ok = window_ok["cool"]
     if not heat_ok:
         thermostat = dataclasses.replace(
             thermostat, on_below_f=THERMOSTAT_DEFAULT_ON_F, off_above_f=THERMOSTAT_DEFAULT_OFF_F
@@ -1489,7 +1868,17 @@ def _fit_problem(
         thermostat = dataclasses.replace(
             thermostat, on_above_f=THERMOSTAT_DEFAULT_ON_F, off_below_f=THERMOSTAT_DEFAULT_OFF_F
         )
-    thermostat, cal_info = _calibrate_thermostat(prob, samples, hp, thermostat, heat=heat_ok, cool=cool_ok)
+    # a carried mode the window cannot grade keeps the carried offsets, not the defaults or a thin calibration (#1525)
+    for mode, rec in carried.items():
+        if not graded[mode]:
+            thermostat = _with_mode_values(thermostat, mode, rec, share=1.0)
+    calibrate = {m: window_ok[m] and (graded[m] or m not in carried) for m in _MODE_GAIN}
+    thermostat, cal_info = _calibrate_thermostat(
+        prob, samples, hp, thermostat, heat=calibrate["heat"], cool=calibrate["cool"]
+    )
+    for mode, rec in carried.items():
+        if graded[mode]:
+            thermostat = _with_mode_values(thermostat, mode, rec, share=float(rec["keep"]))
     info["thermostat_calibration"] = cal_info
 
     # commit the optimum into the dictionaries
@@ -1528,7 +1917,11 @@ def _fit_problem(
     skill_ok = ref is not None and flat_by[ref] > 0 and mae_by[ref] <= (1.0 - GATE_MIN_SKILL) * flat_by[ref]
     if ref is not None:
         info["skill_vs_flat"] = round(1.0 - mae_by[ref] / flat_by[ref], 3) if flat_by[ref] > 0 else 0.0
-    info["thermostat_defaults_used"] = (heat_seen and not heat_ok) or (cool_seen and not cool_ok)
+    # A carried mode counts as observed; its thermostat counts as known when the carried one was trusted (#1525).
+    present = {m: seen[m] or m in carried for m in _MODE_GAIN}
+    known = {m: window_ok[m] or bool(m in carried and carried[m]["trusted"]) for m in _MODE_GAIN}
+    info["thermostat_defaults_used"] = any(seen[m] and not known[m] for m in _MODE_GAIN)
+    info["carried"] = carried
     if sample_days < GATE_MIN_DAYS_NONE:
         confidence, info["reason"] = "none", "under 3 days of samples"
     elif not values_ok or not math.isfinite(cost):
@@ -1537,9 +1930,9 @@ def _fit_problem(
         confidence, info["reason"] = "none", "does not beat no-change at 4 h by 10 %"
     elif sample_days < GATE_MIN_DAYS_OK:
         confidence, info["reason"] = "low", "under 10 days of samples"
-    elif not (heat_seen and cool_seen):
+    elif not (present["heat"] and present["cool"]):
         confidence, info["reason"] = "low", "heating or cooling not yet observed"
-    elif not (heat_ok and cool_ok):
+    elif not (known["heat"] and known["cool"]):
         confidence, info["reason"] = "low", "too few accepted thermostat starts in a used mode"
     else:
         confidence, info["reason"] = "ok", ""
@@ -1552,6 +1945,7 @@ def _fit_problem(
         accepted={"heat": tstats.heat_accepted, "cool": tstats.cool_accepted},
         step=leads.get(ref, 16) if ref is not None else 16,
     )
+    _carry_mode_grades(info["modes"], carried)
     return V4Model(
         schema_version=V4_SCHEMA_VERSION,
         fitted_at=base.fitted_at,
@@ -2076,7 +2470,20 @@ def summary_line(model: V4Model) -> str:
         f"days={f.get('sample_days')} mae={mae} flat={flat} iterations={f.get('iterations')} "
         f"thermostat=({model.thermostat.on_below_f}/{model.thermostat.on_above_f} F, "
         f"{model.thermostat.burst_minutes} min, step {model.thermostat.reading_step_f})"
+        + (
+            f" carried={_carried_words(f)}"
+            if isinstance(f, Mapping) and (f.get("carried") or f.get("carried_params"))
+            else ""
+        )
     )
+
+
+def _carried_words(f: Mapping[str, Any]) -> str:
+    """``heat(keep 0.84),h/a_f`` - the carried modes with their share and the pinned rates (Issue #1525 log line)."""
+    modes = f.get("carried") if isinstance(f.get("carried"), Mapping) else {}
+    parts = [f"{m}(keep {rec.get('keep')})" for m, rec in modes.items() if isinstance(rec, Mapping)]
+    parts += [str(p) for p in (f.get("carried_params") or ()) if str(p) not in ("h/q_h", "h/q_c")]
+    return ",".join(parts)
 
 
 # --------------------------------------------------------------------------- the "_ca" line
@@ -2639,6 +3046,7 @@ def choose_control_model(
     warm_start: V4Model | None = None,
     horizon_h: int = 12,
     sample_filter: Callable[[list[V4Sample]], list[V4Sample]] | None = None,
+    carry_from: V4Model | None = None,
 ) -> ControlFit:
     """Fit the model the decisions will read: A (stitched ``_ca``) or B (per room), Issue #1432.
 
@@ -2648,6 +3056,7 @@ def choose_control_model(
     but only when, on this home's own training rows, B's ``_ca`` replay is no worse than A's (:func:`ca_gate`). Until
     then, and whenever B is worse, A stands. Both models are fitted when B is a candidate (about twice a fit's cost).
 
+    ``carry_from`` (Issue #1525; default ``warm_start``) is passed to :func:`fit` for the season carry.
     ``sample_filter`` (the backtest's no-leak cut) is applied to each sample list before fitting. Display-only nodes
     are NOT fitted here (callers add them with :func:`with_display_nodes`). The model's ``fit["node_choice"]`` records
     the choice; ``choice["model"]`` is ``MODEL_STITCHED`` or ``MODEL_PER_ROOM``. Never raises on thin data."""
@@ -2671,7 +3080,16 @@ def choose_control_model(
         )
 
     def fit_for(prim: str, nodes: list[str], smp: list[V4Sample]) -> V4Model:
-        return fit(smp, primary=prim, sensors=nodes, tz=tz, now=now, horizon_h=horizon_h, warm_start=warm_start)
+        return fit(
+            smp,
+            primary=prim,
+            sensors=nodes,
+            tz=tz,
+            now=now,
+            horizon_h=horizon_h,
+            warm_start=warm_start,
+            carry_from=carry_from,
+        )
 
     a_prim, a_nodes = plan.stitched
     a_samples = samples_for(a_prim)

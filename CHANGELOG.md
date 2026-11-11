@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.30] — 2026-11-11
+
+### Fixed
+- **Fix #1525: a season without heating (or cooling) no longer replaces what v4 learned about it.**
+  - **What you'll notice:** on a zone that uses v4 (the default), the first cold mornings of autumn pre-heat and recover on the heating rate your home learned last winter, not one guessed from the air conditioner's rate; in spring, pre-cooling starts from last summer's cooling rate. Through a season with no heating (or no cooling), v4's confidence no longer reads "low: heating or cooling not yet observed" for a mode your home has learned, and that mode's thermostat start/stop behaviour stays learned instead of going back to the defaults. The Debug tab says "heating ok: carried from last season". The same holds for the window and whole-house-fan rates: a winter with the windows shut no longer forgets how fast open windows or the fan cool the house, and the bedroom night plan no longer forgets which nights it has checked.
+  - **Why:** v4 learns from the last 30 days, a window chosen because older rows made its forecasts worse. A mode missing from those 30 days lost its learned values: its rate was re-derived from the other mode with a fixed ratio (about half wrong on a home whose furnace is much stronger than its AC), its thermostat offsets reset and its grade dropped. Now a mode the house learned keeps the values the previous fit used while the 30 days hold no usable evidence of it, and its new runs take over gradually: last season's share halves for every 20 new runs (every 5 when they disagree with it), never because time passed. A home that has never used a mode, or used it too little for v4 to grade, keeps the old rule. A fit that cannot run for a night (too little data) no longer costs the next fit what was learned.
+  - **Nothing changes at the upgrade:** the first fit after it uses what the previous model already used; the 30-day window, and the fan rate's reliance on it alone, are unchanged.
+  - **Tools:** `tools/predict_backtest.py` carries each week's fit into the next the same way (`--no-carry` for the old behaviour), and its report lists each week's gains.
+
 ## [0.9.29] — 2026-11-11
 
 The version number will be set at merge.

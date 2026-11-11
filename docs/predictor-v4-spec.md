@@ -13,6 +13,7 @@
 | Which model do the decisions read: the stitched CA reading or a model per room (Issue #1432)? | B (a node per room: the thermostat entity as the primary, the sleep sensor as a node, composed into `_ca` by time of day) once BOTH have `NODE_MIN_HISTORY_DAYS` (3) of their own readings at `NODE_MIN_COVERAGE` (50 %) - or the old whole-window coverage - AND B's `_ca` replay on the training rows is no worse than A's (the stitched `_ca` model) at 1, 4 and 12 h within `CA_GATE_TOLERANCE_F` (0.05 F). Otherwise A. Sleep hours are never forecast from the thermostat's room while a separate sleep sensor exists. Logged on every fit; a change is a `forecast_model_changed` Activity row. | [Control model choice](#control-model-choice-issue-1432), [The `_ca` line](#the-_ca-line) |
 | How is the thermostat modelled? | Replayed from the recorded heating/cooling duty when fitting; emulated when predicting, from the plan's heat/cool setpoints with learned start offsets, burst length and reading quantisation. | [Thermostat](#thermostat-learning-and-emulation), `predictor_v4.py#L487` |
 | When is `predict()` allowed to answer? | Never when `confidence == "none"` (< 3 days of samples, diverged fit, or no 10 % skill over "no change" at 4 h on the training data). Callers then treat v4 as not learned yet: as primary the chart shows the schedule estimate and the decisions take their "learning not finished" defaults (never v3, [Prediction Engines Spec](prediction-engines-spec.md#fallback-while-the-primary-is-learning)); the accuracy views score nothing for v4. | [Confidence Gates](#confidence-gates), `predictor_v4.py#L97-L101` |
+| What happens to a mode the last 30 days do not show - heating in summer, cooling in winter (Issue #1525)? | Its learned gain, thermostat offsets and grade are CARRIED from the previous fit while the window cannot grade it (unseen, or too few starts / anchors of it), never re-derived from the other mode; once the window grades it, its new runs displace the carry (share halves per 20 new runs, per 5 when they contradict; released below 0.05). Window / fan / node rates the window has no data for keep the learned value. Only a mode v4 never graded keeps the production ratio. | [Season carry](#season-carry-issue-1525) |
 | Are heating and cooling graded apart (Issue #1469)? | For display only: `fit["modes"]` grades each mode `none`/`unseen`/`low`/`ok` (its own usable starts and its own 4 h skill on the anchors where it ran), shown on the Debug tab. The whole-model `confidence` and every decision input are unchanged. | [Per-mode grades](#per-mode-grades-issue-1469) |
 | How is the forecast corrected? | 24 learned hourly biases (actual - forecast, interpolated around the clock) plus today's current miss decaying with a learned time constant, applied INSIDE `predict()` to the RAW forecast. | [Forecast Correction](#forecast-correction), `predictor_v4.py#L753` |
 | How long does a fit take? | Typically 0.2-6 s for 30-60 days of data on a laptop (100-iteration cap, 160 anchors, 2 sensors; a warm refit runs a second start). `predict()` is about 1 ms. | [Performance](#performance) |
@@ -21,7 +22,7 @@
 
 ## Decision rates (Issue #1230 R6b)
 
-`control_rates(model)` turns a fitted model into the thermal-model scalars the rate decisions read when v4 is the primary engine (`k_active_heat`, `k_active_cool`, `heating_rate_f_per_hour`, `cooling_rate_f_per_hour`, `k_passive`, `confidence`, `confidence_k_passive`, and since Issue #1505 `k_vent_window` = `-(a_o + a_w)`, `k_vent_fan` = `-(a_o + a_f)` and `confidence_k_vent`; a term in `fit["frozen"]` is exported as None): the net gain of one hour of continuous heat (cool) from a settled room, rolled through this module's own `rollout` with no leak and no sun (so the hidden-mass lag is included, about 0.8 x `q_h` for the fitted Zone 1 house); `k_passive = -a_o`; grade `low` -> `low`, `ok` -> `medium`. `v4_shadow.run_cycle(baseline=True)` predicts the house with no setpoints (planned windows only): the path the ceiling guard and the nat-vent plan scan. Design, sensor choice and fallback: [Prediction Engines Spec: Control feed](prediction-engines-spec.md#control-feed-r6b).
+`control_rates(model)` turns a fitted model into the thermal-model scalars the rate decisions read when v4 is the primary engine (`k_active_heat`, `k_active_cool`, `heating_rate_f_per_hour`, `cooling_rate_f_per_hour`, `k_passive`, `confidence`, `confidence_k_passive`, and since Issue #1505 `k_vent_window` = `-(a_o + a_w)`, `k_vent_fan` = `-(a_o + a_f)` and `confidence_k_vent`; a term in `fit["frozen"]` is exported as None; a term carried from an earlier window, Issue #1525, is in `fit["carried_params"]` instead and is exported): the net gain of one hour of continuous heat (cool) from a settled room, rolled through this module's own `rollout` with no leak and no sun (so the hidden-mass lag is included, about 0.8 x `q_h` for the fitted Zone 1 house); `k_passive = -a_o`; grade `low` -> `low`, `ok` -> `medium`. `v4_shadow.run_cycle(baseline=True)` predicts the house with no setpoints (planned windows only): the path the ceiling guard and the nat-vent plan scan. Design, sensor choice and fallback: [Prediction Engines Spec: Control feed](prediction-engines-spec.md#control-feed-r6b).
 
 ## Scope
 
@@ -67,7 +68,7 @@ dB_j      = b_h * (H - B_j) + (b_o + b_w * windows) * (out - B_j) + s_b * sun
 | `s_b` | F/h | 0.1 | 0 | 3 | extra node sun gain |
 | `q_b` | F/h | 4.0 | -5 | 40 | share of the HVAC gain reaching the extra node |
 
-Parameters with no data behind them are **frozen** at their start (or warm-start) value and listed in `fit["frozen"]`: `a_w`/`b_w` when no window-open step is in the anchors, `a_f` when the fan never ran, `q_h` when heating was never seen, `q_c` when cooling was never seen (then tied to `q_h * 6.13/5.55`, production's learned cool/heat ratio; if only cooling was seen, `q_h = q_c / (6.13/5.55)`), `q_b` when neither mode was seen. "Seen" = at least 8 anchor steps (2 h) with that duty.
+Parameters with no data behind them are **frozen** at their start (or warm-start) value and listed in `fit["frozen"]`: `a_w`/`b_w` when no window-open step is in the anchors, `a_f` when the fan never ran, `q_h` when heating was never seen, `q_c` when cooling was never seen (then tied to `q_h * 6.13/5.55`, production's learned cool/heat ratio; if only cooling was seen, `q_h = q_c / (6.13/5.55)`), `q_b` when neither mode was seen. "Seen" = at least 8 anchor steps (2 h) with that duty. The ratio tie applies only to a mode the previous model never learned: a learned mode, and a learned window / fan / node rate, is held at the previous model's value instead and listed in `fit["carried_params"]`, not in `fit["frozen"]` ([Season carry](#season-carry-issue-1525)). `fit["frozen"]` therefore means "no data behind the value", which is what `control_rates` and the night strategy read it as.
 
 ### Hidden-mass filter
 
@@ -133,7 +134,34 @@ The fit trains on a bounded window: the last 30 days before the fit (`const.V4_F
 | 90 d | 12/22 | 1.00 | 0.39 | 1.24 | 0.52 |
 | all history | 13/22 | 1.00 | 0.38 | 1.24 | 0.51 |
 
-The gain comes from the zones whose early history differs from the test weeks (S1 12 h bias -1.07 -> -0.46, HEAT 4 h -0.59 -> -0.40, S3 12 h -0.65 -> -0.43); Zone 1 is unchanged within noise (its 4/12 h heating and 4 h summer rows pass at every window). The cost is the COOL zone (bias +0.28 -> +0.56 at 4 h; v3 wins that zone at every window) and a thinner window per fit: a 30-day window sees both modes less often, so confidence stays `low` more often in shoulder seasons ("heating or cooling not yet observed" keeps the unseen mode's gain tied to the seen one by the production ratio). Exponential recency weights over all history were not implemented: a bounded window is the same rule in the fit and the backtest with no extra parameters, and the 45-90 d windows already show most of the benefit is simply dropping stale rows.
+The gain comes from the zones whose early history differs from the test weeks (S1 12 h bias -1.07 -> -0.46, HEAT 4 h -0.59 -> -0.40, S3 12 h -0.65 -> -0.43); Zone 1 is unchanged within noise (its 4/12 h heating and 4 h summer rows pass at every window). The cost is the COOL zone (bias +0.28 -> +0.56 at 4 h; v3 wins that zone at every window) and a thinner window per fit: a 30-day window sees both modes less often, so a mode is often missing from the window in single-mode seasons. Since Issue #1525 that no longer costs what the house learned about it: the mode is carried from the previous fit ([Season carry](#season-carry-issue-1525)), and the window still alone fits every rate it has data for. Exponential recency weights over all history were not implemented: a bounded window is the same rule in the fit and the backtest with no extra parameters, and the 45-90 d windows already show most of the benefit is simply dropping stale rows.
+
+## Season carry (Issue #1525)
+
+Occupant view: on a v4 zone, after a summer with no heating, autumn pre-heat and recovery timing ran on `q_h = q_c / ratio` (half the true rate on a home whose furnace is much stronger than its AC), the heating start/stop offsets were the defaults, and v4 read "low: heating or cooling not yet observed" all summer; spring had the mirror. The 30-day window (above) is kept; what the previous model learned is carried instead. Owner rule (D35, 2026-11-11): learned values and confidence give way only to new measured evidence, never to time alone.
+
+The previous model is `fit(carry_from=)`, by default `warm_start` (the live nightly fit: the stored model). It must share the primary node; a previous fit of confidence `none` is replaced by the last usable model it kept (`carry_source`, below).
+
+Per mode (`_start_carries`), with "graded" = the window has the mode's thermostat (`GATE_MIN_ACCEPTED_STARTS` accepted starts) AND `GATE_MIN_ANCHORS` anchors where the mode ran in their first 4 h:
+
+| previous model | this window | result |
+|---|---|---|
+| never graded the mode, no carry | any | no carry: the window's fit; an unseen mode keeps the production ratio (unchanged, also for a mode the home used too little to grade: Zone 1's spring heating had no usable start and `q_h` at its 0.5 bound) |
+| graded it, or was carrying it | not graded (unseen, or the season's first / last runs) | carry exactly what the previous model used: gain pinned in the fit (both LM starts), offsets / minimum run / run length, grade; share `keep` = 1.0 |
+| was carrying it | graded | `keep` = previous `keep` x 0.5^(new runs / 20), or / 5 when the window's own gain differs from the carried one by more than 25 %; gain = `keep` x carried + (1 - `keep`) x window fit; offsets the same blend; released (window alone) once `keep` < 0.05 |
+| graded it, no carry | graded | no carry: the window's fit (steady state, unchanged) |
+
+New runs are the runs of the mode that started after the previous model's `fitted_at` (`runs_after`), so a run is counted once whatever the fit cadence. The constants are D35's (`CARRY_HALF_RUNS` 20 = `THERMAL_EVIDENCE_HALF_N`, `CARRY_HALF_RUNS_CONTRADICT` 5, `CARRY_CONTRADICT_REL` 0.25, `CARRY_MIN_KEEP` 0.05).
+
+Confidence: a carried mode counts as observed, and its thermostat as known when the carried one was (the window graded its starts), so the whole-model grade can be `ok` through a single-mode season. Per-mode grade (`fit["modes"]`): while the window cannot grade a carried mode it shows the carried grade with reason `CARRY_REASON` ("carried from last season"); a skill failure on the mode's own anchors is new evidence and speaks. Every carried mode's record has `carried: true` and `keep`.
+
+Window / fan / node rates (`a_w`, `a_f`, per-node `b_w`, `q_b`): when the window has no data for one the previous model had learned (not in its `fit["frozen"]`), it is pinned at that value through both LM starts (the cold restart used to put the cold default back) and listed in `fit["carried_params"]`. They are never blended: when the window has data for one, the window alone fits it (#1230 R1b: older rows are not evidence for the fan rate). `control_rates` therefore exports a carried window / fan rate (`k_vent_window` / `k_vent_fan`) through a winter with the windows shut.
+
+Not carried: the openness prior and the forecast correction (they describe what the occupant and the forecast do now, deliberately recent), `reading_step_f`, the envelope, mass and sun terms (fitted every night from data every window has), display-only nodes (chart lines). A switch between the stitched and the per-room control model (#1432) changes the primary node, so nothing carries across it.
+
+Persistence: `fit["carried"]` (`{mode: {q, on_f, off_f, min_run_min, burst_min, trusted, grade, keep, since, calibrated, new_runs, contradicted}}`) and `fit["carried_params"]` are part of the stored model, so the carry and its share survive a restart. A fit of confidence `none` (too few samples or anchors, a failed fit, no skill) stores the last usable model as `fit["carry_source"]` (its own `carry_source` and display nodes dropped), so one bad night does not cost the next fit what was learned. A model written before Issue #1525 has no carry fields and is read as "no carry"; its graded modes are carried from the first fit after the upgrade, so nothing the decisions use changes then.
+
+Evidence (`tests/test_v4_season_carry_1525.py`, synthetic house q_h 14 / q_c 8 against the ratio's 8.8 / 8): through 30 days without the mode the pre-fix fit's heating gain was 7.30 (cooling 15.59), heating rate 5.47 F/h (cooling 11.67), offsets the defaults and confidence `low`; now 14.12 (8.08), 10.59 F/h (6.05), the learned offsets, `ok`. Season-change simulation (heat 60 d, 120 d cooling only, a gradual return; nightly fits, 30-day window, emulated thermostat): 4 h MAE on anchors whose next 4 h heated, first week back 0.90 -> 0.33 F; cooling mirror, first week the AC ran 0.99 -> 0.28 F. Zone 1's chart log (Apr-Nov 2026, weekly walk-forward): the autumn weeks are unchanged within 0.05 F (its spring heating was never graded, so nothing heating-side is carried); its cooling stays learned and graded `ok` into November instead of falling to `low` with `q_c` at its 0.5 bound.
 
 ## Expected-Openness Prior
 
@@ -184,7 +212,7 @@ Occupant view: per-sensor logging (`indoor_sensors`) began on a known day, so ju
 | Confidence | Condition | `predict()` |
 |---|---|---|
 | `none` | fewer than 3 days of samples that carry a primary reading (`sample_days < 3`), or fewer than 12 anchors, or a non-finite fit, or training MAE at 4 h not at least 10 % below "no change" | returns `None` |
-| `low` | otherwise, but fewer than 10 days of samples, or heating or cooling not yet observed (at least 2 h of duty each), or a used mode with fewer than 5 accepted thermostat starts | predicts |
+| `low` | otherwise, but fewer than 10 days of samples, or heating or cooling not yet observed (at least 2 h of duty each, or carried: Issue #1525), or a used mode with fewer than 5 accepted thermostat starts (a carried mode's carried thermostat counts) | predicts |
 | `ok` | at least 10 days, both modes observed, skill gate passed | predicts |
 
 `predict()` also returns `None` when the primary reading is missing or `inputs` is empty.
@@ -196,7 +224,8 @@ Occupant view: v4 read "low confidence" all winter while it predicted heating we
 | `fit["modes"][mode]["grade"]` | Condition (checked in this order) |
 |---|---|
 | `none` | the whole-model `confidence` is `none` |
-| `unseen` | the mode was not observed in the window (`heat_seen` / `cool_seen` false) |
+| `unseen` | the mode was not observed in the window (`heat_seen` / `cool_seen` false) and is not carried |
+| carried grade (`ok` / `low`), reason "carried from last season" | Issue #1525: a carried mode the window cannot grade (unseen, too few starts or anchors of it): the grade the previous model had for it |
 | `low` | under `GATE_MIN_DAYS_OK` (10) days; or fewer than `GATE_MIN_ACCEPTED_STARTS` (5) accepted starts of that mode; or fewer than `GATE_MIN_ANCHORS` anchors where that mode ran; or, on those anchors, 4 h MAE not at least `GATE_MIN_SKILL` (10 %) below "no change" |
 | `ok` | otherwise |
 
@@ -221,14 +250,15 @@ An anchor counts for a mode when that mode had any duty in its first 16 steps (`
 3. A sensor node never changes the primary node's trajectory.
 3b. While a separate sleep sensor exists, no `_ca` value inside the sleep window is ever the primary room node's prediction (Issue #1432, `ca_line`).
 3a. A display-only node (Issue #1422) never changes the model's control fields (house, `sensors`, `nodes`, thermostat, confidence, `fitted_at`) or any control-facing output (`control_rates`, the control path, `_ca`).
-4. A mode that was never observed never produces an unbounded gain: its parameter is frozen and tied to the other by the production cool/heat ratio.
+4. A mode that was never observed never produces an unbounded gain: its parameter is frozen and tied to the other by the production cool/heat ratio. A mode that was learned is never re-derived by that ratio: it is carried until its own new runs displace it (Issue #1525).
 5. Time is compared by epoch (`timestamp()`), never by subtracting aware datetimes that share a `tzinfo` (wall-clock arithmetic breaks on DST days).
+6. No learned value or grade changes because time passed (Issue #1525, D35): a carry's share moves only with new runs of its mode, and a night with no usable fit keeps the last usable model for the next fit.
 
 ## Error Conditions
 
 | Failure | Handling | Caller receives |
 |---|---|---|
-| Too little data / under 3 days / no skill | `confidence = "none"`, `fit["reason"]` set | model, `predict()` -> `None` |
+| Too little data / under 3 days / no skill | `confidence = "none"`, `fit["reason"]` set; the last usable model kept in `fit["carry_source"]` (Issue #1525) | model, `predict()` -> `None` |
 | Numeric failure in the fit | caught, reason `fit failed: <type>` | model with `confidence = "none"` and default parameters |
 | Unknown schema or malformed dict | `from_dict` -> `None` | `None` (callers refit) |
 | Missing primary reading | `predict` -> `None` | `None` |
@@ -256,6 +286,7 @@ An anchor counts for a mode when that mode had any duty in its first 16 steps (`
 - `V4Thermostat.burst_cool_minutes` (default `None`); R1b: `off_above_f`, `off_below_f`, `min_run_heat_min`, `min_run_cool_min`, `calibrated`. `V4Model.openness`, `V4Sample.whf_running`.
 - `predict(..., outdoor_now_f=None, forecast_now_f=None)`: needed for the nowcast term. R1b: `hvac_action_now=None`, `run_elapsed_min=None`, `openness_prior=True`, `ca_sleep_node/ca_sleep_time/ca_wake_time=None`.
 - `rollout(..., init_run=None)`; `samples_from_chart_log(..., primary=None, primary_aliases=(), in_sleep=None)`; `fit(..., max_iterations=100)`.
+- Issue #1525: `fit(..., carry_from=None)`, `choose_control_model(..., carry_from=None)`; helpers `runs_after`, `displaced_keep`, `carry_source`; `fit["carried"]`, `fit["carried_params"]`, `fit["carry_source"]`, `fit["modes"][mode]["carried" / "keep"]`.
 - `fit(..., max_anchors=160, warm_start=None)`; Issue #1422: `fit(..., display_sensors=())`, `predict(..., display_nodes=False)`, `V4Model.display_nodes`.
 - `step_mass(model, *, mass_f, readings, sample=None)`: `sample` optional.
 - `predict()` omits a sensor whose reading is missing instead of inventing a start value.

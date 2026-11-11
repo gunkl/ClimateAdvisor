@@ -331,23 +331,80 @@ def is_provisional(report: Mapping[str, Any]) -> bool:
     return any(int((ok.get(cls) or {}).get("n_nights") or 0) < ns.VALIDATION_HIGH_NIGHTS for cls in classes)
 
 
+def _carry_class(new: ns.ClassValidation | None, old: ns.ClassValidation | None) -> bool:
+    """True when the previous record's class stands over this replay's (Issue #1525, owner rule "fade only on new
+    evidence"): the replay only covers the newest ``NIGHT_REPLAY_NIGHTS`` nights, so a class whose nights left that
+    span would otherwise drop to "no recorded nights" with time alone. The new replay's class replaces the old one
+    once it has as many nights as the old one (up to ``VALIDATION_HIGH_NIGHTS``), or when its own
+    ``VALIDATION_MIN_NIGHTS``+ nights grade it low (contradicting evidence speaks at once)."""
+    if old is None or old.n_nights < ns.VALIDATION_MIN_NIGHTS:
+        return False
+    if new is None:
+        return True
+    if new.n_nights >= min(old.n_nights, ns.VALIDATION_HIGH_NIGHTS):
+        return False
+    if new.n_nights >= ns.VALIDATION_MIN_NIGHTS:
+        probe = ns.NightValidation(classes={"x": new})
+        if ns.validation_status(probe, "x")[0] == "low":
+            return False
+    return True
+
+
+def _carry_evidence(new: ns.Evidence | None, old: ns.Evidence | None) -> ns.Evidence | None:
+    """Evidence hours that never fall with time alone (Issue #1525): each count is the larger of this window's and
+    the previous record's. The window (``SPAN_DAYS``) only loses hours as rows age out of it, never because a reading
+    contradicted anything; a contradicted rate is graded by the replay's error, not by these counts."""
+    if old is None:
+        return new
+    if new is None:
+        return old
+    sensors = dict(old.sensor_hours)
+    for k, v in new.sensor_hours.items():
+        sensors[k] = max(v, sensors.get(k, 0.0))
+    return ns.Evidence(
+        max(new.window_open_hours, old.window_open_hours),
+        max(new.fan_hours, old.fan_hours),
+        max(new.heat_hours, old.heat_hours),
+        max(new.cool_hours, old.cool_hours),
+        sensors,
+    )
+
+
 def validation_record(
     report: Mapping[str, Any],
     evidence: ns.Evidence | None,
     *,
     model_fitted_at: str | None = None,
+    previous: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The compact record stored next to the v4 model: ``NightValidation.to_dict()`` plus the evidence hours, the run
-    parameters and the counts (no per-night rows: the file is read every start)."""
+    parameters and the counts (no per-night rows: the file is read every start).
+
+    ``previous`` (the stored record, Issue #1525): a class with no newer evidence keeps the previous record's result
+    (``carried_classes``), and the evidence hours never fall below the previous record's."""
     val = ns.NightValidation.from_dict(
         {"schema_version": ns.NIGHT_STRATEGY_SCHEMA_VERSION, "classes": report.get("classes") or {}}
     )
+    classes = dict(val.classes) if val else {}
+    provisional = is_provisional(report)
+    prev_val = ns.NightValidation.from_dict(previous) if isinstance(previous, Mapping) else None
+    carried: list[str] = []
+    if prev_val is not None:
+        for cls, old in prev_val.classes.items():
+            if _carry_class(classes.get(cls), old):
+                classes[cls] = old
+                carried.append(cls)
+        if carried:
+            fresh = {c: v for c, v in (report.get("classes") or {}).items() if c not in carried}
+            provisional = (is_provisional({**report, "classes": fresh}) if fresh else False) or prev_val.provisional
     out = ns.NightValidation(
-        classes=val.classes if val else {},
-        provisional=is_provisional(report),
+        classes=classes,
+        provisional=provisional,
         generated=str(report.get("generated") or ""),
     ).to_dict()
-    out["evidence"] = None if evidence is None else _evidence_dict(evidence)
+    ev = _carry_evidence(evidence, evidence_from_record(previous)) if previous is not None else evidence
+    out["evidence"] = None if ev is None else _evidence_dict(ev)
+    out["carried_classes"] = sorted(carried)
     out["model_fitted_at"] = model_fitted_at
     for key in ("params", "n_nights_found", "n_nights_replayed", "n_ok_confidence_fits", "excluded"):
         out[key] = report.get(key)
@@ -397,11 +454,13 @@ def run_nightly(
     train_days: int = V4_FIT_TRAIN_DAYS,
     nights: int = NIGHT_REPLAY_NIGHTS,
     model_fitted_at: str | None = None,
+    previous: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The nightly validation: samples exactly as the live fit builds them, the newest ``nights`` replayed
-    walk-forward under the live 30-day rule, the evidence hours of the live fit's own window. Blocking CPU: run it
-    on an executor thread, after the v4 fit, under the same domain lock. Raises on failure (the caller keeps the
-    previous record)."""
+    walk-forward under the live 30-day rule, the evidence hours of the live fit's own window. ``previous`` (the stored
+    record) carries what the newer nights have not displaced (Issue #1525, :func:`validation_record`). Blocking CPU:
+    run it on an executor thread, after the v4 fit, under the same domain lock. Raises on failure (the caller keeps
+    the previous record)."""
     p = v4_shadow._predictor()
     horizon_days = float(train_days + nights * 1.1 + NIGHT_REPLAY_EXTRA_DAYS)
     entries = v4_shadow.rows_in_window(chart_entries, now, horizon_days)
@@ -433,4 +492,4 @@ def run_nightly(
     )
     recent = [s for s in samples if s.ts >= now - timedelta(days=SPAN_DAYS)]
     evidence = ns.evidence_from_samples(recent)
-    return validation_record(report, evidence, model_fitted_at=model_fitted_at)
+    return validation_record(report, evidence, model_fitted_at=model_fitted_at, previous=previous)

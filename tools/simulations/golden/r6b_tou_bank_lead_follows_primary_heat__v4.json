@@ -1,6 +1,6 @@
 {
   "name": "r6b_tou_bank_lead_follows_primary_heat__v4",
-  "description": "Heating mirror of r6b_tou_bank_lead_follows_primary__v4: a winter peak starts at 16:15, the house is at 71 F and banking toward the 76 F comfort ceiling means 5 F of heat. Primary engine v4 (v3 live as the comparison engine), a realistic 3.5 F per hour furnace: the window opens when v4's rate says (not v3's 240-minute cap), the plan names it, and the thermostat is told 76 F at the first 5-minute check at or after it.",
+  "description": "Heating mirror of r6b_tou_bank_lead_follows_primary__v4: a winter peak starts at 16:15, the house is at 71 F and banking toward the 76 F comfort ceiling means 5 F of heat. Primary engine v4 (v3 live as the comparison engine), a realistic 5 F per hour furnace (4.5 F in the first hour through the hidden mass), 30 F outside and a 0.05 leak: the lead comes from v4's OWN house model (thermal mass and sun included), stepped with the furnace fully on against the forecast, not from a first-order formula (Issue #1517). That model needs about 105 minutes (121 with the 1.15 safety factor), so the window opens at 14:14, 74 minutes after this scenario starts. The same house gives a different start under every other lead: v3's slow rate 12:15 (the 240-minute cap), the first-order leak formula on v4's rates 13:45 (150 minutes), the plain delta/rate formula 14:48. Nothing is banked before 14:14, and the thermostat is told 76 F at the 14:14:59 check, not at the 14:30 half-hour cycle.",
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 76,
@@ -45,7 +45,7 @@
       "day_type": "cold",
       "hvac_mode": "heat",
       "windows_recommended": false,
-      "note": "The 13:30 plan cycle (the v4 bank window has not started)."
+      "note": "The 13:30 plan cycle (the bank window has not started)."
     },
     {
       "time": "2026-01-13T14:00:00",
@@ -53,56 +53,68 @@
       "day_type": "cold",
       "hvac_mode": "heat",
       "windows_recommended": false,
-      "note": "The 14:00 plan cycle."
+      "note": "The 14:00 plan cycle (the bank window has not started)."
     },
     {
-      "time": "2026-01-13T14:03:00",
+      "time": "2026-01-13T14:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "The 14:30 plan cycle (the bank window opened at 14:14 and is running)."
+    },
+    {
+      "time": "2026-01-13T14:33:00",
       "type": "temp_update",
       "indoor_f": 71.0,
       "outdoor_f": 30.0,
-      "note": "End of run: after the 13:55 check opened the bank."
+      "note": "End of run: after the 14:14:59 check opened the bank."
     }
   ],
   "assertions": [
     {
-      "at": "2026-01-13T13:55:00",
+      "at": "2026-01-13T14:13:00",
       "expect": "tou_precondition_not_applied",
       "reason": "Before the window opens nothing is banked."
     },
     {
-      "at": "2026-01-13T13:59:00",
+      "at": "2026-01-13T14:13:00",
       "expect": "setpoint_writes",
-      "since": "2026-01-13T13:30:30",
-      "values": [],
-      "reason": "Nothing is written between the 13:30 cycle and the window start."
-    },
-    {
-      "at": "2026-01-13T14:00:30",
-      "expect": "setpoint_writes",
-      "since": "2026-01-13T13:59:59",
+      "since": "2026-01-13T12:59:00",
       "values": [
-        76.0
+        68.0,
+        68.0,
+        68.0
       ],
-      "reason": "The 14:00 cycle inside the open bank re-asserts the 76 F bank setpoint once, without the 68 F comfort setpoint first (issue #1393; the heating mirror)."
+      "reason": "Until the window opens the thermostat is only told the 68 F comfort setpoint (the 13:00 setup and the 13:30 and 14:00 cycles)."
     },
     {
-      "at": "2026-01-13T14:03:00",
+      "at": "2026-01-13T14:33:00",
       "expect": "field_equals",
       "field": "engine_state._next_action.tou_window.start",
-      "value": "13:56",
-      "reason": "The window the plan shows starts on v4's heating rate (v3's slow rate would hit the 240-minute cap at 12:15)."
+      "value": "14:14",
+      "reason": "The window the plan shows starts 121 minutes before the 16:15 peak, from v4's own house model: v3's rate would start at 12:15 (240-minute cap), the first-order leak lead at 13:45, the plain formula at 14:48."
     },
     {
-      "at": "2026-01-13T13:59:59",
+      "at": "2026-01-13T14:20:00",
       "expect": "setpoint_writes",
-      "since": "2026-01-13T13:59:00",
+      "since": "2026-01-13T14:14:00",
       "values": [
         76.0
       ],
-      "reason": "The thermostat is told the 76 F bank setpoint within five minutes of the 1:56 PM window start (the first 5-minute check at or after it)."
+      "reason": "The thermostat is told the 76 F bank setpoint at the first 5-minute check at or after the 14:14 window start (14:14:59), without the 68 F comfort setpoint first (issue #1393; the heating mirror), not at the 14:30 half-hour cycle."
     },
     {
-      "at": "2026-01-13T14:03:00",
+      "at": "2026-01-13T14:33:00",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T14:20:00",
+      "values": [
+        76.0
+      ],
+      "reason": "The 14:30 cycle inside the open bank re-asserts the 76 F bank setpoint once, without the 68 F comfort setpoint first (issue #1393; the heating mirror)."
+    },
+    {
+      "at": "2026-01-13T14:33:00",
       "expect": "tou_precondition_applied",
       "tou_precondition": {
         "schedule_id": "peak1",
@@ -112,11 +124,11 @@
       "reason": "Banking toward the 76 F comfort ceiling."
     },
     {
-      "at": "2026-01-13T14:03:00",
+      "at": "2026-01-13T14:33:00",
       "expect": "field_equals",
       "field": "engine_state._next_action.timeline.ca_steps",
       "value": [
-        "13:56 preheat_start",
+        "14:14 preheat_start",
         "22:30 sleep_band",
         "06:00 briefing_send",
         "06:30 wake_band",
@@ -124,14 +136,14 @@
         "06:30 mode_change",
         "06:30 wake_band"
       ],
-      "reason": "The plan list names the same 13:56 start the thermostat acted on."
+      "reason": "The plan list names the same 14:14 start the thermostat acted on."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "The heating bank opens by the primary engine (v4) rate, and the plan and thermostat agree on when",
-    "observed_behavior": "Window 13:56; first 76 F written 13:59:59.",
-    "expected_behavior": "Mirror of the cooling bank: the furnace is not run for hours more than the house needs before a peak price period."
+    "summary": "The heating bank opens by the primary engine (v4) house model, and the plan and thermostat agree on when",
+    "observed_behavior": "Window 14:14 (v4's house model needs about 105 min raw, 121 min with the 1.15 safety factor); nothing banked before it; first 76 F written at the 14:14:59 check.",
+    "expected_behavior": "Mirror of the cooling bank: the furnace is not run for hours more than the house needs before a peak price period, and the lead is v4's own house model (thermal mass, sun, leak), not a first-order formula (Issue #1517). Re-derived 2026-11-11 with the owner's approval (third re-derivation for #1517): the inputs changed (furnace 3.5 to 5 F per hour, hidden-mass coupling 0.6 to 0.3) so that v4's stepped lead lands inside the run, below the 240-minute cap, and this golden tells the engines apart again. The earlier inputs put every lead at the cap, identical to the v3 twin."
   },
   "thermal_model": {
     "confidence": "high",
@@ -144,8 +156,9 @@
     "confidence": "ok",
     "house": {
       "a_o": 0.05,
-      "q_c": 3.5,
-      "q_h": 3.5
+      "q_h": 5,
+      "c_hm": 0.3,
+      "s": 0.7
     }
   },
   "source": "synthetic: Issue #1230 R6b (primary prediction engine drives decisions), redesigned per the independent review; DP-11 pending, unsigned",

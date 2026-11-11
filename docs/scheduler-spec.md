@@ -194,14 +194,22 @@ widening since Issue #1080: they all resolve the band through `automation.resolv
 
 ## Lead-Time Computation
 
-`thermal_lead_time.compute_lead_minutes_from_rate(delta_t, rate, *, min_minutes, max_minutes, safety_multiplier, fallback_minutes)` (`thermal_lead_time.py:21`) — the one shared implementation of a formula independently duplicated 3 times before this feature existed:
+`thermal_lead_time.compute_lead_minutes_from_rate(delta_t, rate, *, min_minutes, max_minutes, safety_multiplier, fallback_minutes, start_temp=None, target_temp=None, outdoor_temp=None, k_passive=None, cooling=..., confidence=None, house_stepper=None, outdoor_at=None, ...)` (`thermal_lead_time.py:21`) — the one shared implementation of a formula independently duplicated 3 times before this feature existed:
 
 | Caller | `min`/`max` | `safety_multiplier` | `fallback_minutes` |
 |---|---|---|---|
 | `scheduler.py::resolve_tou_phase()` | 30 / 240 | 1.3 | configurable, default 45 (`default_tou_lead_minutes` config key, Issue #797; falls back to `_TOU_LEAD_MIN_FALLBACK`=45.0 if the key is absent from an older config entry) |
 | ~~`automation.py::_schedule_pre_condition()` (adaptive pre-heat)~~ removed in Issue #1371 (a stub nothing read; its options-page settings are #1377) | config `CONF_MIN_PREHEAT_MINUTES`/`CONF_MAX_PREHEAT_MINUTES` | config `CONF_PREHEAT_SAFETY_MARGIN` | clamped `default_preheat_minutes` |
 | `ode_ceiling_guard.py` (ceiling-guard escalation) | `_LEAD_MIN_FLOOR`/`_LEAD_MIN_CEIL` (30/240) | `_LEAD_MIN_LOOKAHEAD_MULTIPLIER` (1.3) | `_CEILING_PRECOOL_FALLBACK_MIN` (120) |
-| `briefing.py::_derive_warm_day_events()` (warm-day pre-cool lead) | 30 / 240 | 1.3 | `const.CEILING_PRECOOL_FALLBACK_MIN` (120) — previously a locally-redefined duplicate constant, now imported directly |
+| `scheduler.py::resolve_tou_away_vacation_phase()` | 30 / 240 | 1.3 | as `resolve_tou_phase()` |
+| `nat_vent_plan.py::compute_nat_vent_plan()` (pre-cool start, display) | 30 / 240 | 1.3 | `const.CEILING_PRECOOL_FALLBACK_MIN` (120) |
+| ~~`briefing.py::_derive_warm_day_events()`~~ no longer computes a lead: it reads the cached nat-vent plan (its standalone fallback calls `compute_nat_vent_plan()` with no rates, so the plain lead) | — | — | — |
+
+**Leak-aware (Issue #1517).** The four live callers (`resolve_tou_phase()`, `resolve_tou_away_vacation_phase()`, `ode_ceiling_guard.decide_ode_ceiling_guard()`, plus `nat_vent_plan.compute_nat_vent_plan()`) also pass `start_temp`, `target_temp`, `outdoor_temp`, `k_passive` and `cooling`; the function then returns the closed-form time for the house to reach the target while leaking toward the outdoor temperature, times 1.15 instead of 1.3 (unreachable target: the 240 ceiling). Without `k_passive` or an outdoor value it is the plain formula. It is also the plain formula unless the caller's `confidence_k_passive` is `medium`/`high` (`confidence=` argument; the same gate as the away/vacation depth, applied to the stepper below too). The scheduler functions take `outdoor_at(when)` (the coordinator's forecast at the schedule start, else the current reading). Formula and rationale: [08 §5b](08-COMPUTATION-REFERENCE.md).
+
+**House-model lead (Issue #1517, 2026-11-11).** `resolve_tou_phase()` and `resolve_tou_away_vacation_phase()` also take an optional engine-neutral `house_stepper` (a `prediction_engines.HouseStepper`, supplied by the coordinator from `control_stepper`; `None` on a v3 zone or while the primary is still learning). With it and `outdoor_at`, `compute_lead_minutes_from_rate()` takes the lead from `thermal_lead_time.stepper_lead_minutes_before()` (the primary's own house model, thermal mass and sun included, equipment fully on, ending at the schedule start; 1.15 safety factor, `[30, 240]` clamp) instead of the leak-aware formula; if it cannot be computed the leak-aware / plain formula applies. See [08 §5b](08-COMPUTATION-REFERENCE.md).
+
+**Out of reach (owner decision 2026-11-11).** The 240-minute ceiling stays: pre-conditioning longer than 4 hours is beyond any realistic time-of-use scenario. Both TOU callers pass `warn_label`, so a target not reached within 240 minutes even without the safety margin logs one warning (`thermal_lead_time.OUT_OF_REACH_WARN_INTERVAL_S`, 6 h, per label/mode/target); a lead capped only by the margin is reachable and not logged. The ceiling guard and the nat-vent plan do not warn.
 
 `resolve_tou_phase()`'s own lookahead window (`_LOOKAHEAD = timedelta(minutes=240)`, matching `_TOU_LEAD_MIN_CEIL`) bounds how far ahead `_next_start_within()` searches for a qualifying schedule — a schedule starting further than 4 hours away is not yet "found" (and its window fields stay unpopulated) until a later 30-minute cycle brings it within range. This is intentional, not a gap: the longest possible computed lead time is 240 minutes, so nothing further out could ever need pre-conditioning yet.
 

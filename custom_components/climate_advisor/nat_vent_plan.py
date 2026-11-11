@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import datetime, time, timedelta
+from typing import Any
 
 from .const import CEILING_PRECOOL_FALLBACK_MIN
 from .nat_vent_gate import resolve_comfort_heat
@@ -302,6 +303,21 @@ def describe_nat_vent_cutoff_reason(reason: str | None) -> str:
     return "before outdoor air warms past indoor"
 
 
+def _outdoor_at(predicted_outdoor: list[dict] | None, when: datetime) -> float | None:
+    """The forecast outdoor temperature nearest ``when`` (Issue #1517); None when the curve has no usable entry."""
+    best: tuple[float, float] | None = None
+    for entry in predicted_outdoor or []:
+        temp = entry.get("temp")
+        try:
+            ts = datetime.fromisoformat(entry["ts"])
+            gap = abs((ts - when).total_seconds())
+        except KeyError, ValueError, TypeError:
+            continue
+        if temp is not None and (best is None or gap < best[0]):
+            best = (gap, float(temp))
+    return best[1] if best else None
+
+
 def compute_nat_vent_plan(
     predicted_indoor: list[dict] | None,
     predicted_outdoor: list[dict] | None,
@@ -312,10 +328,24 @@ def compute_nat_vent_plan(
     in_sleep_window_fn: Callable[[datetime], bool] | None = None,
     window_open_time: time | None = None,
     ceiling: float | None = None,
+    k_passive: float | None = None,
+    house_stepper: Any = None,
+    confidence_k_passive: str | None = None,
 ) -> dict:
     """Derive warm/mild-day timing events from ODE predicted curves.
 
     Args:
+        k_passive: optional (Issue #1517) -- the closed-house rate per hour (negative). With ``k_active_cool`` it
+            makes the pre-cool lead leak-aware, using the outdoor curve entry NEAREST the breach in time (the
+            first or last entry when the breach lies beyond the curve). ``None`` keeps the plain ``delta / rate``
+            lead. Issue #1519: the coordinator passes the decisions' ``k_active_cool`` / ``k_passive`` /
+            ``confidence_k_passive``; ``briefing.py``'s standalone fallback calls (production hands it the cached
+            plan) pass none of them and so keep the plain lead.
+        confidence_k_passive: optional (Issue #1517) -- the decisions' grade for ``k_passive``. The leak term and the
+            house model are used only when it is ``"medium"`` / ``"high"``; ``None`` = the plain formula.
+        house_stepper: optional (Issue #1517) -- the primary engine's own house model (engine-neutral
+            ``HouseStepper``). With it the pre-cool lead is stepped through that model (thermal mass, sun) against
+            the forecast outdoor curve, ending at the ceiling breach, instead of either formula.
         ceiling: optional (Issue #1093) -- the ceiling the thermostat/ODE ceiling guard actually
             holds, i.e. ``awake_comfort_edges()``' ceiling (``comfort_cool`` plus the Prefer savings
             margin). ``ceiling_breach_time`` and ``precool_start_time`` -- the plan's twin of the
@@ -525,6 +555,15 @@ def compute_nat_vent_plan(
             max_minutes=240.0,
             safety_multiplier=1.3,
             fallback_minutes=float(CEILING_PRECOOL_FALLBACK_MIN),
+            start_temp=_breach_ceiling,
+            target_temp=t_in_now,
+            outdoor_temp=_outdoor_at(predicted_outdoor, result["ceiling_breach_time"]),
+            k_passive=k_passive,
+            cooling=True,
+            house_stepper=house_stepper,
+            outdoor_at=lambda when: _outdoor_at(predicted_outdoor, when),
+            event_ts=result["ceiling_breach_time"],
+            confidence=confidence_k_passive,
         )
         result["precool_start_time"] = result["ceiling_breach_time"] - timedelta(minutes=lead_min)
 

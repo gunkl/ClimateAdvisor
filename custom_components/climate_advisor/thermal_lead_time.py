@@ -14,9 +14,186 @@ three separate implementations and three separate constant sets (one of which,
 This module is the one source of truth for the formula's *shape*. Callers keep their own
 constants — min/max/safety/fallback genuinely differ per use (heat vs. cool, different
 confidence gating) — and pass them in; nothing here is a policy decision.
+
+Issue #1517: the leak-aware lead. The plain formula treats the equipment as working against
+nothing; the house is in fact drifting toward the outdoor temperature (``k_passive``, per hour,
+negative) the whole time it runs, so a recovery takes longer than ``delta / rate`` (heating a cold
+night) or, with a mild outdoor, shorter. When the caller supplies the start temperature, the
+target, the outdoor temperature at the event and a closed-house ``k_passive``, the first-order
+model ``T(t) = Ts + (T0 - Ts) * exp(k * t)`` with ``Ts = T_out - q / k`` is solved for the time to
+reach the target (a target the equipment can never reach returns the ceiling). Without those
+inputs the result is exactly the plain formula, so every caller keeps its old behavior until it
+passes them.
 """
 
 from __future__ import annotations
+
+import logging
+import math
+import time
+from collections.abc import Callable
+from datetime import datetime, timedelta
+from typing import Any
+
+from homeassistant.util import dt as dt_util
+
+# Issue #1517: safety factor used INSTEAD of the caller's multiplier when the leak term is used. The leak model
+# already covers what the fixed 1.3 was guarding against, so a smaller margin suffices.
+_LOGGER = logging.getLogger(__name__)
+
+LEAK_SAFETY_MULTIPLIER = 1.15
+# A target that cannot be reached within the cap is logged once per (label, mode, target) in this window, so the
+# 5-minute checks and the chart walk do not repeat it (owner decision 2026-11-11: keep the 240-minute cap, warn).
+OUT_OF_REACH_WARN_INTERVAL_S = 6 * 3600.0
+_out_of_reach_warned: dict[tuple[str, bool, float], float] = {}
+# Issue #1517: with an uncertainty (sd) on the rate, plan on |q| - this many sd (a slower rate = an earlier start).
+CAUTIOUS_RATE_SD_FRACTION = 0.5
+# Issue #1517: the leak term and the house-model stepper are only trusted on a model graded at least this ("medium" is
+# v4's "ok"): the same confidence_k_passive gate the away/vacation depth uses. Below it, today's plain formula applies.
+LEAD_MODEL_CONFIDENCES = ("medium", "high")
+# Never plan on less than this share of the learned rate, however large the stated uncertainty.
+_MIN_RATE_SHARE = 0.25
+
+
+def leak_aware_minutes(
+    start_temp: float,
+    target_temp: float,
+    rate: float,
+    k_passive: float,
+    outdoor_temp: float,
+    *,
+    cooling: bool = False,
+    rate_sd: float | None = None,
+) -> float | None:
+    """Minutes (before safety/clamps) for the equipment to move the house ``start_temp`` -> ``target_temp``
+    while it leaks toward ``outdoor_temp``; ``None`` when the target is never reached.
+
+    ``rate`` is the equipment's magnitude (degF/hr, sign ignored), ``k_passive`` the closed-house rate per hour
+    (negative). Model ``dT/dt = k (T - T_out) + q`` (``q`` > 0 heating, < 0 cooling), solved in closed form:
+    ``T(t) = Ts + (T0 - Ts) e^{k t}``, ``Ts = T_out - q / k``. A move already done returns 0.0.
+    """
+    move = (start_temp - target_temp) if cooling else (target_temp - start_temp)
+    if move <= 0:
+        return 0.0
+    q = abs(rate)
+    if rate_sd is not None and rate_sd > 0:
+        q = max(q - CAUTIOUS_RATE_SD_FRACTION * rate_sd, _MIN_RATE_SHARE * q)
+    if cooling:
+        q = -q
+    steady = outdoor_temp - q / k_passive  # the temperature the house settles at with the equipment running
+    start_gap = start_temp - steady
+    target_gap = target_temp - steady
+    if start_gap == 0 or target_gap / start_gap <= 0:
+        return None  # steady state is on the wrong side of the target: never gets there
+    ratio = target_gap / start_gap
+    if ratio >= 1:
+        return None  # leak pulls away from the target faster than the equipment closes it
+    return math.log(ratio) / k_passive * 60.0
+
+
+# Issue #1517: the house-model lead steps in the same 15-minute grid the operation timeline simulates with.
+STEPPER_STEP_MINUTES = 15
+# How many times the "start time depends on the lead, the lead on the start time" loop is repeated.
+_STEPPER_START_PASSES = 3
+_STEPPER_FIRST_GUESS_MIN = 120.0
+
+
+def stepper_lead_minutes(
+    stepper: Any,
+    *,
+    start_temp: float,
+    target_temp: float,
+    cooling: bool,
+    outdoor_at: Callable[[datetime], float | None],
+    start_ts: datetime,
+    min_minutes: float = 30.0,
+    max_minutes: float = 240.0,
+    safety_multiplier: float = LEAK_SAFETY_MULTIPLIER,
+) -> float | None:
+    """Minutes for the equipment, fully on, to move the house ``start_temp`` -> ``target_temp``, stepping the
+    primary prediction engine's own house model (a ``prediction_engines.HouseStepper``); ``None`` when it cannot be
+    computed (the caller then uses the leak-aware / plain formula).
+
+    Occupant view: the pre-heat / pre-cool / bank starts early enough for a house with thermal mass and a sunny
+    afternoon, which a single-rate formula underestimates (a heavy house keeps drawing the heat or cool back out of
+    its walls after the air has reached the target).
+
+    The house starts settled at ``start_temp`` (mass equal to the room). Every 15-minute step is the model's
+    equipment-off step (outdoor temperature from ``outdoor_at(step end)``, the local hour of the step end, so the sun
+    term is right) plus one step of full-duty ``heat_gain`` / ``cool_gain`` (the step is linear in duty), exactly as
+    the operation timeline simulates it. The last step is interpolated. The result is times ``safety_multiplier``
+    (the leak path's 1.15) clamped to ``[min_minutes, max_minutes]``; a target not reached within ``max_minutes``
+    returns ``max_minutes``. ``start_ts`` should carry the home's local time zone (the hour of day comes from it).
+    Never raises.
+    """
+    try:
+        gain = float(stepper.cool_gain if cooling else stepper.heat_gain)
+        if not gain > 0:
+            return None  # the model has no equipment gain for this direction: nothing to step
+        move = (start_temp - target_temp) if cooling else (target_temp - start_temp)
+        if move <= 0:
+            return min_minutes
+        dt_h = STEPPER_STEP_MINUTES / 60.0
+        signed = -gain * dt_h if cooling else gain * dt_h
+        t = float(start_temp)
+        mass = t
+        ts = start_ts
+        out: float | None = None
+        steps = int(math.ceil(max_minutes / STEPPER_STEP_MINUTES))
+        for i in range(steps):
+            ts = ts + timedelta(minutes=STEPPER_STEP_MINUTES)
+            here = outdoor_at(ts)
+            out = float(here) if here is not None else out
+            if out is None:
+                return None
+            local = dt_util.as_local(ts)  # the sun term follows the home's clock, not the forecast's UTC
+            hour = local.hour + local.minute / 60.0
+            free, mass = stepper.step(t, mass, out, 0.0, 0.0, hour)
+            nxt = free + signed
+            if (nxt <= target_temp) if cooling else (nxt >= target_temp):
+                frac = (target_temp - t) / (nxt - t) if nxt != t else 1.0
+                raw = (i + max(0.0, min(1.0, frac))) * STEPPER_STEP_MINUTES
+                return max(min_minutes, min(max_minutes, raw * safety_multiplier))
+            t = nxt
+        return max_minutes
+    except Exception:  # noqa: BLE001 - a broken model must never break the decision: the caller falls back
+        return None
+
+
+def stepper_lead_minutes_before(
+    stepper: Any,
+    *,
+    event_ts: datetime,
+    start_temp: float,
+    target_temp: float,
+    cooling: bool,
+    outdoor_at: Callable[[datetime], float | None],
+    min_minutes: float = 30.0,
+    max_minutes: float = 240.0,
+    safety_multiplier: float = LEAK_SAFETY_MULTIPLIER,
+) -> float | None:
+    """``stepper_lead_minutes`` for a run that must END at ``event_ts``: the run starts ``lead`` minutes earlier and
+    the sun / outdoor it meets depend on when it starts, so the start is settled in a few passes (each pass starts
+    ``event_ts`` minus the previous pass's lead). ``None`` when it cannot be computed."""
+    lead = _STEPPER_FIRST_GUESS_MIN
+    for _ in range(_STEPPER_START_PASSES):
+        got = stepper_lead_minutes(
+            stepper,
+            start_temp=start_temp,
+            target_temp=target_temp,
+            cooling=cooling,
+            outdoor_at=outdoor_at,
+            start_ts=event_ts - timedelta(minutes=lead),
+            min_minutes=min_minutes,
+            max_minutes=max_minutes,
+            safety_multiplier=safety_multiplier,
+        )
+        if got is None:
+            return None
+        if abs(got - lead) < 1.0:
+            return got
+        lead = got
+    return lead
 
 
 def compute_lead_minutes_from_rate(
@@ -27,12 +204,130 @@ def compute_lead_minutes_from_rate(
     max_minutes: float,
     safety_multiplier: float,
     fallback_minutes: float,
+    start_temp: float | None = None,
+    target_temp: float | None = None,
+    outdoor_temp: float | None = None,
+    k_passive: float | None = None,
+    cooling: bool = False,
+    rate_sd: float | None = None,
+    leak_safety_multiplier: float = LEAK_SAFETY_MULTIPLIER,
+    house_stepper: Any = None,
+    outdoor_at: Callable[[datetime], float | None] | None = None,
+    event_ts: datetime | None = None,
+    confidence: str | None = None,
+    warn_label: str | None = None,
 ) -> float:
-    """Minutes needed to close ``delta_t`` degrees at the learned ``rate`` (°F/hr).
+    """Minutes needed to close ``delta_t`` degrees at the learned ``rate`` (degF/hr).
 
     Returns ``fallback_minutes`` (clamped) when ``rate`` is ``None`` or non-positive — no
     confident thermal-model rate to compute from. Otherwise returns
     ``(delta_t / abs(rate)) * 60 * safety_multiplier``, clamped to ``[min_minutes, max_minutes]``.
+
+    Leak-aware (Issue #1517): when ``start_temp``, ``target_temp``, ``outdoor_temp`` and a negative
+    ``k_passive`` are all given (``cooling`` says which way the equipment pushes), the time comes from
+    ``leak_aware_minutes()`` times ``leak_safety_multiplier`` instead; a target the equipment cannot reach
+    returns ``max_minutes``. ``rate_sd`` (optional) makes the rate cautious: ``|q| - 0.5 sd``.
+
+    House-model lead (Issue #1517): when ``house_stepper`` (the primary engine's own house model, engine-neutral),
+    ``outdoor_at`` (forecast outdoor at a time), ``event_ts`` (when the target must be reached), ``start_temp`` and
+    ``target_temp`` are all given, the time comes from stepping that model (``stepper_lead_minutes_before``) instead
+    of either formula above, with its own thermal mass and sun; if that cannot be computed the formulas apply.
+
+    Confidence gate (Issue #1517): ``confidence`` is the decision's ``confidence_k_passive`` (the same value the
+    away/vacation depth gates on). Only ``"medium"`` / ``"high"`` (v4's ``ok``) lets the leak term and the house-model
+    stepper run; ``None``, ``"none"`` or ``"low"`` gives exactly the plain formula, so a noisy leak rate or a weak fit
+    can never stretch a lead time on a mild day. This is the one place every consumer (time-of-use bank, ceiling
+    guard, nat-vent plan) takes the rule from.
+
+    Out of reach (2026-11-11): with ``warn_label`` set, a target that is not reached within ``max_minutes`` even
+    without the safety margin logs one warning (rate-limited by ``OUT_OF_REACH_WARN_INTERVAL_S``); the lead is still
+    ``max_minutes``. A lead that only reaches the cap because of the safety margin is reachable and is not logged.
     """
-    minutes = fallback_minutes if rate is None or abs(rate) <= 0 else (delta_t / abs(rate)) * 60.0 * safety_multiplier
+    if confidence not in LEAD_MODEL_CONFIDENCES:
+        house_stepper = None
+        k_passive = None
+    if (
+        house_stepper is not None
+        and outdoor_at is not None
+        and event_ts is not None
+        and start_temp is not None
+        and target_temp is not None
+    ):
+        stepped = stepper_lead_minutes_before(
+            house_stepper,
+            event_ts=event_ts,
+            start_temp=start_temp,
+            target_temp=target_temp,
+            cooling=cooling,
+            outdoor_at=outdoor_at,
+            min_minutes=min_minutes,
+            max_minutes=max_minutes,
+            safety_multiplier=leak_safety_multiplier,
+        )
+        if stepped is not None:
+            if warn_label is not None and stepped >= max_minutes:
+                bare = stepper_lead_minutes_before(
+                    house_stepper,
+                    event_ts=event_ts,
+                    start_temp=start_temp,
+                    target_temp=target_temp,
+                    cooling=cooling,
+                    outdoor_at=outdoor_at,
+                    min_minutes=min_minutes,
+                    max_minutes=max_minutes,
+                    safety_multiplier=1.0,
+                )
+                if bare is not None and bare >= max_minutes:
+                    _warn_out_of_reach(warn_label, cooling, start_temp, target_temp, max_minutes, "house model")
+            return stepped
+    if (
+        rate is not None
+        and abs(rate) > 0
+        and start_temp is not None
+        and target_temp is not None
+        and outdoor_temp is not None
+        and k_passive is not None
+        and k_passive < 0
+    ):
+        raw = leak_aware_minutes(
+            start_temp, target_temp, rate, k_passive, outdoor_temp, cooling=cooling, rate_sd=rate_sd
+        )
+        if warn_label is not None and (raw is None or raw >= max_minutes):
+            _warn_out_of_reach(warn_label, cooling, start_temp, target_temp, max_minutes, "leak-aware rate")
+        minutes = max_minutes if raw is None else raw * leak_safety_multiplier
+        return max(min_minutes, min(max_minutes, minutes))
+    if rate is None or abs(rate) <= 0:
+        minutes = fallback_minutes
+    else:
+        bare_minutes = (delta_t / abs(rate)) * 60.0
+        if warn_label is not None and bare_minutes >= max_minutes:
+            _warn_out_of_reach(warn_label, cooling, start_temp, target_temp, max_minutes, "learned rate")
+        minutes = bare_minutes * safety_multiplier
     return max(min_minutes, min(max_minutes, minutes))
+
+
+def _warn_out_of_reach(
+    label: str,
+    cooling: bool,
+    start_temp: float | None,
+    target_temp: float | None,
+    max_minutes: float,
+    basis: str,
+) -> None:
+    """Log once per ``OUT_OF_REACH_WARN_INTERVAL_S`` that ``label``'s target looks out of reach within the cap."""
+    key = (label, cooling, round(float(target_temp), 1) if target_temp is not None else float("nan"))
+    now = time.monotonic()
+    last = _out_of_reach_warned.get(key)
+    if last is not None and now - last < OUT_OF_REACH_WARN_INTERVAL_S:
+        return
+    _out_of_reach_warned[key] = now
+    _LOGGER.warning(
+        "%s: %s to %s looks out of reach within %.0f minutes (%s); starting at the %.0f-minute maximum, "
+        "the house may not reach the target by the window start",
+        label,
+        "cooling" if cooling else "heating",
+        f"{target_temp:.1f}" if target_temp is not None else "the target",
+        max_minutes,
+        basis,
+        max_minutes,
+    )

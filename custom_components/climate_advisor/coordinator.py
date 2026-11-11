@@ -1084,6 +1084,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R6b: the engine reads the primary engine's thermal-model scalars through this live provider (it
         # never names an engine); None on a bare engine (headless tools) = its own ``_thermal_model``.
         self.automation_engine._control_model_provider = self.control_thermal_model
+        # Issue #1517: and the primary's house model (engine-neutral stepper) for the lead times; None on a v3 zone.
+        self.automation_engine._control_stepper_provider = self.control_house_stepper
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -7720,6 +7722,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             tou_av=getattr(self, "_tou_av_window", None),
         )
 
+    def control_house_stepper(self) -> Any:
+        """The primary engine's own house model for lead times (Issue #1517): an engine-neutral ``HouseStepper``, or
+        None on a v3 zone or while the primary is still learning (the leak-aware formula then applies). Never raises."""
+        return prediction_engines.control_stepper(self, self.config)
+
     def control_thermal_model(self, base: dict | None) -> dict | None:
         """The thermal-model dict the RATE decisions read (``base`` = the v3 model the learning engine holds).
 
@@ -9016,6 +9023,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._tou_active_cost_resolution = resolve_active_schedules(schedules, now)
         # Issue #1230 R6b: the bank's lead time (and the away/vacation depth) read the PRIMARY engine's rates.
         thermal_model = self.control_thermal_model(self._thermal_model if self.automation_engine else None)
+        # Issue #1517: and, on a primary with its own house model, that model (thermal mass, sun) for the lead time.
+        _stepper = self.control_house_stepper()
         if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
             # Issue #899: split-delta precool/preheat + temporary band expansion, instead
             # of resolve_tou_phase()'s Home/Guest "bank to the comfort-band edge" behavior.
@@ -9031,6 +9040,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._occupancy_mode,
                 target_temp_step=self._thermostat_target_temp_step(),
                 frozen=getattr(self, "_tou_av_frozen", None),
+                outdoor_at=self._outdoor_forecast_at,
+                house_stepper=_stepper,
             )
             self._freeze_tou_av_split(self._tou_phase_resolution, now)
         else:
@@ -9042,9 +9053,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._current_classification.hvac_mode,
                 thermal_model,
                 self.config,
+                outdoor_at=self._outdoor_forecast_at,
+                house_stepper=_stepper,
             )
         self._sync_tou_away_vacation_state()
         self._maybe_emit_tou_active_window_event()
+
+    def _outdoor_forecast_at(self, when: datetime) -> float | None:
+        """Outdoor temperature expected at ``when`` (Issue #1517): the hourly forecast there when it reaches that
+        far, else the current reading; ``None`` when neither is known.
+
+        Occupant view: a lead time (the TOU bank) allows for the house drifting toward the outdoor temperature of
+        the moment the period starts, not this minute's.
+        """
+        forecast, _method = _interpolate_hourly_outdoor_temp(getattr(self, "_hourly_forecast_temps", None), when)
+        return forecast if forecast is not None else self._last_outdoor_temp
 
     def _thermostat_target_temp_step(self) -> Any:
         """The thermostat's advertised ``target_temp_step`` (raw; None when it advertises none or is unreadable)."""
@@ -9786,6 +9809,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._nat_vent_plan = None
             return
         _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
+        _stepper = self.control_house_stepper()  # Issue #1517: the primary's house model for the pre-cool lead
+        # Issue #1519: the plan pre-cool lead used to get no cooling rate (always the 120-min fallback); hand it
+        # the decisions' cooling rate and closed-house rate (the stepper above takes precedence on a v4 zone).
+        _rates = self.control_thermal_model(dict(self._thermal_model or {})) or {}
+        _k_cool = _rates.get("k_active_cool")
+        _k_passive = _rates.get("k_passive")
+        _conf = _rates.get("confidence_k_passive", _rates.get("confidence", "none"))
         # Issue #1093: the plan's AC-handoff time measures against the ceiling the thermostat is armed
         # with (Prefer savings widens it) -- the engine's single source, not comfort_cool + a margin here.
         _, _armed_ceiling = awake_comfort_edges(
@@ -9803,6 +9833,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
                 ceiling=_armed_ceiling,
                 window_open_time=c.window_opportunity_morning_start,
+                house_stepper=_stepper,
+                k_active_cool=_k_cool,
+                k_passive=_k_passive,
+                confidence_k_passive=_conf,
             )
         else:
             _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
@@ -9816,6 +9850,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 sleep_heat=_sleep_heat,
                 in_sleep_window_fn=lambda ts: _in_sleep_window(ts, self.config),
                 window_open_time=c.window_open_time,
+                house_stepper=_stepper,
+                k_active_cool=_k_cool,
+                k_passive=_k_passive,
+                confidence_k_passive=_conf,
             )
         self._nat_vent_plan = self._stabilize_nat_vent_cutoff_reason(raw_plan)
 
@@ -17875,6 +17913,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _ae._manual_override_mode if _ae else None,
                 _ceiling_threshold,
                 _ae._natural_vent_active if _ae else False,
+                house_stepper=self.control_house_stepper() if _control_path is not None else None,
             )
 
         # Issue #1436: the window and nat-vent flags per hour are the PLAN's (the operation timeline's window periods
@@ -20527,6 +20566,7 @@ def _walk_forward_regime(
     manual_override_mode: str | None,
     ceiling_threshold: float | None,
     initial_session_active: bool,
+    house_stepper: Any = None,
 ) -> dict[str, dict]:
     """Forward-walk the real, already-validated production nat-vent gate/exit/ceiling-guard
     functions hour by hour (Issue #802), replacing the old standalone temperature-inequality
@@ -20774,6 +20814,7 @@ def _walk_forward_regime(
                     natural_vent_active=session_active,
                     ceiling_threshold=ceiling_threshold,
                     now=ts_dt,
+                    house_stepper=house_stepper,  # Issue #1517: the walk plans what the live guard will do
                 )
             )
             if guard_decision.outcome == OdeCeilingGuardOutcome.ESCALATE:

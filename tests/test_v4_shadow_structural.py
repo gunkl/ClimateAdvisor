@@ -346,10 +346,19 @@ _SELECTION_COORDINATOR_METHODS = {
     "control_thermal_model",
     "control_predicted_indoor",
     "_refresh_control_prediction",
+    "control_house_stepper",  # Issue #1517: hands the primary's own house model to the lead-time decisions
     "_v3_curve_wanted",
 }
 # The control feed: the only coordinator methods that decide which engine's numbers the decisions read.
-_CONTROL_FEED_METHODS = {"control_thermal_model", "control_predicted_indoor", "_refresh_control_prediction"}
+# Issue #1517: control_house_stepper joins the feed. It hands the primary's house model (an engine-neutral HouseStepper)
+# to the lead-time decisions exactly as control_thermal_model hands its rates; listing it keeps that read visible (the
+# first #1517 commit hid it behind an import alias, which this rule would not have caught).
+_CONTROL_FEED_METHODS = {
+    "control_thermal_model",
+    "control_predicted_indoor",
+    "_refresh_control_prediction",
+    "control_house_stepper",
+}
 _SHADOW_NAMES = {"shadow_id", "shadow_engine_id", "shadow_engine", "CONF_SHADOW_ENGINE", "DEFAULT_SHADOW_ENGINE"}
 
 
@@ -476,6 +485,7 @@ def test_the_shadow_is_never_read_by_a_decision_path() -> None:
             "control_path",
             "control_ready",
             "control_capable",
+            "control_stepper",  # Issue #1517: the house model the lead times step
             "_control_engine",
             "resample_path",
         }:
@@ -485,6 +495,44 @@ def test_the_shadow_is_never_read_by_a_decision_path() -> None:
                 if isinstance(n, ast.Call)
             }
             assert not (called & {"shadow_id", "running_ids"}), f"{fn.name} reads the shadow ({called})"
+
+
+def _registry_from_imports(tree: ast.AST) -> list[str]:
+    """Every import of ``prediction_engines`` other than the plain module import, as ``line: ...``.
+
+    Flags ``from .prediction_engines import X`` (alias or not), a module alias
+    (``from . import prediction_engines as _pe``) and an absolute import of the module
+    (``import custom_components.climate_advisor.prediction_engines``): each hides a registry
+    read from ``_selection_refs``, which only sees the bare name ``prediction_engines``."""
+    found: list[str] = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            if n.module is not None and n.module.split(".")[-1] == "prediction_engines":
+                names = ", ".join(a.name for a in n.names)
+                found.append(f"line {n.lineno}: from {'.' * n.level}{n.module} import {names}")
+            for a in n.names:
+                if a.name == "prediction_engines" and a.asname not in (None, "prediction_engines"):
+                    found.append(f"line {n.lineno}: import prediction_engines as {a.asname}")
+        elif isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name.split(".")[-1] == "prediction_engines":
+                    found.append(f"line {n.lineno}: import {a.name}")
+    return found
+
+
+def test_the_coordinator_imports_the_registry_only_as_a_module() -> None:
+    """Issue #1517: ``prediction_engines`` is reached as ``prediction_engines.<fn>``, never by a from-import.
+
+    An alias (``from .prediction_engines import control_stepper as _cs``) hides a registry read from
+    ``_selection_refs``, which only sees the module name; 73d1af9 removed exactly that pattern."""
+    assert _registry_from_imports(_tree(_PKG / "coordinator.py")) == []
+    # the check itself: a synthetic alias import in an unlisted method is caught
+    synthetic = ast.parse("from .prediction_engines import control_stepper as _cs\n")
+    assert _registry_from_imports(synthetic) == ["line 1: from .prediction_engines import control_stepper"]
+    module_alias = ast.parse("from . import prediction_engines as _pe\n")
+    assert _registry_from_imports(module_alias) == ["line 1: import prediction_engines as _pe"]
+    absolute = ast.parse("import custom_components.climate_advisor.prediction_engines as _pe2\n")
+    assert _registry_from_imports(absolute) == ["line 1: import custom_components.climate_advisor.prediction_engines"]
 
 
 def test_the_registry_and_the_timeline_selection_are_display_inputs_only() -> None:

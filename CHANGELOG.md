@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.27] — 2026-11-11
+
+### Fixed
+- **The simulation test harness no longer fills `/tmp` (Issue #1518).** Every headless coordinator built without a `config_dir` left a `ca_sim_coordinator_*` / `ca_sim_multi_zone_*` folder behind; a development container collected about 581,000 of them. The harness now removes each folder with the simulated Home Assistant it belongs to (at the latest when the process exits) and sweeps its own folders older than 6 hours that a killed run left; the real-HA test conftest sweeps stale `ca_sim_portion_*` copies the same way, and two unit tests use pytest's temporary folders. Development and CI hosts only; no change for Home Assistant installs.
+
 ## [0.9.26] — 2026-11-10
 
 - Fix #1514: a setpoint band whose heat and cool are less than 4 °F apart (or the wrong way round) is now named in the log as the cause of what follows from it.

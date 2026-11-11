@@ -37,6 +37,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,13 @@ import pytest
 _REPO = Path(__file__).resolve().parent.parent
 _SIM_SRC = _REPO / "dev_tools" / "ha_test_integrations" / "ca_dev_thermostat_sim"
 
+# Issue #1518: a run killed before exit never runs the atexit below; sweep this user's own stale copies first.
+for _old in Path(tempfile.gettempdir()).glob("ca_sim_portion_*"):
+    try:
+        if _old.is_dir() and not _old.is_symlink() and time.time() - _old.stat().st_mtime > 6 * 3600:
+            shutil.rmtree(_old, ignore_errors=True)
+    except OSError:
+        pass
 _sim_portion = tempfile.mkdtemp(prefix="ca_sim_portion_")
 shutil.copytree(
     _SIM_SRC,

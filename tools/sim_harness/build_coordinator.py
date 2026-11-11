@@ -28,7 +28,11 @@ Returned tuple: ``(coordinator, fake_hass, scheduler, event_log)``
 from __future__ import annotations
 
 import contextlib
+import os
+import shutil
 import tempfile
+import time
+import weakref
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,6 +41,44 @@ from tools.sim_harness.build_engine import _DEFAULT_CONFIG
 from tools.sim_harness.fake_hass import FakeHass, FakeState
 from tools.sim_harness.fake_scheduler import FakeScheduler
 from tools.sim_harness.ha_stubs import EVENT_HOMEASSISTANT_STARTED, install_ha_stubs
+
+# Issue #1518: every headless coordinator built without a config_dir gets its own temp folder. The unit tier, the
+# Tier-A goldens and the nightly harness build thousands per run, so each folder is removed when the FakeHass it
+# belongs to is released (or the process exits), and folders left by a killed run are swept once per process.
+_SIM_TMP_PREFIXES = ("ca_sim_coordinator_", "ca_sim_multi_zone_")
+_SIM_TMP_STALE_S = 6 * 3600
+_swept_stale_sim_dirs = False
+
+
+def _sweep_stale_sim_dirs() -> None:
+    """Remove this harness's own temp folders older than _SIM_TMP_STALE_S (left by a killed run). Once per process."""
+    global _swept_stale_sim_dirs
+    if _swept_stale_sim_dirs:
+        return
+    _swept_stale_sim_dirs = True
+    now = time.time()
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    try:
+        entries = list(os.scandir(tempfile.gettempdir()))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if not entry.name.startswith(_SIM_TMP_PREFIXES) or not entry.is_dir(follow_symlinks=False):
+                continue
+            st = entry.stat(follow_symlinks=False)
+            if (uid is None or st.st_uid == uid) and now - st.st_mtime > _SIM_TMP_STALE_S:
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _owned_sim_dir(prefix: str, owner: Any) -> str:
+    """A fresh temp config_dir that is deleted when ``owner`` is garbage-collected or the process exits."""
+    _sweep_stale_sim_dirs()
+    path = tempfile.mkdtemp(prefix=prefix)
+    weakref.finalize(owner, shutil.rmtree, path, True)
+    return path
 
 
 def build_headless_coordinator(
@@ -145,9 +187,8 @@ def build_headless_coordinator(
     fake_hass = FakeHass(clock_fn=scheduler.now)
     fake_hass.set_scheduler(scheduler)
 
-    # Isolated config_dir — see docstring. Not cleaned up automatically (matches
-    # tempfile.mkdtemp's default contract); harness runs are short-lived processes.
-    fake_hass.config.config_dir = config_dir or tempfile.mkdtemp(prefix="ca_sim_coordinator_")
+    # Isolated config_dir — see docstring. A folder the harness creates is removed with fake_hass (Issue #1518).
+    fake_hass.config.config_dir = config_dir or _owned_sim_dir("ca_sim_coordinator_", fake_hass)
 
     # 5. Seed initial climate entity state (mirrors build_engine's defaults —
     #    a dual-setpoint thermostat, the most capable real-world unit).
@@ -413,7 +454,7 @@ def build_headless_multi_zone(
     scheduler = FakeScheduler(start=start_time)
     fake_hass = FakeHass(clock_fn=scheduler.now)
     fake_hass.set_scheduler(scheduler)
-    fake_hass.config.config_dir = config_dir or tempfile.mkdtemp(prefix="ca_sim_multi_zone_")
+    fake_hass.config.config_dir = config_dir or _owned_sim_dir("ca_sim_multi_zone_", fake_hass)  # Issue #1518
 
     zones: dict[str, Any] = {}
 

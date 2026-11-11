@@ -91,7 +91,7 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from datetime import time as dtime
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -537,12 +537,24 @@ def prod_model_from_cache(cache: dict) -> dict:
 
 
 def prod_rebuild_cache(observations: list[dict]) -> dict | None:
-    """Fold observations (oldest first) through production's own ``_update_thermal_model_cache``."""
-    engine = _learning_module().LearningEngine
+    """Rebuild the v3 cache from these observations as production does: fold them (oldest first) through
+    ``_update_thermal_model_cache`` (counts, solar, vent, swing), then set the three aged rates with production's
+    ``aged_rates`` as of the newest observation's date (Issue #1512: the rates are no longer folded one by one)."""
+    learning = _learning_module()
+    engine = learning.LearningEngine
     stub = SimpleNamespace(_state=SimpleNamespace(thermal_model_cache=None))
-    for o in sorted(observations, key=lambda o: str(o.get("timestamp") or o.get("date"))):
+    ordered = sorted(observations, key=lambda o: str(o.get("timestamp") or o.get("date")))
+    for o in ordered:
         engine._update_thermal_model_cache(stub, o)
-    return stub._state.thermal_model_cache
+    cache = stub._state.thermal_model_cache
+    if cache is None or not ordered:
+        return cache
+    try:
+        as_of = date.fromisoformat(str(ordered[-1].get("date") or ordered[-1].get("timestamp"))[:10])
+    except ValueError:
+        return cache
+    cache.update(learning.aged_rates(ordered, as_of))
+    return cache
 
 
 V3_ASOF_MIN_OBS = 30  # retained observations needed before an anchor for an honest as-of v3 rebuild

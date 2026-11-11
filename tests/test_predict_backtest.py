@@ -724,6 +724,18 @@ def test_single_zone_flag_reads_only_that_zone(fake, host):
 # ---------------------------------------------------------------------------
 
 
+def _db_shifted(n_late=45):
+    """``_db`` plus a real April shift: many later observations at -0.5 (Issue #1512). The rates are aged weighted
+    medians now, so a single outlier no longer moves them (the EWMA did); a shift that is the bulk of the newer
+    evidence must."""
+    db = _db()
+    db["thermal_observations"] += [
+        {"date": "2026-04-15", "hvac_mode": "passive", "k_passive": -0.5, "confidence_grade": "high"}
+        for _ in range(n_late)
+    ]
+    return db
+
+
 def _db(n_obs=40):
     obs = [
         {
@@ -785,7 +797,11 @@ def test_v3_model_as_of_uses_only_prior_observations():
     assert src == "asof(40 obs)"  # the April observation is in the future of this week
     assert mid["k_passive"] == pytest.approx(-0.05, abs=1e-4)
     later, src_l = models.for_week(datetime(2026, 4, 20, tzinfo=UTC))
-    assert src_l == "asof(41 obs)" and later["k_passive"] < -0.05
+    # Issue #1512: one April outlier is the 41st observation but no longer moves the aged median (the old
+    # ``< -0.05`` came from the EWMA nudge); a real shift in the newer evidence does move it.
+    assert src_l == "asof(41 obs)" and later["k_passive"] == pytest.approx(-0.05, abs=1e-4)
+    shifted, _ = pb.V3Models(_db_shifted(), "asof").for_week(datetime(2026, 4, 20, tzinfo=UTC))
+    assert shifted["k_passive"] < -0.05
     cur = pb.V3Models(_db(), "current").for_week(datetime(2026, 3, 9, tzinfo=UTC))
     assert cur[1] == "current"
 
@@ -892,7 +908,8 @@ def test_v3_model_default_is_honest_and_drift_is_reported():
 
 
 def test_honest_v3_rebuilds_the_model_as_of_the_anchor_day():
-    models = pb.V3Models(_db(), "honest", min_obs=30)
+    # Issue #1512: the shifted fixture, so the newer evidence moves the aged median (one outlier would not)
+    models = pb.V3Models(_db_shifted(), "honest", min_obs=30)
     # 40 observations dated 2026-02-01..27: before 2026-02-20 fewer than 30 precede the anchor (cannot rebuild)
     assert models.for_anchor(datetime(2026, 2, 10, 12, tzinfo=UTC)) is None
     assert models.for_anchor(datetime(2026, 3, 1, 12, tzinfo=UTC))

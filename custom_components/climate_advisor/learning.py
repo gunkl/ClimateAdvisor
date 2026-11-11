@@ -997,6 +997,49 @@ def _obs_rate_weight(obs: dict, today: Any, *, legacy: bool) -> float:
     return grade_w * method_w * 0.5 ** (age / THERMAL_RATE_HALF_LIFE_DAYS)
 
 
+_AGED_RATE_FIELDS = ("k_active_heat", "k_active_cool", "k_passive")
+
+
+def aged_rates(observations: list[dict], today: Any, prior: Any = None) -> dict[str, float]:
+    """The three aged rates from these observations as of ``today`` (Issue #1512): weighted medians.
+
+    weight = grade_w x method_w x 0.5 ** (age_days / THERMAL_RATE_HALF_LIFE_DAYS); legacy heat/cool commits (no
+    ``method`` key) weigh THERMAL_LEGACY_OBS_WEIGHT. ``prior`` (the cache's ``rate_prior``) adds one aged legacy-weight
+    pseudo-observation per field. Only fields with at least one usable value are returned, so a caller never sets a
+    rate to None through ageing. vent_window/vent_fan never feed ``k_passive``; run-edge HVAC runs carry no
+    ``k_passive``. One definition for the live engine and the backtest's as-of rebuild (tools/predict_backtest.py).
+    """
+    pairs: dict[str, list[tuple[float, float]]] = {f: [] for f in _AGED_RATE_FIELDS}
+
+    def _num(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    for o in observations:
+        mode = o.get("hvac_mode")
+        has_method = "method" in o
+        if mode in ("heat", "cool"):
+            field_name = "k_active_heat" if mode == "heat" else "k_active_cool"
+            if _num(o.get("k_active")):
+                pairs[field_name].append((float(o["k_active"]), _obs_rate_weight(o, today, legacy=not has_method)))
+            if _num(o.get("k_passive")):
+                pairs["k_passive"].append((float(o["k_passive"]), _obs_rate_weight(o, today, legacy=not has_method)))
+        elif mode == "passive" and _num(o.get("k_passive")):
+            # Passive fits are the closed-house learner itself (live decay commits, chart_log endpoint/block_ols,
+            # duty_balance): full method weight, not the legacy HVAC post-fit.
+            pairs["k_passive"].append((float(o["k_passive"]), _obs_rate_weight(o, today, legacy=False)))
+    if isinstance(prior, dict):
+        for f, rec in prior.items():
+            if f in pairs and isinstance(rec, dict) and _num(rec.get("value")):
+                w = THERMAL_LEGACY_OBS_WEIGHT * 0.5 ** (_age_days(rec.get("ts"), today) / THERMAL_RATE_HALF_LIFE_DAYS)
+                pairs[f].append((float(rec["value"]), w))
+    out: dict[str, float] = {}
+    for f, plist in pairs.items():
+        med = weighted_median(plist)
+        if med is not None:
+            out[f] = med
+    return out
+
+
 def estimate_daily_cost(
     heat_minutes: float,
     cool_minutes: float,
@@ -1360,7 +1403,7 @@ class LearningEngine:
     # ------------------------------------------------------------------
     # Issue #1512: ageing of k_active_heat / k_active_cool / k_passive
     # ------------------------------------------------------------------
-    _AGED_RATE_FIELDS = ("k_active_heat", "k_active_cool", "k_passive")
+    _AGED_RATE_FIELDS = _AGED_RATE_FIELDS
 
     def _ensure_rate_prior(self) -> None:
         """Store the current cached rates once as the ageing prior (an upgrade never jumps or falls to defaults).
@@ -1393,39 +1436,8 @@ class LearningEngine:
             cache = _new_thermal_cache()
             self._state.thermal_model_cache = cache
         self._ensure_rate_prior()
-        today = dt_util.now().date()
-        pairs: dict[str, list[tuple[float, float]]] = {f: [] for f in self._AGED_RATE_FIELDS}
-
-        def _num(v: Any) -> bool:
-            return isinstance(v, (int, float)) and not isinstance(v, bool)
-
-        for o in self._state.thermal_observations:
-            mode = o.get("hvac_mode")
-            has_method = "method" in o
-            if mode in ("heat", "cool"):
-                field_name = "k_active_heat" if mode == "heat" else "k_active_cool"
-                if _num(o.get("k_active")):
-                    pairs[field_name].append((float(o["k_active"]), _obs_rate_weight(o, today, legacy=not has_method)))
-                if _num(o.get("k_passive")):
-                    pairs["k_passive"].append(
-                        (float(o["k_passive"]), _obs_rate_weight(o, today, legacy=not has_method))
-                    )
-            elif mode == "passive" and _num(o.get("k_passive")):
-                # Passive fits are the closed-house learner itself (live decay commits, chart_log endpoint/block_ols,
-                # duty_balance): full method weight, not the legacy HVAC post-fit.
-                pairs["k_passive"].append((float(o["k_passive"]), _obs_rate_weight(o, today, legacy=False)))
-        prior = cache.get("rate_prior")
-        if isinstance(prior, dict):
-            for f, rec in prior.items():
-                if f in pairs and isinstance(rec, dict) and _num(rec.get("value")):
-                    w = THERMAL_LEGACY_OBS_WEIGHT * 0.5 ** (
-                        _age_days(rec.get("ts"), today) / THERMAL_RATE_HALF_LIFE_DAYS
-                    )
-                    pairs[f].append((float(rec["value"]), w))
-        for f, plist in pairs.items():
-            med = weighted_median(plist)
-            if med is not None:
-                cache[f] = med
+        rates = aged_rates(self._state.thermal_observations, dt_util.now().date(), cache.get("rate_prior"))
+        cache.update(rates)
 
     def record_hvac_run(self, run: dict) -> tuple[dict | None, str | None]:
         """Learn one HVAC run's steady rate from its own edges and record it (Issue #1512).

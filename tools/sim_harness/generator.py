@@ -276,6 +276,19 @@ def _apply_whf_hazard(
     return record
 
 
+def strip_occupant_seconds(plan_dict: dict) -> dict:
+    """Undo Issue #1527's off-the-minute seconds in a ``DayPlan.to_dict()`` (for the pinned earlier-draws digests).
+
+    The seconds are the plan's last draw, so with them back on the whole minute (and the events re-sorted by minute,
+    stable) a plan is byte-identical to the one built before #1527.
+    """
+    plan_dict["timed"] = sorted(
+        ([int(m), k, a] if k == "thermostat_state_changed" else [m, k, a] for m, k, a in plan_dict["timed"]),
+        key=lambda t: t[0],
+    )
+    return plan_dict
+
+
 def strip_whf_hazard(plan_dict: dict) -> dict:
     """Undo the fan hazard in a ``DayPlan.to_dict()`` (for the pinned earlier-draws digest)."""
     whf = plan_dict.pop("whf", None)
@@ -428,6 +441,14 @@ def build_plan(day_seed: int, profile: str = "coordinator") -> DayPlan:
             command_only_roll=cmd_only_roll,
             window_open_roll=occ_open_roll,
         )
+    # Issue #1527: a person touches the thermostat at some second of the minute, never exactly on it. Climate
+    # Advisor writes on the minute (wake-up, bedtime, each 30-minute cycle) and, by design, reads a mode change
+    # within 3 s of its own write as that write reporting back (08 occupant-change guard table, owner decision D6).
+    # A whole-minute occupant change could land in that same second and be judged a Climate Advisor failure it
+    # cannot see (day 17003000036). Drawn LAST, after every other draw, so every earlier event is unchanged.
+    for k, (minute, kind, args) in enumerate(timed):
+        if kind == "thermostat_state_changed":
+            timed[k] = (minute + rng.randint(5, 55) / 60.0, kind, args)
     timed.sort(key=lambda x: x[0])
 
     return DayPlan(
@@ -685,7 +706,7 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
             while ti < len(timed) and DAY0 + timedelta(minutes=timed[ti][0]) <= t:
                 minute, kind, args = timed[ti]
                 ti += 1
-                et = DAY0 + timedelta(minutes=minute)
+                et = DAY0 + timedelta(seconds=round(minute * 60))  # whole seconds, as _iso() reports them
                 advance(et)
                 if kind in ("sensor_open", "sensor_close"):
                     (open_sensors.add if kind == "sensor_open" else open_sensors.discard)(args["entity"])

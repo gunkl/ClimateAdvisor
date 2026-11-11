@@ -35,6 +35,7 @@ from tools.sim_harness.generator import (
     run_day,
     run_plan,
     save_finding,
+    strip_occupant_seconds,
     strip_whf_hazard,
 )
 from tools.sim_harness.replay import shrink
@@ -316,6 +317,7 @@ def test_adding_hazards_left_every_earlier_draw_unchanged() -> None:
         for profile in ("coordinator", "engine", "mixed"):
             d = build_plan(i, profile).to_dict()
             d = strip_whf_hazard(d)  # Issue #1144: the whole-house-fan day is a later, appended draw
+            d = strip_occupant_seconds(d)  # Issue #1527: the occupant's seconds are the last draw of all
             d["timed"] = [t for t in d["timed"] if t[1] not in _HAZARDS]
             h.update(json.dumps(d, sort_keys=True).encode())
     assert h.hexdigest() == _PRE_HAZARD_PLAN_DIGEST

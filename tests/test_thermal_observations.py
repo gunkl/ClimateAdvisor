@@ -4,7 +4,7 @@ Covers the new multi-type observation pipeline:
   _start_hvac_observation / _start_decay_observation
   _sample_all_observations
   _abandon_observation / _commit_observation_if_sufficient
-  _check_hvac_stabilization
+  _end_hvac_active_phase (HVAC runs commit at the off edge, Issue #1512)
   LearningEngine load of legacy fields (pending_thermal_event, pending_observations)
 """
 
@@ -38,8 +38,6 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     OBS_TYPE_VENT_FAN_DECAY,
     OBS_TYPE_VENT_WINDOW_DECAY,
     REJECT_NO_K_PASSIVE,
-    THERMAL_HVAC_MIN_DECAY_F,
-    THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S,
     THERMAL_PASSIVE_CONF_HIGH,
     THERMAL_PASSIVE_MIN_SAMPLES,
     THERMAL_PASSIVE_SAMPLE_INTERVAL_S,
@@ -170,7 +168,6 @@ def _make_obs_coord(
     # ── thermal state ────────────────────────────────────────────────────────
     coord._pending_observations = {}
     coord._pending_thermal_event = None
-    coord._pre_heat_sample_buffer = []
     coord._last_outdoor_temp = outdoor_temp
 
     # ── helper methods ───────────────────────────────────────────────────────
@@ -206,7 +203,8 @@ def _make_obs_coord(
         "_abandon_observation",
         "_commit_observation_if_sufficient",
         "_commit_observation",
-        "_check_hvac_stabilization",
+        "_closed_house_rate",
+        "_reject_hvac_run",
         "_end_hvac_active_phase",
     ):
         method = getattr(ClimateAdvisorCoordinator, method_name)
@@ -442,112 +440,6 @@ class TestConcurrentObservations:
 
 # ---------------------------------------------------------------------------
 # TestHvacObservationReducedPlateauGuard
-# ---------------------------------------------------------------------------
-
-
-class TestHvacObservationReducedPlateauGuard:
-    """_check_hvac_stabilization() plateau guard uses THERMAL_HVAC_MIN_DECAY_F=0.3."""
-
-    def _make_stabilization_window(self, peak_f: float, end_f: float, n_post: int = 10) -> dict:
-        """Build a post_heat HVAC observation with tight recent variance."""
-
-        # All samples within the stabilization window (uniform temperature = no variance)
-        now = _FAKE_NOW
-        samples = []
-        for i in range(n_post):
-            ts = datetime(
-                now.year,
-                now.month,
-                now.day,
-                now.hour,
-                max(0, now.minute - (n_post - 1 - i)),
-                now.second,
-                tzinfo=UTC,
-            )
-            samples.append(
-                {
-                    "timestamp": ts.isoformat(),
-                    "indoor_temp_f": end_f,
-                    "outdoor_temp_f": 50.0,
-                    "elapsed_minutes": float(i),
-                }
-            )
-
-        active_end = datetime(
-            now.year,
-            now.month,
-            now.day,
-            now.hour,
-            max(0, now.minute - n_post),
-            tzinfo=UTC,
-        )
-        return {
-            "obs_type": OBS_TYPE_HVAC_HEAT,
-            "obs_id": "test-hvac-plateau",
-            "start_time": _FAKE_NOW.isoformat(),
-            "active_start": active_end.isoformat(),
-            "active_end": active_end.isoformat(),
-            "status": "monitoring",
-            "_phase": "post_heat",
-            "active_samples": [],
-            "post_heat_samples": samples,
-            "peak_indoor_f": peak_f,
-            "end_indoor_f": end_f,
-            "flags_at_start": {},
-            "schema_version": 1,
-        }
-
-    def test_plateau_guard_fires_for_0_2_delta(self):
-        """peak=72.0, end=71.8 → decay=0.2 < THERMAL_HVAC_MIN_DECAY_F=0.3 → abandoned."""
-        from custom_components.climate_advisor.const import THERMAL_MIN_POST_HEAT_SAMPLES
-
-        coord = _make_obs_coord()
-        n_post = max(10, THERMAL_MIN_POST_HEAT_SAMPLES)
-        obs = self._make_stabilization_window(peak_f=72.0, end_f=71.8, n_post=n_post)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = obs
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_HEAT))
-
-        assert OBS_TYPE_HVAC_HEAT not in coord._pending_observations, (
-            "Plateau guard (decay=0.2 < 0.3) should have abandoned the observation"
-        )
-
-    def test_plateau_guard_passes_for_0_5_delta(self):
-        """peak=72.0, end=71.5 → decay=0.5 > THERMAL_HVAC_MIN_DECAY_F=0.3 → committed."""
-        from custom_components.climate_advisor.const import THERMAL_MIN_POST_HEAT_SAMPLES
-
-        coord = _make_obs_coord()
-        n_post = max(10, THERMAL_MIN_POST_HEAT_SAMPLES)
-        obs = self._make_stabilization_window(peak_f=72.0, end_f=71.5, n_post=n_post)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = obs
-
-        commit_called = []
-
-        async def _fake_commit(obs_type, force_grade=None):
-            commit_called.append(obs_type)
-            coord._pending_observations.pop(obs_type, None)
-
-        coord._commit_observation = _fake_commit
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_HEAT))
-
-        assert len(commit_called) == 1 and commit_called[0] == OBS_TYPE_HVAC_HEAT, (
-            "Plateau guard should pass for decay=0.5 > 0.3, observation should be committed"
-        )
-
-    def test_plateau_guard_threshold_is_0_3(self):
-        """Confirm THERMAL_HVAC_MIN_DECAY_F constant value is exactly 0.3."""
-        assert pytest.approx(0.3) == THERMAL_HVAC_MIN_DECAY_F, (
-            f"Expected THERMAL_HVAC_MIN_DECAY_F=0.3, got {THERMAL_HVAC_MIN_DECAY_F}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# TestAbandonmentLogging
 # ---------------------------------------------------------------------------
 
 
@@ -1280,150 +1172,10 @@ class TestSampleDecimation:
     # OBS_TYPE_HVAC_HEAT post-phase samples — covered by test_hvac_active_not_decimated
     # and the passive/fan interval tests above.
 
-    def _make_post_heat_hvac_obs(self, obs_id: str, extra: dict | None = None) -> dict:
-        obs = {
-            "obs_type": OBS_TYPE_HVAC_HEAT,
-            "obs_id": obs_id,
-            "start_time": _FAKE_NOW.isoformat(),
-            "active_start": _FAKE_NOW.isoformat(),
-            "status": "monitoring",
-            "_phase": "post_heat",
-            "active_samples": [],
-            "post_heat_samples": [],
-            "peak_indoor_f": None,
-            "flags_at_start": {},
-            "schema_version": 1,
-        }
-        if extra:
-            obs.update(extra)
-        return obs
-
-    def test_post_heat_abandons_immediately_for_real_nat_vent_session(self):
-        """A real WHF/nat-vent session overlapping post_heat is long-running and
-        intentional — abandon immediately, unchanged by Issue #1009."""
-        coord = _make_obs_coord(hvac_action="idle", indoor_temp=70.0, outdoor_temp=50.0, nat_vent_active=True)
-        coord._abandon_observation = MagicMock(wraps=coord._abandon_observation)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs("test-hvac-natvent")
-
-        dt_mock = _make_dt_mock(_FAKE_NOW)
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_all_observations()
-
-        coord._abandon_observation.assert_any_call(OBS_TYPE_HVAC_HEAT, "fan_activated")
-        obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
-        post_heat_samples = obs_after.get("post_heat_samples", []) if obs_after else []
-        assert len(post_heat_samples) == 0
-
-    def test_post_heat_tolerates_fresh_thermostat_fan_pulse(self):
-        """Issue #1009: a brief thermostat blower pulse (hvac_action=='fan', e.g. a
-        post-compressor coil-clear cycle) must NOT abandon the observation on first
-        detection — only skip this poll's sample and keep monitoring."""
-        coord = _make_obs_coord(hvac_action="fan", fan_mode="auto", indoor_temp=70.0, outdoor_temp=50.0)
-        coord._abandon_observation = MagicMock(wraps=coord._abandon_observation)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs("test-hvac-fresh-pulse")
-
-        dt_mock = _make_dt_mock(_FAKE_NOW)
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_all_observations()
-
-        coord._abandon_observation.assert_not_called()
-        obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
-        assert obs_after is not None, "observation must survive a fresh, brief fan pulse"
-        assert obs_after.get("status") == "monitoring"
-        assert len(obs_after.get("post_heat_samples", [])) == 0, (
-            "no sample should be appended while the fan pulse is live"
-        )
-        assert obs_after.get("_fan_interference_since") == _FAKE_NOW.isoformat()
-
-    def test_post_heat_abandons_once_fan_pulse_exceeds_grace_window(self):
-        """A thermostat fan run that is still going at/beyond
-        THERMAL_FAN_PULSE_GRACE_MINUTES is genuinely sustained contamination —
-        the original Issue #986 protection must still fire."""
-        coord = _make_obs_coord(hvac_action="fan", fan_mode="auto", indoor_temp=70.0, outdoor_temp=50.0)
-        coord._abandon_observation = MagicMock(wraps=coord._abandon_observation)
-        _stale_since = datetime(2026, 4, 28, 11, 55, 0, tzinfo=UTC)  # 5 min before _FAKE_NOW
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs(
-            "test-hvac-sustained-pulse", extra={"_fan_interference_since": _stale_since.isoformat()}
-        )
-
-        dt_mock = _make_dt_mock(_FAKE_NOW)
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_all_observations()
-
-        coord._abandon_observation.assert_any_call(OBS_TYPE_HVAC_HEAT, "fan_activated")
-
-    def test_post_heat_does_not_abandon_on_stale_ca_fan_flag_with_idle_ground_truth(self):
-        """Regression test for the exact bug reported in Issue #1009: this reproduces
-        the ORIGINAL (pre-fix) test's scenario — ae._fan_active stale-True while the
-        live thermostat ground truth already reads idle (no fan_mode active, hvac_action
-        not 'fan'). Real-world cause: _fan_active can lag physical reality by up to ~10
-        minutes for FAN_MODE_HVAC (2 backstop ticks, 5 min apart) because the reconcile
-        listener only fires on the fan-ON edge, never on fan-OFF. The guard must trust
-        the live ground truth, not this stale flag, or every ordinary post-compressor
-        blower pulse discards the observation before it collects a single sample."""
-        coord = _make_obs_coord(
-            hvac_action="idle", fan_mode="auto", indoor_temp=70.0, outdoor_temp=50.0, fan_active=True
-        )
-        coord._abandon_observation = MagicMock(wraps=coord._abandon_observation)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs("test-hvac-stale-flag")
-
-        dt_mock = _make_dt_mock(_FAKE_NOW)
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_all_observations()
-
-        coord._abandon_observation.assert_not_called()
-        obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
-        assert obs_after is not None
-        assert len(obs_after.get("post_heat_samples", [])) == 1, (
-            "ground truth is idle — sampling should proceed normally despite the stale CA flag"
-        )
-
-    def test_post_heat_samples_normally_without_fan_interference_regression_guard(self):
-        """Regression guard: post-heat sampling must be unaffected when neither CA's
-        fan flag nor the live thermostat ground truth show any fan activity."""
-        coord = _make_obs_coord(hvac_action="idle", indoor_temp=70.0, outdoor_temp=50.0, fan_active=False)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs("test-hvac-post-heat-no-fan")
-
-        dt_mock = _make_dt_mock(_FAKE_NOW)
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_all_observations()
-
-        obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
-        assert obs_after is not None, "observation should not have been abandoned"
-        assert len(obs_after.get("post_heat_samples", [])) == 1, (
-            "post_heat_samples should append normally when there is no fan interference"
-        )
-
-    def test_post_heat_resumes_normally_after_pulse_clears_within_grace(self):
-        """A tolerated pulse that clears before the grace window elapses must let
-        sampling resume normally on the next poll — no stuck state."""
-        coord = _make_obs_coord(hvac_action="idle", fan_mode="auto", indoor_temp=70.0, outdoor_temp=50.0)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = self._make_post_heat_hvac_obs(
-            "test-hvac-pulse-cleared",
-            extra={"_fan_interference_since": datetime(2026, 4, 28, 11, 59, 0, tzinfo=UTC).isoformat()},
-        )
-
-        dt_mock = _make_dt_mock(_FAKE_NOW)
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_all_observations()
-
-        obs_after = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT)
-        assert obs_after is not None
-        assert len(obs_after.get("post_heat_samples", [])) == 1, (
-            "sampling should resume once the live ground truth clears, even if a prior "
-            "poll had started tracking a tolerated pulse"
-        )
-        assert "_fan_interference_since" not in obs_after, (
-            "the interference timestamp must be cleared once the pulse ends"
-        )
-
     def test_interval_constants_have_expected_values(self):
         """Confirm constant values match the plan spec."""
         assert THERMAL_PASSIVE_SAMPLE_INTERVAL_S == 300, (
             f"Expected THERMAL_PASSIVE_SAMPLE_INTERVAL_S=300, got {THERMAL_PASSIVE_SAMPLE_INTERVAL_S}"
-        )
-        assert THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S == 300, (
-            f"Expected THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S=300, got {THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S}"
         )
 
 
@@ -2499,7 +2251,7 @@ class TestHvacObservationLogging:
     These tests validate that the coordinator emits visible, parseable log lines at:
       1. HVAC action state-change detection (was_running / is_running)
       2. _start_hvac_observation entry (obs_type, prior obs list)
-      3. Pre-abandon in _check_hvac_stabilization timeout path (n_active, n_post, elapsed)
+      3. (retired, Issue #1512: the post-run stabilization pre-abandon log; runs commit at the off edge)
     """
 
     # ── helper: build a minimal thermostat-changed event ─────────────────────
@@ -2575,7 +2327,6 @@ class TestHvacObservationLogging:
 
         coord._pending_observations = {}
         coord._pending_thermal_event = None
-        coord._pre_heat_sample_buffer = []
         coord._last_outdoor_temp = 55.0
         coord._hvac_on_since = None
 
@@ -2675,79 +2426,6 @@ class TestHvacObservationLogging:
 
     # ── test 3: abandon log includes n_post, elapsed, reason ─────────────────
 
-    def test_hvac_observation_abandon_logs_n_post_and_elapsed(self):
-        """_check_hvac_stabilization timeout path emits INFO log with n_post and elapsed before abandon."""
-        coord = _make_obs_coord(hvac_action="idle", indoor_temp=72.0, outdoor_temp=55.0)
-
-        from datetime import timedelta
-
-        active_end = _FAKE_NOW - timedelta(minutes=60)  # 60 min elapsed → exceeds timeout
-        post_samples = [
-            {
-                "timestamp": _FAKE_NOW.isoformat(),
-                "indoor_temp_f": 72.0,
-                "outdoor_temp_f": 55.0,
-                "elapsed_minutes": float(i),
-            }
-            for i in range(3)  # 3 post-heat samples
-        ]
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = {
-            "obs_type": OBS_TYPE_HVAC_HEAT,
-            "obs_id": "test-abandon-hvac-1",
-            "start_time": (_FAKE_NOW - timedelta(minutes=90)).isoformat(),
-            "status": "monitoring",
-            "hvac_mode": "heat",
-            "session_mode": "heat",
-            "active_start": (_FAKE_NOW - timedelta(minutes=90)).isoformat(),
-            "active_end": active_end.isoformat(),
-            "_phase": "post_heat",
-            "active_samples": [],
-            "post_heat_samples": post_samples,
-            "pre_heat_samples": [],
-            "peak_indoor_f": 74.0,
-            "start_indoor_f": 70.0,
-            "end_indoor_f": None,
-            "stabilized_at": None,
-            "flags_at_start": {},
-            "schema_version": 1,
-        }
-
-        dt_mock = _make_dt_mock(now=_FAKE_NOW)
-        with (
-            patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock),
-            patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_log,
-        ):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_HEAT))
-
-        # Confirm the observation was abandoned
-        assert OBS_TYPE_HVAC_HEAT not in coord._pending_observations, (
-            "Expected hvac_heat obs to be abandoned after 60-min post-heat timeout"
-        )
-
-        # Collect all info calls
-        info_messages = []
-        for call in mock_log.info.call_args_list:
-            fmt = call[0][0]
-            args = call[0][1:]
-            try:
-                info_messages.append(fmt % args)
-            except Exception:
-                info_messages.append(fmt)
-
-        # Must see a diagnostic log BEFORE the abandon that includes n_post and elapsed
-        pre_abandon_logs = [m for m in info_messages if "n_post" in m or "post_heat" in m.lower()]
-        assert pre_abandon_logs, (
-            f"Expected a pre-abandon INFO log containing 'n_post' or 'post_heat'. Got info calls: {info_messages}"
-        )
-        combined = " ".join(pre_abandon_logs)
-        # n_post=3 should appear
-        assert "3" in combined, f"Expected n_post=3 to appear in pre-abandon log. Got: {combined}"
-
-
-# ---------------------------------------------------------------------------
-# TestHvacShortCycle (Issue #130, Phase B — fixes D14–D17)
-# ---------------------------------------------------------------------------
-
 
 class TestHvacShortCycle:
     """D14–D17: Allow short HVAC cycles (5–30 min) to commit observations.
@@ -2759,237 +2437,6 @@ class TestHvacShortCycle:
     """
 
     # ── shared helpers ────────────────────────────────────────────────────────
-
-    def _make_post_heat_obs(
-        self,
-        n_post: int,
-        peak_f: float = 72.0,
-        end_f: float = 71.0,
-        active_elapsed_minutes: int = 60,
-        now: datetime = _FAKE_NOW,
-    ) -> dict:
-        """Build a hvac_heat obs in post_heat phase with n_post samples.
-
-        Samples are spread across the last n_post minutes before *now*.
-        All temps equal end_f (stable decay), unless oscillating=True is used
-        via the caller.
-        """
-        active_end = datetime(
-            now.year,
-            now.month,
-            now.day,
-            now.hour,
-            max(0, now.minute - n_post),
-            now.second,
-            tzinfo=UTC,
-        )
-        samples = []
-        for i in range(n_post):
-            ts = datetime(
-                now.year,
-                now.month,
-                now.day,
-                now.hour,
-                max(0, now.minute - (n_post - 1 - i)),
-                now.second,
-                tzinfo=UTC,
-            )
-            samples.append(
-                {
-                    "timestamp": ts.isoformat(),
-                    "indoor_temp_f": end_f,
-                    "outdoor_temp_f": 50.0,
-                    "elapsed_minutes": float(active_elapsed_minutes + i),
-                }
-            )
-        return {
-            "obs_type": OBS_TYPE_HVAC_HEAT,
-            "obs_id": "test-short-cycle",
-            "start_time": _FAKE_NOW.isoformat(),
-            "active_start": active_end.isoformat(),
-            "active_end": active_end.isoformat(),
-            "status": "monitoring",
-            "_phase": "post_heat",
-            "active_samples": [],
-            "post_heat_samples": samples,
-            "peak_indoor_f": peak_f,
-            "end_indoor_f": end_f,
-            "flags_at_start": {},
-            "schema_version": 1,
-        }
-
-    def _make_oscillating_post_heat_obs(
-        self,
-        n_post: int = 4,
-        peak_f: float = 72.0,
-        now: datetime = _FAKE_NOW,
-    ) -> dict:
-        """Build post_heat obs with oscillating temps — variance > 0.3°F in last 5 min.
-
-        Temperatures alternate ±0.5°F around 71.5, so max-min = 1.0 > 0.3.
-        Currently this prevents stabilization and blocks commit.
-        After B2, OLS runs directly and commits if R² ok.
-        """
-        active_end = datetime(
-            now.year,
-            now.month,
-            now.day,
-            now.hour,
-            max(0, now.minute - n_post),
-            now.second,
-            tzinfo=UTC,
-        )
-        oscillating = [71.5, 72.0, 71.0, 71.5]
-        samples = []
-        for i in range(n_post):
-            ts = datetime(
-                now.year,
-                now.month,
-                now.day,
-                now.hour,
-                max(0, now.minute - (n_post - 1 - i)),
-                now.second,
-                tzinfo=UTC,
-            )
-            samples.append(
-                {
-                    "timestamp": ts.isoformat(),
-                    "indoor_temp_f": oscillating[i % len(oscillating)],
-                    "outdoor_temp_f": 50.0,
-                    "elapsed_minutes": float(60 + i),
-                }
-            )
-        return {
-            "obs_type": OBS_TYPE_HVAC_HEAT,
-            "obs_id": "test-short-cycle-osc",
-            "start_time": _FAKE_NOW.isoformat(),
-            "active_start": active_end.isoformat(),
-            "active_end": active_end.isoformat(),
-            "status": "monitoring",
-            "_phase": "post_heat",
-            "active_samples": [],
-            "post_heat_samples": samples,
-            "peak_indoor_f": peak_f,
-            "end_indoor_f": oscillating[-1],
-            "flags_at_start": {},
-            "schema_version": 1,
-        }
-
-    # ── B1 ────────────────────────────────────────────────────────────────────
-
-    def test_post_heat_min_samples_constant_is_4(self):
-        """D14: THERMAL_MIN_POST_HEAT_SAMPLES must equal 4 after the fix."""
-        from custom_components.climate_advisor.const import THERMAL_MIN_POST_HEAT_SAMPLES
-
-        assert THERMAL_MIN_POST_HEAT_SAMPLES == 4, (
-            f"Expected THERMAL_MIN_POST_HEAT_SAMPLES=4 (D14 fix), got {THERMAL_MIN_POST_HEAT_SAMPLES}"
-        )
-
-    # ── B2 ────────────────────────────────────────────────────────────────────
-
-    def test_post_heat_commits_at_4_samples(self):
-        """D14+D15: 4 post_heat_samples with sufficient decay triggers commit, not wait."""
-
-        coord = _make_obs_coord()
-        # Use exactly THERMAL_MIN_POST_HEAT_SAMPLES samples (should be 4 after fix)
-        obs = self._make_post_heat_obs(n_post=4, peak_f=72.0, end_f=71.0)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = obs
-
-        commit_called = []
-
-        async def _fake_commit(obs_type, force_grade=None):
-            commit_called.append(obs_type)
-            coord._pending_observations.pop(obs_type, None)
-
-        coord._commit_observation = _fake_commit
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_HEAT))
-
-        assert len(commit_called) == 1 and commit_called[0] == OBS_TYPE_HVAC_HEAT, (
-            "4 post_heat_samples with decay=1.0 > 0.3 should have been committed. "
-            f"commit_called={commit_called}, "
-            f"obs still in pending={OBS_TYPE_HVAC_HEAT in coord._pending_observations}"
-        )
-
-    def test_post_heat_abandons_at_3_samples_after_timeout(self):
-        """D15: 3 post_heat_samples + elapsed > 45 min → timeout abandon (not commit)."""
-        coord = _make_obs_coord()
-        # Only 3 samples, active_end set to 46 min ago so timeout fires
-        now = _FAKE_NOW
-        active_end = datetime(now.year, now.month, now.day, max(0, now.hour - 1), now.minute, now.second, tzinfo=UTC)
-        obs = {
-            "obs_type": OBS_TYPE_HVAC_HEAT,
-            "obs_id": "test-timeout-3",
-            "start_time": _FAKE_NOW.isoformat(),
-            "active_start": active_end.isoformat(),
-            "active_end": active_end.isoformat(),
-            "status": "monitoring",
-            "_phase": "post_heat",
-            "active_samples": [],
-            "post_heat_samples": [
-                {
-                    "timestamp": _FAKE_NOW.isoformat(),
-                    "indoor_temp_f": 71.0,
-                    "outdoor_temp_f": 50.0,
-                    "elapsed_minutes": float(i),
-                }
-                for i in range(3)
-            ],
-            "peak_indoor_f": 72.0,
-            "end_indoor_f": 71.0,
-            "flags_at_start": {},
-            "schema_version": 1,
-        }
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = obs
-
-        commit_called = []
-
-        async def _fake_commit(obs_type, force_grade=None):
-            commit_called.append(obs_type)
-            coord._pending_observations.pop(obs_type, None)
-
-        coord._commit_observation = _fake_commit
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_HEAT))
-
-        assert OBS_TYPE_HVAC_HEAT not in coord._pending_observations, (
-            "3 samples + 60 min timeout should abandon the observation"
-        )
-        assert len(commit_called) == 0, "Timeout path should abandon (not commit). commit_called={commit_called}"
-
-    def test_stabilization_not_required_for_commit(self):
-        """D15: Oscillating post_heat temps must NOT block commit when min samples reached.
-
-        Currently (pre-B2): variance > 0.3°F → code returns without committing.
-        After B2: OLS runs directly; stabilization wait removed.
-        """
-        coord = _make_obs_coord()
-        obs = self._make_oscillating_post_heat_obs(n_post=4, peak_f=72.0)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = obs
-
-        commit_called = []
-
-        async def _fake_commit(obs_type, force_grade=None):
-            commit_called.append(obs_type)
-            coord._pending_observations.pop(obs_type, None)
-
-        coord._commit_observation = _fake_commit
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_HEAT))
-
-        # After B2: commit should be called (stabilization variance no longer required)
-        assert len(commit_called) == 1, (
-            "Oscillating post_heat temps must NOT block commit after stabilization gate removed. "
-            f"commit_called={commit_called}"
-        )
-
-    # ── B3 ────────────────────────────────────────────────────────────────────
 
     def test_outdoor_none_uses_last_known_within_30min(self):
         """D16: When _last_outdoor_temp=None, use _last_known_outdoor_f if < 30 min old."""
@@ -3488,118 +2935,6 @@ class TestSinglePointKActive:
         )
 
     # ── live coordinator n_post gate (Phase D) ─────────────────────────────
-
-    def _make_stabilization_obs(
-        self,
-        n_post: int,
-        peak_f: float = 69.0,
-        end_f: float = 68.5,
-    ) -> dict:
-        """Build a minimal HVAC_HEAT obs in post_heat phase with n_post post samples."""
-        now = _FAKE_NOW
-        active_end = datetime(now.year, now.month, now.day, now.hour, max(0, now.minute - n_post - 2), tzinfo=UTC)
-        post_samples = [
-            {
-                "timestamp": now.isoformat(),
-                "indoor_temp_f": peak_f - i * 0.1,
-                "outdoor_temp_f": 54.0,
-                "elapsed_minutes": float(i * 5),
-            }
-            for i in range(n_post)
-        ]
-        return {
-            "obs_type": OBS_TYPE_HVAC_HEAT,
-            "obs_id": "test-phase-d-n-post",
-            "start_time": active_end.isoformat(),
-            "active_start": active_end.isoformat(),
-            "active_end": active_end.isoformat(),
-            "status": "monitoring",
-            "_phase": "post_heat",
-            "active_samples": [
-                {
-                    "timestamp": active_end.isoformat(),
-                    "indoor_temp_f": 68.0,
-                    "outdoor_temp_f": 54.0,
-                    "elapsed_minutes": 0.0,
-                }
-            ],
-            "post_heat_samples": post_samples,
-            "peak_indoor_f": peak_f,
-            "start_indoor_f": 68.0,
-            "end_indoor_f": end_f,
-            "session_minutes": 10.0,
-            "flags_at_start": {},
-            "schema_version": 1,
-        }
-
-    def test_live_n_post_1_commits_with_proxy(self):
-        """D24: n_post=1 + k_vent_window proxy available → _check_hvac_stabilization commits.
-
-        Without proxy: n_post=1 < THERMAL_MIN_POST_HEAT_SAMPLES (4) → early return (no commit).
-        With proxy: min drops to 1 → single-post sample clears the gate → commit fires.
-        """
-        coord = _make_obs_coord()
-
-        # Seed proxy: k_vent_window < 0 → proxy available
-        coord.learning._state = MagicMock()
-        coord.learning._state.thermal_model_cache = {"k_vent_window": -0.14}
-
-        obs = self._make_stabilization_obs(n_post=1, peak_f=69.0, end_f=68.5)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = obs
-
-        commit_called = []
-
-        async def _fake_commit(obs_type, force_grade=None):
-            commit_called.append(obs_type)
-            coord._pending_observations.pop(obs_type, None)
-
-        coord._commit_observation = _fake_commit
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_HEAT))
-
-        assert len(commit_called) == 1 and commit_called[0] == OBS_TYPE_HVAC_HEAT, (
-            "D24: n_post=1 with k_vent_window=-0.14 proxy should commit via _check_hvac_stabilization, "
-            f"but commit_called={commit_called}"
-        )
-
-    def test_live_n_post_0_rejects_even_with_proxy(self):
-        """D24: n_post=0 (empty post_heat_samples) → abandoned even when proxy is available.
-
-        n_post=0 means no HVAC-off timestamp exists — single-point can't compute elapsed.
-        The proxy drops the minimum to 1, not 0, so this must still be rejected.
-        """
-        coord = _make_obs_coord()
-
-        # Seed proxy: k_vent_window < 0 → proxy available
-        coord.learning._state = MagicMock()
-        coord.learning._state.thermal_model_cache = {"k_vent_window": -0.14}
-
-        obs = self._make_stabilization_obs(n_post=0, peak_f=69.0, end_f=68.5)
-        coord._pending_observations[OBS_TYPE_HVAC_HEAT] = obs
-
-        commit_called = []
-
-        async def _fake_commit(obs_type, force_grade=None):
-            commit_called.append(obs_type)
-            coord._pending_observations.pop(obs_type, None)
-
-        coord._commit_observation = _fake_commit
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_HEAT))
-
-        assert len(commit_called) == 0, (
-            "D24: n_post=0 should never commit — no HVAC-off timestamp for single-point elapsed. "
-            f"commit_called={commit_called}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# TestSwingComputation — thermostat swing auto-detection (Issue #131)
-# ---------------------------------------------------------------------------
 
 
 class TestSwingComputation:

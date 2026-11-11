@@ -42,7 +42,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import log_capture, prediction_engines, v4_shadow, window_span
+from . import hvac_rate_fit, log_capture, prediction_engines, v4_shadow, window_span
 from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
@@ -219,8 +219,14 @@ from .const import (
     REJECT_AC_NO_SETPOINT_BREACH,
     REJECT_AC_SETPOINT_OUT_OF_RANGE,
     REJECT_AC_SETPOINT_UNSTABLE,
+    REJECT_FAN_ACTIVATED,
+    REJECT_HVAC_MODE_SWITCH,
+    REJECT_HVAC_RUN_TOO_SHORT,
+    REJECT_HVAC_SIGNAL_BELOW_RESOLUTION,
     REJECT_INDOOR_UNAVAILABLE,
+    REJECT_NEW_SESSION,
     REJECT_NO_INTERIOR_PEAK,
+    REJECT_NO_K_PASSIVE,
     REJECT_OLS_BAD_FIT,
     REJECT_OLS_BOUNDS,
     REJECT_OLS_WRONG_SIGN,
@@ -241,25 +247,21 @@ from .const import (
     THERMAL_CHART_LOG_PASSIVE_MIN_DT_F,
     THERMAL_CHART_LOG_PASSIVE_MIN_MINUTES,
     THERMAL_CHART_LOG_VENT_MIN_MINUTES,
+    THERMAL_COAST_MAX_S,
     THERMAL_COLD_BUCKET_LIMIT_F,
     THERMAL_DUAL_AGREE_REL,
     THERMAL_DUAL_OLS_GOOD,
     THERMAL_DUAL_OLS_OK,
-    THERMAL_FAN_PULSE_GRACE_MINUTES,
-    THERMAL_HVAC_MIN_DECAY_F,
     THERMAL_K_PASSIVE_MAX,
     THERMAL_K_PASSIVE_MIN,
     THERMAL_MAX_ACTIVE_SAMPLES,
     THERMAL_MAX_OBS_SAMPLES,
-    THERMAL_MAX_POST_HEAT_SAMPLES,
     THERMAL_MILD_BUCKET_LIMIT_F,
     THERMAL_MIN_DECAY_SAMPLES,
-    THERMAL_MIN_POST_HEAT_SAMPLES,
     THERMAL_MIN_R_SQUARED,
     THERMAL_PASSIVE_MIN_DELTA_F,
     THERMAL_PASSIVE_MIN_SAMPLES,
     THERMAL_PASSIVE_SAMPLE_INTERVAL_S,
-    THERMAL_POST_HEAT_TIMEOUT_MINUTES,
     THERMAL_POST_WINDOW_CLOSE_SETTLE_MINUTES,
     THERMAL_ROLLING_MAX_WINDOW_MINUTES,
     THERMAL_ROLLING_MIN_DELTA_T_F,
@@ -664,7 +666,10 @@ def _ventilation_row_states(entries: list[dict]) -> list[dict[str, bool]]:
     (Issue #331) fall back to the legacy ``fan`` flag. The legacy ``fan`` flag, and ``nat_vent_active``, stay True while
     a session is paused between fan cycles: such a row is neither windows-only nor fan. Settle times:
     ``THERMAL_VENT_POST_FAN_SETTLE_MINUTES`` after the fan stops, ``THERMAL_POST_WINDOW_CLOSE_SETTLE_MINUTES`` after
-    the windows close.
+    the windows close. ``settling_hvac`` (Issue #1512) is True on a row that is NOT itself heating/cooling and falls
+    within ``THERMAL_COAST_MAX_S`` (the coast tracker's own window) after the last heating/cooling row: the furnace or
+    compressor has stopped but the house is still coasting, so the row is not a closed-house stretch. A row that is
+    itself heating or cooling is never ``settling_hvac`` (otherwise every active interval would look settling).
     """
 
     def _flag(value: Any) -> bool:
@@ -677,6 +682,7 @@ def _ventilation_row_states(entries: list[dict]) -> list[dict[str, bool]]:
     out: list[dict[str, bool]] = []
     last_running: datetime | None = None
     last_close: datetime | None = None
+    last_active: datetime | None = None
     prev_open: bool | None = None
     for entry in entries:
         has_physical = "fan_running" in entry
@@ -704,18 +710,40 @@ def _ventilation_row_states(entries: list[dict]) -> list[dict[str, bool]]:
             and last_close is not None
             and (ts - last_close).total_seconds() < THERMAL_POST_WINDOW_CLOSE_SETTLE_MINUTES * 60
         )
+        _hvac_txt = str(entry.get("hvac") or "").lower()
+        hvac_active = "heat" in _hvac_txt or "cool" in _hvac_txt
+        settling_hvac = (
+            not hvac_active
+            and ts is not None
+            and last_active is not None
+            and (ts - last_active).total_seconds() < THERMAL_COAST_MAX_S
+        )
         out.append(
             {
                 "running": running,
                 "paused": armed and not running,
                 "settling_fan": settling_fan,
                 "settling_close": settling_close,
+                "settling_hvac": settling_hvac,
             }
         )
         if running and ts is not None:
             last_running = ts
+        if hvac_active and ts is not None:
+            last_active = ts
         prev_open = win_open
     return out
+
+
+def _run_extremum(obs_type: str, current: float | None, reading: float | None) -> float | None:
+    """The running extremum of an HVAC run's indoor readings: the max for heat, the min for cool (Issue #1512).
+
+    The old tracker kept the max for both, so a cooling run's "peak" was its starting temperature."""
+    if reading is None:
+        return current
+    if current is None:
+        return reading
+    return min(current, reading) if obs_type == OBS_TYPE_HVAC_COOL else max(current, reading)
 
 
 def _swing_debug_for_display(summary: dict[str, Any], unit: str) -> dict[str, Any]:
@@ -1280,7 +1308,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pending_thermal_event: dict | None = None
         self._pending_observations: dict = {}  # keyed by obs_type string
         self._rejection_log: dict[str, list[dict]] = {}  # keyed by obs_type; capped at _REJECTION_LOG_CAP
-        self._pre_heat_sample_buffer: list[dict] = []  # rolling pre-heat window, max 15
         self._startup_hvac_initialized: bool = False  # Issue #96: prevents repeated late-start init
         self._untracked_fan_active: bool = False  # Issue #331 follow-up: entry/exit dedup for fan_running_untracked
         self._fan_state_entity_unavailable_warned: bool = False  # Issue #359: WHF Type 2 fallback warning dedup
@@ -3015,9 +3042,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         exact same way the real turn-off path does — by calling
         ``_end_hvac_active_phase()`` for both HVAC observation types (mirrors
         the ``was_running and not is_running`` branch in
-        ``_async_thermostat_changed``). That call transitions ``active`` ->
-        ``post_heat`` (not an outright abandon) so the post-heat decay window
-        still runs and can commit normally — it is a no-op if the observation
+        ``_async_thermostat_changed``). That call commits (or rejects with a code) the run
+        at this edge, using the indoor reading now — the glide is the off edge for
+        the mode being left (Issue #1512). It is a no-op if the observation
         was already ended/abandoned elsewhere (e.g. the heat<->cool mid-session
         switch branch, which abandons explicitly before calling this). Gliding
         back INTO heat/cool later does not resume anything here — a fresh
@@ -4111,6 +4138,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         _cache.get("k_vent_window"),
                         _cache.get("k_vent_fan"),
                     )
+                # Issue #1512: the duty-balance fit, once per startup (no persisted relearn flag: it is a pure refit)
+                self._maybe_run_periodic_duty_balance_fit()
                 if not self._solar_phase_backfill:
                     self._run_solar_phase_chart_log_fit(backfill=True)
                     self._solar_phase_backfill = True
@@ -5008,15 +5037,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         thermostat_fan_only_runtime_today = self.get_thermostat_fan_only_runtime_today()
 
         # --- Thermal observation pipeline sampling ---
-        self._update_pre_heat_buffer()
         self._sample_all_observations()
         if hasattr(self, "_pending_observations") and self._pending_observations:
             _LOGGER.info(
                 "Thermal pipeline: %d pending observations active",
                 len(self._pending_observations),
             )
-        for _hvac_obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
-            await self._check_hvac_stabilization(_hvac_obs_type)
 
         # --- Temperatures for coordinator.data (sensor entities + AI context) ---
         # Issue #895: single resolver call yields both the comfort-facing value and
@@ -10709,7 +10735,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     new_action,
                 )
                 for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
-                    self._abandon_observation(_hvac_ot, "heat_cool mode switch mid-session")
+                    self._abandon_observation(
+                        _hvac_ot, "heat_cool mode switch mid-session", reason_code=REJECT_HVAC_MODE_SWITCH
+                    )
                 new_session_mode = "heat" if new_action == "heating" else "cool"
                 self._glide_hvac_session_mode(new_session_mode)
                 await self._start_hvac_observation(new_session_mode)
@@ -11223,10 +11251,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     elif len(_active_samples) < _THERMAL_MAX_ACTIVE:
                         _active_samples.append(_evt_sample)
                         _active_obs["last_event_sample_time"] = dt_util.now().isoformat()
-                        _ind = _evt_sample.get("indoor_temp_f")
-                        _cur_peak = _active_obs.get("peak_indoor_f")
-                        if _ind and (_cur_peak is None or _ind > _cur_peak):
-                            _active_obs["peak_indoor_f"] = _ind
+                        _active_obs["peak_indoor_f"] = _run_extremum(
+                            _active_obs_type, _active_obs.get("peak_indoor_f"), _evt_sample.get("indoor_temp_f")
+                        )
                         _LOGGER.debug(
                             "Event-driven HVAC sample added: type=%s n_active=%d elapsed=%.1fmin",
                             _active_obs_type,
@@ -13217,30 +13244,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "elapsed_minutes": elapsed_minutes,
         }
 
-    def _update_pre_heat_buffer(self) -> None:
-        """Append current reading to the rolling pre-heat buffer (max 15 entries).
-
-        Called every update cycle when no active thermal event is running.
-        """
-        if self._pending_thermal_event is not None:
-            return
-        from .const import THERMAL_PRE_HEAT_BUFFER_MINUTES
-
-        now = dt_util.now()
-        sample = self._get_current_sample(0.0)
-        # Prune first so a stale buffer cannot survive an outage and be copied into a
-        # post-recovery session (Issue #1035).
-        cutoff = (now - timedelta(minutes=THERMAL_PRE_HEAT_BUFFER_MINUTES)).isoformat()
-        self._pre_heat_sample_buffer = [s for s in self._pre_heat_sample_buffer if s["timestamp"] >= cutoff]
-        if sample is None:
-            _LOGGER.debug("Pre-heat sample skipped: reason=indoor_unavailable")
-        else:
-            sample["timestamp"] = now.isoformat()
-            self._pre_heat_sample_buffer.append(sample)
-        # Hard cap at 15
-        if len(self._pre_heat_sample_buffer) > 15:
-            self._pre_heat_sample_buffer = self._pre_heat_sample_buffer[-15:]
-
     # ------------------------------------------------------------------
     # Thermal observation pipeline v3 (multi-type obs)
     # ------------------------------------------------------------------
@@ -13512,7 +13515,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._commit_observation_if_sufficient(_contaminated, "hvac_started")
 
         if obs_type in self._pending_observations:
-            self._abandon_observation(obs_type, "new HVAC session started")
+            # Issue #1512: a finished run is committed at its off edge, so what is still pending here is a run
+            # that never saw an off edge; it is rejected with its own code.
+            self._abandon_observation(obs_type, "new HVAC session started", reason_code=REJECT_NEW_SESSION)
 
         # Issue #1035: one sample read (Issue #895: .primary_value via _get_current_sample).
         # A session that starts while the indoor sensor is unavailable has no valid
@@ -13539,6 +13544,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "elapsed_minutes": 0,
                     "sf_range": 0.0,
                     "indoor_direction": "flat",
+                    "signal_f": None,
+                    "minutes": 0.0,
+                    "k_passive_source": None,
                     "timestamp": dt_util.now().isoformat(),
                 },
             )
@@ -13552,21 +13560,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
         now = dt_util.now()
-        pre_samples = []
-        for s in self._pre_heat_sample_buffer:
-            try:
-                ts = dt_util.parse_datetime(s["timestamp"])
-                elapsed = (now - ts).total_seconds() / 60.0 if ts else 0.0
-            except Exception:
-                elapsed = 0.0
-            pre_samples.append(
-                {
-                    "timestamp": s["timestamp"],
-                    "indoor_temp_f": s["indoor_temp_f"],
-                    "outdoor_temp_f": s["outdoor_temp_f"],
-                    "elapsed_minutes": -elapsed,
-                }
-            )
 
         indoor = first_sample["indoor_temp_f"]
         import uuid as _uuid_mod
@@ -13577,8 +13570,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "start_time": now.isoformat(),
             "status": "monitoring",
             # NOTE: HVAC obs intentionally omit 'samples' key.  Non-HVAC (passive, fan,
-            # vent, solar) use 'samples'.  HVAC obs use 'active_samples' (active phase)
-            # and 'post_heat_samples' (post-heat phase).  Adding a 'samples': [] here
+            # vent, solar) use 'samples'.  HVAC obs use 'active_samples' (the run itself; the run is
+            # committed at the off edge, Issue #1512, so there is no post-run phase).  Adding a 'samples': [] here
             # would shadow active_samples in every fallback read that uses
             # obs.get('samples', obs.get('active_samples', [])), causing n=0 in
             # rejection logs and discarding all HVAC obs on restart. (Bug 1 fix)
@@ -13591,10 +13584,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "session_mode": session_mode,
             "active_start": now.isoformat(),
             "active_end": None,
-            "stabilized_at": None,
-            "pre_heat_samples": pre_samples,
             "active_samples": [],
-            "post_heat_samples": [],
             "start_indoor_f": indoor,
             "end_indoor_f": None,
             "peak_indoor_f": indoor,
@@ -13655,18 +13645,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         now = dt_util.now()
 
-        # Issue #1009: live ground-truth read of the thermostat's own fan state, hoisted
-        # here so both section A's post_heat fan-interference guard and section B's trigger
-        # evaluation (below) share one read instead of two. Reuses the same signal
-        # _reconcile_fan_physical_drift() already trusts for this archetype
-        # (automation.py's FanDriftInputs derivation) rather than the internal
-        # ae._fan_active/_fan_on_since bookkeeping flags, which can lag physical reality by
-        # up to ~10 minutes for FAN_MODE_HVAC (2 backstop ticks, 5 min apart, before
-        # self-correcting) — too slow to gate a timing-sensitive per-poll decision.
+        # Live HVAC action of the thermostat, read once for section B's trigger evaluation. (Issue #1512: the
+        # post-run fan-pulse grace that also used this read is gone; a run is committed at its off edge, so there
+        # is no post-run window for a blower pulse to contaminate.)
         _cs = self.hass.states.get(self.config["climate_entity"])
         _hvac_action_str = _cs.attributes.get("hvac_action", "").lower() if _cs else ""
-        _fan_mode_str = _cs.attributes.get("fan_mode", "") if _cs else ""
-        _thermostat_fan_pulse_now = is_thermostat_fan_physically_active(_fan_mode_str, _hvac_action_str)
 
         # A. Sample all active observations
         for obs_type, obs in list(self._pending_observations.items()):
@@ -13677,7 +13660,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 continue
 
             if obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
-                phase = obs.get("_phase", "active")
                 active_start_str = obs.get("active_start")
                 try:
                     active_start = dt_util.parse_datetime(active_start_str) if active_start_str else now
@@ -13688,64 +13670,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 sample = self._get_current_sample(elapsed)
                 if sample is None:
                     continue
-                if phase == "active":
-                    samples = obs["active_samples"]
-                    if len(samples) < THERMAL_MAX_ACTIVE_SAMPLES:
-                        samples.append(sample)
-                    cur_peak = obs.get("peak_indoor_f")
-                    if indoor and (cur_peak is None or indoor > cur_peak):
-                        obs["peak_indoor_f"] = indoor
-                else:  # post_heat
-                    # Issue #986: mirror the fan-interference guard passive_decay/solar_gain
-                    # already have (below, "fan_activated") — a CA fan-only cycle overlapping
-                    # the post-heat decay window would otherwise silently contaminate the
-                    # plateau-guard delta and the eventual decay-rate fit with fan-driven
-                    # temperature movement.
-                    #
-                    # Issue #1009: a real WHF/nat-vent session is long-running and intentional
-                    # — abandon immediately, unchanged. But a bare thermostat-blower pulse
-                    # (e.g. a few-second post-compressor coil-clear cycle, very common right
-                    # at this exact active->post_heat boundary) was being treated identically
-                    # via the stale ae._fan_active flag, discarding every single hvac_cool/heat
-                    # observation on affected thermostats before it ever collected a sample.
-                    # Use the live ground-truth read (_thermostat_fan_pulse_now, hoisted above)
-                    # and tolerate it for up to THERMAL_FAN_PULSE_GRACE_MINUTES — short enough
-                    # that skipping samples during it can't meaningfully bias a decay fit
-                    # measured over tens of minutes, long enough to cover an ordinary purge
-                    # cycle. Only abandon once the live read shows the fan still running at or
-                    # beyond the grace threshold (genuinely sustained contamination, including
-                    # a CA-commanded scheduled circulation run — which also updates this same
-                    # thermostat attribute for this archetype, so ground truth still catches
-                    # it).
-                    if ae._natural_vent_active:
-                        self._abandon_observation(obs_type, "fan_activated")
-                        continue
-                    if _thermostat_fan_pulse_now:
-                        _since_str = obs.get("_fan_interference_since")
-                        if _since_str:
-                            try:
-                                _since = dt_util.parse_datetime(_since_str) or now
-                            except Exception:
-                                _since = now
-                        else:
-                            _since = now
-                            obs["_fan_interference_since"] = now.isoformat()
-                        _fan_elapsed_s = (now - _since).total_seconds()
-                        if _fan_elapsed_s / 60.0 >= THERMAL_FAN_PULSE_GRACE_MINUTES:
-                            self._abandon_observation(obs_type, "fan_activated")
-                            continue
-                        _LOGGER.info(
-                            "Post-heat fan pulse tolerated: obs_id=%s elapsed=%.1fs grace=%dmin"
-                            " — sample skipped, observation continues",
-                            obs.get("obs_id", "?"),
-                            _fan_elapsed_s,
-                            THERMAL_FAN_PULSE_GRACE_MINUTES,
-                        )
-                        continue
-                    obs.pop("_fan_interference_since", None)
-                    samples = obs["post_heat_samples"]
-                    if len(samples) < THERMAL_MAX_POST_HEAT_SAMPLES:
-                        samples.append(sample)
+                samples = obs["active_samples"]
+                if len(samples) < THERMAL_MAX_ACTIVE_SAMPLES:
+                    samples.append(sample)
+                # Issue #1512: the run extremum, mode-aware (max for heat, min for cool; was max for both).
+                obs["peak_indoor_f"] = _run_extremum(obs_type, obs.get("peak_indoor_f"), indoor)
             else:
                 # passive/fan/vent/solar: append to samples list
                 elapsed = 0.0
@@ -13863,7 +13792,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 continue
 
             if obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
-                # HVAC stabilization is handled by _check_hvac_stabilization
+                # An HVAC run is committed (or rejected with a code) at its off edge, Issue #1512
                 continue
 
             samples_list = obs.get("samples", [])
@@ -13880,7 +13809,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._abandon_observation(obs_type, "sensor_opened")
                 elif _fan_active:
                     self._run_passive_chart_log_fit(backfill=False)
-                    self._abandon_observation(obs_type, "fan_activated")
+                    self._abandon_observation(obs_type, "fan_activated", reason_code=REJECT_FAN_ACTIVATED)
                 elif indoor is not None and outdoor is not None and abs(indoor - outdoor) < THERMAL_PASSIVE_MIN_DELTA_F:
                     recent_temps = [s["indoor_temp_f"] for s in samples_list[-5:]] if len(samples_list) >= 5 else []
                     if recent_temps and (max(recent_temps) - min(recent_temps)) < 0.1:
@@ -13918,7 +13847,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 elif _sensor_open:
                     self._abandon_observation(obs_type, "sensor_opened")
                 elif _fan_active:
-                    self._abandon_observation(obs_type, "fan_activated")
+                    self._abandon_observation(obs_type, "fan_activated", reason_code=REJECT_FAN_ACTIVATED)
                 elif not (THERMAL_SOLAR_DAYTIME_START_H <= now.hour < THERMAL_SOLAR_DAYTIME_END_H):
                     self._abandon_observation(obs_type, "outside_daytime")
                 elif len(samples_list) >= 5:
@@ -14150,7 +14079,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             fan_off = not vstate["running"] and not vstate["paused"]
             win_closed = not windows_open
-            settled = not vstate["settling_fan"] and not vstate["settling_close"]
+            settled = not vstate["settling_fan"] and not vstate["settling_close"] and not vstate["settling_hvac"]
 
             if not hvac_idle or not fan_off or not win_closed or not settled:
                 _flush()
@@ -14363,7 +14292,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             hvac = entry.get("hvac", "")
             windows_open = entry.get("windows_open")
             fan_on = vstate["running"]
-            unsettled = vstate["paused"] or (not fan_state and vstate["settling_fan"])
+            unsettled = vstate["paused"] or (not fan_state and (vstate["settling_fan"] or vstate["settling_hvac"]))
 
             if indoor is None or outdoor is None:
                 _flush()
@@ -14653,7 +14582,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Regime: HVAC off, fan off, windows closed
             _hvac_off = hvac in ("off", "idle", "")
             _fan_off = fan in ("off", "false", "") and not vstate["running"] and not vstate["paused"]
-            _settled = not vstate["settling_fan"] and not vstate["settling_close"]
+            _settled = not vstate["settling_fan"] and not vstate["settling_close"] and not vstate["settling_hvac"]
             if not (_hvac_off and _fan_off and not windows_open and _settled):
                 _flush_solar()
                 continue
@@ -14796,6 +14725,56 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         self._solar_phase_ac_backfill = True
 
+    def _run_duty_balance_chart_log_fit(self, days: int = 30) -> None:
+        """Fit k_passive / k_active_heat / k_active_cool by duty balance over the last ``days`` of chart_log and
+        record the result (Issue #1512): the learner for homes with no closed-house rate and for short cycles.
+
+        Closed-house, settled, night rows only: the row states (``_ventilation_row_states``, incl. ``settling_hvac``)
+        and the solar-hour rule are handed to the pure fit. Nothing is recorded when the data cannot identify it.
+        """
+        chart_log = getattr(self, "_chart_log", None)
+        if chart_log is None or not hasattr(self, "learning"):
+            return
+        entries = list(getattr(chart_log, "_entries", []))
+        if not entries:
+            return
+        cutoff = dt_util.now() - timedelta(days=days)
+        rows: list[dict] = []
+        for entry in entries:
+            try:
+                ts = datetime.fromisoformat(entry.get("ts", ""))
+            except ValueError, TypeError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if ts >= cutoff:
+                rows.append(entry)
+        if not rows:
+            return
+        states = _ventilation_row_states(rows)
+        fit = hvac_rate_fit.fit_duty_balance(rows, states, is_solar_hour=self._is_solar_hour)
+        if fit is None:
+            _LOGGER.debug("chart_log duty balance: no identifiable fit over %d rows (%d days)", len(rows), days)
+            return
+        n = self.learning.record_duty_balance_fit(fit)
+        _LOGGER.info(
+            "chart_log duty balance: recorded %s observations (k_p=%s heat=%s cool=%s n=%s r2=%s)",
+            n,
+            fit.get("k_passive"),
+            fit.get("k_active_heat"),
+            fit.get("k_active_cool"),
+            fit.get("n_intervals"),
+            fit.get("r_squared"),
+        )
+
+    def _maybe_run_periodic_duty_balance_fit(self) -> None:
+        """Run the duty-balance fit at most once per calendar day, with the periodic chart_log fits (Issue #1512)."""
+        _today = dt_util.now().date()
+        if getattr(self, "_last_duty_balance_fit_date", None) == _today:
+            return
+        self._last_duty_balance_fit_date = _today
+        self._run_duty_balance_chart_log_fit()
+
     def _maybe_run_periodic_solar_phase_fit(self) -> None:
         """Run the incremental daily solar phase re-fit if due (Issue #310/#312).
 
@@ -14807,6 +14786,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         No-ops until the initial backfill has been run at least once
         (_solar_phase_backfill must be True).
         """
+        self._maybe_run_periodic_duty_balance_fit()
         if not self._solar_phase_backfill:
             return
         _today = dt_util.now().date()
@@ -14839,143 +14819,155 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pending_observations[obs_type] = obs
         _LOGGER.debug("Thermal decay observation started: obs_id=%s type=%s", obs["obs_id"], obs_type)
 
+    def _closed_house_rate(self) -> tuple[float | None, str]:
+        """The closed-house leak rate the HVAC run-edge estimator subtracts, and where it came from (Issue #1512).
+
+        Order: (1) the decisions' model (``control_thermal_model``: v4's -a_o on a v4 zone, v3's k_passive on a v3 zone)
+        when it is a real leak rate (< 0) -> the primary engine id; (2) the v3 cache's ``k_passive`` when < 0 -> "v3";
+        (3) ``(None, "none")``: the run is rejected with ``REJECT_NO_K_PASSIVE``; the duty-balance fit covers the home.
+        Never the window-open rate (k_vent_window): that is not a closed-house rate.
+        """
+        try:
+            base = dict(getattr(self, "_thermal_model", None) or {})
+            model = self.control_thermal_model(base) or {}
+            k_model = model.get("k_passive")
+            if isinstance(k_model, int | float) and not isinstance(k_model, bool) and k_model < 0:
+                return float(k_model), str(prediction_engines.primary_id(self.config))
+        except Exception:  # noqa: BLE001 - a rate lookup never breaks the off-edge handler
+            _LOGGER.debug("_closed_house_rate: control model lookup failed", exc_info=True)
+        cache = getattr(getattr(self.learning, "_state", None), "thermal_model_cache", None)
+        k_v3 = cache.get("k_passive") if isinstance(cache, dict) else None
+        if isinstance(k_v3, int | float) and not isinstance(k_v3, bool) and k_v3 < 0:
+            return float(k_v3), ENGINE_V3
+        return None, "none"
+
     def _end_hvac_active_phase(self, obs_type: str) -> None:
-        """Transition HVAC observation active → post_heat when HVAC action stops."""
+        """Commit (or reject with a code) an HVAC run at its off edge (Issue #1512).
+
+        The off reading is the final active sample: the rate is learned from the run itself (heat or cool, the same
+        arithmetic), so whatever the room does after the equipment stops (furnace coast, AC rebound) can never
+        enter it. The pending observation is removed either way. A no-op if there is no active observation.
+        """
         self._ensure_pending_observations()
         obs = self._pending_observations.get(obs_type)
         if obs is None or obs.get("_phase") != "active":
             return
         now = dt_util.now()
+        self._pending_observations.pop(obs_type, None)
+        if not self.config.get("learning_enabled", True) or not hasattr(self, "learning"):
+            return
 
-        # Capture indoor temp at the exact HVAC-off moment as the active phase's true final sample
-        # (the swing is sampled separately at the on/off edges, Issue #1234).
-        # Issue #895: .primary_value, not .value — see _get_current_sample()'s docstring for why
-        # thermal-learning must never see the sleep-window sensor swap.
-        _final_indoor = self._get_indoor_temp_with_provenance().primary_value
-        if _final_indoor is not None:
-            try:
-                _elapsed = (
-                    now - dt_util.parse_datetime(obs.get("active_start", now.isoformat()))
-                ).total_seconds() / 60.0
-            except Exception:
-                _elapsed = 0.0
-            active_samples = obs.get("active_samples", [])
-            _end_sample = self._get_current_sample(_elapsed)
-            if _end_sample is not None and len(active_samples) < THERMAL_MAX_ACTIVE_SAMPLES:
-                active_samples.append(_end_sample)
-            _cur_peak = obs.get("peak_indoor_f")
-            if obs_type == OBS_TYPE_HVAC_COOL:
-                # For cooling, peak is the minimum (lowest indoor temp reached)
-                if _cur_peak is None or _final_indoor < _cur_peak:
-                    obs["peak_indoor_f"] = _final_indoor
-            else:
-                # For heating (and any other type), peak is the maximum
-                if _cur_peak is None or _final_indoor > _cur_peak:
-                    obs["peak_indoor_f"] = _final_indoor
-
-        obs["_phase"] = "post_heat"
-        obs["active_end"] = now.isoformat()
-
+        mode = "cool" if obs_type == OBS_TYPE_HVAC_COOL else "heat"
         active_start_str = obs.get("active_start")
         try:
             active_start = dt_util.parse_datetime(active_start_str) if active_start_str else now
         except Exception:
             active_start = now
-        obs["session_minutes"] = (now - active_start).total_seconds() / 60.0
+        minutes = (now - (active_start or now)).total_seconds() / 60.0
 
+        # The indoor reading AT the off edge (the final active sample); never a later reading.
+        # Issue #895: .primary_value, not .value — see _get_current_sample()'s docstring.
+        off_f = self._get_indoor_temp_with_provenance().primary_value
+        active_samples = obs.get("active_samples", [])
+        if off_f is not None:
+            end_sample = self._get_current_sample(minutes)
+            if end_sample is not None and len(active_samples) < THERMAL_MAX_ACTIVE_SAMPLES:
+                active_samples.append(end_sample)
+            obs["peak_indoor_f"] = _run_extremum(obs_type, obs.get("peak_indoor_f"), off_f)
+        start_f = obs.get("start_indoor_f")
+        k_p, k_p_source = self._closed_house_rate()
+        cache = getattr(getattr(self.learning, "_state", None), "thermal_model_cache", None)
+        res = cache.get(f"swing_{mode}_resolution_f") if isinstance(cache, dict) else None
+        resolution_f = float(res) if isinstance(res, int | float) and not isinstance(res, bool) and res > 0 else None
+        deltas = [
+            s["indoor_temp_f"] - s["outdoor_temp_f"]
+            for s in active_samples
+            if s.get("indoor_temp_f") is not None and s.get("outdoor_temp_f") is not None
+        ]
+        outs = [s["outdoor_temp_f"] for s in active_samples if s.get("outdoor_temp_f") is not None]
+        signal_f = abs(off_f - start_f) if off_f is not None and start_f is not None else None
+
+        if off_f is None or start_f is None:
+            self._reject_hvac_run(obs_type, obs, REJECT_INDOOR_UNAVAILABLE, minutes, signal_f, k_p_source)
+            return
+        run = {
+            "obs_id": obs.get("obs_id"),
+            "mode": mode,
+            "start_ts": obs.get("active_start"),
+            "off_ts": now.isoformat(),
+            "start_f": start_f,
+            "off_f": off_f,
+            "peak_f": obs.get("peak_indoor_f"),
+            "minutes": minutes,
+            "avg_delta_t": sum(deltas) / len(deltas) if deltas else 0.0,
+            "avg_outdoor_f": sum(outs) / len(outs) if outs else obs.get("start_outdoor_f"),
+            "k_passive": k_p,
+            "k_passive_source": k_p_source,
+            "resolution_f": resolution_f,
+            "n_active": len(active_samples),
+        }
+        committed, reject_code = self.learning.record_hvac_run(run)
+        if committed is not None:
+            if self._today_record is not None:
+                self._today_record.thermal_session_count += 1
+            _LOGGER.info(
+                "Thermal HVAC run committed: mode=%s k_active=%s k_p=%s (%s) signal=%.2fF min=%.1f",
+                mode,
+                f"{committed.get('k_active'):.3f}" if isinstance(committed.get("k_active"), int | float) else "?",
+                f"{k_p:.4f}" if k_p is not None else "None",
+                k_p_source,
+                signal_f if signal_f is not None else 0.0,
+                minutes,
+            )
+            self._executor_job(self.learning.save_state)
+            return
+        self._reject_hvac_run(obs_type, obs, reject_code or REJECT_ABANDONED, minutes, signal_f, k_p_source)
+
+    def _reject_hvac_run(
+        self,
+        obs_type: str,
+        obs: dict,
+        reason_code: str,
+        minutes: float,
+        signal_f: float | None,
+        k_passive_source: str,
+    ) -> None:
+        """Record why an HVAC run produced no rate (Issue #1512): code, signal, minutes and the k_passive source."""
+        samples = obs.get("active_samples", [])
+        temps = [s["indoor_temp_f"] for s in samples if "indoor_temp_f" in s]
         _LOGGER.info(
-            "Thermal HVAC observation active → post_heat: obs_id=%s session=%.1f min",
-            obs.get("obs_id", "?"),
-            obs["session_minutes"],
+            "Thermal HVAC run rejected: type=%s reason=%s signal=%s min=%.1f k_p_source=%s",
+            obs_type,
+            reason_code,
+            f"{signal_f:.2f}F" if signal_f is not None else "?",
+            minutes,
+            k_passive_source,
         )
-
-    async def _check_hvac_stabilization(self, obs_type: str) -> None:
-        """Check if post-HVAC temperature has stabilized or timed out."""
-        self._ensure_pending_observations()
-        obs = self._pending_observations.get(obs_type)
-        if obs is None or obs.get("_phase") != "post_heat":
-            return
-
-        active_end_str = obs.get("active_end")
-        try:
-            active_end = dt_util.parse_datetime(active_end_str) if active_end_str else dt_util.now()
-        except Exception:
-            active_end = dt_util.now()
-
-        elapsed_post = (dt_util.now() - active_end).total_seconds() / 60.0
-
-        if elapsed_post > THERMAL_POST_HEAT_TIMEOUT_MINUTES:
-            _n_active = len(obs.get("active_samples", []))
-            _n_post = len(obs.get("post_heat_samples", []))
-            _LOGGER.info(
-                "_check_hvac_stabilization: type=%s timeout n_active=%d n_post=%d elapsed_post=%.0fmin — abandoning",
-                obs_type,
-                _n_active,
-                _n_post,
-                elapsed_post,
-            )
-            self._abandon_observation(obs_type, "post_heat timeout exceeded")
-            await self._executor_job(self.learning.save_state)
-            return
-
-        post_samples = obs.get("post_heat_samples", [])
-
-        # Issue #130 D24: When k_vent_window proxy is available (bridge home), post-heat OLS
-        # is not needed — k_passive comes from the proxy and k_active from single-point
-        # timestamps.  Single-point only needs post[0] for the HVAC-off timestamp, so the
-        # minimum drops from THERMAL_MIN_POST_HEAT_SAMPLES (4) to 1.  Proxy-unaware paths
-        # (normal homes, fresh installs) are unchanged.
-        _cache = getattr(self.learning, "_state", None)
-        _cache = _cache.thermal_model_cache if _cache is not None else None
-        _k_vent_window = _cache.get("k_vent_window") if isinstance(_cache, dict) else None
-        _proxy_available = _k_vent_window is not None and _k_vent_window < 0
-        _min_post = 1 if _proxy_available else THERMAL_MIN_POST_HEAT_SAMPLES
-
-        if len(post_samples) < _min_post:
-            return
-
-        # Issue #130 D15: Remove stabilization-wait gate.  Once min samples are collected,
-        # commit immediately via OLS — the R² already governs quality.  Waiting for ±0.3°F
-        # stability (THERMAL_STABILIZATION_THRESHOLD_F) over the last 5 min is redundant
-        # and systematically blocks short-cycle (5–30 min) observations from ever committing.
-        obs["status"] = "stabilized"
-        obs["stabilized_at"] = dt_util.now().isoformat()
-        obs["end_indoor_f"] = post_samples[-1]["indoor_temp_f"]
-
-        peak_f = obs.get("peak_indoor_f")
-        end_f = obs["end_indoor_f"]
-
-        # Issue #130 D25: Plateau guard validates post-heat decay quality for k_passive OLS.
-        # When proxy is available, k_passive comes from k_vent_window — no OLS decay needed.
-        # Bypass the guard so short-cycle bridge homes are not incorrectly abandoned.
-        if not _proxy_available and peak_f is not None and (peak_f - end_f) < THERMAL_HVAC_MIN_DECAY_F:
-            _n_active_pg = len(obs.get("active_samples", []))
-            _n_post_pg = len(obs.get("post_heat_samples", []))
-            _LOGGER.info(
-                "_check_hvac_stabilization: type=%s plateau guard n_active=%d n_post=%d elapsed_post=%.0fmin",
-                obs_type,
-                _n_active_pg,
-                _n_post_pg,
-                elapsed_post,
-            )
-            _LOGGER.info(
-                "Thermal HVAC plateau guard: obs_id=%s peak=%.2f end=%.2f decay=%.2f < %.2f — abandoning",
-                obs.get("obs_id", "?"),
-                peak_f,
-                end_f,
-                peak_f - end_f,
-                THERMAL_HVAC_MIN_DECAY_F,
-            )
-            self._abandon_observation(obs_type, "plateau guard: insufficient post-heat decay")
-            await self._async_save_state()
-            return
-
-        _LOGGER.info(
-            "Thermal HVAC observation min-samples reached: obs_id=%s post_samples=%d — committing",
-            obs.get("obs_id", "?"),
-            len(post_samples),
+        self._append_rejection(
+            obs_type,
+            {
+                "obs_type": obs_type,
+                "reason_code": reason_code,
+                "n_samples": len(samples),
+                "n_required": None,
+                "r_squared": None,
+                "r_squared_required": THERMAL_MIN_R_SQUARED,
+                "delta_t_f": round(signal_f, 2) if signal_f is not None else 0.0,
+                "delta_t_required": None,
+                "elapsed_minutes": int(minutes),
+                "sf_range": 0.0,
+                "indoor_direction": "rising"
+                if len(temps) >= 2 and temps[-1] > temps[0] + 0.1
+                else "falling"
+                if len(temps) >= 2 and temps[-1] < temps[0] - 0.1
+                else "flat",
+                "signal_f": round(signal_f, 3) if signal_f is not None else None,
+                "minutes": round(minutes, 1),
+                "k_passive_source": k_passive_source,
+                "timestamp": dt_util.now().isoformat(),
+            },
         )
-        await self._commit_observation(obs_type)
+        self._executor_job(self.learning.save_state)
 
     async def _commit_observation(self, obs_type: str, force_grade: str | None = None) -> None:
         """Commit a pending observation to the learning engine."""
@@ -15023,6 +15015,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         n_required: int | None = None,
         delta_t_required: float | None = None,
         elapsed_minutes: int | None = None,
+        signal_f: float | None = None,
+        minutes: float | None = None,
+        k_passive_source: str | None = None,
     ) -> None:
         """Discard a pending observation and emit a structured rejection event."""
         self._ensure_pending_observations()
@@ -15038,15 +15033,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         elapsed_minutes = int((dt_util.now() - _start_ts).total_seconds() / 60)
                 except Exception:
                     pass
-        # Bug 1 fix: For HVAC obs, prefer active_samples (or post_heat_samples when in
-        # post_heat phase) over the generic 'samples' key.  Pre-fix HVAC obs dicts had
-        # 'samples': [] which shadows active_samples in the fallback chain, causing n=0
+        # Bug 1 fix: For HVAC obs, prefer active_samples over the generic 'samples' key.  Pre-fix HVAC obs
+        # dicts had 'samples': [] which shadows active_samples in the fallback chain, causing n=0
         # to be logged even when active_samples has real data.
         _obs_type_ab = obs.get("obs_type", obs_type)
         _hvac_types_ab = {OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL}
         if _obs_type_ab in _hvac_types_ab:
-            _phase_ab = obs.get("_phase", "active")
-            samples = obs.get("post_heat_samples", []) if _phase_ab == "post_heat" else obs.get("active_samples", [])
+            samples = obs.get("active_samples", [])
             # If still empty, fall back to generic 'samples' (legacy migration path)
             if not samples:
                 samples = obs.get("samples", [])
@@ -15091,6 +15084,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "indoor_direction": _dir_ab,
             "timestamp": dt_util.now().isoformat(),
         }
+        # Issue #1512: what the rejection saw. HVAC events always carry the three keys (None when unknown):
+        # sensor.py, learning_db.py and thermal_health.py read them.
+        if _obs_type_ab in _hvac_types_ab:
+            if signal_f is None and obs.get("start_indoor_f") is not None and samples:
+                _last_ind = samples[-1].get("indoor_temp_f")
+                if _last_ind is not None:
+                    signal_f = abs(_last_ind - obs["start_indoor_f"])
+            if minutes is None and elapsed_minutes is not None:
+                minutes = float(elapsed_minutes)
+            event["signal_f"] = round(signal_f, 3) if signal_f is not None else None
+            event["minutes"] = round(minutes, 1) if minutes is not None else None
+            event["k_passive_source"] = k_passive_source
         self._append_rejection(obs_type, event)
         # Issue #491: async_add_executor_job() already returns a scheduled awaitable —
         # wrapping it in async_create_task() (which requires a coroutine, not a Future)
@@ -15141,6 +15146,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             REJECT_INDOOR_UNAVAILABLE,
             REJECT_WINDOW_TOO_SHORT,
             REJECT_NO_INTERIOR_PEAK,
+            REJECT_NO_K_PASSIVE,
+            REJECT_HVAC_RUN_TOO_SHORT,
+            REJECT_HVAC_SIGNAL_BELOW_RESOLUTION,
+            REJECT_NEW_SESSION,
+            REJECT_FAN_ACTIVATED,
+            REJECT_HVAC_MODE_SWITCH,
         ]
         _hvac_mode_to_obs_type = {
             "passive": OBS_TYPE_PASSIVE_DECAY,
@@ -15203,8 +15214,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             OBS_TYPE_VENT_WINDOW_DECAY: THERMAL_VENT_MIN_SAMPLES,
             OBS_TYPE_VENT_FAN_DECAY: THERMAL_VENT_MIN_SAMPLES,
             OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_MIN_SAMPLES,
-            OBS_TYPE_HVAC_HEAT: THERMAL_MIN_POST_HEAT_SAMPLES,
-            OBS_TYPE_HVAC_COOL: THERMAL_MIN_POST_HEAT_SAMPLES,
         }.get(obs_type, 10)
         if len(samples) >= min_samples:
             # H2: total-ΔT guard for short windows — prevent noise-fitting on near-flat data
@@ -19489,7 +19498,6 @@ def _build_predicted_indoor_future(
     # its own future dedicated design pass. Its only live use here is the conservative
     # "does *any* solar/vent signal exist" branch condition below.
     _k_vent_fan: float | None = None
-    _k_passive_via_bridge: bool = False
     # _phase_offset: when model has a learned value use it; otherwise 0.0 preserves
     # pre-feature behavior for callers that do not supply solar_phase_offset_h.
     # (THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT=2 is applied by the coordinator's
@@ -19506,20 +19514,9 @@ def _build_predicted_indoor_future(
         _k_vent_fan = thermal_model.get("k_vent_fan")
         _raw_phase = thermal_model.get("solar_phase_offset_h")
         _phase_offset = float(_raw_phase) if _raw_phase is not None else 0.0
-        # Gate bridge: when k_passive is absent but k_vent_window is learned, use it as
-        # a proxy k_passive so the ODE can activate for thermally inert homes that only
-        # have ventilated observations.  k_vent_window is always ≤ 0 for valid commits
-        # (inert home → k≈0 accepted by widened ventilated bounds in learning.py).
-        # When k_vent_window = 0.0 exactly the ODE produces a flat prediction (T stays at
-        # current_indoor_temp), which is correct for a perfectly inert home.
-        _physics_eligible, _k_passive, _k_passive_via_bridge = physics_eligibility(
-            _conf, _conf_k_passive, _k_passive, _k_vent_window
-        )
-        if _k_passive_via_bridge:
-            _LOGGER.debug(
-                "_build_predicted_indoor_future: gate bridge — using k_vent_window=%.4f as proxy k_passive",
-                _k_passive,
-            )
+        # Issue #1512: no gate bridge. A home with no closed-house k_passive is not physics-eligible; the
+        # window-open hours below still use k_vent_window, but it never stands in for k_passive.
+        _physics_eligible, _k_passive, _ = physics_eligibility(_conf, _conf_k_passive, _k_passive, _k_vent_window)
         if _physics_eligible:
             _use_physics = True
             _LOGGER.debug(
@@ -19648,30 +19645,10 @@ def _build_predicted_indoor_future(
         # Look up pre-computed band entry for this timestamp
         _band = _band_lookup.get(local_ts.isoformat(), {"lower": comfort_heat, "upper": comfort_cool})
 
-        # Per-hour window-open check (computed before bridge guard so both can reference it).
-        # Guard: skip substitution when gate bridge already used k_vent_window as
-        # k_passive for all hours (_k_passive_via_bridge=True).
+        # Per-hour window-open check.
         _hour_windows_open = _k_vent_window is not None and window_span.window_open_at(_window_spans, local_ts)
 
-        # Bridge guard: k_vent_window is measured during open-window conditions
-        # (envelope k + ventilation k).  Applying it to window-closed hours overpredicts
-        # decay (τ≈7h) — the true envelope τ is much longer (≈50h).  Fall back to ramp
-        # only when the classification schedules windows for today but the current hour
-        # falls outside the open window.  When windows are not recommended at all (no
-        # window schedule), k_vent_window is the best available proxy and physics runs
-        # for all hours (behaviour consistent with pre-guard bridge semantics).
-        _bridge_guard_applies = (
-            _k_passive_via_bridge
-            and _windows_recommended  # classification has a window schedule today
-            and not _hour_windows_open  # but this hour is outside the open window
-        )
-        _use_physics_for_hour = _use_physics and not _bridge_guard_applies
-        if _bridge_guard_applies and _use_physics:
-            _LOGGER.debug(
-                "_build_predicted_indoor_future: bridge hour=%s windows-closed, using ramp "
-                "(k_vent_window not valid for envelope-only decay)",
-                local_ts.strftime("%H:%M"),
-            )
+        _use_physics_for_hour = _use_physics
 
         # Issue #1067: nearest-edge arming, HEATING breach only. The real thermostat defends whichever
         # comfort edge the house is outside of, so a cool mild morning that starts under the floor heats
@@ -19746,8 +19723,8 @@ def _build_predicted_indoor_future(
             # Per-hour k selection: window-open hours use k_vent_window (total ventilated
             # rate) as a replacement for k_passive. k_vent_window is measured as the total
             # effective k during ventilated conditions — replacement semantics, not addition.
-            _k_passive_for_hour = _k_vent_window if (_hour_windows_open and not _k_passive_via_bridge) else _k_passive
-            if _hour_windows_open and not _k_passive_via_bridge:
+            _k_passive_for_hour = _k_vent_window if _hour_windows_open else _k_passive
+            if _hour_windows_open:
                 _LOGGER.debug(
                     "_build_predicted_indoor_future: hour=%s using k_vent_window=%.4f (windows open %s–%s)",
                     local_ts.strftime("%H:%M"),

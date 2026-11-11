@@ -36,6 +36,7 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
 )
+from custom_components.climate_advisor.indoor_temp import IndoorTempReading  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -128,7 +129,6 @@ def _make_v3_coord(
     # v3 thermal state
     coord._pending_observations = {}
     coord._pending_thermal_event = None
-    coord._pre_heat_sample_buffer = []
     coord._last_outdoor_temp = outdoor_temp
 
     # learning stub — return a successful commit by default
@@ -136,6 +136,8 @@ def _make_v3_coord(
     learning.set_pending_thermal_event = MagicMock()
     learning.save_state = MagicMock()
     learning._commit_event_from_dict = MagicMock(return_value=({"hvac_mode": "heat"}, None, 0.9))
+    # Issue #1512: an HVAC run is committed at the off edge through record_hvac_run -> (obs, reject_code)
+    learning.record_hvac_run = MagicMock(return_value=({"hvac_mode": "heat", "k_active": 2.0}, None))
     # _abandon_observation writes to learning._state.rejection_log — must not be None
     learning._state = MagicMock()
     learning._state.rejection_log = {}
@@ -162,11 +164,11 @@ def _make_v3_coord(
         "_ensure_pending_observations",
         "_start_hvac_observation",
         "_end_hvac_active_phase",
-        "_check_hvac_stabilization",
+        "_closed_house_rate",
+        "_reject_hvac_run",
         "_commit_observation",
         "_commit_observation_if_sufficient",
         "_abandon_observation",
-        "_update_pre_heat_buffer",
         "_get_current_sample",
         "_get_outdoor_temp",
         "_sample_all_observations",
@@ -176,22 +178,6 @@ def _make_v3_coord(
             setattr(coord, method_name, types.MethodType(method, coord))
 
     return coord
-
-
-def _inject_stable_post_samples(obs: dict, count: int = 6, base_temp: float = 68.0) -> None:
-    """Overwrite post_heat_samples with stable readings for stabilization tests."""
-    samples = []
-    for i in range(count):
-        ts = datetime(2026, 4, 19, 12, i // 60, i % 60, tzinfo=UTC).isoformat()
-        samples.append(
-            {
-                "timestamp": ts,
-                "indoor_temp_f": base_temp + (0.04 * (i % 2)),
-                "outdoor_temp_f": 45.0,
-                "elapsed_minutes": float(i),
-            }
-        )
-    obs["post_heat_samples"] = samples
 
 
 # ---------------------------------------------------------------------------
@@ -214,44 +200,39 @@ class TestCoolModeEndToEndCommit:
         assert obs["session_mode"] == "cool"
 
     def test_cool_observation_commits_with_correct_mode(self):
-        """Full cool session → _commit_event_from_dict called; hvac_mode arg is 'cool'."""
-        coord = _make_v3_coord()
-        coord.learning._commit_event_from_dict.return_value = ({"hvac_mode": "cool"}, None, 0.88)
+        """A cool run commits at the off edge: record_hvac_run gets mode 'cool' and the off-edge reading.
+
+        Issue #1516: the old test faked a post-run decay window and judged "peak - end >= 0.3" for COOLING, which
+        is backwards (a cooling run's extremum is a trough, and a room that warms after the compressor stops is
+        the normal case). The run is now judged by the run itself at the off edge, mirror of heating.
+        """
+        coord = _make_v3_coord(indoor_temp=70.0)
         dt_mock_start = _make_dt_mock(datetime(2026, 4, 19, 12, 0, 0, tzinfo=UTC))
         dt_mock_end = _make_dt_mock(datetime(2026, 4, 19, 12, 20, 0, tzinfo=UTC))
 
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_start):
             asyncio.run(coord._start_hvac_observation("cool"))
-
-        obs = coord._pending_observations[OBS_TYPE_HVAC_COOL]
-
+        # the room cooled during the run: the off-edge reading is 68.0
+        coord._get_indoor_temp_with_provenance = MagicMock(return_value=IndoorTempReading(68.0, "climate.test", 68.0))
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_end):
             coord._end_hvac_active_phase(OBS_TYPE_HVAC_COOL)
 
-        obs["active_end"] = datetime(2026, 4, 19, 12, 20, 0, tzinfo=UTC).isoformat()
-        _inject_stable_post_samples(obs, count=6, base_temp=68.0)
-        obs["peak_indoor_f"] = 70.5  # decay = 70.5 - 68.04 = 2.46 >= THERMAL_HVAC_MIN_DECAY_F
-
-        dt_mock_check = _make_dt_mock(datetime(2026, 4, 19, 12, 22, 0, tzinfo=UTC))
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_check):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_COOL))
-
-        coord.learning._commit_event_from_dict.assert_called_once()
-        call_args = coord.learning._commit_event_from_dict.call_args
-        committed_obs = call_args[0][0]
-        assert committed_obs["hvac_mode"] == "cool"
+        coord.learning.record_hvac_run.assert_called_once()
+        run = coord.learning.record_hvac_run.call_args[0][0]
+        assert run["mode"] == "cool"
+        assert run["start_f"] == 70.0
+        assert run["off_f"] == 68.0
+        assert run["minutes"] == 20.0
         assert OBS_TYPE_HVAC_COOL not in coord._pending_observations
 
-    def test_cool_observation_status_transitions_to_post_heat(self):
-        """_end_hvac_active_phase transitions hvac_cool obs to _phase=post_heat."""
+    def test_cool_observation_removed_at_off_edge(self):
+        """The off edge commits and removes the pending obs; there is no post_heat phase any more (Issue #1512)."""
         coord = _make_v3_coord()
         dt_mock = _make_dt_mock()
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             asyncio.run(coord._start_hvac_observation("cool"))
             coord._end_hvac_active_phase(OBS_TYPE_HVAC_COOL)
-        obs = coord._pending_observations[OBS_TYPE_HVAC_COOL]
-        assert obs["_phase"] == "post_heat"
-        assert obs["active_end"] is not None
+        assert OBS_TYPE_HVAC_COOL not in coord._pending_observations
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +274,7 @@ class TestFanOnlySessionLifecycle:
         assert fan_key not in coord._pending_observations
 
     def test_fan_only_does_not_raise(self):
-        """Complete fan_only lifecycle (start → end active → check stabilization) is error-free."""
+        """Complete fan_only lifecycle (start → end active) is error-free."""
         coord = _make_v3_coord()
         dt_mock = _make_dt_mock()
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
@@ -307,12 +288,7 @@ class TestFanOnlySessionLifecycle:
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._end_hvac_active_phase(fan_key)
 
-        # check_hvac_stabilization should not raise regardless of sample count
-        dt_mock2 = _make_dt_mock(datetime(2026, 4, 19, 12, 5, 0, tzinfo=UTC))
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock2):
-            asyncio.run(coord._check_hvac_stabilization(fan_key))
-        # terminal state: either committed or abandoned (key absent) or still present
-        # — no assertion on outcome, only that it ran cleanly
+        # terminal state: committed or rejected (key absent) — only that it ran cleanly
 
 
 # ---------------------------------------------------------------------------
@@ -320,63 +296,18 @@ class TestFanOnlySessionLifecycle:
 # ---------------------------------------------------------------------------
 
 
-class TestPreHeatBufferSnapshot:
-    """pre_heat_samples in the v3 obs are populated from _pre_heat_sample_buffer."""
+class TestHvacObsShape:
+    """The HVAC observation carries only the run's own samples (Issue #1512: no pre-heat buffer, no post-heat phase)."""
 
-    def test_buffer_contents_copied_into_obs(self):
-        """3 buffer entries become pre_heat_samples on _start_hvac_observation."""
+    def test_obs_has_no_pre_or_post_heat_samples(self):
         coord = _make_v3_coord()
-        buffer_entries = [
-            {
-                "timestamp": f"2026-04-19T11:5{i}:00+00:00",
-                "indoor_temp_f": 66.0 + i * 0.5,
-                "outdoor_temp_f": 44.0,
-                "elapsed_minutes": 0.0,
-            }
-            for i in range(3)
-        ]
-        coord._pre_heat_sample_buffer = list(buffer_entries)
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
+        with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_mock()):
             asyncio.run(coord._start_hvac_observation("heat"))
-
         obs = coord._pending_observations[OBS_TYPE_HVAC_HEAT]
-        pre_samples = obs.get("pre_heat_samples", [])
-        assert len(pre_samples) == 3
-
-    def test_buffer_timestamps_preserved(self):
-        """Timestamps in pre_heat_samples match the original buffer entries."""
-        coord = _make_v3_coord()
-        ts_values = [
-            "2026-04-19T11:45:00+00:00",
-            "2026-04-19T11:50:00+00:00",
-            "2026-04-19T11:55:00+00:00",
-        ]
-        coord._pre_heat_sample_buffer = [
-            {"timestamp": ts, "indoor_temp_f": 67.0, "outdoor_temp_f": 44.0, "elapsed_minutes": 0.0} for ts in ts_values
-        ]
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._start_hvac_observation("heat"))
-
-        obs = coord._pending_observations[OBS_TYPE_HVAC_HEAT]
-        pre_ts = [s["timestamp"] for s in obs.get("pre_heat_samples", [])]
-        for original_ts in ts_values:
-            assert any(original_ts in pt for pt in pre_ts), f"{original_ts!r} not found in {pre_ts}"
-
-    def test_empty_buffer_gives_empty_pre_heat_samples(self):
-        """Empty buffer → pre_heat_samples is an empty list, not missing."""
-        coord = _make_v3_coord()
-        coord._pre_heat_sample_buffer = []
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._start_hvac_observation("heat"))
-
-        obs = coord._pending_observations[OBS_TYPE_HVAC_HEAT]
-        assert obs.get("pre_heat_samples") == []
+        assert "pre_heat_samples" not in obs
+        assert "post_heat_samples" not in obs
+        assert obs["_phase"] == "active"
+        assert len(obs["active_samples"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -385,79 +316,39 @@ class TestPreHeatBufferSnapshot:
 
 
 class TestSessionCountTracking:
-    """thermal_session_count increments when a v3 HVAC observation commits."""
+    """thermal_session_count increments when an HVAC run commits at the off edge (Issue #1512)."""
+
+    @staticmethod
+    def _run(coord, mode: str, obs_type: str) -> None:
+        dt_mock = _make_dt_mock()
+        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
+            asyncio.run(coord._start_hvac_observation(mode))
+            coord._end_hvac_active_phase(obs_type)
 
     def test_session_count_increments_on_heat_commit(self):
         """Successful heat commit increments _today_record.thermal_session_count by 1."""
         coord = _make_v3_coord()
-        coord.learning._commit_event_from_dict.return_value = ({"hvac_mode": "heat"}, None, 0.9)
         assert coord._today_record.thermal_session_count == 0
-
-        dt_mock_start = _make_dt_mock(datetime(2026, 4, 19, 12, 0, 0, tzinfo=UTC))
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_start):
-            asyncio.run(coord._start_hvac_observation("heat"))
-
-        obs = coord._pending_observations[OBS_TYPE_HVAC_HEAT]
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_start):
-            coord._end_hvac_active_phase(OBS_TYPE_HVAC_HEAT)
-
-        obs["active_end"] = datetime(2026, 4, 19, 12, 0, 0, tzinfo=UTC).isoformat()
-        _inject_stable_post_samples(obs, count=6, base_temp=67.0)
-        obs["peak_indoor_f"] = 70.0  # decay = 70 - 67.04 = 2.96 >= 0.3
-
-        dt_mock_check = _make_dt_mock(datetime(2026, 4, 19, 12, 3, 0, tzinfo=UTC))
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_check):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_HEAT))
-
+        self._run(coord, "heat", OBS_TYPE_HVAC_HEAT)
         assert coord._today_record.thermal_session_count == 1
 
     def test_session_count_increments_on_cool_commit(self):
         """Successful cool commit also increments the session count."""
         coord = _make_v3_coord()
-        coord.learning._commit_event_from_dict.return_value = ({"hvac_mode": "cool"}, None, 0.85)
-        assert coord._today_record.thermal_session_count == 0
-
-        dt_mock_start = _make_dt_mock(datetime(2026, 4, 19, 14, 0, 0, tzinfo=UTC))
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_start):
-            asyncio.run(coord._start_hvac_observation("cool"))
-
-        obs = coord._pending_observations[OBS_TYPE_HVAC_COOL]
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_start):
-            coord._end_hvac_active_phase(OBS_TYPE_HVAC_COOL)
-
-        obs["active_end"] = datetime(2026, 4, 19, 14, 0, 0, tzinfo=UTC).isoformat()
-        _inject_stable_post_samples(obs, count=6, base_temp=72.0)
-        obs["peak_indoor_f"] = 75.0  # decay = 75 - 72.04 = 2.96 >= 0.3
-
-        dt_mock_check = _make_dt_mock(datetime(2026, 4, 19, 14, 3, 0, tzinfo=UTC))
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_check):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_COOL))
-
+        coord.learning.record_hvac_run.return_value = ({"hvac_mode": "cool", "k_active": -2.0}, None)
+        self._run(coord, "cool", OBS_TYPE_HVAC_COOL)
         assert coord._today_record.thermal_session_count == 1
 
     def test_session_count_not_incremented_on_reject(self):
-        """If _commit_event_from_dict returns (None, ...), count stays at 0."""
+        """A rejected run (record_hvac_run returns a code) does not count, is logged with its code, and is gone."""
         coord = _make_v3_coord()
-        coord.learning._commit_event_from_dict.return_value = (None, "ols_bad_fit", 0.1)
+        coord._rejection_log = {}
+        coord.learning.record_hvac_run.return_value = (None, "hvac_signal_below_resolution")
+        self._run(coord, "heat", OBS_TYPE_HVAC_HEAT)
         assert coord._today_record.thermal_session_count == 0
-
-        dt_mock = _make_dt_mock()
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            asyncio.run(coord._start_hvac_observation("heat"))
-
-        obs = coord._pending_observations[OBS_TYPE_HVAC_HEAT]
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._end_hvac_active_phase(OBS_TYPE_HVAC_HEAT)
-
-        obs["active_end"] = datetime(2026, 4, 19, 12, 0, 0, tzinfo=UTC).isoformat()
-        _inject_stable_post_samples(obs, count=6, base_temp=67.0)
-        obs["peak_indoor_f"] = 70.0
-
-        dt_mock_check = _make_dt_mock(datetime(2026, 4, 19, 12, 3, 0, tzinfo=UTC))
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock_check):
-            asyncio.run(coord._check_hvac_stabilization(OBS_TYPE_HVAC_HEAT))
-
-        assert coord._today_record.thermal_session_count == 0
+        (event,) = coord._rejection_log[OBS_TYPE_HVAC_HEAT]
+        assert event["reason_code"] == "hvac_signal_below_resolution"
+        assert OBS_TYPE_HVAC_HEAT not in coord._pending_observations
 
 
 # ---------------------------------------------------------------------------

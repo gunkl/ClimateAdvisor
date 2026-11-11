@@ -596,6 +596,7 @@ def test_model_file_round_trip_private_and_atomic(fake: FakePredictor, tmp_path:
         "last_fit",
         "last_fit_error",
         "night_validation",
+        "unusable_fit",  # Issue #1529: the last unusable refit beside the model kept in use
     }
     again = V4ModelStore(tmp_path, entry_id="zoneA")
     again.load()

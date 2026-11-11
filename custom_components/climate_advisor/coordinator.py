@@ -6495,7 +6495,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     return  # unloaded while fitting: drop the result
                 state = self._v4_store
                 previous = state.v4_model if isinstance(state.v4_model, dict) else None
+                if previous is not None and v4_shadow.keep_previous_model(previous, model_dict):
+                    # Issue #1529: an unusable refit is not evidence against the model in use (D35). Keep it for the
+                    # decisions; record the refit for the Debug tab and the log; the next usable fit replaces it.
+                    state.unusable_fit = v4_shadow.unusable_fit_record(
+                        model_dict, at=now.isoformat(), reason=reason, kept=previous
+                    )
+                    state.dirty = True
+                    self._v4_last_fit = {
+                        "at": now.isoformat(),
+                        "reason": reason,
+                        "seconds": round(seconds, 1),
+                        "ok": True,
+                        "unusable": True,
+                    }
+                    state.last_fit = dict(self._v4_last_fit)
+                    state.last_fit_error = None
+                    _LOGGER.info(
+                        "v4 fit (%s): %s (%s) took %.1fs",
+                        reason,
+                        v4_shadow.describe_unusable_fit(state.unusable_fit),
+                        fit_line,
+                        seconds,
+                    )
+                    await self._executor_job(self._v4_store.save)
+                    return
                 state.v4_model = model_dict
+                state.unusable_fit = None
                 if previous is None or previous.get("primary") != model_dict.get("primary"):
                     state.v4_mass_f = None  # a different primary node: re-seed the hidden node from the reading
                     state.v4_mass_at = None
@@ -8189,6 +8215,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             out["last_fit"] = dict(self._v4_last_fit)
             out["last_cycle"] = dict(self._v4_last_cycle)
             out["archive_slots"] = self._v4_archive.slot_count()
+            # Issue #1529: the last refit was unusable and the model from an earlier fit is still in use
+            unusable = getattr(state, "unusable_fit", None)
+            out["unusable_refit"] = (
+                {**unusable, "text": v4_shadow.describe_unusable_fit(unusable)} if isinstance(unusable, dict) else None
+            )
             # Issue #1399: what the Debug tab needs to say it in words: when the archive starts, the modelled sensors'
             # friendly names, and the primary/shadow engine status (the chart payload's block, display only). Cosmetic,
             # so a failure here only drops these fields.

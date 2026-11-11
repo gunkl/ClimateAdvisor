@@ -116,6 +116,8 @@
       if (gr.why) rows.push(['Grade reason', (v.confidence || 'none') + ': ' + gr.why]);
       if (gr.by_mode) rows.push(['By mode', gr.by_mode]);
     }
+    // Issue #1529: an unusable refit never replaces the model in use; say so
+    if (prim && prim.id === 'v4' && v && v.unusable_refit && v.unusable_refit.text) rows.push(['Last refit', v.unusable_refit.text]);
     rows.push(['Shadow engine', !pe ? DASH : !pe.shadow || pe.shadow === 'none' ? 'none' : !sh ? pe.shadow : sh.label + ': ' + (sh.usable ? conf(sh) || 'usable' : 'still learning')]);
     var dec = DASH;
     if (cf && cf.mode) {

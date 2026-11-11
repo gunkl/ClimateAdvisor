@@ -194,6 +194,47 @@ def run_fit(
 
 
 # ---------------------------------------------------------------------------
+# An unusable refit never replaces a usable model (Issue #1529)
+# ---------------------------------------------------------------------------
+
+
+def model_usable(model_dict: Mapping[str, Any] | None) -> bool:
+    """A stored model the decisions can use: a mapping whose confidence is not ``none``."""
+    return isinstance(model_dict, Mapping) and model_dict.get("confidence", "none") != "none"
+
+
+def keep_previous_model(previous: Mapping[str, Any] | None, new: Mapping[str, Any] | None) -> bool:
+    """True when ``new`` (a refit) is unusable and ``previous`` is usable: the previous model stays in use.
+
+    Occupant view: one night with too little data (a sensor outage, a gap in the chart log) or a calm week where the
+    refit cannot beat "no change" used to replace the learned model, so pre-heat, the time-of-use bank, setback depth
+    and the ceiling guard fell back to the "not learned yet" defaults until a usable fit came back. An unusable fit is
+    not evidence against the model (owner rule, D35: learned values give way only to new measured evidence). A home
+    that never had a usable model stores the refit as before."""
+    return model_usable(previous) and not model_usable(new)
+
+
+def unusable_fit_record(new: Mapping[str, Any], *, at: str, reason: str, kept: Mapping[str, Any]) -> dict[str, Any]:
+    """The diagnostic record of an unusable refit kept beside the model in use (``V4ModelStore.unusable_fit``)."""
+    fit = new.get("fit") if isinstance(new.get("fit"), Mapping) else {}
+    return {
+        "at": at,
+        "reason": reason,
+        "fit_reason": str(fit.get("reason") or "confidence none"),
+        "fitted_at": new.get("fitted_at"),
+        "kept_fitted_at": kept.get("fitted_at"),
+    }
+
+
+def describe_unusable_fit(rec: Mapping[str, Any] | None) -> str:
+    """ "last refit unusable (<reason>); keeping the model from <date>" for the log and the Debug tab; "" when none."""
+    if not isinstance(rec, Mapping):
+        return ""
+    kept = str(rec.get("kept_fitted_at") or "")[:10] or "an earlier fit"
+    return f"last refit unusable ({rec.get('fit_reason') or 'confidence none'}); keeping the model from {kept}"
+
+
+# ---------------------------------------------------------------------------
 # Which model the decisions read, in words (Issue #1432)
 # ---------------------------------------------------------------------------
 

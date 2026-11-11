@@ -68,3 +68,13 @@ def test_stale_harness_folders_are_swept_and_fresh_or_foreign_ones_are_kept(monk
     for p in (fresh, foreign):
         p.rmdir()
     base.rmdir()
+
+
+def test_cleanup_owned_sim_dirs_removes_folders_still_in_use():
+    """The end-of-session hook removes folders whose FakeHass is still referenced (xdist workers skip exit hooks)."""
+    coordinator, fake_hass, scheduler, _log = bc.build_headless_coordinator({})
+    path = Path(fake_hass.config.config_dir)
+    assert path.is_dir()
+    assert bc.cleanup_owned_sim_dirs() >= 1
+    assert not path.exists()
+    assert bc.cleanup_owned_sim_dirs() == 0  # idempotent

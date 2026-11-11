@@ -73,12 +73,30 @@ def _sweep_stale_sim_dirs() -> None:
             continue
 
 
+_owned_sim_dirs: dict[str, Any] = {}
+
+
 def _owned_sim_dir(prefix: str, owner: Any) -> str:
     """A fresh temp config_dir that is deleted when ``owner`` is garbage-collected or the process exits."""
     _sweep_stale_sim_dirs()
     path = tempfile.mkdtemp(prefix=prefix)
-    weakref.finalize(owner, shutil.rmtree, path, True)
+    _owned_sim_dirs[path] = weakref.finalize(owner, shutil.rmtree, path, True)
     return path
+
+
+def cleanup_owned_sim_dirs() -> int:
+    """Remove every temp config_dir this process created that is still on disk; returns how many were removed.
+
+    pytest-xdist workers end without running interpreter-exit finalizers, so the test session calls this at its end
+    (tests/conftest.py pytest_sessionfinish); the stale sweep catches anything a killed run still leaves.
+    """
+    removed = 0
+    for path, fin in list(_owned_sim_dirs.items()):
+        if fin.alive:
+            fin()
+            removed += 1
+        _owned_sim_dirs.pop(path, None)
+    return removed
 
 
 def build_headless_coordinator(

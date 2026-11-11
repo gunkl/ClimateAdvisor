@@ -246,3 +246,14 @@ def _close_undrained_scheduler_tasks():
             close = getattr(coro, "close", None)
             if close is not None:
                 close()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Issue #1518: remove the simulation harness's temp config folders this test process still holds.
+
+    pytest-xdist workers exit without running interpreter-exit finalizers, so the folders of coordinators still
+    referenced at the end of a worker's run used to stay in /tmp (hundreds per full run).
+    """
+    harness = sys.modules.get("tools.sim_harness.build_coordinator")
+    if harness is not None:
+        harness.cleanup_owned_sim_dirs()

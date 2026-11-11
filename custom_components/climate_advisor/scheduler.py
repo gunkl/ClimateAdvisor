@@ -378,6 +378,7 @@ def resolve_tou_phase(
         outdoor_at=outdoor_at,
         event_ts=schedule_start,
         confidence=thermal_model.get("confidence_k_passive", thermal_model.get("confidence", "none")),
+        warn_label="Time-of-use bank",
     )
 
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)
@@ -562,6 +563,7 @@ def resolve_tou_away_vacation_phase(
         outdoor_at=_outdoor_for_stepper,
         event_ts=schedule_start,
         confidence=confidence,  # the same gate as the depth above
+        warn_label="Time-of-use bank (away/vacation)",
     )
 
     precondition_start = schedule_start - timedelta(minutes=lead_minutes)

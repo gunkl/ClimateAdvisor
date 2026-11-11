@@ -28,7 +28,9 @@ passes them.
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -37,7 +39,13 @@ from homeassistant.util import dt as dt_util
 
 # Issue #1517: safety factor used INSTEAD of the caller's multiplier when the leak term is used. The leak model
 # already covers what the fixed 1.3 was guarding against, so a smaller margin suffices.
+_LOGGER = logging.getLogger(__name__)
+
 LEAK_SAFETY_MULTIPLIER = 1.15
+# A target that cannot be reached within the cap is logged once per (label, mode, target) in this window, so the
+# 5-minute checks and the chart walk do not repeat it (owner decision 2026-11-11: keep the 240-minute cap, warn).
+OUT_OF_REACH_WARN_INTERVAL_S = 6 * 3600.0
+_out_of_reach_warned: dict[tuple[str, bool, float], float] = {}
 # Issue #1517: with an uncertainty (sd) on the rate, plan on |q| - this many sd (a slower rate = an earlier start).
 CAUTIOUS_RATE_SD_FRACTION = 0.5
 # Issue #1517: the leak term and the house-model stepper are only trusted on a model graded at least this ("medium" is
@@ -207,6 +215,7 @@ def compute_lead_minutes_from_rate(
     outdoor_at: Callable[[datetime], float | None] | None = None,
     event_ts: datetime | None = None,
     confidence: str | None = None,
+    warn_label: str | None = None,
 ) -> float:
     """Minutes needed to close ``delta_t`` degrees at the learned ``rate`` (degF/hr).
 
@@ -229,6 +238,10 @@ def compute_lead_minutes_from_rate(
     stepper run; ``None``, ``"none"`` or ``"low"`` gives exactly the plain formula, so a noisy leak rate or a weak fit
     can never stretch a lead time on a mild day. This is the one place every consumer (time-of-use bank, ceiling
     guard, nat-vent plan) takes the rule from.
+
+    Out of reach (2026-11-11): with ``warn_label`` set, a target that is not reached within ``max_minutes`` even
+    without the safety margin logs one warning (rate-limited by ``OUT_OF_REACH_WARN_INTERVAL_S``); the lead is still
+    ``max_minutes``. A lead that only reaches the cap because of the safety margin is reachable and is not logged.
     """
     if confidence not in LEAD_MODEL_CONFIDENCES:
         house_stepper = None
@@ -252,6 +265,20 @@ def compute_lead_minutes_from_rate(
             safety_multiplier=leak_safety_multiplier,
         )
         if stepped is not None:
+            if warn_label is not None and stepped >= max_minutes:
+                bare = stepper_lead_minutes_before(
+                    house_stepper,
+                    event_ts=event_ts,
+                    start_temp=start_temp,
+                    target_temp=target_temp,
+                    cooling=cooling,
+                    outdoor_at=outdoor_at,
+                    min_minutes=min_minutes,
+                    max_minutes=max_minutes,
+                    safety_multiplier=1.0,
+                )
+                if bare is not None and bare >= max_minutes:
+                    _warn_out_of_reach(warn_label, cooling, start_temp, target_temp, max_minutes, "house model")
             return stepped
     if (
         rate is not None
@@ -265,7 +292,42 @@ def compute_lead_minutes_from_rate(
         raw = leak_aware_minutes(
             start_temp, target_temp, rate, k_passive, outdoor_temp, cooling=cooling, rate_sd=rate_sd
         )
+        if warn_label is not None and (raw is None or raw >= max_minutes):
+            _warn_out_of_reach(warn_label, cooling, start_temp, target_temp, max_minutes, "leak-aware rate")
         minutes = max_minutes if raw is None else raw * leak_safety_multiplier
         return max(min_minutes, min(max_minutes, minutes))
-    minutes = fallback_minutes if rate is None or abs(rate) <= 0 else (delta_t / abs(rate)) * 60.0 * safety_multiplier
+    if rate is None or abs(rate) <= 0:
+        minutes = fallback_minutes
+    else:
+        bare_minutes = (delta_t / abs(rate)) * 60.0
+        if warn_label is not None and bare_minutes >= max_minutes:
+            _warn_out_of_reach(warn_label, cooling, start_temp, target_temp, max_minutes, "learned rate")
+        minutes = bare_minutes * safety_multiplier
     return max(min_minutes, min(max_minutes, minutes))
+
+
+def _warn_out_of_reach(
+    label: str,
+    cooling: bool,
+    start_temp: float | None,
+    target_temp: float | None,
+    max_minutes: float,
+    basis: str,
+) -> None:
+    """Log once per ``OUT_OF_REACH_WARN_INTERVAL_S`` that ``label``'s target looks out of reach within the cap."""
+    key = (label, cooling, round(float(target_temp), 1) if target_temp is not None else float("nan"))
+    now = time.monotonic()
+    last = _out_of_reach_warned.get(key)
+    if last is not None and now - last < OUT_OF_REACH_WARN_INTERVAL_S:
+        return
+    _out_of_reach_warned[key] = now
+    _LOGGER.warning(
+        "%s: %s to %s looks out of reach within %.0f minutes (%s); starting at the %.0f-minute maximum, "
+        "the house may not reach the target by the window start",
+        label,
+        "cooling" if cooling else "heating",
+        f"{target_temp:.1f}" if target_temp is not None else "the target",
+        max_minutes,
+        basis,
+        max_minutes,
+    )

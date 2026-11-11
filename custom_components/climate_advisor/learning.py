@@ -320,43 +320,30 @@ def _grade_swing_confidence(count: int) -> str:
 
 
 def _resolve_solar_phase_offset(cache: dict) -> float:
-    """Return the best current solar phase offset.
+    """Return the best current solar phase offset (Issues #312, #1524).
 
-    A parameter is stale if its last_obs_date is absent or older than THERMAL_PARAM_STALE_DAYS.
-    Stale home-specific measurements are always preferred over a generic default prior —
-    the default is only returned when nothing has ever been observed.
+    The primary (passive-decay fit) gives way to the secondary (AC duty cycle) only as newer secondary evidence
+    replaces or contradicts it, never with the passage of time (owner decision 2026-11-11, "fade only on new
+    evidence"): ``solar_phase_offset_keep`` is the primary's share, 1.0 after each new primary observation and halved
+    every THERMAL_EVIDENCE_HALF_N new AC-duty days that agree with it (every THERMAL_EVIDENCE_HALF_N_CONTRADICT that
+    contradict it, ``update_ac_duty_solar_phase_offset``). The value is ``keep * primary + (1 - keep) * secondary``.
 
-    Priority:
-      1. Fresh primary (passive-decay fit, within THERMAL_PARAM_STALE_DAYS)
-      2. Fresh secondary (AC duty cycle, within THERMAL_PARAM_STALE_DAYS, obs >= min)
-      3. Stale primary (EWMA value preserved in cache — better than a generic prior)
-      4. Stale secondary (obs >= min — better than a generic prior)
-      5. Default prior (THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT) — only when nothing learned
+      * primary and a qualified secondary (obs >= THERMAL_SOLAR_PHASE_AC_MIN_OBS): the blend above
+      * primary only: the primary;  qualified secondary only: the secondary
+      * nothing learned: THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
+    (Was: a primary not observed for THERMAL_PARAM_STALE_DAYS lost to a fresher secondary on day 91 with no new
+    measurement arriving.)
     """
-    from datetime import date as _date
-
-    from .const import THERMAL_PARAM_STALE_DAYS, THERMAL_SOLAR_PHASE_AC_MIN_OBS, THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
-
-    def _is_stale(last_obs_date_str: str | None) -> bool:
-        if last_obs_date_str is None:
-            return True
-        try:
-            return (_date.today() - _date.fromisoformat(last_obs_date_str)).days > THERMAL_PARAM_STALE_DAYS
-        except ValueError, TypeError:
-            return True
+    from .const import THERMAL_SOLAR_PHASE_AC_MIN_OBS, THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
 
     primary = cache.get("solar_phase_offset_h")
     secondary = cache.get("solar_phase_offset_ac_h")
     ac_obs = cache.get("solar_phase_offset_ac_obs_count", 0)
     secondary_qualified = secondary is not None and ac_obs >= THERMAL_SOLAR_PHASE_AC_MIN_OBS
 
-    # Fresh data first
-    if primary is not None and not _is_stale(cache.get("solar_phase_offset_last_obs_date")):
-        return float(primary)
-    if secondary_qualified and not _is_stale(cache.get("solar_phase_offset_ac_last_obs_date")):
-        return float(secondary)
-
-    # Stale home-specific data beats a generic prior
+    if primary is not None and secondary_qualified:
+        keep = _evidence_keep({"keep": cache.get("solar_phase_offset_keep")})
+        return keep * float(primary) + (1.0 - keep) * float(secondary)
     if primary is not None:
         return float(primary)
     if secondary_qualified:
@@ -364,6 +351,36 @@ def _resolve_solar_phase_offset(cache: dict) -> float:
 
     # Nothing has ever been learned — use configured default
     return float(THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT)
+
+
+def migrate_solar_phase_keep(cache: dict, today: Any) -> bool:
+    """Give a cache from before Issue #1524 the primary's share once, so the offset in use does not change.
+
+    The old resolver dropped a primary not observed for THERMAL_PARAM_STALE_DAYS in favour of a qualified secondary
+    observed within them; such a cache starts with ``keep`` 0.0 (the secondary already replaced it), any other with
+    1.0. Read once, at load, when the key is absent; from then on only new evidence moves it. Returns True when set.
+    """
+    from .const import THERMAL_PARAM_STALE_DAYS, THERMAL_SOLAR_PHASE_AC_MIN_OBS
+
+    if not isinstance(cache, dict) or "solar_phase_offset_keep" in cache:
+        return False
+    if cache.get("solar_phase_offset_h") is None:
+        return False
+
+    def _old_stale(stamp: Any) -> bool:
+        try:
+            return (today - datetime.fromisoformat(str(stamp)[:10]).date()).days > THERMAL_PARAM_STALE_DAYS
+        except ValueError, TypeError:
+            return True
+
+    secondary_fresh = (
+        cache.get("solar_phase_offset_ac_h") is not None
+        and cache.get("solar_phase_offset_ac_obs_count", 0) >= THERMAL_SOLAR_PHASE_AC_MIN_OBS
+        and not _old_stale(cache.get("solar_phase_offset_ac_last_obs_date"))
+    )
+    displaced = _old_stale(cache.get("solar_phase_offset_last_obs_date")) and secondary_fresh
+    cache["solar_phase_offset_keep"] = 0.0 if displaced else 1.0
+    return True
 
 
 def _smooth_temps(temps: list[float]) -> list[float]:
@@ -1311,6 +1328,13 @@ class LearningEngine:
                 # never refreshed and misled the diagnostic tools, so drop them.
                 if isinstance(_cache_mig, dict) and drop_stored_grades(_cache_mig):
                     _LOGGER.debug("Thermal model cache: dropped stale stored confidence grades (Issue #1277)")
+                # Issue #1524: the primary solar phase offset's share against the AC-duty secondary, set once.
+                if isinstance(_cache_mig, dict) and migrate_solar_phase_keep(_cache_mig, dt_util.now().date()):
+                    _LOGGER.info(
+                        "Solar phase offset: primary share set to %s (Issue #1524: it now gives way only to newer "
+                        "AC-duty evidence)",
+                        _cache_mig.get("solar_phase_offset_keep"),
+                    )
                 # Issue #1476: undo repeated chart_log fits of one window.
                 self._drop_duplicate_chart_log_fits()
                 # Issue #1512: keep the cached rates as an ageing prior, then age them against retained observations.
@@ -1870,34 +1894,46 @@ class LearningEngine:
             return
         apply_coast_samples(self._swing_cache(), mode, [sample])
 
-    def update_solar_phase_offset(self, observed_h: float, alpha: float) -> None:
+    def update_solar_phase_offset(self, observed_h: float, alpha: float, window_end: str | None = None) -> bool:
         """EWMA update for solar_phase_offset_h from a phase observation.
 
         Args:
             observed_h: Observed solar peak offset in hours (raw, will be clamped).
             alpha: EWMA smoothing factor (use THERMAL_SOLAR_PHASE_ALPHA = 0.10).
+            window_end: ISO timestamp of the window's last row. A window ending no later than the last one applied
+                is already counted (the daily re-fit scans the last two days) and is skipped (Issue #1524).
+
+        A new primary observation is new evidence for the primary: its share against the AC-duty secondary
+        (``solar_phase_offset_keep``) returns to 1.0. Returns False when the window was already counted.
         """
         from datetime import date as _date
 
         from .const import THERMAL_SOLAR_PHASE_OFFSET_MAX, THERMAL_SOLAR_PHASE_OFFSET_MIN
+
+        cache = self._state.thermal_model_cache
+        if cache is None:
+            cache = _new_thermal_cache()
+        last_end = cache.get("solar_phase_offset_last_window_end")
+        if window_end and isinstance(last_end, str) and str(window_end) <= last_end:
+            return False
 
         obs_clamped = max(
             float(THERMAL_SOLAR_PHASE_OFFSET_MIN),
             min(float(THERMAL_SOLAR_PHASE_OFFSET_MAX), float(observed_h)),
         )
 
-        cache = self._state.thermal_model_cache
-        if cache is None:
-            cache = _new_thermal_cache()
-
         current = cache.get("solar_phase_offset_h")
         new_val = obs_clamped if current is None else (1.0 - alpha) * float(current) + alpha * obs_clamped
 
         cache["solar_phase_offset_h"] = new_val
         cache["solar_phase_offset_last_obs_date"] = _date.today().isoformat()
+        cache["solar_phase_offset_keep"] = 1.0
+        if window_end:
+            cache["solar_phase_offset_last_window_end"] = str(window_end)
         self._state.thermal_model_cache = cache
+        return True
 
-    def update_ac_duty_solar_phase_offset(self, observed_offset_h: float, today_str: str) -> None:
+    def update_ac_duty_solar_phase_offset(self, observed_offset_h: float, today_str: str) -> bool:
         """Update the secondary (AC duty cycle) solar phase EWMA.
 
         Never called by the primary passive-decay path. Called by the coordinator's
@@ -1906,10 +1942,20 @@ class LearningEngine:
         Args:
             observed_offset_h: Estimated offset from AC duty peak (peak_hour - 13).
             today_str: ISO date string (YYYY-MM-DD) for the observation date.
+
+        Issue #1524: a day is counted once. The estimator re-scans the whole chart log every day, so a day no later
+        than the last one counted is skipped (it used to be folded in again every day, inflating the count and
+        pulling the EWMA toward the oldest days). Each new day is new evidence against the primary offset: its share
+        ``solar_phase_offset_keep`` halves every THERMAL_EVIDENCE_HALF_N agreeing days, or every
+        THERMAL_EVIDENCE_HALF_N_CONTRADICT days that are THERMAL_SOLAR_PHASE_CONTRADICT_H or more from it.
+        Returns False when the day was already counted.
         """
-        from .const import THERMAL_SOLAR_PHASE_AC_ALPHA
+        from .const import THERMAL_SOLAR_PHASE_AC_ALPHA, THERMAL_SOLAR_PHASE_CONTRADICT_H
 
         cache = self._state.thermal_model_cache or {}
+        last = cache.get("solar_phase_offset_ac_last_obs_date")
+        if isinstance(last, str) and last and str(today_str) <= last:
+            return False
         current = cache.get("solar_phase_offset_ac_h")
         if current is None:
             cache["solar_phase_offset_ac_h"] = observed_offset_h
@@ -1919,7 +1965,13 @@ class LearningEngine:
             )
         cache["solar_phase_offset_ac_obs_count"] = cache.get("solar_phase_offset_ac_obs_count", 0) + 1
         cache["solar_phase_offset_ac_last_obs_date"] = today_str
+        primary = cache.get("solar_phase_offset_h")
+        if isinstance(primary, (int, float)) and not isinstance(primary, bool):
+            contradicts = abs(float(observed_offset_h) - float(primary)) >= THERMAL_SOLAR_PHASE_CONTRADICT_H
+            keep = _evidence_keep({"keep": cache.get("solar_phase_offset_keep")})
+            cache["solar_phase_offset_keep"] = round(_displaced_keep(keep, 1, contradicts), 6)
         self._state.thermal_model_cache = cache
+        return True
 
     def get_engine_status(self) -> dict:
         """Return structured engine status for each thermal parameter.

@@ -14757,7 +14757,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if hasattr(self, "learning") and hasattr(self.learning, "_state")
                 else None
             )
-            self.learning.update_solar_phase_offset(obs, THERMAL_SOLAR_PHASE_ALPHA)
+            if not self.learning.update_solar_phase_offset(
+                obs, THERMAL_SOLAR_PHASE_ALPHA, window_end=window[-1].get("ts")
+            ):
+                continue  # Issue #1524: this window was already counted by an earlier run
             _new_offset = (
                 (self.learning._state.thermal_model_cache or {}).get("solar_phase_offset_h")
                 if hasattr(self, "learning") and hasattr(self.learning, "_state")
@@ -14788,10 +14791,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _run_ac_duty_solar_phase_fit(self) -> None:
         """Estimate solar phase offset from AC duty cycle pattern (Issue #312).
 
-        Secondary estimator — only used when the primary (passive window) method has
-        never produced an observation. Reads the chart_log, groups entries by local
-        calendar date, applies quality filter, estimates peak-load hour, and updates
-        the EWMA via learning.update_ac_duty_solar_phase_offset().
+        Secondary estimator: displaces the primary (passive window) offset only as its new days arrive (Issue
+        #1524, ``learning._resolve_solar_phase_offset``). Reads the chart_log, groups entries by local calendar date,
+        applies quality filter, estimates peak-load hour, and updates the EWMA via
+        learning.update_ac_duty_solar_phase_offset(), which counts each day once.
 
         Sets self._solar_phase_ac_backfill = True on completion.
         """
@@ -14830,7 +14833,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if offset is None:
                 rejected += 1
                 continue
-            self.learning.update_ac_duty_solar_phase_offset(offset, day_str)
+            if not self.learning.update_ac_duty_solar_phase_offset(offset, day_str):
+                continue  # Issue #1524: this day was already counted by an earlier daily run
             committed += 1
 
         current: float | None = None

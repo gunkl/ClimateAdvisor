@@ -48,7 +48,7 @@ The automation logic table and all threshold constants in this document are expr
 | What does the `comfort_family_switch` event carry, and where is the mode-change history kept? | Payload `resolved_family`, `reason`, `margin_applied_f`, `indoor_f`, `floor_f`, `ceiling_f`, `breach` (retired: `deadband_applied_f`, `minutes_since_*_ended`). Since #1073 a held switch emits `comfort_switch_held` and every actual mode write emits `thermostat_mode_set`. Every commanded-mode change is also appended to a 200-entry ring buffer (`AutomationEngine.comfort_mode_changes`) that feeds the `control_quality` report and is the one persisted mode-change clock. | [§6f Events and observability](08-COMPUTATION-REFERENCE.md#events-and-observability) |
 | Why does nat-vent no longer set HVAC off when windows open (Issue #249)? | The band stays armed when nat-vent activates; the thermostat self-arbitrates — free cooling is free, AC kicks in only if the breeze can't hold the ceiling. Turning HVAC off also disarmed the floor, making cold-snap escalation impossible. Fix #338 adds: when nat-vent activates (or re-activates from paused), `_apply_nat_vent_hvac_state()` immediately re-arms the appropriate band (full or floor-only per `aggressive_savings`), closing a gap where Path B re-activation deferred re-arming up to 30 min. | [§6e — Nat-vent and economizer with the band armed](08-COMPUTATION-REFERENCE.md#nat-vent-and-economizer-with-the-band-armed) |
 | What band does `_apply_nat_vent_hvac_state()` arm when nat-vent activates, and how does `aggressive_savings` affect it? | `FAN_MODE_WHOLE_HOUSE`/`DISABLED` → no-op. `FAN_MODE_HVAC` + `aggressive_savings=False` → full band `[comfort_heat, comfort_cool]`. `FAN_MODE_HVAC` + `aggressive_savings=True` → floor-only (heat @ `comfort_heat`, ceiling disarmed — no compressor through open windows). Called at initial activation, paused re-activation, and every 30-min `apply_classification()` cycle. | [§6e — `_apply_nat_vent_hvac_state()`](08-COMPUTATION-REFERENCE.md#_apply_nat_vent_hvac_state--thermostat-off-while-the-blower-ventilates-fix-338-replaced-by-issue-1142-d7) |
-| How does the solar phase offset resolver decide which EWMA to use, and what is the fallback? | Fresh primary wins; fresh secondary (≥ 3 obs) next; then stale primary; stale secondary; generic default only when nothing has ever been learned. Staleness = last_obs_date absent or > 90 days old (`THERMAL_PARAM_STALE_DAYS`). | [§5e-viii Two-EWMA Solar Phase Architecture](08-COMPUTATION-REFERENCE.md#5e-viii-solar-phase-offset--two-ewma-architecture-issue-312) |
+| How does the solar phase offset resolver decide which EWMA to use, and what is the fallback? | By evidence, never by date (Issue #1524): with both learned and the secondary qualified (≥ 3 AC-duty days), `keep × primary + (1 − keep) × secondary`, where the primary's share `keep` is 1.0 after each passive-window observation and halves every 20 new AC-duty days that agree with it (every 5 that are ≥ 1 h away from it). One learned → that one; nothing learned → the default (2 h). | [§5e-viii Two-EWMA Solar Phase Architecture](08-COMPUTATION-REFERENCE.md#5e-viii-solar-phase-offset--two-ewma-architecture-issue-312) |
 | What quality gates must a chart_log day pass before the AC duty cycle solar phase method estimates an offset? | Five gates: setpoint_cool field present; setpoint in [68, 80]°F; spread < 1.5°F over 11:00–18:00; ≥ 4 cool entries in 11:00–16:00; at least one 11:00–16:00 entry has indoor > median setpoint. | [§5e-viii AC duty cycle quality filter](08-COMPUTATION-REFERENCE.md#5e-viii-solar-phase-offset--two-ewma-architecture-issue-312) |
 | What are the two fan archetypes and how does each affect HVAC mode and fan-stops-on-close behavior? | `FAN_MODE_HVAC` (HVAC blower): band stays armed, HVAC unchanged when fan activates, fan does NOT stop when windows close unless `_natural_vent_active=True`. `FAN_MODE_WHOLE_HOUSE` (exhaust fan): HVAC set to off on activation (mode captured in `_pre_fan_hvac_mode`), restored on deactivation, fan stops when ALL sensors close even if `_natural_vent_active=False`. | [§9 Fan Archetype Behavioral Contract](08-COMPUTATION-REFERENCE.md#fan-archetype-behavioral-contract-issue-277) |
 | Why does `_set_hvac_mode("off")` also set `_fan_command_time` (Issue #277 Bug A1)? | The `set_fan_mode(auto)` assertion inside `_set_hvac_mode("off")` sets `_fan_command_time = dt_util.now()` before the service call, so cloud thermostat echoes of the fan_mode attribute change are suppressed within the `_is_recent_fan_command` window instead of triggering a false manual override. | [§9b Race Guard — `_set_hvac_mode("off")` fan_command_time](08-COMPUTATION-REFERENCE.md#_set_hvac_modeoff-fan_command_time-guard-issue-277-bug-a1) |
@@ -723,26 +723,22 @@ The two EWMAs never cross-update: `update_solar_phase_offset()` in `learning.py`
 
 **Resolver — `_resolve_solar_phase_offset(cache)` (`learning.py`):**
 
-Each EWMA stores a `last_obs_date` field (`solar_phase_offset_last_obs_date`, `solar_phase_offset_ac_last_obs_date`). A parameter is **stale** if its date is absent or older than `THERMAL_PARAM_STALE_DAYS` (90 days). Stale home-specific data is still preferred over a generic default — the default is only used when nothing has ever been learned.
+**Evidence, not dates (Issue #1524, owner decision 2026-11-11 "fade only on new evidence").** The primary gives way to the secondary only as newer AC-duty days replace or contradict it. `solar_phase_offset_keep` is the primary's share: 1.0 after every new passive-window observation (`update_solar_phase_offset`), and each new AC-duty day (`update_ac_duty_solar_phase_offset`) lowers it with `thermal_confidence.displaced_keep`: halved every `THERMAL_EVIDENCE_HALF_N` (20) days that agree with the primary, every `THERMAL_EVIDENCE_HALF_N_CONTRADICT` (5) days that are `THERMAL_SOLAR_PHASE_CONTRADICT_H` (1 h) or more away from it.
 
 ```
-1. primary = cache["solar_phase_offset_h"]
-   if primary is not None AND fresh (within 90 days) → return primary   ← preferred
-
-2. secondary = cache["solar_phase_offset_ac_h"]
-   ac_obs = cache["solar_phase_offset_ac_obs_count"]
-   if secondary is not None AND ac_obs >= 3 AND fresh → return secondary
-
-3. if primary is not None (stale) → return primary                       ← best stale data
-
-4. if secondary is not None AND ac_obs >= 3 (stale) → return secondary  ← next best stale
-
-5. return THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT (2)                       ← nothing ever learned
+1. primary and secondary (ac_obs >= 3) → keep × primary + (1 − keep) × secondary
+2. primary only                         → primary
+3. secondary only (ac_obs >= 3)          → secondary
+4. nothing learned                      → THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT (2)
 ```
 
-The secondary requires at least 3 accepted observations (`THERMAL_SOLAR_PHASE_AC_MIN_OBS`) before it is trusted in either the fresh or stale tier. The default prior (`THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT = 2`, peak at 3 pm local) is only returned when both EWMAs have never received an accepted observation.
+Each piece of evidence counts once: the AC-duty estimator re-scans the whole chart log every day, so a day no later than `solar_phase_offset_ac_last_obs_date` is skipped (it used to be folded into the EWMA and the count again every day), and a passive window ending no later than `solar_phase_offset_last_window_end` is skipped (the daily re-fit scans two days). The `last_obs_date` fields are kept for diagnostics only.
 
-**Staleness principle (applies to all computed thermal parameters — see Issue #314):** A learned value is only "current" if it was recently observed. An EWMA frozen by seasonal inactivity is stale, but it still encodes home-specific geometry and is a better estimate than a generic prior. The resolver prefers fresh > stale > default, with primary (passive method) winning within each tier.
+Was (Issue #312): a parameter not observed for `THERMAL_PARAM_STALE_DAYS` (90) was "stale" and a fresh secondary beat a stale primary, so on the 91st day after the last passive window the expected solar peak moved to the AC-duty hour with no new measurement. Upgrade: a cache without `solar_phase_offset_keep` gets it once at load (`migrate_solar_phase_keep`): 0.0 when the old rule was already using the secondary, else 1.0, so the offset in use does not change at the upgrade; `THERMAL_PARAM_STALE_DAYS` is read only there.
+
+The secondary requires at least 3 accepted observations (`THERMAL_SOLAR_PHASE_AC_MIN_OBS`) before it is used at all. The default prior (`THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT = 2`, peak at 3 pm local) is only returned when neither EWMA has an accepted observation.
+
+**Learned values give way only to new evidence (Issues #314, #1524):** an EWMA frozen by seasonal inactivity is not stale; it still encodes the home's geometry and stays in use until newer measurements replace or contradict it.
 
 `get_thermal_model()` returns `solar_phase_offset_h` as the **resolved** value — call sites (ODE, chart) receive the best available estimate without needing to know which source was used. The raw secondary EWMA is also exposed as `solar_phase_offset_ac_h` for diagnostic inspection.
 
@@ -778,6 +774,7 @@ Called once per coordinator update cycle (inside the `_run_solar_phase_chart_log
 |---|---|---|
 | `THERMAL_SOLAR_PHASE_AC_ALPHA` | 0.07 | Secondary EWMA smoothing factor |
 | `THERMAL_SOLAR_PHASE_AC_MIN_OBS` | 3 | Minimum observations before secondary is trusted by resolver |
+| `THERMAL_SOLAR_PHASE_CONTRADICT_H` | 1.0 | Issue #1524: an AC-duty day this far (h) from the primary contradicts it (primary share halves per 5 such days, else per 20) |
 | `THERMAL_SOLAR_PHASE_AC_SETPOINT_MIN_F` | 68.0 | Setpoint range lower bound |
 | `THERMAL_SOLAR_PHASE_AC_SETPOINT_MAX_F` | 80.0 | Setpoint range upper bound |
 | `THERMAL_SOLAR_PHASE_AC_SETPOINT_STABILITY_F` | 1.5 | Max allowed setpoint spread across 11:00–18:00 |
@@ -786,7 +783,7 @@ Called once per coordinator update cycle (inside the `_run_solar_phase_chart_log
 | `THERMAL_SOLAR_PHASE_OFFSET_MIN` | 0 | Offset clamp lower bound |
 | `THERMAL_SOLAR_PHASE_OFFSET_MAX` | 4 | Offset clamp upper bound (5 pm peak) |
 
-**Test coverage:** `tests/test_solar_phase.py` — `TestAcDutySolarPhase` (quality filter reject paths, estimation, EWMA update, resolver priority).
+**Test coverage:** `tests/test_solar_phase.py` — `TestAcDutySolarPhase` (quality filter reject paths, estimation, EWMA update, resolver priority)); `tests/test_solar_phase_evidence_1524.py` (no calendar switch, evidence switch, each day counted once, upgrade continuity).
 
 ---
 

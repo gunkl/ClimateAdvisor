@@ -243,7 +243,8 @@ class TestResolveSolarPhaseOffset:
 
 
 class TestSolarPhaseOffsetStaleness:
-    """_resolve_solar_phase_offset must treat parameters older than THERMAL_PARAM_STALE_DAYS as None."""
+    """Issue #312 tiers, revised by Issue #1524: the dates no longer decide anything; home-specific data still beats
+    the default, the primary still beats the secondary until newer secondary evidence displaces it."""
 
     def _cache(self, primary=None, primary_date=None, secondary=None, secondary_date=None, ac_obs=0):
         return {
@@ -271,8 +272,11 @@ class TestSolarPhaseOffsetStaleness:
         cache = self._cache(primary=3.0, primary_date=self._days_ago(1))
         assert _resolve_solar_phase_offset(cache) == pytest.approx(3.0)
 
-    def test_stale_primary_falls_to_secondary(self):
-        """Primary older than 90 days must be masked; fresh secondary with obs>=3 used instead."""
+    def test_quiet_primary_is_not_dropped_by_the_calendar(self):
+        """Issue #1524 (owner decision 2026-11-11): a primary not observed for 91 days keeps its place; only newer
+        AC-duty evidence displaces it (its ``solar_phase_offset_keep``). Old expectation: 1.5, the secondary took
+        over on day 91 with no new measurement arriving. Its pre-#1524 shape keeps 1.5 through the load migration
+        (tests/test_solar_phase_evidence_1524.py)."""
         from custom_components.climate_advisor.learning import _resolve_solar_phase_offset
 
         cache = self._cache(
@@ -282,7 +286,7 @@ class TestSolarPhaseOffsetStaleness:
             secondary_date=self._days_ago(1),
             ac_obs=3,
         )
-        assert _resolve_solar_phase_offset(cache) == pytest.approx(1.5)
+        assert _resolve_solar_phase_offset(cache) == pytest.approx(3.0)
 
     def test_primary_with_no_date_falls_to_stale_value(self):
         """Primary with last_obs_date=None (pre-312 migration) is stale but still used — better than default."""

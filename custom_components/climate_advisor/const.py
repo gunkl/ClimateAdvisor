@@ -1898,7 +1898,14 @@ THERMAL_SOLAR_PHASE_MIN_ENTRIES = 3  # Min chart_log entries in window
 THERMAL_SOLAR_PHASE_MIN_WINDOW_H = 4  # Min window span (hours)
 THERMAL_SOLAR_PHASE_MIN_DT_F = 1.5  # Min indoor ΔT for visible peak
 THERMAL_SOLAR_PHASE_ALPHA = 0.10  # EWMA alpha (slow — stable building physics)
-THERMAL_PARAM_STALE_DAYS = 90  # days — parameter older than this treated as None at resolver
+# Issue #1524: retired as a resolver rule (the primary solar phase offset gives way only to newer AC-duty evidence,
+# never to the calendar). Read once, when a cache from before #1524 is loaded, so the offset in use does not change
+# at the upgrade (a primary already older than this with a qualified, fresher secondary starts fully displaced).
+THERMAL_PARAM_STALE_DAYS = 90
+# Issue #1524: an AC-duty phase day contradicts the primary offset when it is at least this far from it (hours);
+# such a day halves the primary's share every THERMAL_EVIDENCE_HALF_N_CONTRADICT days, an agreeing one every
+# THERMAL_EVIDENCE_HALF_N days.
+THERMAL_SOLAR_PHASE_CONTRADICT_H = 1.0
 
 # AC duty-cycle secondary solar phase estimator (Issue #312)
 THERMAL_SOLAR_PHASE_AC_ALPHA = 0.07  # EWMA alpha (slower — less reliable signal)

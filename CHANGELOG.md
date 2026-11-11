@@ -13,6 +13,11 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **Internal:** `thermal_lead_time.stepper_lead_minutes` / `stepper_lead_minutes_before` take an engine-neutral `HouseStepper` (`prediction_engines.control_stepper`, supplied by the coordinator as the optional `house_stepper` argument). The goldens `r6b_tou_bank_lead_follows_primary__v4` and `..._heat__v4` were re-derived a third time with different house inputs so the stepped lead lands inside the run and tells v3, the first-order formula and the plain formula apart (cooling window 13:40, heating 14:14; owner approved 2026-11-11).
 - Fix #1519: the nat-vent plan's "start pre-cool at" time now uses your AC's learned cooling rate and the house's leak (on a v4 zone, v4's own house model) instead of always showing a fixed 2-hour lead. Display only; no decision reads it.
 
+## [0.9.27] — 2026-11-11
+
+### Internal
+- **The simulation test harness no longer fills `/tmp` (Issue #1518).** Every headless coordinator built without a `config_dir` left a `ca_sim_coordinator_*` / `ca_sim_multi_zone_*` folder behind; a development container collected about 581,000 of them. The harness now removes each folder with the simulated Home Assistant it belongs to, at process exit at the latest (also at the end of each test session, as a backstop), and sweeps its own folders older than 6 hours that a killed run left; the real-HA test conftest sweeps stale `ca_sim_portion_*` copies the same way, and two unit tests use pytest's temporary folders. The real-HA test tier's 60-second per-test timeout now uses pytest-timeout's `thread` method, so a test that hangs where the default signal cannot reach (seen under heavy load) ends its worker instead of stalling the run for hours (the nightly real-HA job now runs with workers too, so a timeout replaces one worker rather than ending the run). Development and CI hosts only; no change for Home Assistant installs.
+
 ## [0.9.26] — 2026-11-10
 
 - Fix #1514: a setpoint band whose heat and cool are less than 4 °F apart (or the wrong way round) is now named in the log as the cause of what follows from it.

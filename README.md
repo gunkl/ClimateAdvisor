@@ -4,7 +4,6 @@ A Home Assistant integration that runs your thermostat from the weather forecast
 
 [![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=released&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)
 [![Development Version](https://img.shields.io/github/manifest-json/v/gunkl/ClimateAdvisor?filename=custom_components%2Fclimate_advisor%2Fmanifest.json&label=development&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/main/custom_components/climate_advisor/manifest.json)
-[![0.9.x Version](https://img.shields.io/github/manifest-json/v/gunkl/ClimateAdvisor/0.9.x?filename=custom_components%2Fclimate_advisor%2Fmanifest.json&label=0.9.x&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/0.9.x/custom_components/climate_advisor/manifest.json)
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=gunkl&repository=ClimateAdvisor&category=integration)
 
 [![Test coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Fcoverage.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/badges.yml)

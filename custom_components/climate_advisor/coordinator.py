@@ -9031,6 +9031,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._occupancy_mode,
                 target_temp_step=self._thermostat_target_temp_step(),
                 frozen=getattr(self, "_tou_av_frozen", None),
+                outdoor_at=self._outdoor_forecast_at,
             )
             self._freeze_tou_av_split(self._tou_phase_resolution, now)
         else:
@@ -9042,9 +9043,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._current_classification.hvac_mode,
                 thermal_model,
                 self.config,
+                outdoor_at=self._outdoor_forecast_at,
             )
         self._sync_tou_away_vacation_state()
         self._maybe_emit_tou_active_window_event()
+
+    def _outdoor_forecast_at(self, when: datetime) -> float | None:
+        """Outdoor temperature expected at ``when`` (Issue #1517): the hourly forecast there when it reaches that
+        far, else the current reading; ``None`` when neither is known.
+
+        Occupant view: a lead time (the TOU bank) allows for the house drifting toward the outdoor temperature of
+        the moment the period starts, not this minute's.
+        """
+        forecast, _method = _interpolate_hourly_outdoor_temp(getattr(self, "_hourly_forecast_temps", None), when)
+        return forecast if forecast is not None else self._last_outdoor_temp
 
     def _thermostat_target_temp_step(self) -> Any:
         """The thermostat's advertised ``target_temp_step`` (raw; None when it advertises none or is unreadable)."""

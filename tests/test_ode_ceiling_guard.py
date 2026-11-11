@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from custom_components.climate_advisor.ode_ceiling_guard import (
     OdeCeilingGuardInputs,
     OdeCeilingGuardOutcome,
@@ -303,7 +305,8 @@ class TestStandingByVsEscalate:
                 natural_vent_active=False,
                 ceiling_threshold=76.0,
                 comfort_cool=76.0,
-                k_active_cool=-6.0,  # (76-74)/6*60*1.3 = 26min -> clamped to 30min floor
+                k_passive=-0.05,  # Issue #1517: leak-aware lead is ~25 min here -> clamped to the 30 min floor
+                k_active_cool=-6.0,
                 now=_NOW,
             )
         )
@@ -416,18 +419,28 @@ class TestBreachAndLeadMeasureAgainstResolvedCeiling:
                 ceiling_threshold=77.0,
                 indoor=74.0,
                 k_active_cool=-2.0,
+                k_passive=-0.05,
             )
         )
         assert decision.outcome == OdeCeilingGuardOutcome.ESCALATE
         assert decision.breach_ts == datetime(2026, 7, 15, 13, 30, tzinfo=UTC)
-        assert decision.lead_min == 117.0
+        # Issue #1517: leak-aware (outdoor 85, k -0.05); the old (3 / 2) * 60 * 1.3 = 117 ignored the leak.
+        assert decision.lead_min == pytest.approx(135.85, abs=0.01)
         assert decision.ceiling == 77.0
 
     def test_plain_ceiling_keeps_the_old_behaviour(self) -> None:
         curve = _curve(("2026-07-15T12:30:00+00:00", 76.0))
         decision = decide_ode_ceiling_guard(
-            _inputs(predicted_indoor=curve, comfort_cool=75.0, ceiling_threshold=75.0, indoor=74.0, k_active_cool=-2.0)
+            _inputs(
+                predicted_indoor=curve,
+                comfort_cool=75.0,
+                ceiling_threshold=75.0,
+                indoor=74.0,
+                k_active_cool=-2.0,
+                k_passive=-0.05,
+            )
         )
         assert decision.outcome == OdeCeilingGuardOutcome.ESCALATE
-        assert decision.lead_min == 39.0
+        # Issue #1517: leak-aware; the old (1 / 2) * 60 * 1.3 = 39 ignored the leak toward the 85 F outdoor.
+        assert decision.lead_min == pytest.approx(46.78, abs=0.01)
         assert decision.ceiling == 75.0

@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.27] — 2026-11-10
+
+- Fix #1517: pre-heat, pre-cool and the time-of-use bank now start early enough to reach the target, because the lead time allows for the house drifting toward the outdoor temperature while the equipment runs.
+  - **What you'll notice:** on cold or hot days the bank and the ceiling guard start earlier (a few minutes to tens of minutes) so the house is at the target when the period starts; before, about 1 recovery in 5 was more than 5 minutes late. On mild days the start can be a little later. A target the equipment cannot reach at the current outdoor temperature starts at the maximum lead (4 hours).
+  - **Unchanged:** with no learned house leak or no outdoor reading the lead is exactly what it was.
+  - **Internal:** one shared function (`thermal_lead_time.compute_lead_minutes_from_rate`) now carries the leak term for the TOU bank (Home/Guest and Away/Vacation), the ODE ceiling guard and the nat-vent plan.
+
 ## [0.9.26] — 2026-11-10
 
 - Fix #1514: a setpoint band whose heat and cool are less than 4 °F apart (or the wrong way round) is now named in the log as the cause of what follows from it.

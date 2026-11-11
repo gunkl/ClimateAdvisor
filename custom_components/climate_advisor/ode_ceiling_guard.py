@@ -258,6 +258,13 @@ def decide_ode_ceiling_guard(inputs: OdeCeilingGuardInputs) -> OdeCeilingGuardDe
         max_minutes=_LEAD_MIN_CEIL,
         safety_multiplier=_LEAD_MIN_LOOKAHEAD_MULTIPLIER,
         fallback_minutes=_CEILING_PRECOOL_FALLBACK_MIN,
+        # Issue #1517: AC starts when the house is at the ceiling and must pull it back down to where it is now,
+        # while the house leaks toward the (hot) outdoor temperature.
+        start_temp=inputs.ceiling_threshold,
+        target_temp=inputs.indoor,
+        outdoor_temp=inputs.outdoor,
+        k_passive=inputs.k_passive,
+        cooling=True,
     )
 
     if hours_to_breach <= lead_min / 60:

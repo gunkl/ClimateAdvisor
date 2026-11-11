@@ -203,6 +203,8 @@ widening since Issue #1080: they all resolve the band through `automation.resolv
 | `ode_ceiling_guard.py` (ceiling-guard escalation) | `_LEAD_MIN_FLOOR`/`_LEAD_MIN_CEIL` (30/240) | `_LEAD_MIN_LOOKAHEAD_MULTIPLIER` (1.3) | `_CEILING_PRECOOL_FALLBACK_MIN` (120) |
 | `briefing.py::_derive_warm_day_events()` (warm-day pre-cool lead) | 30 / 240 | 1.3 | `const.CEILING_PRECOOL_FALLBACK_MIN` (120) — previously a locally-redefined duplicate constant, now imported directly |
 
+**Leak-aware (Issue #1517).** The four live callers (`resolve_tou_phase()`, `resolve_tou_away_vacation_phase()`, `ode_ceiling_guard.decide_ode_ceiling_guard()`, plus `nat_vent_plan.compute_nat_vent_plan()`) also pass `start_temp`, `target_temp`, `outdoor_temp`, `k_passive` and `cooling`; the function then returns the closed-form time for the house to reach the target while leaking toward the outdoor temperature, times 1.15 instead of 1.3 (unreachable target: the 240 ceiling). Without `k_passive` or an outdoor value it is the plain formula. The scheduler functions take `outdoor_at(when)` (the coordinator's forecast at the schedule start, else the current reading). Formula and rationale: [08 §5b](08-COMPUTATION-REFERENCE.md).
+
 `resolve_tou_phase()`'s own lookahead window (`_LOOKAHEAD = timedelta(minutes=240)`, matching `_TOU_LEAD_MIN_CEIL`) bounds how far ahead `_next_start_within()` searches for a qualifying schedule — a schedule starting further than 4 hours away is not yet "found" (and its window fields stay unpopulated) until a later 30-minute cycle brings it within range. This is intentional, not a gap: the longest possible computed lead time is 240 minutes, so nothing further out could ever need pre-conditioning yet.
 
 ## Chart Coverage

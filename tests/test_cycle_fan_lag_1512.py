@@ -71,7 +71,7 @@ class TestBlowerIsNeverARun:
         _fire(coord, _t(10), (mode, "fan"), (mode, "idle"))
         assert coord._today_record.hvac_runtime_minutes == pytest.approx(8.0)
         coord._start_hvac_observation.assert_called_once_with(mode)
-        assert coord._thermostat_reports_action is True
+        assert coord._thermostat_has_reported_runs() is True
 
     @pytest.mark.parametrize("mode", ["heat", "cool"])
     def test_overrun_straight_from_the_run(self, mode):
@@ -108,14 +108,27 @@ class TestBlowerIsNeverARun:
         assert coord._today_record.hvac_runtime_minutes == pytest.approx(6.0)
         coord._start_hvac_observation.assert_called_once_with("heat")
 
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
     @pytest.mark.parametrize("action", ["", "fan"])
-    def test_thermostat_never_seen_heating_keeps_the_93_fallback(self, action):
-        """A thermostat that only ever reports fan (or nothing) while it heats still gets its sessions (#93)."""
+    def test_a_thermostat_that_never_reports_runs_has_no_runs(self, mode, action):
+        """Owner decision 2026-11-13 ("Never, remove it."): the #93 mode fallback is gone. A thermostat that reports
+        only ``fan`` (or no hvac_action) while its mode is heat/cool records no run, no runtime, no observation. This
+        test replaced ``test_thermostat_never_seen_heating_keeps_the_93_fallback``, whose expectation (50 min of
+        runtime from a selected mode) is now wrong by that decision."""
         coord = _make_thermostat_coord()
-        _fire(coord, _t(0), ("off", action), ("heat", action))
-        _fire(coord, _t(50), ("heat", action), ("off", action))
-        assert coord._today_record.hvac_runtime_minutes == pytest.approx(50.0)
-        assert getattr(coord, "_thermostat_reports_action", False) is False
+        _fire(coord, _t(0), ("off", action), (mode, action))
+        _fire(coord, _t(50), (mode, action), ("off", action))
+        assert coord._today_record.hvac_runtime_minutes == 0.0
+        coord._start_hvac_observation.assert_not_called()
+        assert coord._thermostat_has_reported_runs() is False
+
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    def test_heating_reported_runs_as_before(self, mode):
+        coord = _make_thermostat_coord()
+        _fire(coord, _t(0), (mode, "idle"), (mode, _ACTION[mode]))
+        _fire(coord, _t(12), (mode, _ACTION[mode]), (mode, "idle"))
+        assert coord._today_record.hvac_runtime_minutes == pytest.approx(12.0)
+        coord._start_hvac_observation.assert_called_once_with(mode)
 
     def test_fan_only_mode_is_still_a_fan_only_session(self):
         """Learned blower rule never touches the fan_only session (#912)."""
@@ -129,10 +142,12 @@ class TestBlowerIsNeverARun:
 
     def test_session_still_running_rule_matches(self):
         """The rollover's stale-session rule (#1241) reads the same blower rule."""
-        assert ha.thermostat_reports_running("heat", "fan", ca_ventilating=False) is True  # #93
-        assert ha.thermostat_reports_running("heat", "fan", ca_ventilating=False, fan_is_blower=True) is False
-        assert ha.thermostat_reports_running("fan_only", "fan", ca_ventilating=False, fan_is_blower=True) is True
-        assert ha.thermostat_reports_running("cool", "cooling", ca_ventilating=False, fan_is_blower=True) is True
+        # owner decision 2026-11-13: only a reported heating/cooling is a run; fan_only stays the fan session (#912)
+        assert ha.thermostat_reports_running("heat", "fan", ca_ventilating=False) is False
+        assert ha.thermostat_reports_running("heat", "", ca_ventilating=False) is False
+        assert ha.thermostat_reports_running("fan_only", "fan", ca_ventilating=False) is True
+        assert ha.thermostat_reports_running("fan_only", "fan", ca_ventilating=True) is False  # #986
+        assert ha.thermostat_reports_running("cool", "cooling", ca_ventilating=False) is True
 
     def test_overrun_after_idle_counts_as_a_post_run_blower_for_the_fan_reconcile(self):
         """Mirror of #618: idle -> fan within the overrun window is the post-run blower, so the fan reconcile never
@@ -858,7 +873,7 @@ class TestAFanIsNeverInferredToBeARun:
             _fire(coord, _t(125), (mode, "fan"), (mode, "idle"))
         assert coord._today_record.hvac_runtime_minutes == before
         coord._start_hvac_observation.assert_not_called()
-        assert coord._hvac_session_mode is None and coord._thermostat_reports_action is True
+        assert coord._hvac_session_mode is None and coord._thermostat_has_reported_runs() is True
         assert not hasattr(coord, "_check_unlearn_reports_action")
 
     @pytest.mark.parametrize("mode", ["heat", "cool"])
@@ -888,13 +903,12 @@ class TestAFanIsNeverInferredToBeARun:
         assert len(r.c._cycle_store.cycles(mode)) == n0
         assert not r.c._cycle_recorder.open_modes
 
-    def test_the_flag_belongs_to_the_climate_entity(self):
+    def test_the_report_watch_belongs_to_the_climate_entity(self):
         coord = _make_thermostat_coord()
         _fire(coord, _t(0), ("heat", "idle"), ("heat", "heating"))
-        assert coord._thermostat_reports_action_entity == "climate.test"
-        assert coord._fan_is_blower_only("fan", "heat") is True
+        assert coord._thermostat_has_reported_runs() is True
         coord.config = {**coord.config, "climate_entity": "climate.other"}
-        assert coord._fan_is_blower_only("fan", "heat") is False  # another thermostat starts unlearned
+        assert coord._thermostat_has_reported_runs() is False  # another thermostat starts unknown
 
 
 def test_a_sub_hundredth_step_sensor_never_has_zero_resolution():
@@ -903,3 +917,71 @@ def test_a_sub_hundredth_step_sensor_never_has_zero_resolution():
     from custom_components.climate_advisor.cycle_recorder import _infer_step
 
     assert _infer_step([70.0, 70.001, 70.002]) == 0.01
+
+
+class TestThermostatThatNeverReportsRuns:
+    """Owner decision 2026-11-13: a run exists only when the thermostat reports heating/cooling. A thermostat that
+    never does gets no runtime, observations, cycles or rate learning, and, after 3 days in a heating/cooling mode,
+    an occupant notice."""
+
+    def _tick_days(self, coord, days: float, state):
+        coord.hass.states.get = MagicMock(return_value=state)
+        start = datetime(2026, 11, 1, 0, 0, 0)
+        for k in range(int(days * 24 * 12) + 1):
+            with patch(_DT) as mock_dt:
+                mock_dt.now.return_value = start + __import__("datetime").timedelta(minutes=5 * k)
+                coord._tick_hvac_action_watch()
+
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    @pytest.mark.parametrize("action", ["", "fan"])
+    def test_notice_after_three_days_in_a_mode_with_no_report(self, mode, action):
+        coord = _make_thermostat_coord()
+        self._tick_days(coord, 2.9, _make_state(mode, action))
+        assert coord.thermostat_action_notice() is None  # not before N (3 days of heat/cool-mode time)
+        self._tick_days(coord, 0.2, _make_state(mode, action))
+        n = coord.thermostat_action_notice()
+        assert n is not None and n["rate_in_use"] == "default" and n["ever_reported"] is False
+        assert "has not reported when it is heating or cooling" in n["text"] and "never counted as a run" in n["text"]
+        assert coord.thermostat_action_notice("v4")["rate_in_use"] == "v4"
+
+    def test_off_mode_time_does_not_count_and_a_report_clears_it(self):
+        coord = _make_thermostat_coord()
+        self._tick_days(coord, 4.0, _make_state("off", ""))
+        assert coord.thermostat_action_notice() is None
+        self._tick_days(coord, 3.2, _make_state("heat", ""))
+        assert coord.thermostat_action_notice() is not None
+        _fire(coord, _t(0), ("heat", "idle"), ("heat", "heating"))
+        assert coord.thermostat_action_notice() is None
+
+    def test_no_cost_estimate_for_a_thermostat_with_no_runs(self):
+        from custom_components.climate_advisor.learning import DailyRecord
+
+        coord = _make_thermostat_coord()
+        coord.config = {**coord.config, "energy_rate": 0.2, "heat_power_kw": 3.0, "cool_power_kw": 3.0}
+        rec = DailyRecord(date="2026-11-04", day_type="cold", trend_direction="stable")
+        coord._apply_estimated_cost(rec)
+        assert rec.estimated_cost == 0.0  # a reporting (or not yet judged) thermostat: nothing ran costs 0
+        self._tick_days(coord, 3.2, _make_state("heat", "fan"))
+        coord._apply_estimated_cost(rec)
+        assert rec.estimated_cost is None  # unknown, never a 0.00 that reads as "nothing ran"
+
+
+def test_ai_context_names_a_thermostat_that_never_reports_runs():
+    from custom_components.climate_advisor.ai_skills_context import build_thermal_pipeline_context
+    from tests.test_ai_skills_context_learning_health import _make_coordinator
+
+    coord = _make_coordinator({})
+    coord.config = {"temp_unit": "fahrenheit"}
+    coord.decision_rates_summary.return_value = [
+        {
+            "key": "thermostat_reports",
+            "kind": "notice",
+            "source": "notice",
+            "value": None,
+            "rate_in_use": "default",
+            "ever_reported": False,
+            "text": "Your thermostat has not reported when it is heating or cooling at all",
+        }
+    ]
+    ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
+    assert "thermostat: Your thermostat has not reported when it is heating or cooling at all" in ctx

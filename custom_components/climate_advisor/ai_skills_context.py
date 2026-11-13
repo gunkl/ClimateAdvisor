@@ -1098,12 +1098,15 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
                 if callable(getattr(coordinator, "decision_rates_summary", None))
                 else []
             )
-            if isinstance(r, dict) and r.get("source") == "cycle"
+            if isinstance(r, dict) and r.get("source") in ("cycle", "notice")
         ]
         # rows carry q / sd_q in the display unit per hour and coast_area_f as a degF delta (_cycle_model_rows)
         _unit = (getattr(coordinator, "config", None) or {}).get("temp_unit", "fahrenheit")
         _sym = UNIT_SYMBOL.get(_unit, "°F")
         for r in crow:
+            if r.get("source") == "notice":  # owner decision 2026-11-13: no heating/cooling reports at all
+                lines.append(f"  thermostat: {r.get('text')} (rate in use: {r.get('rate_in_use')})")
+                continue
             val = r.get("value") if isinstance(r.get("value"), dict) else r
             mode = r.get("mode") or ("cool" if "cool" in str(r.get("key", "")) else "heat")
             q, grade = val.get("q"), val.get("grade")

@@ -538,6 +538,15 @@ only the typical value`, `short runs, sensor lag not known yet`). A thermostat t
 run: the blower period is never a run of its own and the coast is recorded through it; a 2-minute `cycle_too_short`
 rejection right after each real run on 0.9.31 was that blower ([05 §blower](05-LEARNING-ENGINE-DESIGN.md#blower-around-the-cycle-issue-1512-reopened)).
 
+### "No heating/cooling runtime at all" (owner decision 2026-11-13)
+
+A heating or cooling run exists only when the thermostat reports `hvac_action` `heating` or `cooling`. A thermostat
+that reports only `fan`, or no `hvac_action` at all, records no runtime, no observations and no cycles: that is by
+design (the #93 mode fallback was removed). After 3 days in a heating/cooling mode with no report, Analysis, Debug
+and the AI context say so (`decision_rates_summary` row `source: "notice"`; `hvac_action_report.unreported_s` in
+the state file). Check the climate entity's attributes in Developer Tools: if `hvac_action` never reads
+`heating`/`cooling`, the integration does not report it.
+
 ### "Thermal model confidence is 'none' after weeks of use"
 
 **Step 1 — Check the structured rejection log (primary tool):**

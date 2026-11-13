@@ -927,30 +927,28 @@ All five fields default to `None` at record creation. On a fire night, `setback_
 
 **What the occupant experiences:** switching the thermostat to heat/cool (or fan_only) while it stays idle must not be logged as hours of heating or cooling. Before the fix, `hvac_runtime_minutes` (and `thermostat_fan_only_runtime_minutes`) were credited for the whole idle window and a phantom heat/cool thermal observation was opened, skewing the briefing, the high-runtime learning pattern and `k_active`.
 
-`coordinator._async_thermostat_changed` derives `was_running` / `is_running` from the old and new thermostat state:
+**Owner decision 2026-11-13 ("Never, remove it."): a heating or cooling run exists ONLY when the thermostat reports `hvac_action` `heating` or `cooling`.** A `fan`, a missing/empty hvac_action, or "a mode is selected and it is not idle" never counts as a run, for any thermostat. The #93 mode fallback and its #1240 refinement below are superseded (owner: "just because running the fan warms the house doesn't mean the heater is running ... It could just be fan on a hot day").
 
-1. If either side's `hvac_action` is `heating`/`cooling` (`is_hvac_compressor_active`), `hvac_action` alone decides each side.
-2. Otherwise fall back to `hvac_mode`: a side is running when its mode is not `off`/`unavailable`/`unknown`/empty **and** its `hvac_action` does not positively report idle (`hvac_action.is_hvac_action_reported_idle`, values in `HVAC_ACTION_REPORTS_NOT_RUNNING` = `idle`/`off`). Applied to both sides so start, stop and glide edges agree.
-3. In the fallback, `is_running` is forced false while CA's own fan or nat-vent is active (`_fan_active` / `_natural_vent_active`, Issue #986).
+`coordinator._async_thermostat_changed` derives `was_running` / `is_running` from each side with `hvac_action.is_session_running`: `heating`/`cooling`, or the thermostat's own fan_only session (mode `fan_only` and hvac_action not `idle`/`off`, #912, unchanged). CA's own fan or nat-vent is never that fan_only session (Issue #986). `_thermostat_session_still_running` (the #1241 rollover) uses the same rule (`thermostat_reports_running`), and the chart log records the hvac_action as reported (the #109 fan->heating remap is gone).
 
 | hvac_mode (old -> new) | hvac_action (old -> new) | Result | Why |
 |---|---|---|---|
-| off -> heat/cool/fan_only | idle -> idle | no session, no runtime | #1240: idle is a positive "not running" signal |
-| off -> heat | idle -> heating | session starts at the `heating` edge | rule 1 |
-| heat | heating -> idle | session ends, runtime flushed | rule 1 |
-| off -> heat | missing/empty -> missing/empty | session starts on the mode change | no signal, fallback applies (#93) |
-| heat | fan -> fan | session counts until idle or mode off | `fan` is no signal (#93/#986) |
-| heat | fan -> idle | session ends, runtime flushed | #1240 stop-side mirror: previously counted until mode off |
+| off -> heat/cool/fan_only | idle -> idle | no session, no runtime | idle is not running |
+| off -> heat | idle -> heating | session starts at the `heating` edge | reported |
+| heat | heating -> idle | session ends, runtime flushed | reported |
+| off -> heat | missing/empty -> missing/empty | **no session, no runtime** | owner decision 2026-11-13 (was: started by the #93 fallback) |
+| heat | fan -> fan | **no session** | a fan is never a run (was: counted, #93/#986) |
 | fan_only -> heat | fan -> idle | fan session ends, no heat timer started | #1240 glide case |
-| heat -> off | idle/missing/fan -> idle/missing/fan | session ends | in the fallback, mode off is never running |
-| heat/cool | heating -> idle, then idle -> fan (Ecobee overrun), or heating -> fan | one session, ends at the burner stop; the blower adds no runtime, no session, no observation, no cycle edge | Issue #1512 reopened: once the thermostat has reported heating/cooling, `fan` in a heat/cool mode is the blower alone (`_fan_is_blower_only`) |
-| heat/cool | idle -> fan (lead-in) -> heating | session starts at `heating` | same rule; on the first run ever (thermostat not yet known to report its burner) the lead-in starts it and the cycle's start is moved to the burner |
-| heat -> off mid-run | heating -> fan -> idle | session ends at the stop | the Off-mode overrun is not a state contradiction (stop within `BLOWER_OVERRUN_LINK_S`) |
-| fan_only | fan | fan_only session as before | #912, unaffected by the blower rule |
+| heat/cool | heating -> idle, then idle -> fan (Ecobee overrun), or heating -> fan | one session, ends at the burner stop; the blower adds no runtime, no session, no observation, no cycle edge | Issue #1512 reopened |
+| heat/cool | idle -> fan (lead-in) -> heating | session starts at `heating` | reported |
+| heat -> off mid-run | heating -> fan -> idle | session ends at the stop | the Off-mode overrun is not a state contradiction (fan start within `BLOWER_OVERRUN_LINK_S`, 60 s, of the stop) |
+| fan_only | fan | fan_only session as before | #912, unchanged |
 
-Regression origin: ebbf5ab (Fix #93, 2026-04-08) widened the fallback guard from `if new_action and old_action` to "neither side heating/cooling", which swept in idle/off. The resolved session mode (`heat`/`cool`/`fan_only`, Issue #912) selects which counter the timer feeds; only `heat`/`cool` open a thermal observation.
+A thermostat that never reports heating/cooling therefore has no heating/cooling runtime, no HVAC observations, no cycles and no HVAC-rate learning. After `THERMOSTAT_NO_ACTION_NOTICE_S` (3 days) in a heating/cooling mode without a report (counted on the 5-minute tick, per climate entity, persisted as `hvac_action_report`; any report resets it) an occupant notice appears on Analysis, Debug and in the AI context (`coordinator.thermostat_action_notice`, a `decision_rates_summary` row with `source: "notice"`), naming the rates used instead (learned, defaults, or the primary engine in control), and the daily cost estimate is unknown (None) rather than 0.
 
-**Day rollover (Issue #1241):** `_async_end_of_day` (23:59) flushes the running session into the day's record, which resets its timer to 23:59, and then keeps the session: the rest of the run lands in the next day's record and the live getters (`get_hvac_runtime_today()`, `get_thermostat_fan_only_runtime_today()`) keep counting, even before the first post-midnight cycle creates the new record. Before, it cleared `_hvac_on_since` / `_thermostat_fan_only_on_since` / `_hvac_session_mode`, so a 23:00–01:00 run credited 59 min and then 0 (regression origin 239cc20; 55c81ff/#912 extended the clear). Stale-session guard: the clear was also the only daily bound on a session whose off-edge was missed (an off-edge dropped during startup coalescing), so the session is kept only while the live thermostat state still reports it running by the edge rule above (`hvac_action.thermostat_reports_running`: heating/cooling, or the mode fallback without an idle/off report and without CA's own fan or nat-vent). An idle, off, unavailable or missing thermostat ends it at the rollover. The in-progress thermal observation never depended on the clear; it ends at the real off-edge.
+Historical (superseded): Regression origin: ebbf5ab (Fix #93, 2026-04-08) widened the fallback guard from `if new_action and old_action` to "neither side heating/cooling", which swept in idle/off. The resolved session mode (`heat`/`cool`/`fan_only`, Issue #912) selects which counter the timer feeds; only `heat`/`cool` open a thermal observation.
+
+**Day rollover (Issue #1241):** `_async_end_of_day` (23:59) flushes the running session into the day's record, which resets its timer to 23:59, and then keeps the session: the rest of the run lands in the next day's record and the live getters (`get_hvac_runtime_today()`, `get_thermostat_fan_only_runtime_today()`) keep counting, even before the first post-midnight cycle creates the new record. Before, it cleared `_hvac_on_since` / `_thermostat_fan_only_on_since` / `_hvac_session_mode`, so a 23:00–01:00 run credited 59 min and then 0 (regression origin 239cc20; 55c81ff/#912 extended the clear). Stale-session guard: the clear was also the only daily bound on a session whose off-edge was missed (an off-edge dropped during startup coalescing), so the session is kept only while the live thermostat state still reports it running by the edge rule above (`hvac_action.thermostat_reports_running`: heating/cooling, or the fan_only session without CA's own fan or nat-vent; the mode fallback is gone, owner decision 2026-11-13). An idle, off, unavailable or missing thermostat ends it at the rollover. The in-progress thermal observation never depended on the clear; it ends at the real off-edge.
 
 **Restart during a run (Issues #1434, #1437):** runtime and learning are treated differently on purpose. The minutes a heating, cooling or fan-only run had already run are kept in today's record: the `EVENT_HOMEASSISTANT_STOP` task flushes the runtime and saves the state, as a zone reload does (#1434, see [state-persistence.md](state-persistence.md)). The thermal model does not learn from the run's pre-restart part at all (#1437, see §5e): Climate Advisor cannot see what the equipment did while Home Assistant was down, so a fit across that gap would be invalid. After the restart, the Issue #96 late start opens a fresh observation from startup.
 
@@ -959,7 +957,7 @@ Regression origin: ebbf5ab (Fix #93, 2026-04-08) widened the fallback guard from
 | Thermostat at 23:59 | Session | Today's record | Tomorrow |
 |---|---|---|---|
 | `heating`/`cooling`, or `fan_only` + `fan` | kept | credited to 23:59 | rest of the run |
-| mode heat/cool, no `hvac_action` (#93) | kept | credited to 23:59 | rest of the run |
+| mode heat/cool, no `hvac_action` | none (owner decision 2026-11-13: no run without a report; was kept by the #93 fallback) | nothing | nothing |
 | `idle`/`off`, mode off, unavailable, no state | ended | credited to 23:59 (as before) | 0 |
 | mode cool + `fan` while CA's fan/nat-vent runs (#986) | ended | credited to 23:59 (as before) | 0 |
 | no session armed | nothing | — | — |

@@ -272,24 +272,6 @@ class CycleRecorder:
             c["outdoor"].append([round(ts, 3), o])
         return closed
 
-    def reanchor_on(self, ts: float, mode: str) -> bool:
-        """The burner/compressor really started at ``ts``: a running cycle of ``mode`` opened earlier by a blower
-        lead-in (a thermostat not yet known to report its burner, Issue #1512 reopened) starts here instead.
-
-        The readings before ``ts`` stay as the pre-start level (their running bit is cleared). True when moved."""
-        ts = _num(ts)  # type: ignore[assignment]
-        c = self._open.get(mode)
-        if ts is None or c is None or c["t_off"] is not None or ts <= c["t_on"]:
-            return False
-        c["t_on"] = round(ts, 3)
-        c["id"] = f"{mode}-{int(ts)}"
-        for s in c["samples"]:
-            if s[0] < ts:
-                s[2] = int(s[2]) & ~CYCLE_FLAG_RUNNING
-        if c["samples"]:
-            self._append(c, ts, c["samples"][-1][1], force=True)
-        return True
-
     def off_edge(self, ts: float, T: float | None = None) -> list[dict[str, Any]]:
         """The equipment stopped at ``ts``. Ignored when no cycle is running. Returns closed cycles."""
         ts = _num(ts)  # type: ignore[assignment]

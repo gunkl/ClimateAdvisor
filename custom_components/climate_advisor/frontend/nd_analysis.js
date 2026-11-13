@@ -236,6 +236,8 @@
       // Issues #1512/#1516: the cycle model's measured heating and cooling rate, how sure it is, and the coast after a run.
       // Rows come from the engines payload (``decisions`` rows with source "cycle"); on a v4 zone decisions keep v4's rate.
       var cyc = cycleRows(E.decisions);
+      // owner decision 2026-11-13: a thermostat that never reports heating/cooling: no runtime, no rates measured
+      (E.decisions || []).forEach(function (r) { if (r && r.source === 'notice' && r.text) row(r.text, 'rate in use: ' + (r.rate_in_use || 'n/a'), ''); });
       ['heat', 'cool'].forEach(function (m) {
         var c = cyc[m]; if (!c || typeof c.q !== 'number') return;
         var word = m === 'heat' ? 'Heating' : 'Cooling';

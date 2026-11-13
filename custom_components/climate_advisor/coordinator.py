@@ -302,6 +302,7 @@ from .const import (
     THERMAL_VENT_MIN_SAMPLES,
     THERMAL_VENT_POST_FAN_SETTLE_MINUTES,
     THERMAL_VENTILATED_MIN_DELTA_F,
+    THERMOSTAT_NO_ACTION_NOTICE_S,
     THRESHOLD_HOT,
     THRESHOLD_MILD,
     THRESHOLD_WARM,
@@ -369,7 +370,7 @@ from .humidity_sources import (
 from .hvac_action import (
     is_hvac_action_active,
     is_hvac_compressor_active,
-    is_mode_fallback_running,
+    is_session_running,
     thermostat_reports_running,
 )
 from .incident_payload import build_incident_payload
@@ -985,6 +986,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _apply_estimated_cost(self, record: DailyRecord) -> None:
         """Fill ``record.estimated_cost`` from the optional energy settings (None when any input is missing)."""
         cfg = self.config
+        # owner decision 2026-11-13: a thermostat that does not report heating/cooling has no measured runtime, so its
+        # cost is unknown (None), never a 0.00 that reads as "nothing ran"
+        notice = getattr(self, "thermostat_action_notice", None)
+        if callable(notice) and isinstance(getattr(self, "_hvac_report_watch", None), dict) and notice():
+            record.estimated_cost = None
+            return
         record.estimated_cost = estimate_daily_cost(
             record.hvac_heat_runtime_minutes,
             record.hvac_cool_runtime_minutes,
@@ -1355,13 +1362,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # (previously only a local variable) so flush-time logic can consult it.
         self._thermostat_fan_only_on_since: datetime | None = None
         self._hvac_session_mode: str | None = None
-        # Issue #1512 reopened: once this thermostat has reported ``heating``/``cooling`` it reports its burner or
-        # compressor, so its ``fan`` is the blower alone (overrun after a run, lead-in before one), never a heating
-        # or cooling run. Learned from the thermostat, persisted (``thermostat_reports_action``); until then ``fan``
-        # keeps the #93 mode fallback (a thermostat that only ever reports ``fan`` while it heats).
-        self._thermostat_reports_action: bool = False
-        # the climate entity the flag was learned on (a different thermostat starts unlearned)
-        self._thermostat_reports_action_entity: str | None = None
+        # Owner decision 2026-11-13: a run exists only when the thermostat reports heating/cooling. For the notice of a
+        # thermostat that never does: the climate entity watched, the heat/cool-mode seconds since its last
+        # heating/cooling report, and whether it ever reported one (persisted as ``hvac_action_report``).
+        self._hvac_report_watch: dict[str, Any] = {}
         # epoch seconds of the last burner/compressor stop (heating/cooling -> anything else), for the blower overrun
         self._last_compressor_stop_ts: float | None = None
         self._last_outdoor_temp: float | None = None  # most recent outdoor reading for gate checks
@@ -2270,6 +2274,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.warning("Blind-fan recovery check failed on thermal tick; sampling continues", exc_info=True)
         self._cycle_tick()  # Issue #1512: coast windows that elapsed, outdoor, flags
+        try:  # owner decision 2026-11-13: watch for a thermostat that never reports heating/cooling
+            self._tick_hvac_action_watch()
+        except Exception:  # noqa: BLE001 - a notice must never break thermal sampling
+            _LOGGER.debug("hvac action watch failed", exc_info=True)
         self._sample_all_observations()
 
     def _refresh_outdoor_temp(self, min_delta_f: float = 0.0) -> None:
@@ -2581,13 +2589,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._vent_fan_k_backfilled = bool(state.get("vent_fan_k_backfilled", False))
         # Dual-estimator backfill flags (v2)
         self._passive_k_backfill_v2 = bool(state.get("passive_k_backfill_v2", False))
-        # Issue #1512 reopened: learned once, kept across restarts (OR: a live event may already have set it)
-        # Issue #1512 verification: the flag belongs to the climate entity it was learned on; another thermostat (the
-        # zone re-pointed) starts unlearned. A bare True (an unreleased 0.9.32 build) is read as unknown.
-        _saved_ent = state.get("thermostat_reports_action")
-        if isinstance(_saved_ent, str) and _saved_ent == self.config.get("climate_entity"):
-            self._thermostat_reports_action = True
-            self._thermostat_reports_action_entity = _saved_ent
+        # The "does this thermostat report heating/cooling" watch, kept for the same climate entity only.
+        _watch = state.get("hvac_action_report")
+        if isinstance(_watch, dict) and _watch.get("entity") == self.config.get("climate_entity"):
+            self._hvac_report_watch = {
+                "entity": _watch.get("entity"),
+                "unreported_s": float(_watch.get("unreported_s") or 0.0),
+                "ever_reported": bool(_watch.get("ever_reported", False)),
+            }
         self._vent_window_k_backfill_v2 = bool(state.get("vent_window_k_backfill_v2", False))
         self._vent_fan_k_backfill_v2 = bool(state.get("vent_fan_k_backfill_v2", False))
         self._vent_k_relearn_1505 = bool(state.get("vent_k_relearn_1505", False))
@@ -2878,11 +2887,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "vent_window_k_backfilled": self._vent_window_k_backfilled,
             "vent_fan_k_backfilled": self._vent_fan_k_backfilled,
             "passive_k_backfill_v2": self._passive_k_backfill_v2,
-            "thermostat_reports_action": (
-                getattr(self, "_thermostat_reports_action_entity", None)
-                if getattr(self, "_thermostat_reports_action", False)
-                else None
-            ),
+            "hvac_action_report": {
+                k: v for k, v in (getattr(self, "_hvac_report_watch", None) or {}).items() if k != "last_ts"
+            },
             "vent_window_k_backfill_v2": self._vent_window_k_backfill_v2,
             "vent_fan_k_backfill_v2": self._vent_fan_k_backfill_v2,
             "vent_k_relearn_1505": getattr(self, "_vent_k_relearn_1505", False),
@@ -7940,6 +7947,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # while it is in control (ready); otherwise v3's rates, which hold the cycle fit only on a v3 zone
             in_control = engine if engine != ENGINE_V3 and ready else None
             rows.extend(self._cycle_model_rows(unit, decisions=in_control, fit_applied=engine == ENGINE_V3))
+            # owner decision 2026-11-13: a thermostat that never reports heating/cooling is told so (display only)
+            _notice_fn = getattr(self, "thermostat_action_notice", None)
+            no_report = _notice_fn(in_control) if callable(_notice_fn) else None
+            if no_report:
+                rows.append(
+                    {"key": "thermostat_reports", "kind": "notice", "source": "notice", "value": None, **no_report}
+                )
             return rows
         except Exception:  # noqa: BLE001 - a debug field must never break the debug payload
             _LOGGER.debug("decision_rates_summary failed", exc_info=True)
@@ -10483,10 +10497,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
     def _note_thermostat_action(self, old_action: str, new_action: str) -> None:
-        """Learn that the thermostat reports its burner/compressor, and stamp each stop (Issue #1512 reopened)."""
+        """Note a heating/cooling report (for the no-report notice), and stamp each start and stop (Issue #1512)."""
         if is_hvac_compressor_active(old_action) or is_hvac_compressor_active(new_action):
-            self._thermostat_reports_action = True
-            self._thermostat_reports_action_entity = (getattr(self, "config", None) or {}).get("climate_entity")
+            self._note_hvac_action_reported()
         if is_hvac_compressor_active(old_action) and not is_hvac_compressor_active(new_action):
             self._last_compressor_stop_ts = dt_util.now().timestamp()
         if is_hvac_compressor_active(new_action) and not is_hvac_compressor_active(old_action):
@@ -10568,17 +10581,74 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("lead-in fan re-check not scheduled", exc_info=True)
 
     def _fan_is_blower_only(self, action: str | None, hvac_mode: str | None = None) -> bool:
-        """``hvac_action`` ``fan`` on a thermostat known to report heating/cooling: the blower alone (overrun after
-        a run, lead-in before one), never a heating or cooling run (Issue #1512 reopened). False for any other
-        action, in ``fan_only`` mode (that is the fan_only session, #912), and for a thermostat never seen reporting
-        heating/cooling (the #93 mode fallback stays)."""
-        return (
-            str(action or "").lower() == "fan"
-            and str(hvac_mode or "") != "fan_only"
-            and bool(getattr(self, "_thermostat_reports_action", False))
-            and getattr(self, "_thermostat_reports_action_entity", None)
-            in (None, (getattr(self, "config", None) or {}).get("climate_entity"))
+        """``hvac_action`` ``fan`` in a heating/cooling mode: the blower alone, never a run (owner decision 2026-11-13:
+        a run exists only when the thermostat reports heating/cooling). False for any other action and in
+        ``fan_only`` mode (that is the fan_only session, #912)."""
+        return str(action or "").lower() == "fan" and str(hvac_mode or "") not in ("fan_only", "off", "")
+
+    def _thermostat_has_reported_runs(self) -> bool:
+        """This climate entity has reported heating/cooling (so a run can follow its fan lead-in, Issue #1535)."""
+        watch = getattr(self, "_hvac_report_watch", None) or {}
+        return bool(watch.get("ever_reported")) and watch.get("entity") == (getattr(self, "config", None) or {}).get(
+            "climate_entity"
         )
+
+    def _note_hvac_action_reported(self) -> None:
+        """The thermostat reported heating/cooling: it is not a thermostat that never does."""
+        entity = (getattr(self, "config", None) or {}).get("climate_entity")
+        self._hvac_report_watch = {"entity": entity, "unreported_s": 0.0, "ever_reported": True}
+
+    def _tick_hvac_action_watch(self) -> None:
+        """5-minute tick: count the time the thermostat spends in a heating/cooling mode without reporting a run."""
+        entity = self.config.get("climate_entity")
+        state = self.hass.states.get(entity) if entity else None
+        now = dt_util.now().timestamp()
+        watch = dict(getattr(self, "_hvac_report_watch", None) or {})
+        if watch.get("entity") != entity:
+            watch = {"entity": entity, "unreported_s": 0.0, "ever_reported": False}
+        last = watch.get("last_ts")
+        watch["last_ts"] = now
+        if state is not None and is_hvac_compressor_active(state.attributes.get("hvac_action", "")):
+            watch.update(unreported_s=0.0, ever_reported=True)
+        elif state is not None and state.state in ("heat", "cool", "heat_cool", "auto") and isinstance(last, float):
+            watch["unreported_s"] = float(watch.get("unreported_s") or 0.0) + max(0.0, min(now - last, 900.0))
+        self._hvac_report_watch = watch
+
+    def thermostat_action_notice(self, decisions: str | None = None) -> dict[str, Any] | None:
+        """Occupant notice for a thermostat that does not report when it heats or cools, or None (owner 2026-11-13).
+
+        Shown once the thermostat has spent THERMOSTAT_NO_ACTION_NOTICE_S (3 days) in a heating/cooling mode without
+        reporting ``heating``/``cooling`` since its last report (or ever). Climate Advisor then measures no runtime
+        and learns no heating/cooling rate from it; the notice names the rates used instead. ``decisions``: the
+        primary engine in control when it is not v3."""
+        watch = getattr(self, "_hvac_report_watch", None) or {}
+        if watch.get("entity") != self.config.get("climate_entity"):
+            return None
+        if float(watch.get("unreported_s") or 0.0) < THERMOSTAT_NO_ACTION_NOTICE_S:
+            return None
+        cache = getattr(getattr(getattr(self, "learning", None), "_state", None), "thermal_model_cache", None)
+        cache = cache if isinstance(cache, dict) else {}
+        rp = cache.get("rate_prior") if isinstance(cache.get("rate_prior"), dict) else {}
+        learned = any(
+            isinstance(rp.get(f"k_active_{m}"), dict) or (cache.get(f"observation_count_{m}") or 0) > 0
+            for m in ("heat", "cool")
+        )
+        if decisions:
+            in_use = str(decisions)
+            use = f"the decisions use the {decisions} engine's own heating and cooling rates"
+        elif learned:
+            in_use = "learned"
+            use = "it keeps using the heating and cooling rates it had already learned"
+        else:
+            in_use = "default"
+            use = "it uses a typical home's heating and cooling rates (defaults)"
+        since = "recently" if watch.get("ever_reported") else "at all"
+        text = (
+            f"Your thermostat has not reported when it is heating or cooling {since} (only its mode or its fan), so "
+            "Climate Advisor cannot measure your heating and cooling runtime or learn how fast your home heats and "
+            f"cools; {use}. A fan running, or the heat or cool mode being on, is never counted as a run."
+        )
+        return {"rate_in_use": in_use, "ever_reported": bool(watch.get("ever_reported")), "text": text}
 
     def _blower_overrun_recent(self) -> bool:
         """The burner/compressor stopped within ``BLOWER_OVERRUN_LINK_S``: a ``fan`` now is the run's overrun."""
@@ -10602,7 +10672,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             state.state,
             str(state.attributes.get("hvac_action", "")).lower(),
             ca_ventilating=bool(ae._fan_active or ae._natural_vent_active),
-            fan_is_blower=bool(getattr(self, "_thermostat_reports_action", False)),
         )
 
     async def _async_end_of_day(self, now: datetime) -> None:
@@ -10991,45 +11060,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         old_action = old_state.attributes.get("hvac_action", "").lower()
         self._note_thermostat_action(old_action, new_action)
 
-        if is_hvac_compressor_active(old_action) or is_hvac_compressor_active(new_action):
-            # At least one side shows active heating/cooling — hvac_action is providing a
-            # meaningful signal, prefer it for precise on/off edge detection.
-            was_running = is_hvac_compressor_active(old_action)
-            is_running = is_hvac_compressor_active(new_action)
-        else:
-            # hvac_action gives no heating/cooling signal (both are "fan", "idle", or absent).
-            # Some thermostats report hvac_action="fan" persistently (even when off/idle),
-            # which would trap this branch indefinitely if we used the old `new_action and
-            # old_action` guard.  Fall back to hvac_mode state for reliable edge detection.
-            # Issue #1240: the fallback is for thermostats whose hvac_action carries no signal
-            # (missing, or "fan" persistently — #93). A side that positively reports "idle"/"off"
-            # IS a signal: the equipment is not running, whatever hvac_mode is selected. Before,
-            # off->heat while idle armed the runtime timer and heat->off (or the day rollover)
-            # credited the whole idle window as runtime; and a "fan" heat session kept counting
-            # after the thermostat turned idle until the mode was switched off. Applied to both
-            # sides so the start, stop and glide edges agree.
-            # Issue #1512 reopened: on a thermostat known to report heating/cooling, ``fan`` in a heat/cool mode is
-            # the blower alone (overrun after the stop, lead-in before the start): no session, no runtime, no
-            # observation, no cycle edge. In fan_only mode it is the fan_only session as before (#912).
-            was_running = is_mode_fallback_running(old_state.state, old_action) and not self._fan_is_blower_only(
-                old_action, old_state.state
-            )
-            is_running = is_mode_fallback_running(new_state.state, new_action) and not self._fan_is_blower_only(
-                new_action, new_state.state
-            )
-            # Issue #986: this state-based fallback can't tell "hvac_mode is cool/heat and
-            # the compressor just hasn't confirmed yet" apart from "CA's own fan-only
-            # ventilation is running while hvac_mode happens to read cool/heat" — the
-            # thermostat's mode selection alone doesn't mean the compressor ever ran. CA
-            # already knows with certainty when IT turned the fan on (via _fan_active /
-            # _natural_vent_active — the same ground-truth flags the passive_decay/
-            # solar_gain observation guards already key off, coordinator.py ~7203) — no
-            # heuristic detection is needed for CA's own commanded fan activity. Don't let
-            # this fallback treat it as a real heat/cool session starting (it would
-            # otherwise open a fake OBS_TYPE_HVAC_COOL/HEAT observation and start the
-            # runtime timer for ventilation CA itself knows isn't compressor activity).
-            if is_running and (self.automation_engine._fan_active or self.automation_engine._natural_vent_active):
-                is_running = False
+        # Owner decision 2026-11-13 ("Never, remove it."): a heating or cooling run exists ONLY when the thermostat
+        # reports hvac_action heating/cooling. The #93 mode fallback (a mode selected and hvac_action fan / missing
+        # counted as running) and its #1240 refinement are superseded: a fan, a missing hvac_action or a selected
+        # mode is never a run. The thermostat's fan_only session (#912) is unchanged: mode fan_only and not idle.
+        was_running = is_session_running(old_state.state, old_action)
+        is_running = is_session_running(new_state.state, new_action)
+        # Issue #986: CA's own fan or natural ventilation is never the thermostat's fan_only session.
+        if (
+            is_running
+            and not is_hvac_compressor_active(new_action)
+            and (self.automation_engine._fan_active or self.automation_engine._natural_vent_active)
+        ):
+            is_running = False
 
         _LOGGER.info(
             "_async_thermostat_changed: hvac action=%s was_running=%s is_running=%s",
@@ -11046,13 +11089,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 session_mode = "heat"
             elif action == "cooling":
                 session_mode = "cool"
-            elif new_state.state == "heat":
-                # Fallback: some thermostats report hvac_action="fan" (or nothing) at
-                # compressor startup before transitioning to "heating". An "idle" startup no
-                # longer reaches here (Issue #1240): it starts at the real "heating" edge.
-                session_mode = "heat"
-            elif new_state.state == "cool":
-                session_mode = "cool"
             elif new_state.state == "fan_only":
                 session_mode = "fan_only"
             else:
@@ -11062,20 +11098,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # (which blended fan_only runtime into hvac_runtime_minutes). Only heat/cool
             # start a thermal observation — a fan_only session is not compressor/burner
             # activity and must never be recorded as an OBS_TYPE_HVAC_COOL observation.
-            # Issue #1512 reopened: the first lead-in after install (``fan`` before the thermostat was known to report
-            # its burner/compressor) opened this session already. The burner's start is the real one: the timer
-            # restarts here (the lead-in is not runtime) and the lead-in's observation is dropped silently, not
-            # rejected as an interrupted session.
-            lead_in = (
-                old_action == "fan"
-                and is_hvac_compressor_active(new_action)
-                and self._hvac_session_mode == session_mode
-            )
-            if lead_in and session_mode in ("heat", "cool"):
-                self._ensure_pending_observations()
-                self._pending_observations.pop(
-                    OBS_TYPE_HVAC_HEAT if session_mode == "heat" else OBS_TYPE_HVAC_COOL, None
-                )
             self._hvac_session_mode = session_mode
             if session_mode in self._RUNTIME_TRACKING:
                 self._start_runtime_timer(session_mode)
@@ -11497,7 +11519,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #1512 reopened (mirror of #618): the overrun can also arrive as heating/cooling -> idle -> fan
             # (Ecobee: the blower restarts about 1 s after the stop), which is the same post-run blower phase.
             _recent_hvac_session_ended_618 = is_hvac_compressor_active(old_action) or self._blower_overrun_recent()
-            if not _recent_hvac_session_ended_618 and self._fan_is_blower_only(new_action, new_state.state):
+            if (
+                not _recent_hvac_session_ended_618
+                and self._fan_is_blower_only(new_action, new_state.state)
+                and self._thermostat_has_reported_runs()
+            ):
                 # Issue #1535 (mirror of #1534 on the lead-in side): on a thermostat that reports its burner /
                 # compressor, ``idle -> fan`` in a heat/cool mode may be the blower's lead-in before a run. Wait
                 # BLOWER_LEAD_IN_DEFER_S: a run starting meanwhile makes it the run's blower (never adopted); a fan
@@ -15380,16 +15406,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._cycle_collect(
                     rec.setpoint_change(ts, self._read_thermostat_setpoint_f(new_state, sp_dir) if sp_dir else None)
                 )
-            old_act = str(old_state.attributes.get("hvac_action", "")).lower()
-            if (
-                new_dir is not None
-                and rec.is_running(new_dir)
-                and old_act == "fan"
-                and is_hvac_compressor_active(new_state.attributes.get("hvac_action", ""))
-            ):
-                # Issue #1512 reopened: a fan lead-in opened this cycle before the thermostat was known to report its
-                # burner/compressor; the run starts now (the lead-in readings stay as the starting level)
-                rec.reanchor_on(ts, new_dir)
             if old_dir != new_dir:
                 if new_dir is None:
                     self._cycle_collect(rec.off_edge(ts, self._get_indoor_temp_with_provenance().primary_value))
@@ -17217,50 +17233,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return None, "none"
 
     def _read_chart_hvac_action(self, _fan_status: str | None = None) -> str:
-        """Return the thermostat's current hvac_action string for chart logging.
+        """Return the thermostat's current hvac_action string for chart logging, exactly as reported.
 
-        Applies the #109 fan→heating/cooling remap: only remaps when fan_mode is
-        auto (fan is part of the HVAC cycle). When fan_mode=on, the fan is
-        circulating independently — hvac_action="fan" does NOT imply active
-        heating or cooling.
-
-        Issue #982: also skips the remap whenever CA's own fan control already
-        explains the "fan" reading (``is_ca_fan_running()``) — e.g. FAN_MODE_HVAC
-        deliberate ventilation cycling on a thermostat whose fan_mode attribute
-        never reflects CA's commanded state. Without this, CA's own scheduled
-        ventilation (compressor off) was mislabeled as an AC cooling/heating period.
-        Accepts an optional pre-computed fan status string (same convention as
-        _fan_is_running()/_fan_physically_running()) so a caller that already
-        invoked _compute_fan_status() this cycle avoids a duplicate recomputation.
-
-        Returns "" if the climate entity is unavailable.
+        Owner decision 2026-11-13 ("Never, remove it."): a run exists only when the thermostat reports heating or
+        cooling, so a ``fan`` is never relabelled as heating/cooling any more. The #109 fan->heating/cooling remap
+        (and its #982 exception for CA's own fan) is gone with the #93 fallback. ``_fan_status`` is accepted for the
+        callers and unused. Returns "" if the climate entity is unavailable.
         """
+        del _fan_status
         climate_id = self.config.get("climate_entity", "")
         cs = self.hass.states.get(climate_id) if climate_id else None
         if cs is None:
             _LOGGER.debug("chart_hvac_action: climate entity unavailable, logging ''")
             return ""
-        hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
-        hvac_mode = cs.state.lower()
-        fan_mode = str(cs.attributes.get("fan_mode", "")).lower()
-        fan_is_auto = not fan_mode or fan_mode.startswith("auto")
-        _ca_explains_fan = False
-        if hvac_action == "fan" and fan_is_auto and getattr(self, "automation_engine", None) is not None:
-            status = _fan_status if _fan_status is not None else self._compute_fan_status()
-            _ca_explains_fan = is_ca_fan_running(status)
-        if (
-            hvac_action == "fan"
-            and fan_is_auto
-            and not _ca_explains_fan
-            and not self._fan_is_blower_only(hvac_action, hvac_mode)
-        ):
-            if hvac_mode == "heat":
-                _LOGGER.debug("chart_hvac_action: remapping fan→heating (fan_mode=%s)", fan_mode or "empty")
-                return "heating"
-            if hvac_mode in ("cool", "heat_cool"):
-                _LOGGER.debug("chart_hvac_action: remapping fan→cooling (fan_mode=%s)", fan_mode or "empty")
-                return "cooling"
-        return hvac_action
+        return str(cs.attributes.get("hvac_action", "")).lower()
 
     def _read_chart_context(self, *, indoor: float | None = None, outdoor: float | None = None) -> dict[str, Any]:
         """Per-row context for chart_log (Issue #1230 R2): occupancy mode, override/grace flag, the comfort sensor, and

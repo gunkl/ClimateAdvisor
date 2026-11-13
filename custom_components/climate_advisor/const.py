@@ -1721,6 +1721,10 @@ CYCLE_STORE_SAVE_INTERVAL_S: float = 1800  # the cycle file is written at most t
 # blower overrun (Ecobee: heating -> idle, then fan 1 s later for about 2 minutes), never an out-of-band fan start.
 # Short on purpose (verification: 600 s labelled a schedule fan 7 minutes after a stop as the run's overrun).
 BLOWER_OVERRUN_LINK_S: float = 60
+# Owner decision 2026-11-13: a run exists only when the thermostat reports heating/cooling. A thermostat that spends
+# this long (3 days) in a heating/cooling mode without reporting a run gets an occupant notice that its runtime and
+# rates cannot be measured (shorter would flag a mild spell in which the heat simply never came on).
+THERMOSTAT_NO_ACTION_NOTICE_S: float = 3 * 86400
 # Issue #1535: an unowned 'fan' that starts from idle in a heat/cool mode (a thermostat that reports its burner /
 # compressor) is re-checked this much later: a run started meanwhile makes it the blower's lead-in (never adopted as a
 # ventilation session); a fan still running alone is reconciled as a genuine schedule / outside fan.

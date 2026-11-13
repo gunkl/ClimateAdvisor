@@ -246,6 +246,8 @@ CYCLE_FIT_KEYS = (
     "run_median_min",
     "grade_caps",
     "n_contradicted",
+    "contradicted_share",
+    "overdispersion",
     "info_ref",
     "model_version",
 )

@@ -1721,15 +1721,10 @@ CYCLE_STORE_SAVE_INTERVAL_S: float = 1800  # the cycle file is written at most t
 # blower overrun (Ecobee: heating -> idle, then fan 1 s later for about 2 minutes), never an out-of-band fan start.
 # Short on purpose (verification: 600 s labelled a schedule fan 7 minutes after a stop as the run's overrun).
 BLOWER_OVERRUN_LINK_S: float = 60
-# A blower-only 'fan' in a heat (cool) mode that lasts this long with the room moving the mode's way by at least
-# BLOWER_UNLEARN_RISE_F (measured from 5 minutes in, past any coast) is a run reported only as 'fan' (#93 shape): the
-# "thermostat reports heating/cooling" flag is dropped (Issue #1512 verification).
-BLOWER_UNLEARN_S: float = 900
 # Issue #1535: an unowned 'fan' that starts from idle in a heat/cool mode (a thermostat that reports its burner /
 # compressor) is re-checked this much later: a run started meanwhile makes it the blower's lead-in (never adopted as a
 # ventilation session); a fan still running alone is reconciled as a genuine schedule / outside fan.
 BLOWER_LEAD_IN_DEFER_S: float = 120
-BLOWER_UNLEARN_RISE_F: float = 0.3
 # A setpoint change during a run ends the run; an off edge (or mode switch) this soon after it is the run's real end.
 CYCLE_SETPOINT_OFF_WINDOW_S: float = 60
 # Refit throttle (Pi CPU): a mode is refitted at most this often, sooner once this many new eligible cycles wait or

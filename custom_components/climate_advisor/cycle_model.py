@@ -131,6 +131,7 @@ MODEL_VERSION: int = _k("THERMAL_CYCLE_MODEL_VERSION", 2)
 # cycle's weight and on what one new cycle displaces of carried evidence (``learning._new_information``).
 CYCLE_INFO_MAX: float = _k("THERMAL_CYCLE_INFO_MAX", 5.0)
 CYCLE_GRADE_HIGH_REL: float = _k("THERMAL_CYCLE_GRADE_HIGH_REL", 0.05)
+CYCLE_CONTRADICTED_SHARE_LOW: float = 0.10  # contradicted cycles still holding this share of the evidence -> "low"
 CYCLE_GRADE_MED_REL: float = _k("THERMAL_CYCLE_GRADE_MED_REL", 0.15)
 _LAG_PRUNE_MASS = 0.005  # a timing point below this share of the coarse-grid posterior is not refined (Pi CPU)
 # Prior against a late-reported edge (-2 log prior odds): most thermostats report their edge as it happens, so a
@@ -148,10 +149,10 @@ _K_ALT_SSE = 9.0  # (sse_alt - sse_fit) / (sigma^2 deff) below this: the data ca
 
 
 SENSOR_CLASS_LABELS = {
-    "whole_c": "whole degrees Celsius",
-    "whole": "whole degrees",
-    "half_c": "half a degree Celsius",
-    "half": "half degrees",
+    "whole_c": "in whole degrees Celsius",
+    "whole": "in whole degrees",
+    "half_c": "in half-degree Celsius steps",
+    "half": "in half degrees",
 }
 
 
@@ -769,7 +770,12 @@ def information_weights(
     for i in range(len(vals) - 1, -1, -1):
         if contradicted is not None and i < len(contradicted) and contradicted[i]:
             # counted at no more than CYCLE_INFO_MAX reference cycles, then halved per 5 newer reference cycles
-            out[i] = min(1.0, CYCLE_INFO_MAX / vals[i]) * 0.5 ** (newer / EVIDENCE_HALF_N_CONTRADICT)
+            # ... or the relative rule at the contradiction half-life, whichever is faster: a light contradicted
+            # pulse must never outlast an agreeing one (re-check 2026-11-13: 0.25 contradicted vs 0.056 agreeing)
+            out[i] = min(
+                min(1.0, CYCLE_INFO_MAX / vals[i]) * 0.5 ** (newer / EVIDENCE_HALF_N_CONTRADICT),
+                0.5 ** (newer / (EVIDENCE_HALF_N_CONTRADICT * vals[i])),
+            )
         else:
             h = halves[i] if halves is not None and i < len(halves) and _num(halves[i]) and halves[i] > 0 else half_n
             out[i] = 0.5 ** (newer / (h * vals[i]))
@@ -1182,6 +1188,9 @@ def grade(result: dict[str, Any]) -> str:
             g = "low"
     if result.get("k_dependent") is True:
         g = "low"
+    cs = result.get("contradicted_share")
+    if _num(cs) and cs >= CYCLE_CONTRADICTED_SHARE_LOW:
+        g = "low"
     short = result.get("run_median_min")
     if (
         g == "high"
@@ -1205,6 +1214,9 @@ def grade_caps(result: dict[str, Any]) -> list[str]:
     sd, q = result.get("sd_q"), result.get("q")
     if _num(sd) and _num(q) and abs(q) > 0 and float(sd) / abs(float(q)) > CYCLE_GRADE_HIGH_REL:
         out.append("imprecise")
+    cs = result.get("contradicted_share")
+    if _num(cs) and cs >= CYCLE_CONTRADICTED_SHARE_LOW:
+        out.append("contradicted")
     return out
 
 
@@ -1356,7 +1368,29 @@ def fit_cycles(
     # Contradiction speeds displacement: older cycles the newer ones contradict yield at the faster rate. One pass
     # (the weights of all eligible cycles are recomputed and the pool refitted once), so the result is deterministic.
     flags = contradicted_by_newer(fit["cyc_q"], fit["cyc_var"])
+    # Pool-level check (re-check 2026-11-13): a heavy old run dominates the first fit, so every newer cycle's own q
+    # is measured against a fit that IS that run (the shared lag even drifts to fit it) and its contradiction can stay
+    # hidden: on a noisy sensor q stayed at the old run's 12 "high" after 12-20 newer runs at 6. When one cycle
+    # carries most of the pool's weighted information and the cycles NEWER than it carry at least CYCLE_INFO_MAX
+    # reference cycles, those newer cycles are fitted on their own (lag refitted); if they disagree with the pooled q
+    # by more than three of their own (over-dispersion-widened) sds, the heavy cycle is contradicted.
+    if len(eligible) >= 4:
+        weighted = [p["info"] * p["w"] for p in eligible]
+        j = max(range(len(eligible)), key=lambda k: weighted[k])
+        newer = eligible[j + 1 :]
+        if (
+            not flags[j]
+            and weighted[j] >= 0.5 * sum(weighted)
+            and sum(p["info"] for p in newer) >= CYCLE_INFO_MAX
+            and len(newer) >= 3
+        ):
+            fr = _fit_core(newer, prior, mode, res, free_k, deff_mult, use_solar, ext)
+            if fr is not None:
+                sd_r = fr["sd_q"] * math.sqrt(overdispersion(fr["cyc_q"], fr["cyc_var"]))
+                if abs(fr["q"] - fit["q"]) > 3.0 * max(sd_r, 1e-9):
+                    flags[j] = True
     n_contra = sum(flags)
+    contra_ids = {id(p) for p, f in zip(eligible, flags, strict=True) if f}
     if n_contra:
         by_id = {id(p): f for p, f in zip(eligible, flags, strict=True)}
         contra = [bool(by_id.get(id(p))) for p in all_eligible]
@@ -1364,7 +1398,10 @@ def fit_cycles(
             all_eligible, information_weights([p["info"] for p in all_eligible], contradicted=contra), strict=True
         ):
             pc["w"] = w
-        fit2 = _fit_core(eligible, prior, mode, res, free_k, deff_mult, use_solar, ext)
+        # a cycle displaced below HELD_MIN_KEEP carries nothing any more: it leaves the fit (its few readings at a
+        # tiny weight still steered the shared lag, tau and noise scale; re-check 2026-11-13)
+        kept = [p for p in eligible if p["w"] >= HELD_MIN_KEEP] or eligible
+        fit2 = _fit_core(kept, prior, mode, res, free_k, deff_mult, use_solar, ext)
         if fit2 is not None:
             fit = fit2
     # Honest width (verification 2026-11-13): when the cycles' own q scatter more than the model's sds allow, the
@@ -1442,6 +1479,13 @@ def fit_cycles(
         "lag_pooled": ext is not None,
         "edge_delay_min": fit["edge_delay_min"],
         "n_contradicted": n_contra,
+        # the share of the pool's weighted information still held by contradicted cycles: while it is 10 % or more
+        # the old and the new evidence are still being reconciled, and the grade is "low" at most
+        "contradicted_share": round(
+            sum(p["info"] * p["w"] for p in eligible if id(p) in contra_ids)
+            / max(sum(p["info"] * p["w"] for p in eligible), 1e-12),
+            4,
+        ),
         "overdispersion": round(phi, 3),
         "run_median_min": round(_median(runs), 2),
         "sigma": fit["sigma"],
@@ -1469,11 +1513,15 @@ def fit_cycles(
     return out
 
 
-def coarse_sensor_notice(fit: Any, mode: str, *, decisions: str | None = None) -> dict[str, Any] | None:
+def coarse_sensor_notice(
+    fit: Any, mode: str, *, decisions: str | None = None, fit_applied: bool = True
+) -> dict[str, Any] | None:
     """Occupant-facing notice for a coarse (whole- or half-degree) sensor (Issue #1512 reopened, item 5), or None.
 
     ``{"sensor_class", "label", "maintenance_cycles_learn", "rate_in_use", "text"}``. ``rate_in_use``: the primary
-    engine's id when ``decisions`` names one other than v3 (its own rate drives the decisions), else
+    engine's id when ``decisions`` names one other than v3 that is in control (its own rate drives the decisions);
+    with ``fit_applied`` False (another engine is primary but not ready, so v3's aged rates drive the decisions and the
+    cycle fit is only shown) never ``measured``; else
     ``"measured"`` (runs that moved the reading far enough, e.g. setback recoveries, have taught it), ``"learned"``
     (the rate learned before, carried) or ``"default"`` (the typical-house rate). There are no user-configured
     heating/cooling rates, so none is named. ``maintenance_cycles_learn`` is False: a normal cycle moves the reading
@@ -1497,9 +1545,9 @@ def coarse_sensor_notice(fit: Any, mode: str, *, decisions: str | None = None) -
     if decisions:
         in_use = str(decisions)  # another engine is primary: its own rate drives the decisions
         use = f"the decisions use the {decisions} engine's own {word} rate, learned from the whole day's readings"
-    elif ne > 0:
+    elif ne > 0 and fit_applied:
         in_use = "measured"
-        use = f"it uses the {word} rate those runs measured"
+        use = f"it uses the {word} rate {'those runs' if ne != 1 else 'that run'} measured"
     elif src in ("cache", "held"):
         in_use = "learned"
         use = f"it keeps using the {word} rate it had already learned"

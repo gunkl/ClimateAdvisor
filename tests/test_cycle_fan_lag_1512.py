@@ -351,6 +351,14 @@ class TestInformationWeights:
         w = cm.information_weights([0.5, 20.0])
         assert w[0] == pytest.approx(0.25)
 
+    def test_a_contradicted_light_pulse_never_outlasts_an_agreeing_one(self):
+        infos = [0.1] + [1.0] * 6  # a 5-minute pulse, then 6 typical runs
+        agree = cm.information_weights(infos)
+        contra = cm.information_weights(infos, contradicted=[True] + [False] * 6)
+        assert contra[0] <= agree[0]
+        heavy = cm.information_weights([125.0] + [1.0] * 20, contradicted=[True] + [False] * 20)
+        assert heavy[0] < 0.01  # and a heavy contradicted run still yields in absolute terms
+
     def test_contradiction_is_faster(self):
         infos = [1.0] * 11
         agree = cm.information_weights(infos)
@@ -444,6 +452,29 @@ class TestContradictedHeavyRun:
         assert r["w_by_id"][f"{mode}-old"] < 0.01
 
     @pytest.mark.parametrize("mode", ["heat", "cool"])
+    @pytest.mark.parametrize("noise", [None, 0.2])
+    def test_a_heavy_run_cannot_hide_its_own_contradiction(self, mode, noise):
+        """Re-check 2026-11-13: the heavy run dominated the first fit, so the newer runs were judged against it and
+        (noisy sensor) q stayed 12.0 "high" after 12-20 newer runs at 6. The pool-level check fits the newer runs on
+        their own: while the contradicted run still holds evidence the grade is low, and q follows the new runs."""
+        sgn = 1.0 if mode == "heat" else -1.0
+        old = synth(mode, q=12.0 * sgn, n=1, run=(60.0, 60.0), seed=7, lag=0.0, noise=noise)
+        for n, settled in ((12, False), (25, True)):
+            new = synth(mode, q=6.0 * sgn, n=n, run=(8.0, 10.0), seed=8, lag=0.0, noise=noise)
+            off = old[0]["t_off"] + 3600 - new[0]["t_on"]
+            for i, c in enumerate(new):
+                c["t_on"] += off
+                c["t_off"] += off
+                c["id"] = f"{mode}-n{i}"
+                c["samples"] = [[s_[0] + off, s_[1], s_[2]] for s_ in c["samples"]]
+                c["outdoor"] = [[o[0] + off, o[1]] for o in c["outdoor"]]
+            old[0]["id"] = f"{mode}-old"
+            r = fit(old + new, mode)
+            assert r["grade"] != "high" or abs(abs(r["q"]) - 6.0) / 6.0 < 0.1, (n, r["q"], r["grade"])
+            if settled:
+                assert abs(abs(r["q"]) - 6.0) / 6.0 < 0.1, (n, r["q"])
+
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
     def test_agreeing_heavy_run_keeps_its_weight(self, mode):
         r = fit(_heavy_then_short(mode, 6.0, 6.0, 40), mode)
         assert r["w_by_id"][f"{mode}-old"] > 0.9
@@ -502,9 +533,15 @@ class TestCoarseSensorNotice:
         """A 0.5 C sensor (0.9 F steps) is "half a degree Celsius", not "whole degrees"; on a v4 zone the rate in use
         is v4's (verification 2026-11-13)."""
         half_c = cm.coarse_sensor_notice({"resolution_f": 0.9, "n_cycles": 4, "ne": 0}, "heat")
-        assert half_c["sensor_class"] == "half_c" and "half a degree Celsius" in half_c["text"]
+        assert half_c["sensor_class"] == "half_c" and "reports in half-degree Celsius steps" in half_c["text"]
         whole_c = cm.coarse_sensor_notice({"resolution_f": 1.8, "n_cycles": 4, "ne": 0}, "heat")
-        assert "whole degrees Celsius" in whole_c["text"]
+        assert "reports in whole degrees Celsius" in whole_c["text"]
+        not_ready = cm.coarse_sensor_notice(
+            {"resolution_f": 1.0, "n_cycles": 4, "ne": 1, "prior_source": "typical"}, "heat", fit_applied=False
+        )
+        assert not_ready["rate_in_use"] == "default"  # v4 still learning, nothing learned before: not the cycle fit
+        one = cm.coarse_sensor_notice({"resolution_f": 1.0, "n_cycles": 4, "ne": 1}, "heat")
+        assert "1 run that moved it further has taught it" in one["text"] and "that run measured" in one["text"]
         v4 = cm.coarse_sensor_notice({"resolution_f": 1.0, "n_cycles": 4, "ne": 0}, "heat", decisions="v4")
         assert v4["rate_in_use"] == "v4" and "the v4 engine's own heating rate" in v4["text"]
 
@@ -548,7 +585,7 @@ class TestCoarseSensorNotice:
             },
         ]
         ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
-        assert "cycle model heat sensor: Your indoor temperature sensor reports whole degrees" in ctx
+        assert "cycle model heat sensor: Your indoor temperature sensor reports in whole degrees" in ctx
         assert "(rate in use: default)" in ctx and "sensor lag 2.0 min (not identified)" in ctx
 
 
@@ -795,50 +832,64 @@ class TestLeadInBlowerIsNeverAdopted:
             assert engine._natural_vent_active is adopted
 
 
-class TestActionFlagUnlearns:
-    """Verification 2026-11-13: a thermostat that reported heating once but reports a whole heat run as 'fan'."""
+class TestAFanIsNeverInferredToBeARun:
+    """Owner decision 2026-11-13: "just because running the fan warms the house doesn't mean the heater is running.
+    If we don't get a heating status from the furnace we shouldn't try to guess that it's a heating run. It could just
+    be fan on a hot day." A fan, however long and however the room moves, is never a heating or cooling run on a
+    thermostat that reports its burner/compressor (the un-learn rule of the first verification round is removed)."""
 
-    def _coord(self):
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    @pytest.mark.parametrize("ca_fan", [None, "fan", "nat_vent"])
+    def test_a_long_fan_while_the_room_moves_records_nothing(self, mode, ca_fan):
         coord = _make_thermostat_coord()
-        coord._initialize_hvac_session_from_current_state = AsyncMock()
-        coord._spawn = lambda c: c.close()
-        return coord
-
-    def _check(self, coord, minute, value):
-        reading = MagicMock(primary_value=value)
-        with patch.object(coord, "_get_indoor_temp_with_provenance", return_value=reading), patch(_DT) as mock_dt:
-            mock_dt.now.return_value = _t(minute)
-            asyncio.run(coord._check_unlearn_reports_action())
-
-    @pytest.mark.parametrize(("mode", "sgn"), [("heat", 1.0), ("cool", -1.0)])
-    def test_a_long_fan_that_moves_the_room_is_a_run(self, mode, sgn):
-        coord = self._coord()
         act = _ACTION[mode]
+        _fire(coord, _t(0), (mode, "idle"), (mode, act))  # the thermostat reports its burner / compressor
+        _fire(coord, _t(5), (mode, act), (mode, "idle"))
+        coord._start_hvac_observation.reset_mock()
+        before = coord._today_record.hvac_runtime_minutes
+        if ca_fan == "fan":
+            coord.automation_engine._fan_active = True
+        elif ca_fan == "nat_vent":
+            coord.automation_engine._natural_vent_active = True
         with patch("custom_components.climate_advisor.coordinator.async_call_later"):
-            _fire(coord, _t(0), (mode, "idle"), (mode, act))
-            _fire(coord, _t(5), (mode, act), (mode, "idle"))
-            _fire(coord, _t(60), (mode, "idle"), (mode, "fan"))  # the #93 shape: a whole run as 'fan'
-        assert coord._thermostat_reports_action is True and coord._blower_fan_since is not None
-        coord.hass.states.get = MagicMock(return_value=_make_state(mode, "fan"))
-        for minute, temp in ((61, 68.0), (66, 68.0), (71, 68.0 + sgn * 0.2), (76, 68.0 + sgn * 0.5)):
-            self._check(coord, minute, temp)
-        assert coord._thermostat_reports_action is False
-        coord._initialize_hvac_session_from_current_state.assert_awaited_once()
-        assert coord._fan_is_blower_only("fan", mode) is False  # the #93 fallback from here on
+            _fire(coord, _t(60), (mode, "idle"), (mode, "fan"))  # fan "on" on a sunny afternoon / evening
+            for minute in range(65, 125, 5):  # an hour of fan, the room moving the mode's way all along
+                _fire(coord, _t(minute), (mode, "fan"), (mode, "fan"))
+            _fire(coord, _t(125), (mode, "fan"), (mode, "idle"))
+        assert coord._today_record.hvac_runtime_minutes == before
+        coord._start_hvac_observation.assert_not_called()
+        assert coord._hvac_session_mode is None and coord._thermostat_reports_action is True
+        assert not hasattr(coord, "_check_unlearn_reports_action")
 
-    def test_a_circulating_fan_is_not_a_run(self):
-        coord = self._coord()
-        with patch("custom_components.climate_advisor.coordinator.async_call_later"):
-            _fire(coord, _t(0), ("heat", "idle"), ("heat", "heating"))
-            _fire(coord, _t(5), ("heat", "heating"), ("heat", "idle"))
-            _fire(coord, _t(60), ("heat", "idle"), ("heat", "fan"))
-        coord.hass.states.get = MagicMock(return_value=_make_state("heat", "fan"))
-        for minute in (61, 66, 71, 81, 91):
-            self._check(coord, minute, 68.0)
-        assert coord._thermostat_reports_action is True
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    def test_no_cycle_from_a_long_fan(self, edge_rig, mode):
+        r = edge_rig
+        act = _ACTION[mode]
+        sgn = 1.0 if mode == "heat" else -1.0
+        r.at(0)
+        _edge(r, _state(mode, "idle"), _state(mode, act))
+        r.at(5)
+        _edge(r, _state(mode, act), _state(mode, "idle"))
+        r.at(50)
+        r.c._cycle_tick()
+        r.drain()
+        n0 = len(r.c._cycle_store.cycles(mode))
+        r.at(60)
+        _edge(r, _state(mode, "idle"), _state(mode, "fan"))
+        for i in range(1, 121):  # an hour of fan, the room moving 1.5 F the mode's way
+            r.at(60 + i * 0.5)
+            r.indoor = round(68.0 + sgn * 1.5 * i / 120, 2)
+            r.c._cycle_reading()
+        r.at(121)
+        _edge(r, _state(mode, "fan"), _state(mode, "idle"))
+        r.at(200)
+        r.c._cycle_tick()
+        r.drain()
+        assert len(r.c._cycle_store.cycles(mode)) == n0
+        assert not r.c._cycle_recorder.open_modes
 
     def test_the_flag_belongs_to_the_climate_entity(self):
-        coord = self._coord()
+        coord = _make_thermostat_coord()
         _fire(coord, _t(0), ("heat", "idle"), ("heat", "heating"))
         assert coord._thermostat_reports_action_entity == "climate.test"
         assert coord._fan_is_blower_only("fan", "heat") is True

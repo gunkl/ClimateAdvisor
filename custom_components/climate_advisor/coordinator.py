@@ -121,8 +121,6 @@ from .const import (
     ATTR_WHF_STATUS,
     BLOWER_LEAD_IN_DEFER_S,
     BLOWER_OVERRUN_LINK_S,
-    BLOWER_UNLEARN_RISE_F,
-    BLOWER_UNLEARN_S,
     BRIEFING_NAT_VENT_CUTOFF_DRIFT_THRESHOLD_MINUTES,
     BRIEFING_TODAY_HIGH_DRIFT_THRESHOLD_F,
     CHART_LOG_MAX_DAYS,
@@ -1362,10 +1360,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # or cooling run. Learned from the thermostat, persisted (``thermostat_reports_action``); until then ``fan``
         # keeps the #93 mode fallback (a thermostat that only ever reports ``fan`` while it heats).
         self._thermostat_reports_action: bool = False
-        # the climate entity the flag was learned on (a different thermostat starts unlearned), and the blower-only
-        # fan period in progress ``(start ts, indoor at start + 5 min or None, mode)`` for the un-learn check
+        # the climate entity the flag was learned on (a different thermostat starts unlearned)
         self._thermostat_reports_action_entity: str | None = None
-        self._blower_fan_since: tuple[float, float | None, str] | None = None
         # epoch seconds of the last burner/compressor stop (heating/cooling -> anything else), for the blower overrun
         self._last_compressor_stop_ts: float | None = None
         self._last_outdoor_temp: float | None = None  # most recent outdoor reading for gate checks
@@ -1394,6 +1390,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1144: one-shot armed when a door/window sensor goes unavailable, so the WHF safety
         # check re-runs once it has been unknown for the 60 s benefit of the doubt (cancelled on shutdown).
         self._whf_unknown_sensor_cancel: Callable[[], None] | None = None
+        self._lead_in_recheck_cancel: Callable[[], None] | None = None  # Issue #1535: the lead-in fan re-check
         self._whf_release_reclassify_cancel: Callable[[], None] | None = None  # Issue #1215
         self._whf_safety_started_at: datetime | None = None
         # Issue #1389: set up during Home Assistant's own start (not a reload) -- an unreadable door/window
@@ -2273,8 +2270,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.warning("Blind-fan recovery check failed on thermal tick; sampling continues", exc_info=True)
         self._cycle_tick()  # Issue #1512: coast windows that elapsed, outdoor, flags
-        if getattr(self, "_blower_fan_since", None) is not None:  # Issue #1512 verification: a long 'fan' run
-            self._spawn(self._check_unlearn_reports_action())
         self._sample_all_observations()
 
     def _refresh_outdoor_temp(self, min_delta_f: float = 0.0) -> None:
@@ -7941,15 +7936,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 else:
                     source = ENGINE_V3
                 rows.append({"key": key, "kind": kind, "value": value, "source": source})
-            # the notice names the rate the decisions use: another primary engine's own (display only)
-            primary = self.primary_engine_id()
-            rows.extend(self._cycle_model_rows(unit, decisions=None if primary == ENGINE_V3 else primary))
+            # the notice names the rate the decisions actually use (display only): another primary engine's own only
+            # while it is in control (ready); otherwise v3's rates, which hold the cycle fit only on a v3 zone
+            in_control = engine if engine != ENGINE_V3 and ready else None
+            rows.extend(self._cycle_model_rows(unit, decisions=in_control, fit_applied=engine == ENGINE_V3))
             return rows
         except Exception:  # noqa: BLE001 - a debug field must never break the debug payload
             _LOGGER.debug("decision_rates_summary failed", exc_info=True)
             return []
 
-    def _cycle_model_rows(self, unit: str, decisions: str | None = None) -> list[dict[str, Any]]:
+    def _cycle_model_rows(
+        self, unit: str, decisions: str | None = None, fit_applied: bool = True
+    ) -> list[dict[str, Any]]:
         """The pooled cycle model's rows for the Debug/Analysis/AI surfaces, source ``"cycle"`` (Issue #1512).
 
         One row per mode, every field on the row and ``mode`` set. ``q`` / ``sd_q`` are rates in the user's DISPLAY
@@ -7977,7 +7975,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #1512 reopened: the sensor class, the sensor lag, and why the grade is held down
             for field in ("sensor_class", "lag_min", "lag_identified", "k_source", "grade_caps"):
                 row[field] = fit.get(field)
-            notice = cycle_model.coarse_sensor_notice(fit, mode, decisions=decisions)
+            notice = cycle_model.coarse_sensor_notice(fit, mode, decisions=decisions, fit_applied=fit_applied)
             row["coarse_sensor"] = notice
             rows.append(row)
         return rows
@@ -10489,7 +10487,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if is_hvac_compressor_active(old_action) or is_hvac_compressor_active(new_action):
             self._thermostat_reports_action = True
             self._thermostat_reports_action_entity = (getattr(self, "config", None) or {}).get("climate_entity")
-            self._blower_fan_since = None
         if is_hvac_compressor_active(old_action) and not is_hvac_compressor_active(new_action):
             self._last_compressor_stop_ts = dt_util.now().timestamp()
         if is_hvac_compressor_active(new_action) and not is_hvac_compressor_active(old_action):
@@ -10499,59 +10496,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._overrun_fan_linked = is_hvac_compressor_active(old_action) or self._blower_overrun_recent()
         elif new_action != "fan":
             self._overrun_fan_linked = False
-
-    def _track_blower_fan(self, new_state: Any) -> None:
-        """Remember when a blower-only ``fan`` period starts in a heat/cool mode, and forget it when it ends."""
-        action = str(new_state.attributes.get("hvac_action", "")).lower()
-        if self._fan_is_blower_only(action, new_state.state) and new_state.state in ("heat", "cool"):
-            if getattr(self, "_blower_fan_since", None) is None:
-                self._blower_fan_since = (dt_util.now().timestamp(), None, str(new_state.state))
-        else:
-            self._blower_fan_since = None
-
-    async def _check_unlearn_reports_action(self) -> None:
-        """Un-learn "this thermostat reports heating/cooling" when a long ``fan`` is really a run (verification).
-
-        A thermostat that reported ``heating`` once may still report a whole heat run only as ``fan`` (the #93 shape,
-        seen on the owner's install). Read as the blower alone, such a run would record no runtime, no observation
-        and no cycle. So when a blower-only ``fan`` in a heat (cool) mode has lasted ``BLOWER_UNLEARN_S`` (15 min)
-        with no heating/cooling report, and the room has moved the mode's way by at least ``BLOWER_UNLEARN_RISE_F``
-        since 5 minutes into it (past any coast after a real run), the flag is dropped (WARNING) and the period is
-        taken up as a run from now, as a late start (#96): the #93 mode fallback applies from here on. A blower
-        circulating the air (fan "on", or a schedule) does not move the room and is never taken for a run."""
-        since = getattr(self, "_blower_fan_since", None)
-        if since is None or not getattr(self, "_thermostat_reports_action", False):
-            return
-        ts0, t5, mode = since
-        now = dt_util.now().timestamp()
-        indoor = self._get_indoor_temp_with_provenance().primary_value
-        if not isinstance(indoor, int | float) or isinstance(indoor, bool):
-            return
-        if t5 is None:
-            if now - ts0 >= 300:
-                self._blower_fan_since = (ts0, float(indoor), mode)
-            return
-        moved = (float(indoor) - t5) * (1.0 if mode == "heat" else -1.0)
-        if now - ts0 < BLOWER_UNLEARN_S or moved < BLOWER_UNLEARN_RISE_F:
-            return
-        state = self.hass.states.get(self.config["climate_entity"])
-        if state is None or str(state.attributes.get("hvac_action", "")).lower() != "fan" or state.state != mode:
-            return
-        _LOGGER.warning(
-            "Thermostat %s reported %s only as 'fan' for %.0f min while the room moved %.1f F its way: treating its "
-            "'fan' as a %s run from now on (#93 behaviour)",
-            self.config.get("climate_entity"),
-            mode,
-            (now - ts0) / 60.0,
-            moved,
-            mode,
-        )
-        self._thermostat_reports_action = False
-        self._thermostat_reports_action_entity = None
-        self._blower_fan_since = None
-        if self._hvac_session_mode is None:
-            await self._initialize_hvac_session_from_current_state(state)
-        self._spawn(self._async_save_state())
 
     async def _fan_reconcile_347(
         self,
@@ -10585,6 +10529,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Re-check an unowned ``idle -> fan`` after BLOWER_LEAD_IN_DEFER_S (Issue #1535), heat and cool alike."""
 
         async def _later(_now: Any) -> None:
+            self._lead_in_recheck_cancel = None
             if getattr(self, "_shut_down", False) is True:
                 return
             started = getattr(self, "_last_compressor_start_ts", None)
@@ -10610,9 +10555,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 thermostat_blower_phase=False,
             )
 
+        prev = getattr(self, "_lead_in_recheck_cancel", None)
+        if prev is not None:  # a newer fan start replaces the pending re-check
+            with contextlib.suppress(Exception):
+                prev()
         try:
-            async_call_later(self.hass, BLOWER_LEAD_IN_DEFER_S, _later)
+            self._lead_in_recheck_cancel = async_call_later(
+                self.hass, BLOWER_LEAD_IN_DEFER_S, self._zone_scoped(_later)
+            )
         except Exception:  # noqa: BLE001 - a scheduling problem must never break the listener
+            self._lead_in_recheck_cancel = None
             _LOGGER.debug("lead-in fan re-check not scheduled", exc_info=True)
 
     def _fan_is_blower_only(self, action: str | None, hvac_mode: str | None = None) -> bool:
@@ -11038,7 +10990,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         new_action = new_state.attributes.get("hvac_action", "").lower()
         old_action = old_state.attributes.get("hvac_action", "").lower()
         self._note_thermostat_action(old_action, new_action)
-        self._track_blower_fan(new_state)
 
         if is_hvac_compressor_active(old_action) or is_hvac_compressor_active(new_action):
             # At least one side shows active heating/cooling — hvac_action is providing a
@@ -19280,6 +19231,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self._whf_unknown_sensor_cancel is not None:  # Issue #1144
                 self._whf_unknown_sensor_cancel()
                 self._whf_unknown_sensor_cancel = None
+            if getattr(self, "_lead_in_recheck_cancel", None) is not None:  # Issue #1535
+                self._lead_in_recheck_cancel()
+                self._lead_in_recheck_cancel = None
             if getattr(self, "_whf_release_reclassify_cancel", None) is not None:  # Issue #1215
                 self._whf_release_reclassify_cancel()
                 self._whf_release_reclassify_cancel = None

@@ -136,7 +136,11 @@ if _PROJECT_ROOT not in sys.path:
 from tools.sim_harness._loop import run_coro  # noqa: E402
 from tools.sim_harness.build_coordinator import arm_startup_coalesce_end, build_headless_coordinator  # noqa: E402
 from tools.sim_harness.build_engine import build_headless_engine  # noqa: E402
-from tools.sim_harness.fake_hass import THERMOSTAT_ACTION_DEADBAND_F, FakeHass, FakeState  # noqa: E402
+from tools.sim_harness.fake_hass import (  # noqa: E402
+    FakeHass,
+    FakeState,
+    configure_thermostat_action,
+)
 from tools.sim_harness.fake_scheduler import FakeScheduler  # noqa: E402
 from tools.sim_harness.ha_stubs import install_ha_stubs  # noqa: E402
 from tools.sim_harness.scenario_model import (  # noqa: E402
@@ -459,17 +463,11 @@ class FakeHassSession:
         # real-HA sim thermostat's 1.5 F, converted for a Celsius install.
         # "thermostat_action": "scripted" keeps the scenario's injected hvac_action through CA's mode changes too
         # (a world whose equipment never starts, e.g. the Issue #1194 e cap scenarios).
-        if merged_config.get("thermostat_action") == "scripted":
-            fake_hass.set_action_deadband(climate_entity, None)
-        elif merged_config.get("temp_unit") == "celsius":
-            fake_hass.set_action_deadband(climate_entity, THERMOSTAT_ACTION_DEADBAND_F / 1.8)
         # Issue #1537 (owner decision 2026-11-13, "Sims report hvac_action"): reporting is the DEFAULT, like a
         # real thermostat; the value is the thermostat's own loop (FakeHass.seed_hvac_action), never CA's
         # decisions. "thermostat_reports_hvac_action": false models a thermostat with no such attribute.
-        if merged_config.get("thermostat_reports_hvac_action", True):
-            _seed_cs = fake_hass.states.get(climate_entity)
-            if _seed_cs is not None:
-                fake_hass.services.seed_hvac_action(climate_entity, _seed_cs.attributes)
+        # One rule shared with build_headless_multi_zone (Issue #1539).
+        configure_thermostat_action(fake_hass, climate_entity, merged_config)
 
         # --- Sensor tracker - drives engine._sensor_check_callback (engine-only mode) ---
         # Issue #476: when a coordinator is present, its real __init__ already wired

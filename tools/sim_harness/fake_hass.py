@@ -886,3 +886,22 @@ class FakeHass:
         future: asyncio.Future = loop.create_future()
         future.set_result(result)
         return future
+
+
+def configure_thermostat_action(fake_hass: FakeHass, climate_entity: str, config: dict) -> None:
+    """How a harness thermostat reports ``hvac_action`` (Issues #1310, #1537, #1539): one rule for every builder.
+
+    ``thermostat_action: "scripted"`` keeps a scenario's injected action through CA's mode changes (no deadband);
+    ``temp_unit: celsius`` converts the 1.5 F deadband. Owner decision 2026-11-13 ("Sims report hvac_action"):
+    the thermostat reports it by DEFAULT, seeded from its own loop (``seed_hvac_action``), never from CA's
+    decisions; ``thermostat_reports_hvac_action: false`` models a thermostat with no such attribute. Call after
+    the entity's initial state is set and before Climate Advisor is set up, so the first read already sees it.
+    """
+    if config.get("thermostat_action") == "scripted":
+        fake_hass.set_action_deadband(climate_entity, None)
+    elif config.get("temp_unit") == "celsius":
+        fake_hass.set_action_deadband(climate_entity, THERMOSTAT_ACTION_DEADBAND_F / 1.8)
+    if config.get("thermostat_reports_hvac_action", True):
+        st = fake_hass.states.get(climate_entity)
+        if st is not None:
+            fake_hass.services.seed_hvac_action(climate_entity, st.attributes)

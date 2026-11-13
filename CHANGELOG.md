@@ -12,6 +12,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ### Internal
 - Simulated thermostats in the test harness now report whether they are heating, cooling or idle, from their own control loop, as real thermostats do. A scenario can model a thermostat that doesn't (`thermostat_reports_hvac_action: false`); the three scenarios that test that case keep doing so. Three scenarios' decisions were re-derived (owner-approved): bedtime keeps the heat on a cold night instead of switching to cool while the furnace was still running, and no heat is armed one reading after the air conditioner stopped on a hot day.
+- Fix #1539: the multi-zone test harness's thermostats report heating, cooling or idle the same way (they reported nothing before), with the same opt-out.
 
 ## [0.9.32] — 2026-11-12
 

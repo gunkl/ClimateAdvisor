@@ -1064,6 +1064,17 @@ class TestP7ThermostatDeadband:
         rs = _db_house(90, indoor=60.0, mode="cool", action=None, setpoint=74.0)
         assert len(hits_for("comfort_kept", make_input(rs))) == 1
 
+    def test_unknown_equipment_time_keeps_the_run_clock_going(self):
+        """Owner decision 2026-11-13 on #1537 ("Keep it running"): equipment_unknown time is not judged, but it does
+        not reset the run either. The room has been out of range since minute 0 (heat, no hvac_action); the first
+        judged reading (CA switched the thermostat Off at minute 70) crosses at once, timed from minute 0."""
+        rs = _db_house(60, indoor=60.0, action=None) + [
+            rd(70, hvac_mode="off", hvac_action=None, indoor_f=60.0, setpoint_f=68.0, forecast_high_f=50.0)
+        ]
+        (h,) = hits_for("comfort_kept", make_input(rs, [cmd(69.97, mode="off")]))  # CA switched it Off
+        assert dict(h.evidence)["minutes"] == pytest.approx(70.0)
+        assert h.ts == at(70)
+
     def test_a_reported_action_is_never_the_unknown_exception(self):
         inp = make_input(_db_house(60))
         assert {x.excused_by for x in _excused(inp)} == {_iw.EXCUSED_BY_THERMOSTAT_DEADBAND}

@@ -112,3 +112,40 @@ def test_only_the_listed_goldens_opt_out() -> None:
         and json.loads(p.read_text(encoding="utf-8")).get("config", {}).get("thermostat_reports_hvac_action") is False
     )
     assert opted == sorted(OPT_OUT)
+
+
+# --- Issue #1539 (mirror of #1537): multi-zone harness thermostats report hvac_action too ------------------------
+
+
+def test_multi_zone_thermostats_report_hvac_action_by_default() -> None:
+    import asyncio  # noqa: PLC0415
+
+    from tools.sim_harness.build_coordinator import build_headless_multi_zone  # noqa: PLC0415
+
+    zones, fake_hass, _ = build_headless_multi_zone(zone_count=2)
+    for zone in zones.values():
+        entity = zone["climate_entity"]
+        assert fake_hass.states.get(entity).attributes.get("hvac_action") == "off"  # starts Off, from its own loop
+    # Maintained afterwards by the same rules as the single-zone thermostat: a command into heat with the room 3 F
+    # under the setpoint starts the furnace.
+    entity = next(iter(zones.values()))["climate_entity"]
+    st = fake_hass.states.get(entity)
+    fake_hass.states.set(entity, FakeState(state=st.state, attributes={**st.attributes, "current_temperature": 67.0}))
+    asyncio.run(
+        fake_hass.services.async_call(
+            "climate", "set_temperature", {"entity_id": entity, "hvac_mode": "heat", "temperature": 70.0}
+        )
+    )
+    assert fake_hass.states.get(entity).attributes.get("hvac_action") == "heating"
+
+
+def test_multi_zone_opt_out_models_a_thermostat_without_hvac_action() -> None:
+    from tools.sim_harness.build_coordinator import build_headless_multi_zone  # noqa: PLC0415
+
+    configs = [
+        {"climate_entity": "climate.zone_a_thermostat", "thermostat_reports_hvac_action": False},
+        {"climate_entity": "climate.zone_b_thermostat"},
+    ]
+    _zones, fake_hass, _ = build_headless_multi_zone(configs=configs)
+    assert "hvac_action" not in fake_hass.states.get("climate.zone_a_thermostat").attributes
+    assert fake_hass.states.get("climate.zone_b_thermostat").attributes.get("hvac_action") == "off"

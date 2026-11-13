@@ -45,6 +45,7 @@ from .const import (
     THERMAL_SWING_DEFAULT_F,
 )
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
+from .remote_offset import cap_f, max_magnitude_f
 from .temperature import format_temp, outdoor_direction_ok_for_thermostat
 from .thermal_confidence import grade_hvac_confidence, grade_solar_confidence
 
@@ -576,6 +577,10 @@ class TimelineSnapshot:
     # usable fit; the plan simulation then steps it (mass, windows, fan) instead of the single-node rate ODE.
     house_stepper: Any = None
     sleep_sensor_label: str | None = None  # e.g. "bedroom sensor"; None = no sleep sensor configured
+    # Issue #1553: the thermostat's room minus the sleep sensor, now (internal F; None = no sleep sensor or a reading
+    # missing). In the sleep window the house holds the BEDROOM at the band through the remote-sensor outer loop
+    # (#1194), which moves the thermostat's setpoint by about this much; the plan simulates the thermostat's room.
+    sleep_gap_f: float | None = None
     primary_sensor_label: str = "thermostat"
     can_heat: bool = True
     can_cool: bool = True
@@ -1170,6 +1175,24 @@ class Sim:
 Span = tuple[datetime, datetime]
 
 
+def _sleep_loop_edges(snap: TimelineSnapshot, seg: Segment) -> tuple[float, float]:
+    """The thermostat-room edges that hold the SLEEP sensor at the band in this segment (Issue #1553).
+
+    In the sleep window the band is the bedroom's, and the remote-sensor outer loop (#1194) moves the thermostat's
+    setpoint until the bedroom is inside it. The plan simulates the thermostat's room, so it holds that room the
+    bedroom gap away from the band: a colder bedroom raises the heat edge, a warmer one lowers the cool edge, never
+    beyond the live loop's limit (the cap, or the opposite band edge: ``remote_offset.max_magnitude_f``). Outside the
+    sleep window, without a sleep sensor or without both readings, the band itself.
+    """
+    gap = snap.sleep_gap_f
+    if not seg.asleep or snap.sleep_sensor_label is None or gap is None or not math.isfinite(gap):
+        return seg.floor, seg.ceiling
+    cap = cap_f(snap.unit)
+    up = min(max(gap, 0.0), max_magnitude_f("heat", seg.floor, floor=seg.floor, ceiling=seg.ceiling, cap_f=cap))
+    down = min(max(-gap, 0.0), max_magnitude_f("cool", seg.ceiling, floor=seg.floor, ceiling=seg.ceiling, cap_f=cap))
+    return seg.floor + up, seg.ceiling - down
+
+
 class _Simulator:
     """One horizon, many window plans. ``run(spans)`` is cheap (about 200 steps)."""
 
@@ -1222,22 +1245,23 @@ class _Simulator:
             nxt = free
             hvac_min = 0.0
             hvac_mode: str | None = None
+            hold_floor, hold_ceiling = _sleep_loop_edges(snap, seg)
             if not open_:
                 # The thermostat holds whichever edge the house would otherwise cross (both armed; an away or
                 # vacation band is just a wider band). The equipment rate is the learned one; the run is the
                 # fraction of the step needed to get back to the edge.
-                if free < seg.floor and snap.can_heat and heat_rate:
+                if free < hold_floor and snap.can_heat and heat_rate:
                     rate = heat_rate
-                    gain = min(seg.floor - free, rate * dt_h)
+                    gain = min(hold_floor - free, rate * dt_h)
                     nxt, hvac_min, hvac_mode = free + gain, gain / rate * 60.0, "heat"
-                elif free > seg.ceiling and snap.can_cool and cool_rate:
+                elif free > hold_ceiling and snap.can_cool and cool_rate:
                     rate = cool_rate
-                    gain = min(free - seg.ceiling, rate * dt_h)
+                    gain = min(free - hold_ceiling, rate * dt_h)
                     nxt, hvac_min, hvac_mode = free - gain, gain / rate * 60.0, "cool"
             # Issue #1477: an unlearned swing is THERMAL_SWING_DEFAULT_F (1.5 F), as everywhere else (was 1.0 here)
             sw_h = r.swing_heat if r.swing_heat is not None else THERMAL_SWING_DEFAULT_F
             sw_c = r.swing_cool if r.swing_cool is not None else THERMAL_SWING_DEFAULT_F
-            disc = max(0.0, seg.floor - sw_h - nxt) + max(0.0, nxt - seg.ceiling - sw_c)
+            disc = max(0.0, hold_floor - sw_h - nxt) + max(0.0, nxt - hold_ceiling - sw_c)
             disc_fh = disc * dt_h
             steps.append(SimStep(ts_next, nxt, free, out, seg, open_, hvac_min, hvac_mode, disc_fh))
             hvac_total += hvac_min

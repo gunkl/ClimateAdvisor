@@ -257,6 +257,92 @@ class V4Roll:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+class SleepLoop:
+    """The remote-sensor outer loop (#1194) as the forecast sees it (Issue #1553). Subclassed by ``v4_shadow``.
+
+    ``setpoints`` is called once per forecast step, in order, with whether the step is in the sleep window, the sleep
+    node's reading at the start of the step, the band's heat/cool setpoints for the step (``None`` = that side not
+    armed, e.g. windows open) and the emulated thermostat's run in progress (+1 heating, -1 cooling, 0 none). It
+    returns the setpoints the thermostat holds this step. Hass-free: this module never imports the live rule.
+    """
+
+    def setpoints(
+        self, *, in_window: bool, target_f: float, heat_sp: float | None, cool_sp: float | None, running: int
+    ) -> tuple[float | None, float | None]:
+        return heat_sp, cool_sp
+
+
+def _rollout_with_sleep_loop(
+    house: Sequence[float],
+    nodes: Sequence[Sequence[float]],
+    *,
+    thermostat: V4Thermostat | None,
+    h0: float,
+    m0: float,
+    b0: Sequence[float],
+    out: Sequence[float],
+    win: Sequence[float],
+    fan: Sequence[float],
+    hours: Sequence[float],
+    heat_sp: Sequence[float | None],
+    cool_sp: Sequence[float | None],
+    init_run: tuple[int, float] | None,
+    loop: SleepLoop,
+    target_j: int,
+    in_window: Sequence[bool],
+) -> V4Roll:
+    """:func:`rollout` one 15-minute step at a time so ``loop`` can move the setpoints between steps (Issue #1553).
+
+    The run in progress is carried from step to step exactly as ``night_strategy._simulate`` carries it (a full-duty
+    step continues the run, a partial step is the run landing on its stop point). With the setpoints unchanged this
+    reproduces the single rollout exactly (pinned by ``tests/test_v4_sleep_loop_1553.py``).
+    """
+    h, m, b = h0, m0, list(b0)
+    run_mode, run_min = init_run if init_run else (0, 0.0)
+    prim: list[float] = []
+    node_traj: list[list[float]] = [[] for _ in nodes]
+    uh_all: list[float] = []
+    uc_all: list[float] = []
+    sun_all: list[float] = []
+    for k in range(len(out)):
+        hsp, csp = loop.setpoints(
+            in_window=in_window[k], target_f=b[target_j], heat_sp=heat_sp[k], cool_sp=cool_sp[k], running=run_mode
+        )
+        roll = rollout(
+            house,
+            nodes,
+            h0=h,
+            m0=m,
+            b0=b,
+            out=[out[k]],
+            win=[win[k]],
+            fan=[fan[k]],
+            hours=[hours[k]],
+            thermostat=thermostat,
+            heat_sp=[hsp],
+            cool_sp=[csp],
+            init_run=(run_mode, run_min) if run_mode else None,
+        )
+        uh, uc = roll.heat_duty[0], roll.cool_duty[0]
+        if uh >= 1.0 - 1e-9:
+            run_min = (run_min if run_mode == 1 else 0.0) + V4_STEP_MINUTES
+            run_mode = 1
+        elif uc >= 1.0 - 1e-9:
+            run_min = (run_min if run_mode == -1 else 0.0) + V4_STEP_MINUTES
+            run_mode = -1
+        else:
+            run_mode, run_min = 0, 0.0
+        h, m = roll.primary[0], roll.mass_end
+        b = [roll.nodes[j][0] for j in range(len(nodes))]
+        prim.append(h)
+        for j in range(len(nodes)):
+            node_traj[j].append(b[j])
+        uh_all.append(uh)
+        uc_all.append(uc)
+        sun_all.append(roll.sun[0])
+    return V4Roll(primary=prim, nodes=node_traj, heat_duty=uh_all, cool_duty=uc_all, sun=sun_all, mass_end=m)
+
+
 # ------------------------------------------------------------------------------------ small helpers
 def _finite(x: Any) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
@@ -2208,6 +2294,7 @@ def predict(
     ca_sleep_time: str | None = None,
     ca_wake_time: str | None = None,
     display_nodes: bool = False,
+    sleep_loop: SleepLoop | None = None,
 ) -> dict[str, list[tuple[datetime, float]]] | None:
     """Predict every model sensor at each ``inputs[k].ts`` (consecutive 15-minute grid points after ``now``).
 
@@ -2225,6 +2312,11 @@ def predict(
     prior (fractional windows / whole-house fan by hour of day) wherever the plan says closed / off.
     With ``ca_sleep_node`` (a model sensor) the result also carries ``"_ca"`` = :func:`ca_line` (the sleep node
     inside the sleep window, else the primary); without it ``_ca`` is the primary and callers derive it.
+
+    ``sleep_loop`` (Issue #1553, the display forecast only) emulates the live remote-sensor outer loop (#1194): inside
+    the sleep window the thermostat still regulates the primary (the hallway), but its setpoints are the band edges
+    moved by the loop from the SLEEP node's predicted reading, step by step, as the house does it. Without it (or
+    with no sleep node / no step in the window) the result is exactly the single rollout, unchanged.
     """
     if model.confidence == "none" or not inputs:
         return None
@@ -2278,21 +2370,53 @@ def predict(
     act = (hvac_action_now or "").lower()
     if act in (_ACTIVE_HEAT, _ACTIVE_COOL):
         init_run = (1 if act == _ACTIVE_HEAT else -1, float(run_elapsed_min) if run_elapsed_min is not None else 0.0)
-    roll = rollout(
-        house,
-        node_params,
-        h0=float(h0),
-        m0=float(m0),
-        b0=b0,
-        out=out,
-        win=win,
-        fan=fan,
-        hours=hours,
-        thermostat=model.thermostat,
-        heat_sp=[i.heat_sp_f for i in inputs],
-        cool_sp=[i.cool_sp_f for i in inputs],
-        init_run=init_run,
+    heat_sp = [i.heat_sp_f for i in inputs]
+    cool_sp = [i.cool_sp_f for i in inputs]
+    loop_j = (
+        node_ids.index(ca_sleep_node)
+        if sleep_loop is not None and ca_sleep_node in node_ids and ca_sleep_node in model.nodes
+        else None
     )
+    in_window = (
+        [in_sleep_window(i.ts.astimezone(tz), ca_sleep_time, ca_wake_time) for i in inputs]
+        if loop_j is not None
+        else []
+    )
+    if loop_j is not None and any(in_window):
+        roll = _rollout_with_sleep_loop(
+            house,
+            node_params,
+            thermostat=model.thermostat,
+            h0=float(h0),
+            m0=float(m0),
+            b0=b0,
+            out=out,
+            win=win,
+            fan=fan,
+            hours=hours,
+            heat_sp=heat_sp,
+            cool_sp=cool_sp,
+            init_run=init_run,
+            loop=sleep_loop,  # type: ignore[arg-type]
+            target_j=loop_j,
+            in_window=in_window,
+        )
+    else:
+        roll = rollout(
+            house,
+            node_params,
+            h0=float(h0),
+            m0=float(m0),
+            b0=b0,
+            out=out,
+            win=win,
+            fan=fan,
+            hours=hours,
+            thermostat=model.thermostat,
+            heat_sp=heat_sp,
+            cool_sp=cool_sp,
+            init_run=init_run,
+        )
     res: dict[str, list[tuple[datetime, float]]] = {
         model.primary: [(inp.ts, roll.primary[k]) for k, inp in enumerate(inputs)]
     }

@@ -28,6 +28,7 @@ from datetime import time as dtime
 from typing import Any
 
 from .const import V4_PREDICT_HORIZON_HOURS, V4_UNUSABLE_WARN_REFITS
+from .remote_offset import RemoteLoopEmulator  # noqa: F401 - Issue #1553: the shared emulated loop (re-exported)
 from .window_span import (  # noqa: F401 - the shared rule lives in the engine-neutral module; re-exported here
     WINDOW_PLAN_FALLBACK_HOURS,
     planned_window_span,
@@ -769,6 +770,7 @@ def run_cycle(
     ca_wake_time: str | None = None,
     baseline: bool = False,
     display: bool = False,
+    sleep_loop: RemoteLoopEmulator | None = None,
 ) -> tuple[dict[str, list[tuple[datetime, float]]] | None, float | None]:
     """Advance the hidden node ``mass_steps`` grid steps, then predict. Blocking CPU: run via the executor.
 
@@ -782,6 +784,8 @@ def run_cycle(
     emulation; ``ca_sleep_node`` (+ the sleep window) makes the result carry the ``_ca`` composite line.
     ``display=True`` (the post-chart shadow cycle only, Issue #1422) adds the model's display-only node lines; the
     pre-decision control cycle never passes it, and every other line is identical either way.
+    ``sleep_loop`` (Issue #1553, the display cycle only) emulates the remote-sensor outer loop in the sleep window; the
+    baseline never uses it (it has no setpoints to move).
     """
     p = _predictor()
     model = p.from_dict(dict(model_dict))
@@ -806,6 +810,8 @@ def run_cycle(
         extra.update(ca_sleep_node=ca_sleep_node, ca_sleep_time=ca_sleep_time, ca_wake_time=ca_wake_time)
     if display and getattr(model, "display_nodes", None):
         extra["display_nodes"] = True
+    if sleep_loop is not None and not baseline and ca_sleep_node:
+        extra["sleep_loop"] = sleep_loop
     predictions = p.predict(
         model,
         now=now,

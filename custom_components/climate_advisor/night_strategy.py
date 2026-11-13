@@ -38,10 +38,9 @@ from . import predictor_v4 as p4
 from .const import (
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
-    REMOTE_OFFSET_CAP_F,
-    REMOTE_OFFSET_STEP_F,
     THERMAL_SWING_DEFAULT_F,
 )
+from .remote_offset import RemoteLoopEmulator
 from .temperature import FAHRENHEIT, format_temp
 
 NIGHT_STRATEGY_SCHEMA_VERSION = 1
@@ -459,8 +458,14 @@ def _simulate(
     sim = _Sim([], [], [], [], [], [], [], 0)
 
     use_loop = inp.offset_loop and tgt_j is not None
-    off_h = 0.0
-    off_c = 0.0
+    # Issue #1554: the live rule (``remote_offset.decide_remote_offset``: measured swing, unit steps, cap and opposite
+    # band edge, raise only between runs), shared with the v4 display forecast (#1553), never a copy of it.
+    loop = RemoteLoopEmulator(
+        swing_heat_f=inp.loop_swing_heat_f if inp.loop_swing_heat_f is not None else inp.swing_heat_f,
+        swing_cool_f=inp.loop_swing_cool_f if inp.loop_swing_cool_f is not None else inp.swing_cool_f,
+        unit=inp.unit,
+        step_minutes=STEP_MINUTES,
+    )
     run_mode = 0  # the emulated thermostat's run in progress: +1 heating, -1 cooling, 0 none
     run_min = 0.0  # minutes that run has lasted (the predictor's minimum-run rule counts from it)
     elapsed_h = 0.0
@@ -489,22 +494,14 @@ def _simulate(
             run = win > 0 or fan > 0
         # HVAC is paused while a window is open or the whole-house fan runs (owner rules 2-3); the blower is HVAC
         paused = win > 0 or (fan > 0 and spec.cls == CLS_FAN)
-        # --- sleep-band outer loop (#1194): only between runs, at most one step per step
-        if use_loop and run_mode == 0 and not paused and setpoints is None:
-            gap_h = inp.floor_f - tgt_now
-            gap_c = tgt_now - inp.ceiling_f
-            loop_h = inp.loop_swing_heat_f if inp.loop_swing_heat_f is not None else inp.swing_heat_f
-            loop_c = inp.loop_swing_cool_f if inp.loop_swing_cool_f is not None else inp.swing_cool_f
-            if gap_h > loop_h:
-                off_h = min(REMOTE_OFFSET_CAP_F, off_h + REMOTE_OFFSET_STEP_F)
-            elif gap_h < -loop_h:
-                off_h = max(0.0, off_h - REMOTE_OFFSET_STEP_F)
-            if gap_c > loop_c:
-                off_c = min(REMOTE_OFFSET_CAP_F, off_c + REMOTE_OFFSET_STEP_F)
-            elif gap_c < -loop_c:
-                off_c = max(0.0, off_c - REMOTE_OFFSET_STEP_F)
-        sp_h = min(inp.floor_f + off_h, inp.ceiling_f - 1.0) if inp.can_heat else None
-        sp_c = max(inp.ceiling_f - off_c, inp.floor_f + 1.0) if inp.can_cool else None
+        # --- sleep-band outer loop (#1194): one decision per step on the live rule; an HVAC pause closes its gate
+        # (offset cleared, the plain target), as the live loop's gate does for an open window
+        sp_h = inp.floor_f if inp.can_heat else None
+        sp_c = inp.ceiling_f if inp.can_cool else None
+        if use_loop and setpoints is None:
+            sp_h, sp_c = loop.setpoints(
+                in_window=not paused, target_f=tgt_now, heat_sp=sp_h, cool_sp=sp_c, running=run_mode
+            )
         if setpoints is not None:
             sp_h, sp_c = setpoints[len(sim.ts)] if len(sim.ts) < len(setpoints) else (None, None)
         # --- thermostat: the PREDICTOR's own emulator (R1b: hysteretic stop at setpoint + off offset, calibrated

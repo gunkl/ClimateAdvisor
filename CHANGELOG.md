@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.34] — 2026-11-13
+
+### Fixed
+- Fix #1553: with a bedroom (sleep) sensor, the Status chart's v4 line and the plan no longer show the bedroom sliding below your sleep temperature overnight.
+  - **What you'll notice:** at night the v4 line shows the bedroom held near your sleep floor, with the heat coming on as it does in your house, instead of coasting 2–4 °F under it and jumping back at wake-up. The plan's faded heating strips and its "Heat runs about N min" text now include the night heating.
+  - **Why it was wrong:** at night Climate Advisor reads the bedroom and raises the hallway thermostat's setpoint, up to 4 °F above your sleep floor, until the bedroom gets there. The forecast and the plan held the hallway at the floor instead, so with a bedroom about 2 °F colder they predicted no heat at all.
+  - **What the house does is unchanged:** decisions never read this line. The Prediction accuracy page now scores the v4 forecast of what your house really does at night.
+
 ## [0.9.33] — 2026-11-13
 
 ### Fixed

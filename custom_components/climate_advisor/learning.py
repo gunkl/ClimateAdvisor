@@ -59,7 +59,7 @@ from .const import (
     THERMAL_SWING_DEFINITION_VERSION,
     WEATHER_BIAS_MAX_OBS,
 )
-from .cycle_model import CYCLE_MAX_CYCLES, HELD_MIN_KEEP
+from .cycle_model import CYCLE_INFO_MAX, CYCLE_MAX_CYCLES, HELD_MIN_KEEP
 from .cycle_model import MODEL_VERSION as CYCLE_MODEL_VERSION
 from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
 from .swing import (
@@ -254,26 +254,27 @@ CYCLE_FIT_KEYS = (
 _HELD_KEYS = ("q", "sd_q", "ne_w", "entity", "t_first", "t_last", "applied", "grade", "info_ref")
 
 
-def _new_information(result: dict, t_new: list, unit: Any) -> float:
-    """How much new evidence the new eligible cycles ``t_new`` of a fit carry, in cycle units (Issue #1512 reopened).
+def _new_information(result: dict, t_new: list, unit: Any = None) -> float:
+    """How much new evidence the new eligible cycles ``t_new`` of a fit carry, in reference cycles (Issue #1512).
 
-    Their summed information (``result["info_eligible"]``, parallel to ``t_eligible``) divided by ``unit`` (the
-    carried record's own per-cycle information) or, when it has none, by the fit's ``info_ref`` (its median eligible
-    cycle). Falls back to the count of new cycles when the fit carries no information (an older result)."""
+    Each new cycle's information (``result["info_eligible"]``, parallel to ``t_eligible``) is already in reference
+    cycles (``cycle_model._cycle_information``: time-weighted, so it does not depend on how often the sensor reports;
+    a 10-minute maintenance run is about 1), and one cycle counts for at most ``CYCLE_INFO_MAX`` (5): a single long
+    run cannot wipe the evidence carried from before (verification 2026-11-13: one 60-minute run used to count as
+    397 cycles against the pool median). The unit is fixed, so the displacement does not depend on the neighbouring
+    cycles. ``unit`` is accepted for callers and ignored. Falls back to the count of new cycles when the fit carries
+    no information (an older result)."""
+    del unit
     t_all = result.get("t_eligible") or []
     infos = result.get("info_eligible") or []
-    ref = unit if isinstance(unit, int | float) and not isinstance(unit, bool) and unit > 0 else result.get("info_ref")
-    if (
-        len(infos) != len(t_all)
-        or not isinstance(ref, int | float)
-        or isinstance(ref, bool)
-        or ref <= 0
-        or not math.isfinite(ref)
-    ):
+    if len(infos) != len(t_all) or not infos:
         return float(len(t_new))
     new = set(t_new)
-    tot = sum(float(i) for t, i in zip(t_all, infos, strict=True) if t in new and isinstance(i, int | float))
-    return tot / float(ref)
+    return sum(
+        min(max(float(i), 0.0), CYCLE_INFO_MAX)
+        for t, i in zip(t_all, infos, strict=True)
+        if t in new and isinstance(i, int | float) and not isinstance(i, bool)
+    )
 
 
 def _same_chart_log_fit(a: dict, b: dict) -> bool:
@@ -1689,18 +1690,18 @@ class LearningEngine:
             from_held = result.get("prior_source") == "held"
             rp = cache.get("rate_prior")
             legacy = rp.get(field_name) if isinstance(rp, dict) else None
-            # Issue #1512 reopened (owner 2026-11-12): new evidence is counted by its INFORMATION, in units of a
-            # typical cycle of this pool (``info_ref``, the median eligible cycle): an average new cycle counts 1 as
-            # before, a long accurate run more, a short low-information pulse a fraction. A held fit is measured in
-            # its own pool's unit. Without information (an older result) each new cycle counts 1.
-            n_new_legacy = _new_information(result, t_new, None)
+            # Issue #1512 reopened (owner 2026-11-12): new evidence is counted by its INFORMATION, in reference
+            # cycles (a 10-minute run counts about 1, a long accurate run more but at most CYCLE_INFO_MAX, a short
+            # pulse a fraction); a fixed unit, the same for the legacy record and a held fit. Without information
+            # (an older result) each new cycle counts 1.
+            n_new_legacy = _new_information(result, t_new)
             if isinstance(legacy, dict):
                 legacy["keep"] = round(
                     _displaced_keep(_evidence_keep(legacy), n_new_legacy, contradicts and not from_held), 6
                 )
             if held is not None:
                 held = dict(held)
-                n_new_held = _new_information(result, t_new, held.get("info_ref"))
+                n_new_held = _new_information(result, t_new)
                 held["keep"] = round(_displaced_keep(_evidence_keep(held), n_new_held, contradicts and from_held), 6)
                 if held["keep"] < HELD_MIN_KEEP:
                     held = None  # displaced by the new sensor's cycles

@@ -132,3 +132,35 @@ async def test_runtime_controls_and_lag(make_sim) -> None:
     # one time constant: about 63 % of the way from 68.4 to the (decaying) air
     assert 68.4 + 0.5 * (air - 68.4) < reading < air - 0.5, (reading, air)
     assert hass.states.get(CLIMATE_ENTITY).attributes["air_temperature"] == round(air, 3)
+
+
+async def test_idle_gap_before_the_overrun(make_sim) -> None:
+    """``idle_before_overrun_s`` 1 (the owner's Ecobee): heating -> idle, then fan 1 s later, then idle."""
+    profile = SimProfile(heat_rate="normal", blower_overrun_heat_min=2.0, idle_before_overrun_s=1.0)
+    house = await make_sim(profile=profile, **WINTER)
+    seen: list[str] = []
+
+    def _on_change(event) -> None:
+        new = event.data.get("new_state")
+        if new is not None and new.entity_id == CLIMATE_ENTITY:
+            seen.append(new.attributes.get("hvac_action"))
+
+    house.hass.bus.async_listen("state_changed", _on_change)
+    for _ in range(2 * 120):
+        await house.advance(seconds=30)
+    seq = _collapse(seen)
+    assert any(seq[i : i + 3] == ["heating", "idle", "fan"] for i in range(len(seq) - 2)), seq
+    assert not any(seq[i : i + 2] == ["heating", "fan"] for i in range(len(seq) - 1)), seq
+
+
+async def test_edge_delay_never_shows_heating_in_off_mode(make_sim) -> None:
+    """With ``edge_report_delay_s`` a mode change is shown at once (verification 2026-11-13)."""
+    house = await make_sim(profile=SimProfile(heat_rate="normal", edge_report_delay_s=60.0), **WINTER)
+    sim = sim_entity(house)
+    for _ in range(240):
+        await house.advance(seconds=30)
+        if sim._true_action() == "heating" and house.thermostat.action == "heating":
+            break
+    assert house.thermostat.action == "heating"
+    await house.occupant_sets_thermostat(mode="off")
+    assert house.thermostat.action != "heating"

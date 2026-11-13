@@ -39,6 +39,7 @@ from .const import (
     CONF_DEADBAND_HEAT_F,
     CONF_EDGE_REPORT_DELAY_S,
     CONF_HEAT_RATE_PRESET,
+    CONF_IDLE_BEFORE_OVERRUN_S,
     CONF_INITIAL_TEMP_F,
     CONF_K_ACTIVE_COOL,
     CONF_K_ACTIVE_HEAT,
@@ -72,10 +73,12 @@ from .hvac_profile import (
     COAST_RATE_MAX_F_PER_H,
     COAST_TAU_MAX_MIN,
     DEFAULT_EDGE_REPORT_DELAY_S,
+    DEFAULT_IDLE_BEFORE_OVERRUN_S,
     DEFAULT_PRECISION,
     DEFAULT_RATE_PRESET,
     DEFAULT_SENSOR_LAG_MIN,
     EDGE_REPORT_DELAY_MAX_S,
+    IDLE_BEFORE_OVERRUN_MAX_S,
     PRECISION_OPTIONS,
     RATE_PRESET_OPTIONS,
     SENSOR_LAG_MAX_MIN,
@@ -183,6 +186,10 @@ def _build_schema(*, defaults: dict[str, Any]) -> vol.Schema:
             vol.Required(
                 CONF_EDGE_REPORT_DELAY_S, default=defaults.get(CONF_EDGE_REPORT_DELAY_S, DEFAULT_EDGE_REPORT_DELAY_S)
             ): _num(min_=0, max_=EDGE_REPORT_DELAY_MAX_S, step=5, unit="s"),
+            vol.Required(
+                CONF_IDLE_BEFORE_OVERRUN_S,
+                default=defaults.get(CONF_IDLE_BEFORE_OVERRUN_S, DEFAULT_IDLE_BEFORE_OVERRUN_S),
+            ): _num(min_=0, max_=IDLE_BEFORE_OVERRUN_MAX_S, step=1, unit="s"),
             **{
                 vol.Required(key, default=defaults.get(key, 0.0)): _num(min_=0, max_=max_, step=step, unit=unit)
                 for key, max_, step, unit in (

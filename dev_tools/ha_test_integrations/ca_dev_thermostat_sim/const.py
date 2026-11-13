@@ -59,6 +59,9 @@ CONF_SENSOR_LAG_MIN = "sensor_lag_min"  # first-order lag, simulated air -> repo
 # Seconds the reported hvac_action trails the equipment (a cloud-polled thermostat); 0 = on time (a directly connected
 # thermostat, the default).
 CONF_EDGE_REPORT_DELAY_S = "edge_report_delay_s"
+# Seconds the thermostat reports "idle" between the burner/compressor stop and its blower overrun ("fan"), as the
+# owner's Ecobee does (heating -> idle, then fan 1 s later); 0 = straight to fan (the default).
+CONF_IDLE_BEFORE_OVERRUN_S = "idle_before_overrun_s"
 CONF_BLOWER_LEAD_IN_HEAT_MIN = "blower_lead_in_heat_min"
 CONF_BLOWER_LEAD_IN_COOL_MIN = "blower_lead_in_cool_min"
 CONF_BLOWER_OVERRUN_HEAT_MIN = "blower_overrun_heat_min"

@@ -84,7 +84,7 @@ def _infer_step(temps: list[float]) -> float | None:
     for a, b in zip(temps, temps[1:], strict=False):
         d = abs(b - a)
         if d > 1e-6:
-            key = round(d, 2)
+            key = max(round(d, 2), 0.01)  # a step under 0.005 F is still a step (never 0)
             counts[key] = counts.get(key, 0) + 1
     if not counts:
         return None

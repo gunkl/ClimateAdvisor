@@ -1717,9 +1717,19 @@ CYCLE_MAX_STORED: int = 3000  # hard cap on stored cycles: half per mode, each m
 CYCLE_STORE_PRUNE_INTERVAL_S: float = 3600  # pruning runs at most this often
 CYCLE_STORE_VERSION: int = 2  # "v" key of the cycle file (2: per-cycle decimal places; a v1 file is migrated on load)
 CYCLE_STORE_SAVE_INTERVAL_S: float = 1800  # the cycle file is written at most this often (+ at HA stop / unload)
-# Issue #1512 reopened: a thermostat ``fan`` this soon after the burner/compressor stopped is that run's blower
-# overrun (Ecobee: heating -> idle, then fan 1 s later for about 2 minutes), never an out-of-band fan start.
-BLOWER_OVERRUN_LINK_S: float = 600
+# Issue #1512 reopened: a thermostat ``fan`` that starts this soon after the burner/compressor stopped is that run's
+# blower overrun (Ecobee: heating -> idle, then fan 1 s later for about 2 minutes), never an out-of-band fan start.
+# Short on purpose (verification: 600 s labelled a schedule fan 7 minutes after a stop as the run's overrun).
+BLOWER_OVERRUN_LINK_S: float = 60
+# A blower-only 'fan' in a heat (cool) mode that lasts this long with the room moving the mode's way by at least
+# BLOWER_UNLEARN_RISE_F (measured from 5 minutes in, past any coast) is a run reported only as 'fan' (#93 shape): the
+# "thermostat reports heating/cooling" flag is dropped (Issue #1512 verification).
+BLOWER_UNLEARN_S: float = 900
+# Issue #1535: an unowned 'fan' that starts from idle in a heat/cool mode (a thermostat that reports its burner /
+# compressor) is re-checked this much later: a run started meanwhile makes it the blower's lead-in (never adopted as a
+# ventilation session); a fan still running alone is reconciled as a genuine schedule / outside fan.
+BLOWER_LEAD_IN_DEFER_S: float = 120
+BLOWER_UNLEARN_RISE_F: float = 0.3
 # A setpoint change during a run ends the run; an off edge (or mode switch) this soon after it is the run's real end.
 CYCLE_SETPOINT_OFF_WINDOW_S: float = 60
 # Refit throttle (Pi CPU): a mode is refitted at most this often, sooner once this many new eligible cycles wait or
@@ -1771,7 +1781,11 @@ THERMAL_CYCLE_K_LEARNED_MIN_NEFF: float = 1.0
 # Sensor resolution classes (Issue #1512 reopened, item 5): at or above WHOLE a sensor reports whole degrees, at or
 # above HALF half degrees; in both a normal maintenance cycle moves the reading one or two steps and cannot teach the
 # rate (only setback recoveries can).
-THERMAL_CYCLE_RES_WHOLE_F: float = 0.9
+# By the ACTUAL step in F (verification 2026-11-13: a 0.5 C sensor, 0.9 F, was called "whole degrees"): >= 1.35 whole
+# degrees Celsius (1.8 F), >= 0.95 whole degrees F, >= 0.7 half a degree Celsius (0.9 F), >= 0.45 half degrees F.
+THERMAL_CYCLE_RES_WHOLE_C_F: float = 1.35
+THERMAL_CYCLE_RES_WHOLE_F: float = 0.95
+THERMAL_CYCLE_RES_HALF_C_F: float = 0.7
 THERMAL_CYCLE_RES_HALF_F: float = 0.45
 # The cycle model's version: a fit made by an older model is not replaced until a new eligible cycle arrives, so
 # nothing the decisions use moves at upgrade (the upgrade's startup refit of the same cycles is not new evidence).
@@ -1816,6 +1830,11 @@ THERMAL_CYCLE_GRADE_MED_ER: float = 0.6  # fine pools: medium needs er_q >= this
 THERMAL_CYCLE_GRADE_HIGH_ER: float = 0.95  # fine: high needs this and ne >= 4; coarse: medium needs this and ne >= 2
 THERMAL_CYCLE_GRADE_MED_NE: int = 2
 THERMAL_CYCLE_GRADE_HIGH_NE: int = 4
+# ... and relative precision (Issue #1512 verification): "high" needs sd_q <= this share of |q|, "medium" the next
+THERMAL_CYCLE_GRADE_HIGH_REL: float = 0.05
+THERMAL_CYCLE_GRADE_MED_REL: float = 0.15
+# The most evidence one cycle can count for, in reference cycles (a 10-minute run is about 1)
+THERMAL_CYCLE_INFO_MAX: float = 5.0
 # Solar regressor: tested in poc round 1, not shipped; OFF.
 THERMAL_CYCLE_SOLAR_REGRESSOR: bool = False
 

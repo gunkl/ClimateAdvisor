@@ -156,7 +156,18 @@ unchanged.** The pure logic lives in `ca_dev_thermostat_sim/hvac_profile.py`.
   measured it as a 30 s report delay. Set `edge_report_delay_s` (seconds) to
   model a cloud-polled thermostat on purpose: `hvac_action` then shows each
   heating / cooling / fan / idle change that many seconds after the equipment
-  changed (the attribute `edge_report_delay_s` shows the setting).
+  changed (the attribute `edge_report_delay_s` shows the setting). At most
+  120 s: Climate Advisor's cycle model profiles an edge delay of up to 1 minute,
+  so longer settings test the product outside what it models. A mode change is
+  shown at once (never "heating" in Off mode), and the restored action is the
+  starting point after a restart, so the first change after it is late too.
+- **Idle gap before the overrun** (`idle_before_overrun_s`, config only,
+  default `0`, at most 60; `SimProfile(idle_before_overrun_s=...)`): with a
+  blower overrun configured, the thermostat reports `idle` for this many
+  seconds after the burner/compressor stops and only then `fan`, as the owner's
+  Ecobee does (`heating -> idle`, then `fan` 1 s later). `0` goes straight
+  from `heating` to `fan`, which Climate Advisor 0.9.31 already handled; the
+  idle gap is the sequence that broke it (Issue #1512 reopened).
 - **Blower lead-in and overrun** (per direction, minutes; overrun is *runtime*:
   `number.<zone>_heat_blower_overrun`, `number.<zone>_cool_blower_overrun`).
   Overrun: after the burner/compressor stops the blower keeps running and

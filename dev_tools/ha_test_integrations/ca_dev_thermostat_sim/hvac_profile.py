@@ -94,7 +94,11 @@ def round_to_precision(value: float, precision: float) -> float:
 DEFAULT_SENSOR_LAG_MIN = 0.0  # 0 = the reading IS the simulated air, as before
 SENSOR_LAG_MAX_MIN = 60.0
 DEFAULT_EDGE_REPORT_DELAY_S = 0.0  # 0 = the thermostat reports its on/off edges as they happen
-EDGE_REPORT_DELAY_MAX_S = 600.0
+# 2 minutes: real polled thermostats report within that, and Climate Advisor's cycle model profiles an edge delay of
+# up to 1 minute (THERMAL_CYCLE_EDGE_DELAYS); a longer setting tests the product outside what it models.
+EDGE_REPORT_DELAY_MAX_S = 120.0
+DEFAULT_IDLE_BEFORE_OVERRUN_S = 0.0
+IDLE_BEFORE_OVERRUN_MAX_S = 60.0
 
 
 def lag_step(reading: float | None, air: float | None, dt_hours: float, lag_minutes: float) -> float | None:

@@ -146,6 +146,28 @@ async def test_fine_sensor_maintenance_learns_the_rate(
         assert all(any(s[0] > c["t_off"] + overrun * 60 for s in c["samples"]) for c in cycles if c["cut"] is None)
 
 
+@pytest.mark.parametrize("mode", ["heat", "cool"])
+async def test_ecobee_idle_gap_overrun_is_one_cycle_with_its_coast(make_sim, mode) -> None:
+    """The owner's Ecobee: heating -> idle, then ``fan`` 1 s later for 2 minutes (heat and cool). Each run is one
+    cycle whose coast is recorded through the blower; no 2-minute phantom run, no runtime or observation for the
+    blower (0.9.31 opened a phantom run on the ``fan`` and closed the real cycle at the stop with no coast)."""
+    profile = SimProfile(
+        heat_rate="normal" if mode == "heat" else None,
+        cool_rate="normal" if mode == "cool" else None,
+        companion_sensor=True,
+        idle_before_overrun_s=1.0,
+        **{f"blower_overrun_{mode}_min": 2.0},
+    )
+    house = await _house(make_sim, HEAT if mode == "heat" else COOL, profile)
+    await house.advance(hours=8)
+    cycles = _no_phantom(house, mode)
+    natural = [c for c in cycles if c["cut"] is None and c["t_off"] is not None]
+    assert len(natural) >= 5
+    assert all(any(s[0] > c["t_off"] + 150 for s in c["samples"]) for c in natural), "coast through the blower"
+    fit = _fit(house, mode)
+    assert fit["ne"] >= 5 and _err(fit, 12.0) <= 0.05, fit.get("q")
+
+
 async def test_undersized_with_an_unlearned_leak_rate_says_it_is_unsure(make_sim) -> None:
     """Undersized 2 F/h furnace in mild air, leak rate only the typical value: the climb is a small difference of
     heat and leak, so the rate depends on the guessed leak; it is graded low with the reason (docs/05 Real-HA check:
@@ -184,7 +206,7 @@ async def test_coarse_sensor_maintenance_never_learns_and_says_so(make_sim, prec
     ("learned_k", "grade", "tol"),
     [
         # k only the typical value (-0.03) in a house leaking at -0.15: q comes out low (docs/05: "k pinned at the
-        # typical -0.03 leaves q 18-58 % low"), and the grade says so
+        # typical -0.03 leaves q 17-58 % low"), and the grade says so
         pytest.param(None, ("low",), 0.35, id="whole-recovery-k-typical"),
         pytest.param(-0.15, ("low", "medium"), 0.10, id="whole-recovery-k-learned"),
     ],

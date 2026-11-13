@@ -57,6 +57,7 @@ from .const import (
     CONF_DEADBAND_HEAT_F,
     CONF_EDGE_REPORT_DELAY_S,
     CONF_HEAT_RATE_PRESET,
+    CONF_IDLE_BEFORE_OVERRUN_S,
     CONF_INITIAL_TEMP_F,
     CONF_K_ACTIVE_COOL,
     CONF_K_ACTIVE_HEAT,
@@ -79,9 +80,12 @@ from .const import (
 )
 from .hvac_profile import (
     DEFAULT_EDGE_REPORT_DELAY_S,
+    DEFAULT_IDLE_BEFORE_OVERRUN_S,
     DEFAULT_PRECISION,
     DEFAULT_RATE_PRESET,
     DEFAULT_SENSOR_LAG_MIN,
+    EDGE_REPORT_DELAY_MAX_S,
+    IDLE_BEFORE_OVERRUN_MAX_S,
     PHASE_LEAD_IN,
     PHASE_OVERRUN,
     PHASE_RUNNING,
@@ -259,10 +263,17 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._sensor_lag_min: float = float(data.get(CONF_SENSOR_LAG_MIN, DEFAULT_SENSOR_LAG_MIN) or 0.0)
         # Edge report delay: hvac_action trails the equipment by this many seconds (a cloud-polled thermostat); 0 =
         # on time (the default: a directly connected thermostat reports its edge as it happens).
-        self._edge_report_delay_s: float = max(
-            0.0, float(data.get(CONF_EDGE_REPORT_DELAY_S, DEFAULT_EDGE_REPORT_DELAY_S) or 0.0)
+        self._edge_report_delay_s: float = min(
+            EDGE_REPORT_DELAY_MAX_S,
+            max(0.0, float(data.get(CONF_EDGE_REPORT_DELAY_S, DEFAULT_EDGE_REPORT_DELAY_S) or 0.0)),
         )
         self._action_history: list[tuple[datetime, str]] = []
+        # Idle gap before the blower overrun (the owner's Ecobee: heating -> idle, then fan 1 s later); 0 = none.
+        self._idle_before_overrun_s: float = min(
+            IDLE_BEFORE_OVERRUN_MAX_S,
+            max(0.0, float(data.get(CONF_IDLE_BEFORE_OVERRUN_S, DEFAULT_IDLE_BEFORE_OVERRUN_S) or 0.0)),
+        )
+        self._overrun_idle_until: datetime | None = None
         # Blower lead-in / overrun and after-stop coast, per direction. All zero (the default) = no blower phase.
         self._blower: dict[str, BlowerConfig] = {
             "heat": BlowerConfig(
@@ -377,6 +388,11 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         # Real elapsed wall time drives the ODE step, not tick_seconds — this
         # keeps the simulation correct across restarts and missed/delayed ticks.
         self._last_update_ts = dt_util.utcnow()
+        # Edge report delay: the (restored) action is the starting point, so the first change after a start or a
+        # restart is reported late too (it used to show at once: the history started empty).
+        self._actively_driving = self._equipment.phase == PHASE_RUNNING
+        self._action_history.clear()
+        self._note_action(self._last_update_ts)
 
         # Register this entity so number.py's manual temperature override (Issue #898)
         # can reach it without a direct cross-platform object reference — same pattern
@@ -556,7 +572,12 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
 
     def _true_action(self) -> HVACAction:
         """What the equipment is doing now (``hvac_action`` shows it ``edge_report_delay_s`` late when that is set)."""
-        if self._equipment.phase in (PHASE_LEAD_IN, PHASE_OVERRUN):
+        idle_gap = (
+            self._equipment.phase == PHASE_OVERRUN
+            and self._overrun_idle_until is not None
+            and dt_util.utcnow() < self._overrun_idle_until
+        )
+        if self._equipment.phase in (PHASE_LEAD_IN, PHASE_OVERRUN) and not idle_gap:
             return HVACAction.FAN
         if self._hvac_mode == HVACMode.HEAT:
             return HVACAction.HEATING if self._actively_driving else HVACAction.IDLE
@@ -605,6 +626,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             "precision_option": self._precision_option,
             "sensor_lag_min": self._sensor_lag_min,
             "edge_report_delay_s": self._edge_report_delay_s,
+            "idle_before_overrun_s": self._idle_before_overrun_s,
             "air_temperature": None if self._current_temp is None else round(self._current_temp, 3),
             "blower_phase": self._equipment.phase,
             "blower_lead_in_heat_min": self._blower["heat"].lead_in_min,
@@ -647,6 +669,11 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         if hvac_mode != self._hvac_mode:
             self._reset_compressor_state()
         self._hvac_mode = hvac_mode
+        # A mode change is the thermostat's own setting, shown at once even with an edge report delay: never
+        # "heating" in Off mode (verification 2026-11-13). The delayed report restarts from the new action.
+        self._actively_driving = self._equipment.phase == PHASE_RUNNING
+        self._action_history.clear()
+        self._note_action(dt_util.utcnow())
         self.async_write_ha_state()
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
@@ -871,6 +898,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
 
         # HVAC profile: the call drives the blower phases (lead-in -> running -> overrun). Capacity flows only while
         # RUNNING (from the next interval on); with no lead-in configured (the default) running is exactly the call.
+        phase_before = self._equipment.phase
         advance_equipment(
             self._equipment,
             call_on=self._compressor_on,
@@ -880,6 +908,16 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             cfg_last=self._blower_for(self._equipment.direction),
         )
         self._actively_driving = self._equipment.phase == PHASE_RUNNING
+        if phase_before == PHASE_RUNNING and self._equipment.phase == PHASE_OVERRUN and self._idle_before_overrun_s > 0:
+            # report "idle" for the gap, then "fan" (one extra state write when the gap ends)
+            self._overrun_idle_until = now + timedelta(seconds=self._idle_before_overrun_s)
+
+            @callback
+            def _end_idle_gap(_now: datetime) -> None:
+                self._note_action(dt_util.utcnow())
+                self.async_write_ha_state()
+
+            self._cancel_echo.append(async_call_later(self.hass, self._idle_before_overrun_s, _end_idle_gap))
         self._note_action(now)
         self._last_update_ts = now
         self.async_write_ha_state()

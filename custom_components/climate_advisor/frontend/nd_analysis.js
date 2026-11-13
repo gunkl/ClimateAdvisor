@@ -247,7 +247,7 @@
         row(line, 'cycle q ' + Number(c.q).toFixed(2) + (typeof c.sd_q === 'number' ? ' \u00b1 ' + Number(c.sd_q).toFixed(2) : '') + ' ' + eu + '/h \u00b7 coast ' +
           (typeof c.coast_area_f === 'number' ? Number(ND.dFToDisp(c.coast_area_f)).toFixed(2) : '\u2014') + ' ' + eu + ' \u00b7 ' + (c.ne != null ? c.ne : 0) + ' informative cycles', 'sure: ' + (c.grade || 'none'));
         // Issue #1512 reopened: a whole- or half-degree sensor cannot learn the rate from normal cycles; say so plainly.
-        if (c.coarse_sensor && c.coarse_sensor.text) row(c.coarse_sensor.text, 'sensor reports ' + (c.coarse_sensor.sensor_class === 'half' ? 'half' : 'whole') + ' degrees \u00b7 rate in use: ' + (c.coarse_sensor.rate_in_use || 'n/a'), '');
+        if (c.coarse_sensor && c.coarse_sensor.text) row(c.coarse_sensor.text, 'sensor reports ' + (c.coarse_sensor.label || 'coarse steps') + ' \u00b7 rate in use: ' + (c.coarse_sensor.rate_in_use || 'n/a'), '');
       });
       if (ks) {
         var ph = E.solar_phase_offset_h && E.solar_phase_offset_h.active ? E.solar_phase_offset_h.value : 0;

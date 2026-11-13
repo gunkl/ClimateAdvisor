@@ -192,22 +192,40 @@ def test_defaults_report_edges_on_time() -> None:
             _Zone(mode=mode, air=air, target=target, outdoor=outdoor, legacy=True),
         )
         sgn = 1.0 if mode == "heat" else -1.0
-        runs_new, runs_old, edge_ok = [], [], True
+        runs_new, runs_old, edge_ok, old_edge_ok = [], [], True, True
         prev_new = prev_old = "idle"
+
+        def passive(z, before):  # the step the room takes over one tick with no capacity at all
+            return ode(
+                before,
+                z.outdoor,
+                z.k_passive,
+                None,
+                TICK_H,
+                z.target,
+                comfort_heat=68,
+                comfort_cool=76,
+                hvac_mode=z.mode,
+            )
+
         for _ in range(6 * 120):
-            before = new.air
+            before_new, before_old = new.air, old.air
             a_new, a_old = new.tick(), old.tick()
             if a_new != prev_new and a_new in ("heating", "cooling"):
                 runs_new.append(new.now)
-                edge_ok = edge_ok and abs(new.air - before) < 0.05  # no heat yet at the reported start
+                # at the reported start the room took exactly the passive step: no heat before the edge
+                edge_ok = edge_ok and abs(new.air - passive(new, before_new)) < 1e-9
             if a_old != prev_old and a_old in ("heating", "cooling"):
                 runs_old.append(old.now)
+                old_edge_ok = old_edge_ok and abs(old.air - passive(old, before_old)) < 1e-9
             prev_new, prev_old = a_new, a_old
         _check(
             f"{mode}: same number of runs as the old tick ({len(runs_new)} vs {len(runs_old)})",
             abs(len(runs_new) - len(runs_old)) <= 1,
         )
         _check(f"{mode}: at each reported start the room has not moved yet (no tick of heat before the edge)", edge_ok)
+        # the check discriminates (verification 2026-11-13): the old order had already applied a tick of heat
+        _check(f"{mode}: the same check fails on the old tick order", runs_old != [] and not old_edge_ok)
         overshoot = max(0.0, sgn * (new.air - target))
         _check(f"{mode}: the room stays within a tick of the stop point", overshoot < 0.2)
 

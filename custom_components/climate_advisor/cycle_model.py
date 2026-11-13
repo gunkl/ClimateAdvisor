@@ -122,9 +122,16 @@ CYCLE_LAG_PLAUSIBLE: float = _k("THERMAL_CYCLE_LAG_PLAUSIBLE_MIN", 3.0)
 CYCLE_LAG_RUN_MULT: float = _k("THERMAL_CYCLE_LAG_RUN_MULT", 3.0)
 CYCLE_K_DEPEND_FRAC: float = _k("THERMAL_CYCLE_K_DEPEND_FRAC", 0.10)
 CYCLE_K_LEARNED_MIN_NEFF: float = _k("THERMAL_CYCLE_K_LEARNED_MIN_NEFF", 1.0)
-CYCLE_RES_WHOLE: float = _k("THERMAL_CYCLE_RES_WHOLE_F", 0.9)
+CYCLE_RES_WHOLE_C: float = _k("THERMAL_CYCLE_RES_WHOLE_C_F", 1.35)
+CYCLE_RES_WHOLE: float = _k("THERMAL_CYCLE_RES_WHOLE_F", 0.95)
+CYCLE_RES_HALF_C: float = _k("THERMAL_CYCLE_RES_HALF_C_F", 0.7)
 CYCLE_RES_HALF: float = _k("THERMAL_CYCLE_RES_HALF_F", 0.45)
 MODEL_VERSION: int = _k("THERMAL_CYCLE_MODEL_VERSION", 2)
+# The most evidence one cycle can count for, in reference cycles (``_cycle_information``): the cap on a contradicted
+# cycle's weight and on what one new cycle displaces of carried evidence (``learning._new_information``).
+CYCLE_INFO_MAX: float = _k("THERMAL_CYCLE_INFO_MAX", 5.0)
+CYCLE_GRADE_HIGH_REL: float = _k("THERMAL_CYCLE_GRADE_HIGH_REL", 0.05)
+CYCLE_GRADE_MED_REL: float = _k("THERMAL_CYCLE_GRADE_MED_REL", 0.15)
 _LAG_PRUNE_MASS = 0.005  # a timing point below this share of the coarse-grid posterior is not refined (Pi CPU)
 # Prior against a late-reported edge (-2 log prior odds): most thermostats report their edge as it happens, so a
 # delay must be clearly in the data (a cloud-polled thermostat) before it is used; without it
@@ -140,16 +147,29 @@ _CONTRADICT_SDS = 3.0  # per-cycle contradiction test (one test per cycle: 2 sd 
 _K_ALT_SSE = 9.0  # (sse_alt - sse_fit) / (sigma^2 deff) below this: the data cannot tell the two leak rates apart
 
 
-def sensor_class(res: Any) -> str:
-    """``"whole"`` (reports whole degrees), ``"half"`` (half degrees) or ``"fine"`` from a pool's resolution (F).
+SENSOR_CLASS_LABELS = {
+    "whole_c": "whole degrees Celsius",
+    "whole": "whole degrees",
+    "half_c": "half a degree Celsius",
+    "half": "half degrees",
+}
 
-    Occupant meaning (Issue #1512 reopened, item 5): on a whole- or half-degree sensor a normal heating or cooling
-    cycle moves the reading by the thermostat's swing, one or two steps, which cannot measure the rate; only longer
-    recoveries (a setback) can. ``"unknown"`` when the resolution is not a positive number."""
+
+def sensor_class(res: Any) -> str:
+    """The sensor's step, by its ACTUAL size in F (unit-aware: a 0.5 C step is 0.9 F, not "whole degrees").
+
+    ``"whole_c"`` (1 C = 1.8 F steps), ``"whole"`` (1 F), ``"half_c"`` (0.5 C = 0.9 F), ``"half"`` (0.5 F) or
+    ``"fine"``; ``"unknown"`` when the resolution is not a positive number. Occupant meaning (Issue #1512 reopened,
+    item 5): on a coarse sensor a normal heating or cooling cycle moves the reading by the thermostat's swing, one or
+    two steps, which rarely measures the rate; longer recoveries (a setback) can."""
     if not _num(res) or res <= 0:
         return "unknown"
+    if res >= CYCLE_RES_WHOLE_C:
+        return "whole_c"
     if res >= CYCLE_RES_WHOLE:
         return "whole"
+    if res >= CYCLE_RES_HALF_C:
+        return "half_c"
     if res >= CYCLE_RES_HALF:
         return "half"
     return "fine"
@@ -254,7 +274,7 @@ def infer_resolution(values: Sequence[float]) -> float:
     prev: float | None = None
     for v in values:
         if prev is not None and abs(v - prev) > 1e-6:
-            key = round(abs(v - prev), 2)
+            key = max(round(abs(v - prev), 2), 0.01)  # a step under 0.005 F is still a step (never 0)
             counts[key] = counts.get(key, 0) + 1
         prev = v
     if not counts:
@@ -674,37 +694,71 @@ def _coast(c: dict[str, Any], tau: float, lag: float | tuple[float, float] = 0.0
 
 
 def _cycle_information(c: dict[str, Any]) -> float:
-    """Fisher information the cycle alone carries about q, per unit noise variance (Issue #1512 reopened, item 4).
+    """Fisher information the cycle alone carries about q, in REFERENCE-CYCLE units (Issue #1512 reopened, item 4).
 
-    The run-hours' spread within the cycle, less the part the coast response (at CYCLE_INFO_TAU) could also explain:
-    ``Sqq - Sqc^2 / Scc`` over the cycle's own readings. A short pulse is nearly indistinguishable from a coast and
-    carries little; a long run carries a lot. Equal cycles get equal information, so the weight rule then reduces
-    to the old count rule. Needs ``_features`` first."""
-    q = c["Q"]
-    co = _coast(c, CYCLE_INFO_TAU)
+    The run-hours' spread over the cycle, less the part the coast response (at CYCLE_INFO_TAU) could also explain:
+    ``Sqq - Sqc^2 / Scc``. Every sum is TIME-weighted (each reading counts for the minutes it stands for, trapezoid),
+    so the number does not depend on how often the sensor reports (a sensor reporting every 10 s is not 6 times as
+    informative as one reporting every minute; readings of one sensor that close are not independent). The result
+    is divided by ``reference_information()`` (a 10-minute run with its 45-minute tail): a typical maintenance run is
+    about 1, a short pulse a fraction, a long recovery several. A short pulse is nearly indistinguishable from a coast
+    and carries little. Equal cycles get equal information, so the weight rule then reduces to the old count rule.
+    Needs ``_features`` first."""
+    return _raw_information(c["t"], c["Q"], _coast(c, CYCLE_INFO_TAU)) / reference_information()
+
+
+def _raw_information(t: Sequence[float], q: Sequence[float], co: Sequence[float]) -> float:
     n = len(q)
     if n < 2:
         return 0.0
-    qm = sum(q) / n
-    cm_ = sum(co) / n
-    sqq = sum((x - qm) ** 2 for x in q)
-    scc = sum((x - cm_) ** 2 for x in co)
-    sqc = sum((x - qm) * (y - cm_) for x, y in zip(q, co, strict=True))
-    info = sqq - (sqc * sqc / scc if scc > 1e-15 else 0.0)
-    return max(info, 0.0)
+    w = [0.0] * n
+    for i in range(n):
+        lo = t[i - 1] if i > 0 else t[i]
+        hi = t[i + 1] if i < n - 1 else t[i]
+        w[i] = max(0.0, (hi - lo) / 2.0)
+    sw = sum(w)
+    if sw <= 0:
+        return 0.0
+    qm = sum(wi * x for wi, x in zip(w, q, strict=True)) / sw
+    cm_ = sum(wi * x for wi, x in zip(w, co, strict=True)) / sw
+    sqq = sum(wi * (x - qm) ** 2 for wi, x in zip(w, q, strict=True))
+    scc = sum(wi * (x - cm_) ** 2 for wi, x in zip(w, co, strict=True))
+    sqc = sum(wi * (x - qm) * (y - cm_) for wi, x, y in zip(w, q, co, strict=True))
+    return max(sqq - (sqc * sqc / scc if scc > 1e-15 else 0.0), 0.0)
+
+
+_REF_INFO: list[float] = []
+
+
+def reference_information() -> float:
+    """Raw information of the reference cycle: a 10-minute run, one reading a minute, 45-minute tail, no lag."""
+    if not _REF_INFO:
+        c = {"t": [float(m) for m in range(-1, 56)], "ton": 0.0, "rend": 10.0, "toff": 10.0, "priors": []}
+        c["offs_all"] = [10.0]
+        _REF_INFO.append(_raw_information(c["t"], _run_hours(c, 0.0), _coast(c, CYCLE_INFO_TAU)) or 1.0)
+    return _REF_INFO[0]
 
 
 def information_weights(
-    infos: Sequence[float], half_n: float = EVIDENCE_HALF_N, halves: Sequence[float] | None = None
+    infos: Sequence[float],
+    half_n: float = EVIDENCE_HALF_N,
+    halves: Sequence[float] | None = None,
+    contradicted: Sequence[bool] | None = None,
 ) -> list[float]:
-    """Weights of cycles ordered oldest -> newest: ``0.5 ** (information of the newer cycles / (half x own))``.
+    """Weights of cycles ordered oldest -> newest (information in reference-cycle units, ``_cycle_information``).
 
-    Owner 2026-11-12 (Issue #1512 reopened): evidence yields to newer INFORMATION, never to the calendar or to a mere
-    count. A long accurate run keeps its weight while short low-information runs arrive (each displaces it only by
-    its own share), and a short run yields quickly to a long one. With equal information this is exactly the old
-    ``0.5 ** (newer cycles / half_n)``. ``halves`` (per cycle) overrides ``half_n``: a cycle the newer ones
-    contradict yields at EVIDENCE_HALF_N_CONTRADICT. Deterministic; a zero-information cycle is floored at a tiny
-    share of the largest so it yields to anything."""
+    Agreeing evidence: ``0.5 ** (information of the newer cycles / (half x own))`` (owner 2026-11-12, Issue #1512
+    reopened): evidence yields to newer INFORMATION, never to the calendar or to a mere count. A long accurate run
+    keeps its weight while short low-information runs arrive (each displaces it only by its own share), and a short
+    run yields quickly to a long one. With equal information this is exactly the old ``0.5 ** (newer / half_n)``.
+
+    Contradicted evidence (``contradicted[i]``, from ``contradicted_by_newer``): the cycle no longer describes the
+    house, so it yields to the newer information in ABSOLUTE terms: it counts for at most CYCLE_INFO_MAX reference
+    cycles and that is halved per EVIDENCE_HALF_N_CONTRADICT (5) reference cycles of newer information, however
+    heavy it was: a 60-minute run that a change in the
+    house has made wrong is displaced by about 25 typical runs, as a short one would be (verification 2026-11-13: the
+    relative rule needed ~2000 pulses to halve a 400x-heavier run). ``halves`` (legacy) overrides ``half_n`` per
+    cycle for the relative rule. Deterministic; a zero-information cycle is floored at a tiny share of the largest."""
     vals = [max(float(x), 0.0) if _num(x) else 0.0 for x in infos]
     if not vals:
         return []
@@ -713,10 +767,27 @@ def information_weights(
     out = [0.0] * len(vals)
     newer = 0.0
     for i in range(len(vals) - 1, -1, -1):
-        h = halves[i] if halves is not None and i < len(halves) and _num(halves[i]) and halves[i] > 0 else half_n
-        out[i] = 0.5 ** (newer / (h * vals[i]))
+        if contradicted is not None and i < len(contradicted) and contradicted[i]:
+            # counted at no more than CYCLE_INFO_MAX reference cycles, then halved per 5 newer reference cycles
+            out[i] = min(1.0, CYCLE_INFO_MAX / vals[i]) * 0.5 ** (newer / EVIDENCE_HALF_N_CONTRADICT)
+        else:
+            h = halves[i] if halves is not None and i < len(halves) and _num(halves[i]) and halves[i] > 0 else half_n
+            out[i] = 0.5 ** (newer / (h * vals[i]))
         newer += vals[i]
     return out
+
+
+def overdispersion(cyc_q: Sequence[float], cyc_var: Sequence[float]) -> float:
+    """How much more neighbouring cycles' own q scatter than their sds say (>= 1): the median of
+    ``(q_i - q_{i+1})^2 / (var_i + var_{i+1})`` over consecutive cycles, over 0.455 (a chi-square's median with one
+    degree of freedom). Neighbours, so a real change in the house (one step) barely moves it."""
+    ratios = []
+    for i in range(len(cyc_q) - 1):
+        vi = cyc_var[i] if i < len(cyc_var) else math.inf
+        vj = cyc_var[i + 1] if i + 1 < len(cyc_var) else math.inf
+        if _num(vi) and _num(vj) and vi > 0 and vj > 0 and math.isfinite(vi + vj):
+            ratios.append((cyc_q[i] - cyc_q[i + 1]) ** 2 / (vi + vj))
+    return max(1.0, _median(ratios) / 0.455) if ratios else 1.0
 
 
 def contradicted_by_newer(cyc_q: Sequence[float], cyc_var: Sequence[float]) -> list[bool]:
@@ -728,6 +799,12 @@ def contradicted_by_newer(cyc_q: Sequence[float], cyc_var: Sequence[float]) -> l
     2026-11-12): such a cycle yields at EVIDENCE_HALF_N_CONTRADICT instead of EVIDENCE_HALF_N."""
     n = len(cyc_q)
     out = [False] * n
+    # Over-dispersion: when neighbouring cycles scatter more than their own sds say (a model that does not fit
+    # every cycle exactly: sensor quantisation, lag, solar), every per-cycle sd is widened by that factor first, so
+    # only a cycle that stands out from the usual scatter counts as contradicted (verification 2026-11-13: without
+    # it 45 of 60 agreeing cycles of a slow system were "contradicted" and the fit kept only the newest few).
+    phi = overdispersion(cyc_q, cyc_var)
+    cyc_var = [v * phi if _num(v) else v for v in cyc_var]
     prec = 0.0
     acc = 0.0
     for i in range(n - 1, -1, -1):
@@ -1093,6 +1170,16 @@ def grade(result: dict[str, Any]) -> str:
         g = "medium"
     else:
         g = "low"
+    # relative precision (verification 2026-11-13): er_q is measured against a prior sd of ~5 F/h, so a small system
+    # (q ~2 F/h) reached er_q 0.999 with an sd of 6 % of q while reading 15 % low; "high" also needs sd_q within
+    # CYCLE_GRADE_HIGH_REL of |q|, "medium" within CYCLE_GRADE_MED_REL
+    sd, q = result.get("sd_q"), result.get("q")
+    if _num(sd) and _num(q) and abs(q) > 0:
+        rel = float(sd) / abs(float(q))
+        if g == "high" and rel > CYCLE_GRADE_HIGH_REL:
+            g = "medium"
+        if g == "medium" and rel > CYCLE_GRADE_MED_REL:
+            g = "low"
     if result.get("k_dependent") is True:
         g = "low"
     short = result.get("run_median_min")
@@ -1107,13 +1194,17 @@ def grade(result: dict[str, Any]) -> str:
 
 
 def grade_caps(result: dict[str, Any]) -> list[str]:
-    """Which honesty caps hold the grade down (``"k_typical_prior"``, ``"lag_unidentified"``), for Debug / AI."""
+    """Which honesty caps hold the grade down (``"k_typical_prior"``, ``"lag_unidentified"``, ``"imprecise"``: sd_q
+    over CYCLE_GRADE_HIGH_REL of |q|), for Debug / AI."""
     out = []
     if result.get("k_dependent") is True:
         out.append("k_typical_prior")
     short = result.get("run_median_min")
     if result.get("lag_identified") is False and _num(short) and short < CYCLE_LAG_RUN_MULT * CYCLE_LAG_PLAUSIBLE:
         out.append("lag_unidentified")
+    sd, q = result.get("sd_q"), result.get("q")
+    if _num(sd) and _num(q) and abs(q) > 0 and float(sd) / abs(float(q)) > CYCLE_GRADE_HIGH_REL:
+        out.append("imprecise")
     return out
 
 
@@ -1268,14 +1359,22 @@ def fit_cycles(
     n_contra = sum(flags)
     if n_contra:
         by_id = {id(p): f for p, f in zip(eligible, flags, strict=True)}
-        halves = [EVIDENCE_HALF_N_CONTRADICT if by_id.get(id(p)) else EVIDENCE_HALF_N for p in all_eligible]
+        contra = [bool(by_id.get(id(p))) for p in all_eligible]
         for pc, w in zip(
-            all_eligible, information_weights([p["info"] for p in all_eligible], halves=halves), strict=True
+            all_eligible, information_weights([p["info"] for p in all_eligible], contradicted=contra), strict=True
         ):
             pc["w"] = w
         fit2 = _fit_core(eligible, prior, mode, res, free_k, deff_mult, use_solar, ext)
         if fit2 is not None:
             fit = fit2
+    # Honest width (verification 2026-11-13): when the cycles' own q scatter more than the model's sds allow, the
+    # pooled sd is too small by the same factor (a model that does not fit every cycle: quantisation, lag, coast).
+    # Widen sd_q by it and recompute er_q, so the grade follows (2 F/h on a 0.18 F sensor read -15 % graded high).
+    phi = overdispersion(fit["cyc_q"], fit["cyc_var"]) if len(eligible) >= 3 else 1.0
+    if phi > 1.0:
+        fit = dict(fit)
+        fit["sd_q"] = fit["sd_q"] * math.sqrt(phi)
+        fit["er_q"] = max(0.0, min(1.0, 1.0 - (fit["sd_q"] / prior["q"][1]) ** 2))
     k_source = prior.get("k_source", "typical")
     runs = [p["rend"] - p["ton"] for p in eligible]
     q_abs = max(abs(fit["q"]), 1e-9)
@@ -1294,7 +1393,13 @@ def fit_cycles(
         hat = _fit_core(eligible, dict(prior, k=(fit["k"], pin_sd)), mode, res, False, deff_mult, use_solar, None, one)
         if hat is not None:
             scale = max(hat["sigma"], 1e-9) ** 2 * hat["deff"]
-            for k_alt in (min(km - 2.0 * ksd, _K_BOUNDS[1]), min(km / 3.0, _K_BOUNDS[1])):
+            # far alternatives (the typical prior two sds leakier, a third of it) and near ones (the fitted k half as
+            # much again, or half of it): at a small net climb (an undersized system) a small error in k is a large
+            # error in q, and the data may not pin k that closely (verification 2026-11-13: 2 F/h on a 0.18 F
+            # sensor read -15 % graded high)
+            k_hat = fit["k"]
+            alts = (km - 2.0 * ksd, km / 3.0, k_hat * 1.5, k_hat * 0.5)
+            for k_alt in (min(max(a_, _K_BOUNDS[0]), _K_BOUNDS[1]) for a_ in alts):
                 if abs(k_alt - fit["k"]) < 1e-6:
                     continue
                 alt = _fit_core(
@@ -1337,6 +1442,7 @@ def fit_cycles(
         "lag_pooled": ext is not None,
         "edge_delay_min": fit["edge_delay_min"],
         "n_contradicted": n_contra,
+        "overdispersion": round(phi, 3),
         "run_median_min": round(_median(runs), 2),
         "sigma": fit["sigma"],
         "reasons": reasons,
@@ -1363,26 +1469,37 @@ def fit_cycles(
     return out
 
 
-def coarse_sensor_notice(fit: Any, mode: str) -> dict[str, Any] | None:
-    """Occupant-facing notice for a whole- or half-degree sensor (Issue #1512 reopened, item 5), or None.
+def coarse_sensor_notice(fit: Any, mode: str, *, decisions: str | None = None) -> dict[str, Any] | None:
+    """Occupant-facing notice for a coarse (whole- or half-degree) sensor (Issue #1512 reopened, item 5), or None.
 
-    ``{"sensor_class", "maintenance_cycles_learn": False, "rate_in_use", "text"}``. ``rate_in_use``: ``"measured"``
-    (longer runs, e.g. setback recoveries, already taught it), ``"learned"`` (the rate learned before, carried), or
-    ``"default"`` (the typical-house rate). There are no user-configured heating/cooling rates, so none is named.
-    The same text is shown on Analysis (the house-model row), Debug and in the AI context."""
+    ``{"sensor_class", "label", "maintenance_cycles_learn", "rate_in_use", "text"}``. ``rate_in_use``: the primary
+    engine's id when ``decisions`` names one other than v3 (its own rate drives the decisions), else
+    ``"measured"`` (runs that moved the reading far enough, e.g. setback recoveries, have taught it), ``"learned"``
+    (the rate learned before, carried) or ``"default"`` (the typical-house rate). There are no user-configured
+    heating/cooling rates, so none is named. ``maintenance_cycles_learn`` is False: a normal cycle moves the reading
+    one or two steps, below the three a measurement needs, though an occasional longer one can count (the text says
+    how many have). The same text is shown on Analysis (the house-model row), Debug and in the AI context."""
     if not isinstance(fit, dict) or mode not in ("heat", "cool"):
         return None
-    cls = fit.get("sensor_class") or sensor_class(fit.get("resolution_f"))
-    if cls not in ("whole", "half") or not fit.get("n_cycles"):
+    cls = sensor_class(fit.get("resolution_f")) if _num(fit.get("resolution_f")) else fit.get("sensor_class")
+    if cls not in SENSOR_CLASS_LABELS or not fit.get("n_cycles"):
         return None
     word = "heating" if mode == "heat" else "cooling"
     verb = "heats" if mode == "heat" else "cools"
-    steps = "whole degrees" if cls == "whole" else "half degrees"
-    ne = fit.get("ne") if _num(fit.get("ne")) else 0
+    steps = SENSOR_CLASS_LABELS[cls]
+    ne = int(fit.get("ne")) if _num(fit.get("ne")) else 0
     src = fit.get("prior_source")
-    if ne and ne > 0:
+    learned = (
+        f"; {ne} run{'s' if ne != 1 else ''} that moved it further {'have' if ne != 1 else 'has'} taught it"
+        if ne
+        else ""
+    )
+    if decisions:
+        in_use = str(decisions)  # another engine is primary: its own rate drives the decisions
+        use = f"the decisions use the {decisions} engine's own {word} rate, learned from the whole day's readings"
+    elif ne > 0:
         in_use = "measured"
-        use = f"so far it has learned from {int(ne)} longer run{'s' if ne != 1 else ''} instead"
+        use = f"it uses the {word} rate those runs measured"
     elif src in ("cache", "held"):
         in_use = "learned"
         use = f"it keeps using the {word} rate it had already learned"
@@ -1392,8 +1509,14 @@ def coarse_sensor_notice(fit: Any, mode: str) -> dict[str, Any] | None:
     recovery = "warming back up after a setback" if mode == "heat" else "cooling back down after a setback"
     text = (
         f"Your indoor temperature sensor reports {steps}. A normal {word} cycle moves the reading by only one or "
-        f"two steps, so it can't teach Climate Advisor how fast your home {verb}; {use}. Longer runs, such as "
-        f"{recovery}, can still teach it, and a finer sensor (for example the thermostat's companion temperature "
+        f"two steps, too few to measure how fast your home {verb}{learned}; {use}. Longer runs, such as "
+        f"{recovery}, can teach it, and a finer sensor (for example the thermostat's companion temperature "
         "sensor, if it has one) fixes this."
     )
-    return {"sensor_class": cls, "maintenance_cycles_learn": False, "rate_in_use": in_use, "text": text}
+    return {
+        "sensor_class": cls,
+        "label": steps,
+        "maintenance_cycles_learn": False,
+        "rate_in_use": in_use,
+        "text": text,
+    }

@@ -10410,6 +10410,7 @@ class AutomationEngine:
         trigger: str = "startup",
         recent_hvac_session_ended: bool = False,
         remote_timer_provenance: tuple[float, float] | None = None,
+        thermostat_blower_phase: bool = False,
     ) -> None:
         """Reconcile fan state on HA startup / coalesce window (Issue #327).
 
@@ -10487,6 +10488,7 @@ class AutomationEngine:
                 trigger=trigger,
                 recent_hvac_session_ended=recent_hvac_session_ended,
                 remote_timer_provenance=remote_timer_provenance,
+                thermostat_blower_phase=thermostat_blower_phase,
             )
         finally:
             self._reconcile_fan_in_progress = False
@@ -10641,6 +10643,7 @@ class AutomationEngine:
         trigger: str,
         recent_hvac_session_ended: bool = False,
         remote_timer_provenance: tuple[float, float] | None = None,
+        thermostat_blower_phase: bool = False,
     ) -> None:
         """Body of reconcile_fan_on_startup(), run under its reentrancy guard (Issue #561)."""
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -10970,6 +10973,17 @@ class AutomationEngine:
 
         # Issue #1103/#1104 "observe, don't own": a blower running with no CA command record behind it is the
         # thermostat's own schedule -- record it, never adopt it as CA-owned, no grace, no turn-off.
+        # Issue #1535 (and the #1512 overrun): the thermostat's own blower phase around a heating/cooling run (a lead-in
+        # before it, an overrun after it) is the equipment's, never a ventilation session to adopt: record it only.
+        if thermostat_blower_phase and thermostat_fan_running and not (self._fan_active or self._natural_vent_active):
+            _LOGGER.info(
+                "Fan reconcile: the thermostat's blower around a heating/cooling run trigger=%s archetype=%s"
+                " — decision=observe-only (never adopted)",
+                trigger,
+                archetype,
+            )
+            self._note_observed_fan_started()
+            return
         if self._blower_is_thermostat_initiated(thermostat_fan_running, nat_vent_eligible, any_sensor_open):
             _LOGGER.info(
                 "Fan reconcile: HVAC fan running outside CA control (thermostat schedule) trigger=%s archetype=%s"

@@ -255,7 +255,12 @@ async def test_a_thermostat_that_never_reports_runs(make_sim, mode) -> None:
     assert coord.thermostat_action_notice() is None  # not before 3 days
     watch = coord._hvac_report_watch
     assert watch["ever_reported"] is False and watch["unreported_s"] >= 7 * 3600
-    await house.advance(hours=66)  # past 3 days in the mode
+    # The 8 real hours above proved the watch accrues mode time. Stepping 66 more virtual hours took ~45 s locally
+    # and overran the tier's 60 s per-test timeout on CI, so the watch is placed 30 min short of the 3-day threshold
+    # and one more real hour crosses it: the notice still comes from elapsed mode time, not from the seed alone.
+    watch["unreported_s"] = 3 * 86400 - 1800
+    assert coord.thermostat_action_notice() is None
+    await house.advance(hours=1)  # past 3 days in the mode
     rows = [r for r in coord.decision_rates_summary() if r.get("source") == "notice"]
     assert rows and rows[0]["rate_in_use"] in ("default", "learned") and "has not reported" in rows[0]["text"]
     assert coord._cycle_store.cycles(mode) == []

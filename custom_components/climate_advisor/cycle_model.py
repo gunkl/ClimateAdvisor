@@ -1514,14 +1514,20 @@ def fit_cycles(
 
 
 def coarse_sensor_notice(
-    fit: Any, mode: str, *, decisions: str | None = None, fit_applied: bool = True
+    fit: Any,
+    mode: str,
+    *,
+    decisions: str | None = None,
+    fit_applied: bool = True,
+    engine_learning: str | None = None,
 ) -> dict[str, Any] | None:
     """Occupant-facing notice for a coarse (whole- or half-degree) sensor (Issue #1512 reopened, item 5), or None.
 
     ``{"sensor_class", "label", "maintenance_cycles_learn", "rate_in_use", "text"}``. ``rate_in_use``: the primary
     engine's id when ``decisions`` names one other than v3 that is in control (its own rate drives the decisions);
     with ``fit_applied`` False (another engine is primary but not ready, so v3's aged rates drive the decisions and the
-    cycle fit is only shown) never ``measured``; else
+    cycle fit is only shown) never ``measured``; ``"default"`` when ``engine_learning`` names a primary engine that
+    is not ready (the decisions then use the blank default model); else
     ``"measured"`` (runs that moved the reading far enough, e.g. setback recoveries, have taught it), ``"learned"``
     (the rate learned before, carried) or ``"default"`` (the typical-house rate). There are no user-configured
     heating/cooling rates, so none is named. ``maintenance_cycles_learn`` is False: a normal cycle moves the reading
@@ -1545,6 +1551,9 @@ def coarse_sensor_notice(
     if decisions:
         in_use = str(decisions)  # another engine is primary: its own rate drives the decisions
         use = f"the decisions use the {decisions} engine's own {word} rate, learned from the whole day's readings"
+    elif engine_learning:
+        in_use = "default"  # another engine is primary but still learning: the blank default model drives them
+        use = f"the decisions use a typical home's {word} rate (a default) while {engine_learning} learns"
     elif ne > 0 and fit_applied:
         in_use = "measured"
         use = f"it uses the {word} rate {'those runs' if ne != 1 else 'that run'} measured"

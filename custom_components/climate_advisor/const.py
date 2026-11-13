@@ -1688,6 +1688,9 @@ REJECT_NO_K_PASSIVE = "no_k_passive"  # no closed-house k_passive yet (solar_gai
 # Issue #1512: reasons that used to be free text (or a generic "abandoned"), now real persisted codes.
 REJECT_NEW_SESSION = "new_session_started"  # another observation session began before this one committed
 REJECT_FAN_ACTIVATED = "fan_activated"  # the fan started and contaminated the observation
+# Issue #1536: the thermostat was in a heating/cooling mode without saying whether it ran (hvac_action missing or
+# "fan"), so the stretch may hold unreported furnace/AC heat: not a sun or closed-house measurement
+REJECT_HVAC_UNREPORTED = "hvac_unreported"
 REJECT_HVAC_MODE_SWITCH = "hvac_mode_switch"  # heat <-> cool switched mid-observation
 # Issue #1512/#1516: why a recorded heat/cool cycle did not (fully) feed the pooled cycle model.
 REJECT_CYCLE_TOO_SHORT = "cycle_too_short"  # run shorter than THERMAL_CYCLE_MIN_RUN_MIN

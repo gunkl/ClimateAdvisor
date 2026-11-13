@@ -350,7 +350,7 @@ This shows every chart log write with its event type and resolved `hvac` value.
 | Heating only visible at 30-min intervals | Event-driven append sites logging mode strings | Same as above |
 | Fan bar always green (even when HVAC off) | `_fan_is_running()` detecting untracked fan state | Check for `"running (untracked)"` in `_compute_fan_status()` log lines |
 | Windows bars drop on HVAC events | An append site missing `windows_open`/`windows_recommended` | Audit all 4 append call sites in coordinator.py for completeness |
-| Heating shown but wrong color (green instead of red) | `hvac_action="fan"` with `fan_mode=auto` not being remapped | Check #109 remap logic in `_read_chart_hvac_action()` |
+| A fan period shows as "fan", not heating | By design since 0.9.32: the chart records `hvac_action` as reported (owner decision 2026-11-13; the #109 fan→heating/cooling remap is gone) | Nothing to fix; if the thermostat never reports heating/cooling, see "No heating/cooling runtime at all" |
 
 See `docs/08-COMPUTATION-REFERENCE.md` §19 for the full invariant table governing all five append sites.
 
@@ -542,7 +542,8 @@ rejection right after each real run on 0.9.31 was that blower ([05 §blower](05-
 
 A heating or cooling run exists only when the thermostat reports `hvac_action` `heating` or `cooling`. A thermostat
 that reports only `fan`, or no `hvac_action` at all, records no runtime, no observations and no cycles: that is by
-design (the #93 mode fallback was removed). After 3 days in a heating/cooling mode with no report, Analysis, Debug
+design (the #93 mode fallback was removed). If this thermostat has NEVER reported heating/cooling, after 3 days in a
+heating/cooling mode Analysis, Debug
 and the AI context say so (`decision_rates_summary` row `source: "notice"`; `hvac_action_report.unreported_s` in
 the state file). Check the climate entity's attributes in Developer Tools: if `hvac_action` never reads
 `heating`/`cooling`, the integration does not report it.

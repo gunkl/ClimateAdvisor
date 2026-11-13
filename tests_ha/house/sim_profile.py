@@ -44,6 +44,7 @@ class SimProfile:
     coast_cool_tau_min: float = 0.0
     edge_report_delay_s: float = 0.0  # hvac_action reported this late (a cloud-polled thermostat); 0 = on time
     idle_before_overrun_s: float = 0.0  # "idle" this long between the stop and the overrun's "fan" (Ecobee: 1 s)
+    report_hvac_action: bool = True  # False: no hvac_action attribute at all (a thermostat that never says)
     extra: dict[str, Any] = field(default_factory=dict)  # any other sim entry key (deadband_heat_f, ...)
 
     @classmethod
@@ -83,6 +84,8 @@ class SimProfile:
         ):
             if (value := getattr(self, key)) > 0:
                 out[key] = float(value)
+        if not self.report_hvac_action:
+            out["report_hvac_action"] = False
         out.update(self.extra)
         return out
 

@@ -985,3 +985,129 @@ def test_ai_context_names_a_thermostat_that_never_reports_runs():
     ]
     ctx = asyncio.run(build_thermal_pipeline_context(MagicMock(), coord))
     assert "thermostat: Your thermostat has not reported when it is heating or cooling at all" in ctx
+
+
+class TestNoticeOnlyForNeverReportingThermostats:
+    """Verification 2026-11-13 (blocker): the notice and the blank cost fired on thermostats that DO report runs,
+    during any mild spell or vacation."""
+
+    _tick = TestThermostatThatNeverReportsRuns._tick_days
+
+    @pytest.mark.parametrize("mode", ["heat", "cool", "heat_cool", "auto"])
+    def test_a_reporting_thermostat_never_gets_the_notice_and_costs_zero(self, mode):
+        from custom_components.climate_advisor.learning import DailyRecord
+
+        coord = _make_thermostat_coord()
+        coord.config = {**coord.config, "energy_rate": 0.2, "heat_power_kw": 3.0, "cool_power_kw": 3.0}
+        _fire(coord, _t(0), ("heat", "idle"), ("heat", "heating"))  # it reports its runs
+        _fire(coord, _t(10), ("heat", "heating"), ("heat", "idle"))
+        self._tick(coord, 5.0, _make_state(mode, "idle"))  # a 5-day mild spell: never ran
+        assert coord.thermostat_action_notice() is None
+        rec = DailyRecord(date="2026-11-04", day_type="mild", trend_direction="stable")
+        coord._apply_estimated_cost(rec)
+        assert rec.estimated_cost == 0.0  # nothing ran: $0 is true
+
+    def test_a_never_reporting_thermostat_has_unknown_cost_from_day_one(self):
+        from custom_components.climate_advisor.learning import DailyRecord
+
+        coord = _make_thermostat_coord()
+        coord.config = {**coord.config, "energy_rate": 0.2, "heat_power_kw": 3.0, "cool_power_kw": 3.0}
+        self._tick(coord, 0.5, _make_state("heat", ""))
+        rec = DailyRecord(date="2026-11-01", day_type="cold", trend_direction="stable")
+        coord._apply_estimated_cost(rec)
+        assert rec.estimated_cost is None and coord.thermostat_action_notice() is None  # notice only at 3 days
+
+    def test_the_watch_is_restored_before_yesterdays_record_is_recovered(self):
+        """Restart across midnight: yesterday's cost needs the watch (it was restored after the cost)."""
+        import inspect
+
+        src = inspect.getsource(ClimateAdvisorCoordinator_restore())
+        assert src.index('state.get("hvac_action_report")') < src.index("self._apply_estimated_cost(recovered)")
+
+    def test_rates_named_while_another_engine_learns(self):
+        coord = _make_thermostat_coord()
+        self._tick(coord, 3.2, _make_state("heat", ""))
+        n = coord.thermostat_action_notice(None, "v4")
+        assert n["rate_in_use"] == "default" and "while v4 learns" in n["text"]
+        c = cm.coarse_sensor_notice(
+            {"resolution_f": 1.0, "n_cycles": 4, "ne": 2, "prior_source": "cache"},
+            "heat",
+            fit_applied=False,
+            engine_learning="v4",
+        )
+        assert c["rate_in_use"] == "default" and "while v4 learns" in c["text"]
+
+
+def ClimateAdvisorCoordinator_restore():  # noqa: N802 - the coordinator's restore method, for an ordering check
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    for name in dir(ClimateAdvisorCoordinator):
+        fn = getattr(ClimateAdvisorCoordinator, name)
+        try:
+            import inspect
+
+            if callable(fn) and "_apply_estimated_cost(recovered)" in inspect.getsource(fn):
+                return fn
+        except OSError, TypeError:
+            continue
+    raise AssertionError("restore method not found")
+
+
+class TestNoSunOrLeakLearningOnUnreportedRuns:
+    """Issue #1536: in a heating/cooling mode with hvac_action missing or "fan" the furnace/AC may be running
+    unreported, so the sun-gain and closed-house observations are not started, and a running one is abandoned with
+    the ``hvac_unreported`` code (excluding unknown data is not inferring a run). Heat and cool."""
+
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    @pytest.mark.parametrize("action", ["", "fan"])
+    def test_not_started_and_abandoned(self, mode, action):
+        from custom_components.climate_advisor.const import (
+            OBS_TYPE_PASSIVE_DECAY,
+            OBS_TYPE_SOLAR_GAIN,
+            REJECT_HVAC_UNREPORTED,
+        )
+        from tests.test_thermal_event import _make_dt_mock
+        from tests.test_thermal_observations import _make_obs_coord
+
+        noon = datetime(2026, 4, 28, 12, 0, 0, tzinfo=__import__("datetime").UTC)
+        coord = _make_obs_coord(hvac_action=action, indoor_temp=72.0, outdoor_temp=50.0)
+        coord.hass.states.get("climate.test").state = mode
+        with patch(_DT, _make_dt_mock(noon)):
+            coord._sample_all_observations()
+        assert OBS_TYPE_SOLAR_GAIN not in coord._pending_observations
+        assert OBS_TYPE_PASSIVE_DECAY not in coord._pending_observations
+        # a running observation is abandoned with the code
+        coord._pending_observations[OBS_TYPE_SOLAR_GAIN] = {
+            "obs_type": OBS_TYPE_SOLAR_GAIN,
+            "obs_id": "sg",
+            "start_time": noon.isoformat(),
+            "status": "monitoring",
+            "samples": [],
+        }
+        coord._abandon_observation = MagicMock()
+        with patch(_DT, _make_dt_mock(noon)):
+            coord._sample_all_observations()
+        assert any(
+            c.kwargs.get("reason_code") == REJECT_HVAC_UNREPORTED for c in coord._abandon_observation.call_args_list
+        )
+
+    def test_reported_idle_still_learns(self):
+        from custom_components.climate_advisor.const import OBS_TYPE_SOLAR_GAIN
+        from tests.test_thermal_event import _make_dt_mock
+        from tests.test_thermal_observations import _make_obs_coord
+
+        noon = datetime(2026, 4, 28, 12, 0, 0, tzinfo=__import__("datetime").UTC)
+        coord = _make_obs_coord(hvac_action="idle", indoor_temp=72.0, outdoor_temp=50.0)
+        coord.hass.states.get("climate.test").state = "heat"
+        with patch(_DT, _make_dt_mock(noon)):
+            coord._sample_all_observations()
+        assert OBS_TYPE_SOLAR_GAIN in coord._pending_observations
+
+    def test_a_fan_row_is_not_a_closed_house_row(self):
+        """``_extract_passive_windows``: a "fan" chart row breaks a passive window (the #109 remap is gone)."""
+        import inspect
+
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+        src = inspect.getsource(ClimateAdvisorCoordinator._extract_passive_windows)
+        assert 'hvac != "fan"' in src and 'hvac in ("idle", "off", "")' in src

@@ -68,6 +68,7 @@ from .const import (
     CONF_OFF_OFFSET_HEAT_F,
     CONF_OUTDOOR_SOURCE,
     CONF_PRECISION,
+    CONF_REPORT_HVAC_ACTION,
     CONF_SENSOR_LAG_MIN,
     CONF_TICK_SECONDS,
     DEFAULT_DEADBAND_COOL_F,
@@ -274,6 +275,8 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             max(0.0, float(data.get(CONF_IDLE_BEFORE_OVERRUN_S, DEFAULT_IDLE_BEFORE_OVERRUN_S) or 0.0)),
         )
         self._overrun_idle_until: datetime | None = None
+        # A thermostat that does not report hvac_action at all (the attribute is absent); default: reported.
+        self._report_hvac_action: bool = bool(data.get(CONF_REPORT_HVAC_ACTION, True))
         # Blower lead-in / overrun and after-stop coast, per direction. All zero (the default) = no blower phase.
         self._blower: dict[str, BlowerConfig] = {
             "heat": BlowerConfig(
@@ -552,7 +555,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         return self._hvac_mode
 
     @property
-    def hvac_action(self) -> HVACAction:
+    def hvac_action(self) -> HVACAction | None:
         """Return what the thermostat is actually doing right now.
 
         Read by 12 separate production sites in coordinator.py/automation.py
@@ -565,6 +568,8 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         HVAC profile: during a configured blower lead-in (before the burner or compressor starts) or overrun (after
         it stops) the blower alone runs, reported as FAN in any mode, as an Ecobee reports its fan dissipation time.
         """
+        if not self._report_hvac_action:
+            return None  # the attribute is absent: this thermostat never says whether it heats or cools
         current = self._true_action()
         if self._edge_report_delay_s <= 0:
             return current
@@ -627,6 +632,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             "sensor_lag_min": self._sensor_lag_min,
             "edge_report_delay_s": self._edge_report_delay_s,
             "idle_before_overrun_s": self._idle_before_overrun_s,
+            "report_hvac_action": self._report_hvac_action,
             "air_temperature": None if self._current_temp is None else round(self._current_temp, 3),
             "blower_phase": self._equipment.phase,
             "blower_lead_in_heat_min": self._blower["heat"].lead_in_min,

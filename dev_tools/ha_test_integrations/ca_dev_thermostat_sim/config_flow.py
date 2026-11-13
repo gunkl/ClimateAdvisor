@@ -52,6 +52,7 @@ from .const import (
     CONF_OFF_OFFSET_HEAT_F,
     CONF_OUTDOOR_SOURCE,
     CONF_PRECISION,
+    CONF_REPORT_HVAC_ACTION,
     CONF_SENSOR_LAG_MIN,
     CONF_TICK_SECONDS,
     DEFAULT_COMFORT_COOL,
@@ -190,6 +191,9 @@ def _build_schema(*, defaults: dict[str, Any]) -> vol.Schema:
                 CONF_IDLE_BEFORE_OVERRUN_S,
                 default=defaults.get(CONF_IDLE_BEFORE_OVERRUN_S, DEFAULT_IDLE_BEFORE_OVERRUN_S),
             ): _num(min_=0, max_=IDLE_BEFORE_OVERRUN_MAX_S, step=1, unit="s"),
+            vol.Required(
+                CONF_REPORT_HVAC_ACTION, default=bool(defaults.get(CONF_REPORT_HVAC_ACTION, True))
+            ): selector.BooleanSelector(),
             **{
                 vol.Required(key, default=defaults.get(key, 0.0)): _num(min_=0, max_=max_, step=step, unit=unit)
                 for key, max_, step, unit in (

@@ -21,7 +21,7 @@
     cycle_no_off_edge: 'The cycle had no end to measure to', cycle_sensor_swap: 'Recorded on an earlier indoor sensor than the one in use now',
     hvac_run_too_short: 'Heating or cooling run was too short to measure (old method)', hvac_signal_below_resolution: 'Room temperature moved less than the sensor can reliably show (old method)',
     no_k_passive: 'House leak rate not learned yet, so this run\'s rate could not be separated', new_session_started: 'A new run started before this one could be measured',
-    fan_activated: 'The fan started during the run', hvac_mode_switch: 'Heat and cool switched during the run', ols_bounds: 'Result was outside the believable range'
+    fan_activated: 'The fan started during the run', hvac_mode_switch: 'Heat and cool switched during the run', hvac_unreported: 'The thermostat was in heat or cool mode without reporting whether it ran, so the stretch was left out (#1536)', ols_bounds: 'Result was outside the believable range'
   };
   var OBS = {
     passive_decay: 'Passive windows', vent_window_decay: 'Window ventilation', vent_fan_decay: 'Fan/WHF ventilation', solar_gain: 'Solar readings',

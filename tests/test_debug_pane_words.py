@@ -113,13 +113,14 @@ class TestDecisionRates:
             return orig(coord, unit, **kw)
 
         monkeypatch.setattr(ClimateAdvisorCoordinator, "_cycle_model_rows", spy)
-        for ready, decisions in ((True, "v4"), (False, None)):
+        # ready: v4's own rates; still learning: the blank default model (named as the defaults, not "learned")
+        for ready, decisions, learning in ((True, "v4", None), (False, None, "v4")):
             seen.clear()
             self._rows(monkeypatch, primary="v4", ready=ready)
-            assert seen and seen[-1] == {"decisions": decisions, "fit_applied": False}
+            assert seen and seen[-1] == {"decisions": decisions, "fit_applied": False, "engine_learning": learning}
         seen.clear()
         self._rows(monkeypatch, primary="v3", ready=True)
-        assert seen[-1] == {"decisions": None, "fit_applied": True}
+        assert seen[-1] == {"decisions": None, "fit_applied": True, "engine_learning": None}
 
     def test_usable_v4_rates_are_v4s_and_vent_solar_are_v3s(self, monkeypatch):
         rows = self._rows(monkeypatch, primary="v4", ready=True)

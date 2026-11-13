@@ -944,7 +944,7 @@ All five fields default to `None` at record creation. On a fire night, `setback_
 | heat -> off mid-run | heating -> fan -> idle | session ends at the stop | the Off-mode overrun is not a state contradiction (fan start within `BLOWER_OVERRUN_LINK_S`, 60 s, of the stop) |
 | fan_only | fan | fan_only session as before | #912, unchanged |
 
-A thermostat that never reports heating/cooling therefore has no heating/cooling runtime, no HVAC observations, no cycles and no HVAC-rate learning. After `THERMOSTAT_NO_ACTION_NOTICE_S` (3 days) in a heating/cooling mode without a report (counted on the 5-minute tick, per climate entity, persisted as `hvac_action_report`; any report resets it) an occupant notice appears on Analysis, Debug and in the AI context (`coordinator.thermostat_action_notice`, a `decision_rates_summary` row with `source: "notice"`), naming the rates used instead (learned, defaults, or the primary engine in control), and the daily cost estimate is unknown (None) rather than 0.
+A thermostat that never reports heating/cooling therefore has no heating/cooling runtime, no HVAC observations, no cycles and no HVAC-rate learning. Only while this climate entity has NEVER reported heating/cooling (`hvac_action_report.ever_reported` false; a re-pointed zone starts again) is the time it spends in a heating/cooling mode counted on the 5-minute tick; after `THERMOSTAT_NO_ACTION_NOTICE_S` (3 days) an occupant notice appears on Analysis, Debug and in the AI context (`coordinator.thermostat_action_notice`, a `decision_rates_summary` row with `source: "notice"`), naming what the decisions use instead (another primary engine in control; the defaults while it still learns; else the rates learned before, or the defaults). An entity that has reported a run never gets the notice, however long a mild spell or a vacation lasts. Its daily cost estimate is unknown (None) from day one rather than 0 (the watch is restored before yesterday's record is recovered at startup). Issue #1536: while the mode is heat/cool/heat_cool/auto and hvac_action is missing or `fan`, the sun-gain and closed-house observations are not started (a running one is abandoned with `hvac_unreported`), and `_extract_passive_windows` treats a `fan` chart row as not closed-house: excluding unknown data, not inferring a run.
 
 Historical (superseded): Regression origin: ebbf5ab (Fix #93, 2026-04-08) widened the fallback guard from `if new_action and old_action` to "neither side heating/cooling", which swept in idle/off. The resolved session mode (`heat`/`cool`/`fan_only`, Issue #912) selects which counter the timer feeds; only `heat`/`cool` open a thermal observation.
 
@@ -962,7 +962,7 @@ Historical (superseded): Regression origin: ebbf5ab (Fix #93, 2026-04-08) widene
 | mode cool + `fan` while CA's fan/nat-vent runs (#986) | ended | credited to 23:59 (as before) | 0 |
 | no session armed | nothing | — | — |
 
-> **Test coverage:** `tests/test_rollover_runtime_1241.py` (heat/cool/fan_only across 23:59, live getters after the rollover, stale-session guard); `tests/test_phantom_runtime_1240.py` (idle windows, real edge after idle, cool mirror, fan_only and glide symmetry, stop-side mirror, #93/#986 fallback guards); `tests/test_hvac_session_detection.py`; real HA: `tests_ha/test_phantom_runtime_1240.py`.
+> **Test coverage:** `tests/test_rollover_runtime_1241.py` (heat/cool/fan_only across 23:59, live getters after the rollover, stale-session guard); `tests/test_phantom_runtime_1240.py` (idle windows, real edge after idle, cool mirror, fan_only and glide symmetry, stop-side mirror, no run without a report: the #93 fallback removed, owner decision 2026-11-13); `tests/test_hvac_session_detection.py`; real HA: `tests_ha/test_phantom_runtime_1240.py`.
 
 ---
 
@@ -4025,7 +4025,7 @@ The temperature forecast chart displays four activity bars fed by `ChartStateLog
 
 **Critical invariants:**
 - The `hvac` field MUST be the thermostat's `hvac_action` attribute string (`"heating"`, `"cooling"`, `"fan"`, `"idle"`, `"off"`) — never the `hvac_mode` state (`"heat"`, `"cool"`). Mode strings produce invisible segments.
-- Use `_read_chart_hvac_action()` at every append site. It encapsulates the #109 fan→heating/cooling remap (only applies when `fan_mode` is auto).
+- Use `_read_chart_hvac_action()` at every append site. It records `hvac_action` as reported (owner decision 2026-11-13: the #109 fan→heating/cooling remap is gone; a fan is never a run).
 - Use `_fan_is_running()` for the `fan` field — never `_fan_active` directly. The helper includes ground-truth thermostat fallback for untracked fan runs.
 
 **Five append sites in coordinator.py:**

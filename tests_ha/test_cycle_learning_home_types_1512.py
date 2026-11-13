@@ -166,6 +166,12 @@ async def test_ecobee_idle_gap_overrun_is_one_cycle_with_its_coast(make_sim, mod
     assert all(any(s[0] > c["t_off"] + 150 for s in c["samples"]) for c in natural), "coast through the blower"
     fit = _fit(house, mode)
     assert fit["ne"] >= 5 and _err(fit, 12.0) <= 0.05, fit.get("q")
+    # no runtime and no observation for the blower: the day's runtime is the reported runs' own minutes (the last run
+    # may still be open), and every observation started is a reported run's
+    runs_min = sum((c["t_off"] - c["t_on"]) / 60.0 for c in natural)
+    runtime = house.coordinator._today_record.hvac_runtime_minutes
+    assert runs_min - 1.0 <= runtime <= runs_min + 15.0, (runtime, runs_min)
+    assert house.coordinator._today_record.thermal_session_count <= len(cycles)
 
 
 async def test_undersized_with_an_unlearned_leak_rate_says_it_is_unsure(make_sim) -> None:
@@ -227,3 +233,29 @@ async def test_whole_degree_setback_recovery_learns(make_sim, learned_k, grade, 
         assert "k_typical_prior" in fit["grade_caps"], fit
         assert fit["q"] < 12.0  # the typical leak rate under-reads a leaky house: the bias is one-sided
     assert _err(fit, 12.0) <= tol, fit["q"]
+
+
+@pytest.mark.parametrize("mode", ["heat", "cool"])
+async def test_a_thermostat_that_never_reports_runs(make_sim, mode) -> None:
+    """Owner decision 2026-11-13: a run exists only when the thermostat reports heating/cooling. This thermostat has
+    no hvac_action at all: heating (cooling) in heat (cool) mode records no runtime and no cycle, and after 3 days in
+    the mode Climate Advisor says so (the notice row), naming the rates in use."""
+    profile = SimProfile(
+        heat_rate="normal" if mode == "heat" else None,
+        cool_rate="normal" if mode == "cool" else None,
+        companion_sensor=True,
+        report_hvac_action=False,
+    )
+    house = await _house(make_sim, HEAT if mode == "heat" else COOL, profile)
+    assert house.thermostat.action is None
+    await house.advance(hours=8)
+    coord = house.coordinator
+    assert coord._today_record.hvac_runtime_minutes == 0.0
+    assert coord._cycle_store.cycles(mode) == []
+    assert coord.thermostat_action_notice() is None  # not before 3 days
+    watch = coord._hvac_report_watch
+    assert watch["ever_reported"] is False and watch["unreported_s"] >= 7 * 3600
+    await house.advance(hours=66)  # past 3 days in the mode
+    rows = [r for r in coord.decision_rates_summary() if r.get("source") == "notice"]
+    assert rows and rows[0]["rate_in_use"] in ("default", "learned") and "has not reported" in rows[0]["text"]
+    assert coord._cycle_store.cycles(mode) == []

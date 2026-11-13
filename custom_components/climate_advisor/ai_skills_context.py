@@ -984,6 +984,7 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
         "new_session_started",
         "fan_activated",
         "hvac_mode_switch",
+        "hvac_unreported",  # Issue #1536: a heating/cooling mode with no run reported, excluded on purpose
     }
 
     # Reason codes that indicate a signal quality problem worth flagging.

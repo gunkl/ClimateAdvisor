@@ -17,4 +17,5 @@ REJECT_LABELS = {
     "new_session_started": "a new run began before this one finished",
     "fan_activated": "fan started during the run",
     "hvac_mode_switch": "heat/cool switched during the run",
+    "hvac_unreported": "the thermostat was in heat/cool mode without reporting whether it ran (excluded, #1536)",
 }

@@ -62,6 +62,9 @@ CONF_EDGE_REPORT_DELAY_S = "edge_report_delay_s"
 # Seconds the thermostat reports "idle" between the burner/compressor stop and its blower overrun ("fan"), as the
 # owner's Ecobee does (heating -> idle, then fan 1 s later); 0 = straight to fan (the default).
 CONF_IDLE_BEFORE_OVERRUN_S = "idle_before_overrun_s"
+# False: the climate entity reports no hvac_action at all (a thermostat that never says whether it heats or cools;
+# Climate Advisor then records no runs, owner decision 2026-11-13). Default True: reported as before.
+CONF_REPORT_HVAC_ACTION = "report_hvac_action"
 CONF_BLOWER_LEAD_IN_HEAT_MIN = "blower_lead_in_heat_min"
 CONF_BLOWER_LEAD_IN_COOL_MIN = "blower_lead_in_cool_min"
 CONF_BLOWER_OVERRUN_HEAT_MIN = "blower_overrun_heat_min"

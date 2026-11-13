@@ -54,7 +54,7 @@
     "issue": 249
   },
   "cool_all_day_heat_all_day": {
-    "sha256": "b51da51a5cdf70eebb71254adac04e531a70f4aaa7b271a4e20a4eeb8aa2409d",
+    "sha256": "4fceca54339a8aae9b8f9debae252a92d17be05a382afc204b6e3ecaa2ee1d91",
     "signed": "2026-11-13",
     "issue": 136
   },
@@ -594,8 +594,8 @@
     "issue": 1230
   },
   "r6b_tou_bank_lead_follows_primary__v4": {
-    "sha256": "7e364a270444dd77a270263fb3f880312162c520dea86ebe1d006bb337286b26",
-    "signed": "2026-11-06",
+    "sha256": "ef1abf6571ae6e5160a4e0edcb023dcc3e685a4188f1a2e36be1c7c6a46e04b9",
+    "signed": "2026-11-13",
     "issue": 1230
   },
   "r6b_tou_bank_lead_follows_primary__v3": {
@@ -614,8 +614,8 @@
     "issue": 1230
   },
   "r6b_tou_bank_lead_follows_primary_heat__v4": {
-    "sha256": "8a66977357d62549c2831a684bc336922caaafe9bf03c403bf769330874227fb",
-    "signed": "2026-11-06",
+    "sha256": "c781453b4858e6c73a8c85c728d1a568a5c222e9fe6c154c28bb5e6fbdcd8510",
+    "signed": "2026-11-13",
     "issue": 1230
   },
   "tou_away_bank_writes_once_1395": {
@@ -684,17 +684,17 @@
     "issue": 1410
   },
   "tou_home_cool_bank_ends_no_hvac_action_1416": {
-    "sha256": "d6110cda8342c00638d3d224c92e3a5bf26d8194933a603b0c5be7f76fdd46e6",
+    "sha256": "4cda3eb2e376c4bbcdb01973e28c9e579ef5408100929e154543804063e38950",
     "signed": "2026-11-13",
     "issue": 1416
   },
   "tou_home_heat_bank_ends_no_hvac_action_1416": {
-    "sha256": "f6f0f7965fffa6ef6e2542f8a1639c8ef4b3e0fe04639703a4acaf025c3c8ad3",
+    "sha256": "b902a48a37cadccc0b41ecb4775d70ccc6a64d5a911f41f9881477c72ce96e50",
     "signed": "2026-11-13",
     "issue": 1416
   },
   "hot_night_same_mode_pre_cool_wakeup_keeps_cool_1417": {
-    "sha256": "17ac64c8a441b79a52fd1c98e8191e78c82da9645d2ffd35eb9f92844f1926be",
+    "sha256": "6a2e4b67b0592df9be8dcea735454e894d30c725216c85c636ca11cad8e266b8",
     "signed": "2026-11-13",
     "issue": 1417
   },

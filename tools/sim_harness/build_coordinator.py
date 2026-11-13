@@ -228,6 +228,9 @@ def build_headless_coordinator(
     if climate_attributes:
         attrs.update(climate_attributes)
     fake_hass.states.set(climate_entity, FakeState(state=climate_state, attributes=attrs))
+    # Owner decision 2026-11-13 ("Sims report hvac_action", #1537/#1539): the thermostat reports hvac_action from its
+    # own loop before Climate Advisor first reads it; config "thermostat_reports_hvac_action": false opts out.
+    configure_thermostat_action(fake_hass, climate_entity, merged_config)
 
     # 6. Event log — shared list the engine's callback appends to (same shape
     #    as build_headless_engine's event_log).

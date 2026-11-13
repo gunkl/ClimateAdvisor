@@ -1210,7 +1210,8 @@ def _p7_unoccupied(r: Reading, away_tl: tuple[list[datetime], list[bool]]) -> bo
 
 def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
     """Every open P7 run: ``start``/``last``/``side``/``worst``, ``cross`` (set only by a NON-excused reading past
-    the allowance) and ``excused_min`` (time spent in the thermostat's deadband, Issue #1260).
+    the allowance) and ``excused`` (excused_by -> minutes and intervals: the thermostat's deadband, Issue #1260, and
+    unknown equipment, Issue #1537).
 
     No clock reset (Issue #1260): an excused reading continues the run exactly like any other out-of-range
     reading, so the run is timed from when the room FIRST left the range. It just can never be the reading that

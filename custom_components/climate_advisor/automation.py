@@ -8861,13 +8861,18 @@ class AutomationEngine:
                 # #1181) past its OWN delay suffices. The old house-wide ``not _sensor_debounce_pending`` let a
                 # second door inside its delay hide a window open for hours and postponed free cooling.
                 _settled_open_1289 = self._any_monitored_sensor_open_and_settled()
-                _idle_open = (
-                    _sensor_open_244
-                    and _settled_open_1289
-                    and _hvac_off_244
-                    and not self._grace_active
-                    and not _locked_out_244
-                )
+                # Issue #1540 (owner household rule 3, #1142: no heat or cool with a window open past its debounce,
+                # except the occupant's own override): a calling compressor no longer blocks this re-check. #244 kept
+                # it out "so we never fight active heating/cooling" -- written when running HVAC into an open window
+                # was allowed. Once the opening has settled, heat or cool running into it is exactly what rule 3
+                # forbids, so the free-cooling start below must be allowed to take over (it turns the HVAC off when
+                # the fan starts). Seen once harness thermostats reported hvac_action (#1537): a window opened while
+                # the AC cooled, the fan-on was deferred by the anti-cycling limit (#935), and the retry was skipped
+                # with reason hvac_calling, so the AC kept cooling into the open window and the fan never started.
+                # The occupant's override still wins: the start decision refuses while it is active (nat_vent_fsm
+                # override_active), and grace and the reactivation lockout still gate as before. Heat and cool alike:
+                # a furnace calling below the floor is refused by the start decision's own floor.
+                _idle_open = _sensor_open_244 and _settled_open_1289 and not self._grace_active and not _locked_out_244
                 # Issue #1205: the #134 overheat bypass is for CA's own graces; the occupant's fan-off hold wins.
                 # ONE predicate (nat_vent_fsm.overheat_bypasses_grace) shared with the FSM's grace short-circuit.
                 _hot_bypass = _overheat_bypasses_grace(
@@ -8886,7 +8891,8 @@ class AutomationEngine:
                         name
                         for name, active in (
                             ("no_sensor_open", not _sensor_open_244),
-                            ("hvac_calling", not _hvac_off_244),
+                            # Issue #1540: a calling compressor is reported, but only beside a real blocker.
+                            ("hvac_calling", not _hvac_off_244 and not _idle_open),
                             # Issue #1289: open, but no open sensor is past its own delay yet.
                             ("sensor_debounce_pending", _sensor_open_244 and not _settled_open_1289),
                             ("grace_active", self._grace_active),

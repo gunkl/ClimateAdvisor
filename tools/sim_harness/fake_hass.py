@@ -891,6 +891,10 @@ class FakeHass:
 def configure_thermostat_action(fake_hass: FakeHass, climate_entity: str, config: dict) -> None:
     """How a harness thermostat reports ``hvac_action`` (Issues #1310, #1537, #1539): one rule for every builder.
 
+    Called by ``build_headless_engine()``, ``build_headless_coordinator()`` and, per zone,
+    ``build_headless_multi_zone()`` right after they set the thermostat's initial state, and again by
+    ``FakeHassSession`` (a no-op for the seed then, since the action is already present).
+
     ``thermostat_action: "scripted"`` keeps a scenario's injected action through CA's mode changes (no deadband);
     ``temp_unit: celsius`` converts the 1.5 F deadband. Owner decision 2026-11-13 ("Sims report hvac_action"):
     the thermostat reports it by DEFAULT, seeded from its own loop (``seed_hvac_action``), never from CA's

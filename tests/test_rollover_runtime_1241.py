@@ -152,24 +152,28 @@ class TestStaleSessionStillResetDaily:
         assert getattr(coord._today_record, field) == 0.0
 
     def test_ca_ventilation_under_a_cool_mode_is_not_a_running_session(self):
-        """Issue #986 rule: CA's own fan/nat-vent under hvac_mode cool (action "fan") is not a session."""
+        """Issue #986 rule at the rollover: a reported cooling run is kept only while the thermostat still reports it;
+        CA's own fan/nat-vent under hvac_mode cool (action "fan") is not a session. (The old test opened the session
+        through the #93 mode fallback; owner decision 2026-11-13 removed it, so the run is reported as 'cooling'.)"""
         coord = _coord()
-        _fire(coord, _t(8, 23), ("off", ""), ("cool", ""))  # no-signal thermostat: mode fallback session
+        _fire(coord, _t(8, 23), ("off", ""), ("cool", "cooling"))
         assert coord._hvac_session_mode == "cool"
         coord.automation_engine._natural_vent_active = True
         _rollover(coord, ("cool", "fan"))
         assert coord._hvac_session_mode is None
         assert coord._hvac_on_since is None
 
-    def test_no_signal_thermostat_session_carries_over(self):
-        """#93 fallback: a thermostat with no hvac_action and mode heat is a running session; keep it."""
+    def test_no_signal_thermostat_never_has_a_session(self):
+        """Owner decision 2026-11-13 ("Never, remove it."): a thermostat with no hvac_action and mode heat has no
+        session at all (was: the #93 fallback kept one across the rollover; that expectation is now wrong)."""
         coord = _coord()
         _fire(coord, _t(8, 23), ("off", ""), ("heat", ""))
+        assert coord._hvac_session_mode is None
         _rollover(coord, ("heat", ""))
-        assert coord._hvac_session_mode == "heat"
+        assert coord._hvac_session_mode is None
         _new_day_record(coord)
         _fire(coord, _t(9, 0, 30), ("heat", ""), ("off", ""))
-        assert coord._today_record.hvac_runtime_minutes == pytest.approx(31.0)
+        assert coord._today_record.hvac_runtime_minutes == 0.0
 
     def test_no_session_rollover_stays_clean(self):
         coord = _coord()

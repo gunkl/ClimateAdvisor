@@ -131,25 +131,30 @@ class TestSymmetryFanOnlyAndGlide:
         assert coord._today_record.thermostat_fan_only_runtime_minutes == pytest.approx(45.0)
 
     def test_session_ends_when_thermostat_turns_idle_without_a_mode_change(self):
-        """Stop-side mirror: a no-signal ("fan") heat session must end when the thermostat
-        reports idle, not keep counting until the mode is switched off."""
+        """Stop-side mirror: a reported heat run ends when the thermostat reports idle, not when the mode is switched
+        off. (Was a no-signal "fan" session; owner decision 2026-11-13 removed the fallback that started it, so the
+        run is now reported as 'heating'.)"""
         coord = _make_thermostat_coord()
-        _fire(coord, _t(10), ("off", ""), ("heat", "fan"))
-        _fire(coord, _t(10, 40), ("heat", "fan"), ("heat", "idle"))  # 40 min, then idle
+        _fire(coord, _t(10), ("off", ""), ("heat", "heating"))
+        _fire(coord, _t(10, 40), ("heat", "heating"), ("heat", "idle"))  # 40 min, then idle
         _fire(coord, _t(13), ("heat", "idle"), ("off", "idle"))  # idle for 2 h 20 min
 
         assert coord._today_record.hvac_runtime_minutes == pytest.approx(40.0)
         assert coord._hvac_on_since is None
 
 
-class TestNoSignalFallbackKept:
-    """Regression guards: #93/#986 thermostats with no usable hvac_action still get sessions."""
+class TestNoSignalFallbackRemoved:
+    """Owner decision 2026-11-13 ("Never, remove it."): the #93 mode fallback these guards protected is gone. A
+    heating or cooling run exists only when the thermostat reports heating/cooling; a missing or 'fan' hvac_action
+    with a mode selected is no run, no runtime and no observation. (Was ``TestNoSignalFallbackKept``, which asserted
+    50 min of runtime from the selected mode; that expectation is now wrong by the owner's decision.)"""
 
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
     @pytest.mark.parametrize("action", ["", "fan"])
-    def test_mode_fallback_still_counts_when_hvac_action_missing_or_fan(self, action):
+    def test_no_run_when_hvac_action_missing_or_fan(self, mode, action):
         coord = _make_thermostat_coord()
-        _fire(coord, _t(6), ("off", action), ("heat", action))
-        _fire(coord, _t(6, 50), ("heat", action), ("off", action))
+        _fire(coord, _t(6), ("off", action), (mode, action))
+        _fire(coord, _t(6, 50), (mode, action), ("off", action))
 
-        assert coord._today_record.hvac_runtime_minutes == pytest.approx(50.0)
-        coord._start_hvac_observation.assert_called_once_with("heat")
+        assert coord._today_record.hvac_runtime_minutes == 0.0
+        coord._start_hvac_observation.assert_not_called()

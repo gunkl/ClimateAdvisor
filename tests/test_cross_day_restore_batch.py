@@ -70,6 +70,7 @@ ANY_RESTART_KEYS = frozenset(
         "last_update_error_time",
         "consecutive_failure_count",
         "sensor_last_real_reading",
+        "hvac_action_report",  # owner decision 2026-11-13: the per-entity heating/cooling report watch
     }
 )
 SAME_DAY_KEYS = frozenset(

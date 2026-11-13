@@ -187,11 +187,13 @@ class TestChartHvacActionConsistency:
         result = coord._read_chart_hvac_action()
         assert result == "idle", f"Expected 'idle' when heater stops, got {result!r}"
 
-    def test_fan_auto_remap_heating(self):
-        """fan_mode=auto + hvac_action=fan + hvac_mode=heat → remapped to 'heating' (#109 fix preserved)."""
+    def test_fan_auto_is_not_remapped_to_heating(self):
+        """Owner decision 2026-11-13 ("Never, remove it."): a run exists only when the thermostat reports heating or
+        cooling, so the #109 fan->heating remap is gone; the old expectation ('heating') is now wrong by that decision:
+        a fan can run on a hot day with the heat mode selected."""
         coord = self._make_coord_with_thermostat(hvac_action="fan", hvac_mode="heat", fan_mode="auto")
         result = coord._read_chart_hvac_action()
-        assert result == "heating", f"Expected 'heating' for fan_mode=auto+hvac_mode=heat, got {result!r}"
+        assert result == "fan", f"Expected 'fan' (reported as is), got {result!r}"
 
     def test_fan_on_no_remap(self):
         """fan_mode=on + hvac_action=fan → stays 'fan' (not remapped: #109 regression fix)."""
@@ -227,14 +229,14 @@ class TestChartHvacActionConsistency:
             result = coord._read_chart_hvac_action()
             assert result == "fan", f"status={status!r}: expected 'fan', got {result!r}"
 
-    def test_genuine_compressor_blower_lag_still_remapped(self):
-        """Regression safety: when CA's fan status is NOT active (the original Issue #109
-        blower-lag case — CA isn't the one running the fan), the remap must still fire."""
+    def test_a_blower_lag_is_not_remapped_either(self):
+        """Owner decision 2026-11-13: the #109 blower-lag remap ('cooling' while the thermostat reported 'fan') is
+        retired with the #93 fallback; the old expectation is now wrong by that decision. The chart shows 'fan'."""
         coord = self._make_coord_with_thermostat(
             hvac_action="fan", hvac_mode="cool", fan_mode="auto", ca_fan_status="inactive"
         )
         result = coord._read_chart_hvac_action()
-        assert result == "cooling", f"Expected 'cooling' (#109 case preserved), got {result!r}"
+        assert result == "fan", f"Expected 'fan' (reported as is), got {result!r}"
 
 
 # ---------------------------------------------------------------------------

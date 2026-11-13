@@ -59,7 +59,8 @@ from .const import (
     THERMAL_SWING_DEFINITION_VERSION,
     WEATHER_BIAS_MAX_OBS,
 )
-from .cycle_model import CYCLE_MAX_CYCLES, HELD_MIN_KEEP
+from .cycle_model import CYCLE_INFO_MAX, CYCLE_MAX_CYCLES, HELD_MIN_KEEP
+from .cycle_model import MODEL_VERSION as CYCLE_MODEL_VERSION
 from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
 from .swing import (
     SWING_DEFINITION_TEXT,
@@ -230,10 +231,52 @@ CYCLE_FIT_KEYS = (
     "entity",
     "t_first",
     "t_last",
+    # Issue #1512 reopened: sensor lag, honesty of the grade, sensor class, information units, model version
+    "sensor_class",
+    "k_source",
+    "k_dependent",
+    "q_sd_from_k",
+    "q_if_k_alt",
+    "lag_min",
+    "lag_sd_min",
+    "lag_identified",
+    "lag_profile",
+    "lag_pooled",
+    "edge_delay_min",
+    "run_median_min",
+    "grade_caps",
+    "n_contradicted",
+    "contradicted_share",
+    "overdispersion",
+    "info_ref",
+    "model_version",
 )
 # The fields of a usable fit kept as ``cycle_fit_<mode>["held"]`` once its cycles leave the pool (finding 4); plus
 # ``at`` (when it was fitted) and ``keep`` (the share of its evidence newer cycles left it).
-_HELD_KEYS = ("q", "sd_q", "ne_w", "entity", "t_first", "t_last", "applied", "grade")
+_HELD_KEYS = ("q", "sd_q", "ne_w", "entity", "t_first", "t_last", "applied", "grade", "info_ref")
+
+
+def _new_information(result: dict, t_new: list, unit: Any = None) -> float:
+    """How much new evidence the new eligible cycles ``t_new`` of a fit carry, in reference cycles (Issue #1512).
+
+    Each new cycle's information (``result["info_eligible"]``, parallel to ``t_eligible``) is already in reference
+    cycles (``cycle_model._cycle_information``: time-weighted, so it does not depend on how often the sensor reports;
+    a 10-minute maintenance run is about 1), and one cycle counts for at most ``CYCLE_INFO_MAX`` (5): a single long
+    run cannot wipe the evidence carried from before (verification 2026-11-13: one 60-minute run used to count as
+    397 cycles against the pool median). The unit is fixed, so the displacement does not depend on the neighbouring
+    cycles. ``unit`` is accepted for callers and ignored. Falls back to the count of new cycles when the fit carries
+    no information (an older result)."""
+    del unit
+    t_all = result.get("t_eligible") or []
+    infos = result.get("info_eligible") or []
+    if len(infos) != len(t_all) or not infos:
+        return float(len(t_new))
+    new = set(t_new)
+    return sum(
+        min(max(float(i), 0.0), CYCLE_INFO_MAX)
+        for t, i in zip(t_all, infos, strict=True)
+        if t in new and isinstance(i, int | float) and not isinstance(i, bool)
+    )
 
 
 def _same_chart_log_fit(a: dict, b: dict) -> bool:
@@ -1595,6 +1638,26 @@ class LearningEngine:
         held = prev.get("held") if isinstance(prev.get("held"), dict) else None
         prev_usable = _num(prev.get("ne")) and prev["ne"] > 0 and _num(prev.get("q"))
         t_elig = [t for t in (result.get("t_eligible") or []) if _num(t)]
+        # Upgrade continuity (Issue #1512 reopened): a fit stored by an older cycle model stays exactly as it is
+        # until a NEW eligible cycle arrives. The startup refit after an upgrade re-reads the same stored cycles with
+        # the new model; that is not new evidence, so nothing the decisions use (rate, grade, confidence) moves on
+        # day one. The first new cycle brings the new model's fit, as any new evidence does.
+        _t_seen0 = prev.get("t_seen", prev.get("t_last"))
+        _has_new = any(not _num(_t_seen0) or t > _t_seen0 for t in t_elig)
+        _prev_v = prev.get("model_version")
+        if (
+            prev_usable
+            and not _has_new
+            and (not _num(_prev_v) or _prev_v < CYCLE_MODEL_VERSION)
+            and result.get("entity") == prev.get("entity")
+        ):
+            _LOGGER.debug(
+                "Cycle model %s: fit of an older model kept until a new eligible cycle arrives (v%s -> v%s)",
+                mode,
+                _prev_v,
+                CYCLE_MODEL_VERSION,
+            )
+            return False
         # The previous fit's cycles are gone from this pool: a sensor swap, or the first cycle after a season so long
         # that the store let the old ones go (it keeps CYCLE_RETENTION_DAYS back from the newest cycle). The prior
         # of this fit was then the previous fit itself (``cycle_model.held_candidate``); keep it as held.
@@ -1629,13 +1692,19 @@ class LearningEngine:
             from_held = result.get("prior_source") == "held"
             rp = cache.get("rate_prior")
             legacy = rp.get(field_name) if isinstance(rp, dict) else None
+            # Issue #1512 reopened (owner 2026-11-12): new evidence is counted by its INFORMATION, in reference
+            # cycles (a 10-minute run counts about 1, a long accurate run more but at most CYCLE_INFO_MAX, a short
+            # pulse a fraction); a fixed unit, the same for the legacy record and a held fit. Without information
+            # (an older result) each new cycle counts 1.
+            n_new_legacy = _new_information(result, t_new)
             if isinstance(legacy, dict):
                 legacy["keep"] = round(
-                    _displaced_keep(_evidence_keep(legacy), len(t_new), contradicts and not from_held), 6
+                    _displaced_keep(_evidence_keep(legacy), n_new_legacy, contradicts and not from_held), 6
                 )
             if held is not None:
                 held = dict(held)
-                held["keep"] = round(_displaced_keep(_evidence_keep(held), len(t_new), contradicts and from_held), 6)
+                n_new_held = _new_information(result, t_new)
+                held["keep"] = round(_displaced_keep(_evidence_keep(held), n_new_held, contradicts and from_held), 6)
                 if held["keep"] < HELD_MIN_KEEP:
                     held = None  # displaced by the new sensor's cycles
             t_seen = max([t for t in (t_seen, *t_new) if _num(t)])

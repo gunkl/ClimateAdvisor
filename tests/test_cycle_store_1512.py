@@ -96,13 +96,14 @@ def test_replaces_same_id_and_rejects_unusable(tmp_path: Path) -> None:
 
 
 def test_retention_prunes_old_cycles_at_most_hourly(tmp_path: Path) -> None:
+    """Past the span only a cycle that no longer carries weight in the fit leaves (Issue #1512 reopened): ``w`` 0."""
     s = CycleStore(tmp_path / "c.json")
     old = T0 - (CYCLE_RETENTION_DAYS + 1) * DAY
-    s.add(_cycle(old), now=old)
+    s.add(dict(_cycle(old), w=0.0), now=old)
     s.add(_cycle(T0 - 10 * DAY), now=old)
     s.add(_cycle(T0), now=T0)  # the add prunes (first call at/after the previous prune hour)
     assert [c["t_on"] for c in s.cycles()] == [T0 - 10 * DAY, T0]
-    s.add(_cycle(T0 - (CYCLE_RETENTION_DAYS + 5) * DAY), now=T0)
+    s.add(dict(_cycle(T0 - (CYCLE_RETENTION_DAYS + 5) * DAY), w=0.005), now=T0)
     s.add(_cycle(T0 + 100), now=T0 + 100)  # within the hour: no prune
     assert len(s) == 4
     assert s.prune(T0 + 200) == 0  # throttled
@@ -113,12 +114,13 @@ def test_retention_prunes_old_cycles_at_most_hourly(tmp_path: Path) -> None:
 def test_load_prunes_expired(tmp_path: Path) -> None:
     path = tmp_path / "c.json"
     s = CycleStore(path)
-    s.add(_cycle(T0 - 100 * DAY), now=T0 - 100 * DAY)
+    s.add(dict(_cycle(T0 - 100 * DAY), w=0.0), now=T0 - 100 * DAY)  # spent: no weight left in the fit
+    s.add(dict(_cycle(T0 - 99 * DAY), w=0.4), now=T0 - 100 * DAY)  # old but still carrying real weight: kept
     s.add(_cycle(T0 - DAY), now=T0 - 100 * DAY)
     s.save()
     r = CycleStore(path)
     r.load(now=T0)
-    assert [c["t_on"] for c in r.cycles()] == [T0 - DAY]
+    assert [c["t_on"] for c in r.cycles()] == [T0 - 99 * DAY, T0 - DAY]
 
 
 def test_cap_drops_oldest_first(tmp_path: Path) -> None:
@@ -371,9 +373,11 @@ def test_retention_counts_back_from_the_newest_cycle_of_the_mode(tmp_path: Path)
     s.save()
     s2.load(now=later + 1)  # a reload a season later keeps them too
     assert len(s2.cycles("heat")) == 2
-    # the first heating cycle of the next season: cycles more than 90 days older than it leave
+    # the next season: past the span only the cycles the refit no longer weighs leave (Issue #1512 reopened)
+    ids = [c["id"] for c in s.cycles("heat")]
+    s.set_weights({ids[0]: 0.004, ids[1]: 0.6})
     s.add(_cycle(later + DAY, "heat"), now=later + DAY)  # add() prunes (hourly)
-    assert [c["t_on"] for c in s.cycles("heat")] == [later + DAY] and len(s.cycles("cool")) == 1
+    assert [c["t_on"] for c in s.cycles("heat")] == [T0, later + DAY] and len(s.cycles("cool")) == 1
     # a clock jump into the future never prunes more: the anchor is capped at now
     s.add(_cycle(later + 400 * DAY, "cool"), now=later + 2 * DAY)
     assert s.prune(later + 2 * DAY, force=True) == 0 and len(s.cycles("cool")) == 2

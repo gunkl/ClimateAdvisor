@@ -23,10 +23,23 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_BLOWER_LEAD_IN_COOL_MIN,
+    CONF_BLOWER_LEAD_IN_HEAT_MIN,
+    CONF_BLOWER_OVERRUN_COOL_MIN,
+    CONF_BLOWER_OVERRUN_HEAT_MIN,
+    CONF_COAST_COOL_RATE,
+    CONF_COAST_COOL_TAU_MIN,
+    CONF_COAST_HEAT_RATE,
+    CONF_COAST_HEAT_TAU_MIN,
     CONF_COMFORT_COOL,
     CONF_COMFORT_HEAT,
+    CONF_COMPANION_SENSOR,
+    CONF_COOL_RATE_PRESET,
     CONF_DEADBAND_COOL_F,
     CONF_DEADBAND_HEAT_F,
+    CONF_EDGE_REPORT_DELAY_S,
+    CONF_HEAT_RATE_PRESET,
+    CONF_IDLE_BEFORE_OVERRUN_S,
     CONF_INITIAL_TEMP_F,
     CONF_K_ACTIVE_COOL,
     CONF_K_ACTIVE_HEAT,
@@ -38,6 +51,9 @@ from .const import (
     CONF_OFF_OFFSET_COOL_F,
     CONF_OFF_OFFSET_HEAT_F,
     CONF_OUTDOOR_SOURCE,
+    CONF_PRECISION,
+    CONF_REPORT_HVAC_ACTION,
+    CONF_SENSOR_LAG_MIN,
     CONF_TICK_SECONDS,
     DEFAULT_COMFORT_COOL,
     DEFAULT_COMFORT_HEAT,
@@ -52,6 +68,22 @@ from .const import (
     DEFAULT_TICK_SECONDS,
     DOMAIN,
     OCCUPANCY_STATES,
+)
+from .hvac_profile import (
+    BLOWER_MAX_MIN,
+    COAST_RATE_MAX_F_PER_H,
+    COAST_TAU_MAX_MIN,
+    DEFAULT_EDGE_REPORT_DELAY_S,
+    DEFAULT_IDLE_BEFORE_OVERRUN_S,
+    DEFAULT_PRECISION,
+    DEFAULT_RATE_PRESET,
+    DEFAULT_SENSOR_LAG_MIN,
+    EDGE_REPORT_DELAY_MAX_S,
+    IDLE_BEFORE_OVERRUN_MAX_S,
+    PRECISION_OPTIONS,
+    RATE_PRESET_OPTIONS,
+    SENSOR_LAG_MAX_MIN,
+    resolve_rate,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -135,8 +167,64 @@ def _build_schema(*, defaults: dict[str, Any]) -> vol.Schema:
             vol.Required(
                 CONF_MIN_OFF_SECONDS, default=defaults.get(CONF_MIN_OFF_SECONDS, DEFAULT_MIN_OFF_SECONDS)
             ): _num(min_=0, max_=1800, step=10, unit="s"),
+            # HVAC profile (owner request 2026-11-12, hvac_profile.py). Defaults reproduce today's behaviour: the
+            # "custom" preset uses k_active_heat / k_active_cool above, "default" precision is Home Assistant's.
+            vol.Required(
+                CONF_HEAT_RATE_PRESET, default=defaults.get(CONF_HEAT_RATE_PRESET) or DEFAULT_RATE_PRESET
+            ): _select(RATE_PRESET_OPTIONS),
+            vol.Required(
+                CONF_COOL_RATE_PRESET, default=defaults.get(CONF_COOL_RATE_PRESET) or DEFAULT_RATE_PRESET
+            ): _select(RATE_PRESET_OPTIONS),
+            vol.Required(CONF_PRECISION, default=defaults.get(CONF_PRECISION) or DEFAULT_PRECISION): _select(
+                PRECISION_OPTIONS
+            ),
+            vol.Required(
+                CONF_COMPANION_SENSOR, default=bool(defaults.get(CONF_COMPANION_SENSOR, False))
+            ): selector.BooleanSelector(),
+            vol.Required(CONF_SENSOR_LAG_MIN, default=defaults.get(CONF_SENSOR_LAG_MIN, DEFAULT_SENSOR_LAG_MIN)): _num(
+                min_=0, max_=SENSOR_LAG_MAX_MIN, step=0.5, unit="min"
+            ),
+            vol.Required(
+                CONF_EDGE_REPORT_DELAY_S, default=defaults.get(CONF_EDGE_REPORT_DELAY_S, DEFAULT_EDGE_REPORT_DELAY_S)
+            ): _num(min_=0, max_=EDGE_REPORT_DELAY_MAX_S, step=5, unit="s"),
+            vol.Required(
+                CONF_IDLE_BEFORE_OVERRUN_S,
+                default=defaults.get(CONF_IDLE_BEFORE_OVERRUN_S, DEFAULT_IDLE_BEFORE_OVERRUN_S),
+            ): _num(min_=0, max_=IDLE_BEFORE_OVERRUN_MAX_S, step=1, unit="s"),
+            vol.Required(
+                CONF_REPORT_HVAC_ACTION, default=bool(defaults.get(CONF_REPORT_HVAC_ACTION, True))
+            ): selector.BooleanSelector(),
+            **{
+                vol.Required(key, default=defaults.get(key, 0.0)): _num(min_=0, max_=max_, step=step, unit=unit)
+                for key, max_, step, unit in (
+                    (CONF_BLOWER_LEAD_IN_HEAT_MIN, BLOWER_MAX_MIN, 0.5, "min"),
+                    (CONF_BLOWER_OVERRUN_HEAT_MIN, BLOWER_MAX_MIN, 0.5, "min"),
+                    (CONF_COAST_HEAT_RATE, COAST_RATE_MAX_F_PER_H, 0.1, "°F/hr"),
+                    (CONF_COAST_HEAT_TAU_MIN, COAST_TAU_MAX_MIN, 0.5, "min"),
+                    (CONF_BLOWER_LEAD_IN_COOL_MIN, BLOWER_MAX_MIN, 0.5, "min"),
+                    (CONF_BLOWER_OVERRUN_COOL_MIN, BLOWER_MAX_MIN, 0.5, "min"),
+                    (CONF_COAST_COOL_RATE, COAST_RATE_MAX_F_PER_H, 0.1, "°F/hr"),
+                    (CONF_COAST_COOL_TAU_MIN, COAST_TAU_MAX_MIN, 0.5, "min"),
+                )
+            },
         }
     )
+
+
+def _select(options: tuple[str, ...]) -> selector.SelectSelector:
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(options=list(options), mode=selector.SelectSelectorMode.DROPDOWN)
+    )
+
+
+def _apply_rate_presets(data: dict[str, Any]) -> dict[str, Any]:
+    """A chosen preset also writes its rate into k_active_heat / k_active_cool, so the stored rate is the one used."""
+    out = dict(data)
+    if CONF_K_ACTIVE_HEAT in out:
+        out[CONF_K_ACTIVE_HEAT] = resolve_rate(out.get(CONF_HEAT_RATE_PRESET), out[CONF_K_ACTIVE_HEAT], cooling=False)
+    if CONF_K_ACTIVE_COOL in out:
+        out[CONF_K_ACTIVE_COOL] = resolve_rate(out.get(CONF_COOL_RATE_PRESET), out[CONF_K_ACTIVE_COOL], cooling=True)
+    return out
 
 
 class CaDevThermostatSimConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -149,7 +237,7 @@ class CaDevThermostatSimConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            return self.async_create_entry(title=user_input["name"], data=user_input)
+            return self.async_create_entry(title=user_input["name"], data=_apply_rate_presets(user_input))
 
         return self.async_show_form(step_id="user", data_schema=_build_schema(defaults={}), errors=errors)
 
@@ -166,7 +254,9 @@ class CaDevThermostatSimConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            return self.async_update_reload_and_abort(entry, data=user_input, title=user_input["name"])
+            return self.async_update_reload_and_abort(
+                entry, data=_apply_rate_presets(user_input), title=user_input["name"]
+            )
 
         return self.async_show_form(
             step_id="reconfigure", data_schema=_build_schema(defaults=dict(entry.data)), errors=errors

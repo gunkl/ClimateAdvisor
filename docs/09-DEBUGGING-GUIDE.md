@@ -350,7 +350,7 @@ This shows every chart log write with its event type and resolved `hvac` value.
 | Heating only visible at 30-min intervals | Event-driven append sites logging mode strings | Same as above |
 | Fan bar always green (even when HVAC off) | `_fan_is_running()` detecting untracked fan state | Check for `"running (untracked)"` in `_compute_fan_status()` log lines |
 | Windows bars drop on HVAC events | An append site missing `windows_open`/`windows_recommended` | Audit all 4 append call sites in coordinator.py for completeness |
-| Heating shown but wrong color (green instead of red) | `hvac_action="fan"` with `fan_mode=auto` not being remapped | Check #109 remap logic in `_read_chart_hvac_action()` |
+| A fan period shows as "fan", not heating | By design since 0.9.32: the chart records `hvac_action` as reported (owner decision 2026-11-13; the #109 fan→heating/cooling remap is gone) | Nothing to fix; if the thermostat never reports heating/cooling, see "No heating/cooling runtime at all" |
 
 See `docs/08-COMPUTATION-REFERENCE.md` §19 for the full invariant table governing all five append sites.
 
@@ -522,6 +522,31 @@ python tools/night_strategy_replay.py --chart-log chart.json --forecast-archive 
 Reading `--tonight`: `RECOMMENDED` is the one sentence the occupant would get; the table lists offered options (best first); `HIDDEN (debug only)` lines give the reason an option was withheld (rate frozen in the fit, effect not resolved, too few hours of bedroom readings, class not validated). Limits: hallway only (no bedroom history before 2026-11-06), recorded outdoor instead of forecast, provisional until R1b's model fix lands. Spec: [Night Strategy](night-strategy-spec.md).
 
 ## Debugging Thermal Model Learning
+
+### "The heating/cooling rate never learns" on a whole- or half-degree sensor (Issue #1512 reopened)
+
+A normal cycle moves the room by the thermostat's swing (about 1 °F) whatever the system's size, so a sensor that
+reports whole degrees (or half degrees) sees one or two steps per cycle: below the 3-step gate, every cycle is
+`cycle_signal_below_resolution` and the fit stays at the prior (grade `none`). That is expected, not a fault. Check
+`cycle_fit_<mode>.sensor_class` (`whole`/`half`) in `learning.json` or the cycle rows' `coarse_sensor` on the Debug
+tab; Analysis and the AI context say the same in plain words, with the rate in use instead (`rate_in_use`:
+`measured`, `learned` or `default`). Setback recoveries can still teach it; a finer sensor (the thermostat's
+companion temperature sensor, in tenths) fixes it. See
+[05 §whole-degree sensors](05-LEARNING-ENGINE-DESIGN.md#whole-degree-sensors-issue-1512-reopened) and its
+expectations table. Also on Debug: `sensor lag` (and whether it is identified) and `grade held down` (`leak rate is
+only the typical value`, `short runs, sensor lag not known yet`). A thermostat that reports `fan` after (or before) a
+run: the blower period is never a run of its own and the coast is recorded through it; a 2-minute `cycle_too_short`
+rejection right after each real run on 0.9.31 was that blower ([05 §blower](05-LEARNING-ENGINE-DESIGN.md#blower-around-the-cycle-issue-1512-reopened)).
+
+### "No heating/cooling runtime at all" (owner decision 2026-11-13)
+
+A heating or cooling run exists only when the thermostat reports `hvac_action` `heating` or `cooling`. A thermostat
+that reports only `fan`, or no `hvac_action` at all, records no runtime, no observations and no cycles: that is by
+design (the #93 mode fallback was removed). If this thermostat has NEVER reported heating/cooling, after 3 days in a
+heating/cooling mode Analysis, Debug
+and the AI context say so (`decision_rates_summary` row `source: "notice"`; `hvac_action_report.unreported_s` in
+the state file). Check the climate entity's attributes in Developer Tools: if `hvac_action` never reads
+`heating`/`cooling`, the integration does not report it.
 
 ### "Thermal model confidence is 'none' after weeks of use"
 

@@ -95,13 +95,32 @@ class TestDecisionRates:
         coord = SimpleNamespace(config={"primary_engine": primary, "temp_unit": "fahrenheit"}, _thermal_model=self._V3)
         coord.control_thermal_model = lambda base: ClimateAdvisorCoordinator.control_thermal_model(coord, base)
         # Issue #1512: decision_rates_summary also appends the cycle model's rows (real method, no learning on the stub)
-        coord._cycle_model_rows = lambda unit: ClimateAdvisorCoordinator._cycle_model_rows(coord, unit)
+        coord._cycle_model_rows = lambda unit, **kw: ClimateAdvisorCoordinator._cycle_model_rows(coord, unit, **kw)
         monkeypatch.setattr(prediction_engines, "control_ready", lambda source, config: ready)
         v4 = prediction_engines.ENGINES["v4"]
         monkeypatch.setattr(v4, "state_of", lambda source: {})
         monkeypatch.setattr(v4, "control_model", lambda state, base: {**dict(base or {}), **self._V4})
         rows = ClimateAdvisorCoordinator.decision_rates_summary(coord)
         return {r["key"]: (r["value"], r["source"]) for r in rows}
+
+    def test_the_coarse_sensor_notice_names_the_engine_actually_in_control(self, monkeypatch):
+        """Issue #1512 re-check: the notice said "v4" while v4 was still learning and v3's rates drove the decisions."""
+        seen = []
+        orig = ClimateAdvisorCoordinator._cycle_model_rows
+
+        def spy(coord, unit, **kw):
+            seen.append(kw)
+            return orig(coord, unit, **kw)
+
+        monkeypatch.setattr(ClimateAdvisorCoordinator, "_cycle_model_rows", spy)
+        # ready: v4's own rates; still learning: the blank default model (named as the defaults, not "learned")
+        for ready, decisions, learning in ((True, "v4", None), (False, None, "v4")):
+            seen.clear()
+            self._rows(monkeypatch, primary="v4", ready=ready)
+            assert seen and seen[-1] == {"decisions": decisions, "fit_applied": False, "engine_learning": learning}
+        seen.clear()
+        self._rows(monkeypatch, primary="v3", ready=True)
+        assert seen[-1] == {"decisions": None, "fit_applied": True, "engine_learning": None}
 
     def test_usable_v4_rates_are_v4s_and_vent_solar_are_v3s(self, monkeypatch):
         rows = self._rows(monkeypatch, primary="v4", ready=True)

@@ -168,7 +168,7 @@
     if (!Array.isArray(list) || !list.length) return [];
     var u = ND.sym(ND.unit), prim = (pe && pe.primary) || 'the primary engine';
     var from = { v3: 'from v3\u2019s learned observations', v4: 'from v4', default: 'default (' + prim + ' still learning)', none: 'not learned yet (decisions use their defaults)' };
-    return list.filter(function (d) { return d && d.source !== 'cycle'; }).map(function (d) {
+    return list.filter(function (d) { return d && d.source !== 'cycle' && d.source !== 'notice'; }).map(function (d) {
       var val = d.value;
       if (d.source === 'none' || d.source === 'default') val = null;
       var txt = val == null ? '' : d.kind === 'rate' ? fmt(val) + ' ' + u + '/h' : d.kind === 'per_hour' ? fmt(val) + ' /h' : d.kind === 'hours' ? fmt(val) + ' h' : String(val);
@@ -189,8 +189,17 @@
       if (typeof f.k_p_cycle === 'number') parts.push('its own leak ' + fmt(f.k_p_cycle) + ' /h (diagnostic only)');
       if (f.ne != null) parts.push(f.ne + ' informative cycles' + (f.n_cycles != null ? ' of ' + f.n_cycles : ''));
       if (typeof f.resolution_f === 'number') parts.push('sensor steps ' + fmt(f.resolution_f) + '\u00b0F');
+      if (typeof f.lag_min === 'number') parts.push('sensor lag ' + fmt(f.lag_min) + ' min' + (f.lag_identified ? '' : ' (not identified yet)'));
+      if (Array.isArray(f.grade_caps) && f.grade_caps.length) parts.push('grade held down: ' + f.grade_caps.map(function (x) { return x === 'k_typical_prior' ? 'leak rate is only the typical value' : x === 'lag_unidentified' ? 'short runs, sensor lag not known yet' : x === 'imprecise' ? 'still too uncertain for its size' : x === 'contradicted' ? 'newer runs disagree with an older one' : x; }).join(', '));
       rows.push({ k: 'Cycle model: ' + (m === 'cool' ? 'cooling' : 'heating'), v: parts.join(' \u00b7 '),
         hint: 'What the pooled cycle model measures from every informative cycle. A v4 zone\u2019s decisions keep v4\u2019s own control rate; this is shown beside it.' });
+      // Issue #1512 reopened: coarse-sensor notice (same text as Analysis and the AI context)
+      if (f.coarse_sensor && f.coarse_sensor.text) rows.push({ k: 'Cycle model: ' + (m === 'cool' ? 'cooling' : 'heating') + ' sensor', v: f.coarse_sensor.text,
+        hint: 'sensor_class ' + f.coarse_sensor.sensor_class + ', rate in use: ' + f.coarse_sensor.rate_in_use });
+    });
+    // owner decision 2026-11-13: a thermostat that never reports heating/cooling (same text as Analysis and the AI context)
+    (Array.isArray(list) ? list : []).forEach(function (d) {
+      if (d && d.source === 'notice' && d.text) rows.push({ k: 'Thermostat reports', v: d.text, hint: 'rate in use: ' + (d.rate_in_use || 'n/a') });
     });
     return rows;
   }

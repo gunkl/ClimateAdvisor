@@ -106,6 +106,122 @@ had no support for that service at all. No thermal effect is modeled for
 fan-only mode (matches how a real furnace fan doesn't meaningfully heat/cool
 either) — it only needs to accept and report the command correctly.
 
+#### HVAC profile: rate, precision, companion sensor, lag, blower (owner request 2026-11-12)
+
+The simulated zones used to be unable to teach Climate Advisor's cycle model a
+heating or cooling rate: they reported whole °F, each maintenance run moved the
+room ~0.6 °F (invisible at whole degrees), and every zone had the same small
+system. Each of the options below is set in the config flow (and Reconfigure),
+and the ones marked *runtime* also have an entity you can change while the zone
+runs. A runtime change is written into the entry's data without a reload, so it
+survives a restart and shows up pre-filled in Reconfigure. **Every option
+defaults to today's behaviour; an entry saved before these existed loads
+unchanged.** The pure logic lives in `ca_dev_thermostat_sim/hvac_profile.py`.
+
+- **Heating / cooling rate** (*runtime*: `number.<zone>_heating_rate`,
+  `number.<zone>_cooling_rate` in °F/h, and `select.<zone>_heating_rate_preset`,
+  `select.<zone>_cooling_rate_preset`). The rate is the equipment's **gross**
+  capacity, the ODE's `k_active`. Presets: `undersized` 2, `extreme_weather` 5,
+  `normal` 12, `oversized` 18 °F/h, or `custom` = the entry's own
+  `k_active_heat` / `k_active_cool` (the default, so old entries keep their
+  6 °F/h). Picking a preset writes its rate into `k_active_*`; typing a preset's
+  rate into the number selects that preset; any other rate shows `custom`.
+- **Reported precision** (*runtime*: `select.<zone>_reported_precision`):
+  `default` (Home Assistant's own: whole degrees on a °F system, tenths on °C —
+  today's behaviour), `whole`, `half`, `tenth`. Sets the climate entity's
+  `precision`, i.e. what `current_temperature` is rounded to.
+- **Companion temperature sensor** (`companion_sensor`, config only): adds
+  `sensor.<zone>_temperature` (`device_class: temperature`, °F, state rounded to
+  0.1) on the **same device** as the climate entity — the shape Climate Advisor's
+  `indoor_temp.discover_companion_sensors` looks for (Issue #1230), like an
+  Ecobee's finer sensor. The climate entity can stay coarse. With the companion
+  on, the zone gets a device (named after the zone) and the climate entity takes
+  the device's name, so its entity id is unchanged; without it there is no
+  device, as before.
+- **Sensor lag** (`sensor_lag_min`, *runtime*: `number.<zone>_sensor_lag`): a
+  first-order lag (time constant in minutes) between the simulated air and the
+  reported reading — the climate entity's `current_temperature` and the
+  companion. The thermostat's own start/stop decision also uses the lagged
+  reading, as a real thermostat does, so lag makes the air overshoot the stop
+  point. The true air is in the `air_temperature` attribute. `0` (default) = no
+  lag: the reading is the air.
+- **Edge timing and edge report delay** (`edge_report_delay_s`, config only,
+  default `0`; `SimProfile(edge_report_delay_s=...)` in tests_ha). Each tick
+  first advances the room over the elapsed interval with the equipment as it
+  was, then decides, then reports: an on/off edge is reported at the tick it is
+  decided, before any of its heat, as a directly connected thermostat does
+  (Issue #1512 reopened). The tick used to decide first and apply the new state
+  to the interval that had already elapsed, so every edge read one tick (30 s)
+  late; that was a discretisation artifact and Climate Advisor's cycle model
+  measured it as a 30 s report delay. Set `edge_report_delay_s` (seconds) to
+  model a cloud-polled thermostat on purpose: `hvac_action` then shows each
+  heating / cooling / fan / idle change that many seconds after the equipment
+  changed (the attribute `edge_report_delay_s` shows the setting). At most
+  120 s: Climate Advisor's cycle model profiles an edge delay of up to 1 minute,
+  so longer settings test the product outside what it models. A mode change is
+  shown at once (never "heating" in Off mode), and the restored action is the
+  starting point after a restart, so the first change after it is late too.
+- **Idle gap before the overrun** (`idle_before_overrun_s`, config only,
+  default `0`, at most 60; `SimProfile(idle_before_overrun_s=...)`): with a
+  blower overrun configured, the thermostat reports `idle` for this many
+  seconds after the burner/compressor stops and only then `fan`, as the owner's
+  Ecobee does (`heating -> idle`, then `fan` 1 s later). `0` goes straight
+  from `heating` to `fan`, which Climate Advisor 0.9.31 already handled; the
+  idle gap is the sequence that broke it (Issue #1512 reopened).
+- **Blower lead-in and overrun** (per direction, minutes; overrun is *runtime*:
+  `number.<zone>_heat_blower_overrun`, `number.<zone>_cool_blower_overrun`).
+  Overrun: after the burner/compressor stops the blower keeps running and
+  `hvac_action` reports `fan` for that long, then `idle` — the cycle reads
+  `idle → heating → fan → idle` (cooling: `idle → cooling → fan → idle`), as an
+  Ecobee reports its fan dissipation time. It also happens when the mode is
+  switched off mid-run. Lead-in: the blower runs (`fan`, no capacity) for that
+  long before the burner/compressor starts: `idle → fan → heating → fan → idle`.
+  A call that returns during an overrun goes straight to `heating`. `min_run_seconds`
+  counts from the call, lead-in included. Default `0` = no fan phase.
+- **Coast** (per direction, config only): heat still delivered after the burner
+  stops (the hot heat exchanger), or cooling after the compressor stops (the
+  cold coil), decaying exponentially: `coast_*_rate_f_per_h` at the stop, time
+  constant `coast_*_tau_min`. Total delivered = rate × τ (e.g. 6 °F/h × 4 min =
+  0.4 °F before envelope loss). A new run clears any coast still decaying. Usually
+  paired with a blower overrun (the blower is what carries it into the room).
+  Default `0` = none.
+- **Thermostat swing** (unchanged keys): `deadband_*_f` is the START distance
+  from the target, `off_offset_*_f` the STOP point past the target (signed, in the
+  direction of travel). **Rise per maintenance cycle = start distance − stop
+  distance**, both measured on the side the room starts from: the defaults start
+  1.5 °F below and stop 0.9 °F below (`off_offset -0.9`), so 1.5 − 0.9 = **0.6 °F**
+  per run. `off_offset 0` (stop at the target) gives 1.5 °F; `off_offset +1.5`
+  (the old symmetric band) gives 3.0 °F.
+
+The climate entity's attributes expose all of it for debugging:
+`heat_rate_f_per_h`, `cool_rate_f_per_h`, `heat_rate_preset`, `cool_rate_preset`,
+`precision_option`, `sensor_lag_min`, `air_temperature`, `blower_phase`
+(`off` / `lead_in` / `running` / `overrun`), `blower_lead_in_*_min`,
+`blower_overrun_*_min`, `coast_f_per_h` (the coast applied on the last tick).
+
+**What each preset means for learning.** The room's NET rate is the gross rate
+minus the envelope loss, `|k_passive| × (indoor − outdoor)`: 3 °F/h at the
+default `k_passive -0.15` and a 20 °F indoor–outdoor gap (a 50 °F winter day at
+70 °F). Run length = rise ÷ net rate. Rounded:
+
+| Preset | Gross | Net (20 °F gap) | Run for 0.6 °F (default swing) | Run for 1.5 °F (`off_offset 0`) | Run for 3.0 °F (symmetric) |
+|---|---|---|---|---|---|
+| `undersized` | 2 °F/h | −1 °F/h: cannot hold; the room falls | never stops | never stops | never stops |
+| `extreme_weather` | 5 °F/h | 2 °F/h | 18 min | 45 min | 90 min |
+| `normal` | 12 °F/h | 9 °F/h | 4 min | 10 min | 20 min |
+| `oversized` | 18 °F/h | 15 °F/h | 2.4 min | 6 min | 12 min |
+
+Notes for learning:
+- The default `min_run_seconds` is 300 s: a run the swing would end sooner is
+  held to 5 min, so at `normal` the room actually rises ~0.75 °F per run and at
+  `oversized` ~1.25 °F (it overshoots the stop point). Lower `min_run_seconds`
+  to see the pure swing.
+- At whole-degree precision a 0.6 °F rise is often no visible change at all;
+  give the zone `precision: tenth` or a companion sensor for a curve the cycle
+  model can fit (6 readings of 0.1 °F per run instead of 0 or 1).
+- `undersized` at a 20 °F gap is the "can't keep up" case (runs until the
+  weather eases); at a 10 °F gap its net is 0.5 °F/h (72 min for 0.6 °F).
+
 #### Occupancy scheduling and manual overrides (Issue #898)
 
 Each zone (config entry) also gets a `switch` and a `number` platform, in
@@ -209,6 +325,14 @@ Reconfigure**. This reloads the entry with the new values immediately.
 | `deadband_cool_f` | number | 1.5 | Cool mode: compressor turns **on** once indoor temp rises to `target_temperature + deadband_cool_f`, and **off** once indoor temp falls to `target_temperature - off_offset_cool_f` (default 0.9 F short of the target) |
 | `min_run_seconds` | number | 300 | Equipment-protection dwell timer: minimum time the compressor stays on once started, even if it reaches setpoint sooner |
 | `min_off_seconds` | number | 300 | Equipment-protection dwell timer: minimum time the compressor stays off once stopped, even if a deadband edge is crossed again sooner |
+| `heat_rate_preset` / `cool_rate_preset` | select | `custom` | `undersized` 2 / `extreme_weather` 5 / `normal` 12 / `oversized` 18 °F/h gross capacity; `custom` = `k_active_heat` / `k_active_cool` |
+| `precision` | select | `default` | Climate entity's reported precision: `default` (HA's: whole on °F), `whole`, `half`, `tenth` |
+| `companion_sensor` | boolean | off | Add `sensor.<zone>_temperature` at tenths on the thermostat's device |
+| `sensor_lag_min` | number | 0 | First-order lag (min) from the simulated air to the reported reading(s); the thermostat decides on the lagged reading |
+| `blower_lead_in_heat_min` / `blower_lead_in_cool_min` | number | 0 | Blower runs (`hvac_action: fan`) this long before the burner / compressor starts |
+| `blower_overrun_heat_min` / `blower_overrun_cool_min` | number | 0 | Blower keeps running (`hvac_action: fan`) this long after the burner / compressor stops |
+| `coast_heat_rate_f_per_h` / `coast_cool_rate_f_per_h` | number | 0 | Heating (cooling) still delivered at the stop, decaying |
+| `coast_heat_tau_min` / `coast_cool_tau_min` | number | 0 | Coast time constant (min); total coast = rate × τ |
 
 `deadband_heat_f`/`deadband_cool_f` default to 1.5°F to match production's
 `THERMAL_SWING_DEFAULT_F` — the same "real thermostat swing" value Climate
@@ -263,3 +387,15 @@ transition the deadband alone would have triggered) — run it with
 It is not a substitute for actually importing the real function once
 `homeassistant` is installed; see that script's docstring for why the import
 itself couldn't be tested here and what to do once it can be.
+
+The HVAC profile has its own checks:
+`python dev_tools/ha_test_integrations/ca_dev_thermostat_sim/test_hvac_profile.py`
+imports the real `hvac_profile.py` (it has no Home Assistant import) and checks
+the presets, that the defaults reproduce the pre-profile tick exactly, the rate
+physics against the ODE's closed form, precision, lag, the blower sequences
+(`idle → heating → fan → idle` and the cooling mirror, lead-in), and coast. The
+real entity inside real Home Assistant is covered by
+`tests_ha/test_dev_sim_hvac_profile.py`; real-HA tests build a zone with a given
+profile through the `make_sim` fixture and `tests_ha/house/sim_profile.py`'s
+`SimProfile` (e.g. `await make_sim(profile=SimProfile(heat_rate="normal",
+companion_sensor=True, blower_overrun_heat_min=2))`).

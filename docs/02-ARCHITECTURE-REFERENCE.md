@@ -64,7 +64,7 @@ custom_components/climate_advisor/
 ├── chart_log.py         # Chart state log: persistent 1-year ring buffer of HVAC/fan/temp data points and event markers, used by the Temperature Forecast chart.
 ├── cycle_model.py       # Pooled heating/cooling cycle model (Issues #1512/#1516): fit_cycles, clean_series, infer_resolution, grade, typical_prior, prior_from_cache. Pure math, no HA imports; shared with tools/thermal_replay.py and tools/predict_backtest.py. See 05-LEARNING-ENGINE-DESIGN.md.
 ├── cycle_recorder.py    # CycleRecorder: pure state machine turning thermostat edges, band-sensor readings, flags, setpoint changes and gaps into closed cycle dicts.
-├── cycle_store.py       # CycleStore: per-zone climate_advisor_cycles.json (90 days back from the mode's newest cycle, cap 3000 cycles (1500 per mode), native-resolution integer deltas (v2; v1 migrated), compact in memory, saved periodically + at HA stop, atomic 0600 write). Separate from the chart_log (chart-log-spec.md).
+├── cycle_store.py       # CycleStore: per-zone climate_advisor_cycles.json (evidence-based retention, Issue #1512 reopened: past 90 days back from the mode's newest cycle only a cycle whose fit weight fell below 0.01 leaves; cap 3000 cycles (1500 per mode) evicting the lowest weight first, native-resolution integer deltas (v2; v1 migrated), compact in memory, saved periodically + at HA stop, atomic 0600 write). Separate from the chart_log (chart-log-spec.md).
 ├── feels_like.py        # Issue #1414: pure NWS heat index / wind chill (feels_like_f) and weather wind-unit -> mph, chart display only. See chart-log-spec.md "Humidity and Feels-Like Fields".
 ├── humidity_sources.py  # Issue #1414: one humidity resolver, three roles (indoor_day, indoor_sleep, outdoor); chart display only, never the climate TARGET humidity.
 ├── forecast_archive.py  # Forecast archive (Issue #1230 R0): persisted hourly-forecast snapshots, one per local hour, for forecast-error scoring. Record-only; entry-scoped JSON. See forecast-archive-spec.md.
@@ -417,7 +417,7 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 - Storage: JSON file in HA config dir
 
 ### Thermal Model Parameters (Issue #114)
-- Cycle model gates (Issues #1512/#1516): cycle ≥ 3 min and readings moved ≥ 3 resolution steps; prior from the typical house or the stored rate by evidence; evidence gives way only to newer cycles (`THERMAL_EVIDENCE_HALF_N` 20, contradicting 5; never with time); at most the last 60 eligible cycles (`cycle_model.py`, see 05-LEARNING-ENGINE-DESIGN.md § Parameter Extraction)
+- Cycle model gates (Issues #1512/#1516): cycle ≥ 3 min and readings moved ≥ 3 resolution steps; prior from the typical house or the stored rate by evidence; evidence gives way only to newer cycles' information (`THERMAL_EVIDENCE_HALF_N` 20, contradicting 5; never with time; Issue #1512 reopened); sensor lag profiled (`THERMAL_CYCLE_LAGS`); at most the 60 heaviest eligible cycles (`cycle_model.py`, see 05-LEARNING-ENGINE-DESIGN.md § Parameter Extraction)
 - Rate ageing: weighted median of retained observations, each weight halved per 20 newer observations of its rate (`THERMAL_EVIDENCE_HALF_N`; no calendar clock, Issue #1523), legacy-method weight 0.25 (`THERMAL_LEGACY_OBS_WEIGHT`); observations kept per kind (`THERMAL_OBS_KIND_CAPS`, sharing `THERMAL_OBS_CAP` 200), none leaves with time
 - Sample interval: 60 seconds (`THERMAL_SAMPLE_INTERVAL_SECONDS`)
 - Minimum R² for k_passive acceptance: 0.2 (`THERMAL_MIN_R_SQUARED`)

@@ -49,7 +49,32 @@ DEFAULT_OFF_OFFSET_COOL_F = -0.9
 DEFAULT_MIN_RUN_SECONDS = 300
 DEFAULT_MIN_OFF_SECONDS = 300
 
-PLATFORMS = ["climate", "switch", "number"]
+# HVAC equipment profile (owner request 2026-11-12; logic and preset values in hvac_profile.py). Every key is
+# optional and read with .get(): an entry saved before these existed loads with today's behaviour.
+CONF_HEAT_RATE_PRESET = "heat_rate_preset"  # hvac_profile.RATE_PRESET_OPTIONS; unset/"custom" = k_active_heat
+CONF_COOL_RATE_PRESET = "cool_rate_preset"  # same, for k_active_cool
+CONF_PRECISION = "precision"  # hvac_profile.PRECISION_OPTIONS; unset/"default" = Home Assistant's own
+CONF_COMPANION_SENSOR = "companion_sensor"  # bool: add a tenths temperature sensor on the thermostat's device
+CONF_SENSOR_LAG_MIN = "sensor_lag_min"  # first-order lag, simulated air -> reported reading(s); 0 = none
+# Seconds the reported hvac_action trails the equipment (a cloud-polled thermostat); 0 = on time (a directly connected
+# thermostat, the default).
+CONF_EDGE_REPORT_DELAY_S = "edge_report_delay_s"
+# Seconds the thermostat reports "idle" between the burner/compressor stop and its blower overrun ("fan"), as the
+# owner's Ecobee does (heating -> idle, then fan 1 s later); 0 = straight to fan (the default).
+CONF_IDLE_BEFORE_OVERRUN_S = "idle_before_overrun_s"
+# False: the climate entity reports no hvac_action at all (a thermostat that never says whether it heats or cools;
+# Climate Advisor then records no runs, owner decision 2026-11-13). Default True: reported as before.
+CONF_REPORT_HVAC_ACTION = "report_hvac_action"
+CONF_BLOWER_LEAD_IN_HEAT_MIN = "blower_lead_in_heat_min"
+CONF_BLOWER_LEAD_IN_COOL_MIN = "blower_lead_in_cool_min"
+CONF_BLOWER_OVERRUN_HEAT_MIN = "blower_overrun_heat_min"
+CONF_BLOWER_OVERRUN_COOL_MIN = "blower_overrun_cool_min"
+CONF_COAST_HEAT_RATE = "coast_heat_rate_f_per_h"  # furnace heat delivered after the burner stops, decaying
+CONF_COAST_HEAT_TAU_MIN = "coast_heat_tau_min"
+CONF_COAST_COOL_RATE = "coast_cool_rate_f_per_h"  # cold coil still cooling after the compressor stops
+CONF_COAST_COOL_TAU_MIN = "coast_cool_tau_min"
+
+PLATFORMS = ["climate", "switch", "number", "select", "sensor"]
 
 # Occupancy scheduling (Issue #898). Reuses production's scheduler.Schedule dataclass
 # directly (see occupancy_schedule.py) — these are just the occupancy-state labels this

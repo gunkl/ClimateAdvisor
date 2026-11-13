@@ -21,7 +21,7 @@
     cycle_no_off_edge: 'The cycle had no end to measure to', cycle_sensor_swap: 'Recorded on an earlier indoor sensor than the one in use now',
     hvac_run_too_short: 'Heating or cooling run was too short to measure (old method)', hvac_signal_below_resolution: 'Room temperature moved less than the sensor can reliably show (old method)',
     no_k_passive: 'House leak rate not learned yet, so this run\'s rate could not be separated', new_session_started: 'A new run started before this one could be measured',
-    fan_activated: 'The fan started during the run', hvac_mode_switch: 'Heat and cool switched during the run', ols_bounds: 'Result was outside the believable range'
+    fan_activated: 'The fan started during the run', hvac_mode_switch: 'Heat and cool switched during the run', hvac_unreported: 'The thermostat was in heat or cool mode without reporting whether it ran, so the stretch was left out (#1536)', ols_bounds: 'Result was outside the believable range'
   };
   var OBS = {
     passive_decay: 'Passive windows', vent_window_decay: 'Window ventilation', vent_fan_decay: 'Fan/WHF ventilation', solar_gain: 'Solar readings',
@@ -236,6 +236,8 @@
       // Issues #1512/#1516: the cycle model's measured heating and cooling rate, how sure it is, and the coast after a run.
       // Rows come from the engines payload (``decisions`` rows with source "cycle"); on a v4 zone decisions keep v4's rate.
       var cyc = cycleRows(E.decisions);
+      // owner decision 2026-11-13: a thermostat that never reports heating/cooling: no runtime, no rates measured
+      (E.decisions || []).forEach(function (r) { if (r && r.source === 'notice' && r.text) row(r.text, 'rate in use: ' + (r.rate_in_use || 'n/a'), ''); });
       ['heat', 'cool'].forEach(function (m) {
         var c = cyc[m]; if (!c || typeof c.q !== 'number') return;
         var word = m === 'heat' ? 'Heating' : 'Cooling';
@@ -246,6 +248,8 @@
         if (onV4) line += '. Decisions use ' + cd.source + '\u2019s ' + Math.abs(cd.value).toFixed(1) + eu + '; the cycle model measures ' + Math.abs(c.q).toFixed(1) + eu;
         row(line, 'cycle q ' + Number(c.q).toFixed(2) + (typeof c.sd_q === 'number' ? ' \u00b1 ' + Number(c.sd_q).toFixed(2) : '') + ' ' + eu + '/h \u00b7 coast ' +
           (typeof c.coast_area_f === 'number' ? Number(ND.dFToDisp(c.coast_area_f)).toFixed(2) : '\u2014') + ' ' + eu + ' \u00b7 ' + (c.ne != null ? c.ne : 0) + ' informative cycles', 'sure: ' + (c.grade || 'none'));
+        // Issue #1512 reopened: a whole- or half-degree sensor cannot learn the rate from normal cycles; say so plainly.
+        if (c.coarse_sensor && c.coarse_sensor.text) row(c.coarse_sensor.text, 'sensor reports ' + (c.coarse_sensor.label || 'coarse steps') + ' \u00b7 rate in use: ' + (c.coarse_sensor.rate_in_use || 'n/a'), '');
       });
       if (ks) {
         var ph = E.solar_phase_offset_h && E.solar_phase_offset_h.active ? E.solar_phase_offset_h.value : 0;

@@ -351,8 +351,11 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
 class TestThermalSessionDetectionReal:
     """Call the REAL _async_thermostat_changed and verify session state."""
 
-    def test_turn_on_detected_when_hvac_action_stuck_at_fan(self):
-        """old=off/fan, new=heat/fan: session starts (mode-based fallback fires)."""
+    def test_no_session_when_hvac_action_stuck_at_fan(self):
+        """old=off/fan, new=heat/fan: NO session (was: the #93 mode fallback started one).
+
+        Owner decision 2026-11-13 ("Never, remove it."): a heating or cooling run exists only when the thermostat
+        reports hvac_action heating/cooling; the #93 mode fallback is gone, so the old expectation is now wrong."""
         coord = _make_thermostat_coord()
         old = _make_state("off", hvac_action="fan")
         new = _make_state("heat", hvac_action="fan")
@@ -361,11 +364,14 @@ class TestThermalSessionDetectionReal:
             mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
-        assert coord._hvac_on_since is not None, "Session should have started"
-        coord._start_hvac_observation.assert_called_once_with("heat")
+        assert coord._hvac_on_since is None, "a fan in heat mode is not a run"
+        coord._start_hvac_observation.assert_not_called()
 
-    def test_session_mode_heat_set_from_state_not_hvac_action(self):
-        """When hvac_action='fan', session mode is resolved from new_state.state='heat'."""
+    def test_no_heat_session_from_the_mode_when_hvac_action_is_fan(self):
+        """hvac_action='fan' in heat mode: no heat session (was: resolved from new_state.state='heat').
+
+        Owner decision 2026-11-13 ("Never, remove it."): a heating or cooling run exists only when the thermostat
+        reports hvac_action heating/cooling; the #93 mode fallback is gone, so the old expectation is now wrong."""
         coord = _make_thermostat_coord()
         old = _make_state("off", hvac_action="")
         new = _make_state("heat", hvac_action="fan")
@@ -374,10 +380,13 @@ class TestThermalSessionDetectionReal:
             mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
-        coord._start_hvac_observation.assert_called_once_with("heat")
+        coord._start_hvac_observation.assert_not_called()
 
-    def test_session_mode_cool_set_from_state_when_hvac_action_is_fan(self):
-        """hvac_action='fan' on a cool-mode turn-on → session mode = 'cool'."""
+    def test_no_cool_session_from_the_mode_when_hvac_action_is_fan(self):
+        """hvac_action='fan' on a cool-mode turn-on: no cool session (was: session mode 'cool').
+
+        Owner decision 2026-11-13 ("Never, remove it."): a heating or cooling run exists only when the thermostat
+        reports hvac_action heating/cooling; the #93 mode fallback is gone, so the old expectation is now wrong."""
         coord = _make_thermostat_coord()
         old = _make_state("off", hvac_action="")
         new = _make_state("cool", hvac_action="fan")
@@ -386,9 +395,9 @@ class TestThermalSessionDetectionReal:
             mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
-        coord._start_hvac_observation.assert_called_once_with("cool")
+        coord._start_hvac_observation.assert_not_called()
 
-    def test_turn_off_detected_when_hvac_action_stuck_at_fan(self):
+    def test_turn_off_detected_when_heating_turns_to_fan_with_mode_off(self):
         """old=heat/fan, new=off/fan: turn-off fires and _end_hvac_active_phase is called.
 
         Issue #912: the turn-off path now calls `_flush_runtime_for_mode(self._hvac_session_mode)`
@@ -401,7 +410,9 @@ class TestThermalSessionDetectionReal:
             hvac_on_since=datetime(2026, 4, 8, 9, 0, 0),
         )
         coord._hvac_session_mode = "heat"
-        old = _make_state("heat", hvac_action="fan")
+        # owner decision 2026-11-13: the run was reported as heating; it ends when heating stops (the old test began
+        # from heat/fan, a run only the removed #93 fallback could have started)
+        old = _make_state("heat", hvac_action="heating")
         new = _make_state("off", hvac_action="fan")
 
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
@@ -499,12 +510,12 @@ class TestIssue986CAFanNotMisreadAsHvacSession:
         assert coord._hvac_on_since is None
 
     def test_ca_fan_inactive_still_starts_real_session_regression_guard(self):
-        """Regression guard: when CA's fan is NOT explaining the reading (e.g. a
-        thermostat whose hvac_action is simply unreliable), the existing state-based
-        fallback must still start a real session — unchanged from before this fix."""
+        """Regression guard: with CA's fan NOT running, a reported cooling run starts a real session. (Was: a
+        cool-mode 'fan' started one through the state-based fallback; owner decision 2026-11-13 removed that
+        fallback, so the guard now uses a reported 'cooling'.)"""
         coord = _make_thermostat_coord()
         old = _make_state("off", hvac_action="")
-        new = _make_state("cool", hvac_action="fan")
+        new = _make_state("cool", hvac_action="cooling")
 
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
@@ -960,8 +971,9 @@ class TestIssue912FanOnlyRuntimeTracking:
         behind Issue #912's reported 402-minute false HVAC runtime."""
         coord = _make_thermostat_coord()
 
+        # owner decision 2026-11-13: the heat run must be REPORTED (a 'fan' in heat mode is no run any more)
         on_old = _make_state("off", hvac_action="")
-        on_new = _make_state("heat", hvac_action="fan")
+        on_new = _make_state("heat", hvac_action="heating")
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 8, 6, 0, 0)
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(on_old, on_new)))
@@ -969,7 +981,7 @@ class TestIssue912FanOnlyRuntimeTracking:
 
         # Glide: hvac_action stays "fan" on both sides (old_action == new_action) —
         # the "no distinguishing signal at all" branch.
-        glide_old = _make_state("heat", hvac_action="fan")
+        glide_old = _make_state("heat", hvac_action="heating")
         glide_new = _make_state("fan_only", hvac_action="fan")
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 8, 6, 30, 0)  # +30 min of heat
@@ -995,13 +1007,14 @@ class TestIssue912FanOnlyRuntimeTracking:
         running heat/cool action (e.g. 'fan' -> ''), so the heat_cool-switch inner
         check doesn't apply and this falls to the state-based glide detection."""
         coord = _make_thermostat_coord()
+        # owner decision 2026-11-13: the heat run is reported ('heating'); a 'fan' in heat mode is no run any more
         on_old = _make_state("off", hvac_action="")
-        on_new = _make_state("heat", hvac_action="fan")
+        on_new = _make_state("heat", hvac_action="heating")
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 8, 6, 0, 0)
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(on_old, on_new)))
 
-        glide_old = _make_state("heat", hvac_action="fan")
+        glide_old = _make_state("heat", hvac_action="heating")
         glide_new = _make_state("fan_only", hvac_action="")
         with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 8, 6, 20, 0)  # +20 min of heat

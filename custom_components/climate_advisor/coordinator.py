@@ -6131,6 +6131,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None
         return getattr(self, "_companion", None)
 
+    def _sleep_gap_f(self, primary_f: float | None, sleep_entity: str | None) -> float | None:
+        """The thermostat's room minus the sleep sensor now, internal F (Issue #1553); None when either is missing.
+
+        The plan holds the thermostat's room this far from the band in the sleep window, as the remote-sensor outer loop
+        (#1194) does to bring the bedroom into it. Pure read."""
+        if not sleep_entity or not isinstance(primary_f, int | float):
+            return None
+        bed = self._read_chart_indoor_sensors().get(sleep_entity)
+        return float(primary_f) - float(bed) if isinstance(bed, int | float) else None
+
     def _read_chart_indoor_sensors(self) -> dict[str, float | None]:
         """Every configured indoor sensor's reading for chart_log's ``indoor_sensors`` (Issue #1230 R0).
 
@@ -6959,6 +6969,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
             house_stepper=prediction_engines.control_stepper(self, self.config),
             sleep_sensor_label="bedroom sensor" if sleep_entity else None,
+            sleep_gap_f=self._sleep_gap_f(reading.primary_value, sleep_entity),
             primary_sensor_label="thermostat",
             band_at=band_resolver_for(c, self.config),
             occupancy_mode=self._occupancy_mode,
@@ -7614,7 +7625,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         cycle = self._v4_cycle_kwargs(now, row, model_dict, state, week=True)
         readings = cycle["readings"]
         inputs = cycle["inputs"]
-        predictions, new_mass = await self._executor_job(functools.partial(v4_shadow.run_cycle, display=True, **cycle))
+        # Issue #1553: inside the sleep window the house regulates the bedroom through the remote-sensor outer loop
+        # (#1194); the display forecast emulates it with the live rule, so the chart shows what the house will do.
+        sleep_loop = (
+            v4_shadow.RemoteLoopEmulator(
+                # the live loop's swing (``AutomationEngine._remote_swing_f``): the measured one, Issue #1477
+                swing_heat_f=measured_swing_f(getattr(self, "_thermal_model", None) or {}, "heat"),
+                swing_cool_f=measured_swing_f(getattr(self, "_thermal_model", None) or {}, "cool"),
+                unit=self.config.get("temp_unit", "fahrenheit"),
+                step_minutes=v4_shadow.step_minutes(),
+            )
+            if cycle.get("ca_sleep_node")
+            else None
+        )
+        predictions, new_mass = await self._executor_job(
+            functools.partial(v4_shadow.run_cycle, display=True, sleep_loop=sleep_loop, **cycle)
+        )
         if getattr(self, "_shut_down", False) is True:
             return
         state.v4_mass_f = new_mass

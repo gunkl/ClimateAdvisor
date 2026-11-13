@@ -3,6 +3,21 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.33] — 2026-11-13
+
+### Fixed
+- **Fix #1537: the household-promise checks no longer guess whether your heat or air conditioning was running.**
+  - **What you'll notice:** on a thermostat that doesn't report whether it is heating or cooling, the Activity log no longer says the house stayed outside your comfort range (or that the heat started right after the AC) on the strength of a guess made from the mode and the room temperature, and no longer excuses a miss on such a guess either. While the thermostat is set to a mode that could be fixing the room, that time is counted separately as "equipment unknown" instead of being judged; with the thermostat Off, or in the opposite mode, the room is still judged as before. Thermostats that report heating and cooling (most do) are judged exactly as before.
+  - **Why:** Climate Advisor never infers heating or cooling from the mode, the fan or the room temperature (owner decision). The promise checks were the last place that still did.
+
+- **Fix #1540: an open window takes over from a running air conditioner when the air outside is cooler.**
+  - **What you'll notice:** if a window opens while the AC is cooling and the whole-house fan's start has to wait a few minutes (it was just switched off), the AC no longer keeps cooling into the open window once the wait is over: the AC turns off and the fan starts. The same holds for a furnace still running into an open window with cooler air outside and the room above your comfort floor. Your own manual override still keeps your heating or cooling running.
+  - **Why:** the retry skipped any moment the compressor was running, so the free cooling never started.
+
+### Internal
+- Simulated thermostats in the test harness now report whether they are heating, cooling or idle, from their own control loop, as real thermostats do. A scenario can model a thermostat that doesn't (`thermostat_reports_hvac_action: false`); the three scenarios that test that case keep doing so. Three scenarios' decisions were re-derived (owner-approved): bedtime keeps the heat on a cold night instead of switching to cool while the furnace was still running, and no heat is armed one reading after the air conditioner stopped on a hot day.
+- Fix #1539: the multi-zone test harness's thermostats report heating, cooling or idle the same way (they reported nothing before), with the same opt-out.
+
 ## [0.9.32] — 2026-11-12
 
 ### Fixed

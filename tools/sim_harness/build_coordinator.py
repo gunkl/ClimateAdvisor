@@ -38,7 +38,7 @@ from typing import Any
 
 from tools.sim_harness._loop import run_coro
 from tools.sim_harness.build_engine import _DEFAULT_CONFIG
-from tools.sim_harness.fake_hass import FakeHass, FakeState
+from tools.sim_harness.fake_hass import FakeHass, FakeState, configure_thermostat_action
 from tools.sim_harness.fake_scheduler import FakeScheduler
 from tools.sim_harness.ha_stubs import EVENT_HOMEASSISTANT_STARTED, install_ha_stubs
 
@@ -228,6 +228,9 @@ def build_headless_coordinator(
     if climate_attributes:
         attrs.update(climate_attributes)
     fake_hass.states.set(climate_entity, FakeState(state=climate_state, attributes=attrs))
+    # Owner decision 2026-11-13 ("Sims report hvac_action", #1537/#1539): the thermostat reports hvac_action from its
+    # own loop before Climate Advisor first reads it; config "thermostat_reports_hvac_action": false opts out.
+    configure_thermostat_action(fake_hass, climate_entity, merged_config)
 
     # 6. Event log — shared list the engine's callback appends to (same shape
     #    as build_headless_engine's event_log).
@@ -506,6 +509,9 @@ def build_headless_multi_zone(
                     },
                 ),
             )
+            # Issue #1539 (mirror of #1537, owner decision 2026-11-13 "Sims report hvac_action"): each zone's
+            # thermostat reports hvac_action from its own loop, with the same opt-out as FakeHassSession.
+            configure_thermostat_action(fake_hass, climate_entity, merged_config)
 
             entry = ConfigEntry(entry_id=f"{zone_label}_entry", data=merged_config, title=zone_title)
             # Real HA registers the entry in its config-entries registry

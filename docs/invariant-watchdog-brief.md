@@ -68,7 +68,7 @@ Written once, run both inside production (log-only first, alert later) and after
 | 5 | `no_blind_fan_start` | #1037, #1042 | hard | log |
 | 5b | `blind_fan_continue` | #1037, #1043 | warning | log |
 | 6 | `mode_flip_rate` | #1066/#1073 flip-flop | warning | log |
-| 7 | `comfort_kept` (not outside the comfort range > 45 min while CA is in control, except while the thermostat itself is in the matching mode, idle, set at or inside the band edge, and the room is within 2.5°F of both that edge and the thermostat's own setpoint: the thermostat's own deadband, Issue #1260; excused time counted separately as `excused_by=thermostat_deadband`) | #1066, #1260 | warning | log |
+| 7 | `comfort_kept` (not outside the comfort range > 45 min while CA is in control, except while the thermostat itself is in the matching mode, idle, set at or inside the band edge, and the room is within 2.5°F of both that edge and the thermostat's own setpoint: the thermostat's own deadband, Issue #1260; excused time counted separately as `excused_by=thermostat_deadband`; a reading with no `hvac_action` while the mode could be correcting the room is counted as `excused_by=equipment_unknown`, Issue #1537) | #1066, #1260, #1537 | warning | log |
 | 8 | `surfaces_agree` | band shown vs band held | hard (ratcheted) | none (test-only; not in `PROMISES`) |
 
 Decisions (user, 2026-10-29): promise 1 follows the user's configured settling tolerance minus 0.5 F of slack (flag zone `min(2.0, smallest tolerance) - 0.5`; lookback `min(120, configured window) - 5` min), both directions, each clause gated by the day's forecast high; promise 4's exception list is split by device (below); promise 5b is included.
@@ -110,7 +110,7 @@ No persistence — violations are transient per-cycle findings, surfaced via the
 | `PromiseNumbers` / `NUMBERS` | `invariant_watchdog.py` | Every tunable promise number with its looseness rationale |
 | `PromiseConfig.from_config()` | `invariant_watchdog.py` | Raw-config view; owns its own sleep window and four floor/ceiling lookups, never calls the engine's band helpers |
 | `Hit` | `invariant_watchdog.py` | One broken promise: stable key, plain-English detail, evidence in F |
-| `equipment()`, `occupant_actions()` | `invariant_watchdog.py` | Ground-truth helpers shared by several promises (an occupant action is derived from readings + commands, not from CA's override detection) |
+| `equipment()`, `occupant_actions()` | `invariant_watchdog.py` | Ground-truth helpers shared by several promises (an occupant action is derived from readings + commands, not from CA's override detection). `equipment()` reads the reported `hvac_action` only; missing = unknown (`None`), never inferred from mode or temperature (Issue #1537, owner decision 2026-11-13): P1 skips such edges, P7 records `equipment_unknown` time instead of judging it |
 | `PromiseJournal`, `derive_episodes()`, `EVENT_MARK_MAP` | `promise_journal.py` | Bounded evidence store, episode derivation, and the CA events it reads |
 | `sanitize_promise_stats()`, `bump_promise_stats()`, `bump_promise_excused()`, `prune_promise_stats()` | `promise_journal.py` | Validated, capped per-promise counters for the persisted `promise_stats`: per-day buckets over the last 30 days (Issue #1490) |
 

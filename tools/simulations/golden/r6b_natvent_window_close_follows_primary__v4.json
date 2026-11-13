@@ -1,6 +1,9 @@
 {
   "name": "r6b_natvent_window_close_follows_primary__v4",
   "description": "Warm day (high 76), windows recommended 06:00-17:00, comfort band 68-76 F, primary engine v4 (v3 is the live comparison engine). The house starts the morning at 78 F with 69-71 F outside. v3's curve for the day stays flat at 78 F, so v3 plans no early close. v4's own forecast of the house with the windows open meets the rising outdoor air at 11:00: that is the plan's close the engine honours (engine._nat_vent_cutoff). Every surface the occupant reads (Next 24 hours list, the open step's 'until about', the close step, the briefing row) is judged on the primary engine's rates and says one story: close by 11:00 AM (the engine's period end; the same time as the open step says, never later).",
+  "notes": [
+    "Issue #1537 (owner-approved golden change; re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)): decisions and service calls are unchanged; only incident_detected.thermostat_action changed (None -> off). (a) Effectiveness: unchanged, no decision, service call, assertion or promise outcome moved. (b) Docs<->production: docs/sim-harness-spec.md (#1537 default reporting). (c) Occupant: nothing the occupant sees changed; the golden now runs on a thermostat that reports its equipment like a real one."
+  ],
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 76,

@@ -1,9 +1,13 @@
 {
   "name": "hot_night_same_mode_pre_cool_wakeup_keeps_cool_1417",
   "description": "Issue #1417 (mirror of #1416): a thermostat that does NOT report hvac_action, a heat wave. Cool is armed all evening (cool 74, then the 72 sleep band at bedtime); the 02:30 overnight pre-cool lowers it to cool 70 in the mode already armed, and the 30-minute cycle keeps the pre-cool (re-asserting cool 70 at 05:00 and 06:00). At the 06:30 wake-up the house reads 70.5 F, inside the 2 F heat arming margin of the 70/74 day band. Before the fix nothing recorded that the cool side ran (no hvac_action, and a same-mode pre-cool is not a mode change), so the wake-up armed heat 70 F on a 95 F day. Now every accepted pre-cool write records 'cool ran', the settling guard holds cool, and wake-up writes cool 74 F.",
+  "notes": [
+    "Issue #1537 (opt-out, 2026-11-13): this golden deliberately models a thermostat that does NOT report hvac_action (its fix is the pre-cool 'ran' record for that case), so it sets thermostat_reports_hvac_action: false and is byte-identical to before. With a reported action the settling guard would be satisfied by the reported cooling and the golden would pass on the pre-#1417 code (effectiveness lost). (a) Effectiveness: kept, the golden still fails on 2523b71/f877c50 as its verdict states, because the no-hvac_action path is still the one exercised. (b) Docs<->production: comfort-edge-selection-spec R3 and section 6 item 1 (pre-cool counts as 'ran', #1417) and sim-harness-spec (#1537 opt-out list) match production. (c) Occupant: on a thermostat that does not report its action, the furnace is not armed at wake-up on a hot morning after an overnight pre-cool."
+  ],
   "source": "synthetic: Issue #1417",
   "issue": 1417,
   "config": {
+    "thermostat_reports_hvac_action": false,
     "comfort_heat": 70,
     "comfort_cool": 74,
     "setback_heat": 62,

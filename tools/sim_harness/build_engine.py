@@ -37,7 +37,7 @@ import contextlib
 from datetime import UTC, datetime
 from typing import Any
 
-from tools.sim_harness.fake_hass import FakeHass, FakeState
+from tools.sim_harness.fake_hass import FakeHass, FakeState, configure_thermostat_action
 from tools.sim_harness.fake_scheduler import FakeScheduler
 from tools.sim_harness.ha_stubs import install_ha_stubs
 
@@ -180,6 +180,9 @@ def build_headless_engine(
     if climate_attributes:
         attrs.update(climate_attributes)
     fake_hass.states.set(climate_entity, FakeState(state=climate_state, attributes=attrs))
+    # Owner decision 2026-11-13 ("Sims report hvac_action", #1537/#1539): the thermostat reports hvac_action from its
+    # own loop before Climate Advisor first reads it; config "thermostat_reports_hvac_action": false opts out.
+    configure_thermostat_action(fake_hass, climate_entity, merged_config)
 
     # 6. Event log — shared list that the engine's callback appends to
     event_log: list[tuple[str, dict, datetime | None]] = []

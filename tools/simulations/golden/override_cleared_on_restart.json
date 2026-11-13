@@ -4,6 +4,7 @@
   "source": "synthetic",
   "issue": 1193,
   "notes": [
+    "Issue #1537 (owner-approved golden change; re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)): decisions and service calls are unchanged; only incident_detected.thermostat_action changed (None -> off). (a) Effectiveness: unchanged, no decision, service call, assertion or promise outcome moved. (b) Docs<->production: docs/sim-harness-spec.md (#1537 default reporting). (c) Occupant: nothing the occupant sees changed; the golden now runs on a thermostat that reports its equipment like a real one.",
     "Replaces grace_timer_expired_on_restart, whose only assertion was the carried-forward classification_applied outcome. That scenario never created an override, so it could not detect a restart that kept one (Issue #1193 review).",
     "Occupant outcome: after a restart the home returns to the automation's comfort schedule instead of staying stuck on a manual override the occupant set hours earlier.",
     "Mechanism: automation.restore_state() unconditionally clears _manual_override_active, _grace_active and _grace_end_time on every restart, not only when the grace had already expired (Issues #199, #226, #327; confirmed by the earlier standalone two-coordinator check recorded in the retired scenario).",

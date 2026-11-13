@@ -2663,20 +2663,20 @@ class TestIdleReactivationGate:
         engine._activate_fan.assert_awaited()
         assert engine._natural_vent_active is True
 
-    def test_does_not_reactivate_when_mode_cool_and_action_cooling(self):
-        """REGRESSION GUARD: if the compressor is ACTIVELY cooling (hvac_action='cooling'),
+    def test_hands_over_when_mode_cool_and_action_cooling(self):
+        """Issue #1540 (supersedes the #244/#402 'never while the compressor runs' guard): the AC is
 
-        reactivation must still be blocked — WHF must never fight a running compressor.
+        actively cooling (hvac_action='cooling') into a settled open window while the outside air
+        can do the job. Household rule 3 forbids cooling into the opening, so the idle-open path
+        must hand over to the fan instead of leaving the AC running. The occupant-override and
+        comfort-floor refusals are covered in test_open_window_calling_compressor_1540.py.
         """
         engine = _make_idle_reactivation_engine(hvac_state="cool", hvac_action="cooling")
         with patch(_PATCH_CALL_LATER):
             asyncio.run(engine.check_natural_vent_conditions())
 
-        engine._activate_fan.assert_not_awaited()
-        assert engine._natural_vent_active is False
-
-        # Without grace the early-return fires normally (neither flag is True)
-        assert engine._natural_vent_active is False
+        engine._activate_fan.assert_awaited()
+        assert engine._natural_vent_active is True
 
 
 # ---------------------------------------------------------------------------

@@ -246,6 +246,48 @@ class _FakeServices:
         attrs["hvac_action"] = derived
         self._derived_action[entity_id] = derived
 
+    def mark_action_scripted(self, entity_id: str) -> None:
+        """Issue #1537: a scenario-injected ``hvac_action`` is scripted, even when it equals the derived value.
+
+        Ownership is "the value the thermostat last derived is still there"; an injected ``idle`` equal to a seeded
+        ``idle`` would otherwise read as the thermostat's own and be re-derived on the next reading (a scripted
+        "never starts" world would start). Scripted until CA's next mode change, as before.
+        """
+        self._derived_action.pop(entity_id, None)
+
+    def seed_hvac_action(self, entity_id: str, attrs: dict) -> None:
+        """Issue #1537: the thermostat reports an ``hvac_action`` from the first moment, from its own loop.
+
+        Owner decision 2026-11-13 ("Sims report hvac_action"): a real thermostat reports what its equipment is
+        doing, so the harness thermostat does too by default. The value comes from the harness's own thermostat
+        model only (the scripted room reading and the setpoint through ``world.thermostat_running``), never from
+        Climate Advisor's decisions: off -> ``off``, fan_only -> ``fan``, heat/cool -> the loop (``idle`` until a
+        reading and a setpoint exist), anything else (heat_cool/auto, which this model does not simulate) ->
+        ``idle``. The seeded value is the thermostat's own, so later readings and commands keep deriving it.
+        An action already present (scenario-supplied) is left alone.
+        """
+        if "hvac_action" in attrs:
+            return
+        st = self._states.get(entity_id)
+        mode = st.state if st is not None else None
+        deadband = self._action_deadband.get(entity_id, THERMOSTAT_ACTION_DEADBAND_F)
+        derived = "idle"
+        if mode == "off":
+            derived = "off"
+        elif mode == "fan_only":
+            derived = "fan"
+        elif mode in ("heat", "cool") and deadband is not None:
+            try:
+                indoor = float(attrs["current_temperature"])
+                setpoint = float(attrs["temperature"])
+            except KeyError, TypeError, ValueError:
+                pass
+            else:
+                derived = thermostat_running(mode, indoor, setpoint, None, start_f=deadband) or "idle"
+        attrs["hvac_action"] = derived
+        if deadband is not None:
+            self._derived_action[entity_id] = derived
+
     def set_entity_quirk(self, entity_id: str, quirk: str) -> None:
         """Mark ``entity_id`` with an opt-in behavioural quirk (Issue #1048).
 
@@ -844,3 +886,26 @@ class FakeHass:
         future: asyncio.Future = loop.create_future()
         future.set_result(result)
         return future
+
+
+def configure_thermostat_action(fake_hass: FakeHass, climate_entity: str, config: dict) -> None:
+    """How a harness thermostat reports ``hvac_action`` (Issues #1310, #1537, #1539): one rule for every builder.
+
+    Called by ``build_headless_engine()``, ``build_headless_coordinator()`` and, per zone,
+    ``build_headless_multi_zone()`` right after they set the thermostat's initial state, and again by
+    ``FakeHassSession`` (a no-op for the seed then, since the action is already present).
+
+    ``thermostat_action: "scripted"`` keeps a scenario's injected action through CA's mode changes (no deadband);
+    ``temp_unit: celsius`` converts the 1.5 F deadband. Owner decision 2026-11-13 ("Sims report hvac_action"):
+    the thermostat reports it by DEFAULT, seeded from its own loop (``seed_hvac_action``), never from CA's
+    decisions; ``thermostat_reports_hvac_action: false`` models a thermostat with no such attribute. Call after
+    the entity's initial state is set and before Climate Advisor is set up, so the first read already sees it.
+    """
+    if config.get("thermostat_action") == "scripted":
+        fake_hass.set_action_deadband(climate_entity, None)
+    elif config.get("temp_unit") == "celsius":
+        fake_hass.set_action_deadband(climate_entity, THERMOSTAT_ACTION_DEADBAND_F / 1.8)
+    if config.get("thermostat_reports_hvac_action", True):
+        st = fake_hass.states.get(climate_entity)
+        if st is not None:
+            fake_hass.services.seed_hvac_action(climate_entity, st.attributes)

@@ -4,6 +4,7 @@
   "source": "synthetic",
   "issue": 229,
   "notes": [
+    "Issue #1537 (owner-approved golden change; re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)): decisions and service calls are unchanged; only incident_detected.thermostat_action changed (None -> off). (a) Effectiveness: unchanged, no decision, service call, assertion or promise outcome moved. (b) Docs<->production: docs/sim-harness-spec.md (#1537 default reporting). (c) Occupant: nothing the occupant sees changed; the golden now runs on a thermostat that reports its equipment like a real one.",
     "Tests the normal (clean) grace expiry path: pause → sensor closes → grace expires cleanly → classification resumes.",
     "Contrast with grace_full_lifecycle_sensor_still_open.json which tests the re-pause path.",
     "Issue #476: migrated to use_coordinator=true. sensor_open/sensor_close now dispatch via",

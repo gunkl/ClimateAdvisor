@@ -93,6 +93,8 @@ def round_to_precision(value: float, precision: float) -> float:
 # --------------------------------------------------------------------------- sensor lag
 DEFAULT_SENSOR_LAG_MIN = 0.0  # 0 = the reading IS the simulated air, as before
 SENSOR_LAG_MAX_MIN = 60.0
+DEFAULT_EDGE_REPORT_DELAY_S = 0.0  # 0 = the thermostat reports its on/off edges as they happen
+EDGE_REPORT_DELAY_MAX_S = 600.0
 
 
 def lag_step(reading: float | None, air: float | None, dt_hours: float, lag_minutes: float) -> float | None:
@@ -210,12 +212,16 @@ def advance_equipment(
 def coast_average_f_per_h(state: EquipmentState, now: datetime, dt_hours: float) -> float:
     """Signed average coast power (F/h) for the tick interval that the tick at ``now`` simulates.
 
-    The coast decays as ``rate * exp(-age / tau)``. Following the simulator's convention that a tick applies the
-    state decided at ``now`` to the elapsed interval, the tick at the stop simulates ages ``[0, dt]``, the next one
-    ``[dt, 2 dt]``, and so on. Returns 0 without a coast; positive warms, negative cools.
+    The coast decays as ``rate * exp(-age / tau)``. ``now`` is the START of the simulated interval: a tick at ``t``
+    advances the room over ``[t - dt, t]`` with the equipment as it was, then decides (the stop at ``t`` is reported at
+    ``t``, before any of its coast), so the tick after the stop asks for ``now = stop`` and simulates ages
+    ``[0, dt]``, the next one ``[dt, 2 dt]``, and so on. Returns 0 without a coast, and for an interval that ends at or
+    before the coast began; positive warms, negative cools.
     """
     if state.coast_start is None or state.coast_rate_f_per_h <= 0 or state.coast_tau_min <= 0 or dt_hours <= 0:
         return 0.0
+    if (state.coast_start - now).total_seconds() / 3600.0 >= dt_hours - 1e-9:
+        return 0.0  # the whole interval is before the stop
     tau_h = state.coast_tau_min / 60.0
     age0 = max(0.0, (now - state.coast_start).total_seconds() / 3600.0)
     if age0 > 10 * tau_h:  # spent (under 0.005 % left): drop it so it stops showing in the debug attributes
@@ -250,3 +256,18 @@ def run_minutes(rise_f: float, net_rate_f_per_h: float) -> float:
     if net_rate_f_per_h <= 0:
         return math.inf
     return rise_f / net_rate_f_per_h * 60.0
+
+
+def reported_action(history: list[tuple[datetime, str]], now: datetime, delay_s: float, current: str) -> str:
+    """The hvac_action a thermostat reporting ``delay_s`` late shows at ``now`` (``history``: ``(time, action)`` of
+    every change, oldest first). ``delay_s`` 0 (the default) is the current action."""
+    if delay_s <= 0 or not history:
+        return current
+    cutoff = now - timedelta(seconds=float(delay_s))
+    shown = history[0][1]
+    for ts, action in history:
+        if ts <= cutoff:
+            shown = action
+        else:
+            break
+    return shown

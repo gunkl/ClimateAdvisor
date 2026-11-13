@@ -55,6 +55,7 @@ from .const import (
     CONF_COOL_RATE_PRESET,
     CONF_DEADBAND_COOL_F,
     CONF_DEADBAND_HEAT_F,
+    CONF_EDGE_REPORT_DELAY_S,
     CONF_HEAT_RATE_PRESET,
     CONF_INITIAL_TEMP_F,
     CONF_K_ACTIVE_COOL,
@@ -77,6 +78,7 @@ from .const import (
     DOMAIN,
 )
 from .hvac_profile import (
+    DEFAULT_EDGE_REPORT_DELAY_S,
     DEFAULT_PRECISION,
     DEFAULT_RATE_PRESET,
     DEFAULT_SENSOR_LAG_MIN,
@@ -93,6 +95,7 @@ from .hvac_profile import (
     lag_step,
     precision_value,
     preset_for_rate,
+    reported_action,
     resolve_rate,
     stop_equipment,
 )
@@ -254,6 +257,12 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             self._attr_device_info = sim_device_info(entry)
         # Sensor lag: the reported reading(s) follow the simulated air through a first-order lag; 0 = no lag.
         self._sensor_lag_min: float = float(data.get(CONF_SENSOR_LAG_MIN, DEFAULT_SENSOR_LAG_MIN) or 0.0)
+        # Edge report delay: hvac_action trails the equipment by this many seconds (a cloud-polled thermostat); 0 =
+        # on time (the default: a directly connected thermostat reports its edge as it happens).
+        self._edge_report_delay_s: float = max(
+            0.0, float(data.get(CONF_EDGE_REPORT_DELAY_S, DEFAULT_EDGE_REPORT_DELAY_S) or 0.0)
+        )
+        self._action_history: list[tuple[datetime, str]] = []
         # Blower lead-in / overrun and after-stop coast, per direction. All zero (the default) = no blower phase.
         self._blower: dict[str, BlowerConfig] = {
             "heat": BlowerConfig(
@@ -540,6 +549,13 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         HVAC profile: during a configured blower lead-in (before the burner or compressor starts) or overrun (after
         it stops) the blower alone runs, reported as FAN in any mode, as an Ecobee reports its fan dissipation time.
         """
+        current = self._true_action()
+        if self._edge_report_delay_s <= 0:
+            return current
+        return HVACAction(reported_action(self._action_history, dt_util.utcnow(), self._edge_report_delay_s, current))
+
+    def _true_action(self) -> HVACAction:
+        """What the equipment is doing now (``hvac_action`` shows it ``edge_report_delay_s`` late when that is set)."""
         if self._equipment.phase in (PHASE_LEAD_IN, PHASE_OVERRUN):
             return HVACAction.FAN
         if self._hvac_mode == HVACMode.HEAT:
@@ -549,6 +565,17 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         if self._fan_mode == FAN_ON:
             return HVACAction.FAN
         return HVACAction.OFF
+
+    def _note_action(self, now: datetime) -> None:
+        """Remember each change of the true action (for a delayed report); keeps only what the delay can reach."""
+        if self._edge_report_delay_s <= 0:
+            return
+        action = str(self._true_action())
+        if not self._action_history or self._action_history[-1][1] != action:
+            self._action_history.append((now, action))
+        horizon = now - timedelta(seconds=self._edge_report_delay_s + 3600)
+        while len(self._action_history) > 2 and self._action_history[1][0] < horizon:
+            self._action_history.pop(0)
 
     @property
     def fan_mode(self) -> str:
@@ -577,6 +604,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             "cool_rate_preset": self._cool_rate_preset,
             "precision_option": self._precision_option,
             "sensor_lag_min": self._sensor_lag_min,
+            "edge_report_delay_s": self._edge_report_delay_s,
             "air_temperature": None if self._current_temp is None else round(self._current_temp, 3),
             "blower_phase": self._equipment.phase,
             "blower_lead_in_heat_min": self._blower["heat"].lead_in_min,
@@ -759,7 +787,50 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         else:
             mode, deadband, off_offset = None, None, None
 
-        # Compressor on/off state machine: deadband thresholds decide when the
+        # 1. The elapsed interval [last tick, now] runs with the equipment as it WAS (Issue #1512 reopened, test
+        #    realism): the decision below is made at ``now`` and reported at ``now``, before any of its heat. The
+        #    tick used to decide first and then apply the new state to the interval that had already elapsed, so
+        #    every on/off edge was reported one tick (30 s) after the room had started (stopped) changing; a directly
+        #    connected thermostat reports its edge as it happens. ``edge_report_delay_s`` models a late (cloud-polled)
+        #    one instead.
+        run_dir = self._equipment.direction or mode
+        running = self._equipment.phase == PHASE_RUNNING
+        coast = coast_average_f_per_h(self._equipment, self._last_update_ts, dt_hours)
+        self._last_coast_f_per_h = coast
+
+        if coast == 0.0:
+            physics_mode = run_dir if running else mode
+            k_active = (self._k_active_heat if run_dir == "heat" else self._k_active_cool) if running else None
+            # Issue #1387: a running compressor delivers full capacity until the state machine below stops it.
+            # The ODE step only applies capacity while the room is short of the setpoint it is given, and clamps
+            # there; the target used to be passed, so with a stop point past the target (the old symmetric
+            # default, target+1.5) the room pinned at the target, reporting "heating" with no heat, for hours. An
+            # unbounded drive target removes both limits; the room passes the stop point by at most one tick
+            # before the compressor stops.
+            drive_to = (math.inf if run_dir == "heat" else -math.inf) if running else self._target_temp
+        else:
+            # After-stop coast (furnace heat exchanger / cold coil) adds to whatever is running: one signed q.
+            q = coast
+            if running:
+                q += abs(self._k_active_heat) if run_dir == "heat" else -abs(self._k_active_cool)
+            physics_mode = "heat" if q > 0 else "cool"
+            k_active = abs(q)
+            drive_to = math.inf if q > 0 else -math.inf
+
+        self._current_temp = _simulate_indoor_physics(
+            self._current_temp,
+            outdoor_temp,
+            self._k_passive,
+            k_active,
+            dt_hours,
+            drive_to,
+            comfort_heat=self._comfort_heat,
+            comfort_cool=self._comfort_cool,
+            hvac_mode=physics_mode,
+        )
+        self._reading = lag_step(self._reading, self._current_temp, dt_hours, self._sensor_lag_min)
+
+        # 2. Compressor on/off state machine: deadband thresholds decide when the
         # compressor *wants* to change state; min_run/min_off dwell timers can delay
         # that change (equipment short-cycle protection), same as real HVAC hardware.
         # Mode-change resets (heat<->cool losing stale compressor/dwell state) are
@@ -799,7 +870,7 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             )
 
         # HVAC profile: the call drives the blower phases (lead-in -> running -> overrun). Capacity flows only while
-        # RUNNING; with no lead-in configured (the default) running is exactly the compressor call, as before.
+        # RUNNING (from the next interval on); with no lead-in configured (the default) running is exactly the call.
         advance_equipment(
             self._equipment,
             call_on=self._compressor_on,
@@ -808,42 +879,8 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             cfg=self._blower_for(mode or self._equipment.direction),
             cfg_last=self._blower_for(self._equipment.direction),
         )
-        running = self._equipment.phase == PHASE_RUNNING
-        self._actively_driving = running
-        coast = coast_average_f_per_h(self._equipment, now, dt_hours)
-        self._last_coast_f_per_h = coast
-
-        if coast == 0.0:
-            physics_mode = mode
-            k_active = (self._k_active_heat if mode == "heat" else self._k_active_cool) if running else None
-            # Issue #1387: a running compressor delivers full capacity until the state machine above stops it.
-            # The ODE step only applies capacity while the room is short of the setpoint it is given, and clamps
-            # there; the target used to be passed, so with a stop point past the target (the old symmetric
-            # default, target+1.5) the room pinned at the target, reporting "heating" with no heat, for hours. An
-            # unbounded drive target removes both limits; the room passes the stop point by at most one tick
-            # before the compressor stops.
-            drive_to = (math.inf if mode == "heat" else -math.inf) if running else self._target_temp
-        else:
-            # After-stop coast (furnace heat exchanger / cold coil) adds to whatever is running: one signed q.
-            q = coast
-            if running:
-                q += abs(self._k_active_heat) if mode == "heat" else -abs(self._k_active_cool)
-            physics_mode = "heat" if q > 0 else "cool"
-            k_active = abs(q)
-            drive_to = math.inf if q > 0 else -math.inf
-
-        self._current_temp = _simulate_indoor_physics(
-            self._current_temp,
-            outdoor_temp,
-            self._k_passive,
-            k_active,
-            dt_hours,
-            drive_to,
-            comfort_heat=self._comfort_heat,
-            comfort_cool=self._comfort_cool,
-            hvac_mode=physics_mode,
-        )
-        self._reading = lag_step(self._reading, self._current_temp, dt_hours, self._sensor_lag_min)
+        self._actively_driving = self._equipment.phase == PHASE_RUNNING
+        self._note_action(now)
         self._last_update_ts = now
         self.async_write_ha_state()
         self._notify_siblings(controls=False)

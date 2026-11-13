@@ -19,6 +19,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
   - **Fix #1534: the blower's run-down never switches your heating or cooling off.** On thermostats that restart the blower a second after the burner or compressor stops (heating, then idle, then fan), Climate Advisor treats that blower as the run's own blower phase, exactly as it already did when the thermostat went straight from heating to fan: its fan check never turns the heating or cooling off because of it, and the Activity log names it as the blower after a run. Switching the thermostat Off mid-run no longer raises a "fan running while Off" warning for the blower's run-down either.
   - **First run after install:** if the blower starts before the very first heating or cooling run Climate Advisor sees, the run's minutes now count from the burner or compressor, and no "interrupted session" is recorded for it.
 
+### Internal
+- Dev thermostat simulator (test tooling): it now reports each heating, cooling or fan change at the moment it decides it, before any of that tick's heat, as a directly connected thermostat does. It used to report every change 30 seconds late. A new `edge_report_delay_s` option models a cloud-polled thermostat on purpose. Real-HA learning tests now use a flat forecast so Climate Advisor reads the same outdoor air the simulated house feels.
+
 ## [0.9.31] — 2026-11-11
 
 ### Fixed

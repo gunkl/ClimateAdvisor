@@ -27,8 +27,9 @@ def _house(mode: str, sim_config: dict | None = None) -> dict:
         "start": datetime(2026, 1, 15, 9, 0, tzinfo=UTC) if heat else datetime(2026, 7, 15, 18, 0, tzinfo=UTC),
         "initial_indoor_f": 70.0 if heat else 76.0,
         "outdoor_f": 50.0 if heat else 92.0,
-        "high_f": 55.0 if heat else 95.0,
-        "low_f": 45.0 if heat else 88.0,
+        # flat forecast: Climate Advisor's outdoor reading is the sim's own outdoor air (Issue #1512 reopened)
+        "high_f": 50.0 if heat else 92.0,
+        "low_f": 50.0 if heat else 92.0,
         "initial_hvac_mode": mode,
         "sim_config": {"min_run_seconds": 120, "min_off_seconds": 120, **(sim_config or {})},
     }
@@ -42,13 +43,18 @@ async def _cycles(house, hours: int) -> tuple[list[dict], list[str]]:
     run: dict | None = None
     for i in range(hours * 120):
         before = sim._current_temp
+        # Issue #1512 reopened: the sim reports an edge at the tick it is decided, BEFORE any of its heat, so the
+        # power of a reported run shows in the tick AFTER the report (the old tick applied a tick of heat before
+        # reporting, an artifact): judge each tick's movement by the action reported at its start.
+        powered = sim.hvac_action
         await house.advance(seconds=30)
         after, target = sim._current_temp, sim._target_temp
         action = sim.hvac_action
-        if action in ("heating", "cooling"):
-            moved = after - before if action == "heating" else before - after
+        if powered in ("heating", "cooling"):
+            moved = after - before if powered == "heating" else before - after
             if moved <= 0:
-                unpowered.append(f"tick {i}: {action} at {after:.2f} (target {target}) moved {moved:+.3f}")
+                unpowered.append(f"tick {i}: {powered} at {after:.2f} (target {target}) moved {moved:+.3f}")
+        if action in ("heating", "cooling"):
             if run is None:
                 run = {"ticks": 0, "action": action, "target": target}
             run["ticks"] += 1

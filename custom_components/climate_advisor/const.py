@@ -1756,7 +1756,7 @@ THERMAL_CYCLE_INFO_TAU_MIN: float = 4.0
 # delay the start, so the two separate. Identified when its posterior sd is at most THERMAL_CYCLE_LAG_IDENT_SD_MIN.
 THERMAL_CYCLE_LAGS: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0, 4.5)
 # ... and jointly with an edge-report delay (minutes the thermostat reports its on/off edge AFTER the equipment changed:
-# a polled or cloud thermostat; the dev sim applies a 30 s tick's heat before it reports the edge).
+# a polled or cloud thermostat; the dev sim's edge_report_delay_s models one).
 THERMAL_CYCLE_EDGE_DELAYS: tuple[float, ...] = (0.0, 0.5, 1.0)
 THERMAL_CYCLE_LAG_IDENT_SD_MIN: float = 0.6
 # Until the lag is identified, a pool whose median eligible run is shorter than THERMAL_CYCLE_LAG_RUN_MULT x

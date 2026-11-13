@@ -127,7 +127,7 @@ CYCLE_RES_HALF: float = _k("THERMAL_CYCLE_RES_HALF_F", 0.45)
 MODEL_VERSION: int = _k("THERMAL_CYCLE_MODEL_VERSION", 2)
 _LAG_PRUNE_MASS = 0.005  # a timing point below this share of the coarse-grid posterior is not refined (Pi CPU)
 # Prior against a late-reported edge (-2 log prior odds): most thermostats report their edge as it happens, so a
-# delay must be clearly in the data (a cloud-polled thermostat, the dev sim's 30 s tick) before it is used; without it
+# delay must be clearly in the data (a cloud-polled thermostat) before it is used; without it
 # a short run's sensor lag and an edge delay look alike.
 _DELAY_PRIOR_PEN = 4.0
 
@@ -623,8 +623,8 @@ def _run_hours(c: dict[str, Any], lag: float | tuple[float, float]) -> list[floa
     is part of the RUN's rise, not a coast.
 
     ``lag`` may be a ``(delay, lag)`` pair: the thermostat reports its edges ``delay`` minutes AFTER the
-    burner/compressor changed (a polled or cloud-reported thermostat, or a simulator that applies a tick's heat before
-    it reports the edge), so the run really was ``[ton - delay, rend - delay]``; the sensor lag then applies to it."""
+    burner/compressor changed (a polled or cloud-reported thermostat), so the run really was
+    ``[ton - delay, rend - delay]``; the sensor lag then applies to it."""
     t = c["t"]
     delay, lag = lag if isinstance(lag, tuple) else (0.0, lag)
     ton, rend = c["ton"] - delay, c["rend"] - delay

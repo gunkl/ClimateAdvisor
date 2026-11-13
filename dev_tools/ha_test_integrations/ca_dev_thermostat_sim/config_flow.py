@@ -37,6 +37,7 @@ from .const import (
     CONF_COOL_RATE_PRESET,
     CONF_DEADBAND_COOL_F,
     CONF_DEADBAND_HEAT_F,
+    CONF_EDGE_REPORT_DELAY_S,
     CONF_HEAT_RATE_PRESET,
     CONF_INITIAL_TEMP_F,
     CONF_K_ACTIVE_COOL,
@@ -70,9 +71,11 @@ from .hvac_profile import (
     BLOWER_MAX_MIN,
     COAST_RATE_MAX_F_PER_H,
     COAST_TAU_MAX_MIN,
+    DEFAULT_EDGE_REPORT_DELAY_S,
     DEFAULT_PRECISION,
     DEFAULT_RATE_PRESET,
     DEFAULT_SENSOR_LAG_MIN,
+    EDGE_REPORT_DELAY_MAX_S,
     PRECISION_OPTIONS,
     RATE_PRESET_OPTIONS,
     SENSOR_LAG_MAX_MIN,
@@ -177,6 +180,9 @@ def _build_schema(*, defaults: dict[str, Any]) -> vol.Schema:
             vol.Required(CONF_SENSOR_LAG_MIN, default=defaults.get(CONF_SENSOR_LAG_MIN, DEFAULT_SENSOR_LAG_MIN)): _num(
                 min_=0, max_=SENSOR_LAG_MAX_MIN, step=0.5, unit="min"
             ),
+            vol.Required(
+                CONF_EDGE_REPORT_DELAY_S, default=defaults.get(CONF_EDGE_REPORT_DELAY_S, DEFAULT_EDGE_REPORT_DELAY_S)
+            ): _num(min_=0, max_=EDGE_REPORT_DELAY_MAX_S, step=5, unit="s"),
             **{
                 vol.Required(key, default=defaults.get(key, 0.0)): _num(min_=0, max_=max_, step=step, unit=unit)
                 for key, max_, step, unit in (

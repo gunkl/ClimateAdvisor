@@ -24,6 +24,7 @@ from test_sim_math import _reference_simulate_indoor_physics as ode  # noqa: E40
 _FAILURES: list[str] = []
 T0 = datetime(2026, 1, 15, 9, 0, tzinfo=UTC)
 TICK = timedelta(seconds=30)
+TICK_H = TICK.total_seconds() / 3600.0
 
 
 def _check(label: str, condition: bool) -> None:
@@ -94,8 +95,28 @@ class _Zone:
         self.mode = mode
 
     def tick(self):
+        """climate.py ``_async_tick`` (Issue #1512 reopened order): advance the room over the elapsed interval with
+        the equipment as it WAS, then decide at the new time, then report. ``legacy=True`` is the old order (decide
+        first, then apply the new state to the elapsed interval), kept only to show what changed."""
+        start = self.now
         self.now += TICK
         dt = TICK.total_seconds() / 3600.0
+        if self.legacy:
+            self._decide()
+            running, coast, direction = self.on, 0.0, self.mode
+            self._step(running, coast, direction, dt)
+            return self.action()
+        running = self.eq.phase == hp.PHASE_RUNNING
+        direction = self.eq.direction or self.mode
+        coast = hp.coast_average_f_per_h(self.eq, start, dt)
+        self._step(running, coast, direction, dt)
+        self._decide()
+        cfg = self.blower.get(self.mode or self.eq.direction or "", hp.BlowerConfig())
+        last = self.blower.get(self.eq.direction or "", hp.BlowerConfig())
+        hp.advance_equipment(self.eq, call_on=self.on, direction=self.mode, now=self.now, cfg=cfg, cfg_last=last)
+        return self.action()
+
+    def _decide(self):
         self.on, self.last_on, self.last_off = _decide(
             self.mode,
             self.reported(),
@@ -109,26 +130,19 @@ class _Zone:
             self.min_run,
             self.min_off,
         )
-        if self.legacy:  # the pre-profile tick: capacity exactly while the compressor call is on
-            running, coast = self.on, 0.0
-        else:
-            cfg = self.blower.get(self.mode or self.eq.direction or "", hp.BlowerConfig())
-            last = self.blower.get(self.eq.direction or "", hp.BlowerConfig())
-            hp.advance_equipment(self.eq, call_on=self.on, direction=self.mode, now=self.now, cfg=cfg, cfg_last=last)
-            running = self.eq.phase == hp.PHASE_RUNNING
-            coast = hp.coast_average_f_per_h(self.eq, self.now, dt)
+
+    def _step(self, running, coast, direction, dt):
         if coast == 0.0:
-            k = (self.rate if self.mode == "heat" else -self.rate) if running else None
-            drive = (math.inf if self.mode == "heat" else -math.inf) if running else self.target
-            pmode = self.mode
+            k = (self.rate if direction == "heat" else -self.rate) if running else None
+            drive = (math.inf if direction == "heat" else -math.inf) if running else self.target
+            pmode = direction if running else self.mode
         else:
-            q = coast + ((self.rate if self.mode == "heat" else -self.rate) if running else 0.0)
+            q = coast + ((self.rate if direction == "heat" else -self.rate) if running else 0.0)
             k, drive, pmode = abs(q), (math.inf if q > 0 else -math.inf), ("heat" if q > 0 else "cool")
         self.air = ode(
             self.air, self.outdoor, self.k_passive, k, dt, drive, comfort_heat=68, comfort_cool=76, hvac_mode=pmode
         )
         self.reading = hp.lag_step(self.reading, self.air, dt, self.lag_min)
-        return self.action()
 
 
 def _collapse(seq: list[str]) -> list[str]:
@@ -160,18 +174,42 @@ def test_presets_and_defaults() -> None:
     _check("default blower/coast all zero", hp.BlowerConfig() == hp.BlowerConfig(0.0, 0.0, 0.0, 0.0))
 
 
-def test_defaults_reproduce_old_tick() -> None:
-    """With every profile option at its default the room follows the pre-profile tick exactly, both directions."""
+def test_defaults_report_edges_on_time() -> None:
+    """With every profile option at its default the room follows the old tick's physics, but each on/off edge is
+    reported at the tick it is decided, before its heat (Issue #1512 reopened).
+
+    This replaces "defaults reproduce the old tick exactly": the old order decided at ``t`` and applied the new state
+    to the interval ``[t - 30 s, t]`` that had already elapsed, so the room had been heating (or coasting) for a whole
+    tick before ``hvac_action`` changed. That was a discretisation artifact, not a behaviour to preserve: it made every
+    run look 30 s late to Climate Advisor (about 16 % on a 4-minute run). A directly connected thermostat reports its
+    edge as it happens; ``edge_report_delay_s`` models a late (cloud-polled) one on purpose.
+
+    Same run lengths and cycle count as before; the reading at each reported on edge is the pre-start level (the old
+    order had already added a tick of heat), and the room still crosses the stop point by at most one tick."""
     for mode, air, target, outdoor in (("heat", 70.0, 70.0, 50.0), ("cool", 76.0, 76.0, 92.0)):
         new, old = (
             _Zone(mode=mode, air=air, target=target, outdoor=outdoor),
             _Zone(mode=mode, air=air, target=target, outdoor=outdoor, legacy=True),
         )
-        same = True
+        sgn = 1.0 if mode == "heat" else -1.0
+        runs_new, runs_old, edge_ok = [], [], True
+        prev_new = prev_old = "idle"
         for _ in range(6 * 120):
+            before = new.air
             a_new, a_old = new.tick(), old.tick()
-            same = same and a_new == a_old and new.air == old.air
-        _check(f"{mode}: defaults give the identical trajectory and hvac_action over 6 h", same)
+            if a_new != prev_new and a_new in ("heating", "cooling"):
+                runs_new.append(new.now)
+                edge_ok = edge_ok and abs(new.air - before) < 0.05  # no heat yet at the reported start
+            if a_old != prev_old and a_old in ("heating", "cooling"):
+                runs_old.append(old.now)
+            prev_new, prev_old = a_new, a_old
+        _check(
+            f"{mode}: same number of runs as the old tick ({len(runs_new)} vs {len(runs_old)})",
+            abs(len(runs_new) - len(runs_old)) <= 1,
+        )
+        _check(f"{mode}: at each reported start the room has not moved yet (no tick of heat before the edge)", edge_ok)
+        overshoot = max(0.0, sgn * (new.air - target))
+        _check(f"{mode}: the room stays within a tick of the stop point", overshoot < 0.2)
 
 
 def test_rate_physics() -> None:
@@ -181,8 +219,11 @@ def test_rate_physics() -> None:
         for _ in range(60):  # 30 min, the call is on throughout (stop at 85 F is never reached)
             z.tick()
         k = -0.15
-        exp_kt = math.exp(k * 0.5)
-        expected = 50.0 + (60.0 - 50.0) * exp_kt + (rate / k) * (exp_kt - 1)
+        # the call is decided (and reported) at the first tick, 30 s in: heat flows from then on (Issue #1512
+        # reopened: edges on time), so the first 30 s are passive and the climb is 29.5 min of heat
+        t1 = 50.0 + (60.0 - 50.0) * math.exp(k * TICK_H)
+        exp_kt = math.exp(k * (0.5 - TICK_H))
+        expected = 50.0 + (t1 - 50.0) * exp_kt + (rate / k) * (exp_kt - 1)
         _check(
             f"{preset}: 30 min climb {z.air - 60:.3f} F matches closed form {expected - 60:.3f} F",
             abs(z.air - expected) < 1e-6,
@@ -191,8 +232,9 @@ def test_rate_physics() -> None:
     z = _Zone(mode="cool", air=80.0, target=60.0, outdoor=90.0, rate=12.0, start=0.0, stop=5.0)
     for _ in range(120):
         z.tick()
-    exp_kt = math.exp(-0.15)
-    expected = 90.0 + (80.0 - 90.0) * exp_kt + (-12.0 / -0.15) * (exp_kt - 1)
+    t1 = 90.0 + (80.0 - 90.0) * math.exp(-0.15 * TICK_H)  # the first 30 s before the call (edges on time)
+    exp_kt = math.exp(-0.15 * (1.0 - TICK_H))
+    expected = 90.0 + (t1 - 90.0) * exp_kt + (-12.0 / -0.15) * (exp_kt - 1)
     _check(
         f"cool normal: 1 h drop {80 - z.air:.3f} F matches closed form {80 - expected:.3f} F",
         abs(z.air - expected) < 1e-6,
@@ -368,6 +410,19 @@ def test_rise_per_cycle_arithmetic() -> None:
         f"normal preset, default swing: one run is {runs * 0.5:.1f} min (~0.7 F at ~9 F/h net, 4-6 min)",
         8 <= runs <= 12,
     )
+
+
+def test_edge_report_delay() -> None:
+    """``edge_report_delay_s`` (a cloud-polled thermostat): hvac_action shows each change that many seconds late."""
+    h = [(T0, "idle"), (T0 + timedelta(minutes=1), "heating"), (T0 + timedelta(minutes=5), "idle")]
+    at = T0 + timedelta(minutes=1, seconds=20)
+    _check("delay 0: the current action", hp.reported_action(h, at, 0.0, "heating") == "heating")
+    _check("delay 30 s, 20 s after the start: still idle", hp.reported_action(h, at, 30.0, "heating") == "idle")
+    later = T0 + timedelta(minutes=1, seconds=31)
+    _check("delay 30 s, 31 s after the start: heating", hp.reported_action(h, later, 30.0, "heating") == "heating")
+    stop = T0 + timedelta(minutes=5, seconds=10)
+    _check("delay 30 s, 10 s after the stop: still heating", hp.reported_action(h, stop, 30.0, "idle") == "heating")
+    _check("default delay is 0 (on time)", hp.DEFAULT_EDGE_REPORT_DELAY_S == 0.0)
 
 
 def main() -> None:

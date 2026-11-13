@@ -26,8 +26,9 @@ _HOUSE = {
     "start": datetime(2026, 1, 15, 9, 0, tzinfo=UTC),
     "initial_indoor_f": 70.0,
     "outdoor_f": 50.0,
-    "high_f": 55.0,
-    "low_f": 45.0,
+    # flat forecast: Climate Advisor's outdoor reading is the sim's own outdoor air (Issue #1512 reopened)
+    "high_f": 50.0,
+    "low_f": 50.0,
     "initial_hvac_mode": "heat",
     "sim_config": {
         "deadband_heat_f": 1.4,

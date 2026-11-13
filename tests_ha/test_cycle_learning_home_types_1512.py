@@ -7,9 +7,9 @@ it says plainly that it cannot learn it (a whole/half-degree sensor) and which r
 
 The REAL coordinator, recorder, store and cycle model run against the dev thermostat sim with an HVAC profile
 (``make_sim(profile=SimProfile(...))``); automation is off so the thermostat keeps the setpoints the test gives it.
-The sim's house leaks fast (k_passive -0.15 /h) and steps its physics in 30 s ticks that apply a tick's heat before
-the edge is reported (the edges read ~30 s late), as a cloud-polled thermostat can; the fit models that offset
-(a negative lag). Matrix and tolerances: docs/05 "Real-HA check (tests_ha/test_cycle_learning_home_types_1512.py)".
+The sim's house leaks fast (k_passive -0.15 /h); it reports each edge as it is decided, and one point reports them
+30 s late (``edge_report_delay_s``), as a cloud-polled thermostat can, which the fit models as an edge delay.
+Matrix and tolerances: docs/05 "Real-HA check".
 """
 
 from __future__ import annotations
@@ -103,24 +103,32 @@ def _notice(house, mode: str) -> dict | None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "env", "size", "lag", "overrun", "learned_k", "tol"),
+    ("mode", "env", "size", "lag", "overrun", "learned_k", "tol", "delay_s"),
     [
-        # tolerances: docs/05 "Real-HA check" (lag 0: within 5 %; a 2-min sensor lag on top of the sim's 30 s edge
-        # offset: within 10 %, 12 % on the oversized system's 4-min runs)
-        pytest.param("heat", HEAT, "normal", 0.0, 0.0, None, 0.05, id="heat-normal12-tenth-lag0-overrun0"),
-        pytest.param("heat", HEAT, "normal", 2.0, 2.0, None, 0.10, id="heat-normal12-tenth-lag2-overrun2"),
-        pytest.param("cool", COOL, "normal", 0.0, 2.0, None, 0.05, id="cool-normal12-tenth-lag0-overrun2"),
-        pytest.param("heat", HEAT, "oversized", 2.0, 0.0, None, 0.12, id="heat-oversized18-tenth-lag2"),
-        pytest.param("heat", MILD, "undersized", 0.0, 0.0, None, 0.10, id="heat-undersized2-tenth-mild"),
-        pytest.param("heat", HEAT, "normal", 2.0, 2.0, -0.15, 0.10, id="heat-normal12-tenth-lag2-overrun2-learned-k"),
+        # tolerances: docs/05 "Real-HA check" (lag 0, edges on time or 30 s late: within 5 %; a 2-min sensor lag:
+        # within 10 %, where a 1-min lag plus a small coast fits the 0.1 F readings almost as well as the true 2 min)
+        pytest.param("heat", HEAT, "normal", 0.0, 0.0, None, 0.05, 0.0, id="heat-normal12-tenth-lag0-overrun0"),
+        pytest.param("heat", HEAT, "normal", 0.0, 0.0, None, 0.05, 30.0, id="heat-normal12-tenth-cloud-delay30s"),
+        pytest.param("heat", HEAT, "normal", 2.0, 2.0, None, 0.10, 0.0, id="heat-normal12-tenth-lag2-overrun2"),
+        pytest.param("cool", COOL, "normal", 0.0, 2.0, None, 0.05, 0.0, id="cool-normal12-tenth-lag0-overrun2"),
+        pytest.param("heat", HEAT, "oversized", 2.0, 0.0, None, 0.10, 0.0, id="heat-oversized18-tenth-lag2"),
+        pytest.param(
+            "heat", MILD, "undersized", 0.0, 0.0, -0.15, 0.10, 0.0, id="heat-undersized2-tenth-mild-learned-k"
+        ),
+        pytest.param(
+            "heat", HEAT, "normal", 2.0, 2.0, -0.15, 0.10, 0.0, id="heat-normal12-tenth-lag2-overrun2-learned-k"
+        ),
     ],
 )
-async def test_fine_sensor_maintenance_learns_the_rate(make_sim, mode, env, size, lag, overrun, learned_k, tol) -> None:
+async def test_fine_sensor_maintenance_learns_the_rate(
+    make_sim, mode, env, size, lag, overrun, learned_k, tol, delay_s
+) -> None:
     profile = SimProfile(
         heat_rate=size if mode == "heat" else None,
         cool_rate=size if mode == "cool" else None,
         companion_sensor=True,
         sensor_lag_min=lag,
+        edge_report_delay_s=delay_s,
         **({f"blower_overrun_{mode}_min": overrun} if overrun else {}),
     )
     house = await _house(make_sim, env, profile, learned_k=learned_k)
@@ -136,6 +144,17 @@ async def test_fine_sensor_maintenance_learns_the_rate(make_sim, mode, env, size
     if overrun:
         # the blower period is inside the cycle it follows: readings recorded through it and after it
         assert all(any(s[0] > c["t_off"] + overrun * 60 for s in c["samples"]) for c in cycles if c["cut"] is None)
+
+
+async def test_undersized_with_an_unlearned_leak_rate_says_it_is_unsure(make_sim) -> None:
+    """Undersized 2 F/h furnace in mild air, leak rate only the typical value: the climb is a small difference of
+    heat and leak, so the rate depends on the guessed leak; it is graded low with the reason (docs/05 Real-HA check:
+    it read 31 % low graded medium before the k identifiability check)."""
+    house = await _house(make_sim, MILD, SimProfile(heat_rate="undersized", companion_sensor=True))
+    await house.advance(hours=8)
+    fit = _fit(house, "heat")
+    assert fit["ne"] >= 3 and fit["sensor_class"] == "fine", fit
+    assert fit["grade"] == "low" and "k_typical_prior" in fit["grade_caps"], fit
 
 
 # ---------------------------------------------------------------------------------------------------------------

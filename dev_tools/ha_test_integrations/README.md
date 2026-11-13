@@ -145,6 +145,18 @@ unchanged.** The pure logic lives in `ca_dev_thermostat_sim/hvac_profile.py`.
   reading, as a real thermostat does, so lag makes the air overshoot the stop
   point. The true air is in the `air_temperature` attribute. `0` (default) = no
   lag: the reading is the air.
+- **Edge timing and edge report delay** (`edge_report_delay_s`, config only,
+  default `0`; `SimProfile(edge_report_delay_s=...)` in tests_ha). Each tick
+  first advances the room over the elapsed interval with the equipment as it
+  was, then decides, then reports: an on/off edge is reported at the tick it is
+  decided, before any of its heat, as a directly connected thermostat does
+  (Issue #1512 reopened). The tick used to decide first and apply the new state
+  to the interval that had already elapsed, so every edge read one tick (30 s)
+  late; that was a discretisation artifact and Climate Advisor's cycle model
+  measured it as a 30 s report delay. Set `edge_report_delay_s` (seconds) to
+  model a cloud-polled thermostat on purpose: `hvac_action` then shows each
+  heating / cooling / fan / idle change that many seconds after the equipment
+  changed (the attribute `edge_report_delay_s` shows the setting).
 - **Blower lead-in and overrun** (per direction, minutes; overrun is *runtime*:
   `number.<zone>_heat_blower_overrun`, `number.<zone>_cool_blower_overrun`).
   Overrun: after the burner/compressor stops the blower keeps running and

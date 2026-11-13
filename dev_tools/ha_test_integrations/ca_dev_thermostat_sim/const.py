@@ -56,6 +56,9 @@ CONF_COOL_RATE_PRESET = "cool_rate_preset"  # same, for k_active_cool
 CONF_PRECISION = "precision"  # hvac_profile.PRECISION_OPTIONS; unset/"default" = Home Assistant's own
 CONF_COMPANION_SENSOR = "companion_sensor"  # bool: add a tenths temperature sensor on the thermostat's device
 CONF_SENSOR_LAG_MIN = "sensor_lag_min"  # first-order lag, simulated air -> reported reading(s); 0 = none
+# Seconds the reported hvac_action trails the equipment (a cloud-polled thermostat); 0 = on time (a directly connected
+# thermostat, the default).
+CONF_EDGE_REPORT_DELAY_S = "edge_report_delay_s"
 CONF_BLOWER_LEAD_IN_HEAT_MIN = "blower_lead_in_heat_min"
 CONF_BLOWER_LEAD_IN_COOL_MIN = "blower_lead_in_cool_min"
 CONF_BLOWER_OVERRUN_HEAT_MIN = "blower_overrun_heat_min"

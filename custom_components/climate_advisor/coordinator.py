@@ -10966,6 +10966,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # (which blended fan_only runtime into hvac_runtime_minutes). Only heat/cool
             # start a thermal observation — a fan_only session is not compressor/burner
             # activity and must never be recorded as an OBS_TYPE_HVAC_COOL observation.
+            # Issue #1512 reopened: the first lead-in after install (``fan`` before the thermostat was known to report
+            # its burner/compressor) opened this session already. The burner's start is the real one: the timer
+            # restarts here (the lead-in is not runtime) and the lead-in's observation is dropped silently, not
+            # rejected as an interrupted session.
+            lead_in = (
+                old_action == "fan"
+                and is_hvac_compressor_active(new_action)
+                and self._hvac_session_mode == session_mode
+            )
+            if lead_in and session_mode in ("heat", "cool"):
+                self._ensure_pending_observations()
+                self._pending_observations.pop(
+                    OBS_TYPE_HVAC_HEAT if session_mode == "heat" else OBS_TYPE_HVAC_COOL, None
+                )
             self._hvac_session_mode = session_mode
             if session_mode in self._RUNTIME_TRACKING:
                 self._start_runtime_timer(session_mode)
@@ -15450,9 +15464,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #1512 reopened: the sensor's lag is pooled over heating and cooling (the other mode's own lag
             # profile on the same sensor; fit_cycles ignores it for another sensor)
             other = snap.get("cycle_fit_cool" if mode == "heat" else "cycle_fit_heat")
-            return cycle_model.fit_cycles(
+            out = cycle_model.fit_cycles(
                 cycles, mode, prior, now_ts=now_ts, lag_evidence=other if isinstance(other, dict) else None
             )
+            # Issue #1512 reopened: the store keeps cycles by their weight in this fit, not by their age
+            store.set_weights(out.get("w_by_id") or {})
+            return out
 
         result = await self._executor_job(_job)
         applied = self.learning.apply_cycle_fit(mode, result, self._cycle_primary_is_v3())

@@ -5,12 +5,15 @@ time (a refit after a restart needs no in-flight state, and a better estimator c
 
 Persistence contract mirrors ``V4Archive`` / ``ChartStateLog``: ``load()`` / ``save()`` are blocking (the coordinator
 MUST run them via its executor), ``save()`` is an atomic tempfile + ``os.replace`` with ``chmod 0o600`` on non-Windows,
-retention is ``CYCLE_RETENTION_DAYS`` counted back from the newest cycle of the same mode (pruned at most hourly), plus
-a hard cap (``CYCLE_MAX_STORED``, half of it per mode, each mode's oldest dropped first), a corrupt or unreadable file
-starts empty and is logged ONCE, and no public method raises. Retention is anchored on the newest cycle, not on today
-(owner decision 2026-11-11, "Fade only on new evidence"): a summer with no heating keeps last winter's heating cycles,
-so the first refit in autumn starts from them instead of from nothing; old cycles leave only as newer ones of the same
-mode arrive.
+retention is evidence-based (Issue #1512 reopened, owner 2026-11-12): each cycle carries its weight in the last pooled
+fit (``w``, ``set_weights``); a cycle more than ``CYCLE_RETENTION_DAYS`` older than the newest cycle of its mode leaves
+only when that weight fell below ``CYCLE_RETAIN_MIN_WEIGHT`` (pruned at most hourly), and the hard cap
+(``CYCLE_MAX_STORED``, half of it per mode) evicts the mode's LOWEST-weight cycle first (unweighed = full weight, ties
+oldest first). So a long accurate run outlives any number of newer short pulses, and a contradicted one leaves. A
+corrupt or unreadable file starts empty and is logged ONCE, and no public method raises. The span is anchored on the
+newest cycle, not on today (owner decision 2026-11-11, "Fade only on new evidence"): a summer with no heating keeps
+last winter's heating cycles, so the first refit in autumn starts from them instead of from nothing; old cycles leave
+only as newer ones of the same mode displace them.
 
 Occupant effect: none directly; this is the memory behind the heating/cooling rate the house is judged by.
 
@@ -64,6 +67,7 @@ from typing import Any
 
 from .const import (
     CYCLE_MAX_STORED,
+    CYCLE_RETAIN_MIN_WEIGHT,
     CYCLE_RETENTION_DAYS,
     CYCLE_STORE_PRUNE_INTERVAL_S,
     CYCLE_STORE_VERSION,
@@ -105,6 +109,7 @@ class _Cycle:
         "t",
         "t_off",
         "t_on",
+        "w",
         "y",
     )
 
@@ -161,6 +166,8 @@ def _compact(cycle: dict[str, Any]) -> _Cycle | None:
         c.ot = array("i", (int(t - t_on) for t, _ in orows))
         c.oy = array("i", (round(v * osc) for _, v in orows))
         c.end = (t_on + c.t[-1]) if rows else t_on
+        w = cycle.get("w")
+        c.w = float(w) if isinstance(w, int | float) and not isinstance(w, bool) and 0.0 <= w <= 1.0 else None
         return c
     except KeyError, TypeError, ValueError, IndexError, OverflowError:
         return None
@@ -203,6 +210,7 @@ def _encode(c: _Cycle) -> dict[str, Any]:
         "op": c.op,
         "ot": _deltas([t_on + dt for dt in c.ot]),
         "oy": _deltas(list(c.oy)),
+        **({} if c.w is None else {"w": round(c.w, 6)}),
     }
 
 
@@ -239,10 +247,16 @@ def _decode(d: Any, version: int) -> _Cycle | None:
                 "entity": d.get("e"),
                 "samples": [[a, b / sc, f] for a, b, f in zip(t, y, flags, strict=True)],
                 "outdoor": [[a, b / osc] for a, b in zip(ot, oy, strict=True)],
+                "w": d.get("w"),
             }
         )
     except KeyError, TypeError, ValueError:
         return None
+
+
+def _retain_weight(c: _Cycle) -> float:
+    """The weight retention judges a cycle by: its last fit weight, full (1.0) while it has not been weighed."""
+    return 1.0 if c.w is None else c.w
 
 
 class CycleStore:
@@ -300,10 +314,11 @@ class CycleStore:
         self._by_id = {c.id: c for c in cycles}
 
     def _enforce_cap(self) -> int:
-        """Each mode keeps at most half of ``max_cycles``, its own oldest dropped first (Issue #1512 final
-        verification, the #1523 rule): a busy cooling summer can never push last winter's heating cycles out (it used
-        to drop the oldest cycles whatever their mode: 0 of 3000 heat cycles left after a summer at 60 cycles a day).
-        Caller holds the lock."""
+        """Each mode keeps at most half of ``max_cycles`` (Issue #1512 final verification, the #1523 rule: a busy
+        cooling summer can never push last winter's heating cycles out). Within a mode's share the cycle with the
+        LOWEST weight leaves first (Issue #1512 reopened, owner 2026-11-12: a long accurate run is kept while newer,
+        weaker pulses come and go); a cycle not yet weighed by a fit (``w`` None: just recorded) counts as full weight;
+        ties leave oldest first. Heat and cool alike. Caller holds the lock."""
         share = max(1, self._max_cycles // 2)
         counts: dict[str, int] = {}
         for c in self._cycles:
@@ -311,17 +326,40 @@ class CycleStore:
         extra = {m: n - share for m, n in counts.items() if n > share}
         if not extra:
             return 0
-        keep: list[_Cycle] = []
+        drop: set[int] = set()
+        for mode, n in extra.items():
+            mine = [c for c in self._cycles if c.mode == mode]
+            mine.sort(key=lambda c: (_retain_weight(c), c.t_on))
+            drop.update(id(c) for c in mine[:n])
+        keep = [c for c in self._cycles if id(c) not in drop]
         for c in self._cycles:
-            if extra.get(c.mode, 0) > 0:
-                extra[c.mode] -= 1
+            if id(c) in drop:
                 self._by_id.pop(c.id, None)
-                continue
-            keep.append(c)
         dropped = len(self._cycles) - len(keep)
         self._cycles = keep
         self._keys = [c.t_on for c in keep]
         return dropped
+
+    def set_weights(self, weights: dict[str, float]) -> int:
+        """Record each cycle's current weight in the pooled fit (``fit_cycles``' ``w_by_id``: eligible cycles their
+        information weight, the pool's other cycles 0). Retention evicts by it (Issue #1512 reopened). Cycles not
+        named keep their last weight. Returns how many were updated. Never raises."""
+        n = 0
+        try:
+            with self._lock:
+                for cid, w in (weights or {}).items():
+                    c = self._by_id.get(str(cid))
+                    if c is None or not isinstance(w, int | float) or isinstance(w, bool):
+                        continue
+                    w = min(1.0, max(0.0, float(w)))
+                    if c.w is None or abs(c.w - w) > 1e-9:
+                        c.w = w
+                        n += 1
+                if n:
+                    self.dirty = True
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("cycle_store: set_weights failed", exc_info=True)
+        return n
 
     def add(self, cycle: dict[str, Any], now: float | None = None) -> bool:
         """Keep a closed cycle (rounded as it will be stored). False when it was unusable. Never raises."""
@@ -375,7 +413,13 @@ class CycleStore:
                 newest: dict[str, float] = {}
                 for c in self._cycles:
                     newest[c.mode] = max(newest.get(c.mode, c.t_on), c.t_on)
-                keep = [c for c in self._cycles if c.end >= min(newest[c.mode], now) - span]
+                # Issue #1512 reopened: past the span only a cycle that no longer carries real weight leaves (the
+                # span is a memory backstop; a long accurate run that still counts stays however old it is)
+                keep = [
+                    c
+                    for c in self._cycles
+                    if c.end >= min(newest[c.mode], now) - span or _retain_weight(c) >= CYCLE_RETAIN_MIN_WEIGHT
+                ]
                 dropped = len(self._cycles) - len(keep)
                 if dropped:
                     self._set_all(keep)

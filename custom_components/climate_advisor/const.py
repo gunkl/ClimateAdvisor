@@ -1710,6 +1710,9 @@ CYCLE_MAX_OUTDOOR: int = 200  # outdoor points kept per cycle
 # Stored cycles more than this many days older than the NEWEST cycle of the same mode are pruned (a quiet season
 # prunes nothing: the clock is new evidence, owner decision 2026-11-11).
 CYCLE_RETENTION_DAYS: int = 90
+# Issue #1512 reopened: past CYCLE_RETENTION_DAYS a cycle is evicted only when its weight in the pooled fit fell below
+# this (it no longer carries real evidence); the cap evicts the lowest weight first.
+CYCLE_RETAIN_MIN_WEIGHT: float = 0.01
 CYCLE_MAX_STORED: int = 3000  # hard cap on stored cycles: half per mode, each mode's oldest dropped first
 CYCLE_STORE_PRUNE_INTERVAL_S: float = 3600  # pruning runs at most this often
 CYCLE_STORE_VERSION: int = 2  # "v" key of the cycle file (2: per-cycle decimal places; a v1 file is migrated on load)
@@ -1752,6 +1755,9 @@ THERMAL_CYCLE_INFO_TAU_MIN: float = 4.0
 # rise after the on edge is delayed and its catch-up after the off edge looks like a coast; a true coast does not
 # delay the start, so the two separate. Identified when its posterior sd is at most THERMAL_CYCLE_LAG_IDENT_SD_MIN.
 THERMAL_CYCLE_LAGS: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0, 4.5)
+# ... and jointly with an edge-report delay (minutes the thermostat reports its on/off edge AFTER the equipment changed:
+# a polled or cloud thermostat; the dev sim applies a 30 s tick's heat before it reports the edge).
+THERMAL_CYCLE_EDGE_DELAYS: tuple[float, ...] = (0.0, 0.5, 1.0)
 THERMAL_CYCLE_LAG_IDENT_SD_MIN: float = 0.6
 # Until the lag is identified, a pool whose median eligible run is shorter than THERMAL_CYCLE_LAG_RUN_MULT x
 # THERMAL_CYCLE_LAG_PLAUSIBLE_MIN cannot earn "high" (the lag could hide a fifth or more of a short run's rise).
@@ -1796,8 +1802,9 @@ THERMAL_CYCLE_RESTART_LATE_MIN: float = 8.0  # reference median window after the
 THERMAL_CYCLE_RESTART_RES_MULT: float = 2.0  # drop if deviation > max(this * res, THERMAL_CYCLE_RESTART_FLOOR_F)
 THERMAL_CYCLE_RESTART_FLOOR_F: float = 0.8
 # Bounds applied after the fit.
-THERMAL_CYCLE_Q_BOUNDS_HEAT: tuple[float, float] = (0.5, 15.0)  # F/h
-THERMAL_CYCLE_Q_BOUNDS_COOL: tuple[float, float] = (-15.0, -0.5)
+# Issue #1512 reopened: 25 (was 15) so an oversized system (18 F/h, the dev sim's preset) is not clamped and graded high
+THERMAL_CYCLE_Q_BOUNDS_HEAT: tuple[float, float] = (0.5, 25.0)  # F/h
+THERMAL_CYCLE_Q_BOUNDS_COOL: tuple[float, float] = (-25.0, -0.5)
 THERMAL_CYCLE_K_BOUNDS: tuple[float, float] = (-0.5, -0.001)  # 1/h
 # Typical-house prior (fresh home): (mean, sd).
 THERMAL_CYCLE_PRIOR_Q_HEAT: tuple[float, float] = (8.0, 5.0)

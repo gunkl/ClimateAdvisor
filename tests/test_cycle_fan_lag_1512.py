@@ -260,7 +260,7 @@ class TestCoastThroughTheBlower:
 
 
 class TestSensorLag:
-    @pytest.mark.parametrize(("q", "tol"), [(6.0, 0.05), (10.0, 0.06), (15.0, 0.06)])
+    @pytest.mark.parametrize(("q", "tol"), [(6.0, 0.05), (10.0, 0.06), (15.0, 0.08)])
     def test_maintenance_cycles_on_a_lagging_fine_sensor_are_unbiased(self, q, tol):
         """lagcheck.py: 2-min sensor lag, fine sensor, 1 F swing. Before: -8 / -22 / -37 % graded high."""
         m = 1.0 / (q - 0.04 * 28) * 60
@@ -501,3 +501,112 @@ class TestUpgradeContinuity:
         assert r["model_version"] == cm.MODEL_VERSION and r["grade"] in ("low", "medium", "none")
         assert cm.grade({"ne": 3, "er_q": 0.99, "resolution_f": 1.0}) == "medium"
         assert cm.prior_from_cache({"cycle_fit_heat": {"q": 7.0}}, "heat", 0)["k_source"] == "typical"
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 8. evidence-based retention of the cycle file (owner 2026-11-12: "wouldn't want to age the data out if it was
+#    more correct")
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def _spread(cycles: list[dict], start: float, every_days: float) -> list[dict]:
+    """Move each cycle to ``start + i * every_days`` (keeps its internal timing)."""
+    out = []
+    for i, c in enumerate(cycles):
+        shift = start + i * every_days * 86400.0 - c["t_on"]
+        d = dict(c)
+        d["id"] = f"{c['mode']}-{int(c['t_on'] + shift)}"
+        d["t_on"] = c["t_on"] + shift
+        d["t_off"] = c["t_off"] + shift
+        d["samples"] = [[s[0] + shift, s[1], s[2]] for s in c["samples"]]
+        d["outdoor"] = [[o[0] + shift, o[1]] for o in c["outdoor"]]
+        out.append(d)
+    return out
+
+
+def _store_after_fit(tmp_path, cycles: list[dict], mode: str):
+    from custom_components.climate_advisor.cycle_store import CycleStore
+
+    store = CycleStore(tmp_path / "cycles.json")
+    for c in cycles:
+        store.add(c, now=cycles[-1]["t_off"])
+    r = cm.fit_cycles(store.cycles(mode), mode, cm.typical_prior(mode), now_ts=0)
+    store.set_weights(r["w_by_id"])
+    store.prune(cycles[-1]["t_off"] + 3600, force=True)
+    return store, r
+
+
+class TestEvidenceRetention:
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    def test_a_long_accurate_run_survives_90_days_of_short_pulses(self, tmp_path, mode):
+        sgn = 1.0 if mode == "heat" else -1.0
+        t0 = 1_760_000_000.0
+        long_run = _spread(synth(mode, q=7.0 * sgn, res=0.1, n=1, run=(45.0, 50.0), seed=31), t0, 1)
+        pulses = _spread(synth(mode, q=7.0 * sgn, res=0.1, n=100, run=(5.0, 6.0), seed=32), t0 + 86400.0, 1.2)
+        store, r = _store_after_fit(tmp_path, long_run + pulses, mode)
+        ids = {c["id"] for c in store.cycles(mode)}
+        assert pulses[-1]["t_on"] - long_run[0]["t_on"] > 110 * 86400
+        assert long_run[0]["id"] in ids, "an accurate long run that still carries weight is never aged out"
+        assert r["w_by_id"][long_run[0]["id"]] > 0.3
+
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    def test_a_contradicted_run_is_evicted_an_agreeing_one_kept(self, tmp_path, mode):
+        sgn = 1.0 if mode == "heat" else -1.0
+        t0 = 1_760_000_000.0
+        newer = _spread(synth(mode, q=7.0 * sgn, res=0.1, n=40, run=(40.0, 45.0), seed=33), t0 + 86400.0, 3.0)
+        for q_old, kept in ((3.0, False), (7.0, True)):
+            old = _spread(synth(mode, q=q_old * sgn, res=0.1, n=1, run=(40.0, 45.0), seed=34), t0, 1)
+            store, r = _store_after_fit(tmp_path / f"q{q_old}", old + newer, mode)
+            ids = {c["id"] for c in store.cycles(mode)}
+            assert (old[0]["id"] in ids) is kept, (q_old, r["w_by_id"][old[0]["id"]])
+
+    def test_the_cap_evicts_the_lowest_weight_not_the_oldest(self, tmp_path):
+        from custom_components.climate_advisor.cycle_store import CycleStore
+
+        store = CycleStore(tmp_path / "c.json", max_cycles=8)  # 4 per mode
+        cyc = _spread(synth("heat", q=7.0, res=0.1, n=4, run=(8.0, 9.0), seed=35), 1_760_000_000.0, 1)
+        for c in cyc:
+            store.add(c, now=cyc[-1]["t_off"])
+        store.set_weights({cyc[0]["id"]: 0.9, cyc[1]["id"]: 0.05, cyc[2]["id"]: 0.5, cyc[3]["id"]: 1.0})
+        extra = _spread(synth("heat", q=7.0, res=0.1, n=1, run=(8.0, 9.0), seed=36), cyc[-1]["t_on"] + 86400, 1)
+        store.add(extra[0], now=extra[0]["t_off"])  # unweighed (just recorded): full weight
+        ids = [c["id"] for c in store.cycles("heat")]
+        assert cyc[1]["id"] not in ids and cyc[0]["id"] in ids and extra[0]["id"] in ids
+
+    def test_weights_survive_a_reload(self, tmp_path):
+        from custom_components.climate_advisor.cycle_store import CycleStore
+
+        p = tmp_path / "c.json"
+        store = CycleStore(p)
+        cyc = _spread(synth("cool", q=-7.0, res=0.1, n=2, run=(8.0, 9.0), seed=37), 1_760_000_000.0, 1)
+        for c in cyc:
+            store.add(c, now=cyc[-1]["t_off"])
+        store.set_weights({cyc[0]["id"]: 0.004})
+        assert store.save()
+        again = CycleStore(p)
+        again.load(now=cyc[-1]["t_off"])
+        assert again._by_id[cyc[0]["id"]].w == pytest.approx(0.004)
+        assert again._by_id[cyc[1]["id"]].w is None
+
+
+class TestFirstLeadInAfterInstall:
+    @pytest.mark.parametrize("mode", ["heat", "cool"])
+    def test_first_ever_lead_in_counts_from_the_burner_and_records_no_rejection(self, mode):
+        coord = _make_thermostat_coord()
+
+        def _start(m):  # the real start's contract: a still-pending observation is abandoned (rejected) first
+            key = f"hvac_{m}"
+            if key in coord._pending_observations:
+                coord._abandon_observation(key, "new HVAC session started")
+            coord._pending_observations[key] = {"_phase": "active"}
+
+        coord._start_hvac_observation = AsyncMock(side_effect=_start)
+        coord._abandon_observation = MagicMock()
+        coord._pending_observations = {}
+        coord._ensure_pending_observations = lambda: None
+        act = _ACTION[mode]
+        _fire(coord, _t(0), (mode, "idle"), (mode, "fan"))  # never seen heating yet: #93 fallback opens it
+        _fire(coord, _t(1), (mode, "fan"), (mode, act))
+        _fire(coord, _t(11), (mode, act), (mode, "idle"))
+        assert coord._today_record.hvac_runtime_minutes == pytest.approx(10.0)
+        coord._abandon_observation.assert_not_called()

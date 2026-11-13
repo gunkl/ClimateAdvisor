@@ -1,6 +1,9 @@
 {
   "name": "r6b_natvent_window_close_follows_primary__v3",
   "description": "Same morning, house, models and events as the v4 twin; primary engine v3, v4 is the live comparison engine. v3's flat curve plans no early close (no engine cutoff); the list, the open step and the briefing close the windows at 10:16 AM, judged on v3's own rates (the plan's static 17:00 close is not what the list says either: the plan's simulation closes the period when outdoor air stops helping).",
+  "notes": [
+    "Issue #1537 (owner-approved golden change; re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)): decisions and service calls are unchanged; only incident_detected.thermostat_action changed (None -> off). (a) Effectiveness: unchanged, no decision, service call, assertion or promise outcome moved. (b) Docs<->production: docs/sim-harness-spec.md (#1537 default reporting). (c) Occupant: nothing the occupant sees changed; the golden now runs on a thermostat that reports its equipment like a real one."
+  ],
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 76,

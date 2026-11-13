@@ -1,5 +1,6 @@
 {
   "config": {
+    "thermostat_reports_hvac_action": false,
     "comfort_heat": 68,
     "comfort_cool": 76,
     "setback_heat": 60,
@@ -144,6 +145,9 @@
   ],
   "name": "tou_home_heat_bank_ends_no_hvac_action_1416",
   "description": "Issue #1416: the #1405 bank-end golden on a thermostat that does NOT report hvac_action. A home pre-heated to 76 F for a 16:15 high-cost period; the bank's mode was set at 14:00 and the 15:30 cycle re-asserted the bank in the same mode. Before the fix nothing recorded that the heat side ran (no hvac_action, and a same-mode write is not a mode change; the 14:00 mode change is outside the 120-minute window by 16:15), so at the period's start the selector armed the nearer edge: cool 76 F, the AC armed on a winter afternoon. Now every accepted bank write records its side, the settling guard holds heat, and the band write is heat 68 F, the same as on a thermostat that reports hvac_action.",
+  "notes": [
+    "Issue #1537 (opt-out, 2026-11-13): this golden deliberately models a thermostat that does NOT report hvac_action (its fix is the bank-write 'ran' record for that case), so it sets thermostat_reports_hvac_action: false and is byte-identical to before. With a reported action the settling guard would be satisfied by the action and the golden would pass on the pre-#1416 code (effectiveness lost)."
+  ],
   "verdict": {
     "type": "positive",
     "summary": "Without hvac_action, the end of a heat bank keeps heat armed instead of arming the AC",

@@ -8,6 +8,7 @@ re-implemented here (DOCTRINE: never mirror the logic under test).
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from datetime import UTC, datetime, timedelta
 
@@ -143,10 +144,15 @@ class TestDerivedHelpers:
         assert equipment(rd(0, hvac_action="off")) == "idle"
         assert equipment(rd(0, hvac_action="drying")) is None
 
-    def test_equipment_infers_when_action_is_missing(self):
-        r = rd(0, hvac_action=None, hvac_mode="heat", indoor_f=66.0, setpoint_f=68.0)
-        assert equipment(r) == "heating"
-        assert equipment(rd(0, hvac_action=None, hvac_mode="heat", indoor_f=68.2, setpoint_f=68.0)) == "idle"
+    def test_equipment_is_unknown_when_action_is_missing(self):
+        """Issue #1537, owner decision 2026-11-13: never infer heating/cooling from mode, fan, a missing action or
+        room temperature ("Sims report hvac_action"). Without hvac_action the equipment state is unknown (None),
+        whatever the mode, setpoint and room reading say -- including mode Off, which used to read as idle."""
+        assert equipment(rd(0, hvac_action=None, hvac_mode="heat", indoor_f=66.0, setpoint_f=68.0)) is None
+        assert equipment(rd(0, hvac_action=None, hvac_mode="heat", indoor_f=68.2, setpoint_f=68.0)) is None
+        assert equipment(rd(0, hvac_action=None, hvac_mode="cool", indoor_f=80.0, setpoint_f=74.0)) is None
+        assert equipment(rd(0, hvac_action=None, hvac_mode="off", indoor_f=60.0, setpoint_f=68.0)) is None
+        assert equipment(rd(0, hvac_action="", hvac_mode="heat", indoor_f=60.0, setpoint_f=68.0)) is None
         assert equipment(rd(0, hvac_action=None, hvac_mode=None)) is None
 
     def test_occupant_action_is_a_change_with_no_nearby_ca_command(self):
@@ -204,6 +210,13 @@ class TestP1SettlingFlip:
 
     def test_twin_no_cooling_in_the_window(self):
         assert hits_for("settling_flip", _afternoon_cooling_then_heat(indoor=67.0, with_cooling=False)) == []
+
+    def test_unreported_action_is_not_judged(self):
+        """Issue #1537 (owner decision 2026-11-13): with no hvac_action the equipment is unknown, never guessed from
+        the mode and room, so the #1073 shape on a thermostat that does not report its action is not judged."""
+        inp = _afternoon_cooling_then_heat(indoor=67.0)
+        rs = tuple(dataclasses.replace(r, hvac_action=None) for r in inp.readings)
+        assert hits_for("settling_flip", make_input(rs, inp.commands)) == []
 
     def test_twin_cooling_older_than_the_recency_window(self):
         rs = [
@@ -1028,10 +1041,32 @@ class TestP7ThermostatDeadband:
         rs = _db_house(60, indoor=75.4, mode="cool", action="off", setpoint=74.0)
         assert len(hits_for("comfort_kept", make_input(rs))) == 1
 
-    def test_an_unreported_action_is_not_idle(self):
-        # heat_cool so equipment() cannot infer heating from the single setpoint: the reading stays in control.
+    def test_an_unreported_action_is_not_idle_but_unknown(self):
+        """Issue #1537 (owner decision 2026-11-13: never infer equipment from mode or temperature): an unreported
+        action is not the deadband's "idle"; it is UNKNOWN. While the mode could be correcting the room, the time is
+        not judged and is recorded as ``equipment_unknown`` instead (never as the deadband)."""
         rs = _db_house(60, mode="heat_cool", action=None, setpoint=None, setpoint_low_f=68.0, setpoint_high_f=76.0)
+        inp = make_input(rs)
+        assert hits_for("comfort_kept", inp) == []
+        (x,) = _excused(inp)
+        assert x.excused_by == _iw.EXCUSED_BY_EQUIPMENT_UNKNOWN
+        assert x.minutes == pytest.approx(60.0)
+
+    def test_unreported_action_in_heat_far_below_the_floor_is_not_judged(self):
+        # The old inference called this "heating" (excused); now it is unknown: still never a hit, but recorded.
+        inp = make_input(_db_house(90, indoor=60.0, action=None))
+        assert hits_for("comfort_kept", inp) == []
+        assert [x.excused_by for x in _excused(inp)] == [_iw.EXCUSED_BY_EQUIPMENT_UNKNOWN]
+
+    def test_unreported_action_in_a_mode_that_cannot_correct_the_room_is_judged(self):
+        # Off (or the opposite mode) cannot be correcting a cold room, reported or not: the promise still applies.
+        assert len(hits_for("comfort_kept", make_input(_db_house(90, indoor=60.0, mode="off", action=None)))) == 1
+        rs = _db_house(90, indoor=60.0, mode="cool", action=None, setpoint=74.0)
         assert len(hits_for("comfort_kept", make_input(rs))) == 1
+
+    def test_a_reported_action_is_never_the_unknown_exception(self):
+        inp = make_input(_db_house(60))
+        assert {x.excused_by for x in _excused(inp)} == {_iw.EXCUSED_BY_THERMOSTAT_DEADBAND}
 
     def test_auto_above_the_ceiling_without_the_high_setpoint_is_strict(self):
         rs = _db_house(60, indoor=75.4, mode="auto", setpoint=74.0)  # only the single setpoint is known

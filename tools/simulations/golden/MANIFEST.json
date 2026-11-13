@@ -54,8 +54,8 @@
     "issue": 249
   },
   "cool_all_day_heat_all_day": {
-    "sha256": "9b4b43685728056314028e83a66175fcc3e8860752bf8647b213dade518ac634",
-    "signed": "2026-07-10",
+    "sha256": "b51da51a5cdf70eebb71254adac04e531a70f4aaa7b271a4e20a4eeb8aa2409d",
+    "signed": "2026-11-13",
     "issue": 136
   },
   "hot_all_day_no_nat_vent_window": {
@@ -99,8 +99,8 @@
     "issue": 218
   },
   "startup_indoor_above_cool_nat_vent_not_running": {
-    "sha256": "d72554fe0a326230d9808fdcc44a050e7460e341857070f4ed80a617fa8b189f",
-    "signed": "2026-11-01",
+    "sha256": "5aafa4f38518fd9c24823240ed046f677816d2668a5e268afb38bbdee07391c9",
+    "signed": "2026-11-13",
     "issue": 218
   },
   "startup_indoor_above_cool_sensors_closed": {
@@ -224,8 +224,8 @@
     "issue": 321
   },
   "warming_trend_pre_cool_applied": {
-    "sha256": "cc3b7229b5a35b45d62a6aaf9c55a71bb4a8ab65b199aebe225d256d09f8f33b",
-    "signed": "2026-11-07",
+    "sha256": "49758479fda66836cefff350e6a97d4ed70ac7b4b42fa2cba80bd21016386a02",
+    "signed": "2026-11-13",
     "issue": 258
   },
   "warming_trend_pre_cool_nat_vent_bypass": {
@@ -274,8 +274,8 @@
     "issue": 371
   },
   "cold_day_heat_all_day_with_override": {
-    "sha256": "60782d3add69ac7279b146ce27b1b626d4271e74f6492d5e2f342a0e87239872",
-    "signed": "2026-10-11",
+    "sha256": "434765e87ab812ab6f6938940901fccafaf357fb4da6e2cc62141d52cb319a33",
+    "signed": "2026-11-13",
     "issue": 229
   },
   "fan_fast_stop_on_outdoor_rise": {
@@ -289,13 +289,13 @@
     "issue": 482
   },
   "grace_full_lifecycle_clean_expiry": {
-    "sha256": "c9594e615fc9beaeba4042efbf71013a18abc027057076dc49cfb5a73500aef6",
-    "signed": "2026-11-01",
+    "sha256": "c8582276617f72485c2dba0760ea33772914e392fbb97fae4bf5d0e51fdee8c3",
+    "signed": "2026-11-13",
     "issue": 229
   },
   "grace_full_lifecycle_sensor_still_open": {
-    "sha256": "1efd8f5a34a8a007cb50a247fb3527881074be8c59f56e2569de8bc4d97b24c3",
-    "signed": "2026-11-01",
+    "sha256": "9d2971297186541bad967f6155f7b1a390b5fdd1587ca53e961bc241f04e7953",
+    "signed": "2026-11-13",
     "issue": 229
   },
   "issue-359-fan-state-machine": {
@@ -324,8 +324,8 @@
     "issue": 481
   },
   "manual_whf_on_suppresses_hvac": {
-    "sha256": "11eb2b8792e554c65c9130254dd28afca42718861f539cade511e94a74260fd1",
-    "signed": "2026-07-12",
+    "sha256": "25c923381e305e651780a986130f429812cc147df30619b567ce6b3632c5d470",
+    "signed": "2026-11-13",
     "issue": 495
   },
   "natvent_exit_hvac_shutoff": {
@@ -334,8 +334,8 @@
     "issue": 337
   },
   "override_adopted_on_matching_decision": {
-    "sha256": "c5984b82081eaf0353ccd276b3169eaac79bee7f1ff3c2a61f0c9d15bf86abb7",
-    "signed": "2026-11-01",
+    "sha256": "aa735e5897abaaab7066dbc07a6c13d9980c40cbf31296ac31ad39a300fc1832",
+    "signed": "2026-11-13",
     "issue": 483
   },
   "override_detection_and_confirmation": {
@@ -374,13 +374,13 @@
     "issue": 629
   },
   "issue_637_paused_during_grace_open_fallthrough": {
-    "sha256": "010412a0eaca70348a6f5ca35edf3b764ee43844dfba4d4f1667374c81183e68",
-    "signed": "2026-11-01",
+    "sha256": "833c06aa67152eccd4f1753498dc8209a335ac0623a3c1af3f163aee9110d3a6",
+    "signed": "2026-11-13",
     "issue": 637
   },
   "issue_637_paused_during_grace_nat_vent_exit": {
-    "sha256": "1fddaf45e4e80c21ecb0fed16e35e765b5500a43b0e838a4b99a946a9fbd8dc5",
-    "signed": "2026-11-01",
+    "sha256": "4e8a027ae1b3df694f17e18d38483f728cc14bd6402d665a34269392d1fddf34",
+    "signed": "2026-11-13",
     "issue": 637
   },
   "override_second_override_during_grace": {
@@ -414,8 +414,8 @@
     "issue": 645
   },
   "issue_677_rf_timer_restart_resume": {
-    "sha256": "a63870a4ed17874c26b176c60bf39c85e178900f8b09a573071e25a340b79cb6",
-    "signed": "2026-10-31",
+    "sha256": "8b1de359c3fbd5d1abba9f1d1fafa747e0ed81455d7ebb5736b0d19efa269f98",
+    "signed": "2026-11-13",
     "issue": 677
   },
   "restart_whf_ac_mutex_backstop_race": {
@@ -449,8 +449,8 @@
     "issue": 764
   },
   "override_cleared_on_restart": {
-    "sha256": "253552818e6e451211d6be478c8261c9b6f0bc22701c5ab4dfe6db53d29c546c",
-    "signed": "2026-11-01",
+    "sha256": "50a8b649eb055953ee4d80d194e7a654fbd6b79c7e32e60207789446e8cdecb2",
+    "signed": "2026-11-13",
     "issue": 1193
   },
   "mild_day_planned_window_no_fan_pauses": {
@@ -484,8 +484,8 @@
     "issue": 1209
   },
   "issue_1222_leaving_home_ends_override_grace": {
-    "sha256": "47bf6eea0b11e953ebad33ae8c8135a747cffd727d349fadc8037c2604c403c1",
-    "signed": "2026-11-02",
+    "sha256": "f54890a45b1c2c8f04f37a6207bf375c224526fda74c55bcb480c254be65eb30",
+    "signed": "2026-11-13",
     "issue": 1222
   },
   "issue_1276_evening_floor_heat_on_no_open_windows_advice": {
@@ -584,13 +584,13 @@
     "issue": 1230
   },
   "r6b_natvent_window_close_follows_primary__v4": {
-    "sha256": "7575446eeaf2a984e7761e177558791a07b3550a888cbd60d50ffe108da5bb4d",
-    "signed": "2026-11-06",
+    "sha256": "e65077ee911a3adff550361444b2dda86b2f891e6943fb73bbdc5342d2e42fac",
+    "signed": "2026-11-13",
     "issue": 1230
   },
   "r6b_natvent_window_close_follows_primary__v3": {
-    "sha256": "d19a5a1fd734e05e82fb73733c04dcdc72af4410d14e39b63eae2513347eaea0",
-    "signed": "2026-11-06",
+    "sha256": "b0c7362e100d5d4f1907d79e15dceb8cc22cc4694c4c6d05de9ee9979fa85c91",
+    "signed": "2026-11-13",
     "issue": 1230
   },
   "r6b_tou_bank_lead_follows_primary__v4": {
@@ -634,13 +634,13 @@
     "issue": 1404
   },
   "tou_away_heat_bank_surfaces_1404": {
-    "sha256": "cd0471f95ddb8f21f61e05d94b58a059e4500c2a4ad70b2f5466483e776aa68a",
-    "signed": "2026-11-07",
+    "sha256": "0b210d96770b8b5a50360eb050f954bafd8a9475e3bb7f61e27b16d13f5579dc",
+    "signed": "2026-11-13",
     "issue": 1404
   },
   "tou_vacation_cool_bank_surfaces_1404": {
-    "sha256": "02b34b8bf72087f58a95b5f05ba97f104ff1d3b8ed95d09f0282618e5bd7ba7d",
-    "signed": "2026-11-07",
+    "sha256": "6020c09f38eeddbc5ecf94b030dd0586552eeab33bb7aaaf885f2fbbbc3a30f4",
+    "signed": "2026-11-13",
     "issue": 1404
   },
   "tou_home_cool_bank_ends_on_time_1405": {
@@ -654,13 +654,13 @@
     "issue": 1405
   },
   "tou_away_heat_bank_home_return_1404": {
-    "sha256": "9c287db920afbb7324839e2b9bcf48a701d84c54326480949e4fea47775300af",
-    "signed": "2026-11-07",
+    "sha256": "c3b05aa5a27f74fc0084137c69dad1979eea6676d0a850eb8ede10e08d5d6a50",
+    "signed": "2026-11-13",
     "issue": 1404
   },
   "tou_away_heat_bank_home_return_surfaces_1404": {
-    "sha256": "e8e7b4c60a370f965701a0f75ee3d37e88c2d188efbe016b28639c2f9a3ae014",
-    "signed": "2026-11-07",
+    "sha256": "297b7c5acd7c817c3a227b6322cd73c1332630c7976f00bfca5239aa52115aae",
+    "signed": "2026-11-13",
     "issue": 1404
   },
   "tou_home_cool_bank_owner_leaves_1404": {
@@ -679,23 +679,23 @@
     "issue": 1404
   },
   "tou_away_cool_bank_frozen_for_window_1410": {
-    "sha256": "8a65a7a3ecfe2d0c76af6d870cc735efa719af71beb9d17ac0d9c465c6587ec6",
-    "signed": "2026-11-07",
+    "sha256": "0c836dda73f2176a7a18235527dac151f290b83ecc2b9eae97c6f407d2aacca6",
+    "signed": "2026-11-13",
     "issue": 1410
   },
   "tou_home_cool_bank_ends_no_hvac_action_1416": {
-    "sha256": "f6486b3c7efade089c62eba7bef00514aace8379e491b14c771292a755ed2d35",
-    "signed": "2026-11-07",
+    "sha256": "d6110cda8342c00638d3d224c92e3a5bf26d8194933a603b0c5be7f76fdd46e6",
+    "signed": "2026-11-13",
     "issue": 1416
   },
   "tou_home_heat_bank_ends_no_hvac_action_1416": {
-    "sha256": "1933acd5cb883df76f74d7bc02c6d877fe24c30747249273b4c739d040ed1357",
-    "signed": "2026-11-07",
+    "sha256": "f6f0f7965fffa6ef6e2542f8a1639c8ef4b3e0fe04639703a4acaf025c3c8ad3",
+    "signed": "2026-11-13",
     "issue": 1416
   },
   "hot_night_same_mode_pre_cool_wakeup_keeps_cool_1417": {
-    "sha256": "a363d8593bf9688f7b8a1d2c1708a4e93daaaca93e8b8b48d167591550b9daf9",
-    "signed": "2026-11-07",
+    "sha256": "17ac64c8a441b79a52fd1c98e8191e78c82da9645d2ffd35eb9f92844f1926be",
+    "signed": "2026-11-13",
     "issue": 1417
   },
   "issue_1436_warm_day_evening_floor_close_strips_follow_plan__whf": {

@@ -382,6 +382,9 @@ class Hit:
 
 
 EXCUSED_BY_THERMOSTAT_DEADBAND = "thermostat_deadband"
+# Issue #1537: P7 time not judged because the thermostat does not report hvac_action, so whether its equipment was
+# already correcting the room is unknown (owner decision 2026-11-13: never infer it from mode or temperature).
+EXCUSED_BY_EQUIPMENT_UNKNOWN = "equipment_unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,10 +423,13 @@ def _ev(**kw: Any) -> Evidence:
 
 
 def equipment(r: Reading) -> str | None:
-    """'heating' | 'cooling' | 'idle' | 'fan' | None (unknown) from ground truth.
+    """'heating' | 'cooling' | 'idle' | 'fan' | None (unknown), from the thermostat's reported ``hvac_action`` only.
 
-    Uses ``hvac_action`` when the thermostat reports it; otherwise infers from mode, setpoint and
-    indoor with a 0.5 F swing.
+    Issue #1537 (owner decision 2026-11-13: never infer heating/cooling from mode, fan, a missing action or room
+    temperature): a thermostat that does not report ``hvac_action`` has UNKNOWN equipment state, whatever its mode,
+    setpoint and room reading (it used to be guessed from them with a 0.5 F swing, and mode Off read as idle). The
+    checks that read this say what they do with unknown: P1 does not judge an edge it cannot see; P7 records the
+    time as ``equipment_unknown`` instead of judging it, while the live mode is one that could be correcting it.
     """
     a = r.hvac_action
     if a:
@@ -432,14 +438,6 @@ def equipment(r: Reading) -> str | None:
             return a
         if a in ("idle", "off"):
             return "idle"
-        return None
-    mode = (r.hvac_mode or "").lower()
-    if mode == "off":
-        return "idle"
-    if mode in ("heat", "cool") and r.indoor_f is not None and r.setpoint_f is not None:
-        if mode == "heat":
-            return "heating" if r.indoor_f < r.setpoint_f - 0.5 else "idle"
-        return "cooling" if r.indoor_f > r.setpoint_f + 0.5 else "idle"
     return None
 
 
@@ -558,7 +556,12 @@ def _p1_start_judged(rs: tuple[Reading, ...] | list[Reading], k: int) -> bool:
 
 
 def check_p1_settling_flip(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
-    """After cooling, a shallow dip must not start the heat (and the mirror)."""
+    """After cooling, a shallow dip must not start the heat (and the mirror).
+
+    Judged only on REPORTED equipment (Issue #1537): an edge where either reading's ``equipment()`` is unknown (no
+    hvac_action) is skipped, since a start that cannot be seen cannot be judged; a thermostat that never reports
+    hvac_action is therefore never judged by P1.
+    """
     hits: list[Hit] = []
     rs = inp.readings
     if len(rs) < 2:
@@ -1278,15 +1281,16 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
     gap = timedelta(minutes=NUMBERS.P7_MAX_GAP_MIN)
-    # (run, ts) of the previous reading when it was excused: its state holds until the next reading arrives.
-    pending: tuple[dict[str, Any], datetime] | None = None
+    # (run, ts, excused_by) of the previous reading when it was excused: its state holds until the next reading.
+    pending: tuple[dict[str, Any], datetime, str] | None = None
     for idx, r in enumerate(rs):
         if pending is not None:
-            run_p, ts_p = pending
+            run_p, ts_p, why = pending
             span = min(_mins(ts_p, r.ts), NUMBERS.P7_MAX_GAP_MIN)
-            run_p["excused_min"] += span
+            row = run_p["excused"].setdefault(why, {"min": 0.0, "iv": []})
+            row["min"] += span
             if span > 0:
-                run_p["excused_iv"].append((ts_p, ts_p + timedelta(minutes=span)))
+                row["iv"].append((ts_p, ts_p + timedelta(minutes=span)))
             pending = None
         o = outside(r)
         if o is None or not in_control(idx, r, o[0], o[1]):
@@ -1300,15 +1304,19 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
                 "worst": 0.0,
                 "cross": None,
                 "last": r.ts,
-                "excused_min": 0.0,
-                "excused_iv": [],
+                "excused": {},  # excused_by -> {"min": minutes, "iv": [(start, end), ...]}
             }
             runs.append(cur)
         cur["last"] = r.ts
         cur["worst"] = max(cur["worst"], dist)
         edge = cfg.floor_lo(r.ts) if side == "below" else cfg.ceiling_hi(r.ts)
         if _p7_thermostat_deadband(r, side, edge):
-            pending = (cur, r.ts)
+            pending = (cur, r.ts, EXCUSED_BY_THERMOSTAT_DEADBAND)
+            continue
+        # Issue #1537: no hvac_action, and the live mode could be correcting this side -- whether the equipment is
+        # already running is unknown, so the reading is not judged (recorded, never a hit; the run's clock goes on).
+        if equipment(r) is None and (r.hvac_mode or "").lower() in _P7_DEADBAND_MODES[side]:
+            pending = (cur, r.ts, EXCUSED_BY_EQUIPMENT_UNKNOWN)
             continue
         if cur["cross"] is None and _mins(cur["start"], r.ts) > NUMBERS.P7_MAX_MIN:
             cur["cross"] = r.ts
@@ -1321,7 +1329,9 @@ def check_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
 
     Issue #1260 (owner-approved): except while the thermostat itself is in the matching mode, idle, set at or inside
     the band edge, and the room is within 2.5 F of both that edge and the thermostat's own setpoint (the thermostat's
-    own deadband).
+    own deadband). Issue #1537: a reading with no hvac_action while the live mode could be correcting the room is not
+    judged either (equipment unknown; recorded as ``equipment_unknown``); with a mode that cannot correct it (Off, the
+    opposite mode) it is judged, and the overshoot excuse needs a REPORTED opposite run.
     """
     hits: list[Hit] = []
     for run in _p7_runs(inp, cfg):
@@ -1346,22 +1356,28 @@ def check_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
 
 
 def excused_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Excused]:
-    """The time P7 did not count because of the thermostat's deadband, one record per open run (Issue #1260)."""
+    """The time P7 did not count, one record per open run and exception.
+
+    ``thermostat_deadband`` (Issue #1260) and ``equipment_unknown`` (Issue #1537: no hvac_action while the live mode
+    could be correcting the room).
+    """
     out: list[Excused] = []
     for run in _p7_runs(inp, cfg):
-        if run["excused_min"] <= 0:
-            continue
-        out.append(
-            Excused(
-                promise="comfort_kept",
-                ts=run["last"],
-                key=RunKey(f"comfort_kept:{run['side']}:{EXCUSED_BY_THERMOSTAT_DEADBAND}", run["start"], run["last"]),
-                excused_by=EXCUSED_BY_THERMOSTAT_DEADBAND,
-                minutes=run["excused_min"],
-                evidence=_ev(minutes=run["excused_min"], side=run["side"], excused_by=EXCUSED_BY_THERMOSTAT_DEADBAND),
-                intervals=tuple(run["excused_iv"]),
+        for why in (EXCUSED_BY_THERMOSTAT_DEADBAND, EXCUSED_BY_EQUIPMENT_UNKNOWN):
+            row = run["excused"].get(why)
+            if row is None or row["min"] <= 0:
+                continue
+            out.append(
+                Excused(
+                    promise="comfort_kept",
+                    ts=run["last"],
+                    key=RunKey(f"comfort_kept:{run['side']}:{why}", run["start"], run["last"]),
+                    excused_by=why,
+                    minutes=row["min"],
+                    evidence=_ev(minutes=row["min"], side=run["side"], excused_by=why),
+                    intervals=tuple(row["iv"]),
+                )
             )
-        )
     return out
 
 

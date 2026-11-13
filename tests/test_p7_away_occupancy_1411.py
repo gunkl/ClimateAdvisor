@@ -186,9 +186,13 @@ class TestStateCarriedPastTheWindow:
 # ── end to end, through the real engine and coordinator ────────────────────────────────────────────────────
 def _run_golden(*, classify_first: bool, occupancy_on_readings: bool, monkeypatch):
     from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator  # noqa: PLC0415
+    from tools.sim_harness import fake_hass as _fh  # noqa: PLC0415
     from tools.sim_harness import promise_probe as pp  # noqa: PLC0415
     from tools.sim_harness.run_production import run_production_scenario  # noqa: PLC0415
 
+    # Issue #1537: a 0.5 F thermostat swing, so the Away setback below the room stops the furnace (see the negative
+    # control's docstring); with the 1.5 F harness default P7 would excuse every reading as a running furnace.
+    monkeypatch.setattr(_fh, "THERMOSTAT_ACTION_DEADBAND_F", 0.5)
     if not occupancy_on_readings:
         monkeypatch.setattr(pp.FakeHassPromiseSource, "_occupancy", lambda self: None)
         monkeypatch.setattr(ClimateAdvisorCoordinator, "_promise_occupancy", lambda self: None)
@@ -235,7 +239,15 @@ def test_away_before_the_first_classification_is_not_a_miss_end_to_end(monkeypat
 
 
 def test_negative_control_end_to_end_without_either_fix_the_false_miss_returns(monkeypatch) -> None:
-    """Effectiveness: no occupancy on readings and no carried mark reproduces the reported 3.0 F / 50 min line."""
+    """Effectiveness: no occupancy on readings and no carried mark reproduces the reported 3.0 F / 50 min line.
+
+    Issue #1537: the harness thermostat now reports hvac_action, and P7 never judges a reading whose furnace is
+    reported running. In the reported incident the furnace was idle at 64 F under a 63 F Away setpoint. With the
+    harness's 1.5 F swing the scripted room (which never warms) leaves the furnace that started at 12:59 "heating"
+    until 64.5 F, so ``_run_golden`` runs the thermostat with a 0.5 F swing: the setback below the room stops the
+    furnace at once, as on the incident's thermostat (and the positive tests are judged on the same idle
+    furnace). P7 equipment-unknown cannot reproduce it either: such a reading is not judged.
+    """
     from custom_components.climate_advisor.promise_journal import PromiseJournal as PJ  # noqa: PLC0415
 
     monkeypatch.setattr(PJ, "_leaves_window", lambda self, mark: None)

@@ -64,6 +64,7 @@
     }
   ],
   "notes": [
+    "Issue #1537 (owner-approved golden change; re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)): decisions and service calls are unchanged; only incident_detected.thermostat_action changed (None -> off). (a) Effectiveness: unchanged, no decision, service call, assertion or promise outcome moved. (b) Docs<->production: docs/sim-harness-spec.md (#1537 default reporting). (c) Occupant: nothing the occupant sees changed; the golden now runs on a thermostat that reports its equipment like a real one.",
     "Issue #1211 (C1): this scenario used to hand-set windows_recommended=false on a warm day with a 60 F low, which classify_day never produces; with A3 the planned-window period no longer exempts the handler, so the setup is made classifier-true (flag, 06:00-10:00 times, forecast high 80 / low 60) and the outcomes are unchanged: with no fan configured the handler pauses at the open window. Coordinator mode needs a later event for the open's debounce timer to fire before the run ends."
   ],
   "use_coordinator": true,

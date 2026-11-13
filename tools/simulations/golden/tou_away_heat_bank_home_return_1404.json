@@ -34,6 +34,9 @@
   "capture_next_action": true,
   "name": "tou_away_heat_bank_home_return_1404",
   "description": "Issue #1404 review: an Away pre-heat bank (63 F) is cut short when the owner comes home at 15:40; the home bank takes over and ends on time at 16:15. Since Issue #1409 the change writes the home bank once (heat 76 F at 15:40).",
+  "notes": [
+    "Issue #1537 (owner-approved golden change; re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)): decisions and service calls are unchanged; only incident_detected.thermostat_action changed (None -> off). (a) Effectiveness: unchanged, no decision, service call, assertion or promise outcome moved. (b) Docs<->production: docs/sim-harness-spec.md (#1537 default reporting). (c) Occupant: nothing the occupant sees changed; the golden now runs on a thermostat that reports its equipment like a real one."
+  ],
   "events": [
     {
       "time": "2026-01-13T13:00:00",

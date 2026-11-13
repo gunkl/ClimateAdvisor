@@ -26,6 +26,7 @@ Caps -- the tighter wins: ``cap`` beyond the target, and never past the OPPOSITE
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, NamedTuple
@@ -146,6 +147,70 @@ def decide_remote_offset(
             return RemoteOffsetDecision(RemoteOffsetAction.HOLD, m, "awaiting_startup")
         return RemoteOffsetDecision(RemoteOffsetAction.RAISE, min(m + step_f, max_magnitude_f), "raised")
     return RemoteOffsetDecision(RemoteOffsetAction.HOLD, m, "in_band")
+
+
+class RemoteLoopEmulator:
+    """The live remote-sensor outer loop (#1194), emulated over forecast steps (Issue #1553).
+
+    Used by the v4 display forecast (passed to ``predictor_v4.predict`` as its ``sleep_loop``, which calls
+    :meth:`setpoints` once per step, in order) and by the bedroom night strategy (Issue #1554), so the chart, the night
+    card and the house share one rule.
+
+    One rule with the house: each side (heat at the band floor, cool at the band ceiling) is decided by
+    ``remote_offset.decide_remote_offset`` with the live loop's measured swing, step, cap and startup wait. Raise
+    only between runs, step down any time, the offset capped at the tighter of the cap and the opposite band edge.
+    Outside the sleep window, or with a side not armed (``None``: windows open, an HVAC pause), that side's offset is
+    cleared and the plain band edge is held, as the live loop's gate does.
+    """
+
+    def __init__(self, *, swing_heat_f: float, swing_cool_f: float, unit: str, step_minutes: int = 15) -> None:
+        self._swing = {"heat": float(swing_heat_f), "cool": float(swing_cool_f)}
+        self._step = step_f(unit)
+        self._cap = cap_f(unit)
+        self._wait_s = startup_wait_s(None)
+        self._step_s = float(step_minutes * 60)
+        self._mag = {"heat": 0.0, "cool": 0.0}
+        self._since_raise: dict[str, float | None] = {"heat": None, "cool": None}
+
+    def _side(self, mode: str, target: float, remote: float, floor: float, ceiling: float, running: bool) -> float:
+        since = self._since_raise[mode]
+        if since is not None:
+            since += self._step_s  # a step has passed since the last decision (the raise was at its start)
+        decision = decide_remote_offset(
+            mode=mode,
+            target_f=target,
+            remote_f=remote,
+            swing_f=self._swing[mode],
+            magnitude_f=self._mag[mode],
+            step_f=self._step,
+            max_magnitude_f=max_magnitude_f(mode, target, floor=floor, ceiling=ceiling, cap_f=self._cap),
+            seconds_since_raise=since,
+            wait_s=self._wait_s,
+            equipment_active=running,
+        )
+        self._since_raise[mode] = 0.0 if decision.magnitude_f > self._mag[mode] + 1e-9 else since
+        self._mag[mode] = decision.magnitude_f
+        return decision.magnitude_f
+
+    def setpoints(
+        self, *, in_window: bool, target_f: float, heat_sp: float | None, cool_sp: float | None, running: int
+    ) -> tuple[float | None, float | None]:
+        if not in_window or not math.isfinite(target_f):
+            self._mag = {"heat": 0.0, "cool": 0.0}
+            self._since_raise = {"heat": None, "cool": None}
+            return heat_sp, cool_sp
+        hsp, csp = heat_sp, cool_sp
+        if heat_sp is None:
+            self._mag["heat"], self._since_raise["heat"] = 0.0, None
+        else:
+            ceiling = cool_sp if cool_sp is not None else heat_sp + self._cap
+            hsp = heat_sp + self._side("heat", heat_sp, target_f, heat_sp, ceiling, running == 1)
+        if cool_sp is None:
+            self._mag["cool"], self._since_raise["cool"] = 0.0, None
+        else:
+            floor = heat_sp if heat_sp is not None else cool_sp - self._cap
+            csp = cool_sp - self._side("cool", cool_sp, target_f, floor, cool_sp, running == -1)
+        return hsp, csp
 
 
 class RemoteOffsetGate(StrEnum):

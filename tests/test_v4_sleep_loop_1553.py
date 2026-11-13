@@ -176,3 +176,17 @@ class TestPlanEdges:
             return sum(r.minutes for r in tl.runs if r.mode == "heat")
 
         assert night_heat(2.5) > night_heat(0.0)
+
+
+# ------------------------------------------------------------------------------------------------ one rule (#1554)
+def test_the_night_card_the_chart_and_the_live_rule_share_one_emulated_loop():
+    """Issue #1554: ``night_strategy`` had its own copy of the loop (Fahrenheit steps on Celsius homes, a 1 F edge
+    clamp, the offset kept through a pause). It now uses the emulator that the v4 display forecast uses."""
+    import inspect
+
+    from custom_components.climate_advisor import night_strategy, remote_offset
+
+    assert v4_shadow.RemoteLoopEmulator is remote_offset.RemoteLoopEmulator
+    src = inspect.getsource(night_strategy._simulate)
+    assert "RemoteLoopEmulator(" in src
+    assert "REMOTE_OFFSET_STEP_F" not in src and "REMOTE_OFFSET_CAP_F" not in src

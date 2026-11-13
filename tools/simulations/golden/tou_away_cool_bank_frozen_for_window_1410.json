@@ -214,6 +214,9 @@
     }
   ],
   "description": "Issue #1410 (decision C23): an empty house on a hot day (outdoor 90 F, k_passive -0.1, so the drift is below the 6 F cap and the raw split is fractional) with a 16:15-21:00 high-cost period, a cycle every 30 minutes until 19:00. Indoor reads 79 F when the bank opens, 78 at 13:10 and 77 at 14:10 as it pre-cools, then 79, 80 and 81 F as it drifts during the period. The bank target and the widened edge are snapped to the thermostat's step (1 F, none advertised) and frozen when the window opens, so the thermostat is told cool 77 for the whole bank and cool 83 for the whole period. (Here the bank stays 77 through rounding alone; the freeze is what keeps the period at 83 as the house drifts to 80 and 81 F.)",
+  "notes": [
+    "Issue #1537 (owner-approved golden change; re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)): decisions and service calls are unchanged; only incident_detected.thermostat_action changed (None -> off). (a) Effectiveness: unchanged, no decision, service call, assertion or promise outcome moved. (b) Docs<->production: docs/sim-harness-spec.md (#1537 default reporting). (c) Occupant: nothing the occupant sees changed; the golden now runs on a thermostat that reports its equipment like a real one."
+  ],
   "verdict": {
     "type": "positive",
     "summary": "The Away bank target and the widened edge are whole degrees and do not creep as the indoor reading changes",

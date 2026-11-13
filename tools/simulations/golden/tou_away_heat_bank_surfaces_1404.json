@@ -158,6 +158,9 @@
     }
   ],
   "description": "Issue #1404 (Away heat): an empty house on a cold day with a 16:15-21:00 peak (Away band 60-80 F). The split-delta bank tells the thermostat heat 63 F. Before the fix Status, the thresholds and the briefing quoted heat 60 F, the chart drew 60-63 F, Next Automation said 'No more actions today' and the plan list called the band 'the away band'.",
+  "notes": [
+    "Issue #1537 (owner-approved golden change; re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)): decisions and service calls are unchanged; only incident_detected.thermostat_action changed (None -> off). (a) Effectiveness: unchanged, no decision, service call, assertion or promise outcome moved. (b) Docs<->production: docs/sim-harness-spec.md (#1537 default reporting). (c) Occupant: nothing the occupant sees changed; the golden now runs on a thermostat that reports its equipment like a real one."
+  ],
   "verdict": {
     "type": "positive",
     "summary": "While an empty house pre-heats for a peak, every surface says it is held to 63 F and when the widened Away band takes over",

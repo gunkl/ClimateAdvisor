@@ -4,6 +4,7 @@
   "source": "synthetic",
   "issue": 136,
   "notes": [
+    "Issue #1537 (owner-approved golden change; re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)): the thermostat now reports heating from 06:01 (68 F is past its own 68.5 F start point under the 70 F setpoint) and, with the scripted room never reaching its 71.5 F stop point, is still heating at 22:00. Production's settling guard reads the reported run (comfort-edge-selection-spec R3: 'heating ran 0 min ago') and holds the bedtime heat->cool margin switch (comfort_switch_held, zone margin), so bedtime now sends heat at the 64 F setback (set_temperature heat 64) instead of set_hvac_mode cool + cool 72 F. That held heat comes from the harness thermostat's 1.5 F stop swing (the scripted room never reaches 71.5 F, so the furnace never stops), not from the physics of a real thermostat: with a realistic 0.5 F swing the furnace stops at 70.5 F and production arms cool 72 F at bedtime as before, a pre-existing production issue tracked as #1541 (open). This golden records the current behaviour under the harness swing and cites #1541; it is not evidence that the bedtime cool arming is fixed. Assertions unchanged. (a) Effectiveness: the assertions still fail without the classification or the bedtime setback; they do not discriminate the hold (setback_applied 64 F was recorded either way). (b) Docs<->production: comfort-edge-selection-spec R3/R2 and sim-harness-spec match production. (c) Occupant: under this harness the AC is not armed at bedtime while the furnace still runs; on a real thermostat with a tight swing the occupant can still get cool 72 F armed on a cold night (#1541).",
     "Covers the standard cold day pattern: heat on all day, no nat vent, setback at night.",
     "Outdoor never reaches indoor levels — no nat vent activation is possible.",
     "Bedtime setback uses DEFAULT_SLEEP_HEAT (64F, a flat default reformatted to a real tuned installation's own value in the architecture-reset session) since no thermal model or explicit sleep_heat is configured.",
@@ -74,7 +75,7 @@
   "verdict": {
     "type": "positive",
     "summary": "Cold day applies heat at comfort target all day; bedtime setback fires at DEFAULT_SLEEP_HEAT",
-    "observed_behavior": "classification_applied (heat, 70F) at 6 AM → setback_applied (64F) at bedtime",
+    "observed_behavior": "classification_applied (heat, 70F) at 6 AM → setback_applied (64F) at bedtime, heat kept (the bedtime switch to cool is held while the harness furnace still runs; with a realistic 0.5 F swing production arms cool 72 F, open issue #1541). Re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)",
     "expected_behavior": "Continuous heat mode all day; no nat vent (outdoor too cold); bedtime setback to 64F"
   }
 }

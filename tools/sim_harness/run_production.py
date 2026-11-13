@@ -136,7 +136,11 @@ if _PROJECT_ROOT not in sys.path:
 from tools.sim_harness._loop import run_coro  # noqa: E402
 from tools.sim_harness.build_coordinator import arm_startup_coalesce_end, build_headless_coordinator  # noqa: E402
 from tools.sim_harness.build_engine import build_headless_engine  # noqa: E402
-from tools.sim_harness.fake_hass import THERMOSTAT_ACTION_DEADBAND_F, FakeHass, FakeState  # noqa: E402
+from tools.sim_harness.fake_hass import (  # noqa: E402
+    FakeHass,
+    FakeState,
+    configure_thermostat_action,
+)
 from tools.sim_harness.fake_scheduler import FakeScheduler  # noqa: E402
 from tools.sim_harness.ha_stubs import install_ha_stubs  # noqa: E402
 from tools.sim_harness.scenario_model import (  # noqa: E402
@@ -266,6 +270,7 @@ def _inject_thermostat_mode(
         attrs["temperature"] = temperature
     if hvac_action is not None:
         attrs["hvac_action"] = hvac_action
+        fake_hass.services.mark_action_scripted(climate_entity)  # Issue #1537: scripted even if equal to the seed
     else:  # Issue #1318: no action injected -- the thermostat answers the occupant's change (a derived action only)
         fake_hass.services.rederive_on_occupant_mode(
             climate_entity, existing.state if existing is not None else None, hvac_mode, attrs
@@ -453,19 +458,16 @@ class FakeHassSession:
             fake_hass.set_echo_delay(climate_entity, float(_echo))
 
         # --- Issue #1310: the thermostat derives the hvac_action it reports after CA's commands ---
-        # Only for a thermostat that reports one (scenario-injected hvac_action, or config
-        # "thermostat_reports_hvac_action": true, which seeds it from the first moment); the deadband is the
+        # Only for a thermostat that reports one (the default since Issue #1537, seeded from the first moment;
+        # config "thermostat_reports_hvac_action": false opts out); the deadband is the
         # real-HA sim thermostat's 1.5 F, converted for a Celsius install.
         # "thermostat_action": "scripted" keeps the scenario's injected hvac_action through CA's mode changes too
         # (a world whose equipment never starts, e.g. the Issue #1194 e cap scenarios).
-        if merged_config.get("thermostat_action") == "scripted":
-            fake_hass.set_action_deadband(climate_entity, None)
-        elif merged_config.get("temp_unit") == "celsius":
-            fake_hass.set_action_deadband(climate_entity, THERMOSTAT_ACTION_DEADBAND_F / 1.8)
-        if merged_config.get("thermostat_reports_hvac_action"):
-            _seed_cs = fake_hass.states.get(climate_entity)
-            if _seed_cs is not None and "hvac_action" not in _seed_cs.attributes:
-                _seed_cs.attributes["hvac_action"] = "off" if _seed_cs.state == "off" else "idle"
+        # Issue #1537 (owner decision 2026-11-13, "Sims report hvac_action"): reporting is the DEFAULT, like a
+        # real thermostat; the value is the thermostat's own loop (FakeHass.seed_hvac_action), never CA's
+        # decisions. "thermostat_reports_hvac_action": false models a thermostat with no such attribute.
+        # One rule shared with build_headless_multi_zone (Issue #1539).
+        configure_thermostat_action(fake_hass, climate_entity, merged_config)
 
         # --- Sensor tracker - drives engine._sensor_check_callback (engine-only mode) ---
         # Issue #476: when a coordinator is present, its real __init__ already wired

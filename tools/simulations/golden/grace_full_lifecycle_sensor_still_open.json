@@ -4,6 +4,7 @@
   "source": "synthetic",
   "issue": 229,
   "notes": [
+    "Issue #1537 (owner-approved golden change; re-derived 2026-11-13, owner approved: harness thermostats report hvac_action (#1537)): decisions and service calls are unchanged; only incident_detected.thermostat_action changed (None -> off). (a) Effectiveness: unchanged, no decision, service call, assertion or promise outcome moved. (b) Docs<->production: docs/sim-harness-spec.md (#1537 default reporting). (c) Occupant: nothing the occupant sees changed; the golden now runs on a thermostat that reports its equipment like a real one.",
     "Issue #1142 (owner-approved golden change): rule 3 -- the only exception to 'no heat/cool with a window open after the debounce' is the occupant's manual override. Climate Advisor's own automation grace is not one, so it no longer holds off the pause: a window open past the debounce inside it gets the same answer as outside a grace (start nat-vent if the nat-vent FSM allows it, otherwise pause). Superseded by this note: the 13:12 assertion below is now 'paused'; the older notes describing 'grace blocks the reopen' and its revert test are historical.",
     "Tests the grace period full lifecycle: pause → grace → sensor opens during grace (blocked) → re-pause on grace expiry.",
     "Issue #476: migrated to use_coordinator=true, same pattern as grace_full_lifecycle_clean_expiry.json.",

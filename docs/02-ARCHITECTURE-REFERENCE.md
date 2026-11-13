@@ -417,7 +417,7 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 - Storage: JSON file in HA config dir
 
 ### Thermal Model Parameters (Issue #114)
-- Cycle model gates (Issues #1512/#1516): cycle ≥ 3 min and readings moved ≥ 3 resolution steps; prior from the typical house or the stored rate by evidence; evidence gives way only to newer cycles (`THERMAL_EVIDENCE_HALF_N` 20, contradicting 5; never with time); at most the last 60 eligible cycles (`cycle_model.py`, see 05-LEARNING-ENGINE-DESIGN.md § Parameter Extraction)
+- Cycle model gates (Issues #1512/#1516): cycle ≥ 3 min and readings moved ≥ 3 resolution steps; prior from the typical house or the stored rate by evidence; evidence gives way only to newer cycles' information (`THERMAL_EVIDENCE_HALF_N` 20, contradicting 5; never with time; Issue #1512 reopened); sensor lag profiled (`THERMAL_CYCLE_LAGS`); at most the 60 heaviest eligible cycles (`cycle_model.py`, see 05-LEARNING-ENGINE-DESIGN.md § Parameter Extraction)
 - Rate ageing: weighted median of retained observations, each weight halved per 20 newer observations of its rate (`THERMAL_EVIDENCE_HALF_N`; no calendar clock, Issue #1523), legacy-method weight 0.25 (`THERMAL_LEGACY_OBS_WEIGHT`); observations kept per kind (`THERMAL_OBS_KIND_CAPS`, sharing `THERMAL_OBS_CAP` 200), none leaves with time
 - Sample interval: 60 seconds (`THERMAL_SAMPLE_INTERVAL_SECONDS`)
 - Minimum R² for k_passive acceptance: 0.2 (`THERMAL_MIN_R_SQUARED`)

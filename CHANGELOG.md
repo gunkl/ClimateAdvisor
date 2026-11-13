@@ -3,6 +3,18 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.32] — 2026-11-12
+
+### Fixed
+- **Fix #1512 (reopened): the furnace's coast is learned on thermostats that run the blower after the burner stops.**
+  - **What you'll notice:** on homes whose thermostat keeps the blower going for a minute or two after a heating run (Ecobee and many others), or runs it before the start, Climate Advisor now sees the room keep warming after the burner stops and allows for it, so pre-heat and recovery overshoot less. The same holds for the air conditioner's blower after cooling.
+  - **Why:** the blower period was read as a short heating run of its own. That cut the real run's coast off at the stop (on the owner's home the room kept rising 1.3 °F that was never recorded) and threw the blower period away as "too short". Heating and cooling runtime no longer include the blower minutes either.
+  - **Big systems on fine sensors:** a room sensor that reacts a couple of minutes late made a strong furnace or AC look 20-40 % weaker on short runs while claiming to be sure. The delay is now measured and allowed for (to within a few percent in testing), and the confidence says honestly when it cannot yet tell.
+  - **Honest confidence:** a rate that depends on a guessed (typical-house) heat-loss rate is no longer shown as "fairly sure". Long, informative runs now count for more than short pulses and keep their value longer; a run of short pulses no longer pushes a long, accurate one aside, while a real change in the house is still picked up quickly.
+  - **Whole-degree sensors:** if your temperature sensor reports whole (or half) degrees, normal heating and cooling cycles cannot measure how fast your home heats or cools. Analysis, Debug and the AI assistant now say so plainly, say which rate is used instead (the one learned before, or a typical home's), and that longer setback recoveries can still teach it and a finer sensor (such as the thermostat's companion sensor) fixes it.
+  - **Nothing changes at the upgrade:** the rate, its confidence and everything the decisions use stay as they were until the next new heating or cooling run is recorded.
+  - **Also fixed (same cause):** a blower that restarts a second after the burner stops is treated as the run's own blower phase, so Climate Advisor never switches the heating or cooling off because of it, and switching the thermostat Off mid-run no longer raises a "fan running while Off" warning for the blower's run-down.
+
 ## [0.9.31] — 2026-11-11
 
 ### Fixed

@@ -189,8 +189,13 @@
       if (typeof f.k_p_cycle === 'number') parts.push('its own leak ' + fmt(f.k_p_cycle) + ' /h (diagnostic only)');
       if (f.ne != null) parts.push(f.ne + ' informative cycles' + (f.n_cycles != null ? ' of ' + f.n_cycles : ''));
       if (typeof f.resolution_f === 'number') parts.push('sensor steps ' + fmt(f.resolution_f) + '\u00b0F');
+      if (typeof f.lag_min === 'number') parts.push('sensor lag ' + fmt(f.lag_min) + ' min' + (f.lag_identified ? '' : ' (not identified yet)'));
+      if (Array.isArray(f.grade_caps) && f.grade_caps.length) parts.push('grade held down: ' + f.grade_caps.map(function (x) { return x === 'k_typical_prior' ? 'leak rate is only the typical value' : x === 'lag_unidentified' ? 'short runs, sensor lag not known yet' : x; }).join(', '));
       rows.push({ k: 'Cycle model: ' + (m === 'cool' ? 'cooling' : 'heating'), v: parts.join(' \u00b7 '),
         hint: 'What the pooled cycle model measures from every informative cycle. A v4 zone\u2019s decisions keep v4\u2019s own control rate; this is shown beside it.' });
+      // Issue #1512 reopened: whole/half-degree sensor notice (same text as Analysis and the AI context)
+      if (f.coarse_sensor && f.coarse_sensor.text) rows.push({ k: 'Cycle model: ' + (m === 'cool' ? 'cooling' : 'heating') + ' sensor', v: f.coarse_sensor.text,
+        hint: 'sensor_class ' + f.coarse_sensor.sensor_class + ', rate in use: ' + f.coarse_sensor.rate_in_use });
     });
     return rows;
   }

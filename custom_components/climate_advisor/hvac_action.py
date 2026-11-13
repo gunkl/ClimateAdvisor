@@ -85,13 +85,20 @@ def is_mode_fallback_running(hvac_mode: str | None, hvac_action: str | None) -> 
     return str(hvac_mode) not in HVAC_MODES_NOT_RUNNING and not is_hvac_action_reported_idle(hvac_action)
 
 
-def thermostat_reports_running(hvac_mode: str | None, hvac_action: str | None, *, ca_ventilating: bool) -> bool:
+def thermostat_reports_running(
+    hvac_mode: str | None, hvac_action: str | None, *, ca_ventilating: bool, fan_is_blower: bool = False
+) -> bool:
     """Whether ONE thermostat snapshot shows a running session, by the session-edge rule (Issue #1241).
 
     The same rule ``_async_thermostat_changed`` applies to each side of an edge: hvac_action
     heating/cooling decides on its own; otherwise the mode fallback, which never counts CA's own fan
-    or natural ventilation (``ca_ventilating``, Issue #986) as a session.
+    or natural ventilation (``ca_ventilating``, Issue #986) as a session. ``fan_is_blower`` (Issue #1512
+    reopened): the thermostat is known to report heating/cooling, so its ``fan`` is the blower alone
+    (overrun / lead-in), never a heating or cooling session; in ``fan_only`` mode it is still the fan_only
+    session (#912).
     """
     if is_hvac_compressor_active(hvac_action):
         return True
+    if fan_is_blower and str(hvac_action).lower() == "fan" and str(hvac_mode) != "fan_only":
+        return False  # a fan_only session (mode fan_only) is still a fan_only session (#912)
     return is_mode_fallback_running(hvac_mode, hvac_action) and not ca_ventilating

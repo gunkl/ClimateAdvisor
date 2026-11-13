@@ -1080,8 +1080,12 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
         " evidence there is, so it is never worse than the default and improves with each informative cycle."
         " A cycle only counts when the room moved by at least three sensor steps; on a whole-degree sensor"
         " short cycles cannot identify the rate, so the model says so (grade low, never high) instead of"
-        " guessing. Old cycles give way only to newer ones: a cycle's weight halves for every 20 newer"
-        " informative cycles, never with time alone, so a quiet season changes nothing and there is no reset."
+        " guessing. Old cycles give way only to newer ones, weighed by what they tell: a cycle's weight halves"
+        " once the newer cycles carry 20 newer cycles' worth of its own information (faster when they contradict"
+        " it), never with time alone, so a long accurate run outlives short pulses, a quiet season changes"
+        " nothing and there is no reset. The sensor's delay is fitted out, the grade is held down when the rate"
+        " rests on a guessed leak rate, and a blower run before or after the heating/cooling is never a run of"
+        " its own (the coast is tracked through it)."
         " The closed-house leak rate comes only from closed-up stretches (passive windows); the open-window"
         " rate never stands in for it. On a v4 zone decisions use v4's own control rate; the cycle model's"
         " measurement is shown beside it."
@@ -1115,7 +1119,19 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
                 parts.append(f"coast after a run {convert_delta(area, _unit):+.2f} {_sym}")
             if val.get("ne") is not None:
                 parts.append(f"{val.get('ne')} informative cycles")
+            if isinstance(val.get("lag_min"), (int, float)) and not isinstance(val.get("lag_min"), bool):
+                parts.append(
+                    f"sensor lag {val['lag_min']:.1f} min" + ("" if val.get("lag_identified") else " (not identified)")
+                )
+            if val.get("grade_caps"):
+                parts.append("grade held down by " + "/".join(str(x) for x in val["grade_caps"]))
             lines.append("  cycle model: " + ", ".join(parts))
+            notice = val.get("coarse_sensor")
+            if isinstance(notice, dict) and notice.get("text"):
+                # Issue #1512 reopened: a whole/half-degree sensor cannot teach the rate from normal cycles
+                lines.append(
+                    f"  cycle model {mode} sensor: {notice['text']} (rate in use: {notice.get('rate_in_use')})"
+                )
     except Exception:  # noqa: BLE001 - context building never fails the investigator
         pass
     # Pipeline failure detection

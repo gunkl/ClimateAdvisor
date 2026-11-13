@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.31"
+VERSION = "0.9.32"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1714,6 +1714,9 @@ CYCLE_MAX_STORED: int = 3000  # hard cap on stored cycles: half per mode, each m
 CYCLE_STORE_PRUNE_INTERVAL_S: float = 3600  # pruning runs at most this often
 CYCLE_STORE_VERSION: int = 2  # "v" key of the cycle file (2: per-cycle decimal places; a v1 file is migrated on load)
 CYCLE_STORE_SAVE_INTERVAL_S: float = 1800  # the cycle file is written at most this often (+ at HA stop / unload)
+# Issue #1512 reopened: a thermostat ``fan`` this soon after the burner/compressor stopped is that run's blower
+# overrun (Ecobee: heating -> idle, then fan 1 s later for about 2 minutes), never an out-of-band fan start.
+BLOWER_OVERRUN_LINK_S: float = 600
 # A setpoint change during a run ends the run; an off edge (or mode switch) this soon after it is the run's real end.
 CYCLE_SETPOINT_OFF_WINDOW_S: float = 60
 # Refit throttle (Pi CPU): a mode is refitted at most this often, sooner once this many new eligible cycles wait or
@@ -1737,9 +1740,36 @@ THERMAL_CYCLE_K_FREE_AFTER: int = 3  # fine pools: k pinned at the prior until t
 THERMAL_CYCLE_COARSE_EVID_N: int = 3  # coarse pools: variance inflated by (this/ne)^2 when ne is smaller
 THERMAL_CYCLE_DEFF_FINE_MULT: float = 0.5  # calibrated deff multiplier, fine pools (coarse: 1.0)
 THERMAL_CYCLE_PLATEAU_MIN: float = 10.0  # final level held >= this long before off -> effective off = first reached
-THERMAL_CYCLE_MAX_FIT_CYCLES: int = 60  # at most the last N eligible cycles are fitted
-# Cycle weight 0.5 ** (newer eligible cycles in the pool / THERMAL_EVIDENCE_HALF_N): a cycle yields to newer
-# evidence, never to the calendar (owner decision 2026-11-11, "fade only on new evidence").
+THERMAL_CYCLE_MAX_FIT_CYCLES: int = 60  # at most N eligible cycles are fitted: the N with the largest weights
+# Cycle weight 0.5 ** (information of the newer eligible cycles / (THERMAL_EVIDENCE_HALF_N x its own information)):
+# a cycle yields to newer INFORMATION, never to the calendar (owner decision 2026-11-11, "fade only on new evidence";
+# Issue #1512 reopened, owner 2026-11-12: a long accurate run keeps its value longer than a short one). With cycles
+# of equal information this is the old 0.5 ** (newer eligible cycles / THERMAL_EVIDENCE_HALF_N).
+# A cycle's information is the Fisher information it alone carries about q once its coast is profiled out (the
+# rate-hours varying against the coast response, at THERMAL_CYCLE_INFO_TAU_MIN, per sensor noise unit).
+THERMAL_CYCLE_INFO_TAU_MIN: float = 4.0
+# Issue #1512 reopened: first-order sensor lag (minutes) profiled jointly with tau. The reading lags the air, so the
+# rise after the on edge is delayed and its catch-up after the off edge looks like a coast; a true coast does not
+# delay the start, so the two separate. Identified when its posterior sd is at most THERMAL_CYCLE_LAG_IDENT_SD_MIN.
+THERMAL_CYCLE_LAGS: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0, 4.5)
+THERMAL_CYCLE_LAG_IDENT_SD_MIN: float = 0.6
+# Until the lag is identified, a pool whose median eligible run is shorter than THERMAL_CYCLE_LAG_RUN_MULT x
+# THERMAL_CYCLE_LAG_PLAUSIBLE_MIN cannot earn "high" (the lag could hide a fifth or more of a short run's rise).
+THERMAL_CYCLE_LAG_PLAUSIBLE_MIN: float = 3.0
+THERMAL_CYCLE_LAG_RUN_MULT: float = 3.0
+# k pinned at an unlearned (typical) prior: the q uncertainty that k's prior sd causes is added to sd_q, and when it
+# is more than this share of |q| the result depends on k and grades "low" at most (Issue #1512 reopened, owner).
+THERMAL_CYCLE_K_DEPEND_FRAC: float = 0.10
+# A k_passive prior counts as learned when its evidence (n_eff) is at least this.
+THERMAL_CYCLE_K_LEARNED_MIN_NEFF: float = 1.0
+# Sensor resolution classes (Issue #1512 reopened, item 5): at or above WHOLE a sensor reports whole degrees, at or
+# above HALF half degrees; in both a normal maintenance cycle moves the reading one or two steps and cannot teach the
+# rate (only setback recoveries can).
+THERMAL_CYCLE_RES_WHOLE_F: float = 0.9
+THERMAL_CYCLE_RES_HALF_F: float = 0.45
+# The cycle model's version: a fit made by an older model is not replaced until a new eligible cycle arrives, so
+# nothing the decisions use moves at upgrade (the upgrade's startup refit of the same cycles is not new evidence).
+THERMAL_CYCLE_MODEL_VERSION: int = 2
 THERMAL_CYCLE_TAIL_BACK_MIN: float = 120.0  # superpose earlier off-edge tails this far back (minutes)
 THERMAL_CYCLE_TAUS: tuple[float, ...] = (1.5, 2.5, 4.0, 6.0, 8.0, 11.0, 15.0, 20.0)  # coast time-constant grid (min)
 THERMAL_CYCLE_IRLS_ITERS: int = 5

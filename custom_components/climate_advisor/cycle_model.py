@@ -57,6 +57,7 @@ THERMAL_LEGACY_OBS_WEIGHT: float = _k("THERMAL_LEGACY_OBS_WEIGHT", 0.25)
 # every EVIDENCE_HALF_N newer eligible cycles, and the evidence carried into a prior (``rate_prior`` n, a held fit)
 # is scaled by its ``keep`` share, which only ``learning.apply_cycle_fit`` lowers as new cycles arrive.
 EVIDENCE_HALF_N: float = _k("THERMAL_EVIDENCE_HALF_N", 20.0)
+EVIDENCE_HALF_N_CONTRADICT: float = _k("THERMAL_EVIDENCE_HALF_N_CONTRADICT", 5.0)
 HELD_MIN_KEEP: float = _k("THERMAL_EVIDENCE_MIN_KEEP", 0.01)  # a held fit whose share fell below this is dropped
 
 # --------------------------------------------------------------------------- constants (const.py THERMAL_CYCLE_*)
@@ -105,6 +106,34 @@ _K_BOUNDS = _k("THERMAL_CYCLE_K_BOUNDS", (-0.5, -0.001))
 # samples after the off edge that still belong to the cycle (minutes): the recorder's post-off window, one definition
 CYCLE_TAIL_MIN: float = _k("CYCLE_POST_OFF_WINDOW_S", 45 * 60) / 60.0
 CYCLE_SOLAR_PRIOR_SD = 3.0  # F/h per unit solar factor, only used when the regressor is on
+# Issue #1512 reopened (owner 2026-11-12): sensor lag, information weighting, honest grades, sensor classes.
+CYCLE_INFO_TAU: float = _k("THERMAL_CYCLE_INFO_TAU_MIN", 4.0)
+CYCLE_LAGS: tuple[float, ...] = _k("THERMAL_CYCLE_LAGS", (0.0, 1.0, 2.0, 3.0, 4.5))
+CYCLE_LAG_IDENT_SD: float = _k("THERMAL_CYCLE_LAG_IDENT_SD_MIN", 0.6)
+CYCLE_LAG_PLAUSIBLE: float = _k("THERMAL_CYCLE_LAG_PLAUSIBLE_MIN", 3.0)
+CYCLE_LAG_RUN_MULT: float = _k("THERMAL_CYCLE_LAG_RUN_MULT", 3.0)
+CYCLE_K_DEPEND_FRAC: float = _k("THERMAL_CYCLE_K_DEPEND_FRAC", 0.10)
+CYCLE_K_LEARNED_MIN_NEFF: float = _k("THERMAL_CYCLE_K_LEARNED_MIN_NEFF", 1.0)
+CYCLE_RES_WHOLE: float = _k("THERMAL_CYCLE_RES_WHOLE_F", 0.9)
+CYCLE_RES_HALF: float = _k("THERMAL_CYCLE_RES_HALF_F", 0.45)
+MODEL_VERSION: int = _k("THERMAL_CYCLE_MODEL_VERSION", 2)
+_LAG_PRUNE_MASS = 0.005  # a lag below this share of the coarse-grid posterior is not refined (Pi CPU)
+
+
+def sensor_class(res: Any) -> str:
+    """``"whole"`` (reports whole degrees), ``"half"`` (half degrees) or ``"fine"`` from a pool's resolution (F).
+
+    Occupant meaning (Issue #1512 reopened, item 5): on a whole- or half-degree sensor a normal heating or cooling
+    cycle moves the reading by the thermostat's swing, one or two steps, which cannot measure the rate; only longer
+    recoveries (a setback) can. ``"unknown"`` when the resolution is not a positive number."""
+    if not _num(res) or res <= 0:
+        return "unknown"
+    if res >= CYCLE_RES_WHOLE:
+        return "whole"
+    if res >= CYCLE_RES_HALF:
+        return "half"
+    return "fine"
+
 
 FLAG_RUNNING = _k("CYCLE_FLAG_RUNNING", 1)
 FLAG_WINDOWS = _k("CYCLE_FLAG_WINDOWS", 2)
@@ -272,7 +301,7 @@ def typical_prior(mode: str) -> dict[str, Any]:
     if mode not in _TYPICAL:
         raise ValueError(f"mode must be 'heat' or 'cool', got {mode!r}")
     t = _TYPICAL[mode]
-    return {"q": t["q"], "k": t["k"], "area": t["area"], "source": "typical", "n_eff": 0.0}
+    return {"q": t["q"], "k": t["k"], "area": t["area"], "source": "typical", "n_eff": 0.0, "k_source": "typical"}
 
 
 def _as_naive_dt(now: Any) -> datetime:
@@ -393,11 +422,25 @@ def prior_from_cache(
         n_eff_q = _n_eff(rec)
         sd_old = math.sqrt((0.30 * abs(q_old)) ** 2 / n_eff_q + (0.08 * abs(q_old)) ** 2)
         out["q"] = _combine(q_old, sd_old, *pr["q"])
+    # k: the home's closed-house leak rate. Issue #1512 reopened: the CURRENT learned k_passive (what the decisions
+    # use; it keeps learning from passive windows) when there is one, with the evidence behind it (the larger of the
+    # carried upgrade evidence and the passive observation counter, which already includes the pre-upgrade count:
+    # never both), else the upgrade-time value. ``k_source`` says whether k is learned or the typical house: a pinned
+    # k that is only the typical value cannot back a confident rate.
     rec = rp.get("k_passive")
-    if isinstance(rec, dict) and _num(rec.get("value")) and rec["value"] < 0:
-        k_old = float(rec["value"])
-        sd_old = math.sqrt((0.40 * abs(k_old)) ** 2 / _n_eff(rec) + (0.08 * abs(k_old)) ** 2)
+    k_val = cache.get("k_passive") if isinstance(cache, dict) else None
+    n_eff_k = _n_eff(rec) if isinstance(rec, dict) and _num(rec.get("value")) and rec["value"] < 0 else 0.0
+    n_pass = cache.get("observation_count_passive") if isinstance(cache, dict) else None
+    if _num(n_pass) and n_pass > 0:
+        n_eff_k = max(n_eff_k, float(n_pass) * THERMAL_LEGACY_OBS_WEIGHT)
+    if not (_num(k_val) and k_val < 0) and isinstance(rec, dict) and _num(rec.get("value")) and rec["value"] < 0:
+        k_val = rec["value"]
+    if _num(k_val) and k_val < 0 and n_eff_k > 0:
+        k_old = float(k_val)
+        sd_old = math.sqrt((0.40 * abs(k_old)) ** 2 / n_eff_k + (0.08 * abs(k_old)) ** 2)
         out["k"] = _combine(k_old, sd_old, *pr["k"])
+        if n_eff_k >= CYCLE_K_LEARNED_MIN_NEFF:
+            out["k_source"] = "learned"
     if n_eff_q:
         out["source"] = "cache"
         out["n_eff"] = n_eff_q
@@ -541,26 +584,132 @@ def _ineligible_reason(c: dict[str, Any], res: float) -> str | None:
 def _features(c: dict[str, Any]) -> None:
     t, temps, to = c["t"], c["T"], c["To"]
     n = len(t)
-    q_cum = [0.0] * n
     k_cum = [0.0] * n
     for j in range(1, n):
         a, b = t[j - 1], t[j]
-        q_cum[j] = q_cum[j - 1] + max(0.0, min(b, c["rend"]) - max(a, c["ton"])) / 60.0
         k_cum[j] = k_cum[j - 1] + 0.5 * ((temps[j - 1] - to[j - 1]) + (temps[j] - to[j])) * (b - a) / 60.0
-    c["Q"], c["K"] = q_cum, k_cum
+    c["K"] = k_cum
+    c["Q"] = _run_hours(c, 0.0)
     c["offs_all"] = ([] if c["toff"] is None else [c["toff"]]) + list(c["priors"])
 
 
-def _coast(c: dict[str, Any], tau: float) -> list[float]:
+def _run_hours(c: dict[str, Any], lag: float) -> list[float]:
+    """Cumulative run-hours ``Q`` as the SENSOR sees them through a first-order lag of ``lag`` minutes.
+
+    Exact for the run's indicator (on at ``ton``, off at ``rend``) passed through ``dS/dt = (u - S) / lag``:
+    during the run ``s - lag (1 - e^(-s/lag))``, afterwards the remaining catch-up ``lag u0 e^(-(t - rend)/lag)``
+    fades out (``u0 = 1 - e^(-D/lag)``, D the run length). ``lag`` 0 is the plain run-hours. Relative to the first
+    row (the per-cycle level absorbs the constant). Issue #1512 reopened: on a lagging sensor the post-off catch-up
+    is part of the RUN's rise, not a coast."""
+    t = c["t"]
+    ton, rend = c["ton"], c["rend"]
+    dur = max(0.0, rend - ton)
+
+    def g(x: float) -> float:
+        s = x - ton
+        if s <= 0:
+            return 0.0
+        if lag <= 1e-9:
+            return min(s, dur)
+        if s <= dur:
+            return s - lag * (1.0 - math.exp(-s / lag))
+        u0 = 1.0 - math.exp(-dur / lag)
+        return dur - lag * u0 * math.exp(-(s - dur) / lag)
+
+    g0 = g(t[0])
+    return [(g(x) - g0) / 60.0 for x in t]
+
+
+def _coast(c: dict[str, Any], tau: float, lag: float = 0.0) -> list[float]:
+    """The coast response (integral of ``e^(-(t - t_off)/tau)`` of every off edge, F per unit c) as the sensor sees
+    it through the first-order ``lag`` (minutes; 0 none), relative to the first row."""
     t = c["t"]
     n = len(t)
     out = [0.0] * n
     t0 = t[0]
+    if lag > 1e-9 and abs(tau - lag) < 1e-3:
+        lag = tau - 1e-3  # the closed form below has a removable singularity at tau == lag
+
+    def g(s: float) -> float:
+        if s <= 0:
+            return 0.0
+        if lag <= 1e-9:
+            return tau * (1.0 - math.exp(-s / tau))
+        return tau / (tau - lag) * (tau * (1.0 - math.exp(-s / tau)) - lag * (1.0 - math.exp(-s / lag)))
+
     for o in c["offs_all"]:
-        ea = math.exp(-(max(t0, o) - o) / tau)
+        g0 = g(t0 - o)
         for j in range(1, n):
             if t[j] > o:
-                out[j] += tau / 60.0 * (ea - math.exp(-(t[j] - o) / tau))
+                out[j] += (g(t[j] - o) - g0) / 60.0
+    return out
+
+
+def _cycle_information(c: dict[str, Any]) -> float:
+    """Fisher information the cycle alone carries about q, per unit noise variance (Issue #1512 reopened, item 4).
+
+    The run-hours' spread within the cycle, less the part the coast response (at CYCLE_INFO_TAU) could also explain:
+    ``Sqq - Sqc^2 / Scc`` over the cycle's own readings. A short pulse is nearly indistinguishable from a coast and
+    carries little; a long run carries a lot. Equal cycles get equal information, so the weight rule then reduces
+    to the old count rule. Needs ``_features`` first."""
+    q = c["Q"]
+    co = _coast(c, CYCLE_INFO_TAU)
+    n = len(q)
+    if n < 2:
+        return 0.0
+    qm = sum(q) / n
+    cm_ = sum(co) / n
+    sqq = sum((x - qm) ** 2 for x in q)
+    scc = sum((x - cm_) ** 2 for x in co)
+    sqc = sum((x - qm) * (y - cm_) for x, y in zip(q, co, strict=True))
+    info = sqq - (sqc * sqc / scc if scc > 1e-15 else 0.0)
+    return max(info, 0.0)
+
+
+def information_weights(
+    infos: Sequence[float], half_n: float = EVIDENCE_HALF_N, halves: Sequence[float] | None = None
+) -> list[float]:
+    """Weights of cycles ordered oldest -> newest: ``0.5 ** (information of the newer cycles / (half x own))``.
+
+    Owner 2026-11-12 (Issue #1512 reopened): evidence yields to newer INFORMATION, never to the calendar or to a mere
+    count. A long accurate run keeps its weight while short low-information runs arrive (each displaces it only by
+    its own share), and a short run yields quickly to a long one. With equal information this is exactly the old
+    ``0.5 ** (newer cycles / half_n)``. ``halves`` (per cycle) overrides ``half_n``: a cycle the newer ones
+    contradict yields at EVIDENCE_HALF_N_CONTRADICT. Deterministic; a zero-information cycle is floored at a tiny
+    share of the largest so it yields to anything."""
+    vals = [max(float(x), 0.0) if _num(x) else 0.0 for x in infos]
+    if not vals:
+        return []
+    floor = max(max(vals) * 1e-6, 1e-15)
+    vals = [max(v, floor) for v in vals]
+    out = [0.0] * len(vals)
+    newer = 0.0
+    for i in range(len(vals) - 1, -1, -1):
+        h = halves[i] if halves is not None and i < len(halves) and _num(halves[i]) and halves[i] > 0 else half_n
+        out[i] = 0.5 ** (newer / (h * vals[i]))
+        newer += vals[i]
+    return out
+
+
+def contradicted_by_newer(cyc_q: Sequence[float], cyc_var: Sequence[float]) -> list[bool]:
+    """Per cycle (oldest -> newest): do the newer cycles, pooled by precision, contradict its own q?
+
+    True when ``|q_j - q_newer| > 2 * sqrt(var_j + var_newer)`` (the same two-sd test the carried evidence uses,
+    ``thermal_confidence.fit_agrees_with_prior``). A cycle with nothing newer, or too uncertain to say, is not
+    contradicted. Contradiction speeds displacement (owner 2026-11-12): such a cycle yields at
+    EVIDENCE_HALF_N_CONTRADICT instead of EVIDENCE_HALF_N."""
+    n = len(cyc_q)
+    out = [False] * n
+    prec = 0.0
+    acc = 0.0
+    for i in range(n - 1, -1, -1):
+        v = cyc_var[i] if i < len(cyc_var) else math.inf
+        if prec > 0 and _num(v) and v > 0 and math.isfinite(v):
+            m = acc / prec
+            out[i] = abs(cyc_q[i] - m) > 2.0 * math.sqrt(v + 1.0 / prec)
+        if _num(v) and v > 0 and math.isfinite(v):
+            prec += 1.0 / v
+            acc += cyc_q[i] / v
     return out
 
 
@@ -588,8 +737,17 @@ def _fit_core(
     free_k: bool,
     deff_mult: float,
     use_solar: bool,
+    lag_evidence: Sequence[float] | None = None,
 ) -> dict[str, Any] | None:
-    """Consistent ridge / MAP over (q, [k], c | tau, [solar]) with Huber IRLS and a tau grid (poc2 est5.fit_core)."""
+    """Consistent ridge / MAP over (q, [k], c | tau, lag, [solar]) with Huber IRLS on a (lag, tau) grid (poc2
+    est5.fit_core; the lag axis is Issue #1512 reopened).
+
+    The sensor's first-order lag is profiled jointly with the coast tau and Bayesian-averaged, so q is fitted net of
+    the lag and the spread between lags is part of sd_q (an unidentified lag makes a short run honestly uncertain).
+    ``lag_evidence`` (relative -2 log-likelihood per ``CYCLE_LAGS`` entry, from the other mode's cycles on the same
+    sensor) pools the sensor's lag across heating and cooling; the returned ``lag_profile`` is this pool's own data
+    only, so the two modes never echo each other. With k pinned, the q uncertainty that k's prior sd causes
+    (``q_sd_from_k``) is added to sd_q."""
     if not cycles:
         return None
     for c in cycles:
@@ -606,96 +764,69 @@ def _fit_core(
     dq = max(d_long[0], w_ * d_max[0]) * deff_mult
     dk = max(d_long[1], w_ * d_max[1]) * deff_mult
     deff = 0.5 * (dq + dk) if free_k else dq
+    lags = tuple(CYCLE_LAGS) or (0.0,)
+    ext = list(lag_evidence) if lag_evidence is not None and len(lag_evidence) == len(lags) else None
     cands: list[dict[str, Any]] = []
-    for tau in CYCLE_TAUS:
+    q_by_lag: dict[int, list[list[float]]] = {}
+
+    def _run(li: int, tau: float) -> None:
+        lag = lags[li]
+        if li not in q_by_lag:
+            q_by_lag[li] = [_run_hours(c, lag) for c in cycles]
+        q_l = q_by_lag[li]
         rows_by = []
-        for c in cycles:
-            coast = _coast(c, tau)
-            feats = []
-            for j in range(len(c["T"])):
-                f = [c["Q"][j]]
-                if free_k:
-                    f.append(c["K"][j])
-                f.append(coast[j])
-                if use_solar:
-                    f.append(c["X"][j])
-                y = c["T"][j] if free_k else c["T"][j] - km * c["K"][j]
-                feats.append((y, f))
-            rows_by.append(feats)
-        nz = sum(len(r) for r in rows_by)
-        nc = len(cycles)
-        csd = 60.0 * asd / tau
-        cm = 60.0 * am / tau
-        m = [qm] + ([km] if free_k else []) + [cm] + ([0.0] if use_solar else [])
-        pp = [1.0 / qsd**2] + ([1.0 / ksd**2] if free_k else []) + [1.0 / csd**2]
-        if use_solar:
-            pp.append(1.0 / CYCLE_SOLAR_PRIOR_SD**2)
-        rw = [[1.0] * len(r) for r in rows_by]
-        sigma = max(sfloor, _SIGMA_FLOOR_FRAC * res + _SIGMA_INIT_ADD)
-        beta: list[float] | None = list(m)
-        res_by: list[list[float]] = []
-        mat: list[list[float]] = []
-        for _ in range(CYCLE_IRLS_ITERS):
-            a_mat = [[0.0] * n_par for _ in range(n_par)]
-            b_vec = [0.0] * n_par
-            for ci, rows in enumerate(rows_by):
-                w = [cycles[ci]["w"] * x for x in rw[ci]]
-                sw = sum(w)
-                if sw <= 0:
-                    continue
-                ym = sum(wi * r[0] for wi, r in zip(w, rows, strict=True)) / sw
-                xm = [sum(wi * r[1][i] for wi, r in zip(w, rows, strict=True)) / sw for i in range(n_par)]
-                for wi, (y, x) in zip(w, rows, strict=True):
-                    yy = y - ym
-                    xx = [x[i] - xm[i] for i in range(n_par)]
-                    for i in range(n_par):
-                        b_vec[i] += wi * xx[i] * yy
-                        for j in range(i, n_par):
-                            a_mat[i][j] += wi * xx[i] * xx[j]
-            for i in range(n_par):
-                for j in range(i):
-                    a_mat[i][j] = a_mat[j][i]
-            s2 = sigma * sigma
-            mat = [
-                [
-                    a_mat[i][j] / (s2 * deff) + (pp[i] if i == j else 0.0) + (1e-9 if i == j else 0.0)
-                    for j in range(n_par)
-                ]
-                for i in range(n_par)
-            ]
-            rhs = [b_vec[i] / (s2 * deff) + pp[i] * m[i] for i in range(n_par)]
-            beta = _solve(mat, rhs)
-            if beta is None:
-                break
-            res_by = []
-            all_r: list[float] = []
-            for ci, rows in enumerate(rows_by):
-                w = [cycles[ci]["w"] * x for x in rw[ci]]
-                sw = sum(w) or 1.0
-                ym = sum(wi * r[0] for wi, r in zip(w, rows, strict=True)) / sw
-                xm = [sum(wi * r[1][i] for wi, r in zip(w, rows, strict=True)) / sw for i in range(n_par)]
-                rr = [(y - ym) - sum(beta[i] * (x[i] - xm[i]) for i in range(n_par)) for (y, x) in rows]
-                res_by.append(rr)
-                all_r.extend(rr)
-            dof = max(nz - nc - n_par, 1) / max(nz, 1)
-            sigma = max(_MAD_SCALE * _median([abs(r) for r in all_r]) / math.sqrt(max(dof, 0.2)), sfloor)
-            kk = CYCLE_HUBER_K * sigma
-            rw = [[1.0 if abs(r) <= kk else kk / abs(r) for r in rr] for rr in res_by]
-        if beta is None:
-            continue
-        kk = CYCLE_HUBER_K * sigma
-        sse = 0.0
-        for ci, rr in enumerate(res_by):
-            for r in rr:
-                a = abs(r)
-                sse += cycles[ci]["w"] * (r * r if a <= kk else 2 * kk * a - kk * kk)
-        pen = sum(pp[i] * (beta[i] - m[i]) ** 2 for i in range(n_par))
-        cands.append({"sse": sse, "pen": pen, "beta": beta, "tau": tau, "M": mat, "pp": pp, "sigma": sigma})
+        for ci, c in enumerate(cycles):
+            cols = [q_l[ci]]
+            if free_k:
+                cols.append(c["K"])
+            cols.append(_coast(c, tau, lag))
+            if use_solar:
+                cols.append(c["X"])
+            y0 = c["T"][0]  # per-cycle offset (the level is free): keeps the raw moment sums well conditioned
+            if free_k:
+                ys = [t_ - y0 for t_ in c["T"]]
+            else:
+                ys = [t_ - y0 - km * k_ for t_, k_ in zip(c["T"], c["K"], strict=True)]
+            rows_by.append((ys, cols, c["K"]))
+        cand = _irls(cycles, rows_by, n_par, sfloor, res, deff, free_k, use_solar, qm, km, am, qsd, ksd, asd, tau)
+        if cand is not None:
+            cand["lag"] = lag
+            cand["li"] = li
+            cands.append(cand)
+
+    # Pi CPU: every lag on a coarse tau subset first, then the full tau grid only for the lags that still carry
+    # posterior mass (>= CYCLE_LAG_PRUNE_MASS). A lag left out had a negligible weight in the average.
+    taus = tuple(CYCLE_TAUS)
+    coarse_taus = tuple(taus[i] for i in sorted({len(taus) // 4, len(taus) // 2, (3 * len(taus)) // 4}))
+    for li in range(len(lags)):
+        for tau in coarse_taus:
+            _run(li, tau)
+    if cands and len(lags) > 1:
+        sref1 = min(c_["sigma"] for c_ in cands)
+        o1 = [
+            c_["sse"] / (sref1 * sref1 * deff)
+            + c_["pen"]
+            + (ext[c_["li"]] if ext is not None and _num(ext[c_["li"]]) else 0.0)
+            for c_ in cands
+        ]
+        omin = min(o1)
+        mass = [0.0] * len(lags)
+        for o, c_ in zip(o1, cands, strict=True):
+            mass[c_["li"]] += math.exp(-0.5 * (o - omin))
+        tot = sum(mass) or 1.0
+        kept = [li for li in range(len(lags)) if mass[li] / tot >= _LAG_PRUNE_MASS]
+    else:
+        kept = list(range(len(lags)))
+    for li in kept:
+        for tau in taus:
+            if tau not in coarse_taus:
+                _run(li, tau)
     if not cands:
         return None
     sref = min(c_["sigma"] for c_ in cands)
     for c_ in cands:
-        c_["obj"] = c_["sse"] / (sref * sref * deff) + c_["pen"]
+        c_["own"] = c_["sse"] / (sref * sref * deff) + c_["pen"]
+        c_["obj"] = c_["own"] + (ext[c_["li"]] if ext is not None and _num(ext[c_["li"]]) else 0.0)
     best = min(cands, key=lambda c_: c_["obj"])
     o0 = best["obj"]
     ws = [math.exp(-0.5 * (c_["obj"] - o0)) for c_ in cands]
@@ -703,11 +834,47 @@ def _fit_core(
     ws = [w / sw_ for w in ws]
     mean = list(best["beta"])
     var = [0.0] * n_par
+    var_qk = 0.0
     for w, c_ in zip(ws, cands, strict=True):
         mi = _inv(c_["M"])
         for i in range(n_par):
             vi = mi[i][i] if mi else 0.0
             var[i] += w * (vi + (c_["beta"][i] - mean[i]) ** 2)
+        if not free_k and mi is not None:
+            # dq/dk of the pinned k: the data part of the normal equations against the K column
+            sens = -sum(mi[0][j] * c_["bk"][j] for j in range(n_par))
+            var_qk += w * (sens * ksd) ** 2
+    var[0] += var_qk
+    # the lag's posterior (marginal over tau), and this pool's own lag profile (relative -2 log-likelihood)
+    lag_w = [0.0] * len(lags)
+    for w, c_ in zip(ws, cands, strict=True):
+        lag_w[c_["li"]] += w
+    lag_mean = sum(lw * lg for lw, lg in zip(lag_w, lags, strict=True))
+    lag_sd = math.sqrt(max(sum(lw * (lg - lag_mean) ** 2 for lw, lg in zip(lag_w, lags, strict=True)), 0.0))
+    own0 = min(c_["own"] for c_ in cands)
+    prof: list[float | None] = []
+    for li in range(len(lags)):
+        s = sum(math.exp(-0.5 * (c_["own"] - own0)) for c_ in cands if c_["li"] == li)
+        prof.append(-2.0 * math.log(s) if s > 0 else None)
+    pmin = min((p for p in prof if p is not None), default=0.0)
+    lag_profile = [round(p - pmin, 4) if p is not None else 1e6 for p in prof]
+    # each cycle's own q at the best (lag, tau), its coast held at the pooled value: the pooled q plus the
+    # projection of its residuals on its run-hours (used to tell whether newer cycles contradict an older one)
+    cyc_q: list[float] = []
+    cyc_var: list[float] = []
+    for ci, c in enumerate(cycles):
+        ql = _run_hours(c, best["lag"])
+        n = len(ql)
+        qbar = sum(ql) / n if n else 0.0
+        xs = [x - qbar for x in ql]
+        sxx = sum(x * x for x in xs)
+        rr = best["res_by"][ci] if ci < len(best["res_by"]) else []
+        if sxx <= 1e-12 or len(rr) != n:
+            cyc_q.append(best["beta"][0])
+            cyc_var.append(math.inf)
+            continue
+        cyc_q.append(best["beta"][0] + sum(x * r for x, r in zip(xs, rr, strict=True)) / sxx)
+        cyc_var.append(best["sigma"] ** 2 * deff / sxx)
     lo, hi = _BOUNDS[mode]
     q = min(max(mean[0], lo), hi)
     ic = 2 if free_k else 1  # index of the coast coefficient
@@ -726,29 +893,181 @@ def _fit_core(
         "coast_area_f": mean[ic] * tau_b / 60.0,
         "sigma": best["sigma"],
         "solar_coeff": mean[-1] if use_solar else None,
+        "lag_min": round(lag_mean, 3),
+        "lag_sd_min": round(lag_sd, 3),
+        "lag_profile": lag_profile,
+        "q_sd_from_k": math.sqrt(var_qk),
+        "cyc_q": cyc_q,
+        "cyc_var": cyc_var,
+    }
+
+
+def _irls(
+    cycles: list[dict[str, Any]],
+    rows_by: list[tuple[list[float], list[list[float]], list[float]]],
+    n_par: int,
+    sfloor: float,
+    res: float,
+    deff: float,
+    free_k: bool,
+    use_solar: bool,
+    qm: float,
+    km: float,
+    am: float,
+    qsd: float,
+    ksd: float,
+    asd: float,
+    tau: float,
+) -> dict[str, Any] | None:
+    """One (lag, tau) candidate: ridge / MAP with Huber IRLS. Per cycle ``(y, feature columns, K)``.
+
+    Each cycle's level is free, so every moment is centred per cycle (computed from weighted raw sums in one pass).
+    """
+    nz = sum(len(r[0]) for r in rows_by)
+    nc = len(cycles)
+    csd = 60.0 * asd / tau
+    cm = 60.0 * am / tau
+    m = [qm] + ([km] if free_k else []) + [cm] + ([0.0] if use_solar else [])
+    pp = [1.0 / qsd**2] + ([1.0 / ksd**2] if free_k else []) + [1.0 / csd**2]
+    if use_solar:
+        pp.append(1.0 / CYCLE_SOLAR_PRIOR_SD**2)
+    rw = [[1.0] * len(r[0]) for r in rows_by]
+    sigma = max(sfloor, _SIGMA_FLOOR_FRAC * res + _SIGMA_INIT_ADD)
+    beta: list[float] | None = list(m)
+    res_by: list[list[float]] = []
+    mat: list[list[float]] = []
+    bk = [0.0] * n_par
+    rng = range(n_par)
+    for _ in range(CYCLE_IRLS_ITERS):
+        a_mat = [[0.0] * n_par for _ in rng]
+        b_vec = [0.0] * n_par
+        bk_vec = [0.0] * n_par
+        means: list[tuple[float, list[float]] | None] = []
+        for ci, (ys, cols, ks) in enumerate(rows_by):
+            cw = cycles[ci]["w"]
+            w = [cw * x for x in rw[ci]]
+            sw = sum(w)
+            if sw <= 0:
+                means.append(None)
+                continue
+            wx = [[wi * xi for wi, xi in zip(w, col, strict=True)] for col in cols]
+            sx = [sum(v) for v in wx]
+            sy = sum(wi * yi for wi, yi in zip(w, ys, strict=True))
+            sk = sum(wi * ki for wi, ki in zip(w, ks, strict=True))
+            for i in rng:
+                wxi = wx[i]
+                b_vec[i] += sum(a_ * yi for a_, yi in zip(wxi, ys, strict=True)) - sx[i] * sy / sw
+                bk_vec[i] += sum(a_ * ki for a_, ki in zip(wxi, ks, strict=True)) - sx[i] * sk / sw
+                for j in range(i, n_par):
+                    a_mat[i][j] += sum(a_ * xj for a_, xj in zip(wxi, cols[j], strict=True)) - sx[i] * sx[j] / sw
+            means.append((sy / sw, [v / sw for v in sx]))
+        for i in rng:
+            for j in range(i):
+                a_mat[i][j] = a_mat[j][i]
+        s2 = sigma * sigma
+        mat = [[a_mat[i][j] / (s2 * deff) + (pp[i] + 1e-9 if i == j else 0.0) for j in rng] for i in rng]
+        rhs = [b_vec[i] / (s2 * deff) + pp[i] * m[i] for i in rng]
+        bk = [bk_vec[i] / (s2 * deff) for i in rng]
+        beta = _solve(mat, rhs)
+        if beta is None:
+            break
+        res_by = []
+        all_r: list[float] = []
+        for ci, (ys, cols, _ks) in enumerate(rows_by):
+            mm = means[ci]
+            if mm is None:
+                n = len(ys)
+                ym = sum(ys) / n
+                xm = [sum(col) / n for col in cols]
+            else:
+                ym, xm = mm
+            off = ym - sum(beta[i] * xm[i] for i in rng)
+            fit_ = [off] * len(ys)
+            for i in rng:
+                bi = beta[i]
+                fit_ = [f_ + bi * xv for f_, xv in zip(fit_, cols[i], strict=True)]
+            rr = [yv - f_ for yv, f_ in zip(ys, fit_, strict=True)]
+            res_by.append(rr)
+            all_r.extend(rr)
+        dof = max(nz - nc - n_par, 1) / max(nz, 1)
+        sigma = max(_MAD_SCALE * _median([abs(r) for r in all_r]) / math.sqrt(max(dof, 0.2)), sfloor)
+        kk = CYCLE_HUBER_K * sigma
+        rw = [[1.0 if abs(r) <= kk else kk / abs(r) for r in rr] for rr in res_by]
+    if beta is None:
+        return None
+    kk = CYCLE_HUBER_K * sigma
+    sse = 0.0
+    for ci, rr in enumerate(res_by):
+        cw = cycles[ci]["w"]
+        for r in rr:
+            a = abs(r)
+            sse += cw * (r * r if a <= kk else 2 * kk * a - kk * kk)
+    pen = sum(pp[i] * (beta[i] - m[i]) ** 2 for i in rng)
+    return {
+        "sse": sse,
+        "pen": pen,
+        "beta": beta,
+        "tau": tau,
+        "M": mat,
+        "pp": pp,
+        "sigma": sigma,
+        "bk": bk,
+        "res_by": res_by,
     }
 
 
 # --------------------------------------------------------------------------- public fit + grade
 def grade(result: dict[str, Any]) -> str:
-    """Calibrated confidence grade of a fit result (poc2 calibration tables, #1512).
+    """Calibrated confidence grade of a fit result (poc2 calibration tables, #1512; honesty caps, #1512 reopened).
 
     ``none``: no eligible cycle. Coarse pool (resolution >= 0.5 F): ``medium`` when er_q >= 0.95 and ne >= 2,
     else ``low`` - a whole-degree sensor is never ``high``. Fine pool: ``high`` er_q >= 0.95 and ne >= 4;
     ``medium`` er_q >= 0.6 and ne >= 2; else ``low``. ``er_q = 1 - posterior variance / prior variance``.
-    """
+
+    The grade reflects information, not only the posterior width (owner 2026-11-12):
+
+    * k pinned at an unlearned (typical-house) prior and the result depends on it (``k_dependent``: the q
+      uncertainty k's prior sd causes is more than CYCLE_K_DEPEND_FRAC of |q|) -> ``low`` at most;
+    * the sensor lag is not identified (``lag_identified`` False) and the median eligible run is shorter than
+      CYCLE_LAG_RUN_MULT x CYCLE_LAG_PLAUSIBLE minutes -> ``medium`` at most (the lag could hide a large share of a
+      short run's rise).
+
+    A result without these fields (stored by an older model) is graded as before."""
     ne = int(result.get("ne", 0) or 0)
     er = float(result.get("er_q", 0.0) or 0.0)
     if ne == 0:
         return "none"
     res = float(result.get("resolution_f", 1.0) or 1.0)
     if res >= CYCLE_COARSE_RES_F:
-        return "medium" if (er >= CYCLE_GRADE_HIGH_ER and ne >= CYCLE_GRADE_MED_NE) else "low"
-    if er >= CYCLE_GRADE_HIGH_ER and ne >= CYCLE_GRADE_HIGH_NE:
-        return "high"
-    if er >= CYCLE_GRADE_MED_ER and ne >= CYCLE_GRADE_MED_NE:
-        return "medium"
-    return "low"
+        g = "medium" if (er >= CYCLE_GRADE_HIGH_ER and ne >= CYCLE_GRADE_MED_NE) else "low"
+    elif er >= CYCLE_GRADE_HIGH_ER and ne >= CYCLE_GRADE_HIGH_NE:
+        g = "high"
+    elif er >= CYCLE_GRADE_MED_ER and ne >= CYCLE_GRADE_MED_NE:
+        g = "medium"
+    else:
+        g = "low"
+    if result.get("k_dependent") is True:
+        g = "low"
+    short = result.get("run_median_min")
+    if (
+        g == "high"
+        and result.get("lag_identified") is False
+        and _num(short)
+        and short < CYCLE_LAG_RUN_MULT * CYCLE_LAG_PLAUSIBLE
+    ):
+        g = "medium"
+    return g
+
+
+def grade_caps(result: dict[str, Any]) -> list[str]:
+    """Which honesty caps hold the grade down (``"k_typical_prior"``, ``"lag_unidentified"``), for Debug / AI."""
+    out = []
+    if result.get("k_dependent") is True:
+        out.append("k_typical_prior")
+    short = result.get("run_median_min")
+    if result.get("lag_identified") is False and _num(short) and short < CYCLE_LAG_RUN_MULT * CYCLE_LAG_PLAUSIBLE:
+        out.append("lag_unidentified")
+    return out
 
 
 def _prior_result(
@@ -765,7 +1084,9 @@ def _prior_result(
         "n_cycles": n_cycles,
         "er_q": 0.0,
         "resolution_f": res,
+        "sensor_class": sensor_class(res) if n_cycles else "unknown",
         "k_pinned": True,
+        "k_source": prior.get("k_source", "typical"),
         "reasons": dict(reasons),
         "prior_source": prior.get("source", "given"),
         "prior_q": prior["q"][0],
@@ -775,28 +1096,51 @@ def _prior_result(
         "t_first": None,
         "t_last": None,
         "t_eligible": [],
+        "info_eligible": [],
+        "info_ref": None,
+        "lag_min": None,
+        "lag_sd_min": None,
+        "lag_identified": False,
+        "lag_profile": None,
+        "model_version": MODEL_VERSION,
     }
     out["grade"] = grade(out)
+    out["grade_caps"] = []
     return out
 
 
-def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *, now_ts: float) -> dict[str, Any]:
+def fit_cycles(
+    cycles: list[dict[str, Any]],
+    mode: str,
+    prior: dict[str, Any],
+    *,
+    now_ts: float,
+    lag_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Fit the heating or cooling rate of ``mode`` from the stored cycles (poc2 R2F; Issue #1512).
 
     ``cycles``: public cycle dicts (see module docs; other-mode cycles are ignored). ``prior``: ``typical_prior``
     or ``prior_from_cache``. ``now_ts`` (epoch s) is accepted for the callers and does not weigh anything: a cycle's
-    weight is ``0.5 ** (newer eligible cycles in the pool / EVIDENCE_HALF_N)`` (owner decision 2026-11-11, evidence
-    yields to newer evidence, never to the calendar: a refit after a quiet season gives the same answer).
+    weight is ``0.5 ** (information of the newer eligible cycles / (EVIDENCE_HALF_N x its own information))``
+    (``information_weights``; owner decisions 2026-11-11 and 2026-11-12: evidence yields to newer evidence, weighed
+    by what it tells, never to the calendar: a refit after a quiet season gives the same answer). At most
+    CYCLE_MAX_CYCLES cycles are fitted: those with the largest weights (a long accurate run is not pushed out by a
+    run of short ones). ``lag_evidence``: the other mode's fit on the same sensor (its ``entity`` and
+    ``lag_profile``), so the sensor's lag is pooled over heating and cooling; ignored when the sensor differs.
     Returns ``q`` (signed F/h: heat > 0, cool < 0), ``sd_q``, ``k_p_cycle`` / ``sd_k`` (diagnostic leak rate; pinned at
     the prior when ``k_pinned``), ``coast_area_f`` (= c*tau/60, post-off drift in F; signed, 0 none), ``tau`` (min),
     ``ne`` (eligible cycles used), ``n_cycles`` (same-mode, same-sensor cycles seen), ``er_q``, ``grade``,
-    ``resolution_f`` and ``reasons`` (counts per rejection code of the cycles that did not qualify). Also the
-    evidence bookkeeping the learning engine needs (Issue #1512 verifier findings 2 and 4): ``prior_q`` /
+    ``resolution_f``, ``sensor_class`` and ``reasons`` (counts per rejection code of the cycles that did not qualify).
+    The sensor lag: ``lag_min`` / ``lag_sd_min`` (posterior), ``lag_identified``, ``lag_profile`` (this pool's own
+    relative -2 log-likelihood per CYCLE_LAGS entry). Honesty: ``k_source`` (``learned`` / ``typical``),
+    ``q_sd_from_k`` (part of sd_q caused by a pinned k), ``k_dependent``, ``run_median_min``, ``grade_caps``. Also
+    the evidence bookkeeping the learning engine needs (Issue #1512 verifier findings 2 and 4): ``prior_q`` /
     ``prior_sd_q`` (the prior the data was weighed against), ``ne_w`` (the eligible cycles' summed weights),
-    ``entity`` (the pool's sensor), ``t_first`` / ``t_last`` (``t_on`` of the oldest / newest eligible cycle) and
-    ``t_eligible`` (the eligible cycles' ``t_on``, so the caller can tell which of them are new; not stored).
-    No eligible cycle returns the prior unchanged (grade ``none``). Never worse than the prior by construction
-    (ridge toward it). Pure and deterministic.
+    ``entity`` (the pool's sensor), ``t_first`` / ``t_last`` (``t_on`` of the oldest / newest eligible cycle),
+    ``t_eligible`` and ``info_eligible`` (the eligible cycles' ``t_on`` and information, so the caller can tell which
+    are new and how much they tell; not stored), ``info_ref`` (the median information of an eligible cycle) and
+    ``model_version``. No eligible cycle returns the prior unchanged (grade ``none``). Never worse than the prior by
+    construction (ridge toward it). Pure and deterministic.
     """
     mine = sorted((c for c in cycles if c.get("mode") == mode and c.get("t_on") is not None), key=lambda c: c["t_on"])
     reasons: dict[str, int] = {}
@@ -845,18 +1189,48 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
     n_seen = len(pool)
     if not eligible:
         return _prior_result(prior, res, n_seen, reasons, ent)
-    eligible = eligible[-CYCLE_MAX_CYCLES:]
-    del now_ts  # no clock: weights count newer eligible cycles
-    for newer, pc in enumerate(sorted(eligible, key=lambda p: p["ton"], reverse=True)):
-        pc["w"] = 0.5 ** (newer / EVIDENCE_HALF_N)
+    del now_ts  # no clock: weights count newer information
+    eligible.sort(key=lambda p: p["ton"])
+    for pc in eligible:
+        _features(pc)
+        pc["info"] = _cycle_information(pc)
+    for pc, w in zip(eligible, information_weights([pc["info"] for pc in eligible]), strict=True):
+        pc["w"] = w
+    all_eligible = list(eligible)
+    if len(eligible) > CYCLE_MAX_CYCLES:
+        keep_ids = {id(p) for p in sorted(eligible, key=lambda p: (p["w"], p["ton"]), reverse=True)[:CYCLE_MAX_CYCLES]}
+        eligible = [p for p in eligible if id(p) in keep_ids]
     ne = len(eligible)
     coarse = res >= CYCLE_COARSE_RES_F
     free_k = (not coarse) and ne >= CYCLE_K_FREE_AFTER
     deff_mult = max(1.0, (CYCLE_COARSE_EVID_N / ne) ** 2) if coarse else CYCLE_FINE_DEFF_MULT
     use_solar = CYCLE_SOLAR_REGRESSOR and all("X" in pc for pc in eligible)
-    fit = _fit_core(eligible, prior, mode, res, free_k, deff_mult, use_solar)
+    ext = None
+    if isinstance(lag_evidence, dict) and lag_evidence.get("entity") == ent:
+        prof = lag_evidence.get("lag_profile")
+        if isinstance(prof, list | tuple) and len(prof) == len(CYCLE_LAGS) and all(_num(x) for x in prof):
+            ext = [float(x) for x in prof]
+    fit = _fit_core(eligible, prior, mode, res, free_k, deff_mult, use_solar, ext)
     if fit is None:
         return _prior_result(prior, res, n_seen, reasons, ent)
+    # Contradiction speeds displacement: older cycles the newer ones contradict yield at the faster rate. One pass
+    # (the weights of all eligible cycles are recomputed and the pool refitted once), so the result is deterministic.
+    flags = contradicted_by_newer(fit["cyc_q"], fit["cyc_var"])
+    n_contra = sum(flags)
+    if n_contra:
+        by_id = {id(p): f for p, f in zip(eligible, flags, strict=True)}
+        halves = [EVIDENCE_HALF_N_CONTRADICT if by_id.get(id(p)) else EVIDENCE_HALF_N for p in all_eligible]
+        for pc, w in zip(
+            all_eligible, information_weights([p["info"] for p in all_eligible], halves=halves), strict=True
+        ):
+            pc["w"] = w
+        fit2 = _fit_core(eligible, prior, mode, res, free_k, deff_mult, use_solar, ext)
+        if fit2 is not None:
+            fit = fit2
+    k_source = prior.get("k_source", "typical")
+    runs = [p["rend"] - p["ton"] for p in eligible]
+    q_abs = max(abs(fit["q"]), 1e-9)
+    infos = sorted(p["info"] for p in eligible)
     out: dict[str, Any] = {
         "q": fit["q"],
         "sd_q": fit["sd_q"],
@@ -868,7 +1242,20 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
         "n_cycles": n_seen,
         "er_q": fit["er_q"],
         "resolution_f": res,
+        "sensor_class": sensor_class(res),
         "k_pinned": not free_k,
+        "k_source": k_source,
+        "q_sd_from_k": round(fit["q_sd_from_k"], 4),
+        "k_dependent": bool(
+            (not free_k) and k_source != "learned" and fit["q_sd_from_k"] > CYCLE_K_DEPEND_FRAC * q_abs
+        ),
+        "lag_min": fit["lag_min"],
+        "lag_sd_min": fit["lag_sd_min"],
+        "lag_identified": bool(fit["lag_sd_min"] <= CYCLE_LAG_IDENT_SD),
+        "lag_profile": fit["lag_profile"],
+        "lag_pooled": ext is not None,
+        "n_contradicted": n_contra,
+        "run_median_min": round(_median(runs), 2),
         "sigma": fit["sigma"],
         "reasons": reasons,
         "prior_source": prior.get("source", "given"),
@@ -879,8 +1266,48 @@ def fit_cycles(cycles: list[dict[str, Any]], mode: str, prior: dict[str, Any], *
         "t_first": min(pc["ton"] for pc in eligible) * 60.0,
         "t_last": max(pc["ton"] for pc in eligible) * 60.0,
         "t_eligible": [pc["ton"] * 60.0 for pc in eligible],
+        "info_eligible": [pc["info"] for pc in eligible],
+        "info_ref": _median(infos),
+        "model_version": MODEL_VERSION,
     }
     if use_solar:
         out["solar_coeff"] = fit["solar_coeff"]
     out["grade"] = grade(out)
+    out["grade_caps"] = grade_caps(out)
     return out
+
+
+def coarse_sensor_notice(fit: Any, mode: str) -> dict[str, Any] | None:
+    """Occupant-facing notice for a whole- or half-degree sensor (Issue #1512 reopened, item 5), or None.
+
+    ``{"sensor_class", "maintenance_cycles_learn": False, "rate_in_use", "text"}``. ``rate_in_use``: ``"measured"``
+    (longer runs, e.g. setback recoveries, already taught it), ``"learned"`` (the rate learned before, carried), or
+    ``"default"`` (the typical-house rate). There are no user-configured heating/cooling rates, so none is named.
+    The same text is shown on Analysis (the house-model row), Debug and in the AI context."""
+    if not isinstance(fit, dict) or mode not in ("heat", "cool"):
+        return None
+    cls = fit.get("sensor_class") or sensor_class(fit.get("resolution_f"))
+    if cls not in ("whole", "half") or not fit.get("n_cycles"):
+        return None
+    word = "heating" if mode == "heat" else "cooling"
+    verb = "heats" if mode == "heat" else "cools"
+    steps = "whole degrees" if cls == "whole" else "half degrees"
+    ne = fit.get("ne") if _num(fit.get("ne")) else 0
+    src = fit.get("prior_source")
+    if ne and ne > 0:
+        in_use = "measured"
+        use = f"so far it has learned from {int(ne)} longer run{'s' if ne != 1 else ''} instead"
+    elif src in ("cache", "held"):
+        in_use = "learned"
+        use = f"it keeps using the {word} rate it had already learned"
+    else:
+        in_use = "default"
+        use = f"it uses a typical home's {word} rate (a default) until it can measure yours"
+    recovery = "warming back up after a setback" if mode == "heat" else "cooling back down after a setback"
+    text = (
+        f"Your indoor temperature sensor reports {steps}. A normal {word} cycle moves the reading by only one or "
+        f"two steps, so it can't teach Climate Advisor how fast your home {verb}; {use}. Longer runs, such as "
+        f"{recovery}, can still teach it, and a finer sensor (for example the thermostat's companion temperature "
+        "sensor, if it has one) fixes this."
+    )
+    return {"sensor_class": cls, "maintenance_cycles_learn": False, "rate_in_use": in_use, "text": text}

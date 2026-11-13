@@ -523,6 +523,21 @@ Reading `--tonight`: `RECOMMENDED` is the one sentence the occupant would get; t
 
 ## Debugging Thermal Model Learning
 
+### "The heating/cooling rate never learns" on a whole- or half-degree sensor (Issue #1512 reopened)
+
+A normal cycle moves the room by the thermostat's swing (about 1 °F) whatever the system's size, so a sensor that
+reports whole degrees (or half degrees) sees one or two steps per cycle: below the 3-step gate, every cycle is
+`cycle_signal_below_resolution` and the fit stays at the prior (grade `none`). That is expected, not a fault. Check
+`cycle_fit_<mode>.sensor_class` (`whole`/`half`) in `learning.json` or the cycle rows' `coarse_sensor` on the Debug
+tab; Analysis and the AI context say the same in plain words, with the rate in use instead (`rate_in_use`:
+`measured`, `learned` or `default`). Setback recoveries can still teach it; a finer sensor (the thermostat's
+companion temperature sensor, in tenths) fixes it. See
+[05 §whole-degree sensors](05-LEARNING-ENGINE-DESIGN.md#whole-degree-sensors-issue-1512-reopened) and its
+expectations table. Also on Debug: `sensor lag` (and whether it is identified) and `grade held down` (`leak rate is
+only the typical value`, `short runs, sensor lag not known yet`). A thermostat that reports `fan` after (or before) a
+run: the blower period is never a run of its own and the coast is recorded through it; a 2-minute `cycle_too_short`
+rejection right after each real run on 0.9.31 was that blower ([05 §blower](05-LEARNING-ENGINE-DESIGN.md#blower-around-the-cycle-issue-1512-reopened)).
+
 ### "Thermal model confidence is 'none' after weeks of use"
 
 **Step 1 — Check the structured rejection log (primary tool):**

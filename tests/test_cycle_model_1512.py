@@ -606,7 +606,7 @@ def test_age_weighting_prefers_recent_cycles() -> None:
         c["samples"] = [[s[0] + shift, s[1], s[2]] for s in c["samples"]]
         c["outdoor"] = [[o[0] + shift, o[1]] for o in c["outdoor"]]
     r = fit(old + new)
-    assert r["q"] > 6.5  # 120-day-old cycles carry ~2% of the weight
+    assert r["q"] > 6.5  # the new cycles contradict the old ones, which then yield at the contradiction rate
 
 
 def test_cap_at_last_60_eligible_cycles() -> None:
@@ -678,7 +678,8 @@ def test_a_refit_after_a_quiet_season_gives_the_same_answer(mode: str) -> None:
     for days in (1, 30, 89, 400):
         again = cm.fit_cycles(cyc, mode, prior, now_ts=base_ts + days * 86400)
         assert again == first
-    # weights count newer eligible cycles: 0.5 ** (j / EVIDENCE_HALF_N), j = 0 for the newest
+    # weights count newer INFORMATION (Issue #1512 reopened): 0.5 ** (newer info / (EVIDENCE_HALF_N x own info))
     ne = first["ne"]
-    assert first["ne_w"] == pytest.approx(sum(0.5 ** (j / cm.EVIDENCE_HALF_N) for j in range(ne)))
+    assert first["n_contradicted"] == 0
+    assert first["ne_w"] == pytest.approx(sum(cm.information_weights(first["info_eligible"])))
     assert len(first["t_eligible"]) == ne and max(first["t_eligible"]) == first["t_last"]

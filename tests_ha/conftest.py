@@ -168,3 +168,20 @@ async def make_house(hass, freezer, tmp_path):
     finally:
         for house in reversed(built):
             await house.close()
+
+
+@pytest.fixture
+async def make_sim(make_house):
+    """Factory for houses whose simulated thermostat runs a given HVAC profile (owner request 2026-11-12).
+
+    ``await make_sim(profile=SimProfile(heat_rate="normal", companion_sensor=True), **build_house_kwargs)``; the
+    profile's keys go under any ``sim_config`` passed (which still wins), and ``physics`` sets build_house's own
+    ``profile`` ("closed_loop", the default, or "scripted"). See tests_ha/house/sim_profile.py.
+    """
+    from tests_ha.house.sim_profile import SimProfile
+
+    async def _make(profile: SimProfile | None = None, *, physics: str = "closed_loop", **kwargs):
+        sim_config = {**(profile or SimProfile()).to_sim_config(), **(kwargs.pop("sim_config", None) or {})}
+        return await make_house(profile=physics, sim_config=sim_config, **kwargs)
+
+    return _make

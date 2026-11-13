@@ -25,6 +25,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_CURRENT_TEMP_OVERRIDE_MAX_F, CONF_CURRENT_TEMP_OVERRIDE_MIN_F, DOMAIN
+from .hvac_profile import BLOWER_MAX_MIN, RATE_MAX_F_PER_H, RATE_MIN_F_PER_H, SENSOR_LAG_MAX_MIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,8 +35,17 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the manual current-temperature override entity for this zone."""
-    async_add_entities([CurrentTemperatureOverride(entry)])
+    """Set up the manual current-temperature override and the HVAC profile numbers for this zone."""
+    async_add_entities(
+        [
+            CurrentTemperatureOverride(entry),
+            RateNumber(entry, "heat"),
+            RateNumber(entry, "cool"),
+            SensorLagNumber(entry),
+            BlowerOverrunNumber(entry, "heat"),
+            BlowerOverrunNumber(entry, "cool"),
+        ]
+    )
 
 
 class CurrentTemperatureOverride(NumberEntity):
@@ -83,3 +93,101 @@ class CurrentTemperatureOverride(NumberEntity):
 
         self._attr_native_value = None
         self.async_write_ha_state()
+
+
+# --------------------------------------------------------------------------- HVAC profile runtime controls
+# Owner request 2026-11-12: heating/cooling rate, sensor lag and blower overrun adjustable while the zone runs. Each
+# reads its value from the thermostat entity and writes through its setter, which also stores the value in the
+# entry's data (no reload), so a change survives a restart and shows in Reconfigure.
+
+
+class _ProfileNumber(NumberEntity):
+    """A thermostat profile value as a number box. Subclasses name the getter and setter."""
+
+    _attr_has_entity_name = False
+    _attr_should_poll = False
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, entry: ConfigEntry, key: str, label: str) -> None:
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_{key}"
+        self._attr_name = f"{entry.data.get('name') or entry.title} {label}"
+
+    def _thermostat(self):
+        return self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("thermostat_entity")
+
+    async def async_added_to_hass(self) -> None:
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(self._entry.entry_id, {}).setdefault(
+            "profile_controls", []
+        ).append(self)
+
+    async def async_will_remove_from_hass(self) -> None:
+        controls = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("profile_controls", [])
+        if self in controls:
+            controls.remove(self)
+
+
+class RateNumber(_ProfileNumber):
+    """Heating or cooling capacity in F/h (a magnitude for both)."""
+
+    _attr_native_unit_of_measurement = "°F/h"
+    _attr_native_min_value = RATE_MIN_F_PER_H
+    _attr_native_max_value = RATE_MAX_F_PER_H
+    _attr_native_step = 0.1
+
+    def __init__(self, entry: ConfigEntry, direction: str) -> None:
+        super().__init__(entry, f"{direction}_rate", "Heating Rate" if direction == "heat" else "Cooling Rate")
+        self._direction = direction
+
+    @property
+    def native_value(self) -> float | None:
+        thermostat = self._thermostat()
+        return None if thermostat is None else thermostat.rate(self._direction)
+
+    async def async_set_native_value(self, value: float) -> None:
+        if (thermostat := self._thermostat()) is not None:
+            thermostat.set_rate(self._direction, value)
+
+
+class SensorLagNumber(_ProfileNumber):
+    """First-order lag (minutes) from the simulated air to the reported reading(s)."""
+
+    _attr_native_unit_of_measurement = "min"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = SENSOR_LAG_MAX_MIN
+    _attr_native_step = 0.5
+
+    def __init__(self, entry: ConfigEntry) -> None:
+        super().__init__(entry, "sensor_lag", "Sensor Lag")
+
+    @property
+    def native_value(self) -> float | None:
+        thermostat = self._thermostat()
+        return None if thermostat is None else thermostat.sensor_lag_min
+
+    async def async_set_native_value(self, value: float) -> None:
+        if (thermostat := self._thermostat()) is not None:
+            thermostat.set_sensor_lag(value)
+
+
+class BlowerOverrunNumber(_ProfileNumber):
+    """Minutes the blower keeps running (hvac_action ``fan``) after a heat or cool run stops."""
+
+    _attr_native_unit_of_measurement = "min"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = BLOWER_MAX_MIN
+    _attr_native_step = 0.5
+
+    def __init__(self, entry: ConfigEntry, direction: str) -> None:
+        label = "Heat Blower Overrun" if direction == "heat" else "Cool Blower Overrun"
+        super().__init__(entry, f"blower_overrun_{direction}", label)
+        self._direction = direction
+
+    @property
+    def native_value(self) -> float | None:
+        thermostat = self._thermostat()
+        return None if thermostat is None else thermostat.blower_overrun_min(self._direction)
+
+    async def async_set_native_value(self, value: float) -> None:
+        if (thermostat := self._thermostat()) is not None:
+            thermostat.set_blower_overrun(self._direction, value)

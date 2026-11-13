@@ -34,16 +34,28 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_BLOWER_LEAD_IN_COOL_MIN,
+    CONF_BLOWER_LEAD_IN_HEAT_MIN,
+    CONF_BLOWER_OVERRUN_COOL_MIN,
+    CONF_BLOWER_OVERRUN_HEAT_MIN,
+    CONF_COAST_COOL_RATE,
+    CONF_COAST_COOL_TAU_MIN,
+    CONF_COAST_HEAT_RATE,
+    CONF_COAST_HEAT_TAU_MIN,
     CONF_COMFORT_COOL,
     CONF_COMFORT_HEAT,
+    CONF_COMPANION_SENSOR,
+    CONF_COOL_RATE_PRESET,
     CONF_DEADBAND_COOL_F,
     CONF_DEADBAND_HEAT_F,
+    CONF_HEAT_RATE_PRESET,
     CONF_INITIAL_TEMP_F,
     CONF_K_ACTIVE_COOL,
     CONF_K_ACTIVE_HEAT,
@@ -53,6 +65,8 @@ from .const import (
     CONF_OFF_OFFSET_COOL_F,
     CONF_OFF_OFFSET_HEAT_F,
     CONF_OUTDOOR_SOURCE,
+    CONF_PRECISION,
+    CONF_SENSOR_LAG_MIN,
     CONF_TICK_SECONDS,
     DEFAULT_DEADBAND_COOL_F,
     DEFAULT_DEADBAND_HEAT_F,
@@ -62,8 +76,38 @@ from .const import (
     DEFAULT_OFF_OFFSET_HEAT_F,
     DOMAIN,
 )
+from .hvac_profile import (
+    DEFAULT_PRECISION,
+    DEFAULT_RATE_PRESET,
+    DEFAULT_SENSOR_LAG_MIN,
+    PHASE_LEAD_IN,
+    PHASE_OVERRUN,
+    PHASE_RUNNING,
+    PRECISION_DEFAULT,
+    RATE_PRESET_CUSTOM,
+    RATE_PRESETS,
+    BlowerConfig,
+    EquipmentState,
+    advance_equipment,
+    coast_average_f_per_h,
+    lag_step,
+    precision_value,
+    preset_for_rate,
+    resolve_rate,
+    stop_equipment,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def sim_device_info(entry: ConfigEntry) -> DeviceInfo:
+    """The device a zone's thermostat and its companion sensor share (only created when the companion is on)."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, entry.entry_id)},
+        name=entry.data.get("name") or entry.title,
+        manufacturer="Climate Advisor dev tools",
+        model="Simulated thermostat",
+    )
 
 
 def _decide_compressor_state(
@@ -191,8 +235,42 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._attr_name = data.get("name")
 
         self._k_passive: float = data[CONF_K_PASSIVE]
-        self._k_active_heat: float = data[CONF_K_ACTIVE_HEAT]
-        self._k_active_cool: float = data[CONF_K_ACTIVE_COOL]
+        # HVAC profile (owner request 2026-11-12, hvac_profile.py). Unset preset = custom = the entry's own
+        # k_active_heat / k_active_cool, so entries saved before presets existed simulate exactly as before.
+        self._heat_rate_preset: str = data.get(CONF_HEAT_RATE_PRESET) or DEFAULT_RATE_PRESET
+        self._cool_rate_preset: str = data.get(CONF_COOL_RATE_PRESET) or DEFAULT_RATE_PRESET
+        self._k_active_heat: float = resolve_rate(self._heat_rate_preset, data[CONF_K_ACTIVE_HEAT], cooling=False)
+        self._k_active_cool: float = resolve_rate(self._cool_rate_preset, data[CONF_K_ACTIVE_COOL], cooling=True)
+        # Reported precision: "default" leaves Home Assistant's own (whole degrees on a Fahrenheit system).
+        self._precision_option: str = data.get(CONF_PRECISION) or DEFAULT_PRECISION
+        if (precision := precision_value(self._precision_option)) is not None:
+            self._attr_precision = precision
+        # Companion sensor: a tenths temperature sensor on this thermostat's DEVICE (sensor.py), the shape Climate
+        # Advisor discovers (indoor_temp.discover_companion_sensors: same device, device_class temperature). With a
+        # device the climate entity takes the device's name (entity name None), so its entity id does not change.
+        self._companion_enabled: bool = bool(data.get(CONF_COMPANION_SENSOR, False))
+        if self._companion_enabled:
+            self._attr_name = None
+            self._attr_device_info = sim_device_info(entry)
+        # Sensor lag: the reported reading(s) follow the simulated air through a first-order lag; 0 = no lag.
+        self._sensor_lag_min: float = float(data.get(CONF_SENSOR_LAG_MIN, DEFAULT_SENSOR_LAG_MIN) or 0.0)
+        # Blower lead-in / overrun and after-stop coast, per direction. All zero (the default) = no blower phase.
+        self._blower: dict[str, BlowerConfig] = {
+            "heat": BlowerConfig(
+                lead_in_min=float(data.get(CONF_BLOWER_LEAD_IN_HEAT_MIN, 0.0) or 0.0),
+                overrun_min=float(data.get(CONF_BLOWER_OVERRUN_HEAT_MIN, 0.0) or 0.0),
+                coast_rate_f_per_h=float(data.get(CONF_COAST_HEAT_RATE, 0.0) or 0.0),
+                coast_tau_min=float(data.get(CONF_COAST_HEAT_TAU_MIN, 0.0) or 0.0),
+            ),
+            "cool": BlowerConfig(
+                lead_in_min=float(data.get(CONF_BLOWER_LEAD_IN_COOL_MIN, 0.0) or 0.0),
+                overrun_min=float(data.get(CONF_BLOWER_OVERRUN_COOL_MIN, 0.0) or 0.0),
+                coast_rate_f_per_h=float(data.get(CONF_COAST_COOL_RATE, 0.0) or 0.0),
+                coast_tau_min=float(data.get(CONF_COAST_COOL_TAU_MIN, 0.0) or 0.0),
+            ),
+        }
+        self._equipment = EquipmentState()
+        self._last_coast_f_per_h: float = 0.0
         self._comfort_heat: float = data[CONF_COMFORT_HEAT]
         self._comfort_cool: float = data[CONF_COMFORT_COOL]
         self._outdoor_source: str = data[CONF_OUTDOOR_SOURCE]
@@ -210,6 +288,9 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._min_off_seconds: float = float(data.get(CONF_MIN_OFF_SECONDS, DEFAULT_MIN_OFF_SECONDS))
 
         self._current_temp: float = float(data.get(CONF_INITIAL_TEMP_F, 70.0))
+        # The thermostat's own sensor reading. Equals _current_temp (the simulated air) unless sensor lag is set;
+        # see reported_temperature.
+        self._reading: float | None = self._current_temp
         self._target_temp: float | None = self._comfort_heat
         self._hvac_mode: HVACMode = HVACMode.OFF
         self._fan_mode: str = FAN_AUTO
@@ -273,6 +354,10 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
 
             restored_hvac_action = last_state.attributes.get("hvac_action")
             self._compressor_on = restored_hvac_action in ("heating", "cooling")
+            if self._compressor_on:
+                self._equipment.phase = PHASE_RUNNING
+                self._equipment.direction = "heat" if restored_hvac_action == "heating" else "cool"
+            self._reading = self._current_temp  # the restored value is the last reported reading
         else:
             _LOGGER.debug(
                 "No prior state for %s — starting from configured initial_temp_f=%.1f",
@@ -293,6 +378,122 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             async_track_time_interval(self.hass, self._async_tick, timedelta(seconds=self._tick_seconds))
         )
         self.async_on_remove(self._cancel_pending_echoes)
+        self._notify_siblings()  # the rate/preset/precision controls and the companion read their value from here
+
+    # ------------------------------------------------------------------ HVAC profile (runtime controls)
+    def _zone_data(self) -> dict[str, Any]:
+        return self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}) if self.hass else {}
+
+    def _notify_siblings(self, *, controls: bool = True) -> None:
+        """Re-write the companion sensor (and, unless told not to, the profile controls) from this entity's values."""
+        zone = self._zone_data()
+        siblings = list(zone.get("profile_controls", ())) if controls else []
+        if (companion := zone.get("companion_entity")) is not None:
+            siblings.append(companion)
+        for entity in siblings:
+            if entity.hass is not None and entity.entity_id:
+                entity.async_write_ha_state()
+
+    def _persist(self, **changes: Any) -> None:
+        """Store a runtime change in the entry's data (no reload), so it survives a restart and shows in reconfigure."""
+        self.hass.config_entries.async_update_entry(self._entry, data={**self._entry.data, **changes})
+
+    def rate(self, direction: str) -> float:
+        """Equipment capacity in F/h (a magnitude; cooling is applied as negative)."""
+        return abs(self._k_active_heat if direction == "heat" else self._k_active_cool)
+
+    def rate_preset(self, direction: str) -> str:
+        return self._heat_rate_preset if direction == "heat" else self._cool_rate_preset
+
+    def set_rate(self, direction: str, rate_f_per_h: float) -> None:
+        """Set heating or cooling capacity (F/h, magnitude). The preset follows: a preset's value selects it."""
+        rate = abs(float(rate_f_per_h))
+        preset = preset_for_rate(rate)
+        if direction == "heat":
+            self._k_active_heat, self._heat_rate_preset = rate, preset
+            self._persist(**{CONF_K_ACTIVE_HEAT: rate, CONF_HEAT_RATE_PRESET: preset})
+        else:
+            self._k_active_cool, self._cool_rate_preset = -rate, preset
+            self._persist(**{CONF_K_ACTIVE_COOL: -rate, CONF_COOL_RATE_PRESET: preset})
+        _LOGGER.info("CA Dev Thermostat Sim %s: %s rate %.1f F/h (%s)", self.entity_id, direction, rate, preset)
+        self.async_write_ha_state()
+        self._notify_siblings()
+
+    def set_rate_preset(self, direction: str, preset: str) -> None:
+        """Choose a rate preset; ``custom`` keeps the current rate (then adjust it with the rate number)."""
+        if preset in RATE_PRESETS:
+            self.set_rate(direction, RATE_PRESETS[preset])
+            return
+        if direction == "heat":
+            self._heat_rate_preset = RATE_PRESET_CUSTOM
+            self._persist(**{CONF_HEAT_RATE_PRESET: RATE_PRESET_CUSTOM})
+        else:
+            self._cool_rate_preset = RATE_PRESET_CUSTOM
+            self._persist(**{CONF_COOL_RATE_PRESET: RATE_PRESET_CUSTOM})
+        self.async_write_ha_state()
+        self._notify_siblings()
+
+    @property
+    def precision_option(self) -> str:
+        return self._precision_option
+
+    def set_precision(self, option: str) -> None:
+        """Set the reported precision (whole / half / tenth, or Home Assistant's default)."""
+        value = precision_value(option)
+        if value is None:  # Home Assistant's own default for this system's unit
+            option = PRECISION_DEFAULT
+            value = 0.1 if self.hass.config.units.temperature_unit == UnitOfTemperature.CELSIUS else 1.0
+        self._precision_option = option
+        self._attr_precision = value
+        self._persist(**{CONF_PRECISION: option})
+        self.async_write_ha_state()
+        self._notify_siblings()
+
+    @property
+    def sensor_lag_min(self) -> float:
+        return self._sensor_lag_min
+
+    def set_sensor_lag(self, minutes: float) -> None:
+        """Set the first-order lag (minutes) between the simulated air and the reported reading(s); 0 = none."""
+        if self._sensor_lag_min <= 0:
+            self._reading = self._current_temp  # start the lag from where the reading is now
+        self._sensor_lag_min = max(0.0, float(minutes))
+        self._persist(**{CONF_SENSOR_LAG_MIN: self._sensor_lag_min})
+        self.async_write_ha_state()
+        self._notify_siblings()
+
+    def blower_overrun_min(self, direction: str) -> float:
+        return self._blower[direction].overrun_min
+
+    def set_blower_overrun(self, direction: str, minutes: float) -> None:
+        """Set how long the blower keeps running (hvac_action ``fan``) after a heat or cool run stops."""
+        minutes = max(0.0, float(minutes))
+        old = self._blower[direction]
+        self._blower[direction] = BlowerConfig(
+            lead_in_min=old.lead_in_min,
+            overrun_min=minutes,
+            coast_rate_f_per_h=old.coast_rate_f_per_h,
+            coast_tau_min=old.coast_tau_min,
+        )
+        key = CONF_BLOWER_OVERRUN_HEAT_MIN if direction == "heat" else CONF_BLOWER_OVERRUN_COOL_MIN
+        self._persist(**{key: minutes})
+        self.async_write_ha_state()
+        self._notify_siblings()
+
+    def _blower_for(self, direction: str | None) -> BlowerConfig:
+        return self._blower.get(direction or "", BlowerConfig())
+
+    @property
+    def reported_temperature(self) -> float | None:
+        """The thermostat's sensor reading: the simulated air, through the sensor lag when one is set.
+
+        With no lag this is ``_current_temp`` itself (tests and the real-HA harness write that directly).
+        """
+        return self._current_temp if self._sensor_lag_min <= 0 else self._reading
+
+    @property
+    def companion_enabled(self) -> bool:
+        return self._companion_enabled
 
     def apply_manual_temperature_override(self, value: float) -> None:
         """Jump the simulated indoor temperature directly (Issue #898) — called by
@@ -306,12 +507,14 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             value,
         )
         self._current_temp = value
+        self._reading = value  # a one-shot jump of the world: the sensor reads it at once too
         self.async_write_ha_state()
+        self._notify_siblings(controls=False)
 
     @property
     def current_temperature(self) -> float | None:
-        """Return the simulated indoor temperature."""
-        return self._current_temp
+        """Return the thermostat's reading of the simulated indoor temperature (through the sensor lag, if set)."""
+        return self.reported_temperature
 
     @property
     def target_temperature(self) -> float | None:
@@ -333,7 +536,12 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         all of them for this fixture. HEATING/COOLING only while actively driving
         toward setpoint (see _actively_driving); once setpoint is reached the mode
         stays HEAT/COOL but the real appliance goes idle, matching a real thermostat.
+
+        HVAC profile: during a configured blower lead-in (before the burner or compressor starts) or overrun (after
+        it stops) the blower alone runs, reported as FAN in any mode, as an Ecobee reports its fan dissipation time.
         """
+        if self._equipment.phase in (PHASE_LEAD_IN, PHASE_OVERRUN):
+            return HVACAction.FAN
         if self._hvac_mode == HVACMode.HEAT:
             return HVACAction.HEATING if self._actively_driving else HVACAction.IDLE
         if self._hvac_mode == HVACMode.COOL:
@@ -362,6 +570,20 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             "off_offset_cool_f": self._off_offset_cool_f,
             "min_run_seconds": self._min_run_seconds,
             "min_off_seconds": self._min_off_seconds,
+            # HVAC profile (hvac_profile.py)
+            "heat_rate_f_per_h": self.rate("heat"),
+            "cool_rate_f_per_h": self.rate("cool"),
+            "heat_rate_preset": self._heat_rate_preset,
+            "cool_rate_preset": self._cool_rate_preset,
+            "precision_option": self._precision_option,
+            "sensor_lag_min": self._sensor_lag_min,
+            "air_temperature": None if self._current_temp is None else round(self._current_temp, 3),
+            "blower_phase": self._equipment.phase,
+            "blower_lead_in_heat_min": self._blower["heat"].lead_in_min,
+            "blower_lead_in_cool_min": self._blower["cool"].lead_in_min,
+            "blower_overrun_heat_min": self._blower["heat"].overrun_min,
+            "blower_overrun_cool_min": self._blower["cool"].overrun_min,
+            "coast_f_per_h": round(self._last_coast_f_per_h, 3),
         }
 
     def _reset_compressor_state(self) -> None:
@@ -377,6 +599,9 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         self._compressor_on = False
         self._last_on_ts = None
         self._last_off_ts = None
+        # The equipment stops with the call: a running run goes to its blower overrun (and coast) if configured,
+        # else straight off, as before.
+        stop_equipment(self._equipment, self._blower_for(self._equipment.direction), dt_util.utcnow())
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set a new HVAC mode (reported ``set_echo_delay()`` seconds later when a cloud echo delay is set, #1246)."""
@@ -541,10 +766,11 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
         # handled at the call sites that change self._hvac_mode — see
         # _reset_compressor_state(). This function only evaluates one mode's own
         # thresholds against whatever state it's handed.
+        # The thermostat decides on its own sensor's reading (the lagged one when sensor lag is set), as a real one.
         was_on = self._compressor_on
         self._compressor_on, self._last_on_ts, self._last_off_ts = _decide_compressor_state(
             mode=mode,
-            current_temp=self._current_temp,
+            current_temp=self.reported_temperature,
             target_temp=self._target_temp,
             deadband=deadband,
             compressor_on=self._compressor_on,
@@ -572,15 +798,39 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
                 self._target_temp,
             )
 
-        self._actively_driving = self._compressor_on
-        k_active = (self._k_active_heat if mode == "heat" else self._k_active_cool) if self._compressor_on else None
+        # HVAC profile: the call drives the blower phases (lead-in -> running -> overrun). Capacity flows only while
+        # RUNNING; with no lead-in configured (the default) running is exactly the compressor call, as before.
+        advance_equipment(
+            self._equipment,
+            call_on=self._compressor_on,
+            direction=mode,
+            now=now,
+            cfg=self._blower_for(mode or self._equipment.direction),
+            cfg_last=self._blower_for(self._equipment.direction),
+        )
+        running = self._equipment.phase == PHASE_RUNNING
+        self._actively_driving = running
+        coast = coast_average_f_per_h(self._equipment, now, dt_hours)
+        self._last_coast_f_per_h = coast
 
-        # Issue #1387: a running compressor delivers full capacity until the state machine above stops it. The
-        # ODE step only applies capacity while the room is short of the setpoint it is given, and clamps there; the
-        # target used to be passed, so with a stop point past the target (the old symmetric default, target+1.5)
-        # the room pinned at the target, reporting "heating" with no heat, for hours. An unbounded drive target
-        # removes both limits; the room passes the stop point by at most one tick before the compressor stops.
-        drive_to = (math.inf if mode == "heat" else -math.inf) if self._compressor_on else self._target_temp
+        if coast == 0.0:
+            physics_mode = mode
+            k_active = (self._k_active_heat if mode == "heat" else self._k_active_cool) if running else None
+            # Issue #1387: a running compressor delivers full capacity until the state machine above stops it.
+            # The ODE step only applies capacity while the room is short of the setpoint it is given, and clamps
+            # there; the target used to be passed, so with a stop point past the target (the old symmetric
+            # default, target+1.5) the room pinned at the target, reporting "heating" with no heat, for hours. An
+            # unbounded drive target removes both limits; the room passes the stop point by at most one tick
+            # before the compressor stops.
+            drive_to = (math.inf if mode == "heat" else -math.inf) if running else self._target_temp
+        else:
+            # After-stop coast (furnace heat exchanger / cold coil) adds to whatever is running: one signed q.
+            q = coast
+            if running:
+                q += abs(self._k_active_heat) if mode == "heat" else -abs(self._k_active_cool)
+            physics_mode = "heat" if q > 0 else "cool"
+            k_active = abs(q)
+            drive_to = math.inf if q > 0 else -math.inf
 
         self._current_temp = _simulate_indoor_physics(
             self._current_temp,
@@ -591,7 +841,9 @@ class SimulatedThermostat(RestoreEntity, ClimateEntity):
             drive_to,
             comfort_heat=self._comfort_heat,
             comfort_cool=self._comfort_cool,
-            hvac_mode=mode,
+            hvac_mode=physics_mode,
         )
+        self._reading = lag_step(self._reading, self._current_temp, dt_hours, self._sensor_lag_min)
         self._last_update_ts = now
         self.async_write_ha_state()
+        self._notify_siblings(controls=False)

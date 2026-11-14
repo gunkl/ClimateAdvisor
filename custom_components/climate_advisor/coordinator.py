@@ -8970,6 +8970,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             timeline=self._surface_timeline(),
             # Issue #1404: a time-of-use bank holding the house right now (the shared display resolver).
             current_hold=self.current_hold(),
+            # Issue #1563: the HA instance's own configured language (unlike the dashboard frontend, which has
+            # no such signal and falls back to the browser's); defaults to "en" for the strings not yet translated.
+            language=self.hass.config.language,
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 

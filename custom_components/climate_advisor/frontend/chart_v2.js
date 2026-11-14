@@ -1213,7 +1213,7 @@
     }
 
     const title = document.getElementById('chart-title');
-    if (title) title.textContent = 'Temperature (' + _unitSym() + ')';
+    if (title) title.textContent = T('cv.temperature_unit', { sym: _unitSym() });
     const hasAnything = S.some(s => s.raw.length > 0);
     const empty = document.getElementById('chart-empty');
     if (empty) empty.hidden = hasAnything;

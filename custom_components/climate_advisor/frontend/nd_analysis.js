@@ -201,7 +201,7 @@
         '</td><td class="num">' + esc(r[1](t) === '—' && !t ? 'No record yet today' : r[1](t)) + '</td><td class="num">' + esc(r[2](n)) + '</td></tr>';
     });
     host.innerHTML = h + '</tbody></table>';
-    $('an-days-sub').textContent = 'Tomorrow shows what the plan knows today; blank cells fill in as the plan grows.';
+    $('an-days-sub').textContent = T('an.days_sub');
     var c = L.compliance || {};
     $('an-compliance').textContent = c.status === 'active' ? 'Over the last ' + (c.window_days || Math.min(14, c.days_recorded)) + ' of ' + c.days_recorded + ' recorded days: window compliance ' + pct(c.window_compliance) +
       ', average HVAC runtime ' + Math.round(c.avg_daily_hvac_runtime_minutes || 0) + ' min/day, average fan-only ' + Math.round(c.avg_daily_thermostat_fan_only_runtime_minutes || 0) +

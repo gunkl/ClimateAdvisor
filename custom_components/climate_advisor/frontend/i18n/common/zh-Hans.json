@@ -1,0 +1,12 @@
+{
+  "common.duration.hours": "{n, plural, other {#小时}}",
+  "common.duration.hours_frac": "{n, number, ::.0}小时",
+  "common.duration.min": "{n, plural, other {#分钟}}",
+  "common.mode.auto": "自动",
+  "common.mode.cool": "制冷",
+  "common.mode.fan_only": "仅风扇",
+  "common.mode.heat": "制热",
+  "common.mode.heat_cool": "制热/制冷",
+  "common.mode.off": "关闭",
+  "common.unknown": "未知"
+}

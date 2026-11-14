@@ -287,6 +287,18 @@ def check_python_temperature_literals(component_dir: str) -> CheckResult:
     return result
 
 
+def check_i18n(component_dir):
+    """Issue #1341: translation parity (both catalogs) and staleness locks; bodies live in tools/i18n_checks.py."""
+    result = CheckResult("i18n catalogs (parity, HA parity, staleness)")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import i18n_checks  # noqa: PLC0415
+
+    for name, errors in i18n_checks.run_all().items():
+        for err in errors:
+            result.error(f"{name}: {err}")
+    return result
+
+
 def main():
     print("Climate Advisor Pre-Deploy Validation")
     print(f"Component dir: {COMPONENT_DIR}")
@@ -304,6 +316,7 @@ def main():
         check_secrets(COMPONENT_DIR),
         check_hardcoded_units(COMPONENT_DIR),
         check_python_temperature_literals(COMPONENT_DIR),
+        check_i18n(COMPONENT_DIR),
     ]
 
     all_passed = True

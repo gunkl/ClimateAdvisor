@@ -1,0 +1,12 @@
+{
+  "common.duration.hours": "{n, plural, other {#時間}}",
+  "common.duration.hours_frac": "{n, number, ::.0}時間",
+  "common.duration.min": "{n, plural, other {#分}}",
+  "common.mode.auto": "自動",
+  "common.mode.cool": "冷房",
+  "common.mode.fan_only": "ファンのみ",
+  "common.mode.heat": "暖房",
+  "common.mode.heat_cool": "暖房/冷房",
+  "common.mode.off": "オフ",
+  "common.unknown": "不明"
+}

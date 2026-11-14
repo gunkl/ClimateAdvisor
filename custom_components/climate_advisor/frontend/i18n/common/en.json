@@ -1,0 +1,12 @@
+{
+  "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+  "common.duration.hours_frac": "{n, number, ::.0}h",
+  "common.duration.min": "{n, plural, one {# min} other {# min}}",
+  "common.mode.auto": "Auto",
+  "common.mode.cool": "Cool",
+  "common.mode.fan_only": "Fan only",
+  "common.mode.heat": "Heat",
+  "common.mode.heat_cool": "Heat/Cool",
+  "common.mode.off": "Off",
+  "common.unknown": "Unknown"
+}

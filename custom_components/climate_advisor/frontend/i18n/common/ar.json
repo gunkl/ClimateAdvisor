@@ -1,0 +1,12 @@
+{
+  "common.duration.hours": "{n, plural, zero {# ساعة} one {ساعة واحدة} two {ساعتان} few {# ساعات} many {# ساعة} other {# ساعة}}",
+  "common.duration.hours_frac": "{n, number, ::.0} ساعة",
+  "common.duration.min": "{n, plural, zero {# دقيقة} one {دقيقة واحدة} two {دقيقتان} few {# دقائق} many {# دقيقة} other {# دقيقة}}",
+  "common.mode.auto": "تلقائي",
+  "common.mode.cool": "تبريد",
+  "common.mode.fan_only": "مروحة فقط",
+  "common.mode.heat": "تدفئة",
+  "common.mode.heat_cool": "تدفئة/تبريد",
+  "common.mode.off": "إيقاف",
+  "common.unknown": "غير معروف"
+}

@@ -1,0 +1,12 @@
+{
+  "common.duration.hours": "{n, plural, one {# ч} few {# ч} many {# ч} other {# ч}}",
+  "common.duration.hours_frac": "{n, number, ::.0} ч",
+  "common.duration.min": "{n, plural, one {# мин} few {# мин} many {# мин} other {# мин}}",
+  "common.mode.auto": "Авто",
+  "common.mode.cool": "Охлаждение",
+  "common.mode.fan_only": "Только вентилятор",
+  "common.mode.heat": "Обогрев",
+  "common.mode.heat_cool": "Обогрев/охлаждение",
+  "common.mode.off": "Выкл.",
+  "common.unknown": "Неизвестно"
+}

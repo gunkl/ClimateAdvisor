@@ -1,0 +1,12 @@
+{
+  "common.duration.hours": "{n, plural, one {# h} many {# h} other {# h}}",
+  "common.duration.hours_frac": "{n, number, ::.0} h",
+  "common.duration.min": "{n, plural, one {# min} many {# min} other {# min}}",
+  "common.mode.auto": "Automático",
+  "common.mode.cool": "Refrigeração",
+  "common.mode.fan_only": "Somente ventilador",
+  "common.mode.heat": "Aquecimento",
+  "common.mode.heat_cool": "Aquecer/Resfriar",
+  "common.mode.off": "Desligado",
+  "common.unknown": "Desconhecido"
+}

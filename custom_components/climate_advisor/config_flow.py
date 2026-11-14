@@ -1536,7 +1536,9 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         tag_label = "High" if schedule.get("cost_tag") == COST_TAG_HIGH else "Low"
         name = schedule.get("name", "(unnamed)")
         window = f"{schedule.get('start')}-{schedule.get('end')}"
-        return f"{name} — {days_label} {window} ({tag_label})"
+        condition = schedule.get("condition_entity")
+        only_when = f", only when {condition} is on" if condition else ""  # Issue #1565
+        return f"{name} — {days_label} {window} ({tag_label}{only_when})"
 
     async def async_step_scheduler(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """List existing TOU cost-period schedules; choose one to edit, or add a new one."""
@@ -1606,6 +1608,10 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     # deliberately not removed there).
                     "cost_tag": COST_TAG_HIGH,
                 }
+                # Issue #1565: optional condition entity; omitted (not stored as None) when blank so schedules saved
+                # without one look exactly like pre-#1565 schedules.
+                if user_input.get("condition_entity"):
+                    new_schedule["condition_entity"] = user_input["condition_entity"]
                 if existing is not None:
                     schedules = [new_schedule if s["id"] == editing_id else s for s in schedules]
                 elif len(schedules) < MAX_SCHEDULES:
@@ -1639,6 +1645,13 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             ),
             vol.Required("start", default=defaults.get("start", "16:00:00")): selector.TimeSelector(),
             vol.Required("end", default=defaults.get("end", "21:00:00")): selector.TimeSelector(),
+            # Issue #1565: optional "only when this entity is on" condition (e.g. a peak-season sensor).
+            vol.Optional(
+                "condition_entity",
+                description={"suggested_value": defaults.get("condition_entity")},
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["binary_sensor", "input_boolean", "switch"])
+            ),
             # cost_tag selector removed from the form (Issue #786 follow-up) — see the
             # commit-path comment above. Always hardcoded to COST_TAG_HIGH there.
         }

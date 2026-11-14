@@ -130,7 +130,8 @@ class TestConfigMetadataHasAllKeys:
 
 # Form fields that are not settings a user "sets" (schedule-editor scratch fields, the zone's display name,
 # the GitHub section which settings_extra reports separately) or are entity picks with no default.
-_NOT_SETTINGS = {"?key", "manage", "delete_schedule", "days", "start", "end", "name", "zone_name"}
+# Per-schedule form fields (stored inside a schedules[] item, not as zone settings). condition_entity: Issue #1565.
+_NOT_SETTINGS = {"?key", "manage", "delete_schedule", "days", "start", "end", "name", "zone_name", "condition_entity"}
 _UNREGISTERED_NO_DEFAULT = {"github_repo", "github_token", "indoor_temp_entity", "outdoor_temp_entity"}
 
 

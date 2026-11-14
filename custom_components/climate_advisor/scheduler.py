@@ -100,6 +100,59 @@ class Schedule:
     start: str  # "HH:MM" or "HH:MM:SS" (HA's TimeSelector's native format) — local wall-clock,
     end: str  # civil time, not an elapsed duration. _parse_hhmm() ignores any seconds component.
     cost_tag: str  # COST_TAG_HIGH | COST_TAG_LOW
+    # Issue #1565: optional entity (binary_sensor / input_boolean / switch). When set, the schedule applies only
+    # while that entity is "on" -- e.g. a utility's peak-season or peak-day sensor. None = always applies (the
+    # pre-#1565 behavior; stored schedules without the key load unchanged). See apply_schedule_conditions().
+    condition_entity: str | None = None
+
+
+# Issue #1565: entity states that cannot say "off" -- a condition entity in one of these (or missing entirely)
+# keeps its schedule active. Failing OPEN preserves the pre-#1565 behavior (the schedule always applied) when the
+# rate-calendar helper is broken, rather than silently disabling pre-conditioning.
+_CONDITION_UNKNOWN_STATES = frozenset({"unknown", "unavailable"})
+
+
+@dataclass(frozen=True)
+class ScheduleConditionFilter:
+    """Result of ``apply_schedule_conditions()`` (Issue #1565)."""
+
+    kept: tuple[Schedule, ...]  # schedules that apply this cycle (no condition, condition on, or failed open)
+    skipped: tuple[Schedule, ...]  # schedules whose condition entity reported a definite non-"on" state
+    failed_open_ids: tuple[str, ...]  # kept only because the condition entity was missing/unknown/unavailable
+
+
+def apply_schedule_conditions(
+    schedules: list[Schedule],
+    state_of: Callable[[str], str | None],
+) -> ScheduleConditionFilter:
+    """Split ``schedules`` by their optional ``condition_entity`` (Issue #1565). Pure: ``state_of(entity_id)``
+    returns the entity's current state string, or None when the entity does not exist.
+
+    - No ``condition_entity`` -> kept (unchanged pre-#1565 behavior).
+    - Condition state ``"on"`` -> kept.
+    - Condition missing, ``unknown`` or ``unavailable`` -> kept and listed in ``failed_open_ids`` (fail open).
+    - Any other state (``"off"``, or anything else) -> skipped.
+
+    Order is preserved within ``kept`` and ``skipped`` so ``resolve_tou_phase()``'s "earliest qualifying schedule in
+    list order" tie-break is unaffected for the schedules that remain.
+    """
+    kept: list[Schedule] = []
+    skipped: list[Schedule] = []
+    failed_open: list[str] = []
+    for schedule in schedules:
+        entity_id = schedule.condition_entity
+        if not entity_id:
+            kept.append(schedule)
+            continue
+        state = state_of(entity_id)
+        if state is None or state in _CONDITION_UNKNOWN_STATES:
+            kept.append(schedule)
+            failed_open.append(schedule.id)
+        elif state == "on":
+            kept.append(schedule)
+        else:
+            skipped.append(schedule)
+    return ScheduleConditionFilter(kept=tuple(kept), skipped=tuple(skipped), failed_open_ids=tuple(failed_open))
 
 
 @dataclass(frozen=True)

@@ -1909,6 +1909,10 @@ def _render_tou_schedule_window_active(p: dict, unit: str) -> tuple[str, str]:
     preconditioned = bool(p.get("preconditioned"))
     hvac_mode = p.get("hvac_mode")
     label = "TOU high-cost period active"
+    if p.get("skipped_by_condition"):
+        # Issue #1565: the schedule's condition entity was off, so the window was skipped entirely.
+        entities = ", ".join(p.get("condition_entities") or []) or "its condition entity"
+        return label, f"skipped: {entities} is off"
     if preconditioned:
         settings = f"coincided with active {hvac_mode} operation"
     else:

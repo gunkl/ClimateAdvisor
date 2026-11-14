@@ -2752,6 +2752,62 @@ class TestOptionsFlowScheduler:
         new = data["schedules"][0]
         assert new["cost_tag"] == "high"
 
+    def test_scheduler_edit_stores_condition_entity_when_set(self):
+        """Issue #1565: an optional condition entity submitted on the edit form is stored on the schedule."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        data = _run_options_flow(
+            entry_data,
+            [
+                ("async_step_scheduler", {"manage": "__add__"}),
+                (
+                    "async_step_scheduler_edit",
+                    _schedule_fields(condition_entity="binary_sensor.peak_season"),
+                ),
+            ],
+        )
+        assert data["schedules"][0]["condition_entity"] == "binary_sensor.peak_season"
+
+    def test_scheduler_edit_omits_condition_entity_when_blank(self):
+        """Issue #1565: no condition submitted -> no key stored, so the schedule looks exactly like a pre-#1565
+        schedule (older versions reading it back are unaffected)."""
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = []
+        data = _run_options_flow(
+            entry_data,
+            [
+                ("async_step_scheduler", {"manage": "__add__"}),
+                ("async_step_scheduler_edit", _schedule_fields()),
+            ],
+        )
+        assert "condition_entity" not in data["schedules"][0]
+
+    def test_scheduler_edit_clearing_condition_removes_it(self):
+        """Issue #1565: editing a schedule that had a condition and submitting the field blank drops the condition."""
+        entry_data = dict(FULL_CONFIG)
+        seeded = _seed_schedule("s1", "Summer peak", "mon", "14:00:00", "19:00:00", "high")
+        seeded["condition_entity"] = "binary_sensor.peak_season"
+        entry_data["schedules"] = [seeded]
+        data = _run_options_flow(
+            entry_data,
+            [
+                ("async_step_scheduler", {"manage": "s1"}),
+                ("async_step_scheduler_edit", _schedule_fields(name="Summer peak")),
+            ],
+        )
+        assert data["schedules"][0]["id"] == "s1"
+        assert "condition_entity" not in data["schedules"][0]
+
+    def test_schedule_summary_names_condition_entity(self):
+        """Issue #1565: the scheduler list label says when a schedule only applies while an entity is on."""
+        entry_data = dict(FULL_CONFIG)
+        seeded = _seed_schedule("s1", "Summer peak", "mon", "14:00:00", "19:00:00", "high")
+        seeded["condition_entity"] = "binary_sensor.peak_season"
+        flow, _ = _make_options_flow(entry_data)
+        assert "only when binary_sensor.peak_season is on" in flow._format_schedule_summary(seeded)
+        plain = _seed_schedule("s2", "Plain", "mon", "14:00:00", "19:00:00", "high")
+        assert "only when" not in flow._format_schedule_summary(plain)
+
     def test_legacy_all_days_schedule_round_trips_and_displays(self):
         """A schedule saved before this change (days=["all"]) must still round-trip
         through the list step and display correctly via _format_schedule_summary(),

@@ -125,7 +125,7 @@ The setup wizard asks for:
    - wake time (default 06:30), bedtime (22:30) and briefing time (06:00).
 
 Everything is editable afterwards under **Configure**. The options there also cover:
-- time-of-use schedules;
+- time-of-use schedules, each of which can apply only while an entity you choose is on (for example a peak-season sensor for a rate that only has on-peak hours in summer);
 - notifications;
 - **Temperature Sources:** **Thermostat Finer Sensor** (Auto by default). Many thermostats show whole degrees but also have a finer sensor on the same device; once it proves to be the same reading, Climate Advisor uses it (68.54°F instead of 69°F) and falls back to the thermostat's own reading if it goes missing or disagrees;
 - **Learning & Behavior:** the prediction and comparison engines, **Prefer Savings Over Comfort**, adaptive pre-heat and setback, and the optional energy rate, heating power and cooling power for the cost estimate;

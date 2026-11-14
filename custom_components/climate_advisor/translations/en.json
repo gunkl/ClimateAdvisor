@@ -331,6 +331,7 @@
           "days": "Days",
           "start": "Starts",
           "end": "Ends",
+          "condition_entity": "Only when this is on",
           "delete_schedule": "Delete this schedule"
         },
         "data_description": {
@@ -338,6 +339,7 @@
           "days": "The days of the week this schedule applies to. Select at least one.",
           "start": "When the High-cost period starts. Climate Advisor begins pre-conditioning before this time.",
           "end": "When the High-cost period ends. Must differ from the start time.",
+          "condition_entity": "Optional. Pick a binary sensor, input boolean or switch, and this schedule applies only while it is on. Use it for rates that change with the season or the day, such as a peak-season helper or a peak-day template sensor. Leave blank to apply on every selected day. If the entity is missing or unavailable, the schedule still applies.",
           "delete_schedule": "Turn on and submit to delete this schedule."
         }
       },

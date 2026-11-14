@@ -438,6 +438,7 @@ from .scheduler import (
     COST_TAG_HIGH,
     Schedule,
     TOUPhase,
+    apply_schedule_conditions,
     resolve_active_schedules,
     resolve_tou_away_vacation_phase,
     resolve_tou_phase,
@@ -1083,6 +1084,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # currently covers `now`, reset when it no longer does, so the event fires once
         # per window-becomes-active transition rather than once every 30-min cycle.
         self._tou_active_window_notified: bool = False
+        # Issue #1565: schedules dropped this cycle because their condition entity is off. The resolution of those
+        # schedules at `now` (so a skipped high-cost window is still explained on the Status card and in the Activity
+        # Record), their id -> condition entity map, and the last logged (skipped, failed-open) ids for INFO dedup.
+        self._tou_condition_skipped_resolution: Any = None
+        self._tou_condition_entities: dict[str, str] = {}
+        self._tou_condition_logged: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
         # Target-band single-choke-point resolution (Issue #514): resolved once per cycle
         # by _resolve_target_band_schedule(), cached here, consumed by the main-cycle and
         # daily-briefing calls to _build_predicted_indoor_future() via band_schedule=.
@@ -9290,12 +9297,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._tou_phase_resolution = None
             self._tou_av_frozen = None
             self._tou_active_cost_resolution = None
+            self._tou_condition_skipped_resolution = None
             self._tou_active_window_notified = False
             self._sync_tou_away_vacation_state()
             return
 
-        schedules = [Schedule(**s) for s in raw_schedules]
+        all_schedules = [Schedule(**s) for s in raw_schedules]
         now = dt_util.now()
+        # Issue #1565: drop schedules whose condition entity is off (e.g. a peak-season sensor out of season). They
+        # still resolve against `now` so a skipped high-cost window is explained rather than silent.
+        conditions = apply_schedule_conditions(all_schedules, self._tou_condition_state)
+        self._log_tou_condition_changes(conditions)
+        self._tou_condition_entities = {s.id: s.condition_entity for s in all_schedules if s.condition_entity}
+        self._tou_condition_skipped_resolution = (
+            resolve_active_schedules(list(conditions.skipped), now) if conditions.skipped else None
+        )
+        schedules = list(conditions.kept)
+        if not schedules:
+            self._tou_phase_resolution = None
+            self._tou_av_frozen = None
+            self._tou_active_cost_resolution = None
+            self._sync_tou_away_vacation_state()
+            self._maybe_emit_tou_active_window_event()
+            return
         self._tou_active_cost_resolution = resolve_active_schedules(schedules, now)
         # Issue #1230 R6b: the bank's lead time (and the away/vacation depth) read the PRIMARY engine's rates.
         thermal_model = self.control_thermal_model(self._thermal_model if self.automation_engine else None)
@@ -9397,6 +9421,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             res.window_end,
         )
 
+    def _tou_condition_state(self, entity_id: str) -> str | None:
+        """Issue #1565: current state of a TOU schedule's condition entity, or None when it does not exist. Read-only
+        (Home Assistant Boundary Rule: reading a user-configured entity's state, never writing it)."""
+        state = self.hass.states.get(entity_id)
+        return state.state if state is not None else None
+
+    def _log_tou_condition_changes(self, conditions: Any) -> None:
+        """Issue #1565: INFO-log when the set of condition-skipped or failed-open schedules changes (not every
+        cycle). Failed open = the condition entity was missing/unknown/unavailable, so the schedule still applied."""
+        key = (tuple(s.id for s in conditions.skipped), tuple(conditions.failed_open_ids))
+        if key == getattr(self, "_tou_condition_logged", ((), ())):
+            return
+        self._tou_condition_logged = key
+        if conditions.skipped:
+            _LOGGER.info(
+                "TOU schedules skipped, condition off: %s",
+                ", ".join(f"{s.id} ({s.condition_entity})" for s in conditions.skipped),
+            )
+        if conditions.failed_open_ids:
+            _LOGGER.warning(
+                "TOU schedule condition entity missing or unavailable, schedule still applies: %s",
+                ", ".join(conditions.failed_open_ids),
+            )
+        if not conditions.skipped and not conditions.failed_open_ids:
+            _LOGGER.info("TOU schedule conditions: all configured schedules apply")
+
     def _maybe_emit_tou_active_window_event(self) -> None:
         """Investigation D / Phase 3d: a configured TOU schedule can silently do nothing
         with zero visibility — the live-instance finding. A ``cost_tag="high"`` window
@@ -9414,13 +9464,41 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         resolution = self._tou_active_cost_resolution
         is_active_high = resolution is not None and resolution.cost_tag == COST_TAG_HIGH
-        if not is_active_high:
+        # Issue #1565: a high-cost window whose schedule was skipped (condition entity off) is still worth one
+        # Activity Record line, so the record says why nothing happened rather than nothing at all.
+        skipped = getattr(self, "_tou_condition_skipped_resolution", None)
+        is_skipped_high = skipped is not None and skipped.cost_tag == COST_TAG_HIGH
+        if not is_active_high and not is_skipped_high:
             self._tou_active_window_notified = False
             return
         if self._tou_active_window_notified:
             return
         self._tou_active_window_notified = True
         mode = self._current_classification.hvac_mode if self._current_classification else None
+        if not is_active_high:
+            entities = sorted(
+                {
+                    self._tou_condition_entities[sid]
+                    for sid in skipped.active_schedule_ids
+                    if sid in getattr(self, "_tou_condition_entities", {})
+                }
+            )
+            _LOGGER.info(
+                "TOU schedule window skipped, condition off: schedule_ids=%s condition_entities=%s",
+                skipped.active_schedule_ids,
+                entities,
+            )
+            self._emit_event(
+                "tou_schedule_window_active",
+                {
+                    "active_schedule_ids": list(skipped.active_schedule_ids),
+                    "preconditioned": False,
+                    "hvac_mode": mode,
+                    "skipped_by_condition": True,
+                    "condition_entities": entities,
+                },
+            )
+            return
         preconditioned = mode in ("heat", "cool")
         _LOGGER.info(
             "TOU schedule window active: schedule_ids=%s preconditioned=%s hvac_mode=%s",
@@ -17273,6 +17351,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return "active (away)"
         if self._occupancy_mode == OCCUPANCY_GUEST:
             return "active (guest)"
+        # Issue #1565: lowest priority, so it never hides away/vacation/guest: a high-cost window covering `now`
+        # whose schedule was skipped because its condition entity is off (e.g. out of peak season). Explained rather
+        # than silent, and never claims pre-conditioning.
+        _tou_skipped = getattr(self, "_tou_condition_skipped_resolution", None)
+        if _tou_skipped is not None and _tou_skipped.cost_tag == COST_TAG_HIGH:
+            _ends = self._format_tou_ends(_tou_skipped.schedule_end)
+            return f"active — TOU high-cost period skipped{_ends}, its condition is off"
         return "active"
 
     @staticmethod

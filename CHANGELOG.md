@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.35] — 2026-11-14
+
+### Added
+- Feat #1565: a time-of-use schedule can now apply only while an entity you choose is on.
+  - **What you'll notice:** the schedule edit form has a new optional field, "Only when this is on". Point it at a `binary_sensor`, `input_boolean` or `switch` (for example a peak-season sensor, or a utility's critical peak day sensor). While that entity is on, the schedule works exactly as before. While it is off, Climate Advisor does not pre-cool or pre-heat for that window, and the Status card says "TOU high-cost period skipped ... its condition is off". The Activity record notes the skipped window too.
+  - **Why:** many rates have on-peak hours only part of the year (Georgia Power's Overnight Advantage: 2 to 7 PM on summer weekdays). Schedules have days of the week but no months, so out of season the house pre-conditioned for a period that cost nothing extra.
+  - **If the entity breaks:** a missing, unknown or unavailable entity counts as on, so the schedule keeps working as it did before the condition was added, and a warning is logged.
+  - Schedules without the new field are unchanged.
+
 ## [0.9.34] — 2026-11-13
 
 ### Fixed

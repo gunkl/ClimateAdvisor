@@ -78,16 +78,17 @@ def build_settings_extra(config: dict[str, Any]) -> dict[str, Any]:
     for s in config.get("schedules") or []:
         if not isinstance(s, dict):
             continue
-        schedules.append(
-            {
-                "id": s.get("id"),
-                "name": s.get("name"),
-                "days": list(s.get("days") or []),
-                "start": s.get("start"),
-                "end": s.get("end"),
-                "cost_tag": s.get("cost_tag"),
-            }
-        )
+        item = {
+            "id": s.get("id"),
+            "name": s.get("name"),
+            "days": list(s.get("days") or []),
+            "start": s.get("start"),
+            "end": s.get("end"),
+            "cost_tag": s.get("cost_tag"),
+        }
+        if s.get("condition_entity"):  # Issue #1565: only present when the schedule has a condition
+            item["condition_entity"] = s["condition_entity"]
+        schedules.append(item)
 
     repo = config.get(CONF_GITHUB_REPO) or ""
     return {

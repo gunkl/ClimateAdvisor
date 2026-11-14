@@ -679,8 +679,10 @@ def test_the_dataclasses_have_exactly_the_contract_fields() -> None:
     def names(cls):
         return [f.name for f in dataclasses.fields(cls)]
 
+    # Issue #1341: ``msg`` is the sentence as a catalog message, ``text`` its English
     assert names(ot.TimelineStep) == [
         "ts", "actor", "kind", "text", "reason", "target_f", "mode", "confidence", "lead_minutes", "source", "meta",
+        "msg",
     ]  # fmt: skip
     assert names(ot.PathPoint) == ["ts", "temp_f", "sensor", "model"]
     assert names(ot.Timeline) == [

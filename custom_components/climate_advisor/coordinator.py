@@ -7398,18 +7398,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if tl is None:
             return None
         unit = self.config.get("temp_unit", "fahrenheit")
-        out = timeline_api_payload(timeline_to_dict(tl), timeline_detail_dict(tl), unit, display_temp)
+        lang = i18n.hass_language(self.hass)  # Issue #1341: prose in the backend language, ``*_msg`` wire siblings kept
+        out = timeline_api_payload(timeline_to_dict(tl), timeline_detail_dict(tl), unit, display_temp, lang)
         # Issue #1404: the hold in force now (a time-of-use bank), for the plan list's "Now" row. A view field like
         # text_short: the stored timeline contract and its steps are unchanged.
         out["current_hold"] = self.current_hold_payload()
         # Issue #1436: the chart's activity strips right of NOW, read off this same plan (a view field like text_short).
-        out["strips"] = strip_spans(tl, dt_util.now())
+        out["strips"] = strip_spans(tl, dt_util.now(), lang)
         return out
 
     def timeline_operations_lines(self) -> list[str]:
         """The briefing's operations section (read from the timeline), or [] without one."""
         tl = self._surface_timeline()
-        return operations_lines(tl, dt_util.now()) if tl is not None else []
+        return operations_lines(tl, dt_util.now(), lang=i18n.hass_language(self.hass)) if tl is not None else []
 
     def timeline_debug(self) -> dict[str, Any]:
         """The timeline for the debug payload: steps, path, runs, window candidates, the last run's cost."""

@@ -26,6 +26,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from custom_components.climate_advisor import i18n
 from custom_components.climate_advisor.briefing import generate_briefing
 from custom_components.climate_advisor.operation_timeline import (
     Actor,
@@ -36,7 +37,7 @@ from custom_components.climate_advisor.operation_timeline import (
 )
 from custom_components.climate_advisor.temperature import display_temp
 from custom_components.climate_advisor.timeline_surfaces import (
-    NEXT_AUTOMATION_LABELS,
+    NEXT_AUTOMATION_LABEL_KEYS,
     CardLive,
     advises_opening,
     apply_direction_veto,
@@ -216,7 +217,9 @@ def test_surfaces_agree_for_generated_snapshots(
 def test_the_label_table_is_free_of_banned_words_and_clock_times() -> None:
     """Status Card Ontology: Next Automation never narrates mechanism state or tells the occupant to do something CA
     cannot do, and never embeds a clock time in the action (the card's second value carries it)."""
-    for key, label in NEXT_AUTOMATION_LABELS.items():
+    i18n.load_catalogs()
+    for key, catalog_key in NEXT_AUTOMATION_LABEL_KEYS.items():  # the English of each label, from the catalog
+        label = i18n.get_message(catalog_key, "en")[0]
         assert not _BANNED.search(label), (key, label)
         assert not _CLOCK.search(label), (key, label)
         assert key.split(".")[0] not in ("windows_open", "windows_close")

@@ -389,12 +389,12 @@ def test_chart_current_hour_follows_a_deferred_bank() -> None:
 
 
 def test_next_automation_label_for_the_bank_end_is_ontology_clean() -> None:
-    from custom_components.climate_advisor.timeline_surfaces import NEXT_AUTOMATION_LABELS, tou_bank_end_label
+    from custom_components.climate_advisor.timeline_surfaces import NEXT_AUTOMATION_LABEL_KEYS, tou_bank_end_label
 
     assert (
         tou_bank_end_label("back to the Away band 60–80°F") == "High-cost period starts — back to the Away band 60–80°F"
     )
-    assert "tou_bank_end" in NEXT_AUTOMATION_LABELS
+    assert "tou_bank_end" in NEXT_AUTOMATION_LABEL_KEYS
 
 
 # ── review mirrors: the family after a bank, the widened Away/Vacation period ──────────────────────────────────────

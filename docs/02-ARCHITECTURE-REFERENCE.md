@@ -295,7 +295,7 @@ Both are rendered in the dashboard as a stepped purple/magenta line: solid past,
 | `sensor.climate_advisor_trend` | warming/cooling/stable | (dynamic icon) |
 | `sensor.climate_advisor_next_action` | Human-readable next action | — |
 | `sensor.climate_advisor_daily_briefing` | TLDR summary, capped at 250 chars (HA's hard limit is 255 — Issue #555) | full_briefing (complete text), tldr (untruncated TLDR) |
-| `sensor.climate_advisor_comfort_score` | 0–100% | `pending_suggestions`, `comfort_violations_minutes_today`, `comfort_range_low`, `comfort_range_high` |
+| `sensor.climate_advisor_comfort_score` | 0–100% | `pending_suggestions`, `suggestions` (text in HA language, Issue #1341), `suggestion_codes` (`[{code, params}]`), `comfort_violations_minutes_today`, `comfort_range_low`, `comfort_range_high` |
 | `sensor.climate_advisor_status` | active/inactive | — |
 | `sensor.climate_advisor_occupancy_mode` | home/away/vacation/guest | occupancy_entity_states (raw toggle states) |
 | `sensor.climate_advisor_ai_status` | active/inactive/error/disabled/circuit_open | last_request_time, error_count, total_requests, model_in_use, circuit_breaker, monthly_cost_estimate, auto_requests_today, manual_requests_today |

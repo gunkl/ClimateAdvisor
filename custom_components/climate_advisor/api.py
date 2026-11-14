@@ -16,7 +16,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
 from . import i18n, log_capture, prediction_accuracy, status_text, zone_registry
-from .ai_skills_context import OUTDOOR_SENSOR_REASON_LABELS, build_event_timeline_table
+from .ai_skills_context import OUTDOOR_SENSOR_REASON_LABELS, build_event_timeline_table, build_event_timeline_wire
 from .const import (
     API_AI_INVESTIGATE,
     API_AI_STATUS,
@@ -725,9 +725,15 @@ class ClimateAdvisorLearningView(HomeAssistantView):
             if coordinator.today_record:
                 today_record = asdict(coordinator.today_record)
 
-            suggestion_texts = coordinator.learning.generate_suggestions()
+            # Issue #1341: ``text`` renders in the backend language; ``text_msg`` is the wire form the
+            # dashboard re-renders in the viewer's language.
+            suggestion_texts = coordinator.learning.generate_suggestions(lang=i18n.hass_language(hass))
             suggestion_keys = coordinator.learning.get_last_suggestion_keys()
-            suggestions = [{"key": k, "text": t} for k, t in zip(suggestion_keys, suggestion_texts, strict=False)]
+            suggestion_msgs = coordinator.learning.get_last_suggestion_msgs()
+            suggestions = [
+                {"key": k, "text": t, "text_msg": m.to_wire()}
+                for k, t, m in zip(suggestion_keys, suggestion_texts, suggestion_msgs, strict=False)
+            ]
 
             unit = coordinator.config.get("temp_unit", "fahrenheit")
 
@@ -1238,6 +1244,17 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
                 limit=EVENT_LOG_CAP,
             )
 
+            # Issue #1341: the same rows as structured data (each carries ``event_msg``/``settings_msg`` beside its
+            # English text) so the dashboard renders them in the viewer's language. Additive: ``table`` is unchanged.
+            timeline = build_event_timeline_wire(
+                event_log,
+                coordinator.config or {},
+                hours,
+                dt_util.now(),
+                newest_first=True,
+                limit=EVENT_LOG_CAP,
+            )
+
             # Issue #973: append the compact diagnostic footer so this view carries the
             # same "what does the thermostat actually report + CA version" context the
             # AI Investigator and raw log download already got in #968 — flows through
@@ -1263,6 +1280,10 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
             return self.json(
                 {
                     "table": table,
+                    "rows": timeline["rows"],
+                    "limited_msg": timeline["limited_msg"],
+                    "no_events_msg": timeline["no_events_msg"],
+                    "whf_warning_msg": timeline["whf_warning_msg"],
                     "hours": hours,
                     "generated_at": dt_util.now().isoformat(),
                     "is_truncated": is_truncated,

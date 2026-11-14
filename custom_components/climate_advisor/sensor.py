@@ -44,6 +44,7 @@ from .const import (
     ATTR_INDOOR_TEMP,
     ATTR_LAST_ACTION_REASON,
     ATTR_LAST_ACTION_TIME,
+    ATTR_LEARNING_SUGGESTION_MSGS,
     ATTR_LEARNING_SUGGESTIONS,
     ATTR_NEXT_ACTION,
     ATTR_NEXT_AUTOMATION_ACTION,
@@ -321,10 +322,14 @@ class ClimateAdvisorComplianceSensor(ClimateAdvisorBaseSensor):
         """Include learning suggestions count, comfort range context, and thermal model data."""
         data = self.coordinator.data or {}
         suggestions = data.get(ATTR_LEARNING_SUGGESTIONS, [])
+        suggestion_msgs = [m for m in (data.get(ATTR_LEARNING_SUGGESTION_MSGS) or []) if isinstance(m, i18n.Msg)]
         today = self.coordinator.today_record
         unit = self.coordinator.config.get("temp_unit", FAHRENHEIT)
         attrs: dict[str, Any] = {
             "pending_suggestions": len(suggestions),
+            # Issue #1341 (D6): the suggestion text in HA's language, with its stable key and params for automations.
+            "suggestions": [self._prose(m) for m in suggestion_msgs],
+            "suggestion_codes": [self._code_attrs(m) for m in suggestion_msgs],
             "comfort_violations_minutes_today": today.comfort_violations_minutes if today else 0.0,
             # Issue #1048: config comfort settings are internal degF; show them in the user's unit.
             "comfort_range_low": display_temp(self.coordinator.config.get("comfort_heat", 70), unit),

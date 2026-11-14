@@ -948,11 +948,16 @@ def select_comfort_band(
         context = ctx
 
     _unit = config.get("temp_unit", "fahrenheit")
-    reason = (
-        f"{ctx} band [{_band_num(floor, _unit)}/{_band_num(ceiling, _unit)}]"
-        f" (day={classification.day_type}, active={active}"
-        f"{', aggressive' if aggressive_savings else ''}"
-        f"{f', tou_expansion={display_delta(tou_expansion_f, _unit, 1):.1f}' if tou_expansion_f else ''})"
+    reason = _R(
+        "reason_band_select",
+        ctx=ctx,
+        floor=_band_num(floor, _unit),
+        ceiling=_band_num(ceiling, _unit),
+        day_type=str(classification.day_type),
+        active=active,
+        aggressive=_yn_flag(aggressive_savings),
+        has_tou=_yn_flag(tou_expansion_f),
+        tou=f"{display_delta(tou_expansion_f, _unit, 1):.1f}" if tou_expansion_f else "",
     )
     return ComfortBand(floor=floor, ceiling=ceiling, active=active, reason=reason, context=context)
 
@@ -1298,14 +1303,14 @@ def tou_bank_band(schedule: ComfortBand, target: float, mode: str) -> ComfortBan
             floor=min(schedule.floor, target),
             ceiling=target,
             active="ceiling",
-            reason=f"time-of-use pre-cool to {target:.1f}F",
+            reason=_R("reason_tou_pre_cool", target=f"{target:.1f}"),
             context=BAND_CONTEXT_TOU_BANK,
         )
     return ComfortBand(
         floor=target,
         ceiling=max(schedule.ceiling, target),
         active="floor",
-        reason=f"time-of-use pre-heat to {target:.1f}F",
+        reason=_R("reason_tou_pre_heat", target=f"{target:.1f}"),
         context=BAND_CONTEXT_TOU_BANK,
     )
 
@@ -1460,6 +1465,11 @@ def _fan_archetype_requires_open_sensor(fan_mode: str) -> bool:
 def _R(key: str, **params: Any) -> MsgText:
     """A catalog message of the ``activity`` area as a record ``reason`` (English text plus the message, #1341)."""
     return MsgText(i18n.Msg(f"activity.{key}", **params))
+
+
+def _yn_flag(flag: Any) -> str:
+    """``select`` argument for an optional clause."""
+    return "yes" if flag else "no"
 
 
 def _nest(value: Any) -> Any:
@@ -5377,7 +5387,7 @@ class AutomationEngine:
                     with self._mode_change_context("pause"):
                         await self._set_hvac_mode(
                             "off",
-                            reason="classification cycle: door/window open — HVAC suppressed while paused",
+                            reason=_R("reason_classification_door_window_open"),
                         )
                 else:
                     _LOGGER.info("apply_classification: thermostat already off — no mode change needed (windows open)")
@@ -5492,9 +5502,11 @@ class AutomationEngine:
                 )
 
             # Arm the comfort band — the thermostat holds the house; no mode-specific dispatch needed.
-            cls_reason = (
-                f"daily classification — {classification.day_type} day,"
-                f" trend {classification.trend_direction} {format_temp_delta(classification.trend_magnitude, unit)}"
+            cls_reason = _R(
+                "reason_daily_classification",
+                day_type=str(classification.day_type),
+                trend=str(classification.trend_direction),
+                magnitude=self._tdp(classification.trend_magnitude, 0),
             )
             _band = select_comfort_band(
                 classification,
@@ -5516,7 +5528,9 @@ class AutomationEngine:
                     classification.day_type,
                 )
             elif _held is not _band:
-                await self._apply_comfort_band(_held, reason=cls_reason + " (pre-cool held)", mode_reason="pre_cool")
+                await self._apply_comfort_band(
+                    _held, reason=_R("reason_pre_cool_held", reason=_nest(cls_reason)), mode_reason="pre_cool"
+                )
             else:
                 await self._apply_comfort_band(_band, reason=cls_reason)
 
@@ -5781,7 +5795,13 @@ class AutomationEngine:
         _band_reason = (
             band.reason
             if _effective_active == band.active
-            else f"{band.reason} -- {_effective_active} edge used ({_cmd_shape} at {self._t(_target, 0)})"
+            else _R(
+                "reason_band_edge_used",
+                band=_nest(band.reason),
+                edge=str(_effective_active),
+                shape=str(_cmd_shape),
+                target=self._tp(_target, 0),
+            )
         )
         _signature = (band.active, _cmd_shape, round(_target, 2), _outcome)
         if self._recent_duplicate("comfort_band_applied", _signature):
@@ -6533,7 +6553,7 @@ class AutomationEngine:
             # Read back later (Off direction included): did the thermostat actually take it?
             self._schedule_mode_alignment_recheck(_mode_seq)
             _LOGGER.info("Set HVAC mode to %s — %s role=%s", mode, reason, self.role)
-            self._record_action(f"Set HVAC to {mode}", reason)
+            self._record_action(_R("action_set_hvac", mode=mode), reason)
             # When taking HVAC offline, assert fan_mode=auto to clear any post-heat
             # blowdown state. Skip if nat-vent is active — clobbering fan_mode=on
             # while nat-vent is running silently stops cooling (Issue #134).
@@ -6665,7 +6685,7 @@ class AutomationEngine:
             self._last_mode_switch_result = HvacCommandResult.EXECUTED
         self._update_write_record(result=self._last_mode_switch_result)
         self._mode_switch_marker = (mode, dt_util.now())
-        self._record_action(f"Set HVAC to {mode}", "mode switch before setpoint write")
+        self._record_action(_R("action_set_hvac", mode=mode), _R("reason_mode_switch_before_setpoint"))
         if self._write_seq != my_seq:
             _LOGGER.info("Setpoint write superseded by a newer command during the mode switch — aborting")
             return False
@@ -7129,7 +7149,7 @@ class AutomationEngine:
         self._remote_exit_at = None  # any writer's setpoint ends the exit's wait for "the next band" (Issue #1194 c)
         if _call.ok:
             self._remote_write_failed_at = None  # a write went through: the outer loop's failed-write back-off is over
-        self._record_action(f"Set temp to {format_temp(temperature, unit)} (mode={mode})", reason)
+        self._record_action(_R("action_set_temp", temp=i18n.Temp(temperature, unit), mode=mode), reason)
         return HvacCommandResult.EXECUTED if _call.ok else HvacCommandResult.UNCONFIRMED
 
     # ------------------------------------------------------------------
@@ -7707,7 +7727,7 @@ class AutomationEngine:
                 floor=heat,
                 ceiling=cool,
                 active="floor" if getattr(c, "hvac_mode", None) == "heat" else "ceiling",
-                reason="flat comfort band (resolver unavailable)",
+                reason=_R("reason_flat_band"),
             )
 
     @staticmethod
@@ -11163,7 +11183,7 @@ class AutomationEngine:
             _adopt_reason = _R(
                 "reason_reconcile_adopt", trigger=str(trigger), indoor=self._tp(indoor), outdoor=self._tp(outdoor)
             )
-            self._record_action("Fan activated", _adopt_reason)
+            self._record_action(_R("action_fan_activated"), _adopt_reason)
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "fan_activated",
@@ -19432,7 +19452,7 @@ class AutomationEngine:
             self._resolve_fan_manual_origin_pending_on_start(
                 deferral_applied_at=_deferral_applied_at, seq_before=_start_seq_before
             )
-            self._record_action("Fan activated", reason)
+            self._record_action(_R("action_fan_activated"), reason)
             if emit_event and self._emit_event_callback:
                 self._emit_event_callback(
                     "fan_activated",
@@ -20695,7 +20715,7 @@ class AutomationEngine:
             # comment on the already-inactive branch above for why that's wrong.
             if release_suppression:
                 self._cancel_fan_thermo_backstop()
-            self._record_action("Fan deactivated", reason)
+            self._record_action(_R("action_fan_deactivated"), reason)
             if emit_event and self._emit_event_callback:
                 self._emit_event_callback(
                     "fan_deactivated",

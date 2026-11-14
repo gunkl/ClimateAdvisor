@@ -4855,7 +4855,8 @@ class TestWhfStatusRateLimitSuffix:
         coord.automation_engine._fan_rate_limited_direction = "deactivate"
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now):
             result = coord._compute_whf_status()
-        assert result == f"inactive (off pending — 5-min floor, applies at {applies_at.strftime('%H:%M:%S')})"
+        # Issue #1341: the card uses the one clock formatter (12-hour in English, no seconds)
+        assert result == "inactive (off pending — 5-min floor, applies at 6:43 AM)"
 
     def test_suffix_absent_once_cooldown_elapses(self):
         coord = _make_coordinator_for_fan_status(

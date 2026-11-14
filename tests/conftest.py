@@ -24,7 +24,7 @@ from custom_components.climate_advisor.classifier import ForecastSnapshot  # noq
 
 @pytest.fixture(autouse=True)
 def _i18n_catalogs_loaded():
-    """Issue #1341: the backend renders occupant text from the on-disk catalogs; load them (idempotent) for every test."""
+    """Issue #1341: the backend renders occupant text from the catalogs on disk; load them (idempotent) per test."""
     from custom_components.climate_advisor import i18n
 
     i18n.load_catalogs()

@@ -1,0 +1,6 @@
+{
+  "activity.*": "General: every select option name (cooling, heating, cool, heat, yes, no, restart, takeover, nat_vent, override, economizer, sleep, indoor, below, above, equipment_ran, chasing, version_changed, user_restart, reload, other) is a fixed code and must be kept verbatim; translate only the text inside the braces after it. 'other' is mandatory in every select. Keep arrows (->), the comparison signs (<=, >=) and technical tokens such as hvac_mode, fan_mode, WHF, CA, k_cool and k_passive unchanged: this text mirrors the English activity record.",
+  "activity.fan_cancel_manual_origin": "Three whole sentences chosen by 'kind' (restart / takeover / other); the optional ' (started HH:MM)' clause is chosen by has_started (yes / no).",
+  "activity.join_comma_2": "Joins short facts; use the language's own list separator. Same for the other join_comma_N and join_dash_N keys.",
+  "activity.fact_grace_churn": "Quotes around {trigger} are doubled ('') on purpose (ICU apostrophe escape); keep them doubled."
+}

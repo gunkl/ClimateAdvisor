@@ -69,7 +69,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from . import i18n
 from .const import DAY_TYPE_COLD, DAY_TYPE_COOL, DAY_TYPE_HOT, DAY_TYPE_WARM
+from .record_text import MsgText
+
+
+def _reason(key: str, **params: object) -> MsgText:
+    """A decision reason: the English text (the record) that also carries its message (Issue #1341)."""
+    return MsgText(i18n.Msg(f"activity.{key}", **params))
+
 
 _FAMILY_HEATING = "heating"
 _FAMILY_COOLING = "cooling"
@@ -198,9 +206,14 @@ def _settling_hold(
     return ComfortFamilyDecision(
         outcome=ComfortFamilyOutcome.HOLD,
         target_family=current,
-        reason=(
-            f"settling guard: {current} ran {ran:.0f} min ago (window {inputs.recency_window_min:.0f} min),"
-            f" {zone} zone depth {depth:.1f}F <= tolerance {inputs.tolerance_f:.1f}F -- holding {current}"
+        reason=_reason(
+            "reason_cf_settling_guard",
+            current=str(current),
+            ran=f"{ran:.0f}",
+            window=f"{inputs.recency_window_min:.0f}",
+            zone=zone,
+            depth=f"{depth:.1f}",
+            tolerance=f"{inputs.tolerance_f:.1f}",
         ),
         breach=past_edge > 0.0,
         margin_applied_f=margin,
@@ -242,19 +255,19 @@ def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
         return ComfortFamilyDecision(
             outcome=ComfortFamilyOutcome.NOT_APPLICABLE,
             target_family=inputs.current_family,
-            reason="nat-vent/WHF owns HVAC — comfort family defers",
+            reason=_reason("reason_cf_nat_vent_owns"),
         )
     if inputs.tou_precondition_active:
         return ComfortFamilyDecision(
             outcome=ComfortFamilyOutcome.NOT_APPLICABLE,
             target_family=inputs.current_family,
-            reason="TOU precondition owns HVAC — comfort family defers",
+            reason=_reason("reason_cf_tou_owns"),
         )
     if inputs.indoor is None or inputs.floor is None or inputs.ceiling is None:
         return ComfortFamilyDecision(
             outcome=ComfortFamilyOutcome.NOT_APPLICABLE,
             target_family=inputs.current_family,
-            reason="missing indoor temperature or comfort band",
+            reason=_reason("reason_cf_missing_input"),
         )
 
     indoor, floor, ceiling = inputs.indoor, inputs.floor, inputs.ceiling
@@ -264,13 +277,13 @@ def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
         return ComfortFamilyDecision(
             outcome=ComfortFamilyOutcome.NOT_APPLICABLE,
             target_family=inputs.current_family,
-            reason="thermostat supports neither heat nor cool",
+            reason=_reason("reason_cf_no_support"),
             breach=breach,
         )
     if inputs.supports_heat and not inputs.supports_cool:
-        return _decision(inputs, _FAMILY_HEATING, "heat-only thermostat", breach=breach)
+        return _decision(inputs, _FAMILY_HEATING, _reason("reason_cf_heat_only"), breach=breach)
     if inputs.supports_cool and not inputs.supports_heat:
-        return _decision(inputs, _FAMILY_COOLING, "cool-only thermostat", breach=breach)
+        return _decision(inputs, _FAMILY_COOLING, _reason("reason_cf_cool_only"), breach=breach)
 
     m = effective_margin(inputs.margin_f, floor, ceiling)
     heat_limit = floor + m if m is not None else None
@@ -283,7 +296,7 @@ def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
         return _decision(
             inputs,
             _FAMILY_HEATING,
-            "floor breach — arming heat immediately",
+            _reason("reason_cf_floor_breach"),
             breach=True,
             margin=m,
             heat_limit=heat_limit,
@@ -296,7 +309,7 @@ def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
         return _decision(
             inputs,
             _FAMILY_COOLING,
-            "ceiling breach — arming cool immediately",
+            _reason("reason_cf_ceiling_breach"),
             breach=True,
             margin=m,
             heat_limit=heat_limit,
@@ -305,7 +318,7 @@ def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
 
     if heat_limit is None or cool_limit is None:
         target = inputs.current_family or inputs.default_family
-        return _decision(inputs, target, "band too narrow for interior switching", margin=m)
+        return _decision(inputs, target, _reason("reason_cf_band_too_narrow"), margin=m)
 
     if indoor <= heat_limit:
         held = _settling_hold(inputs, _FAMILY_HEATING, floor - indoor, m)
@@ -314,7 +327,7 @@ def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
         return _decision(
             inputs,
             _FAMILY_HEATING,
-            "within heat arming margin",
+            _reason("reason_cf_within_heat_margin"),
             margin=m,
             heat_limit=heat_limit,
             cool_limit=cool_limit,
@@ -326,7 +339,7 @@ def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
         return _decision(
             inputs,
             _FAMILY_COOLING,
-            "within cool arming margin",
+            _reason("reason_cf_within_cool_margin"),
             margin=m,
             heat_limit=heat_limit,
             cool_limit=cool_limit,
@@ -336,7 +349,7 @@ def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
     return _decision(
         inputs,
         target,
-        "in hysteresis gap — keeping current family",
+        _reason("reason_cf_hysteresis_gap"),
         margin=m,
         heat_limit=heat_limit,
         cool_limit=cool_limit,

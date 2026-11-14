@@ -434,6 +434,7 @@ from .promise_journal import (
 from .promise_journal import (
     Reading as _PromiseReading,
 )
+from .record_text import split_msg_fields
 from .remote_offset import RemoteOffsetState
 from .scheduler import (
     COST_TAG_HIGH,
@@ -4699,7 +4700,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "fan_ownership_self_healed",
             {
                 "was_on_since": ae._fan_on_since,
-                "reason": "blower physically off with no CA command, session or override behind the ownership flag",
+                "reason": i18n.Msg("activity.reason_fan_ownership_self_healed"),
                 "fan_mode_config": fan_mode,
             },
         )
@@ -16736,8 +16737,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         return _decide("comfortable", i18n.Msg("status.next_action.comfortable"))
 
+    _split_msg_fields = staticmethod(split_msg_fields)
+
     def _emit_event(self, event_type: str, data: dict) -> None:
         """Append a timestamped event to the in-memory event log ring buffer (Issue #76)."""
+        data = split_msg_fields(data)
         _now = dt_util.now()
         entry: dict[str, Any] = {"time": _now.isoformat(), "type": event_type, **data}
         # Normalize alternate temp field names used by automation events

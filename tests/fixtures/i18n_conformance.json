@@ -6,7 +6,7 @@
   "cldr": "46.0",
   "unicode": "16.0",
   "intl_messageformat": "10.7.16",
-  "rows": 1175
+  "rows": 1989
  },
  "rows": [
   {
@@ -11779,6 +11779,10724 @@
     "n": "z"
    },
    "expected": "a 20,2°C b z"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN%"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "en",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "en",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "en",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN %"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞ %"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞ %"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN %"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "es",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞ %"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "es",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞ %"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "es",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN %"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "de",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞ %"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "de",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞ %"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "de",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN%"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN%"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN%"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN%"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "it",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "it",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "it",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN%"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN%"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN%"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN%"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "ليس رقمًا"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "ليس رقمًا‎%‎"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "ليس رقمًا"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x ليس رقمًا"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞‎%‎"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "‎-∞"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "‎-∞‎%‎"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "‎-∞"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x ‎-∞"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "не число"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "не число %"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "не число"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x не число"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞ %"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞ %"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN%"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "%NaN"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x NaN"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "%∞"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-%∞"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000"
+  },
+  {
+   "lang": "fr",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000"
+  },
+  {
+   "lang": "es",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000"
+  },
+  {
+   "lang": "nl",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000"
+  },
+  {
+   "lang": "ja",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000"
+  },
+  {
+   "lang": "pt",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000"
+  },
+  {
+   "lang": "it",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000"
+  },
+  {
+   "lang": "pl",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000"
+  },
+  {
+   "lang": "uk",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000"
+  },
+  {
+   "lang": "ko",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000"
+  },
+  {
+   "lang": "hi",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "10,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,000"
+  },
+  {
+   "lang": "ar",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000"
+  },
+  {
+   "lang": "ru",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000 000"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000"
+  },
+  {
+   "lang": "tr",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000.000"
+  },
+  {
+   "lang": "en",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1,234.5, x, 3, and 1,000,000"
+  },
+  {
+   "lang": "en",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1,234.5, x, 3, or 1,000,000"
+  },
+  {
+   "lang": "fr",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1 234,5, x, 3 et 1 000 000"
+  },
+  {
+   "lang": "fr",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1 234,5, x, 3 ou 1 000 000"
+  },
+  {
+   "lang": "es",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1234,5, x, 3 y 1.000.000"
+  },
+  {
+   "lang": "es",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1234,5, x, 3 o 1.000.000"
+  },
+  {
+   "lang": "de",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1.234,5, x, 3 und 1.000.000"
+  },
+  {
+   "lang": "de",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1.234,5, x, 3 oder 1.000.000"
+  },
+  {
+   "lang": "nl",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1.234,5, x, 3 en 1.000.000"
+  },
+  {
+   "lang": "nl",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1.234,5, x, 3 of 1.000.000"
+  },
+  {
+   "lang": "ja",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1,234.5、x、3、1,000,000"
+  },
+  {
+   "lang": "ja",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1,234.5、x、3、または1,000,000"
+  },
+  {
+   "lang": "pt",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1.234,5, x, 3 e 1.000.000"
+  },
+  {
+   "lang": "pt",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1.234,5, x, 3 ou 1.000.000"
+  },
+  {
+   "lang": "it",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1234,5, x, 3 e 1.000.000"
+  },
+  {
+   "lang": "it",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1234,5, x, 3 o 1.000.000"
+  },
+  {
+   "lang": "pl",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1234,5, x, 3 i 1 000 000"
+  },
+  {
+   "lang": "pl",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1234,5, x, 3 lub 1 000 000"
+  },
+  {
+   "lang": "uk",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1 234,5, x, 3 і 1 000 000"
+  },
+  {
+   "lang": "uk",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1 234,5, x, 3 або 1 000 000"
+  },
+  {
+   "lang": "ko",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1,234.5, x, 3 및 1,000,000"
+  },
+  {
+   "lang": "ko",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1,234.5, x, 3 또는 1,000,000"
+  },
+  {
+   "lang": "hi",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1,234.5, x, 3, और 10,00,000"
+  },
+  {
+   "lang": "hi",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1,234.5, x, 3 या 10,00,000"
+  },
+  {
+   "lang": "ar",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1,234.5 وx و3 و1,000,000"
+  },
+  {
+   "lang": "ar",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1,234.5 أو x أو 3 أو 1,000,000"
+  },
+  {
+   "lang": "ru",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1 234,5, x, 3 и 1 000 000"
+  },
+  {
+   "lang": "ru",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1 234,5, x, 3 или 1 000 000"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1,234.5、x、3和1,000,000"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1,234.5、x、3或1,000,000"
+  },
+  {
+   "lang": "tr",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1.234,5, x, 3 ve 1.000.000"
+  },
+  {
+   "lang": "tr",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1.234,5, x, 3 veya 1.000.000"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 0.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "0°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 1.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "2°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 2.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "2°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 72.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "72°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 73.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "74°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 72.25,
+     "unit": "fahrenheit",
+     "d": 1
+    }
+   },
+   "expected": "72.2°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 72.75,
+     "unit": "fahrenheit",
+     "d": 1
+    }
+   },
+   "expected": "72.8°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 0.125,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "0.12°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 0.375,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "0.38°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 1.005,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "1.00°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 2.675,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "2.67°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": -2.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-2°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": -0.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-0°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": -0.04,
+     "unit": "fahrenheit",
+     "d": 1
+    }
+   },
+   "expected": "-0.0°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": 4.5,
+     "unit": "celsius",
+     "d": 0
+    }
+   },
+   "expected": "2°C"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": 13.5,
+     "unit": "celsius",
+     "d": 0
+    }
+   },
+   "expected": "8°C"
+  },
+  {
+   "lang": "de",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 2.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "3°F"
+  },
+  {
+   "lang": "de",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 0.125,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "0,13°F"
+  },
+  {
+   "lang": "de",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 1.005,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "1,01°F"
+  },
+  {
+   "lang": "de",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": -2.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-3°F"
+  },
+  {
+   "lang": "fr",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 2.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "3°F"
+  },
+  {
+   "lang": "fr",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 0.125,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "0,13°F"
+  },
+  {
+   "lang": "fr",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 1.005,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "1,01°F"
+  },
+  {
+   "lang": "fr",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": -2.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-3°F"
+  },
+  {
+   "lang": "ja",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 2.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "3°F"
+  },
+  {
+   "lang": "ja",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 0.125,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "0.13°F"
+  },
+  {
+   "lang": "ja",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 1.005,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "1.01°F"
+  },
+  {
+   "lang": "ja",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": -2.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-3°F"
+  },
+  {
+   "lang": "ar",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 2.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "3°F"
+  },
+  {
+   "lang": "ar",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 0.125,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "0.13°F"
+  },
+  {
+   "lang": "ar",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 1.005,
+     "unit": "fahrenheit",
+     "d": 2
+    }
+   },
+   "expected": "1.01°F"
+  },
+  {
+   "lang": "ar",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": -2.5,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "‎-3°F"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "en",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "fr",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "fr",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "es",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "es",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "de",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "de",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "nl",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "nl",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "ja",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "ja",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "pt",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "pt",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "it",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "it",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "pl",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "pl",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "uk",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "uk",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "ko",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "ko",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "hi",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "hi",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "ar",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "ليس رقمًا°C"
+  },
+  {
+   "lang": "ar",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "‎-∞°F"
+  },
+  {
+   "lang": "ru",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "не число°C"
+  },
+  {
+   "lang": "ru",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "tr",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "NaN°C"
+  },
+  {
+   "lang": "tr",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 0
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1 min"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 30
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1 min"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 45
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1 min"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 90
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 2 min"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 150
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 2 min"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 300
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 5 min"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 3600
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 4500
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1.2h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 5400
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1.5h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 6300
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1.8h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 7200
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 2h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 8100
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 2.2h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 9000
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 2.5h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 10800
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 3h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 86400
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 24h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 90000
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 25h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 0
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 1 min"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 30
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 1 min"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 45
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 1 min"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 90
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 2 min"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 150
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 2 min"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 300
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 5 min"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 3600
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 1 h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 4500
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 1,2 h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 5400
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 1,5 h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 6300
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 1,8 h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 7200
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 2 h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 8100
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 2,2 h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 9000
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 2,5 h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 10800
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 3 h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 86400
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 24 h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 90000
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "dans 25 h"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 0
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1 min"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 30
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1 min"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 45
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1 min"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 90
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 2 min"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 150
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 2 min"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 300
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 5 min"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 3600
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1h"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 4500
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1,2h"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 5400
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1,5h"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 6300
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 1,8h"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 7200
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 2h"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 8100
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 2,2h"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 9000
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 2,5h"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 10800
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 3h"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 86400
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 24h"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 90000
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "in {d}"
+    },
+    "fr": {
+     "common.duration.hours": "{n, plural, one {# h} other {# h}}",
+     "common.duration.hours_frac": "{n, number, ::.0} h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "dans {d}"
+    }
+   },
+   "expected": "in 25h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 4500
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "{d}"
+    }
+   },
+   "expected": "1.2h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 8100
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "{d}"
+    }
+   },
+   "expected": "2.2h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 6300
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "{d}"
+    }
+   },
+   "expected": "1.8h"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "d": {
+     "$t": "dur",
+     "s": 9900
+    }
+   },
+   "catalogs": {
+    "en": {
+     "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+     "common.duration.hours_frac": "{n, number, ::.0}h",
+     "common.duration.min": "{n, plural, one {# min} other {# min}}",
+     "conformance.row": "{d}"
+    }
+   },
+   "expected": "2.8h"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "n": 1,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1 item / 1 / a, b et 3 / 21,3°C"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "n": 1.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1,5 item / 1,5 / a, b et 3 / 21,3°C"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "n": 2.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "2,5 items / 2,5 / a, b et 3 / 21,3°C"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "n": 1234.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1 234,5 items / 1 234,5 / a, b et 3 / 21,3°C"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "n": 1,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1 item / 1 / a, b und 3 / 21,3°C"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "n": 1.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1,5 items / 1,5 / a, b und 3 / 21,3°C"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "n": 2.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "2,5 items / 2,5 / a, b und 3 / 21,3°C"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "n": 1234.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1.234,5 items / 1.234,5 / a, b und 3 / 21,3°C"
+  },
+  {
+   "lang": "ru",
+   "key": "conformance.row",
+   "params": {
+    "n": 1,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1 item / 1 / a, b и 3 / 21,3°C"
+  },
+  {
+   "lang": "ru",
+   "key": "conformance.row",
+   "params": {
+    "n": 1.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1,5 items / 1,5 / a, b и 3 / 21,3°C"
+  },
+  {
+   "lang": "ru",
+   "key": "conformance.row",
+   "params": {
+    "n": 2.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "2,5 items / 2,5 / a, b и 3 / 21,3°C"
+  },
+  {
+   "lang": "ru",
+   "key": "conformance.row",
+   "params": {
+    "n": 1234.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1 234,5 items / 1 234,5 / a, b и 3 / 21,3°C"
+  },
+  {
+   "lang": "ar",
+   "key": "conformance.row",
+   "params": {
+    "n": 1,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1 item / 1 / a وb و3 / 21.3°C"
+  },
+  {
+   "lang": "ar",
+   "key": "conformance.row",
+   "params": {
+    "n": 1.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1.5 items / 1.5 / a وb و3 / 21.3°C"
+  },
+  {
+   "lang": "ar",
+   "key": "conformance.row",
+   "params": {
+    "n": 2.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "2.5 items / 2.5 / a وb و3 / 21.3°C"
+  },
+  {
+   "lang": "ar",
+   "key": "conformance.row",
+   "params": {
+    "n": 1234.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1,234.5 items / 1,234.5 / a وb و3 / 21.3°C"
+  },
+  {
+   "lang": "pl",
+   "key": "conformance.row",
+   "params": {
+    "n": 1,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1 item / 1 / a, b i 3 / 21,3°C"
+  },
+  {
+   "lang": "pl",
+   "key": "conformance.row",
+   "params": {
+    "n": 1.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1,5 items / 1,5 / a, b i 3 / 21,3°C"
+  },
+  {
+   "lang": "pl",
+   "key": "conformance.row",
+   "params": {
+    "n": 2.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "2,5 items / 2,5 / a, b i 3 / 21,3°C"
+  },
+  {
+   "lang": "pl",
+   "key": "conformance.row",
+   "params": {
+    "n": 1234.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1234,5 items / 1234,5 / a, b i 3 / 21,3°C"
+  },
+  {
+   "lang": "ja",
+   "key": "conformance.row",
+   "params": {
+    "n": 1,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1 items / 1 / a、b、3 / 21.3°C"
+  },
+  {
+   "lang": "ja",
+   "key": "conformance.row",
+   "params": {
+    "n": 1.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1.5 items / 1.5 / a、b、3 / 21.3°C"
+  },
+  {
+   "lang": "ja",
+   "key": "conformance.row",
+   "params": {
+    "n": 2.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "2.5 items / 2.5 / a、b、3 / 21.3°C"
+  },
+  {
+   "lang": "ja",
+   "key": "conformance.row",
+   "params": {
+    "n": 1234.5,
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      "b",
+      3
+     ],
+     "style": "and"
+    },
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}} / {n, number} / {l} / {t}"
+    }
+   },
+   "strict": false,
+   "expected": "1,234.5 items / 1,234.5 / a、b、3 / 21.3°C"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "n": 1234.5,
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n} items ({t})"
+    },
+    "de": {
+     "conformance.row": "{n, plural, one {# x} other {# y"
+    }
+   },
+   "strict": false,
+   "expected": "1234.5 items (21.2°C)"
+  },
+  {
+   "lang": "fr",
+   "key": "conformance.row",
+   "params": {
+    "n": 1234.5,
+    "t": {
+     "$t": "temp",
+     "f": 70.25,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n} items ({t})"
+    },
+    "fr": {
+     "conformance.row": "{n} {missing_arg}"
+    }
+   },
+   "strict": false,
+   "expected": "1234.5 items (21.2°C)"
+  },
+  {
+   "lang": "ru",
+   "key": "conformance.row",
+   "params": {
+    "n": 3
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# item} other {# items}}"
+    },
+    "ru": {
+     "conformance.row": "{n, plural, one {# a} few {# b}}"
+    }
+   },
+   "strict": false,
+   "expected": "3 items"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "n": 3
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {#"
+    },
+    "de": {
+     "conformance.row": "{n, plural, one {#"
+    }
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "en",
+   "key": "conformance.row",
+   "params": {
+    "n": 3
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "{n, plural, one {# a}"
+    }
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "fr",
+   "key": "common.nowhere",
+   "params": {
+    "n": 3
+   },
+   "catalogs": {
+    "en": {}
+   },
+   "strict": false,
+   "expected": "common.nowhere"
+  },
+  {
+   "lang": "de",
+   "key": "",
+   "params": {},
+   "catalogs": {
+    "en": {}
+   },
+   "strict": false,
+   "expected": ""
+  },
+  {
+   "lang": "en",
+   "msg": "temp_none: {x}",
+   "params": {
+    "x": {
+     "$t": "temp",
+     "f": null,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "strict": false,
+   "expected": "temp_none: —"
+  },
+  {
+   "lang": "en",
+   "msg": "temp_str: {x}",
+   "params": {
+    "x": {
+     "$t": "temp",
+     "f": "72",
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "strict": false,
+   "expected": "temp_str: —"
+  },
+  {
+   "lang": "en",
+   "msg": "temp_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "temp",
+     "unit": "celsius"
+    }
+   },
+   "strict": false,
+   "expected": "temp_missing: —"
+  },
+  {
+   "lang": "en",
+   "msg": "tdelta_none: {x}",
+   "params": {
+    "x": {
+     "$t": "tdelta",
+     "f": null,
+     "unit": "celsius",
+     "d": 0
+    }
+   },
+   "strict": false,
+   "expected": "tdelta_none: —"
+  },
+  {
+   "lang": "en",
+   "msg": "time_garbage: {x}",
+   "params": {
+    "x": {
+     "$t": "time",
+     "ts": "garbage"
+    }
+   },
+   "strict": false,
+   "expected": "time_garbage: —"
+  },
+  {
+   "lang": "en",
+   "msg": "time_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "time"
+    }
+   },
+   "strict": false,
+   "expected": "time_missing: —"
+  },
+  {
+   "lang": "en",
+   "msg": "time_number: {x}",
+   "params": {
+    "x": {
+     "$t": "time",
+     "ts": 5
+    }
+   },
+   "strict": false,
+   "expected": "time_number: —"
+  },
+  {
+   "lang": "en",
+   "msg": "time_overflow: {x}",
+   "params": {
+    "x": {
+     "$t": "time",
+     "ts": "2026-13-45T25:61:00+00:00"
+    }
+   },
+   "strict": false,
+   "expected": "time_overflow: —"
+  },
+  {
+   "lang": "en",
+   "msg": "date_garbage: {x}",
+   "params": {
+    "x": {
+     "$t": "date",
+     "ts": "nope"
+    }
+   },
+   "strict": false,
+   "expected": "date_garbage: —"
+  },
+  {
+   "lang": "en",
+   "msg": "date_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "date"
+    }
+   },
+   "strict": false,
+   "expected": "date_missing: —"
+  },
+  {
+   "lang": "en",
+   "msg": "dur_none: {x}",
+   "params": {
+    "x": {
+     "$t": "dur",
+     "s": null
+    }
+   },
+   "strict": false,
+   "expected": "dur_none: —"
+  },
+  {
+   "lang": "en",
+   "msg": "dur_str: {x}",
+   "params": {
+    "x": {
+     "$t": "dur",
+     "s": "300"
+    }
+   },
+   "strict": false,
+   "expected": "dur_str: —"
+  },
+  {
+   "lang": "en",
+   "msg": "dur_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "dur"
+    }
+   },
+   "strict": false,
+   "expected": "dur_missing: —"
+  },
+  {
+   "lang": "en",
+   "msg": "list_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "list",
+     "style": "and"
+    }
+   },
+   "strict": false,
+   "expected": "list_missing: —"
+  },
+  {
+   "lang": "en",
+   "msg": "list_not_array: {x}",
+   "params": {
+    "x": {
+     "$t": "list",
+     "items": "ab"
+    }
+   },
+   "strict": false,
+   "expected": "list_not_array: —"
+  },
+  {
+   "lang": "en",
+   "msg": "unknown_type: {x}",
+   "params": {
+    "x": {
+     "$t": "nope",
+     "x": 1
+    }
+   },
+   "strict": false,
+   "expected": "unknown_type: —"
+  },
+  {
+   "lang": "en",
+   "msg": "marked_bad: {x}",
+   "params": {
+    "x": {
+     "$t": "bad"
+    }
+   },
+   "strict": false,
+   "expected": "marked_bad: —"
+  },
+  {
+   "lang": "en",
+   "msg": "code_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "code"
+    }
+   },
+   "strict": false,
+   "expected": "code_missing: —"
+  },
+  {
+   "lang": "en",
+   "msg": "plain_null: {x}",
+   "params": {
+    "x": null
+   },
+   "strict": false,
+   "expected": "plain_null: —"
+  },
+  {
+   "lang": "en",
+   "msg": "plain_true: {x}",
+   "params": {
+    "x": true
+   },
+   "strict": false,
+   "expected": "plain_true: —"
+  },
+  {
+   "lang": "en",
+   "msg": "plain_array: {x}",
+   "params": {
+    "x": [
+     1,
+     2
+    ]
+   },
+   "strict": false,
+   "expected": "plain_array: —"
+  },
+  {
+   "lang": "en",
+   "msg": "plain_object: {x}",
+   "params": {
+    "x": {
+     "a": 1
+    }
+   },
+   "strict": false,
+   "expected": "plain_object: —"
+  },
+  {
+   "lang": "en",
+   "msg": "items: {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      null,
+      5,
+      {
+       "$t": "temp",
+       "f": null
+      },
+      true
+     ],
+     "style": "and"
+    }
+   },
+   "strict": false,
+   "expected": "items: a, —, 5, —, and —"
+  },
+  {
+   "lang": "en",
+   "msg": "a {x} b {y}",
+   "params": {
+    "x": {
+     "$t": "dur",
+     "s": null
+    },
+    "y": {
+     "$t": "time",
+     "ts": "garbage"
+    }
+   },
+   "strict": false,
+   "expected": "a — b —"
+  },
+  {
+   "lang": "de",
+   "msg": "temp_none: {x}",
+   "params": {
+    "x": {
+     "$t": "temp",
+     "f": null,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "strict": false,
+   "expected": "temp_none: —"
+  },
+  {
+   "lang": "de",
+   "msg": "temp_str: {x}",
+   "params": {
+    "x": {
+     "$t": "temp",
+     "f": "72",
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "strict": false,
+   "expected": "temp_str: —"
+  },
+  {
+   "lang": "de",
+   "msg": "temp_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "temp",
+     "unit": "celsius"
+    }
+   },
+   "strict": false,
+   "expected": "temp_missing: —"
+  },
+  {
+   "lang": "de",
+   "msg": "tdelta_none: {x}",
+   "params": {
+    "x": {
+     "$t": "tdelta",
+     "f": null,
+     "unit": "celsius",
+     "d": 0
+    }
+   },
+   "strict": false,
+   "expected": "tdelta_none: —"
+  },
+  {
+   "lang": "de",
+   "msg": "time_garbage: {x}",
+   "params": {
+    "x": {
+     "$t": "time",
+     "ts": "garbage"
+    }
+   },
+   "strict": false,
+   "expected": "time_garbage: —"
+  },
+  {
+   "lang": "de",
+   "msg": "time_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "time"
+    }
+   },
+   "strict": false,
+   "expected": "time_missing: —"
+  },
+  {
+   "lang": "de",
+   "msg": "time_number: {x}",
+   "params": {
+    "x": {
+     "$t": "time",
+     "ts": 5
+    }
+   },
+   "strict": false,
+   "expected": "time_number: —"
+  },
+  {
+   "lang": "de",
+   "msg": "time_overflow: {x}",
+   "params": {
+    "x": {
+     "$t": "time",
+     "ts": "2026-13-45T25:61:00+00:00"
+    }
+   },
+   "strict": false,
+   "expected": "time_overflow: —"
+  },
+  {
+   "lang": "de",
+   "msg": "date_garbage: {x}",
+   "params": {
+    "x": {
+     "$t": "date",
+     "ts": "nope"
+    }
+   },
+   "strict": false,
+   "expected": "date_garbage: —"
+  },
+  {
+   "lang": "de",
+   "msg": "date_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "date"
+    }
+   },
+   "strict": false,
+   "expected": "date_missing: —"
+  },
+  {
+   "lang": "de",
+   "msg": "dur_none: {x}",
+   "params": {
+    "x": {
+     "$t": "dur",
+     "s": null
+    }
+   },
+   "strict": false,
+   "expected": "dur_none: —"
+  },
+  {
+   "lang": "de",
+   "msg": "dur_str: {x}",
+   "params": {
+    "x": {
+     "$t": "dur",
+     "s": "300"
+    }
+   },
+   "strict": false,
+   "expected": "dur_str: —"
+  },
+  {
+   "lang": "de",
+   "msg": "dur_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "dur"
+    }
+   },
+   "strict": false,
+   "expected": "dur_missing: —"
+  },
+  {
+   "lang": "de",
+   "msg": "list_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "list",
+     "style": "and"
+    }
+   },
+   "strict": false,
+   "expected": "list_missing: —"
+  },
+  {
+   "lang": "de",
+   "msg": "list_not_array: {x}",
+   "params": {
+    "x": {
+     "$t": "list",
+     "items": "ab"
+    }
+   },
+   "strict": false,
+   "expected": "list_not_array: —"
+  },
+  {
+   "lang": "de",
+   "msg": "unknown_type: {x}",
+   "params": {
+    "x": {
+     "$t": "nope",
+     "x": 1
+    }
+   },
+   "strict": false,
+   "expected": "unknown_type: —"
+  },
+  {
+   "lang": "de",
+   "msg": "marked_bad: {x}",
+   "params": {
+    "x": {
+     "$t": "bad"
+    }
+   },
+   "strict": false,
+   "expected": "marked_bad: —"
+  },
+  {
+   "lang": "de",
+   "msg": "code_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "code"
+    }
+   },
+   "strict": false,
+   "expected": "code_missing: —"
+  },
+  {
+   "lang": "de",
+   "msg": "plain_null: {x}",
+   "params": {
+    "x": null
+   },
+   "strict": false,
+   "expected": "plain_null: —"
+  },
+  {
+   "lang": "de",
+   "msg": "plain_true: {x}",
+   "params": {
+    "x": true
+   },
+   "strict": false,
+   "expected": "plain_true: —"
+  },
+  {
+   "lang": "de",
+   "msg": "plain_array: {x}",
+   "params": {
+    "x": [
+     1,
+     2
+    ]
+   },
+   "strict": false,
+   "expected": "plain_array: —"
+  },
+  {
+   "lang": "de",
+   "msg": "plain_object: {x}",
+   "params": {
+    "x": {
+     "a": 1
+    }
+   },
+   "strict": false,
+   "expected": "plain_object: —"
+  },
+  {
+   "lang": "de",
+   "msg": "items: {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      null,
+      5,
+      {
+       "$t": "temp",
+       "f": null
+      },
+      true
+     ],
+     "style": "and"
+    }
+   },
+   "strict": false,
+   "expected": "items: a, —, 5, — und —"
+  },
+  {
+   "lang": "de",
+   "msg": "a {x} b {y}",
+   "params": {
+    "x": {
+     "$t": "dur",
+     "s": null
+    },
+    "y": {
+     "$t": "time",
+     "ts": "garbage"
+    }
+   },
+   "strict": false,
+   "expected": "a — b —"
+  },
+  {
+   "lang": "ja",
+   "msg": "temp_none: {x}",
+   "params": {
+    "x": {
+     "$t": "temp",
+     "f": null,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "strict": false,
+   "expected": "temp_none: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "temp_str: {x}",
+   "params": {
+    "x": {
+     "$t": "temp",
+     "f": "72",
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "strict": false,
+   "expected": "temp_str: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "temp_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "temp",
+     "unit": "celsius"
+    }
+   },
+   "strict": false,
+   "expected": "temp_missing: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "tdelta_none: {x}",
+   "params": {
+    "x": {
+     "$t": "tdelta",
+     "f": null,
+     "unit": "celsius",
+     "d": 0
+    }
+   },
+   "strict": false,
+   "expected": "tdelta_none: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "time_garbage: {x}",
+   "params": {
+    "x": {
+     "$t": "time",
+     "ts": "garbage"
+    }
+   },
+   "strict": false,
+   "expected": "time_garbage: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "time_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "time"
+    }
+   },
+   "strict": false,
+   "expected": "time_missing: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "time_number: {x}",
+   "params": {
+    "x": {
+     "$t": "time",
+     "ts": 5
+    }
+   },
+   "strict": false,
+   "expected": "time_number: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "time_overflow: {x}",
+   "params": {
+    "x": {
+     "$t": "time",
+     "ts": "2026-13-45T25:61:00+00:00"
+    }
+   },
+   "strict": false,
+   "expected": "time_overflow: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "date_garbage: {x}",
+   "params": {
+    "x": {
+     "$t": "date",
+     "ts": "nope"
+    }
+   },
+   "strict": false,
+   "expected": "date_garbage: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "date_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "date"
+    }
+   },
+   "strict": false,
+   "expected": "date_missing: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "dur_none: {x}",
+   "params": {
+    "x": {
+     "$t": "dur",
+     "s": null
+    }
+   },
+   "strict": false,
+   "expected": "dur_none: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "dur_str: {x}",
+   "params": {
+    "x": {
+     "$t": "dur",
+     "s": "300"
+    }
+   },
+   "strict": false,
+   "expected": "dur_str: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "dur_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "dur"
+    }
+   },
+   "strict": false,
+   "expected": "dur_missing: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "list_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "list",
+     "style": "and"
+    }
+   },
+   "strict": false,
+   "expected": "list_missing: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "list_not_array: {x}",
+   "params": {
+    "x": {
+     "$t": "list",
+     "items": "ab"
+    }
+   },
+   "strict": false,
+   "expected": "list_not_array: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "unknown_type: {x}",
+   "params": {
+    "x": {
+     "$t": "nope",
+     "x": 1
+    }
+   },
+   "strict": false,
+   "expected": "unknown_type: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "marked_bad: {x}",
+   "params": {
+    "x": {
+     "$t": "bad"
+    }
+   },
+   "strict": false,
+   "expected": "marked_bad: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "code_missing: {x}",
+   "params": {
+    "x": {
+     "$t": "code"
+    }
+   },
+   "strict": false,
+   "expected": "code_missing: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "plain_null: {x}",
+   "params": {
+    "x": null
+   },
+   "strict": false,
+   "expected": "plain_null: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "plain_true: {x}",
+   "params": {
+    "x": true
+   },
+   "strict": false,
+   "expected": "plain_true: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "plain_array: {x}",
+   "params": {
+    "x": [
+     1,
+     2
+    ]
+   },
+   "strict": false,
+   "expected": "plain_array: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "plain_object: {x}",
+   "params": {
+    "x": {
+     "a": 1
+    }
+   },
+   "strict": false,
+   "expected": "plain_object: —"
+  },
+  {
+   "lang": "ja",
+   "msg": "items: {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "a",
+      null,
+      5,
+      {
+       "$t": "temp",
+       "f": null
+      },
+      true
+     ],
+     "style": "and"
+    }
+   },
+   "strict": false,
+   "expected": "items: a、—、5、—、—"
+  },
+  {
+   "lang": "ja",
+   "msg": "a {x} b {y}",
+   "params": {
+    "x": {
+     "$t": "dur",
+     "s": null
+    },
+    "y": {
+     "$t": "time",
+     "ts": "garbage"
+    }
+   },
+   "strict": false,
+   "expected": "a — b —"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, plural, one {# item} other {# items}}",
+   "params": {
+    "n": null
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number}",
+   "params": {
+    "n": null
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, plural, one {# item} other {# items}}",
+   "params": {
+    "n": {
+     "$t": "dur",
+     "s": null
+    }
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$t": "dur",
+     "s": null
+    }
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, plural, one {# item} other {# items}}",
+   "params": {
+    "n": "five"
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number}",
+   "params": {
+    "n": "five"
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, plural, one {# item} other {# items}}",
+   "params": {
+    "n": true
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "en",
+   "msg": "{n, number}",
+   "params": {
+    "n": true
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, plural, one {# item} other {# items}}",
+   "params": {
+    "n": null
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number}",
+   "params": {
+    "n": null
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, plural, one {# item} other {# items}}",
+   "params": {
+    "n": {
+     "$t": "dur",
+     "s": null
+    }
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$t": "dur",
+     "s": null
+    }
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, plural, one {# item} other {# items}}",
+   "params": {
+    "n": "five"
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number}",
+   "params": {
+    "n": "five"
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, plural, one {# item} other {# items}}",
+   "params": {
+    "n": true
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "de",
+   "msg": "{n, number}",
+   "params": {
+    "n": true
+   },
+   "strict": false,
+   "expected": "conformance.row"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "m": {
+     "$t": "msg",
+     "key": "common.x",
+     "params": {
+      "n": 3
+     }
+    },
+    "c": {
+     "$t": "code",
+     "key": "common.x"
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "a {m} b {c}",
+     "common.x": "X {n}"
+    },
+    "de": {
+     "common.x": "X-de {n}"
+    }
+   },
+   "strict": false,
+   "expected": "a X-de 3 b common.x"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "m": {
+     "$t": "msg",
+     "params": {
+      "n": 3
+     }
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "a {m} b"
+    }
+   },
+   "strict": false,
+   "expected": "a  b"
+  },
+  {
+   "lang": "de",
+   "key": "conformance.row",
+   "params": {
+    "m": {
+     "$t": "msg",
+     "key": "common.x",
+     "params": "junk"
+    }
+   },
+   "catalogs": {
+    "en": {
+     "conformance.row": "a {m} b",
+     "common.x": "X"
+    }
+   },
+   "strict": false,
+   "expected": "a X b"
+  },
+  {
+   "lang": "en",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=3:05 PM d=Nov 14"
+  },
+  {
+   "lang": "en",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=12:05 AM d=Nov 14"
+  },
+  {
+   "lang": "en",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 PM d=Mar 1"
+  },
+  {
+   "lang": "en",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 AM d=Jan 5"
+  },
+  {
+   "lang": "en",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=11:59 PM d=Dec 31"
+  },
+  {
+   "lang": "en",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 AM d=Jul 4"
+  },
+  {
+   "lang": "fr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=14 nov."
+  },
+  {
+   "lang": "fr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=14 nov."
+  },
+  {
+   "lang": "fr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=1 mars"
+  },
+  {
+   "lang": "fr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=5 janv."
+  },
+  {
+   "lang": "fr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=31 déc."
+  },
+  {
+   "lang": "fr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=4 juil."
+  },
+  {
+   "lang": "es",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=14 nov"
+  },
+  {
+   "lang": "es",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=14 nov"
+  },
+  {
+   "lang": "es",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=1 mar"
+  },
+  {
+   "lang": "es",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=5 ene"
+  },
+  {
+   "lang": "es",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=31 dic"
+  },
+  {
+   "lang": "es",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=4 jul"
+  },
+  {
+   "lang": "de",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=14. Nov."
+  },
+  {
+   "lang": "de",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=14. Nov."
+  },
+  {
+   "lang": "de",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=1. März"
+  },
+  {
+   "lang": "de",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=5. Jan."
+  },
+  {
+   "lang": "de",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=31. Dez."
+  },
+  {
+   "lang": "de",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=4. Juli"
+  },
+  {
+   "lang": "nl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=14 nov"
+  },
+  {
+   "lang": "nl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=14 nov"
+  },
+  {
+   "lang": "nl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=1 mrt"
+  },
+  {
+   "lang": "nl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=5 jan"
+  },
+  {
+   "lang": "nl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=31 dec"
+  },
+  {
+   "lang": "nl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=4 jul"
+  },
+  {
+   "lang": "ja",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=11月14日"
+  },
+  {
+   "lang": "ja",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=11月14日"
+  },
+  {
+   "lang": "ja",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=3月1日"
+  },
+  {
+   "lang": "ja",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=1月5日"
+  },
+  {
+   "lang": "ja",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=12月31日"
+  },
+  {
+   "lang": "ja",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=7月4日"
+  },
+  {
+   "lang": "pt",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=14 de nov."
+  },
+  {
+   "lang": "pt",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=14 de nov."
+  },
+  {
+   "lang": "pt",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=1 de mar."
+  },
+  {
+   "lang": "pt",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=5 de jan."
+  },
+  {
+   "lang": "pt",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=31 de dez."
+  },
+  {
+   "lang": "pt",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=4 de jul."
+  },
+  {
+   "lang": "it",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=14 nov"
+  },
+  {
+   "lang": "it",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=14 nov"
+  },
+  {
+   "lang": "it",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=1 mar"
+  },
+  {
+   "lang": "it",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=5 gen"
+  },
+  {
+   "lang": "it",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=31 dic"
+  },
+  {
+   "lang": "it",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=4 lug"
+  },
+  {
+   "lang": "pl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=14 lis"
+  },
+  {
+   "lang": "pl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=14 lis"
+  },
+  {
+   "lang": "pl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=1 mar"
+  },
+  {
+   "lang": "pl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=5 sty"
+  },
+  {
+   "lang": "pl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=31 gru"
+  },
+  {
+   "lang": "pl",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=4 lip"
+  },
+  {
+   "lang": "uk",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=14 лист."
+  },
+  {
+   "lang": "uk",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=14 лист."
+  },
+  {
+   "lang": "uk",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=1 бер."
+  },
+  {
+   "lang": "uk",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=5 січ."
+  },
+  {
+   "lang": "uk",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=31 груд."
+  },
+  {
+   "lang": "uk",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=4 лип."
+  },
+  {
+   "lang": "ko",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=오후 3:05 d=11월 14일"
+  },
+  {
+   "lang": "ko",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=오전 12:05 d=11월 14일"
+  },
+  {
+   "lang": "ko",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=오후 12:00 d=3월 1일"
+  },
+  {
+   "lang": "ko",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=오전 7:30 d=1월 5일"
+  },
+  {
+   "lang": "ko",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=오후 11:59 d=12월 31일"
+  },
+  {
+   "lang": "ko",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=오전 9:00 d=7월 4일"
+  },
+  {
+   "lang": "hi",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=3:05 pm d=14 नव॰"
+  },
+  {
+   "lang": "hi",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=12:05 am d=14 नव॰"
+  },
+  {
+   "lang": "hi",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 pm d=1 मार्च"
+  },
+  {
+   "lang": "hi",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 am d=5 जन॰"
+  },
+  {
+   "lang": "hi",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=11:59 pm d=31 दिस॰"
+  },
+  {
+   "lang": "hi",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 am d=4 जुल॰"
+  },
+  {
+   "lang": "ar",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=3:05 م d=14 نوفمبر"
+  },
+  {
+   "lang": "ar",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=12:05 ص d=14 نوفمبر"
+  },
+  {
+   "lang": "ar",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 م d=1 مارس"
+  },
+  {
+   "lang": "ar",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 ص d=5 يناير"
+  },
+  {
+   "lang": "ar",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=11:59 م d=31 ديسمبر"
+  },
+  {
+   "lang": "ar",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 ص d=4 يوليو"
+  },
+  {
+   "lang": "ru",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=14 нояб."
+  },
+  {
+   "lang": "ru",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=14 нояб."
+  },
+  {
+   "lang": "ru",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=1 мар."
+  },
+  {
+   "lang": "ru",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=5 янв."
+  },
+  {
+   "lang": "ru",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=31 дек."
+  },
+  {
+   "lang": "ru",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=4 июл."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=11月14日"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=11月14日"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=3月1日"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=1月5日"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=12月31日"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=7月4日"
+  },
+  {
+   "lang": "tr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=15:05 d=14 Kas"
+  },
+  {
+   "lang": "tr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=0:05 d=14 Kas"
+  },
+  {
+   "lang": "tr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=12:00 d=1 Mar"
+  },
+  {
+   "lang": "tr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=7:30 d=5 Oca"
+  },
+  {
+   "lang": "tr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=23:59 d=31 Ara"
+  },
+  {
+   "lang": "tr",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=9:00 d=4 Tem"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Jan 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 janv."
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 ene"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Jan."
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 jan"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "1月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de jan."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 gen"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 sty"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 січ."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "1월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 जन॰"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 يناير"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 янв."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "1月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Oca"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Feb 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 févr."
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 feb"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Feb."
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 feb"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "2月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de fev."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 feb"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 lut"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 лют."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "2월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 फ़र॰"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 فبراير"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 февр."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "2月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Şub"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Mar 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 mars"
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 mar"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. März"
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 mrt"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "3月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de mar."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 mar"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 mar"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 бер."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "3월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 मार्च"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 مارس"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 мар."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "3月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Mar"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Apr 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 avr."
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 abr"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Apr."
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 apr"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "4月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de abr."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 apr"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 kwi"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 квіт."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "4월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 अप्रैल"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 أبريل"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 апр."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "4月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Nis"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "May 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 mai"
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 may"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Mai"
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 mei"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "5月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de mai."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 mag"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 maj"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 трав."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "5월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 मई"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 مايو"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 мая"
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "5月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 May"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Jun 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 juin"
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 jun"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Juni"
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 jun"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "6月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de jun."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 giu"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 cze"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 черв."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "6월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 जून"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 يونيو"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 июн."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "6月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Haz"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Jul 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 juil."
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 jul"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Juli"
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 jul"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "7月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de jul."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 lug"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 lip"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 лип."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "7월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 जुल॰"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 يوليو"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 июл."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "7月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Tem"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Aug 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 août"
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 ago"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Aug."
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 aug"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "8月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de ago."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 ago"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 sie"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 серп."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "8월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 अग॰"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 أغسطس"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 авг."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "8月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Ağu"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Sep 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 sept."
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 sept"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Sept."
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 sep"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "9月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de set."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 set"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 wrz"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 вер."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "9월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 सित॰"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 سبتمبر"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 сент."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "9月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Eyl"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Oct 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 oct."
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 oct"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Okt."
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 okt"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "10月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de out."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 ott"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 paź"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 жовт."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "10월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 अक्तू॰"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 أكتوبر"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 окт."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "10月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Eki"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Nov 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 nov."
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 nov"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Nov."
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 nov"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "11月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de nov."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 nov"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 lis"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 лист."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "11월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 नव॰"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 نوفمبر"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 нояб."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "11月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Kas"
+  },
+  {
+   "lang": "en",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "Dec 14"
+  },
+  {
+   "lang": "fr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 déc."
+  },
+  {
+   "lang": "es",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 dic"
+  },
+  {
+   "lang": "de",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14. Dez."
+  },
+  {
+   "lang": "nl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 dec"
+  },
+  {
+   "lang": "ja",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "12月14日"
+  },
+  {
+   "lang": "pt",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 de dez."
+  },
+  {
+   "lang": "it",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 dic"
+  },
+  {
+   "lang": "pl",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 gru"
+  },
+  {
+   "lang": "uk",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 груд."
+  },
+  {
+   "lang": "ko",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "12월 14일"
+  },
+  {
+   "lang": "hi",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 दिस॰"
+  },
+  {
+   "lang": "ar",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 ديسمبر"
+  },
+  {
+   "lang": "ru",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 дек."
+  },
+  {
+   "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "12月14日"
+  },
+  {
+   "lang": "tr",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "14 Ara"
   }
  ]
 }

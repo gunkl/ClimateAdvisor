@@ -1,7 +1,17 @@
 // Issue #1341: CAI18N language resolution order, code mapping, per-key fallback, failure tolerance, direction.
 // Usage: node tests/i18n_runtime.mjs
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadRuntime } from './i18n_node_shim.mjs';
+
+// "local" time zone tests need a known browser zone (Node reads TZ at run time).
+process.env.TZ = 'America/Los_Angeles';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+// The resolution table is shared with tests/test_i18n_engine.py (i18n.resolve_language).
+const RESOLUTION = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures', 'i18n_language_resolution.json'), 'utf8'));
 
 let n = 0;
 async function check(name, fn) {
@@ -18,10 +28,9 @@ const FILES = {
 
 await check('resolution codes', async () => {
   const { CAI18N } = loadRuntime({});
-  const r = (c) => CAI18N.resolveLanguage(c, ['en','fr','es','de','nl','ja','pt','it','pl','uk','ko','hi','ar','ru','zh-Hans','tr']);
-  for (const [i, o] of [['de', 'de'], ['DE', 'de'], ['pt-BR', 'pt'], ['de-CH', 'de'], ['zh', 'zh-Hans'], ['zh-CN', 'zh-Hans'],
-    ['zh-SG', 'zh-Hans'], ['zh-Hans-CN', 'zh-Hans'], ['zh-TW', 'en'], ['zh-HK', 'en'], ['zh-Hant', 'en'], ['xx', 'en'],
-    ['', 'en'], [null, 'en'], ['zh-Hans', 'zh-Hans'], ['en_US', 'en']]) assert.equal(r(i), o, `${i} -> ${o}`);
+  const r = (c) => CAI18N.resolveLanguage(c, RESOLUTION.languages);
+  assert.ok(RESOLUTION.cases.length > 30);
+  for (const [i, o] of RESOLUTION.cases) assert.equal(r(i), o, `${JSON.stringify(i)} -> ${o}`);
 });
 
 await check('order: ?lang= beats hass beats status beats navigator beats en', async () => {
@@ -105,6 +114,104 @@ await check('locale comes from hass.locale; esc escapes', async () => {
   await CAI18N.init({});
   assert.deepEqual(CAI18N.locale, loc);
   assert.equal(CAI18N.esc(`<a href="x">'&'</a>`), '&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;');
+});
+
+await check('timeZone(): server zone, local and no hass; times follow it (S4)', async () => {
+  const ts = '2026-11-14T15:05:00-05:00'; // 20:05 UTC, 12:05 in the (Los Angeles) browser, 05:05 next day in Tokyo
+  const mk = (hass) => loadRuntime({ hass }).CAI18N;
+  // no hass reachable: the wall clock written in ts
+  let c = loadRuntime({}).CAI18N;
+  assert.equal(c.timeZone(), null);
+  assert.equal(c.fmt.time(ts, 'en'), '3:05 PM');
+  assert.equal(c.fmt.date(ts, 'en'), 'Nov 14');
+  assert.equal(c.fmt.time('2026-11-14T00:05:00+09:00', 'en'), '12:05 AM');
+  assert.equal(c.fmt.dateTime(ts, 'en'), 'Nov 14, 3:05 PM');
+  // hass.locale.time_zone === 'server' (the HA default): hass.config.time_zone
+  const server = { language: 'en', locale: { time_zone: 'server' }, config: { time_zone: 'Asia/Tokyo' } };
+  c = mk(server);
+  assert.equal(c.timeZone(), 'Asia/Tokyo');
+  assert.equal(c.fmt.time(ts, 'en'), '5:05 AM');
+  assert.equal(c.fmt.date(ts, 'en'), 'Nov 15');
+  assert.equal(c.fmt.time(ts, 'de'), '5:05');
+  // a hass without the setting behaves as the HA default (server)
+  c = mk({ language: 'en', config: { time_zone: 'Europe/Berlin' } });
+  assert.equal(c.timeZone(), 'Europe/Berlin');
+  assert.equal(c.fmt.time(ts, 'en'), '9:05 PM');
+  // 'local': the browser's own zone
+  c = mk({ language: 'en', locale: { time_zone: 'local' }, config: { time_zone: 'Asia/Tokyo' } });
+  assert.equal(c.timeZone(), 'local');
+  assert.equal(c.fmt.time(ts, 'en'), '12:05 PM');
+  assert.equal(c.fmt.date(ts, 'en'), 'Nov 14');
+  // server setting but no zone known, or an unknown zone id: back to the wall clock in ts
+  c = mk({ language: 'en', locale: { time_zone: 'server' } });
+  assert.equal(c.timeZone(), null);
+  assert.equal(c.fmt.time(ts, 'en'), '3:05 PM');
+  c = mk({ language: 'en', config: { time_zone: 'Nope/Zone' } });
+  assert.equal(c.fmt.time(ts, 'en'), '3:05 PM');
+  // Date objects and epoch numbers are instants: hass zone, else the browser zone
+  c = mk(server);
+  assert.equal(c.fmt.time(new Date('2026-11-14T20:05:00Z'), 'en'), '5:05 AM');
+  assert.equal(loadRuntime({}).CAI18N.fmt.time(new Date('2026-11-14T20:05:00Z'), 'en'), '12:05 PM');
+  // not an instant: an em dash, never a throw
+  for (const bad of ['garbage', '2026-13-45T25:61:00+00:00', new Date(NaN), undefined, null, {}]) {
+    assert.equal(c.fmt.time(bad, 'en'), '—');
+    assert.equal(c.fmt.date(bad, 'en'), '—');
+  }
+  // ICU's narrow no-break spaces are normalised to a plain space, like the Python tables
+  assert.ok(!/[  ]/.test(loadRuntime({}).CAI18N.fmt.time(ts, 'en')));
+});
+
+await check('tw: a wire without a key renders as nothing (N5)', async () => {
+  const { CAI18N } = loadRuntime({ files: FILES });
+  await CAI18N.init({});
+  for (const w of [{}, { key: '' }, { key: 5 }, { params: { n: 1 } }, [], null, undefined]) assert.equal(CAI18N.tw(w), '', JSON.stringify(w));
+  assert.equal(CAI18N.tw({ key: 'common.a', params: 'junk' }), 'A en');
+});
+
+const DUR = { 'i18n/common/en.json': {
+  'common.duration.hours': '{n, plural, one {#h} other {#h}}', 'common.duration.hours_frac': '{n, number, ::.0}h',
+  'common.duration.min': '{n, plural, one {# min} other {# min}}' } };
+await check('duration: half-even tenths and minutes like Python; unusable input is an em dash (S3)', async () => {
+  const { CAI18N } = loadRuntime({ files: { ...FILES, ...DUR } });
+  await CAI18N.init({});
+  const d = (s) => CAI18N.fmt.duration(s);
+  assert.equal(d(75 * 60), '1.2h'); assert.equal(d(135 * 60), '2.2h'); assert.equal(d(105 * 60), '1.8h'); assert.equal(d(165 * 60), '2.8h');
+  assert.equal(d(150), '2 min'); assert.equal(d(90), '2 min'); assert.equal(d(210), '4 min');
+  for (const bad of [NaN, Infinity, -Infinity, null, undefined, '300', {}]) assert.equal(d(bad), '—', String(bad));
+});
+
+await check('english temperatures are the legacy f-string: half-even on the exact value; other languages are Intl (S3)', async () => {
+  const { CAI18N } = loadRuntime({});
+  const t = (f, u, d, l) => CAI18N.fmt.temp(f, u, d, l);
+  for (const [f, d, want] of [[0.5, 0, '0'], [1.5, 0, '2'], [2.5, 0, '2'], [72.5, 0, '72'], [73.5, 0, '74'], [72.25, 1, '72.2'],
+    [72.75, 1, '72.8'], [0.125, 2, '0.12'], [0.375, 2, '0.38'], [1.005, 2, '1.00'], [2.675, 2, '2.67'], [-2.5, 0, '-2'],
+    [-0.5, 0, '-0'], [-0.04, 1, '-0.0']]) assert.equal(t(f, 'fahrenheit', d, 'en'), want + '°F', `${f}/${d}`);
+  assert.equal(CAI18N.fmt.tempDelta(4.5, 'celsius', 0, 'en'), '2°C');
+  assert.equal(t(2.5, 'fahrenheit', 0, 'de'), '3°F');
+  assert.equal(t(1.005, 'fahrenheit', 2, 'de'), '1,01°F');
+  assert.equal(t(1e22, 'fahrenheit', 1, 'en'), '10000000000000000000000.0°F');
+  assert.equal(t(null, 'celsius', 1, 'en'), '—'); assert.equal(t('72', 'celsius', 1, 'en'), '—');
+  assert.equal(t(NaN, 'celsius', 1, 'en'), 'NaN°C'); assert.equal(t(Infinity, 'fahrenheit', 0, 'de'), '∞°F');
+});
+
+await check('list items that are numbers use the locale number format (S3)', async () => {
+  const { CAI18N } = loadRuntime({});
+  assert.equal(CAI18N.fmt.list([1234.5, 'x', 3], 'and', 'de'), '1.234,5, x und 3');
+  assert.equal(CAI18N.format('{l}', { l: { $t: 'list', items: [1234.5, 2], style: 'or' } }, 'en'), '1,234.5 or 2');
+});
+
+await check('fallbacks: a missing key uses the English pattern with the requested language formats; a broken translation the English message (S3)', async () => {
+  const files = { 'i18n/index.json': { languages: ['en', 'de', 'fr'], areas: ['common'] }, 'i18n/common/en.json': {
+    'common.n': '{n, number} / {l}', 'common.b': '{n} items ({t})', 'common.c': '{n, plural, one {# item} other {# items}}' },
+  'i18n/common/de.json': { 'common.b': '{n, plural, one {# x} other {# y', 'common.c': '{n, plural, one {# a} few {# b}}' } };
+  const { CAI18N } = loadRuntime({ hassLanguage: 'de', files });
+  await CAI18N.init({});
+  const list = { $t: 'list', items: ['a', 'b'], style: 'and' };
+  assert.equal(CAI18N.t('common.n', { n: 1234.5, l: list }), '1.234,5 / a und b');          // not "1,234.5 / a and b"
+  const tmp = { $t: 'temp', f: 70.25, unit: 'celsius', d: 1 };
+  assert.equal(CAI18N.t('common.b', { n: 1234.5, t: tmp }), '1234.5 items (21.2°C)');   // English message, not raw source
+  assert.equal(CAI18N.t('common.c', { n: 3 }), '3 items');
+  assert.equal(CAI18N.t('common.c', { n: 'x' }), 'common.c');                                  // fails everywhere: the key
 });
 
 console.log(`i18n runtime: ${n} checks OK`);

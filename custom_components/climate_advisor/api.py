@@ -285,6 +285,8 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                         "zones": _bootstrap_zones,
                         "zone_count": len(_bootstrap_zones),
                         "version": VERSION,
+                        # Issue #1341: the dashboard's language fallback applies before a zone is chosen too.
+                        "language": i18n.hass_language(hass),
                     }
                 )
 

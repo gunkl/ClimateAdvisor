@@ -29,8 +29,14 @@ Deviations from the first Stage 1 contract, both forced by FormatJS itself (the 
 
 For ``lang == "ar"`` every rendered argument (and ``#``) is wrapped in U+2068 ... U+2069 (first-strong isolates).
 
-Times and dates are Python-owned tables modelled on ``Intl.DateTimeFormat`` (hour numeric, minute two-digit; short
-month and day). Languages whose default is a 24-hour clock use it ("15:05"); en, ko, hi and ar use 12-hour with the
+Never raises while rendering (non-strict mode): a bad parameter shows as "\u2014" (U+2014), a failing message falls back
+to the English message and then to the key, each logged once. Strict mode (tests) raises instead.
+
+Times and dates: ``Time``/``Date`` carry an aware ``datetime`` (a naive one is taken as UTC and logged once) and are
+rendered in the zone the datetime is given in, so callers pass Home Assistant local datetimes (``dt_util.as_local``).
+The wire ``ts`` is that instant as ISO 8601 with offset. Tables are Python-owned and modelled on
+``Intl.DateTimeFormat`` (hour numeric, minute two-digit; short month and day). Languages whose default is a
+24-hour clock use it ("15:05"); en, ko, hi and ar use 12-hour with the
 locale's day period ("3:05 PM", "오후 3:05", "3:05 pm", "3:05 م"). ICU's U+202F/U+00A0 inside times and dates are
 normalised to a plain space. Number, percent and list separators keep the exact characters Intl emits (they are
 compared byte for byte with Intl in the conformance fixture).
@@ -41,6 +47,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import logging
+import math
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -111,6 +118,9 @@ _NUMBER_SYMBOLS: dict[str, tuple[str, str, str, str, int, bool]] = {
     "zh-Hans": (".", ",", "-", "{}%", 1, False),
     "tr": (",", ".", "-", "%{}", 1, False),
 }
+# Intl.NumberFormat renders NaN as "NaN" except in these languages (infinity is "\u221e" everywhere).
+_NAN_TEXT: dict[str, str] = {"ar": "ليس\u00a0رقمًا", "ru": "не\u00a0число"}
+BAD_PARAM = "\u2014"  # shown in place of a parameter that cannot be rendered
 _LIST_AND: dict[str, tuple[str, str, str, str]] = {
     # lang: (pair, start, middle, end) separators between items
     "en": (" and ", ", ", ", ", ", and "),
@@ -435,7 +445,8 @@ class MissingKeyError(I18nError):
 def resolve_language(code: str | None) -> str:
     """Map any HA/browser language code to one of ``LANGUAGES`` (exact, case-insensitive, primary subtag, else en).
 
-    ``zh``/``zh-CN``/``zh-SG``/``zh-Hans-*`` map to ``zh-Hans``; ``zh-TW``/``zh-HK``/``zh-Hant`` map to ``en`` for now.
+    ``zh``/``zh-CN``/``zh-SG``/``zh-Hans-*`` (any region) map to ``zh-Hans``; ``zh-TW``/``zh-HK``/``zh-Hant`` map to
+    ``en`` for now. The cases live in ``tests/fixtures/i18n_language_resolution.json`` (shared with the JS runtime).
     """
     if not code or not isinstance(code, str):
         return DEFAULT_LANGUAGE
@@ -448,7 +459,10 @@ def resolve_language(code: str | None) -> str:
     parts = code.lower().split("-")
     primary = parts[0]
     if primary == "zh":
-        return DEFAULT_LANGUAGE if _HANT_MARKERS.intersection(parts[1:]) else "zh-Hans"
+        rest = parts[1:]
+        if "hans" in rest:  # an explicit Simplified script wins over any region (zh-Hans-TW is Simplified)
+            return "zh-Hans"
+        return DEFAULT_LANGUAGE if _HANT_MARKERS.intersection(rest) else "zh-Hans"
     if primary in lowered and "-" not in lowered[primary]:
         return lowered[primary]
     return DEFAULT_LANGUAGE
@@ -460,12 +474,15 @@ def hass_language(hass: Any) -> str:
 
 
 # ------------------------------------------------------------------------------------------------ plurals
+_PREC = 400  # Decimal precision: enough for any finite double plus three fraction digits
+
+
 def _operands(x: float | int) -> tuple[int, int]:
     """Return (i, v): integer part and visible fraction-digit count, after Intl's default 3-digit rounding."""
     if isinstance(x, int):
         return abs(x), 0
     with localcontext() as ctx:
-        ctx.prec = 80
+        ctx.prec = _PREC
         q = Decimal(repr(abs(float(x)))).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
         whole, _, frac = format(q, "f").partition(".")
     return int(whole), len(frac.rstrip("0"))
@@ -562,6 +579,8 @@ _PLURAL_RULES = {
 
 def plural_category(n: float | int, lang: str) -> str:
     """CLDR cardinal plural category of ``n`` in ``lang`` (same operands Intl.PluralRules uses)."""
+    if isinstance(n, float) and not math.isfinite(n):
+        return "other"  # Intl.PluralRules.select(NaN | Infinity) is "other"
     i, v = _operands(n)
     return _PLURAL_RULES[resolve_language(lang)](i, v)
 
@@ -580,11 +599,11 @@ def js_str(x: Any) -> str:
             return "Infinity" if x > 0 else "-Infinity"
         if x == int(x) and abs(x) < 1e21:
             return str(int(x))
-        if 1e-7 <= abs(x) < 1e21:
+        if 1e-6 <= abs(x) < 1e21:  # JavaScript switches to exponent form below 1e-6 (String(1e-7) is "1e-7")
             with localcontext() as ctx:
-                ctx.prec = 80
+                ctx.prec = _PREC
                 return format(Decimal(repr(x)), "f")
-        return repr(x)
+        return re.sub(r"e([+-])0*(\d)", r"e\1\2", repr(x))  # 1e-07 -> 1e-7, 1.5e+22 -> 1.5e+22 like JavaScript
     return str(x)
 
 
@@ -604,10 +623,13 @@ def _format_decimal(
     value: float | int, lang: str, min_frac: int, max_frac: int, *, grouping: bool = True, percent: bool = False
 ) -> str:
     decimal, group, minus, pct, min_group, indian = _NUMBER_SYMBOLS[lang]
-    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
-        return "NaN" if value != value else (minus if value < 0 else "") + "∞"
+    if isinstance(value, float) and not math.isfinite(value):
+        body = _NAN_TEXT.get(lang, "NaN") if value != value else "∞"
+        if percent:
+            body = pct.replace("{}", body)
+        return (minus if value < 0 else "") + body
     with localcontext() as ctx:
-        ctx.prec = 80
+        ctx.prec = _PREC
         d = Decimal(value) if isinstance(value, int) else Decimal(repr(value))
         if percent:
             d = d.scaleb(2)
@@ -672,6 +694,8 @@ def format_duration(seconds: float, lang: str) -> str:
 
     Rendered from the ``common.duration.*`` catalog messages, so every language is a translated message.
     """
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds):
+        raise I18nError(f"duration must be a finite number of seconds, not {seconds!r}")
     minutes = max(1, round(seconds / 60))
     if minutes >= 60 and minutes % 60 == 0:
         msg = Msg("common.duration.hours", n=minutes // 60)
@@ -689,9 +713,13 @@ _NUM_SKELETONS = {
     "percent": ("percent", 0, 0),
     "precision-integer": ("decimal", 0, 0),
 }
-_FRACTION_SKELETON = re.compile(r"\.(0+)")
-_IDENT = re.compile(r"[A-Za-z0-9_]+")
-_WS = " \t\r\n"
+_FRACTION_SKELETON = re.compile(r"\.(0{1,2})")  # only ::.0 and ::.00 are in the contract
+# FormatJS skips Pattern_White_Space between argument tokens: TAB..CR (incl. VT and FF), space, NEL, LRM, RLM, LS, PS.
+_WS = " \t\n\v\f\r\x85\u200e\u200f\u2028\u2029"
+# Identifiers keep a trailing LRM/RLM as part of the name (FormatJS: not White_Space, not Pattern_Syntax), so such a
+# name is simply an unknown argument/type, exactly as in FormatJS.
+_IDENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_\u200e\u200f]*")
+_ASCII_ALPHA = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 MAX_NESTING = 2
 
 
@@ -734,7 +762,9 @@ class _Parser:
             elif ch == "#" and parent == "plural":
                 out.append(("pound",))
                 self.i += 1
-            elif ch == "<" and self.i + 1 < self.n and (self.s[self.i + 1].isalpha() or self.s[self.i + 1] == "/"):
+            elif (
+                ch == "<" and self.i + 1 < self.n and (self.s[self.i + 1] in _ASCII_ALPHA or self.s[self.i + 1] == "/")
+            ):
                 raise self.fail("tags are not supported")
             else:
                 start = self.i
@@ -762,7 +792,7 @@ class _Parser:
             ch = self.s[self.i]
             if ch == "<":
                 nxt = self.s[self.i + 1] if self.i + 1 < self.n else ""
-                if nxt and (nxt.isalpha() or nxt == "/"):
+                if nxt and (nxt in _ASCII_ALPHA or nxt == "/"):  # FormatJS: only an ASCII letter or "/" opens a tag
                     break
                 self.i += 1
                 buf.append("<")
@@ -951,9 +981,16 @@ def _render_nodes(nodes: Sequence[tuple], lang: str, params: Mapping[str, Any], 
 
 
 def format_message(pattern: str, lang: str, params: Mapping[str, Any] | None = None) -> str:
-    """Render one ICU-subset ``pattern`` in ``lang``. ``params`` may hold plain values and the typed params below."""
+    """Render one ICU-subset ``pattern`` in ``lang``. ``params`` may hold plain values and the typed params below.
+
+    A parameter that cannot be rendered shows as ``BAD_PARAM`` (strict mode raises ``I18nError`` instead).
+    """
+    return _format(pattern, lang, params, None)
+
+
+def _format(pattern: str, lang: str, params: Mapping[str, Any] | None, key: str | None) -> str:
     lang = resolve_language(lang)
-    plain = {k: _to_plain(v, lang) for k, v in (params or {}).items()}
+    plain = {k: _to_plain(v, lang, key) for k, v in (params or {}).items()}
     return _render_nodes(parse_message(pattern), lang, plain, None)
 
 
@@ -962,6 +999,16 @@ def _num_or_text(v: Any) -> Any:
     if isinstance(v, bool) or not isinstance(v, (str, int, float)):
         raise I18nError(f"unsupported parameter value {v!r}")
     return v
+
+
+def _aware(dt: Any) -> _dt.datetime:
+    """The datetime as an aware one: a naive datetime is taken as UTC (logged once); anything else is an error."""
+    if not isinstance(dt, _dt.datetime):
+        raise I18nError(f"Time/Date need a datetime, not {type(dt).__name__}")
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        _warn_once("Time/Date got a naive datetime; taking it as UTC (pass an aware, Home Assistant local datetime)")
+        return dt.replace(tzinfo=_dt.UTC)
+    return dt
 
 
 @dataclass(frozen=True)
@@ -990,22 +1037,22 @@ class TempDelta:
 
 @dataclass(frozen=True)
 class Time:
-    """A wall-clock time (the datetime's own local fields are shown)."""
+    """A clock time: an aware datetime, shown in the zone it is given in (callers pass HA-local datetimes)."""
 
     dt: _dt.datetime
 
     def to_wire(self) -> dict:
-        return {"$t": "time", "ts": self.dt.isoformat()}
+        return {"$t": "time", "ts": _aware(self.dt).isoformat()}
 
 
 @dataclass(frozen=True)
 class Date:
-    """A calendar date (short month and day)."""
+    """A calendar date (short month and day): an aware datetime, shown in the zone it is given in."""
 
     dt: _dt.datetime
 
     def to_wire(self) -> dict:
-        return {"$t": "date", "ts": self.dt.isoformat()}
+        return {"$t": "date", "ts": _aware(self.dt).isoformat()}
 
 
 @dataclass(frozen=True)
@@ -1039,6 +1086,16 @@ class Code:
         return {"$t": "code", "key": self.key}
 
 
+@dataclass(frozen=True)
+class _BadParam:
+    """A wire parameter that could not be decoded (non-strict ``from_wire``); renders as ``BAD_PARAM``."""
+
+    reason: str = ""
+
+    def to_wire(self) -> dict:
+        return {"$t": "bad"}
+
+
 class Msg:
     """A catalog key plus typed parameters; renders in any language and round-trips through JSON."""
 
@@ -1063,22 +1120,67 @@ class Msg:
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> Msg:
-        msg = cls(str(data["key"]))
-        msg.params = {k: param_from_wire(v) for k, v in (data.get("params") or {}).items()}
+        """Inverse of ``to_wire``. Malformed input never raises outside strict mode: a missing key gives an empty
+        message (renders as ""), an undecodable parameter becomes one that renders as ``BAD_PARAM``."""
+        key = data.get("key") if isinstance(data, Mapping) else None
+        if not isinstance(key, str) or not key:
+            if _strict():
+                raise I18nError(f"malformed message wire: {data!r}")
+            _warn_once("malformed message wire (no key)")
+            key = ""
+        raw = data.get("params") if isinstance(data, Mapping) else None
+        if raw is not None and not isinstance(raw, Mapping):
+            if _strict():
+                raise I18nError(f"malformed message wire params: {raw!r}")
+            _warn_once(f"malformed params in message wire {key!r}")
+            raw = None
+        msg = cls(key)
+        msg.params = {k: param_from_wire(v) for k, v in (raw or {}).items()}
         return msg
 
 
 def param_to_wire(v: Any) -> Any:
-    """Python param to the JSON wire form (plain str/int/float pass through)."""
-    if isinstance(v, Msg):
-        return {"$t": "msg", **v.to_wire()}
-    if hasattr(v, "to_wire"):
-        return v.to_wire()
-    return _num_or_text(v)
+    """Python param to the JSON wire form (plain str/int/float pass through).
+
+    A value JSON (or the dashboard) cannot carry (NaN/inf, None, a naive-less non-datetime) becomes ``{"$t":"bad"}``
+    outside strict mode, which the dashboard renders as ``BAD_PARAM``.
+    """
+    try:
+        if isinstance(v, Msg):
+            return {"$t": "msg", **v.to_wire()}
+        if hasattr(v, "to_wire"):
+            wire = v.to_wire()
+            for val in wire.values():
+                if isinstance(val, float) and not math.isfinite(val):
+                    raise I18nError(f"{type(v).__name__} holds a non-finite number")
+            return wire
+        out = _num_or_text(v)
+        if isinstance(out, float) and not math.isfinite(out):
+            raise I18nError("a non-finite number cannot travel as JSON")
+        return out
+    except Exception as err:
+        if _strict():
+            if isinstance(err, I18nError):
+                raise
+            raise I18nError(f"cannot serialise {type(v).__name__} parameter: {err}") from err
+        _warn_once(f"cannot serialise a {type(v).__name__} parameter ({err})")
+        return {"$t": "bad"}
 
 
 def param_from_wire(v: Any) -> Any:
-    """Inverse of ``param_to_wire``."""
+    """Inverse of ``param_to_wire``; outside strict mode a malformed typed param renders as ``BAD_PARAM``."""
+    try:
+        return _param_from_wire(v)
+    except Exception as err:
+        if _strict():
+            if isinstance(err, I18nError):
+                raise
+            raise I18nError(f"malformed wire parameter {v!r}: {err}") from err
+        _warn_once(f"malformed wire parameter ({type(err).__name__}: {err})")
+        return _BadParam(str(err))
+
+
+def _param_from_wire(v: Any) -> Any:
     if not isinstance(v, Mapping):
         return _num_or_text(v)
     kind = v.get("$t")
@@ -1093,37 +1195,79 @@ def param_from_wire(v: Any) -> Any:
     if kind == "dur":
         return Duration(v["s"])
     if kind == "list":
-        return ListOf([param_from_wire(i) for i in v["items"]], v.get("style", "and"))
+        items = v["items"]
+        if not isinstance(items, (list, tuple)):
+            raise I18nError("list items must be an array")
+        return ListOf([param_from_wire(i) for i in items], v.get("style", "and"))
     if kind == "msg":
         return Msg.from_wire(v)
     if kind == "code":
         return Code(v["key"])
+    if kind == "bad":
+        if _strict():
+            raise I18nError("the sender marked this parameter bad")
+        return _BadParam("sender marked this parameter bad")
     raise I18nError(f"unknown typed parameter {kind!r}")
 
 
-def _to_plain(v: Any, lang: str) -> Any:
-    """Reduce a param to what the ICU engine takes: str, int or float."""
-    if isinstance(v, (Temp, TempDelta)):
-        from .temperature import format_temp, format_temp_delta  # noqa: PLC0415 - temperature imports this module lazily too
+def _temp_text(v: Temp | TempDelta, lang: str) -> str:
+    """Temperature text. Finite values go through ``temperature.format_temp*`` (English keeps the legacy f-string,
+    i.e. round-half-even on the exact binary value); NaN/inf print as Intl does."""
+    from .temperature import (  # noqa: PLC0415 - temperature imports this module lazily too
+        UNIT_SYMBOL,
+        convert_delta,
+        format_temp,
+        format_temp_delta,
+        from_fahrenheit,
+    )
 
-        fmt = format_temp if isinstance(v, Temp) else format_temp_delta
-        return fmt(v.f, v.unit, v.decimals, lang=lang)
+    f, delta = v.f, isinstance(v, TempDelta)
+    if isinstance(f, bool) or not isinstance(f, (int, float)):
+        raise I18nError(f"temperature needs a number, not {f!r}")
+    d = v.decimals if isinstance(v.decimals, int) and not isinstance(v.decimals, bool) and 0 <= v.decimals <= 20 else 0
+    shown = convert_delta(f, v.unit) if delta else from_fahrenheit(f, v.unit)
+    if isinstance(shown, float) and not math.isfinite(shown):
+        return _format_decimal(shown, lang, 0, 0, grouping=False) + UNIT_SYMBOL.get(v.unit, "°F")
+    return (format_temp_delta if delta else format_temp)(f, v.unit, d, lang=lang)
+
+
+def _to_plain(v: Any, lang: str, key: str | None = None) -> Any:
+    """Reduce a param to what the ICU engine takes: str, int or float.
+
+    A param that cannot be rendered becomes ``BAD_PARAM`` (logged once per key and type); strict mode raises.
+    """
+    try:
+        return _to_plain_inner(v, lang, key)
+    except Exception as err:
+        if _strict():
+            if isinstance(err, I18nError):
+                raise
+            raise I18nError(f"cannot render {type(v).__name__} parameter: {err}") from err
+        _warn_once(f"bad {type(v).__name__} parameter in {key or 'a message'} ({err})")
+        return BAD_PARAM
+
+
+def _to_plain_inner(v: Any, lang: str, key: str | None) -> Any:
+    if isinstance(v, (Temp, TempDelta)):
+        return _temp_text(v, lang)
     if isinstance(v, Time):
-        return format_time(v.dt, lang)
+        return format_time(_aware(v.dt), lang)
     if isinstance(v, Date):
-        return format_date(v.dt, lang)
+        return format_date(_aware(v.dt), lang)
     if isinstance(v, Duration):
         return format_duration(v.seconds, lang)
     if isinstance(v, ListOf):
         texts = []
         for item in v.items:
-            plain = _to_plain(item, lang)
+            plain = _to_plain(item, lang, key)
             texts.append(format_number(plain, lang) if _is_number(plain) else str(plain))
         return format_list(texts, lang, v.style)
     if isinstance(v, Msg):
         return _render_msg(v, lang)
     if isinstance(v, Code):
         return _render_msg(Msg(v.key), lang)
+    if isinstance(v, _BadParam):
+        raise I18nError(v.reason or "bad parameter")
     return _num_or_text(v)
 
 
@@ -1163,6 +1307,21 @@ def catalogs_loaded() -> bool:
     return _LOADED_FROM is not None
 
 
+def catalogs_source() -> Path | None:
+    """Where the cached catalogs came from (the i18n directory, ``INLINE_SOURCE`` for ``use_catalogs``, or None)."""
+    return _LOADED_FROM
+
+
+INLINE_SOURCE = Path("<inline catalogs>")
+
+
+def use_catalogs(catalogs: Mapping[str, Mapping[str, str]]) -> None:
+    """Install in-memory catalogs ``{lang: {key: pattern}}`` instead of the files (tests, conformance rows)."""
+    global _CATALOGS, _LOADED_FROM  # noqa: PLW0603
+    _CATALOGS = {lang: dict(catalogs.get(lang, {})) for lang in LANGUAGES}
+    _LOADED_FROM = INLINE_SOURCE
+
+
 def reset_catalogs() -> None:
     """Forget the cached catalogs (tests)."""
     global _CATALOGS, _LOADED_FROM  # noqa: PLW0603
@@ -1199,26 +1358,33 @@ def get_message(key: str, lang: str) -> tuple[str, str] | None:
 
 
 def _render_msg(msg: Msg, lang: str) -> str:
-    found = get_message(msg.key, lang)
+    key = msg.key
+    if not isinstance(key, str) or not key:
+        if _strict():
+            raise MissingKeyError(repr(key))
+        _warn_once("a message with no catalog key")
+        return ""
+    found = get_message(key, lang)
     if found is None:
         if _strict():
-            raise MissingKeyError(msg.key)
-        _warn_once(f"missing catalog key {msg.key!r}" + ("" if catalogs_loaded() else " (catalogs not loaded)"))
-        return msg.key
+            raise MissingKeyError(key)
+        _warn_once(f"missing catalog key {key!r}" + ("" if catalogs_loaded() else " (catalogs not loaded)"))
+        return key
     pattern, _source = found
     try:
-        return format_message(pattern, lang, msg.params)
-    except I18nError:
+        return _format(pattern, lang, msg.params, key)
+    except Exception as err:
         if _strict():
             raise
-        _warn_once(f"cannot render {msg.key!r} in {lang}")
-        english = get_message(msg.key, DEFAULT_LANGUAGE)
+        # Never raise while rendering: the English message (in English), then the key.
+        _warn_once(f"cannot render {key!r} in {lang} ({type(err).__name__}: {err})")
+        english = get_message(key, DEFAULT_LANGUAGE)
         if lang != DEFAULT_LANGUAGE and english is not None:
             try:
-                return format_message(english[0], DEFAULT_LANGUAGE, msg.params)
-            except I18nError:
+                return _format(english[0], DEFAULT_LANGUAGE, msg.params, key)
+            except Exception:  # noqa: BLE001 - last resort below
                 pass
-        return msg.key
+        return key
 
 
 def render(msg: Msg | Code | str, lang: str) -> str:
@@ -1227,6 +1393,11 @@ def render(msg: Msg | Code | str, lang: str) -> str:
         return msg
     if isinstance(msg, Code):
         msg = Msg(msg.key)
+    if not isinstance(msg, Msg):
+        if _strict():
+            raise I18nError(f"cannot render {type(msg).__name__}: expected a Msg, Code or str")
+        _warn_once(f"render() got a {type(msg).__name__}, not a Msg")
+        return ""
     return _render_msg(msg, resolve_language(lang))
 
 

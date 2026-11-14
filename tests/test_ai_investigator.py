@@ -1834,3 +1834,78 @@ class TestTimingCorrelations:
             "Fix G: investigator context must include TIMING CORRELATIONS section.\n"
             f"Context snippet (first 3000 chars):\n{context[:3000]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #1341 (D9): the occupant-facing sections are written in the HA language; headers/context stay English
+# ---------------------------------------------------------------------------
+
+
+class TestOutputLanguageInstruction:
+    """The investigator context names the output language (HA language) and keeps the English contract."""
+
+    @staticmethod
+    def _context(language: str | None) -> str:
+        coord = _make_coordinator()
+        hass = _make_hass()
+        hass.config.language = language
+        return asyncio.run(async_build_investigator_context(hass, coord))
+
+    def test_english_adds_no_instruction_so_the_context_is_unchanged(self):
+        for language in ("en", "en-GB", None, "xx"):
+            assert "OUTPUT LANGUAGE" not in self._context(language)
+
+    def test_other_languages_get_the_instruction_with_the_language_name(self):
+        ctx = self._context("de")
+        assert "=== OUTPUT LANGUAGE ===" in ctx
+        assert "in German" in ctx
+        # regional codes map like the rest of the integration (pt-BR -> pt, zh-CN -> zh-Hans)
+        assert "in Portuguese" in self._context("pt-BR")
+        assert "in Simplified Chinese" in self._context("zh-CN")
+
+    def test_instruction_keeps_the_english_section_headers_and_citations(self):
+        ctx = self._context("ja")
+        assert "headers (## prefix) exactly as listed in English" in ctx
+        assert "[source: ..., value: ...]" in ctx
+
+    def test_instruction_comes_first_and_the_context_header_stays_english(self):
+        coord = _make_coordinator()
+        hass = _make_hass()
+        hass.config.language = "fr"
+        ctx = asyncio.run(async_build_investigator_context(hass, coord, focus="why is the fan on"))
+        assert ctx.startswith("=== Climate Advisor Investigator Context ===")
+        assert ctx.index("=== OUTPUT LANGUAGE ===") < ctx.index("=== INVESTIGATION FOCUS (USER-DIRECTED) ===")
+        assert "  why is the fan on" in ctx  # the focus text is passed through untouched
+
+    def test_every_shipped_language_but_english_has_a_name(self):
+        from custom_components.climate_advisor import i18n
+        from custom_components.climate_advisor.claude_api import OUTPUT_LANGUAGE_NAMES, output_language_instruction
+
+        assert set(OUTPUT_LANGUAGE_NAMES) == set(i18n.LANGUAGES) - {"en"}
+        for code in OUTPUT_LANGUAGE_NAMES:
+            assert output_language_instruction(code)
+        assert output_language_instruction("en") == ""
+
+    def test_localized_body_still_parses_on_the_english_headers(self):
+        text = (
+            "## ACTIVITY SUMMARY\n10:53 AM: Die Automatik wurde neu gestartet.\n\n"
+            "## INCONGRUITIES FOUND\nKeine erkannt.\n\n"
+            "## DATA QUALITY ISSUES\n- Der Sensor fehlt.\n\n"
+            "## SYSTEM ERRORS / WARNINGS\nKeine Fehler.\n\n"
+            "## HYPOTHESES\n1. Hohe Sicherheit [source: fan_status, value: off]\n\n"
+            "## RECOMMENDED ACTIONS\nPrüfen Sie den Sensor.\n\n"
+            "## ASSUMPTIONS & CONFIDENCE\nAnnahme: Zeitzone stimmt.\n"
+        )
+        parsed = parse_investigation_response(text)
+        assert parsed["activity_summary"].startswith("10:53 AM: Die Automatik")
+        assert parsed["incongruities"] == "Keine erkannt."
+        assert parsed["data_quality"] == "- Der Sensor fehlt."
+        assert parsed["errors_warnings"] == "Keine Fehler."
+        assert "[source: fan_status, value: off]" in parsed["hypotheses"]
+        assert parsed["recommended_actions"] == "Prüfen Sie den Sensor."
+        assert parsed["assumptions"].startswith("Annahme")
+
+    def test_translated_headers_would_not_parse(self):
+        """Why the headers must stay English: a localized header lands in no section."""
+        parsed = parse_investigation_response("## ZUSAMMENFASSUNG\nText")
+        assert parsed["activity_summary"] == ""

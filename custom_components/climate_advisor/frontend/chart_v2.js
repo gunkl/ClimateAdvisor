@@ -34,6 +34,331 @@
     return div.innerHTML;
   }
 
+  // ---- i18n (Issue #1341) ----
+  // EN is the English text of every chart string; its keys are the catalog keys `dashboard.chart.<id>`
+  // (frontend/i18n/dashboard/en.json, kept identical by tests/test_chart_i18n.py). The classic dashboard (index.html)
+  // never loads i18n.js and stays English, so English renders from this table through the small renderer below
+  // (the same ICU subset as docs/i18n-spec.md); any other language is rendered by CAI18N.tw from the catalog.
+  /* EN-BEGIN */
+  const EN = {
+    "lead.hours": "{n, number} h",
+    "lead.days": "{n, plural, one {# day} other {# days}}",
+    "cap.v4_running": "v4 is switched off (Settings → Prediction engine)",
+    "cap.outdoor_sensor": "No outdoor sensor configured (Settings → Sensors)",
+    "cap.fan": "No fan configured (Settings → Equipment)",
+    "cap.door_sensors": "No door or window sensors configured (Settings → Sensors)",
+    "cap.occupancy": "No home, vacation or guest switch configured (Settings → Occupancy)",
+    "cap.humidity_indoor": "No indoor humidity source found (Settings → Sensors)",
+    "cap.humidity_outdoor": "No outdoor humidity source found (Settings → Sensors)",
+    "series.ca_reading": "CA reading",
+    "series.ca_reading_role": "the reading Climate Advisor uses",
+    "series.climate_advisor_reading": "Climate Advisor reading",
+    "series.humidity": "Humidity",
+    "series.indoor_humidity": "Indoor humidity",
+    "series.indoor_humidity_role": "relative humidity of the room Climate Advisor reads",
+    "series.no_humidity": "No humidity reading recorded in this view",
+    "series.feels": "Feels-like",
+    "series.indoor_feels": "Indoor feels-like",
+    "series.indoor_feels_role": "heat index, shown only at {hi} and up",
+    "series.indoor_feels_empty": "Indoor feels-like only shows as a heat index ({hi} and up)",
+    "series.v3_role": "v3's prediction of the reading Climate Advisor uses; left of Now, what it predicted 4 h earlier",
+    "series.schedule_short": "Schedule estimate",
+    "series.schedule_label": "Schedule estimate (learning)",
+    "series.schedule_role": "shown while the main prediction engine is still learning",
+    "series.schedule_note": "Not needed: the main engine has a usable fit",
+    "series.why_v4_off": "v4 is switched off (Settings, Prediction engine)",
+    "series.why_v4_no_data": "v4 has no data for this zone yet (it is still learning this house)",
+    "series.engine_name": "{engine} {name}",
+    "series.v4_hist_role": "past v4 predictions only (from its backtest); v4 does not forecast {name} yet",
+    "series.no_plan": "No plan {name}",
+    "series.no_plan_note": "v4 has no no-plan line for {name} yet",
+    "series.out_sensor_short": "Outdoor sensor",
+    "series.out_sensor": "Sensor",
+    "series.out_service_short": "Service",
+    "series.out_service": "Service forecast",
+    "series.out_corrected_short": "Corrected",
+    "series.out_corrected": "CA-corrected forecast",
+    "series.out_humidity_short": "Outdoor humidity",
+    "series.out_humidity_role": "outdoor relative humidity; right of Now, the forecast",
+    "series.out_feels_short": "Outdoor feels-like",
+    "series.out_feels_role": "heat index at {hi} and up, wind chill at {lo} and below with wind; right of Now, the forecast",
+    "series.out_feels_empty": "Feels-like only shows as a heat index ({hi} and up) or wind chill ({lo} and below with wind)",
+    "band.sensor_sleep": "{name}, sleep",
+    "band.named": "Band ({names})",
+    "band.plain": "Band",
+    "band.target": "Target band",
+    "empty.not_in_view": "Nothing to draw in this view (it has data at other times): scroll or change the range",
+    "empty.events_none": "No overrides or re-classifications recorded in the loaded time",
+    "empty.strip_none": "{row, select, heating {No heating recorded or planned in the loaded time} cooling {No cooling recorded or planned in the loaded time} fan {No fan recorded or planned in the loaded time} natvent {No nat-vent recorded or planned in the loaded time} windows {No windows open recorded or planned in the loaded time} windowsplan {No windows plan recorded or planned in the loaded time} away {No away / vacation recorded or planned in the loaded time} override {No override / grace recorded or planned in the loaded time} other {No {name} recorded or planned in the loaded time}}",
+    "empty.plan_outside": "The plan covers Now and the next days: not in this view",
+    "empty.no_plan": "No plan yet",
+    "empty.no_steps": "No plan steps to show",
+    "empty.v4_other_leads": "No v4 predictions made {lead} earlier in this view: choose {others} under \"Past v4 lines\"",
+    "empty.no_band": "No target band recorded or scheduled in the loaded time",
+    "empty.no_target": "No target recorded or scheduled in the loaded time",
+    "empty.no_readings": "No readings from {name} in the loaded time",
+    "empty.no_data": "No data for this line in the loaded time",
+    "lead.help": "Left of Now, each v4 line shows what v4 predicted that many hours earlier for each moment, so you can see how well it called it. This changes only the past part of the v4 lines; from Now on they stay the same.",
+    "lead.btn_title": "Left of Now, show what v4 predicted {lead} earlier for each moment",
+    "lead.btn_title_none": "No predictions v4 made {lead} earlier in this view",
+    "lead.btn": "{lead} earlier",
+    "lead.btn_none": "{lead} earlier (none in view)",
+    "lead.subhelp": "how far ahead v4 looked; changes only the v4 lines left of Now",
+    "lead.note_view": "{lead} earlier: none in this view; choose {others}",
+    "lead.none_span": "No past v4 predictions in this view; v4 has them from {first} to {last}",
+    "lead.none_view": "No past v4 predictions in this view",
+    "lead.none_yet": "v4 has no past predictions to show yet",
+    "lead.label": "Past v4 lines: predicted",
+    "role.word.primary": "main prediction",
+    "role.word.shadow": "comparison",
+    "role.word.other": "not selected in Settings",
+    "role.head.primary": "Main",
+    "role.head.shadow": "Comparison",
+    "role.head.other": "Not selected",
+    "role.aria.primary": "Main prediction",
+    "role.aria.shadow": "Comparison",
+    "role.aria.other": "Not selected in Settings",
+    "role.line": "{head} · {engine}",
+    "role.aria_line": "{head}: {engine}",
+    "aria.what_schedule": "schedule estimate while the main engine is still learning",
+    "aria.what_v3": "v3 prediction",
+    "aria.what_hist": "v4 past predictions only",
+    "aria.what_base": "v4 forecast if Climate Advisor did nothing",
+    "aria.what_plan": "v4 forecast with plan",
+    "aria.pred_role": "{label}, {what} ({role})",
+    "aria.pred": "{label}, {what}",
+    "aria.why": "{label}: {why}",
+    "notset.item": "{labels}: {why}",
+    "engines.label": "Engines",
+    "engines.none_shadow": "No comparison engine",
+    "engines.shadow": "Comparison: {engine}",
+    "engines.line": "Main prediction: {primary} · {comparison} — change it in {link}.",
+    "engines.settings_link": "Settings → Prediction engine",
+    "engines.scores": "{link}.",
+    "engines.notice": "{notice}.",
+    "engines.scores_link": "How each engine has scored",
+    "row.prediction": "Prediction",
+    "row.forecast_plan": "Forecast with plan",
+    "row.forecast_base": "Forecast if Climate Advisor did nothing",
+    "row.past_only": "Past predictions only",
+    "row.while_learning": "While learning",
+    "learn.error": "v4's lines could not be read this time; they come back on the next refresh",
+    "learn.still": "v4 is still learning: {names}",
+    "learn.still_house": "v4 is still learning this house",
+    "learn.item_role": "{name} ({role})",
+    "learn.title": "No v4 lines yet for: {names}",
+    "ov.target": "Target",
+    "ov.thermostat_set": "Thermostat set",
+    "ov.plan": "Plan",
+    "ov.plan_title": "What Climate Advisor will do (circles) and what you are asked to do (diamonds), from the plan",
+    "ov.events": "Events",
+    "ds.band": "Target Band",
+    "ds.plan_path": "Plan path",
+    "strip.heating.label": "Heating",
+    "strip.heating.short": "Heating",
+    "strip.cooling.label": "Cooling",
+    "strip.cooling.short": "Cooling",
+    "strip.fan.label": "Fan",
+    "strip.fan.short": "Fan",
+    "strip.natvent.label": "Nat-vent",
+    "strip.natvent.short": "Nat-vent",
+    "strip.windows.label": "Windows open",
+    "strip.windows.short": "Windows",
+    "strip.windowsplan.label": "Windows plan",
+    "strip.windowsplan.short": "Win plan",
+    "strip.away.label": "Away / Vacation",
+    "strip.away.short": "Away",
+    "strip.override.label": "Override / grace",
+    "strip.override.short": "Override",
+    "strip.none_in_view": "None in this view: scroll or change the range",
+    "strip.legend_solid": "Solid: what happened",
+    "strip.legend_faded": "Faded: what the plan expects",
+    "strip.legend_aria": "Solid: what happened · Faded: what the plan expects",
+    "strip.aria": "Heating, cooling, fan, ventilation and window activity over time",
+    "group.indoor": "Indoor",
+    "group.indoor_aria": "Indoor lines",
+    "group.predicted": "Predicted",
+    "group.predicted_aria": "Prediction lines",
+    "group.outdoor": "Outdoor",
+    "group.outdoor_aria": "Outdoor lines",
+    "group.overlays": "Overlays",
+    "group.overlays_aria": "Overlays",
+    "group.activity": "Activity",
+    "group.activity_aria": "Activity strips",
+    "key.lines": "Lines",
+    "key.showing": "Showing: {lines}",
+    "key.nothing": "nothing",
+    "key.hide_title": "Hide the lines and sensors key",
+    "key.show_title": "Choose which lines and sensors the chart shows",
+    "key.count": "({n, number})",
+    "key.count_open": "({n, number} shown)",
+    "key.hide": "▾ Hide",
+    "key.edit": "▸ Edit",
+    "draw.now": "NOW",
+    "draw.classify": "Classify",
+    "draw.override": "Override",
+    "readout.now": "Now · {time}",
+    "readout.end_week": "{weekday} {time} (end of view)",
+    "readout.end_date": "{date}, {time} (end of view)",
+    "readout.value": "{name}: {value}",
+    "readout.band_value": "{lo, number}–{hi, number}{unit}",
+    "readout.miss_title": "{name} minus what was read",
+    "readout.rough": "rough",
+    "readout.rough_title": "Past the hourly forecast: from the daily high and low",
+    "readout.actor_you": "You",
+    "readout.actor_ca": "CA",
+    "readout.plan_step": "{actor} {time}: {text}",
+    "readout.plan_tag": "plan",
+    "readout.may_help": "may help",
+    "readout.sliver": "about {mins, number} min of {total, number} min {what, select, heating {heating} other {cooling}}",
+    "readout.sliver_win": "about {mins, number} min of {total, number} min {what, select, heating {heating} other {cooling}}, {start}–{end}",
+    "readout.plan_value": "{label}{who}: {text}",
+    "readout.state_heating": "Heating",
+    "readout.state_cooling": "Cooling",
+    "readout.state_fan": "Fan-Only",
+    "readout.state_sched_fan": "Sched fan",
+    "readout.hint_touch": "Tap the chart to pin a time",
+    "readout.hint_mouse": "Hover the chart for any time; click to pin",
+    "readout.pinned_touch": "Pinned · tap to release",
+    "readout.pinned_click": "Pinned · click to release",
+    "readout.none": "No readings at this time.",
+    "chart.title": "Temperature ({unit})",
+    "table.time": "Time",
+    "table.thermostat": "Thermostat",
+    "table.col": "{name} ({unit})",
+    "table.caption": "Temperatures in {unit}, every {n, plural, one {# minute} other {# minutes}}. Rows after now are predictions.",
+    "table.caption_hum": "Temperatures in {unit}, humidity in %, every {n, plural, one {# minute} other {# minutes}}. Rows after now are predictions.",
+    "table.state_heating": "heating",
+    "table.state_cooling": "cooling",
+    "table.state_fan": "fan",
+    "table.copied": "Copied",
+    "table.copy": "Copy table",
+    "plan.reminder": "Reminder at {time}",
+    "plan.you_title": "You do this",
+    "plan.ca_title": "Climate Advisor does this",
+    "plan.later_head": "Later: an outlook from the forecast, updated as the forecast changes",
+    "plan.day_sum": "{n, plural, one {# step} other {# steps}}",
+    "plan.day_sum_you": "{n, plural, one {# step} other {# steps}} · {you, number} for you",
+    "plan.now": "Now",
+    "plan.loading": "Loading the plan...",
+    "plan.none": "The plan appears after Climate Advisor has classified the day.",
+    "plan.error": "The plan could not be loaded. It will be retried.",
+    "plan.empty": "Nothing is planned for the next 24 hours."
+  };
+  /* EN-END */
+  const _CAT = 'dashboard.chart.';
+  function _lang() { return window.CAI18N && window.CAI18N.lang ? window.CAI18N.lang : 'en'; }
+  function _isRtl() { return !!(window.CAI18N && window.CAI18N.dir === 'rtl'); }
+  // Locale for Intl calls: English keeps the browser's own locale (as before), any other language its own.
+  function _loc() { const l = _lang(); return l === 'en' ? [] : l; }
+  // A dynamic Latin name inside right-to-left text: isolate it (what the Python renderer does for ar).
+  function _iso(s) { return _isRtl() && s ? '⁨' + s + '⁩' : s; }
+  function _enNum(n, skel) {
+    const d = skel === '::.0' ? 1 : skel === '::.00' ? 2 : skel === '::precision-integer' ? 0 : null;
+    if (skel === '::percent') return Math.round(n * 100) + '%';
+    return n.toLocaleString('en', d == null ? { maximumFractionDigits: 3 } : { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+  // The English decoder for typed wire params (CAI18N.tw does it for the other languages).
+  function _enVal(v) {
+    if (v && typeof v === 'object' && v.$t) {
+      if (v.$t === 'temp') {
+        const x = v.unit === 'celsius' ? (v.f - 32) * 5 / 9 : v.f;
+        return (v.d ? x.toFixed(v.d) : String(Math.round(x))) + (v.unit === 'celsius' ? '°C' : '°F');
+      }
+      if (v.$t === 'list') return (v.items || []).map(_enVal).join(v.style === 'or' ? ' or ' : ', ');
+      if (v.$t === 'msg') return _fmtEn(EN[String(v.key).slice(_CAT.length)] || '', v.params);
+    }
+    return v;
+  }
+  function _fmtEn(msg, p, hash) {
+    let out = '', i = 0;
+    while (i < msg.length) {
+      const c = msg[i];
+      if (c === "'") {
+        if (msg[i + 1] === "'") { out += "'"; i += 2; continue; }
+        if (msg[i + 1] === '{' || msg[i + 1] === '}') { const j = msg.indexOf("'", i + 2); out += msg.slice(i + 1, j < 0 ? msg.length : j); i = j < 0 ? msg.length : j + 1; continue; }
+      } else if (c === '#' && hash !== undefined) { out += hash; i++; continue; }
+      else if (c === '{') {
+        let d = 1, j = i + 1;
+        while (j < msg.length && d) { if (msg[j] === '{') d++; else if (msg[j] === '}') d--; j++; }
+        out += _argEn(msg.slice(i + 1, j - 1), p || {}); i = j; continue;
+      }
+      out += c; i++;
+    }
+    return out;
+  }
+  function _argEn(body, p) {
+    const m = /^\s*(\w+)\s*(?:,\s*(\w+)\s*(?:,([\s\S]*))?)?$/.exec(body);
+    if (!m) return '';
+    const v = _enVal(p[m[1]]), type = m[2], rest = m[3] || '';
+    if (!type) return String(v);
+    if (type === 'number') return _enNum(Number(v), rest.trim());
+    const opts = {};
+    const re = /\s*(=?\w+)\s*\{/g;
+    let mm;
+    while ((mm = re.exec(rest))) {
+      let d = 1, j = re.lastIndex;
+      while (j < rest.length && d) { if (rest[j] === '{') d++; else if (rest[j] === '}') d--; j++; }
+      opts[mm[1]] = rest.slice(re.lastIndex, j - 1);
+      re.lastIndex = j;
+    }
+    if (type === 'plural') {
+      const n = Number(v);
+      const k = ('=' + n) in opts ? '=' + n : n === 1 && 'one' in opts ? 'one' : 'other';
+      return _fmtEn(opts[k] || '', p, _enNum(n, ''));
+    }
+    return _fmtEn(opts[String(v)] !== undefined ? opts[String(v)] : (opts.other || ''), p);   // select: '#' is literal inside it
+  }
+  // Render message `id` with params (numbers as numbers; temperatures, lists and nested messages as wire objects).
+  // The catalogs load after the page: until CAI18N.ready has resolved, everything renders from EN (silently), and the
+  // chart is drawn again once the catalogs are in (init below).
+  let _catReady = false, _catHooked = false;
+  function _hookReady() {
+    if (_catHooked || !window.CAI18N || !window.CAI18N.ready || !window.CAI18N.ready.then) return;
+    _catHooked = true;
+    window.CAI18N.ready.then(() => { _catReady = true; _renderPlans(); if (_lastChartData) drawChart(_lastChartData); });
+  }
+  function _t(id, p) {
+    _hookReady();
+    if (_lang() !== 'en' && _catReady) {
+      try {
+        const r = window.CAI18N.tw({ key: _CAT + id, params: p });
+        if (r && r !== _CAT + id) return r;
+      } catch (_e) { /* fall back to the English text */ }
+    }
+    return _fmtEn(EN[id] || id, p);
+  }
+  // A nested message as a wire param; a temperature; a list.
+  function _m(id, p) { return { $t: 'msg', key: _CAT + id, params: p || {} }; }
+  function _tp(f) { return { $t: 'temp', f: f, unit: _unitSym() === '°C' ? 'celsius' : 'fahrenheit', d: 0 }; }
+  function _lst(items, style) { return { $t: 'list', items: items, style: style || 'and' }; }
+  // A message whose params include markup: `rich` maps a param name to ready HTML (already escaped); the rest is
+  // escaped. Returns safe HTML.
+  function _tH(id, p, rich) {
+    const q = Object.assign({}, p), toks = {};
+    Object.keys(rich || {}).forEach((k, i) => { toks[k] = '' + i + ''; q[k] = toks[k]; });
+    let html = escapeHtml(_t(id, q));
+    Object.keys(toks).forEach(k => { html = html.split(toks[k]).join(rich[k]); });
+    return html;
+  }
+  // Text the backend may send with a `<field>_msg` wire sibling (Issue #1341 D3): render it, else the English field.
+  function _bk(o, f) {
+    if (!o) return '';
+    const w = o[f + '_msg'];
+    if (w && window.CAI18N && window.CAI18N.tw) { try { const r = window.CAI18N.tw(w); if (r) return r; } catch (_e) { /* English field */ } }
+    return o[f] == null ? '' : o[f];
+  }
+  // Numbers: English keeps toFixed / String exactly; other languages get their separators.
+  function _num(v, d) {
+    if (_lang() === 'en' || !window.CAI18N) return v.toFixed(d);
+    return window.CAI18N.fmt.number(v, { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+  function _numPlain(v) {
+    if (_lang() === 'en' || !window.CAI18N) return String(v);
+    return window.CAI18N.fmt.number(v, { maximumFractionDigits: 6, useGrouping: false });
+  }
+  
+
   function _copyText(text) {
     const fallback = () => {
       const ta = document.createElement('textarea');
@@ -95,9 +420,13 @@
   const MIN_AHEAD_H = 24;
   const CHART_LEADS = ['1h', '4h', '12h', '24h', '48h', '72h', '120h'];   // Issue #1483: and 2, 3 and 5 days
   // a look-ahead in words: '4h' -> '4 h', '48h' -> '2 days' (whole days from 2 days on)
+  function _leadW(l) {
+    const h = parseInt(l, 10);
+    return h >= 48 && h % 24 === 0 ? _m('lead.days', { n: h / 24 }) : _m('lead.hours', { n: h });
+  }
   function _leadTxt(l) {
     const h = parseInt(l, 10);
-    return h >= 48 && h % 24 === 0 ? (h / 24) + ' days' : l.replace('h', ' h');
+    return h >= 48 && h % 24 === 0 ? _t('lead.days', { n: h / 24 }) : _t('lead.hours', { n: h });
   }
   // Issue #1483: past the last real hourly forecast hour v4's line runs on the daily highs and lows: drawn fainter
   function _fade(color, alpha) {
@@ -425,20 +754,12 @@
   // time, weather and the current view never lock it (an empty view only says why it is empty). It is locked only when
   // the home cannot have it as set up, and then the reason says where to set it up. chart_data.capabilities carries those
   // install facts; an older backend without it locks nothing (every capability counts as available).
-  const CAP_LOCK = {
-    v4_running: 'v4 is switched off (Settings \u2192 Prediction engine)',
-    outdoor_sensor: 'No outdoor sensor configured (Settings \u2192 Sensors)',
-    fan: 'No fan configured (Settings \u2192 Equipment)',
-    door_sensors: 'No door or window sensors configured (Settings \u2192 Sensors)',
-    occupancy: 'No home, vacation or guest switch configured (Settings \u2192 Occupancy)',
-    humidity_indoor: 'No indoor humidity source found (Settings \u2192 Sensors)',
-    humidity_outdoor: 'No outdoor humidity source found (Settings \u2192 Sensors)',
-  };
+  const CAP_LOCK_IDS = ['v4_running', 'outdoor_sensor', 'fan', 'door_sensors', 'occupancy', 'humidity_indoor', 'humidity_outdoor'];
   // the strips a home without the equipment can never have (no chip and no row then; the key names them once)
   const STRIP_CAP = { fan: 'fan', natvent: 'fan', windows: 'door_sensors', windowsplan: 'door_sensors', away: 'occupancy' };
   function _capLock(cd, name) {
     const c = cd && cd.capabilities;
-    return c && typeof c === 'object' && c[name] === false ? CAP_LOCK[name] : '';
+    return c && typeof c === 'object' && c[name] === false && CAP_LOCK_IDS.includes(name) ? _t('cap.' + name) : '';
   }
   function _stripLock(r) { return STRIP_CAP[r] ? _capLock(_lastChartData, STRIP_CAP[r]) : ''; }
 
@@ -457,25 +778,26 @@
     // Indoor: one actual line per sensor, then the CA reading (follows the sensor CA reads).
     metas.forEach((m, i) => {
       const pts = ((cd.actual_indoor_sensors || {})[m.id] || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
-      S.push(_mkSeries({ id: 'ind:' + m.id, group: 'indoor', short: m.name, label: m.name, role: m.role,
+      const mname = _iso(_bk(m, 'name'));
+      S.push(_mkSeries({ id: 'ind:' + m.id, group: 'indoor', short: mname, label: mname, role: _bk(m, 'role'),
         color: 'ink', dash: SENSOR_DASH[i % SENSOR_DASH.length], sensor: m.id, kind: 'actual' }, pts));
     });
     const caPts = (cd.actual_indoor || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
-    S.push(_mkSeries({ id: 'ind:_ca', group: 'indoor', short: 'CA reading', label: 'CA reading',
-      role: 'the reading Climate Advisor uses', color: 'ink', dash: [1, 3], width: 1.5, sensor: '_ca', kind: 'actual', breaks: caBreaks }, caPts));
+    S.push(_mkSeries({ id: 'ind:_ca', group: 'indoor', short: _t('series.ca_reading'), label: _t('series.ca_reading'),
+      role: _t('series.ca_reading_role'), color: 'ink', dash: [1, 3], width: 1.5, sensor: '_ca', kind: 'actual', breaks: caBreaks }, caPts));
 
     // Issue #1414: humidity (right % axis) and feels-like (left temperature axis), indoor and outdoor, as ordinary
     // lines. Past from the chart log rows that carry the value (a row without it is a gap, never a guess); outdoor
     // future from the forecast lists. Feels-like is absent unless it is a real heat index / wind chill.
     const logPts = key => state.filter(e => e[key] != null).map(e => ({ x: _parseTs(e.ts), y: e[key] })).filter(p => p.x <= nowMs);
     const fcPts = list => (list || []).map(p => ({ x: _parseTs(p.ts), y: p.value })).filter(p => p.y != null && p.x > nowMs);
-    const hiF = _tempTxt(80), lowF = _tempTxt(50);
-    S.push(_mkSeries({ id: 'ind:humidity', group: 'indoor', short: 'Indoor humidity', label: 'Humidity', role: 'relative humidity of the room Climate Advisor reads',
-      color: 'hum', width: 1.5, axis: 'yRight', unit: '%', kind: 'actual', emptyReason: 'No humidity reading recorded in this view',
+    const hiF = _tp(80), lowF = _tp(50);
+    S.push(_mkSeries({ id: 'ind:humidity', group: 'indoor', short: _t('series.indoor_humidity'), label: _t('series.humidity'), role: _t('series.indoor_humidity_role'),
+      color: 'hum', width: 1.5, axis: 'yRight', unit: '%', kind: 'actual', emptyReason: _t('series.no_humidity'),
       disabledReason: _capLock(cd, 'humidity_indoor') }, logPts('humidity')));
-    S.push(_mkSeries({ id: 'ind:feelslike', group: 'indoor', short: 'Indoor feels-like', label: 'Feels-like', role: 'heat index, shown only at ' + hiF + ' and up',
+    S.push(_mkSeries({ id: 'ind:feelslike', group: 'indoor', short: _t('series.indoor_feels'), label: _t('series.feels'), role: _t('series.indoor_feels_role', { hi: hiF }),
       color: 'feels', dash: [3, 3], width: 1.5, kind: 'actual',
-      emptyReason: 'Indoor feels-like only shows as a heat index (' + hiF + ' and up)',
+      emptyReason: _t('series.indoor_feels_empty', { hi: hiF }),
       disabledReason: _capLock(cd, 'humidity_indoor') }, logPts('feelslike')));
 
     // Predicted: v3's prediction of the CA reading: the 4 h-ahead snapshots logged earlier, then the live forecast.
@@ -483,20 +805,20 @@
     const histPredIndoor = state.map(e => ({ x: _parseTs(e.ts), y: e.pred_indoor != null ? e.pred_indoor : e.pred_indoor_avg != null ? e.pred_indoor_avg : null }))
       .filter(p => p.y != null && p.x <= nowMs);
     const futPredIndoor = (cd.predicted_indoor || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
-    S.push(_mkSeries({ id: 'v3', group: 'predicted', short: 'v3', label: 'Climate Advisor reading', role: "v3's prediction of the reading Climate Advisor uses; left of Now, what it predicted 4 h earlier",
+    S.push(_mkSeries({ id: 'v3', group: 'predicted', short: 'v3', label: _t('series.climate_advisor_reading'), role: _t('series.v3_role'),
       color: 'v3', dash: [7, 4], width: 2, missVs: 'ind:_ca', kind: 'pred', breaks: caBreaks }, [...histPredIndoor, ...futPredIndoor]));
 
     // The schedule estimate: the main line while the primary engine is still learning.
     const sched = (cd.schedule_estimate || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
-    S.push(_mkSeries({ id: 'schedule', group: 'predicted', short: 'Schedule estimate', label: 'Schedule estimate (learning)',
-      role: 'shown while the main prediction engine is still learning', color: 'base', dash: [4, 3], width: 2, missVs: 'ind:_ca', kind: 'pred',
-      note: sched.length ? '' : 'Not needed: the main engine has a usable fit' }, sched));
+    S.push(_mkSeries({ id: 'schedule', group: 'predicted', short: _t('series.schedule_short'), label: _t('series.schedule_label'),
+      role: _t('series.schedule_role'), color: 'base', dash: [4, 3], width: 2, missVs: 'ind:_ca', kind: 'pred',
+      note: sched.length ? '' : _t('series.schedule_note') }, sched));
 
     // v4: drawn whenever it has data; there is no accuracy gate (which model is the main line is the occupant's setting).
     // Issue #1459: only capabilities.v4_running=false locks the v4 lines; "no data yet" is a note, the chip stays switchable
     const v4Lock = _capLock(cd, 'v4_running');
     const why = (v4Lock || v4Ready) ? '' : (_engines().engines || []).some(x => x.id === 'v4' && !x.running)
-      ? 'v4 is switched off (Settings, Prediction engine)' : 'v4 has no data for this zone yet (it is still learning this house)';
+      ? _t('series.why_v4_off') : _t('series.why_v4_no_data');
     // 0.9.6 Lane F: a v4 chip only for a sensor v4 has something for (past, forecast or no-plan line); the sensors v4
     // has not learned yet are named on one muted line instead (_v4Learning). A sensor with past predictions only (the
     // backtest) and no forecast gets one chip, on the key's "Past predictions only" row (Issue #1430: no no-plan chip
@@ -515,30 +837,30 @@
       const pastElsewhere = spanSensors.includes(m.id);
       if (!v4Ready || (!pastAny && !pastElsewhere && !futRaw.length && !baseRaw.length)) { _v4Learning.push(m); return; }
       const histOnly = !futRaw.length && !baseRaw.length;
-      const label = m.name;
+      const label = _iso(_bk(m, 'name'));
       const past = (byLead[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       const fut = futRaw.map(p => ({ x: _parseTs(p.ts), y: p.temp }));
-      S.push(_mkSeries({ id: 'v4:' + m.id, group: 'predicted', sub: 'plan', short: 'v4 ' + m.name, label, color: 'plan', dash,
+      S.push(_mkSeries({ id: 'v4:' + m.id, group: 'predicted', sub: 'plan', short: _t('series.engine_name', { engine: 'v4', name: label }), label, color: 'plan', dash,
         width: 2.5, sensor: m.id, missVs: 'ind:' + m.id, kind: 'pred', disabledReason: v4Lock, note: why, histOnly, pastElsewhere, roughAfter,
-        role: histOnly ? 'past v4 predictions only (from its backtest); v4 does not forecast ' + m.name + ' yet' : '' }, v4Ready ? [...past, ...fut] : []));
+        role: histOnly ? _t('series.v4_hist_role', { name: label }) : '' }, v4Ready ? [...past, ...fut] : []));
       if (histOnly) return;   // Issue #1430: no no-plan line (a forecast) for a sensor v4 has only past predictions for
       const base = baseRaw.map(p => ({ x: _parseTs(p.ts), y: p.temp }));
-      S.push(_mkSeries({ id: 'base:' + m.id, group: 'predicted', sub: 'base', short: 'No plan ' + m.name, label, color: 'base', dash,
+      S.push(_mkSeries({ id: 'base:' + m.id, group: 'predicted', sub: 'base', short: _t('series.no_plan', { name: label }), label, color: 'base', dash,
         width: 2, sensor: m.id, kind: 'pred', roughAfter,
-        disabledReason: v4Lock, note: why || (base.length ? '' : 'v4 has no no-plan line for ' + m.name + ' yet') }, v4Ready ? base : []));
+        disabledReason: v4Lock, note: why || (base.length ? '' : _t('series.no_plan_note', { name: label })) }, v4Ready ? base : []));
     });
 
     // v4's line for the reading Climate Advisor uses (Issue #1400): the only line of a _ca-only model, and the one to
     // compare with today's (v3) line. It follows the sensor CA reads, so it is broken at every swap (v4.breaks._ca).
     if ((v4.sensors || []).includes('_ca')) {
-      const caName = 'Climate Advisor reading';
+      const caName = _t('series.climate_advisor_reading');
       const past = (((v4.past || {})._ca || {})[_chartLead] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
       const fut = ((v4.future || {})._ca || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
-      S.push(_mkSeries({ id: 'v4:_ca', group: 'predicted', sub: 'plan', short: 'v4 ' + caName, label: caName, color: 'plan', dash: [],
+      S.push(_mkSeries({ id: 'v4:_ca', group: 'predicted', sub: 'plan', short: _t('series.engine_name', { engine: 'v4', name: caName }), label: caName, color: 'plan', dash: [],
         width: 2.5, sensor: '_ca', missVs: 'ind:_ca', kind: 'pred', disabledReason: v4Lock, note: why, breaks: caBreaks, roughAfter },
         v4Ready ? [...past, ...fut] : []));
       const base = ((v4.baseline || {})._ca || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
-      S.push(_mkSeries({ id: 'base:_ca', group: 'predicted', sub: 'base', short: 'No plan ' + caName, label: caName, color: 'base', dash: [],
+      S.push(_mkSeries({ id: 'base:_ca', group: 'predicted', sub: 'base', short: _t('series.no_plan', { name: caName }), label: caName, color: 'base', dash: [],
         width: 2, sensor: '_ca', kind: 'pred', disabledReason: v4Lock, note: why, breaks: caBreaks, roughAfter }, v4Ready ? base : []));
     }
 
@@ -546,26 +868,26 @@
     const outPts = (cd.actual_outdoor || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
     // Issue #1459: a home with no outdoor sensor never has this line: no chip (noChip), never drawn (locked)
     const outLock = _capLock(cd, 'outdoor_sensor');
-    S.push(_mkSeries({ id: 'out:sensor', group: 'outdoor', short: 'Outdoor sensor', label: 'Sensor', color: 'out', width: 2, chart: 'out', kind: 'actual',
+    S.push(_mkSeries({ id: 'out:sensor', group: 'outdoor', short: _t('series.out_sensor_short'), label: _t('series.out_sensor'), color: 'out', width: 2, chart: 'out', kind: 'actual',
       disabledReason: outLock, noChip: !!outLock }, outPts));
     const histSvc = state.map(e => ({ x: _parseTs(e.ts), y: e.pred_outdoor != null ? e.pred_outdoor : e.pred_outdoor_avg != null ? e.pred_outdoor_avg : null }))
       .filter(p => p.y != null && p.x <= nowMs);
     const futSvc = (cd.forecast_outdoor || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })).filter(p => p.x > nowMs);
-    S.push(_mkSeries({ id: 'out:service', group: 'outdoor', short: 'Service', label: 'Service forecast', color: 'svc', dash: [2, 3], width: 2,
+    S.push(_mkSeries({ id: 'out:service', group: 'outdoor', short: _t('series.out_service_short'), label: _t('series.out_service'), color: 'svc', dash: [2, 3], width: 2,
       chart: 'out', missVs: 'out:sensor', kind: 'pred' }, [...histSvc, ...futSvc]));
     const co = v4.corrected_outdoor || {};
     const corr = [...(co.past || []), ...(co.future || [])].map(p => ({ x: _parseTs(p.ts), y: p.temp }));
-    S.push(_mkSeries({ id: 'out:corrected', group: 'outdoor', short: 'Corrected', label: 'CA-corrected forecast', color: 'svc', width: 2.5,
+    S.push(_mkSeries({ id: 'out:corrected', group: 'outdoor', short: _t('series.out_corrected_short'), label: _t('series.out_corrected'), color: 'svc', width: 2.5,
       chart: 'out', missVs: 'out:sensor', kind: 'pred', disabledReason: v4Lock, note: why,
       roughAfter: v4.hourly_until ? _parseTs(v4.hourly_until) : null }, v4Ready ? corr : []));
     // Outdoor humidity / feels-like (Issue #1414): dashed, so they never read as the indoor lines of the same colour.
-    S.push(_mkSeries({ id: 'out:humidity', group: 'outdoor', short: 'Outdoor humidity', label: 'Humidity', role: 'outdoor relative humidity; right of Now, the forecast',
+    S.push(_mkSeries({ id: 'out:humidity', group: 'outdoor', short: _t('series.out_humidity_short'), label: _t('series.humidity'), role: _t('series.out_humidity_role'),
       color: 'hum', dash: [8, 4], width: 1.5, chart: 'out', axis: 'yRight', unit: '%', kind: 'actual',
-      emptyReason: 'No humidity reading recorded in this view', disabledReason: _capLock(cd, 'humidity_outdoor') }, [...logPts('outdoor_humidity'), ...fcPts(cd.outdoor_humidity_forecast)]));
-    S.push(_mkSeries({ id: 'out:feelslike', group: 'outdoor', short: 'Outdoor feels-like', label: 'Feels-like',
-      role: 'heat index at ' + hiF + ' and up, wind chill at ' + lowF + ' and below with wind; right of Now, the forecast',
+      emptyReason: _t('series.no_humidity'), disabledReason: _capLock(cd, 'humidity_outdoor') }, [...logPts('outdoor_humidity'), ...fcPts(cd.outdoor_humidity_forecast)]));
+    S.push(_mkSeries({ id: 'out:feelslike', group: 'outdoor', short: _t('series.out_feels_short'), label: _t('series.feels'),
+      role: _t('series.out_feels_role', { hi: hiF, lo: lowF }),
       color: 'feels', dash: [8, 3, 2, 3], width: 1.5, chart: 'out', kind: 'actual',
-      emptyReason: 'Feels-like only shows as a heat index (' + hiF + ' and up) or wind chill (' + lowF + ' and below with wind)' },
+      emptyReason: _t('series.out_feels_empty', { hi: hiF, lo: lowF }) },
       [...logPts('outdoor_feelslike'), ...fcPts(cd.outdoor_feelslike_forecast)]));
     return S;
   }
@@ -608,11 +930,9 @@
     return out;
   }
 
-  function _fmt(v, digits) { return v == null ? '—' : v.toFixed(digits == null ? 1 : digits); }
-  function _fmtSigned(v) { return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(1); }
+  function _fmt(v, digits) { return v == null ? '—' : _num(v, digits == null ? 1 : digits); }
+  function _fmtSigned(v) { return (v > 0 ? '+' : v < 0 ? '−' : '') + _num(Math.abs(v), 1); }
   function _unitSym() { return unitSymbol(_lastChartData ? _lastChartData.unit : (_lastStatus ? _lastStatus.unit : null)); }
-  // a fixed °F threshold in the display unit, for wording (80 °F reads "27°C")
-  function _tempTxt(f) { return _unitSym() === '°C' ? Math.round((f - 32) * 5 / 9) + '°C' : f + '°F'; }
 
   // ---- the key (compact, grouped, independent toggles) ----
   function _swatch(s) {
@@ -630,30 +950,35 @@
       (o.title ? ' title="' + escapeHtml(o.title) + '"' : '') + (o.aria ? ' aria-label="' + escapeHtml(o.aria) + '"' : '') + '>' + inner + '</button>';
   }
 
-  function _group(label, ariaLabel, inner) {
-    return '<div class="key-group" role="group" aria-label="' + escapeHtml(ariaLabel) + '"><span class="key-group-label">' + escapeHtml(label) + '</span>' +
+  function _group(id, inner) {
+    return '<div class="key-group" role="group" aria-label="' + escapeHtml(_t('group.' + id + '_aria')) + '"><span class="key-group-label">' + escapeHtml(_t('group.' + id)) + '</span>' +
       '<div class="key-chips">' + inner + '</div></div>';
   }
 
   const STRIP_ROWS = [
     // `short` is the label on the strip itself (the plot starts about 44 px from the edge); `label` names the key chip.
-    { id: 'heating', label: 'Heating', short: 'Heating', color: 'rgba(239,83,80,0.85)' },
-    { id: 'cooling', label: 'Cooling', short: 'Cooling', color: 'rgba(66,165,250,0.85)' },
-    { id: 'fan', label: 'Fan', short: 'Fan', color: 'rgba(38,166,154,0.85)' },
-    { id: 'natvent', label: 'Nat-vent', short: 'Nat-vent', color: 'rgba(102,187,106,0.85)' },
-    { id: 'windows', label: 'Windows open', short: 'Windows', color: 'rgba(56,142,60,0.85)' },
-    { id: 'windowsplan', label: 'Windows plan', short: 'Win plan', color: 'rgba(156,204,101,0.9)' },
+    // Both are catalog messages (strip.<id>.label / .short), filled in by _stripText() on every read.
+    { id: 'heating', color: 'rgba(239,83,80,0.85)' },
+    { id: 'cooling', color: 'rgba(66,165,250,0.85)' },
+    { id: 'fan', color: 'rgba(38,166,154,0.85)' },
+    { id: 'natvent', color: 'rgba(102,187,106,0.85)' },
+    { id: 'windows', color: 'rgba(56,142,60,0.85)' },
+    { id: 'windowsplan', color: 'rgba(156,204,101,0.9)' },
     // Chart-log context fields (Issue #1230 R2): rows without them draw nothing.
-    { id: 'away', label: 'Away / Vacation', short: 'Away', color: 'rgba(171,71,188,0.85)' },
-    { id: 'override', label: 'Override / grace', short: 'Override', color: 'rgba(255,112,67,0.9)' },
+    { id: 'away', color: 'rgba(171,71,188,0.85)' },
+    { id: 'override', color: 'rgba(255,112,67,0.9)' },
   ];
+  function _stripText() {
+    STRIP_ROWS.forEach(r => { r.label = _t('strip.' + r.id + '.label'); r.short = _t('strip.' + r.id + '.short'); });
+  }
 
   function _stripOn(id) { return _isOn('strip:' + id); }
 
   // The comfort band applies to whichever sensor Climate Advisor was reading (chart_log band_sensor): say which.
   function _sensorLabel(sid) {
     const m = ((_lastChartData || {}).indoor_sensors || []).find(x => x.id === sid);
-    return m ? m.name + (m.role === 'bedroom sensor' ? ', sleep' : '') : null;
+    // m.role is the backend's English role word (matched here until the payload carries a role code)
+    return m ? (m.role === 'bedroom sensor' ? _t('band.sensor_sleep', { name: _iso(_bk(m, 'name')) }) : _iso(_bk(m, 'name'))) : null;
   }
 
   function _bandLabelAt(ms) {
@@ -674,7 +999,7 @@
       const n = _sensorLabel(e.band_sensor);
       if (n && !names.includes(n)) names.push(n);
     });
-    return names.length ? 'Band (' + names.join(' / ') + ')' : 'Target band';
+    return names.length ? _t('band.named', { names: names.join(' / ') }) : _t('band.target');
   }
 
   // ---- what a chip would draw (0.9.6 Lane F, Issue #1459) ----
@@ -700,7 +1025,7 @@
     [_tempChart, _outChart].forEach(ch => { if (ch) ch.data.datasets.forEach(d => { if (d.caId === id) out.push(d); }); });
     return out;
   }
-  const _NOT_IN_VIEW = 'Nothing to draw in this view (it has data at other times): scroll or change the range';
+  const _notInView = () => _t('empty.not_in_view');
   // Issue #1459: why a chip is LOCKED (the home cannot have its line as set up), or ''. Only this disables a chip.
   function _chipLock(id, s) {
     if (s) return s.disabledReason || '';
@@ -716,19 +1041,19 @@
         const ev = ((_lastChartData || {}).state_log || []).filter(e => e.event === 'override' || e.event === 'classification_change')
           .map(e => _parseTs(e.ts));
         if (ev.some(t => t >= win.min && t <= win.max)) return '';
-        return ev.length ? _NOT_IN_VIEW : 'No overrides or re-classifications recorded in the loaded time';
+        return ev.length ? _notInView() : _t('empty.events_none');
       }
       const segs = _stripSegs[r] || [];
       if (segs.some(g => g.b > win.min && g.a < win.max)) return '';
       const row = STRIP_ROWS.find(x => x.id === r);
-      return segs.length ? _NOT_IN_VIEW : 'No ' + (row ? row.label.toLowerCase() : r) + ' recorded or planned in the loaded time';
+      return segs.length ? _notInView() : _t('empty.strip_none', { row: r, name: row ? row.label.toLowerCase() : r });
     }
     if (id === 'ov:plan') {
       const steps = _planSteps(5 * 86400000).filter(p => p._ms > Date.now());
       const path = _planPath();
       if (steps.some(p => p._ms >= win.min && p._ms <= win.max) || _ptsDraw(path, win)) return '';
-      return steps.length || path.length ? 'The plan covers Now and the next days: not in this view'
-        : (_timelineState === 'none' ? 'No plan yet' : 'No plan steps to show');
+      return steps.length || path.length ? _t('empty.plan_outside')
+        : (_timelineState === 'none' ? _t('empty.no_plan') : _t('empty.no_steps'));
     }
     if (!_tempChart && !_outChart) return null;
     const dss = _chipDatasets(id);
@@ -738,16 +1063,15 @@
       const byLead = (((_lastChartData || {}).v4 || {}).past || {})[s.sensor] || {};
       const others = CHART_LEADS.filter(l => l !== _chartLead &&
         _ptsDraw((byLead[l] || []).map(p => ({ x: _parseTs(p.ts), y: p.temp })), win));
-      if (others.length) return 'No v4 predictions made ' + _leadTxt(_chartLead) + ' earlier in this view: choose ' +
-        others.map(_leadTxt).join(' or ') + ' under "Past v4 lines"';
+      if (others.length) return _t('empty.v4_other_leads', { lead: _leadW(_chartLead), others: _lst(others.map(_leadW), 'or') });
     }
     if (s && s.note) return s.note;   // not yet: v4 learning, no no-plan line yet, schedule estimate not needed (#1459)
-    if (dss.some(d => _ptsAny(d.data || [])) || (s && s.pastElsewhere)) return _NOT_IN_VIEW;
+    if (dss.some(d => _ptsAny(d.data || [])) || (s && s.pastElsewhere)) return _notInView();
     if (s && s.emptyReason) return s.emptyReason;   // humidity / feels-like: why there is nothing (Issue #1414)
-    if (id === 'ov:band') return 'No target band recorded or scheduled in the loaded time';
-    if (id === 'ov:target') return 'No target recorded or scheduled in the loaded time';
-    if (s && s.kind === 'actual') return 'No readings from ' + s.label + ' in the loaded time';
-    return 'No data for this line in the loaded time';
+    if (id === 'ov:band') return _t('empty.no_band');
+    if (id === 'ov:target') return _t('empty.no_target');
+    if (s && s.kind === 'actual') return _t('empty.no_readings', { name: s.label });
+    return _t('empty.no_data');
   }
 
   // The past-lead row: the look-ahead buttons (Issue #1230 R2). Issue #1459: always choosable (locked only when v4 is
@@ -762,47 +1086,45 @@
     const leadInView = l => ready && _ptsDraw(pastPts(l), win);
     const anyInView = CHART_LEADS.some(leadInView);
     const leadTxt = _leadTxt;
-    const leadHelp = 'Left of Now, each v4 line shows what v4 predicted that many hours earlier for each moment, so you can ' +
-      'see how well it called it. This changes only the past part of the v4 lines; from Now on they stay the same.';
+    const leadHelp = _t('lead.help');
     const btns = '<div class="seg" role="group" aria-labelledby="chart-lead-label" aria-describedby="chart-lead-help">' +
       CHART_LEADS.map(l => {
         const has = leadInView(l);
         const on = l === _chartLead && !lock;
         return '<button type="button" class="seg-btn' + (on ? ' on' : '') + (has || lock ? '' : ' no-data') + '" data-lead="' + l +
           '" aria-pressed="' + (on ? 'true' : 'false') + '"' + (lock ? ' disabled' : '') +
-          ' title="' + escapeHtml(lock || (has ? 'Left of Now, show what v4 predicted ' + leadTxt(l) + ' earlier for each moment'
-            : 'No predictions v4 made ' + leadTxt(l) + ' earlier in this view')) + '">' +
-          leadTxt(l) + ' earlier' + (has || lock ? '' : ' (none in view)') + '</button>';
+          ' title="' + escapeHtml(lock || _t(has ? 'lead.btn_title' : 'lead.btn_title_none', { lead: _leadW(l) })) + '">' +
+          escapeHtml(_t(has || lock ? 'lead.btn' : 'lead.btn_none', { lead: _leadW(l) })) + '</button>';
       }).join('') +
-      '</div><span class="key-sub" id="chart-lead-help">' + escapeHtml(lock || 'how far ahead v4 looked; changes only the v4 lines left of Now') + '</span>';
+      '</div><span class="key-sub" id="chart-lead-help">' + escapeHtml(lock || _t('lead.subhelp')) + '</span>';
     let note = '';
     if (lock) {
       // locked: the help line already says why
     } else if (anyInView) {
       if (!leadInView(_chartLead)) {
-        note = leadTxt(_chartLead) + ' earlier: none in this view; choose ' + CHART_LEADS.filter(leadInView).map(leadTxt).join(' or ');
+        note = _t('lead.note_view', { lead: _leadW(_chartLead), others: _lst(CHART_LEADS.filter(leadInView).map(_leadW), 'or') });
         note = '<span class="key-sub" id="chart-lead-empty" data-lead-empty="view">' + escapeHtml(note) + '</span>';
       }
     } else {
       const span = v4 && v4.past_span;
       const loaded = ready && CHART_LEADS.some(l => pastPts(l).length > 0);
-      const fmtDay = iso => new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      const fmtDay = iso => new Date(iso).toLocaleString(_loc(), { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
       let msg, state;
       if (span && span.first && span.last) {
-        msg = 'No past v4 predictions in this view; v4 has them from ' + fmtDay(span.first) + ' to ' + fmtDay(span.last);
+        msg = _t('lead.none_span', { first: fmtDay(span.first), last: fmtDay(span.last) });
         state = 'view';
       } else if (loaded || (v4 && !('past_span' in v4) && _isHistoricalView)) {
-        msg = 'No past v4 predictions in this view';
+        msg = _t('lead.none_view');
         state = 'view';
       } else {
-        msg = 'v4 has no past predictions to show yet';
+        msg = _t('lead.none_yet');
         state = 'yet';
       }
       note = '<span class="key-sub" id="chart-lead-empty" data-lead-empty="' + state + '">' + escapeHtml(msg) + '</span>';
     }
     const inner = btns + note;
     return '<div class="key-row" id="chart-lead-row" title="' + escapeHtml(leadHelp) + '">' +
-      '<span class="key-sub" id="chart-lead-label">Past v4 lines: predicted</span>' + inner + '</div>';
+      '<span class="key-sub" id="chart-lead-label">' + escapeHtml(_t('lead.label')) + '</span>' + inner + '</div>';
   }
 
   function renderKey(cd, S) {
@@ -816,35 +1138,35 @@
     const sw = s => _swatch(s);
     const eng = _engines();
     // Issue #1430: a prediction chip's accessible name says what the line is and which role its engine has.
-    const ROLE_WORD = { primary: 'main prediction', shadow: 'comparison', other: 'not selected in Settings' };
     const predAria = s => {
       const engine = s.id === 'schedule' ? null : s.id === 'v3' ? 'v3' : 'v4';
-      const what = s.id === 'schedule' ? 'schedule estimate while the main engine is still learning'
-        : s.id === 'v3' ? 'v3 prediction'
-        : s.histOnly ? 'v4 past predictions only'
-        : s.sub === 'base' ? 'v4 forecast if Climate Advisor did nothing' : 'v4 forecast with plan';
-      return s.label + ', ' + what + (engine ? ' (' + ROLE_WORD[_roleOf(engine, eng)] + ')' : '');
+      const what = _t(s.id === 'schedule' ? 'aria.what_schedule'
+        : s.id === 'v3' ? 'aria.what_v3'
+        : s.histOnly ? 'aria.what_hist'
+        : s.sub === 'base' ? 'aria.what_base' : 'aria.what_plan');
+      return engine ? _t('aria.pred_role', { label: s.label, what: what, role: _t('role.word.' + _roleOf(engine, eng)) })
+        : _t('aria.pred', { label: s.label, what: what });
     };
     const chipFor = s => {
       const lock = lockOf(s.id, s);
       const why = lock || blockOf(s.id, s);
       return _chip(s.id, sw(s) + '<span>' + escapeHtml(s.label) + '</span>', {
         noData: why == null ? s.raw.length === 0 : !!why, disabled: !!lock, title: why || s.role || '',
-        aria: (s.group === 'predicted' ? predAria(s) : s.label) + (why ? ': ' + why : ''),
+        aria: why ? _t('aria.why', { label: s.group === 'predicted' ? predAria(s) : s.label, why: why }) : (s.group === 'predicted' ? predAria(s) : s.label),
       });
     };
     // an overlay or strip chip: the same rule, with the reason on hover and in its accessible name
     const ovChip = (id, inner, label, title) => {
       const lock = lockOf(id, null);
       const why = lock || blockOf(id, null);
-      return _chip(id, inner, { noData: !!why, disabled: !!lock, title: why || title || '', aria: why ? label + ': ' + why : '' });
+      return _chip(id, inner, { noData: !!why, disabled: !!lock, title: why || title || '', aria: why ? _t('aria.why', { label: label, why: why }) : '' });
     };
     // Issue #1459: lines and strips this home can never have get no chip; one muted line per group says where to set
     // them up, so a missing chip is never a mystery.
     const notSetUp = (idAttr, items) => {
       const byWhy = {};
       items.forEach(([label, why]) => { (byWhy[why] = byWhy[why] || []).push(label); });
-      const txt = Object.keys(byWhy).map(w => byWhy[w].join(', ') + ': ' + w).join(' \u00b7 ');
+      const txt = Object.keys(byWhy).map(w => _t('notset.item', { labels: _lst(byWhy[w]), why: w })).join(' \u00b7 ');
       return txt ? '<span class="key-sub key-not-set-up" ' + idAttr + '>' + escapeHtml(txt) + '</span>' : '';
     };
     const ind = S.filter(s => s.group === 'indoor');
@@ -853,23 +1175,25 @@
     const sched = S.find(s => s.id === 'schedule');
     const plan = S.filter(s => s.sub === 'plan');
     const base = S.filter(s => s.sub === 'base');
-    const shadowTxt = eng.shadow && eng.shadow !== 'none' ? 'Comparison: ' + eng.shadow : 'No comparison engine';
-    let predHtml = '<div class="key-row" id="chart-main-model"><span class="key-sub">Engines</span><span>' +
-      escapeHtml('Main prediction: ' + eng.primary + ' · ' + shadowTxt) + ' — change it in <a href="new_dashboard.html#settings">Settings → Prediction engine</a>.' +
-      (eng.text ? ' ' + escapeHtml(eng.text) + '.' : '') + ' <a href="prediction_accuracy.html' + (/new_dashboard\.html$/.test(location.pathname) ? '' : '?from=classic') + // classic: its Back returns to index.html
-      '">How each engine has scored</a>.</span></div>';
+    const shadowW = eng.shadow && eng.shadow !== 'none' ? _m('engines.shadow', { engine: eng.shadow }) : _m('engines.none_shadow');
+    const settingsLink = '<a href="new_dashboard.html#settings">' + escapeHtml(_t('engines.settings_link')) + '</a>';
+    const scoresLink = '<a href="prediction_accuracy.html' + (/new_dashboard\.html$/.test(location.pathname) ? '' : '?from=classic') + // classic: its Back returns to index.html
+      '">' + escapeHtml(_t('engines.scores_link')) + '</a>';
+    let predHtml = '<div class="key-row" id="chart-main-model"><span class="key-sub">' + escapeHtml(_t('engines.label')) + '</span><span>' +
+      _tH('engines.line', { primary: eng.primary, comparison: shadowW }, { link: settingsLink }) +
+      (eng.text ? ' ' + escapeHtml(_bk(eng, 'text')) + '.' : '') + ' ' + _tH('engines.scores', {}, { link: scoresLink }) + '</span></div>';
     const ready = !!(v4 && v4.ready);
     // Issue #1430: the prediction rows are grouped by ROLE, in the order Settings gives: the main engine's block first
     // ("Main · <engine>"), then the comparison engine's ("Comparison · <engine>"), then any engine that is neither
     // (its lines start off but stay in the key). The lines themselves (ids, colours, dashes) do not depend on this.
     const row = (label, chips) => chips ? '<div class="key-row"><span class="key-sub">' + escapeHtml(label) + '</span>' + chips + '</div>' : '';
     const engineRows = {};
-    engineRows.v3 = row('Prediction', chipFor(v3));
+    engineRows.v3 = row(_t('row.prediction'), chipFor(v3));
     let v4Rows = '';
     if (plan.length) {
-      v4Rows += row('Forecast with plan', plan.filter(s => !s.histOnly).map(chipFor).join(''));
-      v4Rows += row('Forecast if Climate Advisor did nothing', base.map(chipFor).join(''));
-      v4Rows += row('Past predictions only', plan.filter(s => s.histOnly).map(chipFor).join(''));
+      v4Rows += row(_t('row.forecast_plan'), plan.filter(s => !s.histOnly).map(chipFor).join(''));
+      v4Rows += row(_t('row.forecast_base'), base.map(chipFor).join(''));
+      v4Rows += row(_t('row.past_only'), plan.filter(s => s.histOnly).map(chipFor).join(''));
       v4Rows += _leadRowHtml(v4, ready, _capLock(cd, 'v4_running'));
     }
     // One muted line for the sensors v4 has nothing for yet (no chips for them: they would draw nothing).
@@ -877,30 +1201,29 @@
     if (_v4Learning.length || (!ready && _shown('v4'))) {
       // the sensor's role when it says which one ("thermostat", "bedroom sensor"), else its name
       const KNOWN = ['thermostat', 'bedroom sensor', "thermostat's finer sensor"];
-      const names = [...new Set(_v4Learning.map(m => KNOWN.includes(m.role) ? m.role : m.name))];
+      const names = [...new Set(_v4Learning.map(m => KNOWN.includes(m.role) ? _bk(m, 'role') : _bk(m, 'name')))];
       // v4.reason says why there is nothing at all: switched off, a failed read (back on the next refresh), or learning
       const reason = (v4 && v4.reason) || '';
-      const text = !ready && (v4Off || reason === 'not_running') ? 'v4 is switched off (Settings, Prediction engine)'
-        : !ready && reason === 'error' ? "v4's lines could not be read this time; they come back on the next refresh"
-        : 'v4 is still learning' + (names.length ? ': ' + names.join(', ') : ' this house');
-      const title = _v4Learning.map(m => m.name + (m.role ? ' (' + m.role + ')' : '')).join(', ');
-      v4Rows += '<div class="key-row key-learning" id="chart-v4-learning"' + (title ? ' title="' + escapeHtml('No v4 lines yet for: ' + title) + '"' : '') +
+      const text = !ready && (v4Off || reason === 'not_running') ? _t('series.why_v4_off')
+        : !ready && reason === 'error' ? _t('learn.error')
+        : names.length ? _t('learn.still', { names: _lst(names.map(_iso)) }) : _t('learn.still_house');
+      const title = _t('learn.title', { names: _lst(_v4Learning.map(m => m.role ? _t('learn.item_role', { name: _iso(_bk(m, 'name')), role: _bk(m, 'role') }) : _iso(_bk(m, 'name')))) });
+      v4Rows += '<div class="key-row key-learning" id="chart-v4-learning"' + (_v4Learning.length ? ' title="' + escapeHtml(title) + '"' : '') +
         '><span class="key-sub">' + escapeHtml(text) + '</span></div>';
     }
     engineRows.v4 = v4Rows;
-    const ROLE_HEAD = { primary: [' id="chart-role-main"', 'Main', 'Main prediction'], shadow: [' id="chart-role-comparison"', 'Comparison', 'Comparison'],
-      other: ['', 'Not selected', 'Not selected in Settings'] };
+    const ROLE_HEAD = { primary: [' id="chart-role-main"'], shadow: [' id="chart-role-comparison"'], other: [''] };
     const order = [eng.primary, eng.shadow].concat(['v3', 'v4']).filter((x, i, a) => x in engineRows && a.indexOf(x) === i);
     order.forEach(engine => {
       const role = _roleOf(engine, eng);
       // the schedule estimate is the main line while the main engine is still learning: it sits in the Main block
-      const extra = role === 'primary' && sched && sched.raw.length > 0 ? row('While learning', chipFor(sched)) : '';
+      const extra = role === 'primary' && sched && sched.raw.length > 0 ? row(_t('row.while_learning'), chipFor(sched)) : '';
       const inner = engineRows[engine] + extra;
       if (!inner) return;
       const h = ROLE_HEAD[role];
       predHtml += '<div class="key-role"' + h[0] + ' data-engine="' + escapeHtml(engine) +
-        '" data-role="' + role + '" role="group" aria-label="' + escapeHtml(h[2] + ': ' + engine) + '"><span class="key-role-label">' +
-        escapeHtml(h[1] + ' · ' + engine) + '</span>' + inner + '</div>';
+        '" data-role="' + role + '" role="group" aria-label="' + escapeHtml(_t('role.aria_line', { head: _t('role.aria.' + role), engine: engine })) + '"><span class="key-role-label">' +
+        escapeHtml(_t('role.line', { head: _t('role.head.' + role), engine: engine })) + '</span>' + inner + '</div>';
     });
     const outS = S.filter(s => s.group === 'outdoor');
     const outHtml = outS.filter(s => !s.noChip).map(chipFor).join('') +
@@ -909,19 +1232,19 @@
     const bandLabel = _bandLabelInView();
     const overlays =
       ovChip('ov:band', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><rect x="2" y="1" width="26" height="8" rx="2" fill="var(--c-band)" stroke="var(--c-bandline)" stroke-dasharray="3 2"/></svg><span>' + escapeHtml(bandLabel) + '</span>', bandLabel) +
-      ovChip('ov:target', ovSw('var(--c-target)', '', 3) + '<span>Target</span>', 'Target') +
-      ovChip('ov:plan', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><circle cx="8" cy="5" r="3.5" fill="var(--c-plan)"/><path d="M22 0 L27 5 L22 10 L17 5 Z" fill="var(--c-target)" stroke="var(--c-ink)" stroke-width="1"/></svg><span>Plan</span>',
-        'Plan', 'What Climate Advisor will do (circles) and what you are asked to do (diamonds), from the plan');
+      ovChip('ov:target', ovSw('var(--c-target)', '', 3) + '<span>' + escapeHtml(_t('ov.target')) + '</span>', _t('ov.target')) +
+      ovChip('ov:plan', '<svg class="key-sw" width="30" height="10" aria-hidden="true"><circle cx="8" cy="5" r="3.5" fill="var(--c-plan)"/><path d="M22 0 L27 5 L22 10 L17 5 Z" fill="var(--c-target)" stroke="var(--c-ink)" stroke-width="1"/></svg><span>' + escapeHtml(_t('ov.plan')) + '</span>',
+        _t('ov.plan'), _t('ov.plan_title'));
     const stripChips = STRIP_ROWS.filter(r => !_stripLock(r.id)).map(r => ovChip('strip:' + r.id,
-      '<svg class="key-sw" width="14" height="10" aria-hidden="true"><rect x="1" y="1" width="12" height="8" rx="2" fill="' + r.color + '"/></svg><span>' + r.label + '</span>', r.label)).join('') +
-      ovChip('strip:events', '<svg class="key-sw" width="14" height="10" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="10" stroke="#f44336" stroke-width="1.5" stroke-dasharray="3 2"/></svg><span>Events</span>', 'Events') +
+      '<svg class="key-sw" width="14" height="10" aria-hidden="true"><rect x="1" y="1" width="12" height="8" rx="2" fill="' + r.color + '"/></svg><span>' + escapeHtml(r.label) + '</span>', r.label)).join('') +
+      ovChip('strip:events', '<svg class="key-sw" width="14" height="10" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="10" stroke="#f44336" stroke-width="1.5" stroke-dasharray="3 2"/></svg><span>' + escapeHtml(_t('ov.events')) + '</span>', _t('ov.events')) +
       notSetUp('id="chart-strips-not-set-up"', STRIP_ROWS.filter(r => _stripLock(r.id)).map(r => [r.label, _stripLock(r.id)]));
     body.innerHTML =
-      _group('Indoor', 'Indoor lines', indoorHtml) +
-      _group('Predicted', 'Prediction lines', predHtml) +
-      _group('Outdoor', 'Outdoor lines', outHtml) +
-      _group('Overlays', 'Overlays', overlays) +
-      _group('Activity', 'Activity strips', stripChips);
+      _group('indoor', indoorHtml) +
+      _group('predicted', predHtml) +
+      _group('outdoor', outHtml) +
+      _group('overlays', overlays) +
+      _group('activity', stripChips);
 
     const note = document.getElementById('chart-v4-note');
     if (note) {
@@ -930,10 +1253,10 @@
       const stale = !show && !!eng.notice;
       note.hidden = !(show || stale);
       if (show) {
-        note.textContent = eng.text + (eng.control && eng.control.text ? ' ' + eng.control.text : '');
+        note.textContent = _bk(eng, 'text') + (eng.control && eng.control.text ? ' ' + _bk(eng.control, 'text') : '');
         note.setAttribute('data-engine-state', eng.fitting ? 'fitting' : 'learning');
       } else if (stale) {
-        note.textContent = eng.notice + '.';
+        note.textContent = _t('engines.notice', { notice: _bk(eng, 'notice') });
         note.setAttribute('data-engine-state', 'stale');
       }
     }
@@ -950,11 +1273,11 @@
     const sum = key && key.querySelector('summary');
     if (!sum) return;
     const n = _keyShown.length;
-    const text = key.open ? 'Lines' : 'Showing: ' + (n ? _keyShown.join(' · ') : 'nothing');
+    const text = key.open ? _t('key.lines') : _t('key.showing', { lines: n ? _keyShown.join(' · ') : _t('key.nothing') });
     sum.setAttribute('aria-expanded', key.open ? 'true' : 'false');
-    sum.title = key.open ? 'Hide the lines and sensors key' : 'Choose which lines and sensors the chart shows';
-    sum.innerHTML = '<span class="key-sum-text">' + escapeHtml(text) + '</span> <span id="chart-key-count">(' + n + (key.open ? ' shown' : '') + ')</span>' +
-      '<span class="key-sum-act" aria-hidden="true">' + (key.open ? '▾ Hide' : '▸ Edit') + '</span>';
+    sum.title = key.open ? _t('key.hide_title') : _t('key.show_title');
+    sum.innerHTML = '<span class="key-sum-text">' + escapeHtml(text) + '</span> <span id="chart-key-count">' + escapeHtml(_t(key.open ? 'key.count_open' : 'key.count', { n: n })) + '</span>' +
+      '<span class="key-sum-act" aria-hidden="true">' + escapeHtml(_t(key.open ? 'key.hide' : 'key.edit')) + '</span>';
   }
 
   // ---- drawing ----
@@ -967,9 +1290,9 @@
     const w = _viewWindow();
     const d = new Date(ms);
     const span = _spanMs(w);
-    if (span <= 36 * 3600000) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    if (span <= 8 * 86400000) return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric' });
-    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    if (span <= 36 * 3600000) return _clock(ms);
+    if (span <= 8 * 86400000) return d.toLocaleDateString(_loc(), { weekday: 'short' }) + ' ' + d.toLocaleTimeString(_loc(), { hour: 'numeric' });
+    return d.toLocaleDateString(_loc(), { month: 'short', day: 'numeric' });
   }
 
   function _xScaleOptions(win, showTicks, gridColor, textColor) {
@@ -987,8 +1310,12 @@
       elements: { point: { hoverRadius: 0 } },
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { display: false },
-        tooltip: { enabled: false },
+        // Direction: the time axis runs left to right in every language (the usual choice for charts in right-to-left
+        // apps; the axes, the NOW line and the plan markers keep their pixel positions). Chart.js's own legend and
+        // tooltip are off (the key and the readout are HTML and follow the page direction); the rtl flags are set so
+        // they would lay out correctly if one is ever switched on.
+        legend: { display: false, rtl: _isRtl(), textDirection: _isRtl() ? 'rtl' : 'ltr' },
+        tooltip: { enabled: false, rtl: _isRtl(), textDirection: _isRtl() ? 'rtl' : 'ltr' },
         zoom: {
           zoom: {
             drag: { enabled: true, backgroundColor: 'rgba(33,150,243,0.12)' },
@@ -1031,8 +1358,8 @@
           ctx.beginPath(); ctx.moveTo(nowX, ys.top); ctx.lineTo(nowX, ys.bottom); ctx.stroke();
           ctx.setLineDash([]);
           if (isIndoor) {
-            ctx.fillStyle = textColor; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
-            ctx.fillText('NOW', nowX, ys.top - 4);
+            ctx.fillStyle = textColor; ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.direction = _isRtl() ? 'rtl' : 'ltr';
+            ctx.fillText(_t('draw.now'), nowX, ys.top - 4);
           }
           ctx.restore();
         }
@@ -1047,8 +1374,8 @@
           ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
           ctx.beginPath(); ctx.moveTo(evtX, ys.top); ctx.lineTo(evtX, ys.bottom); ctx.stroke();
           ctx.setLineDash([]);
-          ctx.fillStyle = color; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-          ctx.fillText(e.event === 'classification_change' ? 'Classify' : 'Override', evtX, ys.top + 10);
+          ctx.fillStyle = color; ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.direction = _isRtl() ? 'rtl' : 'ltr';
+          ctx.fillText(_t(e.event === 'classification_change' ? 'draw.classify' : 'draw.override'), evtX, ys.top + 10);
           ctx.restore();
         });
       },
@@ -1066,7 +1393,7 @@
     const color = _cssVar('--c-' + s.color);
     return {
       caId: s.id,
-      label: s.id.startsWith('v4:') || s.id === 'v3' ? s.id.slice(0, 2) + ' ' + s.label : s.id.startsWith('base:') ? 'No plan ' + s.label : s.label,
+      label: s.id.startsWith('v4:') || s.id === 'v3' ? _t('series.engine_name', { engine: s.id.slice(0, 2), name: s.label }) : s.id.startsWith('base:') ? _t('series.no_plan', { name: s.label }) : s.label,
       type: 'line', data: s.data,
       borderColor: color, backgroundColor: 'transparent',
       borderWidth: s.width, borderDash: s.dash, borderCapStyle: s.dash.length && s.dash[0] <= 2 ? 'round' : 'butt',
@@ -1085,6 +1412,7 @@
 
   function drawChart(chartData) {
     if (!chartData) return;
+    _stripText();   // the strip names are catalog messages: read them in the language now in force
     _lastChartData = chartData;
     _ensurePrefs();
     const canvas = document.getElementById('temp-chart');
@@ -1121,16 +1449,16 @@
     const bandUpper = [..._stepHeld(histBandUpper), ...futBandUpper].sort((a, b) => a.x - b.x);
     const bandLower = [..._stepHeld(histBandLower), ...futBandLower].sort((a, b) => a.x - b.x);
     if (bandUpper.length > 0 || bandLower.length > 0) {
-      datasets.push({ caId: 'ov:band', label: 'Target Band', type: 'line', data: bandUpper, borderColor: _cssVar('--c-bandline'), borderWidth: 1,
+      datasets.push({ caId: 'ov:band', caPart: 'upper', label: _t('ds.band'), type: 'line', data: bandUpper, borderColor: _cssVar('--c-bandline'), borderWidth: 1,
         borderDash: [3, 3], backgroundColor: _cssVar('--c-band'), fill: '+1', pointRadius: 0, tension: 0, yAxisID: 'y', hidden: !bandOn, order: 5 });
-      datasets.push({ caId: 'ov:band', label: '_target_band_lower', type: 'line', data: bandLower, borderColor: _cssVar('--c-bandline'), borderWidth: 1,
+      datasets.push({ caId: 'ov:band', caPart: 'lower', label: '_target_band_lower', type: 'line', data: bandLower, borderColor: _cssVar('--c-bandline'), borderWidth: 1,
         borderDash: [3, 3], backgroundColor: 'transparent', fill: false, pointRadius: 0, tension: 0, yAxisID: 'y', hidden: !bandOn, order: 6 });
     }
 
     // The plan path (R3 timeline): where the house is predicted to go under the plan, from NOW on.
     const planPathPts = _planPath();
     if (planPathPts.length) {
-      datasets.push({ caId: 'ov:plan', label: 'Plan path', type: 'line', data: planPathPts, borderColor: _cssVar('--c-plan'), borderWidth: 3,
+      datasets.push({ caId: 'ov:plan', label: _t('ds.plan_path'), type: 'line', data: planPathPts, borderColor: _cssVar('--c-plan'), borderWidth: 3,
         borderDash: [1, 5], borderCapStyle: 'round', pointRadius: 0, tension: 0.2, spanGaps: false, yAxisID: 'y', hidden: !_isOn('ov:plan'), order: 1 });
     }
 
@@ -1150,7 +1478,7 @@
     }
     const setpointVisible = _isOn('ov:target');
     datasets.push({
-      caId: 'ov:target', label: 'Target', type: 'line', data: mergedEffTarget, borderColor: _cssVar('--c-target'),
+      caId: 'ov:target', label: _t('ov.target'), type: 'line', data: mergedEffTarget, borderColor: _cssVar('--c-target'),
       segment: { borderColor: (segCtx) => _targetModeColor(_targetModeAt(segCtx.p1.parsed.x)) },
       borderWidth: 4, pointRadius: 0, tension: 0, spanGaps: false, yAxisID: 'y',
       hidden: !setpointVisible || !mergedEffTarget.some(p => p.y != null), order: 8,
@@ -1165,7 +1493,7 @@
     if (_cmdLegend) _cmdLegend.style.display = _hasCommanded ? '' : 'none';
     if (_hasCommanded) {
       datasets.push({
-        caId: 'ov:target', label: 'Thermostat set', type: 'line', data: commandedPts, borderColor: _cssVar('--c-target'),
+        caId: 'ov:target', label: _t('ov.thermostat_set'), type: 'line', data: commandedPts, borderColor: _cssVar('--c-target'),
         borderWidth: 2, borderDash: [6, 4], pointRadius: 0, tension: 0, spanGaps: false, yAxisID: 'y', hidden: !setpointVisible, order: 8,
       });
     }
@@ -1176,11 +1504,11 @@
     // relative humidity reads on one scale on both charts, so a 2-point change is drawn as the small change it is
     // instead of being stretched to the full chart height by an auto-fitted axis.
     const rightAxis = lim => ({ position: 'right', display: true, min: 0, max: 100, grid: { display: false }, border: { display: false },
-      ticks: { color: textColor, maxTicksLimit: lim, callback(v) { return this.chart.data.datasets.some(d => d.yAxisID === 'yRight' && !d.hidden) ? v + '%' : ''; } },
+      ticks: { color: textColor, maxTicksLimit: lim, callback(v) { return this.chart.data.datasets.some(d => d.yAxisID === 'yRight' && !d.hidden) ? _numPlain(v) + '%' : ''; } },
       afterFit(sc) { sc.width = RIGHT_PX; } });
     const indoorScales = {
       x: _xScaleOptions(win, false, gridColor, textColor),
-      y: { position: 'left', grid: { color: gridColor }, ticks: { color: textColor, callback: v => v + '°' }, afterFit(sc) { sc.width = OUT_PX; } },
+      y: { position: 'left', grid: { color: gridColor }, ticks: { color: textColor, callback: v => _numPlain(v) + '°' }, afterFit(sc) { sc.width = OUT_PX; } },
       yRight: rightAxis(11),
     };
     try {
@@ -1198,7 +1526,7 @@
     const outDatasets = S.filter(s => s.chart === 'out').map(_dsFor);
     const outScales = {
       x: _xScaleOptions(win, true, gridColor, textColor),
-      y: { position: 'left', grid: { color: gridColor }, ticks: { color: textColor, maxTicksLimit: 4, callback: v => v + '°' }, afterFit(sc) { sc.width = OUT_PX; } },
+      y: { position: 'left', grid: { color: gridColor }, ticks: { color: textColor, maxTicksLimit: 4, callback: v => _numPlain(v) + '°' }, afterFit(sc) { sc.width = OUT_PX; } },
       yRight: rightAxis(4),   // takes the RIGHT_PX gutter the old right padding held: the plot areas stay aligned
     };
     try {
@@ -1213,7 +1541,7 @@
     }
 
     const title = document.getElementById('chart-title');
-    if (title) title.textContent = 'Temperature (' + _unitSym() + ')';
+    if (title) title.textContent = _t('chart.title', { unit: _unitSym() });
     const hasAnything = S.some(s => s.raw.length > 0);
     const empty = document.getElementById('chart-empty');
     if (empty) empty.hidden = hasAnything;
@@ -1303,7 +1631,7 @@
         if (isNaN(a) || isNaN(b)) return;
         // A run's bar is its expected minutes (owner decision); its hover covers the whole run window.
         const wa = sp.window_start ? _parseTs(sp.window_start) : NaN, wb = sp.window_end ? _parseTs(sp.window_end) : NaN;
-        push(a, b, true, { text: sp.text || '', short: sp.text_short || sp.text || '', kind: sp.kind || '',
+        push(a, b, true, { text: _bk(sp, 'text'), short: _bk(sp, 'text_short') || _bk(sp, 'text'), kind: sp.kind || '',
           at: sp.step_ts ? _parseTs(sp.step_ts) : null, actor: sp.actor || 'ca', confidence: sp.confidence || 'ok',
           winA: isNaN(wa) ? null : wa, winB: isNaN(wb) ? null : wb, minutes: sp.minutes == null ? null : sp.minutes });
       });
@@ -1341,21 +1669,21 @@
     const mins = Math.max(1, Math.round((sliver.b - sliver.a) / 60000));
     const total = Math.max(1, Math.round(step.minutes || 0));
     const what = row.id === 'heating' ? 'heating' : 'cooling';
-    const win = step.winA != null && step.winB != null ? ', ' + _clock(step.winA) + '\u2013' + _clock(step.winB) : '';
-    return 'about ' + mins + ' min of ' + total + ' min ' + what + win;
+    return step.winA != null && step.winB != null
+      ? _t('readout.sliver_win', { mins: mins, total: total, what: what, start: _clock(step.winA), end: _clock(step.winB) })
+      : _t('readout.sliver', { mins: mins, total: total, what: what });
   }
 
   // Issue #1436: one line under the strips says what solid and faded mean (both dashboards: the module adds it).
-  const STRIP_LEGEND_TEXT = 'Solid: what happened \u00b7 Faded: what the plan expects';
   function _stripLegend(wrap, rows) {
     let el = document.getElementById('chart-strip-legend');
     if (!el) {
       el = document.createElement('p');
       el.id = 'chart-strip-legend';
       el.className = 'strip-legend';
-      el.innerHTML = '<span class="strip-legend-sw strip-legend-solid" aria-hidden="true"></span>Solid: what happened' +
-        ' \u00b7 <span class="strip-legend-sw strip-legend-faded" aria-hidden="true"></span>Faded: what the plan expects';
-      el.setAttribute('aria-label', STRIP_LEGEND_TEXT);
+      el.innerHTML = '<span class="strip-legend-sw strip-legend-solid" aria-hidden="true"></span>' + escapeHtml(_t('strip.legend_solid')) +
+        ' \u00b7 <span class="strip-legend-sw strip-legend-faded" aria-hidden="true"></span>' + escapeHtml(_t('strip.legend_faded'));
+      el.setAttribute('aria-label', _t('strip.legend_aria'));
       wrap.appendChild(el);
     }
     el.hidden = !rows.length;
@@ -1373,7 +1701,7 @@
     wrap.style.display = rows.length ? '' : 'none';
     _stripLegend(wrap, rows);
     window.__test_strips = { rows: rows.map(r => r.id), segs: _stripSegs, empty };   // test hook (tests/ui/strips-plan.spec.js)
-    const base = 'Heating, cooling, fan, ventilation and window activity over time';
+    const base = _t('strip.aria');
     const emptyIds = Object.keys(empty);
     canvas.setAttribute('aria-label', emptyIds.length ? base + '. ' + emptyIds.map(id => STRIP_ROWS.find(r => r.id === id).label + ': ' + empty[id]).join('. ') : base);
     if (!rows.length) return;
@@ -1399,6 +1727,7 @@
     ctx.clearRect(0, 0, W, H);
     ctx.font = '9px sans-serif';
     ctx.textBaseline = 'middle';
+    ctx.direction = _isRtl() ? 'rtl' : 'ltr';   // bidi base for the labels; the strips themselves stay left to right
     rows.forEach((r, i) => {
       const y = i * (rowH + gap);
       ctx.fillStyle = _cssVar('--chart-track');
@@ -1420,7 +1749,7 @@
         ctx.save();
         ctx.beginPath(); ctx.rect(plotLeft, y, plotW, rowH); ctx.clip();
         ctx.textAlign = 'left';
-        ctx.fillText(empty[r.id] === _NOT_IN_VIEW ? 'None in this view: scroll or change the range' : empty[r.id], plotLeft + 4, y + rowH / 2);
+        ctx.fillText(empty[r.id] === _notInView() ? _t('strip.none_in_view') : empty[r.id], plotLeft + 4, y + rowH / 2);
         ctx.restore();
       }
       ctx.textAlign = 'right';
@@ -1478,12 +1807,11 @@
   function _restPoint() {
     const now = Date.now();
     const win = _viewWindow();
-    if (now >= win.min && now <= win.max) return { ms: now, label: 'Now \u00b7 ' + _clock(now) };
+    if (now >= win.min && now <= win.max) return { ms: now, label: _t('readout.now', { time: _clock(now) }) };
     const ms = win.max;
-    const day = Math.abs(ms - now) < 6 * 86400000
-      ? new Date(ms).toLocaleDateString([], { weekday: 'short' })
-      : new Date(ms).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ',';
-    return { ms: ms, label: day + ' ' + _clock(ms) + ' (end of view)' };
+    return { ms: ms, label: Math.abs(ms - now) < 6 * 86400000
+      ? _t('readout.end_week', { weekday: new Date(ms).toLocaleDateString(_loc(), { weekday: 'short' }), time: _clock(ms) })
+      : _t('readout.end_date', { date: new Date(ms).toLocaleDateString(_loc(), { month: 'short', day: 'numeric' }), time: _clock(ms) }) };
   }
 
   function _renderRest() {
@@ -1532,12 +1860,12 @@
       if (isPast && s.missVs) {
         const ref = _seriesById(s.missVs);
         const a = ref ? _valueAt(ref, ms) : null;
-        if (a != null) miss = ' <span class="chp-miss" title="' + escapeHtml(s.short) + ' minus what was read">(' + _fmtSigned(v - a) + ')</span>';
+        if (a != null) miss = ' <span class="chp-miss" title="' + escapeHtml(_t('readout.miss_title', { name: s.short })) + '">(' + _fmtSigned(v - a) + ')</span>';
       }
       // a series' own unit ('%' for humidity, Issue #1414), else the temperature degree sign
       // Issue #1483: a v4 value past the real hourly forecast says it is built on the daily highs and lows
-      const rough = s.roughAfter && ms > s.roughAfter ? ' <span class="plan-qual" title="Past the hourly forecast: from the daily high and low">rough</span>' : '';
-      const item = _chpItem('var(--c-' + s.color + ')', escapeHtml(s.short) + ': <strong>' + _fmt(v, 1) + (s.unit || sym) + '</strong>' + miss + rough);
+      const rough = s.roughAfter && ms > s.roughAfter ? ' <span class="plan-qual" title="' + escapeHtml(_t('readout.rough_title')) + '">' + escapeHtml(_t('readout.rough')) + '</span>' : '';
+      const item = _chpItem('var(--c-' + s.color + ')', _tH('readout.value', { name: s.short }, { value: '<strong>' + escapeHtml(_fmt(v, 1) + (s.unit || sym)) + '</strong>' }) + miss + rough);
       lines[s.group] += item;
     });
     const log = (_lastChartData && _lastChartData.state_log) || [];
@@ -1549,30 +1877,33 @@
         const s = { data: ds.data, tol: 90 * 60000 };
         const v = _valueAt(s, ms);
         if (v == null) return;
-        overlay += _chpItem('var(--c-target)', escapeHtml(ds.label) + ': <strong>' + Math.round(v) + sym + '</strong>');
+        overlay += _chpItem('var(--c-target)', _tH('readout.value', { name: ds.label }, { value: '<strong>' + escapeHtml(_numPlain(Math.round(v) || 0) + sym) + '</strong>' }));
       });
     }
     if (_tempChart && _isOn('ov:band')) {
-      const up = _tempChart.data.datasets.find(d => d.label === 'Target Band');
-      const lo = _tempChart.data.datasets.find(d => d.label === '_target_band_lower');
+      const up = _tempChart.data.datasets.find(d => d.caId === 'ov:band' && d.caPart === 'upper');
+      const lo = _tempChart.data.datasets.find(d => d.caId === 'ov:band' && d.caPart === 'lower');
       const hi = up ? _valueAt({ data: up.data, tol: 90 * 60000 }, ms) : null;
       const lw = lo ? _valueAt({ data: lo.data, tol: 90 * 60000 }, ms) : null;
       if (hi != null && lw != null) {
         const who = _bandLabelAt(ms);
-        overlay += _chpItem('var(--c-bandline)', 'Band' + (who ? ' (' + escapeHtml(who) + ')' : '') + ': <strong>' + Math.round(lw) + '\u2013' + Math.round(hi) + sym + '</strong>');
+        overlay += _chpItem('var(--c-bandline)', _tH('readout.value', { name: who ? _t('band.named', { names: who }) : _t('band.plain') },
+          { value: '<strong>' + escapeHtml(_t('readout.band_value', { lo: Math.round(lw) || 0, hi: Math.round(hi) || 0, unit: sym })) + '</strong>' }));
       }
     }
     const planStep = ms >= Date.now() - 60000 ? _planNear(ms) : null;   // NOW itself (a minute's slack) counts as ahead
     if (planStep) overlay += _chpItem(planStep.actor === 'you' ? 'var(--c-target)' : 'var(--c-plan)',
-      escapeHtml(planStep.actor === 'you' ? 'You' : 'CA') + ' ' + escapeHtml(_clock(planStep._ms)) + ': <strong>' + escapeHtml(planStep.text_short || planStep.text || '') + '</strong>');
+      _tH('readout.plan_step', { actor: _t(planStep.actor === 'you' ? 'readout.actor_you' : 'readout.actor_ca'), time: _clock(planStep._ms) },
+        { text: '<strong>' + escapeHtml(_bk(planStep, 'text_short') || _bk(planStep, 'text')) + '</strong>' }));
     // Issue #1436: right of NOW each faded strip names the plan step it draws ("Win plan: 7:14 PM: close the windows ...")
     let activity = '';
     // (the step's time and who acts beside it, its sentence without the time, as the plan overlay's line does, #1399)
     _stripPlanAt(ms).forEach(({ row, step, sliver }) => {
-      const who = step.at == null ? '' : ' \u00b7 ' + (step.actor === 'you' ? 'You' : 'CA') + ' ' + escapeHtml(_clock(step.at));
+      const who = step.at == null ? '' : ' \u00b7 ' + _t(step.actor === 'you' ? 'readout.actor_you' : 'readout.actor_ca') + ' ' + _clock(step.at);
       const said = sliver ? _runSliverText(row, step, sliver) : step.short;
-      activity += _chpItem(row.color, escapeHtml(row.short) + ' <span class="chp-plan-tag">plan</span>' + who + ': <strong>' +
-        escapeHtml(said) + '</strong>' + (step.confidence === 'low' ? ' <span class="plan-qual">may help</span>' : ''));
+      activity += _chpItem(row.color, _tH('readout.plan_value', { who: who },
+        { label: escapeHtml(row.short) + ' <span class="chp-plan-tag">' + escapeHtml(_t('readout.plan_tag')) + '</span>', text: '<strong>' + escapeHtml(said) + '</strong>' }) +
+        (step.confidence === 'low' ? ' <span class="plan-qual">' + escapeHtml(_t('readout.may_help')) + '</span>' : ''));
     });
     let closest = null, minDiff = Infinity;
     log.forEach(e => {
@@ -1582,25 +1913,25 @@
     let stateHtml = '';
     if (closest && minDiff < 3 * 3600000) {
       const hvacColors = { heating: '#ef5350', cooling: '#42a5f5', fan: '#66bb6a' };
-      const hvacText = { heating: 'Heating', cooling: 'Cooling', fan: 'Fan-Only' };
+      const hvacText = { heating: _t('readout.state_heating'), cooling: _t('readout.state_cooling'), fan: _t('readout.state_fan') };
       const hv = _hvacOf(closest);
       if (hvacColors[hv]) stateHtml += '<div class="chp-item"><span class="chp-state" style="background:' + hvacColors[hv] + '">' + hvacText[hv] + '</span></div>';
-      if (closest.fan && hv !== 'fan') stateHtml += '<div class="chp-item"><span class="chp-state" style="background:#66bb6a">Sched fan</span></div>';
+      if (closest.fan && hv !== 'fan') stateHtml += '<div class="chp-item"><span class="chp-state" style="background:#66bb6a">' + escapeHtml(_t('readout.state_sched_fan')) + '</span></div>';
       if (closest.event) stateHtml += '<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">' + escapeHtml(String(closest.event).replace(/_/g, ' ')) + '</div>';
     }
     const when = restLabel ? escapeHtml(restLabel)
-      : new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      : new Date(ms).toLocaleString(_loc(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     const touchOnly = window.matchMedia && window.matchMedia('(hover: none)').matches;
     const pin = restLabel
-      ? '<span class="chp-hint">' + (touchOnly ? 'Tap the chart to pin a time' : 'Hover the chart for any time; click to pin') + '</span>'
-      : _cursorPinned ? '<button type="button" class="chp-clear" onclick="clearChartPin()">Pinned · ' + (touchOnly ? 'tap' : 'click') + ' to release</button>' : '';
-    const body = _readoutRow('Indoor', lines.indoor) + _readoutRow('Predicted', lines.predicted) + _readoutRow('Outdoor', lines.outdoor) +
-      _readoutRow('Overlays', overlay) + _readoutRow('Activity', activity) + (stateHtml ? '<div class="chp-row">' + stateHtml + '</div>' : '');
+      ? '<span class="chp-hint">' + escapeHtml(_t(touchOnly ? 'readout.hint_touch' : 'readout.hint_mouse')) + '</span>'
+      : _cursorPinned ? '<button type="button" class="chp-clear" onclick="clearChartPin()">' + escapeHtml(_t(touchOnly ? 'readout.pinned_touch' : 'readout.pinned_click')) + '</button>' : '';
+    const body = _readoutRow(escapeHtml(_t('group.indoor')), lines.indoor) + _readoutRow(escapeHtml(_t('group.predicted')), lines.predicted) + _readoutRow(escapeHtml(_t('group.outdoor')), lines.outdoor) +
+      _readoutRow(escapeHtml(_t('group.overlays')), overlay) + _readoutRow(escapeHtml(_t('group.activity')), activity) + (stateHtml ? '<div class="chp-row">' + stateHtml + '</div>' : '');
     const prevH = _readoutFresh ? 0 : panel.offsetHeight;
     _readoutFresh = false;
     panel.dataset.mode = restLabel ? 'rest' : (_cursorPinned ? 'pinned' : 'hover');
     // Resting on a moment with nothing to read (a stretch with no data in view) still says which moment it is.
-    const grid = body || (restLabel && _lastChartData ? '<div class="chp-row chp-none">No readings at this time.</div>' : '');
+    const grid = body || (restLabel && _lastChartData ? '<div class="chp-row chp-none">' + escapeHtml(_t('readout.none')) + '</div>' : '');
     panel.innerHTML = grid ? '<div class="chp-time">' + when + pin + '</div><div class="chp-grid">' + grid + '</div>' : '';
     _holdReadoutHeight(panel, prevH);
   }
@@ -1869,12 +2200,12 @@
     if (!_tableView || !_lastChartData) return;
     const m = buildTableModel();
     const sym = _unitSym();
-    const fmtT = t => new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-    const head = '<tr><th scope="col">Time</th>' + m.cols.map(c => '<th scope="col">' + escapeHtml(c.short) + ' (' + (c.unit || sym) + ')</th>').join('') + '<th scope="col">Thermostat</th></tr>';
+    const fmtT = t => new Date(t).toLocaleString(_loc(), { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const head = '<tr><th scope="col">' + escapeHtml(_t('table.time')) + '</th>' + m.cols.map(c => '<th scope="col">' + escapeHtml(_t('table.col', { name: c.short, unit: c.unit || sym })) + '</th>').join('') + '<th scope="col">' + escapeHtml(_t('table.thermostat')) + '</th></tr>';
+    const stateTxt = st => ({ heating: 1, cooling: 1, fan: 1 })[st] ? _t('table.state_' + st) : st;
     const body = m.rows.map(r => '<tr' + (r.t > Date.now() ? ' class="future"' : '') + '><th scope="row">' + escapeHtml(fmtT(r.t)) + '</th>' +
-      r.cells.map(v => '<td>' + (v == null ? '—' : v.toFixed(1)) + '</td>').join('') + '<td>' + escapeHtml(r.state || '') + '</td></tr>').join('');
-    wrap.querySelector('table').innerHTML = '<caption>Temperatures in ' + escapeHtml(sym) + (m.cols.some(c => c.unit === '%') ? ', humidity in %' : '') + ', every ' + Math.round(m.step / 60000) +
-      ' minutes. Rows after now are predictions.</caption><thead>' + head + '</thead><tbody>' + body + '</tbody>';
+      r.cells.map(v => '<td>' + (v == null ? '—' : _num(v, 1)) + '</td>').join('') + '<td>' + escapeHtml(stateTxt(r.state || '')) + '</td></tr>').join('');
+    wrap.querySelector('table').innerHTML = '<caption>' + escapeHtml(_t(m.cols.some(c => c.unit === '%') ? 'table.caption_hum' : 'table.caption', { unit: sym, n: Math.round(m.step / 60000) })) + '</caption><thead>' + head + '</thead><tbody>' + body + '</tbody>';
   }
 
   function copyChartTable() {
@@ -1884,7 +2215,7 @@
     m.rows.forEach(r => lines.push([new Date(r.t).toISOString()].concat(r.cells.map(v => v == null ? '' : v.toFixed(1)), [r.state || '']).join('\t')));
     _copyText(lines.join('\n'));
     const btn = document.getElementById('chart-table-copy');
-    if (btn) { btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = 'Copy table'; }, 1500); }
+    if (btn) { btn.textContent = _t('table.copied'); setTimeout(() => { btn.textContent = _t('table.copy'); }, 1500); }
   }
 
   window.__chartState = function() {
@@ -1995,23 +2326,27 @@
     return best;
   }
 
-  function _clock(ms) { return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+  // the time of day: English as before; other languages through CAI18N (honours the user's 12/24 h setting)
+  function _clock(ms) {
+    if (_lang() !== 'en' && window.CAI18N) return window.CAI18N.fmt.time(ms);
+    return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
 
   function _planRowHtml(s, now) {
     const you = s.actor === 'you', low = s.confidence === 'low';
     const held = !!(s.meta && s.meta.status === 'held');   // a held step (a hold or the live direction veto) is not a "may help" offer
     const sameDay = new Date(s._ms).toDateString() === new Date(now).toDateString();
-    const day = sameDay ? '' : '<span class="plan-day">' + escapeHtml(new Date(s._ms).toLocaleDateString([], { weekday: 'short' })) + '</span> ';
+    const day = sameDay ? '' : '<span class="plan-day">' + escapeHtml(new Date(s._ms).toLocaleDateString(_loc(), { weekday: 'short' })) + '</span> ';
     const lead = you && s.lead_minutes > 0 && s._ms - s.lead_minutes * 60000 > now
-      ? '<span class="plan-note">Reminder at ' + escapeHtml(_clock(s._ms - s.lead_minutes * 60000)) + '</span>' : '';
+      ? '<span class="plan-note">' + escapeHtml(_t('plan.reminder', { time: _clock(s._ms - s.lead_minutes * 60000) })) + '</span>' : '';
     return '<li class="plan-row ' + (you ? 'plan-you' : 'plan-ca') + (low ? ' plan-low' : '') + (held ? ' plan-held' : '') + '" data-kind="' + escapeHtml(s.kind || '') + '" data-actor="' + escapeHtml(s.actor || '') + '">' +
       '<span class="plan-time">' + day + escapeHtml(_clock(s._ms)) + '</span>' +
-      '<span class="plan-actor" title="' + (you ? 'You do this' : 'Climate Advisor does this') + '">' +
+      '<span class="plan-actor" title="' + escapeHtml(_t(you ? 'plan.you_title' : 'plan.ca_title')) + '">' +
         '<svg width="12" height="12" viewBox="-7 -7 14 14" aria-hidden="true">' + (you
           ? '<path d="M0 -6 L6 0 L0 6 L-6 0 Z" fill="' + (low ? 'none' : 'var(--c-target)') + '" stroke="var(--c-ink)" stroke-width="1.5"/>'
           : '<circle r="4.5" fill="' + (low ? 'none' : 'var(--c-plan)') + '" stroke="var(--c-plan)" stroke-width="1.5"/>') + '</svg>' +
-        (you ? 'You' : 'CA') + '</span>' +
-      '<span class="plan-text">' + escapeHtml(s.text_short || s.text || '') + (low && !held ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
+        escapeHtml(_t(you ? 'readout.actor_you' : 'readout.actor_ca')) + '</span>' +
+      '<span class="plan-text">' + escapeHtml(_bk(s, 'text_short') || _bk(s, 'text')) + (low && !held ? ' <span class="plan-qual">' + escapeHtml(_t('readout.may_help')) + '</span>' : '') + lead + '</span></li>';
   }
 
   // Issue #1483: the steps after the first 24 h, one folded row per local day: "Wed, Nov 11 · 5 steps · 1 for you".
@@ -2024,29 +2359,29 @@
       const d = new Date(s._ms);
       const key = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
       let g = days.find(x => x.key === key);
-      if (!g) { g = { key, label: d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }), steps: [] }; days.push(g); }
+      if (!g) { g = { key, label: d.toLocaleDateString(_loc(), { weekday: 'short', month: 'short', day: 'numeric' }), steps: [] }; days.push(g); }
       g.steps.push(s);
     });
     const rows = days.map(g => {
       const you = g.steps.filter(s => s.actor === 'you').length;
-      const sum = g.steps.length + (g.steps.length === 1 ? ' step' : ' steps') + (you ? ' \u00b7 ' + you + ' for you' : '');
+      const sum = you ? _t('plan.day_sum_you', { n: g.steps.length, you: you }) : _t('plan.day_sum', { n: g.steps.length });
       return '<li class="plan-later" data-day="' + escapeHtml(g.key) + '"><details' + (_planOpenDays.has(g.key) ? ' open' : '') + '>' +
         '<summary><span class="plan-later-day">' + escapeHtml(g.label) + '</span><span class="plan-later-sum"> ' + escapeHtml(sum) + '</span></summary>' +
         '<ul class="plan-list">' + g.steps.map(s => _planRowHtml(s, now)).join('') + '</ul></details></li>';
     }).join('');
-    return '<li class="plan-later-head">Later: an outlook from the forecast, updated as the forecast changes</li>' + rows;
+    return '<li class="plan-later-head">' + escapeHtml(_t('plan.later_head')) + '</li>' + rows;
   }
 
   // Issue #1404: a time-of-use bank holding the house right now opens the list ("Now"), in the same words as the
   // Status line, so the list says what the thermostat is told and when the band returns.
   function _planHoldRowHtml() {
     const h = _timeline && _timeline.current_hold;
-    if (!h || !h.text) return '';
+    if (!h || !_bk(h, 'text')) return '';
     return '<li class="plan-row plan-ca plan-now" data-kind="tou_bank" data-actor="ca">' +
-      '<span class="plan-time">Now</span>' +
-      '<span class="plan-actor" title="Climate Advisor does this">' +
-        '<svg width="12" height="12" viewBox="-7 -7 14 14" aria-hidden="true"><circle r="4.5" fill="var(--c-plan)" stroke="var(--c-plan)" stroke-width="1.5"/></svg>CA</span>' +
-      '<span class="plan-text">' + escapeHtml(h.text) + '</span></li>';
+      '<span class="plan-time">' + escapeHtml(_t('plan.now')) + '</span>' +
+      '<span class="plan-actor" title="' + escapeHtml(_t('plan.ca_title')) + '">' +
+        '<svg width="12" height="12" viewBox="-7 -7 14 14" aria-hidden="true"><circle r="4.5" fill="var(--c-plan)" stroke="var(--c-plan)" stroke-width="1.5"/></svg>' + escapeHtml(_t('readout.actor_ca')) + '</span>' +
+      '<span class="plan-text">' + escapeHtml(_bk(h, 'text')) + '</span></li>';
   }
 
   // Render the "Next 24 hours" list into `el`. opts.extra() may return extra HTML for the foot (the page's own
@@ -2058,16 +2393,16 @@
     const extra = typeof o.extra === 'function' ? (o.extra() || '') : '';
     let body;
     if (_timelineState === 'idle') {
-      body = '<li class="plan-empty">Loading the plan...</li>';
+      body = '<li class="plan-empty">' + escapeHtml(_t('plan.loading')) + '</li>';
     } else if (_timelineState === 'none') {
-      body = '<li class="plan-empty">The plan appears after Climate Advisor has classified the day.</li>';
+      body = '<li class="plan-empty">' + escapeHtml(_t('plan.none')) + '</li>';
     } else if (_timelineState === 'error') {
-      body = '<li class="plan-empty">The plan could not be loaded. It will be retried.</li>';
+      body = '<li class="plan-empty">' + escapeHtml(_t('plan.error')) + '</li>';
     } else {
       const steps = _planSteps(PLAN_HORIZON_MS);
       const hold = _planHoldRowHtml();
       body = (steps.length || hold) ? hold + steps.map(s => _planRowHtml(s, now)).join('')
-        : '<li class="plan-empty">Nothing is planned for the next 24 hours.</li>';
+        : '<li class="plan-empty">' + escapeHtml(_t('plan.empty')) + '</li>';
       body += _planLaterHtml(now);
     }
     el.innerHTML = body;
@@ -2116,6 +2451,7 @@
     window.copyChartTable = copyChartTable;
     window.clearChartPin = clearChartPin;
     _initChartInteraction();
+    _hookReady();   // draws again in the chosen language once the catalogs are loaded (nothing to do in English)
   }
 
   window.CAChartV2 = {

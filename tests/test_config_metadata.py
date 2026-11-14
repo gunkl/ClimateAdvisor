@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+
+import pytest
+
 from custom_components.climate_advisor.const import CONFIG_METADATA
 
 # All config keys that appear across config_flow.py steps.
@@ -214,7 +218,16 @@ class TestConfigMetadataStructure:
             assert "category" in meta, f"Entry '{key}' is missing 'category'"
 
     def test_each_entry_has_only_known_fields(self):
-        allowed = {"label", "description", "category", "display_transform", "sensitive", "default", "no_default"}
+        allowed = {
+            "label",
+            "description",
+            "category",
+            "display_transform",
+            "sensitive",
+            "default",
+            "no_default",
+            "unit",
+        }
         for key, meta in CONFIG_METADATA.items():
             extra = set(meta.keys()) - allowed
             assert not extra, f"Entry '{key}' has unexpected fields: {extra}"
@@ -254,3 +267,106 @@ def test_changed_markers_cover_formerly_unknown_defaults():
     assert changed["push_briefing"]["default"] is True
     assert changed["ai_investigator_requests_per_day"]["default"] == 3
     assert "energy_rate" not in changed  # no default: set-or-not is not "changed"
+
+
+class TestConfigMetadataI18n:
+    """Issue #1341 (L9b): labels/descriptions are catalog keys; ``unit`` is explicit, never parsed from a label."""
+
+    @staticmethod
+    def _catalog() -> dict[str, str]:
+        import json
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[1] / "custom_components/climate_advisor/frontend/i18n/settings/en.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_catalog_has_every_label_and_description_with_identical_english(self):
+        cat = self._catalog()
+        for key, meta in CONFIG_METADATA.items():
+            assert cat.get(f"settings.{key}.label") == meta["label"], key
+            assert cat.get(f"settings.{key}.description") == meta["description"], key
+        pattern = re.compile(r"settings\.([a-z_0-9]+)\.(label|description)")
+        meta_keys = {k for k in cat if (m := pattern.fullmatch(k)) and m.group(1) in CONFIG_METADATA}
+        assert len(meta_keys) == 2 * len(CONFIG_METADATA)
+
+    def test_static_unit_is_a_time_unit_only(self):
+        for key, meta in CONFIG_METADATA.items():
+            if "unit" in meta:
+                assert meta["unit"] in {"min", "s"}, key
+
+    def test_label_units_match_the_explicit_unit(self):
+        # Every label that still says "(minutes)/(min)/(sec)" declares the unit explicitly (the dashboard no
+        # longer parses the label), and a seconds_to_minutes setting is shown in minutes.
+        import re
+
+        for key, meta in CONFIG_METADATA.items():
+            if re.search(r"\((minutes|min)\)", meta["label"], re.I):
+                assert meta.get("unit") == "min", key
+            if re.search(r"\((sec|seconds)\)", meta["label"], re.I):
+                assert meta.get("unit") == "s", key
+            if meta.get("display_transform") == "seconds_to_minutes":
+                assert meta.get("unit") == "min", key
+
+
+class TestSettingsApiI18n:
+    """The /config payload carries wire siblings for label/description/value and an explicit unit (Issue #1341)."""
+
+    @pytest.fixture(autouse=True)
+    def _catalogs(self):
+        from custom_components.climate_advisor import i18n
+
+        i18n.load_catalogs()
+
+    @staticmethod
+    def _settings(config: dict) -> dict:
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from custom_components.climate_advisor.api import ClimateAdvisorConfigView
+        from tests.test_api import _make_view_request
+
+        coord = MagicMock()
+        coord.config = config
+        coord._outdoor_sensor_fallback_reason = None
+        resp = asyncio.run(ClimateAdvisorConfigView().get(_make_view_request(coord)))
+        return {s["key"]: s for s in resp.json_data["settings"]}
+
+    def test_label_and_description_msg_siblings_render_to_the_english_fields(self):
+        from custom_components.climate_advisor import i18n
+
+        by_key = self._settings({"comfort_heat": 70})
+        entry = by_key["comfort_heat"]
+        assert entry["label"] == CONFIG_METADATA["comfort_heat"]["label"]  # the English field stays
+        for field in ("label", "description"):
+            msg = i18n.Msg.from_wire(entry[f"{field}_msg"])
+            assert msg.key == f"settings.comfort_heat.{field}"
+            assert i18n.render_en(msg) == entry[field]
+
+    def test_every_entry_has_msgs_that_render_in_a_non_english_language_without_error(self):
+        from custom_components.climate_advisor import i18n
+
+        for key, entry in self._settings({}).items():
+            assert i18n.render(i18n.Msg.from_wire(entry["label_msg"]), "de"), (
+                key
+            )  # falls back to English until translated
+
+    def test_explicit_unit_for_time_settings_and_temperature_symbol_for_temps(self):
+        by_key = self._settings(
+            {"temp_unit": "celsius", "manual_grace_seconds": 1800, "comfort_mode_switch_min_interval_s": 300}
+        )
+        assert by_key["manual_grace_seconds"]["unit"] == "min"
+        assert by_key["manual_grace_seconds"]["value"] == 30
+        assert by_key["comfort_mode_switch_min_interval_s"]["unit"] == "s"
+        assert by_key["comfort_heat"]["unit"] == "°C"
+        assert "unit" not in by_key["weather_entity"]
+
+    def test_prose_values_carry_a_value_msg(self):
+        from custom_components.climate_advisor import i18n
+
+        by_key = self._settings({"ai_api_key": "secret", "door_window_sensors": ["a", "b", "c"]})
+        v = by_key["ai_api_key"]
+        assert v["value"] == "configured"
+        assert i18n.render_en(i18n.Msg.from_wire(v["value_msg"])) == "configured"
+        d = by_key["door_window_sensors"]
+        assert d["value"] == "3 configured"
+        assert i18n.render_en(i18n.Msg.from_wire(d["value_msg"])) == "3 configured"

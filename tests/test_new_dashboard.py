@@ -21,9 +21,27 @@ FE = ROOT / "custom_components" / "climate_advisor" / "frontend"
 HTML = (FE / "new_dashboard.html").read_text(encoding="utf-8")
 JS = {p.name: p.read_text(encoding="utf-8") for p in sorted(FE.glob("nd_*.js"))}
 # R6fe: the chart (and the plan list and overlay) is one shared module, chart_v2.js + chart_v2.css, loaded by BOTH pages.
+# Issue #1341: the Analysis/Debug sentences are catalog messages (area dashboard); English-literal pins read the catalog too.
+CATALOG_EN = json.loads((FE / "i18n" / "dashboard" / "en.json").read_text(encoding="utf-8"))
+CATALOG_TEXT = "\n".join(CATALOG_EN.values())
 CHART_JS = (FE / "chart_v2.js").read_text(encoding="utf-8")
 CHART_CSS = (FE / "chart_v2.css").read_text(encoding="utf-8")
-CORPUS = HTML + "\n".join(JS.values()) + "\n" + CHART_JS + "\n" + CHART_CSS
+SETTINGS_CATALOG_TEXT = "\n".join(
+    json.loads((FE / "i18n" / "settings" / "en.json").read_text(encoding="utf-8")).values()
+)
+# Issue #1341: the new dashboard's English text lives in the catalogs, so the English pins read them too
+CORPUS = (
+    HTML
+    + "\n".join(JS.values())
+    + "\n"
+    + CHART_JS
+    + "\n"
+    + CHART_CSS
+    + "\n"
+    + CATALOG_TEXT
+    + "\n"
+    + SETTINGS_CATALOG_TEXT
+)
 # the classic page's behaviour = its own file + the shared chart module it loads
 INDEX = (FE / "index.html").read_text(encoding="utf-8") + "\n" + CHART_JS
 FIX = json.loads((ROOT / "tests" / "fixtures" / "new_dashboard_api.json").read_text(encoding="utf-8"))
@@ -297,9 +315,9 @@ PARITY = [
     ),
     (
         [],
-        "_group('Overlays', 'Overlays', overlays)",
+        "_group('overlays', overlays)",
         "Chart overlays (target band, target, plan; humidity and feels-like are indoor / outdoor lines, Issue #1414)",
-        ["_group('Overlays', 'Overlays', overlays)", "ov:plan"],
+        ["_group('overlays', overlays)", "ov:plan"],
         "placed",
         "",
     ),
@@ -427,7 +445,7 @@ PARITY = [
         ["settings-content"],
         "settings-content",
         "Settings groups (read-only, with descriptions, search, jump links)",
-        ['id="set-groups"', "'Other'"],
+        ['id="set-groups"', "'other'"],
         "placed",
         "",
     ),
@@ -776,10 +794,12 @@ def test_analysis_data_calls_and_writes_match_classic():
         assert f in js
     assert "'incident_detected'" in js  # the incident package, as classic
     # report window options are classic's
-    for opt in ('value="6">Last 6 hours', 'value="168">Last 7 days', 'value="720">Last 30 days'):
-        assert opt in js
+    for opt in ("Last 6 hours", "Last 7 days", "Last 30 days"):
+        assert opt in CATALOG_TEXT
+    for v in ("[6, 'h6']", "[168, 'd7']", "[720, 'd30']"):
+        assert v in js
     for h in ("Accept", "Dismiss", "Correct", "Incorrect"):
-        assert h in js
+        assert h in CATALOG_TEXT
 
 
 def test_analysis_sections_exist():
@@ -796,7 +816,7 @@ def test_analysis_sections_exist():
         "an-ai-line",
         "Tomorrow (plan)",
     ):
-        assert frag in HTML or frag in JS["nd_analysis.js"], frag
+        assert frag in HTML or frag in JS["nd_analysis.js"] or frag in CATALOG_TEXT, frag
     js = JS["nd_analysis.js"]
     for tile in (
         "Comfort score",
@@ -806,7 +826,7 @@ def test_analysis_sections_exist():
         "Promises missed",
         "Prediction error, 4 h",
     ):
-        assert tile in js, tile
+        assert tile in CATALOG_TEXT, tile
     assert "fToDisp" in js and "dFToDisp" in js  # records are internal degF; shown in the install's unit
     assert "prediction_accuracy.html" in js and "?zone=" in js  # R1's page, reused
 
@@ -1089,11 +1109,12 @@ def test_status_tab_reads_the_live_night_plan_and_gates_its_figures():
 def test_status_places_the_same_actors_as_the_timeline():
     mod = CHART_JS
     # "you" and "CA" are named in words and by shape (never colour alone), low confidence says "may help"
-    assert "'You'" in mod and "'CA'" in mod and "may help" in mod
+    assert '"readout.actor_you": "You"' in mod and '"readout.actor_ca": "CA"' in mod and "may help" in mod
     assert "s.confidence === 'low'" in mod
     # nothing in the list invents wording: the step's own server-side text is what is shown (its plan-list row form
     # text_short, Issue #1399, built by timeline_surfaces.plan_list_text; else the canonical text)
-    assert "escapeHtml(s.text_short || s.text || '')" in mod
+    # (Issue #1341: _bk() prefers the step's `<field>_msg` sibling and falls back to the English field)
+    assert "escapeHtml(_bk(s, 'text_short') || _bk(s, 'text'))" in mod
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1178,7 +1199,7 @@ def test_cycle_model_surfaces_1512():
     its rows; every cycle rejection code has a label in the new and classic dashboards (old codes stay, marked)."""
     an, dbg = JS["nd_analysis.js"], JS["nd_debug.js"]
     assert "cycleRows(E.decisions)" in an and "coast_area_f" in an
-    assert "the cycle model measures" in an and "Decisions use" in an
+    assert "the cycle model measures" in CATALOG_TEXT and "Decisions use" in CATALOG_TEXT
     assert "Cycle model: " in dbg and "k_p_cycle" in dbg and "diagnostic only" in dbg
     codes = (
         "cycle_too_short",
@@ -1191,7 +1212,11 @@ def test_cycle_model_surfaces_1512():
         "cycle_sensor_swap",
     )
     for code in codes:
-        assert code + ":" in an, code
+        assert f'"{code}"' in an.replace("'", '"'), code  # the REASON_CODES list
+        assert f"dashboard.analysis.reason.{code}" in CATALOG_EN, code
         assert code + ":" in INDEX, code
     # the retired per-run codes remain for old history, marked as the old method
-    assert "hvac_run_too_short: 'Heating or cooling run was too short to measure (old method)'" in an
+    assert (
+        CATALOG_EN["dashboard.analysis.reason.hvac_run_too_short"]
+        == "Heating or cooling run was too short to measure (old method)"
+    )

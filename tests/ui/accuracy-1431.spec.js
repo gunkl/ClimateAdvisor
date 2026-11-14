@@ -56,6 +56,8 @@ async function mock(page, opts = {}) {
   });
   await page.goto('/prediction_accuracy.html');
   await expect(page.locator('#tiles')).toContainText('average miss');
+  // the tiles also draw in the "Loading" state: wait until the data (and so the lines) are in
+  await page.waitForFunction(() => window.__paLines && window.__paLines().length > 0);
   return seen;
 }
 

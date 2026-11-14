@@ -11,16 +11,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests.helpers.chart_i18n import chart_en, read_chart_js
+
 ROOT = Path(__file__).resolve().parent.parent
 _FE = ROOT / "custom_components" / "climate_advisor" / "frontend"
 # R6fe: the chart lives in the shared module chart_v2.js (and chart_v2.css); the classic page loads both. The checks
 # below read the classic page plus those two files as one source, as they did when the chart was inline.
-INDEX = "\n".join((_FE / n).read_text(encoding="utf-8") for n in ("index.html", "chart_v2.js", "chart_v2.css"))
+INDEX = "\n".join(
+    read_chart_js() if n == "chart_v2.js" else (_FE / n).read_text(encoding="utf-8")
+    for n in ("index.html", "chart_v2.js", "chart_v2.css")
+)
 
 
 def _func(name: str) -> str:
     # the shared module's definition wins over a page-level wrapper of the same name (classic's loadChart)
-    module = (_FE / "chart_v2.js").read_text(encoding="utf-8")
+    module = read_chart_js()
     m = re.search(rf"  (?:async )?function {name}\(.*?\n  \}}\n", module, re.DOTALL) or re.search(
         rf"  (?:async )?function {name}\(.*?\n  \}}\n", INDEX, re.DOTALL
     )
@@ -81,8 +86,14 @@ def test_zoom_drag_and_pinch_apply_to_both_charts_with_reset():
 
 def test_every_toggle_group_is_in_the_key():
     key = _func("renderKey")
-    for group in ("Indoor", "Predicted", "Outdoor", "Overlays", "Activity"):
-        assert f"_group('{group}'" in key, group
+    for gid, group in (
+        ("indoor", "Indoor"),
+        ("predicted", "Predicted"),
+        ("outdoor", "Outdoor"),
+        ("overlays", "Overlays"),
+        ("activity", "Activity"),
+    ):
+        assert f"_group('{gid}'" in key and chart_en()[f"group.{gid}"] == group, group
     for sid in ("ov:band", "ov:target", "ov:plan", "strip:events"):
         assert f"'{sid}'" in key, sid
     # Issue #1414: humidity / feels-like are ordinary indoor and outdoor series, not overlays; the old overlay
@@ -242,7 +253,7 @@ def test_key_folds_at_every_width_and_remembers_it():
     assert "_chartPrefs.keyOpen" in s and "max-width" not in s
     assert "_chartPrefs.keyOpen = key.open" in _func("_onKeyToggle")
     r = _func("_renderKeySummary")
-    assert "aria-expanded" in r and "'Showing: '" in r
+    assert "aria-expanded" in r and chart_en()["key.showing"].startswith("Showing: ") and "_t('key.showing'" in r
     assert "min-height: 36px" in INDEX  # touch targets
 
 
@@ -259,9 +270,9 @@ def test_table_view_is_an_accessible_table_of_the_visible_window():
 
 def test_units_come_from_the_payload():
     assert "unitSymbol(_lastChartData ? _lastChartData.unit" in _func("_unitSym")
-    assert "'Temperature (' + _unitSym() + ')'" in INDEX
-    assert "Temperatures in ' + escapeHtml(sym)" in _func("_applyTableView")
-    assert "callback: v => v + '°'" in INDEX  # axis ticks carry the degree sign, the title the unit
+    assert chart_en()["chart.title"] == "Temperature ({unit})" and "_t('chart.title', { unit: _unitSym() })" in INDEX
+    assert chart_en()["table.caption"].startswith("Temperatures in {unit}") and "unit: sym" in _func("_applyTableView")
+    assert "callback: v => _numPlain(v) + '°'" in INDEX  # axis ticks carry the degree sign, the title the unit
 
 
 def test_activity_strips_toggle_and_future_is_dimmer():
@@ -347,7 +358,11 @@ def test_away_and_override_strips_read_the_chart_log_context_and_forecast_draws_
 
 
 def test_band_is_labelled_with_the_sensor_it_applies_to_in_key_and_hover():
-    assert "function _bandLabelInView()" in INDEX and "'Band (' + names.join(' / ') + ')'" in INDEX
+    assert (
+        "function _bandLabelInView()" in INDEX
+        and chart_en()["band.named"] == "Band ({names})"
+        and "names: names.join(' / ')" in INDEX
+    )
     assert "e.band_sensor" in _func("_bandLabelAt") and "bedroom sensor" in _func("_sensorLabel")
     assert "_bandLabelInView()" in _func("renderKey")
     assert "_bandLabelAt(ms)" in _func("_renderReadout")

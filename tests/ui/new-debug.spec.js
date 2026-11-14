@@ -114,7 +114,7 @@ test.describe('New dashboard: Debug tab', () => {
     await expect(value(page, 'Mass node')).toHaveText('67.4°F');
     await expect(value(page, 'Fitting now')).toHaveText('no');
     await expect(value(page, 'Engine available')).toHaveText('yes');
-    await expect(value(page, 'Generated')).toHaveText(/^\d{1,2}:50\s?AM for \w{3} \d{1,2}\/\d{1,2}$/);
+    await expect(value(page, 'Generated')).toHaveText(/^\d{1,2}:50\s?AM for \w{3} \w{3,} \d{1,2}$/);
     await expect(value(page, 'Covers through')).toHaveText(/^\w{3} \d{1,2}:30\s?AM$/);
     await expect(value(page, 'Steps')).toHaveText('10');
     await expect(value(page, 'Last checked')).toHaveText(/^\d{1,2}:30\s?AM, not regenerated$/);

@@ -66,12 +66,13 @@
     display: inline-block;
     width: 14px;
     height: 8px;
-    margin: 0 4px 0 0;
+    margin: 0;
+    margin-inline-end: 4px;
     vertical-align: middle;
     border-radius: 2px;
     background: var(--text-secondary);
   }
-  .strip-legend-faded { opacity: 0.4; margin-left: 2px; }
+  .strip-legend-faded { opacity: 0.4; margin-inline-start: 2px; }
   .chp-plan-tag { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.8; }
   .chart-hover-panel {
     height: 24px;
@@ -141,7 +142,7 @@
     cursor: pointer;
   }
   .chart-zoom-reset {
-    margin-left: auto;
+    margin-inline-start: auto;
     padding: 3px 10px;
     font-size: 0.75rem;
     border: 1px solid var(--border);
@@ -172,10 +173,10 @@
   .chart-head-actions { display: flex; gap: 6px; align-items: center; }
   .chart-tool-btn { padding: 3px 10px; font-size: 0.75rem; border: 1px solid var(--border); border-radius: 12px; background: transparent; color: var(--text); cursor: pointer; min-height: 28px; }
   .chart-tool-btn.active, .chart-tool-btn[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); color: #fff; }
-  .chart-head-actions .chart-zoom-reset { margin-left: 0; }
+  .chart-head-actions .chart-zoom-reset { margin-inline-start: 0; }
   .chart-range-bar { gap: 6px 14px; }
   .ctl-group { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
-  .ctl-label { font-size: 0.72rem; color: var(--text-secondary); margin-right: 2px; }
+  .ctl-label { font-size: 0.72rem; color: var(--text-secondary); margin-inline-end: 2px; }
   .chart-range-bar .ahead-btn { padding: 3px 10px; font-size: 0.75rem; border: 1px solid var(--border); border-radius: 12px; background: transparent; color: var(--text); cursor: pointer; min-height: 28px; }
   .chart-range-bar .ahead-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
   .chart-range-bar .range-btn { min-height: 28px; }
@@ -186,7 +187,7 @@
   .chart-key > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; border-radius: 4px; }
   .chart-key > summary .key-sum-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chart-key > summary #chart-key-count { flex: 0 0 auto; color: var(--text-secondary); }
-  .chart-key > summary .key-sum-act { flex: 0 0 auto; margin-left: auto; color: var(--primary); font-weight: 600; }
+  .chart-key > summary .key-sum-act { flex: 0 0 auto; margin-inline-start: auto; color: var(--primary); font-weight: 600; }
   .chart-key[open] > summary { margin-bottom: 4px; }
   #chart-key-body { display: flex; flex-wrap: wrap; gap: 8px 16px; }
   .key-group { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
@@ -195,9 +196,9 @@
   .key-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; width: 100%; }
   .key-sub { font-size: 0.7rem; color: var(--text-secondary); min-width: 4.2em; }
   /* Issue #1430: the Predicted rows grouped by engine role (Main, then Comparison, then any engine not selected) */
-  .key-role { display: flex; flex-direction: column; gap: 3px; width: 100%; padding-left: 6px; border-left: 2px solid var(--border); }
+  .key-role { display: flex; flex-direction: column; gap: 3px; width: 100%; padding-inline-start: 6px; border-inline-start: 2px solid var(--border); }
   .key-role-label { font-size: 0.72rem; font-weight: 600; color: var(--text); }
-  #chart-role-main { border-left-color: var(--text-secondary); }
+  #chart-role-main { border-inline-start-color: var(--text-secondary); }
   .key-chip, .seg-btn { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; font-size: 0.74rem; border: 1px solid var(--border); border-radius: 8px;
     background: transparent; color: var(--text-secondary); cursor: pointer; min-height: 28px; }
   .key-chip.on, .seg-btn.on { color: var(--text); border-color: var(--text-secondary); background: var(--bg); font-weight: 600; }
@@ -206,13 +207,16 @@
   .key-chip:disabled, .seg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .key-chip:focus-visible, .seg-btn:focus-visible, .chart-tool-btn:focus-visible, .range-btn:focus-visible, .ahead-btn:focus-visible, .chart-nav-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
   .seg { display: inline-flex; gap: 0; }
-  .seg .seg-btn { border-radius: 0; margin-left: -1px; }
-  .seg .seg-btn:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
-  .seg .seg-btn:last-child { border-radius: 0 8px 8px 0; }
+  .seg .seg-btn { border-radius: 0; margin-inline-start: -1px; }
+  .seg .seg-btn:first-child { border-start-start-radius: 8px; border-end-start-radius: 8px; margin-inline-start: 0; }
+  .seg .seg-btn:last-child { border-start-end-radius: 8px; border-end-end-radius: 8px; }
   .key-extra { margin-top: 6px; font-size: 0.74rem; color: var(--text-secondary); }
   .chart-note { font-size: 0.78rem; color: var(--text-secondary); margin: 0 0 8px; }
   .chart-note a { color: var(--primary); }
-  .chart-stack { position: relative; outline: none; }
+  /* The time axis runs left to right in every language (the usual choice for charts in right-to-left apps), so the
+     stack that holds the canvases, the cursor line and the strips is always ltr: their pixel positions (the cursor's
+     style.left, the canvas drawing) are physical and tied to the canvas. Text outside it follows the page direction. */
+  .chart-stack { position: relative; outline: none; direction: ltr; }
   .chart-stack:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
   .chart-stack .chart-container { height: 300px; touch-action: pan-y; }
   .chart-stack .chart-container-out { height: 130px; }
@@ -240,10 +244,10 @@
   .chart-table-actions { display: flex; justify-content: flex-end; margin-bottom: 6px; }
   .chart-table-scroll { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
   .chart-table { border-collapse: collapse; width: 100%; font-size: 0.78rem; font-variant-numeric: tabular-nums; }
-  .chart-table caption { text-align: left; font-size: 0.75rem; color: var(--text-secondary); padding: 6px 8px; caption-side: top; }
-  .chart-table th, .chart-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+  .chart-table caption { text-align: start; font-size: 0.75rem; color: var(--text-secondary); padding: 6px 8px; caption-side: top; }
+  .chart-table th, .chart-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: end; white-space: nowrap; }
   .chart-table thead th { position: sticky; top: 0; background: var(--card-bg); z-index: 1; }
-  .chart-table th[scope="row"] { text-align: left; font-weight: 500; position: sticky; left: 0; background: var(--card-bg); }
+  .chart-table th[scope="row"] { text-align: start; font-weight: 500; position: sticky; inset-inline-start: 0; background: var(--card-bg); }
   .chart-table tr.future td, .chart-table tr.future th[scope="row"] { color: var(--text-secondary); }
   @media (max-width: 640px) {
     .chart-stack .chart-container { height: 240px; }
@@ -262,7 +266,7 @@
   .plan-actor { display: inline-flex; align-items: center; gap: 5px; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
   .plan-you .plan-actor { color: var(--text); font-weight: 600; }
   .plan-text { min-width: 0; overflow-wrap: anywhere; }
-  .plan-qual { display: inline-block; font-size: 0.72rem; padding: 0 6px; border: 1px dashed var(--text-secondary); border-radius: 8px; color: var(--text-secondary); margin-left: 4px; white-space: nowrap; }
+  .plan-qual { display: inline-block; font-size: 0.72rem; padding: 0 6px; border: 1px dashed var(--text-secondary); border-radius: 8px; color: var(--text-secondary); margin-inline-start: 4px; white-space: nowrap; }
   .plan-note { display: block; font-size: 0.74rem; color: var(--text-secondary); margin-top: 1px; }
   .plan-empty { color: var(--text-secondary); font-size: 0.84rem; padding: 4px 0; }
   /* Issue #1483: the outlook after the first 24 h, one folded row per day */
@@ -271,7 +275,7 @@
   .plan-later summary { display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; padding: 8px 0; cursor: pointer; min-height: 24px; font-size: 0.86rem; }
   .plan-later-day { font-weight: 600; }
   .plan-later-sum { color: var(--text-secondary); font-size: 0.78rem; }
-  .plan-later .plan-list { padding-left: 1.1em; }
+  .plan-later .plan-list { padding-inline-start: 1.1em; }
   .plan-foot { font-size: 0.78rem; color: var(--text-secondary); margin-top: 6px; }
   .plan-foot:empty { display: none; }
   @media (max-width: 640px) {

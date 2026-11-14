@@ -50,6 +50,9 @@
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   [hidden] { display: none !important; }
 </style>
+<!-- i18n.js: pa_view.js (shared with the new dashboard) reads window.CA_I18N; loaded here so it is defined even
+     though this stand-alone page's own text stays English (no data-i18n attributes are used on this page). -->
+<script src="i18n.js"></script>
 <!-- Bundled libraries only, same files as index.html (no CDN) -->
 <script src="hammer.min.js"></script>
 <script src="chart.umd.min.js"></script>

@@ -288,14 +288,22 @@ def check_python_temperature_literals(component_dir: str) -> CheckResult:
 
 
 def check_i18n(component_dir):
-    """Issue #1341: translation parity (both catalogs) and staleness locks; bodies live in tools/i18n_checks.py."""
-    result = CheckResult("i18n catalogs (parity, HA parity, staleness)")
+    """Issue #1341: translation parity, staleness locks, length budgets and the English/CSS ratchets.
+
+    Bodies live in tools/i18n_checks.py (shared with the tools/i18n.py CLI, so the two cannot disagree).
+    """
+    result = CheckResult("i18n catalogs (parity, HA parity, staleness, budgets, ratchets)")
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import i18n_checks  # noqa: PLC0415
 
-    for name, errors in i18n_checks.run_all().items():
+    for name, errors in i18n_checks.run_guards().items():
         for err in errors:
             result.error(f"{name}: {err}")
+    for note in i18n_checks.ratchet_notes():
+        result.warn(note)
+    glossary = i18n_checks.glossary_warnings(i18n_checks.catalogs_by_area())
+    if glossary:
+        result.warn(f"glossary: {len(glossary)} term warnings (python tools/i18n.py glossary)")
     return result
 
 

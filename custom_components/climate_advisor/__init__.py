@@ -477,9 +477,11 @@ def _resolve_zone_coordinator(hass: HomeAssistant, call) -> ClimateAdvisorCoordi
     entry_id = call.data.get("entry_id")
     coordinator = zone_registry.get_coordinator(hass, entry_id) if entry_id else None
     if coordinator is None:
+        # Issue #1341: the text is strings.json ``exceptions.unknown_zone`` (HA's own method, translated per language).
         raise ServiceValidationError(
-            f"Unknown or unloaded Climate Advisor zone entry_id '{entry_id}'. "
-            "Check Settings > Devices & Services for the correct zone."
+            translation_domain=DOMAIN,
+            translation_key="unknown_zone",
+            translation_placeholders={"entry_id": str(entry_id)},
         )
     return coordinator
 

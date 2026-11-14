@@ -36,6 +36,22 @@ Issue #1341. Plan and recheck record: the #1341 plan (D1-D9, phases P0a-P5). Thi
 - **Stage 1 content:** every area directory has `en` and the 15 others; only `common` has real keys (mode names heat/cool/off/auto/fan_only, "unknown"), the other areas are `{}`.
 - **Staleness lock** (outside the shipped package): `i18n/locks/<area>.json` and `i18n/locks/ha.json` hold `{"<lang>": {"<key>": "<sha1 of the English value, first 12 hex>"}}`. A translation is current when `lock[lang][key] == hash(en[key])`. `tools/i18n.py lock` records "I translated against this English".
 
+## HA-rendered text (P1: entities, selectors, services, exceptions)
+
+Everything Home Assistant itself renders is a key in `strings.json` (byte-identical to `translations/en.json`), with plain `{name}` placeholders only. `tools/validate.py` (`check_ha_translations`) enforces hassfest's slug and placeholder rules plus the code-to-catalog cross-checks.
+
+| Surface | Where the text is | Rule |
+|---|---|---|
+| Entity names | `entity.<platform>.<translation_key>.name` | `_attr_translation_key` = the unique-id suffix (`day_type`, `automation_enabled`, ...) and `_attr_has_entity_name = True`; **never** `_attr_name` (it overrides the translation). The English names equal the old hard-coded ones, so an English install keeps its friendly names and entity ids. |
+| Code-valued states | `entity.sensor.<key>.state.<value>` | Only values that are hassfest slugs (`hot`, `circuit_open`). A state with spaces or punctuation (`running (manual override)`) is prose and is rendered through a `Msg` instead. |
+| Prose-valued states | `i18n.render(Msg, i18n.hass_language(hass))` in `sensor.py` (`_prose`) | A `str` passes through; a `Msg`/`Code` the coordinator provides is rendered in HA's language. Each prose sensor also exposes stable `code` and `params` attributes (`code` is None for legacy plain prose). |
+| Option lists | `selector.<translation_key>.options.<value>` | `SelectSelectorConfig(options=[plain values], translation_key=...)`. A dynamic label (a schedule summary) keeps its own label and only its fixed words are translated. |
+| Words built in Python (schedule summary, key and token status) | `common.<key>` and `selector.weekday` | Read with `config_flow._async_texts(hass)` through HA's translation cache (English underneath); `_text(texts, key, **placeholders)` fills plain placeholders. |
+| Services | `services.<service>.name`, `.description`, `.fields.<field>.name/.description` | `services.yaml` holds no text, only field structure, defaults, examples and `translation_key`s. |
+| Exceptions | `exceptions.<key>.message` | `ServiceValidationError(translation_domain=DOMAIN, translation_key=..., translation_placeholders=...)`. HA's own `str()` of the error is the English text. |
+
+Entity ids: HA builds an entity id once, when the entity is first registered, from the entity name in the language HA is set to if that language is one of HA's native-entity-id languages (de, fr, es, it, nl, pt, pl, tr of our 16), else from the English name. Existing installs keep their ids; a fresh install in a native-id language gets ids in that language. Docs and tools therefore never assume `sensor.climate_advisor_*`: they look up by unique id (`<config entry id>_<key>`), see `tools/ha_logs.py --entity ca:<key>` and `tools/thermal_health.py`.
+
 ## ICU subset
 
 Identical semantics in Python (`i18n.py`) and FormatJS 10.7.16:

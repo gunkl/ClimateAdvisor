@@ -8,13 +8,14 @@ import logging
 import math
 import re
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers import selector
+from homeassistant.helpers import selector, translation
 
 from . import prediction_engines, zone_registry
 from .const import (
@@ -118,6 +119,7 @@ from .const import (
     DEFAULT_THRESHOLD_WARM,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
+    ENGINE_NONE,
     FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
@@ -142,53 +144,88 @@ _LOGGER = logging.getLogger(__name__)
 
 _NOTIFY_SERVICE_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 
+
+async def _async_texts(hass: HomeAssistant) -> dict[str, str]:
+    """Climate Advisor's HA-rendered words for the language HA is set to (Issue #1341, D1).
+
+    ``common`` (the schedule summary words and the key/token status words) plus the weekday ``selector`` labels,
+    read through HA's own translation cache (English underneath, ``hass.config.language`` on top), keyed by
+    ``common.<key>`` and ``weekday.<value>``. Never raises: an unreadable catalog yields ``{}`` and the callers show
+    the key instead of failing a form.
+    """
+    out: dict[str, str] = {}
+    for category, prefix in (("common", f"component.{DOMAIN}.common."), ("selector", f"component.{DOMAIN}.selector.")):
+        try:
+            found = await translation.async_get_translations(hass, hass.config.language, category, {DOMAIN})
+        except Exception:  # noqa: BLE001 - a form must render even when the catalog cannot be read
+            _LOGGER.debug("Could not load %s translations", category, exc_info=True)
+            continue
+        for key, text in found.items():
+            if key.startswith(prefix):
+                tail = key[len(prefix) :]
+                if category == "selector":
+                    if tail.startswith("weekday.options."):
+                        out["weekday." + tail[len("weekday.options.") :]] = text
+                else:
+                    out[tail] = text
+    return out
+
+
+def _text(texts: Mapping[str, str], key: str, **placeholders: str) -> str:
+    """One translated phrase with its plain ``{name}`` placeholders filled in (the key itself when unknown)."""
+    template = texts.get(key)
+    if template is None:
+        return key
+    try:
+        return template.format(**placeholders)
+    except KeyError, IndexError, ValueError:
+        return template
+
+
 # Trailing words stripped from a climate entity's friendly name when
 # suggesting a default zone name (Gap 7, Issue #796) — e.g. "Bedroom
 # Thermostat" suggests "Bedroom" rather than reproducing the device label.
 _ZONE_NAME_SUFFIX_RE = re.compile(r"\s*(thermostat|climate)\s*$", re.IGNORECASE)
 
-FAN_MODE_OPTIONS = [
-    selector.SelectOptionDict(value=FAN_MODE_DISABLED, label="Disabled (no fan control)"),
-    selector.SelectOptionDict(value=FAN_MODE_WHOLE_HOUSE, label="Whole house fan (dedicated entity)"),
-    selector.SelectOptionDict(value=FAN_MODE_HVAC, label="HVAC fan mode"),
-]
+# Issue #1341 (D1/D6): every option list is HA's own method -- plain values here, the labels live in strings.json
+# under ``selector.<translation_key>.options.<value>`` (translated per language by HA). The ``*_SELECTOR`` constants
+# are the ``translation_key`` each list is rendered with.
+FAN_MODE_OPTIONS = [FAN_MODE_DISABLED, FAN_MODE_WHOLE_HOUSE, FAN_MODE_HVAC]
+FAN_MODE_SELECTOR = "fan_mode"
+ENGINE_SELECTOR = "prediction_engine"
 
 
 # Issue #835: restricts *when* the hvac_fan/both fan mechanism is allowed to run,
 # based on which HVAC mode last ran — avoids raising humidity by circulating air
 # over wet coils shortly after a cooling cycle.
 def _engine_select(include_none: bool) -> selector.SelectSelectorConfig:
-    """The engine dropdown, straight from the engine registry (a newly registered engine appears with no edit here)."""
+    """The engine dropdown, straight from the engine registry (a newly registered engine appears with no edit here).
+
+    Every choice is a plain value; its label is ``strings.json`` ``selector.prediction_engine.options.<id>``
+    (``tests/test_ha_translations_1341.py`` fails when a registered engine has no entry).
+    """
+    # HA rejects a list that mixes plain values and dicts, so every engine is a plain value too.
+    options: list[str] = [i for i, _label in prediction_engines.options(False)]
+    if include_none:
+        options.insert(0, ENGINE_NONE)
     return selector.SelectSelectorConfig(
-        options=[selector.SelectOptionDict(value=i, label=lb) for i, lb in prediction_engines.options(include_none)],
+        options=options,
         mode=selector.SelectSelectorMode.DROPDOWN,
+        translation_key=ENGINE_SELECTOR,
     )
 
 
-HVAC_FAN_RESTRICT_OPTIONS = [
-    selector.SelectOptionDict(value=HVAC_FAN_RESTRICT_HEAT, label="Heat only (avoid humidity after cooling)"),
-    selector.SelectOptionDict(value=HVAC_FAN_RESTRICT_COOL, label="Cool only"),
-    selector.SelectOptionDict(value=HVAC_FAN_RESTRICT_BOTH, label="Both (no restriction)"),
-]
+HVAC_FAN_RESTRICT_OPTIONS = [HVAC_FAN_RESTRICT_HEAT, HVAC_FAN_RESTRICT_COOL, HVAC_FAN_RESTRICT_BOTH]
+HVAC_FAN_RESTRICT_SELECTOR = "hvac_fan_restrict"
 
-OUTDOOR_SOURCE_OPTIONS = [
-    selector.SelectOptionDict(value=TEMP_SOURCE_WEATHER_SERVICE, label="Weather service (recommended)"),
-    selector.SelectOptionDict(value=TEMP_SOURCE_SENSOR, label="Dedicated sensor"),
-    selector.SelectOptionDict(value=TEMP_SOURCE_INPUT_NUMBER, label="Input helper (input_number)"),
-]
+OUTDOOR_SOURCE_OPTIONS = [TEMP_SOURCE_WEATHER_SERVICE, TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER]
+OUTDOOR_SOURCE_SELECTOR = "outdoor_temp_source"
 
-THERMOSTAT_COMPANION_OPTIONS = [
-    selector.SelectOptionDict(
-        value=COMPANION_SENSOR_AUTO, label="Auto (use the thermostat's finer sensor when proven)"
-    ),
-    selector.SelectOptionDict(value=COMPANION_SENSOR_OFF, label="Off (always use the thermostat's own reading)"),
-]
+THERMOSTAT_COMPANION_OPTIONS = [COMPANION_SENSOR_AUTO, COMPANION_SENSOR_OFF]
+THERMOSTAT_COMPANION_SELECTOR = "thermostat_companion"
 
-INDOOR_SOURCE_OPTIONS = [
-    selector.SelectOptionDict(value=TEMP_SOURCE_CLIMATE_FALLBACK, label="Climate entity (recommended)"),
-    selector.SelectOptionDict(value=TEMP_SOURCE_SENSOR, label="Dedicated sensor"),
-    selector.SelectOptionDict(value=TEMP_SOURCE_INPUT_NUMBER, label="Input helper (input_number)"),
-]
+INDOOR_SOURCE_OPTIONS = [TEMP_SOURCE_CLIMATE_FALLBACK, TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER]
+INDOOR_SOURCE_SELECTOR = "indoor_temp_source"
 
 # Menu options for the options flow (Issue #50). Each entry's own Submit
 # persists that section only (Issue #573) — no reload menu items live here at
@@ -210,10 +247,15 @@ OPTIONS_MENU_OPTIONS = [
     "github_settings",
 ]
 
-TEMP_UNIT_OPTIONS = [
-    {"value": FAHRENHEIT, "label": "Fahrenheit (°F)"},
-    {"value": CELSIUS, "label": "Celsius (°C)"},
-]
+TEMP_UNIT_OPTIONS = [FAHRENHEIT, CELSIUS]
+TEMP_UNIT_SELECTOR = "temp_unit"
+
+# Day-of-week option values of the TOU schedule editor (the labels are ``selector.weekday``) and the AI reasoning
+# effort choices (``selector.ai_reasoning_effort``).
+WEEKDAY_SELECTOR = "weekday"
+AI_REASONING_SELECTOR = "ai_reasoning_effort"
+# The list step's "add a new schedule" choice. A schedule id is a 32-character hex uuid, so this cannot collide.
+SCHEDULER_ADD = "add_new"
 
 
 def _suggest_zone_name(hass: HomeAssistant, climate_entity: str | None) -> str:
@@ -622,6 +664,7 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=TEMP_UNIT_OPTIONS,
+                            translation_key=TEMP_UNIT_SELECTOR,
                             mode=selector.SelectSelectorMode.LIST,
                         )
                     ),
@@ -699,12 +742,14 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("outdoor_temp_source", default=TEMP_SOURCE_WEATHER_SERVICE): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=OUTDOOR_SOURCE_OPTIONS,
+                            translation_key=OUTDOOR_SOURCE_SELECTOR,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
                     vol.Required("indoor_temp_source", default=TEMP_SOURCE_CLIMATE_FALLBACK): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=INDOOR_SOURCE_OPTIONS,
+                            translation_key=INDOOR_SOURCE_SELECTOR,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
@@ -789,6 +834,7 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         selector.SelectSelector(
                             selector.SelectSelectorConfig(
                                 options=FAN_MODE_OPTIONS,
+                                translation_key=FAN_MODE_SELECTOR,
                                 mode=selector.SelectSelectorMode.DROPDOWN,
                             )
                         )
@@ -1048,6 +1094,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=TEMP_UNIT_OPTIONS,
+                            translation_key=TEMP_UNIT_SELECTOR,
                             mode=selector.SelectSelectorMode.LIST,
                         )
                     ),
@@ -1219,6 +1266,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=OUTDOOR_SOURCE_OPTIONS,
+                            translation_key=OUTDOOR_SOURCE_SELECTOR,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
@@ -1236,6 +1284,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=INDOOR_SOURCE_OPTIONS,
+                            translation_key=INDOOR_SOURCE_SELECTOR,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
@@ -1263,6 +1312,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=THERMOSTAT_COMPANION_OPTIONS,
+                            translation_key=THERMOSTAT_COMPANION_SELECTOR,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
@@ -1376,6 +1426,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=FAN_MODE_OPTIONS,
+                            translation_key=FAN_MODE_SELECTOR,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
@@ -1385,6 +1436,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=HVAC_FAN_RESTRICT_OPTIONS,
+                            translation_key=HVAC_FAN_RESTRICT_SELECTOR,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
@@ -1529,14 +1581,24 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     # scheduler.py's module docstring and docs/scheduler-spec.md for the full design.
 
     @staticmethod
-    def _format_schedule_summary(schedule: dict[str, Any]) -> str:
-        """One-line summary for the scheduler list step's option labels."""
+    def _format_schedule_summary(schedule: dict[str, Any], texts: Mapping[str, str]) -> str:
+        """One-line summary for the scheduler list step's option labels.
+
+        The words (all days, the weekday names, High/Low, unnamed and the sentence shape) come from ``texts``
+        (``_async_texts``: strings.json, translated by HA); the schedule's own name and window are data.
+        """
         days = schedule.get("days", [])
-        days_label = "All days" if ALL_DAYS in days else "/".join(d.capitalize() for d in days)
-        tag_label = "High" if schedule.get("cost_tag") == COST_TAG_HIGH else "Low"
-        name = schedule.get("name", "(unnamed)")
+        days_label = (
+            _text(texts, "schedule_all_days")
+            if ALL_DAYS in days
+            else "/".join(texts.get(f"weekday.{d}", d.capitalize()) for d in days)
+        )
+        tag_label = _text(
+            texts, "schedule_cost_high" if schedule.get("cost_tag") == COST_TAG_HIGH else "schedule_cost_low"
+        )
+        name = schedule.get("name") or _text(texts, "schedule_unnamed")
         window = f"{schedule.get('start')}-{schedule.get('end')}"
-        return f"{name} — {days_label} {window} ({tag_label})"
+        return _text(texts, "schedule_summary", name=name, days=days_label, window=window, cost=tag_label)
 
     async def async_step_scheduler(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """List existing TOU cost-period schedules; choose one to edit, or add a new one."""
@@ -1544,19 +1606,25 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             selection = user_input["manage"]
-            self._editing_schedule_id = None if selection == "__add__" else selection
+            self._editing_schedule_id = None if selection == SCHEDULER_ADD else selection
             return await self.async_step_scheduler_edit()
 
-        options = [selector.SelectOptionDict(value=s["id"], label=self._format_schedule_summary(s)) for s in schedules]
+        texts = await _async_texts(self.hass)
+        options = [
+            selector.SelectOptionDict(value=s["id"], label=self._format_schedule_summary(s, texts)) for s in schedules
+        ]
         if len(schedules) < MAX_SCHEDULES:
-            options.append(selector.SelectOptionDict(value="__add__", label="+ Add a new schedule"))
+            options.append(selector.SelectOptionDict(value=SCHEDULER_ADD, label=_text(texts, "schedule_add_new")))
 
         return self.async_show_form(
             step_id="scheduler",
             data_schema=vol.Schema(
                 {
                     vol.Required("manage"): selector.SelectSelector(
-                        selector.SelectSelectorConfig(options=options, mode=selector.SelectSelectorMode.LIST)
+                        selector.SelectSelectorConfig(
+                            options=options,
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
                     ),
                 }
             ),
@@ -1623,7 +1691,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         # compat: existing pending golden scenarios and any already-saved schedule
         # may still use days=["all"], and _format_schedule_summary() above keeps
         # its "All days" display branch as a defensive case for those.
-        day_options = [selector.SelectOptionDict(value=d, label=d.capitalize()) for d in WEEKDAY_ABBREVS]
+        day_options = list(WEEKDAY_ABBREVS)
         # Error-redisplay must preserve what the user just typed, not revert to the
         # pre-edit (or blank/new-schedule) defaults — otherwise every field wipes on
         # a validation error (e.g. missing days), forcing the user to re-enter
@@ -1634,7 +1702,10 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             vol.Required("name", default=defaults.get("name", "")): selector.TextSelector(),
             vol.Required("days", default=list(defaults.get("days", []))): selector.SelectSelector(
                 selector.SelectSelectorConfig(
-                    options=day_options, multiple=True, mode=selector.SelectSelectorMode.DROPDOWN
+                    options=day_options,
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    translation_key=WEEKDAY_SELECTOR,
                 )
             ),
             vol.Required("start", default=defaults.get("start", "16:00:00")): selector.TimeSelector(),
@@ -2107,7 +2178,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         if existing_key:
             key_status = "••••" + existing_key[-4:] if len(existing_key) > 4 else "••••"
         else:
-            key_status = "Not configured"
+            key_status = _text(await _async_texts(self.hass), "key_status_not_configured")
 
         # Issue #563: populate the dropdown from Anthropic's live model registry
         # instead of the hardcoded AI_MODELS list, so newly released models appear
@@ -2145,8 +2216,9 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     default=current.get(CONF_AI_REASONING_EFFORT, DEFAULT_AI_REASONING_EFFORT),
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
-                        options=[{"value": r, "label": r.capitalize()} for r in AI_REASONING_OPTIONS],
+                        options=list(AI_REASONING_OPTIONS),
                         mode=selector.SelectSelectorMode.DROPDOWN,
+                        translation_key=AI_REASONING_SELECTOR,
                     )
                 ),
                 vol.Optional(
@@ -2246,7 +2318,10 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_init()
 
         existing_token = current.get(CONF_GITHUB_TOKEN, "")
-        token_status = "configured" if existing_token else "not configured"
+        token_status = _text(
+            await _async_texts(self.hass),
+            "token_status_configured" if existing_token else "token_status_not_configured",
+        )
 
         schema = vol.Schema(
             {

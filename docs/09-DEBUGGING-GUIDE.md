@@ -30,6 +30,19 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 
 Climate Advisor exposes several sensor entities in Home Assistant. These persist in the Recorder database (default 10 days).
 
+> **Entity ids are not fixed (Issue #1341).** HA builds an entity id once, when the entity is first registered, as
+> `<domain>.<zone title>_<entity name>`, and keeps it for the life of that install. The ids in this guide are what a zone
+> titled "Climate Advisor" gets on an English install. A zone with another title (`sensor.house_status`), or a fresh
+> install whose HA language is one of HA's native-entity-id languages (for example de, fr, es, it, nl, pt, pl, tr: the
+> entity *names* are translated and the id follows), gets other ids. Existing installs keep theirs. Look an entity up by
+> its unique id `<config entry id>_<key>` instead of typing its id: `python3 tools/ha_logs.py --history --entity
+> ca:automation_status` (add `--entry-id` on a multi-zone install); `tools/thermal_health.py` finds its sensor by what it
+> carries. The key is the unique-id suffix: `automation_status` (Status), `trend_direction` (Trend), `next_human_action`
+> (Your Next Action), `compliance_score` (Comfort Score), `contact_status` (Contact Sensors), `effective_target_temp`
+> (Target Temperature), `indoor_temp`, `outdoor_temp`, and otherwise the entity's name in snake case (`day_type`,
+> `fan_status`, `ai_status`, `occupancy_mode`, `last_action_reason`, ...); the switch is `automation_enabled`.
+
+
 | Sensor | Entity ID | State | Key Attributes | Debugging Value |
 |--------|-----------|-------|----------------|-----------------|
 | Status | `sensor.climate_advisor_status` | active / paused / grace period / disabled | — | Current automation state |

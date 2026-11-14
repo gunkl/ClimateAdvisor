@@ -141,7 +141,7 @@ per-commit CI. Recommended gate: pull-request merge (not every push).
 The `test_integration_boot.py` file proves the foundation:
 - HA 2025.5.3 booted in Docker in < 90s (base image now 2026.10.4, Issue #1102 S1: CA needs Python 3.14)
 - `climate_advisor` config entry state = `loaded`
-- 18 `sensor.climate_advisor_*` entities + 1 `switch.climate_advisor_*` are visible
+- the integration's 21 sensors + 1 switch are registered (found with `integration_entities('climate_advisor')`; entity ids depend on the zone title and the install language, Issue #1341)
 - Demo climate (`climate.ecobee`) and weather (`weather.demo_weather_north`) entities present
 
 ## Next step: scenario replay (Tier B)
@@ -158,5 +158,5 @@ The following `track: integration` scenarios need scenario replay infrastructure
 Scenario replay design will:
 1. Use a time-control fixture to freeze/advance FAKETIME
 2. Drive HA state via `POST /api/services/climate/set_temperature` etc.
-3. Poll `GET /api/states/sensor.climate_advisor_*` and assert expected values
+3. Poll `GET /api/states/<entity id>` (looked up through the registry / `integration_entities`, never assumed) and assert expected values
 4. Map scenario JSON `assertions` → REST API checks

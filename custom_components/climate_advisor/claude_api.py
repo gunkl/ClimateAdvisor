@@ -87,6 +87,45 @@ _MODEL_COSTS: dict[str, dict[str, float]] = {
 }
 
 # Circuit breaker states
+# Issue #1341 (D9): the occupant-facing sections of an AI report are written in the Home Assistant language. The
+# prompt itself and every context section stay English (render_en); only this instruction names the output language.
+# `## SECTION` headers stay English: parse_investigation_response() splits on them.
+OUTPUT_LANGUAGE_NAMES: dict[str, str] = {
+    "fr": "French",
+    "es": "Spanish",
+    "de": "German",
+    "nl": "Dutch",
+    "ja": "Japanese",
+    "pt": "Portuguese",
+    "it": "Italian",
+    "pl": "Polish",
+    "uk": "Ukrainian",
+    "ko": "Korean",
+    "hi": "Hindi",
+    "ar": "Arabic",
+    "ru": "Russian",
+    "zh-Hans": "Simplified Chinese",
+    "tr": "Turkish",
+}
+
+
+def output_language_instruction(language: str | None) -> str:
+    """The "answer in <language>" instruction for a shipped language code, or "" for English / unknown.
+
+    English adds nothing, so the English prompt (and every English-asserting test) is byte-identical.
+    """
+    name = OUTPUT_LANGUAGE_NAMES.get(language or "")
+    if not name:
+        return ""
+    return (
+        f"=== OUTPUT LANGUAGE ===\n"
+        f"  Write the occupant-facing text of every section of your report in {name}.\n"
+        f"  Keep the section headers (## prefix) exactly as listed in English: they are parsed by exact match.\n"
+        f"  Keep [source: ..., value: ...] citations, entity ids, field names, numbers and quoted log records"
+        f" verbatim.\n"
+    )
+
+
 _CB_CLOSED = "closed"
 _CB_OPEN = "open"
 _CB_HALF_OPEN = "half_open"

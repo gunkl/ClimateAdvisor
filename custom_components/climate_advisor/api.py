@@ -842,13 +842,18 @@ class ClimateAdvisorConfigView(HomeAssistantView):
                 if value is None:
                     value = meta.get("default")
                 # Sanitize: replace notify service names (may reveal personal info)
+                value_msg: i18n.Msg | None = None
                 if key == "notify_service" or meta.get("sensitive"):
                     value = "configured" if value else "not set"
+                    value_msg = i18n.Msg(
+                        "settings.value_configured" if value == "configured" else "settings.value_not_set"
+                    )
                 # Convert time objects to strings
                 if hasattr(value, "strftime"):
                     value = str(value)
                 # Convert lists to counts for display
                 if isinstance(value, list):
+                    value_msg = i18n.Msg("settings.value_n_configured", n=len(value))
                     value = f"{len(value)} configured"
                 # Apply display transforms (e.g., seconds → minutes for UI)
                 transform = meta.get("display_transform")
@@ -878,10 +883,18 @@ class ClimateAdvisorConfigView(HomeAssistantView):
                     "value": value,
                     "label": meta["label"],
                     "description": meta["description"],
+                    "label_msg": i18n.Msg(f"settings.{key}.label").to_wire(),
+                    "description_msg": i18n.Msg(f"settings.{key}.description").to_wire(),
                     "category": meta["category"],
                 }
+                if value_msg is not None:
+                    entry["value_msg"] = value_msg.to_wire()
+                # Explicit unit (Issue #1341): the temperature symbol, else the metadata's static time unit
+                # ("min"/"s"); the dashboard never parses "(minutes)" out of a label.
                 if setting_unit is not None:
                     entry["unit"] = setting_unit
+                elif meta.get("unit"):
+                    entry["unit"] = meta["unit"]
                 settings.append(entry)
 
             return self.json({"settings": settings})

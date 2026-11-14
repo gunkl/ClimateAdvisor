@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 
+from . import i18n
 from .ai_skills import AISkillDefinition, AISkillRegistry
 from .ai_skills_context import (
     _AUTOMATION_INTERVALS_SECONDS,
@@ -235,6 +236,13 @@ async def async_build_investigator_context(
     providers = registry.select(focus, narration=narration, deep=deep)
 
     sections: list[str] = ["=== Climate Advisor Investigator Context ===", ""]
+
+    # Issue #1341 (D9): occupant-facing sections in the Home Assistant language; headers and context stay English.
+    from .claude_api import output_language_instruction  # noqa: PLC0415
+
+    language_instruction = output_language_instruction(i18n.hass_language(hass))
+    if language_instruction:
+        sections += [language_instruction]
 
     # Prepend focus question if provided
     if focus:

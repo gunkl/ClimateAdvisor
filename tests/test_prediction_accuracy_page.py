@@ -18,7 +18,14 @@ FRONTEND = ROOT / "custom_components" / "climate_advisor" / "frontend"
 # and the new dashboard's Analysis tab both mount; the page adds its header. PAGE is the two together.
 PAGE_HTML = (FRONTEND / "prediction_accuracy.html").read_text(encoding="utf-8")
 VIEW = (FRONTEND / "pa_view.js").read_text(encoding="utf-8")
-PAGE = PAGE_HTML + "\n" + VIEW
+# Issue #1341: the view's English text lives in the dashboard catalog (dashboard.pa.*), not in the source; the
+# English-wording assertions below read it from there, so they still pin the exact English the occupant sees.
+CATALOG_PA = "\n".join(
+    v
+    for k, v in json.loads((FRONTEND / "i18n" / "dashboard" / "en.json").read_text(encoding="utf-8")).items()
+    if k.startswith("dashboard.pa.")
+)
+PAGE = PAGE_HTML + "\n" + VIEW + "\n" + CATALOG_PA
 INDEX = (
     (FRONTEND / "index.html").read_text(encoding="utf-8")
     + "\n"
@@ -39,12 +46,14 @@ def _func(name: str) -> str:
 
 
 def test_control_groups_present_with_aria():
+    # Issue #1341: the aria labels come from the catalog (key in the markup, English text in dashboard.pa.*)
     for gid, label in (
         ("grp-sensor", 'aria-labelledby="lbl-sensor"'),
-        ("grp-lead", 'aria-label="How far ahead the prediction was made"'),
-        ("grp-range", 'aria-label="Time range"'),
+        ("grp-lead", "aria-label=\"' + e('lead_group_aria') + '\""),
+        ("grp-range", "aria-label=\"' + e('range_aria') + '\""),
     ):
         assert re.search(rf'role="group" {re.escape(label)} id="{gid}"', PAGE), gid
+    assert "How far ahead the prediction was made" in CATALOG_PA and "Time range" in CATALOG_PA
     assert 'id="reset-zoom"' in PAGE and "Reset zoom" in PAGE
     assert 'id="zone-select"' in PAGE
 
@@ -60,7 +69,8 @@ def test_buttons_are_real_buttons_with_aria_pressed():
 def test_ranges_leads_and_scroll():
     assert "var RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y']" in PAGE
     assert "var LEADS = ['1h', '4h', '12h', '24h', '48h', '72h', '120h']" in PAGE
-    assert "'Scroll back'" in PAGE and "'Scroll forward'" in PAGE
+    assert "T('nav.back')" in PAGE and "T('nav.forward')" in PAGE
+    assert "Scroll back" in CATALOG_PA and "Scroll forward" in CATALOG_PA
     assert "\u2039" in PAGE and "\u203a" in PAGE
     scroll = _func("scroll")
     assert "S.before" in scroll and "toISOString" in scroll
@@ -69,7 +79,8 @@ def test_ranges_leads_and_scroll():
 
 def test_sensor_group_is_ca_reading_plus_response_sensors():
     sl = _func("sensorList")
-    assert "'Climate Advisor reading'" in sl  # Issue #1400: the name the payload gives "_ca", once
+    assert "T('sensor.default_name')" in sl  # Issue #1400: the name the payload gives "_ca", once
+    assert "Climate Advisor reading" in CATALOG_PA
     assert "s.id !== CA_SENSOR" in sl
     assert "S.sensors" in sl
     assert "S.sensors = d.sensors" in PAGE
@@ -108,7 +119,7 @@ def test_heat_strip_tiles_scorecard_and_seasons():
 def test_tiles_lead_with_the_primary_engine_and_name_the_comparison_engine():
     tiles = _func("renderTiles")
     assert "S.data.primary_engine" in tiles and "S.data.shadow_engine" in tiles
-    assert "main prediction on Status" in tiles
+    assert "T('tile.main_note'" in tiles and "main prediction on Status" in CATALOG_PA
 
 
 # ---- request building --------------------------------------------------------------------------
@@ -176,6 +187,9 @@ def test_units_come_from_response():
 
 def test_only_bundled_libraries():
     srcs = re.findall(r'<script[^>]+src="([^"]+)"', PAGE)
+    # Issue #1341: the i18n runtime (bundled, same folder) loads first
+    assert srcs[:2] == ["intl-messageformat.iife.js", "i18n.js"]
+    srcs = srcs[2:]
     assert sorted(srcs) == ["chart.umd.min.js", "chartjs-plugin-zoom.min.js", "hammer.min.js", "pa_view.js"]
     for s in srcs:
         assert (FRONTEND / s).is_file()
@@ -243,7 +257,9 @@ def test_index_links_to_page_in_analysis_tab():
 def test_engine_labels_follow_the_payload_roles():
     role = _func("engineRole")
     assert "d.primary_engine" in role and "d.shadow_engine" in role
-    assert "'main engine'" in role and "'comparison'" in role
+    # the role is a code (never English prose); its text is role.<code> in the catalog
+    assert "'main'" in role and "'comparison'" in role and "'off'" in role
+    assert "main engine" in CATALOG_PA and "not running now" in CATALOG_PA
     assert "legend-v4-name').textContent = engineName('v4')" in PAGE
     assert "legend-v3-name').textContent = engineName('v3')" in PAGE
 
@@ -257,15 +273,16 @@ def test_lines_break_at_swaps_and_real_gaps_only():
 
 def test_explanation_and_no_v4_wording():
     ex = _func("renderExplain")
-    assert "Each point is a past prediction" in ex
-    assert "lone dots mean the predictions there are spaced out" in ex
-    assert "v4 hasn’t learned this sensor yet (see #1422)" in ex
+    assert "T('explain'" in ex and "T('nov4.not_learned')" in ex
+    assert "Each point is a past prediction" in CATALOG_PA
+    assert "lone dots mean the predictions there are spaced out" in CATALOG_PA
+    assert "v4 hasn’t learned this sensor yet (see #1422)" in CATALOG_PA
 
 
 def test_sensor_buttons_without_data_are_labelled_or_disabled():
     av = _func("sensorAvail")
     assert "has_v4 === false" in av and "has_readings === false" in av
-    assert "'no v4 data yet'" in av and "#1422" in av
+    assert "T('sensor.tag_no_v4')" in av and "no v4 data yet" in CATALOG_PA and "#1422" in CATALOG_PA
     assert "aria-disabled" in _func("renderControls")
 
 
@@ -287,7 +304,7 @@ def test_page_mounts_the_shared_view_and_keeps_its_own_header():
         "function renderTiles",
         "function authedFetch",
         ".tile {",
-        "How well each prediction engine has forecast this house",  # the closing note, once
+        "e('gate.footer')",  # the closing note, once
     ):
         assert view_bit not in PAGE_HTML and view_bit in VIEW, view_bit
     # the view's styles are scoped, so mounting it never restyles the dashboard around it

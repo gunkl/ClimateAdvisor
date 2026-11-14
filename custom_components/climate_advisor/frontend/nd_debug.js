@@ -5,6 +5,11 @@
 (function () {
   'use strict';
   var $ = ND.$, esc = ND.esc;
+  // Issue #1341: chrome (group titles, headings, buttons, messages) comes from the catalog; field names, hints and the
+  // in-words values stay English (owner decision Q3). A missing catalog degrades to the key, so T() is the only sink.
+  function T(key, params) { return CAI18N.t('dashboard.debug.' + key, params); }
+  // U+2068..U+2069 isolate a Latin name inside RTL text (the Python renderer does the same for ar)
+  function iso(x) { return CAI18N.dir === 'rtl' ? '\u2068' + x + '\u2069' : String(x); }
   var A = null, E = null, EV = null, evOff = {}, loaded = false, timer = null;
 
   // Group -> automation_state keys. 'Today's classification', 'Learning pipeline', 'Prediction engines' and 'Last thermostat
@@ -21,6 +26,10 @@
     ['Prediction engines (v4 shadow)', ['v4_model', 'control_feed']],
     ['Plan', ['operation_timeline']]
   ];
+  // English group title -> catalog key (the English titles stay in GROUPS: tests/test_new_dashboard.py parses that block).
+  var TITLE_KEY = { 'Control': 'group.control', 'Manual override & grace': 'group.manual', 'Doors, windows & pause': 'group.doors',
+    'Fan': 'group.fan', 'Natural ventilation & economizer': 'group.natvent', 'Comfort edge': 'group.comfort_edge', 'Occupancy': 'group.occupancy',
+    'Units': 'group.units', 'Prediction engines (v4 shadow)': 'group.engines', 'Plan': 'group.plan' };
   var NESTED = { classification: 1, thermal_pipeline: 1 };      // expanded into their own groups
   var MOVED = { promise_summary: 'Analysis' };                    // shown in Analysis, not repeated here
   // Issue #1399: keys deliberately not shown on this tab; their full data is in Download diagnostics (this tab's button
@@ -58,11 +67,11 @@
   // Issue #1399: no raw JSON on this tab. An object reads "key value · key value", a list of objects "...; ...".
   function fmt(v) {
     if (v == null) return DASH;
-    if (typeof v === 'boolean') return v ? 'yes' : 'no';
+    if (typeof v === 'boolean') return T(v ? 'yes' : 'no');
     if (typeof v === 'number') return String(Math.round(v * 1000) / 1000);
-    if (typeof v === 'string') return /^\d{4}-\d\d-\d\dT/.test(v) ? new Date(v).toLocaleString([], { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }) : v;
-    if (Array.isArray(v)) return v.length ? v.map(fmt).join(v.some(function (x) { return x && typeof x === 'object'; }) ? '; ' : ', ') : 'none';
-    if (typeof v === 'object') { var ks = Object.keys(v); return ks.length ? ks.map(function (k) { return k.replace(/_/g, ' ') + ' ' + fmt(v[k]); }).join(' · ') : 'none'; }
+    if (typeof v === 'string') return /^\d{4}-\d\d-\d\dT/.test(v) ? new Intl.DateTimeFormat(CAI18N.lang, { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(new Date(v)) : v;
+    if (Array.isArray(v)) return v.length ? v.map(fmt).join(v.some(function (x) { return x && typeof x === 'object'; }) ? '; ' : ', ') : T('none');
+    if (typeof v === 'object') { var ks = Object.keys(v); return ks.length ? ks.map(function (k) { return k.replace(/_/g, ' ') + ' ' + fmt(v[k]); }).join(' · ') : T('none'); }
     return String(v);
   }
   function dur(sec) {  // 10800 -> "3 h", 90 -> "1 min 30 s"
@@ -74,7 +83,7 @@
     if (k === 'fan_remote_speed' && has(v) && A && A.fan_active === false) return v + ' (fan is off)';
     if (k === 'door_window_sensors' && v && typeof v === 'object') {
       var names = Object.keys(v);
-      return names.length ? names.map(function (n) { return (v[n].friendly_name || n) + ': ' + (v[n].open ? 'open' : 'closed'); }).join('; ') : 'none';
+      return names.length ? names.map(function (n) { return (v[n].friendly_name || n) + ': ' + T(v[n].open ? 'open' : 'closed'); }).join('; ') : T('none');
     }
     if (k === 'comfort_family_last_switch' && v && typeof v === 'object') {
       return (v.from || '?') + ' → ' + (v.to || '?') + ' at ' + tDay(v.ts) + (v.reason ? ' (' + v.reason + ')' : '');
@@ -84,15 +93,15 @@
 
   // ---------- plain-language times ----------
   function when(iso) { var d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d : null; }
-  function tShort(d) { return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+  function tShort(d) { return CAI18N.fmt.time(d); }
   function tDay(iso) {  // "7:30 AM" today, "Mon 7:30 AM" on another day
     var d = when(iso); if (!d) return DASH;
-    return (d.toDateString() === new Date().toDateString() ? '' : d.toLocaleDateString([], { weekday: 'short' }) + ' ') + tShort(d);
+    return (d.toDateString() === new Date().toDateString() ? '' : new Intl.DateTimeFormat(CAI18N.lang, { weekday: 'short' }).format(d) + ' ') + tShort(d);
   }
   function dayLabel(ymd) {  // "2026-11-07" (a local calendar day, not UTC midnight) -> "Sat 11/7"
     var m = /^(\d{4})-(\d\d)-(\d\d)/.exec(ymd || ''); if (!m) return DASH;
     var d = new Date(+m[1], +m[2] - 1, +m[3]);
-    return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + (d.getMonth() + 1) + '/' + d.getDate();
+    return new Intl.DateTimeFormat(CAI18N.lang, { weekday: 'short' }).format(d) + ' ' + CAI18N.fmt.date(d);
   }
   function count(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
   function has(x) { return x != null && x !== ''; }
@@ -151,7 +160,7 @@
       var vals = Object.keys(ar).map(function (k) { return Number(ar[k]) || 0; });
       var n = '_ca' in ar ? Number(ar._ca) || 0 : Math.max.apply(null, vals.concat([0]));
       var since = when(v.archive_since);
-      arTxt = n ? count(n, 'slot', 'slots') + (since ? ' since ' + (since.getMonth() + 1) + '/' + since.getDate() : '') : 'empty';
+      arTxt = n ? count(n, 'slot', 'slots') + (since ? ' since ' + CAI18N.fmt.date(since) : '') : 'empty';
     }
     rows.push(['Archive', arTxt]);
     rows.push(['Mass node', has(v.mass) ? Number(v.mass).toFixed(1) + u : DASH]);
@@ -268,7 +277,7 @@
     function rowsOf(list) { return list.map(function (r) { return row(r[0], r[1]); }); }
     GROUPS.forEach(function (g) {
       var rows = g[1].filter(function (k) { return A && k in A && !CUSTOM[k]; }).map(function (k) { return row(k, fmtKey(k, A[k])); });
-      if (g[0].indexOf('Prediction engines') === 0) {
+      if (TITLE_KEY[g[0]] === 'group.engines') {
         var v4s = (E && E.v4) || (A && A.v4_model);
         rows = rows.concat(rowsOf(engineRows(v4s, v4s && v4s.prediction_engines, A && A.control_feed)));
         if (E) {
@@ -282,13 +291,13 @@
           rows.push(row('v3 model', (E.ode_version || '?') + ' physics · ' + (E.physics_eligible ? 'eligible' : 'not eligible') + (E.physics_eligible_reason ? ' · ' + E.physics_eligible_reason : '')));
         }
       }
-      if (g[0] === 'Plan' && A && 'operation_timeline' in A) rows = rowsOf(planRows(A.operation_timeline));
-      groups.push({ title: g[0] === 'Prediction engines (v4 shadow)' ? 'Prediction engines' : g[0], rows: rows });
+      if (TITLE_KEY[g[0]] === 'group.plan' && A && 'operation_timeline' in A) rows = rowsOf(planRows(A.operation_timeline));
+      groups.push({ title: T(TITLE_KEY[g[0]]), rows: rows });
     });
-    if (A && A.classification) { groups.splice(8, 0, { title: 'Today’s classification', rows: classificationRows(A.classification) }); }
+    if (A && A.classification) { groups.splice(8, 0, { title: T('group.classification'), rows: classificationRows(A.classification) }); }
     if (A && A.thermal_pipeline) {
       var tp = A.thermal_pipeline;
-      groups.push({ title: 'Learning pipeline', rows: (tp.pending || []).map(function (p) {
+      groups.push({ title: T('group.learning_pipeline'), rows: (tp.pending || []).map(function (p) {
         return row('pending ' + p.obs_type, p.status + ' · ' + p.elapsed_minutes + ' min · ' + p.sample_count + ' samples · indoor Δ' + ND.num(ND.dFToDisp(p.indoor_delta_f), 2) + '° · outdoor ' + ND.num(ND.fToDisp(p.outdoor_f), 1) + ND.sym(ND.unit));
       }).concat(Object.keys(tp.rejection_log_counts || {}).map(function (k) {
         var n = tp.rejection_log_counts[k], cap = tp.rejection_log_cap;
@@ -296,41 +305,41 @@
       })) });
     }
     var lc = EV && EV.diagnostics && EV.diagnostics.last_command;
-    if (lc) groups.push({ title: 'Last thermostat command', rows: Object.keys(lc).map(function (k) { return row(k, fmt(lc[k])); }) });
+    if (lc) groups.push({ title: T('group.last_command'), rows: Object.keys(lc).map(function (k) { return row(k, fmt(lc[k])); }) });
     return groups;
   }
 
   function render() {
-    var q = ($('dbg-search').value || '').toLowerCase(), host = $('dbg-groups'), total = 0;
+    var q = ($('dbg-search').value || '').toLocaleLowerCase(CAI18N.lang), host = $('dbg-groups'), total = 0;
     if (!A) { return; }
     var html = '';
     buildGroups().forEach(function (g) {
-      var rows = g.rows.filter(function (r) { return !q || (r.k + ' ' + r.v).toLowerCase().indexOf(q) >= 0; });
+      var rows = g.rows.filter(function (r) { return !q || (r.k + ' ' + r.v).toLocaleLowerCase(CAI18N.lang).indexOf(q) >= 0; });
       if (!rows.length) return;
       total += rows.length;
-      html += '<section class="card" style="margin:0 0 10px"><h2 style="font-size:14px">' + esc(g.title) + ' <span class="sub">' + rows.length + ' fields</span></h2><table class="field-table"><tbody>' +
+      html += '<section class="card" style="margin:0 0 10px"><h2 style="font-size:14px">' + esc(g.title) + ' <span class="sub">' + esc(T('fields', { n: rows.length })) + '</span></h2><table class="field-table"><tbody>' +
         rows.map(function (r) { return '<tr><td class="k"><span class="kn">' + esc(r.k) + '</span>' + (r.hint ? '<span class="hint">' + esc(r.hint) + '</span>' : '') + '</td><td class="mono">' + esc(r.v) + '</td></tr>'; }).join('') + '</tbody></table></section>';
     });
-    host.innerHTML = html || '<div class="empty">No field matches the filter.</div>';
-    $('dbg-count').textContent = total + ' fields';
+    host.innerHTML = html || '<div class="empty">' + esc(T('no_field_match')) + '</div>';
+    $('dbg-count').textContent = T('fields', { n: total });
     renderEvents();
   }
 
   function renderEvents() {
-    var q = ($('dbg-search').value || '').toLowerCase();
+    var q = ($('dbg-search').value || '').toLocaleLowerCase(CAI18N.lang);
     var evs = ((EV && EV.events) || []).slice().reverse(), counts = {};
     evs.forEach(function (e) { counts[e.type] = (counts[e.type] || 0) + 1; });
     $('dbg-ev-types').innerHTML = Object.keys(counts).sort().map(function (k) {
       return '<button type="button" class="pill" data-type="' + esc(k) + '" aria-pressed="' + (!evOff[k]) + '">' + esc(k.replace(/_/g, ' ')) + ' <span class="n">' + counts[k] + '</span></button>';
     }).join('');
-    var rows = evs.filter(function (e) { return !evOff[e.type]; }).filter(function (e) { return !q || JSON.stringify(e).toLowerCase().indexOf(q) >= 0; });
+    var rows = evs.filter(function (e) { return !evOff[e.type]; }).filter(function (e) { return !q || JSON.stringify(e).toLocaleLowerCase(CAI18N.lang).indexOf(q) >= 0; });
     $('dbg-ev-rows').innerHTML = rows.length ? rows.map(function (e) {
       var d = Object.assign({}, e); delete d.time; delete d.type;
       return '<tr><td style="white-space:nowrap;color:var(--ink2)">' + esc(ND.fmtTime(e.time)) + '</td><td>' + esc(String(e.type).replace(/_/g, ' ')) + '</td><td class="mono" style="color:var(--ink2);font-size:12px">' +
         esc(Object.keys(d).map(function (k) { return k + '=' + (d[k] && typeof d[k] === 'object' ? fmt(d[k]) : d[k]); }).join('  ')) + '</td></tr>';
-    }).join('') : '<tr><td colspan="3" class="empty">' + (EV ? 'No events in this window.' : 'Event log unavailable.') + '</td></tr>';
-    $('dbg-ev-count').textContent = 'last ' + $('dbg-ev-hours').selectedOptions[0].textContent + ' · ' + rows.length + ' of ' + evs.length;
-    if (EV && EV.is_truncated) $('dbg-ev-count').textContent += ' · older events were not kept';
+    }).join('') : '<tr><td colspan="3" class="empty">' + esc(T(EV ? 'events_none' : 'events_unavailable')) + '</td></tr>';
+    $('dbg-ev-count').textContent = T(EV && EV.is_truncated ? 'events_count_truncated' : 'events_count',
+      { window: $('dbg-ev-hours').selectedOptions[0].textContent, shown: rows.length, total: evs.length });
   }
 
   async function loadEvents() {
@@ -341,26 +350,26 @@
     var r = await Promise.allSettled([ND.api('automation_state'), ND.api('engines'), ND.api('event_log?hours=' + $('dbg-ev-hours').value)]);
     A = r[0].status === 'fulfilled' ? r[0].value : null; E = r[1].status === 'fulfilled' ? r[1].value : null; EV = r[2].status === 'fulfilled' ? r[2].value : null;
     loaded = true;
-    if (!A) $('dbg-groups').innerHTML = '<div class="err">Failed to load: ' + esc(r[0].reason ? r[0].reason.message : 'no data') + '</div>';
+    if (!A) $('dbg-groups').innerHTML = '<div class="err">' + esc(T('load_failed', { error: r[0].reason ? r[0].reason.message : T('no_data') })) + '</div>';
     else render();
     loadBacktest();
   }
 
   // ---------- downloads (same bundle as classic's Download Logs) ----------
   async function downloadLogs() {
-    var b = $('dbg-dl-logs'), orig = b.textContent; b.textContent = 'Downloading...'; b.disabled = true;
+    var b = $('dbg-dl-logs'), orig = b.textContent; b.textContent = T('downloading'); b.disabled = true;
     try {
       var r = await Promise.allSettled([ND.api('event_log?hours=168'), ND.api('investigation_reports')]);
       var bundle = { downloaded_at: new Date().toISOString(), events: r[0].status === 'fulfilled' ? (r[0].value.events || []) : [], diagnostics: r[0].status === 'fulfilled' ? (r[0].value.diagnostics || null) : null };
       if (r[1].status === 'fulfilled') bundle.investigation_reports = r[1].value;
       ND.download(JSON.stringify(bundle, null, 2), 'climate-advisor-logs-' + new Date().toISOString().slice(0, 10) + '.json', 'application/json');
-    } catch (e) { ND.toast('Failed to download logs: ' + e.message, 'err'); } finally { b.textContent = orig; b.disabled = false; }
+    } catch (e) { ND.toast(T('download_logs_failed', { error: e.message }), 'err'); } finally { b.textContent = orig; b.disabled = false; }
   }
   async function downloadDiagnostics() {
     try {
       var ev = await ND.api('event_log?hours=2');
       ND.download(JSON.stringify({ downloaded_at: new Date().toISOString(), diagnostics: ev.diagnostics || null, automation_state: A }, null, 2), 'climate-advisor-diagnostics-' + new Date().toISOString().slice(0, 10) + '.json', 'application/json');
-    } catch (e) { ND.toast('Failed to download diagnostics: ' + e.message, 'err'); }
+    } catch (e) { ND.toast(T('download_diag_failed', { error: e.message }), 'err'); }
   }
 
   // ---------- backtest lab ----------
@@ -369,16 +378,17 @@
     lead = lead || (host.getAttribute('data-lead') || '4h'); range = range || (host.getAttribute('data-range') || '7d');
     host.setAttribute('data-lead', lead); host.setAttribute('data-range', range);
     var opt = function (list, cur) { return list.map(function (x) { return '<option' + (x === cur ? ' selected' : '') + '>' + x + '</option>'; }).join(''); };
-    var head = '<div class="row"><label class="small">Look-ahead <select id="bt-lead" class="ctl">' + opt(['1h', '4h', '12h', '24h'], lead) + '</select></label>' +
-      '<label class="small">Range <select id="bt-range" class="ctl">' + opt(['24h', '3d', '7d', '30d'], range) + '</select></label><button type="button" class="btn small" id="bt-run">Run</button></div>';
+    var head = '<div class="row"><label class="small">' + esc(T('bt_lookahead')) + ' <select id="bt-lead" class="ctl">' + opt(['1h', '4h', '12h', '24h'], lead) + '</select></label>' +
+      '<label class="small">' + esc(T('bt_range')) + ' <select id="bt-range" class="ctl">' + opt(['24h', '3d', '7d', '30d'], range) + '</select></label><button type="button" class="btn small" id="bt-run">' + esc(T('bt_run')) + '</button></div>';
     try {
       var d = await ND.api('prediction_accuracy?lead=' + lead + '&range=' + range), s = d.stats || {}, u = d.unit || ND.sym(ND.unit), g = d.gate_summary || {}, m = d.model || {};
       var tile = function (l, v) { return '<div class="tile"><div class="l">' + esc(l) + '</div><div class="v">' + esc(v) + '</div></div>'; };
-      var f = function (x) { return x == null ? '—' : Number(x).toFixed(2) + ' ' + u; };
-      host.innerHTML = head + '<div class="note" style="margin:8px 0">' + (g.scored != null ? 'v4 beats both v3 and "no change" in ' + g.passed + ' of ' + g.scored + ' scored rows over the last ' + (g.window_days || 30) + ' days, live (' + g.total + ' rows in all).' : 'Nothing has been scored yet.') + ' Main prediction on Status: ' + esc(d.primary_engine || 'v4') + '.' +
-        ' Model: ' + esc(m.confidence || 'n/a') + (m.span_days != null ? ', ' + m.span_days + ' days of data' : '') + (m.fitted_at ? ', fitted ' + esc(ND.fmtDateTime(m.fitted_at)) : '') + '.</div>' +
-        '<div class="tiles">' + tile('Points scored', s.n != null ? String(s.n) : '—') + (d.primary_engine !== 'v3' ? tile('v4 average miss', f(s.v4_mae)) + tile('v3 average miss', f(s.v3_mae)) : tile('v3 average miss', f(s.v3_mae)) + tile('v4 average miss', f(s.v4_mae))) + tile('"No change" miss', f(s.flat_mae)) + (d.primary_engine !== 'v3' ? tile('v4 bias', f(s.v4_bias)) + tile('v3 bias', f(s.v3_bias)) : tile('v3 bias', f(s.v3_bias)) + tile('v4 bias', f(s.v4_bias))) + '</div>';
-    } catch (e) { host.innerHTML = head + '<div class="empty" style="margin-top:8px">Backtest data is not available yet (' + esc(e.message) + ').</div>'; }
+      var f = function (x) { return x == null ? '—' : CAI18N.fmt.number(Number(x), { minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false }) + ' ' + u; };
+      host.innerHTML = head + '<div class="note" style="margin:8px 0">' + esc(g.scored != null ? T('bt_scored', { passed: g.passed, scored: g.scored, days: g.window_days || 30, total: g.total }) : T('bt_not_scored')) +
+        ' ' + esc(T('bt_main', { engine: iso(d.primary_engine || 'v4') })) +
+        ' ' + esc(T('bt_model', { confidence: iso(m.confidence || 'n/a'), span: m.span_days != null ? 'yes' : 'no', days: m.span_days, fitted: m.fitted_at ? 'yes' : 'no', at: m.fitted_at ? ND.fmtDateTime(m.fitted_at) : '' })) + '</div>' +
+        '<div class="tiles">' + tile(T('bt_points'), s.n != null ? String(s.n) : '—') + (d.primary_engine !== 'v3' ? tile(T('bt_v4_miss'), f(s.v4_mae)) + tile(T('bt_v3_miss'), f(s.v3_mae)) : tile(T('bt_v3_miss'), f(s.v3_mae)) + tile(T('bt_v4_miss'), f(s.v4_mae))) + tile(T('bt_flat_miss'), f(s.flat_mae)) + (d.primary_engine !== 'v3' ? tile(T('bt_v4_bias'), f(s.v4_bias)) + tile(T('bt_v3_bias'), f(s.v3_bias)) : tile(T('bt_v3_bias'), f(s.v3_bias)) + tile(T('bt_v4_bias'), f(s.v4_bias))) + '</div>';
+    } catch (e) { host.innerHTML = head + '<div class="empty" style="margin-top:8px">' + esc(T('bt_unavailable', { error: e.message })) + '</div>'; }
   }
 
   function init() {

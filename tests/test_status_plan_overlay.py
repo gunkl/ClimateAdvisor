@@ -9,8 +9,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests.helpers.chart_i18n import chart_en, read_chart_js
+
 FE = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "frontend"
-MOD = (FE / "chart_v2.js").read_text(encoding="utf-8")
+MOD = read_chart_js()
 CSS = (FE / "chart_v2.css").read_text(encoding="utf-8")
 CLASSIC = (FE / "index.html").read_text(encoding="utf-8")
 NEW = (FE / "new_dashboard.html").read_text(encoding="utf-8")
@@ -62,7 +64,7 @@ def test_the_plan_is_read_from_the_timeline_endpoint_and_never_recomputed():
     for field in (
         "s.actor",
         "s.kind",
-        "s.text",
+        "_bk(s, 'text')",
         "s.confidence",
         "s.lead_minutes",
         "s.meta",
@@ -88,11 +90,16 @@ def test_list_window_ordering_and_hidden_kinds():
 
 def test_you_steps_carry_the_reminder_and_low_confidence_says_may_help():
     assert "s.actor === 'you'" in PLAN
-    assert "Reminder at " in PLAN and "s.lead_minutes * 60000" in PLAN  # decision DP-4: 30 minutes ahead
+    assert (
+        chart_en()["plan.reminder"] == "Reminder at {time}"
+        and "_t('plan.reminder'" in PLAN
+        and "s.lead_minutes * 60000" in PLAN
+    )  # decision DP-4: 30 minutes ahead
     assert "s.confidence === 'low'" in PLAN
-    assert PLAN.count("may help") >= 1  # decision C13
+    assert chart_en()["readout.may_help"] == "may help" and "escapeHtml('may help')" in PLAN  # decision C13
     # who does it is a word AND a shape, never colour alone
-    assert "(you ? 'You' : 'CA')" in PLAN
+    assert chart_en()["readout.actor_you"] == "You" and chart_en()["readout.actor_ca"] == "CA"
+    assert "you ? 'readout.actor_you' : 'readout.actor_ca'" in PLAN
     assert "M0 -6 L6 0 L0 6 L-6 0 Z" in PLAN and '<circle r="4.5"' in PLAN
     assert 'role="img"' not in PLAN  # the markers are decoration for the list that says the same in words
 
@@ -112,7 +119,7 @@ def test_the_module_adds_no_mechanism_words_to_the_plan_list():
 
 def test_plan_overlay_is_one_toggle_in_the_overlays_group_remembered_with_the_others():
     overlays = MOD[MOD.index("const overlays =") : MOD.index("const stripChips")]
-    assert "ovChip('ov:plan'" in overlays and "<span>Plan</span>" in overlays
+    assert "ovChip('ov:plan'" in overlays and chart_en()["ov.plan"] == "Plan" and "escapeHtml('Plan')" in overlays
     # it goes through the same toggle and storage path as every other chip (try/catch storage, per zone)
     # the stored key is per role since #1399 (_prefId), so an engine switch keeps the choice
     assert "if (id.startsWith('strip:'))" in MOD and "_chartPrefs.on[_prefId(id)] = !_isOn(id)" in MOD

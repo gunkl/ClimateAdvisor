@@ -22,13 +22,6 @@ import pytest  # noqa: E402
 from custom_components.climate_advisor.classifier import ForecastSnapshot  # noqa: E402
 
 
-@pytest.fixture(autouse=True)
-def _i18n_catalogs_loaded():
-    """Issue #1341: the backend renders occupant text from the catalogs on disk; load them (idempotent) per test."""
-    from custom_components.climate_advisor import i18n
-
-    i18n.load_catalogs()
-
 
 @pytest.fixture(autouse=True)
 def _reset_ha_dt():

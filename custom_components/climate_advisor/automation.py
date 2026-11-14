@@ -4647,7 +4647,7 @@ class AutomationEngine:
         while physically running) is actually turned off instead of reported ALREADY_IN_STATE.
         """
         result = await self._deactivate_fan(
-            reason=_R("reason_manual_override_ending_free_cooling", mode=mode),
+            reason=_R("reason_manual_override_ending_free_cooling", mode=str(mode)),
             restore_hvac=False,
             release_suppression=True,
             emit_event=False,
@@ -6593,7 +6593,7 @@ class AutomationEngine:
             # Read back later (Off direction included): did the thermostat actually take it?
             self._schedule_mode_alignment_recheck(_mode_seq)
             _LOGGER.info("Set HVAC mode to %s — %s role=%s", mode, reason, self.role)
-            self._record_action(_R("action_set_hvac", mode=mode), reason)
+            self._record_action(_R("action_set_hvac", mode=str(mode)), reason)
             # When taking HVAC offline, assert fan_mode=auto to clear any post-heat
             # blowdown state. Skip if nat-vent is active — clobbering fan_mode=on
             # while nat-vent is running silently stops cooling (Issue #134).
@@ -6725,7 +6725,7 @@ class AutomationEngine:
             self._last_mode_switch_result = HvacCommandResult.EXECUTED
         self._update_write_record(result=self._last_mode_switch_result)
         self._mode_switch_marker = (mode, dt_util.now())
-        self._record_action(_R("action_set_hvac", mode=mode), _R("reason_mode_switch_before_setpoint"))
+        self._record_action(_R("action_set_hvac", mode=str(mode)), _R("reason_mode_switch_before_setpoint"))
         if self._write_seq != my_seq:
             _LOGGER.info("Setpoint write superseded by a newer command during the mode switch — aborting")
             return False
@@ -7189,7 +7189,7 @@ class AutomationEngine:
         self._remote_exit_at = None  # any writer's setpoint ends the exit's wait for "the next band" (Issue #1194 c)
         if _call.ok:
             self._remote_write_failed_at = None  # a write went through: the outer loop's failed-write back-off is over
-        self._record_action(_R("action_set_temp", temp=i18n.Temp(temperature, unit), mode=mode), reason)
+        self._record_action(_R("action_set_temp", temp=i18n.Temp(temperature, unit), mode=str(mode)), reason)
         return HvacCommandResult.EXECUTED if _call.ok else HvacCommandResult.UNCONFIRMED
 
     # ------------------------------------------------------------------
@@ -8285,7 +8285,7 @@ class AutomationEngine:
             self._pre_pause_mode = mode
             with self._mode_change_context("pause"):
                 _off_result = await self._set_hvac_mode(
-                    "off", reason=_R("reason_pause_was_mode", reason=_nest(reason), mode=mode)
+                    "off", reason=_R("reason_pause_was_mode", reason=_nest(reason), mode=str(mode))
                 )
             if _off_result is HvacCommandResult.DRY_RUN:
                 # Issue #1293: observe-only sent nothing, so the HVAC keeps running and there is no pause to record.

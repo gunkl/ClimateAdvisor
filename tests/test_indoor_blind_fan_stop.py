@@ -664,7 +664,7 @@ class TestFanCardSuffix:
     def test_suffix_names_the_stop_time(self):
         stop_at = datetime(2026, 10, 9, 2, 30, tzinfo=UTC)
         out = self._suffix({"stop_at": stop_at, "session": "nat_vent", "since": _T0}, "active")
-        assert out == "active (indoor sensor offline — stops 02:30)"
+        assert out == "active (indoor sensor offline — stops 2:30 AM)"
 
     def test_alert_only_session_says_no_auto_stop(self):
         out = self._suffix({"stop_at": None, "session": "override", "since": _T0}, "running (manual override)")

@@ -76,6 +76,7 @@ def test_a_broken_catalog_does_not_stop_setup(breakage, tmp_path, monkeypatch, c
     ``async_setup_entry`` logs the reason and carries on; text then falls back to English, then to the key.
     """
     i18n.reset_catalogs()
+    i18n.set_strict(False)  # a broken catalog is the non-strict production path; the session fixture re-arms strict
     if breakage == "malformed_json":
         (tmp_path / "i18n").mkdir()
         (tmp_path / "i18n" / "index.json").write_text("{not json", encoding="utf-8")
@@ -95,5 +96,4 @@ def test_a_broken_catalog_does_not_stop_setup(breakage, tmp_path, monkeypatch, c
     assert errors and reason in errors[0]
     assert not i18n.catalogs_loaded()
     # rendering falls back (non-strict): the key itself, never an exception
-    i18n.set_strict(False)
     assert i18n.render(i18n.Msg("common.mode.heat", x=1), "de") == "common.mode.heat"

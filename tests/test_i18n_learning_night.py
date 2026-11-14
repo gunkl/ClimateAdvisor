@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -273,22 +273,22 @@ def test_api_payload_prose_and_msg_siblings(fr_catalog) -> None:
     [
         (
             "night_strategy.windows_open",
-            {"t": datetime(2026, 11, 6, 21, 5)},
+            {"t": datetime(2026, 11, 6, 21, 5, tzinfo=UTC)},
             "9:05 PM: open the bedroom windows; the outdoor air is cooler than the bedroom.",
         ),
         (
             "night_strategy.windows_close_predicted",
-            {"t": datetime(2026, 11, 7, 0, 0), "target": 67.0, "floor": 66.0},
+            {"t": datetime(2026, 11, 7, 0, 0, tzinfo=UTC), "target": 67.0, "floor": 66.0},
             "12:00 AM: close the bedroom windows (about when the bedroom reaches 67°F); CA keeps it at 66°F+.",
         ),
         (
             "night_strategy.fan_on",
-            {"t": datetime(2026, 11, 6, 22, 30), "fan": ns.FAN_WORD_HVAC},
+            {"t": datetime(2026, 11, 6, 22, 30, tzinfo=UTC), "fan": ns.FAN_WORD_HVAC},
             "10:30 PM: turn the HVAC fan on with the windows open to cool the bedroom.",
         ),
         (
             "night_strategy.fan_off",
-            {"t": datetime(2026, 11, 7, 1, 0), "fan": ns.FAN_WORD_WHOLE_HOUSE},
+            {"t": datetime(2026, 11, 7, 1, 0, tzinfo=UTC), "fan": ns.FAN_WORD_WHOLE_HOUSE},
             "1:00 AM: turn the whole-house fan off; CA takes over holding the bedroom.",
         ),
     ],

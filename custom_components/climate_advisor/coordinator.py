@@ -2298,8 +2298,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("hvac action watch failed", exc_info=True)
         try:  # Issues #1566-#1568: learn what this thermostat's fan modes do from its own reports
             self._tick_thermostat_profile()
+            self._thermostat_profile_tick_failed = False
         except Exception:  # noqa: BLE001 - learning must never break thermal sampling
-            _LOGGER.warning("Thermostat profile tick failed; thermal sampling continues", exc_info=True)
+            # WARNING once per failure streak, DEBUG while it continues (a persistent fault would flood every 5 min).
+            _log = _LOGGER.debug if getattr(self, "_thermostat_profile_tick_failed", False) else _LOGGER.warning
+            _log("Thermostat profile tick failed; thermal sampling continues", exc_info=True)
+            self._thermostat_profile_tick_failed = True
         self._sample_all_observations()
 
     def _refresh_outdoor_temp(self, min_delta_f: float = 0.0) -> None:
@@ -10707,7 +10711,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         try:
             entry = er.async_get(self.hass).async_get(entity)
             device_id = entry.device_id if entry is not None else None
-            if device_id:
+            if isinstance(device_id, str) and device_id:
                 device = dr.async_get(self.hass).async_get(device_id)
                 manufacturer = getattr(device, "manufacturer", None) if device is not None else None
                 model = getattr(device, "model", None) if device is not None else None
@@ -10748,8 +10752,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.warning(
                 "Thermostat changed: device=%s (was %s) -- %s; fan_modes=%s",
                 identity.label,
-                " ".join(p for p in ((previous.manufacturer, previous.model) if previous else ()) if p)
-                or "unknown device",
+                previous.identity.label if previous else "unknown device",
                 "restored the profile learned for it earlier" if change.kind == "restored" else "learning it fresh",
                 list(fan_modes or []),
             )
@@ -10763,7 +10766,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         action = attrs.get("hvac_action")
         if action not in (None, "") and store.note_reports_hvac_action():
             _LOGGER.info("Thermostat reports hvac_action: device=%s -- fan modes can be learned", identity.label)
-        kind = evidence_kind(action)
+        if str(action).strip().lower() == "fan" and store.note_reports_fan():
+            _LOGGER.info("Thermostat reports its blower (hvac_action=fan): device=%s", identity.label)
+        # Issue #1566 review H2: in fan_only/dry the system itself runs the blower, whatever the fan mode says.
+        kind = evidence_kind(action) if state.state not in ("fan_only", "dry") else None
         last = self._thermostat_profile_last_ts
         self._thermostat_profile_last_ts = now.timestamp()
         if kind is not None and isinstance(last, float):
@@ -10786,11 +10792,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         (through the engine's single accessor) and whether it has reported heating/cooling."""
         if identity is None:
             active = self._thermostat_profiles.active
-            identity = (
-                ThermostatIdentity(active.fingerprint, active.manufacturer, active.model)
-                if active is not None
-                else ThermostatIdentity(f"entity:{self.config.get('climate_entity')}")
-            )
+            entity_identity = ThermostatIdentity(f"entity:{self.config.get('climate_entity')}")
+            identity = active.identity if active is not None else entity_identity
         return ThermostatProfile(
             identity=identity,
             fan=self._fan_profile(),
@@ -10803,7 +10806,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         out = self.thermostat_profile().as_dict()
         out["archived_devices"] = [
             {
-                "device": " ".join(p for p in (a.manufacturer, a.model) if p) or None,
+                "device": a.identity.label,
                 "fan_modes": list(a.fan_modes),
                 "last_seen": a.last_seen,
             }

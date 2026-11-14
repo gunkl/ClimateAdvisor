@@ -8,8 +8,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ### Fixed
 - Fix #1556: Climate Advisor now works with thermostats whose fan modes have their own names, such as the Honeywell T6 Pro (`Auto low`, `Low`, `Circulation`).
   - **What you'll notice:** when Climate Advisor turns its fan off, a T6 Pro goes back to `Auto low`. Before, it was set to `Low`, which is fan **On** on that thermostat, so the blower ran for days. Thermal learning now records observations on these thermostats. Before, `Auto low` read as "fan running", every heating/cooling observation was thrown away, and confidence stayed at none.
-  - **Safety rule:** the fan-off command is never a mode that keeps the blower running. If no fan mode on your thermostat is safe to use for off, Climate Advisor sends nothing and logs a warning that says why.
-  - **Unchanged:** thermostats with a literal `auto`/`on` (Ecobee, Nest, most others) send the same values as before.
+  - **Safety rule:** the fan-off command is never a mode known to keep the blower running when your thermostat has an auto or off mode. A thermostat with only fan speeds keeps the old behaviour of using the lowest speed for off. If no fan mode is safe to use for off, Climate Advisor won't start its fan, and it logs a warning that says why.
+  - **Unchanged:** thermostats with a literal `auto`/`on` (Ecobee, Nest, most others) send the same values as before, unless their own reports show a mode does something different from its name.
 
 ### Added
 - Feat #1567: Climate Advisor learns what each fan mode actually does from your thermostat's own reports, so nothing needs configuring.

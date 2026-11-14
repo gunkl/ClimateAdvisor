@@ -2005,7 +2005,7 @@ Fans activate during natural ventilation and during the economizer (both phases 
 |---|---|---|
 | `disabled` | No action | No action |
 | `whole_house_fan` | `turn_on` the configured `fan_entity` (using the entity's own domain — `fan` or `switch`) | `turn_off` the configured `fan_entity` |
-| `hvac_fan` | `climate.set_fan_mode` → the thermostat's fan-on value (a literal `"on"`, else the highest named speed; subject to the `hvac_fan_restrict_mode` guard below) | `climate.set_fan_mode` → the thermostat's fan-off value (`"auto"`, else an `auto*`/`off` mode, e.g. `"Auto low"` on a T6 Pro; never a mode that runs the blower). Both come from the thermostat profile ([thermostat-profile-spec.md](thermostat-profile-spec.md), Issues #1556/#1566); no safe value = no command |
+| `hvac_fan` | `climate.set_fan_mode` → the thermostat's fan-on value (a literal `"on"`, else the highest named speed; subject to the `hvac_fan_restrict_mode` guard below) | `climate.set_fan_mode` → the thermostat's fan-off value (`"auto"`, else an `auto*`/`off` mode, e.g. `"Auto low"` on a T6 Pro; never a mode known to keep the blower running while an auto/off mode exists; a speeds-only list uses its lowest speed, #968). Both come from the thermostat profile ([thermostat-profile-spec.md](thermostat-profile-spec.md), Issues #1556/#1566); with no safe off value CA does not start the HVAC fan |
 | `both` (**not supported** — hidden from setup, #1175; out of scope for fixes) | Both `whole_house_fan` and `hvac_fan` actions (HVAC-fan leg subject to `hvac_fan_restrict_mode`; WHF leg unaffected) | Both deactivate actions |
 
 ### Fan Archetype Behavioral Contract (Issue #277)

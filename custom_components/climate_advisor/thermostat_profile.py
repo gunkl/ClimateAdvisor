@@ -67,7 +67,9 @@ def _norm(value: Any) -> str:
 
 
 def classify_fan_mode_name(value: Any) -> FanRole:
-    """The name guess for one fan-mode value (no evidence)."""
+    """The name guess for one fan-mode value (no evidence). ``None`` (no attribute at all) is unknown, as before."""
+    if value is None:
+        return FanRole.UNKNOWN
     name = _norm(value)
     if name in _OFF_NAMES:
         return FanRole.OFF
@@ -158,6 +160,7 @@ class FanProfile:
     on_value: str | None
     reports_hvac_action: bool = False
     problems: tuple[str, ...] = ()
+    reports_fan: bool = False  # the thermostat was seen reporting hvac_action == "fan" (it reports its blower)
 
     def role_of(self, value: Any) -> FanRole:
         """The role of a fan_mode value read from the entity (a value outside the list gets the name guess)."""
@@ -185,6 +188,7 @@ class FanProfile:
             self.off_value,
             self.on_value,
             self.reports_hvac_action,
+            self.reports_fan,
             self.problems,
         )
 
@@ -198,7 +202,8 @@ class FanProfile:
         problems = f" problems={list(self.problems)}" if self.problems else ""
         return (
             f"modes={list(self.modes)} roles=[{', '.join(parts)}] off={self.off_value!r} on={self.on_value!r}"
-            f" status={self.status} reports_hvac_action={self.reports_hvac_action}{problems}"
+            f" status={self.status} reports_hvac_action={self.reports_hvac_action} reports_fan={self.reports_fan}"
+            f"{problems}"
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -218,15 +223,20 @@ class FanProfile:
             "on_value": self.on_value,
             "status": self.status,
             "reports_hvac_action": self.reports_hvac_action,
+            "reports_fan": self.reports_fan,
             "problems": list(self.problems),
         }
 
 
-def _resolve_role(name_role: FanRole, observed: bool | None) -> tuple[FanRole, str]:
+def _resolve_role(name_role: FanRole, observed: bool | None, reports_fan: bool) -> tuple[FanRole, str]:
     if observed is None:
         return name_role, "name"
     if observed:
         return FanRole.ON, "observed"
+    if name_role is FanRole.ON and not reports_fan:
+        # Idle reports cannot demote an "on"-named mode on a thermostat never seen reporting its blower: some
+        # integrations derive hvac_action from heat/cool calls only and say "idle" while a continuous fan runs.
+        return name_role, "name"
     # Observed NOT continuous: keep a name that already says so; anything else behaves like auto.
     if name_role in (FanRole.AUTO, FanRole.OFF, FanRole.CIRCULATE):
         return name_role, "observed"
@@ -238,6 +248,7 @@ def build_fan_profile(
     evidence: dict[str, FanModeEvidence] | None = None,
     *,
     reports_hvac_action: bool = False,
+    reports_fan: bool = False,
 ) -> FanProfile:
     """Resolve every offered fan mode's role and pick the on/off values under the consistency rules.
 
@@ -254,7 +265,7 @@ def build_fan_profile(
     for mode in modes:
         name_role = classify_fan_mode_name(mode)
         ev = evidence.get(mode) or FanModeEvidence()
-        role, source = _resolve_role(name_role, ev.observed_runs_blower())
+        role, source = _resolve_role(name_role, ev.observed_runs_blower(), reports_fan)
         info[mode] = FanModeInfo(mode, role, source, name_role, ev.fan_min, ev.idle_min)
 
     problems: list[str] = []
@@ -292,7 +303,7 @@ def build_fan_profile(
         problems.append("no fan mode that leaves the blower idle")
     if modes and on_value is None:
         problems.append("no fan mode that runs the blower continuously")
-    return FanProfile(modes, info, off_value, on_value, reports_hvac_action, tuple(problems))
+    return FanProfile(modes, info, off_value, on_value, reports_hvac_action, tuple(problems), reports_fan)
 
 
 def role_of(value: Any, profile: Any = None) -> FanRole:
@@ -353,6 +364,11 @@ class StoredThermostat:
     evidence: dict[str, FanModeEvidence] = field(default_factory=dict)
     reports_hvac_action: bool = False
     last_seen: str | None = None
+    reports_fan: bool = False
+
+    @property
+    def identity(self) -> ThermostatIdentity:
+        return ThermostatIdentity(self.fingerprint, self.manufacturer, self.model)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -362,6 +378,7 @@ class StoredThermostat:
             "fan_modes": list(self.fan_modes),
             "evidence": {m: e.to_dict() for m, e in self.evidence.items()},
             "reports_hvac_action": self.reports_hvac_action,
+            "reports_fan": self.reports_fan,
             "last_seen": self.last_seen,
         }
 
@@ -383,6 +400,7 @@ class StoredThermostat:
             evidence={str(m): FanModeEvidence.from_dict(e) for m, e in ev.items()},
             reports_hvac_action=bool(data.get("reports_hvac_action", False)),
             last_seen=_s("last_seen"),
+            reports_fan=bool(data.get("reports_fan", False)),
         )
 
 
@@ -427,8 +445,8 @@ class ThermostatProfileStore:
         """Make ``identity`` the active thermostat and reconcile its offered fan-mode list.
 
         A new fingerprint starts a fresh profile ("new" on first use, "swapped" when it replaces another); a
-        fingerprint seen before is "restored" with its evidence. On the same fingerprint, evidence is kept for modes
-        still offered, removed modes are dropped, and new ones start with none ("modes_changed").
+        fingerprint seen before is "restored" with its evidence. On the same fingerprint the new list is recorded
+        ("modes_changed"); evidence is kept for every mode, offered or not, and new modes start with none.
         """
         modes = [str(m) for m in (fan_modes or ()) if m is not None]
         previous = self.active
@@ -451,8 +469,8 @@ class ThermostatProfileStore:
         if modes and modes != cur.fan_modes:
             added = tuple(m for m in modes if m not in cur.fan_modes)
             removed = tuple(m for m in cur.fan_modes if m not in modes)
-            for m in removed:
-                cur.evidence.pop(m, None)
+            # Evidence for a removed mode is KEPT (never wiped): some integrations offer a shorter list in some
+            # hvac modes or after a re-interview, and only offered modes are ever read.
             if kind == "none" and cur.fan_modes and (added or removed):
                 kind = "modes_changed"
             cur.fan_modes = list(modes)
@@ -469,6 +487,14 @@ class ThermostatProfileStore:
             return  # a value outside the advertised list: nothing to learn for the list
         cur.evidence.setdefault(mode, FanModeEvidence()).add(fan=fan, minutes=minutes)
 
+    def note_reports_fan(self) -> bool:
+        """Mark that the active thermostat reports its blower (hvac_action == "fan"); True the first time."""
+        cur = self.active
+        if cur is None or cur.reports_fan:
+            return False
+        cur.reports_fan = True
+        return True
+
     def note_reports_hvac_action(self) -> bool:
         """Mark that the active thermostat reports hvac_action; True the first time."""
         cur = self.active
@@ -483,6 +509,7 @@ class ThermostatProfileStore:
             fan_modes,
             cur.evidence if cur is not None else None,
             reports_hvac_action=bool(cur is not None and cur.reports_hvac_action),
+            reports_fan=bool(cur is not None and cur.reports_fan),
         )
 
     def _prune(self) -> None:

@@ -20,11 +20,11 @@ Each fan-mode value gets one `FanRole`:
 
 | Role | Meaning | Reads as blower running when… |
 |---|---|---|
-| `auto` | The blower runs only with a heat/cool call or the thermostat's own schedule | the thermostat reports `hvac_action == "fan"` |
+| `auto` | The blower runs only with a heat/cool call or the thermostat's own schedule | the thermostat reports `hvac_action == "fan"` (a heat/cool call is the equipment's run, not CA's fan) |
 | `off` | The blower is off | the thermostat reports `hvac_action == "fan"` |
-| `circulate` | The thermostat runs the blower part of the time by itself | `hvac_action == "fan"`; with no reported action (`""`), always (conservative) |
+| `circulate` | The thermostat runs the blower part of the time by itself | `hvac_action == "fan"` (as for auto, a heat/cool run is the equipment's, not CA's fan); with no reported action (`""`), always (conservative) |
 | `on` | The blower runs continuously (`on`, `continuous`, or a named speed) | always |
-| `unknown` | Nothing known | always (the pre-#1566 conservative read) |
+| `unknown` | Nothing known, including no `fan_mode` value at all (`None`) | always (the pre-#1566 conservative read) |
 
 **Name guess** (`classify_fan_mode_name`), used until there is evidence:
 
@@ -44,6 +44,8 @@ The coordinator's 5-minute thermal tick credits the minutes since the previous t
 - anything else carries no fan-mode evidence: heating/cooling (the blower runs then whatever the mode), `off`
   (some thermostats report `off` while a continuous fan runs, which would make an ON mode look idle), and a missing
   value
+- nothing at all is recorded while the thermostat's `hvac_mode` is `fan_only` or `dry`: the system runs the blower
+  itself then, so an hour of fan-only would otherwise teach "auto runs continuously"
 
 Nothing is inferred from temperatures. This follows the owner rule that a run exists only when the thermostat
 reports it.
@@ -54,7 +56,7 @@ A mode's observed role depends on its share of idle minutes:
 |---|---|
 | fewer than 30 minutes in total | none (the name guess stands) |
 | idle share ≤ 5 % | `on` (continuous) |
-| idle share ≥ 25 % | not continuous: the name role if it is auto/off/circulate, else `auto` |
+| idle share ≥ 25 % | not continuous: the name role if it is auto/off/circulate, else `auto`. An `on`-named mode is demoted only on a thermostat that has been seen reporting `hvac_action == "fan"` (`reports_fan`), because some integrations report `idle` while a continuous fan runs |
 | in between (e.g. an Ecobee fan-minimum-runtime) | none (the name guess stands) |
 
 **Aging:** at most 1,440 minutes per mode. New minutes past the cap scale the older evidence down first, so old
@@ -83,6 +85,11 @@ evidence fades only as new evidence arrives. Nothing ages out by time alone, and
 When there's no safe value, the result is `None`. The caller then sends nothing, and the coordinator logs
 `Fan control held back` (WARNING).
 
+**Activate/deactivate symmetry:** `_activate_fan()` refuses to start the HVAC fan when the profile has an on value
+but no off value (WARNING `Feature suppressed: HVAC fan not activated`), so CA never starts a blower it couldn't
+stop. If the off value disappears during a session (the profile changed), the deactivate logs a WARNING that the
+blower may still be running.
+
 `status` is one of:
 
 - `verified`: every value sent was observed;
@@ -101,7 +108,7 @@ device entry it falls back to `entity:<climate entity id>`. Both are read-only r
 | Change | Result | Log |
 |---|---|---|
 | first sight | new profile | INFO `Thermostat profile started` |
-| same device, mode list changed (firmware) | evidence kept for unchanged modes, removed modes dropped, new modes start empty | INFO `Thermostat fan modes changed` |
+| same device, mode list changed (firmware, a shorter list in some hvac modes, a re-interview) | the new list is used; evidence is kept for every mode, offered or not; new modes start empty | INFO `Thermostat fan modes changed` |
 | different device (replacement) | fresh profile; the previous one archived | WARNING `Thermostat changed … learning it fresh` |
 | a device seen before (swap back) | its profile restored | WARNING `Thermostat changed … restored the profile learned for it earlier` |
 
@@ -123,7 +130,8 @@ engine (headless tools) uses the name guess.
 ## Observability
 
 - **INFO `Thermostat profile: device=… hvac_modes=… fan: modes=[…] roles=[Low=on (observed fan=60m idle=0m), …] off='Auto low' on='Low' status=verified reports_hvac_action=True`**: logged once whenever a role, a sent value, a capability or a problem changes.
-- **INFO `Thermostat reports hvac_action`**: the first time it does.
+- **INFO `Thermostat reports hvac_action`** and **INFO `Thermostat reports its blower`**: the first time each
+  happens.
 - **WARNING** lines for a device change and for `Fan control held back`.
 - **Diagnostics** (`diagnostic_snapshot.thermostat_profile`, which also feeds the AI investigator footer): the device,
   capabilities, every mode's role, source, name guess and minutes, the sent values, status, problems and archived

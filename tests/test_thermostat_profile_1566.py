@@ -169,7 +169,7 @@ class TestEvidence:
 
     def test_a_speed_observed_idle_is_never_the_on_value(self):
         """A 'low' the thermostat reports idle in does not run the blower: CA cannot express fan-on with it."""
-        p = build_fan_profile(["auto", "low"], {"low": ev(0, 60)})
+        p = build_fan_profile(["auto", "low"], {"low": ev(0, 60)}, reports_fan=True)
         assert p.info["low"].role is FanRole.AUTO
         assert p.on_value is None
 
@@ -304,7 +304,7 @@ def test_fan_command_starts_blower():
     assert fan_command_starts_blower("Low") is True
     assert fan_command_starts_blower("on") is True
     assert fan_command_starts_blower("Auto low") is False
-    p = build_fan_profile(["auto", "low"], {"low": ev(0, 60)})
+    p = build_fan_profile(["auto", "low"], {"low": ev(0, 60)}, reports_fan=True)
     assert fan_command_starts_blower("low", p) is False
 
 
@@ -514,3 +514,79 @@ def test_t6_fan_sessions_end_on_auto_low_through_the_real_engine(name):
     assert set(sent) <= {"Auto low", "Low"}, sent
     assert "Auto low" in sent, f"fan-off never sent the auto variant: {sent}"
     assert sent[-1] == "Auto low" and result.engine_state.get("_fan_active") is False
+
+
+# ── Independent-review fixes (H1, H2, M1, M2, L1, L3, L4) ────────────────────────────────────────────────────
+def test_h1_ca_never_starts_a_blower_it_cannot_stop_through_the_real_engine():
+    """Mirror of #1556: with an on value but no off value, the real engine refuses to start the HVAC fan."""
+    for p in (str(_SIM.parent.parent), str(_SIM.parent)):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    from sim_harness.run_production import run_production_scenario
+
+    from custom_components.climate_advisor.automation import AutomationEngine
+
+    blocked = build_fan_profile(T6, {"Auto low": ev(120, 0)}, reports_fan=True)
+    assert blocked.on_value == "Low" and blocked.off_value is None
+    sc = json.loads(next(_SIM.glob("*/nat_vent_thermostat_cycling.json")).read_text())
+    sc["config"]["thermostat_fan_modes"] = T6
+    with patch.object(AutomationEngine, "_fan_profile", lambda self: blocked):
+        result = run_production_scenario(sc, use_coordinator=bool(sc.get("use_coordinator")))
+    assert [a for a in result.action_log if a["service"] == "set_fan_mode"] == []
+    assert result.engine_state.get("_fan_active") is False
+
+
+def test_h2_fan_only_time_teaches_nothing():
+    c = _coord({"fan_modes": ["auto", "on"], "fan_mode": "auto", "hvac_action": "fan"}, state="fan_only")
+    _ticks(c, 30, start=TestCoordinatorTick.T0)
+    assert c._thermostat_profiles.active.evidence == {}
+    assert c._fan_profile().off_value == "auto"
+
+
+def test_m1_idle_reports_cannot_demote_an_on_mode_on_a_thermostat_that_never_reports_its_blower():
+    p = build_fan_profile(["auto", "on"], {"on": ev(0, 120)})
+    assert p.info["on"].role is FanRole.ON and p.on_value == "on"
+    p = build_fan_profile(["auto", "on"], {"on": ev(0, 120)}, reports_fan=True)
+    assert p.info["on"].role is FanRole.AUTO
+
+
+def test_m1_through_the_tick_idle_with_fan_on_keeps_on():
+    """An integration that says 'idle' while its continuous fan runs (and never says 'fan') keeps 'on' working."""
+    c = _coord({"fan_modes": ["auto", "on"], "fan_mode": "on", "hvac_action": "idle"})
+    _ticks(c, 30, start=TestCoordinatorTick.T0)
+    p = c._fan_profile()
+    assert p.on_value == "on" and p.reports_fan is False
+    assert is_thermostat_fan_physically_active("on", "idle", profile=p) is True
+
+
+def test_m2_a_temporarily_shorter_list_keeps_the_evidence():
+    s = ThermostatProfileStore()
+    a = ThermostatIdentity("device:a")
+    s.select(a, T6, "t0")
+    s.record("Low", fan=True, minutes=60)
+    s.select(a, ["Auto low", "Circulation"], "t1")  # e.g. a re-interview reports a partial list
+    s.select(a, T6, "t2")
+    assert s.fan_profile(T6).info["Low"].source == "observed"
+
+
+def test_l1_a_missing_fan_mode_value_reads_as_unknown_running():
+    assert classify_fan_mode_name(None) is FanRole.UNKNOWN
+    assert is_thermostat_fan_physically_active(None, "idle") is True
+    assert is_thermostat_schedule_signal(None, "fan") is False
+
+
+def test_l3_a_non_string_device_id_falls_back_to_the_entity():
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    c = object.__new__(ClimateAdvisorCoordinator)
+    c.hass = MagicMock()
+    with patch("custom_components.climate_advisor.coordinator.er.async_get") as er_get:
+        er_get.return_value.async_get.return_value = types.SimpleNamespace(device_id=MagicMock())
+        assert ClimateAdvisorCoordinator._thermostat_identity(c, "climate.t").fingerprint == "entity:climate.t"
+
+
+def test_reports_fan_survives_a_restart():
+    s = ThermostatProfileStore()
+    s.select(ThermostatIdentity("device:a"), T6, "t0")
+    s.note_reports_fan()
+    assert ThermostatProfileStore.from_dict(s.to_dict()).fan_profile(T6).reports_fan is True

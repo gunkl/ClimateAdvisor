@@ -53,6 +53,10 @@ PRODUCTION_ALLOWLIST: dict[tuple[str, str], str] = {
     ): "read-only provider install, once in __init__ (#1517): the primary engine's house model for lead times",
     (
         "custom_components/climate_advisor/coordinator.py",
+        "_fan_profile_provider",
+    ): "read-only provider install, once in __init__ (#1566): this zone's learned thermostat fan profile",
+    (
+        "custom_components/climate_advisor/coordinator.py",
         "_command_observer",
     ): "observer install, once in __init__ (#1128 promises): sees every command, changes nothing",
     (

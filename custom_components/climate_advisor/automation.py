@@ -19284,8 +19284,23 @@ class AutomationEngine:
                             "most thermostats support fan circulation independent of heating/cooling"
                         )
                     _fan_modes_on = list(hvac_state.attributes.get("fan_modes") or []) if hvac_state else []
-                    _on_value = resolve_fan_mode_command(_fan_modes_on, "on", profile=self._fan_profile())
-                    if _on_value is None:
+                    _fan_profile_on = self._fan_profile()
+                    _on_value = resolve_fan_mode_command(_fan_modes_on, "on", profile=_fan_profile_on)
+                    # Issue #1566 (activate/deactivate mirror): never start a blower this thermostat gives CA no safe
+                    # way to stop -- the deactivate below would send nothing and the blower would run on unseen.
+                    _off_value_on = resolve_fan_mode_command(_fan_modes_on, "off", profile=_fan_profile_on)
+                    if _on_value is not None and _off_value_on is None:
+                        _cause = (self.climate_entity, tuple(_fan_modes_on), fan_mode, "no_off")
+                        _log_no_off = _LOGGER.debug if self._hvac_fan_no_on_logged_cause == _cause else _LOGGER.warning
+                        self._hvac_fan_no_on_logged_cause = _cause
+                        _log_no_off(
+                            "Feature suppressed: HVAC fan not activated -- no fan mode on this thermostat is known to "
+                            "leave the blower idle, so Climate Advisor could not turn it back off (fan_modes=%s, "
+                            "Issue #1566) -- %s",
+                            _fan_modes_on,
+                            reason,
+                        )
+                    elif _on_value is None:
                         # Issue #1205 (C-a): the economizer retries about twice an hour, so the same unchanged cause
                         # is an ERROR once and a DEBUG line after that. The cause is the thermostat, its offered
                         # fan_modes and the configured fan mode, so a different thermostat/config logs ERROR again;
@@ -20574,9 +20589,13 @@ class AutomationEngine:
                 _fan_modes_deact = list(_cs_deact.attributes.get("fan_modes") or []) if _cs_deact else []
                 _deact_value = resolve_fan_mode_command(_fan_modes_deact, "off", profile=self._fan_profile())
                 if _deact_value is None:
-                    _LOGGER.debug(
-                        "No safe off/auto fan_mode found in entity's fan_modes=%s — skipping deactivate command",
+                    # Issue #1566: activation is refused when no off value exists, so this is reached only if the
+                    # profile changed during the session -- loud, because the blower may still be running.
+                    _LOGGER.warning(
+                        "HVAC fan deactivate sent nothing: no fan mode on this thermostat is known to leave the blower "
+                        "idle (fan_modes=%s, Issue #1566) -- the blower may still be running — %s",
                         _fan_modes_deact,
+                        reason,
                     )
                 else:
                     await self._call_service_with_context(

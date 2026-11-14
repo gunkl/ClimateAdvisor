@@ -28,6 +28,7 @@ from .thermostat_profile import (
     IDLE_ROLES,
     FanProfile,
     build_fan_profile,
+    evidence_kind,
     fan_mode_runs_blower,
     role_of,
 )
@@ -42,7 +43,7 @@ def is_thermostat_schedule_signal(fan_mode_attr: str, hvac_action_attr: str, pro
     thermostat's schedule.
     """
     role = role_of(fan_mode_attr, profile)
-    return str(hvac_action_attr).strip().lower() == "fan" and role in IDLE_ROLES
+    return evidence_kind(hvac_action_attr) is True and role in IDLE_ROLES
 
 
 def fan_control_enabled(fan_mode: str) -> bool:
@@ -76,9 +77,10 @@ def resolve_fan_mode_command(
     The choice is :func:`thermostat_profile.build_fan_profile`'s, under its consistency rules (Issue #1556):
 
     ``intent="off"``: a literal ``auto``, then another ``auto*``/``off`` mode, then a mode the thermostat was
-    observed not to run continuously. Never a named speed or circulate mode -- on a Honeywell T6 Pro
-    (``["Auto low", "Low", "Circulation"]``) ``Low`` is fan ON, and the old ``auto, off, low`` fallback latched
-    the blower on every time CA turned its fan off.
+    observed not to run continuously, and only for a list with no auto/off mode at all the lowest named speed
+    (the #968 fallback). Never a circulate mode, and never a speed when an auto variant exists -- on a Honeywell T6
+    Pro (``["Auto low", "Low", "Circulation"]``) ``Low`` is fan ON, and the old ``auto, off, low`` preference
+    latched the blower on every time CA turned its fan off.
 
     ``intent="on"``: a literal ``"on"``, else the highest named speed tier present (high > medium > low), else
     any other mode that runs the blower. ``None`` means "cannot express this intent for this entity": callers

@@ -1285,6 +1285,10 @@ def pseudo(text: str) -> str:
                 chunk, i = argument(s, i)
                 out.append(chunk)
                 continue
+            if s.startswith("''", i):  # an escaped apostrophe is literal text, never a quote opener
+                out.append("''")
+                i += 2
+                continue
             q = quoted(s, i)
             if q is not None:
                 out.append(s[i:q])

@@ -340,20 +340,24 @@ def test_every_catalog_key_renders_in_en_xa_with_expansion():
                     (
                         eng.pseudo(text).format(**{n: "Sample" for n in names}),
                         text.format(**{n: "Sample" for n in names}),
+                        {},
                     )
                 ]
             else:
                 pseudo = eng.pseudo(text)
                 pairs = [
-                    (eng.format_message(pseudo, "en", p), eng.format_message(text, "en", p))
+                    (eng.format_message(pseudo, "en", p), eng.format_message(text, "en", p), p)
                     for p in checks.sample_param_sets(text)
                 ]
-            for out, plain in pairs:
+            for out, plain, params in pairs:
                 where = f"{area}: {key}"
                 assert out.startswith("[") and out.endswith("]"), where
                 if re.search("[A-Za-z]", plain.replace("Sample", "")):
                     assert "~" in out and len(out) > len(plain), where
                 leftover = out.replace("Sample", "")
+                for value in params.values():  # a sampled select value echoed by `other {{x}}` is data, not text
+                    if isinstance(value, str) and value:
+                        leftover = leftover.replace(value, "")
                 assert not re.search("[aeiouAEIOU]", leftover), f"{where}: unaccented English in {out!r}"
                 rendered += 1
     assert rendered >= 100
@@ -364,6 +368,9 @@ def test_every_catalog_key_renders_in_en_xa_with_expansion():
 def memory(tree, monkeypatch, tmp_path):  # noqa: F811
     monkeypatch.setattr(checks, "TM_PATH", tmp_path / "tm.json")
     monkeypatch.setattr(checks, "NOTES_DIR", tmp_path / "notes")
+    for path in tree[2].glob("*.json"):  # memory tests reason about the `common` area only
+        if path.stem != "en":
+            path.unlink()
     return tree
 
 

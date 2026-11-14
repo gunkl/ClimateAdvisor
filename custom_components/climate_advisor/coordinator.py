@@ -473,7 +473,6 @@ from .temperature import (
     display_delta,
     display_temp,
     find_temperature_crossing,
-    format_temp,
     format_temp_delta,
     ha_system_unit,
     is_sensor_stale,

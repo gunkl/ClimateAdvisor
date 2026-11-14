@@ -91,9 +91,10 @@ await check('failed catalog fetch never throws; falls back to the key', async ()
 
 await check('html lang and dir; rtl only for ar', async () => {
   const ar = loadRuntime({ hassLanguage: 'ar', files: FILES });
-  assert.equal(ar.attrs.lang, 'ar'); assert.equal(ar.attrs.dir, 'rtl'); assert.equal(ar.CAI18N.dir, 'rtl');
+  // <html dir> stays ltr until the logical-CSS work flips RTL_LAYOUT_READY (#1341 L9).
+  assert.equal(ar.attrs.lang, 'ar'); assert.equal(ar.attrs.dir, 'ltr'); assert.equal(ar.CAI18N.dir, 'rtl');
   await ar.CAI18N.init({});
-  assert.equal(ar.attrs.dir, 'rtl');
+  assert.equal(ar.attrs.dir, 'ltr');
   const de = loadRuntime({ hassLanguage: 'de' });
   assert.equal(de.attrs.lang, 'de'); assert.equal(de.attrs.dir, 'ltr');
 });

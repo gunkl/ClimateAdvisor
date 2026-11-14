@@ -38,7 +38,10 @@ def code_of(value: Any, default: str | None = None) -> str | None:
 
 def msg_of(value: Any) -> i18n.Msg | None:
     """The message of a status value, or None when it is plain text."""
-    return value.msg if isinstance(value, CodedText) else None
+    if isinstance(value, CodedText):
+        return value.msg
+    msg = getattr(value, "msg", None)  # other str subclasses that carry a message (CardText, MsgText)
+    return msg if isinstance(msg, i18n.Msg) else None
 
 
 def wire_of(value: Any) -> dict | None:

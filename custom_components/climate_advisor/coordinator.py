@@ -16423,7 +16423,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         def _decide(code: str, msg: i18n.Msg | str, *, warn: bool = False, **ctx: Any) -> CodedText:
             # ``msg`` is a catalog message, or plain text another module still produces (the timeline card).
-            result = CodedText(code, msg) if isinstance(msg, i18n.Msg) else CodedText(code, None, text=msg)
+            # A str subclass from another module (timeline_surfaces.CardText) carries its message on ``.msg``: keep it,
+            # because the harness's advises_opening (Q6) and the ``_msg`` sibling read the card's message key.
+            result = (
+                CodedText(code, msg)
+                if isinstance(msg, i18n.Msg)
+                else CodedText(code, getattr(msg, "msg", None), text=msg)
+            )
             ctx_str = " ".join(f"{k}={v}" for k, v in ctx.items())
             (_LOGGER.warning if warn else _LOGGER.info)("Next-action: %s (%s)", result, ctx_str)
             return result

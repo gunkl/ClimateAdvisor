@@ -11,7 +11,9 @@
      'climate_advisor_dashboard' key in this browser's localStorage ('classic' -> classic; unset, 'new', anything else,
      or storage unavailable -> new). '?classic=1' forces classic for that visit only. -->
 <style>html,body{margin:0;background:Canvas;color:CanvasText;font:14px system-ui,sans-serif}p{padding:16px}</style>
-<!-- Issue #1341: i18n runtime first (FormatJS, then CAI18N). This page only redirects, so it sets <html lang>/dir and fetches no catalogs. -->
+<!-- Issue #1341: i18n runtime first (FormatJS, then CAI18N). This page only redirects, so it sets <html lang>/dir and, only if the
+     redirect is still pending after a moment, fetches the dashboard catalog to word the waiting line. The <noscript> line is
+     plain English by necessity: with scripts off nothing can translate it. -->
 <script src="intl-messageformat.iife.js"></script>
 <script src="i18n.js"></script>
 <script>
@@ -25,11 +27,15 @@
   var target = chooseDashboard(pref, location.search) + (location.search || '') + (location.hash || '');
   window.__chooseDashboard = chooseDashboard;
   location.replace(target);
+  // the waiting line (normally never seen: replace() leaves this page at once); the timer dies with the page
+  setTimeout(function () {
+    if (window.CAI18N) CAI18N.init({ areas: ['dashboard'] }).then(function () { CAI18N.apply(document); });
+  }, 400);
 })();
 </script>
 </head>
 <body>
 <noscript><p><a href="new_dashboard.html">Open Climate Advisor</a> &middot; <a href="index.html">classic dashboard</a></p></noscript>
-<p>Opening Climate Advisor&hellip; <a href="new_dashboard.html">new dashboard</a> &middot; <a href="index.html">classic</a></p>
+<p><span data-i18n="dashboard.entry.opening">Opening Climate Advisor&hellip;</span> <a href="new_dashboard.html" data-i18n="dashboard.entry.new_dashboard">new dashboard</a> &middot; <a href="index.html" data-i18n="dashboard.entry.classic">classic</a></p>
 </body>
 </html>

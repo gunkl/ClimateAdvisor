@@ -195,7 +195,8 @@ try { localStorage.setItem('hassTokens', JSON.stringify({access_token:'mock-toke
 
   // Serve frontend JS files
   const jsFiles = ['/hammer.min.js', '/chart.umd.min.js', '/chartjs-plugin-zoom.min.js', '/chart_v2.js'];
-  const ndFiles = /^\/(nd_[a-z_]+\.(js|json)|pa_view\.js|chart_v2\.css|prediction_accuracy\.html|entry\.html)$/;
+  // Issue #1341: the i18n runtime and its catalogs (i18n/index.json, i18n/<area>/<lang>.json) are served like the other assets
+  const ndFiles = /^\/(nd_[a-z_]+\.(js|json)|pa_view\.js|chart_v2\.css|prediction_accuracy\.html|entry\.html|i18n\.js|intl-messageformat\.iife\.js|i18n\/index\.json|i18n\/[a-z]+\/[A-Za-z-]+\.json)$/;
   if (jsFiles.includes(pathname) || ndFiles.test(pathname)) {
     try {
       const filename = pathname.slice(1);

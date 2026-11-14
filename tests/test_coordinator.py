@@ -186,7 +186,7 @@ class TestComputeNextAction:
         result = _compute_next_action(
             c, {}, time(8, 0), indoor_temp=78.0, outdoor_temp=80.0, occupancy_mode=OCCUPANCY_VACATION
         )
-        assert result in mod._VACATION_ACTION_MESSAGES
+        assert result.msg in mod._VACATION_ACTION_MESSAGES  # Issue #1341: catalog messages (result is their English)
         assert "78" not in result
         assert "80" not in result
 
@@ -197,7 +197,7 @@ class TestComputeNextAction:
         result = _compute_next_action(
             c, {}, time(8, 0), indoor_temp=78.0, outdoor_temp=80.0, occupancy_mode=OCCUPANCY_AWAY
         )
-        assert result in mod._AWAY_ACTION_MESSAGES
+        assert result.msg in mod._AWAY_ACTION_MESSAGES  # Issue #1341: catalog messages (result is their English)
         assert "78" not in result
         assert "80" not in result
 
@@ -208,7 +208,7 @@ class TestComputeNextAction:
         first = _compute_next_action(c, {}, time(8, 0), occupancy_mode=OCCUPANCY_AWAY)
         second = _compute_next_action(c, {}, time(20, 0), occupancy_mode=OCCUPANCY_AWAY)
         assert first == second
-        assert first in mod._AWAY_ACTION_MESSAGES
+        assert first.msg in mod._AWAY_ACTION_MESSAGES  # Issue #1341: catalog messages (first is their English)
 
     def test_next_action_hot_morning_shows_threshold(self):
         """HOT day, morning opportunity, before 9 AM → threshold and cutoff time shown."""

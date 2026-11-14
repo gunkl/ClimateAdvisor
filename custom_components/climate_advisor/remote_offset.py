@@ -31,6 +31,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, NamedTuple
 
+from . import i18n
 from .const import (
     REMOTE_CONTEXT_SLEEP,
     REMOTE_OFFSET_CAP_C,
@@ -41,7 +42,7 @@ from .const import (
     REMOTE_OFFSET_STEP_F,
     REMOTE_OFFSET_WAIT_MARGIN_S,
 )
-from .temperature import UNIT_SYMBOL, convert_delta, display_delta, display_temp, from_fahrenheit
+from .temperature import convert_delta, display_delta, display_temp
 
 _EPS = 1e-6
 _F_PER_C = 9.0 / 5.0
@@ -324,107 +325,152 @@ class RemoteOffsetState(NamedTuple):
     note: str | None = None  # WAITING: "context_band"; CLEARING: "exit_grace" | "backing_off" (Issue #1194 c)
 
 
-# Why the loop is gated (keys ``AutomationEngine._remote_offset_gate_and_reason`` returns) -> short occupant text.
-GATE_REASON_TEXT: dict[str, str] = {
-    "occupant_change": "you changed the thermostat",
-    "override": "manual override",
-    "away": "away mode",
-    "door_window_pause": "paused for an open window or door",
-    "fan": "fan running",
-    "window_open": "window or door open",
-    "debounce": "window or door just opened",
+# Why the loop is gated (keys ``AutomationEngine._remote_offset_gate_and_reason`` returns) -> catalog key (Issue #1341).
+GATE_REASON_KEYS: dict[str, str] = {
+    "occupant_change": "status.remote_offset.gate_occupant_change",
+    "override": "status.remote_offset.gate_override",
+    "away": "status.remote_offset.gate_away",
+    "door_window_pause": "status.remote_offset.gate_door_window_pause",
+    "fan": "status.remote_offset.gate_fan",
+    "window_open": "status.remote_offset.gate_window_open",
+    "debounce": "status.remote_offset.gate_debounce",
 }
 
-_CONTEXT_LABELS: dict[str, str] = {REMOTE_CONTEXT_SLEEP: "Bedroom"}
+_CONTEXT_LABEL_KEYS: dict[str, str] = {REMOTE_CONTEXT_SLEEP: "status.remote_offset.label_bedroom"}
 # The band the context starts on (the WAITING text): the sleep window's is written by the bedtime routine.
-_CONTEXT_BAND_TEXT: dict[str, str] = {REMOTE_CONTEXT_SLEEP: "the bedtime setting"}
+_CONTEXT_BAND_KEYS: dict[str, str] = {REMOTE_CONTEXT_SLEEP: "status.remote_offset.band_bedtime"}
 
-_ACTIVE_NOTE: dict[str, str] = {
-    "raised": "raising",
-    "awaiting_startup": "waiting for the thermostat to start",
-    "equipment_running": "heating/cooling running",
-    "stepped_down": "easing off",
+_ACTIVE_NOTE_KEYS: dict[str, str] = {
+    "raised": "status.remote_offset.note_raising",
+    "awaiting_startup": "status.remote_offset.note_awaiting_startup",
+    "equipment_running": "status.remote_offset.note_equipment_running",
+    "stepped_down": "status.remote_offset.note_stepped_down",
 }
+
+
+def context_label_msg(context: str | None) -> i18n.Msg:
+    """The sensor's label as a message: "Bedroom" for the sleep sensor, else "Remote sensor"."""
+    return i18n.Msg(_CONTEXT_LABEL_KEYS.get(context or "", "status.remote_offset.label_remote"))
 
 
 def context_label(context: str | None) -> str:
-    return _CONTEXT_LABELS.get(context or "", "Remote sensor")
+    return i18n.render_en(context_label_msg(context))
 
 
-def _temp_text(value_f: float, unit: str) -> str:
-    return f"{round(from_fahrenheit(value_f, unit))}{UNIT_SYMBOL.get(unit, '°F')}"
-
-
-def _gap_text(delta_f: float, unit: str) -> str:
+def _gap_msg(delta_f: float, unit: str) -> i18n.Msg:
     """A temperature gap as plain degrees, unsigned and without the unit letter: "4°", "2.2°" (Issue #1399).
 
     A gap is never written like a reading ("+4°F", "-2°C"): scale-only conversion, no -32 offset, no sign.
     """
     shown = round(convert_delta(abs(delta_f), unit), 1)
-    return f"{shown:.0f}°" if shown == int(shown) else f"{shown:.1f}°"
+    if shown == int(shown):
+        return i18n.Msg("status.remote_offset.gap_whole", n=int(shown))
+    return i18n.Msg("status.remote_offset.gap_frac", n=shown)
 
 
-def _delta_text(delta_f: float, unit: str) -> str:
+def _delta_msg(delta_f: float, unit: str) -> i18n.Msg:
     """The offset as a gap from the room's target: "4° above the target" / "1° below the target"."""
-    return f"{_gap_text(delta_f, unit)} {'above' if delta_f >= 0 else 'below'} the target"
+    key = "status.remote_offset.delta_above" if delta_f >= 0 else "status.remote_offset.delta_below"
+    return i18n.Msg(key, gap=_gap_msg(delta_f, unit))
 
 
-def remote_offset_text(st: RemoteOffsetState, unit: str) -> str | None:
-    """The one occupant-facing sentence for the loop, or None when there is nothing worth saying.
+def remote_offset_msg(st: RemoteOffsetState, unit: str) -> i18n.Msg | None:
+    """The one occupant-facing sentence for the loop as a message, or None when there is nothing worth saying.
 
-    Example: "Bedroom 66°F target - thermostat set 70°F (4° above the target, clamped at the 4° cap)". The comfort
-    target is the room's target; the thermostat's number is only what the loop commands to get there. It is never a
-    comfort-band change and never the #402 disagreement wording.
+    English example: "Bedroom 66°F target - thermostat set 70°F (4° above the target, clamped at the 4° cap)". The
+    comfort target is the room's target; the thermostat's number is only what the loop commands to get there. It is
+    never a comfort-band change and never the #402 disagreement wording.
     """
-    label = context_label(st.context)
+    label = context_label_msg(st.context)
     if st.state is RemoteLoopState.INACTIVE:
         return None
     if st.state is RemoteLoopState.STALE:
         # Not "thermostat at the plain target": an owner may hold it, or the plain write may not have gone through.
-        return f"{label} sensor not reporting - offset not in use"
+        return i18n.Msg("status.remote_offset.stale", label=label)
     if st.state is RemoteLoopState.WAITING:
-        band = _CONTEXT_BAND_TEXT.get(st.context or "", "the room's own setting")
-        return f"{label} offset starting: waiting for {band}"
+        band = i18n.Msg(_CONTEXT_BAND_KEYS.get(st.context or "", "status.remote_offset.band_own"))
+        return i18n.Msg("status.remote_offset.waiting", label=label, band=band)
     if st.state is RemoteLoopState.CLEARING:
-        why = "clearing, retrying after a refused write" if st.note == "backing_off" else "clearing"
-        if st.commanded_f is None or st.offset_f is None or abs(st.offset_f) <= _EPS:
-            return f"{label} offset ending: {why}"
-        return (
-            f"{label} offset ending - thermostat still set {_temp_text(st.commanded_f, unit)}"
-            f" ({_delta_text(st.offset_f, unit)}, {why})"
+        why = i18n.Msg(
+            "status.remote_offset.why_retrying" if st.note == "backing_off" else "status.remote_offset.why_clearing"
         )
-    reason = GATE_REASON_TEXT.get(st.gate_reason or "", st.gate_reason or "")
+        if st.commanded_f is None or st.offset_f is None or abs(st.offset_f) <= _EPS:
+            return i18n.Msg("status.remote_offset.clearing", label=label, why=why)
+        return i18n.Msg(
+            "status.remote_offset.clearing_set",
+            label=label,
+            commanded=i18n.Temp(st.commanded_f, unit),
+            delta=_delta_msg(st.offset_f, unit),
+            why=why,
+        )
+    gate = st.gate_reason or ""
+    reason: i18n.Msg | None = None
+    if gate:
+        reason = (
+            i18n.Msg(GATE_REASON_KEYS[gate])
+            if gate in GATE_REASON_KEYS
+            else i18n.Msg("status.remote_offset.gate_other", reason=gate)
+        )
     if st.state is RemoteLoopState.GATED:
-        return f"{label} offset off: {reason}" if reason else f"{label} offset off"
+        if reason is not None:
+            return i18n.Msg("status.remote_offset.gated", label=label, reason=reason)
+        return i18n.Msg("status.remote_offset.gated_plain", label=label)
     if st.comfort_target_f is None or st.commanded_f is None or st.offset_f is None:
-        return f"{label} offset held: {reason}" if st.state is RemoteLoopState.FROZEN and reason else None
+        if st.state is RemoteLoopState.FROZEN and reason is not None:
+            return i18n.Msg("status.remote_offset.held", label=label, reason=reason)
+        return None
     if abs(st.offset_f) <= _EPS and st.state is not RemoteLoopState.CLAMPED:
         return None  # no offset in force and nothing blocked: the thermostat simply sits at the target
-    head = f"{label} {_temp_text(st.comfort_target_f, unit)} target - thermostat set {_temp_text(st.commanded_f, unit)}"
-    amount = _delta_text(st.offset_f, unit) if abs(st.offset_f) > _EPS else "no offset"
+    amount = _delta_msg(st.offset_f, unit) if abs(st.offset_f) > _EPS else i18n.Msg("status.remote_offset.amount_none")
     if st.state is RemoteLoopState.FROZEN:
-        note = f"held, {reason}" if reason else "held"
+        note = (
+            i18n.Msg("status.remote_offset.note_held_reason", reason=reason)
+            if reason is not None
+            else i18n.Msg("status.remote_offset.note_held")
+        )
     elif st.state is RemoteLoopState.CLAMPED:
         if st.clamp_limit is ClampLimit.BAND_EDGE:
-            edge = "ceiling" if st.mode == "heat" else "floor"
-            note = f"clamped at the comfort band {edge}"
+            note = i18n.Msg("status.remote_offset.note_clamped_band", edge="ceiling" if st.mode == "heat" else "floor")
         else:
-            note = f"clamped at the {_gap_text(st.cap_limit_f, unit)} cap"
+            note = i18n.Msg("status.remote_offset.note_clamped_cap", gap=_gap_msg(st.cap_limit_f, unit))
     elif st.state is RemoteLoopState.ACTIVE:
-        note = _ACTIVE_NOTE.get(st.last_reason or "", "adjusting")
+        note = i18n.Msg(_ACTIVE_NOTE_KEYS.get(st.last_reason or "", "status.remote_offset.note_adjusting"))
     else:
-        note = "holding"
-    return f"{head} ({amount}, {note})"
+        note = i18n.Msg("status.remote_offset.note_holding")
+    return i18n.Msg(
+        "status.remote_offset.main",
+        label=label,
+        target=i18n.Temp(st.comfort_target_f, unit),
+        commanded=i18n.Temp(st.commanded_f, unit),
+        amount=amount,
+        note=note,
+    )
 
 
-def remote_offset_view(st: RemoteOffsetState, unit: str) -> dict[str, Any]:
-    """``RemoteOffsetState`` in the user's display unit, plus the sentence: the payload Status/AI/diagnostics share."""
+def remote_offset_text(st: RemoteOffsetState, unit: str, lang: str | None = None) -> str | None:
+    """The sentence of ``remote_offset_msg`` in ``lang`` (English by default: the AI context and diagnostics)."""
+    msg = remote_offset_msg(st, unit)
+    if msg is None:
+        return None
+    return i18n.render(msg, lang) if lang else i18n.render_en(msg)
+
+
+def remote_offset_view(st: RemoteOffsetState, unit: str, lang: str | None = None) -> dict[str, Any]:
+    """``RemoteOffsetState`` in the user's display unit, plus the sentence: the payload Status/AI/diagnostics share.
+
+    ``lang`` (Issue #1341): the language of ``text`` and ``context_label`` (the status API passes the backend
+    language); the default is English, which the AI context and the diagnostic footer read. ``text_msg`` and
+    ``context_label_msg`` are the same wording as ``{key, params}`` wire messages for a viewer's own language.
+    """
     offset = st.offset_f
+    _label_msg = context_label_msg(st.context)
+    _text_msg = remote_offset_msg(st, unit)
     return {
         "state": st.state.value,
         "detail": (st.clamp_limit.value if st.clamp_limit is not None else st.gate_reason or st.note),
         "context": st.context,
-        "context_label": context_label(st.context),
+        "context_label": i18n.render(_label_msg, lang) if lang else i18n.render_en(_label_msg),
+        "context_label_msg": _label_msg.to_wire(),
         "mode": st.mode,
         "comfort_target": display_temp(st.comfort_target_f, unit),
         "commanded": display_temp(st.commanded_f, unit),
@@ -447,11 +493,12 @@ def remote_offset_view(st: RemoteOffsetState, unit: str) -> dict[str, Any]:
         "remote_reading": display_temp(st.remote_value_f, unit),
         "remote_reading_age_s": None if st.remote_age_s is None else round(st.remote_age_s),
         "unit": unit,
-        "text": remote_offset_text(st, unit),
+        "text": (None if _text_msg is None else i18n.render(_text_msg, lang) if lang else i18n.render_en(_text_msg)),
+        "text_msg": _text_msg.to_wire() if _text_msg is not None else None,
     }
 
 
-def remote_offset_view_for(engine: Any, unit: str) -> dict[str, Any] | None:
+def remote_offset_view_for(engine: Any, unit: str, lang: str | None = None) -> dict[str, Any] | None:
     """The view for an engine, or None when it has no remote sensor / is not an engine (tolerant of stubs)."""
     getter = getattr(engine, "remote_offset_state", None)
     if not callable(getter):
@@ -460,7 +507,7 @@ def remote_offset_view_for(engine: Any, unit: str) -> dict[str, Any] | None:
         st = getter()
     except Exception:  # noqa: BLE001 - a status read must never break the endpoint
         return None
-    return remote_offset_view(st, unit) if isinstance(st, RemoteOffsetState) else None
+    return remote_offset_view(st, unit, lang) if isinstance(st, RemoteOffsetState) else None
 
 
 def remote_offset_lines(view: dict[str, Any]) -> list[str]:

@@ -43,7 +43,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import cycle_model, log_capture, prediction_engines, v4_shadow, window_span
+from . import cycle_model, i18n, log_capture, prediction_engines, v4_shadow, window_span
 from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
@@ -62,8 +62,9 @@ from .automation import (
     compute_bedtime_setback,
     compute_pre_cool_target,
     fallback_edges_without_classification,
+    hold_after_msg,
     hold_after_text,
-    hold_sentence,
+    hold_sentence_msg,
     hvac_outcome_label,
     pre_cool_sleep_window_config,
     pre_cool_waking_date,
@@ -450,6 +451,7 @@ from .setpoint_combinations import (
     vacation_edges,
 )
 from .state import StatePersistence
+from .status_text import CodedText, code_of, fan_status_text, msg_of, wire_of
 from .storage_paths import resolve_entry_scoped_path, split_shared_list_file
 from .swing import (
     build_swing_audit_record,
@@ -553,14 +555,15 @@ _ENTITY_HEALTH_REMINDER_SECONDS: float = 24 * 60 * 60
 # for manual thermostat overrides, which never populate _last_action_reason at all). An
 # unmapped/unknown trigger falls back to no cause segment rather than leaking a raw internal
 # string like "sensor_closed_resume" onto the UI.
+# Issue #1341: the values are catalog keys (status area), rendered in the viewer's language.
 _GRACE_TRIGGER_LABELS: Final[dict[str, str]] = {
-    "fan_manual_override": "WHF override",
-    "fan_off": "WHF turned off",
-    "dashboard_resume": "resumed from pause",
-    "physical_drift_correction": "fan drift correction",
-    "override_confirmed": "thermostat override",
-    "sensor_closed_resume": "door/window closed",
-    "nat_vent_exit_resume": "nat-vent exit",
+    "fan_manual_override": "status.grace_cause.fan_manual_override",
+    "fan_off": "status.grace_cause.fan_off",
+    "dashboard_resume": "status.grace_cause.dashboard_resume",
+    "physical_drift_correction": "status.grace_cause.physical_drift_correction",
+    "override_confirmed": "status.grace_cause.override_confirmed",
+    "sensor_closed_resume": "status.grace_cause.sensor_closed_resume",
+    "nat_vent_exit_resume": "status.grace_cause.nat_vent_exit_resume",
 }
 
 # Registered exceptions to the Status Card Ontology's "Next Automation must not
@@ -617,9 +620,32 @@ _OCCUPANCY_TOGGLE_KEYS: Final[tuple[str, ...]] = (CONF_HOME_TOGGLE, CONF_VACATIO
 
 # Issue #1455: what each humidity role is called in its source-change line and Activity row.
 _HUMIDITY_ROLE_SUBJECT: Final[dict[str, str]] = {
-    ROLE_INDOOR_DAY: "room humidity",
-    ROLE_INDOOR_SLEEP: "bedroom humidity",
-    ROLE_OUTDOOR: "outdoor humidity",
+    ROLE_INDOOR_DAY: "status.humidity_subject.indoor_day",
+    ROLE_INDOOR_SLEEP: "status.humidity_subject.indoor_sleep",
+    ROLE_OUTDOOR: "status.humidity_subject.outdoor",
+}
+# Issue #1341: source role / kind / reason codes -> catalog keys (log and Activity text; the logs render English).
+_SOURCE_ROLE_KEYS: Final[dict[str, str]] = {
+    "sleep_sensor": "status.source_role.sleep_sensor",
+    "finer_sensor": "status.sensor_role.finer_sensor",
+    "thermostat": "status.sensor_role.thermostat",
+    "dedicated_sensor": "status.source_role.dedicated_sensor",
+}
+_COMPANION_REASON_KEYS: Final[dict[str, str]] = {
+    "unavailable": "status.indoor_source.reason_unavailable",
+    "stale": "status.indoor_source.reason_stale",
+    "implausible": "status.indoor_source.reason_implausible",
+    "ambiguous": "status.indoor_source.reason_ambiguous",
+    "entity_missing": "status.indoor_source.reason_entity_missing",
+    "non_numeric": "status.indoor_source.reason_non_numeric",
+    "non_finite": "status.indoor_source.reason_non_finite",
+    "not_proven": "status.indoor_source.reason_not_proven",
+}
+_HUMIDITY_KIND_KEYS: Final[dict[str, str]] = {
+    "chosen": "status.humidity_kind.chosen",
+    "weather_service": "status.humidity_kind.weather_service",
+    "thermostat": "status.humidity_kind.thermostat",
+    "device_sensor": "status.humidity_kind.device_sensor",
 }
 
 
@@ -647,31 +673,31 @@ class _PendingFanRemoteBurst:
 # Next User Action flavor text for occupancy modes where there's nothing for the
 # occupant to do (Issue #527). Date-seeded rotation (see _pick_daily_line()) picks
 # one line per calendar day so the dashboard doesn't flicker between refreshes.
-_AWAY_ACTION_MESSAGES: tuple[str, ...] = (
-    "You're away. The house is holding steady.",
-    "Away mode: nothing needs you right now.",
-    "No action needed. The thermostat has it handled.",
-    "You're away — temperature's stable, no news is good news.",
-    "Nothing to do. The house is behaving.",
-    "You're away — the house says it's fine, promise.",
-    "We've got the house-sitting covered.",
-    "Away and comfortable. Go enjoy wherever you are.",
-    "Nothing to do — even the thermostat's taking it easy.",
-    "Away mode: the house is behaving better than usual.",
+_AWAY_ACTION_MESSAGES: tuple[i18n.Msg, ...] = (
+    i18n.Msg("status.next_action_away_1"),
+    i18n.Msg("status.next_action_away_2"),
+    i18n.Msg("status.next_action_away_3"),
+    i18n.Msg("status.next_action_away_4"),
+    i18n.Msg("status.next_action_away_5"),
+    i18n.Msg("status.next_action_away_6"),
+    i18n.Msg("status.next_action_away_7"),
+    i18n.Msg("status.next_action_away_8"),
+    i18n.Msg("status.next_action_away_9"),
+    i18n.Msg("status.next_action_away_10"),
 )
 # Issue #1369: no "deep" here -- with the #1347 separate vacation setpoints a vacation band can be
 # as mild as (or milder than) away, so these lines only claim what is always true.
-_VACATION_ACTION_MESSAGES: tuple[str, ...] = (
-    "Vacation mode: your vacation temperatures are set, nothing for you to do.",
-    "On vacation. The thermostat is unbothered.",
-    "Vacation temperatures active — the house is coasting.",
-    "Nothing needed here. Go be on vacation.",
-    "Setback engaged. This message is the only work being done.",
-    "Vacation mode — the house is on autopilot, saving you money while you're gone.",
-    "Go have fun. The thermostat's got the boring part.",
-    "On vacation — sit back, we're saving energy for you.",
-    "Vacation temperatures engaged. The house is basically hibernating politely.",
-    "Vacation: lights out, temps relaxed, wallet happy.",
+_VACATION_ACTION_MESSAGES: tuple[i18n.Msg, ...] = (
+    i18n.Msg("status.next_action_vacation_1"),
+    i18n.Msg("status.next_action_vacation_2"),
+    i18n.Msg("status.next_action_vacation_3"),
+    i18n.Msg("status.next_action_vacation_4"),
+    i18n.Msg("status.next_action_vacation_5"),
+    i18n.Msg("status.next_action_vacation_6"),
+    i18n.Msg("status.next_action_vacation_7"),
+    i18n.Msg("status.next_action_vacation_8"),
+    i18n.Msg("status.next_action_vacation_9"),
+    i18n.Msg("status.next_action_vacation_10"),
 )
 
 
@@ -845,7 +871,7 @@ def _coordinator_label(coordinator: Any) -> str:
     return f"Climate Advisor coordinator {_instance_tag(coordinator)}"
 
 
-def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
+def _pick_daily_line(pool: tuple[Any, ...], salt: str) -> Any:
     """Deterministically pick one line from ``pool`` per calendar day.
 
     Stable across repeated calls within the same day (no flicker on the ~30-min
@@ -855,6 +881,138 @@ def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
     today = dt_util.now().date().isoformat()
     index = int(hashlib.sha256(f"{today}:{salt}".encode()).hexdigest(), 16) % len(pool)
     return pool[index]
+
+
+# Issue #1341: automation-status code -> catalog key (one literal per key, so the key audit sees every use).
+_AUTO_STATUS_KEYS: Final[dict[str, str]] = {
+    "disabled": "status.auto.disabled",
+    "starting_weather": "status.auto.starting_weather",
+    "starting_init": "status.auto.starting_init",
+    "windows_planned": "status.auto.windows_planned",
+    "nat_vent": "status.auto.nat_vent",
+    "nat_vent_soft_start": "status.auto.nat_vent_soft_start",
+    "paused_away": "status.auto.paused_away",
+    "paused_vacation": "status.auto.paused_vacation",
+    "paused_door_window": "status.auto.paused_door_window",
+    "override_pending": "status.auto.override_pending",
+    "override_stuck": "status.auto.override_stuck",
+    "resumed_door_window": "status.auto.resumed_door_window",
+    "grace_period": "status.auto.grace_period",
+    "tou_precondition": "status.auto.tou_precondition",
+    "tou_high_cost": "status.auto.tou_high_cost",
+    "tou_high_cost_idle": "status.auto.tou_high_cost_idle",
+    "active_vacation": "status.auto.active_vacation",
+    "active_away": "status.auto.active_away",
+    "active_guest": "status.auto.active_guest",
+    "active": "status.auto.active",
+}
+
+
+_SENSOR_ROLE_KEYS: Final[dict[str, str]] = {
+    "finer_sensor": "status.sensor_role.finer_sensor",
+    "thermostat": "status.sensor_role.thermostat",
+    "bedroom_sensor": "status.sensor_role.bedroom_sensor",
+    "room_sensor": "status.sensor_role.room_sensor",
+}
+
+
+# Issue #1341: promise key -> the Debug tab's label (catalog key).
+_PROMISE_LABEL_KEYS: Final[dict[str, str]] = {
+    "settling_flip": "status.promise.settling_flip",
+    "ac_whf_mutex": "status.promise.ac_whf_mutex",
+    "observe_only_silence": "status.promise.observe_only_silence",
+    "override_respected": "status.promise.override_respected",
+    "no_blind_fan_start": "status.promise.no_blind_fan_start",
+    "blind_fan_continue": "status.promise.blind_fan_continue",
+    "mode_flip_rate": "status.promise.mode_flip_rate",
+    "comfort_kept": "status.promise.comfort_kept",
+    "whf_sealed": "status.promise.whf_sealed",
+    "heat_cool_settles": "status.promise.heat_cool_settles",
+}
+
+
+def _clock(value: datetime | time) -> i18n.Time:
+    """A wall-clock ``i18n.Time`` param for a datetime (shown in local time) or a bare ``time`` (today's date)."""
+    if isinstance(value, datetime):
+        return i18n.Time(dt_util.as_local(value))
+    now = dt_util.now()
+    return i18n.Time(datetime.combine(now.date(), value, tzinfo=now.tzinfo))
+
+
+def _fan_status_coded(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Return a fan-status computation's token as a ``CodedText`` (None stays None): the same English string, plus
+    the stable code and the message. A decorator, so the computation reads as before (Issue #1341)."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> CodedText | None:
+        token = fn(*args, **kwargs)
+        return fan_status_text(token) if token is not None else None
+
+    return wrapper
+
+
+def _msg_wire(msg: Any) -> dict | None:
+    """``Msg.to_wire()`` of a row's message, or None (a row without one, or an older row type; Issue #1341)."""
+    return msg.to_wire() if isinstance(msg, i18n.Msg) else None
+
+
+def _invariant_rows(violations: Any) -> list[dict[str, Any]]:
+    """Status-payload rows for the invariant violations, with the ``detail_msg`` wire sibling (Issue #1341)."""
+    return [
+        {"invariant": v.name, "detail": v.detail, "detail_msg": _msg_wire(getattr(v, "detail_msg", None))}
+        for v in violations
+    ]
+
+
+def _entity_health_rows(issues: Any) -> list[dict[str, Any]]:
+    """Status-payload rows for the entity-health issues, with ``friendly_name_msg`` / ``detail_msg`` siblings."""
+    return [
+        {
+            "config_key": i.config_key,
+            "entity_id": i.entity_id,
+            "friendly_name": i.friendly_name,
+            "friendly_name_msg": _msg_wire(getattr(i, "friendly_name_msg", None)),
+            "criticality": i.criticality,
+            "status": i.status,
+            "detail": i.detail,  # Issue #1181: what Climate Advisor is doing about it
+            "detail_msg": _msg_wire(getattr(i, "detail_msg", None)),
+        }
+        for i in issues
+    ]
+
+
+def _clock_text(value: datetime | time) -> CodedText:
+    """A clock time as status text (``status.clock``): the English text is ``3:45 PM``; ``msg`` follows the language."""
+    return CodedText("clock", i18n.Msg("status.clock", t=_clock(value)))
+
+
+def _label_text(label: i18n.Msg | str) -> CodedText:
+    """An automation-candidate label (a catalog message, or plain text the timeline still produces) as status text."""
+    if isinstance(label, i18n.Msg):
+        return CodedText(label.key.rsplit(".", 1)[-1], label)
+    return CodedText("timeline_step", None, text=str(label))
+
+
+def _fan_status_compound(status: str | None, *, rate: Any = "", blind: Any = "") -> CodedText | None:
+    """A fan-card value (a ``fan_status`` token) plus the rate-limit / indoor-blind notes (Issue #1341).
+
+    The result IS the English text (token + notes); ``code`` is the token's code; ``msg`` renders token and notes
+    in the viewer's language. A plain-string input (tests, legacy) is looked up in the token table.
+    """
+    if status is None:
+        return None
+    base = status if isinstance(status, CodedText) else fan_status_text(status)
+    rate_msg = msg_of(rate) or ""
+    blind_msg = blind if isinstance(blind, i18n.Msg) else (msg_of(blind) or "")
+    if not rate_msg and not blind_msg:
+        return base
+    if base.msg is None:  # a token outside the enum: no catalog message to compose with
+        extra = "".join(i18n.render_en(m) for m in (rate_msg, blind_msg) if m)
+        return CodedText(base.code, None, text=f"{base}{extra}")
+    return CodedText(
+        base.code,
+        i18n.Msg("status.fan_status.compound", base=base.msg, rate=rate_msg, blind=blind_msg),
+    )
 
 
 def _first_non_none(*values):
@@ -5225,20 +5383,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FAN_OVERRIDE_SINCE: self.automation_engine._fan_override_time,
             ATTR_FAN_RUNNING: fan_running,
             ATTR_HVAC_ACTION: hvac_action,
-            "invariant_violations": [{"invariant": v.name, "detail": v.detail} for v in _invariant_violations],
+            "invariant_violations": _invariant_rows(_invariant_violations),
             "promise_summary": self._promise_summary(),  # Issue #1128 I8: Debug tab, null when none missed
             "hvac_control_issues": _hvac_control_issues,
-            "entity_health_issues": [
-                {
-                    "config_key": i.config_key,
-                    "entity_id": i.entity_id,
-                    "friendly_name": i.friendly_name,
-                    "criticality": i.criticality,
-                    "status": i.status,
-                    "detail": i.detail,  # Issue #1181: what Climate Advisor is doing about it
-                }
-                for i in _entity_health_issues
-            ],
+            "entity_health_issues": _entity_health_rows(_entity_health_issues),
             "hvac_mode": hvac_mode,
             "target_temp": _target_temp,
             "target_temp_low": _target_temp_low,
@@ -5648,42 +5796,42 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return title if isinstance(title, str) and title else self._zone_log_id()
 
     def _indoor_source_role(self, entity_id: str, reading: IndoorTempReading) -> str:
-        """Plain-words role of the sensor CA reads the room from."""
+        """Code of the role of the sensor CA reads the room from (``sleep_sensor``, ``finer_sensor``, ``thermostat``,
+        ``dedicated_sensor``); ``_SOURCE_ROLE_KEYS`` names each in words."""
         if reading.remote_context is not None or entity_id == self.config.get("sleep_indoor_temp_entity"):
-            return "sleep sensor"
+            return "sleep_sensor"
         if entity_id in getattr(getattr(self, "_companion", None), "entities", ()):
-            return "thermostat's finer sensor"
+            return "finer_sensor"
         if entity_id == self.config.get("climate_entity"):
             return "thermostat"
-        return "dedicated indoor sensor"
+        return "dedicated_sensor"
 
-    def _indoor_source_reason(self, reading: IndoorTempReading, using: str, was_role: str) -> str:
-        """Why the room's sensor changed, in plain words (Issue #1230 R1c)."""
+    def _indoor_source_reason(self, reading: IndoorTempReading, using: str, was_role: str) -> i18n.Msg:
+        """Why the room's sensor changed, as a message (Issue #1230 R1c); ``was_role`` is a role code."""
         if reading.remote_context is not None:
-            return "sleep sensor reporting again" if self._indoor_source_left_sleep_failed else "sleep window started"
-        if was_role == "sleep sensor":
+            if self._indoor_source_left_sleep_failed:
+                return i18n.Msg("status.indoor_source.reason_sleep_reporting_again")
+            return i18n.Msg("status.indoor_source.reason_sleep_started")
+        if was_role == "sleep_sensor":
             if reading.sleep_reason:
-                return f"sleep sensor not usable ({str(reading.sleep_reason).replace('_', ' ')})"
-            return "sleep window ended"
+                return i18n.Msg(
+                    "status.indoor_source.reason_sleep_unusable", why=str(reading.sleep_reason).replace("_", " ")
+                )
+            return i18n.Msg("status.indoor_source.reason_sleep_ended")
         if using == reading.companion_entity:
             if using in self._indoor_source_companions_seen:
-                return "finer sensor available again"
-            return "finer sensor proven"
-        if was_role == "thermostat's finer sensor":
+                return i18n.Msg("status.indoor_source.reason_finer_again")
+            return i18n.Msg("status.indoor_source.reason_finer_proven")
+        if was_role == "finer_sensor":
             if self._companion_for_resolver() is None:
-                return "setting off"
-            return {
-                "unavailable": "finer sensor unavailable — using the thermostat",
-                "stale": "finer sensor stopped updating — using the thermostat",
-                "implausible": "finer sensor reading out of range — using the thermostat",
-                "inconsistent": f"more than {COMPANION_CONSISTENCY_F:.1f} °F apart",
-                "ambiguous": "two candidate sensors",
-                "entity_missing": "finer sensor not found — using the thermostat",
-                "non_numeric": "finer sensor reading not a number — using the thermostat",
-                "non_finite": "finer sensor reading invalid — using the thermostat",
-                "not_proven": "finer sensor not proven — using the thermostat",
-            }.get(reading.companion_reason or "", "finer sensor no longer used — using the thermostat")
-        return "indoor sensor setting changed"
+                return i18n.Msg("status.indoor_source.reason_setting_off")
+            if reading.companion_reason == "inconsistent":
+                return i18n.Msg("status.indoor_source.reason_inconsistent", n=COMPANION_CONSISTENCY_F)
+            key = _COMPANION_REASON_KEYS.get(
+                reading.companion_reason or "", "status.indoor_source.reason_finer_dropped"
+            )
+            return i18n.Msg(key)
+        return i18n.Msg("status.indoor_source.reason_setting_changed")
 
     def _note_indoor_source(self, reading: IndoorTempReading) -> None:
         """Announce each real change of the sensor CA reads the room from, once (Issue #1230 R1c).
@@ -5701,39 +5849,43 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         previous = self._sources_announced.get("indoor")
         role = self._indoor_source_role(using, reading)
+        role_text = i18n.render_en(i18n.Msg(_SOURCE_ROLE_KEYS[role]))  # the log and the stored payload are English
 
         def _fmt(value: float | None) -> str:
             return "no reading" if value is None else f"{value:.2f}".rstrip("0").rstrip(".") + "°F"
 
         to_value = reading.value
         to_name = self._indoor_friendly_name(using)
-        to_text = f'"{to_name}" ({using}, {role}, {_fmt(to_value)})'
+        to_text = f'"{to_name}" ({using}, {role_text}, {_fmt(to_value)})'
         if previous is None:
             self._record_indoor_source(using, role)
             self._announce_source("indoor", using, subject="room temperature", to_text=to_text)
             return
         was_role = self._indoor_source_announced_role or "thermostat"
+        was_role_text = i18n.render_en(i18n.Msg(_SOURCE_ROLE_KEYS[was_role]))
         reason = self._indoor_source_reason(reading, using, was_role)
         from_value = self._indoor_snapshot_f().get(previous)
         from_name = self._indoor_friendly_name(previous)
-        self._indoor_source_left_sleep_failed = was_role == "sleep sensor" and bool(reading.sleep_reason)
+        self._indoor_source_left_sleep_failed = was_role == "sleep_sensor" and bool(reading.sleep_reason)
         self._record_indoor_source(using, role)
         self._announce_source(
             "indoor",
             using,
             subject="room temperature",
             to_text=to_text,
-            from_text=f'"{from_name}" ({previous}, {was_role}, {_fmt(from_value)})',
+            from_text=f'"{from_name}" ({previous}, {was_role_text}, {_fmt(from_value)})',
             reason=reason,
             event_type="indoor_source_changed",
             payload={
                 "from_entity": previous,
                 "from_name": from_name,
-                "from_role": was_role,
+                "from_role": was_role_text,
+                "from_role_key": _SOURCE_ROLE_KEYS[was_role],
                 "from_value_f": from_value,
                 "to_entity": using,
                 "to_name": to_name,
-                "to_role": role,
+                "to_role": role_text,
+                "to_role_key": _SOURCE_ROLE_KEYS[role],
                 "to_value_f": to_value,
             },
         )
@@ -5766,10 +5918,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         subject: str,
         to_text: str,
         from_text: str | None = None,
-        reason: str | None = None,
+        reason: i18n.Msg | str | None = None,
         event_type: str | None = None,
         payload: dict[str, Any] | None = None,
-        using_note: str | None = None,
+        using_note: i18n.Msg | str | None = None,
     ) -> None:
         """The one writer of a source announcement: one INFO line and, on a real change, one Activity event.
 
@@ -5784,15 +5936,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         first = key not in announced
         announced[key] = using
         zone = self._indoor_zone_title()
+        # Issue #1341: the log and the stored ``reason`` are the English record; a ``Msg`` reason also travels as
+        # ``reason_key`` / ``reason_params`` so the Activity row can show it in the viewer's language.
+        note_text = i18n.render_en(using_note) if isinstance(using_note, i18n.Msg) else using_note
+        reason_text = i18n.render_en(reason) if isinstance(reason, i18n.Msg) else reason
         if first:
-            if using_note:
-                _LOGGER.info('Zone "%s": %s using %s: %s', zone, subject, to_text, using_note)
+            if note_text:
+                _LOGGER.info('Zone "%s": %s using %s: %s', zone, subject, to_text, note_text)
             else:
                 _LOGGER.info('Zone "%s": %s using %s', zone, subject, to_text)
             return
-        _LOGGER.info('Zone "%s": %s now from %s instead of %s: %s', zone, subject, to_text, from_text, reason)
+        _LOGGER.info('Zone "%s": %s now from %s instead of %s: %s', zone, subject, to_text, from_text, reason_text)
         if event_type:
-            self._emit_event(event_type, {"zone": zone, **(payload or {}), "reason": reason})
+            event: dict[str, Any] = {"zone": zone, **(payload or {}), "reason": reason_text}
+            if isinstance(reason, i18n.Msg):
+                wire = reason.to_wire()
+                event["reason_key"] = wire["key"]
+                event["reason_params"] = wire["params"]
+            self._emit_event(event_type, event)
 
     def _indoor_snapshot_f(self) -> dict[str, float | None]:
         """Every known indoor sensor's reading now, for the "instead of" value of a switch line (never raises).
@@ -5816,7 +5977,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Remember the announced sensor's role (and that a finer sensor has been in use); ``_announce_source``
         records the sensor itself."""
         self._indoor_source_announced_role = role
-        if role == "thermostat's finer sensor":
+        if role == "finer_sensor":
             self._indoor_source_companions_seen.add(using)
 
     def _companion_ensure_tracking_attrs(self) -> None:
@@ -6030,30 +6191,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return out
 
     def _humidity_source_kind(self, role: str, source: str | None, chosen: str | None) -> str | None:
-        """Plain-words kind of a humidity source (Issue #1455); None for "no source"."""
+        """Code of the kind of a humidity source (Issue #1455): ``chosen``, ``weather_service``, ``thermostat`` or
+        ``device_sensor``; None for "no source"."""
         if source is None:
             return None
         if chosen and source == chosen:
-            return "your chosen sensor"
+            return "chosen"
         if "#" in source:
-            return "weather service" if role == ROLE_OUTDOOR else "thermostat"
-        return "sensor on the device"
+            return "weather_service" if role == ROLE_OUTDOOR else "thermostat"
+        return "device_sensor"
 
-    def _humidity_source_reason(self, role: str, source: str | None, chosen: str | None) -> str:
-        """Why this humidity source is the one in use, in plain words (Issue #1455)."""
+    def _humidity_source_reason(self, role: str, source: str | None, chosen: str | None) -> i18n.Msg:
+        """Why this humidity source is the one in use, as a message (Issue #1455)."""
         if chosen and source == chosen:
-            return "back to your chosen sensor"
+            return i18n.Msg("status.humidity_source.reason_back_to_chosen")
         if chosen:
-            return "the chosen sensor is unavailable"
+            return i18n.Msg("status.humidity_source.reason_chosen_unavailable")
         if source is None:
             if role == ROLE_OUTDOOR:
-                return "no outdoor humidity sensor and no weather service humidity"
-            return "no humidity sensor found on the device"
+                return i18n.Msg("status.humidity_source.reason_no_outdoor")
+            return i18n.Msg("status.humidity_source.reason_no_device_sensor")
         if "#" in source:
             if role == ROLE_OUTDOOR:
-                return "weather service (no outdoor humidity sensor)"
-            return "no humidity sensor found on the device"
-        return "humidity sensor found on the device"
+                return i18n.Msg("status.humidity_source.reason_weather_service")
+            return i18n.Msg("status.humidity_source.reason_no_device_sensor")
+        return i18n.Msg("status.humidity_source.reason_device_sensor")
 
     def _note_humidity_source(self, role: str, source: str | None, value: float | None, chosen: str | None) -> None:
         """Announce each real change of the humidity source a chart role reads, once (Issue #1455).
@@ -6071,9 +6233,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             key = f"humidity:{role}"
             if not self._source_changed(key, source):
                 return
-            subject = _HUMIDITY_ROLE_SUBJECT.get(role, f"{role} humidity")
+            subject_msg = (
+                i18n.Msg(_HUMIDITY_ROLE_SUBJECT[role])
+                if role in _HUMIDITY_ROLE_SUBJECT
+                else i18n.Msg("status.humidity_subject.other", role=role)
+            )
+            subject = i18n.render_en(subject_msg)
             reason = self._humidity_source_reason(role, source, chosen)
-            to_name, to_kind = self._humidity_source_name(source), self._humidity_source_kind(role, source, chosen)
+            to_name = self._humidity_source_name(source)
+            to_kind_code = self._humidity_source_kind(role, source, chosen)
+            to_kind = i18n.render_en(i18n.Msg(_HUMIDITY_KIND_KEYS[to_kind_code])) if to_kind_code else None
             to_text = self._humidity_source_text(source, to_name, to_kind, value)
             announced = self._sources_announced_map()
             if key not in announced:
@@ -6083,7 +6252,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             previous = announced[key]
             from_value = read_humidity_source(self.hass, previous)
             from_name = self._humidity_source_name(previous)
-            from_kind = self._humidity_source_kind(role, previous, chosen)
+            from_kind_code = self._humidity_source_kind(role, previous, chosen)
+            from_kind = i18n.render_en(i18n.Msg(_HUMIDITY_KIND_KEYS[from_kind_code])) if from_kind_code else None
             self._announce_source(
                 key,
                 source,
@@ -6095,13 +6265,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 payload={
                     "role": role,
                     "subject": subject,
+                    "subject_key": subject_msg.key,
                     "from_entity": previous,
                     "from_name": from_name,
                     "from_kind": from_kind,
+                    "from_kind_key": _HUMIDITY_KIND_KEYS[from_kind_code] if from_kind_code else None,
                     "from_rh": from_value,
                     "to_entity": source,
                     "to_name": to_name,
                     "to_kind": to_kind,
+                    "to_kind_key": _HUMIDITY_KIND_KEYS[to_kind_code] if to_kind_code else None,
                     "to_rh": value,
                 },
             )
@@ -7776,10 +7949,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         for sid in self._read_chart_indoor_sensors():
             if sid not in ids:
                 ids.append(sid)
-        meta: list[dict[str, str]] = [
-            {"id": "_ca", "name": "Climate Advisor reading", "role": "the reading Climate Advisor uses"}
+        _lang = i18n.hass_language(getattr(self, "hass", None))
+        _ca_name = i18n.Msg("status.sensor_meta.ca_name")
+        _ca_role = i18n.Msg("status.sensor_meta.ca_role")
+        meta: list[dict[str, Any]] = [
+            {
+                "id": "_ca",
+                "name": i18n.render(_ca_name, _lang),
+                "name_msg": _ca_name.to_wire(),
+                "role": i18n.render(_ca_role, _lang),
+                "role_code": "ca_reading",
+                "role_msg": _ca_role.to_wire(),
+            }
         ]
-        meta.extend({"id": m["id"], "name": m["name"], "role": m["role"]} for m in self.v4_indoor_sensors_meta(ids))
+        meta.extend(
+            {
+                "id": m["id"],
+                "name": m["name"],
+                "role": m["role"],
+                "role_code": m.get("role_code"),
+                "role_msg": m.get("role_msg"),
+            }
+            for m in self.v4_indoor_sensors_meta(ids)
+        )
         return {
             "zone": self._entry_id,
             "unit": self.config.get("temp_unit", "fahrenheit"),
@@ -7814,14 +8006,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         def _role(entity_id: str) -> str:
             if entity_id == companion:
-                return "thermostat's finer sensor"
+                return "finer_sensor"
             if entity_id == climate:
                 return "thermostat"
             if entity_id == sleep_entity:
-                return "bedroom sensor"
-            return "room sensor"
+                return "bedroom_sensor"
+            return "room_sensor"
 
-        return [{"id": sid, "name": _name(sid), "role": _role(sid), "primary": sid == primary} for sid in ids]
+        _lang = i18n.hass_language(getattr(self, "hass", None))
+        out: list[dict[str, Any]] = []
+        for sid in ids:
+            code = _role(sid)
+            role_msg = i18n.Msg(_SENSOR_ROLE_KEYS[code])
+            out.append(
+                {
+                    "id": sid,
+                    "name": _name(sid),
+                    "role": i18n.render(role_msg, _lang),
+                    "role_code": code,
+                    "role_msg": role_msg.to_wire(),
+                    "primary": sid == primary,
+                }
+            )
+        return out
 
     def v4_chart_series(
         self,
@@ -9557,6 +9764,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None
         unit = self.config.get("temp_unit", "fahrenheit")
         after = hold.after_band or hold.schedule_band
+        _lang = i18n.hass_language(getattr(self, "hass", None))
+        _text_msg = hold_sentence_msg(hold, unit)
+        _after_msg = hold_after_msg(hold, unit)
         return {
             "kind": "tou_bank",
             "mode": hold.bank.mode,
@@ -9569,8 +9779,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "schedule_cool": display_temp(hold.schedule_band.ceiling, unit),
             "after_heat": display_temp(after.floor, unit),
             "after_cool": display_temp(after.ceiling, unit),
-            "text": hold_sentence(hold, unit),
-            "after_text": hold_after_text(hold, unit),
+            # Issue #1341: the prose in the backend language, plus the same sentences as {key, params} wire messages.
+            "text": i18n.render(_text_msg, _lang) if _text_msg is not None else None,
+            "text_msg": _text_msg.to_wire() if _text_msg is not None else None,
+            "after_text": i18n.render(_after_msg, _lang) if _after_msg is not None else "",
+            "after_text_msg": _after_msg.to_wire() if _after_msg is not None else None,
         }
 
     async def _occupancy_bank_write(self) -> OccupancyBankWrite | None:
@@ -10456,9 +10669,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pre_cool_trigger_scheduled = True
         self._pre_cool_trigger_dt = trigger_time
         self._pre_cool_target = pre_cool_target
-        self._pre_cool_status = (
-            f"Pre-cool scheduled ({format_temp(pre_cool_target, self.config.get('temp_unit', 'fahrenheit'))} "
-            f"@ {dt_util.as_local(trigger_time).strftime('%I:%M %p').lstrip('0')})"
+        self._pre_cool_status = CodedText(
+            "scheduled",
+            i18n.Msg(
+                "status.pre_cool_status.scheduled",
+                target=i18n.Temp(pre_cool_target, self.config.get("temp_unit", "fahrenheit")),
+                t=_clock(trigger_time),
+            ),
         )
 
     async def _async_pre_cool_trigger(self, now: datetime) -> None:
@@ -10483,13 +10700,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             modifier=_modifier,
         )
         _LOGGER.info("Pre-cool trigger handler completed: %s", result)
-        if "suppressed" in result:
-            self._pre_cool_status = result.replace("suppressed: ", "pre-cool suppressed — ")
-        elif result.startswith("not applied"):
+        # Issue #1341: compare the result's code, never its English text.
+        _result_code = code_of(result, "")
+        _result_params = result.msg.params if msg_of(result) is not None else {}
+        if _result_code == "suppressed_session":
+            self._pre_cool_status = CodedText("suppressed", i18n.Msg("status.pre_cool_status.suppressed_session"))
+        elif _result_code == "suppressed_achieved":
+            self._pre_cool_status = CodedText(
+                "suppressed", i18n.Msg("status.pre_cool_status.suppressed_achieved", **_result_params)
+            )
+        elif _result_code == "not_applied":
             # Issue #1049: the write was blocked/failed/not sent -- never present it as active.
-            self._pre_cool_status = result.replace("not applied", "pre-cool not applied", 1)
-        elif "applied" in result:
-            self._pre_cool_status = result.replace("applied: ", "pre-cool active (").rstrip() + ")"
+            self._pre_cool_status = CodedText(
+                "not_applied", i18n.Msg("status.pre_cool_status.not_applied", **_result_params)
+            )
+        elif _result_code == "applied":
+            self._pre_cool_status = CodedText("active", i18n.Msg("status.pre_cool_status.active", **_result_params))
         await self.async_refresh()
 
     def _maybe_reschedule_pre_cool_on_nat_vent_exit(self) -> None:
@@ -10524,8 +10750,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         self._pre_cool_trigger_dt = new_trigger
         _local_trigger = dt_util.as_local(new_trigger)
-        self._pre_cool_status = (
-            f"Pre-cool rescheduled ({_local_trigger.strftime('%I:%M %p').lstrip('0')}) — nat-vent exited early"
+        self._pre_cool_status = CodedText(
+            "rescheduled", i18n.Msg("status.pre_cool_status.rescheduled", t=_clock(_local_trigger))
         )
         _LOGGER.info(
             "Pre-cool trigger pulled earlier to %s — nat-vent exited ahead of its scheduled window close",
@@ -10679,24 +10905,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         if decisions:
             in_use = str(decisions)
-            use = f"the decisions use the {decisions} engine's own heating and cooling rates"
+            use = i18n.Msg("status.thermostat_notice.use_engine", engine=str(decisions))
         elif engine_learning:
             in_use = "default"
-            use = "the decisions use a typical home's heating and cooling rates (defaults) while " + (
-                f"{engine_learning} learns"
-            )
+            use = i18n.Msg("status.thermostat_notice.use_defaults_learning", engine=str(engine_learning))
         elif learned:
             in_use = "learned"
-            use = "it keeps using the heating and cooling rates it had already learned"
+            use = i18n.Msg("status.thermostat_notice.use_learned")
         else:
             in_use = "default"
-            use = "it uses a typical home's heating and cooling rates (defaults)"
-        text = (
-            "Your thermostat has not reported when it is heating or cooling (only its mode or its fan), so "
-            "Climate Advisor cannot measure your heating and cooling runtime or learn how fast your home heats and "
-            f"cools; {use}. A fan running, or the heat or cool mode being on, is never counted as a run."
-        )
-        return {"rate_in_use": in_use, "ever_reported": False, "text": text}
+            use = i18n.Msg("status.thermostat_notice.use_defaults")
+        msg = i18n.Msg("status.thermostat_notice.text", use=use)
+        # English text: this row also feeds the AI context (D9); ``text_msg`` is what a surface renders in the
+        # viewer's language.
+        return {"rate_in_use": in_use, "ever_reported": False, "text": i18n.render_en(msg), "text_msg": msg.to_wire()}
 
     def _blower_overrun_recent(self) -> bool:
         """The burner/compressor stopped within ``BLOWER_OVERRUN_LINK_S``: a ``fan`` now is the run's overrun."""
@@ -13182,10 +13404,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if not isinstance(hits, int) or isinstance(hits, bool) or hits <= 0:
                 continue
             last = entry.get("last_ts")
+            _label_key = _PROMISE_LABEL_KEYS.get(spec.key)
+            _label_msg = (
+                i18n.Msg(_label_key, n=spec.label)
+                if _label_key
+                else i18n.Msg("status.promise.other", n=spec.label, key=spec.key.replace("_", " "))
+            )
             rows.append(
                 {
                     "promise": spec.key,
-                    "label": f"{spec.label}: {spec.key.replace('_', ' ')}",
+                    "label": i18n.render(_label_msg, i18n.hass_language(getattr(self, "hass", None))),
+                    "label_msg": _label_msg.to_wire(),
                     "hits": hits,
                     "last_hit": last if isinstance(last, str) else None,
                 }
@@ -16117,8 +16346,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         outdoor_temp: float | None = None,
         windows_physically_open: bool = False,
         ae: AutomationEngine | None = None,
-    ) -> str:
-        """Compute the next recommended human action for display.
+    ) -> CodedText:
+        """Compute the next recommended human action for display (English text + ``code`` + ``msg``).
 
         Every window/fan cooling (or heating) suggestion is gated on ONE live direction
         rule, ``_outdoor_direction_ok()`` against the band the thermostat is armed with
@@ -16147,36 +16376,41 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._occupancy_mode,
         )
 
-        def _decide(msg: str, *, warn: bool = False, **ctx: Any) -> str:
+        def _decide(code: str, msg: i18n.Msg | str, *, warn: bool = False, **ctx: Any) -> CodedText:
+            # ``msg`` is a catalog message, or plain text another module still produces (the timeline card).
+            result = CodedText(code, msg) if isinstance(msg, i18n.Msg) else CodedText(code, None, text=msg)
             ctx_str = " ".join(f"{k}={v}" for k, v in ctx.items())
-            (_LOGGER.warning if warn else _LOGGER.info)("Next-action: %s (%s)", msg, ctx_str)
-            return msg
+            (_LOGGER.warning if warn else _LOGGER.info)("Next-action: %s (%s)", result, ctx_str)
+            return result
 
-        def _close_windows_msg(od: float, id_: float) -> str:
-            return f"Close windows — outdoor's not helping now ({format_temp(od, unit)} vs {format_temp(id_, unit)})."
+        def _tmp(value: float) -> i18n.Temp:
+            return i18n.Temp(value, unit)
 
-        def _windows_helping_msg(od: float, id_: float) -> str:
-            return f"Windows open — outdoor's helping ({format_temp(od, unit)} vs {format_temp(id_, unit)})."
+        def _close_windows_msg(od: float, id_: float) -> i18n.Msg:
+            return i18n.Msg("status.next_action.close_windows_not_helping", outdoor=_tmp(od), indoor=_tmp(id_))
+
+        def _windows_helping_msg(od: float, id_: float) -> i18n.Msg:
+            return i18n.Msg("status.next_action.windows_helping", outdoor=_tmp(od), indoor=_tmp(id_))
 
         if not c:
-            return _decide("Waiting for forecast data...")
+            return _decide("waiting_forecast", i18n.Msg("status.next_action.waiting_forecast"))
 
         # Issue #1404: while a time-of-use bank owns the thermostat the house is being pre-cooled / pre-heated on
         # purpose; the occupant's answer is "nothing", and the card says what the house is held to and until when
         # (the same sentence as Status). Judging "too warm / too cold" against the schedule band here would contradict
         # the thermostat. A bank something defers (door/window, override, nat-vent) is not claimed.
         _bank_hold = self.current_hold()
-        _bank_text = hold_sentence(_bank_hold, unit) if _bank_hold is not None else None
-        if _bank_text is not None:
-            return _decide(f"Nothing needs you: {_bank_text[0].lower()}{_bank_text[1:]}.")
+        _bank_msg = hold_sentence_msg(_bank_hold, unit, lowercase=True) if _bank_hold is not None else None
+        if _bank_msg is not None:
+            return _decide("tou_hold", i18n.Msg("status.next_action.tou_hold", hold=_bank_msg))
 
         # Occupancy guards (Issue #527): these answer "what should I do" with "nothing —
         # you're not here," which is legitimate comfort-relevant guidance, not automation
         # mechanism narration, so they stay ahead of the comfort-guidance branches below.
         if self._occupancy_mode == OCCUPANCY_VACATION:
-            return _decide(_pick_daily_line(_VACATION_ACTION_MESSAGES, "vacation"))
+            return _decide("vacation_line", _pick_daily_line(_VACATION_ACTION_MESSAGES, "vacation"))
         if self._occupancy_mode == OCCUPANCY_AWAY:
-            return _decide(_pick_daily_line(_AWAY_ACTION_MESSAGES, "away"))
+            return _decide("away_line", _pick_daily_line(_AWAY_ACTION_MESSAGES, "away"))
 
         # Issue #527: automation-mechanism state (override/grace/pause) used to be
         # narrated here directly, pre-empting the comfort guidance below and duplicating
@@ -16249,52 +16483,74 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ),
             )
             if _got is not None:
-                return _decide(_got[0], step=_got[1].id)
+                return _decide("window_card", _got[0], step=_got[1].id)
 
         if c.windows_recommended:
             if not timeline_mode and c.window_open_time and now < c.window_open_time:
-                return _decide(f"Open windows at {c.window_open_time.strftime('%I:%M %p').lstrip('0')}")
+                return _decide(
+                    "open_windows_at", i18n.Msg("status.next_action.open_windows_at", t=_clock(c.window_open_time))
+                )
             elif not timeline_mode and _effective_close_time and now < _effective_close_time:
-                return _decide(f"Close windows by {_effective_close_time.strftime('%I:%M %p').lstrip('0')}")
+                return _decide(
+                    "close_windows_by",
+                    i18n.Msg("status.next_action.close_windows_by", t=_clock(_effective_close_time)),
+                )
             elif now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
                 if windows_physically_open:
                     if outdoor_temp is not None and indoor_temp is not None and not direction_ok:
                         if heat_side_veto:
                             return _decide(
-                                f"Close windows to hold heat — outdoor's cooler ({format_temp(outdoor_temp, unit)}"
-                                f" vs {format_temp(indoor_temp, unit)}).",
+                                "close_windows_hold_heat",
+                                i18n.Msg(
+                                    "status.next_action.close_windows_hold_heat",
+                                    outdoor=_tmp(outdoor_temp),
+                                    indoor=_tmp(indoor_temp),
+                                ),
                                 outdoor=outdoor_temp,
                                 indoor=indoor_temp,
                             )
                         return _decide(
+                            "close_windows_not_helping",
                             _close_windows_msg(outdoor_temp, indoor_temp),
                             outdoor=outdoor_temp,
                             indoor=indoor_temp,
                         )
-                    return _decide("Windows open — you're all set.")
+                    return _decide("windows_open_all_set", i18n.Msg("status.next_action.windows_open_all_set"))
                 if outdoor_temp is not None and indoor_temp is not None:
                     if direction_ok and outdoor_temp < indoor_temp and not timeline_mode:
                         return _decide(
-                            f"Open windows — outdoor's cooler now ({format_temp(outdoor_temp, unit)} vs"
-                            f" {format_temp(indoor_temp, unit)}).",
+                            "open_windows_cooler",
+                            i18n.Msg(
+                                "status.next_action.open_windows_cooler",
+                                outdoor=_tmp(outdoor_temp),
+                                indoor=_tmp(indoor_temp),
+                            ),
                             outdoor=outdoor_temp,
                             indoor=indoor_temp,
                         )
                     if heat_side_veto:
                         return _decide(
-                            f"Keep windows closed to hold heat — outdoor ({format_temp(outdoor_temp, unit)}) would"
-                            f" cool the house below its {format_temp(_armed_heat, unit)} floor.",
+                            "keep_closed_hold_heat",
+                            i18n.Msg(
+                                "status.next_action.keep_closed_hold_heat",
+                                outdoor=_tmp(outdoor_temp),
+                                floor=_tmp(_armed_heat),
+                            ),
                             outdoor=outdoor_temp,
                             indoor=indoor_temp,
                         )
                     return _decide(
-                        f"Keep windows closed for now — outdoor ({format_temp(outdoor_temp, unit)}) isn't"
-                        f" cooler than indoor ({format_temp(indoor_temp, unit)}) yet.",
+                        "keep_closed_not_cooler",
+                        i18n.Msg(
+                            "status.next_action.keep_closed_not_cooler",
+                            outdoor=_tmp(outdoor_temp),
+                            indoor=_tmp(indoor_temp),
+                        ),
                         outdoor=outdoor_temp,
                         indoor=indoor_temp,
                     )
                 if not timeline_mode:
-                    return _decide("Open windows — outdoor air may be cooler now.")
+                    return _decide("open_windows_maybe", i18n.Msg("status.next_action.open_windows_maybe"))
 
         if c.day_type == DAY_TYPE_HOT:
             # Issue #876: threshold formula and morning-close/evening-open times now
@@ -16336,23 +16592,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 and now < _close_time
                 and not _already
             ):
-                end_t = _close_time.strftime("%I:%M %p").lstrip("0")
-                return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)} (until {end_t})")
+                return _decide(
+                    "hot_open_until",
+                    i18n.Msg("status.next_action.hot_open_until", threshold=_tmp(threshold), t=_clock(_close_time)),
+                )
             elif (
                 not timeline_mode
                 and c.window_opportunity_evening
                 and _evening_open_time is not None
                 and now >= _evening_open_time
             ):
-                start_t = _evening_open_time.strftime("%I:%M %p").lstrip("0")
-                return _decide(f"Open windows once outdoor cools back below indoor (from {start_t})")
+                return _decide(
+                    "hot_open_from",
+                    i18n.Msg("status.next_action.hot_open_from", t=_clock(_evening_open_time)),
+                )
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
-                return _decide("-")
-            return _decide("Keep windows and blinds closed.")
+                return _decide("nothing_to_do", "-")
+            return _decide("keep_windows_blinds_closed", i18n.Msg("status.next_action.keep_windows_blinds_closed"))
         elif c.day_type == DAY_TYPE_COLD:
             if windows_physically_open:
-                return _decide("Close doors to help the heater.")
-            return _decide("Keep doors closed.")
+                return _decide("close_doors_heater", i18n.Msg("status.next_action.close_doors_heater"))
+            return _decide("keep_doors_closed", i18n.Msg("status.next_action.keep_doors_closed"))
 
         # WARM/MILD/COOL fallback: symmetric cooling-direction and heating-direction
         # checks, both gated on the one live direction rule above (Issues #428, #1211, #1276).
@@ -16361,20 +16621,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         if cooling_needed:
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
-                return _decide("-")
+                return _decide("nothing_to_do", "-")
             if windows_physically_open:
                 if outdoor_temp is not None and not direction_ok:
                     return _decide(
+                        "close_windows_not_helping",
                         _close_windows_msg(outdoor_temp, indoor_temp),
                         outdoor=outdoor_temp,
                         indoor=indoor_temp,
                     )
                 if outdoor_temp is not None:
-                    return _decide(_windows_helping_msg(outdoor_temp, indoor_temp))
-                return _decide("Windows open — you're all set.")
+                    return _decide("windows_helping", _windows_helping_msg(outdoor_temp, indoor_temp))
+                return _decide("windows_open_all_set", i18n.Msg("status.next_action.windows_open_all_set"))
             if outdoor_temp is None:
                 return _decide(
-                    f"Indoor is {format_temp(indoor_temp, unit)} — no outdoor reading available.",
+                    "indoor_no_outdoor",
+                    i18n.Msg("status.next_action.indoor_no_outdoor", indoor=_tmp(indoor_temp)),
                     indoor=indoor_temp,
                 )
             if direction_ok and timeline_mode:
@@ -16384,43 +16646,51 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # briefing still say no window period today). What the AC does next is the Status and Next Automation
                 # cards' job.
                 return _decide(
-                    f"Opening windows would help now \u2014 outdoor ({format_temp(outdoor_temp, unit)}) is cooler than"
-                    f" indoor ({format_temp(indoor_temp, unit)}). Climate Advisor didn't plan a window period today,"
-                    " so this one is your call.",
+                    "opening_would_help",
+                    i18n.Msg(
+                        "status.next_action.opening_would_help", outdoor=_tmp(outdoor_temp), indoor=_tmp(indoor_temp)
+                    ),
                     outdoor=outdoor_temp,
                     indoor=indoor_temp,
                 )
             if direction_ok:
-                fan_clause = " or turn on the fan" if fan_enabled else ""
                 return _decide(
-                    f"Open windows{fan_clause} — outdoor's cooler now ({format_temp(outdoor_temp, unit)} vs"
-                    f" {format_temp(indoor_temp, unit)}).",
+                    "open_windows_cooler_fan",
+                    i18n.Msg(
+                        "status.next_action.open_windows_cooler_fan",
+                        fan="yes" if fan_enabled else "no",
+                        outdoor=_tmp(outdoor_temp),
+                        indoor=_tmp(indoor_temp),
+                    ),
                     outdoor=outdoor_temp,
                     indoor=indoor_temp,
                 )
             return _decide(
-                f"Outdoor ({format_temp(outdoor_temp, unit)}) isn't cooler than indoor"
-                f" ({format_temp(indoor_temp, unit)}) yet — windows/fan won't help.",
+                "outdoor_not_cooler",
+                i18n.Msg("status.next_action.outdoor_not_cooler", outdoor=_tmp(outdoor_temp), indoor=_tmp(indoor_temp)),
                 outdoor=outdoor_temp,
                 indoor=indoor_temp,
             )
 
         if heating_needed:
             if windows_physically_open:
-                return _decide("Close windows to enable the heater.")
+                return _decide("close_windows_heater", i18n.Msg("status.next_action.close_windows_heater"))
             if outdoor_temp is not None and direction_ok and not timeline_mode:
                 return _decide(
-                    f"Open windows briefly — outdoor's warmer ({format_temp(outdoor_temp, unit)} vs"
-                    f" {format_temp(indoor_temp, unit)}).",
+                    "open_briefly_warmer",
+                    i18n.Msg(
+                        "status.next_action.open_briefly_warmer", outdoor=_tmp(outdoor_temp), indoor=_tmp(indoor_temp)
+                    ),
                     outdoor=outdoor_temp,
                     indoor=indoor_temp,
                 )
             return _decide(
-                f"Keep windows and doors closed to hold heat (indoor {format_temp(indoor_temp, unit)}).",
+                "keep_closed_hold_heat_indoor",
+                i18n.Msg("status.next_action.keep_closed_hold_heat_indoor", indoor=_tmp(indoor_temp)),
                 indoor=indoor_temp,
             )
 
-        return _decide("Comfortable — no action needed.")
+        return _decide("comfortable", i18n.Msg("status.next_action.comfortable"))
 
     def _emit_event(self, event_type: str, data: dict) -> None:
         """Append a timestamped event to the in-memory event log ring buffer (Issue #76)."""
@@ -17125,25 +17395,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     comfort_cool=comfort_cool,
                 )
 
-    def _compute_automation_status(self) -> str:
-        """Compute the current automation status string.
+    def _compute_automation_status(self) -> CodedText:
+        """Compute the current automation status (English text + stable ``code`` + translatable ``msg``).
 
         Issue #1205: the occupant's fan requests that outlive the running grace (the fan-off hold, a fan run) are
         named on the card even when no grace runs at all (the grace branch already adds them via
         ``_grace_status_detail()``).
         """
         status = self._compute_automation_status_core()
-        if status == "disabled" or status.startswith("starting"):
+        if not isinstance(status, CodedText):  # a plain string (a test double): no code, no message
+            status = CodedText("unknown", None, text=str(status))
+            if status == "disabled" or status.startswith("starting"):
+                return status
+        elif status.code == "disabled" or status.code.startswith("starting"):
             return status
         ae = self.automation_engine
         trigger = getattr(ae, "_last_grace_trigger", None) if getattr(ae, "_grace_active", False) is True else ""
         extra = self._separate_fan_request_detail(ae, trigger if isinstance(trigger, str) else "")
-        return status if not extra or extra in status else f"{status}{extra}"
+        # The grace branches already carry the fan-request detail (``_grace_status_detail``); never name it twice.
+        if not extra or status.fan_detail_included:
+            return status
+        if status.msg is None:
+            return CodedText(status.code, None, text=f"{status}{extra}")
+        return CodedText(
+            status.code, i18n.Msg("status.auto.with_fan_requests", base=status.msg, requests=extra.msg or "")
+        )
 
-    def _compute_automation_status_core(self) -> str:
-        """The status string before the separate-fan-request detail is added."""
+    def _compute_automation_status_core(self) -> CodedText:
+        """The status before the separate-fan-request detail is added (a ``CodedText``; codes in ``status.auto.*``)."""
+
+        def _status(code: str, **params: Any) -> CodedText:
+            return CodedText(code, i18n.Msg(_AUTO_STATUS_KEYS[code], **params))
+
         if not self._automation_enabled:
-            return "disabled"
+            return _status("disabled")
         # Bug 1 (Issue #321): Surface startup coalescing window in status
         if self._startup_coalesce_active:
             # Issue #396: the coalesce check only runs once weather data is available
@@ -17154,11 +17439,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # with no clue that the actual cause is a weather integration that hasn't
             # come back after restart.
             if self._startup_timer_fired and self._current_classification is None:
-                return "starting — waiting for weather data"
-            return "starting — initializing"
+                return _status("starting_weather")
+            return _status("starting_init")
         # Check if windows are open during a planned window period (not a pause)
         if self.automation_engine._is_within_planned_window_period() and self._any_sensor_open():
-            return "windows open (as planned)"
+            return _status("windows_planned")
         if self.automation_engine.natural_vent_active:
             # Issue #415: no numeric target here. This string is cached for up to
             # update_interval (30 min), but api.py recomputes compute_nat_vent_cycling_band()
@@ -17170,8 +17455,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # bulk free-cooling) — surfaced here per the Status Card Ontology, since this
             # is the one card where mechanism state belongs.
             if self.automation_engine._nat_vent_soft_start:
-                return "nat-vent — soft-start (purge)"
-            return "nat-vent"
+                return _status("nat_vent_soft_start")
+            return _status("nat_vent")
         if self.automation_engine.is_paused_by_door:
             # Issue #1095: a grace period can be active while door/window-paused (e.g. a
             # fan-off grace holding nat-vent back). This branch used to return first and
@@ -17179,33 +17464,44 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Status card. Same compact "label — duration (ends HH:MM)" shape as the grace
             # branch below; `is True` because tests stub the engine as a bare MagicMock.
             _pae = self.automation_engine
-            _grace_note = (
-                f" · grace ({_pae._last_resume_source or 'automation'}){self._grace_status_detail(_pae)}"
-                if _pae._grace_active is True
+            _grace_on = _pae._grace_active is True
+            _grace_note: i18n.Msg | str = (
+                i18n.Msg(
+                    "status.auto.grace_note",
+                    source=str(_pae._last_resume_source or "automation"),
+                    detail=msg_of(self._grace_status_detail(_pae)) or "",
+                )
+                if _grace_on
                 else ""
             )
             if self._occupancy_mode == OCCUPANCY_AWAY:
-                return f"paused — away (resumes after windows close){_grace_note}"
-            if self._occupancy_mode == OCCUPANCY_VACATION:
-                return f"paused — vacation (resumes after windows close){_grace_note}"
-            return f"paused — door/window open{_grace_note}"
+                _paused = _status("paused_away", grace=_grace_note)
+            elif self._occupancy_mode == OCCUPANCY_VACATION:
+                _paused = _status("paused_vacation", grace=_grace_note)
+            else:
+                _paused = _status("paused_door_window", grace=_grace_note)
+            _paused.fan_detail_included = _grace_on
+            return _paused
         if self.automation_engine._override_confirm_pending:
-            return "override pending (confirming...)"
+            return _status("override_pending")
         # Bug 2 (Issue #321): detect stuck grace before the normal grace-active path
         _ae2 = self.automation_engine
         if _ae2._manual_override_active and not _ae2._grace_active and _ae2._grace_end_time is not None:
             _se = dt_util.parse_datetime(_ae2._grace_end_time)
             if _se is not None and dt_util.now() > _se:
-                return "override (stuck — see Debug tab)"
+                return _status("override_stuck")
         if self.automation_engine._grace_active:
             if self.automation_engine._resumed_from_pause:
                 # Issue #1095: was a bare string with no timing; the resume starts a real
                 # grace whose end time the occupant needs. The cause is already in the
                 # wording, so only the duration/end clause is appended (same #860 rule).
                 if self.automation_engine._fan_remote_timer_hours is not None:
-                    return "resumed — door/window override"
-                return f"resumed — door/window override{self._format_grace_remaining(self.automation_engine)}"
-            source = self.automation_engine._last_resume_source or "automation"
+                    return _status("resumed_door_window", remaining="")
+                return _status(
+                    "resumed_door_window",
+                    remaining=msg_of(self._format_grace_remaining(self.automation_engine)) or "",
+                )
+            source = str(self.automation_engine._last_resume_source or "automation")
             # Issue #625: previously appended the full _last_action_reason sentence here
             # (Issue #620) — for fan-triggered grace periods that duplicated what the Fan
             # (WHF) card already says, and for manual thermostat overrides
@@ -17232,7 +17528,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # data-driven condition (not a hardcoded trigger-name allowlist) so any future
             # grace-trigger cause that happens to co-occur with an active remote timer is
             # automatically handled correctly with no further maintenance.
-            return f"grace period ({source}){self._grace_status_detail(self.automation_engine)}"
+            _grace = _status(
+                "grace_period",
+                source=source,
+                detail=msg_of(self._grace_status_detail(self.automation_engine)) or "",
+            )
+            _grace.fan_detail_included = True
+            return _grace
         # Issue #786: TOU scheduler pre-conditioning — a mechanism reason, per the Status
         # Card Ontology this is the one card it belongs on. Same compact "short label —
         # duration (ends HH:MM)" shape _format_grace_remaining() already established.
@@ -17244,13 +17546,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # cannot be resolved the earlier short wording stays.
             _hold = self.current_hold()
             if _hold is not None:
-                _sentence = hold_sentence(_hold, self.config.get("temp_unit", "fahrenheit"))
+                _sentence = hold_sentence_msg(_hold, self.config.get("temp_unit", "fahrenheit"), lowercase=True)
                 if _sentence is not None:
-                    return _sentence[0].lower() + _sentence[1:]
+                    return CodedText("tou_hold", _sentence)
             else:
-                _label = "pre-cooling" if _tou.mode == "cool" else "pre-heating"
                 _ends = self._format_tou_ends(_tou.schedule_start)
-                return f"{_label} — TOU high-cost period{_ends}"
+                return _status("tou_precondition", mode=_tou.mode, ends=msg_of(_ends) or "")
         # Investigation D / Phase 3d: the active cost_period window itself (not just the
         # PRECONDITIONING lead-time before it) — previously invisible on the Status card
         # entirely, including the case David actually hit (a configured schedule covering
@@ -17265,15 +17566,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _ends = self._format_tou_ends(_tou_active.schedule_end)
             _mode = getattr(self._current_classification, "hvac_mode", None) if self._current_classification else None
             if _mode in ("heat", "cool"):
-                return f"TOU high-cost period active{_ends}"
-            return f"TOU high-cost period active{_ends} — no pre-conditioning needed today"
+                return _status("tou_high_cost", ends=msg_of(_ends) or "")
+            return _status("tou_high_cost_idle", ends=msg_of(_ends) or "")
         if self._occupancy_mode == OCCUPANCY_VACATION:
-            return "active (vacation)"
+            return _status("active_vacation")
         if self._occupancy_mode == OCCUPANCY_AWAY:
-            return "active (away)"
+            return _status("active_away")
         if self._occupancy_mode == OCCUPANCY_GUEST:
-            return "active (guest)"
-        return "active"
+            return _status("active_guest")
+        return _status("active")
 
     @staticmethod
     def _pred_archive_key(dt: datetime) -> int:
@@ -17450,8 +17751,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             FAN_STATUS_THERMOSTAT,
         }
 
+    @_fan_status_coded
     def _compute_fan_status(self) -> str:
-        """Compute the current fan status string.
+        """Compute the current fan status string (returned as a ``CodedText``: the token, its code and its message).
 
         Priority order:
         1. CA-activated fan (_fan_active=True) → "active" (or "active (unconfirmed)" briefly,
@@ -17560,7 +17862,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     )
         return "inactive"
 
-    def _compute_whf_status(self) -> str | None:
+    def _compute_whf_status(self) -> CodedText | None:
+        """The WHF status (token + any rate-limit note) as a ``CodedText``, or None when WHF is not configured."""
+        token, rate = self._compute_whf_status_parts()
+        if token is None:
+            return None
+        return _fan_status_compound(fan_status_text(token), rate=rate)
+
+    def _compute_whf_status_parts(self) -> tuple[str | None, str | CodedText]:
         """Return WHF-specific status, or None when WHF is not configured.
 
         Issue #510: same ground-truth-first priority as _compute_fan_status() — see that
@@ -17576,7 +17885,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ae = self.automation_engine
         fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
-            return None
+            return None, ""
         physical_on = self._get_fan_physical_state()
         if ae._fan_override_active:
             status = "running (manual override)" if ae._fan_active or physical_on is True else "off (manual override)"
@@ -17618,9 +17927,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         else:
             status = "inactive"
-        return status + self._whf_rate_limit_suffix(ae)
+        return status, self._whf_rate_limit_suffix(ae)
 
-    def _whf_rate_limit_suffix(self, ae: AutomationEngine) -> str:
+    def _whf_rate_limit_suffix(self, ae: AutomationEngine) -> str | CodedText:
         """Append '(<direction> pending — 5-min floor, applies at HH:MM:SS)' to the WHF
         status while a toggle is still deferred by the Issue #641 cooldown — Status Card
         Ontology rule: extend the existing card's value string, don't add a new one.
@@ -17641,7 +17950,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return ""
         direction = getattr(ae, "_fan_rate_limited_direction", None)
         pending = "on" if direction == "activate" else "off"
-        return f" ({pending} pending — 5-min floor, applies at {dt_util.as_local(until).strftime('%H:%M:%S')})"
+        return CodedText("rate_limit", i18n.Msg("status.part.rate_limit", pending=pending, t=_clock(until)))
 
     def _append_indoor_blind_suffix(self, status: str | None, *, card: str) -> str | None:
         """Append the blind-fan note to a Fan (WHF)/(HVAC) card value (Issue #1037).
@@ -17668,12 +17977,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if isinstance(now, datetime) and stop_at <= now:
                 # Deadline passed but the stop has not landed (e.g. the Issue #641 rate limiter
                 # deferred the fan-off): never advertise a time that is already in the past.
-                return f"{status} (indoor sensor offline — stop pending)"
-            return f"{status} (indoor sensor offline — stops {dt_util.as_local(stop_at).strftime('%H:%M')})"
-        return f"{status} (indoor sensor offline — no auto-stop)"
+                note = i18n.Msg("status.part.blind_stop_pending")
+            else:
+                note = i18n.Msg("status.part.blind_stops", t=_clock(stop_at))
+        else:
+            note = i18n.Msg("status.part.blind_no_stop")
+        return _fan_status_compound(status, blind=note)
 
+    @_fan_status_coded
     def _compute_hvac_fan_status(self) -> str | None:
-        """Return HVAC-fan-blower-specific status, or None when HVAC fan is not configured.
+        """Return HVAC-fan-blower-specific status (a ``CodedText``), or None when HVAC fan is not configured.
 
         Issue #571: mirrors _compute_whf_status()'s ground-truth-first shape — including
         the ON-direction "active (unconfirmed)"/stale-flag guard, which this function never
@@ -17754,23 +18067,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return resolve_untracked_fan_status(recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0))
         return "inactive"
 
-    def _compute_contact_status(self) -> str:
-        """Compute the contact sensor summary string.
+    def _compute_contact_status(self) -> CodedText:
+        """Compute the contact sensor summary (English text + ``code`` + ``msg``).
 
         Issue #1181: a sensor that cannot be read is never summarised as closed -- it is called out with
         what Climate Advisor is doing about it ("held open" when its last real reading was open).
+        Codes: ``no_sensors``, ``all_closed``, ``counts`` (open and/or not-responding counts in the message).
         """
         if not self._resolved_sensors:
-            return "no sensors"
+            return CodedText("no_sensors", i18n.Msg("status.contact.no_sensors"))
         open_count = sum(1 for s in self._resolved_sensors if self._is_sensor_open(s))
         dark = [s for s in self._resolved_sensors if self._sensor_real_reading(self.hass.states.get(s)) is None]
         if open_count == 0 and not dark:
-            return "all closed"
-        parts = [f"{open_count} open"] if open_count else []
+            return CodedText("all_closed", i18n.Msg("status.contact.all_closed"))
+        parts: list[i18n.Msg] = [i18n.Msg("status.contact.open", n=open_count)] if open_count else []
         if dark:
             held = sum(1 for s in dark if self._sensor_holds_open(s))
-            parts.append(f"{len(dark)} not responding" + (f" ({held} last read open, held open)" if held else ""))
-        return ", ".join(parts)
+            if held:
+                parts.append(i18n.Msg("status.contact.dark_held", n=len(dark), held=held))
+            else:
+                parts.append(i18n.Msg("status.contact.dark", n=len(dark)))
+        msg = parts[0] if len(parts) == 1 else i18n.Msg("status.contact.join", a=parts[0], b=parts[1])
+        return CodedText("counts", msg)
 
     def _compute_contact_details(self) -> list[dict[str, Any]]:
         """Return per-sensor details for contact status attributes.
@@ -17793,16 +18111,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         return details
 
-    def _format_tou_ends(self, schedule_start: datetime | None) -> str:
+    def _format_tou_ends(self, schedule_start: datetime | None) -> str | CodedText:
         """Format the TOU pre-conditioning window's end (the schedule's own start instant)
         as " (ends H:MM AM)", same convention as _format_grace_remaining(). Returns "" if
         unavailable — never raises."""
         if not isinstance(schedule_start, datetime):
             return ""
-        end_str = dt_util.as_local(schedule_start).strftime("%I:%M %p").lstrip("0")
-        return f" (ends {end_str})"
+        return CodedText("ends", i18n.Msg("status.part.ends", t=_clock(schedule_start)))
 
-    def _grace_status_detail(self, ae: AutomationEngine) -> str:
+    def _grace_status_detail(self, ae: AutomationEngine) -> str | CodedText:
         """Status-card grace detail: ' — <cause>' plus ' — <duration> (ends HH:MM)' (Issues #625/#860/#1095).
 
         Single definition used by every Status string that mentions a grace period.
@@ -17810,14 +18127,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Fan card owns the duration/expiry, so only the cause label is returned here.
         """
         _trigger = getattr(ae, "_last_grace_trigger", None) or ""
-        _label = _GRACE_TRIGGER_LABELS.get(_trigger, "")
-        _cause = f" — {_label}" if _label else ""
-        _cause += self._separate_fan_request_detail(ae, _trigger)
-        if ae._fan_remote_timer_hours is not None:
-            return _cause
-        return f"{_cause}{self._format_grace_remaining(ae)}"
+        _label_key = _GRACE_TRIGGER_LABELS.get(_trigger, "")
+        _cause = i18n.Msg("status.part.cause", cause=i18n.Msg(_label_key)) if _label_key else ""
+        _fan = msg_of(self._separate_fan_request_detail(ae, _trigger))
+        _remaining = "" if ae._fan_remote_timer_hours is not None else msg_of(self._format_grace_remaining(ae))
+        if not _cause and _fan is None and not _remaining:
+            return ""
+        return CodedText(
+            "grace_detail",
+            i18n.Msg(
+                "status.part.grace_detail",
+                cause=_cause,
+                fan=_fan if _fan is not None else "",
+                remaining=_remaining or "",
+            ),
+        )
 
-    def _separate_fan_request_detail(self, ae: AutomationEngine, trigger: str) -> str:
+    def _separate_fan_request_detail(self, ae: AutomationEngine, trigger: str) -> str | CodedText:
         """Issue #1205: name the occupant's fan request that outlives the running grace (owner decision 2026-11-01).
 
         "Fan off" and "fan on" are separate requests from a thermostat change; once the thermostat override's grace
@@ -17829,7 +18155,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not isinstance(now, datetime):
             return ""
 
-        def _at(value: Any) -> str | None:
+        def _at(value: Any) -> i18n.Time | None:
             if not isinstance(value, datetime):
                 return None
             try:
@@ -17837,18 +18163,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     return None
             except TypeError:
                 return None
-            return dt_util.as_local(value).strftime("%I:%M %p").lstrip("0")
+            return _clock(value)
 
-        out = ""
+        hold_msg: i18n.Msg | str = ""
+        run_msg: i18n.Msg | str = ""
         hold_at = _at(getattr(ae, "_fan_off_hold_until", None))
-        if hold_at and trigger != "fan_off":
-            out += f" — fan held off until {hold_at}"
+        if hold_at is not None and trigger != "fan_off":
+            hold_msg = i18n.Msg("status.part.fan_hold", t=hold_at)
         run_at = _at(getattr(ae, "_fan_override_until", None))
-        if run_at and trigger != "fan_manual_override" and getattr(ae, "_fan_override_active", False) is True:
-            out += f" — your fan run continues until {run_at}"
-        return out
+        if (
+            run_at is not None
+            and trigger != "fan_manual_override"
+            and getattr(ae, "_fan_override_active", False) is True
+        ):
+            run_msg = i18n.Msg("status.part.fan_run", t=run_at)
+        if not hold_msg and not run_msg:
+            return ""
+        return CodedText("fan_requests", i18n.Msg("status.part.fan_requests", hold=hold_msg, run=run_msg))
 
-    def _format_grace_remaining(self, ae: AutomationEngine) -> str:
+    def _format_grace_remaining(self, ae: AutomationEngine) -> str | CodedText:
         """Format grace duration + end time as ' — 30 min (ends H:MM AM)', matching the
         Fan (WHF) card's 'remote timer: Xh (ends HH:MM)' style (Issue #625).
 
@@ -17884,32 +18217,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         remaining_s = (end_dt - now).total_seconds()
         if remaining_s <= 0:
             return ""
-        end_str = dt_util.as_local(end_dt).strftime("%I:%M %p").lstrip("0")
-        minutes = max(1, round(duration_s / 60))
-        if minutes >= 60 and minutes % 60 == 0:
-            dur_str = f"{minutes // 60}h"
-        elif minutes >= 60:
-            dur_str = f"{minutes / 60:.1f}h"
-        else:
-            dur_str = f"{minutes} min"
-        return f" — {dur_str} (ends {end_str})"
+        return CodedText(
+            "grace_remaining",
+            i18n.Msg("status.part.remaining", dur=i18n.Duration(duration_s), t=_clock(end_dt)),
+        )
 
-    def _compute_next_automation_action(self, c: DayClassification | None) -> tuple[str, str]:
+    def _compute_next_automation_action(self, c: DayClassification | None) -> tuple[CodedText, CodedText]:
         """Compute the next scheduled automation action and its time.
 
         Returns:
-            Tuple of (action_description, execution_time_str).
+            Tuple of (action_description, execution_time_str), each a ``CodedText`` (English text, ``code``, ``msg``).
         """
         # Bug 1 (Issue #321): Surface coalescing as the next imminent action
         if self._startup_coalesce_active and self._startup_coalesce_expiry:
             # Format as a local-time label like the other branches below; the field's
             # contract is a display-ready label, never a raw ISO timestamp (Issue #324).
             coalesce_dt = dt_util.parse_datetime(self._startup_coalesce_expiry)
-            time_str = dt_util.as_local(coalesce_dt).strftime("%I:%M %p").lstrip("0") if coalesce_dt else ""
-            return ("Startup coalescing", time_str)
+            time_text = _clock_text(coalesce_dt) if coalesce_dt else CodedText("none", None, text="")
+            return (CodedText("startup_coalescing", i18n.Msg("status.next_automation.startup_coalescing")), time_text)
 
         if not c:
-            return ("Waiting for classification...", "")
+            return (
+                CodedText("waiting_classification", i18n.Msg("status.next_automation.waiting_classification")),
+                CodedText("none", None, text=""),
+            )
 
         now = dt_util.now()
         today = now.date()
@@ -17942,7 +18273,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1404: while a time-of-use bank owns the thermostat, the next thing CA does is end it at the high-cost
         # period's start and go back to the schedule band (current_hold(), the same answer as Status). Not a timeline
         # step (the plan's step list is unchanged); a card candidate like the timeline's own.
-        _bank_cand: list[tuple[datetime, str]] = []
+        _bank_cand: list[tuple[datetime, i18n.Msg | str]] = []
         _bank_hold = self.current_hold(now)
         if _bank_hold is not None and _bank_hold.bank is not None and _bank_hold.bank.ends > now:
             _bank_cand.append(
@@ -17954,18 +18285,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         _tl = self._surface_timeline()
         if _tl is not None:
-            candidates: list[tuple[datetime, str]] = list(_bank_cand)
+            candidates: list[tuple[datetime, i18n.Msg | str]] = list(_bank_cand)
             _unit_na = self.config.get("temp_unit", "fahrenheit")
             for _step_dt, _step_label, _step in next_automation_candidates(_tl, now, _unit_na):
                 candidates.append((_step_dt, _step_label))
             candidates.sort(key=lambda e: e[0])
             if not candidates:
                 _LOGGER.info("Next-automation: No more actions today")
-                return ("No more actions today", "")
+                return (
+                    CodedText("no_more_actions", i18n.Msg("status.next_automation.no_more_actions")),
+                    CodedText("none", None, text=""),
+                )
             _next_dt, _next_desc = candidates[0]
-            _next_time = dt_util.as_local(_next_dt).strftime("%I:%M %p").lstrip("0")
-            _LOGGER.info("Next-automation (timeline): %s at %s", _next_desc, _next_time)
-            return (_next_desc, _next_time)
+            _next_time = _clock_text(_next_dt)
+            _LOGGER.info("Next-automation (timeline): %s at %s", _label_text(_next_desc), _next_time)
+            return (_label_text(_next_desc), _next_time)
 
         # Build list of upcoming scheduled events as (datetime, description).
         # Using full datetimes (not time objects) so cross-midnight events like
@@ -17981,18 +18315,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         def _to_dt(t: time) -> datetime:
             return datetime.combine(today, t, tzinfo=now.tzinfo)
 
-        candidates: list[tuple[datetime, str]] = list(_bank_cand)
+        candidates: list[tuple[datetime, i18n.Msg | str]] = list(_bank_cand)
 
         bt_dt = _to_dt(_parse_time(briefing_time))
         if bt_dt > now:
-            candidates.append((bt_dt, "Send daily briefing"))
+            candidates.append((bt_dt, i18n.Msg("status.next_automation.send_briefing")))
 
         wt_dt = _to_dt(_parse_time(wake_time))
         if wt_dt > now:
             if c.hvac_mode in ("heat", "cool"):
-                candidates.append((wt_dt, f"Morning wake-up — restore {c.hvac_mode} comfort"))
+                candidates.append((wt_dt, i18n.Msg("status.next_automation.wake_restore", mode=c.hvac_mode)))
             else:
-                candidates.append((wt_dt, "Morning wake-up check"))
+                candidates.append((wt_dt, i18n.Msg("status.next_automation.wake_check")))
 
         st_dt = _to_dt(_parse_time(sleep_time))
         if st_dt > now:
@@ -18009,15 +18343,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     else self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL)
                 )
                 mode_label = "heat" if c.hvac_mode == "heat" else "cool"
-                candidates.append((st_dt, f"Bedtime — {mode_label} setback to {format_temp(bedtime_target, unit)}"))
+                candidates.append(
+                    (
+                        st_dt,
+                        i18n.Msg(
+                            "status.next_automation.bedtime_setback",
+                            mode=mode_label,
+                            target=i18n.Temp(bedtime_target, unit),
+                        ),
+                    )
+                )
             else:
-                candidates.append((st_dt, "Bedtime check"))
+                candidates.append((st_dt, i18n.Msg("status.next_automation.bedtime_check")))
 
         # Pre-cool is scheduled for early tomorrow morning — its trigger_dt crosses
         # midnight, so only full-datetime comparison handles it correctly.
         if self._pre_cool_trigger_dt and self._pre_cool_trigger_dt > now and self._pre_cool_target is not None:
             unit = self.config.get("temp_unit", "fahrenheit")
-            pc_desc = f"Pre-cool ceiling ({format_temp(self._pre_cool_target, unit)})"
+            pc_desc = i18n.Msg("status.next_automation.pre_cool_ceiling", target=i18n.Temp(self._pre_cool_target, unit))
             candidates.append((self._pre_cool_trigger_dt, pc_desc))
 
         # Issue #528: self._last_predicted_indoor is always set in __init__() in
@@ -18045,7 +18388,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and _warm_events["ceiling_breach_time"]
             and _warm_events["ceiling_breach_time"] > now
         ):
-            candidates.append((_warm_events["ceiling_breach_time"], "AC turns on to hold the ceiling"))
+            candidates.append(
+                (_warm_events["ceiling_breach_time"], i18n.Msg("status.next_automation.ac_holds_ceiling"))
+            )
 
         # Nat-vent/WHF start prediction (Issue #528). Uses the real activation gate
         # (decide_nat_vent_gate(), the same pure function automation.py's
@@ -18066,7 +18411,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # the engine as a bare MagicMock whose unset attributes are truthy.
         _nat_vent_dt = self._predict_nat_vent_start(now, c)
         if _nat_vent_dt:
-            candidates.append((_nat_vent_dt, "Natural ventilation"))
+            candidates.append((_nat_vent_dt, i18n.Msg("status.next_automation.natural_ventilation")))
 
         # Phase 3e (Issue #786 follow-up): TOU pre-conditioning start. Per CLAUDE.md's
         # Status Card Ontology, "Next Automation" answers "what will the automation do
@@ -18087,23 +18432,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and _tou_next.target is not None
         ):
             _tou_unit = self.config.get("temp_unit", "fahrenheit")
-            _tou_action = "Pre-cool" if _tou_next.mode == "cool" else "Pre-heat"
             candidates.append(
                 (
                     _tou_next.precondition_start,
-                    f"{_tou_action} for TOU schedule ({format_temp(_tou_next.target, _tou_unit)})",
+                    i18n.Msg(
+                        "status.next_automation.tou_precondition",
+                        mode=_tou_next.mode,
+                        target=i18n.Temp(_tou_next.target, _tou_unit),
+                    ),
                 )
             )
 
         if not candidates:
             _LOGGER.info("Next-automation: No more actions today")
-            return ("No more actions today", "")
+            return (
+                CodedText("no_more_actions", i18n.Msg("status.next_automation.no_more_actions")),
+                CodedText("none", None, text=""),
+            )
 
         candidates.sort(key=lambda e: e[0])
         next_dt, next_desc = candidates[0]
-        time_str = dt_util.as_local(next_dt).strftime("%I:%M %p").lstrip("0")
-        _LOGGER.info("Next-automation: %s at %s", next_desc, time_str)
-        return (next_desc, time_str)
+        time_text = _clock_text(next_dt)
+        _LOGGER.info("Next-automation: %s at %s", _label_text(next_desc), time_text)
+        return (_label_text(next_desc), time_text)
 
     def _predict_nat_vent_start(self, now: datetime, c: DayClassification | None) -> datetime | None:
         """The engine's own prediction of when a nat-vent / whole-house-fan session would start (Issue #528).
@@ -18886,6 +19237,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _comfort_family_hold_label(ae: Any, now: datetime, unit: str = "fahrenheit") -> str | None:
+        """The settling-guard hold sentence in English (see ``_comfort_family_hold_msg``), None when not holding."""
+        msg = ClimateAdvisorCoordinator._comfort_family_hold_msg(ae, now, unit)
+        return i18n.render_en(msg) if msg is not None else None
+
+    @staticmethod
+    def _comfort_family_hold_msg(ae: Any, now: datetime, unit: str = "fahrenheit") -> i18n.Msg | None:
         """Issue #1073: plain-language settling-guard hold ("holding cooling: ..."), None when not holding.
 
         Built from ``AutomationEngine._last_comfort_hold``. "until" is the ABSOLUTE time the recency window
@@ -18907,7 +19264,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ):
                 return None
             side = "floor" if candidate == "heating" else "ceiling"
-            opposite = "cooling" if candidate == "heating" else "heating"
             until_dt: datetime | None = None
             until_raw = hold.get("until_ts")
             if isinstance(until_raw, str):
@@ -18917,18 +19273,43 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     until_dt = None
             if until_dt is None:
                 until_dt = instant_after(max(0.0, float(window) - float(ran)) * 60.0, now=now)
-            until = dt_util.as_local(until_dt).strftime("%H:%M")
-            tol_txt = format_temp_delta(float(tolerance), unit, 1)
             if hold.get("zone") == "margin":
-                where = f"near the {side}, still inside the comfort range"
+                where: i18n.Msg = i18n.Msg("status.comfort_hold.where_margin", side=side)
             else:
-                where = f"{format_temp_delta(float(depth), unit, 1)} past {side}"
-            return (
-                f"holding {candidate}: {where}, tolerance {tol_txt}, "
-                f"{opposite} ran {int(round(ran))} min ago (until ~{until})"
+                where = i18n.Msg(
+                    "status.comfort_hold.where_past", depth=i18n.TempDelta(float(depth), unit, 1), side=side
+                )
+            return i18n.Msg(
+                "status.comfort_hold.holding",
+                candidate="heating" if candidate == "heating" else "cooling",
+                where=where,
+                tolerance=i18n.TempDelta(float(tolerance), unit, 1),
+                ran=int(round(ran)),
+                until=_clock(until_dt),
             )
         except Exception:  # noqa: BLE001 - diagnostics must never break the debug view
             return None
+
+    def _last_action_reason_text(self, ae: Any) -> str | None:
+        """``last_action_reason`` in the backend language (the English record when no message was kept, Issue #1341)."""
+        msg = getattr(ae, "_last_action_reason_msg", None)
+        if isinstance(msg, i18n.Msg):
+            return i18n.render(msg, i18n.hass_language(getattr(self, "hass", None)))
+        return ae._last_action_reason
+
+    @staticmethod
+    def _last_action_reason_wire(ae: Any) -> dict | None:
+        msg = getattr(ae, "_last_action_reason_msg", None)
+        return msg.to_wire() if isinstance(msg, i18n.Msg) else None
+
+    def _comfort_family_hold_text(self, ae: Any, now: datetime, unit: str) -> str | None:
+        """The hold sentence in the backend language (the Debug state's ``comfort_family_hold``)."""
+        msg = self._comfort_family_hold_msg(ae, now, unit)
+        return i18n.render(msg, i18n.hass_language(getattr(self, "hass", None))) if msg is not None else None
+
+    def _comfort_family_hold_wire(self, ae: Any, now: datetime, unit: str) -> dict | None:
+        msg = self._comfort_family_hold_msg(ae, now, unit)
+        return msg.to_wire() if msg is not None else None
 
     @staticmethod
     def _debug_window_rule(c: Any, unit: str) -> dict[str, Any]:
@@ -19023,13 +19404,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 },
             },
             "last_action_time": ae._last_action_time,
-            "last_action_reason": ae._last_action_reason,
+            "last_action_reason": self._last_action_reason_text(ae),
+            "last_action_reason_msg": self._last_action_reason_wire(ae),
             "manual_override_active": ae._manual_override_active,
             "manual_override_mode": ae._manual_override_mode,
             "manual_override_time": ae._manual_override_time,
             "manual_grace_duration": ae.config.get(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS),
             "next_automation_action": self.data.get(ATTR_NEXT_AUTOMATION_ACTION, "") if self.data else "",
+            "next_automation_action_msg": wire_of(self.data.get(ATTR_NEXT_AUTOMATION_ACTION)) if self.data else None,
             "next_automation_time": self.data.get(ATTR_NEXT_AUTOMATION_TIME, "") if self.data else "",
+            "next_automation_time_msg": wire_of(self.data.get(ATTR_NEXT_AUTOMATION_TIME)) if self.data else None,
             # Fan state (Issue #37)
             "fan_active": ae._fan_active,
             "fan_on_since": ae._fan_on_since,
@@ -19048,7 +19432,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Derived from the thermostat's real mode: ``_comfort_mode_family`` is overwritten by
             # nat-vent/WHF/economizer callers and can say "cooling" while the thermostat heats.
             "comfort_family_armed": self._comfort_family_armed_label(ae),
-            "comfort_family_hold": self._comfort_family_hold_label(ae, dt_util.now(), unit),
+            "comfort_family_hold": self._comfort_family_hold_text(ae, dt_util.now(), unit),
+            "comfort_family_hold_msg": self._comfort_family_hold_wire(ae, dt_util.now(), unit),
             "comfort_family_last_switch": (
                 dict(ae._last_comfort_switch) if getattr(ae, "_last_comfort_switch", None) else None
             ),

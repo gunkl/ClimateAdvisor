@@ -20,7 +20,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 
 from . import log_capture
-from .api import _ambiguous_zone_payload, _get_coordinator
+from .api import _ambiguous_zone_payload, _error_body, _get_coordinator
 from .const import CONF_GITHUB_REPO, CONF_GITHUB_TOKEN, CONFIG_METADATA, DOMAIN
 from .temperature import FAHRENHEIT, UNIT_SYMBOL, display_delta, display_temp
 
@@ -126,7 +126,7 @@ class ClimateAdvisorSettingsExtraView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
         with log_capture.zone_scope(coordinator.zone_label):
             payload = build_settings_extra(coordinator.config)
             payload["reload_needed"] = _reload_needed(hass, getattr(coordinator, "_entry_id", ""))

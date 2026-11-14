@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
-from . import i18n, log_capture, prediction_accuracy, zone_registry
+from . import i18n, log_capture, prediction_accuracy, status_text, zone_registry
 from .ai_skills_context import OUTDOOR_SENSOR_REASON_LABELS, build_event_timeline_table
 from .const import (
     API_AI_INVESTIGATE,
@@ -77,6 +77,7 @@ from .const import (
 )
 from .engine_inputs import decide, decide_sync
 from .remote_offset import remote_offset_view_for
+from .status_text import code_of
 from .temperature import FAHRENHEIT, UNIT_SYMBOL, display_delta, display_temp
 
 _LOGGER = logging.getLogger(__name__)
@@ -202,6 +203,79 @@ def _resolve_request_zone(hass: HomeAssistant, request: web.Request, *, allow_gu
     return zone_registry.resolve_zone(hass, zone_id, context=context, allow_guess=allow_guess)
 
 
+# Issue #1341: error code -> catalog key (one literal per key; the English lives in frontend/i18n/errors/en.json).
+_ERROR_KEYS: dict[str, str] = {
+    "not_loaded": "errors.not_loaded",
+    "zone_selection_required": "errors.zone_selection_required",
+    "invalid_verbosity": "errors.invalid_verbosity",
+    "invalid_json_body": "errors.invalid_json_body",
+    "feedback_value": "errors.feedback_value",
+    "suggestion_key_required": "errors.suggestion_key_required",
+    "action_or_feedback_required": "errors.action_or_feedback_required",
+    "action_value": "errors.action_value",
+    "engine_status_unavailable": "errors.engine_status_unavailable",
+    "ai_not_enabled": "errors.ai_not_enabled",
+    "investigator_not_enabled": "errors.investigator_not_enabled",
+    "ai_client_unavailable": "errors.ai_client_unavailable",
+    "timeline_not_ready": "errors.timeline_not_ready",
+    "night_strategy_not_ready": "errors.night_strategy_not_ready",
+    "invalid_json": "errors.invalid_json",
+    "missing_timestamp": "errors.missing_timestamp",
+    "invalid_type": "errors.invalid_type",
+    "not_configured": "errors.not_configured",
+    "missing_title": "errors.missing_title",
+    "network_error": "errors.network_error",
+    "github_api": "errors.github_api",
+    "investigation_failed": "errors.investigation_failed",
+}
+
+
+def _msg_fields(hass: HomeAssistant, msg: i18n.Msg, field: str = "message") -> dict[str, Any]:
+    """``{field: <text in the backend language>, "<field>_msg": <wire Msg>}`` (Issue #1341, D3 "API shape").
+
+    The prose stays in every body as before (rendered in ``hass.config.language``); the sibling is the same message as
+    ``{key, params}`` so the dashboard can render it in the viewer's own language.
+    """
+    return {field: i18n.render(msg, i18n.hass_language(hass)), f"{field}_msg": msg.to_wire()}
+
+
+def _error_body(hass: HomeAssistant, code: str, **params: Any) -> dict[str, Any]:
+    """An ``{"error", "error_code", "error_msg"}`` body for a prose error (catalog ``errors``)."""
+    body = _msg_fields(hass, i18n.Msg(_ERROR_KEYS[code], **params), "error")
+    body["error_code"] = code
+    return body
+
+
+def _coded_extra(hass: HomeAssistant, code: str, **params: Any) -> dict[str, Any]:
+    """The siblings to add beside an ``error`` that already IS a stable code (an existing contract, kept as is).
+
+    ``error_code`` repeats the code, ``error_msg`` is the wire message and ``error_text`` the same sentence in the
+    backend language (the code itself is not a sentence).
+    """
+    msg = i18n.Msg(_ERROR_KEYS[code], **params)
+    return {
+        "error_code": code,
+        "error_msg": msg.to_wire(),
+        "error_text": i18n.render(msg, i18n.hass_language(hass)),
+    }
+
+
+def _text_fields(field: str, value: Any, lang: str | None, *, code: bool = False) -> dict[str, Any]:
+    """``{field, field_msg[, field_code]}`` for a status value (Issue #1341).
+
+    ``value`` is a ``CodedText`` (its English text, a stable code and a message) or plain text. ``lang`` is the
+    language the prose is rendered in; None keeps the English text (the documented enum-like fan values).
+    ``<field>_msg`` is None for plain text no catalog message describes yet.
+    """
+    out: dict[str, Any] = {
+        field: status_text.render_text(value, lang) if (lang and value is not None) else value,
+        f"{field}_msg": status_text.wire_of(value),
+    }
+    if code:
+        out[f"{field}_code"] = code_of(value)
+    return out
+
+
 def _ambiguous_zone_payload(hass: HomeAssistant) -> dict[str, Any]:
     """Response body for a POST request refused for ambiguous zone selection.
 
@@ -215,10 +289,7 @@ def _ambiguous_zone_payload(hass: HomeAssistant) -> dict[str, Any]:
     """
     zones = zone_registry.list_zones(hass)
     return {
-        "message": (
-            "Multiple Climate Advisor zones are configured — add ?zone=<entry_id> (one of the entry_id values in "
-            "'zones') so the request names exactly one zone."
-        ),
+        **_msg_fields(hass, i18n.Msg(_ERROR_KEYS["zone_selection_required"], hint="?zone=<entry_id>")),
         "zone_selection_required": True,
         "zones": zones,
         "zone_count": len(zones),
@@ -292,7 +363,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             data = coordinator.data or {}
@@ -398,10 +469,12 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             _pause_suppressed_classification = (
                 bool(ae.is_paused_by_door) and ae._last_classification_applied is not None
             )
+            _pause_suppressed_msg = (
+                i18n.Msg("status.pause_suppressed_classification") if _pause_suppressed_classification else None
+            )
+            _lang = i18n.hass_language(hass)
             _pause_suppressed_classification_text = (
-                "Classification suppressed — HVAC held off until windows close"
-                if _pause_suppressed_classification
-                else None
+                i18n.render(_pause_suppressed_msg, _lang) if _pause_suppressed_msg is not None else None
             )
 
             # Issue #480: gate on coordinator.last_update_success instead of silently
@@ -415,7 +488,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             _coordinator_healthy = bool(coordinator.last_update_success)
             # Issue #1194 (d): the remote-sensor outer loop, described once (comfort target vs the commanded setpoint,
             # the signed offset, the loop state, the sentence). Read live from the engine, never re-decided here.
-            _remote_offset = remote_offset_view_for(ae, unit)
+            _remote_offset = remote_offset_view_for(ae, unit, _lang)
             _zones = zone_registry.list_zones(hass)
             _status_payload = {
                 "version": VERSION,
@@ -435,7 +508,10 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "sleep_indoor_sensor_active": data.get("sleep_indoor_sensor_active", False),
                 "outdoor_temp": outdoor_temp_display,
                 "unit": unit,
-                "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),
+                # Issue #1341: the prose in the backend language, ``automation_status_msg`` ({key, params}) for the
+                # viewer's language, and ``status_code`` (stable) for anything that branches on the state.
+                **_text_fields("automation_status", data.get(ATTR_AUTOMATION_STATUS, "unknown"), _lang),
+                "status_code": code_of(data.get(ATTR_AUTOMATION_STATUS)),
                 # Issue #1404: the time-of-use bank holding the house right now (target, mode, end, the band it
                 # goes back to, and the one sentence every surface quotes), live; null when no bank owns the
                 # thermostat. ca_target_heat/ca_target_cool already quote the bank band while it does.
@@ -456,15 +532,18 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 # everything is fine. Same Status Card Ontology as invariant_violations above.
                 "entity_health_issues": data.get("entity_health_issues", []),
                 "compliance_score": data.get(ATTR_COMPLIANCE_SCORE, 1.0),
-                "next_action": data.get(ATTR_NEXT_ACTION, ""),
-                "next_automation_action": data.get(ATTR_NEXT_AUTOMATION_ACTION, ""),
-                "next_automation_time": data.get(ATTR_NEXT_AUTOMATION_TIME, ""),
+                **_text_fields("next_action", data.get(ATTR_NEXT_ACTION, ""), _lang, code=True),
+                **_text_fields("next_automation_action", data.get(ATTR_NEXT_AUTOMATION_ACTION, ""), _lang, code=True),
+                **_text_fields("next_automation_time", data.get(ATTR_NEXT_AUTOMATION_TIME, ""), _lang),
                 "automation_enabled": coordinator.automation_enabled,
                 "occupancy_mode": coordinator._occupancy_mode,
-                "fan_status": data.get(ATTR_FAN_STATUS, "disabled"),
-                "whf_status": data.get(ATTR_WHF_STATUS),
-                "hvac_fan_status": data.get(ATTR_HVAC_FAN_STATUS),
-                "contact_status": data.get(ATTR_CONTACT_STATUS, "no sensors"),
+                # The three fan cards keep their documented English values (the "Fan Status Values" enum, plus the
+                # rate-limit / blind notes): dashboards and automations compare them. ``*_code`` is the stable
+                # token code and ``*_msg`` renders token and notes in the viewer's language.
+                **_text_fields("fan_status", data.get(ATTR_FAN_STATUS, "disabled"), None, code=True),
+                **_text_fields("whf_status", data.get(ATTR_WHF_STATUS), None, code=True),
+                **_text_fields("hvac_fan_status", data.get(ATTR_HVAC_FAN_STATUS), None, code=True),
+                **_text_fields("contact_status", data.get(ATTR_CONTACT_STATUS, "no sensors"), _lang, code=True),
                 "contact_sensors": coordinator._compute_contact_details(),
                 "manual_override_active": ae._manual_change_protected(),
                 "fan_override_active": ae._fan_override_active,
@@ -484,6 +563,9 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "paused_by_door": ae.is_paused_by_door,
                 "pause_suppressed_classification": _pause_suppressed_classification,
                 "pause_suppressed_classification_text": _pause_suppressed_classification_text,
+                "pause_suppressed_classification_text_msg": (
+                    _pause_suppressed_msg.to_wire() if _pause_suppressed_msg is not None else None
+                ),
                 "ca_target_heat": display_temp(_ca_target_heat, unit),
                 "ca_target_cool": display_temp(_ca_target_cool, unit),
                 "remote_offset": _remote_offset,
@@ -492,7 +574,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "nat_vent_target": _nat_vent_target_display,
                 "nat_vent_on_threshold": _nat_vent_on_threshold_display,
                 "nat_vent_off_threshold": _nat_vent_off_threshold_display,
-                "pre_cool_status": data.get("pre_cool_status"),
+                **_text_fields("pre_cool_status", data.get("pre_cool_status"), _lang),
                 "coordinator_healthy": _coordinator_healthy,
                 # Issue #796 PR9: dashboard zone selector. loadStatus() polls every
                 # cycle regardless of which tab is active, so this is the one
@@ -533,13 +615,13 @@ class ClimateAdvisorBriefingView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             verbosity = request.rel_url.query.get("verbosity", "normal")
             if verbosity not in ("tldr_only", "normal", "verbose"):
                 return self.json(
-                    {"error": "verbosity must be one of: tldr_only, normal, verbose"},
+                    _error_body(hass, "invalid_verbosity"),
                     status_code=400,
                 )
 
@@ -578,7 +660,7 @@ class ClimateAdvisorChartDataView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             range_str = request.rel_url.query.get("range", "24h")
@@ -615,7 +697,7 @@ class ClimateAdvisorAutomationStateView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             return self.json(coordinator.get_debug_state())
@@ -634,7 +716,7 @@ class ClimateAdvisorLearningView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             today_record = None
@@ -690,11 +772,11 @@ class ClimateAdvisorForceReclassifyView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             await coordinator.async_request_refresh()
-            return self.json({"status": "ok", "message": "Reclassification triggered"})
+            return self.json({"status": "ok", **_msg_fields(hass, i18n.Msg("errors.reclassify_triggered"))})
 
 
 class ClimateAdvisorSendBriefingView(HomeAssistantView):
@@ -710,7 +792,7 @@ class ClimateAdvisorSendBriefingView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             # Issue #817 Part 4: optional {"notify": bool} body, default True — backward
@@ -730,7 +812,10 @@ class ClimateAdvisorSendBriefingView(HomeAssistantView):
 
             await coordinator._async_send_briefing(dt_util.now(), send_notifications=notify)
             return self.json(
-                {"status": "ok", "message": "Briefing sent" if notify else "Briefing regenerated (no notification)"}
+                {
+                    "status": "ok",
+                    **_msg_fields(hass, i18n.Msg("errors.briefing_sent" if notify else "errors.briefing_regenerated")),
+                }
             )
 
 
@@ -747,13 +832,13 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             try:
                 body = await request.json()
             except Exception:
-                return self.json({"error": "Invalid JSON body"}, status_code=400)
+                return self.json(_error_body(hass, "invalid_json_body"), status_code=400)
 
             action = body.get("action")
             suggestion_key = body.get("suggestion_key")
@@ -762,24 +847,24 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
             # Validate feedback if present
             if feedback is not None and feedback not in ("correct", "incorrect"):
                 return self.json(
-                    {"error": "feedback must be 'correct' or 'incorrect'"},
+                    _error_body(hass, "feedback_value"),
                     status_code=400,
                 )
 
             # suggestion_key is required; action is required only when feedback is absent
             if not suggestion_key:
                 return self.json(
-                    {"error": "Required: suggestion_key"},
+                    _error_body(hass, "suggestion_key_required"),
                     status_code=400,
                 )
             if action is None and feedback is None:
                 return self.json(
-                    {"error": "Required: action (accept/dismiss) or feedback (correct/incorrect)"},
+                    _error_body(hass, "action_or_feedback_required"),
                     status_code=400,
                 )
             if action is not None and action not in ("accept", "dismiss"):
                 return self.json(
-                    {"error": "action must be 'accept' or 'dismiss'"},
+                    _error_body(hass, "action_value"),
                     status_code=400,
                 )
 
@@ -829,7 +914,7 @@ class ClimateAdvisorConfigView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             config = coordinator.config
@@ -935,7 +1020,7 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             ae = coordinator.automation_engine
@@ -946,17 +1031,15 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
             had_hold = ae._fan_off_hold_active()  # Issue #1205: a hold can run with no grace behind it
             cancelled = decide_sync(coordinator, ae.cancel_override, reason="user_cancel_override")
             if not cancelled:
-                return self.json({"status": "ok", "message": "No active override or grace period to cancel"})
+                return self.json({"status": "ok", **_msg_fields(hass, i18n.Msg("errors.cancel_nothing"))})
 
             _schedule_reclassify_after_cancel(hass, coordinator, ae)
 
-            what = (
-                "Override cancelled" if had_override else ("Fan-off pause ended" if had_hold else "Grace period ended")
-            )
+            what = "override" if had_override else ("hold" if had_hold else "grace")
             return self.json(
                 {
                     "status": "ok",
-                    "message": f"{what}. Automated control resumes in 10 seconds.",
+                    **_msg_fields(hass, i18n.Msg("errors.cancel_done", what=what)),
                 }
             )
 
@@ -974,12 +1057,12 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             ae = coordinator.automation_engine
             if not ae.is_paused_by_door:
-                return self.json({"status": "ok", "message": "Not currently paused"})
+                return self.json({"status": "ok", **_msg_fields(hass, i18n.Msg("errors.resume_not_paused"))})
 
             restored_mode = await decide(coordinator, ae.resume_from_pause)
             if ae.dry_run:
@@ -987,7 +1070,7 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
                 return self.json(
                     {
                         "status": "ok",
-                        "message": "Pause cleared. Automation is off (observe-only): no thermostat command was sent.",
+                        **_msg_fields(hass, i18n.Msg("errors.resume_observe_only")),
                         "restored_mode": None,
                     }
                 )
@@ -996,10 +1079,7 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
                 return self.json(
                     {
                         "status": "ok",
-                        "message": (
-                            f"Pause cleared. The thermostat did not take {restored_mode or 'the restore'} yet; "
-                            "Climate Advisor is re-sending it. The grace period starts once it lands."
-                        ),
+                        **_msg_fields(hass, i18n.Msg("errors.resume_pending", mode=restored_mode or "none")),
                         "restored_mode": restored_mode,
                         "restore_pending": True,
                     }
@@ -1007,9 +1087,7 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
             return self.json(
                 {
                     "status": "ok",
-                    "message": (
-                        f"Resumed from pause. HVAC set to {restored_mode or 'N/A'}. Manual grace period started."
-                    ),
+                    **_msg_fields(hass, i18n.Msg("errors.resume_done", mode=restored_mode or "none")),
                     "restored_mode": restored_mode,
                 }
             )
@@ -1028,7 +1106,7 @@ class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             ae = coordinator.automation_engine
@@ -1036,13 +1114,13 @@ class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
             had_hold = ae._fan_off_hold_active()  # Issue #1205: the fan-off pause is a fan-side request too
             cancelled = decide_sync(coordinator, ae.cancel_override, reason="user_cancel_fan_override")
             if not cancelled:
-                return self.json({"status": "ok", "message": "No active fan override to cancel."})
+                return self.json({"status": "ok", **_msg_fields(hass, i18n.Msg("errors.fan_cancel_nothing"))})
 
             _schedule_reclassify_after_cancel(hass, coordinator, ae)
 
             if had_hold and not had_fan_override:
-                return self.json({"status": "ok", "message": "Fan-off pause ended."})
-            return self.json({"status": "ok", "message": "Fan override cleared."})
+                return self.json({"status": "ok", **_msg_fields(hass, i18n.Msg("errors.fan_pause_ended"))})
+            return self.json({"status": "ok", **_msg_fields(hass, i18n.Msg("errors.fan_override_cleared"))})
 
 
 class ClimateAdvisorToggleAutomationView(HomeAssistantView):
@@ -1058,7 +1136,7 @@ class ClimateAdvisorToggleAutomationView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             new_state = not coordinator.automation_enabled
@@ -1068,7 +1146,9 @@ class ClimateAdvisorToggleAutomationView(HomeAssistantView):
                 {
                     "status": "ok",
                     "automation_enabled": new_state,
-                    "message": f"Automation {'enabled' if new_state else 'disabled'}.",
+                    **_msg_fields(
+                        hass, i18n.Msg("errors.automation_toggled", state="enabled" if new_state else "disabled")
+                    ),
                 }
             )
 
@@ -1086,7 +1166,7 @@ class ClimateAdvisorAIStatusView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             if coordinator.claude_client:
@@ -1132,7 +1212,7 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             try:
@@ -1202,7 +1282,7 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             # Parse optional JSON body — body may be absent
@@ -1222,13 +1302,13 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
             deep: bool = bool(body.get("deep", False))
 
             if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
-                return self.json_message("AI features are not enabled", status_code=403)
+                return self.json(_msg_fields(hass, i18n.Msg(_ERROR_KEYS["ai_not_enabled"])), status_code=403)
 
             if not coordinator.config.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED):
-                return self.json_message("Investigative agent is not enabled", status_code=403)
+                return self.json(_msg_fields(hass, i18n.Msg(_ERROR_KEYS["investigator_not_enabled"])), status_code=403)
 
             if coordinator.claude_client is None:
-                return self.json_message("AI client not available", status_code=503)
+                return self.json(_msg_fields(hass, i18n.Msg(_ERROR_KEYS["ai_client_unavailable"])), status_code=503)
 
             allowed, reason = coordinator.claude_client.check_investigator_rate_limit()
             if not allowed:
@@ -1345,7 +1425,10 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 _LOGGER.info("Investigation complete: source=%s", result.get("source", "unknown"))
                 return self.json(result)
 
-            return self.json_message(result.get("error", "Investigation failed"), status_code=500)
+            _failure = result.get("error")
+            if _failure:  # the investigator's own text (produced outside this module): shown as it is
+                return self.json_message(_failure, status_code=500)
+            return self.json(_msg_fields(hass, i18n.Msg(_ERROR_KEYS["investigation_failed"])), status_code=500)
 
 
 class ClimateAdvisorInvestigationReportsView(HomeAssistantView):
@@ -1361,7 +1444,7 @@ class ClimateAdvisorInvestigationReportsView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             return self.json(coordinator.get_investigation_report_history())
@@ -1382,7 +1465,7 @@ class ClimateAdvisorEventLogView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             try:
@@ -1432,11 +1515,11 @@ class ClimateAdvisorEnginesView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             if not hasattr(coordinator, "learning") or not hasattr(coordinator.learning, "get_engine_status"):
-                return self.json({"error": "Engine status not available"}, status_code=503)
+                return self.json(_error_body(hass, "engine_status_unavailable"), status_code=503)
 
             status = coordinator.learning.get_engine_status()
             status["unit"] = coordinator.config.get("temp_unit", "fahrenheit")
@@ -1472,7 +1555,7 @@ class ClimateAdvisorPredictionAccuracyView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             range_str = query.get("range", prediction_accuracy.DEFAULT_RANGE)
@@ -1533,11 +1616,13 @@ class ClimateAdvisorTimelineView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
         with log_capture.zone_scope(coordinator.zone_label):
             payload = coordinator.timeline_payload()
             if payload is None:
-                return self.json({"error": "timeline_not_ready"}, status_code=503)
+                return self.json(
+                    {"error": "timeline_not_ready", **_coded_extra(hass, "timeline_not_ready")}, status_code=503
+                )
             return self.json(payload)
 
 
@@ -1564,11 +1649,18 @@ class ClimateAdvisorNightStrategyView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
         with log_capture.zone_scope(coordinator.zone_label):
             payload, reason = coordinator.night_strategy_payload()
             if payload is None:
-                return self.json({"error": "night_strategy_not_ready", "reason": reason}, status_code=503)
+                return self.json(
+                    {
+                        "error": "night_strategy_not_ready",
+                        "reason": reason,
+                        **_coded_extra(hass, "night_strategy_not_ready"),
+                    },
+                    status_code=503,
+                )
             return self.json(payload)
 
 
@@ -1606,25 +1698,27 @@ class ClimateAdvisorDeleteReportView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             try:
                 body = await request.json()
             except Exception:
-                return self.json({"error": "invalid_json"}, status_code=400)
+                return self.json({"error": "invalid_json", **_coded_extra(hass, "invalid_json")}, status_code=400)
 
             report_type = body.get("report_type", "")
             timestamp = body.get("timestamp", "")
             if not timestamp:
-                return self.json({"error": "missing_timestamp"}, status_code=400)
+                return self.json(
+                    {"error": "missing_timestamp", **_coded_extra(hass, "missing_timestamp")}, status_code=400
+                )
 
             if report_type == "investigation":
                 found = coordinator.delete_investigation_report(timestamp)
                 if found:
                     await hass.async_add_executor_job(coordinator._save_investigation_reports)
             else:
-                return self.json({"error": "invalid_type"}, status_code=400)
+                return self.json({"error": "invalid_type", **_coded_extra(hass, "invalid_type")}, status_code=400)
 
             return self.json({"success": True, "found": found})
 
@@ -1644,25 +1738,25 @@ class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
         if ambiguous_refused:
             return self.json(_ambiguous_zone_payload(hass), status_code=400)
         if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
 
         with log_capture.zone_scope(coordinator.zone_label):
             token = coordinator.config.get(CONF_GITHUB_TOKEN, "")
             repo = coordinator.config.get(CONF_GITHUB_REPO, "")
             if not token or not repo:
-                return self.json({"success": False, "error": "not_configured"})
+                return self.json({"success": False, "error": "not_configured", **_coded_extra(hass, "not_configured")})
 
             try:
                 body = await request.json()
             except Exception:
-                return self.json({"error": "invalid_json"}, status_code=400)
+                return self.json({"error": "invalid_json", **_coded_extra(hass, "invalid_json")}, status_code=400)
 
             title = str(body.get("title", "")).strip()
             issue_body = str(body.get("body", "")).strip()
             labels = body.get("labels", ["bug"])
 
             if not title:
-                return self.json({"error": "missing_title"}, status_code=400)
+                return self.json({"error": "missing_title", **_coded_extra(hass, "missing_title")}, status_code=400)
             if not isinstance(labels, list):
                 labels = ["bug"]
 
@@ -1682,7 +1776,7 @@ class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
                 )
             except Exception:
                 _LOGGER.exception("GitHub issue submission: network error")
-                return self.json({"success": False, "error": "network_error"})
+                return self.json({"success": False, "error": "network_error", **_coded_extra(hass, "network_error")})
 
             if resp.status == 201:
                 issue = await resp.json()
@@ -1696,7 +1790,13 @@ class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
 
             # Never log the token — log only the HTTP status
             _LOGGER.warning("GitHub issue submission: API returned status %d", resp.status)
-            return self.json({"success": False, "error": f"github_api_{resp.status}"})
+            return self.json(
+                {
+                    "success": False,
+                    "error": f"github_api_{resp.status}",
+                    **_coded_extra(hass, "github_api", status=resp.status),
+                }
+            )
 
 
 # All views to register

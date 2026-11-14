@@ -22,6 +22,7 @@ from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
+from . import i18n
 from .classifier import DayClassification
 from .const import (
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
@@ -168,6 +169,7 @@ from .own_write_echo import (
     prune_own_writes,
     resolve_step,
 )
+from .status_text import CodedText
 
 if TYPE_CHECKING:
     from .classification_fsm import ClassificationDecision
@@ -1308,54 +1310,87 @@ def tou_bank_band(schedule: ComfortBand, target: float, mode: str) -> ComfortBan
     )
 
 
-def hold_band_label(band: ComfortBand, occupancy_mode: str) -> str:
-    """'comfort band' / 'sleep band' / 'Away band' / 'Vacation band' for a schedule band (pure)."""
+def hold_band_label_msg(band: ComfortBand, occupancy_mode: str) -> i18n.Msg:
+    """The band's name as a message: comfort band / sleep band / Away band / Vacation band (pure)."""
     ctx = getattr(band, "context", "")
     if ctx == BAND_CONTEXT_VACATION or (ctx == BAND_CONTEXT_TOU_EXPANSION and occupancy_mode == OCCUPANCY_VACATION):
-        return "Vacation band"
+        return i18n.Msg("status.hold.band_vacation")
     if ctx in (BAND_CONTEXT_AWAY, BAND_CONTEXT_TOU_EXPANSION):
-        return "Away band"
+        return i18n.Msg("status.hold.band_away")
     if ctx == BAND_CONTEXT_SLEEP:
-        return "sleep band"
-    return "comfort band"
+        return i18n.Msg("status.hold.band_sleep")
+    return i18n.Msg("status.hold.band_comfort")
+
+
+def hold_band_label(band: ComfortBand, occupancy_mode: str) -> str:
+    """'comfort band' / 'sleep band' / 'Away band' / 'Vacation band' for a schedule band (pure; English)."""
+    return i18n.render_en(hold_band_label_msg(band, occupancy_mode))
+
+
+def _hold_band_range_msg(band: ComfortBand, unit: str) -> i18n.Msg:
+    """'60–80°F' as a message (display unit, whole degrees; the unit symbol follows the upper edge only)."""
+    lo = int(f"{from_fahrenheit(band.floor, unit):.0f}")
+    return i18n.Msg("status.hold.range", lo=lo, hi=i18n.Temp(band.ceiling, unit))
 
 
 def _hold_band_text(band: ComfortBand, unit: str) -> str:
-    """'60–80°F' (display unit, whole degrees)."""
-    return f"{format_temp(band.floor, unit)[:-2]}–{format_temp(band.ceiling, unit)}"
+    """'60–80°F' (display unit, whole degrees; English)."""
+    return i18n.render_en(_hold_band_range_msg(band, unit))
 
 
 def _hold_clock(at: datetime) -> str:
-    return dt_util.as_local(at).strftime("%I:%M %p").lstrip("0")
+    return i18n.format_time(dt_util.as_local(at), "en")
+
+
+def hold_after_msg(hold: CurrentHold, unit: str) -> i18n.Msg | None:
+    """What follows the bank, as a message: 'the Away band widened to 60–83°F until 9:00 PM' with a high-cost
+    widening (the Away/Vacation default), 'back to the Away band 60–80°F' without one, 'back to the comfort band
+    68–76°F' at home. None without a bank."""
+    if hold.bank is None:
+        return None
+    after = hold.after_band or hold.schedule_band
+    label = hold_band_label_msg(after, hold.occupancy_mode)
+    range_msg = _hold_band_range_msg(after, unit)
+    if getattr(after, "context", "") == BAND_CONTEXT_TOU_EXPANSION:
+        if hold.bank.period_end is not None:
+            return i18n.Msg(
+                "status.hold.after_widened_until",
+                label=label,
+                range=range_msg,
+                until=i18n.Time(dt_util.as_local(hold.bank.period_end)),
+            )
+        return i18n.Msg("status.hold.after_widened", label=label, range=range_msg)
+    return i18n.Msg("status.hold.after_back", label=label, range=range_msg)
 
 
 def hold_after_text(hold: CurrentHold, unit: str) -> str:
-    """What follows the bank (pure): 'the Away band widened to 60–83°F until 9:00 PM' with a high-cost widening (the
-    Away/Vacation default), 'back to the Away band 60–80°F' without one, 'back to the comfort band 68–76°F' at home.
-    '' without a bank."""
-    if hold.bank is None:
-        return ""
-    after = hold.after_band or hold.schedule_band
-    label = hold_band_label(after, hold.occupancy_mode)
-    if getattr(after, "context", "") == BAND_CONTEXT_TOU_EXPANSION:
-        until = f" until {_hold_clock(hold.bank.period_end)}" if hold.bank.period_end is not None else ""
-        return f"the {label} widened to {_hold_band_text(after, unit)}{until}"
-    return f"back to the {label} {_hold_band_text(after, unit)}"
+    """What follows the bank (pure, English): 'the Away band widened to 60–83°F until 9:00 PM' ... '' without a bank."""
+    msg = hold_after_msg(hold, unit)
+    return i18n.render_en(msg) if msg is not None else ""
 
 
-def hold_sentence(hold: CurrentHold | None, unit: str) -> str | None:
-    """The one bank sentence every surface quotes (pure), or None when no bank owns the thermostat.
+def hold_sentence_msg(hold: CurrentHold | None, unit: str, *, lowercase: bool = False) -> i18n.Msg | None:
+    """The one bank sentence every surface quotes, as a message, or None when no bank owns the thermostat.
 
     'Pre-cooling to 77°F until the 4:15 PM high-cost period, then the Away band widened to 60–83°F until 9:00 PM'
-    (home: '..., then back to the comfort band 68–76°F').
+    (home: '..., then back to the comfort band 68–76°F'). ``lowercase`` is the variant that starts mid-sentence (the
+    Status card line), its own catalog message so each language lowercases correctly.
     """
     if hold is None or hold.bank is None:
         return None
-    verb = "Pre-cooling" if hold.bank.mode == "cool" else "Pre-heating"
-    return (
-        f"{verb} to {format_temp(hold.bank.target, unit)} until the {_hold_clock(hold.bank.ends)} high-cost period, "
-        f"then {hold_after_text(hold, unit)}"
+    return i18n.Msg(
+        "status.hold.sentence_lc" if lowercase else "status.hold.sentence",
+        mode=hold.bank.mode,
+        target=i18n.Temp(hold.bank.target, unit),
+        ends=i18n.Time(dt_util.as_local(hold.bank.ends)),
+        after=hold_after_msg(hold, unit),
     )
+
+
+def hold_sentence(hold: CurrentHold | None, unit: str) -> str | None:
+    """The one bank sentence every surface quotes (pure, English), or None when no bank owns the thermostat."""
+    msg = hold_sentence_msg(hold, unit)
+    return i18n.render_en(msg) if msg is not None else None
 
 
 def pre_cool_sleep_window_config(config: dict) -> dict:
@@ -1965,6 +2000,7 @@ class AutomationEngine:
         # Action tracking (Issue #37)
         self._last_action_time: str | None = None
         self._last_action_reason: str | None = None
+        self._last_action_reason_msg: i18n.Msg | None = None  # Issue #1341: the Msg behind _last_action_reason
 
         # Revisit scheduling — 5-min follow-up after any HVAC action
         self._revisit_cancel: Any | None = None
@@ -2986,10 +3022,18 @@ class AutomationEngine:
         except Exception:
             _LOGGER.warning("Re-enable door/window reconcile failed; the next cycle retries", exc_info=True)
 
-    def _record_action(self, action: str, reason: str) -> None:
-        """Record an HVAC action with timestamp and reason, and schedule a revisit."""
+    def _record_action(self, action: str, reason: str | i18n.Msg) -> None:
+        """Record an HVAC action with timestamp and reason, and schedule a revisit.
+
+        Issue #1341 (D4): ``_last_action_reason`` stays the English record (log, Debug tab, AI context);
+        ``_last_action_reason_msg`` holds the ``Msg`` (``status.action_reason``: the action and the reason, the
+        reason itself a ``Msg`` when the caller passed one) so a surface can show it in the viewer's language.
+        A reason still passed as plain text shows its English in every language until its caller passes a ``Msg``.
+        The message is not persisted (after a restart only the English record is shown).
+        """
         self._last_action_time = dt_util.now().isoformat()
-        self._last_action_reason = f"{action} — {reason}"
+        self._last_action_reason_msg = i18n.Msg("status.action_reason", action=action, reason=reason)
+        self._last_action_reason = i18n.render_en(self._last_action_reason_msg)
         _LOGGER.info("Action recorded: %s", self._last_action_reason)
         self._schedule_revisit()
 
@@ -12583,7 +12627,7 @@ class AutomationEngine:
 
     async def handle_pre_cool(
         self, indoor_temp: float | None, nat_vent_just_closed: bool, *, modifier: float | None = None
-    ) -> str:
+    ) -> CodedText:
         """Apply overnight pre-cool setpoint to bank cold thermal mass before a hot day.
 
         Fires at the pre-cool trigger time (nat-vent close + delay, or wake_time - 4h), gated by
@@ -12594,7 +12638,9 @@ class AutomationEngine:
         when the trigger was decided and which day the night wakes into -- Issue #1378). ``None`` judges it
         from the current classification as before.
         Suppressed when nat-vent already brought indoor to or below the target.
-        Returns a short status string for logging.
+        Returns a short status for logging: a ``CodedText`` (Issue #1341) whose text is the English line, whose ``code``
+        is what the coordinator compares (``skipped_*``, ``suppressed_session``, ``suppressed_achieved``, ``applied``,
+        ``not_applied``) and whose ``msg`` carries the same line, with typed params, for the viewer's language.
         """
         c = self._current_classification
         _modifier = modifier if modifier is not None else (resolve_pre_cool_modifier(c, self.config) if c else None)
@@ -12603,13 +12649,13 @@ class AutomationEngine:
                 "Pre-cool trigger fired: skipped — no warming trend and tomorrow not hot (modifier=%s)",
                 getattr(c, "setback_modifier", "n/a"),
             )
-            return "skipped: not eligible"
+            return CodedText("skipped_not_eligible", i18n.Msg("status.pre_cool.skipped_not_eligible"))
 
         # Issue #1371 (defence in depth): pre-cool banks cold thermal mass overnight. A late timer, a restart
         # or an old schedule must never arm the sleep band's lowered ceiling while people are awake.
         if not _in_sleep_window(dt_util.now(), pre_cool_sleep_window_config(self.config)):
             _LOGGER.info("Pre-cool trigger fired: skipped — awake hours (pre-cool runs only in the sleep window)")
-            return "skipped: awake hours"
+            return CodedText("skipped_awake", i18n.Msg("status.pre_cool.skipped_awake"))
 
         # Issue #593: computed up front (pure config + modifier, no gate/indoor dependency)
         # so the DEFER_NAT_VENT "active_session" branch below can show the target it's
@@ -12630,7 +12676,7 @@ class AutomationEngine:
         # would (Issue #498 finding #8a).
         # Issue #1119 follow-up: wait on an unconfirmed manual change (same as apply_classification/TOU).
         if self._scheduled_routine_waits_for_pending_override("pre-cool"):
-            return "skipped: override confirmation pending"
+            return CodedText("skipped_override_pending", i18n.Msg("status.pre_cool.skipped_override_pending"))
         # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
         # since before any event-driven pause path ran would otherwise never be seen.
         await self._sync_paused_by_door_with_live_sensors()
@@ -12653,7 +12699,9 @@ class AutomationEngine:
                 await self.handle_occupancy_vacation()
             else:
                 await self.handle_occupancy_away()
-            return f"skipped: {self._occupancy_mode}"
+            return CodedText(
+                "skipped_occupancy", i18n.Msg("status.pre_cool.skipped_occupancy", mode=self._occupancy_mode)
+            )
 
         if _gate == ScheduledBandGate.DEFER_OVERRIDE:
             _LOGGER.info(
@@ -12661,11 +12709,11 @@ class AutomationEngine:
                 self._manual_override_mode,
                 self._manual_override_time,
             )
-            return "skipped: manual override"
+            return CodedText("skipped_manual_override", i18n.Msg("status.pre_cool.skipped_manual_override"))
 
         if _gate == ScheduledBandGate.DEFER_PAUSED:
             _LOGGER.info("Pre-cool skipped — paused by open door/window")
-            return "skipped: paused_by_door"
+            return CodedText("skipped_paused", i18n.Msg("status.pre_cool.skipped_paused"))
 
         if _gate == ScheduledBandGate.DEFER_NAT_VENT:
             _fan_cfg_pc = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -12685,7 +12733,7 @@ class AutomationEngine:
                     },
                 )
             if _fan_cfg_pc in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
-                return "suppressed: nat-vent/WHF session active"
+                return CodedText("suppressed_session", i18n.Msg("status.pre_cool.suppressed_session"))
             # FAN_MODE_HVAC: fall through and arm the pre-cool ceiling, fan keeps running.
 
         sleep_cool = float(self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
@@ -12730,7 +12778,14 @@ class AutomationEngine:
                         "reason": "achieved",
                     },
                 )
-            return f"suppressed: nat-vent achieved {self._t(indoor_temp)} (target {self._t(pre_cool_target)})"
+            return CodedText(
+                "suppressed_achieved",
+                i18n.Msg(
+                    "status.pre_cool.suppressed_achieved",
+                    indoor=i18n.Temp(indoor_temp, self._temp_unit, 1),
+                    target=i18n.Temp(pre_cool_target, self._temp_unit, 1),
+                ),
+            )
 
         # Get sleep heat floor from current sleep band so we preserve it
         _sleep_band = select_comfort_band(
@@ -12780,13 +12835,22 @@ class AutomationEngine:
                 pre_cool_target,
                 _sleep_band.floor,
             )
-            return f"applied: {self._t(pre_cool_target)}"
+            return CodedText(
+                "applied", i18n.Msg("status.pre_cool.applied", target=i18n.Temp(pre_cool_target, self._temp_unit, 1))
+            )
         _LOGGER.info(
             "Pre-cool setpoint NOT applied (%s): cool ceiling %.1f°F was intended",
             _pre_cool_outcome,
             pre_cool_target,
         )
-        return f"not applied ({_pre_cool_outcome}): {self._t(pre_cool_target)}"
+        return CodedText(
+            "not_applied",
+            i18n.Msg(
+                "status.pre_cool.not_applied",
+                outcome=_pre_cool_outcome,
+                target=i18n.Temp(pre_cool_target, self._temp_unit, 1),
+            ),
+        )
 
     async def handle_morning_wakeup(self, indoor_temp: float | None = None) -> None:
         """Restore comfort for morning wake-up."""

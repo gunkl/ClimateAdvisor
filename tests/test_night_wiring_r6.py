@@ -481,7 +481,10 @@ def test_the_endpoint_answers_200_503_and_400(monkeypatch: pytest.MonkeyPatch) -
             _request({"zoneA": _coord((None, "no_night_in_view"))}, {"zone": "zoneA"})
         )
     )
-    assert resp.status == 503 and resp.json_data == {"error": "night_strategy_not_ready", "reason": "no_night_in_view"}
+    assert resp.status == 503
+    # Issue #1341: the code-valued ``error`` and the ``reason`` are unchanged; the message siblings are added
+    assert resp.json_data["error"] == "night_strategy_not_ready" and resp.json_data["reason"] == "no_night_in_view"
+    assert resp.json_data["error_msg"] == {"key": "errors.night_strategy_not_ready", "params": {}}
     resp = asyncio.run(ClimateAdvisorNightStrategyView().get(_request({})))
     assert resp.status == 503
     a, b = _coord((payload, "ok")), _coord((payload, "ok"))

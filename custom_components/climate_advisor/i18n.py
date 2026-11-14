@@ -1233,3 +1233,97 @@ def render(msg: Msg | Code | str, lang: str) -> str:
 def render_en(msg: Msg | str) -> str:
     """English rendering for logs, stored reasons, GitHub text and AI input."""
     return render(msg, DEFAULT_LANGUAGE)
+
+
+# ------------------------------------------------------------------------------------------------ en-XA pseudo-locale
+# Issue #1341 guard: a generated test locale, never shipped. Every letter of the literal text becomes an accented
+# look-alike, the text grows by about 35% (a tilde pad), and the whole message is wrapped in brackets, while ICU
+# syntax (arguments, plural/select selectors, ``#``, quoted braces, number styles) is left untouched. Any plain ASCII
+# vowel left in a rendered en-XA string therefore came from outside the catalog: a hard-coded English bypass.
+PSEUDO_EXPANSION = 0.35
+_PSEUDO_MAP = str.maketrans(
+    "AEIOUYaeiouyCcDdNnSsZz",
+    "ÀÉÎÕÛÝàéîõûýÇçÐđÑñŠšŽž",
+)
+
+
+def pseudo(text: str) -> str:
+    """The en-XA rendering of an ICU-subset ``text``: accented, ~35% longer, bracketed; syntax preserved."""
+    letters = 0
+
+    def lit(chunk: str) -> str:
+        nonlocal letters
+        letters += sum(1 for c in chunk if c.isalpha())
+        return chunk.translate(_PSEUDO_MAP)
+
+    def skip_to(s: str, i: int, stops: str) -> int:
+        while i < len(s) and s[i] not in stops:
+            i += 1
+        return i
+
+    def quoted(s: str, i: int) -> int | None:
+        """End index of a ``'{...}'`` quote starting at ``i`` (kept verbatim), or ``None``."""
+        if s[i] != "'" or i + 1 >= len(s) or s[i + 1] not in "{}#<":
+            return None
+        j = i + 2
+        while j < len(s):
+            if s[j] == "'":
+                if j + 1 < len(s) and s[j + 1] == "'":
+                    j += 2
+                    continue
+                return j + 1
+            j += 1
+        return len(s)
+
+    def message(s: str, i: int, nested: bool) -> tuple[str, int]:
+        out: list[str] = []
+        while i < len(s):
+            ch = s[i]
+            if ch == "}" and nested:
+                break
+            if ch == "{":
+                chunk, i = argument(s, i)
+                out.append(chunk)
+                continue
+            q = quoted(s, i)
+            if q is not None:
+                out.append(s[i:q])
+                i = q
+                continue
+            if ch == "#":
+                out.append(ch)
+                i += 1
+                continue
+            j = i + 1
+            while j < len(s) and s[j] not in "{}#'":
+                j += 1
+            out.append(lit(s[i:j]))
+            i = j
+        return "".join(out), i
+
+    def argument(s: str, i: int) -> tuple[str, int]:
+        end = skip_to(s, i, ",}")
+        if end >= len(s) or s[end] == "}":
+            return s[i : end + 1], end + 1
+        type_end = skip_to(s, end + 1, ",}")
+        kind = s[end + 1 : type_end].strip()
+        if kind not in ("plural", "select", "selectordinal") or type_end >= len(s) or s[type_end] == "}":
+            close = skip_to(s, type_end, "}")
+            return s[i : close + 1], close + 1
+        out = [s[i : type_end + 1]]
+        j = type_end + 1
+        while j < len(s) and s[j] != "}":
+            sel_end = skip_to(s, j, "{}")
+            out.append(s[j:sel_end])
+            if sel_end >= len(s) or s[sel_end] == "}":
+                j = sel_end
+                break
+            body, j = message(s, sel_end + 1, True)
+            out.append("{" + body + "}")
+            j += 1  # the closing brace of the option
+        out.append("}")
+        return "".join(out), j + 1
+
+    body, _end = message(text, 0, False)
+    pad = "~" * -(-int(letters * PSEUDO_EXPANSION * 100) // 100) if letters else ""
+    return f"[{body}{pad}]"

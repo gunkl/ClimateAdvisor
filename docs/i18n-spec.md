@@ -137,6 +137,21 @@ hreflang and URL routing (a private panel); logs, brand name and email headers s
 
 Summary: write English → 15 translations → `tools/i18n.py lock` → `check`.
 
+## Guards and commands (lane L1)
+
+All check bodies are in `tools/i18n_checks.py`; `tools/validate.py` and `python tools/i18n.py check` both call `run_guards()`, so the pre-commit gate and the CLI cannot disagree. The Python AST finders and the one sink list are in `tests/helpers/ast_walk.py`.
+
+- **Ratchets** (`i18n/baselines/<name>.json`, per-file counts; a file may never gain hits even if another loses some; the test and `check` print `python tools/i18n.py baseline --update` when counts fall; at zero a guard is absolute; `baseline --init` creates, `--update` only lowers):
+  - `py_literals`: English literals at Python sinks (`_notify*` title/message, `_attr_name`, `SelectOptionDict(label=)`, `ServiceValidationError`/`HomeAssistantError`, `async_create_issue` placeholders, API `error/message/detail/prose/text/summary/description/title` in `api.py`/`dashboard_api.py`, `_emit_event` display keys, `detail=`, `EVENT_RENDERERS` returns, `strftime`, bare `°F`/`°C` outside `i18n.py`/`temperature.py`/`time_utils.py`). Logs and docstrings are not sinks.
+  - `english_matching`: `startswith`/`endswith`/`in`/`==`/regex against English prose, Python and JS. Stored-English readers (`ai_skills_investigator.py`, `log_capture.py`, `tools/sim_harness/outcomes.py`) are exempt by design (D4).
+  - `js_dom_literals`: English at DOM sinks (`textContent`/`innerText`/`innerHTML`/`title`/`placeholder`/`alt`/`ariaLabel`, `setAttribute` of title/alt/aria-label/placeholder, `createTextNode`, `insertAdjacentHTML`, Chart.js `label`/`text`) and static HTML text in `frontend/*.js` and `*.html`. The classic `index.html` is excluded (stays English); elements with any `data-i18n*` attribute are covered; in `nd_debug.js` only multi-word prose counts (field names are identifiers).
+  - `physical_css`: `margin|padding|border-left/right`, `left:`/`right:`, `text-align`/`float: left|right`, `marginLeft`/`paddingRight` in frontend CSS, HTML and JS style strings (classic `index.html` excluded: never right-to-left).
+- **en-XA pseudo-locale** (`i18n.pseudo(text)`, Python side): accents every letter, adds about 35% as a `~` pad, wraps in brackets, keeps ICU syntax. `tests/test_i18n_guards.py` renders EVERY key of both catalogs in en-XA with sampled parameters and fails on an exception, a missing expansion or any ASCII vowel left over (a bypass). Never committed.
+- **Translation memory**: `python tools/i18n.py tm-build` rebuilds `i18n/tm.json` (`sha(en) -> {lang: translation}`) from approved translations (lock equals current English); `tm-fill --area A [--lang L] [--dry-run]` fills missing keys whose identical English already has a translation and records them in the lock. Review reused strings that depend on context.
+- **Translator prompt**: `python tools/i18n.py prompt --area A --lang L` prints the missing and stale keys with English, previous translation, arguments, length budget, notes (`i18n/notes/<area>.json` and/or `frontend/i18n/<area>/_notes.json`, `{key: note}`), the relevant GLOSSARY rows, the language style rules and its CLDR plural categories.
+- **Glossary check**: `python tools/i18n.py glossary [--area A] [--lang L]` lists WARNINGS (never failures; inflection) where an English value contains a term with an approved glossary translation (no `(?)`) that the language's value lacks. `check` and `validate` print only the count.
+- **Length budgets**: `i18n/budgets.json` maps `<area>.<key>` (HA keys as `ha:<dotted.key>`) to a maximum number of characters of the longest rendering (plural counts and select variants sampled, text arguments empty), checked in every language including English; failures are errors and a budget for a missing key is an error. Seeded for `common.*`; lanes add theirs (notification titles 60, button labels 24).
+
 ## Tests
 
 `tests/test_i18n_panel_wiring.py` (panel hash, status `language`), `tests/test_panel_entry.py` (panel URL, unchanged), the conformance and drift tests above, `tests/i18n_runtime.mjs`, `tests/i18n_conformance.mjs`.

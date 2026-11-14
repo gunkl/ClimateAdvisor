@@ -726,6 +726,8 @@ ATTR_BRIEFING_SHORT = "daily_briefing_short"
 ATTR_NEXT_ACTION = "next_human_action"
 ATTR_AUTOMATION_STATUS = "automation_status"
 ATTR_LEARNING_SUGGESTIONS = "pending_suggestions"
+# Issue #1341: messages parallel to ATTR_LEARNING_SUGGESTIONS (i18n.Msg); the sensor renders them in HA language
+ATTR_LEARNING_SUGGESTION_MSGS = "pending_suggestions_msgs"
 ATTR_COMPLIANCE_SCORE = "compliance_score"
 ATTR_ESTIMATED_SAVINGS = "estimated_savings"
 ATTR_AUTOMATION_ENABLED = "automation_enabled"

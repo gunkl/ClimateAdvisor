@@ -110,6 +110,7 @@ from .const import (
     ATTR_INDOOR_TEMP,
     ATTR_LAST_ACTION_REASON,
     ATTR_LAST_ACTION_TIME,
+    ATTR_LEARNING_SUGGESTION_MSGS,
     ATTR_LEARNING_SUGGESTIONS,
     ATTR_NEXT_ACTION,
     ATTR_NEXT_AUTOMATION_ACTION,
@@ -4991,6 +4992,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Build the data dict that sensors will read
         c = self._current_classification
         suggestions = self.learning.generate_suggestions()
+        suggestion_msgs = self.learning.get_last_suggestion_msgs()  # Issue #1341: parallel to ``suggestions``
         compliance = self.learning.get_compliance_summary()
 
         # HVAC action (compressor/fan actual operation state) and today's runtime
@@ -5370,6 +5372,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ),
             ATTR_AUTOMATION_STATUS: self._compute_automation_status(),
             ATTR_LEARNING_SUGGESTIONS: suggestions,
+            ATTR_LEARNING_SUGGESTION_MSGS: suggestion_msgs,
             ATTR_COMPLIANCE_SCORE: compliance.get("comfort_score", 1.0),
             ATTR_NEXT_AUTOMATION_ACTION: next_auto[0],
             ATTR_NEXT_AUTOMATION_TIME: next_auto[1],

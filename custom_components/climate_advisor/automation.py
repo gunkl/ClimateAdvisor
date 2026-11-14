@@ -1876,14 +1876,6 @@ class AutomationEngine:
         """Format an internal-°F absolute temperature in the user's unit (Issue #1048)."""
         return format_temp(value_f, self._temp_unit, decimals)
 
-    def _outdoor_ge_indoor(self, outdoor_f: float, indoor_f: float) -> str:
-        """Shared phrase for the nat-vent airflow-direction exit reasons (Issue #1048)."""
-        return f"outdoor {self._t(outdoor_f)} >= indoor {self._t(indoor_f)}"
-
-    def _indoor_le_comfort_floor(self, indoor_f: float, floor_f: float) -> str:
-        """Shared phrase for the nat-vent comfort-floor exit reasons (Issue #1048)."""
-        return f"indoor {self._t(indoor_f)} ≤ comfort floor {self._t(floor_f)}"
-
     def _band_num(self, value_f: float) -> str:
         """Whole-number band edge in the user's unit, no symbol (the ``[floor/ceiling]`` text)."""
         return _band_num(value_f, self._temp_unit)
@@ -3060,7 +3052,7 @@ class AutomationEngine:
         except Exception:
             _LOGGER.warning("Re-enable door/window reconcile failed; the next cycle retries", exc_info=True)
 
-    def _record_action(self, action: str, reason: str | i18n.Msg) -> None:
+    def _record_action(self, action: str | i18n.Msg, reason: str | i18n.Msg) -> None:
         """Record an HVAC action with timestamp and reason, and schedule a revisit.
 
         Issue #1341 (D4): ``_last_action_reason`` stays the English record (log, Debug tab, AI context);
@@ -3070,7 +3062,9 @@ class AutomationEngine:
         The message is not persisted (after a restart only the English record is shown).
         """
         self._last_action_time = dt_util.now().isoformat()
-        self._last_action_reason_msg = i18n.Msg("status.action_reason", action=action, reason=reason)
+        self._last_action_reason_msg = i18n.Msg(
+            "status.action_reason", action=msg_of(action) or action, reason=msg_of(reason) or reason
+        )
         self._last_action_reason = i18n.render_en(self._last_action_reason_msg)
         _LOGGER.info("Action recorded: %s", self._last_action_reason)
         self._schedule_revisit()
@@ -5748,7 +5742,7 @@ class AutomationEngine:
             )
             await self._pause_for_door_window(
                 entity_label="monitored door/window",
-                reason="door/window open at comfort-band arm time",
+                reason=_R("reason_door_window_arm_time"),
                 notify_message=i18n.Msg("notify.door_window_paused"),
                 notify_type="door_window_pause",
                 quiet=self._fan_session_about_to_take_over(caller="_apply_comfort_band"),
@@ -8236,7 +8230,7 @@ class AutomationEngine:
             return  # nat-vent/WHF owns this, or not open / only transiently open — do not pause on a blip
         await self._pause_for_door_window(
             entity_label="monitored door/window",
-            reason="door/window still open at comfort-restore time",
+            reason=_R("reason_door_window_restore_time"),
             notify_message=i18n.Msg("notify.door_window_paused"),
             notify_type="door_window_pause",
             quiet=self._fan_session_about_to_take_over(caller="_sync_paused_by_door_with_live_sensors"),
@@ -8290,7 +8284,9 @@ class AutomationEngine:
             _prev_pre_pause_mode = self._pre_pause_mode
             self._pre_pause_mode = mode
             with self._mode_change_context("pause"):
-                _off_result = await self._set_hvac_mode("off", reason=f"{reason}, was {mode} mode")
+                _off_result = await self._set_hvac_mode(
+                    "off", reason=_R("reason_pause_was_mode", reason=_nest(reason), mode=mode)
+                )
             if _off_result is HvacCommandResult.DRY_RUN:
                 # Issue #1293: observe-only sent nothing, so the HVAC keeps running and there is no pause to record.
                 # Recording one (``_paused_by_door`` + a "heat→off" ``sensor_opened``) left Climate Advisor believing
@@ -8307,7 +8303,9 @@ class AutomationEngine:
                 return None
             # Issue #1302: a FAILED / UNCONFIRMED Off keeps the pause (the window IS open and ``_pre_pause_mode`` is
             # what closing it restores) and re-sends the Off soon while the thermostat still reads an active mode.
-            self._arm_open_window_off_retry(_off_result, reason=f"door/window pause ({entity_label})")
+            self._arm_open_window_off_retry(
+                _off_result, reason=_R("reason_door_window_pause_entity", entity=entity_label)
+            )
             if not quiet:
                 await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
             if self._emit_event_callback:
@@ -8687,7 +8685,7 @@ class AutomationEngine:
             # planned-window check stay byte-for-byte unchanged.
             hvac_already_off = await self._pause_for_door_window_action(
                 entity_label=entity_id,
-                reason=f"door/window open — {entity_id}",
+                reason=_R("reason_door_window_open_entity", entity=entity_id),
                 notify_message=i18n.Msg(
                     "notify.door_window_paused_named", name=friendly_name, minutes=debounce_minutes
                 ),
@@ -11522,12 +11520,12 @@ class AutomationEngine:
                 if restore_mode not in ("heat", "cool", "off"):
                     _mode_result = await self._set_hvac_mode(
                         restore_mode,
-                        reason="user resumed from door/window pause",
+                        reason=_R("reason_user_resumed_door_window"),
                     )
                 with self._mode_change_context("restore"):
                     _temp_result = await self._set_temperature_for_mode(
                         self._current_classification,
-                        reason="user resumed from door/window pause",
+                        reason=_R("reason_user_resumed_door_window"),
                     )
 
         # Issue #1306 (owner decision 2026-11-03, "clear pause, no grace"): in observe-only the restore above comes
@@ -12411,7 +12409,7 @@ class AutomationEngine:
             # tests/test_resume_from_pause.py's test_re_pause_when_hvac_already_off.
             await self._pause_for_door_window(
                 entity_label="re-check",
-                reason="grace expired — door/window still open, re-pausing",
+                reason=_R("reason_grace_expired_repause"),
                 notify_message=i18n.Msg("notify.grace_repause"),
                 notify_type="grace_repause",
             )
@@ -13578,9 +13576,7 @@ class AutomationEngine:
         if decision.action is WhfSafetyAction.SUPPRESS_HVAC:
             if decision.backstop:
                 self._announce_whf_rule2_backstop(decision, trigger=trigger, snap=snap, climate_state=climate_state)
-                await self._suppress_hvac_for_whf(
-                    reason="whole-house fan running — heating/cooling turned off (rule-2 backstop)", resend=True
-                )
+                await self._suppress_hvac_for_whf(reason=_R("reason_whf_rule2_backstop"), resend=True)
                 return None
             else:
                 _LOGGER.warning(
@@ -13589,18 +13585,14 @@ class AutomationEngine:
                     trigger,
                     thermostat_mode,
                 )
-            await self._suppress_hvac_for_whf(
-                reason="whole-house fan turned on after HVAC — suppressing HVAC (newest action wins)"
-            )
+            await self._suppress_hvac_for_whf(reason=_R("reason_whf_suppress_newest_wins"))
             return None
 
         # STOP_SEALED / STOP_MUTEX_FAN
         sealed = decision.action is WhfSafetyAction.STOP_SEALED
         if decision.backstop:
             self._announce_whf_rule2_backstop(decision, trigger=trigger, snap=snap, climate_state=climate_state)
-        reason_text = (
-            "sealed house — stopping whole-house fan" if sealed else "HVAC turned on — stopping whole-house fan"
-        )
+        reason_text = _R("reason_whf_stop_sealed" if sealed else "reason_whf_stop_hvac_on")
         now = dt_util.now()
         if self._whf_stop_hold_active(now):
             _LOGGER.debug("WHF safety stop: held after giving up, next attempt later (trigger=%s)", trigger)
@@ -13711,10 +13703,8 @@ class AutomationEngine:
             self.role,
         )
         self._record_action(
-            "Whole-house fan stopped (fan and heating/cooling were both running)"
-            if stops_fan
-            else "Heating/cooling turned off (whole-house fan running)",
-            decision.reason,
+            _R("action_whf_stopped_rule2" if stops_fan else "action_hvac_off_whf_running"),
+            msg_text(decision.reason_msg) if decision.reason_msg is not None else decision.reason,
         )
         if self._emit_event_callback:
             self._emit_event_callback(
@@ -13799,7 +13789,7 @@ class AutomationEngine:
             self._whf_control_state_name(),
             self.role,
         )
-        self._record_action("Whole-house fan could not be stopped", detail)
+        self._record_action(_R("action_whf_stop_failed"), MsgText(detail_msg))
         if not self._recent_duplicate("whf_stop_failed", (control_was_on is False,), window_seconds=3600):
             self._notify_whf_safety(
                 i18n.Msg("notify.title.whf_stop_failed"),
@@ -14030,7 +14020,7 @@ class AutomationEngine:
         )
         if self._pre_fan_hvac_mode is not None:
             await self._deactivate_fan(
-                reason="whole-house fan confirmed off after the sealed-house stop",
+                reason=_R("reason_whf_confirmed_off_sealed"),
                 restore_hvac=not held_open,
                 release_suppression=True,
                 emit_event=False,
@@ -17992,7 +17982,7 @@ class AutomationEngine:
             _bank_write = await self._bank_takes_occupancy_write("home")
             if _bank_write is None:
                 with self._mode_change_context("restore"):
-                    await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
+                    await self._set_temperature_for_mode(c, reason=_R("reason_occupancy_home_restore", family=family))
             # The comfort-edge selector may have written the OTHER family than the band's active edge (a mild day
             # next to its floor arms heat); report the family it actually armed.
             # Issue #1245: report what ``_set_temperature_for_mode()`` actually did -- the resolved band edge for the
@@ -19887,7 +19877,7 @@ class AutomationEngine:
         # tests/test_nat_vent_exit_lockout_coverage.py). Re-entry while still blind is
         # impossible: decide_nat_vent_gate fails closed on indoor None.
         result = await self._exit_nat_vent(
-            reason=f"indoor temperature unavailable for {minutes} min — stopping ventilation fan",
+            reason=_R("reason_indoor_blind_stop_fan", minutes=minutes),
             event_type="fan_blind_stopped",
             event_payload={
                 "session": "nat_vent",
@@ -20516,7 +20506,8 @@ class AutomationEngine:
                     )
                     if _stranded_restore_result is not HvacCommandResult.DRY_RUN:
                         self._record_action(
-                            "Restored HVAC mode from stranded fan suppression", f"{reason} (restored={_restore_mode})"
+                            _R("action_stranded_hvac_restored"),
+                            _R("reason_stranded_hvac_restored", reason=_nest(reason), mode=str(_restore_mode)),
                         )
                         if self._emit_event_callback:
                             self._emit_event_callback(

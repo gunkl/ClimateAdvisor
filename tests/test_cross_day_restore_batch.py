@@ -71,6 +71,7 @@ ANY_RESTART_KEYS = frozenset(
         "consecutive_failure_count",
         "sensor_last_real_reading",
         "hvac_action_report",  # owner decision 2026-11-13: the per-entity heating/cooling report watch
+        "thermostat_profiles",  # Issue #1568: what each thermostat's fan modes do; never re-learned from scratch
     }
 )
 SAME_DAY_KEYS = frozenset(

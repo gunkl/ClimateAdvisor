@@ -50,3 +50,22 @@ def msg_of(value: Any) -> i18n.Msg | None:
     if isinstance(value, i18n.Msg):
         return value
     return getattr(value, "msg", None) if isinstance(value, MsgText) else None
+
+
+def split_msg_fields(data: dict) -> dict:
+    """Issue #1341 (D4): a ``Msg`` (or ``MsgText``) in an event field (``reason``, ``detail``, ``fan_mode_change``,
+    ...) is stored as its English text (the record field is unchanged, so the harness and the AI investigator read
+    the same bytes) plus ``<field>_key`` and ``<field>_params`` (``Msg.to_wire``) for the dashboard to re-render in
+    the viewer's language. A plain ``str`` (legacy call sites) is left exactly as given, with no key fields.
+    """
+    if not any(msg_of(v) is not None for v in data.values()):
+        return data
+    out = dict(data)
+    for field_name, value in data.items():
+        msg = msg_of(value)
+        if msg is not None:
+            wire = msg.to_wire()
+            out[field_name] = record_en(msg)
+            out[f"{field_name}_key"] = wire["key"]
+            out[f"{field_name}_params"] = wire["params"]
+    return out

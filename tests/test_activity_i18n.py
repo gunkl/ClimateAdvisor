@@ -52,23 +52,33 @@ def _icu_arguments(nodes) -> set[str]:
     return names
 
 
-def _m_calls(path: Path):
+def _msg_calls(path: Path):
+    """Every ``activity.*`` message built in ``path``: ``_m("key")``, ``_R("key")`` and ``i18n.Msg("activity.key")``."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "_m"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-        ):
-            yield node
+        if not (isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+        value = node.args[0].value
+        if name in ("_m", "_R") and isinstance(value, str):
+            yield "activity." + value, node
+        elif name == "Msg" and isinstance(value, str) and value.startswith("activity."):
+            yield value, node
 
 
 def test_every_renderer_key_exists_with_matching_arguments():
+    problems: list[str] = []
+    for module in ("ai_skills_context.py", "automation.py", "coordinator.py"):
+        calls = list(_msg_calls(PKG / module))
+        assert calls or module == "coordinator.py"
+        problems += _check_calls(calls)
+    assert not problems, problems
+
+
+def _check_calls(calls) -> list[str]:
     problems = []
-    for node in _m_calls(PKG / "ai_skills_context.py"):
-        key = "activity." + node.args[0].value
+    for key, node in calls:
         if key not in CATALOG:
             problems.append(f"missing {key}")
             continue
@@ -78,7 +88,7 @@ def test_every_renderer_key_exists_with_matching_arguments():
         taken = _icu_arguments(i18n.parse_message(CATALOG[key]))
         if passed != taken:
             problems.append(f"{key}: passed {sorted(passed)} vs catalog {sorted(taken)}")
-    assert not problems, problems
+    return problems
 
 
 def test_sensor_reason_label_tables_match_the_catalog():

@@ -2002,15 +2002,15 @@
     const sameDay = new Date(s._ms).toDateString() === new Date(now).toDateString();
     const day = sameDay ? '' : '<span class="plan-day">' + escapeHtml(new Date(s._ms).toLocaleDateString([], { weekday: 'short' })) + '</span> ';
     const lead = you && s.lead_minutes > 0 && s._ms - s.lead_minutes * 60000 > now
-      ? '<span class="plan-note">Reminder at ' + escapeHtml(_clock(s._ms - s.lead_minutes * 60000)) + '</span>' : '';
+      ? '<span class="plan-note">' + escapeHtml(T('cv.reminder_at', { t: _clock(s._ms - s.lead_minutes * 60000) })) + '</span>' : '';
     return '<li class="plan-row ' + (you ? 'plan-you' : 'plan-ca') + (low ? ' plan-low' : '') + (held ? ' plan-held' : '') + '" data-kind="' + escapeHtml(s.kind || '') + '" data-actor="' + escapeHtml(s.actor || '') + '">' +
       '<span class="plan-time">' + day + escapeHtml(_clock(s._ms)) + '</span>' +
-      '<span class="plan-actor" title="' + (you ? 'You do this' : 'Climate Advisor does this') + '">' +
+      '<span class="plan-actor" title="' + escapeHtml(you ? T('cv.you_do_this') : T('cv.ca_does_this')) + '">' +
         '<svg width="12" height="12" viewBox="-7 -7 14 14" aria-hidden="true">' + (you
           ? '<path d="M0 -6 L6 0 L0 6 L-6 0 Z" fill="' + (low ? 'none' : 'var(--c-target)') + '" stroke="var(--c-ink)" stroke-width="1.5"/>'
           : '<circle r="4.5" fill="' + (low ? 'none' : 'var(--c-plan)') + '" stroke="var(--c-plan)" stroke-width="1.5"/>') + '</svg>' +
-        (you ? 'You' : 'CA') + '</span>' +
-      '<span class="plan-text">' + escapeHtml(s.text_short || s.text || '') + (low && !held ? ' <span class="plan-qual">may help</span>' : '') + lead + '</span></li>';
+        (you ? T('night.you') : T('night.ca')) + '</span>' +
+      '<span class="plan-text">' + escapeHtml(s.text_short || s.text || '') + (low && !held ? ' <span class="plan-qual">' + escapeHtml(T('night.may_help')) + '</span>' : '') + lead + '</span></li>';
   }
 
   // Issue #1483: the steps after the first 24 h, one folded row per local day: "Wed, Nov 11 · 5 steps · 1 for you".
@@ -2028,12 +2028,12 @@
     });
     const rows = days.map(g => {
       const you = g.steps.filter(s => s.actor === 'you').length;
-      const sum = g.steps.length + (g.steps.length === 1 ? ' step' : ' steps') + (you ? ' \u00b7 ' + you + ' for you' : '');
+      const sum = T(g.steps.length === 1 ? 'cv.n_step_plain' : 'cv.n_steps_plain', { n: g.steps.length }) + (you ? ' \u00b7 ' + T('cv.n_for_you', { n: you }) : '');
       return '<li class="plan-later" data-day="' + escapeHtml(g.key) + '"><details' + (_planOpenDays.has(g.key) ? ' open' : '') + '>' +
         '<summary><span class="plan-later-day">' + escapeHtml(g.label) + '</span><span class="plan-later-sum"> ' + escapeHtml(sum) + '</span></summary>' +
         '<ul class="plan-list">' + g.steps.map(s => _planRowHtml(s, now)).join('') + '</ul></details></li>';
     }).join('');
-    return '<li class="plan-later-head">Later: an outlook from the forecast, updated as the forecast changes</li>' + rows;
+    return '<li class="plan-later-head">' + escapeHtml(T('cv.later_outlook')) + '</li>' + rows;
   }
 
   // Issue #1404: a time-of-use bank holding the house right now opens the list ("Now"), in the same words as the
@@ -2042,8 +2042,8 @@
     const h = _timeline && _timeline.current_hold;
     if (!h || !h.text) return '';
     return '<li class="plan-row plan-ca plan-now" data-kind="tou_bank" data-actor="ca">' +
-      '<span class="plan-time">Now</span>' +
-      '<span class="plan-actor" title="Climate Advisor does this">' +
+      '<span class="plan-time">' + escapeHtml(T('status.now')) + '</span>' +
+      '<span class="plan-actor" title="' + escapeHtml(T('cv.ca_does_this')) + '">' +
         '<svg width="12" height="12" viewBox="-7 -7 14 14" aria-hidden="true"><circle r="4.5" fill="var(--c-plan)" stroke="var(--c-plan)" stroke-width="1.5"/></svg>CA</span>' +
       '<span class="plan-text">' + escapeHtml(h.text) + '</span></li>';
   }

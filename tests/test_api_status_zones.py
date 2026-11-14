@@ -141,6 +141,16 @@ class TestBootstrapNeverGuesses:
         assert "hvac_mode" not in body
         assert "day_type" not in body
 
+    def test_zone_selection_required_branch_carries_the_backend_language(self):
+        """Issue #1341 N3: the dashboard's language fallback must work before a zone is chosen too."""
+        zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+        fake_hass.config.language = "pt-BR"
+
+        body = _get_status(fake_hass)
+
+        assert body.get("zone_selection_required") is True
+        assert body["language"] == "pt"
+
     def test_no_entry_id_multi_zone_never_calls_get_default_coordinator(self):
         from unittest.mock import patch
 

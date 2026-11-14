@@ -265,3 +265,31 @@ def pytest_sessionfinish(session, exitstatus):
     harness = sys.modules.get("tools.sim_harness.build_coordinator")
     if harness is not None:
         harness.cleanup_owned_sim_dirs()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _i18n_strict_session():
+    """Issue #1341: load the translation catalogs once and render strictly for the whole session.
+
+    Strict mode turns a catalog key missing from English, a malformed message or an unrenderable parameter into an
+    exception, so no test module can pass while quietly rendering the raw key (non-strict production behaviour).
+    """
+    from custom_components.climate_advisor import i18n
+
+    i18n.load_catalogs()
+    i18n.set_strict(True)
+    yield
+    i18n.set_strict(None)
+
+
+@pytest.fixture(autouse=True)
+def _i18n_strict_each_test(_i18n_strict_session):
+    """Re-assert strict mode and the real catalogs before every test (a test that swapped catalogs, reset them or
+    turned strict off must not leak into the next one)."""
+    from custom_components.climate_advisor import i18n
+
+    i18n.set_strict(True)
+    if i18n.catalogs_source() != i18n.default_i18n_dir():
+        i18n.reset_catalogs()
+        i18n.load_catalogs()
+    yield

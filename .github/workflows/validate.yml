@@ -39,7 +39,13 @@ jobs:
         run: uv run --locked --only-group test ruff format --check .
 
       # Issue #1341: the dashboard's JS i18n runtime must render every conformance row exactly as Python does.
-      # Uses the Node that ships on ubuntu-latest (20+; the runner needs ESM, Intl.ListFormat and unit formatting).
+      # The fixture's expected text embeds one ICU/CLDR release (tests/fixtures/i18n_conformance.json header), so Node
+      # is pinned: 22.12.0 ships ICU 76.1. tests/i18n_conformance.mjs fails with a clear message if the ICU differs.
+      - name: Set up Node.js (pinned for the i18n ICU data)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+
       - name: i18n runtime checks and Python/JS conformance (node)
         run: |
           node --version

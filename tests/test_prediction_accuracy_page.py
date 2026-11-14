@@ -176,7 +176,18 @@ def test_units_come_from_response():
 
 def test_only_bundled_libraries():
     srcs = re.findall(r'<script[^>]+src="([^"]+)"', PAGE)
-    assert sorted(srcs) == ["chart.umd.min.js", "chartjs-plugin-zoom.min.js", "hammer.min.js", "pa_view.js"]
+    assert sorted(srcs) == [
+        "chart.umd.min.js",
+        "chartjs-plugin-zoom.min.js",
+        "hammer.min.js",
+        "i18n.js",
+        "intl-messageformat.iife.js",
+        "pa_view.js",
+    ]
+    # Issue #1341: the FormatJS bundle, then the i18n runtime, load before every other script on the page
+    assert srcs[:2] == ["intl-messageformat.iife.js", "i18n.js"]
+    for other in set(srcs) - {"intl-messageformat.iife.js", "i18n.js"}:
+        assert srcs.index(other) > srcs.index("i18n.js") > srcs.index("intl-messageformat.iife.js"), other
     for s in srcs:
         assert (FRONTEND / s).is_file()
     assert "http://" not in PAGE and "https://" not in PAGE

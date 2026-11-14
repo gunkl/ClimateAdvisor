@@ -43,7 +43,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import cycle_model, log_capture, prediction_engines, v4_shadow, window_span
+from . import cycle_model, i18n, log_capture, prediction_engines, v4_shadow, window_span
 from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
@@ -339,7 +339,7 @@ from .engine_inputs import (
 from .entity_health import (
     THERMOSTAT_CONFIG_KEY,
     EntityHealthIssue,
-    entity_health_consequence,
+    entity_health_consequence_msg,
     run_entity_health_sweep,
 )
 from .fan_mode_resolver import (
@@ -13050,11 +13050,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 f"invariant_violation:{violation.name}", (violation.name,), window_seconds=300
             ):
                 continue
-            self._emit_event("invariant_violation", {"invariant": violation.name, "detail": violation.detail})
+            self._emit_event(
+                "invariant_violation",
+                {
+                    "invariant": violation.name,
+                    "detail": violation.detail,
+                    "detail_msg": violation.detail_msg.to_wire() if violation.detail_msg is not None else None,
+                },
+            )
             self._notify_in_background(
-                "Climate Advisor — invariant violated",
-                f"{violation.detail} Climate Advisor's whole-house-fan safety check is acting on this where"
-                " it can, but it is flagged because it should never happen.",
+                i18n.Msg("notify.title.invariant_violated"),
+                i18n.Msg("notify.invariant_violated", detail=violation.detail_msg or violation.detail),
                 "invariant_violation",
             )
         return violations
@@ -13268,6 +13274,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 {
                     "invariant": hit.promise,
                     "detail": hit.detail,
+                    "detail_msg": hit.msg.to_wire() if hit.msg is not None else None,
                     "promise": spec.label,
                     "severity": spec.home_level,
                     "episode_ts": hit.ts.isoformat(),
@@ -13277,8 +13284,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # Issue #1144: promise 9 (whf_sealed) alerts. Promise 2 has its own path above. The journal's
                 # is_new() dedup already limits this to one alert per episode.
                 self._notify_in_background(
-                    "Climate Advisor — whole-house fan ran on a sealed house",
-                    f"{hit.detail} The safety check should have stopped it within 30 seconds; please report this.",
+                    i18n.Msg("notify.title.whf_sealed_promise"),
+                    i18n.Msg("notify.whf_sealed_promise", detail=hit.msg or hit.detail),
                     "invariant_violation",
                 )
             reported.append(hit)
@@ -13286,8 +13293,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._spawn(self._async_save_state())
         return reported
 
-    def _notify_in_background(self, title: str, message: str, notification_type: str, *, email: bool = True) -> None:
+    def _notify_in_background(
+        self, title: str | i18n.Msg, message: str | i18n.Msg, notification_type: str, *, email: bool = True
+    ) -> None:
         """Fire-and-forget owner notification (Issue #1050, change 26).
+
+        ``title``/``message`` are a ``str`` or an ``i18n.Msg``; ``AutomationEngine._notify`` renders a ``Msg`` at send
+        time in ``hass.config.language`` (Issue #1341), so nothing is rendered (or frozen in a language) here.
 
         The one place the coordinator sends an alert without awaiting it: a task, so a notify
         failure can never abort the update cycle that detected the problem (logged as a WARNING
@@ -13306,7 +13318,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     await engine._notify(message, title, notification_type=notification_type, email=False)
             except Exception:
                 _LOGGER.warning(
-                    "Background notification failed: type=%s title=%s", notification_type, title, exc_info=True
+                    "Background notification failed: type=%s title=%s",
+                    notification_type,
+                    i18n.render_en(title),
+                    exc_info=True,
                 )
 
         self.hass.async_create_task(_send())
@@ -13354,13 +13369,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             whf_running = bool(
                 ae is not None and (self._get_fan_physical_state() is True or ae._fan_active or ae._fan_override_active)
             )
+        detail_msg = entity_health_consequence_msg(
+            issue,
+            door_last_reading=self._sensor_last_readings().get(issue.entity_id),
+            whf_running=whf_running,
+        )
         return dataclasses.replace(
             issue,
-            detail=entity_health_consequence(
-                issue,
-                door_last_reading=self._sensor_last_readings().get(issue.entity_id),
-                whf_running=whf_running,
-            ),
+            detail=i18n.render_en(detail_msg) if detail_msg is not None else "",
+            detail_msg=detail_msg,
         )
 
     def _process_entity_health_transitions(self, issues: list) -> None:
@@ -13393,6 +13410,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "last_notified": now,
                     "entity_id": issue.entity_id,
                     "friendly_name": issue.friendly_name,
+                    "friendly_name_msg": issue.friendly_name_msg.to_wire() if issue.friendly_name_msg else None,
                     "down_since": down_since,
                 }
                 to_notify.append(issue)
@@ -13403,6 +13421,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "status": issue.status,
                     "criticality": issue.criticality,
                     "detail": issue.detail,
+                    "friendly_name_msg": issue.friendly_name_msg.to_wire() if issue.friendly_name_msg else None,
+                    "detail_msg": issue.detail_msg.to_wire() if issue.detail_msg else None,
                     "down_since": down_since.isoformat(),
                 }
                 activity.append((issue.entity_id, lambda data=outage: self._emit_event("entity_unavailable", data)))
@@ -13427,6 +13447,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 recovered = {
                     "entity_id": tracked.get("entity_id", key),
                     "friendly_name": tracked.get("friendly_name", key),
+                    "friendly_name_msg": tracked.get("friendly_name_msg"),
                     "outage_minutes": outage_minutes,
                     "down_since": down_since.isoformat(),
                 }
@@ -13474,30 +13495,50 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 f" — {issue.detail}" if issue.detail else "",
             )
 
-        generic = "Climate Advisor may not be able to control your HVAC correctly until {}."
+        def _name(i: EntityHealthIssue) -> i18n.Msg | str:
+            return i.friendly_name_msg or i.friendly_name
+
+        def _detail(i: EntityHealthIssue) -> i18n.Msg | str:
+            return i.detail_msg or i.detail
+
         if len(issues) == 1:
             issue = issues[0]
-            consequence = issue.detail or generic.format("it's fixed")
-            message = (
-                f"{issue.friendly_name} ('{issue.entity_id}') isn't responding. {consequence} "
-                "Check Settings > Devices & Services."
+            message: i18n.Msg = i18n.Msg(
+                "notify.entity_health_single",
+                name=_name(issue),
+                entity_id=issue.entity_id,
+                consequence=_detail(issue) if issue.detail else i18n.Msg("notify.entity_generic_consequence_single"),
             )
         else:
-            names = ", ".join(f"{i.friendly_name} ({i.entity_id})" for i in issues)
-            details = " ".join(f"{i.friendly_name} ({i.entity_id}): {i.detail}" for i in issues if i.detail)
-            message = (
-                f"{len(issues)} entities aren't responding: {names}. "
-                f"{details or generic.format("they're fixed")} Check Settings > Devices & Services."
+            # The per-entity consequence sentences are listed one after another; they are rendered here, in the
+            # language the notification will be sent in, because a variable-length list of sentences has no single
+            # catalog message (Issue #1341). Everything else stays one message.
+            lang = i18n.hass_language(self.hass)
+            details = " ".join(
+                i18n.render(
+                    i18n.Msg("notify.entity_detail_line", name=_name(i), entity_id=i.entity_id, detail=_detail(i)),
+                    lang,
+                )
+                for i in issues
+                if i.detail
+            )
+            message = i18n.Msg(
+                "notify.entity_health_multi",
+                count=len(issues),
+                names=i18n.ListOf(
+                    [i18n.Msg("notify.entity_label", name=_name(i), entity_id=i.entity_id) for i in issues]
+                ),
+                details=details or i18n.render(i18n.Msg("notify.entity_generic_consequence_multi"), lang),
             )
 
         # Issue #1322: the title says what happened. "not found" only when every listed entity is really missing; an
         # entity that exists but reports unavailable (a weather service outage) is "unavailable".
         if all(i.status == "missing" for i in issues):
-            title = "Climate Advisor — entity not found"
+            title = i18n.Msg("notify.title.entity_not_found")
         elif all(i.status != "missing" for i in issues):
-            title = "Climate Advisor — entity unavailable"
+            title = i18n.Msg("notify.title.entity_unavailable")
         else:
-            title = "Climate Advisor — entities unavailable or not found"
+            title = i18n.Msg("notify.title.entities_mixed")
         self._notify_in_background(title, message, "entity_health")
 
     def _should_run_untracked_fan_backstop(self, is_untracked: bool) -> bool:
@@ -16533,7 +16574,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         self._emit_event("incident_detected", payload)
 
-    def _compute_hvac_control_issues(self) -> list[dict[str, str]]:
+    def _compute_hvac_control_issues(self) -> list[dict[str, Any]]:
         """Open "thermostat is not following commands" episodes for the Status card (Issue #1049, change 7).
 
         Occupant outcome: Status used to read "active" while a thermostat that ignored the
@@ -16551,7 +16592,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return max(0, int((now - since).total_seconds() // 60))
             return None
 
-        issues: list[dict[str, str]] = []
+        def _entry(issue: str, msg: i18n.Msg) -> dict[str, Any]:
+            # ``detail`` is the English record text; ``detail_msg`` is the translatable form (Issue #1341).
+            return {"issue": issue, "detail": i18n.render_en(msg), "detail_msg": msg.to_wire()}
+
+        issues: list[dict[str, Any]] = []
         rec = getattr(ae, "_hvac_write_record", None)
         requested = getattr(rec, "episode_reason", None)
         state = self.hass.states.get(ae.climate_entity)
@@ -16565,11 +16610,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return user_owns or live == mode
 
         if isinstance(requested, str) and requested and not _contradicted(requested):
-            detail = f"Thermostat is not following the requested mode: requested {requested}, reports {live!r}"
             mins = _minutes_since(getattr(rec, "mismatch_since", None))
             if mins is not None:
-                detail += f" for {mins} min"
-            issues.append({"issue": "mode_not_obeyed", "detail": detail})
+                msg = i18n.Msg("notify.control_mode_not_obeyed_for", requested=requested, live=repr(live), minutes=mins)
+            else:
+                msg = i18n.Msg("notify.control_mode_not_obeyed", requested=requested, live=repr(live))
+            issues.append(_entry("mode_not_obeyed", msg))
         failed_mode = getattr(ae, "_hvac_cmd_fail_mode", None)
         if getattr(ae, "_hvac_cmd_fail_announced", None) and isinstance(failed_mode, str) and failed_mode:
             # Issue #1121: held until the episode is >= HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN old
@@ -16577,8 +16623,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # contradict the thermostat. The ERROR log and the incident are not held.
             mins = _minutes_since(getattr(ae, "_hvac_cmd_fail_since", None))
             if mins is not None and mins >= HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN and not _contradicted(failed_mode):
-                detail = f"Thermostat commands are failing (last attempted mode: {failed_mode}) for {mins} min"
-                issues.append({"issue": "command_failing", "detail": detail})
+                issues.append(
+                    _entry(
+                        "command_failing",
+                        i18n.Msg("notify.control_command_failing", mode=failed_mode, minutes=mins),
+                    )
+                )
         # Issue #1048 change 9: the comfort stall entry. Hidden while a mode-not-obeyed
         # episode is open -- that entry already says why the equipment is not running.
         stall = self._stall_status
@@ -16757,26 +16807,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         edge = comfort_heat if direction == "heat" else comfort_cool
         elapsed_s = (now - (decision.effective_since or now)).total_seconds()
         hours = max(1, round(elapsed_s / 3600))
-        side = "below" if direction == "heat" else "above"
-        equipment = "heating" if direction == "heat" else "cooling"
-        gap_txt = format_temp_delta(abs(indoor - edge), unit, 1)
+        gap = i18n.TempDelta(abs(indoor - edge), unit, 1)
         mode_txt = state_str if isinstance(state_str, str) else "unknown"
-        diag = f"thermostat mode {mode_txt}, action {action}"
+        diag = i18n.Msg("notify.stall_diag", mode=mode_txt, action=str(action))
         self._stall_status = None
         if any(i["issue"] == "mode_not_obeyed" for i in self._compute_hvac_control_issues()):
             _LOGGER.info(
                 "Comfort stall alert held: direction=%s hours=%d -- a mode-not-obeyed episode is open", direction, hours
             )
             return
+        _stall_msg = i18n.Msg("notify.control_output_stall", gap=gap, direction=direction, hours=hours, diag=diag)
         self._stall_status = {
             "issue": "output_stall",
-            "detail": (
-                f"House has been {gap_txt} {side} the comfort band for {hours} h with no {equipment} running ({diag})"
-            ),
+            "detail": i18n.render_en(_stall_msg),
+            "detail_msg": _stall_msg.to_wire(),
         }
-        message = (
-            f"The house is {gap_txt} {side} your comfort band ({format_temp(edge, unit)}) and the {equipment}"
-            f" hasn't run for {hours} hours ({diag})."
+        message = i18n.Msg(
+            "notify.stall_message", gap=gap, direction=direction, edge=i18n.Temp(edge, unit), hours=hours, diag=diag
         )
         if announced != direction:
             _LOGGER.warning(
@@ -16802,14 +16849,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._stall_announced_direction = direction
             self._stall_announced_at = now
             self._stall_last_push = now
-            self._notify_in_background("Climate Advisor — house off-target", message, "hvac_output_stall", email=False)
+            self._notify_in_background(
+                i18n.Msg("notify.title.stall_off_target"), message, "hvac_output_stall", email=False
+            )
             # Same lag as the recovery path: refresh once on the open transition only.
             self.hass.async_create_task(self.async_request_refresh())
         elif reminder_due(self._stall_last_push, now, COMFORT_STALL_REMINDER_SECONDS):
             _LOGGER.info("Comfort stall reminder: direction=%s hours=%d", direction, hours)
             self._stall_last_push = now
             self._notify_in_background(
-                "Climate Advisor — house still off-target", message, "hvac_output_stall", email=False
+                i18n.Msg("notify.title.stall_still_off_target"), message, "hvac_output_stall", email=False
             )
 
     def _comfort_score_band_now(self) -> tuple[float, float]:

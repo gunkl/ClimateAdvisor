@@ -22,6 +22,7 @@ from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
+from . import i18n
 from .classifier import DayClassification
 from .const import (
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
@@ -1118,13 +1119,11 @@ def _override_event_source(reason: str) -> str:
     return "manual" if reason.startswith("user_cancel") else "automation"
 
 
-# Issue #1050 (#1048 #18): occupant-facing text for each arrival-home restore-hold reason.
-_RESTORE_DEFERRED_TEXT: dict[str, str] = {
-    "manual_override": "your manual thermostat change",
-    "override_confirm_pending": "your pending thermostat change",
-    "paused_by_door": "the open door/window",
-    "open_sensor": "the open door/window",
-}
+# Issue #1050 (#1048 #18): the arrival-home restore-hold reason codes the welcome-home notice names. The wording is the
+# ``select`` in the ``notify.welcome_home_hold`` catalog message (Issue #1341); an unlisted code reads "the hold".
+_RESTORE_DEFERRED_REASONS: frozenset[str] = frozenset(
+    {"manual_override", "override_confirm_pending", "paused_by_door", "open_sensor"}
+)
 
 
 def resolve_active_band(
@@ -2700,8 +2699,8 @@ class AutomationEngine:
 
     async def _notify(
         self,
-        message: str,
-        title: str,
+        message: str | i18n.Msg,
+        title: str | i18n.Msg,
         notification_type: str,
         *,
         email: bool = True,
@@ -2709,17 +2708,26 @@ class AutomationEngine:
     ) -> None:
         """Send a notification via configured channels, filtered by per-event preferences.
 
+        ``message`` and ``title`` are a plain ``str`` (sent as is) or an ``i18n.Msg`` rendered here, at send time, in
+        ``hass.config.language`` (Issue #1341); logs always carry the English rendering.
+
         ``email=False`` suppresses the email channel for this call (push still follows its
         per-event preference); the default keeps today's push + email behavior.
         ``observe_only_ok=True`` sends even with automation switched off: a notification is not a
         command, and the one caller (the sealed-house whole-house-fan notice, Issue #1144) exists
         precisely to tell the occupant about a fan Climate Advisor will not touch while observing.
         """
-        if _refuse_if_shut_down(self, f"send notification {title!r}"):
+        log_title = i18n.render_en(title)
+        if _refuse_if_shut_down(self, f"send notification {log_title!r}"):
             return
         if self.dry_run and not observe_only_ok:
-            _LOGGER.info("[DRY RUN] Would send notification: %s — %s role=%s", title, message, self.role)
+            _LOGGER.info(
+                "[DRY RUN] Would send notification: %s — %s role=%s", log_title, i18n.render_en(message), self.role
+            )
             return
+        lang = i18n.hass_language(self.hass)
+        title = i18n.render(title, lang)
+        message = i18n.render(message, lang)
         push_key = f"push_{notification_type}"
         email_key = f"email_{notification_type}"
         service_name = self.notify_service.split(".")[-1] if "." in self.notify_service else self.notify_service
@@ -4857,9 +4865,7 @@ class AutomationEngine:
         if notify:
             # _notify() never raises (Issue #1133 M3), so this last step cannot undo the follow-ups above.
             await self._notify(
-                "Brief thermostat adjustment detected \u2014 treated as transient "
-                "(reverted within confirmation window). "
-                "Climate Advisor continues normal operation.",
+                i18n.Msg("notify.override_self_resolved"),
                 "Climate Advisor",
                 notification_type="override_self_resolved",
             )
@@ -5665,9 +5671,7 @@ class AutomationEngine:
             await self._pause_for_door_window(
                 entity_label="monitored door/window",
                 reason="door/window open at comfort-band arm time",
-                notify_message=(
-                    "🚪 HVAC paused — a monitored door/window is open. Heating/cooling will resume when it's closed."
-                ),
+                notify_message=i18n.Msg("notify.door_window_paused"),
                 notify_type="door_window_pause",
                 quiet=self._fan_session_about_to_take_over(caller="_apply_comfort_band"),
             )
@@ -8142,9 +8146,7 @@ class AutomationEngine:
         await self._pause_for_door_window(
             entity_label="monitored door/window",
             reason="door/window still open at comfort-restore time",
-            notify_message=(
-                "🚪 HVAC paused — a monitored door/window is open. Heating/cooling will resume when it's closed."
-            ),
+            notify_message=i18n.Msg("notify.door_window_paused"),
             notify_type="door_window_pause",
             quiet=self._fan_session_about_to_take_over(caller="_sync_paused_by_door_with_live_sensors"),
         )
@@ -8172,7 +8174,7 @@ class AutomationEngine:
         self._paused_since = dt_util.now()
 
     async def _pause_for_door_window_action(
-        self, *, entity_label: str, reason: str, notify_message: str, notify_type: str, quiet: bool = False
+        self, *, entity_label: str, reason: str, notify_message: str | i18n.Msg, notify_type: str, quiet: bool = False
     ) -> bool | None:
         """The HVAC-affecting half of a door/window pause (Issue #660 Step 6):
         thermostat mode capture, turning HVAC off (or noting it's already off),
@@ -8245,7 +8247,7 @@ class AutomationEngine:
         return None
 
     async def _pause_for_door_window(
-        self, *, entity_label: str, reason: str, notify_message: str, notify_type: str, quiet: bool = False
+        self, *, entity_label: str, reason: str, notify_message: str | i18n.Msg, notify_type: str, quiet: bool = False
     ) -> bool:
         """Pause HVAC for an open door/window, or mark paused if HVAC was already off.
 
@@ -8594,10 +8596,8 @@ class AutomationEngine:
             hvac_already_off = await self._pause_for_door_window_action(
                 entity_label=entity_id,
                 reason=f"door/window open — {entity_id}",
-                notify_message=(
-                    f"🚪 HVAC paused — {friendly_name} has been open for "
-                    f"{debounce_minutes} minutes. "
-                    f"Heating/cooling will resume when it's closed."
+                notify_message=i18n.Msg(
+                    "notify.door_window_paused_named", name=friendly_name, minutes=debounce_minutes
                 ),
                 notify_type="door_window_pause",
             )
@@ -11852,12 +11852,9 @@ class AutomationEngine:
 
         if should_notify:
             if source == "manual":
-                message = "Your manual thermostat override has expired. Climate Advisor has resumed automated control."
+                message = i18n.Msg("notify.grace_expired_manual")
             else:
-                message = (
-                    f"Automation grace period expired ({duration // 60} minutes). "
-                    "HVAC will now respond normally to door/window sensor changes."
-                )
+                message = i18n.Msg("notify.grace_expired_automation", minutes=duration // 60)
             self.hass.async_create_task(
                 self._notify(
                     message,
@@ -12270,7 +12267,7 @@ class AutomationEngine:
             await self._pause_for_door_window(
                 entity_label="re-check",
                 reason="grace expired — door/window still open, re-pausing",
-                notify_message=("Grace period expired but a door/window is still open. HVAC has been paused again."),
+                notify_message=i18n.Msg("notify.grace_repause"),
                 notify_type="grace_repause",
             )
 
@@ -13551,11 +13548,7 @@ class AutomationEngine:
                 {"stopped": "fan" if stops_fan else "hvac", "trigger": trigger, "thermostat_mode": mode},
             )
         if not stops_fan and not self._recent_duplicate("whf_rule2_backstop_hvac", (True,), window_seconds=600):
-            self._notify_whf_safety(
-                "Climate Advisor — heating/cooling turned off",
-                "Climate Advisor turned off the heating/cooling because the whole-house fan was running beside it."
-                " The fan and the heating/cooling are never run together, and the most recent change wins.",
-            )
+            self._notify_whf_safety(i18n.Msg("notify.title.whf_hvac_off"), i18n.Msg("notify.whf_hvac_off"))
 
     def _arm_whf_restore_pending(self, *, fan_already_off: bool, verify_timer: bool = False) -> None:
         """Hand a fan stop's HVAC restore to the ONE gated release (``_complete_whf_safety_release``).
@@ -13619,9 +13612,10 @@ class AutomationEngine:
         mem = self._whf_last_command
         control_was_on = mem[2] if mem is not None and mem[0] == "off" else None
         if control_was_on is False:
-            detail = "control entity already reads off (firmware may not reflect remote power state)"
+            detail_msg = i18n.Msg("notify.whf_stop_failed_detail_control_off")
         else:
-            detail = f"the fan was still running after {max(attempts, 1)} off command(s)"
+            detail_msg = i18n.Msg("notify.whf_stop_failed_detail_attempts", attempts=max(attempts, 1))
+        detail = i18n.render_en(detail_msg)
         _LOGGER.warning(
             "WHF safety stop failed: whole-house fan could not be stopped: %s"
             " attempts=%d trigger=%s control=%s role=%s",
@@ -13634,9 +13628,8 @@ class AutomationEngine:
         self._record_action("Whole-house fan could not be stopped", detail)
         if not self._recent_duplicate("whf_stop_failed", (control_was_on is False,), window_seconds=3600):
             self._notify_whf_safety(
-                "Climate Advisor — whole-house fan could not be stopped",
-                f"The whole-house fan is running with every door and window closed and Climate Advisor could not stop"
-                f" it: {detail}. Turn it off at the remote or the wall switch, or open a window.",
+                i18n.Msg("notify.title.whf_stop_failed"),
+                i18n.Msg("notify.whf_stop_failed", detail=detail_msg),
             )
 
     async def _observe_only_whf_notice(self, trigger: str) -> None:
@@ -13690,9 +13683,8 @@ class AutomationEngine:
         )
         try:
             await self._notify(
-                "The whole-house fan is running while every door and window is closed, and automation is switched"
-                " off, so Climate Advisor will not turn it off. Turn the fan off, or open a window.",
-                "Climate Advisor — whole-house fan on with the house closed up",
+                i18n.Msg("notify.whf_observe_sealed"),
+                i18n.Msg("notify.title.whf_observe_sealed"),
                 "invariant_violation",
                 observe_only_ok=True,
             )
@@ -13724,9 +13716,8 @@ class AutomationEngine:
         )
         try:
             await self._notify(
-                "The whole-house fan and the heating/cooling are running at the same time, and automation is switched"
-                " off, so Climate Advisor will not turn either off. Turn one of them off.",
-                "Climate Advisor — whole-house fan and heating/cooling both on",
+                i18n.Msg("notify.whf_observe_rule2"),
+                i18n.Msg("notify.title.whf_observe_rule2"),
                 "invariant_violation",
                 observe_only_ok=True,
             )
@@ -13774,23 +13765,15 @@ class AutomationEngine:
             # Issue #1178: the two stops say different things. A sealed-house stop waits for a window; a rule-2 stop
             # (the fan and the heating/cooling never run together, the newer action wins) does not.
             self._notify_whf_safety(
-                "Climate Advisor — whole-house fan stopped",
-                (
-                    "Climate Advisor turned off the whole-house fan because every monitored door and window is closed."
-                    " It will not restart the fan until a window opens."
-                    if sealed
-                    else "Climate Advisor turned off the whole-house fan because the heating/cooling was turned on"
-                    " after it. The fan and the heating/cooling are never run together, and the most recent change"
-                    " wins."
-                ),
+                i18n.Msg("notify.title.whf_stopped"),
+                i18n.Msg("notify.whf_stopped_sealed" if sealed else "notify.whf_stopped_rule2"),
             )
         if len(stops) >= 3 and not self._recent_duplicate(
             "whf_safety_oscillation", (len(stops) >= 3,), window_seconds=600
         ):
             self._notify_whf_safety(
-                "Climate Advisor — whole-house fan keeps being turned on",
-                f"The whole-house fan was turned on {len(stops)} times in 10 minutes and Climate Advisor stopped"
-                " it each time. Check what keeps switching it on (a remote, a HomeKit automation, a schedule).",
+                i18n.Msg("notify.title.whf_oscillation"),
+                i18n.Msg("notify.whf_oscillation", count=len(stops)),
             )
             _LOGGER.warning("WHF safety anti-oscillation alert: stops_in_10min=%d trigger=%s", len(stops), trigger)
         # A stop that did not take is retried by this verify; the 15 s tick is the second line.
@@ -14002,24 +13985,28 @@ class AutomationEngine:
 
     def _alert_whf_stale_sensors(self, snap: WhfSafetySnapshot, count: int) -> None:
         """Alert (once per 6 h per sensor set) that an unavailable sensor is being counted as closed."""
-        names = ", ".join(snap.stale_names) if snap.stale_names else f"{count} sensor(s)"
+        names_msg = i18n.Msg("notify.sensor_count", n=count)
+        names = ", ".join(snap.stale_names) if snap.stale_names else i18n.render_en(names_msg)
         if self._recent_duplicate("whf_stale_sensor", (names,), window_seconds=6 * 3600):
             return
         _LOGGER.warning("WHF safety: door/window sensor unavailable > 60 s, counted as closed: sensors=%s", names)
         self._notify_whf_safety(
-            "Climate Advisor — door/window sensor unavailable",
-            f"{names} has been unavailable for over a minute. Climate Advisor counts it as closed when deciding"
-            " whether the whole-house fan may run.",
+            i18n.Msg("notify.title.whf_stale_sensors"),
+            i18n.Msg(
+                "notify.whf_stale_sensors",
+                names=", ".join(snap.stale_names) if snap.stale_names else names_msg,
+                count=len(snap.stale_names) if snap.stale_names else count,
+            ),
         )
 
-    def _notify_whf_safety(self, title: str, message: str) -> None:
+    def _notify_whf_safety(self, title: str | i18n.Msg, message: str | i18n.Msg) -> None:
         """Fire-and-forget owner push (a notify failure must never abort a safety stop)."""
 
         async def _send() -> None:
             try:
                 await self._notify(message, title, "invariant_violation")
             except Exception:
-                _LOGGER.warning("WHF safety notification failed: title=%s", title, exc_info=True)
+                _LOGGER.warning("WHF safety notification failed: title=%s", i18n.render_en(title), exc_info=True)
 
         self._spawn_whf_task(_send())
 
@@ -17903,15 +17890,17 @@ class AutomationEngine:
         if decision.notify is HomeNotifyOutcome.SEND:
             self._last_welcome_home_notified = dt_util.now()
             if decision.restore_deferred_reason is not None:
-                _msg = (
-                    "🏠 Welcome home! Comfort temperature will resume once "
-                    f"{_RESTORE_DEFERRED_TEXT.get(decision.restore_deferred_reason, 'the hold')} clears."
+                _msg = i18n.Msg(
+                    "notify.welcome_home_hold",
+                    hold=decision.restore_deferred_reason
+                    if decision.restore_deferred_reason in _RESTORE_DEFERRED_REASONS
+                    else "other",
                 )
             elif decision.restore and self._last_mode_write.held_reason is not None:
                 # Issue #1245: the restore wrote nothing (WHF session / blower hold) -- don't promise a restore.
-                _msg = "🏠 Welcome home! Comfort temperature will resume once ventilation ends."
+                _msg = i18n.Msg("notify.welcome_home_ventilation")
             else:
-                _msg = "🏠 Welcome home! Restoring comfort temperature. Should feel normal in about 20–30 minutes."
+                _msg = i18n.Msg("notify.welcome_home_restoring")
             await self._notify(_msg, "Climate Advisor", notification_type="occupancy_home")
 
     def _build_fan_fsm_inputs(
@@ -18447,10 +18436,12 @@ class AutomationEngine:
             comfort_cool,
         )
         await self._notify(
-            f"It's {self._t(indoor)} inside, above your {self._t(comfort_cool)} comfort limit, and the windows are "
-            "open. Climate Advisor won't run the air conditioning with the windows open. Close the windows and "
-            "it will cool the house.",
-            "Climate Advisor — close the windows",
+            i18n.Msg(
+                "notify.close_windows",
+                indoor=i18n.Temp(indoor, self._temp_unit, 1),
+                limit=i18n.Temp(comfort_cool, self._temp_unit, 1),
+            ),
+            i18n.Msg("notify.title.close_windows"),
             notification_type="door_window_pause",
             email=False,
         )
@@ -19574,18 +19565,18 @@ class AutomationEngine:
         if self._request_refresh_callback:
             self._request_refresh_callback()
 
-    def _notify_indoor_blind(self, title: str, message: str) -> None:
+    def _notify_indoor_blind(self, title: str | i18n.Msg, message: str | i18n.Msg) -> None:
         """Fire-and-forget owner push (task, so a notify failure can never kill the backstop chain)."""
 
         async def _send() -> None:
             try:
                 await self._notify(message, title, "indoor_blind_fan")
             except Exception:
-                _LOGGER.warning("Blind-fan notification failed: title=%s", title, exc_info=True)
+                _LOGGER.warning("Blind-fan notification failed: title=%s", i18n.render_en(title), exc_info=True)
 
         self.hass.async_create_task(_send())
 
-    def _push_indoor_blind_alert(self, title: str, message: str, *, force: bool = False) -> bool:
+    def _push_indoor_blind_alert(self, title: str | i18n.Msg, message: str | i18n.Msg, *, force: bool = False) -> bool:
         """Send the episode's alert push unless one went out within INDOOR_BLIND_PUSH_DEBOUNCE_S.
 
         A flapping sensor would otherwise produce an alert + recovery pair every 5-10 minutes
@@ -19685,21 +19676,10 @@ class AutomationEngine:
                     },
                 )
             self._request_indoor_blind_refresh()
-            if will_stop:
-                outcome = (
-                    f"Climate Advisor will turn the fan off at {stop_at.strftime('%H:%M')} if it doesn't come back."
-                )
-            elif session == "override":
-                outcome = (
-                    "The fan was turned on manually (or by its remote), so Climate Advisor will NOT turn it off — "
-                    "you may want to."
-                )
-            else:
-                outcome = "Climate Advisor will not turn this fan off automatically — you may want to."
+            outcome = "will_stop" if will_stop else ("override" if session == "override" else "other")
             self._indoor_blind_alert_pushed = self._push_indoor_blind_alert(
-                "Climate Advisor: fan running without a temperature reading",
-                "The indoor temperature sensor stopped reporting while a ventilation fan is running, so Climate "
-                f"Advisor can't tell whether the house is getting too cold. {outcome}",
+                i18n.Msg("notify.title.blind_alert"),
+                i18n.Msg("notify.blind_alert", outcome=outcome, time=i18n.Time(dt_util.as_local(stop_at))),
                 force=force_push,
             )
         else:
@@ -19755,9 +19735,8 @@ class AutomationEngine:
         _LOGGER.warning("Fan stopped: indoor blind timeout minutes_blind=%d result=%s", minutes, result.name)
         self._request_indoor_blind_refresh()  # clear the Fan-card suffix now (_exit_nat_vent emitted the event)
         self._notify_indoor_blind(
-            "Climate Advisor: ventilation fan turned off",
-            f"The indoor temperature sensor has been unavailable for {minutes} minutes, so Climate Advisor turned the "
-            "ventilation fan off to avoid overcooling the house. Please check the sensor.",
+            i18n.Msg("notify.title.blind_stopped"),
+            i18n.Msg("notify.blind_stopped", minutes=minutes),
         )
 
     def note_indoor_available(self, indoor: float) -> None:
@@ -19813,21 +19792,16 @@ class AutomationEngine:
         self._request_indoor_blind_refresh()
         if not alert_pushed:
             return  # the alert push was debounced, so its recovery push is too (no orphan "it's back")
-        if stopped:
-            tail = "The fan stays off; ventilation may resume if conditions allow."
-        elif fan_running:
-            tail = "Climate Advisor is monitoring the fan normally again."
-        else:
-            tail = "The fan is no longer running."
+        tail = "stopped" if stopped else ("running" if fan_running else "off")
         if lower_bound and minutes < 5:
-            when = "after a short outage"
+            when = "short"
         elif lower_bound:
-            when = f"after at least {minutes} minutes"
+            when = "at_least"
         else:
-            when = f"after about {minutes} minutes"
+            when = "about"
         self._notify_indoor_blind(
-            "Climate Advisor: indoor temperature is back",
-            f"The indoor temperature sensor is reporting again {when}. {tail}",
+            i18n.Msg("notify.title.blind_recovered"),
+            i18n.Msg("notify.blind_recovered", when=when, tail=tail, minutes=minutes),
         )
 
     def _whf_command_readback_on(self, fan_mode: str) -> bool | None:

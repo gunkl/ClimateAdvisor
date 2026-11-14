@@ -1,0 +1,22 @@
+{
+  "briefing.full.hot": "Top-level layout of the daily briefing email/dashboard text. Sections are named params ({title} {tldr} {body} {leaving} {fresh_air} {grace} {steps} {tonight} {suggestions}); you may reorder or drop sections. Keep the 40-character rule lines and the blank lines between sections. Same for warm/mild/cool/cold/other.",
+  "briefing.tldr": "The short push-notification text (Android/iOS cap ~255 chars shown). Rows are whole messages; keep one row per line.",
+  "briefing.band": "A temperature range: {lo} is a bare number, {hi} carries the unit symbol (e.g. 68–74°F). Keep the en dash; do not add a second unit symbol.",
+  "briefing.close_when": "'now' when the windows should already be closed, otherwise a clock time. Used inside other sentences (e.g. 'Close by now' / 'Close by 11:00 AM').",
+  "briefing.reason.comfort_floor": "A clause inside 'Close up {when} {reason}.' - why the windows close. Lower case, no final period.",
+  "briefing.reason.outdoor_rise": "A clause inside 'Close up {when} {reason}.' - why the windows close. Lower case, no final period.",
+  "briefing.reason.trap_warmth": "A clause inside 'Close up by {time} {reason}.' Lower case, no final period.",
+  "briefing.hot.plan": "Paragraph slots of the hot-day plan; each is a whole paragraph message. Placement and separators are yours.",
+  "briefing.hot.blinds_after_close": "{evening} is yes/no: 'yes' ends the sentence after the temperature (another paragraph follows about reopening); 'no' adds 'for the rest of the day'.",
+  "briefing.warm.ac_breach": "{windows} yes/no: whether windows are being advised today (adds 'Once windows are closed, ...').",
+  "briefing.reopen_evening": "{ac_off} yes/no: 'yes' adds the promise that the AC will be turned off. {time} is a clock time.",
+  "briefing.leaving.home_cool": "{minutes} is a count of minutes (plural). Wording about 'drift up' = the house is allowed to get warmer while nobody is home.",
+  "briefing.fresh.cool": "{minutes} is the delay (plural) before the AC pauses for an open window. {away} yes/no: 'yes' omits the sentence about pulling back down to {target}.",
+  "briefing.fresh.heat": "{minutes} is the delay (plural) before the heat pauses for an open window.",
+  "briefing.fresh.other": "{away} yes/no: 'yes' omits the dash clause with the band.",
+  "briefing.grace.manual": "'N minutes hands-off window': a period in which door/window sensors do not pause the HVAC. English reads 'a 5 minutes hands-off window'; use correct grammar for your language.",
+  "briefing.grace.automation": "'N minutes settling period' after the system resumed the HVAC.",
+  "briefing.steps": "Heading plus a rule line, then the list of today's steps (each already a '  • ...' line) - {now} is an optional first line.",
+  "briefing.suggestions": "Heading plus a rule line, then bullet lines ({items}), then the closing instruction about the dashboard AI tab.",
+  "briefing.tonight.plan": "{adaptive} is an optional extra line directly under {first}."
+}

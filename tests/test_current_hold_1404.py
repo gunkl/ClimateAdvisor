@@ -312,8 +312,8 @@ DISPLAY_CALLERS = {
     "get_chart_data",
     "active_thresholds_for",
     "_current_hold_payload",
-    "generate_briefing",
-    "_generate_tldr_table",
+    "generate_briefing_msg",  # Issue #1341: the Msg builder (generate_briefing renders it)
+    "_tldr_msg",
 }
 
 

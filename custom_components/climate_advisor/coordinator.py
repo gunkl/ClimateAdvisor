@@ -43,7 +43,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import cycle_model, log_capture, prediction_engines, v4_shadow, window_span
+from . import cycle_model, i18n, log_capture, prediction_engines, v4_shadow, window_span
 from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
@@ -433,6 +433,7 @@ from .promise_journal import (
 from .promise_journal import (
     Reading as _PromiseReading,
 )
+from .record_text import record_en
 from .remote_offset import RemoteOffsetState
 from .scheduler import (
     COST_TAG_HIGH,
@@ -16422,8 +16423,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         return _decide("Comfortable — no action needed.")
 
+    @staticmethod
+    def _split_msg_fields(data: dict) -> dict:
+        """Issue #1341 (D4): a ``Msg`` in an event field (``reason``, ``detail``, ``fan_mode_change``, ...) is stored
+        as its English text (the record field is unchanged, so the harness and the AI investigator read the same
+        bytes) plus ``<field>_key`` and ``<field>_params`` (``Msg.to_wire``) for the dashboard to re-render in the
+        viewer's language. A plain ``str`` (legacy call sites) is left exactly as given, with no key fields.
+        """
+        if not any(isinstance(v, i18n.Msg) for v in data.values()):
+            return data
+        out = dict(data)
+        for field_name, value in data.items():
+            if isinstance(value, i18n.Msg):
+                wire = value.to_wire()
+                out[field_name] = record_en(value)
+                out[f"{field_name}_key"] = wire["key"]
+                out[f"{field_name}_params"] = wire["params"]
+        return out
+
     def _emit_event(self, event_type: str, data: dict) -> None:
         """Append a timestamped event to the in-memory event log ring buffer (Issue #76)."""
+        data = self._split_msg_fields(data)
         _now = dt_util.now()
         entry: dict[str, Any] = {"time": _now.isoformat(), "type": event_type, **data}
         # Normalize alternate temp field names used by automation events

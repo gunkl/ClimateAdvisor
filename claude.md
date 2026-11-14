@@ -548,6 +548,18 @@ Claude Code's built-in memory system stores project context, tooling locations, 
 
 ---
 
+## Translations (#1341)
+
+Climate Advisor speaks 16 languages (`en fr es de nl ja pt it pl uk ko hi ar ru zh-Hans tr`). Spec and workflow: `docs/i18n-spec.md`.
+
+- **Every new occupant-facing string goes in a catalog, in all 16 languages, in the same PR:** Climate Advisor-rendered text in `frontend/i18n/<area>/<lang>.json` (ICU subset), HA-rendered text (entity names and states, config flow, services, issues) in `translations/<lang>.json` (plain `{name}` only). Workflow: write English, write the 15 translations, `python tools/i18n.py lock`, `python tools/i18n.py check`.
+- **No hard-coded English at occupant sinks** (notifications, entity names/states, API prose, dashboard DOM text and attributes, chart labels). Build a message (`i18n.Msg(key, **params)`, `CAI18N.t(key, params)`), never join rendered sentences, never compare code against English prose; compare codes.
+- Logs, stored reasons (`render_en`), GitHub text and AI input stay English.
+- **Import convention (prevents merge conflicts in the two 21k-line files):** every Python module uses exactly `from . import i18n` and calls `i18n.Msg` / `i18n.render` / `i18n.hass_language(self.hass)`. Never `from .i18n import ...`.
+- The classic `index.html` stays English; the new dashboard, `entry.html` and `prediction_accuracy.html` load `i18n.js` first.
+
+---
+
 ## Documentation Convergence
 
 Documentation must converge toward completeness each session, not diverge. These rules are enforced in every mob session and tracked via GitHub issue #131.

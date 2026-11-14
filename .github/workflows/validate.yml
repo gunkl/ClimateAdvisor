@@ -38,6 +38,14 @@ jobs:
       - name: Check formatting (ruff)
         run: uv run --locked --only-group test ruff format --check .
 
+      # Issue #1341: the dashboard's JS i18n runtime must render every conformance row exactly as Python does.
+      # Uses the Node that ships on ubuntu-latest (20+; the runner needs ESM, Intl.ListFormat and unit formatting).
+      - name: i18n runtime checks and Python/JS conformance (node)
+        run: |
+          node --version
+          node tests/i18n_runtime.mjs
+          node tests/i18n_conformance.mjs
+
   # The unit tier in round-robin slices (CA_UNIT_SHARD, tests/conftest.py): one serial job took 8-14 min.
   # 8 slices x 4 workers (each runner has 4 CPUs): twice the workers of the first 4 x 4 layout (3.5 min, one slice
   # ~1 min behind the rest), in smaller slices so a slow test holds up less of the run.

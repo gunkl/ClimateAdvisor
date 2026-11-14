@@ -11,6 +11,9 @@
      'climate_advisor_dashboard' key in this browser's localStorage ('classic' -> classic; unset, 'new', anything else,
      or storage unavailable -> new). '?classic=1' forces classic for that visit only. -->
 <style>html,body{margin:0;background:Canvas;color:CanvasText;font:14px system-ui,sans-serif}p{padding:16px}</style>
+<!-- Issue #1341: i18n runtime first (FormatJS, then CAI18N). This page only redirects, so it sets <html lang>/dir and fetches no catalogs. -->
+<script src="intl-messageformat.iife.js"></script>
+<script src="i18n.js"></script>
 <script>
 (function () {
   function chooseDashboard(pref, search) {

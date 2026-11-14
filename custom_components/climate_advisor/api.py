@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
-from . import log_capture, prediction_accuracy, zone_registry
+from . import i18n, log_capture, prediction_accuracy, zone_registry
 from .ai_skills_context import OUTDOOR_SENSOR_REASON_LABELS, build_event_timeline_table
 from .const import (
     API_AI_INVESTIGATE,
@@ -419,6 +419,9 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             _zones = zone_registry.list_zones(hass)
             _status_payload = {
                 "version": VERSION,
+                # Issue #1341: the backend language (hass.config.language resolved to a shipped one); the
+                # dashboard's third fallback after ?lang= and the parent frame's hass.language.
+                "language": i18n.hass_language(hass),
                 "day_type": data.get(ATTR_DAY_TYPE, "unknown"),
                 "trend_direction": trend_direction_display,
                 "trend_magnitude": trend_magnitude_display,

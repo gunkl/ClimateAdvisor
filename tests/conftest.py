@@ -22,7 +22,6 @@ import pytest  # noqa: E402
 from custom_components.climate_advisor.classifier import ForecastSnapshot  # noqa: E402
 
 
-
 @pytest.fixture(autouse=True)
 def _reset_ha_dt():
     """Issue #1186: restore the shared ``homeassistant.util.dt`` stub's real defaults around

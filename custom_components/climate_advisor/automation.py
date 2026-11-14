@@ -22,6 +22,7 @@ from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
+from . import i18n
 from .classifier import DayClassification
 from .const import (
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
@@ -287,6 +288,7 @@ from .override_grace_lifecycle import (
     OverrideConfirmState,
     OverrideGraceLifecycleState,
 )
+from .record_text import msg_text
 from .remote_offset import (
     ClampLimit,
     RemoteContext,
@@ -6434,8 +6436,9 @@ class AutomationEngine:
 
         self._mode_align_recheck_cancel = async_call_later(self.hass, MODE_ALIGNMENT_RECHECK_S, _recheck)
 
-    async def _set_hvac_mode(self, mode: str, *, reason: str) -> HvacCommandResult:
+    async def _set_hvac_mode(self, mode: str, *, reason: str | i18n.Msg) -> HvacCommandResult:
         """Set the thermostat HVAC mode and report what happened (Issue #1049)."""
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
         # enforced here rather than by convention at every one of the ~13 call sites.
         if mode != "off" and self._whf_owns_hvac():
@@ -6649,7 +6652,7 @@ class AutomationEngine:
         self,
         temperature: float,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         mode: str = "cool",
         skip_setpoint_sanity_check: bool = False,
         keep_pre_cool_hold: bool = False,
@@ -6674,6 +6677,7 @@ class AutomationEngine:
         ``_hold_pre_cool_band()``) is not a new target either, so it keeps the hold. Any other write -- heat at the
         floor, wake-up, a restore to another band -- still ends it.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         _held = self._pre_cool_band_in_force
         _rewrites_held = _held is not None and mode == "cool" and abs(float(temperature) - _held.ceiling) < 0.05
         if not keep_pre_cool_hold and not _rewrites_held:
@@ -6730,7 +6734,7 @@ class AutomationEngine:
         self,
         temperature: float,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         mode: str = "cool",
         skip_setpoint_sanity_check: bool = False,
     ) -> HvacCommandResult:
@@ -6752,6 +6756,7 @@ class AutomationEngine:
                 Every other caller (``_apply_comfort_band()`` and all its other callers)
                 keeps the default False and still gets the full sanity check.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
         # enforced here rather than by convention at every call site.
         if mode != "off" and self._whf_owns_hvac():
@@ -7735,7 +7740,7 @@ class AutomationEngine:
         self,
         c: DayClassification,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         target_override: float | None = None,
         skip_setpoint_sanity_check: bool = False,
     ) -> HvacCommandResult | None:
@@ -7770,6 +7775,7 @@ class AutomationEngine:
         call site. TOU's own gate is already the authority here; the resolver must not
         second-guess it.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         self._last_mode_write = ComfortModeWrite()  # Issue #1245: overwritten by whichever path returns below
         # Issue #85: redirect to setback when not home/guest. Gate unified via
         # should_defer_to_occupancy_setback() (Issue #460); which handler to redirect
@@ -14187,7 +14193,7 @@ class AutomationEngine:
     async def _exit_nat_vent(
         self,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         set_outdoor_exit_time: bool = False,
         event_type: str | None = None,
         event_payload: dict[str, Any] | None = None,
@@ -14229,6 +14235,7 @@ class AutomationEngine:
         Returns:
             The ``FanCommandResult`` from the underlying ``_deactivate_fan()`` call.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         # Issue #931: flags are no longer cleared here, unconditionally, before the
         # deactivate command's result is known — see _end_nat_vent_session(), called
         # below in each branch once `result` is actually available.
@@ -15306,7 +15313,7 @@ class AutomationEngine:
         self,
         to_state: NatVentLifecycleState,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         outdoor: float | None,
         indoor: float | None,
     ) -> tuple[bool, FanCommandResult]:
@@ -15317,6 +15324,7 @@ class AutomationEngine:
         ``_apply_nat_vent_fsm_state_after_activation()``, and -- when the activation was not applied
         -- keeps the pause. Returns ``(applied, result)``; callers clear the pause only if ``applied``.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         result = await self._activate_fan(reason=reason)
         applied = self._nat_vent_activation_applied(result)
         self._apply_nat_vent_fsm_state_after_activation(to_state, result, keep_door_pause=True)
@@ -19016,7 +19024,7 @@ class AutomationEngine:
         """
         return self._get_indoor_temp_f() is None
 
-    async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> FanCommandResult:
+    async def _activate_fan(self, *, reason: str | i18n.Msg, emit_event: bool = True) -> FanCommandResult:
         """Activate fan based on configured fan_mode.
 
         Args:
@@ -19032,6 +19040,7 @@ class AutomationEngine:
             avoid reporting a state change that didn't happen (rate-limited) or reporting the
             same deferral twice (a duplicate block within the same window).
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
             return FanCommandResult.DISABLED
@@ -20151,7 +20160,7 @@ class AutomationEngine:
     async def _deactivate_fan(
         self,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         restore_hvac: bool = True,
         release_suppression: bool | None = None,
         emit_event: bool = True,
@@ -20200,6 +20209,7 @@ class AutomationEngine:
             A ``FanCommandResult`` describing what actually happened (Issue #649) — see
             ``_activate_fan()``'s matching docstring note.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         if release_suppression is None:
             release_suppression = restore_hvac
         _arm_release_after_stop = False

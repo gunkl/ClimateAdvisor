@@ -182,3 +182,25 @@ def test_coordinator_event_keeps_english_reason_and_adds_key_fields():
     assert out["fan_mode_change_key"] == "activity.fan_whf_on"
     legacy = {"reason": "plain text"}
     assert ClimateAdvisorCoordinator._split_msg_fields(legacy) is legacy
+
+
+def test_msg_text_is_the_english_string_and_carries_the_message():
+    from custom_components.climate_advisor.record_text import MsgText, msg_of, msg_text
+
+    msg = i18n.Msg(
+        "activity.nat_vent_exit_outdoor_gt_indoor",
+        outdoor=i18n.Temp(80.0, "fahrenheit"),
+        indoor=i18n.Temp(70.0, "fahrenheit"),
+    )
+    text = msg_text(msg)
+    assert isinstance(text, MsgText)
+    assert text == "Nat-vent exit -- outdoor 80°F > indoor 70°F"
+    assert text.startswith("Nat-vent exit") and "indoor 70°F" in text
+    assert msg_of(text) is msg and msg_of(msg) is msg and msg_of("plain") is None
+    assert msg_text("plain") == "plain"
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    out = ClimateAdvisorCoordinator._split_msg_fields({"reason": text})
+    assert out["reason"] == str(text) and type(out["reason"]) is str
+    assert out["reason_key"] == msg.key
+    assert i18n.Msg.from_wire({"key": out["reason_key"], "params": out["reason_params"]}) == msg

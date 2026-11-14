@@ -21,3 +21,32 @@ def record_en(value: Any) -> Any:
             i18n.load_catalogs()
         return i18n.render_en(value)
     return value
+
+
+class MsgText(str):
+    """The English text of a ``Msg`` that still carries the message (``.msg``).
+
+    A reason/detail written as ``MsgText`` behaves as the exact English ``str`` everywhere (comparison, ``in``,
+    ``startswith``, JSON, f-strings, test assertions) while the event log can also store ``<field>_key`` /
+    ``<field>_params`` for display in another language (``coordinator._emit_event`` reads ``.msg``). Joining it
+    with another string (``+``, an f-string) yields a plain ``str``; a composite sentence must be one ``Msg``.
+    """
+
+    msg: i18n.Msg
+
+    def __new__(cls, msg: i18n.Msg) -> MsgText:
+        obj = super().__new__(cls, record_en(msg))
+        obj.msg = msg
+        return obj
+
+
+def msg_text(value: Any) -> Any:
+    """``Msg`` -> ``MsgText`` (English text plus the message); ``str``/``MsgText``/``None`` pass through unchanged."""
+    return MsgText(value) if isinstance(value, i18n.Msg) else value
+
+
+def msg_of(value: Any) -> i18n.Msg | None:
+    """The ``Msg`` a value carries (a ``Msg`` itself or a ``MsgText``), else ``None``."""
+    if isinstance(value, i18n.Msg):
+        return value
+    return getattr(value, "msg", None) if isinstance(value, MsgText) else None

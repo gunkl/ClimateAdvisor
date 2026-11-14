@@ -78,6 +78,13 @@ Python builds `i18n.Msg(key, **params)`; `i18n.render(msg, lang)` renders it, `r
 | `fmt.number/time/date/dateTime/duration/list/temp/tempDelta` | `Intl.*`-based. `temp`/`tempDelta`: `Intl.NumberFormat(lang, {min/maxFractionDigits: d, useGrouping: false})` of the converted value (Celsius `(f-32)*5/9`, delta `f*5/9`), then `°F`/`°C` with no space. `list`: `Intl.ListFormat` conjunction/disjunction, long. `duration`: the `common.duration.min|hours|hours_frac` messages with the same thresholds as `i18n.format_duration` (minutes = max(1, round-half-even(s/60)); whole hours; else one decimal). `time`/`date`: `Intl.DateTimeFormat`, dashboard-owned. |
 | `esc(s)` | The one HTML escaper. |
 | `hass()` | The one parent-`hass` lookup (parent, then top window; never throws). |
+| `th(key, params)` | Like `t()` but returns safe HTML: the message is escaped and every string param (a formatted temperature, a time, a name) is wrapped in `<bdi>`. Number params stay numbers (plural selection). Only for `innerHTML`. |
+| `text(obj, field)` | The one call-site shape for API prose: the `<field>_msg` wire sibling rendered with `tw()` when the backend sent one (and its key is in the catalog), else the plain prose field. `ND.text` is this. |
+| `has(key)` | Whether the language or English catalog has the key. |
+| `apply(root)` | Fills `[data-i18n="key"]` (`textContent`) and `[data-i18n-attr="title:key;aria-label:key"]` (`setAttribute`); `data-i18n-params='{"n":6}'` passes arguments. Never `innerHTML`. A key with no entry leaves the element's English markup (which a test keeps equal to the catalog). |
+| `fmt.hour(d)` | Hour only (`3 PM` / `15`). |
+| `init({areas})` | `areas` limits the fetch to some catalog areas (`entry.html` loads only `dashboard`). |
+| `?lang=en-XA` | The pseudo-locale, built on the fly from `en`: every letter accented, ~35% padding, each message bracketed `[...]`; ICU syntax is preserved. Only ever chosen by `?lang=` (never by `hass` or the browser), never listed in `index.json`, formats numbers and dates as English. A visible word that is not bracketed bypassed the catalog (`tests/ui/i18n-dashboard.spec.js`). |
 
 Stage 1 adds the file and the `<script>` tags only; no page text uses `t()` yet, so every page behaves exactly as before. Stage 2 (L9) replaces the duplicated `haAuth`/`esc` helpers in `nd_*.js` with these. Prior art: lboue's closed PR #1562 (French), whose `t()`/`data-i18n`/`?lang=` design this adapts; its French strings are imported with credit in the strings phase.
 

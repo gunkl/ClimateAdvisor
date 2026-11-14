@@ -45,6 +45,7 @@ jobs:
           node --version
           node tests/i18n_runtime.mjs
           node tests/i18n_conformance.mjs
+          node tests/i18n_dashboard.mjs
 
   # The unit tier in round-robin slices (CA_UNIT_SHARD, tests/conftest.py): one serial job took 8-14 min.
   # 8 slices x 4 workers (each runner has 4 CPUs): twice the workers of the first 4 x 4 layout (3.5 min, one slice

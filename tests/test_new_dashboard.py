@@ -23,7 +23,10 @@ JS = {p.name: p.read_text(encoding="utf-8") for p in sorted(FE.glob("nd_*.js"))}
 # R6fe: the chart (and the plan list and overlay) is one shared module, chart_v2.js + chart_v2.css, loaded by BOTH pages.
 CHART_JS = (FE / "chart_v2.js").read_text(encoding="utf-8")
 CHART_CSS = (FE / "chart_v2.css").read_text(encoding="utf-8")
-CORPUS = HTML + "\n".join(JS.values()) + "\n" + CHART_JS + "\n" + CHART_CSS
+# Issue #1341: the page's words live in the dashboard catalog (frontend/i18n/dashboard/en.json), not in the JS, so the
+# English the tests look for is the JS + HTML + that catalog's English values.
+CAT_TEXT = "\n".join(json.loads((FE / "i18n" / "dashboard" / "en.json").read_text(encoding="utf-8")).values())
+CORPUS = HTML + "\n".join(JS.values()) + "\n" + CHART_JS + "\n" + CHART_CSS + "\n" + CAT_TEXT
 # the classic page's behaviour = its own file + the shared chart module it loads
 INDEX = (FE / "index.html").read_text(encoding="utf-8") + "\n" + CHART_JS
 FIX = json.loads((ROOT / "tests" / "fixtures" / "new_dashboard_api.json").read_text(encoding="utf-8"))
@@ -647,7 +650,7 @@ def test_actions_are_the_classic_posts():
     ],
 )
 def test_context_banners(text):
-    assert text in JS["nd_core.js"]
+    assert text in JS["nd_core.js"] or text in CAT_TEXT  # Issue #1341: the banner words are catalog messages
 
 
 def test_banner_level_roles_and_status_only_promises():
@@ -834,8 +837,12 @@ def test_accuracy_page_is_never_framed_or_opened_in_a_new_tab_1491():
 
 def test_ha_login_lookup_also_reaches_the_top_window_1491():
     """Issue #1491 belt and braces: each page's HA-login lookup tries the parent, then the top window."""
+    # Issue #1341: nd_core.js no longer carries its own lookup; it asks CAI18N.hass(), whose single copy is in i18n.js
+    assert "I.hass()" in JS["nd_core.js"] and "haAuth" in JS["nd_core.js"]
+    runtime = (FE / "i18n.js").read_text("utf-8")  # the one lookup: the parent window first, then the top window
+    assert "wins.push(root.parent)" in runtime and "wins.push(root.top)" in runtime
+    assert "window.parent.document" not in runtime
     pages = {
-        "nd_core.js": JS["nd_core.js"],
         "pa_view.js": (FE / "pa_view.js").read_text("utf-8"),  # Issue #1497: the accuracy page's view and auth
         "index.html": (FE / "index.html").read_text("utf-8"),
     }
@@ -1020,7 +1027,7 @@ def test_night_card_is_a_self_contained_component():
         "fahrenheit",
         "celsius",
     ):
-        assert frag in card or frag.lower() in card.lower(), frag
+        assert frag in card or frag.lower() in card.lower() or frag in CAT_TEXT, frag
     status = JS["nd_status.js"]
     assert "NDNightCard.mount" in status and "NDNightCard.fromStrategy" in status
     assert "Sample data, not your house" in HTML  # the labelled fallback for an install without the endpoint
@@ -1083,7 +1090,7 @@ def test_status_tab_reads_the_live_night_plan_and_gates_its_figures():
     for figure in ("bed_min", "bed_max", "bed_wake", "d1(", "heat_min", "<svg", "<table"):
         assert figure not in plan_only, f"plan-only view must not show {figure}"
     # low-confidence steps keep the qualifier (decision C13)
-    assert "may help" in card
+    assert "may help" in card or "may help" in CAT_TEXT
 
 
 def test_status_places_the_same_actors_as_the_timeline():

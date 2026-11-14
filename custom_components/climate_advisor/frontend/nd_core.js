@@ -14,11 +14,29 @@
 
   // ---------- small helpers ----------
   ND.$ = function (id) { return document.getElementById(id); };
-  ND.esc = function (s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
+  // Issue #1341: text comes from the catalog (CAI18N, loaded before this file); the helpers below are thin wrappers so
+  // every module shares one escaper, one formatter set and one way to show an API prose field.
+  var I = window.CAI18N;
+  ND.esc = I.esc;
+  ND.t = function (key, params) { return I.t(key, params); };
+  ND.th = function (key, params) { return I.th(key, params); }; // safe HTML: string params in <bdi>
+  ND.text = function (obj, field) { return I.text(obj, field); }; // `<field>_msg` when sent, else the prose field
+  ND.bdi = function (s) { return '<bdi>' + I.esc(s) + '</bdi>'; };
+  // HTML from plain sentence text: escaped, with every number (a temperature, a time, a percentage) in <bdi> so it
+  // keeps its own direction inside right-to-left text. The sentence helpers return plain text (tests read it); the
+  // card sinks run it through here.
+  var NUM_TOKEN = /[+−-]?\p{Nd}+(?:[.,:]\p{Nd}+)*(?:\s?[AaPp]\.?[Mm]\.?)?(?:\s?°\s?[CF])?(?:\s?[–-]\s?\p{Nd}+(?:[.,]\p{Nd}+)*(?:\s?°\s?[CF])?)?%?/gu;
+  ND.iso = function (text) {
+    text = String(text == null ? '' : text);
+    var out = '', last = 0, m;
+    NUM_TOKEN.lastIndex = 0;
+    while ((m = NUM_TOKEN.exec(text))) { // split first, escape after: an entity such as &#39; must never be cut by a <bdi>
+      out += I.esc(text.slice(last, m.index)) + '<bdi>' + I.esc(m[0]) + '</bdi>';
+      last = m.index + m[0].length;
+    }
+    return out + I.esc(text.slice(last));
   };
+  ND.rtl = function () { return document.documentElement.getAttribute('dir') === 'rtl'; };
   ND.ls = {
     get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } },
@@ -31,20 +49,24 @@
   // internal records keep degrees F (suffix _f); show them in the install's unit
   ND.fToDisp = function (f) { return f == null ? null : (ND.isC() ? (f - 32) * 5 / 9 : f); };
   ND.dFToDisp = function (f) { return f == null ? null : (ND.isC() ? f * 5 / 9 : f); };
-  ND.num = function (v, d) { return v == null || isNaN(v) ? '—' : Number(v).toFixed(d == null ? 1 : d); };
+  ND.num = function (v, d) {
+    if (v == null || isNaN(v)) return '—';
+    var n = d == null ? 1 : d;
+    return I.fmt.number(Number(v), { minimumFractionDigits: n, maximumFractionDigits: n, useGrouping: false });
+  };
   ND.fmtTime = function (iso) {
     if (!iso) return '—';
     var d = new Date(iso);
-    return isNaN(d) ? String(iso) : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return isNaN(d) ? String(iso) : I.fmt.time(d);
   };
   ND.fmtDateTime = function (iso) {
     if (!iso) return '—';
     var d = new Date(iso);
-    return isNaN(d) ? String(iso) : d.toLocaleString([], { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    return isNaN(d) ? String(iso) : I.fmt.dateTime(d);
   };
   ND.toast = function (msg, kind) {
     var t = ND.$('toast');
-    t.textContent = (kind === 'err' ? 'Error: ' : '') + msg;
+    t.textContent = kind === 'err' ? ND.t('dashboard.core.toast_error', { message: msg }) : msg;
     t.hidden = false;
     clearTimeout(ND._toastT);
     ND._toastT = setTimeout(function () { t.hidden = true; }, kind === 'err' ? 7000 : 3500);
@@ -59,14 +81,14 @@
   };
   ND.copy = function (text) {
     try {
-      navigator.clipboard.writeText(text).then(function () { ND.toast('Copied'); }, function () { fallbackCopy(text); });
+      navigator.clipboard.writeText(text).then(function () { ND.toast(ND.t('dashboard.core.copied')); }, function () { fallbackCopy(text); });
     } catch (e) { fallbackCopy(text); }
   };
   function fallbackCopy(text) {
     var ta = document.createElement('textarea');
     ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
     document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); ND.toast('Copied'); } catch (e) { ND.toast('Copy failed', 'err'); }
+    try { document.execCommand('copy'); ND.toast(ND.t('dashboard.core.copied')); } catch (e) { ND.toast(ND.t('dashboard.core.copy_failed'), 'err'); }
     document.body.removeChild(ta);
   }
   ND.md = function (text) { // the classic report renderer: escaped lines, pipe tables, **bold**
@@ -92,17 +114,11 @@
 
   // ---------- auth (as classic) ----------
   // HA's <home-assistant> element is normally the parent (the panel frame); Issue #1491: also look in the top window,
-  // in case this page ends up one frame deeper. Without it the only fallback is localStorage 'hassTokens', which the
-  // iOS app (external auth) never writes.
+  // in case this page ends up one frame deeper (CAI18N.hass() tries the parent, then the top window). Without it the
+  // only fallback is localStorage 'hassTokens', which the iOS app (external auth) never writes.
   function haAuth() {
-    var wins = [window.parent, window.top];
-    for (var i = 0; i < wins.length; i++) {
-      try {
-        var ha = wins[i].document.querySelector('home-assistant');
-        if (ha && ha.hass && ha.hass.auth) return ha.hass.auth;
-      } catch (e) { /* cross-origin or not ready */ }
-    }
-    return null;
+    var h = I.hass();
+    return h && h.auth ? h.auth : null;
   }
   async function getToken() {
     var auth = haAuth();
@@ -137,7 +153,7 @@
   // (Climate Advisor still starting) the request is not sent. An unscoped request raises the "Ambiguous zone
   // selection" Repairs card (owner's rule, Issue #1418), so the dashboard never sends one.
   ND.STARTING = 'Climate Advisor is starting';
-  function startingError() { var e = new Error(ND.STARTING); e.status = 503; e.starting = true; return e; }
+  function startingError() { var e = new Error(ND.STARTING); e.status = 503; e.starting = true; return e; } // internal: the page shows dashboard.core.starting_retry
   ND.scopedPath = async function (path) {
     if (!ND.zone) await ND.ensureZone();
     if (!ND.zone) throw startingError();
@@ -243,6 +259,7 @@
       renderZones(data.zones, data.zone_count);
       var recovered = ND._statusDown || attempt > 0;
       ND._statusDown = false;
+      await settleLanguage(data.language); // first good status: the backend language is the third language candidate
       ND.status = data;
       ND.unit = data.unit || ND.unit;
       renderHealth(data);
@@ -251,19 +268,30 @@
       if (recovered && !ND._booting) ND.emit('refresh'); // the tab's own loads failed while Climate Advisor was starting
       return data;
     } catch (e) {
-      if (e.status === 400 || e.status === 401 || e.message === 'HTTP 401') return statusFailed('Could not load status: ' + e.message);
+      if (e.status === 400 || e.status === 401 || e.message === 'HTTP 401') return statusFailed(ND.t('dashboard.core.status_failed', { error: e.message }));
       var before = ND.zone;
       try { await ND.refreshZones(); } catch (e2) { /* zones not served yet: still starting */ }
       if (attempt < ND.STATUS_BACKOFF_MS.length) {
-        if (!ND.status) { ND.$('health-text').textContent = 'Connecting to Climate Advisor…'; }
+        if (!ND.status) { ND.$('health-text').textContent = ND.t('dashboard.core.connecting'); }
         // a stored zone that is no longer listed was just re-picked: retry it now; the same zone waits
         await wait(ND.zone !== before && ND.zone ? 0 : ND.STATUS_BACKOFF_MS[attempt]);
         return ND.loadStatus(attempt + 1);
       }
       var starting = e.starting || !e.status || e.status === 404 || e.status >= 500;
-      return statusFailed(starting ? ND.STARTING + '. This page keeps trying every minute.' : 'Could not load status: ' + e.message);
+      return statusFailed(starting ? ND.t('dashboard.core.starting_retry') : ND.t('dashboard.core.status_failed', { error: e.message }));
     }
   };
+  // The language is resolved before the first render from ?lang=, the parent's hass.language, then (here) the status
+  // payload's `language`, then the browser. Called once, with the first status payload; a changed result re-fills the
+  // static markup (the first init() ran without the status language).
+  var langSettled = false;
+  async function settleLanguage(statusLanguage) {
+    if (langSettled) return;
+    langSettled = true;
+    var before = I.lang;
+    try { await I.init({ statusLanguage: statusLanguage }); } catch (e) { /* init always resolves */ }
+    if (I.lang !== before) I.apply(document);
+  }
   function statusFailed(text) {
     ND._statusDown = true;
     ND.status = null;
@@ -275,59 +303,82 @@
   function renderHealth(s) {
     var ok = s.coordinator_healthy !== false;
     ND.$('health').className = 'health ' + (ok ? 'ok' : 'bad');
-    ND.$('health-text').textContent = (ok ? 'Healthy' : 'Unavailable') + (s.version ? ' · v' + s.version : '') +
-      ' · automation ' + (s.automation_enabled ? 'on' : 'off');
-    ND.$('menu-toggle-automation').textContent = s.automation_enabled ? 'Pause all automation' : 'Resume automation';
+    ND.$('health-text').textContent = ND.t('dashboard.core.health_line', {
+      health: ok ? 'ok' : 'bad', version: s.version ? String(s.version) : 'none', automation: s.automation_enabled ? 'on' : 'off'
+    });
+    ND.$('menu-toggle-automation').textContent = ND.t(s.automation_enabled ? 'dashboard.core.menu_pause' : 'dashboard.core.menu_resume');
   }
 
+  // A banner part is plain text, or {h: html} when it carries names/values that need <bdi> isolation (ND.th output).
   function banner(level, title, text, actions, tabs, id) {
-    return { id: id || title, level: level, title: title, text: text || '', actions: actions || [], tabs: tabs || null };
+    var key = id || (title && title.h != null ? title.h : title);
+    return { id: key, level: level, title: title, text: text || '', actions: actions || [], tabs: tabs || null };
   }
+  function H(html) { return { h: html }; }
+  function part(x) { return x && x.h != null ? x.h : ND.esc(x); }
+  var B = 'dashboard.banner.';
+  // The weather source is told by its config key (a code in the payload); the old friendly-name match is the fallback
+  // for a payload without config_key (waits on the backend: entity_health_issues role code).
+  function isWeatherIssue(i) { return i.config_key ? i.config_key === 'weather_entity' : /weather/i.test(i.friendly_name || ''); }
+  var ISSUE_STATUS = { missing: B + 'status_missing', unavailable: B + 'status_unavailable' };
+  var TREATED = { open: B + 'treated_open', closed: B + 'treated_closed' };
   ND.buildBanners = function (s, extra) {
     var b = [];
     if (s.coordinator_healthy === false) {
-      b.push(banner('bad', 'Climate Advisor is unavailable', 'Since ' + (s.stale_since ? ND.fmtTime(s.stale_since) : 'an unknown time') + ': ' + (s.last_error || 'unknown error')));
+      b.push(banner('bad', ND.t(B + 'unavailable_title'), ND.t(B + 'unavailable_text', {
+        known: s.stale_since ? 'yes' : 'no', since: s.stale_since ? ND.fmtTime(s.stale_since) : '',
+        error: s.last_error || ND.t(B + 'unknown_error')
+      })));
     }
     if (s.automation_enabled === false) {
-      b.push(banner('warn', 'Automation is off', 'Climate Advisor is watching only (observe-only): it will not change the thermostat or fan.',
-        [{ label: 'Turn automation on', act: 'toggle_automation' }]));
+      b.push(banner('warn', ND.t(B + 'off_title'), ND.t(B + 'off_text'),
+        [{ label: ND.t(B + 'off_action'), act: 'toggle_automation' }]));
     }
     if (s.manual_override_active || s.grace_active) {
       var graceOnly = !s.manual_override_active && !s.fan_override_active && s.grace_active;
-      b.push(banner('info', graceOnly ? 'A grace period is active' : 'You changed the thermostat',
-        'Climate Advisor is hands-off until it ends.', [{ label: graceOnly ? 'End grace period' : 'Cancel override', act: 'cancel_override' }]));
+      b.push(banner('info', ND.t(graceOnly ? B + 'grace_title' : B + 'override_title'),
+        ND.t(B + 'override_text'), [{ label: ND.t(graceOnly ? B + 'grace_action' : B + 'override_action'), act: 'cancel_override' }]));
     }
     if (s.fan_override_active || s.fan_off_hold_active) {
       var fanHold = !s.fan_override_active && s.fan_off_hold_active;
-      b.push(banner('info', fanHold ? 'Fan-off pause is active' : 'Fan override is active', '',
-        [{ label: fanHold ? 'End fan-off pause' : 'Cancel fan override', act: 'cancel_fan_override' }]));
+      b.push(banner('info', ND.t(fanHold ? B + 'fan_hold_title' : B + 'fan_override_title'), '',
+        [{ label: ND.t(fanHold ? B + 'fan_hold_action' : B + 'fan_override_action'), act: 'cancel_fan_override' }]));
     }
     if (s.paused_by_door) {
-      b.push(banner('warn', 'Paused: a door or window is open', s.pause_suppressed_classification_text || '', [{ label: 'Resume from pause', act: 'resume_from_pause' }]));
+      b.push(banner('warn', ND.t(B + 'paused_title'), ND.text(s, 'pause_suppressed_classification_text'), [{ label: ND.t(B + 'paused_action'), act: 'resume_from_pause' }]));
     }
     if (s.occupancy_mode === 'vacation' || s.occupancy_mode === 'away') {
-      b.push(banner('info', s.occupancy_mode === 'vacation' ? 'Vacation mode' : 'Away', 'Climate Advisor is using the ' + s.occupancy_mode + ' temperatures.'));
+      b.push(banner('info', ND.t(s.occupancy_mode === 'vacation' ? B + 'vacation_title' : B + 'away_title'),
+        ND.t(B + 'occupancy_text', { mode: s.occupancy_mode })));
     }
     (s.entity_health_issues || []).forEach(function (i) {
-      var weather = /weather/i.test(i.friendly_name || '');
-      b.push(banner('warn', (weather ? 'Weather source problem: ' : 'Sensor problem: ') + (i.friendly_name || i.entity_id),
-        (i.entity_id ? i.entity_id + ' is ' : 'is ') + (i.status || 'unavailable') + (i.detail ? ': ' + i.detail : '')));
+      var name = i.friendly_name || i.entity_id, st = i.status || 'unavailable';
+      var stText = ISSUE_STATUS[st] ? ND.t(ISSUE_STATUS[st]) : st;
+      var who = i.entity_id || i.friendly_name || '';
+      var detail = ND.text(i, 'detail');
+      b.push(banner('warn', H(ND.th(isWeatherIssue(i) ? B + 'weather_problem' : B + 'sensor_problem', { name: name })),
+        H(ND.th(detail ? B + 'entity_issue_detail' : B + 'entity_issue', { entity: who, status: stText, detail: detail }))));
     });
     (s.contact_sensors || []).filter(function (c) { return c.unreadable; }).forEach(function (c) {
-      b.push(banner('warn', 'Sensor problem: ' + c.friendly_name, 'Not responding; last read ' + (c.last_reading || 'never') + ', treated as ' + c.treated_as + '.'));
+      b.push(banner('warn', H(ND.th(B + 'sensor_problem', { name: c.friendly_name })),
+        H(ND.th(B + 'contact_unreadable', {
+          last: c.last_reading || ND.t('dashboard.core.never'), treated: TREATED[c.treated_as] ? ND.t(TREATED[c.treated_as]) : String(c.treated_as)
+        }))));
     });
     (s.invariant_violations || []).concat(s.hvac_control_issues || []).forEach(function (v) {
-      b.push(banner('bad', 'Problem', v.detail));
+      b.push(banner('bad', ND.t(B + 'problem_title'), ND.text(v, 'detail')));
     });
     var ps = s.promise_summary;
     if (ps && ps.total_hits) {
-      b.push(banner('info', ps.total_hits + ' household promise' + (ps.total_hits === 1 ? '' : 's') + ' missed in the last 30 days',  // Issue #1490 (was mislabelled '24 h')
-        (ps.promises || []).map(function (p) { return String(p.label || p.promise).replace(/^\d+: /, '') + ' ×' + p.hits; }).join(' · '),
-        [{ label: 'Open in Analysis', href: '#analysis' }], ['status'], 'promises'));
+      b.push(banner('info', ND.t(B + 'promises_title', { n: ps.total_hits }),  // Issue #1490 (was mislabelled '24 h')
+        H((ps.promises || []).map(function (p) {
+          return ND.th(B + 'promise_item', { label: String(ND.text(p, 'label') || p.promise).replace(/^\d+: /, ''), hits: p.hits });
+        }).join(' · ')),
+        [{ label: ND.t(B + 'promises_action'), href: '#analysis' }], ['status'], 'promises'));
     }
     if (extra && extra.reload_needed) {
-      b.push(banner('warn', 'Saved settings are waiting for a reload', 'Reload Climate Advisor in Home Assistant to apply them.',
-        [{ label: 'Open Home Assistant', href: HA_CONFIG_URL, blank: true }]));
+      b.push(banner('warn', ND.t(B + 'reload_title'), ND.t(B + 'reload_text'),
+        [{ label: ND.t(B + 'reload_action'), href: HA_CONFIG_URL, blank: true }]));
     }
     return b;
   };
@@ -343,7 +394,7 @@
       var el = document.createElement('div');
       el.className = 'banner ' + b.level;
       el.setAttribute('role', b.level === 'bad' ? 'alert' : 'status');
-      el.innerHTML = '<div class="b-text"><strong>' + ND.esc(b.title) + '</strong>' + (b.text ? ' ' + ND.esc(b.text) : '') + '</div>';
+      el.innerHTML = '<div class="b-text"><strong>' + part(b.title) + '</strong>' + (b.text ? ' ' + part(b.text) : '') + '</div>';
       b.actions.forEach(function (a) {
         var c;
         if (a.href) {
@@ -370,7 +421,7 @@
     if (btn) btn.disabled = true;
     try {
       var data = await ND.post(action, body);
-      ND.toast(data.message || 'Done');
+      ND.toast(ND.text(data, 'message') || ND.t('dashboard.core.done'));
       ND.emit('action', action);
       if (action === 'toggle_automation' || action === 'cancel_override' || action === 'cancel_fan_override' || action === 'resume_from_pause') ND.emit('state-changed');
       setTimeout(function () { ND.loadStatus(); }, 700);
@@ -393,13 +444,13 @@
       else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
       else if (e.key === 'Tab') close();
     });
-    document.addEventListener('click', function (e) { if (!menu.hidden && !menu.contains(e.target) && e.target !== btn) close(); });
+    document.addEventListener('click', function (e) { if (!menu.hidden && !menu.contains(e.target) && !btn.contains(e.target)) close(); });
     menu.addEventListener('click', function (e) {
       var it = e.target.closest('button[data-action]');
       if (!it) return;
       close(true);
       var a = it.getAttribute('data-action');
-      if (a === 'refresh') { ND.loadStatus(); ND.loadExtra(); ND.emit('refresh'); ND.toast('Refreshed'); }
+      if (a === 'refresh') { ND.loadStatus(); ND.loadExtra(); ND.emit('refresh'); ND.toast(ND.t('dashboard.core.refreshed')); }
       else ND.runAction(a);
     });
   }
@@ -439,8 +490,9 @@
       b.addEventListener('click', function () { ND.showTab(b.getAttribute('data-tab')); });
       b.addEventListener('keydown', function (e) {
         var n = -1;
-        if (e.key === 'ArrowRight') n = (i + 1) % btns.length;
-        else if (e.key === 'ArrowLeft') n = (i - 1 + btns.length) % btns.length;
+        var fwd = ND.rtl() ? 'ArrowLeft' : 'ArrowRight', back = ND.rtl() ? 'ArrowRight' : 'ArrowLeft'; // keys follow reading direction
+        if (e.key === fwd) n = (i + 1) % btns.length;
+        else if (e.key === back) n = (i - 1 + btns.length) % btns.length;
         else if (e.key === 'Home') n = 0;
         else if (e.key === 'End') n = btns.length - 1;
         if (n >= 0) { e.preventDefault(); btns[n].focus(); ND.showTab(TABS[n]); }
@@ -481,6 +533,9 @@
   // ---------- boot ----------
   ND.start = async function () {
     ND._booting = true;
+    ND.ls.set(PREF_KEY, 'new'); // remembered at once (before the catalog loads): entry.html reads it on the next open
+    try { await I.ready; } catch (e) { /* init always resolves */ }
+    I.apply(document); // the static markup, in the viewer's language, before the first render
     ND.zone = ND.ls.get(ZONE_KEY) || null;
     initMenu(); initTabs(); initZone(); initSwitch();
     ND.emit('init');

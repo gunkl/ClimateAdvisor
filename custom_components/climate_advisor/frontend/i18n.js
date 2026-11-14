@@ -80,6 +80,8 @@
   // The first candidate that is a non-empty string wins (an unsupported one resolves to its nearest shipped
   // language, or en: the dashboard never mixes two languages).
   function pickLanguage(statusLanguage) {
+    var q = queryLang();
+    if (q && String(q).toLowerCase() === 'en-xa') return PSEUDO; // pseudo-locale: only ever from ?lang=
     var hass = getHass();
     var cands = [
       queryLang(),
@@ -102,9 +104,11 @@
 
   // ---------- formatters (Intl; the English output of temp/number matches the Python formatters) ----------
   function L(lang) { return lang || CAI18N.lang || 'en'; }
+  // Intl and FormatJS need a real locale: the pseudo-locale formats numbers and dates as English.
+  function IL(lang) { lang = L(lang); return lang === 'en-XA' ? 'en' : lang; }
 
   function number(x, opts, lang) {
-    try { return new Intl.NumberFormat(L(lang), opts || {}).format(x); } catch (e) { return String(x); }
+    try { return new Intl.NumberFormat(IL(lang), opts || {}).format(x); } catch (e) { return String(x); }
   }
   function toDate(d) { return d instanceof Date ? d : new Date(d); }
   function dtf(lang, opts) {
@@ -112,11 +116,15 @@
     for (k in opts) o[k] = opts[k];
     var loc = CAI18N.locale;
     if (o.hour && loc && (loc.time_format === '12' || loc.time_format === '24')) o.hour12 = loc.time_format === '12';
-    try { return new Intl.DateTimeFormat(L(lang), o); } catch (e) { return null; }
+    try { return new Intl.DateTimeFormat(IL(lang), o); } catch (e) { return null; }
   }
   function time(d, lang) {
     var f = dtf(lang, { hour: 'numeric', minute: '2-digit' });
     return f ? f.format(toDate(d)) : toDate(d).toISOString().slice(11, 16);
+  }
+  function hour(d, lang) {
+    var f = dtf(lang, { hour: 'numeric' });
+    return f ? f.format(toDate(d)) : String(toDate(d).getUTCHours());
   }
   function date(d, lang) {
     var f = dtf(lang, { month: 'short', day: 'numeric' });
@@ -145,7 +153,7 @@
   function list(items, style, lang) {
     var arr = (items || []).map(String);
     try {
-      return new Intl.ListFormat(L(lang), { type: style === 'or' ? 'disjunction' : 'conjunction', style: 'long' })
+      return new Intl.ListFormat(IL(lang), { type: style === 'or' ? 'disjunction' : 'conjunction', style: 'long' })
         .format(arr);
     } catch (e) { return arr.join(', '); }
   }
@@ -208,7 +216,7 @@
     var ck = cacheKey ? lang + '\u0000' + cacheKey : null;
     var inst = ck && Object.prototype.hasOwnProperty.call(state.compiled, ck) ? state.compiled[ck] : undefined;
     if (inst === undefined) {
-      try { inst = new IMF(msg, lang); } catch (e) {
+      try { inst = new IMF(msg, lang === PSEUDO ? 'en' : lang); } catch (e) {
         warnOnce('parse:' + (cacheKey || msg), 'message does not parse (' + (cacheKey || msg) + '): ' + e.message);
         inst = null;
       }
@@ -238,6 +246,135 @@
     return formatMsg(msg, dec, useLang, key);
   }
 
+  // ---------- en-XA pseudo-locale (?lang=en-XA only) ----------
+  // Generated on the fly from en so a branch can be checked before any translation exists: every letter is accented,
+  // text grows ~35% and each message is bracketed. ICU syntax (argument names, plural/select keywords, #, quoting,
+  // number skeletons) is left alone; only the literal text is changed. Not a shipped language: it is never listed in
+  // index.json, and python never sees it.
+  var PSEUDO = 'en-XA';
+  var ACCENT = {
+    a: 'à', b: 'ƀ', c: 'ç', d: 'ð', e: 'é', f: 'ƒ', g: 'ĝ', h: 'ĥ', i: 'î', j: 'ĵ', k: 'ķ', l: 'ļ', m: 'ɱ', n: 'ñ',
+    o: 'ö', p: 'þ', q: 'ǫ', r: 'ŕ', s: 'š', t: 'ţ', u: 'û', v: 'ṽ', w: 'ŵ', x: 'ẋ', y: 'ý', z: 'ž',
+    A: 'Â', B: 'Ɓ', C: 'Ç', D: 'Ð', E: 'É', F: 'Ƒ', G: 'Ĝ', H: 'Ĥ', I: 'Î', J: 'Ĵ', K: 'Ķ', L: 'Ļ', M: 'Ṁ', N: 'Ñ',
+    O: 'Ö', P: 'Þ', Q: 'Ǫ', R: 'Ŕ', S: 'Š', T: 'Ţ', U: 'Û', V: 'Ṽ', W: 'Ŵ', X: 'Ẋ', Y: 'Ý', Z: 'Ž'
+  };
+  function pseudoText(t, acc) {
+    var out = '';
+    for (var i = 0; i < t.length; i++) {
+      var c = t.charAt(i);
+      if (Object.prototype.hasOwnProperty.call(ACCENT, c)) { out += ACCENT[c]; acc.n++; } else out += c;
+    }
+    return out;
+  }
+  // Matching close brace for the '{' at index i (quoted braces do not count); -1 when unbalanced.
+  function closeBrace(s, i) {
+    var depth = 0;
+    for (var k = i; k < s.length; k++) {
+      var c = s.charAt(k);
+      if (c === "'") {
+        var nx = s.charAt(k + 1);
+        if (nx === "'") { k++; continue; }
+        if (nx === '{' || nx === '}') { var q = s.indexOf("'", k + 2); if (q < 0) return -1; k = q; continue; }
+      } else if (c === '{') depth++;
+      else if (c === '}') { depth--; if (depth === 0) return k; }
+    }
+    return -1;
+  }
+  function pseudoBody(s, acc) {
+    var out = '', run = '', i = 0;
+    function flush() { if (run) { out += pseudoText(run, acc); run = ''; } }
+    while (i < s.length) {
+      var c = s.charAt(i);
+      if (c === "'") {
+        var nx = s.charAt(i + 1);
+        if (nx === "'") { flush(); out += "''"; i += 2; continue; }
+        if (nx === '{' || nx === '}' || nx === '#') {
+          var q = s.indexOf("'", i + 2);
+          if (q < 0) q = s.length - 1;
+          flush(); out += s.slice(i, q + 1); i = q + 1; continue;
+        }
+        run += c; i++; continue;
+      }
+      if (c === '{') {
+        var end = closeBrace(s, i);
+        if (end < 0) { run += s.slice(i); i = s.length; continue; }
+        flush(); out += pseudoArg(s.slice(i + 1, end), acc); i = end + 1; continue;
+      }
+      if (c === '#') { flush(); out += c; i++; continue; }
+      run += c; i++;
+    }
+    flush();
+    return out;
+  }
+  function pseudoArg(inner, acc) {
+    var m = /^(\s*[^,\s]+\s*),(\s*)(plural|select|selectordinal)(\s*),/.exec(inner);
+    if (!m) return '{' + inner + '}';
+    var out = m[0], rest = inner.slice(m[0].length), i = 0;
+    while (i < rest.length) {
+      var ob = rest.indexOf('{', i);
+      if (ob < 0) { out += rest.slice(i); break; }
+      var cb = closeBrace(rest, ob);
+      if (cb < 0) { out += rest.slice(i); break; }
+      out += rest.slice(i, ob + 1) + pseudoBody(rest.slice(ob + 1, cb), acc) + '}';
+      i = cb + 1;
+    }
+    return '{' + out + '}';
+  }
+  function pseudoMessage(msg) {
+    var acc = { n: 0 };
+    var body = pseudoBody(String(msg), acc);
+    var pad = acc.n >= 4 ? new Array(Math.ceil(acc.n * 0.35) + 1).join('~') : '';
+    return '[' + body + pad + ']';
+  }
+  function pseudoCatalog(en) {
+    var out = {};
+    for (var k in en) if (Object.prototype.hasOwnProperty.call(en, k)) out[k] = pseudoMessage(en[k]);
+    Object.defineProperty(out, '__loaded', { value: true, enumerable: false });
+    return out;
+  }
+
+  // ---------- HTML-safe rendering with <bdi> isolates ----------
+  // th(): like t() but returns a safe HTML string: the message text is escaped, and every string param (a formatted
+  // temperature, a time, a name) is wrapped in <bdi> so it cannot reorder inside right-to-left text. Number params
+  // stay numbers (plural selection needs them). Never put th() output anywhere but innerHTML.
+  function thRender(key, params, lang) {
+    var vals = [], p = {}, k;
+    for (k in (params || {})) {
+      if (!Object.prototype.hasOwnProperty.call(params, k)) continue;
+      var v = params[k];
+      if (v != null && typeof v !== 'number' && typeof v !== 'boolean' && (typeof v !== 'object' || !v.$t)) {
+        p[k] = '' + vals.length + ''; vals.push(String(v));
+      } else p[k] = v;
+    }
+    var html = esc(renderKey(key, p, lang));
+    return html.replace(/(\d+)/g, function (m, n) { return '<bdi>' + esc(vals[+n]) + '</bdi>'; });
+  }
+  // Fill [data-i18n] (textContent) and [data-i18n-attr="title:key;aria-label:key"] (setAttribute) under root.
+  // Never innerHTML. A key with no catalog entry leaves the element's English markup in place.
+  function hasKey(key) { return lookup(CAI18N.lang, key) !== undefined || lookup('en', key) !== undefined; }
+  function apply(rootEl) {
+    var scope = rootEl || (root.document && root.document.documentElement);
+    if (!scope || !scope.querySelectorAll) return;
+    var els = scope.querySelectorAll('[data-i18n]'), i;
+    for (i = 0; i < els.length; i++) {
+      var key = els[i].getAttribute('data-i18n');
+      if (!hasKey(key)) continue;
+      var params = null, raw = els[i].getAttribute('data-i18n-params');
+      if (raw) { try { params = JSON.parse(raw); } catch (e) { params = null; } } // {"n":6} for a message with arguments
+      els[i].textContent = CAI18N.t(key, params);
+    }
+    var attrs = scope.querySelectorAll('[data-i18n-attr]');
+    attrs = Array.prototype.slice.call(attrs);
+    attrs.forEach(function (el) {
+      (el.getAttribute('data-i18n-attr') || '').split(';').forEach(function (pair) {
+        var ix = pair.indexOf(':');
+        if (ix < 1) return;
+        var an = pair.slice(0, ix).trim(), ak = pair.slice(ix + 1).trim();
+        if (ak && hasKey(ak)) el.setAttribute(an, CAI18N.t(ak));
+      });
+    });
+  }
+
   // ---------- catalog loading ----------
   function fetchJson(url) {
     if (typeof root.fetch !== 'function') return Promise.resolve(null);
@@ -257,6 +394,7 @@
   }
   function loadLang(lang) {
     if (state.cat[lang] && state.cat[lang].__loaded) return Promise.resolve();
+    if (lang === PSEUDO) return loadLang('en').then(function () { state.cat[PSEUDO] = pseudoCatalog(state.cat.en || {}); });
     return Promise.all(state.areas.map(function (a) {
       return fetchJson(state.base + a + '/' + lang + '.json');
     })).then(function (parts) {
@@ -299,10 +437,23 @@
     hass: getHass,
     esc: esc,
     fmt: {
-      number: number, time: time, date: date, dateTime: dateTime, duration: duration, list: list,
+      number: number, time: time, hour: hour, date: date, dateTime: dateTime, duration: duration, list: list,
       temp: temp, tempDelta: tempDelta
     },
     t: function (key, params) { return renderKey(key, params, CAI18N.lang); },
+    th: function (key, params) { return thRender(key, params, CAI18N.lang); },
+    apply: apply,
+    has: hasKey,
+    // The prose of an API field: its `<field>_msg` wire sibling rendered in the viewer's language when the backend sent
+    // one (and the catalog has that key), else the plain prose field the API still carries. The one call-site shape.
+    text: function (obj, field) {
+      if (!obj || typeof obj !== 'object') return '';
+      var w = obj[field + '_msg'];
+      if (w && typeof w === 'object' && w.key && hasKey(w.key)) return renderKey(w.key, w.params, CAI18N.lang);
+      var v = obj[field];
+      return v == null ? '' : String(v);
+    },
+    pseudo: pseudoMessage,
     // A {key, params} wire object from the API (the Python Msg.to_wire() format). Plain strings pass through.
     tw: function (wire) {
       if (wire == null) return '';
@@ -327,13 +478,14 @@
         if (idx && Array.isArray(idx.languages) && idx.languages.length) {
           state.languages = idx.languages.slice();
           CAI18N.languages = idx.languages.slice();
-          if (state.languages.indexOf(CAI18N.lang) < 0) {
+          if (CAI18N.lang !== PSEUDO && state.languages.indexOf(CAI18N.lang) < 0) {
             setLang(resolveLanguage(CAI18N.lang));
             applyDocument(CAI18N.lang);
           }
         }
-        if (idx && Array.isArray(idx.areas) && idx.areas.length) state.areas = idx.areas.slice();
-        var langs = CAI18N.lang === 'en' ? ['en'] : ['en', CAI18N.lang];
+        if (opts.areas && opts.areas.length) state.areas = opts.areas.slice(); // a page that needs only some areas
+        else if (idx && Array.isArray(idx.areas) && idx.areas.length) state.areas = idx.areas.slice();
+        var langs = CAI18N.lang === 'en' ? ['en'] : CAI18N.lang === PSEUDO ? [PSEUDO] : ['en', CAI18N.lang];
         return Promise.all(langs.map(loadLang));
       }).then(function () { return CAI18N; }, function () { return CAI18N; });
       return CAI18N.ready;

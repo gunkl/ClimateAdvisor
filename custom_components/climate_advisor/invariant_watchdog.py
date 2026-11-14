@@ -83,6 +83,7 @@ from .const import (
 from .hvac_action import is_hvac_compressor_active
 from .promise_journal import NAT_VENT_END_KINDS, Command, Episode, Mark, PromiseInput, Reading, RunKey
 from .temperature import format_temp_delta
+from .thermostat_profile import fan_command_starts_blower
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -923,8 +924,12 @@ def check_p5_no_blind_fan_start(inp: PromiseInput, cfg: PromiseConfig) -> list[H
     """
     hits: list[Hit] = []
     for c in inp.commands:
+        # Issue #1556: a thermostat fan start is whatever value turns its blower on -- stamped by the adapter from the
+        # thermostat's profile (``fan_on``), else the name guess (a literal "on" or a named speed such as "Low").
         starts = (c.target == "fan" and c.fan_on is True) or (
-            c.target == "thermostat" and c.service == "set_fan_mode" and str(c.mode).lower() == "on"
+            c.target == "thermostat"
+            and c.service == "set_fan_mode"
+            and (c.fan_on if c.fan_on is not None else fan_command_starts_blower(c.mode))
         )
         if c.origin == "ca" and starts and c.indoor_f is None:
             hits.append(

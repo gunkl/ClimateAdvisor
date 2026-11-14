@@ -12,6 +12,11 @@ any thermostat whose real ``fan_modes`` list has no literal ``"on"``, e.g.
 source of truth for both directions, mirroring the existing ``fan_status.py``/
 ``temperature.py`` precedent: a tiny, dependency-free utility module imported by both
 ``automation.py`` and ``coordinator.py``.
+
+Issue #1556/#1566: the meaning of each value now comes from ``thermostat_profile.py`` (a name guess,
+overridden by what the thermostat itself reports, under consistency rules), not from fixed English
+preference lists. Every function here takes an optional learned ``profile``; without one it uses
+the name guess for the values given.
 """
 
 from __future__ import annotations
@@ -19,30 +24,25 @@ from __future__ import annotations
 from typing import Literal
 
 from .const import FAN_MODE_BOTH, FAN_MODE_DISABLED, FAN_MODE_HVAC
-
-# Preference order when resolving "turn the fan on" against a real fan_modes list —
-# checked case-insensitively, first match wins.
-_ON_PREFERENCE = ("on", "high", "medium", "low")
-# Preference order for "turn the fan off" (return to idle/circulation-only).
-_OFF_PREFERENCE = ("auto", "off", "low")
-
-# Values that mean "fan is not actively running" when read back from a real entity —
-# anything NOT in this set (and non-empty) is treated as an active/running fan mode.
-_INACTIVE_FAN_MODE_VALUES = frozenset({"", "auto", "off"})
+from .thermostat_profile import (
+    IDLE_ROLES,
+    FanProfile,
+    build_fan_profile,
+    fan_mode_runs_blower,
+    role_of,
+)
 
 
-def is_thermostat_schedule_signal(fan_mode_attr: str, hvac_action_attr: str) -> bool:
+def is_thermostat_schedule_signal(fan_mode_attr: str, hvac_action_attr: str, profile: FanProfile | None = None) -> bool:
     """True when the thermostat's own schedule is the only reason its blower runs.
 
-    ``hvac_action == "fan"`` while the ``fan_mode`` attribute is in the inactive set
-    (empty/auto/off): e.g. an Ecobee fan-min-on-time or the post-compressor tail. A
-    ``fan_mode`` attribute that reads active ("on", a named speed) is a fan someone
-    commanded, not the thermostat's schedule.
+    ``hvac_action == "fan"`` while the ``fan_mode`` attribute is an idle mode (empty/auto/off, or a vendor auto
+    variant such as ``Auto low``, #1556): e.g. an Ecobee fan-min-on-time or the post-compressor tail. A
+    ``fan_mode`` attribute that reads active ("on", a named speed) is a fan someone commanded, not the
+    thermostat's schedule.
     """
-    return (
-        str(hvac_action_attr).strip().lower() == "fan"
-        and str(fan_mode_attr).strip().lower() in _INACTIVE_FAN_MODE_VALUES
-    )
+    role = role_of(fan_mode_attr, profile)
+    return str(hvac_action_attr).strip().lower() == "fan" and role in IDLE_ROLES
 
 
 def fan_control_enabled(fan_mode: str) -> bool:
@@ -65,49 +65,44 @@ def thermostat_blower_is_ca_fan(fan_mode: str) -> bool:
     return fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH)
 
 
-def resolve_fan_mode_command(fan_modes: list[str] | None, intent: Literal["on", "off"]) -> str | None:
-    """Return the fan_mode value to command for the given intent, or None if impossible.
+def resolve_fan_mode_command(
+    fan_modes: list[str] | None, intent: Literal["on", "off"], profile: FanProfile | None = None
+) -> str | None:
+    """Return the fan_mode value to command for the given intent, or None if no value is safe.
 
-    Reads the entity's live ``fan_modes`` list each time (never cached/configured) —
-    the whole point is to stop assuming a fixed vocabulary. Matching is
-    case-insensitive against the real list; the original casing from `fan_modes` is
-    returned so the service call uses a value the entity actually advertises.
+    Reads the entity's live ``fan_modes`` list each time (never cached/configured). Matching is case-insensitive
+    and the original casing is returned, so the service call uses a value the entity actually advertises.
 
-    ``intent="off"``: prefers ``"auto"``, then ``"off"``, then the lowest named speed
-    tier present — a thermostat almost always has *some* safe idle value.
+    The choice is :func:`thermostat_profile.build_fan_profile`'s, under its consistency rules (Issue #1556):
 
-    ``intent="on"``: prefers a literal ``"on"``, else the highest named speed tier
-    present (high > medium > low) — the direction with no guaranteed-safe fallback.
-    Returns ``None`` when `fan_modes` has no literal "on" and none of the named speed
-    tiers either (e.g. an empty/unknown list); callers must treat ``None`` as "cannot
-    express fan-on for this entity" and log an error rather than sending an invalid
-    value the thermostat will silently reject (Issue #893's original failure mode).
+    ``intent="off"``: a literal ``auto``, then another ``auto*``/``off`` mode, then a mode the thermostat was
+    observed not to run continuously. Never a named speed or circulate mode -- on a Honeywell T6 Pro
+    (``["Auto low", "Low", "Circulation"]``) ``Low`` is fan ON, and the old ``auto, off, low`` fallback latched
+    the blower on every time CA turned its fan off.
+
+    ``intent="on"``: a literal ``"on"``, else the highest named speed tier present (high > medium > low), else
+    any other mode that runs the blower. ``None`` means "cannot express this intent for this entity": callers
+    log and send nothing rather than a value the thermostat would misread or reject (Issue #893).
+
+    ``profile``: the learned profile for this thermostat (its evidence overrides the name guess). It is used only
+    when its mode list is this ``fan_modes`` list; otherwise a name-only profile is built from ``fan_modes``.
     """
     if not fan_modes:
         return None
-    lower_to_original = {str(m).lower(): m for m in fan_modes}
-    preference = _ON_PREFERENCE if intent == "on" else _OFF_PREFERENCE
-    for candidate in preference:
-        if candidate in lower_to_original:
-            return lower_to_original[candidate]
-    return None
+    modes = [str(m) for m in fan_modes]
+    resolved = profile if isinstance(profile, FanProfile) and list(profile.modes) == modes else build_fan_profile(modes)
+    return resolved.on_value if intent == "on" else resolved.off_value
 
 
-def is_thermostat_fan_physically_active(fan_mode_attr: str, hvac_action_attr: str) -> bool:
+def is_thermostat_fan_physically_active(
+    fan_mode_attr: str, hvac_action_attr: str, profile: FanProfile | None = None
+) -> bool:
     """True if the thermostat's own attributes indicate its fan is physically running.
 
-    Replaces the previous ``fan_mode_attr == "on"`` strict-equality checks scattered
-    across coordinator.py (Issue #968) — those never matched a named speed tier like
-    "low"/"medium"/"high", so a fan genuinely running at a named speed was
-    misread as idle, feeding the repeating "fan found running without a CA-owned
-    session" grace-period churn seen in Issue #893.
-
-    Any fan_mode value other than empty/"auto"/"off" is treated as active — this
-    mirrors the same active-set-membership pattern already proven correct for
-    hvac_action off/idle detection elsewhere in this codebase, applied to the
-    read side of fan_mode for the first time.
+    Replaces the previous ``fan_mode_attr == "on"`` strict-equality checks scattered across coordinator.py
+    (Issue #968). An idle mode (empty/auto/off, or a vendor auto variant like ``Auto low``, #1556) runs the blower
+    only when the thermostat reports ``hvac_action == "fan"``; a circulate mode follows the reported
+    ``hvac_action`` when there is one; a continuous/named-speed or unrecognised value reads as running. A learned
+    ``profile`` overrides the name guess with what this thermostat was observed to do.
     """
-    normalized = str(fan_mode_attr).strip().lower()
-    if normalized not in _INACTIVE_FAN_MODE_VALUES:
-        return True
-    return str(hvac_action_attr).strip().lower() == "fan"
+    return fan_mode_runs_blower(fan_mode_attr, hvac_action_attr, profile)

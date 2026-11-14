@@ -3,6 +3,25 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.35] — 2026-11-14
+
+### Fixed
+- Fix #1556: Climate Advisor now works with thermostats whose fan modes have their own names, such as the Honeywell T6 Pro (`Auto low`, `Low`, `Circulation`).
+  - **What you'll notice:** when Climate Advisor turns its fan off, a T6 Pro goes back to `Auto low`. Before, it was set to `Low`, which is fan **On** on that thermostat, so the blower ran for days. Thermal learning now records observations on these thermostats. Before, `Auto low` read as "fan running", every heating/cooling observation was thrown away, and confidence stayed at none.
+  - **Safety rule:** the fan-off command is never a mode that keeps the blower running. If no fan mode on your thermostat is safe to use for off, Climate Advisor sends nothing and logs a warning that says why.
+  - **Unchanged:** thermostats with a literal `auto`/`on` (Ecobee, Nest, most others) send the same values as before.
+
+### Added
+- Feat #1567: Climate Advisor learns what each fan mode actually does from your thermostat's own reports, so nothing needs configuring.
+  - **How it learns:** while heat/cool isn't running, it counts the minutes your thermostat reports its fan running vs idle in each mode. A mode that is almost never idle runs the blower continuously. What the thermostat reports overrides the name guess.
+  - **What it never does:** guess from temperatures. A thermostat that never reports what it's doing stays on the name guess, marked "unverified".
+- Feat #1568: what Climate Advisor learned about your thermostat is kept across restarts and updates.
+  - **Firmware renames a fan mode:** only that mode is re-learned.
+  - **You replace the thermostat:** the new one is learned fresh, and the old one's profile is kept, so putting it back restores what was learned.
+- Feat #1569: one thermostat profile covers what your thermostat supports (heat, cool, both setpoints), what its fan modes do, and whether it reports its runs.
+  - **In the logs:** one "Thermostat profile" line whenever something changes.
+  - **In diagnostics:** the full profile, with the minutes behind each fan mode's meaning. Attaching the diagnostics file to an issue is enough to debug a new thermostat.
+
 ## [0.9.34] — 2026-11-13
 
 ### Fixed

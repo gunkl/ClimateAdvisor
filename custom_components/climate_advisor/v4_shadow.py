@@ -429,6 +429,18 @@ def _days_param(days: Any) -> Any:
     return i18n.Msg("timeline.v4.too_few_days")
 
 
+# The persisted v4 fit codes (predictor_v4 writes these exact strings into the stored model, so they are data codes,
+# not display text; #1341). Each maps to the catalog message family describe_* renders for it.
+_V4_REASON_KINDS: dict[str, str] = {
+    "under 3 days of samples": "under_3_days",
+    "fit diverged": "fit_diverged",
+    "does not beat no-change at 4 h by 10 %": "no_beat_4h",
+    "under 10 days of samples": "under_10_days",
+    "heating or cooling not yet observed": "mode_not_observed",
+    "too few accepted thermostat starts in a used mode": "too_few_starts",
+}
+
+
 def describe_grade_msgs(summary: Mapping[str, Any] | None) -> tuple[Any, Any]:
     """``(why, by_mode)`` as messages (a stored reason this module has no word for stays text); ``(None, None)`` when
     there is no model. See :func:`describe_grade`."""
@@ -516,6 +528,7 @@ def describe_grade_msgs(summary: Mapping[str, Any] | None) -> tuple[Any, Any]:
         if isinstance(modes.get(m), Mapping) and not modes[m].get("seen") and not modes[m].get("carried")
     ]
     why: Any
+    kind = _V4_REASON_KINDS.get(code)
     if code == "":
         if summary.get("confidence") != "ok":
             why = ""
@@ -523,22 +536,22 @@ def describe_grade_msgs(summary: Mapping[str, Any] | None) -> tuple[Any, Any]:
             why = M("timeline.v4.why.ok_carried", modes=words(carried), reason=_reason_param(carried_reason))
         else:
             why = M("timeline.v4.why.ok")
-    elif code == "under 3 days of samples":
+    elif kind == "under_3_days":
         why = M("timeline.v4.why.under_3_days", days=days_w)
-    elif code == "fit diverged":
+    elif kind == "fit_diverged":
         why = M("timeline.v4.why.fit_diverged")
-    elif code == "does not beat no-change at 4 h by 10 %":
+    elif kind == "no_beat_4h":
         why = M("timeline.v4.why.no_beat_4h")
-    elif code == "under 10 days of samples":
+    elif kind == "under_10_days":
         why = M("timeline.v4.why.under_10_days", days=days_w, need=need_days)
-    elif code == "heating or cooling not yet observed":
+    elif kind == "mode_not_observed":
         modes_p = words(unseen) if unseen else M("timeline.v4.one_mode")
         why = (
             M("timeline.v4.why.mode_not_observed_window", modes=modes_p, days=span_days)
             if span_days is not None
             else M("timeline.v4.why.mode_not_observed", modes=modes_p)
         )
-    elif code == "too few accepted thermostat starts in a used mode":
+    elif kind == "too_few_starts":
         why = (
             M("timeline.v4.why.too_few_starts", modes=words(short), need=need_starts)
             if short

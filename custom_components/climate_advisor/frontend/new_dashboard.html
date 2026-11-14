@@ -201,28 +201,28 @@
 <header class="top">
   <div class="top-in">
     <h1 class="brand">Climate Advisor</h1>
-    <label class="zone-lab" id="zone-wrap" hidden>Zone
-      <select id="zone-select" class="ctl" aria-label="Zone"></select>
+    <label class="zone-lab" id="zone-wrap" hidden><span data-i18n="nav.zone">Zone</span>
+      <select id="zone-select" class="ctl" aria-label="Zone" data-i18n-aria-label="nav.zone"></select>
     </label>
     <nav class="tabs" role="tablist" aria-label="Dashboard sections">
-      <button type="button" role="tab" id="tab-btn-status" data-tab="status" aria-controls="panel-status" aria-selected="true" tabindex="0">Status</button>
-      <button type="button" role="tab" id="tab-btn-analysis" data-tab="analysis" aria-controls="panel-analysis" aria-selected="false" tabindex="-1">Analysis</button>
-      <button type="button" role="tab" id="tab-btn-debug" data-tab="debug" aria-controls="panel-debug" aria-selected="false" tabindex="-1">Debug</button>
-      <button type="button" role="tab" id="tab-btn-settings" data-tab="settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1">Settings</button>
+      <button type="button" role="tab" id="tab-btn-status" data-tab="status" aria-controls="panel-status" aria-selected="true" tabindex="0" data-i18n="nav.status">Status</button>
+      <button type="button" role="tab" id="tab-btn-analysis" data-tab="analysis" aria-controls="panel-analysis" aria-selected="false" tabindex="-1" data-i18n="nav.analysis">Analysis</button>
+      <button type="button" role="tab" id="tab-btn-debug" data-tab="debug" aria-controls="panel-debug" aria-selected="false" tabindex="-1" data-i18n="nav.debug">Debug</button>
+      <button type="button" role="tab" id="tab-btn-settings" data-tab="settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1" data-i18n="nav.settings">Settings</button>
     </nav>
     <span class="spacer"></span>
-    <span class="health" id="health" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="health-text">Loading...</span></span>
+    <span class="health" id="health" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="health-text" data-i18n="common.loading">Loading...</span></span>
     <div class="menu-wrap">
-      <button type="button" class="btn" id="actions-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="actions-menu">Actions &#9662;</button>
+      <button type="button" class="btn" id="actions-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="actions-menu" data-i18n="nav.actions">Actions &#9662;</button>
       <div class="menu" id="actions-menu" role="menu" aria-labelledby="actions-btn" hidden>
-        <button type="button" role="menuitem" data-action="force_reclassify">Re-plan (reclassify now)</button>
-        <button type="button" role="menuitem" data-action="send_briefing">Send briefing</button>
-        <button type="button" role="menuitem" data-action="refresh">Refresh</button>
+        <button type="button" role="menuitem" data-action="force_reclassify" data-i18n="nav.replan">Re-plan (reclassify now)</button>
+        <button type="button" role="menuitem" data-action="send_briefing" data-i18n="nav.send_briefing">Send briefing</button>
+        <button type="button" role="menuitem" data-action="refresh" data-i18n="common.refresh">Refresh</button>
         <div class="sep" role="separator"></div>
-        <button type="button" role="menuitem" data-action="toggle_automation" id="menu-toggle-automation">Pause all automation</button>
+        <button type="button" role="menuitem" data-action="toggle_automation" id="menu-toggle-automation" data-i18n="nav.pause_automation">Pause all automation</button>
       </div>
     </div>
-    <a class="btn" id="back-classic" href="index.html" style="display:inline-flex;align-items:center;text-decoration:none;color:var(--ink)">Back to classic</a>
+    <a class="btn" id="back-classic" href="index.html" style="display:inline-flex;align-items:center;text-decoration:none;color:var(--ink)" data-i18n="nav.back_classic">Back to classic</a>
   </div>
 </header>
 
@@ -231,72 +231,72 @@
 <main>
   <!-- ============ Status: what is happening now, and what do I need to do? ============ -->
   <div id="panel-status" class="panel-tab" role="tabpanel" aria-labelledby="tab-btn-status" tabindex="0">
-    <div class="status-next" aria-label="What to do next">
-      <div class="tile"><div class="l">For you</div><div class="v" id="status-for-you">…</div></div>
-      <div class="tile"><div class="l">CA next</div><div class="v" id="status-ca-next">…</div><div class="n" id="status-ca-next-time"></div></div>
+    <div class="status-next" aria-label="What to do next" data-i18n-aria-label="status.next_aria">
+      <div class="tile"><div class="l" data-i18n="status.for_you">For you</div><div class="v" id="status-for-you">…</div></div>
+      <div class="tile"><div class="l" data-i18n="status.ca_next">CA next</div><div class="v" id="status-ca-next">…</div><div class="n" id="status-ca-next-time"></div></div>
     </div>
-    <div class="tiles" id="status-grid" aria-label="Readings"></div>
+    <div class="tiles" id="status-grid" aria-label="Readings" data-i18n-aria-label="status.readings"></div>
 
     <section class="card chart-card" id="status-chart" aria-labelledby="chart-title">
       <div class="chart-head">
-        <h2 id="chart-title">Temperature</h2>
+        <h2 id="chart-title" data-i18n="status.temperature">Temperature</h2>
         <div class="chart-head-actions">
-          <button type="button" class="chart-zoom-reset" id="chart-zoom-reset" onclick="resetChartZoom()">Reset Zoom</button>
-          <button type="button" class="chart-tool-btn" id="chart-table-toggle" aria-pressed="false" onclick="toggleTableView()">Table view</button>
+          <button type="button" class="chart-zoom-reset" id="chart-zoom-reset" onclick="resetChartZoom()" data-i18n="status.reset_zoom">Reset Zoom</button>
+          <button type="button" class="chart-tool-btn" id="chart-table-toggle" aria-pressed="false" onclick="toggleTableView()" data-i18n="status.table_view">Table view</button>
         </div>
       </div>
       <div class="chart-range-bar" id="status-chart-range">
-        <div class="ctl-group" role="group" aria-label="Past: how much history to show">
-          <span class="ctl-label">Past</span>
+        <div class="ctl-group" role="group" aria-label="Past: how much history to show" data-i18n-aria-label="status.past_aria">
+          <span class="ctl-label" data-i18n="status.past">Past</span>
           <button type="button" class="range-btn" data-range="6h" aria-pressed="false" onclick="setChartRange('6h', this)">6h</button>
           <button type="button" class="range-btn" data-range="12h" aria-pressed="false" onclick="setChartRange('12h', this)">12h</button>
           <button type="button" class="range-btn active" data-range="24h" aria-pressed="true" onclick="setChartRange('24h', this)">24h</button>
-          <button type="button" class="range-btn" data-range="3d" aria-pressed="false" onclick="setChartRange('3d', this)">3d</button>
-          <button type="button" class="range-btn" data-range="7d" aria-pressed="false" onclick="setChartRange('7d', this)">7d</button>
-          <button type="button" class="range-btn" data-range="30d" aria-pressed="false" onclick="setChartRange('30d', this)">30d</button>
-          <button type="button" class="range-btn" data-range="1y" aria-pressed="false" onclick="setChartRange('1y', this)">1y</button>
+          <button type="button" class="range-btn" data-range="3d" aria-pressed="false" onclick="setChartRange('3d', this)" data-i18n="status.3d">3d</button>
+          <button type="button" class="range-btn" data-range="7d" aria-pressed="false" onclick="setChartRange('7d', this)" data-i18n="status.7d">7d</button>
+          <button type="button" class="range-btn" data-range="30d" aria-pressed="false" onclick="setChartRange('30d', this)" data-i18n="status.30d">30d</button>
+          <button type="button" class="range-btn" data-range="1y" aria-pressed="false" onclick="setChartRange('1y', this)" data-i18n="status.1y">1y</button>
         </div>
-        <div class="ctl-group" role="group" aria-label="Ahead: how much forecast to show">
-          <span class="ctl-label">Ahead</span>
+        <div class="ctl-group" role="group" aria-label="Ahead: how much forecast to show" data-i18n-aria-label="status.ahead_aria">
+          <span class="ctl-label" data-i18n="status.ahead">Ahead</span>
           <button type="button" class="ahead-btn active" data-ahead="24h" aria-pressed="true" onclick="setChartAhead('24h')">24h</button>
           <button type="button" class="ahead-btn" data-ahead="48h" aria-pressed="false" onclick="setChartAhead('48h')">48h</button>
-          <button type="button" class="ahead-btn" data-ahead="5d" aria-pressed="false" onclick="setChartAhead('5d')">5d</button>
-          <button type="button" class="ahead-btn" data-ahead="7d" aria-pressed="false" onclick="setChartAhead('7d')">7d</button>
+          <button type="button" class="ahead-btn" data-ahead="5d" aria-pressed="false" onclick="setChartAhead('5d')" data-i18n="status.5d">5d</button>
+          <button type="button" class="ahead-btn" data-ahead="7d" aria-pressed="false" onclick="setChartAhead('7d')" data-i18n="status.7d">7d</button>
         </div>
-        <div class="ctl-group" role="group" aria-label="Move through time" id="status-chart-nav">
-          <button type="button" class="chart-nav-btn" id="chart-nav-back" title="Scroll back" aria-label="Scroll back half a view" onclick="shiftChartWindow(-1)">&#8249;</button>
-          <button type="button" class="chart-nav-btn now-btn" id="chart-nav-now" title="Back to now" onclick="chartGoNow()">Now</button>
-          <button type="button" class="chart-nav-btn" id="chart-nav-fwd" title="Scroll forward" aria-label="Scroll forward half a view" onclick="shiftChartWindow(1)">&#8250;</button>
+        <div class="ctl-group" role="group" aria-label="Move through time" id="status-chart-nav" data-i18n-aria-label="status.move_time">
+          <button type="button" class="chart-nav-btn" id="chart-nav-back" title="Scroll back" aria-label="Scroll back half a view" onclick="shiftChartWindow(-1)" data-i18n-title="status.scroll_back" data-i18n-aria-label="status.scroll_back_half">&#8249;</button>
+          <button type="button" class="chart-nav-btn now-btn" id="chart-nav-now" title="Back to now" onclick="chartGoNow()" data-i18n-title="status.back_to_now" data-i18n="status.now">Now</button>
+          <button type="button" class="chart-nav-btn" id="chart-nav-fwd" title="Scroll forward" aria-label="Scroll forward half a view" onclick="shiftChartWindow(1)" data-i18n-title="status.scroll_fwd" data-i18n-aria-label="status.scroll_fwd_half">&#8250;</button>
         </div>
       </div>
       <details class="chart-key" id="chart-key">
-        <summary>Lines <span id="chart-key-count"></span></summary>
+        <summary><span data-i18n="status.lines">Lines</span> <span id="chart-key-count"></span></summary>
         <div id="chart-key-body"></div>
-        <div class="cl-item key-extra" id="legend-thermostat-set" style="display:none"><span class="cl-swatch" style="border-top:2px dashed rgba(255,193,7,0.95)"></span><span>Thermostat set</span></div>
+        <div class="cl-item key-extra" id="legend-thermostat-set" style="display:none"><span class="cl-swatch" style="border-top:2px dashed rgba(255,193,7,0.95)"></span><span data-i18n="status.thermostat_set">Thermostat set</span></div>
       </details>
       <p class="chart-note" id="chart-v4-note" hidden></p>
-      <div class="chart-stack" id="chart-stack" tabindex="0" aria-label="Temperature chart. Left and right arrows move a readout along the time axis; Escape clears it. Table view lists the same values.">
+      <div class="chart-stack" id="chart-stack" tabindex="0" aria-label="Temperature chart. Left and right arrows move a readout along the time axis; Escape clears it. Table view lists the same values." data-i18n-aria-label="status.chart_stack_aria">
         <div class="chart-container">
-          <canvas id="temp-chart" role="img" aria-label="Indoor temperature by sensor with predictions"></canvas>
+          <canvas id="temp-chart" role="img" aria-label="Indoor temperature by sensor with predictions" data-i18n-aria-label="status.temp_chart_aria"></canvas>
         </div>
         <div class="chart-container chart-container-out">
-          <canvas id="out-chart" role="img" aria-label="Outdoor temperature: sensor, weather service forecast and corrected forecast"></canvas>
+          <canvas id="out-chart" role="img" aria-label="Outdoor temperature: sensor, weather service forecast and corrected forecast" data-i18n-aria-label="status.out_chart_aria"></canvas>
         </div>
         <div class="activity-timeline" id="status-chart-strips">
-          <canvas id="activity-chart" role="img" aria-label="Heating, cooling, fan, ventilation and window activity over time"></canvas>
+          <canvas id="activity-chart" role="img" aria-label="Heating, cooling, fan, ventilation and window activity over time" data-i18n-aria-label="status.activity_chart_aria"></canvas>
         </div>
         <div class="chart-cursor" id="chart-cursor" hidden></div>
       </div>
       <div id="chart-hover-panel" class="chart-hover-panel" aria-live="off"></div>
-      <p class="chart-note" id="chart-empty" hidden>No chart data yet. The chart fills in as Climate Advisor logs readings.</p>
+      <p class="chart-note" id="chart-empty" hidden data-i18n="status.chart_empty">No chart data yet. The chart fills in as Climate Advisor logs readings.</p>
       <div class="chart-table-wrap" id="chart-table-wrap" hidden>
-        <div class="chart-table-actions"><button type="button" class="chart-tool-btn" id="chart-table-copy" onclick="copyChartTable()">Copy table</button></div>
-        <div class="chart-table-scroll" tabindex="0" role="region" aria-label="Chart values as a table"><table class="chart-table"></table></div>
+        <div class="chart-table-actions"><button type="button" class="chart-tool-btn" id="chart-table-copy" onclick="copyChartTable()" data-i18n="status.copy_table">Copy table</button></div>
+        <div class="chart-table-scroll" tabindex="0" role="region" aria-label="Chart values as a table" data-i18n-aria-label="status.chart_table_aria"><table class="chart-table"></table></div>
       </div>
     </section>
 
     <section class="card" id="status-plan" aria-labelledby="status-plan-h">
-      <div class="card-head"><h2 id="status-plan-h">Next 24 hours</h2><span class="sub">What Climate Advisor will do, and what you are asked to do. The same steps are marked on the chart.</span></div>
+      <div class="card-head"><h2 id="status-plan-h" data-i18n="status.next_24h">Next 24 hours</h2><span class="sub" data-i18n="status.next_24h_sub">What Climate Advisor will do, and what you are asked to do. The same steps are marked on the chart.</span></div>
       <div class="plan">
         <ol class="plan-list" id="status-plan-list" aria-live="polite"></ol>
         <div class="plan-foot" id="status-natvent-line"></div>
@@ -304,84 +304,84 @@
     </section>
 
     <section class="card night" id="status-slot-night" data-slot="night" aria-labelledby="night-title">
-      <div class="card-head"><h2 id="night-title">Tonight in the bedroom</h2><span class="badge sample" id="night-sample-badge" hidden>Sample data, not your house</span></div>
-      <div id="night-card"><div class="empty">Loading...</div></div>
+      <div class="card-head"><h2 id="night-title" data-i18n="status.tonight">Tonight in the bedroom</h2><span class="badge sample" id="night-sample-badge" hidden data-i18n="status.sample_data">Sample data, not your house</span></div>
+      <div id="night-card"><div class="empty" data-i18n="common.loading">Loading...</div></div>
     </section>
 
     <details class="card" id="status-briefing">
-      <summary>Today&#8217;s briefing</summary>
+      <summary data-i18n="status.todays_briefing">Today&#8217;s briefing</summary>
       <div class="brief-bar" style="margin:8px 0">
-        <button type="button" class="btn small" id="status-briefing-regenerate" title="Refreshes the plan shown here. It does not send a push or email notification.">Regenerate</button>
-        <button type="button" class="btn small" id="status-briefing-send" title="Sends today's briefing as a notification">Send</button>
+        <button type="button" class="btn small" id="status-briefing-regenerate" title="Refreshes the plan shown here. It does not send a push or email notification." data-i18n-title="status.regenerate_title" data-i18n="status.regenerate">Regenerate</button>
+        <button type="button" class="btn small" id="status-briefing-send" title="Sends today's briefing as a notification" data-i18n-title="status.send_title" data-i18n="common.send">Send</button>
       </div>
-      <div class="brief-text" id="status-briefing-text" aria-live="polite">Loading...</div>
+      <div class="brief-text" id="status-briefing-text" aria-live="polite" data-i18n="common.loading">Loading...</div>
     </details>
   </div>
 
   <!-- ============ Analysis ============ -->
   <div id="panel-analysis" class="panel-tab" role="tabpanel" aria-labelledby="tab-btn-analysis" tabindex="0" hidden>
-    <div class="sub">How well it is working, and what to improve</div>
-    <div class="tiles" id="an-kpis" aria-label="Headline numbers"></div>
+    <div class="sub" data-i18n="analysis.sub">How well it is working, and what to improve</div>
+    <div class="tiles" id="an-kpis" aria-label="Headline numbers" data-i18n-aria-label="analysis.headline_numbers"></div>
 
     <section class="card" aria-labelledby="an-days-h">
-      <div class="card-head"><h2 id="an-days-h">Days</h2><span class="sub" id="an-days-sub"></span></div>
-      <div class="scroll-x" id="an-days"><div class="empty">Loading...</div></div>
+      <div class="card-head"><h2 id="an-days-h" data-i18n="analysis.days">Days</h2><span class="sub" id="an-days-sub"></span></div>
+      <div class="scroll-x" id="an-days"><div class="empty" data-i18n="common.loading">Loading...</div></div>
       <div id="an-compliance" class="small"></div>
     </section>
 
     <div class="grid2">
       <section class="card" aria-labelledby="an-model-h">
-        <div class="card-head"><h2 id="an-model-h">Your house, as CA has learned it</h2><span class="sub" id="an-model-status"></span></div>
-        <div id="an-model"><div class="empty">Loading...</div></div>
+        <div class="card-head"><h2 id="an-model-h" data-i18n="analysis.your_house">Your house, as CA has learned it</h2><span class="sub" id="an-model-status"></span></div>
+        <div id="an-model"><div class="empty" data-i18n="common.loading">Loading...</div></div>
       </section>
       <section class="card" aria-labelledby="an-cq-h">
-        <h2 id="an-cq-h">Last 24 hours of control</h2>
-        <div id="an-cq"><div class="empty">Loading...</div></div>
-        <h3>Prediction error by look-ahead <span class="sub" id="an-pe-src"></span></h3>
+        <h2 id="an-cq-h" data-i18n="analysis.last_24h">Last 24 hours of control</h2>
+        <div id="an-cq"><div class="empty" data-i18n="common.loading">Loading...</div></div>
+        <h3><span data-i18n="analysis.pred_error">Prediction error by look-ahead</span> <span class="sub" id="an-pe-src"></span></h3>
         <div id="an-pe"></div>
-        <h3>Household promises missed <span class="sub">last 30 days</span></h3>
+        <h3><span data-i18n="analysis.promises_missed">Household promises missed</span> <span class="sub" data-i18n="analysis.last_30d">last 30 days</span></h3>
         <div id="an-promises"></div>
       </section>
     </div>
 
     <section class="card" aria-labelledby="an-sug-h">
-      <h2 id="an-sug-h">Suggestions</h2>
-      <div id="an-suggestions"><div class="empty">Loading...</div></div>
+      <h2 id="an-sug-h" data-i18n="analysis.suggestions">Suggestions</h2>
+      <div id="an-suggestions"><div class="empty" data-i18n="common.loading">Loading...</div></div>
     </section>
 
     <section class="card" aria-labelledby="an-rep-h">
-      <div class="card-head"><h2 id="an-rep-h">Reports</h2><span class="sub" id="an-ai-line" role="status"></span></div>
+      <div class="card-head"><h2 id="an-rep-h" data-i18n="analysis.reports">Reports</h2><span class="sub" id="an-ai-line" role="status"></span></div>
       <div class="row">
-        <label class="small">Type <select id="report-type" class="ctl"><option value="activity_record">Activity record (no AI)</option><option value="investigation">AI investigation</option></select></label>
-        <label class="small">Window <select id="report-time-window" class="ctl"></select></label>
-        <button type="button" class="btn primary" id="run-report-btn">Generate</button>
+        <label class="small"><span data-i18n="analysis.type">Type</span> <select id="report-type" class="ctl"><option value="activity_record" data-i18n="analysis.activity_record">Activity record (no AI)</option><option value="investigation" data-i18n="analysis.ai_investigation">AI investigation</option></select></label>
+        <label class="small"><span data-i18n="analysis.window">Window</span> <select id="report-time-window" class="ctl"></select></label>
+        <button type="button" class="btn primary" id="run-report-btn" data-i18n="common.generate">Generate</button>
         <span class="small" id="report-status" role="status"></span>
       </div>
       <div id="investigation-focus-controls" hidden>
-        <label class="small" for="investigation-focus">What should it look into? (optional)</label>
-        <textarea id="investigation-focus" rows="2" placeholder="e.g. why is window compliance 0%"></textarea>
-        <label class="small"><input type="checkbox" id="investigation-deep"> Deep investigation (also include config, known fixes, version history, GitHub issues)</label>
+        <label class="small" for="investigation-focus" data-i18n="analysis.focus_label">What should it look into? (optional)</label>
+        <textarea id="investigation-focus" rows="2" placeholder="e.g. why is window compliance 0%" data-i18n-placeholder="analysis.focus_placeholder"></textarea>
+        <label class="small"><input type="checkbox" id="investigation-deep"> <span data-i18n="analysis.deep_investigation">Deep investigation (also include config, known fixes, version history, GitHub issues)</span></label>
       </div>
-      <div id="ai-disabled-notice" class="note" hidden>AI features are not configured. Enable them in Settings &#8594; AI.</div>
-      <div id="report-loading" class="small" hidden>Generating...</div>
-      <div id="report-content" class="report-md scroll-x" aria-live="polite"><div class="empty">Choose a report type and press Generate.</div></div>
+      <div id="ai-disabled-notice" class="note" hidden data-i18n="analysis.ai_disabled">AI features are not configured. Enable them in Settings &#8594; AI.</div>
+      <div id="report-loading" class="small" hidden data-i18n="analysis.generating">Generating...</div>
+      <div id="report-content" class="report-md scroll-x" aria-live="polite"><div class="empty" data-i18n="analysis.choose_report">Choose a report type and press Generate.</div></div>
       <div id="report-actions" class="row" hidden>
-        <button type="button" class="btn small" id="rep-copy">Copy</button>
-        <button type="button" class="btn small" id="rep-download">Download .md</button>
-        <button type="button" class="btn small" id="rep-fulllogs">Download full logs</button>
-        <button type="button" class="btn small" id="rep-issue">Submit GitHub issue</button>
+        <button type="button" class="btn small" id="rep-copy" data-i18n="common.copy">Copy</button>
+        <button type="button" class="btn small" id="rep-download" data-i18n="analysis.download_md">Download .md</button>
+        <button type="button" class="btn small" id="rep-fulllogs" data-i18n="analysis.download_full_logs">Download full logs</button>
+        <button type="button" class="btn small" id="rep-issue" data-i18n="analysis.submit_issue">Submit GitHub issue</button>
       </div>
-      <h3>Report history</h3>
+      <h3 data-i18n="analysis.report_history">Report history</h3>
       <div class="row">
-        <span class="row" role="group" aria-label="Report type filter">
-          <button type="button" class="pill" id="hist-filter-all" aria-pressed="true">All</button>
-          <button type="button" class="pill" id="hist-filter-investigation" aria-pressed="false">Investigation</button>
+        <span class="row" role="group" aria-label="Report type filter" data-i18n-aria-label="analysis.report_type_filter">
+          <button type="button" class="pill" id="hist-filter-all" aria-pressed="true" data-i18n="common.all">All</button>
+          <button type="button" class="pill" id="hist-filter-investigation" aria-pressed="false" data-i18n="analysis.investigation">Investigation</button>
         </span>
-        <label class="small">From <input type="date" id="hist-from-date"></label>
-        <label class="small">to <input type="date" id="hist-to-date"></label>
-        <button type="button" class="btn small" id="hist-clear" aria-label="Clear date range">Clear dates</button>
+        <label class="small"><span data-i18n="common.from">From</span> <input type="date" id="hist-from-date"></label>
+        <label class="small"><span data-i18n="common.to">to</span> <input type="date" id="hist-to-date"></label>
+        <button type="button" class="btn small" id="hist-clear" aria-label="Clear date range" data-i18n-aria-label="analysis.clear_dates" data-i18n="analysis.clear_dates">Clear dates</button>
       </div>
-      <div id="unified-history-list"><div class="empty">Loading history...</div></div>
+      <div id="unified-history-list"><div class="empty" data-i18n="analysis.loading_history">Loading history...</div></div>
     </section>
 
     <section class="card" aria-labelledby="an-pa-h">
@@ -389,82 +389,83 @@
            Never in a frame (Issue #1491: the dashboard is already inside Home Assistant's panel frame, and a page one
            frame deeper could not reach HA's login on a phone). The link opens the stand-alone page in this same frame
            ("Back to dashboard" returns to this tab). -->
-      <div class="card-head"><h2 id="an-pa-h">Prediction accuracy</h2><a id="prediction-accuracy-link" href="prediction_accuracy.html">Open on its own page</a></div>
-      <div class="sub">How well each prediction engine guessed this home: its past predictions next to what the sensor then read. The main engine (Settings, Prediction engine) times Climate Advisor&#8217;s decisions; the comparison engine only draws a line.</div>
-      <div id="an-pa-view"><div class="empty">Loading...</div></div>
+      <div class="card-head"><h2 id="an-pa-h" data-i18n="analysis.prediction_accuracy">Prediction accuracy</h2><a id="prediction-accuracy-link" href="prediction_accuracy.html" data-i18n="analysis.open_own_page">Open on its own page</a></div>
+      <div class="sub" data-i18n="analysis.pa_sub">How well each prediction engine guessed this home: its past predictions next to what the sensor then read. The main engine (Settings, Prediction engine) times Climate Advisor&#8217;s decisions; the comparison engine only draws a line.</div>
+      <div id="an-pa-view"><div class="empty" data-i18n="common.loading">Loading...</div></div>
     </section>
   </div>
 
   <!-- ============ Debug ============ -->
   <div id="panel-debug" class="panel-tab" role="tabpanel" aria-labelledby="tab-btn-debug" tabindex="0" hidden>
     <div class="row">
-      <input type="search" id="dbg-search" aria-label="Filter fields" placeholder="Filter every field by name or value..." style="flex:1 1 240px">
+      <input type="search" id="dbg-search" aria-label="Filter fields" placeholder="Filter every field by name or value..." style="flex:1 1 240px" data-i18n-aria-label="debug.filter_fields" data-i18n-placeholder="debug.filter_placeholder">
       <span class="sub" id="dbg-count" role="status"></span>
-      <button type="button" class="btn" id="dbg-dl-logs">Download logs</button>
-      <button type="button" class="btn" id="dbg-dl-diag">Download diagnostics</button>
+      <button type="button" class="btn" id="dbg-dl-logs" data-i18n="debug.download_logs">Download logs</button>
+      <button type="button" class="btn" id="dbg-dl-diag" data-i18n="debug.download_diagnostics">Download diagnostics</button>
     </div>
-    <div id="dbg-groups" class="cols"><div class="empty">Loading...</div></div>
+    <div id="dbg-groups" class="cols"><div class="empty" data-i18n="common.loading">Loading...</div></div>
 
     <section class="card" aria-labelledby="dbg-ev-h">
       <div class="card-head">
-        <h2 id="dbg-ev-h">Event log <span class="sub" id="dbg-ev-count"></span></h2>
+        <h2 id="dbg-ev-h"><span data-i18n="debug.event_log">Event log</span> <span class="sub" id="dbg-ev-count"></span></h2>
         <span class="row">
-          <label class="small">Window <select id="dbg-ev-hours" class="ctl"><option value="2">2 h</option><option value="6">6 h</option><option value="24" selected>24 h</option><option value="72">3 days</option><option value="168">7 days</option></select></label>
-          <button type="button" class="btn small" id="dbg-ev-all">All</button>
-          <button type="button" class="btn small" id="dbg-ev-none">None</button>
+          <label class="small"><span data-i18n="analysis.window">Window</span> <select id="dbg-ev-hours" class="ctl"><option value="2">2 h</option><option value="6">6 h</option><option value="24" selected>24 h</option><option value="72" data-i18n="debug.3days">3 days</option><option value="168" data-i18n="debug.7days">7 days</option></select></label>
+          <button type="button" class="btn small" id="dbg-ev-all" data-i18n="common.all">All</button>
+          <button type="button" class="btn small" id="dbg-ev-none" data-i18n="common.none">None</button>
         </span>
       </div>
-      <div class="row" id="dbg-ev-types" role="group" aria-label="Event types"></div>
-      <div class="event-box" tabindex="0" aria-label="Events"><table><thead><tr><th style="width:90px">Time</th><th style="width:200px">Event</th><th>Details</th></tr></thead><tbody id="dbg-ev-rows"></tbody></table></div>
+      <div class="row" id="dbg-ev-types" role="group" aria-label="Event types" data-i18n-aria-label="debug.event_types"></div>
+      <div class="event-box" tabindex="0" aria-label="Events" data-i18n-aria-label="debug.events"><table><thead><tr><th style="width:90px" data-i18n="common.time">Time</th><th style="width:200px" data-i18n="debug.event">Event</th><th data-i18n="debug.details">Details</th></tr></thead><tbody id="dbg-ev-rows"></tbody></table></div>
     </section>
 
     <section class="card" aria-labelledby="dbg-bt-h">
-      <div class="card-head"><h2 id="dbg-bt-h">Backtest lab</h2><a href="prediction_accuracy.html" id="dbg-bt-link">Open the full accuracy view</a></div>
-      <div id="dbg-bt"><div class="empty">Loading...</div></div>
+      <div class="card-head"><h2 id="dbg-bt-h" data-i18n="debug.backtest_lab">Backtest lab</h2><a href="prediction_accuracy.html" id="dbg-bt-link" data-i18n="debug.open_full_accuracy">Open the full accuracy view</a></div>
+      <div id="dbg-bt"><div class="empty" data-i18n="common.loading">Loading...</div></div>
     </section>
-    <div class="sub">Every automation-state field is listed once, in its group. Download diagnostics has the full raw data. Daily records and promises moved to Analysis.</div>
+    <div class="sub" data-i18n="debug.footer_note">Every automation-state field is listed once, in its group. Download diagnostics has the full raw data. Daily records and promises moved to Analysis.</div>
   </div>
 
   <!-- ============ Settings ============ -->
   <div id="panel-settings" class="panel-tab" role="tabpanel" aria-labelledby="tab-btn-settings" tabindex="0" hidden>
     <div class="row">
-      <input type="search" id="set-search" aria-label="Search settings" placeholder="Search settings..." style="flex:1 1 240px">
-      <label class="small"><input type="checkbox" id="set-desc"> Show descriptions</label>
-      <label class="small"><input type="checkbox" id="set-changed"> Only changed from default</label>
+      <input type="search" id="set-search" aria-label="Search settings" placeholder="Search settings..." style="flex:1 1 240px" data-i18n-aria-label="settings.search" data-i18n-placeholder="settings.search_placeholder">
+      <label class="small"><input type="checkbox" id="set-desc"> <span data-i18n="settings.show_descriptions">Show descriptions</span></label>
+      <label class="small"><input type="checkbox" id="set-changed"> <span data-i18n="settings.only_changed">Only changed from default</span></label>
       <span class="sub" id="set-count" role="status"></span>
-      <a class="btn primary" id="set-ha" href="/config/integrations/integration/climate_advisor" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;text-decoration:none">Change in Home Assistant</a>
+      <a class="btn primary" id="set-ha" href="/config/integrations/integration/climate_advisor" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;text-decoration:none" data-i18n="settings.change_in_ha">Change in Home Assistant</a>
     </div>
-    <div class="row" id="set-jump" aria-label="Jump to a group"></div>
-    <div id="set-groups" class="cols"><div class="empty">Loading settings...</div></div>
+    <div class="row" id="set-jump" aria-label="Jump to a group" data-i18n-aria-label="settings.jump_to_group"></div>
+    <div id="set-groups" class="cols"><div class="empty" data-i18n="settings.loading_settings">Loading settings...</div></div>
     <section class="card" id="set-tou" aria-labelledby="set-tou-h" hidden>
-      <h2 id="set-tou-h">Time-of-use schedules</h2>
+      <h2 id="set-tou-h" data-i18n="settings.tou_schedules">Time-of-use schedules</h2>
       <div id="set-tou-body"></div>
     </section>
     <section class="card" id="set-integrations" aria-labelledby="set-int-h">
-      <h2 id="set-int-h">GitHub and AI status</h2>
-      <div id="set-int-body"><div class="empty">Loading...</div></div>
+      <h2 id="set-int-h" data-i18n="settings.github_ai_status">GitHub and AI status</h2>
+      <div id="set-int-body"><div class="empty" data-i18n="common.loading">Loading...</div></div>
     </section>
-    <div class="sub" id="set-foot">These are the current settings. They are read-only here; use Change in Home Assistant to edit them.</div>
+    <div class="sub" id="set-foot" data-i18n="settings.readonly_note">These are the current settings. They are read-only here; use Change in Home Assistant to edit them.</div>
   </div>
 </main>
 
 <dialog id="gh-modal" aria-labelledby="gh-title">
-  <h2 id="gh-title">Submit GitHub issue</h2>
-  <div id="github-modal-not-configured" class="err" hidden>GitHub integration is not configured. Add your token and repository in Home Assistant, Settings, Devices &amp; services, Climate Advisor, Configure, GitHub integration.</div>
-  <label for="github-issue-title">Title</label>
+  <h2 id="gh-title" data-i18n="gh.submit_issue">Submit GitHub issue</h2>
+  <div id="github-modal-not-configured" class="err" hidden data-i18n="gh.not_configured">GitHub integration is not configured. Add your token and repository in Home Assistant, Settings, Devices &amp; services, Climate Advisor, Configure, GitHub integration.</div>
+  <label for="github-issue-title" data-i18n="gh.title_label">Title</label>
   <input type="text" id="github-issue-title">
-  <label for="github-issue-body">Body</label>
+  <label for="github-issue-body" data-i18n="gh.body_label">Body</label>
   <textarea id="github-issue-body" rows="8" class="mono"></textarea>
-  <label for="github-issue-labels">Labels (comma-separated)</label>
+  <label for="github-issue-labels" data-i18n="gh.labels_label">Labels (comma-separated)</label>
   <input type="text" id="github-issue-labels" value="bug">
   <div id="github-issue-status" class="small" role="status" style="margin:8px 0"></div>
   <div class="row" style="justify-content:flex-end">
-    <button type="button" class="btn" id="gh-cancel">Cancel</button>
-    <button type="button" class="btn primary" id="github-submit-btn">Submit issue</button>
+    <button type="button" class="btn" id="gh-cancel" data-i18n="common.cancel">Cancel</button>
+    <button type="button" class="btn primary" id="github-submit-btn" data-i18n="gh.submit_issue_btn">Submit issue</button>
   </div>
 </dialog>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 
+<script src="i18n.js"></script>
 <script src="hammer.min.js"></script>
 <script src="chart.umd.min.js"></script>
 <script src="chartjs-plugin-zoom.min.js"></script>

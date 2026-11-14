@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.35] — 2026-11-14
+
+### Added
+- Feat #1563: the new dashboard (`new_dashboard.html`) and the Status tab's chart are now available in French. The language is auto-detected from the browser; English stays the default otherwise. The classic dashboard and the stand-alone prediction accuracy page keep their own English text (they share the chart code, which is now bilingual).
+
 ## [0.9.34] — 2026-11-13
 
 ### Fixed

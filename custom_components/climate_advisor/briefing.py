@@ -64,6 +64,614 @@ _LOGGER = logging.getLogger(__name__)
 # strftime format for 12-hour without leading zero (platform-dependent)
 _FMT_HOUR = "%#I:%M %p" if platform.system() == "Windows" else "%-I:%M %p"
 
+# Issue #1563: the briefing's language. ``generate_briefing()`` threads ``language`` down to every helper that
+# builds text; the coordinator passes ``hass.config.language`` (the HA instance's own setting, unlike the dashboard
+# frontend, which has no such signal and falls back to the browser's). Defaults to "en" everywhere so callers that
+# don't pass it (tests, direct calls) are unaffected. ``_t()`` falls back to the English string for an unknown key
+# or language, never raises, and formats with ``str.format`` only when kwargs are given.
+_BRIEFING_STR: dict[str, dict[str, str]] = {
+    "en": {
+        "briefing.header_title": "\U0001f3e0 Your Home Climate Plan for Today",
+        "briefing.now_prefix": "Now: ",
+        "briefing.todays_steps": "\U0001f4cb Today's Steps",
+        "briefing.suggestions_header": "\U0001f4a1 Suggestions Based on Recent Patterns",
+        "briefing.suggestions_footer": (
+            "To respond to these suggestions, open the Climate Advisor dashboard and visit the AI tab."
+        ),
+        "briefing.verb_cool": "Cool",
+        "briefing.verb_heat": "Heat",
+        "briefing.hvac_bank": "{verb} at {target} until the {until} high-cost period, then {after}",
+        "briefing.cool_at": "Cool at {t}",
+        "briefing.heat_at": "Heat at {t}",
+        "briefing.label_vacation": "Vacation",
+        "briefing.label_away": "Away",
+        "briefing.named_band": "{label} band {band}",
+        "briefing.comfort_band": "Comfort band {band}",
+        "briefing.windows_day_suffix": "(windows day)",
+        "briefing.open_close_by": "Open {open} – close by {close}",
+        "briefing.close_by": "Close by {close}",
+        "briefing.close_by_threshold_and_open": "Close by {close} (<{threshold}) / Open {open}+",
+        "briefing.close_by_threshold": "Close by {close} (<{threshold})",
+        "briefing.open_onward": "Open {open} onward",
+        "briefing.closed_veto_heat": "Closed for now — outdoor air would cool the house below its floor",
+        "briefing.closed_veto_warm": "Closed for now — outdoor air isn't cooler than indoor yet",
+        "briefing.closed_all_day": "Closed all day",
+        "briefing.away_setback_held": "away setback held",
+        "briefing.bedtime_at": "{t} at {when}",
+        "briefing.no_setback": "No setback",
+        "briefing.row_day_type": "Day Type",
+        "briefing.row_hvac_mode": "HVAC Mode",
+        "briefing.occ_away": "Occupancy: Away — setback active",
+        "briefing.occ_vacation_deep": "Occupancy: Vacation — deep setback active",
+        "briefing.occ_vacation": "Occupancy: Vacation — vacation temperatures active",
+        "briefing.occ_guest": "Occupancy: Guest — comfort maintained",
+        "briefing.row_windows": "Windows",
+        "briefing.row_bedtime_setback": "Bedtime Setback",
+        "briefing.row_tomorrow": "Tomorrow",
+        "briefing.trend_sig_warmer": "Significantly warmer tomorrow (+{delta})",
+        "briefing.trend_warming": "Warming trend (+{delta})",
+        "briefing.trend_sig_cooler": "Significant cold front coming (-{delta})",
+        "briefing.trend_cooling": "Cooling trend (-{delta})",
+        "briefing.trend_stable": "Stable",
+        "briefing.hot_unoccupied": "A hot day, and the house is empty, so the away settings below are what apply.",
+        "briefing.hot_precool_opener": (
+            "Tonight I'll pre-cool the house to about {t} while outdoor air is still cool — that banking"
+            " strategy cuts energy use over the course of the day."
+        ),
+        "briefing.hot_hold_opener": (
+            "Today's forecast calls for a high near {high} — I'll hold things at {hold} through the day."
+        ),
+        "briefing.hot_already_above": (
+            "Outdoor's already above {t} — close up for the day now. I'll handle the AC transition."
+        ),
+        "briefing.hot_close_around": (
+            "Once outdoor temps rise above {t}, close up for the day (around {close}) — I'll handle the AC"
+            " transition. Until then, enjoy the cross-breeze."
+        ),
+        "briefing.hot_once_closed": (
+            "Once closed, keep blinds drawn on sun-facing windows (especially west-facing after noon)."
+            " I'll hold things at {hold}{tail}"
+        ),
+        "briefing.tail_period": ".",
+        "briefing.tail_rest_of_day": " for the rest of the day.",
+        "briefing.hot_sealed_blinds_hold": (
+            "Today's a keep-it-sealed kind of day. Close the blinds on sun-facing windows (especially"
+            " west-facing ones after noon) and I'll hold things at {hold}."
+        ),
+        "briefing.hot_sealed_blinds_handle": (
+            "Today's a keep-it-sealed kind of day. Close the blinds on sun-facing windows (especially"
+            " west-facing ones after noon) and I'll handle the rest at {hold}."
+        ),
+        "briefing.hot_fan_helps": (
+            "When ventilation windows open, I'll use the fan to help pull that cool outdoor air through the house."
+        ),
+        "briefing.warm_close_now": "Close up now — outdoor's already warmed past indoor.",
+        "briefing.at_prep": "at ",
+        "briefing.warm_close_at": "Close up {prep}{close_phrase} {reason}.",
+        "briefing.warm_windows_open_morning": (
+            "Windows are open to catch the cool morning air — cross-ventilation keeps things comfortable"
+            " without the AC."
+        ),
+        "briefing.warm_unoccupied": "A warm day, and the house is empty, so the away settings below are what apply.",
+        "briefing.warm_heater_ran_overnight": (
+            "The heater ran a bit overnight before settling — the thermostat is holding {band} today."
+        ),
+        "briefing.warm_air_wont_help": "Outside air won't do much for the house today, so the thermostat holds {band}.",
+        "briefing.warm_holds_band": "The thermostat holds {band} today.",
+        "briefing.warm_fan_boost": "I'll use the fan to boost cross-ventilation when windows are open.",
+        "briefing.ac_auto_tail_windows": (
+            " Once windows are closed, the AC will step in automatically if it's needed to hold that ceiling."
+        ),
+        "briefing.ac_auto_tail": " The AC will step in automatically if it's needed to hold that ceiling.",
+        "briefing.indoor_forecast_reach": "Indoor temps are forecast to reach {hold} around {t}.{tail}",
+        "briefing.warm_close_before_climb": (
+            "Close up by {close} before outdoor temps climb — seal the cool air inside so the AC can take"
+            " over above {hold}."
+        ),
+        "briefing.warm_ac_safety_net": (
+            "The AC will step in above {hold} as a safety net if needed, but with good airflow you probably"
+            " won't need it."
+        ),
+        "briefing.warm_ac_steps_in": "The AC will step in above {hold} to hold your comfort ceiling.",
+        "briefing.warm_precool_tonight": (
+            "Tonight I'll cool the home to {t} while you sleep to build up cold thermal mass before tomorrow's"
+            " heat — so the house coasts longer before the AC needs to kick in."
+        ),
+        "briefing.when_evening_cools": "when the evening air cools back down",
+        "briefing.reopen_turn_off_ac": "Reopen windows around {t} {reason} — I'll turn off the AC.",
+        "briefing.reopen_around": "Reopen windows around {t} {reason}.",
+        "briefing.thermostat_holds_lc": "the thermostat holds {band}",
+        "briefing.mild_unoccupied": "A mild day, and the house is empty, so the away settings below are what apply.",
+        "briefing.mild_air_wont_help": (
+            "A mild day. Outside air isn't going to warm the house, so {holding} and steps in if it drifts."
+        ),
+        "briefing.mild_default": "A mild day, so {holding} and steps in if it drifts.",
+        "briefing.mild_near_miss": (
+            "The forecast high of {high} is just under your {floor} floor and forecasts can run low, so"
+            " outside air may help later this afternoon. I'll keep going on the thermostat until it does."
+        ),
+        "briefing.mild_warmed_before_sunrise": (
+            "A day where the house practically takes care of itself. I warmed to {t} before sunrise —"
+            " now the weather does the rest and {holding}."
+        ),
+        "briefing.mild_held_on_own": (
+            "A day where the house practically takes care of itself — it held at or above {t} on its own"
+            " overnight, so HVAC stayed off and the weather did the rest."
+        ),
+        "briefing.mild_open_south_east": (
+            "Open south and east windows for a natural cross-breeze that freshens the air and warms the house"
+            " for free."
+        ),
+        "briefing.mild_close_now": (
+            "Close up now — outdoor's already warmed past indoor. If the house dips below {t} tonight,"
+            " the heater comes back on automatically."
+        ),
+        "briefing.trap_the_warmth": "to trap the warmth",
+        "briefing.by_prep": "by ",
+        "briefing.mild_close_by": (
+            "Close up {prep}{close} {reason}. If the house dips below {t} tonight, the heater comes back on"
+            " automatically."
+        ),
+        "briefing.cool_unoccupied": "A cool day, and the house is empty, so the away settings below are what apply.",
+        "briefing.cool_heater_day": "Heater day — too cool outside for windows. I'll hold {t} through the day.",
+        "briefing.cool_bedtime_setback": (
+            "At bedtime I'll set back to {t} — most people sleep better a little cooler."
+        ),
+        "briefing.cold_unoccupied": "A cold day, and the house is empty, so the away settings below are what apply.",
+        "briefing.cold_day_help": (
+            "Cold day — heater runs all day. Help it out: close north-side curtains, open south-facing ones"
+            " for free solar heat, and minimize time holding exterior doors open."
+        ),
+        "briefing.cold_tomorrow_colder": "Tomorrow's even colder, so expect the heater to work harder in the morning.",
+        "briefing.cold_bedtime_setback": "At bedtime I'll set back to {t}.",
+        "briefing.cold_conservative_setback": (
+            "Tonight I'm using a conservative setback — {t} instead of the usual {usual}. When it's this"
+            " cold, a deeper setback takes too long to recover from in the morning."
+        ),
+        "briefing.vacation_band": (
+            "While you're on vacation, I'm keeping the house at your vacation temperatures ({band})."
+            " Comfort temperatures will be restored when you return."
+        ),
+        "briefing.vacation_deeper": (
+            "While you're on vacation, I'm keeping the house at a deeper energy-saving setback to save energy."
+            " Comfort temperatures will be restored when you return."
+        ),
+        "briefing.guest_visiting": (
+            "Guests are visiting — maintaining full comfort temperatures. Away setbacks are disabled while"
+            " guest mode is active."
+        ),
+        "briefing.away_cool_overridden": (
+            "You're currently away — setback should be in effect (target {t}). Comfort will be restored"
+            " when you return — give it 20 to 30 minutes to feel normal again."
+        ),
+        "briefing.away_cool_applied": (
+            "You're currently away. I've applied setback temperatures, letting the house drift up to {t} to"
+            " save energy. Comfort will be restored when you return — give it 20 to 30 minutes to feel"
+            " normal again."
+        ),
+        "briefing.away_heat_overridden": (
+            "You're currently away — setback should be in effect (target {t}). Comfort will be restored"
+            " when you return — should take 20 to 30 minutes depending on how long you've been gone."
+        ),
+        "briefing.away_heat_applied": (
+            "You're currently away. I've dropped to {t} to save energy. Comfort will be restored when you"
+            " return — should take 20 to 30 minutes depending on how long you've been gone."
+        ),
+        "briefing.away_band": (
+            "You're currently away. I'm holding the wider energy-saving band ({band}) while you're out, so"
+            " not much should run. Comfort will be restored when you return."
+        ),
+        "briefing.home_leave_cool": (
+            "If you head out, no worries. After about {minutes} minutes I'll let the house drift up to {t} to"
+            " save energy. When you're back, I'll pull it right back down — give it 20 to 30 minutes to"
+            " feel normal again."
+        ),
+        "briefing.home_leave_heat": (
+            "If you head out, I'll drop to {t} after about {minutes} minutes. When you get back, I'll warm"
+            " things right up — should take 20 to 30 minutes depending on how long you were gone."
+        ),
+        "briefing.home_leave_band": (
+            "If you head out, not much changes today — after about {minutes} minutes I'll widen the band"
+            " to {band} to save energy, and restore comfort when you're back."
+        ),
+        "briefing.minute": "{n} minute",
+        "briefing.minutes": "{n} minutes",
+        "briefing.fresh_hold_target": " to hold your {t} target",
+        "briefing.fresh_natvent_active": (
+            "Windows are open and outdoor air is {t} — I'll use the fan{target} without running the AC."
+            " Once you close up, I'll resume normal cooling."
+        ),
+        "briefing.fresh_pull_back": (
+            " Just know that on a day like today it may take a bit longer to pull back down to {t}, so if you"
+            " want to minimize the impact, shorter is better — and try to keep other windows and doors"
+            " shut while you've got one open."
+        ),
+        "briefing.fresh_cool": (
+            "If you want to crack a window for some fresh air, no problem — it's your house. I'll keep"
+            " the AC running for a bit in case it's just a quick thing, but if it stays open past {debounce}"
+            " I'll shut the AC off so you're not cooling the outdoors. Once you close up, I'll fire the AC"
+            " back up right away.{pull_back}"
+        ),
+        "briefing.fresh_heat": (
+            "If you want to open a window for some fresh air, no problem — go for it. I'll keep the heat"
+            " running for a bit in case you're just airing things out, but if it stays open past {debounce}"
+            " I'll turn the heat off so we're not heating the neighborhood. Once you close up, the heat kicks"
+            " right back on. It'll take a little extra energy to warm back up, so if you want to minimize the"
+            " impact, a quick burst of fresh air works great — and closing doors to the room with the"
+            " open window helps keep the rest of the house comfortable while you do it."
+        ),
+        "briefing.fresh_holding_clause": " — the thermostat is holding {band} today",
+        "briefing.fresh_off": (
+            "If you want to open a window for some fresh air, go for it{holding}. Enjoy the breeze. If the"
+            " heat or AC does need to run while a window is still open, I'll give it {debounce} and then"
+            " pause until you close up."
+        ),
+        "briefing.grace_manual": (
+            "One heads-up: you manually turned the HVAC back on earlier, so I'm in a {grace} hands-off window"
+            " right now. During that window, opening a door or window won't trigger a pause — I'm giving"
+            " you space to settle in without the system jumping in. Once the window closes, door/window"
+            " sensing goes back to normal."
+        ),
+        "briefing.grace_automation": (
+            "One heads-up: I just resumed the HVAC after all the doors and windows closed, so I'm in a"
+            " {grace} settling period. During that time, opening a door or window briefly won't immediately"
+            " pause things again — this prevents the system from cycling on and off if you're moving in"
+            " and out. After the settling period, normal door/window sensing resumes."
+        ),
+        "briefing.tonight_warmer_away": "Looking ahead — tomorrow's warmer at {t}.",
+        "briefing.tonight_warmer_home": (
+            "Looking ahead — tomorrow's warmer at {t}, so I'm going to set back a bit more aggressively"
+            " tonight. Less heating needed means energy saved while you sleep."
+        ),
+        "briefing.tonight_cooler": (
+            "Looking ahead — tomorrow's cooler at {t}, so expect the heater to run more tomorrow."
+        ),
+        "briefing.tonight_similar": (
+            "Tomorrow looks pretty similar to today — {t} for a high. Nothing special planned overnight."
+        ),
+        "briefing.tonight_adaptive_tuned": (
+            "Bedtime setback and pre-heat timing are tuned to your home's actual heating performance."
+        ),
+    },
+    "fr": {
+        "briefing.header_title": "\U0001f3e0 Votre plan climatique du jour",
+        "briefing.now_prefix": "Maintenant : ",
+        "briefing.todays_steps": "\U0001f4cb Étapes du jour",
+        "briefing.suggestions_header": "\U0001f4a1 Suggestions basées sur les habitudes récentes",
+        "briefing.suggestions_footer": (
+            "Pour répondre à ces suggestions, ouvrez le tableau de bord Climate Advisor"
+            " et allez dans l'onglet IA."
+        ),
+        "briefing.verb_cool": "Climatise",
+        "briefing.verb_heat": "Chauffe",
+        "briefing.hvac_bank": "{verb} à {target} jusqu'à la période de pointe de {until}, puis {after}",
+        "briefing.cool_at": "Climatise à {t}",
+        "briefing.heat_at": "Chauffe à {t}",
+        "briefing.label_vacation": "Vacances",
+        "briefing.label_away": "Absence",
+        "briefing.named_band": "Plage {label} {band}",
+        "briefing.comfort_band": "Plage de confort {band}",
+        "briefing.windows_day_suffix": "(jour fenêtres)",
+        "briefing.open_close_by": "Ouvre {open} – ferme avant {close}",
+        "briefing.close_by": "Ferme avant {close}",
+        "briefing.close_by_threshold_and_open": "Ferme avant {close} (<{threshold}) / Ouvre {open}+",
+        "briefing.close_by_threshold": "Ferme avant {close} (<{threshold})",
+        "briefing.open_onward": "Ouvre à partir de {open}",
+        "briefing.closed_veto_heat": (
+            "Fermées pour l'instant — l'air extérieur refroidirait la maison sous son plancher"
+        ),
+        "briefing.closed_veto_warm": (
+            "Fermées pour l'instant — l'air extérieur n'est pas encore plus frais que l'intérieur"
+        ),
+        "briefing.closed_all_day": "Fermées toute la journée",
+        "briefing.away_setback_held": "repli absence maintenu",
+        "briefing.bedtime_at": "{t} à {when}",
+        "briefing.no_setback": "Pas de repli",
+        "briefing.row_day_type": "Type de journée",
+        "briefing.row_hvac_mode": "Mode CVC",
+        "briefing.occ_away": "Occupation : Absent — repli actif",
+        "briefing.occ_vacation_deep": "Occupation : Vacances — repli profond actif",
+        "briefing.occ_vacation": "Occupation : Vacances — températures vacances actives",
+        "briefing.occ_guest": "Occupation : Invité — confort maintenu",
+        "briefing.row_windows": "Fenêtres",
+        "briefing.row_bedtime_setback": "Repli nocturne",
+        "briefing.row_tomorrow": "Demain",
+        "briefing.trend_sig_warmer": "Nettement plus chaud demain (+{delta})",
+        "briefing.trend_warming": "Tendance au réchauffement (+{delta})",
+        "briefing.trend_sig_cooler": "Front froid important à venir (-{delta})",
+        "briefing.trend_cooling": "Tendance au refroidissement (-{delta})",
+        "briefing.trend_stable": "Stable",
+        "briefing.hot_unoccupied": (
+            "Une journée chaude, et la maison est vide, donc ce sont les réglages d'absence"
+            " ci-dessous qui s'appliquent."
+        ),
+        "briefing.hot_precool_opener": (
+            "Ce soir, je vais pré-rafraîchir la maison à environ {t} pendant que l'air extérieur"
+            " est encore frais — cette stratégie réduit la consommation d'énergie sur"
+            " l'ensemble de la journée."
+        ),
+        "briefing.hot_hold_opener": (
+            "Les prévisions annoncent un maximum proche de {high} — je vais maintenir {hold} toute"
+            " la journée."
+        ),
+        "briefing.hot_already_above": (
+            "Il fait déjà plus de {t} dehors — fermez dès maintenant pour la journée."
+            " Je gère la transition vers la clim."
+        ),
+        "briefing.hot_close_around": (
+            "Dès que la température extérieure dépasse {t}, fermez pour la journée"
+            " (vers {close}) — je gère la transition vers la clim. D'ici là, profitez du"
+            " courant d'air traversant."
+        ),
+        "briefing.hot_once_closed": (
+            "Une fois fermé, gardez les stores baissés sur les fenêtres exposées au soleil"
+            " (surtout côté ouest l'après-midi). Je vais maintenir {hold}{tail}"
+        ),
+        "briefing.tail_period": ".",
+        "briefing.tail_rest_of_day": " pour le reste de la journée.",
+        "briefing.hot_sealed_blinds_hold": (
+            "Aujourd'hui, mieux vaut tout garder fermé. Baissez les stores sur les fenêtres exposées"
+            " au soleil (surtout côté ouest l'après-midi) et je vais maintenir {hold}."
+        ),
+        "briefing.hot_sealed_blinds_handle": (
+            "Aujourd'hui, mieux vaut tout garder fermé. Baissez les stores sur les fenêtres exposées"
+            " au soleil (surtout côté ouest l'après-midi) et je m'occupe du reste à {hold}."
+        ),
+        "briefing.hot_fan_helps": (
+            "Quand les fenêtres de ventilation s'ouvrent, j'utilise le ventilateur pour aider à faire"
+            " circuler cet air frais extérieur dans la maison."
+        ),
+        "briefing.warm_close_now": "Fermez maintenant — l'air extérieur a déjà dépassé la température intérieure.",
+        "briefing.at_prep": "à ",
+        "briefing.warm_close_at": "Fermez {prep}{close_phrase} {reason}.",
+        "briefing.warm_windows_open_morning": (
+            "Les fenêtres sont ouvertes pour profiter de l'air frais du matin — la ventilation"
+            " traversante garde la maison confortable sans la clim."
+        ),
+        "briefing.warm_unoccupied": (
+            "Une journée douce, et la maison est vide, donc ce sont les réglages d'absence ci-dessous"
+            " qui s'appliquent."
+        ),
+        "briefing.warm_heater_ran_overnight": (
+            "Le chauffage a tourné un peu cette nuit avant de se stabiliser — le thermostat maintient"
+            " {band} aujourd'hui."
+        ),
+        "briefing.warm_air_wont_help": (
+            "L'air extérieur n'apportera pas grand-chose à la maison aujourd'hui, donc le thermostat"
+            " maintient {band}."
+        ),
+        "briefing.warm_holds_band": "Le thermostat maintient {band} aujourd'hui.",
+        "briefing.warm_fan_boost": (
+            "J'utilise le ventilateur pour renforcer la ventilation traversante quand les fenêtres sont"
+            " ouvertes."
+        ),
+        "briefing.ac_auto_tail_windows": (
+            " Une fois les fenêtres fermées, la clim se déclenchera automatiquement si nécessaire"
+            " pour maintenir ce plafond."
+        ),
+        "briefing.ac_auto_tail": (
+            " La clim se déclenchera automatiquement si nécessaire pour maintenir ce plafond."
+        ),
+        "briefing.indoor_forecast_reach": (
+            "La température intérieure devrait atteindre {hold} vers {t}.{tail}"
+        ),
+        "briefing.warm_close_before_climb": (
+            "Fermez avant {close}, avant que la température extérieure ne grimpe — gardez l'air"
+            " frais à l'intérieur pour que la clim puisse prendre le relais au-dessus de {hold}."
+        ),
+        "briefing.warm_ac_safety_net": (
+            "La clim se déclenchera au-dessus de {hold} comme filet de sécurité si besoin, mais"
+            " avec une bonne circulation d'air vous n'en aurez probablement pas besoin."
+        ),
+        "briefing.warm_ac_steps_in": (
+            "La clim se déclenchera au-dessus de {hold} pour maintenir votre plafond de confort."
+        ),
+        "briefing.warm_precool_tonight": (
+            "Ce soir, je vais rafraîchir la maison à {t} pendant votre sommeil pour accumuler de la"
+            " fraîcheur avant la chaleur de demain — la maison tiendra ainsi plus longtemps avant que"
+            " la clim doive s'enclencher."
+        ),
+        "briefing.when_evening_cools": "quand l'air du soir redescend",
+        "briefing.reopen_turn_off_ac": "Rouvrez les fenêtres vers {t} {reason} — j'éteins la clim.",
+        "briefing.reopen_around": "Rouvrez les fenêtres vers {t} {reason}.",
+        "briefing.thermostat_holds_lc": "le thermostat maintient {band}",
+        "briefing.mild_unoccupied": (
+            "Une journée douce, et la maison est vide, donc ce sont les réglages d'absence ci-dessous"
+            " qui s'appliquent."
+        ),
+        "briefing.mild_air_wont_help": (
+            "Une journée douce. L'air extérieur ne va pas réchauffer la maison, donc {holding}"
+            " et intervient si elle dérive."
+        ),
+        "briefing.mild_default": "Une journée douce, donc {holding} et intervient si elle dérive.",
+        "briefing.mild_near_miss": (
+            "Le maximum prévu de {high} est juste en dessous de votre plancher de {floor} et les"
+            " prévisions peuvent être sous-estimées, donc l'air extérieur pourrait aider plus"
+            " tard dans l'après-midi. Je continue sur le thermostat en attendant."
+        ),
+        "briefing.mild_warmed_before_sunrise": (
+            "Une journée où la maison se débrouille presque toute seule. J'ai chauffé à"
+            " {t} avant le lever du soleil — maintenant la météo fait le reste et {holding}."
+        ),
+        "briefing.mild_held_on_own": (
+            "Une journée où la maison se débrouille presque toute seule — elle s'est maintenue"
+            " à {t} ou plus toute seule cette nuit, donc le chauffage est resté éteint et la"
+            " météo a fait le reste."
+        ),
+        "briefing.mild_open_south_east": (
+            "Ouvrez les fenêtres côté sud et est pour une ventilation naturelle qui rafraîchit"
+            " l'air et réchauffe la maison gratuitement."
+        ),
+        "briefing.mild_close_now": (
+            "Fermez maintenant — l'air extérieur a déjà dépassé la température"
+            " intérieure. Si la maison descend sous {t} cette nuit, le chauffage se rallume"
+            " automatiquement."
+        ),
+        "briefing.trap_the_warmth": "pour garder la chaleur",
+        "briefing.by_prep": "avant ",
+        "briefing.mild_close_by": (
+            "Fermez {prep}{close} {reason}. Si la maison descend sous {t} cette nuit, le chauffage se rallume"
+            " automatiquement."
+        ),
+        "briefing.cool_unoccupied": (
+            "Une journée fraîche, et la maison est vide, donc ce sont les réglages d'absence"
+            " ci-dessous qui s'appliquent."
+        ),
+        "briefing.cool_heater_day": (
+            "Journée de chauffage — trop frais dehors pour les fenêtres. Je vais maintenir {t}"
+            " toute la journée."
+        ),
+        "briefing.cool_bedtime_setback": (
+            "Au coucher, je vais réduire à {t} — on dort généralement mieux dans une"
+            " pièce un peu plus fraîche."
+        ),
+        "briefing.cold_unoccupied": (
+            "Une journée froide, et la maison est vide, donc ce sont les réglages d'absence ci-dessous"
+            " qui s'appliquent."
+        ),
+        "briefing.cold_day_help": (
+            "Journée froide — le chauffage tourne toute la journée. Aidez-le : fermez les"
+            " rideaux côté nord, ouvrez ceux côté sud pour profiter du soleil gratuitement, et"
+            " limitez le temps où les portes extérieures restent ouvertes."
+        ),
+        "briefing.cold_tomorrow_colder": (
+            "Demain sera encore plus froid, attendez-vous à ce que le chauffage travaille plus le matin."
+        ),
+        "briefing.cold_bedtime_setback": "Au coucher, je vais réduire à {t}.",
+        "briefing.cold_conservative_setback": (
+            "Ce soir, j'applique une réduction prudente — {t} au lieu des {usual} habituels. Par ce"
+            " froid, une réduction plus profonde met trop de temps à récupérer le matin."
+        ),
+        "briefing.vacation_band": (
+            "Pendant vos vacances, je maintiens la maison à vos températures de vacances ({band})."
+            " Les températures de confort seront rétablies à votre retour."
+        ),
+        "briefing.vacation_deeper": (
+            "Pendant vos vacances, je maintiens la maison avec une réduction d'énergie plus profonde."
+            " Les températures de confort seront rétablies à votre retour."
+        ),
+        "briefing.guest_visiting": (
+            "Vous avez des invités — je maintiens les températures de confort complètes. Les"
+            " réductions d'absence sont désactivées tant que le mode invité est actif."
+        ),
+        "briefing.away_cool_overridden": (
+            "Vous êtes actuellement absent — la réduction devrait être active (cible {t})."
+            " Le confort sera rétabli à votre retour — comptez 20 à 30 minutes pour que ça"
+            " redevienne normal."
+        ),
+        "briefing.away_cool_applied": (
+            "Vous êtes actuellement absent. J'ai appliqué les températures de réduction,"
+            " laissant la maison monter jusqu'à {t} pour économiser l'énergie. Le confort sera"
+            " rétabli à votre retour — comptez 20 à 30 minutes pour que ça redevienne"
+            " normal."
+        ),
+        "briefing.away_heat_overridden": (
+            "Vous êtes actuellement absent — la réduction devrait être active (cible {t})."
+            " Le confort sera rétabli à votre retour — ça prendra 20 à 30 minutes selon"
+            " la durée de votre absence."
+        ),
+        "briefing.away_heat_applied": (
+            "Vous êtes actuellement absent. J'ai baissé à {t} pour économiser l'énergie."
+            " Le confort sera rétabli à votre retour — ça prendra 20 à 30 minutes selon"
+            " la durée de votre absence."
+        ),
+        "briefing.away_band": (
+            "Vous êtes actuellement absent. Je maintiens la plage élargie d'économie d'énergie"
+            " ({band}) pendant votre absence, donc peu de choses devraient fonctionner. Le confort sera"
+            " rétabli à votre retour."
+        ),
+        "briefing.home_leave_cool": (
+            "Si vous sortez, pas d'inquiétude. Après environ {minutes} minutes, je laisse la maison"
+            " monter jusqu'à {t} pour économiser l'énergie. À votre retour, je la redescends"
+            " tout de suite — comptez 20 à 30 minutes pour que ça redevienne normal."
+        ),
+        "briefing.home_leave_heat": (
+            "Si vous sortez, je baisse à {t} après environ {minutes} minutes. À votre retour, je"
+            " réchauffe tout de suite — ça prendra 20 à 30 minutes selon la durée de"
+            " votre absence."
+        ),
+        "briefing.home_leave_band": (
+            "Si vous sortez, pas grand changement aujourd'hui — après environ {minutes} minutes,"
+            " j'élargis la plage à {band} pour économiser l'énergie, et je rétablis le"
+            " confort à votre retour."
+        ),
+        "briefing.minute": "{n} minute",
+        "briefing.minutes": "{n} minutes",
+        "briefing.fresh_hold_target": " pour maintenir votre cible de {t}",
+        "briefing.fresh_natvent_active": (
+            "Les fenêtres sont ouvertes et l'air extérieur est à {t} — j'utilise le"
+            " ventilateur{target} sans faire tourner la clim. Une fois les fenêtres fermées, je"
+            " reprends le rafraîchissement normal."
+        ),
+        "briefing.fresh_pull_back": (
+            " Sachez qu'un jour comme aujourd'hui, redescendre à {t} peut prendre un peu plus de temps,"
+            " donc si vous voulez limiter l'impact, mieux vaut faire court — et essayez de garder les"
+            " autres fenêtres et portes fermées pendant ce temps."
+        ),
+        "briefing.fresh_cool": (
+            "Si vous voulez entrouvrir une fenêtre pour prendre l'air, aucun problème — c'est"
+            " chez vous. Je laisse la clim tourner un peu au cas où ce soit rapide, mais si ça reste"
+            " ouvert au-delà de {debounce}, je coupe la clim pour ne pas refroidir l'extérieur. Une"
+            " fois refermé, je relance la clim tout de suite.{pull_back}"
+        ),
+        "briefing.fresh_heat": (
+            "Si vous voulez ouvrir une fenêtre pour prendre l'air, aucun problème — allez-y. Je"
+            " laisse le chauffage tourner un peu au cas où vous aériez juste, mais si ça reste"
+            " ouvert au-delà de {debounce}, j'éteins le chauffage pour ne pas chauffer le voisinage."
+            " Une fois refermé, le chauffage se rallume aussitôt. Ça demandera un peu plus"
+            " d'énergie pour remonter en température, donc si vous voulez limiter l'impact, une"
+            " courte aération fonctionne très bien — et fermer la porte de la pièce avec la"
+            " fenêtre ouverte aide à garder le reste de la maison confortable pendant ce temps."
+        ),
+        "briefing.fresh_holding_clause": " — le thermostat maintient {band} aujourd'hui",
+        "briefing.fresh_off": (
+            "Si vous voulez ouvrir une fenêtre pour prendre l'air, allez-y{holding}. Profitez de la"
+            " brise. Si le chauffage ou la clim doit quand même tourner pendant qu'une fenêtre est"
+            " encore ouverte, je lui laisse {debounce} puis je mets en pause jusqu'à ce que vous"
+            " refermiez."
+        ),
+        "briefing.grace_manual": (
+            "Petite info : vous avez remis le chauffage/la clim en marche manuellement tout à"
+            " l'heure, donc je suis dans une fenêtre de non-intervention de {grace} en ce moment."
+            " Pendant ce temps, ouvrir une porte ou une fenêtre ne déclenchera pas de pause — je"
+            " vous laisse le temps de vous installer sans que le système n'intervienne. Une fois cette"
+            " fenêtre terminée, la détection des portes et fenêtres reprend normalement."
+        ),
+        "briefing.grace_automation": (
+            "Petite info : je viens de reprendre la main sur le chauffage/la clim après que toutes"
+            " les portes et fenêtres ont été fermées, donc je suis dans une période de"
+            " stabilisation de {grace}. Pendant ce temps, ouvrir brièvement une porte ou une fenêtre"
+            " ne déclenchera pas immédiatement une nouvelle pause — cela évite que le"
+            " système s'arrête et redémarre sans cesse si vous allez et venez. Après cette"
+            " période, la détection des portes et fenêtres reprend normalement."
+        ),
+        "briefing.tonight_warmer_away": "En perspective — demain sera plus chaud, à {t}.",
+        "briefing.tonight_warmer_home": (
+            "En perspective — demain sera plus chaud, à {t}, donc je vais réduire un peu plus"
+            " fort cette nuit. Moins de chauffage nécessaire veut dire de l'énergie économisée"
+            " pendant votre sommeil."
+        ),
+        "briefing.tonight_cooler": (
+            "En perspective — demain sera plus frais, à {t}, donc attendez-vous à ce que le"
+            " chauffage tourne plus demain."
+        ),
+        "briefing.tonight_similar": (
+            "Demain ressemble beaucoup à aujourd'hui — {t} de maximum. Rien de particulier prévu"
+            " cette nuit."
+        ),
+        "briefing.tonight_adaptive_tuned": (
+            "Le réglage nocturne et le pré-chauffage sont ajustés selon les performances"
+            " réelles de chauffage de votre maison."
+        ),
+    },
+}
+
+
+def _t(language: str, key: str, **kwargs: Any) -> str:
+    table = _BRIEFING_STR.get(language) or _BRIEFING_STR["en"]
+    s = table.get(key, _BRIEFING_STR["en"].get(key, key))
+    return s.format(**kwargs) if kwargs else s
+
 
 @dataclass(frozen=True)
 class _CloseFact:
@@ -369,6 +977,7 @@ def generate_briefing(
     now: datetime | None = None,
     timeline: Any | None = None,
     current_hold: Any | None = None,
+    language: str = "en",
 ) -> str:
     """Generate the daily climate briefing message.
 
@@ -568,7 +1177,7 @@ def generate_briefing(
     )
     if current_hold is not None and hasattr(current_hold, "band"):
         facts = replace(facts, current_hold=current_hold)
-    tldr_lines = _generate_tldr_table(c, config, temp_unit=temp_unit, facts=facts)
+    tldr_lines = _generate_tldr_table(c, config, temp_unit=temp_unit, facts=facts, language=language)
 
     if verbosity == "tldr_only":
         briefing_text = "\n".join(tldr_lines).rstrip()
@@ -581,7 +1190,7 @@ def generate_briefing(
     # Structured header (kept for full briefing / email)
     # Note: Today/Tomorrow temps and Day Type are already in the TLDR table,
     # so we only include the title and separator to avoid duplication (Issue #52).
-    lines.append("\U0001f3e0 Your Home Climate Plan for Today")
+    lines.append(_t(language, "briefing.header_title"))
     lines.append(f"{'=' * 40}")
     lines.append("")
     lines.extend(tldr_lines)
@@ -589,7 +1198,7 @@ def generate_briefing(
 
     # Conversational body
     if c.day_type == DAY_TYPE_HOT:
-        lines.extend(_hot_day_plan(c, facts, fan_mode=fan_mode, temp_unit=temp_unit))
+        lines.extend(_hot_day_plan(c, facts, fan_mode=fan_mode, temp_unit=temp_unit, language=language))
     elif c.day_type == DAY_TYPE_WARM:
         lines.extend(
             _warm_day_plan(
@@ -601,6 +1210,7 @@ def generate_briefing(
                 current_indoor_temp=current_indoor_temp,
                 current_outdoor_temp=current_outdoor_temp,
                 overnight_heat_engaged=overnight_heat_engaged,
+                language=language,
             )
         )
     elif c.day_type == DAY_TYPE_MILD:
@@ -613,12 +1223,13 @@ def generate_briefing(
                 current_indoor_temp=current_indoor_temp,
                 current_outdoor_temp=current_outdoor_temp,
                 overnight_heat_engaged=overnight_heat_engaged,
+                language=language,
             )
         )
     elif c.day_type == DAY_TYPE_COOL:
-        lines.extend(_cool_day_plan(c, facts, temp_unit=temp_unit))
+        lines.extend(_cool_day_plan(c, facts, temp_unit=temp_unit, language=language))
     elif c.day_type == DAY_TYPE_COLD:
-        lines.extend(_cold_day_plan(c, facts, temp_unit=temp_unit))
+        lines.extend(_cold_day_plan(c, facts, temp_unit=temp_unit, language=language))
 
     _LOGGER.debug("Dispatched %s day plan", c.day_type)
 
@@ -632,10 +1243,11 @@ def generate_briefing(
             temp_unit=temp_unit,
             automation_overridden=automation_overridden,
             facts=facts,
+            language=language,
         )
     )
     lines.append("")
-    lines.extend(_fresh_air_section(c, facts, debounce_seconds, temp_unit=temp_unit))
+    lines.extend(_fresh_air_section(c, facts, debounce_seconds, temp_unit=temp_unit, language=language))
 
     # Grace period status — only shown when a grace period is currently active,
     # or when grace periods are configured to a non-default value worth explaining
@@ -645,6 +1257,7 @@ def generate_briefing(
         automation_grace_seconds=automation_grace_seconds,
         grace_active=grace_active,
         grace_source=grace_source,
+        language=language,
     )
     if grace_lines:
         lines.append("")
@@ -655,10 +1268,10 @@ def generate_briefing(
     if timeline is not None or _bank_line is not None:
         ops = operations_lines(timeline, now or dt_util.now()) if timeline is not None else []
         if _bank_line is not None:
-            ops = [f"  • Now: {_bank_line}.", *ops]
+            ops = [f"  • {_t(language, 'briefing.now_prefix')}{_bank_line}.", *ops]
         if ops:
             lines.append("")
-            lines.append("\U0001f4cb Today's Steps")
+            lines.append(_t(language, "briefing.todays_steps"))
             lines.append("-" * 40)
             lines.extend(ops)
 
@@ -669,18 +1282,19 @@ def generate_briefing(
             facts,
             temp_unit=temp_unit,
             adaptive_thermal_active=adaptive_thermal_active,
+            language=language,
         )
     )
 
     # Learning suggestions (kept structured for accept/dismiss clarity)
     if learning_suggestions:
         lines.append("")
-        lines.append("\U0001f4a1 Suggestions Based on Recent Patterns")
+        lines.append(_t(language, "briefing.suggestions_header"))
         lines.append("-" * 40)
         for suggestion in learning_suggestions:
             lines.append(f"  \u2022 {suggestion}")
         lines.append("")
-        lines.append("To respond to these suggestions, open the Climate Advisor dashboard and visit the AI tab.")
+        lines.append(_t(language, "briefing.suggestions_footer"))
 
     briefing_text = "\n".join(lines)
     _LOGGER.debug(
@@ -735,6 +1349,7 @@ def _generate_tldr_table(
     hot_events: dict | None = None,
     facts: _BriefingFacts | None = None,
     now: datetime | None = None,
+    language: str = "en",
 ) -> list[str]:
     """Generate a plain-text aligned TLDR summary table.
 
@@ -791,32 +1406,42 @@ def _generate_tldr_table(
             _day_mode = _hold.family
     if _bank is not None:
         # Issue #1404: a time-of-use bank owns the thermostat: the row quotes what it is told and what follows.
-        _verb = "Cool" if _bank.mode == "cool" else "Heat"
+        _verb = _t(language, "briefing.verb_cool") if _bank.mode == "cool" else _t(language, "briefing.verb_heat")
         _until = dt_util.as_local(_bank.ends).strftime(_FMT_HOUR)
-        hvac_val = (
-            f"{_verb} at {format_temp(_bank.target, temp_unit)} until the {_until} high-cost period, "
-            f"then {hold_after_text(facts.current_hold, temp_unit)}"
+        hvac_val = _t(
+            language,
+            "briefing.hvac_bank",
+            verb=_verb,
+            target=format_temp(_bank.target, temp_unit),
+            until=_until,
+            after=hold_after_text(facts.current_hold, temp_unit),
         )
     elif facts.unoccupied:
         if _day_mode == "cool":
-            hvac_val = f"Cool at {format_temp(_band.ceiling, temp_unit)}"
+            hvac_val = _t(language, "briefing.cool_at", t=format_temp(_band.ceiling, temp_unit))
         elif _day_mode == "heat":
-            hvac_val = f"Heat at {format_temp(_band.floor, temp_unit)}"
+            hvac_val = _t(language, "briefing.heat_at", t=format_temp(_band.floor, temp_unit))
         else:
             # Issue #1253 (mirror of #1211): hvac_mode "off" on a warm/mild day is NOT "nothing runs" -- the
             # away/vacation band is armed (heat below its floor, cool above its ceiling). Name the held band.
-            _label = "Vacation" if occupancy_mode == "vacation" else "Away"
-            hvac_val = f"{_label} band {_band_text(_band.floor, _band.ceiling, temp_unit)}"
+            _label = (
+                _t(language, "briefing.label_vacation")
+                if occupancy_mode == "vacation"
+                else _t(language, "briefing.label_away")
+            )
+            hvac_val = _t(
+                language, "briefing.named_band", label=_label, band=_band_text(_band.floor, _band.ceiling, temp_unit)
+            )
     elif _day_mode == "cool":
-        hvac_val = f"Cool at {format_temp(_band.ceiling, temp_unit)}"
+        hvac_val = _t(language, "briefing.cool_at", t=format_temp(_band.ceiling, temp_unit))
     elif _day_mode == "heat":
-        hvac_val = f"Heat at {format_temp(_band.floor, temp_unit)}"
+        hvac_val = _t(language, "briefing.heat_at", t=format_temp(_band.floor, temp_unit))
     else:
         # Issue #1211: hvac_mode "off" on a warm/mild day is NOT "off": the comfort band is armed (heat below
         # the floor, cool above the ceiling). Say what is held, and "(windows day)" only when it is true.
-        hvac_val = f"Comfort band {_band_text(_band.floor, _band.ceiling, temp_unit)}"
+        hvac_val = _t(language, "briefing.comfort_band", band=_band_text(_band.floor, _band.ceiling, temp_unit))
         if facts.windows_advice:
-            hvac_val += " (windows day)"
+            hvac_val += " " + _t(language, "briefing.windows_day_suffix")
 
     # --- Windows row ---
     # Issue #1231: every close time is the dated one from the facts (``effective_window_close()``), so a cutoff
@@ -826,76 +1451,95 @@ def _generate_tldr_table(
         # Issue #876: the morning OPEN time is intentionally dropped from this row -- it carries no useful
         # information -- so the row shows only the close time, matching the conversational body.
         if facts.open_at is not None:
-            windows_val = f"Open {facts.open_at.strftime(_FMT_HOUR)} – close by {facts.close.text}"
+            windows_val = _t(
+                language,
+                "briefing.open_close_by",
+                open=facts.open_at.strftime(_FMT_HOUR),
+                close=facts.close.text,
+            )
         else:
-            windows_val = f"Close by {facts.close.text}"
+            windows_val = _t(language, "briefing.close_by", close=facts.close.text)
     elif facts.hot_morning and facts.hot_evening and facts.close is not None:
         # Issue #878: close/open resolved TOGETHER (see resolve_window_pair()) -- the incident (Close by 6:00 PM /
         # Open 5:00 PM+) is prevented when the facts were gathered.
         e_start = facts.hot_evening_open.strftime(_FMT_HOUR)
-        windows_val = f"Close by {facts.close.text} (<{format_temp(threshold, temp_unit)}) / Open {e_start}+"
+        windows_val = _t(
+            language,
+            "briefing.close_by_threshold_and_open",
+            close=facts.close.text,
+            threshold=format_temp(threshold, temp_unit),
+            open=e_start,
+        )
     elif facts.hot_morning and facts.close is not None:
-        windows_val = f"Close by {facts.close.text} (<{format_temp(threshold, temp_unit)})"
+        windows_val = _t(
+            language, "briefing.close_by_threshold", close=facts.close.text, threshold=format_temp(threshold, temp_unit)
+        )
     elif facts.hot_evening and facts.hot_evening_open is not None:
-        windows_val = f"Open {facts.hot_evening_open.strftime(_FMT_HOUR)} onward"
+        windows_val = _t(language, "briefing.open_onward", open=facts.hot_evening_open.strftime(_FMT_HOUR))
     elif facts.window_veto == "heat":
-        windows_val = "Closed for now — outdoor air would cool the house below its floor"
+        windows_val = _t(language, "briefing.closed_veto_heat")
     elif facts.window_veto == "warm":
-        windows_val = "Closed for now — outdoor air isn't cooler than indoor yet"
+        windows_val = _t(language, "briefing.closed_veto_warm")
     else:
-        windows_val = "Closed all day"
+        windows_val = _t(language, "briefing.closed_all_day")
 
     # --- Bedtime Setback row ---
     # Issue #1231: one bedtime number (adaptive when learned, else the normal bedtime setpoint) shared with the
     # body; while away/vacation the engine holds the away setback all night, so that is what the row says.
     sleep_str = sleep_time.strftime(_FMT_HOUR)
     if facts.unoccupied:
-        bedtime_val = "away setback held"
+        bedtime_val = _t(language, "briefing.away_setback_held")
     elif facts.bedtime_target is not None:
-        bedtime_val = f"{format_temp(facts.bedtime_target, temp_unit)} at {sleep_str}"
+        bedtime_val = _t(
+            language, "briefing.bedtime_at", t=format_temp(facts.bedtime_target, temp_unit), when=sleep_str
+        )
     else:
-        bedtime_val = "No setback"
+        bedtime_val = _t(language, "briefing.no_setback")
 
     # --- Tomorrow row ---
-    trend_desc = _trend_description(c, temp_unit=temp_unit)
+    trend_desc = _trend_description(c, temp_unit=temp_unit, language=language)
     tomorrow_val = f"{trend_desc} ({format_temp(c.tomorrow_high, temp_unit)})"
 
     rows = [
-        f"  Day Type: {day_type_val}",
-        f"  HVAC Mode: {hvac_val}",
+        f"  {_t(language, 'briefing.row_day_type')}: {day_type_val}",
+        f"  {_t(language, 'briefing.row_hvac_mode')}: {hvac_val}",
     ]
     # Issue #85: show occupancy status when not home
     if occupancy_mode == "away":
-        rows.append("  Occupancy: Away — setback active")
+        rows.append(f"  {_t(language, 'briefing.occ_away')}")
     elif occupancy_mode == "vacation":
         # Issue #1369: "deep" only when the vacation band is deeper than away on the edge that matters.
         if facts.vacation_deeper:
-            rows.append("  Occupancy: Vacation — deep setback active")
+            rows.append(f"  {_t(language, 'briefing.occ_vacation_deep')}")
         else:
-            rows.append("  Occupancy: Vacation — vacation temperatures active")
+            rows.append(f"  {_t(language, 'briefing.occ_vacation')}")
     elif occupancy_mode == "guest":
-        rows.append("  Occupancy: Guest — comfort maintained")
+        rows.append(f"  {_t(language, 'briefing.occ_guest')}")
     rows.extend(
         [
-            f"  Windows: {windows_val}",
-            f"  Bedtime Setback: {bedtime_val}",
-            f"  Tomorrow: {tomorrow_val}",
+            f"  {_t(language, 'briefing.row_windows')}: {windows_val}",
+            f"  {_t(language, 'briefing.row_bedtime_setback')}: {bedtime_val}",
+            f"  {_t(language, 'briefing.row_tomorrow')}: {tomorrow_val}",
         ]
     )
     return rows
 
 
-def _trend_description(c: DayClassification, temp_unit: str = FAHRENHEIT) -> str:
+def _trend_description(c: DayClassification, temp_unit: str = FAHRENHEIT, language: str = "en") -> str:
     """Human-readable trend description."""
     if c.trend_direction == "warming":
         if c.trend_magnitude >= 10:
-            return f"Significantly warmer tomorrow (+{format_temp_delta(c.trend_magnitude, temp_unit)})"
-        return f"Warming trend (+{format_temp_delta(c.trend_magnitude, temp_unit)})"
+            return _t(
+                language, "briefing.trend_sig_warmer", delta=format_temp_delta(c.trend_magnitude, temp_unit)
+            )
+        return _t(language, "briefing.trend_warming", delta=format_temp_delta(c.trend_magnitude, temp_unit))
     elif c.trend_direction == "cooling":
         if c.trend_magnitude >= 10:
-            return f"Significant cold front coming (-{format_temp_delta(c.trend_magnitude, temp_unit)})"
-        return f"Cooling trend (-{format_temp_delta(c.trend_magnitude, temp_unit)})"
-    return "Stable"
+            return _t(
+                language, "briefing.trend_sig_cooler", delta=format_temp_delta(c.trend_magnitude, temp_unit)
+            )
+        return _t(language, "briefing.trend_cooling", delta=format_temp_delta(c.trend_magnitude, temp_unit))
+    return _t(language, "briefing.trend_stable")
 
 
 def _hot_day_plan(
@@ -903,6 +1547,7 @@ def _hot_day_plan(
     facts: _BriefingFacts,
     fan_mode: str = FAN_MODE_DISABLED,
     temp_unit: str = FAHRENHEIT,
+    language: str = "en",
 ) -> list[str]:
     """Conversational plan for hot days (85\u00b0F+).
 
@@ -920,7 +1565,7 @@ def _hot_day_plan(
     a pairing like "Close by 6:00 PM / Open 5:00 PM+" can never render.
     """
     if facts.unoccupied:
-        return ["A hot day, and the house is empty, so the away settings below are what apply."]
+        return [_t(language, "briefing.hot_unoccupied")]
 
     threshold = facts.economizer_threshold
     # Issue #1091: display-only armed ceiling (Prefer savings widens it); thresholds stay on raw comfort_cool.
@@ -932,15 +1577,13 @@ def _hot_day_plan(
     # Issue #558: only claim overnight pre-cool banking when it's actually expected to run tonight
     # (resolve_pre_cool_modifier() -- the same gate handle_pre_cool() uses), and phrase it prospectively.
     if facts.hot_pre_cool_target is not None:
-        opener = (
-            f"Tonight I'll pre-cool the house to about {format_temp(facts.hot_pre_cool_target, temp_unit)} while"
-            f" outdoor air is still cool \u2014 that banking strategy cuts energy use over the course"
-            f" of the day."
-        )
+        opener = _t(language, "briefing.hot_precool_opener", t=format_temp(facts.hot_pre_cool_target, temp_unit))
     else:
-        opener = (
-            f"Today's forecast calls for a high near {format_temp(c.today_high, temp_unit)} \u2014"
-            f" I'll hold things at {format_temp(_hold, temp_unit)} through the day."
+        opener = _t(
+            language,
+            "briefing.hot_hold_opener",
+            high=format_temp(c.today_high, temp_unit),
+            hold=format_temp(_hold, temp_unit),
         )
     lines = [opener]
 
@@ -949,21 +1592,24 @@ def _hot_day_plan(
         # static fallback hour (including a cutoff dated another day) is a plain configured hour.
         lines.append("")
         if close.already:
-            lines.append(
-                f"Outdoor's already above {format_temp(threshold, temp_unit)} \u2014 close up for the day"
-                f" now. I'll handle the AC transition."
-            )
+            lines.append(_t(language, "briefing.hot_already_above", t=format_temp(threshold, temp_unit)))
         else:
             lines.append(
-                f"Once outdoor temps rise above {format_temp(threshold, temp_unit)}, close up"
-                f" for the day (around {close.text}) \u2014 I'll handle the AC transition. Until then,"
-                f" enjoy the cross-breeze."
+                _t(
+                    language,
+                    "briefing.hot_close_around",
+                    t=format_temp(threshold, temp_unit),
+                    close=close.text,
+                )
             )
         lines.append("")
         lines.append(
-            f"Once closed, keep blinds drawn on sun-facing windows"
-            f" (especially west-facing after noon). I'll hold things at"
-            f" {format_temp(_hold, temp_unit)}" + ("." if has_evening else " for the rest of the day.")
+            _t(
+                language,
+                "briefing.hot_once_closed",
+                hold=format_temp(_hold, temp_unit),
+                tail=_t(language, "briefing.tail_period" if has_evening else "briefing.tail_rest_of_day"),
+            )
         )
         if has_evening:
             lines.append("")
@@ -972,28 +1618,18 @@ def _hot_day_plan(
             )
     elif has_evening:
         lines.append("")
-        lines.append(
-            f"Today's a keep-it-sealed kind of day. Close the blinds on sun-facing"
-            f" windows (especially west-facing ones after noon) and I'll hold things"
-            f" at {format_temp(_hold, temp_unit)}."
-        )
+        lines.append(_t(language, "briefing.hot_sealed_blinds_hold", hold=format_temp(_hold, temp_unit)))
         lines.append("")
         lines.append(
             describe_reopen_clause(facts.hot_evening_open.strftime(_FMT_HOUR), reopening_from_closed_all_day=True)
         )
     else:
         lines.append("")
-        lines.append(
-            f"Today's a keep-it-sealed kind of day. Close the blinds on sun-facing"
-            f" windows (especially west-facing ones after noon) and I'll handle"
-            f" the rest at {format_temp(_hold, temp_unit)}."
-        )
+        lines.append(_t(language, "briefing.hot_sealed_blinds_handle", hold=format_temp(_hold, temp_unit)))
 
     if fan_mode != FAN_MODE_DISABLED and (has_morning or has_evening):
         lines.append("")
-        lines.append(
-            "When ventilation windows open, I'll use the fan to help pull that cool outdoor air through the house."
-        )
+        lines.append(_t(language, "briefing.hot_fan_helps"))
     return lines
 
 
@@ -1006,6 +1642,7 @@ def _warm_day_plan(
     current_indoor_temp: float | None = None,
     current_outdoor_temp: float | None = None,
     overnight_heat_engaged: bool = False,
+    language: str = "en",
 ) -> list[str]:
     """Conversational plan for warm days (75-85\u00b0F).
 
@@ -1098,31 +1735,34 @@ def _warm_day_plan(
                 # "before outdoor air warms past indoor" reads backwards once that's
                 # already happened \u2014 a self-contained present-tense sentence instead
                 # of composing the (now-wrong-tense) reason fragment.
-                lines.append("Close up now \u2014 outdoor's already warmed past indoor.")
+                lines.append(_t(language, "briefing.warm_close_now"))
             else:
                 close_phrase = describe_close_timing(close_t, _already)
-                prep = "" if _already else "at "
-                lines.append(f"Close up {prep}{close_phrase} {describe_nat_vent_cutoff_reason(_effective_reason)}.")
+                prep = "" if _already else _t(language, "briefing.at_prep")
+                lines.append(
+                    _t(
+                        language,
+                        "briefing.warm_close_at",
+                        prep=prep,
+                        close_phrase=close_phrase,
+                        reason=describe_nat_vent_cutoff_reason(_effective_reason),
+                    )
+                )
         else:
-            lines.append(
-                "Windows are open to catch the cool morning air \u2014"
-                " cross-ventilation keeps things comfortable without the AC."
-            )
+            lines.append(_t(language, "briefing.warm_windows_open_morning"))
     elif away:
         # Nobody is home: no claim about the air, and no awake band (the away section quotes the setbacks).
-        lines.append("A warm day, and the house is empty, so the away settings below are what apply.")
+        lines.append(_t(language, "briefing.warm_unoccupied"))
     elif overnight_heat_engaged:
-        lines.append(
-            f"The heater ran a bit overnight before settling \u2014 the thermostat is holding {_band_desc} today."
-        )
+        lines.append(_t(language, "briefing.warm_heater_ran_overnight", band=_band_desc))
     elif _says_air_wont_help(c):
-        lines.append(f"Outside air won't do much for the house today, so the thermostat holds {_band_desc}.")
+        lines.append(_t(language, "briefing.warm_air_wont_help", band=_band_desc))
     else:
         # Low is estimated: say neither that windows help nor that they don't.
-        lines.append(f"The thermostat holds {_band_desc} today.")
+        lines.append(_t(language, "briefing.warm_holds_band", band=_band_desc))
 
     if windows_advice and fan_mode != FAN_MODE_DISABLED:
-        lines.append("I'll use the fan to boost cross-ventilation when windows are open.")
+        lines.append(_t(language, "briefing.warm_fan_boost"))
 
     lines.append("")
 
@@ -1139,33 +1779,34 @@ def _warm_day_plan(
         lines.pop()  # drop the spacer so the away line is not followed by a double blank
     elif _ceiling_breach is not None:
         breach_t = _ceiling_breach.strftime(_FMT_HOUR)
-        _tail = (
-            " Once windows are closed, the AC will step in automatically if it's needed to hold that ceiling."
-            if windows_advice
-            else " The AC will step in automatically if it's needed to hold that ceiling."
+        _tail = _t(language, "briefing.ac_auto_tail_windows" if windows_advice else "briefing.ac_auto_tail")
+        lines.append(
+            _t(
+                language,
+                "briefing.indoor_forecast_reach",
+                hold=format_temp(_hold, temp_unit),
+                t=breach_t,
+                tail=_tail,
+            )
         )
-        lines.append(f"Indoor temps are forecast to reach {format_temp(_hold, temp_unit)} around {breach_t}.{_tail}")
     elif windows_advice and _close is not None and not _close.already:
         lines.append(
-            f"Close up by {_close.text} before outdoor temps climb \u2014 seal the cool"
-            f" air inside so the AC can take over above {format_temp(_hold, temp_unit)}."
+            _t(
+                language,
+                "briefing.warm_close_before_climb",
+                close=_close.text,
+                hold=format_temp(_hold, temp_unit),
+            )
         )
     elif windows_advice and _close is None:
-        lines.append(
-            f"The AC will step in above {format_temp(_hold, temp_unit)} as a safety net if"
-            f" needed, but with good airflow you probably won't need it."
-        )
+        lines.append(_t(language, "briefing.warm_ac_safety_net", hold=format_temp(_hold, temp_unit)))
     else:
-        lines.append(f"The AC will step in above {format_temp(_hold, temp_unit)} to hold your comfort ceiling.")
+        lines.append(_t(language, "briefing.warm_ac_steps_in", hold=format_temp(_hold, temp_unit)))
 
     # Pre-cool night mention: warming trend + a lower sleep ceiling is planned
     if facts.pre_cool_target is not None and getattr(c, "setback_modifier", 0.0) < 0:
         lines.append("")
-        lines.append(
-            f"Tonight I'll cool the home to {format_temp(facts.pre_cool_target, temp_unit)} while"
-            f" you sleep to build up cold thermal mass before tomorrow's heat — so the house"
-            f" coasts longer before the AC needs to kick in."
-        )
+        lines.append(_t(language, "briefing.warm_precool_tonight", t=format_temp(facts.pre_cool_target, temp_unit)))
 
     if windows_advice and _evening_open_time is not None:
         rec_t = _evening_open_time.strftime(_FMT_HOUR)
@@ -1176,15 +1817,15 @@ def _warm_day_plan(
         # actionable later event, so evening_open_time is always None there and this
         # block is never reached for that reason. Only the outdoor_rise phrasing
         # applies here.
-        recovery_reason = "when the evening air cools back down"
+        recovery_reason = _t(language, "briefing.when_evening_cools")
         # Issue #518: only claim "I'll turn off the AC" when the AC could
         # plausibly have engaged first (breach predicted before recovery) \u2014
         # otherwise this contradicted itself by canceling an action that was
         # never actually started.
         if _ceiling_breach is not None and _ceiling_breach < _evening_open_time:
-            lines.append(f"Reopen windows around {rec_t} {recovery_reason} \u2014 I'll turn off the AC.")
+            lines.append(_t(language, "briefing.reopen_turn_off_ac", t=rec_t, reason=recovery_reason))
         else:
-            lines.append(f"Reopen windows around {rec_t} {recovery_reason}.")
+            lines.append(_t(language, "briefing.reopen_around", t=rec_t, reason=recovery_reason))
 
     return lines
 
@@ -1197,6 +1838,7 @@ def _mild_day_plan(
     current_indoor_temp: float | None = None,
     current_outdoor_temp: float | None = None,
     overnight_heat_engaged: bool = True,
+    language: str = "en",
 ) -> list[str]:
     """Conversational plan for mild days (60-74\u00b0F).
 
@@ -1230,43 +1872,38 @@ def _mild_day_plan(
     # Issue #1091: display-only armed floor (Prefer savings widens it).
     _shown_heat = facts.awake_heat
     _band_desc = _band_text(_shown_heat, facts.awake_cool, temp_unit)
-    _holding = f"the thermostat holds {_band_desc}"
+    _holding = _t(language, "briefing.thermostat_holds_lc", band=_band_desc)
     if not windows_advice:
         if away:
             # Nobody is home: no claim about the air, and no awake band (the away section quotes the setbacks).
-            lines = ["A mild day, and the house is empty, so the away settings below are what apply."]
+            lines = [_t(language, "briefing.mild_unoccupied")]
         elif _says_air_wont_help(c):
-            lines = [f"A mild day. Outside air isn't going to warm the house, so {_holding} and steps in if it drifts."]
+            lines = [_t(language, "briefing.mild_air_wont_help", holding=_holding)]
         else:
             # Low is estimated: the answer is unknown, so say neither that windows help nor that they don't.
-            lines = [f"A mild day, so {_holding} and steps in if it drifts."]
+            lines = [_t(language, "briefing.mild_default", holding=_holding)]
         if near_miss:
             lines.append("")
             lines.append(
-                f"The forecast high of {format_temp(c.today_high, temp_unit)} is just under your"
-                f" {format_temp(_shown_heat, temp_unit)} floor and forecasts can run low, so outside air may"
-                f" help later this afternoon. I'll keep going on the thermostat until it does."
+                _t(
+                    language,
+                    "briefing.mild_near_miss",
+                    high=format_temp(c.today_high, temp_unit),
+                    floor=format_temp(_shown_heat, temp_unit),
+                )
             )
     elif overnight_heat_engaged:
         lines = [
-            f"A day where the house practically takes care of itself. I warmed to"
-            f" {format_temp(_shown_heat, temp_unit)} before sunrise \u2014 now the weather does the rest and"
-            f" {_holding}.",
+            _t(language, "briefing.mild_warmed_before_sunrise", t=format_temp(_shown_heat, temp_unit), holding=_holding)
         ]
     else:
-        lines = [
-            f"A day where the house practically takes care of itself \u2014 it held at or above"
-            f" {format_temp(_shown_heat, temp_unit)} on its own overnight, so HVAC stayed off"
-            f" and the weather did the rest.",
-        ]
+        lines = [_t(language, "briefing.mild_held_on_own", t=format_temp(_shown_heat, temp_unit))]
 
     if windows_advice and c.window_open_time:
         # Issue #876: the morning OPEN time is intentionally dropped from this
         # sentence \u2014 it carries no useful information.
         lines.append("")
-        lines.append(
-            "Open south and east windows for a natural cross-breeze that freshens the air and warms the house for free."
-        )
+        lines.append(_t(language, "briefing.mild_open_south_east"))
 
     # Issue #534: prefer the ODE-derived cutoff when available, matching docs/08-COMPUTATION-REFERENCE.md
     # \u00a76d. Issue #1231: the close is the dated one from the facts (``effective_window_close()``) -- a cutoff
@@ -1296,19 +1933,24 @@ def _mild_day_plan(
         lines.append("")
         if _already and _effective_reason == "outdoor_rise":
             lines.append(
-                f"Close up now \u2014 outdoor's already warmed past indoor. If the house dips below"
-                f" {format_temp(_shown_heat, temp_unit)} tonight, the heater comes back on"
-                f" automatically."
+                _t(language, "briefing.mild_close_now", t=format_temp(_shown_heat, temp_unit))
             )
         else:
             reason_fragment = (
-                "to trap the warmth" if not _dynamic else describe_nat_vent_cutoff_reason(_effective_reason)
+                _t(language, "briefing.trap_the_warmth")
+                if not _dynamic
+                else describe_nat_vent_cutoff_reason(_effective_reason)
             )
-            prep = "" if _already else "by "
+            prep = "" if _already else _t(language, "briefing.by_prep")
             lines.append(
-                f"Close up {prep}{_close.text} {reason_fragment}. If the house dips below"
-                f" {format_temp(_shown_heat, temp_unit)} tonight, the heater comes back on"
-                f" automatically."
+                _t(
+                    language,
+                    "briefing.mild_close_by",
+                    prep=prep,
+                    close=_close.text,
+                    reason=reason_fragment,
+                    t=format_temp(_shown_heat, temp_unit),
+                )
             )
 
     # Issue #876: MILD days had no evening-reopen sentence at all \u2014 mirroring _warm_day_plan()'s equivalent
@@ -1317,12 +1959,13 @@ def _mild_day_plan(
     if windows_advice and facts.evening_open is not None:
         rec_t = facts.evening_open.strftime(_FMT_HOUR)
         lines.append("")
-        lines.append(f"Reopen windows around {rec_t} when the evening air cools back down.")
+        _reason = _t(language, "briefing.when_evening_cools")
+        lines.append(_t(language, "briefing.reopen_around", t=rec_t, reason=_reason))
 
     return lines
 
 
-def _cool_day_plan(c, facts: _BriefingFacts, temp_unit: str = FAHRENHEIT) -> list[str]:
+def _cool_day_plan(c, facts: _BriefingFacts, temp_unit: str = FAHRENHEIT, language: str = "en") -> list[str]:
     """Conversational plan for cool days (45-59\u00b0F).
 
     Issue #1231: an empty house (away/vacation) gets the lead line only -- the engine holds the away setback
@@ -1330,22 +1973,16 @@ def _cool_day_plan(c, facts: _BriefingFacts, temp_unit: str = FAHRENHEIT) -> lis
     the one the TLDR row shows (``facts.bedtime_target``).
     """
     if facts.unoccupied:
-        return ["A cool day, and the house is empty, so the away settings below are what apply."]
+        return [_t(language, "briefing.cool_unoccupied")]
     # Issue #1091: display-only armed floor (Prefer savings widens it).
-    lines = [
-        f"Heater day \u2014 too cool outside for windows. I'll hold {format_temp(facts.awake_heat, temp_unit)}"
-        f" through the day.",
-    ]
+    lines = [_t(language, "briefing.cool_heater_day", t=format_temp(facts.awake_heat, temp_unit))]
     if facts.bedtime_target is not None:
         lines.append("")
-        lines.append(
-            f"At bedtime I'll set back to {format_temp(facts.bedtime_target, temp_unit)}"
-            " \u2014 most people sleep better a little cooler."
-        )
+        lines.append(_t(language, "briefing.cool_bedtime_setback", t=format_temp(facts.bedtime_target, temp_unit)))
     return lines
 
 
-def _cold_day_plan(c, facts: _BriefingFacts, temp_unit: str = FAHRENHEIT) -> list[str]:
+def _cold_day_plan(c, facts: _BriefingFacts, temp_unit: str = FAHRENHEIT, language: str = "en") -> list[str]:
     """Conversational plan for cold days (below 45\u00b0F).
 
     Issue #1231: an empty house (away/vacation) gets the lead line only. At home, the bedtime target is compared
@@ -1356,29 +1993,28 @@ def _cold_day_plan(c, facts: _BriefingFacts, temp_unit: str = FAHRENHEIT) -> lis
     of the usual" one. Body and TLDR quote the same number.
     """
     if facts.unoccupied:
-        return ["A cold day, and the house is empty, so the away settings below are what apply."]
-    lines = [
-        "Cold day \u2014 heater runs all day. Help it out: close north-side curtains,"
-        " open south-facing ones for free solar heat, and minimize time holding"
-        " exterior doors open.",
-    ]
+        return [_t(language, "briefing.cold_unoccupied")]
+    lines = [_t(language, "briefing.cold_day_help")]
 
     if c.pre_condition and c.trend_direction == "cooling":
         # Issue #1211: this used to promise "I'll bump to X around 7pm for a couple hours". Nothing performs
         # that (the pre-heat intent is written to config and never read), so say only what is true.
         lines.append("")
-        lines.append("Tomorrow's even colder, so expect the heater to work harder in the morning.")
+        lines.append(_t(language, "briefing.cold_tomorrow_colder"))
 
     if facts.bedtime_target is not None:
         _target = format_temp(facts.bedtime_target, temp_unit)
         lines.append("")
         if facts.normal_bedtime is None or format_temp(facts.normal_bedtime, temp_unit) == _target:
-            lines.append(f"At bedtime I'll set back to {_target}.")
+            lines.append(_t(language, "briefing.cold_bedtime_setback", t=_target))
         else:
             lines.append(
-                f"Tonight I'm using a conservative setback \u2014 {_target} instead of the usual"
-                f" {format_temp(facts.normal_bedtime, temp_unit)}. When it's this cold, a deeper setback takes too"
-                f" long to recover from in the morning."
+                _t(
+                    language,
+                    "briefing.cold_conservative_setback",
+                    t=_target,
+                    usual=format_temp(facts.normal_bedtime, temp_unit),
+                )
             )
 
     return lines
@@ -1392,6 +2028,7 @@ def _leaving_home_section(
     temp_unit: str = FAHRENHEIT,
     automation_overridden: bool = False,
     facts: _BriefingFacts | None = None,
+    language: str = "en",
 ) -> list[str]:
     """Conversational section about what happens when they leave.
 
@@ -1419,75 +2056,56 @@ def _leaving_home_section(
     if occupancy_mode == "vacation":
         if facts is not None and not facts.vacation_deeper:
             return [
-                "While you're on vacation, I'm keeping the house at your vacation temperatures"
-                f" ({_band_text(facts.band.floor, facts.band.ceiling, temp_unit)})."
-                " Comfort temperatures will be restored when you return.",
+                _t(
+                    language,
+                    "briefing.vacation_band",
+                    band=_band_text(facts.band.floor, facts.band.ceiling, temp_unit),
+                )
             ]
-        return [
-            "While you're on vacation, I'm keeping the house at a deeper"
-            " energy-saving setback to save energy. Comfort temperatures will be"
-            " restored when you return.",
-        ]
+        return [_t(language, "briefing.vacation_deeper")]
     elif occupancy_mode == "guest":
-        return [
-            "Guests are visiting \u2014 maintaining full comfort temperatures."
-            " Away setbacks are disabled while guest mode is active.",
-        ]
+        return [_t(language, "briefing.guest_visiting")]
     elif occupancy_mode == "away":
         if c.hvac_mode == "cool":
             if automation_overridden:
-                return [
-                    f"You're currently away \u2014 setback should be in effect"
-                    f" (target {format_temp(setback_cool, temp_unit)}). Comfort will be restored"
-                    f" when you return \u2014 give it 20 to 30 minutes to feel normal again.",
-                ]
-            return [
-                f"You're currently away. I've applied setback temperatures,"
-                f" letting the house drift up to {format_temp(setback_cool, temp_unit)} to save"
-                f" energy. Comfort will be restored when you return \u2014 give it"
-                f" 20 to 30 minutes to feel normal again.",
-            ]
+                return [_t(language, "briefing.away_cool_overridden", t=format_temp(setback_cool, temp_unit))]
+            return [_t(language, "briefing.away_cool_applied", t=format_temp(setback_cool, temp_unit))]
         elif c.hvac_mode == "heat":
             if automation_overridden:
-                return [
-                    f"You're currently away \u2014 setback should be in effect"
-                    f" (target {format_temp(setback_heat, temp_unit)}). Comfort will be restored"
-                    f" when you return \u2014 should take 20 to 30 minutes depending on how"
-                    f" long you've been gone.",
-                ]
-            return [
-                f"You're currently away. I've dropped to {format_temp(setback_heat, temp_unit)}"
-                f" to save energy. Comfort will be restored when you return \u2014"
-                f" should take 20 to 30 minutes depending on how long you've been gone.",
-            ]
+                return [_t(language, "briefing.away_heat_overridden", t=format_temp(setback_heat, temp_unit))]
+            return [_t(language, "briefing.away_heat_applied", t=format_temp(setback_heat, temp_unit))]
         else:
             # Issue #1211: the comfort band is armed on a warm/mild day (HVAC mode "off" is not "nothing runs"),
             # so say what is held while away instead of "the HVAC is off".
-            return [
-                f"You're currently away. I'm holding the wider energy-saving band"
-                f" ({_band_text(setback_heat, setback_cool, temp_unit)}) while you're out, so not much"
-                f" should run. Comfort will be restored when you return.",
-            ]
+            return [_t(language, "briefing.away_band", band=_band_text(setback_heat, setback_cool, temp_unit))]
     else:
         # occupancy_mode == "home" — default hypothetical text
         if c.hvac_mode == "cool":
             return [
-                f"If you head out, no worries. After about {OCCUPANCY_SETBACK_MINUTES} minutes I'll let the"
-                f" house drift up to {format_temp(setback_cool, temp_unit)} to save energy. When you're"
-                f" back, I'll pull it right back down \u2014 give it 20 to 30 minutes to"
-                f" feel normal again.",
+                _t(
+                    language,
+                    "briefing.home_leave_cool",
+                    minutes=OCCUPANCY_SETBACK_MINUTES,
+                    t=format_temp(setback_cool, temp_unit),
+                )
             ]
         elif c.hvac_mode == "heat":
             return [
-                f"If you head out, I'll drop to {format_temp(setback_heat, temp_unit)} after about"
-                f" {OCCUPANCY_SETBACK_MINUTES} minutes. When you get back, I'll warm things right up \u2014 should"
-                f" take 20 to 30 minutes depending on how long you were gone.",
+                _t(
+                    language,
+                    "briefing.home_leave_heat",
+                    t=format_temp(setback_heat, temp_unit),
+                    minutes=OCCUPANCY_SETBACK_MINUTES,
+                )
             ]
         else:
             return [
-                f"If you head out, not much changes today \u2014 after about {OCCUPANCY_SETBACK_MINUTES} minutes"
-                f" I'll widen the band to {_band_text(setback_heat, setback_cool, temp_unit)} to save energy,"
-                f" and restore comfort when you're back.",
+                _t(
+                    language,
+                    "briefing.home_leave_band",
+                    minutes=OCCUPANCY_SETBACK_MINUTES,
+                    band=_band_text(setback_heat, setback_cool, temp_unit),
+                )
             ]
 
 
@@ -1498,6 +2116,7 @@ def _fresh_air_section(
     temp_unit: str = FAHRENHEIT,
     natural_vent_active: bool = False,
     current_outdoor_temp: float | None = None,
+    language: str = "en",
 ) -> list[str]:
     """User-centric section about opening windows/doors for fresh air.
 
@@ -1510,57 +2129,38 @@ def _fresh_air_section(
     Uses the configured debounce duration so the timing matches actual behavior.
     """
     debounce_minutes = max(1, debounce_seconds // 60)
-    debounce_desc = f"{debounce_minutes} minute" if debounce_minutes == 1 else f"{debounce_minutes} minutes"
+    debounce_desc = _t(
+        language, "briefing.minute" if debounce_minutes == 1 else "briefing.minutes", n=debounce_minutes
+    )
     away = facts.unoccupied
     comfort_cool = facts.awake_cool
 
     if natural_vent_active and current_outdoor_temp is not None:
-        _target = "" if away else f" to hold your {format_temp(comfort_cool, temp_unit)} target"
+        _target = "" if away else _t(language, "briefing.fresh_hold_target", t=format_temp(comfort_cool, temp_unit))
         return [
-            f"Windows are open and outdoor air is {format_temp(current_outdoor_temp, temp_unit)} \u2014"
-            f" I'll use the fan{_target}"
-            f" without running the AC. Once you close up, I'll resume normal cooling."
+            _t(
+                language,
+                "briefing.fresh_natvent_active",
+                t=format_temp(current_outdoor_temp, temp_unit),
+                target=_target,
+            )
         ]
 
     if c.hvac_mode == "cool":
         _pull_back = (
             ""
             if away
-            else f" Just know that on a day like today it may take a bit longer to pull back down to"
-            f" {format_temp(comfort_cool, temp_unit)}, so if you want to minimize the impact, shorter"
-            f" is better \u2014 and try to keep other windows and doors shut while"
-            f" you've got one open."
+            else _t(language, "briefing.fresh_pull_back", t=format_temp(comfort_cool, temp_unit))
         )
         return [
-            f"If you want to crack a window for some fresh air, no problem \u2014"
-            f" it's your house. I'll keep the AC running for a bit in"
-            f" case it's just a quick thing, but if it stays open past {debounce_desc}"
-            f" I'll shut the AC off so you're not cooling the outdoors. Once you"
-            f" close up, I'll fire the AC back up right away.{_pull_back}",
+            _t(language, "briefing.fresh_cool", debounce=debounce_desc, pull_back=_pull_back)
         ]
     elif c.hvac_mode == "heat":
-        return [
-            f"If you want to open a window for some fresh air, no problem \u2014"
-            f" go for it. I'll keep the heat running for a bit in case"
-            f" you're just airing things out, but if it stays open past {debounce_desc}"
-            f" I'll turn the heat off so we're not heating the neighborhood. Once"
-            f" you close up, the heat kicks right back on. It'll take a little"
-            f" extra energy to warm back up, so if you want to minimize the"
-            f" impact, a quick burst of fresh air works great \u2014 and closing doors"
-            f" to the room with the open window helps keep the rest of the house"
-            f" comfortable while you do it.",
-        ]
+        return [_t(language, "briefing.fresh_heat", debounce=debounce_desc)]
     else:
-        _holding_clause = (
-            ""
-            if away
-            else f" \u2014 the thermostat is holding {_band_text(facts.awake_heat, comfort_cool, temp_unit)} today"
-        )
-        return [
-            f"If you want to open a window for some fresh air, go for it{_holding_clause}."
-            f" Enjoy the breeze. If the heat or AC does need to run while a window is"
-            f" still open, I'll give it {debounce_desc} and then pause until you close up.",
-        ]
+        _band = _band_text(facts.awake_heat, comfort_cool, temp_unit)
+        _holding_clause = "" if away else _t(language, "briefing.fresh_holding_clause", band=_band)
+        return [_t(language, "briefing.fresh_off", holding=_holding_clause, debounce=debounce_desc)]
 
 
 def _grace_period_section(
@@ -1569,6 +2169,7 @@ def _grace_period_section(
     automation_grace_seconds: int = DEFAULT_AUTOMATION_GRACE_SECONDS,
     grace_active: bool = False,
     grace_source: str | None = None,
+    language: str = "en",
 ) -> list[str]:
     """Explain active grace periods and configured timings.
 
@@ -1581,25 +2182,13 @@ def _grace_period_section(
 
     if grace_source == "manual":
         grace_minutes = max(1, manual_grace_seconds // 60)
-        grace_desc = f"{grace_minutes} minute" if grace_minutes == 1 else f"{grace_minutes} minutes"
-        return [
-            f"One heads-up: you manually turned the HVAC back on"
-            f" earlier, so I'm in a {grace_desc} hands-off window right now. During"
-            f" that window, opening a door or window won't trigger a pause \u2014 I'm"
-            f" giving you space to settle in without the system jumping in. Once the"
-            f" window closes, door/window sensing goes back to normal."
-        ]
+        grace_desc = _t(language, "briefing.minute" if grace_minutes == 1 else "briefing.minutes", n=grace_minutes)
+        return [_t(language, "briefing.grace_manual", grace=grace_desc)]
     else:
         # automation grace
         grace_minutes = max(1, automation_grace_seconds // 60)
-        grace_desc = f"{grace_minutes} minute" if grace_minutes == 1 else f"{grace_minutes} minutes"
-        return [
-            f"One heads-up: I just resumed the HVAC after all the doors and windows"
-            f" closed, so I'm in a {grace_desc} settling period. During that time,"
-            f" opening a door or window briefly won't immediately pause things again \u2014"
-            f" this prevents the system from cycling on and off if you're moving in"
-            f" and out. After the settling period, normal door/window sensing resumes."
-        ]
+        grace_desc = _t(language, "briefing.minute" if grace_minutes == 1 else "briefing.minutes", n=grace_minutes)
+        return [_t(language, "briefing.grace_automation", grace=grace_desc)]
 
 
 def _tonight_preview(
@@ -1607,6 +2196,7 @@ def _tonight_preview(
     facts: _BriefingFacts,
     temp_unit: str = FAHRENHEIT,
     adaptive_thermal_active: bool = False,
+    language: str = "en",
 ) -> list[str]:
     """Conversational preview of tonight and tomorrow based on trend.
 
@@ -1620,23 +2210,13 @@ def _tonight_preview(
     )
     if c.trend_direction == "warming" and c.trend_magnitude >= 5:
         if facts.unoccupied:
-            lines = [f"Looking ahead \u2014 tomorrow's warmer at {format_temp(c.tomorrow_high, temp_unit)}."]
+            lines = [_t(language, "briefing.tonight_warmer_away", t=format_temp(c.tomorrow_high, temp_unit))]
         else:
-            lines = [
-                f"Looking ahead \u2014 tomorrow's warmer at {format_temp(c.tomorrow_high, temp_unit)}, so"
-                f" I'm going to set back a bit more aggressively tonight. Less"
-                f" heating needed means energy saved while you sleep.",
-            ]
+            lines = [_t(language, "briefing.tonight_warmer_home", t=format_temp(c.tomorrow_high, temp_unit))]
     elif c.trend_direction == "cooling" and c.trend_magnitude >= 5:
-        lines = [
-            f"Looking ahead \u2014 tomorrow's cooler at {format_temp(c.tomorrow_high, temp_unit)}, so"
-            f" expect the heater to run more tomorrow.",
-        ]
+        lines = [_t(language, "briefing.tonight_cooler", t=format_temp(c.tomorrow_high, temp_unit))]
     else:
-        lines = [
-            f"Tomorrow looks pretty similar to today \u2014 {format_temp(c.tomorrow_high, temp_unit)}"
-            f" for a high. Nothing special planned overnight.",
-        ]
+        lines = [_t(language, "briefing.tonight_similar", t=format_temp(c.tomorrow_high, temp_unit))]
     if adaptive_thermal_active and c.hvac_mode in ("heat", "cool") and not facts.unoccupied:
-        lines.append("Bedtime setback and pre-heat timing are tuned to your home's actual heating performance.")
+        lines.append(_t(language, "briefing.tonight_adaptive_tuned"))
     return lines

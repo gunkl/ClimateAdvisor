@@ -16,6 +16,7 @@
                       cost, tags, best } ] } ] }                 (all temperatures internal degF) */
 (function () {
   'use strict';
+  var T = window.CA_I18N.t;
   var COL = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c5)'];
   var DASH = ['', '6 3', '2 3', '8 3 2 3', '10 4'];
 
@@ -48,9 +49,9 @@
     opts.some(function (o) { if (o.path && o.path.length) { grid = o.path.map(function (pt) { return pt[0]; }); return true; } return false; });
     var rows = opts.map(function (o) {
       var steps = o.n_actions || 0;
-      var tags = [steps === 0 ? 'Nothing for you to do' : steps + (steps === 1 ? ' step' : ' steps') + ' for you'];
-      if (o.runs === false) tags.push('would not run tonight');
-      tags.push(o.confidence === 'low' ? 'may help' : (o.confidence || 'medium') + ' confidence');
+      var tags = [steps === 0 ? T('night.nothing_to_do') : T(steps === 1 ? 'night.n_step' : 'night.n_steps', { n: steps })];
+      if (o.runs === false) tags.push(T('night.would_not_run'));
+      tags.push(o.confidence === 'low' ? T('night.may_help') : T('night.confidence', { level: T('night.conf_' + (o.confidence || 'medium')) }));
       return {
         key: o.key, label: o.label, bed: grid.length ? resample(o.path, grid).map(F) : [], // figures are null while the gate has not passed: never 0
         bed_min: F(o.bedroom_low_f), bed_max: F(o.bedroom_high_f), bed_wake: F(o.bedroom_wake_f),
@@ -65,23 +66,26 @@
     };
   }
 
-  var ACTION_TEXT = {
-    windows_open: 'Open the windows', windows_close: 'Close the windows',
-    fan_on: 'Turn the fan on', fan_off: 'Turn the fan off'
-  };
+  function actionText() {
+    return {
+      windows_open: T('night.action_windows_open'), windows_close: T('night.action_windows_close'),
+      fan_on: T('night.action_fan_on'), fan_off: T('night.action_fan_off')
+    };
+  }
   function clock(iso) { var d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
   function stepsHtml(row) { // one thing to do, at a time
     var acts = (row && row.actions) || [];
-    if (!acts.length) return '<div class="note" id="night-steps">Nothing for you to do: keep the windows closed and let Climate Advisor hold the sleep band.</div>';
+    if (!acts.length) return '<div class="note" id="night-steps">' + esc(T('night.nothing_to_do_full')) + '</div>';
     var low = row.confidence === 'low';
-    return '<ol class="plan-list" id="night-steps" aria-label="Steps for tonight">' + acts.map(function (a) {
+    var ACTION_TEXT = actionText();
+    return '<ol class="plan-list" id="night-steps" aria-label="' + esc(T('night.steps_aria')) + '">' + acts.map(function (a) {
       var you = a.actor !== 'ca';
       var text = ACTION_TEXT[a.kind] || String(a.kind || '').replace(/_/g, ' ');
-      if (a.through_night) text = 'Leave the windows open until you wake, then close them';
-      else if (a.predicted) text += ' once the bedroom reaches the target (about this time)';
-      return '<li class="plan-row ' + (you ? 'plan-you' : 'plan-ca') + '"><span class="plan-time">' + esc(a.predicted ? 'about ' + clock(a.ts) : clock(a.ts)) + '</span>' +
-        '<span class="plan-actor">' + (you ? 'You' : 'CA') + '</span><span class="plan-text">' + esc(text) +
-        (low ? ' <span class="plan-qual">may help</span>' : '') + '</span></li>';
+      if (a.through_night) text = T('night.leave_windows_open');
+      else if (a.predicted) text += ' ' + T('night.once_bedroom_reaches');
+      return '<li class="plan-row ' + (you ? 'plan-you' : 'plan-ca') + '"><span class="plan-time">' + esc(a.predicted ? T('night.about') + ' ' + clock(a.ts) : clock(a.ts)) + '</span>' +
+        '<span class="plan-actor">' + (you ? T('night.you') : T('night.ca')) + '</span><span class="plan-text">' + esc(text) +
+        (low ? ' <span class="plan-qual">' + esc(T('night.may_help')) + '</span>' : '') + '</span></li>';
     }).join('') + '</ol>';
   }
 
@@ -94,15 +98,15 @@
 
     function render() {
       var nights = (data && data.nights) || [];
-      if (!nights.length) { el.innerHTML = '<div class="empty">No night plan yet.</div>'; return; }
+      if (!nights.length) { el.innerHTML = '<div class="empty">' + esc(T('night.no_plan_yet')) + '</div>'; return; }
       if (state.ni >= nights.length) state.ni = 0;
       var N = nights[state.ni], rows = N.rows || [];
       var best = rows.filter(function (r) { return r.best; })[0] || rows[0];
       if (data.show_numbers === false || !(N.t && N.t.length > 1) || best.bed_min == null) { // plan only: no predicted figures (decision C11)
-        el.innerHTML = '<div class="rec"><div class="sub">RECOMMENDED FOR ' + esc(String(N.title || 'TONIGHT').toUpperCase()) + '</div>' +
+        el.innerHTML = '<div class="rec"><div class="sub">' + esc(T('night.recommended_for', { title: String(N.title || T('night.tonight_upper')).toUpperCase() })) + '</div>' +
           '<div style="font-size:20px;font-weight:650;margin-top:2px">' + esc(best.label) + '</div>' +
           (data.headline ? '<div class="note" id="night-headline" style="margin-top:4px">' + esc(data.headline) + '</div>' : '') + '</div>' + stepsHtml(best) +
-          '<div class="sub" id="night-nonumbers">Predicted bedroom temperatures are not shown yet. Climate Advisor shows them once its bedroom model has learned enough about your bedroom.</div>';
+          '<div class="sub" id="night-nonumbers">' + esc(T('night.no_numbers_yet')) + '</div>';
         return;
       }
       var W = 1000, H = 260, off = state.off;
@@ -117,19 +121,20 @@
 
       var h = '';
       if (nights.length > 1) {
-        h += '<div class="row" role="group" aria-label="Which night">' + nights.map(function (n, i) {
+        h += '<div class="row" role="group" aria-label="' + esc(T('night.which_night')) + '">' + nights.map(function (n, i) {
           return '<button type="button" class="pill" data-night="' + i + '" aria-pressed="' + (i === state.ni) + '">' +
-            esc(n.label || (i === 0 ? 'Tonight' : n.title)) + '</button>';
+            esc(n.label || (i === 0 ? T('night.tonight') : n.title)) + '</button>';
         }).join('') + '</div>';
       }
       if (best) {
-        h += '<div class="rec"><div class="sub">RECOMMENDED FOR ' + esc(String(N.title || 'TONIGHT').toUpperCase()) + '</div>' +
+        h += '<div class="rec"><div class="sub">' + esc(T('night.recommended_for', { title: String(N.title || T('night.tonight_upper')).toUpperCase() })) + '</div>' +
           '<div style="font-size:20px;font-weight:650;margin-top:2px">' + esc(best.label) + '</div>' +
-          '<div class="note" style="margin-top:4px">' + (data.source_note ? '<span class="badge" id="night-source">from v4</span> ' : '') + 'Bedroom ' + d1(best.bed_min) + '–' + d1(best.bed_max) + '° against a ' +
-          D(N.floor).toFixed(0) + '–' + D(N.ceiling).toFixed(0) + '° sleep band; ' + ((best.heat_min || 0) + (best.cool_min || 0)) + ' min of HVAC.</div>' +
+          '<div class="note" style="margin-top:4px">' + (data.source_note ? '<span class="badge" id="night-source">' + esc(T('night.from_v4')) + '</span> ' : '') + esc(T('night.bedroom_against', {
+            lo: d1(best.bed_min), hi: d1(best.bed_max), band_lo: D(N.floor).toFixed(0), band_hi: D(N.ceiling).toFixed(0), min: (best.heat_min || 0) + (best.cool_min || 0)
+          })) + '</div>' +
           (data.headline ? '<div class="note" id="night-headline" style="margin-top:4px">' + esc(data.headline) + '</div>' : '') + '</div>' + stepsHtml(best);
       }
-      h += '<div class="row"><span class="sub">Bedroom under each option:</span>' + rows.map(function (r, i) {
+      h += '<div class="row"><span class="sub">' + esc(T('night.bedroom_under_each')) + '</span>' + rows.map(function (r, i) {
         return '<button type="button" class="pill" data-opt="' + esc(r.key) + '" aria-pressed="' + (!off[r.key]) + '">' +
           '<svg width="22" height="10" aria-hidden="true"><line x1="1" y1="5" x2="21" y2="5" stroke="' + COL[i % 5] + '" stroke-width="2.5" stroke-dasharray="' + DASH[i % 5] + '" stroke-linecap="round"></line></svg>' +
           esc(r.label) + '</button>';
@@ -152,28 +157,28 @@
       }).join('');
       var hasOut = !!(N.out && N.out.length);
       var outLo = hasOut ? Math.min.apply(null, N.out.map(D)).toFixed(0) : '', outHi = hasOut ? Math.max.apply(null, N.out.map(D)).toFixed(0) : '';
-      var label = 'Predicted bedroom temperature for each strategy' + (best ? '. Best: ' + best.label + ', ' + d1(best.bed_min) + ' to ' + d1(best.bed_max) + ' degrees' : '');
+      var label = T('night.chart_aria') + (best ? T('night.chart_aria_best', { label: best.label, lo: d1(best.bed_min), hi: d1(best.bed_max) }) : '');
       h += '<div style="display:flex;gap:8px"><div style="position:relative;width:30px;height:' + H + 'px;font-size:11px;color:var(--muted)" aria-hidden="true">' + yt + '</div>' +
         '<div style="position:relative;flex:1;min-width:0;height:' + H + 'px">' +
         '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%" role="img" aria-label="' + esc(label) + '">' + grid +
         '<rect x="0" y="' + Y(D(N.ceiling)) + '" width="' + W + '" height="' + (Y(D(N.floor)) - Y(D(N.ceiling))) + '" fill="var(--band)"></rect>' +
         (hasOut ? '<path d="' + path(N.out) + '" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"></path>' : '') + lines + '</svg>' +
-        '<div style="position:absolute;right:4px;top:2px;font-size:11px;color:var(--muted)">shaded = sleep band' + (hasOut ? ' · dotted = outdoor ' + outLo + '–' + outHi + '°' : '') + '</div></div></div>' +
+        '<div style="position:absolute;right:4px;top:2px;font-size:11px;color:var(--muted)">' + esc(T('night.shaded_sleep_band')) + (hasOut ? ' · ' + esc(T('night.dotted_outdoor', { lo: outLo, hi: outHi })) : '') + '</div></div></div>' +
         '<div style="display:flex;gap:8px"><div style="width:30px"></div><div style="position:relative;flex:1;min-width:0;height:16px;font-size:11px;color:var(--muted)" aria-hidden="true">' + xt + '</div></div>';
 
-      h += '<div class="scroll-x"><table style="min-width:640px"><caption class="sr-only">Each night option compared</caption><thead><tr><th>Option</th><th>Bedroom low–high</th><th>At wake</th><th>Outside comfort</th><th>Heat</th><th>AC</th><th>Score</th><th></th></tr></thead><tbody>' +
+      h += '<div class="scroll-x"><table style="min-width:640px"><caption class="sr-only">' + esc(T('night.each_option_compared')) + '</caption><thead><tr><th>' + esc(T('night.option')) + '</th><th>' + esc(T('night.bedroom_low_high')) + '</th><th>' + esc(T('night.at_wake')) + '</th><th>' + esc(T('night.outside_comfort')) + '</th><th>' + esc(T('night.heat')) + '</th><th>' + esc(T('night.ac')) + '</th><th>' + esc(T('night.score')) + '</th><th></th></tr></thead><tbody>' +
         rows.map(function (r) {
           return '<tr' + (r.best ? ' style="font-weight:600"' : '') + '><td>' + esc(r.label) + '</td><td class="num">' + d1(r.bed_min) + '–' + d1(r.bed_max) + '°</td><td class="num">' + d1(r.bed_wake) + '°</td>' +
             '<td class="num">' + (r.miss_dh ? (celsius ? (r.miss_dh * 5 / 9).toFixed(1) : r.miss_dh) + ' ' + sym() + '·h' : '—') + '</td>' +
-            '<td class="num">' + (r.heat_min ? r.heat_min + ' min' : '—') + '</td><td class="num">' + (r.cool_min ? r.cool_min + ' min' : '—') + '</td>' +
+            '<td class="num">' + (r.heat_min ? r.heat_min + ' ' + T('night.min') : '—') + '</td><td class="num">' + (r.cool_min ? r.cool_min + ' ' + T('night.min') : '—') + '</td>' +
             '<td class="num">' + Number(r.cost).toFixed(2) + '</td><td style="color:var(--ink2)">' + esc(r.tags || '') + '</td></tr>';
         }).join('') + '</tbody></table></div>' +
-        '<div class="sub">Score = degree-hours outside the sleep band beyond the thermostat swing + hours of HVAC. Lowest wins; ties go to fewer things for you to do.</div>';
+        '<div class="sub">' + esc(T('night.score_explainer')) + '</div>';
       if (data.tradeoffs && data.tradeoffs.length) {
-        h += '<ul class="note" id="night-tradeoffs" aria-label="Compared with the recommendation" style="margin:0;padding-left:18px">' + data.tradeoffs.map(function (t) { return '<li>' + esc(t.text) + '</li>'; }).join('') + '</ul>';
+        h += '<ul class="note" id="night-tradeoffs" aria-label="' + esc(T('night.compared_with_rec')) + '" style="margin:0;padding-left:18px">' + data.tradeoffs.map(function (t) { return '<li>' + esc(t.text) + '</li>'; }).join('') + '</ul>';
       }
       if (data.source_note) h += '<div class="sub" id="night-source-note">' + esc(data.source_note) + '</div>';
-      if (data.note) h += '<div class="note-box"><strong>Not validated yet.</strong> ' + esc(String(data.note).replace(/^Not validated yet\.\s*/, '')) + '</div>';
+      if (data.note) h += '<div class="note-box"><strong>' + esc(T('night.not_validated')) + '</strong> ' + esc(String(data.note).replace(/^Not validated yet\.\s*/, '')) + '</div>';
       el.innerHTML = h;
     }
 

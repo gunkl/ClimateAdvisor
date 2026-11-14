@@ -4,6 +4,7 @@
 (function () {
   'use strict';
 
+  var T = window.CA_I18N.t;
   var ND = window.ND = { unit: 'fahrenheit', status: null, zone: null, active: null, mods: {}, handlers: {} };
   var ZONE_KEY = 'climate_advisor_selected_zone'; // same key as classic and the accuracy page
   var PREF_KEY = 'climate_advisor_dashboard';     // 'new' | 'classic' (remembered per browser/user)
@@ -44,7 +45,7 @@
   };
   ND.toast = function (msg, kind) {
     var t = ND.$('toast');
-    t.textContent = (kind === 'err' ? 'Error: ' : '') + msg;
+    t.textContent = (kind === 'err' ? T('core.error_prefix') : '') + msg;
     t.hidden = false;
     clearTimeout(ND._toastT);
     ND._toastT = setTimeout(function () { t.hidden = true; }, kind === 'err' ? 7000 : 3500);
@@ -59,14 +60,14 @@
   };
   ND.copy = function (text) {
     try {
-      navigator.clipboard.writeText(text).then(function () { ND.toast('Copied'); }, function () { fallbackCopy(text); });
+      navigator.clipboard.writeText(text).then(function () { ND.toast(T('core.copied')); }, function () { fallbackCopy(text); });
     } catch (e) { fallbackCopy(text); }
   };
   function fallbackCopy(text) {
     var ta = document.createElement('textarea');
     ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
     document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); ND.toast('Copied'); } catch (e) { ND.toast('Copy failed', 'err'); }
+    try { document.execCommand('copy'); ND.toast(T('core.copied')); } catch (e) { ND.toast(T('core.copy_failed'), 'err'); }
     document.body.removeChild(ta);
   }
   ND.md = function (text) { // the classic report renderer: escaped lines, pipe tables, **bold**
@@ -136,7 +137,7 @@
   // GET zones (names no zone by design, raises nothing) and a zone is picked first; with no zone loaded at all
   // (Climate Advisor still starting) the request is not sent. An unscoped request raises the "Ambiguous zone
   // selection" Repairs card (owner's rule, Issue #1418), so the dashboard never sends one.
-  ND.STARTING = 'Climate Advisor is starting';
+  ND.STARTING = T('core.starting');
   function startingError() { var e = new Error(ND.STARTING); e.status = 503; e.starting = true; return e; }
   ND.scopedPath = async function (path) {
     if (!ND.zone) await ND.ensureZone();
@@ -251,17 +252,17 @@
       if (recovered && !ND._booting) ND.emit('refresh'); // the tab's own loads failed while Climate Advisor was starting
       return data;
     } catch (e) {
-      if (e.status === 400 || e.status === 401 || e.message === 'HTTP 401') return statusFailed('Could not load status: ' + e.message);
+      if (e.status === 400 || e.status === 401 || e.message === 'HTTP 401') return statusFailed(T('core.could_not_load_status') + e.message);
       var before = ND.zone;
       try { await ND.refreshZones(); } catch (e2) { /* zones not served yet: still starting */ }
       if (attempt < ND.STATUS_BACKOFF_MS.length) {
-        if (!ND.status) { ND.$('health-text').textContent = 'Connecting to Climate Advisor…'; }
+        if (!ND.status) { ND.$('health-text').textContent = T('core.connecting'); }
         // a stored zone that is no longer listed was just re-picked: retry it now; the same zone waits
         await wait(ND.zone !== before && ND.zone ? 0 : ND.STATUS_BACKOFF_MS[attempt]);
         return ND.loadStatus(attempt + 1);
       }
       var starting = e.starting || !e.status || e.status === 404 || e.status >= 500;
-      return statusFailed(starting ? ND.STARTING + '. This page keeps trying every minute.' : 'Could not load status: ' + e.message);
+      return statusFailed(starting ? ND.STARTING + T('core.keeps_trying') : T('core.could_not_load_status') + e.message);
     }
   };
   function statusFailed(text) {
@@ -275,9 +276,9 @@
   function renderHealth(s) {
     var ok = s.coordinator_healthy !== false;
     ND.$('health').className = 'health ' + (ok ? 'ok' : 'bad');
-    ND.$('health-text').textContent = (ok ? 'Healthy' : 'Unavailable') + (s.version ? ' · v' + s.version : '') +
-      ' · automation ' + (s.automation_enabled ? 'on' : 'off');
-    ND.$('menu-toggle-automation').textContent = s.automation_enabled ? 'Pause all automation' : 'Resume automation';
+    ND.$('health-text').textContent = (ok ? T('core.healthy') : T('core.unavailable')) + (s.version ? ' · v' + s.version : '') +
+      ' · ' + T('core.automation') + ' ' + (s.automation_enabled ? T('core.on') : T('core.off'));
+    ND.$('menu-toggle-automation').textContent = s.automation_enabled ? T('nav.pause_automation') : T('core.resume_automation');
   }
 
   function banner(level, title, text, actions, tabs, id) {
@@ -286,48 +287,49 @@
   ND.buildBanners = function (s, extra) {
     var b = [];
     if (s.coordinator_healthy === false) {
-      b.push(banner('bad', 'Climate Advisor is unavailable', 'Since ' + (s.stale_since ? ND.fmtTime(s.stale_since) : 'an unknown time') + ': ' + (s.last_error || 'unknown error')));
+      b.push(banner('bad', T('core.ca_unavailable'), T('core.since') + ' ' + (s.stale_since ? ND.fmtTime(s.stale_since) : T('core.unknown_time')) + ': ' + (s.last_error || T('core.unknown_error'))));
     }
     if (s.automation_enabled === false) {
-      b.push(banner('warn', 'Automation is off', 'Climate Advisor is watching only (observe-only): it will not change the thermostat or fan.',
-        [{ label: 'Turn automation on', act: 'toggle_automation' }]));
+      b.push(banner('warn', T('core.automation_off'), T('core.automation_off_text'),
+        [{ label: T('core.turn_automation_on'), act: 'toggle_automation' }]));
     }
     if (s.manual_override_active || s.grace_active) {
       var graceOnly = !s.manual_override_active && !s.fan_override_active && s.grace_active;
-      b.push(banner('info', graceOnly ? 'A grace period is active' : 'You changed the thermostat',
-        'Climate Advisor is hands-off until it ends.', [{ label: graceOnly ? 'End grace period' : 'Cancel override', act: 'cancel_override' }]));
+      b.push(banner('info', graceOnly ? T('core.grace_active') : T('core.you_changed_thermostat'),
+        T('core.hands_off_until_ends'), [{ label: graceOnly ? T('core.end_grace') : T('core.cancel_override'), act: 'cancel_override' }]));
     }
     if (s.fan_override_active || s.fan_off_hold_active) {
       var fanHold = !s.fan_override_active && s.fan_off_hold_active;
-      b.push(banner('info', fanHold ? 'Fan-off pause is active' : 'Fan override is active', '',
-        [{ label: fanHold ? 'End fan-off pause' : 'Cancel fan override', act: 'cancel_fan_override' }]));
+      b.push(banner('info', fanHold ? T('core.fan_off_pause_active') : T('core.fan_override_active'), '',
+        [{ label: fanHold ? T('core.end_fan_off_pause') : T('core.cancel_fan_override'), act: 'cancel_fan_override' }]));
     }
     if (s.paused_by_door) {
-      b.push(banner('warn', 'Paused: a door or window is open', s.pause_suppressed_classification_text || '', [{ label: 'Resume from pause', act: 'resume_from_pause' }]));
+      b.push(banner('warn', T('core.paused_door_window'), s.pause_suppressed_classification_text || '', [{ label: T('core.resume_from_pause'), act: 'resume_from_pause' }]));
     }
     if (s.occupancy_mode === 'vacation' || s.occupancy_mode === 'away') {
-      b.push(banner('info', s.occupancy_mode === 'vacation' ? 'Vacation mode' : 'Away', 'Climate Advisor is using the ' + s.occupancy_mode + ' temperatures.'));
+      b.push(banner('info', s.occupancy_mode === 'vacation' ? T('core.vacation_mode') : T('core.away'),
+        T('core.using_temperatures', { mode: s.occupancy_mode === 'vacation' ? T('core.vacation_mode_lc') : T('core.away_lc') })));
     }
     (s.entity_health_issues || []).forEach(function (i) {
       var weather = /weather/i.test(i.friendly_name || '');
-      b.push(banner('warn', (weather ? 'Weather source problem: ' : 'Sensor problem: ') + (i.friendly_name || i.entity_id),
-        (i.entity_id ? i.entity_id + ' is ' : 'is ') + (i.status || 'unavailable') + (i.detail ? ': ' + i.detail : '')));
+      b.push(banner('warn', (weather ? T('core.weather_source_problem') : T('core.sensor_problem')) + (i.friendly_name || i.entity_id),
+        (i.entity_id ? i.entity_id + ' ' + T('core.is') + ' ' : T('core.is') + ' ') + (i.status || T('core.unavailable_lc')) + (i.detail ? ': ' + i.detail : '')));
     });
     (s.contact_sensors || []).filter(function (c) { return c.unreadable; }).forEach(function (c) {
-      b.push(banner('warn', 'Sensor problem: ' + c.friendly_name, 'Not responding; last read ' + (c.last_reading || 'never') + ', treated as ' + c.treated_as + '.'));
+      b.push(banner('warn', T('core.sensor_problem') + c.friendly_name, T('core.not_responding', { reading: c.last_reading || T('core.never'), treated_as: c.treated_as })));
     });
     (s.invariant_violations || []).concat(s.hvac_control_issues || []).forEach(function (v) {
-      b.push(banner('bad', 'Problem', v.detail));
+      b.push(banner('bad', T('core.problem'), v.detail));
     });
     var ps = s.promise_summary;
     if (ps && ps.total_hits) {
-      b.push(banner('info', ps.total_hits + ' household promise' + (ps.total_hits === 1 ? '' : 's') + ' missed in the last 30 days',  // Issue #1490 (was mislabelled '24 h')
+      b.push(banner('info', T(ps.total_hits === 1 ? 'core.promise_missed_1' : 'core.promise_missed_n', { n: ps.total_hits }),  // Issue #1490 (was mislabelled '24 h')
         (ps.promises || []).map(function (p) { return String(p.label || p.promise).replace(/^\d+: /, '') + ' ×' + p.hits; }).join(' · '),
-        [{ label: 'Open in Analysis', href: '#analysis' }], ['status'], 'promises'));
+        [{ label: T('core.open_in_analysis'), href: '#analysis' }], ['status'], 'promises'));
     }
     if (extra && extra.reload_needed) {
-      b.push(banner('warn', 'Saved settings are waiting for a reload', 'Reload Climate Advisor in Home Assistant to apply them.',
-        [{ label: 'Open Home Assistant', href: HA_CONFIG_URL, blank: true }]));
+      b.push(banner('warn', T('core.reload_waiting'), T('core.reload_waiting_text'),
+        [{ label: T('core.open_ha'), href: HA_CONFIG_URL, blank: true }]));
     }
     return b;
   };
@@ -370,7 +372,7 @@
     if (btn) btn.disabled = true;
     try {
       var data = await ND.post(action, body);
-      ND.toast(data.message || 'Done');
+      ND.toast(data.message || T('core.done'));
       ND.emit('action', action);
       if (action === 'toggle_automation' || action === 'cancel_override' || action === 'cancel_fan_override' || action === 'resume_from_pause') ND.emit('state-changed');
       setTimeout(function () { ND.loadStatus(); }, 700);
@@ -399,7 +401,7 @@
       if (!it) return;
       close(true);
       var a = it.getAttribute('data-action');
-      if (a === 'refresh') { ND.loadStatus(); ND.loadExtra(); ND.emit('refresh'); ND.toast('Refreshed'); }
+      if (a === 'refresh') { ND.loadStatus(); ND.loadExtra(); ND.emit('refresh'); ND.toast(T('core.refreshed')); }
       else ND.runAction(a);
     });
   }

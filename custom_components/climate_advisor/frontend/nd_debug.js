@@ -4,11 +4,14 @@
    tests/test_new_dashboard.py fails when get_debug_state() gains a key that is in none of these lists (Issue #1399). */
 (function () {
   'use strict';
+  var T = window.CA_I18N.t;
   var $ = ND.$, esc = ND.esc;
   var A = null, E = null, EV = null, evOff = {}, loaded = false, timer = null;
 
   // Group -> automation_state keys. 'Today's classification', 'Learning pipeline', 'Prediction engines' and 'Last thermostat
   // command' are built from nested/other payloads below. Keep in sync with tests/test_new_dashboard.py.
+  // Group titles are translated for display (T(...)); the English string is kept as the lookup/matching key everywhere
+  // else in this file (buildGroups, the splice/push titles below), so GROUPS[i][0] itself must stay in English.
   var GROUPS = [
     ['Control', ['automation_enabled', 'last_action_time', 'last_action_reason', 'next_automation_action', 'next_automation_time', 'decision_lock_holder', 'decision_lock_held_seconds', 'startup_coalesce_active', 'startup_coalesce_seconds_remaining']],
     ['Manual override & grace', ['manual_override_active', 'manual_override_mode', 'manual_override_time', 'manual_grace_duration', 'grace_active', 'grace_end_time', 'grace_stuck', 'last_resume_source', 'resumed_from_pause']],
@@ -21,6 +24,13 @@
     ['Prediction engines (v4 shadow)', ['v4_model', 'control_feed']],
     ['Plan', ['operation_timeline']]
   ];
+  var GROUP_TITLE_KEY = {
+    'Control': 'dbg.g_control', 'Manual override & grace': 'dbg.g_override_grace', 'Doors, windows & pause': 'dbg.g_doors_pause',
+    'Fan': 'dbg.g_fan', 'Natural ventilation & economizer': 'dbg.g_natvent', 'Comfort edge': 'dbg.g_comfort_edge',
+    'Occupancy': 'dbg.g_occupancy', 'Units': 'dbg.g_units', 'Prediction engines': 'dbg.g_engines', 'Plan': 'dbg.g_plan',
+    'Today’s classification': 'dbg.g_classification', 'Learning pipeline': 'dbg.g_learning_pipeline', 'Last thermostat command': 'dbg.g_last_command'
+  };
+  function gTitle(title) { return GROUP_TITLE_KEY[title] ? T(GROUP_TITLE_KEY[title]) : title; }
   var NESTED = { classification: 1, thermal_pipeline: 1 };      // expanded into their own groups
   var MOVED = { promise_summary: 'Analysis' };                    // shown in Analysis, not repeated here
   // Issue #1399: keys deliberately not shown on this tab; their full data is in Download diagnostics (this tab's button
@@ -283,12 +293,12 @@
         }
       }
       if (g[0] === 'Plan' && A && 'operation_timeline' in A) rows = rowsOf(planRows(A.operation_timeline));
-      groups.push({ title: g[0] === 'Prediction engines (v4 shadow)' ? 'Prediction engines' : g[0], rows: rows });
+      groups.push({ title: gTitle(g[0].indexOf('Prediction engines') === 0 ? 'Prediction engines' : g[0]), rows: rows });
     });
-    if (A && A.classification) { groups.splice(8, 0, { title: 'Today’s classification', rows: classificationRows(A.classification) }); }
+    if (A && A.classification) { groups.splice(8, 0, { title: gTitle('Today’s classification'), rows: classificationRows(A.classification) }); }
     if (A && A.thermal_pipeline) {
       var tp = A.thermal_pipeline;
-      groups.push({ title: 'Learning pipeline', rows: (tp.pending || []).map(function (p) {
+      groups.push({ title: gTitle('Learning pipeline'), rows: (tp.pending || []).map(function (p) {
         return row('pending ' + p.obs_type, p.status + ' · ' + p.elapsed_minutes + ' min · ' + p.sample_count + ' samples · indoor Δ' + ND.num(ND.dFToDisp(p.indoor_delta_f), 2) + '° · outdoor ' + ND.num(ND.fToDisp(p.outdoor_f), 1) + ND.sym(ND.unit));
       }).concat(Object.keys(tp.rejection_log_counts || {}).map(function (k) {
         var n = tp.rejection_log_counts[k], cap = tp.rejection_log_cap;
@@ -296,7 +306,7 @@
       })) });
     }
     var lc = EV && EV.diagnostics && EV.diagnostics.last_command;
-    if (lc) groups.push({ title: 'Last thermostat command', rows: Object.keys(lc).map(function (k) { return row(k, fmt(lc[k])); }) });
+    if (lc) groups.push({ title: gTitle('Last thermostat command'), rows: Object.keys(lc).map(function (k) { return row(k, fmt(lc[k])); }) });
     return groups;
   }
 
@@ -308,11 +318,11 @@
       var rows = g.rows.filter(function (r) { return !q || (r.k + ' ' + r.v).toLowerCase().indexOf(q) >= 0; });
       if (!rows.length) return;
       total += rows.length;
-      html += '<section class="card" style="margin:0 0 10px"><h2 style="font-size:14px">' + esc(g.title) + ' <span class="sub">' + rows.length + ' fields</span></h2><table class="field-table"><tbody>' +
+      html += '<section class="card" style="margin:0 0 10px"><h2 style="font-size:14px">' + esc(g.title) + ' <span class="sub">' + esc(T('dbg.n_fields', { n: rows.length })) + '</span></h2><table class="field-table"><tbody>' +
         rows.map(function (r) { return '<tr><td class="k"><span class="kn">' + esc(r.k) + '</span>' + (r.hint ? '<span class="hint">' + esc(r.hint) + '</span>' : '') + '</td><td class="mono">' + esc(r.v) + '</td></tr>'; }).join('') + '</tbody></table></section>';
     });
-    host.innerHTML = html || '<div class="empty">No field matches the filter.</div>';
-    $('dbg-count').textContent = total + ' fields';
+    host.innerHTML = html || '<div class="empty">' + esc(T('dbg.no_field_matches')) + '</div>';
+    $('dbg-count').textContent = T('dbg.n_fields', { n: total });
     renderEvents();
   }
 
@@ -328,9 +338,9 @@
       var d = Object.assign({}, e); delete d.time; delete d.type;
       return '<tr><td style="white-space:nowrap;color:var(--ink2)">' + esc(ND.fmtTime(e.time)) + '</td><td>' + esc(String(e.type).replace(/_/g, ' ')) + '</td><td class="mono" style="color:var(--ink2);font-size:12px">' +
         esc(Object.keys(d).map(function (k) { return k + '=' + (d[k] && typeof d[k] === 'object' ? fmt(d[k]) : d[k]); }).join('  ')) + '</td></tr>';
-    }).join('') : '<tr><td colspan="3" class="empty">' + (EV ? 'No events in this window.' : 'Event log unavailable.') + '</td></tr>';
-    $('dbg-ev-count').textContent = 'last ' + $('dbg-ev-hours').selectedOptions[0].textContent + ' · ' + rows.length + ' of ' + evs.length;
-    if (EV && EV.is_truncated) $('dbg-ev-count').textContent += ' · older events were not kept';
+    }).join('') : '<tr><td colspan="3" class="empty">' + esc(EV ? T('dbg.no_events_window') : T('dbg.event_log_unavailable')) + '</td></tr>';
+    $('dbg-ev-count').textContent = T('dbg.last_n_of', { window: $('dbg-ev-hours').selectedOptions[0].textContent, shown: rows.length, total: evs.length });
+    if (EV && EV.is_truncated) $('dbg-ev-count').textContent += ' · ' + T('dbg.older_not_kept');
   }
 
   async function loadEvents() {
@@ -341,26 +351,26 @@
     var r = await Promise.allSettled([ND.api('automation_state'), ND.api('engines'), ND.api('event_log?hours=' + $('dbg-ev-hours').value)]);
     A = r[0].status === 'fulfilled' ? r[0].value : null; E = r[1].status === 'fulfilled' ? r[1].value : null; EV = r[2].status === 'fulfilled' ? r[2].value : null;
     loaded = true;
-    if (!A) $('dbg-groups').innerHTML = '<div class="err">Failed to load: ' + esc(r[0].reason ? r[0].reason.message : 'no data') + '</div>';
+    if (!A) $('dbg-groups').innerHTML = '<div class="err">' + esc(T('dbg.failed_load', { msg: r[0].reason ? r[0].reason.message : T('set.no_data') })) + '</div>';
     else render();
     loadBacktest();
   }
 
   // ---------- downloads (same bundle as classic's Download Logs) ----------
   async function downloadLogs() {
-    var b = $('dbg-dl-logs'), orig = b.textContent; b.textContent = 'Downloading...'; b.disabled = true;
+    var b = $('dbg-dl-logs'), orig = b.textContent; b.textContent = T('dbg.downloading'); b.disabled = true;
     try {
       var r = await Promise.allSettled([ND.api('event_log?hours=168'), ND.api('investigation_reports')]);
       var bundle = { downloaded_at: new Date().toISOString(), events: r[0].status === 'fulfilled' ? (r[0].value.events || []) : [], diagnostics: r[0].status === 'fulfilled' ? (r[0].value.diagnostics || null) : null };
       if (r[1].status === 'fulfilled') bundle.investigation_reports = r[1].value;
       ND.download(JSON.stringify(bundle, null, 2), 'climate-advisor-logs-' + new Date().toISOString().slice(0, 10) + '.json', 'application/json');
-    } catch (e) { ND.toast('Failed to download logs: ' + e.message, 'err'); } finally { b.textContent = orig; b.disabled = false; }
+    } catch (e) { ND.toast(T('dbg.failed_download_logs', { msg: e.message }), 'err'); } finally { b.textContent = orig; b.disabled = false; }
   }
   async function downloadDiagnostics() {
     try {
       var ev = await ND.api('event_log?hours=2');
       ND.download(JSON.stringify({ downloaded_at: new Date().toISOString(), diagnostics: ev.diagnostics || null, automation_state: A }, null, 2), 'climate-advisor-diagnostics-' + new Date().toISOString().slice(0, 10) + '.json', 'application/json');
-    } catch (e) { ND.toast('Failed to download diagnostics: ' + e.message, 'err'); }
+    } catch (e) { ND.toast(T('dbg.failed_download_diag', { msg: e.message }), 'err'); }
   }
 
   // ---------- backtest lab ----------
@@ -369,16 +379,16 @@
     lead = lead || (host.getAttribute('data-lead') || '4h'); range = range || (host.getAttribute('data-range') || '7d');
     host.setAttribute('data-lead', lead); host.setAttribute('data-range', range);
     var opt = function (list, cur) { return list.map(function (x) { return '<option' + (x === cur ? ' selected' : '') + '>' + x + '</option>'; }).join(''); };
-    var head = '<div class="row"><label class="small">Look-ahead <select id="bt-lead" class="ctl">' + opt(['1h', '4h', '12h', '24h'], lead) + '</select></label>' +
-      '<label class="small">Range <select id="bt-range" class="ctl">' + opt(['24h', '3d', '7d', '30d'], range) + '</select></label><button type="button" class="btn small" id="bt-run">Run</button></div>';
+    var head = '<div class="row"><label class="small">' + esc(T('dbg.look_ahead')) + ' <select id="bt-lead" class="ctl">' + opt(['1h', '4h', '12h', '24h'], lead) + '</select></label>' +
+      '<label class="small">' + esc(T('dbg.range')) + ' <select id="bt-range" class="ctl">' + opt(['24h', '3d', '7d', '30d'], range) + '</select></label><button type="button" class="btn small" id="bt-run">' + esc(T('dbg.run')) + '</button></div>';
     try {
       var d = await ND.api('prediction_accuracy?lead=' + lead + '&range=' + range), s = d.stats || {}, u = d.unit || ND.sym(ND.unit), g = d.gate_summary || {}, m = d.model || {};
       var tile = function (l, v) { return '<div class="tile"><div class="l">' + esc(l) + '</div><div class="v">' + esc(v) + '</div></div>'; };
       var f = function (x) { return x == null ? '—' : Number(x).toFixed(2) + ' ' + u; };
-      host.innerHTML = head + '<div class="note" style="margin:8px 0">' + (g.scored != null ? 'v4 beats both v3 and "no change" in ' + g.passed + ' of ' + g.scored + ' scored rows over the last ' + (g.window_days || 30) + ' days, live (' + g.total + ' rows in all).' : 'Nothing has been scored yet.') + ' Main prediction on Status: ' + esc(d.primary_engine || 'v4') + '.' +
-        ' Model: ' + esc(m.confidence || 'n/a') + (m.span_days != null ? ', ' + m.span_days + ' days of data' : '') + (m.fitted_at ? ', fitted ' + esc(ND.fmtDateTime(m.fitted_at)) : '') + '.</div>' +
-        '<div class="tiles">' + tile('Points scored', s.n != null ? String(s.n) : '—') + (d.primary_engine !== 'v3' ? tile('v4 average miss', f(s.v4_mae)) + tile('v3 average miss', f(s.v3_mae)) : tile('v3 average miss', f(s.v3_mae)) + tile('v4 average miss', f(s.v4_mae))) + tile('"No change" miss', f(s.flat_mae)) + (d.primary_engine !== 'v3' ? tile('v4 bias', f(s.v4_bias)) + tile('v3 bias', f(s.v3_bias)) : tile('v3 bias', f(s.v3_bias)) + tile('v4 bias', f(s.v4_bias))) + '</div>';
-    } catch (e) { host.innerHTML = head + '<div class="empty" style="margin-top:8px">Backtest data is not available yet (' + esc(e.message) + ').</div>'; }
+      host.innerHTML = head + '<div class="note" style="margin:8px 0">' + esc(g.scored != null ? T('dbg.v4_beats', { passed: g.passed, scored: g.scored, days: g.window_days || 30, total: g.total }) : T('dbg.nothing_scored')) + ' ' + esc(T('dbg.main_prediction', { engine: d.primary_engine || 'v4' })) +
+        ' ' + esc(T('dbg.model_line', { conf: m.confidence || T('dbg.na'), span: m.span_days != null ? T('dbg.span_days', { n: m.span_days }) : '', fitted: m.fitted_at ? T('dbg.fitted_at', { t: ND.fmtDateTime(m.fitted_at) }) : '' })) + '</div>' +
+        '<div class="tiles">' + tile(T('dbg.points_scored'), s.n != null ? String(s.n) : '—') + (d.primary_engine !== 'v3' ? tile(T('dbg.v4_avg_miss'), f(s.v4_mae)) + tile(T('dbg.v3_avg_miss'), f(s.v3_mae)) : tile(T('dbg.v3_avg_miss'), f(s.v3_mae)) + tile(T('dbg.v4_avg_miss'), f(s.v4_mae))) + tile(T('dbg.no_change_miss'), f(s.flat_mae)) + (d.primary_engine !== 'v3' ? tile(T('dbg.v4_bias'), f(s.v4_bias)) + tile(T('dbg.v3_bias'), f(s.v3_bias)) : tile(T('dbg.v3_bias'), f(s.v3_bias)) + tile(T('dbg.v4_bias'), f(s.v4_bias))) + '</div>';
+    } catch (e) { host.innerHTML = head + '<div class="empty" style="margin-top:8px">' + esc(T('dbg.backtest_unavailable', { msg: e.message })) + '</div>'; }
   }
 
   function init() {

@@ -4,6 +4,7 @@
    activity_record / ai_investigate (report generation), delete_report, submit_github_issue. */
 (function () {
   'use strict';
+  var T = window.CA_I18N.t;
   var $ = ND.$, esc = ND.esc;
   var D = {};              // last loaded payloads
   var currentReport = null, activityTable = null;
@@ -27,12 +28,15 @@
     passive_decay: 'Passive windows', vent_window_decay: 'Window ventilation', vent_fan_decay: 'Fan/WHF ventilation', solar_gain: 'Solar readings',
     hvac_heat: 'Heating cycles', hvac_cool: 'Cooling cycles', fan_only_decay: 'Fan-only windows (legacy)', ventilated_decay: 'Ventilated windows (legacy)'
   };
-  var SECTIONS = [
-    { key: 'activity_summary', label: 'Activity summary' }, { key: 'incongruities', label: 'Incongruities found' },
-    { key: 'data_quality', label: 'Data quality issues' }, { key: 'errors_warnings', label: 'System errors / warnings' },
-    { key: 'hypotheses', label: 'Hypotheses' }, { key: 'recommended_actions', label: 'Recommended actions' },
-    { key: 'assumptions', label: 'Assumptions & confidence' }
-  ];
+  function sections() {
+    return [
+      { key: 'activity_summary', label: T('an.sec_activity_summary') }, { key: 'incongruities', label: T('an.sec_incongruities') },
+      { key: 'data_quality', label: T('an.sec_data_quality') }, { key: 'errors_warnings', label: T('an.sec_errors_warnings') },
+      { key: 'hypotheses', label: T('an.sec_hypotheses') }, { key: 'recommended_actions', label: T('an.sec_recommended_actions') },
+      { key: 'assumptions', label: T('an.sec_assumptions') }
+    ];
+  }
+  var SECTIONS = sections();
   var HEADER_MAP = {
     'ACTIVITY SUMMARY': 'activity_summary', 'INCONGRUITIES FOUND': 'incongruities', 'DATA QUALITY ISSUES': 'data_quality',
     'SYSTEM ERRORS / WARNINGS': 'errors_warnings', 'HYPOTHESES': 'hypotheses', 'RECOMMENDED ACTIONS': 'recommended_actions',
@@ -45,7 +49,7 @@
   function span(a, b) { return a ? ND.fmtTime(a) + '–' + ND.fmtTime(b) : '—'; }
   function r0(v) { return v == null ? '—' : String(Math.round(v)); }
   function tdisp(f, d) { return f == null ? '—' : ND.num(ND.fToDisp(f), d == null ? 0 : d); }
-  function err(el, msg) { el.innerHTML = '<div class="err">Failed to load: ' + esc(msg) + '</div>'; }
+  function err(el, msg) { el.innerHTML = '<div class="err">' + esc(T('dbg.failed_load', { msg: msg })) + '</div>'; }
 
   // ---------- load ----------
   async function load() {
@@ -76,7 +80,7 @@
   }
   function renderKpis() {
     var L = D.learning, host = $('an-kpis');
-    if (!L) { host.innerHTML = '<div class="tile"><div class="l">Headline numbers</div><div class="err">' + esc(D.errs[0] || 'No data') + '</div></div>'; return; }
+    if (!L) { host.innerHTML = '<div class="tile"><div class="l">' + esc(T('analysis.headline_numbers')) + '</div><div class="err">' + esc(D.errs[0] || T('an.no_data')) + '</div></div>'; return; }
     var c = L.compliance || {}, active = c.status === 'active';
     var ps = ND.status && ND.status.promise_summary;
     var today = L.today_record ? L.today_record.manual_overrides || 0 : 0;
@@ -84,16 +88,16 @@
     var wd = c.window_days || Math.min(14, c.days_recorded || 0), last = 'last ' + wd + ' days';
     var pe = primaryMiss(), lastHit = promiseLastHit(ps);
     var tiles = [
-      { l: 'Comfort score', v: active ? pct(c.comfort_score) : '—', n: last + ' (' + (c.days_recorded || 0) + ' recorded)',
+      { l: T('an.kpi_comfort_score'), v: active ? pct(c.comfort_score) : '—', n: last + ' (' + (c.days_recorded || 0) + ' recorded)',
         t: '% of time the indoor temperature stayed within the target range in effect, over the last ' + wd + ' days' },
-      { l: 'Window advice followed', v: active ? pct(c.window_compliance) : '—', n: c.window_compliance_denominator != null ? c.window_compliance_denominator + ' days with advice, ' + last : '' },
-      { l: 'Runtime per day', v: active ? Math.round(c.avg_daily_hvac_runtime_minutes || 0) + ' min' : '—', n: 'average HVAC, ' + last +
+      { l: T('an.kpi_window_advice'), v: active ? pct(c.window_compliance) : '—', n: c.window_compliance_denominator != null ? c.window_compliance_denominator + ' days with advice, ' + last : '' },
+      { l: T('an.kpi_runtime'), v: active ? Math.round(c.avg_daily_hvac_runtime_minutes || 0) + ' min' : '—', n: 'average HVAC, ' + last +
         (active && c.avg_daily_thermostat_fan_only_runtime_minutes ? ', fan-only ' + Math.round(c.avg_daily_thermostat_fan_only_runtime_minutes) + ' min' : '') },
-      { l: 'Manual changes', v: active ? String(c.total_manual_overrides || 0) : '—', n: last + ' · ' + today + ' today' },
+      { l: T('an.kpi_manual_changes'), v: active ? String(c.total_manual_overrides || 0) : '—', n: last + ' · ' + today + ' today' },
       // Issue #1490: misses over the last 30 days only (older misses age out), not a lifetime total
-      { l: 'Promises missed', v: ps ? String(ps.total_hits || 0) : '0', n: ps && ps.total_hits ? 'last 30 days' + (lastHit ? ' · last ' + ND.fmtDateTime(lastHit) : '') : 'none in the last 30 days',
+      { l: T('an.kpi_promises_missed'), v: ps ? String(ps.total_hits || 0) : '0', n: ps && ps.total_hits ? 'last 30 days' + (lastHit ? ' · last ' + ND.fmtDateTime(lastHit) : '') : 'none in the last 30 days',
         t: 'Times a household promise was found broken over the last 30 days; each miss drops off 30 days after the day it happened' },
-      { l: 'Prediction error, 4 h', v: pe ? ND.num(pe.mae, 1) + '°' : '—',
+      { l: T('an.kpi_prediction_error'), v: pe ? ND.num(pe.mae, 1) + '°' : '—',
         n: pe ? pe.engine + ', last 24 h · runs ' + (pe.bias > 0 ? '+' : '') + ND.num(pe.bias, 1) + '° ' + (pe.bias > 0 ? 'warm' : 'cool') : 'not enough data yet',
         t: 'How far the main prediction 4 hours ahead was from what happened, over the last 24 hours (Debug > Backtest for more)' }
     ];
@@ -197,7 +201,7 @@
         '</td><td class="num">' + esc(r[1](t) === '—' && !t ? 'No record yet today' : r[1](t)) + '</td><td class="num">' + esc(r[2](n)) + '</td></tr>';
     });
     host.innerHTML = h + '</tbody></table>';
-    $('an-days-sub').textContent = 'Tomorrow shows what the plan knows today; blank cells fill in as the plan grows.';
+    $('an-days-sub').textContent = T('an.days_sub');
     var c = L.compliance || {};
     $('an-compliance').textContent = c.status === 'active' ? 'Over the last ' + (c.window_days || Math.min(14, c.days_recorded)) + ' of ' + c.days_recorded + ' recorded days: window compliance ' + pct(c.window_compliance) +
       ', average HVAC runtime ' + Math.round(c.avg_daily_hvac_runtime_minutes || 0) + ' min/day, average fan-only ' + Math.round(c.avg_daily_thermostat_fan_only_runtime_minutes || 0) +
@@ -309,7 +313,7 @@
   function renderControl() {
     var q = cq24(), host = $('an-cq'), pe = $('an-pe');
     if (!q) {
-      host.innerHTML = '<div class="empty">' + (D.errs[2] ? esc(D.errs[2]) : 'Not enough history yet.') + '</div>'; pe.innerHTML = '<div class="empty">Not available yet.</div>';
+      host.innerHTML = '<div class="empty">' + (D.errs[2] ? esc(D.errs[2]) : esc(T('an.not_enough_history'))) + '</div>'; pe.innerHTML = '<div class="empty">' + esc(T('an.not_available_yet')) + '</div>';
     } else {
       var hr = q.runtime.heating, cl = q.runtime.cooling;
       var items = [
@@ -337,7 +341,7 @@
     pr.innerHTML = ps && ps.promises && ps.promises.length ? ps.promises.map(function (p) {
       return '<div style="font-size:13px;display:flex;justify-content:space-between;gap:8px;border-top:1px solid var(--rule);padding-top:5px;margin-bottom:5px"><span>' +
         esc(String(p.label || p.promise).replace(/^(\d+): /, '#$1 ')) + '</span><span style="color:var(--ink2)">×' + p.hits + (p.last_hit ? ' · last ' + esc(ND.fmtDateTime(p.last_hit)) : '') + '</span></div>';
-    }).join('') : '<div class="empty">None missed in the last 30 days.</div>';
+    }).join('') : '<div class="empty">' + esc(T('an.none_missed_30d')) + '</div>';
   }
 
   // ---------- suggestions (respond_suggestion, exactly as classic) ----------
@@ -345,20 +349,20 @@
     var host = $('an-suggestions'), L = D.learning;
     if (!L) { err(host, D.errs[0] || 'no data'); return; }
     var list = L.suggestions || [];
-    if (!list.length) { host.innerHTML = '<div class="empty">No suggestions right now. CA proposes setting changes here when a pattern repeats (for example, comfort misses on 5+ days).</div>'; return; }
+    if (!list.length) { host.innerHTML = '<div class="empty">' + esc(T('an.no_suggestions')) + '</div>'; return; }
     host.innerHTML = list.map(function (s) {
       var k = esc(s.key);
       return '<div class="kv" id="sug-' + k + '" style="grid-template-columns:1fr"><div>' + esc(s.text) + '</div><div class="row" id="sug-actions-' + k + '">' +
-        '<button type="button" class="btn small primary" data-sug="' + k + '" data-act="accept">Accept</button>' +
-        '<button type="button" class="btn small" data-sug="' + k + '" data-act="dismiss">Dismiss</button></div></div>';
+        '<button type="button" class="btn small primary" data-sug="' + k + '" data-act="accept">' + esc(T('an.accept')) + '</button>' +
+        '<button type="button" class="btn small" data-sug="' + k + '" data-act="dismiss">' + esc(T('an.dismiss')) + '</button></div></div>';
     }).join('');
   }
   async function respond(key, action) {
     var box = $('sug-actions-' + key);
     try {
       await ND.api('respond_suggestion', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: action, suggestion_key: key }) });
-      if (box) box.innerHTML = '<span class="badge ok">' + (action === 'accept' ? 'Accepted' : 'Dismissed') + '</span> <span class="small">Was this diagnosis accurate?</span> ' +
-        '<button type="button" class="btn small" data-sug="' + esc(key) + '" data-fb="correct">Correct</button> <button type="button" class="btn small" data-sug="' + esc(key) + '" data-fb="incorrect">Incorrect</button>';
+      if (box) box.innerHTML = '<span class="badge ok">' + (action === 'accept' ? esc(T('an.accepted')) : esc(T('an.dismissed'))) + '</span> <span class="small">' + esc(T('an.was_accurate')) + '</span> ' +
+        '<button type="button" class="btn small" data-sug="' + esc(key) + '" data-fb="correct">' + esc(T('an.correct')) + '</button> <button type="button" class="btn small" data-sug="' + esc(key) + '" data-fb="incorrect">' + esc(T('an.incorrect')) + '</button>';
       setTimeout(function () { if (D.learning) { D.learning.suggestions = (D.learning.suggestions || []).filter(function (s) { return s.key !== key; }); renderSuggestions(); } }, 8000);
     } catch (e) { ND.toast(e.message, 'err'); }
   }
@@ -366,7 +370,7 @@
     var box = $('sug-actions-' + key);
     try {
       await ND.api('respond_suggestion', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: verdict, suggestion_key: key }) });
-      if (box) box.innerHTML = '<span class="badge ok">Feedback recorded</span>';
+      if (box) box.innerHTML = '<span class="badge ok">' + esc(T('an.feedback_recorded')) + '</span>';
       setTimeout(function () { if (D.learning) { D.learning.suggestions = (D.learning.suggestions || []).filter(function (s) { return s.key !== key; }); renderSuggestions(); } }, 1500);
     } catch (e) { ND.toast(e.message, 'err'); }
   }
@@ -374,10 +378,10 @@
   // ---------- AI status line ----------
   function renderAiLine() {
     var a = D.ai && D.ai.status, el = $('an-ai-line');
-    if (!a) { el.textContent = D.errs[4] ? 'AI status unavailable: ' + D.errs[4] : ''; return; }
+    if (!a) { el.textContent = D.errs[4] ? T('an.ai_unavailable', { msg: D.errs[4] }) : ''; return; }
     aiDisabled = a.status === 'disabled' || !a.status;
-    el.textContent = 'AI ' + (a.status || 'unknown') + (a.model ? ' · ' + a.model : '') + (a.investigator_requests_limit != null ? ' · investigations today ' + (a.investigator_requests_today || 0) + '/' + a.investigator_requests_limit : '') +
-      ' · $' + (a.monthly_cost_estimate || 0).toFixed(2) + ' this month · ' + (a.error_count || 0) + ' errors' + (a.circuit_breaker_state && a.circuit_breaker_state !== 'closed' ? ' · circuit ' + a.circuit_breaker_state : '');
+    el.textContent = T('an.ai_line', { status: a.status || T('set.unknown') }) + (a.model ? ' · ' + a.model : '') + (a.investigator_requests_limit != null ? ' · ' + T('an.investigations_today', { n: a.investigator_requests_today || 0, limit: a.investigator_requests_limit }) : '') +
+      ' · $' + (a.monthly_cost_estimate || 0).toFixed(2) + ' ' + T('set.this_month') + ' · ' + T('an.n_errors', { n: a.error_count || 0 }) + (a.circuit_breaker_state && a.circuit_breaker_state !== 'closed' ? ' · ' + T('an.circuit', { state: a.circuit_breaker_state }) : '');
     applyAiState();
   }
   function applyAiState() {
@@ -390,24 +394,24 @@
   function updateReportType() {
     var type = $('report-type').value, tw = $('report-time-window');
     if (type === 'activity_record') {
-      tw.innerHTML = '<option value="6">Last 6 hours</option><option value="12" selected>Last 12 hours</option><option value="24">Last 24 hours</option><option value="48">Last 48 hours</option><option value="168">Last 7 days</option>';
-      $('investigation-focus-controls').hidden = true; $('run-report-btn').textContent = 'Generate';
+      tw.innerHTML = '<option value="6">' + esc(T('an.last_6h')) + '</option><option value="12" selected>' + esc(T('an.last_12h')) + '</option><option value="24">' + esc(T('an.last_24h')) + '</option><option value="48">' + esc(T('an.last_48h')) + '</option><option value="168">' + esc(T('an.last_7d')) + '</option>';
+      $('investigation-focus-controls').hidden = true; $('run-report-btn').textContent = T('common.generate');
     } else {
-      tw.innerHTML = '<option value="24" selected>Last 1 day</option><option value="168">Last 7 days</option><option value="720">Last 30 days</option>';
-      $('investigation-focus-controls').hidden = false; $('run-report-btn').textContent = 'Investigate';
+      tw.innerHTML = '<option value="24" selected>' + esc(T('an.last_1d')) + '</option><option value="168">' + esc(T('an.last_7d')) + '</option><option value="720">' + esc(T('an.last_30d')) + '</option>';
+      $('investigation-focus-controls').hidden = false; $('run-report-btn').textContent = T('an.investigate');
     }
     applyAiState();
   }
-  function reset(label) { var b = $('run-report-btn'); b.disabled = false; b.textContent = label; $('report-loading').textContent = 'Generating...'; $('report-loading').hidden = true; applyAiState(); }
+  function reset(label) { var b = $('run-report-btn'); b.disabled = false; b.textContent = label; $('report-loading').textContent = T('analysis.generating'); $('report-loading').hidden = true; applyAiState(); }
   async function runActivity() {
     var hours = parseInt($('report-time-window').value, 10) || 12, btn = $('run-report-btn');
-    btn.disabled = true; btn.textContent = 'Generating...'; $('report-loading').hidden = false; $('report-status').textContent = '';
+    btn.disabled = true; btn.textContent = T('analysis.generating'); $('report-loading').hidden = false; $('report-status').textContent = '';
     try {
       var resp = await ND.api('activity_record?hours=' + hours);
       activityTable = resp.table || '';
-      $('report-content').innerHTML = activityTable ? '<div>' + ND.md(activityTable) + '</div>' : '<div class="empty">No events in the selected window.</div>';
+      $('report-content').innerHTML = activityTable ? '<div>' + ND.md(activityTable) + '</div>' : '<div class="empty">' + esc(T('an.no_events_window')) + '</div>';
       $('report-actions').hidden = false;
-    } catch (e) { $('report-status').textContent = 'Error: ' + e.message; } finally { reset('Generate'); }
+    } catch (e) { $('report-status').textContent = T('an.error_prefix') + e.message; } finally { reset(T('common.generate')); }
   }
   function parseSections(text) {
     var sections = {}, order = [], key = null, lines = [];
@@ -422,16 +426,16 @@
   }
   function renderProgress(content, acc) {
     var p = parseSections(acc);
-    if (!p.order.length) { content.innerHTML = '<div class="empty">Writing investigation...</div>'; return; }
+    if (!p.order.length) { content.innerHTML = '<div class="empty">' + esc(T('an.writing_investigation')) + '</div>'; return; }
     content.innerHTML = p.order.map(function (k) {
       var def = SECTIONS.filter(function (d) { return d.key === k; })[0]; if (!def) return '';
-      return '<details open><summary><strong>' + esc(def.label) + '</strong>' + (k === p.active ? ' <span class="sub">writing...</span>' : '') + '</summary><div class="note">' + ND.md(p.sections[k] || '') + '</div></details>';
+      return '<details open><summary><strong>' + esc(def.label) + '</strong>' + (k === p.active ? ' <span class="sub">' + esc(T('an.writing')) + '</span>' : '') + '</summary><div class="note">' + ND.md(p.sections[k] || '') + '</div></details>';
     }).join('');
   }
   async function runInvestigation() {
     var btn = $('run-report-btn'), loading = $('report-loading'), status = $('report-status'), content = $('report-content');
     var focus = $('investigation-focus').value.trim(), hours = parseInt($('report-time-window').value, 10) || 24, deep = $('investigation-deep').checked;
-    btn.disabled = true; btn.textContent = 'Running...'; loading.hidden = false; loading.textContent = 'Connecting...'; status.textContent = ''; content.innerHTML = ''; $('report-actions').hidden = true;
+    btn.disabled = true; btn.textContent = T('an.running'); loading.hidden = false; loading.textContent = T('an.connecting'); status.textContent = ''; content.innerHTML = ''; $('report-actions').hidden = true;
     var acc = '';
     try {
       var body = { hours: hours }; if (focus) body.focus = focus; if (deep) body.deep = true;
@@ -443,33 +447,33 @@
         for (var i = 0; i < evs.length; i++) {
           if (evs[i].indexOf('data: ') !== 0) continue;
           var ev; try { ev = JSON.parse(evs[i].slice(6)); } catch (e) { continue; }
-          if (ev.type === 'thinking') loading.textContent = 'Thinking... ' + ev.text.replace(/[\n]+/g, ' ').trim().slice(-180);
+          if (ev.type === 'thinking') loading.textContent = T('an.thinking') + ' ' + ev.text.replace(/[\n]+/g, ' ').trim().slice(-180);
           else if (ev.type === 'status') loading.textContent = ev.text;
-          else if (ev.type === 'chunk') { var first = !acc.length; acc += ev.text; renderProgress(content, acc); if (first) loading.hidden = true; status.textContent = 'Receiving response... (' + acc.length + ' chars)'; }
+          else if (ev.type === 'chunk') { var first = !acc.length; acc += ev.text; renderProgress(content, acc); if (first) loading.hidden = true; status.textContent = T('an.receiving_response', { n: acc.length }); }
           else if (ev.type === 'done') {
             var result = { success: ev.success !== false, source: ev.source || 'ai', data: ev.data || {}, error: ev.error || null, raw_response: ev.raw_response || acc, input_context: ev.input_context || '', truncated: !!ev.truncated, truncated_empty: !!ev.truncated_empty };
             currentReport = { reportType: 'investigation', timestamp: new Date().toISOString(), result: result, focus: focus };
             renderReport(currentReport);
-            status.textContent = result.truncated_empty ? 'The model produced no visible output despite using the full response budget. Try a different reasoning effort or model.'
-              : result.truncated ? 'Report truncated: it hit the max response length. Increase "Investigator Max Response Length" in AI settings and re-run.'
-              : 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + result.source + ')';
+            status.textContent = result.truncated_empty ? T('an.no_visible_output')
+              : result.truncated ? T('an.report_truncated')
+              : T('an.completed_at', { t: new Date().toLocaleTimeString(), source: result.source });
             loadHistory();
-          } else if (ev.type === 'error') throw new Error(ev.message || 'Investigation failed');
+          } else if (ev.type === 'error') throw new Error(ev.message || T('an.investigation_failed'));
         }
       }
-      if (!currentReport && acc) { content.innerHTML = '<pre style="white-space:pre-wrap;font-size:12px">' + esc(acc) + '</pre>'; status.textContent = 'Stream ended (no structured response)'; }
+      if (!currentReport && acc) { content.innerHTML = '<pre style="white-space:pre-wrap;font-size:12px">' + esc(acc) + '</pre>'; status.textContent = T('an.stream_ended'); }
     } catch (e) {
-      status.textContent = 'Error: ' + e.message + (e.message.toLowerCase().indexOf('not enabled') >= 0 ? ' - enable it in Home Assistant, Settings, Integrations, Climate Advisor, Configure, AI settings' : '');
+      status.textContent = T('an.error_prefix') + e.message + (e.message.toLowerCase().indexOf('not enabled') >= 0 ? ' - ' + T('an.enable_in_ha') : '');
       content.innerHTML = '';
-    } finally { reset('Investigate'); }
+    } finally { reset(T('an.investigate')); }
   }
   function renderReport(entry) {
     var content = $('report-content'), res = entry.result || {}, ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '';
-    if (!res.success) { content.innerHTML = '<div class="err">Report failed (' + esc(res.source || 'error') + '): ' + esc(res.error || 'Unknown error') + '</div>'; $('report-actions').hidden = true; return; }
-    var data = res.data || {}, h = (ts ? '<div class="sub">' + esc(ts) + (res.is_refined ? ' <span class="badge">refined</span>' : '') + '</div>' : '');
-    if (res.truncated_empty) h += '<div class="banner warn">The model produced no visible output despite using the full response budget.</div>';
-    else if (res.truncated) h += '<div class="banner warn">Report truncated: it hit the max response length.</div>';
-    h += '<div class="small">' + (res.source === 'fallback' ? 'Fallback (AI unavailable)' : 'AI-generated') + '</div>';
+    if (!res.success) { content.innerHTML = '<div class="err">' + esc(T('an.report_failed', { source: res.source || T('an.error_lc') })) + ': ' + esc(res.error || T('an.unknown_error')) + '</div>'; $('report-actions').hidden = true; return; }
+    var data = res.data || {}, h = (ts ? '<div class="sub">' + esc(ts) + (res.is_refined ? ' <span class="badge">' + esc(T('an.refined')) + '</span>' : '') + '</div>' : '');
+    if (res.truncated_empty) h += '<div class="banner warn">' + esc(T('an.no_visible_output_banner')) + '</div>';
+    else if (res.truncated) h += '<div class="banner warn">' + esc(T('an.report_truncated_banner')) + '</div>';
+    h += '<div class="small">' + (res.source === 'fallback' ? esc(T('an.fallback_ai')) : esc(T('an.ai_generated'))) + '</div>';
     var any = false;
     SECTIONS.forEach(function (d) { var tx = data[d.key] || ''; if (!tx) return; any = true; h += '<details open><summary><strong>' + esc(d.label) + '</strong></summary><div class="note">' + ND.md(tx) + '</div></details>'; });
     if (!any && res.raw_response) h += '<div class="note">' + ND.md(res.raw_response) + '</div>';
@@ -520,17 +524,17 @@
   async function submitIssue() {
     var st = $('github-issue-status'), btn = $('github-submit-btn'), title = $('github-issue-title').value.trim();
     var body = $('github-issue-body').value.trim(), labels = $('github-issue-labels').value.split(',').map(function (l) { return l.trim(); }).filter(Boolean);
-    if (!title) { st.textContent = 'Title is required.'; return; }
-    st.textContent = 'Submitting...'; btn.disabled = true;
+    if (!title) { st.textContent = T('an.title_required'); return; }
+    st.textContent = T('an.submitting'); btn.disabled = true;
     body = await appendIncident(body);
     var token = await ND.getToken();
     try {
       var resp = await fetch('/api/climate_advisor/' + await ND.scopedPath('submit_github_issue'), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify({ title: title, body: body, labels: labels }) });
       var data = await resp.json();
-      if (data.success) { st.innerHTML = 'Issue created: <a href="' + esc(data.issue_url) + '" target="_blank" rel="noopener">#' + esc(data.issue_number) + '</a>'; $('gh-cancel').textContent = 'Close'; }
+      if (data.success) { st.innerHTML = esc(T('an.issue_created')) + ' <a href="' + esc(data.issue_url) + '" target="_blank" rel="noopener">#' + esc(data.issue_number) + '</a>'; $('gh-cancel').textContent = T('an.close'); }
       else if (data.error === 'not_configured') { $('github-modal-not-configured').hidden = false; st.textContent = ''; btn.disabled = false; }
-      else { st.textContent = 'Failed: ' + (data.error || 'unknown error'); btn.disabled = false; }
-    } catch (e) { st.textContent = 'Network error: ' + e.message; btn.disabled = false; }
+      else { st.textContent = T('an.failed', { msg: data.error || T('an.unknown_error_lc') }); btn.disabled = false; }
+    } catch (e) { st.textContent = T('an.network_error', { msg: e.message }); btn.disabled = false; }
   }
 
   // ---------- history ----------
@@ -542,7 +546,7 @@
         .sort(function (a, b) { return new Date(b.timestamp) - new Date(a.timestamp); });
       D.reports = null; // later calls refetch
       renderHistory();
-    } catch (e) { host.innerHTML = '<div class="empty">Failed to load history.</div>'; }
+    } catch (e) { host.innerHTML = '<div class="empty">' + esc(T('an.failed_load_history')) + '</div>'; }
   }
   function renderHistory() {
     var host = $('unified-history-list'), f = $('hist-from-date').value, t = $('hist-to-date').value;
@@ -551,17 +555,17 @@
       if (histFilter !== 'all' && (e.report_type || 'activity') !== histFilter) return false;
       var ts = new Date(e.timestamp); return !(from && ts < from) && !(to && ts > to);
     });
-    if (!filtered.length) { host.innerHTML = '<div class="empty">' + (allHistory.length ? 'No reports match the current filter.' : 'No reports yet.') + '</div>'; return; }
+    if (!filtered.length) { host.innerHTML = '<div class="empty">' + esc(allHistory.length ? T('an.no_reports_match') : T('an.no_reports_yet')) + '</div>'; return; }
     var shown = Math.min(histShowing, filtered.length);
     host.innerHTML = filtered.slice(0, shown).map(function (e, i) {
       var res = e.result || {}, sum = res.data && res.data.activity_summary ? res.data.activity_summary.replace(/\s+/g, ' ').trim() : '';
       if (sum.length > 110) sum = sum.slice(0, 110) + '...';
-      return '<div class="hist-row"><div class="body"><div class="row" style="gap:6px"><strong style="font-size:13px">' + esc(e.timestamp ? new Date(e.timestamp).toLocaleString() : 'Unknown time') + '</strong>' +
-        '<span class="badge">' + esc(e.report_type === 'investigation' ? 'Investigation' : 'Activity') + '</span>' + (res.truncated_empty ? '<span class="badge changed">no output</span>' : res.truncated ? '<span class="badge changed">truncated</span>' : '') +
-        '<span class="sub">' + esc(res.source || 'unknown') + '</span></div>' + (sum ? '<div class="small">' + esc(sum) + '</div>' : '') + '</div>' +
-        '<div class="acts"><button type="button" class="btn small" data-h="open" data-i="' + i + '">Open</button><button type="button" class="btn small" data-h="copy" data-i="' + i + '">Copy</button>' +
-        '<button type="button" class="btn small" data-h="issue" data-i="' + i + '">Issue</button><button type="button" class="btn small danger" data-h="del" data-i="' + i + '" aria-label="Delete report">Delete</button></div></div>';
-    }).join('') + (filtered.length > shown ? '<button type="button" class="btn small" id="hist-more" style="margin-top:8px">Show more (' + (filtered.length - shown) + ' remaining)</button>' : '');
+      return '<div class="hist-row"><div class="body"><div class="row" style="gap:6px"><strong style="font-size:13px">' + esc(e.timestamp ? new Date(e.timestamp).toLocaleString() : T('an.unknown_time')) + '</strong>' +
+        '<span class="badge">' + esc(e.report_type === 'investigation' ? T('analysis.investigation') : T('an.activity')) + '</span>' + (res.truncated_empty ? '<span class="badge changed">' + esc(T('an.no_output')) + '</span>' : res.truncated ? '<span class="badge changed">' + esc(T('an.truncated')) + '</span>' : '') +
+        '<span class="sub">' + esc(res.source || T('set.unknown')) + '</span></div>' + (sum ? '<div class="small">' + esc(sum) + '</div>' : '') + '</div>' +
+        '<div class="acts"><button type="button" class="btn small" data-h="open" data-i="' + i + '">' + esc(T('an.open')) + '</button><button type="button" class="btn small" data-h="copy" data-i="' + i + '">' + esc(T('common.copy')) + '</button>' +
+        '<button type="button" class="btn small" data-h="issue" data-i="' + i + '">' + esc(T('an.issue')) + '</button><button type="button" class="btn small danger" data-h="del" data-i="' + i + '" aria-label="' + esc(T('an.delete_report_aria')) + '">' + esc(T('an.delete')) + '</button></div></div>';
+    }).join('') + (filtered.length > shown ? '<button type="button" class="btn small" id="hist-more" style="margin-top:8px">' + esc(T('an.show_more', { n: filtered.length - shown })) + '</button>' : '');
   }
   function asCurrent(e) { return { reportType: e.report_type || 'activity', timestamp: e.timestamp, result: e.result, focus: e.focus }; }
   async function histClick(btn) {
@@ -573,9 +577,9 @@
     else if (what === 'del') {
       try {
         await ND.api('delete_report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ report_type: e.report_type || 'activity', timestamp: e.timestamp }) });
-        if (currentReport && currentReport.timestamp === e.timestamp) { currentReport = null; $('report-content').innerHTML = '<div class="empty">Report deleted.</div>'; $('report-actions').hidden = true; }
+        if (currentReport && currentReport.timestamp === e.timestamp) { currentReport = null; $('report-content').innerHTML = '<div class="empty">' + esc(T('an.report_deleted')) + '</div>'; $('report-actions').hidden = true; }
         D.reports = null; await loadHistory();
-      } catch (er) { ND.toast('Failed to delete report: ' + er.message, 'err'); }
+      } catch (er) { ND.toast(T('an.failed_delete', { msg: er.message }), 'err'); }
     }
   }
 
@@ -588,7 +592,7 @@
   function loadAccuracy() {
     $('prediction-accuracy-link').href = 'prediction_accuracy.html' + (ND.zone ? '?zone=' + encodeURIComponent(ND.zone) : '');
     var PA = window.CAPredictionAccuracy;
-    if (!PA) { $('an-pa-view').innerHTML = '<div class="err">Failed to load the accuracy view.</div>'; return; }
+    if (!PA) { $('an-pa-view').innerHTML = '<div class="err">' + esc(T('an.failed_load_accuracy')) + '</div>'; return; }
     if (!paMounted) { paMounted = true; PA.mount($('an-pa-view'), { zone: ND.zone, embedded: true }); }
     else if (ND.zone) PA.setZone(ND.zone);
   }

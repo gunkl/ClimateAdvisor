@@ -193,6 +193,14 @@ class TestThresholdContexts:
         assert display_temp(cool, unit) == pytest.approx(api_cool)
 
 
+def _entity_name(key: str) -> str:
+    import json
+    import pathlib
+
+    strings = pathlib.Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "strings.json"
+    return json.loads(strings.read_text(encoding="utf-8"))["entity"]["sensor"][key]["name"]
+
+
 class TestThresholdSensorShape:
     def test_entity_metadata(self):
         from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
@@ -206,7 +214,10 @@ class TestThresholdSensorShape:
         ):
             s = cls(coord, _entry())
             assert s._attr_unique_id == f"zone1_{key}"
-            assert s._attr_name == name and s._attr_has_entity_name
+            # Issue #1341 (D6): the name is HA's translated entity name, never a hard-coded ``_attr_name``.
+            assert not hasattr(s, "_attr_name") and s._attr_has_entity_name
+            assert s._attr_translation_key == key
+            assert _entity_name(key) == name
             assert s._attr_native_unit_of_measurement == UnitOfTemperature.FAHRENHEIT
             assert s._attr_device_class == SensorDeviceClass.TEMPERATURE
             assert s._attr_state_class == SensorStateClass.MEASUREMENT

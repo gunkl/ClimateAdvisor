@@ -286,6 +286,9 @@ Both are rendered in the dashboard as a stepped purple/magenta line: solid past,
 
 ## Sensors Exposed
 
+> **Entity ids depend on the zone title and install language (Issue #1341).** The ids below are those of a zone titled
+> "Climate Advisor" on an English install; see the note in [09-DEBUGGING-GUIDE.md](09-DEBUGGING-GUIDE.md#1-ha-sensor-entities-recommended-first) and look entities up by unique id (`<entry_id>_<key>`).
+
 | Entity ID | Value | Extra Attributes |
 |-----------|-------|-----------------|
 | `sensor.climate_advisor_day_type` | hot/warm/mild/cool/cold | trend_direction, trend_magnitude |

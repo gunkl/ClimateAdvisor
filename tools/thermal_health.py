@@ -52,7 +52,9 @@ def _load_dotenv() -> None:
                 os.environ[k] = v.strip().strip('"').strip("'")
 
 
-SENSOR_ENTITY_ID = "sensor.climate_advisor_comfort_score"
+# Issue #1341: never an entity id typed out. Entity ids come from the zone's title and (for some languages) the language
+# HA was set to when the entity was first registered, so the comfort-score sensor is found by what it carries.
+SENSOR_ENTITY_ID_HINT = "the Climate Advisor sensor that carries the thermal_learning_health attribute"
 OBS_TYPES = [
     "passive_decay",
     "vent_window_decay",
@@ -76,25 +78,25 @@ def _pad(text: str, width: int) -> str:
     return str(text).ljust(width)
 
 
-def _zone_sensor_template(entry_id: str) -> str:
-    """HA template listing the zone's Climate Advisor sensor that carries ``thermal_learning_health``."""
+def _zone_sensor_template(entry_id: str | None) -> str:
+    """HA template listing the Climate Advisor sensors that carry ``thermal_learning_health`` (one zone's, or all)."""
+    zone = f" and config_entry_id(e) == '{entry_id}'" if entry_id else ""
     return (
         "{% for e in integration_entities('climate_advisor') %}"
-        f"{{% if e.startswith('sensor.') and config_entry_id(e) == '{entry_id}'"
+        f"{{% if e.startswith('sensor.'){zone}"
         " and state_attr(e, 'thermal_learning_health') is not none %}{{ e }} {% endif %}"
         "{% endfor %}"
     )
 
 
 def _resolve_sensor_entity(ha_url: str, ha_token: str, entry_id: str | None) -> str:
-    """The zone's comfort-score sensor entity id (Issue #1418).
+    """The zone's comfort-score sensor entity id, looked up on the install (Issues #1418, #1341).
 
-    Each zone has its own sensor (unique id ``<entry_id>_comfort_score``), so a fixed entity id reads the first
-    zone's. With no ``entry_id`` (single-zone install) the historical default is kept.
+    Each zone has its own sensor (unique id ``<entry_id>_comfort_score``) and its entity id depends on the zone's
+    title and on the language HA was set to when the entity was first registered, so nothing here assumes
+    ``sensor.climate_advisor_*``. With no ``entry_id`` the install's only zone is used.
     """
-    if not entry_id:
-        return SENSOR_ENTITY_ID
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", entry_id):
+    if entry_id and not re.fullmatch(r"[A-Za-z0-9_-]+", entry_id):
         print(f"Error: --entry-id {entry_id!r} is not a config entry id.")
         sys.exit(1)
     body = json.dumps({"template": _zone_sensor_template(entry_id)}).encode("utf-8")
@@ -104,19 +106,24 @@ def _resolve_sensor_entity(ha_url: str, ha_token: str, entry_id: str | None) -> 
         headers={"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"},
         method="POST",
     )
+    scope = f"zone {entry_id}" if entry_id else "this install"
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             found = resp.read().decode("utf-8").split()
     except (urllib.error.URLError, OSError) as exc:
-        print(f"Error: could not look up zone {entry_id}'s sensor: {exc}")
+        print(f"Error: could not look up the sensor for {scope}: {exc}")
         sys.exit(1)
     if not found:
-        print(f"Error: no Climate Advisor sensor with thermal_learning_health found for zone {entry_id}.")
+        print(f"Error: no {SENSOR_ENTITY_ID_HINT} found for {scope}.")
+        print("  Is the Climate Advisor integration installed and loaded?")
         sys.exit(2)
+    if len(found) > 1 and not entry_id:
+        print(f"Error: several Climate Advisor zones are loaded ({', '.join(found)}) — pass --entry-id.")
+        sys.exit(1)
     return found[0]
 
 
-def _fetch_sensor(ha_url: str, ha_token: str, entity_id: str = SENSOR_ENTITY_ID) -> dict:
+def _fetch_sensor(ha_url: str, ha_token: str, entity_id: str) -> dict:
     """Fetch the compliance sensor state from HA REST API."""
     url = f"{ha_url}/api/states/{entity_id}"
     req = urllib.request.Request(
@@ -133,7 +140,7 @@ def _fetch_sensor(ha_url: str, ha_token: str, entity_id: str = SENSOR_ENTITY_ID)
         if exc.code == 401:
             print("Error: HA_TOKEN is invalid or expired (HTTP 401).")
         elif exc.code == 404:
-            print(f"Error: Sensor '{SENSOR_ENTITY_ID}' not found (HTTP 404).")
+            print(f"Error: Sensor '{entity_id}' not found (HTTP 404).")
             print("  Is the Climate Advisor integration installed and loaded?")
         else:
             print(f"Error: HTTP {exc.code} fetching sensor state.")

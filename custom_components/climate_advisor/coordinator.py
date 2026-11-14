@@ -43,7 +43,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import cycle_model, log_capture, prediction_engines, v4_shadow, window_span
+from . import cycle_model, i18n, log_capture, prediction_engines, v4_shadow, window_span
 from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
@@ -7154,7 +7154,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if strategy is None:
                 return None, str(cache.get("reason") or "not_ready")
             unit = self.config.get("temp_unit", "fahrenheit")
-            return night_strategy.api_payload(strategy, unit=unit, convert=display_temp), "ok"
+            body = night_strategy.api_payload(
+                strategy, unit=unit, convert=display_temp, lang=i18n.hass_language(getattr(self, "hass", None))
+            )
+            return body, "ok"
         except Exception:  # noqa: BLE001 - a read-only view answers "not ready", never a 500
             _LOGGER.debug("night_strategy_payload failed", exc_info=True)
             return None, "error"

@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from . import i18n
 from .const import (
     COMFORT_FAMILY_RECENCY_WINDOW_MIN_MAX,
     COMFORT_FAMILY_RECENCY_WINDOW_MIN_MIN,
@@ -82,7 +83,6 @@ from .const import (
 )
 from .hvac_action import is_hvac_compressor_active
 from .promise_journal import NAT_VENT_END_KINDS, Command, Episode, Mark, PromiseInput, Reading, RunKey
-from .temperature import format_temp_delta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,7 +92,8 @@ class InvariantViolation:
     """A single hard-invariant violation, ready to log/notify/surface."""
 
     name: str
-    detail: str
+    detail: str  # English (records, logs); ``detail_msg`` is the translatable form (Issue #1341)
+    detail_msg: i18n.Msg | None = None
 
 
 def check_ac_whf_mutex(
@@ -125,12 +126,11 @@ def check_ac_whf_mutex(
         return None
     if not is_hvac_compressor_active(hvac_action):
         return None
+    _msg = i18n.Msg("notify.invariant_ac_whf_mutex", hvac_action=hvac_action)
     return InvariantViolation(
         name="ac_whf_mutex",
-        detail=(
-            f"AC is actively {hvac_action} while the whole-house fan is physically running — "
-            "these must never run at the same time."
-        ),
+        detail=i18n.render_en(_msg),
+        detail_msg=_msg,
     )
 
 
@@ -376,9 +376,15 @@ class Hit:
     promise: str
     ts: datetime
     key: str
-    detail: str
+    detail: str  # English (records, logs); ``msg`` is the translatable form (Issue #1341)
     evidence: Evidence = ()
     kind: str = KIND_EVENT
+    msg: i18n.Msg | None = None
+
+
+def _detail(msg: i18n.Msg) -> dict[str, Any]:
+    """The ``detail`` (English, for records) and ``msg`` (translatable) fields of a ``Hit``, from one ``Msg``."""
+    return {"detail": i18n.render_en(msg), "msg": msg}
 
 
 EXCUSED_BY_THERMOSTAT_DEADBAND = "thermostat_deadband"
@@ -644,27 +650,18 @@ def check_p1_settling_flip(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
         ):
             continue
         since = _mins(last_opposite, cur.ts)
-        where = (
-            "right at"
-            if dip <= 0.05
-            else f"only {format_temp_delta(dip, cfg.temp_unit, 1)} {'under' if side == 'heat' else 'over'}"
+        msg = i18n.Msg(
+            "notify.promise_p1_heat" if side == "heat" else "notify.promise_p1_cool",
+            since=round(since),
+            near="at" if dip <= 0.05 else "off",
+            dip=i18n.TempDelta(dip, cfg.temp_unit, 1),
         )
-        if side == "heat":
-            detail = (
-                f"Your heat started {since:.0f} min after the AC cooled the house, while the house was "
-                f"{where} your comfort minimum. It should have waited."
-            )
-        else:
-            detail = (
-                f"Your AC started {since:.0f} min after the heat ran, while the house was "
-                f"{where} your comfort maximum. It should have waited."
-            )
         hits.append(
             Hit(
                 promise="settling_flip",
                 ts=cur.ts,
                 key=f"settling_flip:{side}@{cur.ts.strftime('%Y-%m-%dT%H:%M')}",
-                detail=detail,
+                **_detail(msg),
                 evidence=_ev(
                     side=side,
                     minutes_since_opposite=since,
@@ -720,6 +717,7 @@ def check_p2_ac_whf_mutex(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
             ts=latest.ts,
             key="ac_whf_mutex",
             detail=v.detail,
+            msg=v.detail_msg,
             evidence=_ev(hvac_action=latest.hvac_action, fan_on=latest.fan_on),
             kind=KIND_STATE,
         )
@@ -737,9 +735,7 @@ def check_p3_observe_only_silence(inp: PromiseInput, cfg: PromiseConfig) -> list
                     promise="observe_only_silence",
                     ts=c.ts,
                     key=f"observe_only_silence:{c.ts.isoformat()}:{c.service}",
-                    detail=(
-                        "Climate Advisor sent a command to your thermostat or fan while automation was switched off."
-                    ),
+                    **_detail(i18n.Msg("notify.promise_p3_silence")),
                     evidence=_ev(target=c.target, service=c.service),
                 )
             )
@@ -831,12 +827,15 @@ def _p4_reverses(cmd: Command, ep: Episode) -> bool:
     return cmd.fan_on is True if occupant_wants_off else cmd.fan_on is False
 
 
-def _p4_when(remaining_min: float) -> str:
-    """Wording for a reversal: minutes of grace left (round half up), or 'still in force' when none."""
+def _p4_changed_msg(label: str, remaining_min: float) -> i18n.Msg:
+    """A reversal: minutes of grace left (round half up), or 'still in force' when none."""
     whole = int(remaining_min + 0.5)
-    if whole <= 0:
-        return "while your manual change was still in force"
-    return f"{whole} min before your manual change was due to end"
+    return i18n.Msg(
+        "notify.promise_p4_changed",
+        target=label,
+        when="in_force" if whole <= 0 else "minutes_left",
+        minutes=max(whole, 0),
+    )
 
 
 def check_p4_override_respected(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
@@ -883,7 +882,7 @@ def check_p4_override_respected(inp: PromiseInput, cfg: PromiseConfig) -> list[H
                     promise="override_respected",
                     ts=cmd.ts,
                     key=f"override_respected:{ep.id}:{cmd.ts.isoformat()}",
-                    detail=(f"Climate Advisor changed your {label} setting {_p4_when(remaining)}."),
+                    **_detail(_p4_changed_msg(label, remaining)),
                     evidence=_ev(
                         target=ep.target,
                         remaining_min=remaining,
@@ -905,10 +904,7 @@ def check_p4_override_respected(inp: PromiseInput, cfg: PromiseConfig) -> list[H
                     promise="override_respected",
                     ts=ep.end_ts,
                     key=f"override_respected:early_end:{ep.id}",
-                    detail=(
-                        f"Climate Advisor ended your manual {label} change {int(remaining + 0.5)} min early, "
-                        "so nothing protects it any more."
-                    ),
+                    **_detail(i18n.Msg("notify.promise_p4_early_end", target=label, minutes=int(remaining + 0.5))),
                     evidence=_ev(target=ep.target, remaining_min=remaining, end_reason=ep.end_reason),
                 )
             )
@@ -932,7 +928,7 @@ def check_p5_no_blind_fan_start(inp: PromiseInput, cfg: PromiseConfig) -> list[H
                     promise="no_blind_fan_start",
                     ts=c.ts,
                     key=f"no_blind_fan_start:{c.ts.isoformat()}",
-                    detail="The fan was started while the indoor temperature could not be read.",
+                    **_detail(i18n.Msg("notify.promise_p5_blind_start")),
                     evidence=_ev(target=c.target, service=c.service),
                 )
             )
@@ -956,7 +952,7 @@ def check_p5b_blind_fan_continue(inp: PromiseInput, cfg: PromiseConfig) -> list[
                     ts=run[0].ts,
                     # Stable while the run stays open, even after its first reading ages out of the window.
                     key=RunKey("blind_fan_continue", run[0].ts, end),
-                    detail=f"The fan ran {minutes:.0f} minutes while the indoor temperature could not be read.",
+                    **_detail(i18n.Msg("notify.promise_p5b_blind_continue", minutes=round(minutes))),
                     evidence=_ev(minutes=minutes),
                 )
             )
@@ -1016,9 +1012,8 @@ def check_p9_whf_sealed(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
                     promise="whf_sealed",
                     ts=run[0].ts,
                     key=RunKey("whf_sealed", run[0].ts, end),
-                    detail=(
-                        f"The whole-house fan ran {seconds + NUMBERS.P9_WHF_SETTLE_S:.0f} seconds with every "
-                        "door and window closed."
+                    **_detail(
+                        i18n.Msg("notify.promise_p9_whf_sealed", seconds=round(seconds + NUMBERS.P9_WHF_SETTLE_S))
                     ),
                     evidence=_ev(seconds=seconds + NUMBERS.P9_WHF_SETTLE_S),
                     kind=KIND_STATE,
@@ -1059,7 +1054,7 @@ def check_p6_mode_flip_rate(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
                     promise="mode_flip_rate",
                     ts=flips[i],
                     key=f"mode_flip_rate:{flips[i].isoformat()}",
-                    detail=f"The thermostat flipped between heat and cool {n + 1} times in the past hour.",
+                    **_detail(i18n.Msg("notify.promise_p6_flip_rate", count=n + 1)),
                     evidence=_ev(flips=n + 1, window_min=NUMBERS.P6_WINDOW_MIN),
                 )
             )
@@ -1110,10 +1105,7 @@ def check_p10_heat_cool_settles(inp: PromiseInput, cfg: PromiseConfig) -> list[H
                     promise="heat_cool_settles",
                     ts=switches[i],
                     key=f"heat_cool_settles:{switches[i].isoformat()}",
-                    detail=(
-                        f"Climate Advisor switched the thermostat between heat and cool {count} times "
-                        f"in the past {NUMBERS.P10_WINDOW_MIN / 60.0:g} hours."
-                    ),
+                    **_detail(i18n.Msg("notify.promise_p10_settles", count=count, hours=NUMBERS.P10_WINDOW_MIN / 60.0)),
                     evidence=_ev(switches=count, window_min=NUMBERS.P10_WINDOW_MIN),
                 )
             )
@@ -1346,9 +1338,12 @@ def check_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
                 ts=run["cross"],
                 # Stable while the run stays open, even after its first reading ages out of the window.
                 key=RunKey(f"comfort_kept:{run['side']}", run["start"], run["last"]),
-                detail=(
-                    f"The house stayed {format_temp_delta(worst, cfg.temp_unit, 1)} outside your comfort range "
-                    f"for {minutes:.0f} minutes while Climate Advisor was in control."
+                **_detail(
+                    i18n.Msg(
+                        "notify.promise_p7_comfort_kept",
+                        worst=i18n.TempDelta(worst, cfg.temp_unit, 1),
+                        minutes=round(minutes),
+                    )
                 ),
                 evidence=_ev(minutes=minutes, worst_f=worst, side=run["side"]),
             )

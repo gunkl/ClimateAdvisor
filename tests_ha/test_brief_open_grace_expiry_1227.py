@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from custom_components.climate_advisor import i18n
+
 pytestmark = pytest.mark.house
 
 DEB = 600
@@ -34,7 +36,7 @@ def _spy(engine):
     real = engine._notify
 
     async def _n(message, title, notification_type=None, **kw):
-        sent.append((notification_type, message[:90]))
+        sent.append((notification_type, i18n.render_en(message)[:90]))
         return await real(message, title, notification_type, **kw)
 
     engine._notify = _n

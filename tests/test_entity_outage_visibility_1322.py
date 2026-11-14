@@ -12,6 +12,7 @@ import datetime as _datetime
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+from custom_components.climate_advisor import i18n
 from tests.test_entity_health_coordinator import BASE_CONFIG, _make_coordinator, _patch_now
 
 T0 = _datetime.datetime(2026, 11, 4, 4, 32, 8, tzinfo=_datetime.UTC)
@@ -124,7 +125,7 @@ class TestNotificationTitle:
         coord._notify_in_background = MagicMock()
         _states(coord, mapping)
         coord._run_entity_health_check()
-        return coord._notify_in_background.call_args.args[0]
+        return i18n.render_en(coord._notify_in_background.call_args.args[0])
 
     def test_an_unavailable_entity_is_not_called_not_found(self):
         assert self._title({"climate.thermostat": "heat", "weather.home": "unavailable"}) == (

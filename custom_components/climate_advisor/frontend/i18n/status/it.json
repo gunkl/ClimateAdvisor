@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "ore di punta attive{ends}",
   "status.auto.tou_high_cost_idle": "ore di punta attive{ends} — oggi non serve il precondizionamento",
   "status.auto.tou_precondition": "{mode, select, cool {preraffreddamento} other {preriscaldamento}} — ore di punta{ends}",
+  "status.auto.tou_skipped": "attivo — ore di punta saltate{ends}: {reasons}",
   "status.auto.windows_planned": "finestre aperte (come previsto)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

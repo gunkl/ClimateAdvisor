@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "TOU 사전 조절 시간대 종료",
   "activity.tou_window_hvac_ran": "시간대 중에도 냉난방이 운전됨 — 예측이 부족했음",
   "activity.tou_window_none_needed": "오늘은 사전 조절 불필요 (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "TOU 고비용 시간대 건너뜀",
   "activity.unknown_paren": "(알 수 없음)",
   "activity.version_changed": "버전 변경됨: {old} -> {new}",
   "activity.warm_day_comfort_gap": "따뜻한 날 쾌적성 부족 -- 정지 전 난방",

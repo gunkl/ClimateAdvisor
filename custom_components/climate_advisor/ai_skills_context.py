@@ -2016,6 +2016,13 @@ def _render_tou_schedule_window_active(p: dict, unit: str) -> tuple[Cell, Cell]:
     del unit  # no temperature value on this event
     preconditioned = bool(p.get("preconditioned"))
     hvac_mode = p.get("hvac_mode")
+    skipped = p.get("skipped")
+    if isinstance(skipped, list) and skipped:
+        # Issues #1558/#1565: every schedule covering the window was skipped -- say so, and why (one wording).
+        from .scheduler import schedule_skip_list  # noqa: PLC0415
+
+        pairs = [(str(i.get("reason")), i.get("entity")) for i in skipped if isinstance(i, dict)]
+        return _m("tou_window_skipped"), _m("tou_window_skip_reasons", reasons=schedule_skip_list(pairs))
     label = _m("tou_window_active")
     settings = _m("tou_window_coincided", mode=str(hvac_mode)) if preconditioned else _m("tou_window_none_needed")
     return label, settings

@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "Voorconditioneringsperiode van het tijdgebonden tarief beëindigd",
   "activity.tou_window_hvac_ran": "HVAC draaide tijdens de periode toch — voorspelling schoot tekort",
   "activity.tou_window_none_needed": "vandaag geen voorconditionering nodig (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "Dure periode (tijdgebonden tarief) overgeslagen",
   "activity.unknown_paren": "(onbekend)",
   "activity.version_changed": "Versie gewijzigd: {old} -> {new}",
   "activity.warm_day_comfort_gap": "Comfortkloof op warme dag -- verwarmen vóór uitschakeling",

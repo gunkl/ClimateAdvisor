@@ -8,5 +8,9 @@
   "common.mode.heat": "Обогрев",
   "common.mode.heat_cool": "Обогрев/охлаждение",
   "common.mode.off": "Выкл.",
+  "common.tou_skip.condition_off": "условие выключено",
+  "common.tou_skip.condition_off_entity": "условие выключено ({entity})",
+  "common.tou_skip.not_applied_cool": "не применяется к охлаждению",
+  "common.tou_skip.not_applied_heat": "не применяется к отоплению",
   "common.unknown": "Неизвестно"
 }

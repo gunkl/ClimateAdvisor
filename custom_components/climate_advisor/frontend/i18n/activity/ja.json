@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "TOU の事前調整の時間帯が終了",
   "activity.tou_window_hvac_ran": "時間帯中も空調が運転しました — 予測は不十分でした",
   "activity.tou_window_none_needed": "本日は事前調整は不要(hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "TOU の高コスト時間帯をスキップ",
   "activity.unknown_paren": "(不明)",
   "activity.version_changed": "バージョンが変更されました: {old} -> {new}",
   "activity.warm_day_comfort_gap": "暖かい日の快適性の不足 -- 停止前に暖房",

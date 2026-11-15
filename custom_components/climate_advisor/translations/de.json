@@ -331,14 +331,18 @@
           "days": "Tage",
           "start": "Beginnt",
           "end": "Endet",
-          "delete_schedule": "Diesen Zeitplan löschen"
+          "delete_schedule": "Diesen Zeitplan löschen",
+          "applies_to": "Gilt für",
+          "condition_entity": "Nur wenn dies an ist"
         },
         "data_description": {
           "name": "Ein kurzer Name für diesen Tarifplan (z. B. „Sommerspitze“).",
           "days": "Die Wochentage, an denen dieser Zeitplan gilt. Wähle mindestens einen aus.",
           "start": "Wann die Hochpreisphase beginnt. Climate Advisor beginnt vor diesem Zeitpunkt mit der Vorkonditionierung.",
           "end": "Wann die Hochpreisphase endet. Muss sich von der Startzeit unterscheiden.",
-          "delete_schedule": "Aktivieren und absenden, um diesen Zeitplan zu löschen."
+          "delete_schedule": "Aktivieren und absenden, um diesen Zeitplan zu löschen.",
+          "applies_to": "An welchen Tagen dieser Zeitplan vorkonditioniert. Wählen Sie Nur Kühlen, wenn Ihre Heizung nicht elektrisch ist (z. B. eine Gasheizung): Vorheizen vor einer Hochpreisphase spart dann nichts. Standard: Kühlen und Heizen.",
+          "condition_entity": "Optional. Der Zeitplan gilt nur, solange dieser Binärsensor, Input Boolean oder Schalter an ist (zum Beispiel ein Helfer für die Hochsaison). Leer lassen, damit er immer gilt. Fehlt die Entität oder ist sie nicht verfügbar, gilt der Zeitplan trotzdem."
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "Nicht konfiguriert",
     "token_status_configured": "konfiguriert",
     "token_status_not_configured": "nicht konfiguriert",
-    "schedule_add_new": "+ Neuen Zeitplan hinzufügen"
+    "schedule_add_new": "+ Neuen Zeitplan hinzufügen",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}, nur Kühlen)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}, nur Heizen)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}, nur wenn {entity} an ist)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, nur Kühlen, nur wenn {entity} an ist)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, nur Heizen, nur wenn {entity} an ist)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "Thermisches Modell",
         "weather_bias": "Abweichung der Wettervorhersage",
         "suggestions": "Verworfene Vorschläge"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "Kühlen und Heizen",
+        "cool": "Nur Kühlen",
+        "heat": "Nur Heizen"
       }
     }
   },

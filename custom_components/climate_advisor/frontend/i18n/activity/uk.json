@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "Вікно підготовки під погодинний тариф завершено",
   "activity.tou_window_hvac_ran": "HVAC усе одно працював у вікні — прогноз виявився замалим",
   "activity.tou_window_none_needed": "сьогодні попереднє кондиціонування не потрібне (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "Період високої вартості (погодинний тариф) пропущено",
   "activity.unknown_paren": "(невідомо)",
   "activity.version_changed": "Версію змінено: {old} -> {new}",
   "activity.warm_day_comfort_gap": "Прогалина комфорту теплого дня -- опалення перед вимкненням",

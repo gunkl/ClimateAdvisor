@@ -1,1 +1,7 @@
-{}
+{
+  "settings.tou_applies.both": "制冷和制热",
+  "settings.tou_applies.cool": "仅制冷",
+  "settings.tou_applies.heat": "仅制热",
+  "settings.tou_applies_to": "适用于",
+  "settings.tou_condition": "仅在开启时"
+}

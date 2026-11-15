@@ -8,5 +8,9 @@
   "common.mode.heat": "हीटिंग",
   "common.mode.heat_cool": "हीट/कूल",
   "common.mode.off": "बंद",
+  "common.tou_skip.condition_off": "इसकी शर्त बंद है",
+  "common.tou_skip.condition_off_entity": "इसकी शर्त बंद है ({entity})",
+  "common.tou_skip.not_applied_cool": "कूलिंग पर लागू नहीं",
+  "common.tou_skip.not_applied_heat": "हीटिंग पर लागू नहीं",
   "common.unknown": "अज्ञात"
 }

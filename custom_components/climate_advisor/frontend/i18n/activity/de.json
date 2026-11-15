@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "Vorkonditionierungszeitraum des zeitvariablen Tarifs beendet",
   "activity.tou_window_hvac_ran": "HVAC lief im Zeitraum trotzdem — Vorhersage reichte nicht aus",
   "activity.tou_window_none_needed": "heute keine Vorkonditionierung nötig (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "Zeitraum mit hohen Kosten (zeitvariabler Tarif) übersprungen",
   "activity.unknown_paren": "(unbekannt)",
   "activity.version_changed": "Version geändert: {old} -> {new}",
   "activity.warm_day_comfort_gap": "Komfortlücke an warmem Tag -- Heizen vor dem Abschalten",

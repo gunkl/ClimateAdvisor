@@ -1,1 +1,7 @@
-{}
+{
+  "settings.tou_applies.both": "Refrigeración y calefacción",
+  "settings.tou_applies.cool": "Solo refrigeración",
+  "settings.tou_applies.heat": "Solo calefacción",
+  "settings.tou_applies_to": "Se aplica a",
+  "settings.tou_condition": "Solo si está activado"
+}

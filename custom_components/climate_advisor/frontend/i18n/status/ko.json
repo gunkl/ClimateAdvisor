@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "시간대별 요금제 피크 시간대{ends}",
   "status.auto.tou_high_cost_idle": "시간대별 요금제 피크 시간대{ends} — 오늘은 사전 조절이 필요 없습니다",
   "status.auto.tou_precondition": "{mode, select, cool {사전 냉방} other {예열}} — 시간대별 요금제 피크 시간대{ends}",
+  "status.auto.tou_skipped": "활성 — 시간대별 요금제 피크 시간대 건너뜀{ends}: {reasons}",
   "status.auto.windows_planned": "창문 열림 (계획대로)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "Spitzenzeit aktiv{ends}",
   "status.auto.tou_high_cost_idle": "Spitzenzeit aktiv{ends} — heute keine Vorkonditionierung nötig",
   "status.auto.tou_precondition": "{mode, select, cool {Vorkühlen} other {Vorheizen}} — Spitzenzeit{ends}",
+  "status.auto.tou_skipped": "aktiv — Spitzenzeit übersprungen{ends}: {reasons}",
   "status.auto.windows_planned": "Fenster offen (wie geplant)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

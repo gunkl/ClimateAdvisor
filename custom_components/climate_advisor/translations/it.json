@@ -331,14 +331,18 @@
           "days": "Giorni",
           "start": "Inizio",
           "end": "Fine",
-          "delete_schedule": "Elimina questo programma"
+          "delete_schedule": "Elimina questo programma",
+          "applies_to": "Si applica a",
+          "condition_entity": "Solo se questo è attivo"
         },
         "data_description": {
           "name": "Un nome breve per questo programma a fasce orarie (ad es. \"Picco estivo\").",
           "days": "I giorni della settimana in cui si applica questo programma. Selezionarne almeno uno.",
           "start": "Quando inizia il periodo a tariffa alta. Climate Advisor inizia a preparare la casa prima di quest’ora.",
           "end": "Quando termina il periodo a tariffa alta. Deve essere diversa dall’ora di inizio.",
-          "delete_schedule": "Attiva e invia per eliminare questo programma."
+          "delete_schedule": "Attiva e invia per eliminare questo programma.",
+          "applies_to": "I giorni in cui questa pianificazione prepara la casa in anticipo. Scegli Solo raffrescamento se il riscaldamento non è elettrico (ad es. una caldaia a gas): in quel caso preriscaldare prima di un periodo a tariffa alta non fa risparmiare nulla. Predefinito: raffrescamento e riscaldamento.",
+          "condition_entity": "Facoltativo. La pianificazione vale solo mentre questo sensore binario, input boolean o interruttore è attivo (ad esempio un helper per l'alta stagione). Lascia vuoto per applicarla sempre. Se l'entità manca o non è disponibile, la pianificazione vale comunque."
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "Non configurata",
     "token_status_configured": "configurato",
     "token_status_not_configured": "non configurato",
-    "schedule_add_new": "+ Aggiungi un nuovo programma"
+    "schedule_add_new": "+ Aggiungi un nuovo programma",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}, solo raffrescamento)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}, solo riscaldamento)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}, solo se {entity} è attivo)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, solo raffrescamento, solo se {entity} è attivo)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, solo riscaldamento, solo se {entity} è attivo)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "Modello termico",
         "weather_bias": "Scostamento delle previsioni meteo",
         "suggestions": "Suggerimenti ignorati"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "Raffrescamento e riscaldamento",
+        "cool": "Solo raffrescamento",
+        "heat": "Solo riscaldamento"
       }
     }
   },

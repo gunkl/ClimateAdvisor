@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "Período de pré-condicionamento da tarifa por horário terminado",
   "activity.tou_window_hvac_ran": "O AVAC funcionou mesmo assim durante o período — a previsão ficou aquém",
   "activity.tou_window_none_needed": "sem pré-condicionamento necessário hoje (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "Período de custo elevado (tarifa por horário) ignorado",
   "activity.unknown_paren": "(desconhecido)",
   "activity.version_changed": "Versão alterada: {old} -> {new}",
   "activity.warm_day_comfort_gap": "Lacuna de conforto em dia quente -- aquecimento antes de desligar",

@@ -1,1 +1,7 @@
-{}
+{
+  "settings.tou_applies.both": "Koelen en verwarmen",
+  "settings.tou_applies.cool": "Alleen koelen",
+  "settings.tou_applies.heat": "Alleen verwarmen",
+  "settings.tou_applies_to": "Van toepassing op",
+  "settings.tou_condition": "Alleen als aan"
+}

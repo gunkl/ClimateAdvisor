@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "TOU 预先调节时段已结束",
   "activity.tou_window_hvac_ran": "时段内暖通空调仍在运行 — 预测不足",
   "activity.tou_window_none_needed": "今日无需预先调节（hvac_mode=off）",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "已跳过 TOU 高价时段",
   "activity.unknown_paren": "（未知）",
   "activity.version_changed": "版本已更改：{old} -> {new}",
   "activity.warm_day_comfort_gap": "暖日舒适度缺口 -- 关闭前先供暖",

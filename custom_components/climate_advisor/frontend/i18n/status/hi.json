@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "उपयोग-समय आधारित दर का पीक समय चालू है{ends}",
   "status.auto.tou_high_cost_idle": "उपयोग-समय आधारित दर का पीक समय चालू है{ends} — आज पहले से तैयारी की ज़रूरत नहीं",
   "status.auto.tou_precondition": "{mode, select, cool {पूर्व-कूलिंग} other {पूर्व-हीटिंग}} — उपयोग-समय आधारित दर का पीक समय{ends}",
+  "status.auto.tou_skipped": "सक्रिय — उपयोग-समय आधारित दर का पीक समय छोड़ा गया{ends}: {reasons}",
   "status.auto.windows_planned": "खिड़कियाँ खुली हैं (योजना के अनुसार)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

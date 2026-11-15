@@ -42,20 +42,23 @@ numeric shift.
 
 from __future__ import annotations
 
+import logging
 import math
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timedelta
 from datetime import time as dt_time
 from enum import Enum
 from typing import Any
 
+from . import i18n
 from .automation import _in_sleep_window
 from .const import (
     DEFAULT_SETBACK_COOL,
     DEFAULT_SETBACK_HEAT,
     OCCUPANCY_VACATION,
     TOU_SETBACK_PRECOND_MAX_DELTA_F,
+    is_unavailable_state,
 )
 from .nat_vent_gate import resolve_comfort_cool, resolve_comfort_heat
 from .own_write_echo import resolve_step
@@ -70,6 +73,21 @@ WEEKDAY_ABBREVS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 COST_TAG_HIGH = "high"
 COST_TAG_LOW = "low"
+
+_LOGGER = logging.getLogger(__name__)
+
+# Issue #1558: which days a schedule pre-conditions on. "both" (the default) is the behaviour before #1558.
+APPLIES_TO_BOTH = "both"
+APPLIES_TO_COOL = "cool"
+APPLIES_TO_HEAT = "heat"
+APPLIES_TO_VALUES = (APPLIES_TO_BOTH, APPLIES_TO_COOL, APPLIES_TO_HEAT)
+# Issue #1565: the domains a schedule's enable entity may come from (on = the schedule applies).
+CONDITION_ENTITY_DOMAINS = ("binary_sensor", "input_boolean", "switch")
+
+# Issues #1558/#1565: why a schedule was skipped this cycle -- one code each, worded once by schedule_skip_sentence().
+SKIP_CONDITION_OFF = "condition_off"
+SKIP_NOT_APPLIED_HEAT = "not_applied_heat"
+SKIP_NOT_APPLIED_COOL = "not_applied_cool"
 
 # Pre-conditioning lead-time bounds (Issue #786) — a distinct trigger from the ODE
 # ceiling guard's own bounds (ode_ceiling_guard.py's _LEAD_MIN_FLOOR/_LEAD_MIN_CEIL),
@@ -92,7 +110,8 @@ _LOOKAHEAD = timedelta(minutes=_TOU_LEAD_MIN_CEIL)
 @dataclass(frozen=True)
 class Schedule:
     """One user-authored cost_period schedule (Issue #786 requirement 5/6 — no
-    temperature fields; only day-of-week/time/cost-tag)."""
+    temperature fields; only day-of-week/time/cost-tag, plus which days it pre-conditions on (#1558) and an
+    optional entity that enables it (#1565))."""
 
     id: str
     name: str
@@ -100,6 +119,129 @@ class Schedule:
     start: str  # "HH:MM" or "HH:MM:SS" (HA's TimeSelector's native format) — local wall-clock,
     end: str  # civil time, not an elapsed duration. _parse_hhmm() ignores any seconds component.
     cost_tag: str  # COST_TAG_HIGH | COST_TAG_LOW
+    # Issue #1558: APPLIES_TO_BOTH | APPLIES_TO_COOL | APPLIES_TO_HEAT -- the days this schedule pre-conditions on.
+    applies_to: str = APPLIES_TO_BOTH
+    # Issue #1565: the schedule applies only while this entity is on (None = always). Missing/unavailable = applies.
+    condition_entity: str | None = None
+
+
+# Issues #1558/#1565: the single list of schedule fields. Required fields are always stored; optional ones only when
+# they differ from their default, so a schedule the occupant never changed is stored exactly as before.
+SCHEDULE_FIELDS: tuple[str, ...] = tuple(f.name for f in fields(Schedule))
+SCHEDULE_OPTIONAL_DEFAULTS: dict[str, Any] = {"applies_to": APPLIES_TO_BOTH, "condition_entity": None}
+SCHEDULE_REQUIRED_FIELDS: tuple[str, ...] = tuple(f for f in SCHEDULE_FIELDS if f not in SCHEDULE_OPTIONAL_DEFAULTS)
+
+
+def schedule_from_dict(raw: Any) -> Schedule | None:
+    """A stored schedule dict as a :class:`Schedule` -- tolerant of fields this build does not know.
+
+    Before Issues #1558/#1565 the coordinator built ``Schedule(**stored)``: any key it did not know raised and the
+    whole update cycle failed (no TOU bank, no comfort band). Unknown keys are now ignored (DEBUG); a record missing a
+    required field returns ``None`` (the caller skips it and warns); ``days`` stored as a list becomes a tuple; an
+    unrecognised ``applies_to`` value means ``both`` (the schedule applies, as before the field existed).
+    """
+    if not isinstance(raw, dict):
+        return None
+    missing = [k for k in SCHEDULE_REQUIRED_FIELDS if k not in raw]
+    if missing:
+        return None
+    unknown = sorted(k for k in raw if k not in SCHEDULE_FIELDS)
+    if unknown:
+        _LOGGER.debug("TOU schedule %s: ignoring fields this version does not know: %s", raw.get("id"), unknown)
+    values = {k: raw[k] for k in SCHEDULE_FIELDS if k in raw}
+    days = values.get("days")
+    values["days"] = tuple(days) if isinstance(days, (list, tuple)) else (str(days),)
+    if values.get("applies_to") not in APPLIES_TO_VALUES:
+        values["applies_to"] = APPLIES_TO_BOTH
+    entity = values.get("condition_entity")
+    values["condition_entity"] = entity if isinstance(entity, str) and entity else None
+    return Schedule(**values)
+
+
+def schedule_to_dict(schedule: Schedule) -> dict[str, Any]:
+    """The stored form of a :class:`Schedule`: required fields always, optional ones only when not their default."""
+    out: dict[str, Any] = {}
+    for name in SCHEDULE_FIELDS:
+        value = getattr(schedule, name)
+        if name in SCHEDULE_OPTIONAL_DEFAULTS and value == SCHEDULE_OPTIONAL_DEFAULTS[name]:
+            continue
+        out[name] = list(value) if name == "days" else value
+    return out
+
+
+@dataclass(frozen=True)
+class ScheduleFilter:
+    """Issues #1558/#1565: the schedules that apply this cycle, and the ones skipped (with why)."""
+
+    kept: tuple[Schedule, ...]
+    skipped: tuple[tuple[Schedule, str], ...]  # (schedule, SKIP_* reason)
+    failed_open: tuple[str, ...]  # ids of schedules kept because their enable entity could not be read
+
+
+def filter_schedules(
+    schedules: list[Schedule] | tuple[Schedule, ...],
+    state_of: Callable[[str], str | None],
+    hvac_mode: str | None,
+) -> ScheduleFilter:
+    """Which schedules apply this cycle -- the one filter every TOU resolver, display and record reads (#1558/#1565).
+
+    1. ``applies_to`` (no state read): on a heat or cool day, a schedule limited to the other direction is skipped
+       (``not_applied_heat`` / ``not_applied_cool``). On any other day (off, fan, unset) it is kept, so the existing
+       "no pre-conditioning needed today" display is unchanged.
+    2. ``condition_entity``: ``on`` keeps the schedule; a missing or unavailable entity also keeps it (fails open, so
+       a broken rate-calendar helper never silently stops pre-conditioning; listed in ``failed_open``); any other
+       state (``off``) skips it (``condition_off``).
+
+    Order is preserved, so "the earliest schedule wins" still picks among the schedules that apply.
+    """
+    kept: list[Schedule] = []
+    skipped: list[tuple[Schedule, str]] = []
+    failed_open: list[str] = []
+    for schedule in schedules:
+        if hvac_mode in (APPLIES_TO_HEAT, APPLIES_TO_COOL) and schedule.applies_to not in (APPLIES_TO_BOTH, hvac_mode):
+            skipped.append((schedule, SKIP_NOT_APPLIED_HEAT if hvac_mode == APPLIES_TO_HEAT else SKIP_NOT_APPLIED_COOL))
+            continue
+        if schedule.condition_entity:
+            state = state_of(schedule.condition_entity)
+            if state is None or is_unavailable_state(state):
+                failed_open.append(schedule.id)
+            elif str(state).lower() != "on":
+                skipped.append((schedule, SKIP_CONDITION_OFF))
+                continue
+        kept.append(schedule)
+    return ScheduleFilter(tuple(kept), tuple(skipped), tuple(failed_open))
+
+
+# One catalog key per skip reason (Issue #1341: the common area), so Status, the Activity record and logs agree.
+_SKIP_KEYS = {
+    SKIP_CONDITION_OFF: "common.tou_skip.condition_off",
+    SKIP_NOT_APPLIED_HEAT: "common.tou_skip.not_applied_heat",
+    SKIP_NOT_APPLIED_COOL: "common.tou_skip.not_applied_cool",
+}
+
+
+def schedule_skip_msg(reason: str, entity: str | None = None) -> i18n.Msg:
+    """The one wording of a skip reason, as a translatable message (Issues #1558/#1565).
+
+    With ``entity`` given for ``condition_off`` the entity is named ("its condition is off (input_boolean.peak)").
+    """
+    if reason == SKIP_CONDITION_OFF and entity:
+        return i18n.Msg("common.tou_skip.condition_off_entity", entity=entity)
+    return i18n.Msg(_SKIP_KEYS.get(reason, "common.tou_skip.condition_off"))
+
+
+def schedule_skip_list(items: Iterable[tuple[str, str | None]]) -> i18n.ListOf:
+    """Several ``(reason, entity)`` skip reasons as one translatable list, each wording once, in order."""
+    seen: dict[tuple[str, str | None], i18n.Msg] = {}
+    for reason, entity in items:
+        key = (reason, entity if reason == SKIP_CONDITION_OFF else None)
+        seen.setdefault(key, schedule_skip_msg(reason, key[1]))
+    return i18n.ListOf(list(seen.values()))
+
+
+def schedule_skip_sentence(reason: str) -> str:
+    """The English wording of a skip reason (logs and records), rendered from the same catalog key."""
+    return i18n.render_en(schedule_skip_msg(reason))
 
 
 @dataclass(frozen=True)

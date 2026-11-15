@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "Periodo de acondicionamiento previo por tarifa terminado",
   "activity.tou_window_hvac_ran": "la climatización funcionó igualmente durante el periodo — la predicción se quedó corta",
   "activity.tou_window_none_needed": "hoy no hace falta acondicionamiento previo (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "Periodo de coste alto por tarifa omitido",
   "activity.unknown_paren": "(desconocido)",
   "activity.version_changed": "Versión cambiada: {old} -> {new}",
   "activity.warm_day_comfort_gap": "Brecha de confort en día cálido -- calefacción antes del apagado",

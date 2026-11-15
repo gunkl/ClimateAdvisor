@@ -1,1 +1,7 @@
-{}
+{
+  "settings.tou_applies.both": "Kühlen und Heizen",
+  "settings.tou_applies.cool": "Nur Kühlen",
+  "settings.tou_applies.heat": "Nur Heizen",
+  "settings.tou_applies_to": "Gilt für",
+  "settings.tou_condition": "Nur wenn an"
+}

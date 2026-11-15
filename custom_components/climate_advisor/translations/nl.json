@@ -331,14 +331,18 @@
           "days": "Dagen",
           "start": "Begint",
           "end": "Eindigt",
-          "delete_schedule": "Dit schema verwijderen"
+          "delete_schedule": "Dit schema verwijderen",
+          "applies_to": "Van toepassing op",
+          "condition_entity": "Alleen als dit aan staat"
         },
         "data_description": {
           "name": "Een korte naam voor dit tijdgebonden tariefschema (bijv. ‘Zomerpiek’).",
           "days": "De dagen van de week waarop dit schema geldt. Selecteer er minstens één.",
           "start": "Wanneer de periode met hoge kosten begint. Climate Advisor begint vóór dit tijdstip met voorconditioneren.",
           "end": "Wanneer de periode met hoge kosten eindigt. Moet verschillen van de starttijd.",
-          "delete_schedule": "Schakel in en verstuur om dit schema te verwijderen."
+          "delete_schedule": "Schakel in en verstuur om dit schema te verwijderen.",
+          "applies_to": "Op welke dagen dit schema vooraf conditioneert. Kies Alleen koelen als uw verwarming niet elektrisch is (bijv. een gasketel): voorverwarmen vóór een periode met hoge kosten bespaart dan niets. Standaard: koelen en verwarmen.",
+          "condition_entity": "Optioneel. Het schema geldt alleen zolang deze binaire sensor, input boolean of schakelaar aan staat (bijvoorbeeld een helper voor het piekseizoen). Laat leeg om altijd toe te passen. Als de entiteit ontbreekt of niet beschikbaar is, geldt het schema toch."
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "Niet ingesteld",
     "token_status_configured": "ingesteld",
     "token_status_not_configured": "niet ingesteld",
-    "schedule_add_new": "+ Nieuw schema toevoegen"
+    "schedule_add_new": "+ Nieuw schema toevoegen",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}, alleen koelen)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}, alleen verwarmen)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}, alleen als {entity} aan staat)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, alleen koelen, alleen als {entity} aan staat)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, alleen verwarmen, alleen als {entity} aan staat)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "Thermisch model",
         "weather_bias": "Afwijking weersvoorspelling",
         "suggestions": "Genegeerde suggesties"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "Koelen en verwarmen",
+        "cool": "Alleen koelen",
+        "heat": "Alleen verwarmen"
       }
     }
   },

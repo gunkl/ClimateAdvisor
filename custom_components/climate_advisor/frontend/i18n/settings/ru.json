@@ -1,1 +1,7 @@
-{}
+{
+  "settings.tou_applies.both": "Охлаждение и отопление",
+  "settings.tou_applies.cool": "Только охлаждение",
+  "settings.tou_applies.heat": "Только отопление",
+  "settings.tou_applies_to": "Применяется к",
+  "settings.tou_condition": "Только когда включено"
+}

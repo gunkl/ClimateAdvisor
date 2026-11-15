@@ -251,9 +251,25 @@ class TestCoordinatorWiring:
 
     def test_the_home_bank_end_timer_runs_the_cycle_pass(self):
         """Issue #1405: the Home/Guest bank-end timer runs the regular cycle's pass, flag included (False once the
-        re-resolve at the period's start has ended the bank)."""
+        re-resolve at the period's start has ended the bank). Issue #1565: that pass lives in one helper, shared with
+        the schedule-enable-entity listener (which ends a bank early the same way)."""
         sites = _apply_classification_sites()
-        assert sites[("coordinator.py", "_fire_tou_home_bank_end")] == ["self._tou_bank_owns_setpoint()"]
+        assert sites[("coordinator.py", "_reapply_classification_after_tou_change")] == [
+            "self._tou_bank_owns_setpoint()"
+        ]
+        import ast  # noqa: PLC0415
+
+        tree = ast.parse(
+            (Path(__file__).resolve().parent.parent / "custom_components/climate_advisor/coordinator.py").read_text()
+        )
+        callers = {
+            fn.name
+            for fn in ast.walk(tree)
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Attribute) and node.attr == "_reapply_classification_after_tou_change"
+        }
+        assert {"_fire_tou_home_bank_end", "_async_tou_condition_changed"} <= callers
 
     def test_every_call_site_is_accounted_for(self):
         """A new apply_classification() call site must be added to the lists above on purpose."""

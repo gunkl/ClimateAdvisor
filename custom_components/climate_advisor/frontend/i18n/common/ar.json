@@ -8,5 +8,9 @@
   "common.mode.heat": "تدفئة",
   "common.mode.heat_cool": "تدفئة/تبريد",
   "common.mode.off": "إيقاف",
+  "common.tou_skip.condition_off": "شرطه متوقف",
+  "common.tou_skip.condition_off_entity": "شرطه متوقف ({entity})",
+  "common.tou_skip.not_applied_cool": "لا ينطبق على التبريد",
+  "common.tou_skip.not_applied_heat": "لا ينطبق على التدفئة",
   "common.unknown": "غير معروف"
 }

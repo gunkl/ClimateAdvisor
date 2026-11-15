@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "horas de ponta ativas{ends}",
   "status.auto.tou_high_cost_idle": "horas de ponta ativas{ends} — hoje não é preciso pré-condicionar",
   "status.auto.tou_precondition": "{mode, select, cool {pré-arrefecimento} other {pré-aquecimento}} — horas de ponta{ends}",
+  "status.auto.tou_skipped": "ativo — horas de ponta ignoradas{ends}: {reasons}",
   "status.auto.windows_planned": "janelas abertas (como planeado)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

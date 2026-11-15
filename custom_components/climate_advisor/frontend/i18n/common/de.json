@@ -8,5 +8,9 @@
   "common.mode.heat": "Heizen",
   "common.mode.heat_cool": "Heizen/Kühlen",
   "common.mode.off": "Aus",
+  "common.tou_skip.condition_off": "die Bedingung ist aus",
+  "common.tou_skip.condition_off_entity": "die Bedingung ist aus ({entity})",
+  "common.tou_skip.not_applied_cool": "gilt nicht für Kühlen",
+  "common.tou_skip.not_applied_heat": "gilt nicht für Heizen",
   "common.unknown": "Unbekannt"
 }

@@ -331,14 +331,18 @@
           "days": "Jours",
           "start": "Début",
           "end": "Fin",
-          "delete_schedule": "Supprimer ce planning"
+          "delete_schedule": "Supprimer ce planning",
+          "applies_to": "S'applique à",
+          "condition_entity": "Seulement si ceci est activé"
         },
         "data_description": {
           "name": "Un nom court pour ce planning tarifaire (p. ex. \"Pointe d’été\").",
           "days": "Les jours de la semaine où ce planning s’applique. Sélectionnez-en au moins un.",
           "start": "Début de la période à tarif élevé. Climate Advisor commence à préparer la maison avant cette heure.",
           "end": "Fin de la période à tarif élevé. Doit être différente de l’heure de début.",
-          "delete_schedule": "Activez et validez pour supprimer ce planning."
+          "delete_schedule": "Activez et validez pour supprimer ce planning.",
+          "applies_to": "Les jours où ce planning prépare la maison. Choisissez Climatisation uniquement si votre chauffage n'est pas électrique (p. ex. une chaudière au gaz) : préchauffer avant une période à tarif élevé n'économise alors rien. Par défaut : climatisation et chauffage.",
+          "condition_entity": "Facultatif. Le planning ne s'applique que lorsque ce capteur binaire, input boolean ou interrupteur est activé (par exemple une entrée « saison de pointe »). Laissez vide pour toujours l'appliquer. Si l'entité est absente ou indisponible, le planning s'applique quand même."
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "Non configuré",
     "token_status_configured": "configuré",
     "token_status_not_configured": "non configuré",
-    "schedule_add_new": "+ Ajouter un planning"
+    "schedule_add_new": "+ Ajouter un planning",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}, climatisation uniquement)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}, chauffage uniquement)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}, seulement si {entity} est activé)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, climatisation uniquement, seulement si {entity} est activé)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, chauffage uniquement, seulement si {entity} est activé)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "Modèle thermique",
         "weather_bias": "Biais des prévisions météo",
         "suggestions": "Suggestions ignorées"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "Climatisation et chauffage",
+        "cool": "Climatisation uniquement",
+        "heat": "Chauffage uniquement"
       }
     }
   },

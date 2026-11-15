@@ -1,0 +1,16 @@
+{
+  "common.duration.hours": "{n, plural, one {# घंटा} other {# घंटे}}",
+  "common.duration.hours_frac": "{n, number, ::.0} घंटे",
+  "common.duration.min": "{n, plural, one {# मिनट} other {# मिनट}}",
+  "common.mode.auto": "ऑटो",
+  "common.mode.cool": "कूलिंग",
+  "common.mode.fan_only": "केवल पंखा",
+  "common.mode.heat": "हीटिंग",
+  "common.mode.heat_cool": "हीट/कूल",
+  "common.mode.off": "बंद",
+  "common.tou_skip.condition_off": "इसकी शर्त बंद है",
+  "common.tou_skip.condition_off_entity": "इसकी शर्त बंद है ({entity})",
+  "common.tou_skip.not_applied_cool": "कूलिंग पर लागू नहीं",
+  "common.tou_skip.not_applied_heat": "हीटिंग पर लागू नहीं",
+  "common.unknown": "अज्ञात"
+}

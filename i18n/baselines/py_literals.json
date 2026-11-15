@@ -1,0 +1,18 @@
+{
+  "description": "hard-coded English at Python occupant sinks",
+  "total": 59,
+  "files": {
+    "ai_skills_context.py": 13,
+    "ai_skills_investigator.py": 3,
+    "automation.py": 3,
+    "chart_log.py": 2,
+    "claude_api.py": 1,
+    "config_flow.py": 8,
+    "const.py": 6,
+    "coordinator.py": 19,
+    "invariant_watchdog.py": 1,
+    "operation_timeline.py": 1,
+    "prediction_accuracy.py": 1,
+    "v4_shadow.py": 1
+  }
+}

@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.climate_advisor import i18n
 from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
 from custom_components.climate_advisor.const import (
     CONF_FAN_ENTITY,
@@ -250,7 +251,7 @@ class TestAfterTheStop:
     def test_notify_once_per_episode_and_alert_on_the_third_distinct_stop(self, clock):
         engine, world = _engine()
         sent: list[str] = []
-        engine._notify_whf_safety = lambda title, message: sent.append(title)
+        engine._notify_whf_safety = lambda title, message: sent.append(i18n.render_en(title))
         for _ in range(3):
             engine._fan_override_active = True
             world["fan_on"] = True
@@ -266,7 +267,7 @@ class TestAfterTheStop:
     def test_retrying_the_same_stop_is_not_counted_as_oscillation(self, clock):
         engine, world = _engine()
         sent: list[str] = []
-        engine._notify_whf_safety = lambda title, message: sent.append(title)
+        engine._notify_whf_safety = lambda title, message: sent.append(i18n.render_en(title))
         for _ in range(4):  # the fan never goes off between the attempts: one stuck stop, not four presses
             engine._fan_override_active = True
             _run(engine)
@@ -637,7 +638,7 @@ class TestRule2StateBackstop:
     def test_the_suppression_notice_is_sent_once_per_episode(self, clock):
         engine, world, events = self._overlap_engine(clock, mode_age_s=600.0)
         sent: list[str] = []
-        engine._notify_whf_safety = lambda title, message: sent.append(message)
+        engine._notify_whf_safety = lambda title, message: sent.append(i18n.render_en(message))
         _run(engine)
         engine._last_commanded_hvac_time = None  # the toy thermostat ignored the off; the next tick acts again
         clock.advance(15)
@@ -697,7 +698,7 @@ class TestStopNotificationWording:
     def _message(clock, *, sealed: bool) -> str:
         engine, _ = _engine()
         sent: list[str] = []
-        engine._notify_whf_safety = lambda title, message: sent.append(message)
+        engine._notify_whf_safety = lambda title, message: sent.append(i18n.render_en(message))
         engine._after_whf_safety_stop(FanCommandResult.EXECUTED, sealed=sealed, reason="test", trigger="tick")
         assert len(sent) == 1, sent
         return sent[0]

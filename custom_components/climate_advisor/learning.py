@@ -21,6 +21,7 @@ from typing import Any, TypedDict
 
 from homeassistant.util import dt as dt_util
 
+from . import i18n
 from .const import (
     COMPLIANCE_THRESHOLD_LOW,
     LEARNING_DB_FILE,
@@ -71,7 +72,6 @@ from .swing import (
     reset_swing_cache,
     swing_debug_summary,
 )
-from .temperature import format_temp_delta
 from .thermal_confidence import displaced_keep as _displaced_keep
 from .thermal_confidence import (
     drop_stored_grades,
@@ -1281,6 +1281,7 @@ class LearningEngine:
         self._db_path = resolve_entry_scoped_path(storage_path, LEARNING_DB_FILE, entry_id)
         self._state = LearningState()
         self._last_suggestion_keys: list[str] = []
+        self._last_suggestion_msgs: list[i18n.Msg] = []
 
     def _zone_log_id(self) -> str:
         """Zone identifier for log lines (the config entry id; ``-`` for the legacy unscoped engine)."""
@@ -2526,11 +2527,27 @@ class LearningEngine:
                 return rec
         return None
 
-    def generate_suggestions(self) -> list[str]:
+    def generate_suggestions(self, lang: str | None = None) -> list[str]:
         """Analyze recent patterns and generate improvement suggestions.
+
+        Args:
+            lang: language to render in (an occupant surface passes ``i18n.hass_language(hass)``);
+                ``None`` renders English (records, AI input, tests). ``get_last_suggestion_msgs()`` returns the
+                same suggestions as ``i18n.Msg`` for callers that build an API ``text_msg`` sibling.
 
         Returns:
             List of human-readable suggestion strings.
+        """
+        msgs = self.generate_suggestion_msgs()
+        if lang is None:
+            return [i18n.render_en(m) for m in msgs]
+        return [i18n.render(m, lang) for m in msgs]
+
+    def generate_suggestion_msgs(self) -> list[i18n.Msg]:
+        """The suggestions as catalog messages (``learning.suggestion.<key>``), keys in ``get_last_suggestion_keys``.
+
+        Suggestion text is never persisted (only the key is: dismissed list, settings history, ``suggestion_sent``),
+        so these are rebuilt each call.
         """
         records = self._state.records
         if len(records) < MIN_DATA_POINTS_FOR_SUGGESTION:
@@ -2540,9 +2557,10 @@ class LearningEngine:
                 MIN_DATA_POINTS_FOR_SUGGESTION,
             )
             self._last_suggestion_keys = []
+            self._last_suggestion_msgs = []
             return []
 
-        pairs: list[tuple[str, str]] = []
+        pairs: list[tuple[str, i18n.Msg]] = []
         recently_dismissed = set(self._state.dismissed_suggestions)
 
         # Build suppression set from feedback history (last 30 days)
@@ -2579,11 +2597,9 @@ class LearningEngine:
                 pairs.append(
                     (
                         suggestion_key,
-                        f"Over the past {len(window_days)} days where opening windows was recommended, "
-                        f"they were opened only {compliance:.0%} of the time. "
-                        f"Would you like Climate Advisor to stop suggesting window actions "
-                        f"and instead rely on HVAC with optimized schedules? "
-                        f"This uses slightly more energy but requires no manual action.",
+                        i18n.Msg(
+                            "learning.suggestion.low_window_compliance", days=len(window_days), compliance=compliance
+                        ),
                     )
                 )
 
@@ -2617,29 +2633,26 @@ class LearningEngine:
                             pass
 
                     direction_word = "up" if up_count >= down_count else "down"
-                    detail = f"mostly {direction_word} by about {format_temp_delta(avg_mag, self._temp_unit)}"
+                    delta = i18n.TempDelta(avg_mag, self._temp_unit)
                     if hour_counts:
                         peak_hour = max(hour_counts, key=hour_counts.get)  # type: ignore[arg-type]
-                        peak_time = f"{peak_hour}:00" if peak_hour >= 10 else f" {peak_hour}:00"
-                        detail += f", often around {peak_time.strip()}"
+                        detail = i18n.Msg(
+                            "learning.override_detail_peak", direction=direction_word, delta=delta, hour=peak_hour
+                        )
+                    else:
+                        detail = i18n.Msg("learning.override_detail", direction=direction_word, delta=delta)
 
                     pairs.append(
                         (
                             suggestion_key,
-                            f"You've manually adjusted the thermostat {total_overrides} times "
-                            f"in the past two weeks ({detail}). "
-                            f"Would you like Climate Advisor to adjust the comfort setpoints, "
-                            f"or add a scheduled temperature bump?",
+                            i18n.Msg("learning.suggestion.frequent_overrides", count=total_overrides, detail=detail),
                         )
                     )
                 else:
                     pairs.append(
                         (
                             suggestion_key,
-                            f"You've manually adjusted the thermostat {total_overrides} times "
-                            f"in the past two weeks. This may indicate the comfort setpoints "
-                            f"don't match your preferences. Would you like Climate Advisor to "
-                            f"analyze the override patterns and suggest new setpoints?",
+                            i18n.Msg("learning.suggestion.frequent_overrides_no_detail", count=total_overrides),
                         )
                     )
 
@@ -2653,11 +2666,7 @@ class LearningEngine:
                     pairs.append(
                         (
                             suggestion_key,
-                            f"On mild and warm days, the HVAC has been running an average of "
-                            f"{avg_runtime:.0f} minutes — more than expected. This could indicate "
-                            f"doors/windows being left open, or the setpoint being too aggressive. "
-                            f"Would you like to add more door/window sensors, or adjust the "
-                            f"setpoints for mild days?",
+                            i18n.Msg("learning.suggestion.high_runtime_mild_days", minutes=round(avg_runtime)),
                         )
                     )
 
@@ -2670,11 +2679,7 @@ class LearningEngine:
                 pairs.append(
                     (
                         suggestion_key,
-                        "You frequently leave for 30\u201345 minute periods, which is barely "
-                        "long enough for the setback to take effect before you return. "
-                        "Would you like to shorten the setback delay from 15 minutes to "
-                        "5 minutes for these quick trips, or skip setback for departures "
-                        "under 1 hour?",
+                        i18n.Msg("learning.suggestion.short_departures"),
                     )
                 )
 
@@ -2686,10 +2691,7 @@ class LearningEngine:
                 pairs.append(
                     (
                         suggestion_key,
-                        f"The house has been outside your comfort range for more than "
-                        f"30 minutes on {len(violation_days)} of the last 14 days. "
-                        f"Would you like to reduce the setback aggressiveness, or "
-                        f"start the morning warm-up earlier?",
+                        i18n.Msg("learning.suggestion.comfort_violations", days=len(violation_days)),
                     )
                 )
 
@@ -2711,20 +2713,19 @@ class LearningEngine:
                     pairs.append(
                         (
                             suggestion_key,
-                            f"HVAC has been paused {pause_total} times due to open doors/windows "
-                            f"in the past two weeks. {top_name} was the most frequent trigger "
-                            f"({top_count} times). Would you like to extend the pause delay for "
-                            f"that sensor, or exclude it from monitoring?",
+                            i18n.Msg(
+                                "learning.suggestion.frequent_door_pauses_sensor",
+                                count=pause_total,
+                                sensor=top_name,
+                                top_count=top_count,
+                            ),
                         )
                     )
                 else:
                     pairs.append(
                         (
                             suggestion_key,
-                            f"HVAC has been paused {pause_total} times due to open doors/windows "
-                            f"in the past two weeks. If a specific door is the main culprit, "
-                            f"would you like to extend the pause delay for that door, or "
-                            f"exclude it from monitoring?",
+                            i18n.Msg("learning.suggestion.frequent_door_pauses", count=pause_total),
                         )
                     )
 
@@ -2744,11 +2745,7 @@ class LearningEngine:
             pairs.append(
                 (
                     "thermal_model_ready",
-                    (
-                        "I've now collected enough thermal observations to estimate your home's "
-                        "envelope and HVAC performance. Pre-heat timing and bedtime setbacks will "
-                        "adjust automatically based on how your home actually behaves — no action needed."
-                    ),
+                    i18n.Msg("learning.suggestion.thermal_model_ready"),
                 )
             )
 
@@ -2766,20 +2763,23 @@ class LearningEngine:
             pairs.append(
                 (
                     "forecast_bias_significant",
-                    (
-                        f"I've noticed your weather service consistently forecasts highs about "
-                        f"{format_temp_delta(magnitude, self._temp_unit, 1)} {direction} than what actually occurs "
-                        "at your location. "
-                        "I'm now applying a correction to improve forecasting accuracy — this helps "
-                        "pre-heat and pre-cool decisions account for your local conditions."
+                    i18n.Msg(
+                        "learning.suggestion.forecast_bias_significant",
+                        delta=i18n.TempDelta(magnitude, self._temp_unit, 1),
+                        direction=direction,
                     ),
                 )
             )
 
         self._last_suggestion_keys = [key for key, _ in pairs]
-        suggestions = [text for _, text in pairs]
-        _LOGGER.debug("Generated %d learning suggestions", len(suggestions))
-        return suggestions
+        msgs = [msg for _, msg in pairs]
+        self._last_suggestion_msgs = msgs
+        _LOGGER.debug("Generated %d learning suggestions", len(msgs))
+        return msgs
+
+    def get_last_suggestion_msgs(self) -> list[i18n.Msg]:
+        """The messages of the most recently generated suggestions (parallel to ``get_last_suggestion_keys``)."""
+        return list(self._last_suggestion_msgs)
 
     def get_last_suggestion_keys(self) -> list[str]:
         """Return the keys of the most recently generated suggestions."""

@@ -1,0 +1,7 @@
+{
+  "settings.tou_applies.both": "कूलिंग और हीटिंग",
+  "settings.tou_applies.cool": "केवल कूलिंग",
+  "settings.tou_applies.heat": "केवल हीटिंग",
+  "settings.tou_applies_to": "किस पर लागू",
+  "settings.tou_condition": "केवल चालू रहने पर"
+}

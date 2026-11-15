@@ -1,0 +1,840 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Climate Advisor のセットアップ",
+        "description": "Climate Advisor が監視・制御するエンティティを選択して、連携を設定します。",
+        "data": {
+          "weather_entity": "天気サービス",
+          "climate_entity": "サーモスタット",
+          "notify_service": "通知サービス"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor が天気予報と屋外の状況の取得に使う天気連携です。",
+          "climate_entity": "Climate Advisor が監視・制御するサーモスタットです。",
+          "notify_service": "アラートと毎日のブリーフィングに使う Home Assistant の通知サービスです(例: notify.mobile_app_yourphone)。"
+        }
+      },
+      "unit": {
+        "title": "温度の単位",
+        "description": "Climate Advisor で表示・入力するすべての温度に使う単位を選択してください。後からコア設定で変更できます。",
+        "data": {
+          "temp_unit": "温度の単位"
+        },
+        "data_description": {
+          "temp_unit": "Climate Advisor で表示・入力するすべての温度に使われます。後からコア設定で変更できます。変更後はリロードが必要で、Climate Advisor が案内します。"
+        }
+      },
+      "setpoints": {
+        "title": "設定温度",
+        "description": "快適、外出、就寝時の目標温度を設定します。暖房と冷房が競合したり、思わぬ温度で落ち着いたりする組み合わせの場合は、項目の横に警告が表示されます。そのまま使う場合は、もう一度送信してください。",
+        "data": {
+          "comfort_heat": "快適な暖房温度",
+          "comfort_cool": "快適な冷房温度",
+          "setback_heat": "外出時の暖房温度",
+          "setback_cool": "外出時の冷房温度",
+          "sleep_heat": "就寝時の暖房温度",
+          "sleep_cool": "就寝時の冷房温度"
+        },
+        "data_description": {
+          "comfort_heat": "在宅中に暖房するときの目標温度です。",
+          "comfort_cool": "在宅中に冷房するときの目標温度です。",
+          "setback_heat": "省エネのため、外出中に使う低めの温度です。",
+          "setback_cool": "省エネのため、外出中に使う高めの温度です。",
+          "sleep_heat": "就寝時間帯(在宅時)に暖房するときの目標温度です。",
+          "sleep_cool": "就寝時間帯(在宅時)に冷房するときの目標温度です。"
+        }
+      },
+      "temperature_sources": {
+        "title": "温度の取得元",
+        "description": "Climate Advisor が外気温と室温のデータを取得する場所を選択してください。",
+        "data": {
+          "outdoor_temp_source": "外気温の取得元",
+          "indoor_temp_source": "室温の取得元"
+        },
+        "data_description": {
+          "outdoor_temp_source": "外気温の取得元です。「天気サービス」は天気連携を使います。専用のセンサーまたは入力ヘルパーを選ぶと、特定のエンティティを使えます。",
+          "indoor_temp_source": "室温の取得元です。「Climate エンティティ」はサーモスタット内蔵のセンサーを使います。専用のセンサーまたは入力ヘルパーを選ぶと、別のエンティティを使えます。"
+        }
+      },
+      "outdoor_temp_entity": {
+        "title": "外気温エンティティ",
+        "description": "外気温の値を提供するエンティティを選択してください。",
+        "data": {
+          "outdoor_temp_entity": "外気温エンティティ"
+        },
+        "data_description": {
+          "outdoor_temp_entity": "外気温を報告するセンサーまたは入力ヘルパーを選択してください。"
+        }
+      },
+      "indoor_temp_entity": {
+        "title": "室温エンティティ",
+        "description": "室温の値を提供するエンティティを選択してください。",
+        "data": {
+          "indoor_temp_entity": "室温エンティティ"
+        },
+        "data_description": {
+          "indoor_temp_entity": "室温を報告するセンサーまたは入力ヘルパーを選択してください。"
+        }
+      },
+      "sensors": {
+        "title": "ドア/窓センサー",
+        "description": "Climate Advisor が監視するバイナリセンサーを選択してください。ドアや窓が開いているとセンサーが示すと、エネルギーの無駄を避けるため空調を一時停止します。\n\n個別のセンサーでも、複数のセンサーをまとめたバイナリセンサーグループのエンティティでも選択できます。\n\n極性の切り替えは、センサーの状態の解釈方法を制御します。ほとんどのセンサーは、「オン」が開いている(安全でない)状態を意味する Home Assistant 標準です。センサーが逆の値を報告する場合は、反転を有効にしてください。",
+        "data": {
+          "door_window_sensors": "ドア/窓センサー",
+          "sensor_polarity_inverted": "センサーの極性を反転",
+          "fan_mode": "ファン制御モード",
+          "fan_entity": "ファンエンティティ"
+        },
+        "data_description": {
+          "door_window_sensors": "監視するバイナリセンサーのエンティティを選択してください。複数のセンサーをまとめたバイナリセンサーグループも選べます。",
+          "sensor_polarity_inverted": "センサーが閉じているときに「オン」、開いているときに「オフ」を報告する場合(Home Assistant 標準とは逆の場合)に有効にしてください。",
+          "fan_mode": "換気用ファンの制御方法です。「全館換気ファン」は専用のファンエンティティを制御します。「送風ファン」はサーモスタットのファンモードを使います。",
+          "fan_entity": "制御するファンまたはスイッチのエンティティです(全館換気ファンモードでのみ必要)。"
+        }
+      },
+      "occupancy": {
+        "title": "在宅状況の認識",
+        "description": "誰が在宅かを Climate Advisor に伝えるトグルエンティティを設定します。すべての項目は任意です。使わない機能は空欄のままにしてください。",
+        "data": {
+          "home_toggle_entity": "在宅/外出トグル",
+          "home_toggle_invert": "在宅トグルを反転",
+          "vacation_toggle_entity": "バケーションモードのトグル",
+          "vacation_toggle_invert": "バケーショントグルを反転",
+          "guest_toggle_entity": "ゲストモードのトグル",
+          "guest_toggle_invert": "ゲストトグルを反転"
+        },
+        "data_description": {
+          "home_toggle_entity": "誰かが在宅かどうかを示すエンティティ(input_boolean、スイッチなど)です。オン = 在宅、オフ = 外出。",
+          "home_toggle_invert": "外出中にトグルがオン、在宅中にオフを報告する場合に有効にしてください。",
+          "vacation_toggle_entity": "バケーションモードを示すエンティティです。有効な間は、長期の省エネのためさらに大きく温度を下げます。",
+          "vacation_toggle_invert": "バケーション中でないときにトグルがオンを報告する場合に有効にしてください。",
+          "guest_toggle_entity": "来客中を示すエンティティです。バケーションモードと外出モードより優先され、快適温度が維持されます。",
+          "guest_toggle_invert": "来客がいないときにトグルがオンを報告する場合に有効にしてください。"
+        }
+      },
+      "schedule": {
+        "title": "毎日のスケジュール",
+        "description": "世帯のスケジュールを設定すると、Climate Advisor が暖房・冷房を始める時刻やブリーフィングを送る時刻を把握できます。",
+        "data": {
+          "zone_name": "ゾーン名",
+          "wake_time": "起床時刻",
+          "sleep_time": "就寝時刻",
+          "briefing_time": "毎日のブリーフィング時刻",
+          "briefing_notifications_enabled": "毎日のブリーフィング通知"
+        },
+        "data_description": {
+          "zone_name": "このゾーンの短い名前です(例: 「寝室」)。設定 → デバイスとサービス、およびダッシュボードのゾーン選択に表示されます。Climate エンティティの名前から提案されます。自由に編集できます。",
+          "wake_time": "世帯が通常起きる時刻です。Climate Advisor は、この時刻より前に快適温度に向けて暖房または冷房を始めます。",
+          "sleep_time": "世帯が通常就寝する時刻です。Climate Advisor は、この時刻に外出/就寝時の温度へ切り替えます。",
+          "briefing_time": "その日の天気予報と空調の計画を含む、毎日の気象ブリーフィング通知を送る時刻です。",
+          "briefing_notifications_enabled": "予定された毎日のブリーフィングを、このゾーンのプッシュ通知として送信します。最初のゾーンのみ初期値がオンのため、複数ゾーンの住まいでもゾーンごとに同じ通知は届きません。後から通知で変更できます。"
+        }
+      }
+    },
+    "error": {
+      "invalid_notify_service": "domain.service 形式で入力してください(例: notify.mobile_app_phone)",
+      "zone_name_too_long": "ゾーン名は50文字以内にしてください",
+      "whf_entity_shared_zone": "このファンはすでに別の Climate Advisor ゾーンで制御されています。全館換気ファンは1つのゾーンにのみ属せます。別のファンを選ぶか、先に他のゾーンから外してください。",
+      "whf_no_sensors_warning": "ドア/窓センサーが選択されていないため、Climate Advisor は家が閉め切られているかどうか判断できず、そのために全館換気ファンを停止しません。このまま使う場合はもう一度送信してください。センサーを追加することもできます。",
+      "whf_command_only_warning": "Climate Advisor はファンの実際の状態を確認できないため、自分で起動していないファンを確認も停止もできません。このまま使う場合はもう一度送信してください。または、センサーとファンのオプションでファン状態センサーを追加してください。",
+      "setpoint_band_inverted_warning": "この暖房温度は、対応する冷房温度以上です。暖房と冷房の両方がある設備では、一日中交互に動作し、家を暖めては冷やすことになります。暖房は冷房より少なくとも 4 °F (2.5 °C) 低く設定してください。このまま使う場合はもう一度送信してください。",
+      "setpoint_band_narrow_warning": "この暖房温度は、対応する冷房温度より 4 °F (2.5 °C) 未満の差しかありません。機器は設定温度を行き過ぎるため、これほど差が小さいと、暖房と冷房が必要以上に切り替わる場合があります。このまま使う場合はもう一度送信してください。",
+      "setpoint_outside_thermostat_warning": "サーモスタットがこの温度を受け付けないため、Climate Advisor は受け付け可能な最も近い温度を代わりに送信します。このまま使う場合はもう一度送信してください。",
+      "away_heat_above_home_warning": "外出時の暖房が在宅時の暖房より高いため、在宅中より不在中の方が家を暖めることになります。このまま使う場合はもう一度送信してください。",
+      "away_cool_below_home_warning": "外出時の冷房が在宅時の冷房より低いため、在宅中より不在中の方がエアコンが強く動作します。このまま使う場合はもう一度送信してください。",
+      "sleep_heat_below_away_warning": "就寝時の暖房が外出時の暖房より低いため、夜間は不在時より家が冷えます。このまま使う場合はもう一度送信してください。",
+      "sleep_cool_above_away_warning": "就寝時の冷房が外出時の冷房より高いため、夜間は不在時より家の温度が上がることを許容します。このまま使う場合はもう一度送信してください。",
+      "vacation_heat_above_away_warning": "バケーション時の暖房が外出時の暖房より高いため、バケーション中の方が通常の外出日よりエネルギーを使います。このまま使う場合はもう一度送信してください。",
+      "vacation_cool_below_away_warning": "バケーション時の冷房が外出時の冷房より低いため、バケーション中の方が通常の外出日よりエネルギーを使います。このまま使う場合はもう一度送信してください。",
+      "vacation_freeze_warning": "この設定では、バケーション時の暖房が 45 °F (7 °C) を下回ります。長期の旅行中に水道管が凍結するおそれがあります。このまま使う場合はもう一度送信してください。"
+    },
+    "abort": {
+      "already_configured": "このサーモスタットには、すでに Climate Advisor のゾーンが設定されています。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Climate Advisor のオプション",
+        "description": "設定するセクションを選択してください。",
+        "menu_options": {
+          "core": "コア設定",
+          "setpoints": "設定温度",
+          "temperature_sources": "温度の取得元",
+          "sensors": "センサーとファン",
+          "occupancy": "在宅状況",
+          "schedule": "スケジュール",
+          "scheduler": "TOU スケジューラー",
+          "notifications": "通知",
+          "advanced": "学習と動作",
+          "classification_thresholds": "日のタイプのしきい値",
+          "ai_settings": "Claude AI の設定",
+          "github_settings": "GitHub 連携"
+        }
+      },
+      "core": {
+        "title": "コア設定",
+        "description": "Climate Advisor が使うメインのエンティティと通知サービスを設定します。",
+        "data": {
+          "weather_entity": "天気サービス",
+          "climate_entity": "サーモスタット",
+          "notify_service": "通知サービス",
+          "temp_unit": "温度の単位",
+          "zone_name": "ゾーン名"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor が天気予報と屋外の状況の取得に使う天気連携です。",
+          "climate_entity": "Climate Advisor が監視・制御するサーモスタットです。",
+          "notify_service": "アラートと毎日のブリーフィングに使う Home Assistant の通知サービスです(例: notify.mobile_app_yourphone)。",
+          "temp_unit": "Climate Advisor で表示・入力するすべての温度に使われます。変更後はリロードが必要で、Climate Advisor が案内します。",
+          "zone_name": "ダッシュボードとデバイス一覧でこのゾーンに表示される名前です。名前を変更してもエンティティ ID は変わりません。"
+        }
+      },
+      "setpoints": {
+        "title": "設定温度",
+        "description": "快適、外出、就寝、バケーション時の目標温度を設定します。暖房と冷房が競合したり、思わぬ温度で落ち着いたりする組み合わせの場合は、項目の横に警告が表示されます。そのまま使う場合は、もう一度送信してください。",
+        "data": {
+          "comfort_heat": "快適な暖房温度",
+          "comfort_cool": "快適な冷房温度",
+          "setback_heat": "外出時の暖房温度",
+          "setback_cool": "外出時の冷房温度",
+          "sleep_heat": "就寝時の暖房温度",
+          "sleep_cool": "就寝時の冷房温度",
+          "vacation_heat": "バケーション時の暖房温度",
+          "vacation_cool": "バケーション時の冷房温度"
+        },
+        "data_description": {
+          "comfort_heat": "在宅中に暖房するときの目標温度です。",
+          "comfort_cool": "在宅中に冷房するときの目標温度です。",
+          "setback_heat": "省エネのため、外出中に使う低めの温度です。",
+          "setback_cool": "省エネのため、外出中に使う高めの温度です。",
+          "sleep_heat": "就寝時間帯(在宅時)に暖房するときの目標温度です。",
+          "sleep_cool": "就寝時間帯(在宅時)に冷房するときの目標温度です。",
+          "vacation_heat": "バケーションスイッチがオンの間の暖房温度です。空欄の場合は、外出時の暖房温度から 3 °F (約 1.5 °C) 引いた値を使います。",
+          "vacation_cool": "バケーションスイッチがオンの間の冷房温度です。空欄の場合は、外出時の冷房温度に 3 °F (約 1.5 °C) 足した値を使います。"
+        }
+      },
+      "temperature_sources": {
+        "title": "温度の取得元",
+        "description": "Climate Advisor が外気温と室温のデータを取得する場所を選択してください。",
+        "data": {
+          "outdoor_temp_source": "外気温の取得元",
+          "outdoor_temp_entity": "外気温エンティティ",
+          "outdoor_humidity_entity": "屋外湿度センサー",
+          "indoor_temp_source": "室温の取得元",
+          "indoor_temp_entity": "室温エンティティ",
+          "indoor_humidity_entity": "室内湿度センサー",
+          "sleep_indoor_temp_entity": "就寝時の室温センサー",
+          "sleep_indoor_humidity_entity": "就寝時の湿度センサー",
+          "thermostat_companion_sensor": "サーモスタット高精度センサー"
+        },
+        "data_description": {
+          "outdoor_temp_source": "外気温の取得元です。「天気サービス」は天気連携を使います。専用のセンサーまたは入力ヘルパーを選ぶと、特定のエンティティを使えます。「天気サービス」に戻すと、選択したエンティティは削除されます。",
+          "outdoor_temp_entity": "外気温を報告するセンサーまたは入力ヘルパーを選択してください。上の取得元は自動的にそれに合わせて切り替わります。この項目を空にすると天気サービスに戻ります。",
+          "outdoor_humidity_entity": "屋外の体感温度とともにステータスのグラフに表示される屋外湿度センサーです。グラフ専用で、暖房・冷房の判断には使われません。空欄にすると自動検出します。",
+          "indoor_temp_source": "室温の取得元です。「Climate エンティティ」はサーモスタット内蔵のセンサーを使います。専用のセンサーまたは入力ヘルパーを選ぶと、別のエンティティを使えます。",
+          "indoor_temp_entity": "室温を報告するセンサーまたは入力ヘルパーを選択してください。上の取得元は自動的にそれに合わせて切り替わります。この項目を空にするとサーモスタット内蔵のセンサーに戻ります。",
+          "indoor_humidity_entity": "Climate Advisor が日中に読み取る部屋の湿度センサーで、その部屋の体感温度とともにステータスのグラフに表示されます。グラフ専用で、暖房・冷房の判断には使われません。空欄にすると自動検出します。",
+          "sleep_indoor_temp_entity": "就寝スケジュールが有効な間、快適性と自動制御の判断に使う寝室のセンサー(任意)です(熱モデルは常にメインのセンサーを使います)。利用できない場合はメインのセンサーに切り替わります。無効にするには空欄にしてください。",
+          "sleep_indoor_humidity_entity": "就寝スケジュールが有効な間、ステータスのグラフに表示される寝室の湿度センサーです。グラフ専用で、暖房・冷房の判断には使われません。空欄にすると自動検出します。",
+          "thermostat_companion_sensor": "多くのサーモスタットはメインのエンティティで整数の温度を報告しますが、同じデバイスにより細かい温度センサーもあります。「自動」では、そのセンサーが同じ値であると確認できた場合(差が 1 °F 以内で、サーモスタットが整数を表示する間は小数を表示)にこの細かいセンサーを使い、値がなくなったり一致しなくなったりした場合はサーモスタット自身の値に戻ります。サーモスタット内蔵センサーの取得元でのみ有効です。「オフ」では常にサーモスタット自身の値を使います。"
+        }
+      },
+      "sensors": {
+        "title": "センサーとファン",
+        "description": "ドア/窓センサーとファン制御を設定します。ドアや窓が開いているとセンサーが示すと、エネルギーの無駄を避けるため空調を一時停止します。",
+        "data": {
+          "door_window_sensors": "ドア/窓センサー",
+          "sensor_polarity_inverted": "センサーの極性を反転",
+          "sensor_debounce_seconds": "センサーのデバウンス遅延",
+          "manual_grace_seconds": "手動変更後の一時停止",
+          "automation_grace_seconds": "自動変更後のクールダウン",
+          "override_confirm_seconds": "手動変更の確認遅延",
+          "fan_mode": "ファン制御モード",
+          "hvac_fan_restrict_mode": "送風ファンの制限",
+          "fan_entity": "ファンエンティティ",
+          "fan_state_entity": "ファン状態エンティティ",
+          "fan_state_feedback": "ファン状態フィードバックが信頼できる",
+          "fan_remote_entity": "ファン RF リモコンのイベントエンティティ",
+          "fan_min_runtime_per_hour": "ファンの1時間あたりの最小運転時間",
+          "nat_vent_soft_start_enabled": "自然換気のソフトスタート"
+        },
+        "data_description": {
+          "door_window_sensors": "監視するバイナリセンサーのエンティティを選択してください。複数のセンサーをまとめたバイナリセンサーグループも選べます。",
+          "sensor_polarity_inverted": "センサーが閉じているときに「オン」、開いているときに「オフ」を報告する場合(Home Assistant 標準とは逆の場合)に有効にしてください。",
+          "sensor_debounce_seconds": "Climate Advisor が反応するまでに、ドア/窓センサーの状態が安定して続く必要がある時間です。反応とは、空調の一時停止/再開や、自然換気ファン制御の開始/終了を指します。短時間の開放やセンサーの不安定なチャタリングで反応してしまうのを防ぎます。",
+          "manual_grace_seconds": "サーモスタットを手動で調整した後、Climate Advisor が自動制御を再開するまでの待機時間です。",
+          "automation_grace_seconds": "Climate Advisor が自動で変更を行った後、次の変更を許可するまでの待機時間です。",
+          "override_confirm_seconds": "システムの変更から手動変更の確認までの時間です。この時間内に解消される一時的な出来事(サーモスタットの再起動、ファンの動作サイクルなど)は自動的に無視されます。0 にすると、手動変更をすぐに確認します。",
+          "fan_mode": "換気用ファンの制御方法です。「全館換気ファン」は専用のファンエンティティを制御します。「送風ファン」はサーモスタットのファンモードを使います。",
+          "hvac_fan_restrict_mode": "湿度の高い気候向けです。「暖房のみ」にすると、冷房後2時間は送風ファンを使わず、結露したコイルによる湿気を避けます。",
+          "fan_entity": "制御するファンまたはスイッチのエンティティです(全館換気ファンモードでのみ必要)。",
+          "fan_state_entity": "物理的なファンの状態を読み取る別のセンサー(任意)です(2つのエンティティで構成される全館換気ファン向け)。空欄の場合は、ファンエンティティから状態も読み取ります。",
+          "fan_state_feedback": "ファンエンティティまたは状態センサーが、直前に送ったコマンドではなく実際のモーターの状態を報告する場合はオンにしてください。不明な場合はオフのままにしてください。その場合、CA は毎回のサイクルでファンを目的の状態に指示します。",
+          "fan_remote_entity": "物理的な RF 壁リモコンが押されたときに発火するイベントエンティティ(任意)です(例: gunkl/quietcool-house-fan ファームウェア)。リモコンのタイマー選択(1/2/4/8/12時間)で、ファンの手動変更後の一時停止時間が決まります。無効にするには空欄にしてください。",
+          "fan_min_runtime_per_hour": "ファンの1時間あたりの運転時間(分)です(0 = 無効、60 = 常時オン)。サイクルは時刻に合わせず、HA の起動タイミングに応じて自然にずれます。",
+          "nat_vent_soft_start_enabled": "有効にすると、今日の外気温がピークを過ぎて下がっていると確認できた時点で、全館換気ファンが外気温と室温が同じ時点でも(外気が明らかに低くなるのを待たずに)起動することがあります。目的は空気の流れと屋根裏・蓄熱体の排熱で、大量の冷却ではありません。初期値はオンです。外気が室温より明らかに低くなってからのみファンを動かしたい場合は無効にしてください。現在、湿度・露点センサーによる制限はありません。"
+        }
+      },
+      "occupancy": {
+        "title": "在宅状況の認識",
+        "description": "誰が在宅かを Climate Advisor に伝えるトグルエンティティを設定します。すべての項目は任意です。使わない機能は空欄のままにしてください。",
+        "data": {
+          "home_toggle_entity": "在宅/外出トグル",
+          "home_toggle_invert": "在宅トグルを反転",
+          "vacation_toggle_entity": "バケーションモードのトグル",
+          "vacation_toggle_invert": "バケーショントグルを反転",
+          "guest_toggle_entity": "ゲストモードのトグル",
+          "guest_toggle_invert": "ゲストトグルを反転",
+          "welcome_home_debounce_seconds": "おかえり通知の待機時間"
+        },
+        "data_description": {
+          "home_toggle_entity": "誰かが在宅かどうかを示すエンティティ(input_boolean、スイッチなど)です。オン = 在宅、オフ = 外出。",
+          "home_toggle_invert": "外出中にトグルがオン、在宅中にオフを報告する場合に有効にしてください。",
+          "vacation_toggle_entity": "バケーションモードを示すエンティティです。有効な間は、長期の省エネのためさらに大きく温度を下げます。",
+          "vacation_toggle_invert": "バケーション中でないときにトグルがオンを報告する場合に有効にしてください。",
+          "guest_toggle_entity": "来客中を示すエンティティです。バケーションモードと外出モードより優先され、快適温度が維持されます。",
+          "guest_toggle_invert": "来客がいないときにトグルがオンを報告する場合に有効にしてください。",
+          "welcome_home_debounce_seconds": "おかえり通知の最小間隔です。この時間内に外出して戻った場合、通知は送られません。0 にすると常に通知します。"
+        }
+      },
+      "schedule": {
+        "title": "毎日のスケジュール",
+        "description": "世帯のスケジュールを設定すると、Climate Advisor が暖房・冷房を始める時刻やブリーフィングを送る時刻を把握できます。",
+        "data": {
+          "wake_time": "起床時刻",
+          "sleep_time": "就寝時刻",
+          "briefing_time": "毎日のブリーフィング時刻"
+        },
+        "data_description": {
+          "wake_time": "世帯が通常起きる時刻です。Climate Advisor は、この時刻より前に快適温度に向けて暖房または冷房を始めます。",
+          "sleep_time": "世帯が通常就寝する時刻です。Climate Advisor は、この時刻に外出/就寝時の温度へ切り替えます。",
+          "briefing_time": "その日の天気予報と空調の計画を含む、毎日の気象ブリーフィング通知を送る時刻です。"
+        }
+      },
+      "scheduler": {
+        "title": "TOU スケジューラー",
+        "description": "時間帯別料金のスケジュールを最大 {max} 件まで定義できます(現在 {count} 件)。Climate Advisor は、既存の快適温度範囲と学習した応答速度を使って、料金の高い時間帯の前に自動で予冷または予熱します。ここで設定する温度はありません。",
+        "data": {
+          "manage": "スケジュールを管理"
+        },
+        "data_description": {
+          "manage": "編集するスケジュールを選択するか、新しく追加してください。"
+        }
+      },
+      "scheduler_edit": {
+        "title": "TOU スケジューラー",
+        "description": "温度の項目はありません。Climate Advisor は、料金の高い時間帯の前に、既存の快適温度範囲に向けて自動で準備します。",
+        "data": {
+          "name": "名前",
+          "days": "曜日",
+          "start": "開始",
+          "end": "終了",
+          "delete_schedule": "このスケジュールを削除",
+          "applies_to": "適用対象",
+          "condition_entity": "これがオンのときのみ"
+        },
+        "data_description": {
+          "name": "この時間帯別料金スケジュールの短い名前です(例: 「夏のピーク」)。",
+          "days": "このスケジュールを適用する曜日です。1つ以上選択してください。",
+          "start": "料金の高い時間帯の開始時刻です。Climate Advisor は、この時刻より前に準備を始めます。",
+          "end": "料金の高い時間帯の終了時刻です。開始時刻と異なる必要があります。",
+          "delete_schedule": "オンにして送信すると、このスケジュールを削除します。",
+          "applies_to": "このスケジュールが事前調整を行う日です。暖房が電気でない場合（ガス炉など）は「冷房のみ」を選んでください。その場合、料金の高い時間帯の前に予熱しても節約になりません。既定：冷房と暖房。",
+          "condition_entity": "任意。このバイナリーセンサー、input boolean、またはスイッチがオンの間だけスケジュールが適用されます（例：ピークシーズン用のヘルパー）。常に適用する場合は空欄にしてください。エンティティが存在しない、または利用できない場合も、スケジュールは適用されます。"
+        }
+      },
+      "notifications": {
+        "title": "通知の設定",
+        "description": "受け取る通知とその通知先を選択します。プッシュ通知はモバイルアプリに届き、メール通知は send_email サービス経由で届きます。",
+        "data": {
+          "briefing_notifications_enabled": "毎日のブリーフィング通知",
+          "push_briefing": "プッシュ: 毎日のブリーフィング",
+          "push_door_window_pause": "プッシュ: 空調を一時停止",
+          "push_occupancy_home": "プッシュ: おかえりなさい",
+          "manual_grace_notify": "プッシュ: 手動変更後の一時停止が終了",
+          "automation_grace_notify": "プッシュ: 自動変更後の一時停止が終了",
+          "push_entity_health": "プッシュ: エンティティが見つかりません",
+          "email_briefing": "メール: 毎日のブリーフィング",
+          "email_door_window_pause": "メール: 空調を一時停止",
+          "email_grace_expired": "メール: 一時停止期間が終了",
+          "email_grace_repause": "メール: 空調を再び一時停止",
+          "email_occupancy_home": "メール: おかえりなさい",
+          "email_entity_health": "メール: エンティティが見つかりません"
+        },
+        "data_description": {
+          "briefing_notifications_enabled": "複数ゾーンの環境では、予定された毎日のブリーフィングのプッシュ/メールを送るゾーンは1つだけにしてください。そうしないとゾーンごとに同じ通知が届きます。ちょうど1つのゾーンでオンにしてください。デバッグタブで「ブリーフィングを送信」を手動でクリックした場合は、これがオフでも常に送信されます。",
+          "push_briefing": "毎朝、短い要約のブリーフィングをスマートフォンに送信します。",
+          "push_door_window_pause": "ドアや窓が長時間開いているために空調が一時停止されたときに、プッシュ通知を送信します。",
+          "push_occupancy_home": "誰かが帰宅して快適温度に戻したときに、プッシュ通知を送信します。",
+          "manual_grace_notify": "手動変更後の一時停止期間が終わり、通常のセンサー動作が再開したときに、プッシュ通知を送信します。",
+          "automation_grace_notify": "自動変更後の一時停止期間が終わったときに、プッシュ通知を送信します。",
+          "push_entity_health": "設定したエンティティ(サーモスタット、天気の取得元、センサー、ファン、トグル、通知サービス)が削除されたり応答しなくなったりしたときに、プッシュ通知を送信します。",
+          "email_briefing": "予報と計画の詳細をすべて含む毎日のブリーフィングを、メールで送信します。",
+          "email_door_window_pause": "ドアや窓が開いているために空調が一時停止されたときに、メールを送信します。",
+          "email_grace_expired": "一時停止期間が終わり、通常のセンサー動作が再開したときに、メールを送信します。",
+          "email_grace_repause": "一時停止期間の終了後もドア/窓が開いたままのため空調が再び一時停止されたときに、メールを送信します。",
+          "email_occupancy_home": "誰かが帰宅したときに、メールを送信します。",
+          "email_entity_health": "設定したエンティティ(サーモスタット、天気の取得元、センサー、ファン、トグル、通知サービス)が削除されたり応答しなくなったりしたときに、メールを送信します。"
+        }
+      },
+      "advanced": {
+        "title": "学習と動作",
+        "description": "Climate Advisor があなたの好みから学習する方法と、快適性と節約のバランスの取り方を設定します。",
+        "data": {
+          "primary_engine": "予測エンジン",
+          "shadow_engine": "比較エンジン",
+          "learning_enabled": "学習と提案を有効にする",
+          "adaptive_preheat_enabled": "適応型の予熱タイミング",
+          "adaptive_setback_enabled": "適応型の就寝時の省エネ設定",
+          "weather_bias_enabled": "天気予報の偏り補正",
+          "min_preheat_minutes": "最小予熱時間",
+          "max_preheat_minutes": "最大予熱時間",
+          "default_preheat_minutes": "既定の予熱時間",
+          "default_tou_lead_minutes": "TOU 事前調整のリード時間",
+          "preheat_safety_margin": "予熱の安全マージン",
+          "max_setback_depth_f": "最大の省エネ設定幅",
+          "comfort_mode_switch_min_interval_s": "暖房/冷房の切替間隔",
+          "aggressive_savings": "快適性より節約を優先",
+          "comfort_deadband_hot_f": "暑い日の許容超過幅",
+          "comfort_deadband_warm_f": "暖かい日の許容超過幅",
+          "comfort_deadband_mild_f": "穏やかな日の許容超過幅",
+          "comfort_deadband_cool_f": "涼しい日の許容超過幅",
+          "comfort_deadband_cold_f": "寒い日の許容超過幅",
+          "comfort_family_recency_window_min": "直近の運転ウィンドウ",
+          "energy_rate": "電気料金",
+          "heat_power_kw": "暖房の電力",
+          "cool_power_kw": "冷房の電力"
+        },
+        "data_description": {
+          "primary_engine": "Climate Advisor が使う予測エンジンです。v4(既定)または v3。予熱と予冷のタイミング、上限ガード、窓を閉める時刻、省エネ設定幅を決め、ステータスのグラフと「今後24時間」の計画の主線になります。選択したエンジンがまだ学習中の間は、これらの判断は既定の動作を使い(もう一方のエンジンは使いません)、グラフにはスケジュールの推定値が表示されます。",
+          "shadow_engine": "比較用の線として描画される2つ目のエンジン(任意)です。予測エンジンとは異なるものを選ぶ必要があります。動作するのはこの2つのエンジンだけで、それ以外はオフになります。",
+          "learning_enabled": "有効にすると、Climate Advisor があなたの手動調整から学習し、時間とともに改善案を提案します。",
+          "adaptive_preheat_enabled": "学習した暖房速度を使って予熱の開始時刻を計算します。学習が有効である必要があります。",
+          "adaptive_setback_enabled": "学習した暖房/冷房速度を使って、安全な最大の省エネ設定幅を計算します。学習が有効である必要があります。",
+          "weather_bias_enabled": "観測した予報の精度に基づいて、明日の予報に地域固有の補正を適用します。学習が有効である必要があります。",
+          "min_preheat_minutes": "システムがスケジュールする最短の予熱時間です。",
+          "max_preheat_minutes": "システムがスケジュールする最長の予熱時間です。",
+          "default_preheat_minutes": "十分な観測が集まるまで使用する予熱時間です。",
+          "default_tou_lead_minutes": "料金の高い時間帯の何分前に TOU の事前調整を開始するかを指定します。住まいの実際の速度を計算できるだけの暖房/冷房サイクルが観測されるまで使用されます。",
+          "preheat_safety_margin": "モデルが計算した予熱時間にバッファとして掛ける倍率です(例: 1.2 = 20% 増し)。",
+          "max_setback_depth_f": "適応型エンジンが計算できる、夜間の省エネ設定の最大幅です。",
+          "comfort_mode_switch_min_interval_s": "通常の暖房/冷房の切り替えの最小待機時間で、短時間での行き来を防ぎます。実際に快適範囲の端を超えた場合(室温が本当に超えた場合)は、この待機を無視してすぐに切り替えます。",
+          "aggressive_savings": "有効にすると、Climate Advisor は快適性より省エネを優先します。たとえば、暖房や冷房が動く前に、より大きな温度変動を許容します。",
+          "comfort_deadband_hot_f": "暑い日: 反対のモードが動いた直後(直近の運転ウィンドウ内)に、反対のモードに切り替える前に、快適範囲の端を何度超えてよいかを指定します。暑い日は暖房への切り替えに適用されます(冷房側は遅らせません)。これを超えるとすぐに切り替わります。これは許容幅であり、端を事前に準備する距離ではありません(そちらは 2 度、または快適範囲が小さい場合はその3分の1で固定です)。",
+          "comfort_deadband_warm_f": "暖かい日: 反対のモードが動いた直後(直近の運転ウィンドウ内)に、反対のモードに切り替える前に、快適範囲の端を何度超えてよいかを指定します。暖かい日は暖房への切り替えに適用されます(冷房側は遅らせません)。これを超えるとすぐに切り替わります。これは許容幅であり、端を事前に準備する距離ではありません(そちらは 2 度、または快適範囲が小さい場合はその3分の1で固定です)。",
+          "comfort_deadband_mild_f": "穏やかな日、または対象外に分類された日: 反対のモードが動いた直後(直近の運転ウィンドウ内)に、反対のモードに切り替える前に、快適範囲の端を何度超えてよいかを指定します。穏やかな日はどちらかに偏らないため、暖房と冷房の両方に適用されます。これを超えるとすぐに切り替わります。これは許容幅であり、端を事前に準備する距離ではありません(そちらは 2 度、または快適範囲が小さい場合はその3分の1で固定です)。",
+          "comfort_deadband_cool_f": "涼しい日: 反対のモードが動いた直後(直近の運転ウィンドウ内)に、反対のモードに切り替える前に、快適範囲の端を何度超えてよいかを指定します。涼しい日は冷房への切り替えに適用されます(暖房側は遅らせません)。これを超えるとすぐに切り替わります。これは許容幅であり、端を事前に準備する距離ではありません(そちらは 2 度、または快適範囲が小さい場合はその3分の1で固定です)。",
+          "comfort_deadband_cold_f": "寒い日: 反対のモードが動いた直後(直近の運転ウィンドウ内)に、反対のモードに切り替える前に、快適範囲の端を何度超えてよいかを指定します。寒い日は冷房への切り替えに適用されます(暖房側は遅らせません)。これを超えるとすぐに切り替わります。これは許容幅であり、端を事前に準備する距離ではありません(そちらは 2 度、または快適範囲が小さい場合はその3分の1で固定です)。",
+          "comfort_family_recency_window_min": "暖房側または冷房側が「最近動いた」とみなす期間です(実際に動作した機器、または時間帯別料金・予測上限・ユーザー操作によるモード変更が対象で、Climate Advisor のすべての書き込みではありません)。上の許容超過幅(この期間内の小さな超過ではサーモスタットを反対のモードに切り替えません)と、予測温度の上限ガード(予測された超過に対して動作せず待機します)で使われます。",
+          "energy_rate": "任意。1キロワット時あたりの料金を、お使いの通貨で入力します。下の暖房・冷房の電力と合わせて、ダッシュボードが毎日のコストを見積もれるようになります。コストを表示しない場合は3つとも空欄にしてください。",
+          "heat_power_kw": "任意。暖房が運転中に消費する平均電力で、銘板やスマートプラグから調べられます。1日のコスト見積もりには、電気料金とともに必要です。",
+          "cool_power_kw": "任意。冷房が運転中に消費する平均電力で、銘板やスマートプラグから調べられます。1日のコスト見積もりには、電気料金とともに必要です。"
+        }
+      },
+      "classification_thresholds": {
+        "title": "日のタイプのしきい値",
+        "description": "Climate Advisor が各日を分類するための温度のしきい値です。「暑い」のしきい値以上の日はエアコンを使い、「涼しい」のしきい値を下回る日は暖房を使います。既定値: 暑い 85°F (29°C)、暖かい 75°F (24°C)、穏やか 60°F (16°C)、涼しい 45°F (7°C)。",
+        "data": {
+          "threshold_hot": "暑い日のしきい値",
+          "threshold_warm": "暖かい日のしきい値",
+          "threshold_mild": "穏やかな日のしきい値",
+          "threshold_cool": "涼しい日のしきい値"
+        },
+        "data_description": {
+          "threshold_hot": "予報最高気温がこの温度以上の日は「暑い」(エアコンモード)に分類されます。既定値: 85°F / 29°C。",
+          "threshold_warm": "予報最高気温がこの温度以上の日は「暖かい」(窓の開放を推奨、エアコンなし)に分類されます。既定値: 75°F / 24°C。",
+          "threshold_mild": "予報最高気温がこの温度以上の日は「穏やか」(快適、窓を開ける)に分類されます。既定値: 60°F / 16°C。",
+          "threshold_cool": "予報最高気温がこの温度以上の日は「涼しい」(軽い暖房)に分類されます。これを下回る日は「寒い」(本格的な暖房)です。既定値: 45°F / 7°C。"
+        }
+      },
+      "ai_settings": {
+        "title": "AI の設定",
+        "description": "Claude AI 連携を設定して、インテリジェントな分析とレポートを利用します。\nAPI キーの状態: {key_status}",
+        "data": {
+          "ai_enabled": "AI 機能を有効にする",
+          "ai_api_key": "Claude API キー",
+          "ai_model": "AI モデル",
+          "ai_reasoning_effort": "推論の強度",
+          "ai_max_tokens": "最大応答長",
+          "ai_temperature": "創造性",
+          "ai_monthly_budget": "月額予算の上限",
+          "ai_auto_requests_per_day": "1日あたりの自動リクエスト数",
+          "ai_manual_requests_per_day": "1日あたりの手動リクエスト数",
+          "ai_investigator_enabled": "調査エージェントを有効にする",
+          "ai_investigator_requests_per_day": "1日あたりの調査リクエスト数"
+        },
+        "data_description": {
+          "ai_enabled": "すべての AI 機能のマスタースイッチです。無効にすると、Climate Advisor は組み込みのロジックのみを使用します。",
+          "ai_api_key": "Anthropic の API キーです。console.anthropic.com で取得できます。既存のキーを保持する場合は空欄のままにしてください。",
+          "ai_model": "使用する Claude モデルです。コストと品質のバランスから Sonnet をおすすめします。",
+          "ai_reasoning_effort": "Claude が推論に費やす労力の大きさです。高いほど分析の質が上がりますが、コストも増えます。",
+          "ai_max_tokens": "AI の応答の最大長(トークン数、256〜16384)です。",
+          "ai_temperature": "ランダム性を制御します。0 = 決定的、1.0 = 最も創造的。0.3 をおすすめします。",
+          "ai_monthly_budget": "月額の推定支出の上限(米ドル)です。0 にすると上限なしです。",
+          "ai_auto_requests_per_day": "1日あたりの自動 AI リクエストの上限です(午前0時にリセット)。",
+          "ai_manual_requests_per_day": "1日あたりのユーザー操作による AI リクエストの上限です(午前0時にリセット)。",
+          "ai_investigator_enabled": "調査エージェントを有効にします(AI の有効化が必要)。複数のデータソースにまたがる詳細な分析を行い、不整合やデータの問題を見つけます。",
+          "ai_investigator_requests_per_day": "1日あたりの調査分析の実行回数の上限です。各調査では拡張思考を使用します。午前0時にリセットされます。"
+        }
+      },
+      "github_settings": {
+        "title": "GitHub 連携",
+        "description": "調査レポートの GitHub Issue 送信を設定します。\n現在のトークン: {token_status}",
+        "data": {
+          "github_token": "GitHub パーソナルアクセストークン",
+          "github_repo": "GitHub リポジトリ"
+        },
+        "data_description": {
+          "github_token": "issues:write スコープを持つトークンです。既存のトークンを保持する場合は空欄のままにしてください。",
+          "github_repo": "Issue を送信するリポジトリを owner/repo 形式で指定します(例: gunkl/ClimateAdvisor)。"
+        }
+      }
+    },
+    "error": {
+      "entity_required_for_source": "使用するセンサーまたはヘルパーを選択するか、取得元を天気サービス/Climate エンティティに戻してください。",
+      "entity_domain_mismatch": "そのエンティティは選択した取得元と一致しません。「専用センサー」にはセンサーを、「入力ヘルパー」には input_number を選択してください。",
+      "source_entity_conflict": "取得元とエンティティを同時に変更したため、内容が競合しています。取得元を選択してから、一致するエンティティを選択してください(または空にしてください)。",
+      "invalid_notify_service": "domain.service 形式で入力してください(例: notify.mobile_app_phone)",
+      "schedule_days_required": "少なくとも1日を選択してください",
+      "schedule_start_end_equal": "開始時刻と終了時刻は異なる必要があります",
+      "preheat_min_exceeds_max": "最小予熱時間は最大予熱時間以下にしてください",
+      "preheat_default_exceeds_max": "既定の予熱時間は最大予熱時間以下にしてください",
+      "shadow_same_as_primary": "比較エンジンは予測エンジンと異なるものにしてください。別のエンジンを選ぶか「なし」を選択してください。",
+      "unknown_engine": "その予測エンジンは利用できません。",
+      "ai_connection_failed": "Claude API に接続できませんでした。API キーを確認して、もう一度お試しください。",
+      "ai_key_required": "AI 機能を有効にする場合は API キーが必要です。",
+      "ai_temperature_out_of_range": "温度は 0.0 から 1.0 の間で指定してください。",
+      "ai_max_tokens_out_of_range": "最大トークン数の値が、この項目で許可されている範囲外です。",
+      "github_repo_invalid": "リポジトリは owner/repo 形式で指定してください(例: myuser/MyRepo)。",
+      "zone_name_too_long": "ゾーン名は50文字以内にしてください",
+      "whf_entity_shared_zone": "このファンはすでに別の Climate Advisor ゾーンで制御されています。全館換気ファンは1つのゾーンにのみ属せます。別のファンを選ぶか、先に他のゾーンから外してください。",
+      "whf_no_sensors_warning": "ドア/窓センサーが選択されていないため、Climate Advisor は家が閉め切られているかどうか判断できず、そのために全館換気ファンを停止しません。このまま使う場合はもう一度送信してください。センサーを追加することもできます。",
+      "whf_command_only_warning": "Climate Advisor はファンの実際の状態を確認できないため、自分で起動していないファンを確認も停止もできません。このまま使う場合はもう一度送信してください。または、センサーとファンのオプションでファン状態センサーを追加してください。",
+      "thresholds_must_be_ascending": "日のタイプのしきい値は、涼しい → 穏やか → 暖かい → 暑い の順に高くなる必要があります(涼しい < 穏やか < 暖かい < 暑い)。",
+      "setpoint_band_inverted_warning": "この暖房温度は、対応する冷房温度以上です。暖房と冷房の両方がある設備では、一日中交互に動作し、家を暖めては冷やすことになります。暖房は冷房より少なくとも 4 °F (2.5 °C) 低く設定してください。このまま使う場合はもう一度送信してください。",
+      "setpoint_band_narrow_warning": "この暖房温度は、対応する冷房温度より 4 °F (2.5 °C) 未満の差しかありません。機器は設定温度を行き過ぎるため、これほど差が小さいと、暖房と冷房が必要以上に切り替わる場合があります。このまま使う場合はもう一度送信してください。",
+      "setpoint_outside_thermostat_warning": "サーモスタットがこの温度を受け付けないため、Climate Advisor は受け付け可能な最も近い温度を代わりに送信します。このまま使う場合はもう一度送信してください。",
+      "away_heat_above_home_warning": "外出時の暖房が在宅時の暖房より高いため、在宅中より不在中の方が家を暖めることになります。このまま使う場合はもう一度送信してください。",
+      "away_cool_below_home_warning": "外出時の冷房が在宅時の冷房より低いため、在宅中より不在中の方がエアコンが強く動作します。このまま使う場合はもう一度送信してください。",
+      "sleep_heat_below_away_warning": "就寝時の暖房が外出時の暖房より低いため、夜間は不在時より家が冷えます。このまま使う場合はもう一度送信してください。",
+      "sleep_cool_above_away_warning": "就寝時の冷房が外出時の冷房より高いため、夜間は不在時より家の温度が上がることを許容します。このまま使う場合はもう一度送信してください。",
+      "vacation_heat_above_away_warning": "バケーション時の暖房が外出時の暖房より高いため、バケーション中の方が通常の外出日よりエネルギーを使います。このまま使う場合はもう一度送信してください。",
+      "vacation_cool_below_away_warning": "バケーション時の冷房が外出時の冷房より低いため、バケーション中の方が通常の外出日よりエネルギーを使います。このまま使う場合はもう一度送信してください。",
+      "vacation_freeze_warning": "この設定では、バケーション時の暖房が 45 °F (7 °C) を下回ります。長期の旅行中に水道管が凍結するおそれがあります。このまま使う場合はもう一度送信してください。"
+    }
+  },
+  "issues": {
+    "weather_entity_not_found": {
+      "title": "天気エンティティが見つかりません",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "天気エンティティを選択",
+            "description": "以前設定した天気エンティティ `{entity_id}` が存在しなくなりました。下から正しい天気エンティティを選択してください。",
+            "data": {
+              "weather_entity": "天気サービス"
+            },
+            "data_description": {
+              "weather_entity": "天気予報と屋外の状況を提供する天気連携です。"
+            }
+          }
+        }
+      }
+    },
+    "reload_needed": {
+      "title": "設定の変更を反映するには再読み込みが必要です。",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "保存した設定を適用",
+            "description": "Climate Advisor のオプションで保存した変更が、まだ反映されていません。今すぐ Climate Advisor を再読み込みして適用してください。"
+          }
+        }
+      }
+    },
+    "zone_resolution_ambiguous": {
+      "title": "ゾーンの選択があいまいです",
+      "description": "Climate Advisor には複数のゾーンがありますが、リクエストがどのゾーン宛てか指定されていませんでした: {request}。結果は {outcome} でした。送信元(スクリプト、オートメーション、コマンドラインツール、古いブラウザタブ)が、別のゾーンの情報を表示している可能性があります。\n\n修正するには、そのリクエストに `?zone=ENTRY_ID` を追加してください。ENTRY_ID は `GET /api/climate_advisor/status` に一覧表示されるゾーンの `entry_id` です。Climate Advisor のダッシュボードはすでにこれを行っています。この通知は次回 Climate Advisor が起動したときに消えます。"
+    }
+  },
+  "common": {
+    "schedule_summary": "{name} — {days} {window} ({cost})",
+    "schedule_all_days": "毎日",
+    "schedule_cost_high": "高",
+    "schedule_cost_low": "低",
+    "schedule_unnamed": "(名前なし)",
+    "key_status_not_configured": "未設定",
+    "token_status_configured": "設定済み",
+    "token_status_not_configured": "未設定",
+    "schedule_add_new": "+ 新しいスケジュールを追加",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}、冷房のみ)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}、暖房のみ)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}、{entity} がオンのときのみ)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}、冷房のみ、{entity} がオンのときのみ)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}、暖房のみ、{entity} がオンのときのみ)"
+  },
+  "entity": {
+    "sensor": {
+      "day_type": {
+        "name": "日のタイプ",
+        "state": {
+          "hot": "暑い",
+          "warm": "暖かい",
+          "mild": "穏やか",
+          "cool": "涼しい",
+          "cold": "寒い",
+          "unknown": "不明"
+        }
+      },
+      "trend_direction": {
+        "name": "傾向",
+        "state": {
+          "warming": "上昇中",
+          "cooling": "下降中",
+          "stable": "安定",
+          "unknown": "不明"
+        }
+      },
+      "next_human_action": {
+        "name": "あなたの次の操作"
+      },
+      "daily_briefing": {
+        "name": "毎日のブリーフィング"
+      },
+      "compliance_score": {
+        "name": "快適スコア"
+      },
+      "automation_status": {
+        "name": "ステータス"
+      },
+      "next_automation_action": {
+        "name": "次の自動制御の動作"
+      },
+      "next_automation_time": {
+        "name": "次の自動制御の時刻"
+      },
+      "occupancy_mode": {
+        "name": "在宅モード",
+        "state": {
+          "home": "在宅",
+          "away": "不在",
+          "vacation": "バケーション",
+          "guest": "ゲスト"
+        }
+      },
+      "last_action_time": {
+        "name": "最後の動作の時刻"
+      },
+      "last_action_reason": {
+        "name": "最後の動作の理由"
+      },
+      "fan_status": {
+        "name": "ファンの状態",
+        "state": {
+          "disabled": "無効",
+          "active": "動作中",
+          "inactive": "停止中"
+        }
+      },
+      "contact_status": {
+        "name": "ドア/窓センサー"
+      },
+      "ai_status": {
+        "name": "AI の状態",
+        "state": {
+          "active": "動作中",
+          "inactive": "停止中",
+          "error": "エラー",
+          "disabled": "無効",
+          "circuit_open": "エラーが続いたため一時停止中",
+          "budget_exceeded": "月額予算に到達"
+        }
+      },
+      "indoor_temp": {
+        "name": "室温"
+      },
+      "outdoor_temp": {
+        "name": "外気温"
+      },
+      "forecast_high": {
+        "name": "予報最高気温"
+      },
+      "forecast_low": {
+        "name": "予報最低気温"
+      },
+      "effective_target_temp": {
+        "name": "目標温度"
+      },
+      "heat_threshold": {
+        "name": "暖房のしきい値"
+      },
+      "cool_threshold": {
+        "name": "冷房のしきい値"
+      }
+    },
+    "switch": {
+      "automation_enabled": {
+        "name": "自動制御"
+      }
+    }
+  },
+  "selector": {
+    "fan_mode": {
+      "options": {
+        "disabled": "無効(ファン制御なし)",
+        "whole_house_fan": "全館換気ファン(専用エンティティ)",
+        "hvac_fan": "送風ファンモード"
+      }
+    },
+    "hvac_fan_restrict": {
+      "options": {
+        "heat": "暖房のみ(冷房後の湿気を避ける)",
+        "cool": "冷房のみ",
+        "both": "両方(制限なし)"
+      }
+    },
+    "outdoor_temp_source": {
+      "options": {
+        "weather_service": "天気サービス(推奨)",
+        "sensor": "専用センサー",
+        "input_number": "入力ヘルパー(input_number)"
+      }
+    },
+    "indoor_temp_source": {
+      "options": {
+        "climate_fallback": "Climate エンティティ(推奨)",
+        "sensor": "専用センサー",
+        "input_number": "入力ヘルパー(input_number)"
+      }
+    },
+    "thermostat_companion": {
+      "options": {
+        "auto": "自動(確認できた場合にサーモスタットの細かいセンサーを使用)",
+        "off": "オフ(常にサーモスタット自身の値を使用)"
+      }
+    },
+    "temp_unit": {
+      "options": {
+        "fahrenheit": "華氏 (°F)",
+        "celsius": "摂氏 (°C)"
+      }
+    },
+    "prediction_engine": {
+      "options": {
+        "none": "なし",
+        "v3": "v3",
+        "v4": "v4"
+      }
+    },
+    "weekday": {
+      "options": {
+        "mon": "月",
+        "tue": "火",
+        "wed": "水",
+        "thu": "木",
+        "fri": "金",
+        "sat": "土",
+        "sun": "日"
+      }
+    },
+    "ai_reasoning_effort": {
+      "options": {
+        "low": "低",
+        "medium": "中",
+        "high": "高"
+      }
+    },
+    "suggestion_action": {
+      "options": {
+        "accept": "承認",
+        "dismiss": "却下"
+      }
+    },
+    "reset_scope": {
+      "options": {
+        "all": "学習したすべてのデータ",
+        "thermal_model": "熱モデル",
+        "weather_bias": "天気予報の偏り",
+        "suggestions": "却下した提案"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "冷房と暖房",
+        "cool": "冷房のみ",
+        "heat": "暖房のみ"
+      }
+    }
+  },
+  "services": {
+    "respond_to_suggestion": {
+      "name": "提案に応答",
+      "description": "Climate Advisor からの学習に基づく提案を承認または却下します。",
+      "fields": {
+        "entry_id": {
+          "name": "ゾーン",
+          "description": "この呼び出しの対象となる Climate Advisor のゾーン(設定エントリ)です。Issue #796 以降は必須です。複数のゾーンが設定されている場合、HA のサービスレジストリには、呼び出しがどのゾーン宛てかを知る他の方法がないためです。"
+        },
+        "action": {
+          "name": "アクション",
+          "description": "提案を承認するか却下するかを指定します。"
+        },
+        "suggestion_key": {
+          "name": "提案キー",
+          "description": "応答する提案を識別するキーです。"
+        }
+      }
+    },
+    "force_reclassify": {
+      "name": "強制再分類",
+      "description": "Climate Advisor に予報データを再取得させ、その日を再分類させます。デバッグに便利です。",
+      "fields": {
+        "entry_id": {
+          "name": "ゾーン",
+          "description": "この呼び出しの対象となる Climate Advisor のゾーン(設定エントリ)です。Issue #796 以降は必須です。複数のゾーンが設定されている場合、HA のサービスレジストリには、呼び出しがどのゾーン宛てかを知る他の方法がないためです。"
+        }
+      }
+    },
+    "resend_briefing": {
+      "name": "ブリーフィングを再送信",
+      "description": "毎日のブリーフィング通知を再生成して再送信します。今日すでに送信済みの場合も実行されます。",
+      "fields": {
+        "entry_id": {
+          "name": "ゾーン",
+          "description": "この呼び出しの対象となる Climate Advisor のゾーン(設定エントリ)です。Issue #796 以降は必須です。複数のゾーンが設定されている場合、HA のサービスレジストリには、呼び出しがどのゾーン宛てかを知る他の方法がないためです。"
+        }
+      }
+    },
+    "dump_diagnostics": {
+      "name": "診断情報を出力",
+      "description": "トラブルシューティング用に、Climate Advisor の内部状態の詳細な診断スナップショットをログに記録します。出力は INFO レベルで記録されるため、結果は Home Assistant のログで確認してください。",
+      "fields": {
+        "entry_id": {
+          "name": "ゾーン",
+          "description": "この呼び出しの対象となる Climate Advisor のゾーン(設定エントリ)です。Issue #796 以降は必須です。複数のゾーンが設定されている場合、HA のサービスレジストリには、呼び出しがどのゾーン宛てかを知る他の方法がないためです。"
+        }
+      }
+    },
+    "reset_learning_data": {
+      "name": "学習データをリセット",
+      "description": "Climate Advisor が学習したデータの一部またはすべてをリセットします。空調設備を交換したとき、新しい場所に引っ越したとき、または最初からやり直したいときに使用してください。",
+      "fields": {
+        "entry_id": {
+          "name": "ゾーン",
+          "description": "この呼び出しの対象となる Climate Advisor のゾーン(設定エントリ)です。Issue #796 以降は必須です。複数のゾーンが設定されている場合、HA のサービスレジストリには、呼び出しがどのゾーン宛てかを知る他の方法がないためです。呼び出す前によく確認してください。このサービスは元に戻せません。"
+        },
+        "scope": {
+          "name": "範囲",
+          "description": "リセットするデータです。「all」はすべてを消去します。「thermal_model」は空調の運転セッションの観測データを消去します。「weather_bias」は予報精度の記録を消去します。「suggestions」は、却下済みの提案が再び表示されるようにします。"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "unknown_zone": {
+      "message": "Climate Advisor のゾーン entry_id「{entry_id}」が不明、または読み込まれていません。設定 > デバイスとサービスで正しいゾーンを確認してください。"
+    }
+  }
+}

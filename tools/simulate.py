@@ -711,6 +711,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Issue #1341: simulate.py renders catalog messages (event_log text, reports); read the translation catalogs
+    # once up front (the same single headless entry the harness uses; never raises, no-op afterwards).
+    _root = str(Path(__file__).resolve().parent.parent)
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    from tools.sim_harness.ha_stubs import install_ha_stubs  # noqa: PLC0415
+
+    install_ha_stubs()
+
     if args.surfaces:
         _repo_root = str(Path(__file__).resolve().parent.parent)
         if _repo_root not in sys.path:

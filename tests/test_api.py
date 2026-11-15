@@ -1523,3 +1523,36 @@ class TestIssue911ZoneScopedHandlers:
         response = asyncio.run(ClimateAdvisorAutomationStateView().get(request))
 
         assert response.status == 503
+
+
+def test_briefing_view_renders_in_language_and_adds_msg_sibling():
+    """Issue #1341: the briefing endpoint renders in the backend language and adds ``briefing_msg``."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from custom_components.climate_advisor import i18n
+    from custom_components.climate_advisor.api import ClimateAdvisorBriefingView
+    from custom_components.climate_advisor.briefing import BriefingText
+
+    i18n.reset_catalogs()
+    i18n.load_catalogs()
+    msg = i18n.Msg("briefing.title")
+    text = BriefingText(i18n.render_en(msg), msg)
+    for lang, expect_en in (("en", True), ("fr", False)):
+        coordinator = MagicMock()
+        coordinator.zone_label = "z"
+        coordinator._last_briefing = text
+        coordinator._briefing_sent_today = False
+        hass = SimpleNamespace(config=SimpleNamespace(language=lang), data={DOMAIN: {"entry1": coordinator}})
+        req = MagicMock()
+        req.app = {"hass": hass}
+        req.query = {}
+        req.rel_url.query = {}
+        view = ClimateAdvisorBriefingView()
+        view.json = lambda body, status_code=200: body
+        body = asyncio.run(view.get(req))
+        assert body["briefing"] == (str(text) if expect_en else text.rendered("fr"))
+        assert body["briefing_msg"] == msg.to_wire()
+    coordinator._last_briefing = "plain"
+    body = asyncio.run(view.get(req))
+    assert body["briefing"] == "plain" and body["briefing_msg"] is None

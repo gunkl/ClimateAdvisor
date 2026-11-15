@@ -1,0 +1,16 @@
+{
+  "common.duration.hours": "{n, plural, one {# h} many {# h} other {# h}}",
+  "common.duration.hours_frac": "{n, number, ::.0} h",
+  "common.duration.min": "{n, plural, one {# min} many {# min} other {# min}}",
+  "common.mode.auto": "Automatico",
+  "common.mode.cool": "Raffreddamento",
+  "common.mode.fan_only": "Solo ventola",
+  "common.mode.heat": "Riscaldamento",
+  "common.mode.heat_cool": "Caldo/Freddo",
+  "common.mode.off": "Spento",
+  "common.tou_skip.condition_off": "la condizione è disattivata",
+  "common.tou_skip.condition_off_entity": "la condizione è disattivata ({entity})",
+  "common.tou_skip.not_applied_cool": "non applicato al raffrescamento",
+  "common.tou_skip.not_applied_heat": "non applicato al riscaldamento",
+  "common.unknown": "Sconosciuto"
+}

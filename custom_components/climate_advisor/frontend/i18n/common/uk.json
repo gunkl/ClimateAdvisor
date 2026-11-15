@@ -1,0 +1,16 @@
+{
+  "common.duration.hours": "{n, plural, one {# год} few {# год} many {# год} other {# год}}",
+  "common.duration.hours_frac": "{n, number, ::.0} год",
+  "common.duration.min": "{n, plural, one {# хв} few {# хв} many {# хв} other {# хв}}",
+  "common.mode.auto": "Авто",
+  "common.mode.cool": "Охолодження",
+  "common.mode.fan_only": "Лише вентилятор",
+  "common.mode.heat": "Опалення",
+  "common.mode.heat_cool": "Опалення/охолодження",
+  "common.mode.off": "Вимкнено",
+  "common.tou_skip.condition_off": "умову вимкнено",
+  "common.tou_skip.condition_off_entity": "умову вимкнено ({entity})",
+  "common.tou_skip.not_applied_cool": "не застосовується до охолодження",
+  "common.tou_skip.not_applied_heat": "не застосовується до опалення",
+  "common.unknown": "Невідомо"
+}

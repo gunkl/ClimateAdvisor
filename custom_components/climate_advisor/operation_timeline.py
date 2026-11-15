@@ -34,6 +34,7 @@ from datetime import date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Any
 
+from . import i18n
 from .const import (
     DEFAULT_NATURAL_VENT_DELTA,
     FAN_MODE_DISABLED,
@@ -46,7 +47,7 @@ from .const import (
 )
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .remote_offset import cap_f, max_magnitude_f
-from .temperature import format_temp, outdoor_direction_ok_for_thermostat
+from .temperature import outdoor_direction_ok_for_thermostat
 from .thermal_confidence import grade_hvac_confidence, grade_solar_confidence
 
 _LOGGER = logging.getLogger(__name__)
@@ -339,8 +340,8 @@ SENTENCES: dict[str, Sentence] = dict(
         ),
         _s(
             "windows_open.free_cooling",
-            "{t}: open the windows. Outdoor is {delta} cooler than the house{until}.",
-            {"t": "time", "delta": "delta", "until": "text"},
+            "{t}: open the windows. Outdoor is {delta} cooler than the house until about {end}.",
+            {"t": "time", "delta": "delta", "end": "time"},
             "window candidate (free cooling) with simulated benefit",
             "house predicted above the ceiling, outdoor at least FREE_COOL_MIN_DELTA_F cooler, saves >= 10 min "
             "HVAC or >= 0.5 F-h",
@@ -348,8 +349,8 @@ SENTENCES: dict[str, Sentence] = dict(
         ),
         _s(
             "windows_open.free_heating",
-            "{t}: open the windows. Outdoor is {delta} warmer than the house{until}.",
-            {"t": "time", "delta": "delta", "until": "text"},
+            "{t}: open the windows. Outdoor is {delta} warmer than the house until about {end}.",
+            {"t": "time", "delta": "delta", "end": "time"},
             "window candidate (free heating) with simulated benefit",
             "daytime, outdoor at least FREE_HEAT_MIN_DELTA_F warmer, house in the lower half of the band, same "
             "benefit gate",
@@ -405,23 +406,23 @@ SENTENCES: dict[str, Sentence] = dict(
         ),
         _s(
             "summary.windows_closed",
-            "Keep windows closed for the next {hours}: no opening helps ({checked} checked).",
-            {"hours": "text", "checked": "int"},
+            "Keep windows closed for the next {hours} h: no opening helps ({checked} checked).",
+            {"hours": "int", "checked": "int"},
             "window candidates (all rejected or none found)",
             "no window period accepted",
             "numbers are the candidate count, not a prediction",
         ),
         _s(
             "summary.windows_open",
-            "Windows help for {count} period(s) in the next {hours}.",
-            {"count": "int", "hours": "text"},
+            "Windows help for {count} period(s) in the next {hours} h.",
+            {"count": "int", "hours": "int"},
             "accepted window periods",
             "at least one window period accepted",
             "only accepted periods are counted",
         ),
         _s(
             "run.heat",
-            "Heat runs about {minutes} between {start} and {end} to hold {edge}.",
+            "Heat runs about {minutes} min between {start} and {end} to hold {edge}.",
             {"minutes": "minutes", "start": "time", "end": "time", "edge": "temp"},
             "predicted runs (simulated under the plan)",
             "runs < 45 min apart are one run; rounded to 5 min; model confidence >= medium",
@@ -429,7 +430,7 @@ SENTENCES: dict[str, Sentence] = dict(
         ),
         _s(
             "run.cool",
-            "AC runs about {minutes} between {start} and {end} to hold {edge}.",
+            "AC runs about {minutes} min between {start} and {end} to hold {edge}.",
             {"minutes": "minutes", "start": "time", "end": "time", "edge": "temp"},
             "predicted runs (simulated under the plan)",
             "runs < 45 min apart are one run; rounded to 5 min; model confidence >= medium",
@@ -494,21 +495,108 @@ STEP_SENTENCE_PREFIX: dict[StepKind, str] = {
 }
 
 
-def _fmt_time(dt: datetime, ref: datetime | None = None) -> str:
-    """ "7:30 PM", with the weekday when it is not the reference day ("Thu 6:30 AM")."""
-    text = dt.strftime("%I:%M %p").lstrip("0")
+# Issue #1341: every table sentence is a catalog message (``timeline.step.<sentence key>``); the sentence's English
+# text is derived from that message, never written twice. ``SENTENCES`` keeps each template as the documented English
+# source (and for the night strategy's registered sentences, which L6 renders itself); a test pins the catalog to it.
+STEP_MSG_PREFIX = "timeline.step."
+STEP_SHORT_PREFIX = "timeline.step_short."
+HELD_SUFFIX_KEY = "timeline.step.held.suffix"
+HELD_PAUSE_KEY = "timeline.step.held.pause"
+# The table sentences that open with their own time ("{t}: ..."): each has a plan-list row wording (``step_short``).
+STEP_SHORT_KEYS = frozenset(k for k, sent in SENTENCES.items() if sent.template.startswith("{t}"))
+
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+# Snapshot words (the coordinator hands English labels) and the catalog word each one is shown as.
+_TEXT_CODES: dict[str, dict[str, str]] = {
+    "fan": {"whole-house fan": "timeline.fan.whole_house_fan", "HVAC fan": "timeline.fan.hvac_fan"},
+    "sensor": {"bedroom sensor": "timeline.sensor.bedroom", "thermostat": "timeline.sensor.thermostat"},
+    "old": {m: f"timeline.mode.{m}" for m in ("heat", "cool", "off")},
+    "new": {m: f"timeline.mode.{m}" for m in ("heat", "cool", "off")},
+    "occupancy": {"away": "timeline.occupancy.away", "vacation": "timeline.occupancy.vacation"},
+}
+
+
+def render_msg(msg: i18n.Msg | str, lang: str = "en") -> str:
+    """``msg`` in ``lang``. The catalogs are loaded once at the entry point (setup, or ``i18n.ensure_catalogs()``
+    for a headless caller); with them missing the render falls back and never raises."""
+    return i18n.render(msg, lang)
+
+
+def _en(msg: i18n.Msg) -> str:
+    """The English text of a message (the stored step text, logs)."""
+    return render_msg(msg, i18n.DEFAULT_LANGUAGE)
+
+
+def when(dt: datetime, ref: datetime | None = None) -> i18n.Time | i18n.Msg:
+    """A step's time as a message parameter: the clock time, with the weekday when it is not the reference day.
+
+    ``dt`` must be an aware local datetime (the plan's own times are). English: ``7:30 PM`` / ``Thu 6:30 AM``."""
     if ref is not None and dt.date() != ref.date():
-        return f"{dt.strftime('%a')} {text}"
-    return text
+        return i18n.Msg(
+            "timeline.when.other_day",
+            weekday=i18n.Code(f"timeline.weekday.{_WEEKDAYS[dt.weekday()]}"),
+            t=i18n.Time(dt),
+        )
+    return i18n.Time(dt)
 
 
-def _fmt_minutes(m: float) -> str:
-    rounded = max(RUN_MIN_MINUTES, int(round(m / 5.0) * 5))
-    return f"{rounded} min"
+def _fmt_time(dt: datetime, ref: datetime | None = None) -> str:
+    """English "7:30 PM", with the weekday when it is not the reference day ("Thu 6:30 AM")."""
+    return _en(i18n.Msg("timeline.when.at", t=when(dt, ref)))
 
 
-def say(key: str, unit: str = "fahrenheit", *, ref: datetime | None = None, **facts: Any) -> str:
-    """Render one table sentence. Raises ``MissingFact`` when a declared fact is absent or None."""
+def _fmt_minutes_value(m: float) -> int:
+    return max(RUN_MIN_MINUTES, int(round(m / 5.0) * 5))
+
+
+def _as_int(value: Any) -> int:
+    if isinstance(value, str):
+        digits = "".join(ch for ch in value if ch.isdigit())
+        return int(digits) if digits else 0
+    return int(value)
+
+
+def _fact_param(name: str, kind: str, value: Any, unit: str, ref: datetime | None) -> Any:
+    """One sentence fact as a typed message parameter (never a pre-formatted string)."""
+    if kind == "time":
+        return when(value, ref)
+    if kind == "temp":
+        return i18n.Temp(round(float(value) * 2) / 2 if name == "temp" else float(value), unit)
+    if kind == "delta":
+        return i18n.TempDelta(float(value), unit)
+    if kind == "minutes":
+        return _fmt_minutes_value(float(value))
+    if kind == "int":
+        return _as_int(value)
+    if isinstance(value, i18n.Msg):
+        return value
+    codes = _TEXT_CODES.get(name)
+    if codes is not None and str(value) in codes:
+        return i18n.Code(codes[str(value)])
+    return str(value)
+
+
+def sentence_msg(key: str, unit: str = "fahrenheit", *, ref: datetime | None = None, **facts: Any) -> i18n.Msg:
+    """One table sentence as a catalog message. Raises ``MissingFact`` when a declared fact is absent or None."""
+    sentence = SENTENCES[key]
+    params: dict[str, Any] = {}
+    for name, kind in sentence.facts.items():
+        value = facts.get(name)
+        if value is None:
+            raise MissingFact(f"{key}: {name}")
+        params[name] = _fact_param(name, kind, value, unit, ref)
+    return i18n.Msg(STEP_MSG_PREFIX + key, **params)
+
+
+# Sentences another module registered here (the night strategy renders them itself, area ``night``): they are table
+# entries, not ``timeline`` catalog messages.
+_REGISTERED_KEYS: set[str] = set()
+
+
+def _say_registered(key: str, unit: str, ref: datetime | None, facts: Mapping[str, Any]) -> str:
+    """A registered (night) sentence in English from its template, exactly as the table always rendered it."""
+    from .temperature import format_temp, format_temp_delta  # noqa: PLC0415
+
     sentence = SENTENCES[key]
     rendered: dict[str, str] = {}
     for name, kind in sentence.facts.items():
@@ -520,18 +608,57 @@ def say(key: str, unit: str = "fahrenheit", *, ref: datetime | None = None, **fa
         elif kind == "temp":
             rendered[name] = format_temp(round(float(value) * 2) / 2 if name == "temp" else float(value), unit)
         elif kind == "delta":
-            rendered[name] = format_temp_delta_text(float(value), unit)
+            rendered[name] = format_temp_delta(float(value), unit)
         elif kind == "minutes":
-            rendered[name] = _fmt_minutes(float(value))
+            rendered[name] = str(_fmt_minutes_value(float(value)))
         else:
             rendered[name] = str(value)
     return sentence.template.format(**rendered)
 
 
+def say(key: str, unit: str = "fahrenheit", *, ref: datetime | None = None, **facts: Any) -> str:
+    """Render one table sentence in English (the stored text). Raises ``MissingFact`` when a fact is absent."""
+    if key in _REGISTERED_KEYS:
+        return _say_registered(key, unit, ref, facts)
+    return _en(sentence_msg(key, unit, ref=ref, **facts))
+
+
+def short_msg(msg: i18n.Msg) -> i18n.Msg:
+    """The plan-list row wording of a step message: no leading time, no "CA" beside the CA badge, capitalised.
+
+    A held wrapper keeps its own sentence and shortens the step it wraps. A message without a row wording (a summary,
+    a veto, a night sentence that has none) is its own row wording."""
+    if msg.key in (HELD_SUFFIX_KEY, HELD_PAUSE_KEY):
+        base = msg.params.get("base")
+        return i18n.Msg(msg.key, **{**msg.params, "base": short_msg(base)}) if isinstance(base, i18n.Msg) else msg
+    if msg.key.startswith(STEP_MSG_PREFIX):
+        if msg.key[len(STEP_MSG_PREFIX) :] in STEP_SHORT_KEYS:
+            return i18n.Msg(STEP_SHORT_PREFIX + msg.key[len(STEP_MSG_PREFIX) :], **msg.params)
+        return msg
+    short_key = msg.key + "_short"  # another area's sentence (the night strategy) may ship a row wording beside it
+    return i18n.Msg(short_key, **msg.params) if i18n.get_message(short_key, i18n.DEFAULT_LANGUAGE) else msg
+
+
+def step_text(step: TimelineStep, lang: str = "en") -> str:
+    """A step's sentence in ``lang`` (its stored English when the step carries no message, e.g. an older replay)."""
+    return render_msg(step.msg, lang) if step.msg is not None else step.text
+
+
+def step_short_text(step: TimelineStep, lang: str = "en") -> str:
+    """The step's plan-list row wording in ``lang``."""
+    if step.msg is not None:
+        return render_msg(short_msg(step.msg), lang)
+    from .timeline_surfaces import plan_list_text  # noqa: PLC0415 - surfaces import this module
+
+    return plan_list_text(step.text, step.actor.value)
+
+
 def format_temp_delta_text(delta_f: float, unit: str) -> str:
-    """A temperature difference as text in the user's unit (scale only, no offset)."""
-    scaled = delta_f * (5.0 / 9.0) if unit == "celsius" else delta_f
-    return f"{scaled:.0f}°{'C' if unit == 'celsius' else 'F'}"
+    """A temperature difference as text in the user's unit (scale only, no offset). Folded into
+    ``temperature.format_temp_delta`` (Issue #1341, D5); kept as the one-line English wrapper."""
+    from .temperature import format_temp_delta  # noqa: PLC0415
+
+    return format_temp_delta(float(delta_f), unit)
 
 
 def template_fields(template: str) -> set[str]:
@@ -676,6 +803,8 @@ class TimelineStep:
     lead_minutes: int = 0  # YOU steps: how far ahead to show them (DP-4: 30)
     source: str = ""
     meta: Mapping[str, Any] = field(default_factory=dict)  # id, grade (low|medium|high), status, after, facts
+    # Issue #1341: the sentence as a catalog message (``text`` is its English); None for a step built before it existed
+    msg: i18n.Msg | None = None
 
     @property
     def id(self) -> str:
@@ -792,6 +921,7 @@ class DetailedTimeline(Timeline):
     runs: tuple[PredictedRun, ...] = ()
     candidates: tuple[WindowCandidate, ...] = ()
     summary: tuple[str, ...] = ()
+    summary_msgs: tuple[i18n.Msg, ...] = ()  # Issue #1341: ``summary`` as catalog messages (same order)
     grade: str = "low"  # overall confidence: low | medium | high
     hvac_minutes: float | None = None  # predicted equipment minutes over the horizon under the plan
     dropped: tuple[str, ...] = ()  # sentence keys dropped for missing facts
@@ -814,6 +944,7 @@ def _step_to_dict(s: TimelineStep) -> dict[str, Any]:
         "lead_minutes": s.lead_minutes,
         "source": s.source,
         "meta": {k: _jsonable(v) for k, v in s.meta.items()},
+        **({"text_msg": s.msg.to_wire()} if s.msg is not None else {}),
     }
 
 
@@ -845,6 +976,7 @@ def detail_dict(t: DetailedTimeline) -> dict[str, Any]:
         "runs": [r.to_dict() for r in t.runs],
         "candidates": [c.to_dict() for c in t.candidates],
         "summary": list(t.summary),
+        "summary_msg": [m.to_wire() for m in t.summary_msgs],
         "hvac_minutes": None if t.hvac_minutes is None else round(t.hvac_minutes, 1),
         "dropped": list(t.dropped),
         "days": [{k: (v.isoformat() if isinstance(v, (date, time)) else v) for k, v in day.items()} for day in t.days],
@@ -869,6 +1001,7 @@ def from_dict(d: Mapping[str, Any]) -> Timeline | None:
                 lead_minutes=int(s.get("lead_minutes", 0)),
                 source=str(s.get("source", "")),
                 meta=dict(s.get("meta") or {}),
+                msg=i18n.Msg.from_wire(s["text_msg"]) if isinstance(s.get("text_msg"), Mapping) else None,
             )
             for s in d["steps"]
         )
@@ -1777,7 +1910,7 @@ def build_timeline(
         mode: str | None = None,
     ) -> str | None:
         try:
-            text = say(key, unit, ref=now, **(sentence_facts if sentence_facts is not None else facts))
+            msg = sentence_msg(key, unit, ref=now, **(sentence_facts if sentence_facts is not None else facts))
         except MissingFact:
             dropped.append(key)
             return None
@@ -1795,7 +1928,7 @@ def build_timeline(
                 ts=ts,
                 actor=actor,
                 kind=kind,
-                text=text,
+                text=_en(msg),
                 reason=key,
                 target_f=target_f,
                 mode=mode,
@@ -1803,6 +1936,7 @@ def build_timeline(
                 lead_minutes=YOU_STEP_LEAD_MIN if actor == Actor.YOU else 0,
                 source=STEP_SOURCE[kind],
                 meta=meta,
+                msg=msg,
             )
         )
         return sid
@@ -2024,13 +2158,11 @@ def build_timeline(
         key = {"planned": "windows_open.planned", "free_cooling": "windows_open.free_cooling"}.get(
             cand.kind, "windows_open.free_heating"
         )
-        until = f" until about {_fmt_time(cand.end, now)}"
         conf = cand.confidence
         open_facts = {
             "t": cand.start,
             "end": cand.end,
             "delta": cand.outdoor_delta_f,
-            "until": until,
             "kind": cand.kind,
             "hvac_saved_min": None if cand.hvac_saved_min is None else round(cand.hvac_saved_min, 1),
         }
@@ -2087,7 +2219,7 @@ def build_timeline(
     # predicted path
     path, source = _choose_path(snap, accepted, final)
     runs = tuple(predicted_runs(final, rates)) if final is not None and rates is not None else ()
-    summary = _summary(snap, index, candidates, accepted, runs, path, unit, end, dropped)
+    summary_msgs = _summary(snap, index, candidates, accepted, runs, path, unit, end, dropped)
 
     conf = "low"
     if rates is not None:
@@ -2116,7 +2248,8 @@ def build_timeline(
         band=band,
         runs=runs,
         candidates=tuple(candidates),
-        summary=tuple(summary),
+        summary=tuple(_en(m) for m in summary_msgs),
+        summary_msgs=tuple(summary_msgs),
         grade=conf,
         hvac_minutes=final.hvac_minutes if final is not None else None,
         dropped=tuple(dropped),
@@ -2160,7 +2293,8 @@ def _apply_holds(
     out: list[TimelineStep] = []
     for s in steps:
         ca_band = s.kind in (StepKind.WAKE_BAND, StepKind.SLEEP_BAND, StepKind.PRECOOL_START, StepKind.PREHEAT_START)
-        text, hold = s.text, None
+        text, hold, msg = s.text, None, s.msg
+        base = s.msg if s.msg is not None else s.text
         if (
             hold_until is not None
             and s.ts < hold_until
@@ -2168,13 +2302,15 @@ def _apply_holds(
             and (s.actor == Actor.CA and ca_band)
         ):
             try:
-                text, hold = say("held.suffix", unit, ref=snap.now, base=s.text, until=hold_until), "held.suffix"
+                msg = sentence_msg("held.suffix", unit, ref=snap.now, base=base, until=hold_until)
+                text, hold = _en(msg), "held.suffix"
             except MissingFact:
                 dropped.append("held.suffix")
         elif snap.paused_by_door and s.actor == Actor.CA and ca_band and s.ts - snap.now < timedelta(hours=1):
-            text, hold = say("held.pause", unit, base=s.text), "held.pause"
+            msg = sentence_msg("held.pause", unit, base=base)
+            text, hold = _en(msg), "held.pause"
         if hold:
-            s = replace(s, text=text, meta={**s.meta, "status": "held", "hold": hold})
+            s = replace(s, text=text, msg=msg, meta={**s.meta, "status": "held", "hold": hold})
         out.append(s)
     return out
 
@@ -2215,14 +2351,14 @@ def _summary(
     unit: str,
     end: datetime,
     dropped: list[str],
-) -> list[str]:
-    lines: list[str] = []
-    hours = f"{TIMELINE_HORIZON_HOURS} h"
+) -> list[i18n.Msg]:
+    lines: list[i18n.Msg] = []
+    hours = TIMELINE_HORIZON_HOURS
     try:
         if accepted:
-            lines.append(say("summary.windows_open", unit, ref=snap.now, count=len(accepted), hours=hours))
+            lines.append(sentence_msg("summary.windows_open", unit, ref=snap.now, count=len(accepted), hours=hours))
         elif candidates or snap.thermal_model is not None:
-            lines.append(say("summary.windows_closed", unit, hours=hours, checked=len(candidates)))
+            lines.append(sentence_msg("summary.windows_closed", unit, hours=hours, checked=len(candidates)))
     except MissingFact:
         dropped.append("summary")
     shown = [r for r in runs if r.start < snap.now + timedelta(hours=24)][:SUMMARY_MAX_RUNS]
@@ -2231,14 +2367,14 @@ def _summary(
         seg = index.at(r.start)
         edge = None if seg is None else (seg.floor if r.mode == "heat" else seg.ceiling)
         try:
-            lines.append(say(key, unit, ref=snap.now, minutes=r.minutes, start=r.start, end=r.end, edge=edge))
+            lines.append(sentence_msg(key, unit, ref=snap.now, minutes=r.minutes, start=r.start, end=r.end, edge=edge))
         except MissingFact:
             dropped.append(key)
     if path and (snap.forecast_age_h is None or snap.forecast_age_h <= FORECAST_MAX_AGE_H):
         day_pts = [(t, v) for t, v in path if 9 <= t.hour < 20 and t.date() == snap.now.date()]
         if day_pts:
             t, v = max(day_pts, key=lambda p: p[1])
-            lines.append(say("peak.warmest", unit, ref=snap.now, temp=v, t=t))
+            lines.append(sentence_msg("peak.warmest", unit, ref=snap.now, temp=v, t=t))
     return lines
 
 
@@ -2477,15 +2613,13 @@ def _refresh_open_until(steps: list[TimelineStep], now: datetime, unit: str) -> 
         if s.kind == StepKind.WINDOWS_OPEN and "end" in s.facts and s.reason in SENTENCES:
             close = next((c for c in steps[i + 1 :] if c.kind == StepKind.WINDOWS_CLOSE and c.ts > s.ts), None)
             if close is not None and s.facts.get("end") != _jsonable(close.ts):
-                until = f" until about {_fmt_time(close.ts, now)}"
-                facts = {**s.facts, "t": s.ts, "end": close.ts, "until": until}
+                facts = {**s.facts, "t": s.ts, "end": close.ts}
                 try:
-                    text = say(s.reason, unit, ref=now, **facts)
+                    msg = sentence_msg(s.reason, unit, ref=now, **facts)
+                    text = _en(msg)
                 except MissingFact:
-                    text = s.text
-                s = replace(
-                    s, text=text, meta={**s.meta, "facts": {**s.facts, "end": _jsonable(close.ts), "until": until}}
-                )
+                    msg, text = s.msg, s.text
+                s = replace(s, text=text, msg=msg, meta={**s.meta, "facts": {**s.facts, "end": _jsonable(close.ts)}})
         out.append(s)
     return out
 
@@ -2586,6 +2720,8 @@ def _register_night_sentences() -> None:
     from .night_strategy import NIGHT_SENTENCES  # noqa: PLC0415
 
     for key, ns_ in NIGHT_SENTENCES.items():
+        if key not in SENTENCES:
+            _REGISTERED_KEYS.add(key)
         SENTENCES.setdefault(
             key,
             Sentence(

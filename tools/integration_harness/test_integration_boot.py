@@ -18,8 +18,8 @@ WHAT THIS TEST CHECKS
 2. The climate_advisor config entry is loaded (config entry appears in
    GET /api/config/config_entries/entry and the entry state is "loaded").
 3. At least one climate_advisor sensor entity is present in the state machine
-   (GET /api/states returns an entity with entity_id starting with
-   "sensor.climate_advisor_").
+   (found through the integration, ``integration_entities('climate_advisor')``, never by an entity id's spelling:
+   ids follow the zone title and the language HA was set to, Issue #1341).
 
 These three assertions together prove the foundation milestone: HA is up,
 the pre-seeded config entry was accepted, and the integration's
@@ -27,6 +27,8 @@ async_setup_entry() ran to completion and created sensor entities.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 import requests
@@ -37,6 +39,9 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
+
+_CA_SENSORS_TEMPLATE = "{{ integration_entities('climate_advisor') | select('match', 'sensor[.]') | list | tojson }}"
 
 
 def _api(url: str, ha_url: str, ha_headers: dict, **kwargs) -> requests.Response:
@@ -95,20 +100,22 @@ class TestClimateAdvisorLoaded:
 
     def test_climate_advisor_sensor_entities_present(self, ha_url, ha_headers):
         """
-        At least one sensor.climate_advisor_* entity appears in the state machine.
+        At least one sensor entity of the climate_advisor integration appears in the state machine.
 
         This confirms that the sensor platform was set up (PLATFORMS = ['sensor','switch']
         in __init__.py) and entities were registered.
         """
-        resp = _api("/api/states", ha_url, ha_headers)
-        assert resp.status_code == 200, f"GET /api/states failed: {resp.text[:200]}"
-        states = resp.json()
-        ca_sensors = [s["entity_id"] for s in states if s.get("entity_id", "").startswith("sensor.climate_advisor_")]
+        resp = requests.post(
+            f"{ha_url}/api/template",
+            headers=ha_headers,
+            json={"template": _CA_SENSORS_TEMPLATE},
+            timeout=15,
+        )
+        assert resp.status_code == 200, f"POST /api/template failed: {resp.text[:200]}"
+        ca_sensors = json.loads(resp.text)
         assert ca_sensors, (
-            "No sensor.climate_advisor_* entities found in /api/states.\n"
-            "This suggests async_setup_entry() failed or the sensor platform "
-            "did not register entities.\n"
-            f"All entity_ids (first 30): {sorted(s['entity_id'] for s in states)[:30]}"
+            "No sensor entities of the climate_advisor integration were found.\n"
+            "This suggests async_setup_entry() failed or the sensor platform did not register entities."
         )
 
     def test_demo_climate_entity_available(self, ha_url, ha_headers):

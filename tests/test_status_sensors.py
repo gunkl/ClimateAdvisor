@@ -1605,6 +1605,15 @@ class TestWarmDayForecastEventCandidates:
 # ---------------------------------------------------------------------------
 
 
+def _entity_name(key: str) -> str:
+    """The English name HA shows for a sensor: strings.json ``entity.sensor.<key>.name`` (Issue #1341, D6)."""
+    import json
+    import pathlib
+
+    strings = pathlib.Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "strings.json"
+    return json.loads(strings.read_text(encoding="utf-8"))["entity"]["sensor"][key]["name"]
+
+
 class TestNextActionSensorRename:
     """Verify sensor names via source inspection.
 
@@ -1624,17 +1633,18 @@ class TestNextActionSensorRename:
 
     def test_next_action_sensor_name_is_your_next_action(self):
         """Sensor display name should be 'Your Next Action'."""
-        assert '"Your Next Action"' in self.source
+        assert _entity_name("next_human_action") == "Your Next Action"
+        assert "ATTR_NEXT_ACTION" in self.source
 
     def test_new_automation_action_sensor_name(self):
         """Next Automation Action sensor class exists with correct name."""
         assert "ClimateAdvisorNextAutomationSensor" in self.source
-        assert '"Next Automation Action"' in self.source
+        assert _entity_name("next_automation_action") == "Next Automation Action"
 
     def test_new_automation_time_sensor_name(self):
         """Next Automation Time sensor class exists with correct name."""
         assert "ClimateAdvisorNextAutomationTimeSensor" in self.source
-        assert '"Next Automation Time"' in self.source
+        assert _entity_name("next_automation_time") == "Next Automation Time"
 
 
 # ---------------------------------------------------------------------------

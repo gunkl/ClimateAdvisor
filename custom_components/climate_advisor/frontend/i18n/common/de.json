@@ -1,0 +1,16 @@
+{
+  "common.duration.hours": "{n, plural, one {# Std.} other {# Std.}}",
+  "common.duration.hours_frac": "{n, number, ::.0} Std.",
+  "common.duration.min": "{n, plural, one {# Min.} other {# Min.}}",
+  "common.mode.auto": "Automatik",
+  "common.mode.cool": "Kühlen",
+  "common.mode.fan_only": "Nur Lüfter",
+  "common.mode.heat": "Heizen",
+  "common.mode.heat_cool": "Heizen/Kühlen",
+  "common.mode.off": "Aus",
+  "common.tou_skip.condition_off": "die Bedingung ist aus",
+  "common.tou_skip.condition_off_entity": "die Bedingung ist aus ({entity})",
+  "common.tou_skip.not_applied_cool": "gilt nicht für Kühlen",
+  "common.tou_skip.not_applied_heat": "gilt nicht für Heizen",
+  "common.unknown": "Unbekannt"
+}

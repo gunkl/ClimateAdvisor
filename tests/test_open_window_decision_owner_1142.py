@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from custom_components.climate_advisor import i18n
 from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
 from custom_components.climate_advisor.const import (
     CONF_FAN_MODE,
@@ -565,7 +566,7 @@ class TestCloseTheWindowsGuidance:
         for seconds in (60, 120, 180, 240):
             _tick(engine, seconds)
         assert notify.await_count == 1, "one message per ventilation session, not one per check"
-        message, title = notify.call_args.args[0], notify.call_args.args[1]
+        message, title = i18n.render_en(notify.call_args.args[0]), i18n.render_en(notify.call_args.args[1])
         assert "close the windows" in message.lower() and "close the windows" in title.lower()
         assert "76" in message and "74" in message
         assert engine._test_state.state == "off", "no air conditioning while the window is open"

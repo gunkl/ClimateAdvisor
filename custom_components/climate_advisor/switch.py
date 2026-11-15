@@ -62,8 +62,9 @@ class ClimateAdvisorAutomationSwitch(CoordinatorEntity, SwitchEntity):
         """Initialize the automation switch."""
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_automation_enabled"
+        # Issue #1341 (D6): the name is strings.json ``entity.switch.automation_enabled.name`` (HA's own method).
         self._attr_has_entity_name = True
-        self._attr_name = "Automation"
+        self._attr_translation_key = "automation_enabled"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,

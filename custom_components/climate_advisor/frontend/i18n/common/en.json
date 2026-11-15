@@ -1,0 +1,16 @@
+{
+  "common.duration.hours": "{n, plural, one {#h} other {#h}}",
+  "common.duration.hours_frac": "{n, number, ::.0}h",
+  "common.duration.min": "{n, plural, one {# min} other {# min}}",
+  "common.mode.auto": "Auto",
+  "common.mode.cool": "Cool",
+  "common.mode.fan_only": "Fan only",
+  "common.mode.heat": "Heat",
+  "common.mode.heat_cool": "Heat/Cool",
+  "common.mode.off": "Off",
+  "common.tou_skip.condition_off": "its condition is off",
+  "common.tou_skip.condition_off_entity": "its condition is off ({entity})",
+  "common.tou_skip.not_applied_cool": "not applied to cooling",
+  "common.tou_skip.not_applied_heat": "not applied to heating",
+  "common.unknown": "Unknown"
+}

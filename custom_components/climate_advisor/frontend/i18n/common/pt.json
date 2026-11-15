@@ -1,0 +1,16 @@
+{
+  "common.duration.hours": "{n, plural, one {# h} many {# h} other {# h}}",
+  "common.duration.hours_frac": "{n, number, ::.0} h",
+  "common.duration.min": "{n, plural, one {# min} many {# min} other {# min}}",
+  "common.mode.auto": "Automático",
+  "common.mode.cool": "Refrigeração",
+  "common.mode.fan_only": "Somente ventilador",
+  "common.mode.heat": "Aquecimento",
+  "common.mode.heat_cool": "Aquecer/Resfriar",
+  "common.mode.off": "Desligado",
+  "common.tou_skip.condition_off": "a condição está desligada",
+  "common.tou_skip.condition_off_entity": "a condição está desligada ({entity})",
+  "common.tou_skip.not_applied_cool": "não se aplica ao arrefecimento",
+  "common.tou_skip.not_applied_heat": "não se aplica ao aquecimento",
+  "common.unknown": "Desconhecido"
+}

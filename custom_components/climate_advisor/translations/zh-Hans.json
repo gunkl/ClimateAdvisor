@@ -1,0 +1,840 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Climate Advisor 设置",
+        "description": "配置您的 Climate Advisor 集成。选择它需要监控和控制的实体。",
+        "data": {
+          "weather_entity": "天气服务",
+          "climate_entity": "恒温器",
+          "notify_service": "通知服务"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor 用于获取天气预报和室外天气状况的天气集成。",
+          "climate_entity": "Climate Advisor 将监控和控制的恒温器。",
+          "notify_service": "用于警报和每日简报的 Home Assistant 通知服务（例如 notify.mobile_app_yourphone）。"
+        }
+      },
+      "unit": {
+        "title": "温度单位",
+        "description": "选择 Climate Advisor 用于显示和输入所有温度的单位。您之后可以在核心设置中更改。",
+        "data": {
+          "temp_unit": "温度单位"
+        },
+        "data_description": {
+          "temp_unit": "用于 Climate Advisor 中显示和输入的所有温度。您之后可以在核心设置中更改；更改后需要重新加载，Climate Advisor 会提示您。"
+        }
+      },
+      "setpoints": {
+        "title": "温度设定",
+        "description": "设置舒适、离家和睡眠的目标温度。如果某种组合会让制热和空调互相对抗，或停在奇怪的温度，字段旁会显示警告；再次提交即可保留该设置。",
+        "data": {
+          "comfort_heat": "舒适制热温度",
+          "comfort_cool": "舒适制冷温度",
+          "setback_heat": "离家制热温度",
+          "setback_cool": "离家制冷温度",
+          "sleep_heat": "睡眠制热温度",
+          "sleep_cool": "睡眠制冷温度"
+        },
+        "data_description": {
+          "comfort_heat": "有人在家时制热的目标温度。",
+          "comfort_cool": "有人在家时制冷的目标温度。",
+          "setback_heat": "离家时为节能使用的较低温度。",
+          "setback_cool": "离家时为节能使用的较高温度。",
+          "sleep_heat": "睡眠时段（有人在家时）制热的目标温度。",
+          "sleep_cool": "睡眠时段（有人在家时）制冷的目标温度。"
+        }
+      },
+      "temperature_sources": {
+        "title": "温度来源",
+        "description": "选择 Climate Advisor 从何处读取室外和室内温度数据。",
+        "data": {
+          "outdoor_temp_source": "室外温度来源",
+          "indoor_temp_source": "室内温度来源"
+        },
+        "data_description": {
+          "outdoor_temp_source": "从何处读取室外温度。“天气服务”使用您的天气集成；选择专用传感器或输入辅助元素，则可使用指定的实体。",
+          "indoor_temp_source": "从何处读取室内温度。“Climate 实体”使用恒温器内置的传感器；选择专用传感器或输入辅助元素，则可使用单独的实体。"
+        }
+      },
+      "outdoor_temp_entity": {
+        "title": "室外温度实体",
+        "description": "选择提供室外温度读数的实体。",
+        "data": {
+          "outdoor_temp_entity": "室外温度实体"
+        },
+        "data_description": {
+          "outdoor_temp_entity": "选择报告室外温度的传感器或输入辅助元素。"
+        }
+      },
+      "indoor_temp_entity": {
+        "title": "室内温度实体",
+        "description": "选择提供室内温度读数的实体。",
+        "data": {
+          "indoor_temp_entity": "室内温度实体"
+        },
+        "data_description": {
+          "indoor_temp_entity": "选择报告室内温度的传感器或输入辅助元素。"
+        }
+      },
+      "sensors": {
+        "title": "门窗传感器",
+        "description": "选择 Climate Advisor 需要监控的二元传感器。当传感器显示门或窗开着时，空调将暂停以避免浪费能源。\n\n您可以选择单个传感器，也可以选择将多个传感器合并在一起的二元传感器组实体。\n\n极性开关控制如何解读传感器状态。大多数传感器遵循 Home Assistant 标准，即“开”表示开着（不安全）。如果您的传感器报告的结果相反，请启用反转开关。",
+        "data": {
+          "door_window_sensors": "门窗传感器",
+          "sensor_polarity_inverted": "反转传感器极性",
+          "fan_mode": "风扇控制模式",
+          "fan_entity": "风扇实体"
+        },
+        "data_description": {
+          "door_window_sensors": "选择要监控的二元传感器实体，包括将多个传感器合并在一起的二元传感器组。",
+          "sensor_polarity_inverted": "如果您的传感器在关闭时报告“开”、打开时报告“关”（与 Home Assistant 标准相反），请启用此项。",
+          "fan_mode": "如何控制风扇进行通风。“全屋换气扇”控制专用的风扇实体。“风机”使用恒温器的风扇模式。",
+          "fan_entity": "要控制的风扇或开关实体（仅全屋换气扇模式需要）。"
+        }
+      },
+      "occupancy": {
+        "title": "在家状态感知",
+        "description": "配置告诉 Climate Advisor 谁在家的开关实体。所有字段均为可选——不使用的功能请留空。",
+        "data": {
+          "home_toggle_entity": "在家/外出开关",
+          "home_toggle_invert": "反转在家开关",
+          "vacation_toggle_entity": "度假模式开关",
+          "vacation_toggle_invert": "反转度假开关",
+          "guest_toggle_entity": "访客模式开关",
+          "guest_toggle_invert": "反转访客开关"
+        },
+        "data_description": {
+          "home_toggle_entity": "表示是否有人在家的实体（input_boolean、开关等）。开 = 在家，关 = 离家。",
+          "home_toggle_invert": "如果您的开关在离家时报告“开”、在家时报告“关”，请启用此项。",
+          "vacation_toggle_entity": "表示度假模式的实体。启用后会进一步降低温度设定，以长期节能。",
+          "vacation_toggle_invert": "如果您的开关在没有度假时报告“开”，请启用此项。",
+          "guest_toggle_entity": "表示有访客在家的实体。优先于度假和离家模式，并保持舒适温度。",
+          "guest_toggle_invert": "如果您的开关在没有访客时报告“开”，请启用此项。"
+        }
+      },
+      "schedule": {
+        "title": "每日计划",
+        "description": "设置家人的作息计划，让 Climate Advisor 知道何时预热、预冷以及发送简报。",
+        "data": {
+          "zone_name": "区域名称",
+          "wake_time": "起床时间",
+          "sleep_time": "就寝时间",
+          "briefing_time": "每日简报时间",
+          "briefing_notifications_enabled": "每日简报通知"
+        },
+        "data_description": {
+          "zone_name": "此区域的简短名称（例如“卧室”）。显示在设置 → 设备与服务以及仪表板的区域选择器中。根据您的 Climate 实体名称建议，可随意编辑。",
+          "wake_time": "家人通常起床的时间。Climate Advisor 会在此时间之前开始制热或制冷，使温度达到舒适温度。",
+          "sleep_time": "家人通常上床睡觉的时间。Climate Advisor 会在此时间切换到离家/睡眠温度。",
+          "briefing_time": "发送每日气候简报通知的时间，简报包含当天的天气预报和空调计划。",
+          "briefing_notifications_enabled": "将定时的每日简报作为推送通知发送给此区域。只有第一个区域默认开启，因此多区域的家不会为每个区域各发一份。您之后可以在通知中更改。"
+        }
+      }
+    },
+    "error": {
+      "invalid_notify_service": "必须为 domain.service 格式（例如 notify.mobile_app_phone）",
+      "zone_name_too_long": "区域名称不得超过 50 个字符",
+      "whf_entity_shared_zone": "此风扇已由另一个 Climate Advisor 区域控制。全屋换气扇只能属于一个区域。请选择其他风扇，或先将它从另一个区域中移除。",
+      "whf_no_sensors_warning": "未选择门窗传感器，因此 Climate Advisor 无法判断房子是否封闭，也不会因此停止全屋换气扇。再次提交可保留此设置，或添加传感器。",
+      "whf_command_only_warning": "Climate Advisor 看不到风扇的真实状态，因此无法查看或停止并非由它启动的风扇。再次提交可保留此设置，或在“传感器与风扇”选项中添加风扇状态传感器。",
+      "setpoint_band_inverted_warning": "此制热温度等于或高于对应的制冷温度。在同时具备制热和空调的系统上，两者会整天轮流运行，先加热房子再给它降温。请将制热温度设置为至少比制冷温度低 4 °F (2.5 °C)。再次提交可保留此设置。",
+      "setpoint_band_narrow_warning": "此制热温度比对应的制冷温度低不到 4 °F (2.5 °C)。设备会超出设定温度，因此间隔这么小时，制热和空调可能会不必要地频繁来回切换。再次提交可保留此设置。",
+      "setpoint_outside_thermostat_warning": "您的恒温器不接受此温度，因此 Climate Advisor 将改为发送它能接受的最接近的温度。再次提交可保留此设置。",
+      "away_heat_above_home_warning": "离家制热温度高于在家制热温度，因此没人在家时比有人在家时加热得更多。再次提交可保留此设置。",
+      "away_cool_below_home_warning": "离家制冷温度低于在家制冷温度，因此没人在家时空调比有人在家时更费力。再次提交可保留此设置。",
+      "sleep_heat_below_away_warning": "睡眠制热温度低于离家制热温度，因此夜间房子比没人在家时更凉。再次提交可保留此设置。",
+      "sleep_cool_above_away_warning": "睡眠制冷温度高于离家制冷温度，因此夜间房子允许比没人在家时更热。再次提交可保留此设置。",
+      "vacation_heat_above_away_warning": "度假制热温度高于离家制热温度，因此度假比平常外出的一天更耗能。再次提交可保留此设置。",
+      "vacation_cool_below_away_warning": "度假制冷温度低于离家制冷温度，因此度假比平常外出的一天更耗能。再次提交可保留此设置。",
+      "vacation_freeze_warning": "按此设置，度假制热温度最终会低于 45 °F (7 °C)。长途旅行期间水管可能会冻结。再次提交可保留此设置。"
+    },
+    "abort": {
+      "already_configured": "此恒温器已配置了 Climate Advisor 区域。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Climate Advisor 选项",
+        "description": "选择要配置的部分。",
+        "menu_options": {
+          "core": "核心设置",
+          "setpoints": "温度设定",
+          "temperature_sources": "温度来源",
+          "sensors": "传感器与风扇",
+          "occupancy": "在家状态",
+          "schedule": "计划表",
+          "scheduler": "分时电价调度器",
+          "notifications": "通知",
+          "advanced": "学习与行为",
+          "classification_thresholds": "日类型阈值",
+          "ai_settings": "Claude AI 设置",
+          "github_settings": "GitHub 集成"
+        }
+      },
+      "core": {
+        "title": "核心设置",
+        "description": "配置 Climate Advisor 使用的主要实体和通知服务。",
+        "data": {
+          "weather_entity": "天气服务",
+          "climate_entity": "恒温器",
+          "notify_service": "通知服务",
+          "temp_unit": "温度单位",
+          "zone_name": "区域名称"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor 用于获取天气预报和室外天气状况的天气集成。",
+          "climate_entity": "Climate Advisor 将监控和控制的恒温器。",
+          "notify_service": "用于警报和每日简报的 Home Assistant 通知服务（例如 notify.mobile_app_yourphone）。",
+          "temp_unit": "用于 Climate Advisor 中显示和输入的所有温度。更改后需要重新加载，Climate Advisor 会提示您。",
+          "zone_name": "此区域在仪表板和设备列表中显示的名称。重命名不会更改实体 ID。"
+        }
+      },
+      "setpoints": {
+        "title": "温度设定",
+        "description": "配置舒适、离家、睡眠和度假的目标温度。如果某种组合会让制热和空调互相对抗，或停在奇怪的温度，字段旁会显示警告；再次提交即可保留该设置。",
+        "data": {
+          "comfort_heat": "舒适制热温度",
+          "comfort_cool": "舒适制冷温度",
+          "setback_heat": "离家制热温度",
+          "setback_cool": "离家制冷温度",
+          "sleep_heat": "睡眠制热温度",
+          "sleep_cool": "睡眠制冷温度",
+          "vacation_heat": "度假制热温度",
+          "vacation_cool": "度假制冷温度"
+        },
+        "data_description": {
+          "comfort_heat": "有人在家时制热的目标温度。",
+          "comfort_cool": "有人在家时制冷的目标温度。",
+          "setback_heat": "离家时为节能使用的较低温度。",
+          "setback_cool": "离家时为节能使用的较高温度。",
+          "sleep_heat": "睡眠时段（有人在家时）制热的目标温度。",
+          "sleep_cool": "睡眠时段（有人在家时）制冷的目标温度。",
+          "vacation_heat": "度假开关开启期间的制热温度。留空则使用离家制热温度减 3 °F（约 1.5 °C）。",
+          "vacation_cool": "度假开关开启期间的制冷温度。留空则使用离家制冷温度加 3 °F（约 1.5 °C）。"
+        }
+      },
+      "temperature_sources": {
+        "title": "温度来源",
+        "description": "选择 Climate Advisor 从何处读取室外和室内温度数据。",
+        "data": {
+          "outdoor_temp_source": "室外温度来源",
+          "outdoor_temp_entity": "室外温度实体",
+          "outdoor_humidity_entity": "室外湿度传感器",
+          "indoor_temp_source": "室内温度来源",
+          "indoor_temp_entity": "室内温度实体",
+          "indoor_humidity_entity": "室内湿度传感器",
+          "sleep_indoor_temp_entity": "睡眠室内温度传感器",
+          "sleep_indoor_humidity_entity": "睡眠湿度传感器",
+          "thermostat_companion_sensor": "恒温器精细传感器"
+        },
+        "data_description": {
+          "outdoor_temp_source": "从何处读取室外温度。“天气服务”使用您的天气集成；选择专用传感器或输入辅助元素，则可使用指定的实体。切换回“天气服务”会移除所选实体。",
+          "outdoor_temp_entity": "选择报告室外温度的传感器或输入辅助元素——上方的来源会自动随之切换。清空此字段即可返回天气服务。",
+          "outdoor_humidity_entity": "与室外体感温度一起显示在状态图表上的室外湿度传感器。仅用于图表：任何制热或制冷决策都不会用到它。留空则自动检测。",
+          "indoor_temp_source": "从何处读取室内温度。“Climate 实体”使用恒温器内置的传感器；选择专用传感器或输入辅助元素，则可使用单独的实体。",
+          "indoor_temp_entity": "选择报告室内温度的传感器或输入辅助元素——上方的来源会自动随之切换。清空此字段即可返回恒温器内置传感器。",
+          "indoor_humidity_entity": "Climate Advisor 白天读取的房间湿度传感器，与该房间的体感温度一起显示在状态图表上。仅用于图表：任何制热或制冷决策都不会用到它。留空则自动检测。",
+          "sleep_indoor_temp_entity": "可选的卧室传感器，在睡眠计划生效期间用于舒适度和自动化决策（热模型始终使用主传感器）。不可用时回退到主传感器。留空则禁用。",
+          "sleep_indoor_humidity_entity": "卧室的湿度传感器，在睡眠计划生效期间显示在状态图表上。仅用于图表：任何制热或制冷决策都不会用到它。留空则自动检测。",
+          "thermostat_companion_sensor": "许多恒温器在主实体上报告整数温度，但同一设备上还有更精细的温度传感器。“自动”会在确认该精细传感器读数一致时使用它（相差在 1 °F 以内，恒温器显示整数时它会显示小数），并在它丢失或读数不一致时回退到恒温器自己的读数。仅适用于恒温器内置传感器来源。“关闭”则始终使用恒温器自己的读数。"
+        }
+      },
+      "sensors": {
+        "title": "传感器与风扇",
+        "description": "配置门窗传感器和风扇控制。当传感器显示门或窗开着时，空调将暂停以避免浪费能源。",
+        "data": {
+          "door_window_sensors": "门窗传感器",
+          "sensor_polarity_inverted": "反转传感器极性",
+          "sensor_debounce_seconds": "传感器防抖延迟",
+          "manual_grace_seconds": "手动更改后暂停",
+          "automation_grace_seconds": "自动更改冷却时间",
+          "override_confirm_seconds": "手动更改确认延迟",
+          "fan_mode": "风扇控制模式",
+          "hvac_fan_restrict_mode": "风机限制",
+          "fan_entity": "风扇实体",
+          "fan_state_entity": "风扇状态实体",
+          "fan_state_feedback": "风扇状态反馈可靠",
+          "fan_remote_entity": "风扇射频遥控器事件实体",
+          "fan_min_runtime_per_hour": "风扇每小时最短运行时间",
+          "nat_vent_soft_start_enabled": "自然通风软启动"
+        },
+        "data_description": {
+          "door_window_sensors": "选择要监控的二元传感器实体，包括将多个传感器合并在一起的二元传感器组。",
+          "sensor_polarity_inverted": "如果您的传感器在关闭时报告“开”、打开时报告“关”（与 Home Assistant 标准相反），请启用此项。",
+          "sensor_debounce_seconds": "门窗传感器的状态必须稳定保持多久，Climate Advisor 才会做出反应——暂停/恢复空调，或启动/退出自然通风风扇控制。可避免短暂开启或传感器不稳定的抖动触发反应。",
+          "manual_grace_seconds": "您手动调整恒温器后，Climate Advisor 等待多久才恢复自动化。",
+          "automation_grace_seconds": "Climate Advisor 做出自动更改后，等待多久才允许再次更改。",
+          "override_confirm_seconds": "系统更改与确认手动更改之间的时间。在此时间内自行恢复的瞬时事件（恒温器重启、风扇循环）会被自动忽略。设为 0 则立即确认手动更改。",
+          "fan_mode": "如何控制风扇进行通风。“全屋换气扇”控制专用的风扇实体。“风机”使用恒温器的风扇模式。",
+          "hvac_fan_restrict_mode": "适用于潮湿气候，“仅制热”会在制冷后的 2 小时内不使用风机，以避免盘管潮湿带来的湿气。",
+          "fan_entity": "要控制的风扇或开关实体（仅全屋换气扇模式需要）。",
+          "fan_state_entity": "用于读取风扇实际状态的可选独立传感器（适用于双实体的全屋换气扇）。留空则同样使用风扇实体读取状态。",
+          "fan_state_feedback": "如果您的风扇实体或状态传感器报告的是电机的实际状态（而不仅是最后发送的命令），请开启。不确定时请保持关闭——CA 会在每个周期都将风扇指令为所需状态。",
+          "fan_remote_entity": "在按下实体射频墙壁遥控器时触发的可选事件实体（例如来自 gunkl/quietcool-house-fan 固件）。遥控器上选择的定时（1/2/4/8/12 小时）会设定风扇手动更改后的暂停时长。留空则禁用。",
+          "fan_min_runtime_per_hour": "风扇每小时运行的分钟数（0 = 禁用，60 = 始终开启）。该周期不与整点对齐——它会根据 HA 的启动时间自然错开。",
+          "nat_vent_soft_start_enabled": "启用后，一旦确认今天的室外温度已过峰值并在下降，全屋换气扇可在室外与室内温度持平时启动（无需等待室外明显更凉）——目的是促进空气流动并排出阁楼和蓄热体的热量，而不是大量降温。默认开启；如果只想在室外明显比室内更凉时才运行风扇，请禁用。目前没有湿度/露点传感器对此进行限制。"
+        }
+      },
+      "occupancy": {
+        "title": "在家状态感知",
+        "description": "配置告诉 Climate Advisor 谁在家的开关实体。所有字段均为可选——不使用的功能请留空。",
+        "data": {
+          "home_toggle_entity": "在家/外出开关",
+          "home_toggle_invert": "反转在家开关",
+          "vacation_toggle_entity": "度假模式开关",
+          "vacation_toggle_invert": "反转度假开关",
+          "guest_toggle_entity": "访客模式开关",
+          "guest_toggle_invert": "反转访客开关",
+          "welcome_home_debounce_seconds": "欢迎回家静默期"
+        },
+        "data_description": {
+          "home_toggle_entity": "表示是否有人在家的实体（input_boolean、开关等）。开 = 在家，关 = 离家。",
+          "home_toggle_invert": "如果您的开关在离家时报告“开”、在家时报告“关”，请启用此项。",
+          "vacation_toggle_entity": "表示度假模式的实体。启用后会进一步降低温度设定，以长期节能。",
+          "vacation_toggle_invert": "如果您的开关在没有度假时报告“开”，请启用此项。",
+          "guest_toggle_entity": "表示有访客在家的实体。优先于度假和离家模式，并保持舒适温度。",
+          "guest_toggle_invert": "如果您的开关在没有访客时报告“开”，请启用此项。",
+          "welcome_home_debounce_seconds": "两次欢迎回家通知之间的最短间隔。如果您在此时间内离开又返回，则不会发送通知。设为 0 则始终通知。"
+        }
+      },
+      "schedule": {
+        "title": "每日计划",
+        "description": "设置家人的作息计划，让 Climate Advisor 知道何时预热、预冷以及发送简报。",
+        "data": {
+          "wake_time": "起床时间",
+          "sleep_time": "就寝时间",
+          "briefing_time": "每日简报时间"
+        },
+        "data_description": {
+          "wake_time": "家人通常起床的时间。Climate Advisor 会在此时间之前开始制热或制冷，使温度达到舒适温度。",
+          "sleep_time": "家人通常上床睡觉的时间。Climate Advisor 会在此时间切换到离家/睡眠温度。",
+          "briefing_time": "发送每日气候简报通知的时间，简报包含当天的天气预报和空调计划。"
+        }
+      },
+      "scheduler": {
+        "title": "分时电价调度器",
+        "description": "最多可定义 {max} 个分时电价计划（当前已定义 {count} 个）。Climate Advisor 会利用您现有的舒适范围和学到的响应速度，在高价时段之前自动预冷或预热——这里无需设置温度。",
+        "data": {
+          "manage": "管理计划"
+        },
+        "data_description": {
+          "manage": "选择要编辑的计划，或添加新计划。"
+        }
+      },
+      "scheduler_edit": {
+        "title": "分时电价调度器",
+        "description": "没有温度字段——Climate Advisor 会在高价时段之前自动朝您现有的舒适范围做准备。",
+        "data": {
+          "name": "名称",
+          "days": "日期",
+          "start": "开始",
+          "end": "结束",
+          "delete_schedule": "删除此计划",
+          "applies_to": "适用于",
+          "condition_entity": "仅在此项开启时"
+        },
+        "data_description": {
+          "name": "此分时电价计划的简短名称（例如“夏季高峰”）。",
+          "days": "此计划适用的星期。至少选择一天。",
+          "start": "高价时段开始的时间。Climate Advisor 会在此时间之前开始预调节。",
+          "end": "高价时段结束的时间。必须与开始时间不同。",
+          "delete_schedule": "开启并提交即可删除此计划。",
+          "applies_to": "此计划在哪些日子进行预调节。如果供暖不是电力的（例如燃气炉），请选择「仅制冷」：这时在高价时段前预热不会节省任何费用。默认：制冷和制热。",
+          "condition_entity": "可选。只有在此二进制传感器、input boolean 或开关处于开启状态时，计划才会生效（例如「用电高峰季」辅助元素）。留空则始终生效。如果该实体不存在或不可用，计划仍然生效。"
+        }
+      },
+      "notifications": {
+        "title": "通知偏好",
+        "description": "选择您要接收哪些通知以及通过哪些渠道。推送通知发送到您的手机应用；电子邮件通知通过 send_email 服务发送。",
+        "data": {
+          "briefing_notifications_enabled": "每日简报通知",
+          "push_briefing": "推送：每日简报",
+          "push_door_window_pause": "推送：空调已暂停",
+          "push_occupancy_home": "推送：欢迎回家",
+          "manual_grace_notify": "推送：手动更改后暂停已结束",
+          "automation_grace_notify": "推送：自动更改后暂停已结束",
+          "push_entity_health": "推送：未找到实体",
+          "email_briefing": "邮件：每日简报",
+          "email_door_window_pause": "邮件：空调已暂停",
+          "email_grace_expired": "邮件：暂停期已结束",
+          "email_grace_repause": "邮件：空调再次暂停",
+          "email_occupancy_home": "邮件：欢迎回家",
+          "email_entity_health": "邮件：未找到实体"
+        },
+        "data_description": {
+          "briefing_notifications_enabled": "在多区域安装中，只应有一个区域发送定时的每日简报推送/邮件——否则每个区域都会发一份。请恰好为一个区域开启此项。在调试选项卡手动点击“发送简报”时，即使此项关闭也始终会发送。",
+          "push_briefing": "每天早上向您的手机发送一份简短的要点简报。",
+          "push_door_window_pause": "因门或窗开得太久而暂停空调时，发送推送通知。",
+          "push_occupancy_home": "有人到家并恢复舒适温度时，发送推送通知。",
+          "manual_grace_notify": "手动更改后暂停期结束、恢复正常传感器行为时，发送推送通知。",
+          "automation_grace_notify": "自动更改后暂停期结束时，发送推送通知。",
+          "push_entity_health": "已配置的实体（恒温器、天气来源、传感器、风扇、开关或通知服务）被移除或停止响应时，发送推送通知。",
+          "email_briefing": "通过电子邮件发送包含完整天气预报和计划详情的每日简报。",
+          "email_door_window_pause": "因门或窗开着而暂停空调时，发送电子邮件。",
+          "email_grace_expired": "暂停期结束、恢复正常传感器行为时，发送电子邮件。",
+          "email_grace_repause": "暂停期结束后门/窗仍然开着，空调再次暂停时，发送电子邮件。",
+          "email_occupancy_home": "有人到家时，发送电子邮件。",
+          "email_entity_health": "已配置的实体（恒温器、天气来源、传感器、风扇、开关或通知服务）被移除或停止响应时，发送电子邮件。"
+        }
+      },
+      "advanced": {
+        "title": "学习与行为",
+        "description": "配置 Climate Advisor 如何从您的偏好中学习，以及如何在舒适与节能之间取得平衡。",
+        "data": {
+          "primary_engine": "预测引擎",
+          "shadow_engine": "对比引擎",
+          "learning_enabled": "启用学习与建议",
+          "adaptive_preheat_enabled": "自适应预热时机",
+          "adaptive_setback_enabled": "自适应就寝节能温度",
+          "weather_bias_enabled": "天气预报偏差修正",
+          "min_preheat_minutes": "最短预热时间",
+          "max_preheat_minutes": "最长预热时间",
+          "default_preheat_minutes": "默认预热时间",
+          "default_tou_lead_minutes": "分时电价预调节提前时间",
+          "preheat_safety_margin": "预热安全余量",
+          "max_setback_depth_f": "最大节能温度幅度",
+          "comfort_mode_switch_min_interval_s": "制热/制冷切换间隔",
+          "aggressive_savings": "节能优先于舒适",
+          "comfort_deadband_hot_f": "炎热日超调容差",
+          "comfort_deadband_warm_f": "温暖日超调容差",
+          "comfort_deadband_mild_f": "温和日超调容差",
+          "comfort_deadband_cool_f": "凉爽日超调容差",
+          "comfort_deadband_cold_f": "寒冷日超调容差",
+          "comfort_family_recency_window_min": "近期运行窗口",
+          "energy_rate": "能源费率",
+          "heat_power_kw": "制热功率",
+          "cool_power_kw": "制冷功率"
+        },
+        "data_description": {
+          "primary_engine": "Climate Advisor 使用的预测引擎：v4（默认）或 v3。它决定预热和预冷的时机、上限保护、关窗时间和节能温度幅度，也是状态图表和未来 24 小时计划中的主线。所选引擎仍在学习时，这些决策使用默认行为（绝不使用另一个引擎），图表显示计划估算值。",
+          "shadow_engine": "可选的第二个引擎，绘制为对比线。必须与预测引擎不同。只运行这两个引擎；其他引擎均会关闭。",
+          "learning_enabled": "启用后，Climate Advisor 会从您的手动调整中学习，并随时间推移提出改进建议。",
+          "adaptive_preheat_enabled": "使用学到的制热速率来计算预热开始时间。需要启用学习。",
+          "adaptive_setback_enabled": "使用学到的制热/制冷速率来计算最大安全节能温度幅度。需要启用学习。",
+          "weather_bias_enabled": "根据观察到的预报准确度，对明天的预报应用针对所在位置的修正。需要启用学习。",
+          "min_preheat_minutes": "系统将安排的最短预热时长。",
+          "max_preheat_minutes": "系统将安排的最长预热时长。",
+          "default_preheat_minutes": "在收集到足够观测数据之前使用的预热时长。",
+          "default_tou_lead_minutes": "在高价时段开始前多久启动分时电价预调节；在观察到足够多的制热/制冷周期、能算出您家的实际速率之前使用。",
+          "preheat_safety_margin": "作为缓冲，乘以模型计算出的预热时间的倍数（例如 1.2 = 额外增加 20%）。",
+          "max_setback_depth_f": "自适应引擎可计算的最大夜间节能温度幅度。",
+          "comfort_mode_switch_min_interval_s": "常规制热/制冷切换之间的最短等待时间，以防止快速来回切换。真正越界（室内温度确实超出舒适范围边缘）时会忽略此等待并立即切换。",
+          "aggressive_savings": "启用后，Climate Advisor 会优先节能而非舒适——例如，在制热或制冷启动之前容忍更大的温度波动。",
+          "comfort_deadband_hot_f": "炎热日：在相反模式刚运行之后（近期运行窗口内），在切换到相反模式之前，房子可超出舒适范围边缘多少度。炎热日此项适用于切换到制热（制冷侧从不延迟）。超出更多则立即切换。这是容差，不是预先准备边缘的距离（该距离固定为 2 度，或舒适范围的三分之一，取较小者）。",
+          "comfort_deadband_warm_f": "温暖日：在相反模式刚运行之后（近期运行窗口内），在切换到相反模式之前，房子可超出舒适范围边缘多少度。温暖日此项适用于切换到制热（制冷侧从不延迟）。超出更多则立即切换。这是容差，不是预先准备边缘的距离（该距离固定为 2 度，或舒适范围的三分之一，取较小者）。",
+          "comfort_deadband_mild_f": "温和日或归为关闭的日子：在相反模式刚运行之后（近期运行窗口内），在切换到相反模式之前，房子可超出舒适范围边缘多少度。温和日没有偏向的一侧，因此此项同时适用于制热和制冷。超出更多则立即切换。这是容差，不是预先准备边缘的距离（该距离固定为 2 度，或舒适范围的三分之一，取较小者）。",
+          "comfort_deadband_cool_f": "凉爽日：在相反模式刚运行之后（近期运行窗口内），在切换到相反模式之前，房子可超出舒适范围边缘多少度。凉爽日此项适用于切换到制冷（制热侧从不延迟）。超出更多则立即切换。这是容差，不是预先准备边缘的距离（该距离固定为 2 度，或舒适范围的三分之一，取较小者）。",
+          "comfort_deadband_cold_f": "寒冷日：在相反模式刚运行之后（近期运行窗口内），在切换到相反模式之前，房子可超出舒适范围边缘多少度。寒冷日此项适用于切换到制冷（制热侧从不延迟）。超出更多则立即切换。这是容差，不是预先准备边缘的距离（该距离固定为 2 度，或舒适范围的三分之一，取较小者）。",
+          "comfort_family_recency_window_min": "制热侧或制冷侧被视为“最近运行过”的时长（指实际运行过的设备，或分时电价、预测上限、您发起的模式更改；并非 Climate Advisor 的每次写入）。用于上面的超调容差（此窗口内的小幅超调不会让恒温器切换到相反模式），以及预测温度上限保护（它会等待，而不是针对预测的超调采取行动）。",
+          "energy_rate": "可选。一千瓦时电在您所在地的费用，使用您自己的货币。配合下面的制热和制冷功率，仪表板可以估算每天的费用。三项都留空则不显示费用。",
+          "heat_power_kw": "可选。制热运行时消耗的平均电功率，可从铭牌或智能插座获得。与能源费率一起用于每日费用估算。",
+          "cool_power_kw": "可选。制冷运行时消耗的平均电功率，可从铭牌或智能插座获得。与能源费率一起用于每日费用估算。"
+        }
+      },
+      "classification_thresholds": {
+        "title": "日类型阈值",
+        "description": "Climate Advisor 用来对每一天分类的温度阈值。达到或高于炎热阈值的日子使用空调；低于凉爽阈值的日子使用制热。默认值：炎热 85°F (29°C)，温暖 75°F (24°C)，温和 60°F (16°C)，凉爽 45°F (7°C)。",
+        "data": {
+          "threshold_hot": "炎热日阈值",
+          "threshold_warm": "温暖日阈值",
+          "threshold_mild": "温和日阈值",
+          "threshold_cool": "凉爽日阈值"
+        },
+        "data_description": {
+          "threshold_hot": "预报最高温度达到或高于此温度的日子归为炎热（空调模式）。默认值：85°F / 29°C。",
+          "threshold_warm": "预报最高温度达到或高于此温度的日子归为温暖（建议开窗，不用空调）。默认值：75°F / 24°C。",
+          "threshold_mild": "预报最高温度达到或高于此温度的日子归为温和（舒适，开窗）。默认值：60°F / 16°C。",
+          "threshold_cool": "预报最高温度达到或高于此温度的日子归为凉爽（少量制热）。低于此温度为寒冷（全力制热）。默认值：45°F / 7°C。"
+        }
+      },
+      "ai_settings": {
+        "title": "AI 设置",
+        "description": "配置 Claude AI 集成，用于智能分析和报告。\nAPI 密钥状态：{key_status}",
+        "data": {
+          "ai_enabled": "启用 AI 功能",
+          "ai_api_key": "Claude API 密钥",
+          "ai_model": "AI 模型",
+          "ai_reasoning_effort": "推理强度",
+          "ai_max_tokens": "最大响应长度",
+          "ai_temperature": "创造性",
+          "ai_monthly_budget": "每月预算上限",
+          "ai_auto_requests_per_day": "每日自动请求次数",
+          "ai_manual_requests_per_day": "每日手动请求次数",
+          "ai_investigator_enabled": "启用调查代理",
+          "ai_investigator_requests_per_day": "每日调查请求次数"
+        },
+        "data_description": {
+          "ai_enabled": "所有 AI 功能的总开关。禁用后，Climate Advisor 只使用内置的编码逻辑。",
+          "ai_api_key": "您的 Anthropic API 密钥。可在 console.anthropic.com 获取。留空则保留现有密钥。",
+          "ai_model": "使用哪个 Claude 模型。建议使用 Sonnet，兼顾成本与质量。",
+          "ai_reasoning_effort": "Claude 使用多少推理强度。越高分析越好，但成本也越高。",
+          "ai_max_tokens": "AI 响应的最大长度，以 token 计（256-16384）。",
+          "ai_temperature": "控制随机性。0 = 确定性，1.0 = 最具创造性。建议 0.3。",
+          "ai_monthly_budget": "每月预估最高花费，以美元计。设为 0 表示不限制。",
+          "ai_auto_requests_per_day": "每日自动 AI 请求的最大次数（午夜重置）。",
+          "ai_manual_requests_per_day": "每日用户触发的 AI 请求的最大次数（午夜重置）。",
+          "ai_investigator_enabled": "启用调查代理（需要启用 AI）。执行深入的跨数据源分析，以发现不一致和数据问题。",
+          "ai_investigator_requests_per_day": "每日调查分析的最大运行次数。每次调查都使用扩展思考。午夜重置。"
+        }
+      },
+      "github_settings": {
+        "title": "GitHub 集成",
+        "description": "配置向 GitHub 提交调查报告的 Issue。\n当前令牌：{token_status}",
+        "data": {
+          "github_token": "GitHub 个人访问令牌",
+          "github_repo": "GitHub 仓库"
+        },
+        "data_description": {
+          "github_token": "具有 issues:write 权限范围的令牌。留空则保留现有令牌。",
+          "github_repo": "要提交 Issue 的仓库，格式为 owner/repo，例如 gunkl/ClimateAdvisor。"
+        }
+      }
+    },
+    "error": {
+      "entity_required_for_source": "请选择要使用的传感器或辅助元素，或将来源改回天气服务/Climate 实体。",
+      "entity_domain_mismatch": "该实体与所选来源不匹配。“专用传感器”请选择传感器，“输入辅助元素”请选择 input_number。",
+      "source_entity_conflict": "您同时更改了来源和实体，两者互相冲突。请先选择来源，再选择匹配的实体（或将其清空）。",
+      "invalid_notify_service": "必须为 domain.service 格式（例如 notify.mobile_app_phone）",
+      "schedule_days_required": "请至少选择一天",
+      "schedule_start_end_equal": "开始时间和结束时间必须不同",
+      "preheat_min_exceeds_max": "最短预热时间不得超过最长预热时间",
+      "preheat_default_exceeds_max": "默认预热时间不得超过最长预热时间",
+      "shadow_same_as_primary": "对比引擎必须与预测引擎不同。请选择另一个引擎或“无”。",
+      "unknown_engine": "该预测引擎不可用。",
+      "ai_connection_failed": "无法连接到 Claude API。请检查您的 API 密钥后重试。",
+      "ai_key_required": "启用 AI 功能时需要 API 密钥。",
+      "ai_temperature_out_of_range": "温度必须介于 0.0 和 1.0 之间。",
+      "ai_max_tokens_out_of_range": "最大 token 数超出此字段允许的范围。",
+      "github_repo_invalid": "仓库必须为 owner/repo 格式（例如 myuser/MyRepo）。",
+      "zone_name_too_long": "区域名称不得超过 50 个字符",
+      "whf_entity_shared_zone": "此风扇已由另一个 Climate Advisor 区域控制。全屋换气扇只能属于一个区域。请选择其他风扇，或先将它从另一个区域中移除。",
+      "whf_no_sensors_warning": "未选择门窗传感器，因此 Climate Advisor 无法判断房子是否封闭，也不会因此停止全屋换气扇。再次提交可保留此设置，或添加传感器。",
+      "whf_command_only_warning": "Climate Advisor 看不到风扇的真实状态，因此无法查看或停止并非由它启动的风扇。再次提交可保留此设置，或在“传感器与风扇”选项中添加风扇状态传感器。",
+      "thresholds_must_be_ascending": "日类型阈值必须依次升高：凉爽 → 温和 → 温暖 → 炎热（凉爽 < 温和 < 温暖 < 炎热）。",
+      "setpoint_band_inverted_warning": "此制热温度等于或高于对应的制冷温度。在同时具备制热和空调的系统上，两者会整天轮流运行，先加热房子再给它降温。请将制热温度设置为至少比制冷温度低 4 °F (2.5 °C)。再次提交可保留此设置。",
+      "setpoint_band_narrow_warning": "此制热温度比对应的制冷温度低不到 4 °F (2.5 °C)。设备会超出设定温度，因此间隔这么小时，制热和空调可能会不必要地频繁来回切换。再次提交可保留此设置。",
+      "setpoint_outside_thermostat_warning": "您的恒温器不接受此温度，因此 Climate Advisor 将改为发送它能接受的最接近的温度。再次提交可保留此设置。",
+      "away_heat_above_home_warning": "离家制热温度高于在家制热温度，因此没人在家时比有人在家时加热得更多。再次提交可保留此设置。",
+      "away_cool_below_home_warning": "离家制冷温度低于在家制冷温度，因此没人在家时空调比有人在家时更费力。再次提交可保留此设置。",
+      "sleep_heat_below_away_warning": "睡眠制热温度低于离家制热温度，因此夜间房子比没人在家时更凉。再次提交可保留此设置。",
+      "sleep_cool_above_away_warning": "睡眠制冷温度高于离家制冷温度，因此夜间房子允许比没人在家时更热。再次提交可保留此设置。",
+      "vacation_heat_above_away_warning": "度假制热温度高于离家制热温度，因此度假比平常外出的一天更耗能。再次提交可保留此设置。",
+      "vacation_cool_below_away_warning": "度假制冷温度低于离家制冷温度，因此度假比平常外出的一天更耗能。再次提交可保留此设置。",
+      "vacation_freeze_warning": "按此设置，度假制热温度最终会低于 45 °F (7 °C)。长途旅行期间水管可能会冻结。再次提交可保留此设置。"
+    }
+  },
+  "issues": {
+    "weather_entity_not_found": {
+      "title": "未找到天气实体",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "选择天气实体",
+            "description": "之前配置的天气实体 `{entity_id}` 已不存在。请在下方选择正确的天气实体。",
+            "data": {
+              "weather_entity": "天气服务"
+            },
+            "data_description": {
+              "weather_entity": "提供天气预报和室外天气状况的天气集成。"
+            }
+          }
+        }
+      }
+    },
+    "reload_needed": {
+      "title": "需要重新加载以应用配置更改。",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "应用已保存的设置",
+            "description": "您在 Climate Advisor 选项中保存的更改尚未生效。请立即重新加载 Climate Advisor 以应用这些更改。"
+          }
+        }
+      }
+    },
+    "zone_resolution_ambiguous": {
+      "title": "区域选择不明确",
+      "description": "Climate Advisor 有多个区域，而一个请求没有说明针对哪个区域：{request}。结果是 {outcome}。发送该请求的程序（脚本、自动化、命令行工具或旧的浏览器标签页）可能正在显示另一个区域的信息。\n\n要修复此问题，请在该请求中添加 `?zone=ENTRY_ID`，其中 ENTRY_ID 是 `GET /api/climate_advisor/status` 所列出的该区域的 `entry_id`。Climate Advisor 仪表板已经这样做了。此通知将在 Climate Advisor 下次启动时清除。"
+    }
+  },
+  "common": {
+    "schedule_summary": "{name} — {days} {window} ({cost})",
+    "schedule_all_days": "每天",
+    "schedule_cost_high": "高",
+    "schedule_cost_low": "低",
+    "schedule_unnamed": "（未命名）",
+    "key_status_not_configured": "未配置",
+    "token_status_configured": "已配置",
+    "token_status_not_configured": "未配置",
+    "schedule_add_new": "+ 添加新计划",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}、仅制冷)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}、仅制热)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}、仅在 {entity} 开启时)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}、仅制冷、仅在 {entity} 开启时)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}、仅制热、仅在 {entity} 开启时)"
+  },
+  "entity": {
+    "sensor": {
+      "day_type": {
+        "name": "日类型",
+        "state": {
+          "hot": "炎热",
+          "warm": "温暖",
+          "mild": "温和",
+          "cool": "凉爽",
+          "cold": "寒冷",
+          "unknown": "未知"
+        }
+      },
+      "trend_direction": {
+        "name": "趋势",
+        "state": {
+          "warming": "升温中",
+          "cooling": "降温中",
+          "stable": "稳定",
+          "unknown": "未知"
+        }
+      },
+      "next_human_action": {
+        "name": "您的下一步操作"
+      },
+      "daily_briefing": {
+        "name": "每日简报"
+      },
+      "compliance_score": {
+        "name": "舒适度评分"
+      },
+      "automation_status": {
+        "name": "状态"
+      },
+      "next_automation_action": {
+        "name": "下一个自动化操作"
+      },
+      "next_automation_time": {
+        "name": "下一次自动化时间"
+      },
+      "occupancy_mode": {
+        "name": "在家模式",
+        "state": {
+          "home": "在家",
+          "away": "离家",
+          "vacation": "度假",
+          "guest": "访客"
+        }
+      },
+      "last_action_time": {
+        "name": "上次操作时间"
+      },
+      "last_action_reason": {
+        "name": "上次操作原因"
+      },
+      "fan_status": {
+        "name": "风扇状态",
+        "state": {
+          "disabled": "已禁用",
+          "active": "运行中",
+          "inactive": "未运行"
+        }
+      },
+      "contact_status": {
+        "name": "门窗传感器"
+      },
+      "ai_status": {
+        "name": "AI 状态",
+        "state": {
+          "active": "运行中",
+          "inactive": "未运行",
+          "error": "错误",
+          "disabled": "已禁用",
+          "circuit_open": "因反复出错已暂停",
+          "budget_exceeded": "已达到每月预算"
+        }
+      },
+      "indoor_temp": {
+        "name": "室内温度"
+      },
+      "outdoor_temp": {
+        "name": "室外温度"
+      },
+      "forecast_high": {
+        "name": "预报最高温度"
+      },
+      "forecast_low": {
+        "name": "预报最低温度"
+      },
+      "effective_target_temp": {
+        "name": "目标温度"
+      },
+      "heat_threshold": {
+        "name": "制热阈值"
+      },
+      "cool_threshold": {
+        "name": "制冷阈值"
+      }
+    },
+    "switch": {
+      "automation_enabled": {
+        "name": "自动化"
+      }
+    }
+  },
+  "selector": {
+    "fan_mode": {
+      "options": {
+        "disabled": "已禁用（无风扇控制）",
+        "whole_house_fan": "全屋换气扇（专用实体）",
+        "hvac_fan": "风机模式"
+      }
+    },
+    "hvac_fan_restrict": {
+      "options": {
+        "heat": "仅制热（避免制冷后的湿气）",
+        "cool": "仅制冷",
+        "both": "两者（无限制）"
+      }
+    },
+    "outdoor_temp_source": {
+      "options": {
+        "weather_service": "天气服务（推荐）",
+        "sensor": "专用传感器",
+        "input_number": "输入辅助元素 (input_number)"
+      }
+    },
+    "indoor_temp_source": {
+      "options": {
+        "climate_fallback": "Climate 实体（推荐）",
+        "sensor": "专用传感器",
+        "input_number": "输入辅助元素 (input_number)"
+      }
+    },
+    "thermostat_companion": {
+      "options": {
+        "auto": "自动（确认可靠后使用恒温器的精细传感器）",
+        "off": "关闭（始终使用恒温器自己的读数）"
+      }
+    },
+    "temp_unit": {
+      "options": {
+        "fahrenheit": "华氏度 (°F)",
+        "celsius": "摄氏度 (°C)"
+      }
+    },
+    "prediction_engine": {
+      "options": {
+        "none": "无",
+        "v3": "v3",
+        "v4": "v4"
+      }
+    },
+    "weekday": {
+      "options": {
+        "mon": "周一",
+        "tue": "周二",
+        "wed": "周三",
+        "thu": "周四",
+        "fri": "周五",
+        "sat": "周六",
+        "sun": "周日"
+      }
+    },
+    "ai_reasoning_effort": {
+      "options": {
+        "low": "低",
+        "medium": "中",
+        "high": "高"
+      }
+    },
+    "suggestion_action": {
+      "options": {
+        "accept": "接受",
+        "dismiss": "忽略"
+      }
+    },
+    "reset_scope": {
+      "options": {
+        "all": "所有已学习的数据",
+        "thermal_model": "热模型",
+        "weather_bias": "天气预报偏差",
+        "suggestions": "已忽略的建议"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "制冷和制热",
+        "cool": "仅制冷",
+        "heat": "仅制热"
+      }
+    }
+  },
+  "services": {
+    "respond_to_suggestion": {
+      "name": "回应建议",
+      "description": "接受或忽略 Climate Advisor 的学习建议。",
+      "fields": {
+        "entry_id": {
+          "name": "区域",
+          "description": "此调用适用的 Climate Advisor 区域（配置条目）。自 Issue #796 起为必填——配置了多个区域时，HA 的服务注册表没有其他方式知道调用针对哪个区域。"
+        },
+        "action": {
+          "name": "操作",
+          "description": "接受还是忽略该建议。"
+        },
+        "suggestion_key": {
+          "name": "建议键",
+          "description": "用于标识要回应的建议的键。"
+        }
+      }
+    },
+    "force_reclassify": {
+      "name": "强制重新分类",
+      "description": "强制 Climate Advisor 重新获取天气预报数据并对当天重新分类。适用于调试。",
+      "fields": {
+        "entry_id": {
+          "name": "区域",
+          "description": "此调用适用的 Climate Advisor 区域（配置条目）。自 Issue #796 起为必填——配置了多个区域时，HA 的服务注册表没有其他方式知道调用针对哪个区域。"
+        }
+      }
+    },
+    "resend_briefing": {
+      "name": "重新发送简报",
+      "description": "重新生成并重新发送每日简报通知，即使今天已经发送过。",
+      "fields": {
+        "entry_id": {
+          "name": "区域",
+          "description": "此调用适用的 Climate Advisor 区域（配置条目）。自 Issue #796 起为必填——配置了多个区域时，HA 的服务注册表没有其他方式知道调用针对哪个区域。"
+        }
+      }
+    },
+    "dump_diagnostics": {
+      "name": "转储诊断信息",
+      "description": "将 Climate Advisor 内部状态的完整诊断快照记录到日志中，用于故障排除。输出以 INFO 级别记录——请在 Home Assistant 日志中查看结果。",
+      "fields": {
+        "entry_id": {
+          "name": "区域",
+          "description": "此调用适用的 Climate Advisor 区域（配置条目）。自 Issue #796 起为必填——配置了多个区域时，HA 的服务注册表没有其他方式知道调用针对哪个区域。"
+        }
+      }
+    },
+    "reset_learning_data": {
+      "name": "重置学习数据",
+      "description": "重置 Climate Advisor 已学习的部分或全部数据。更换空调设备、搬到新地点或想重新开始时使用。",
+      "fields": {
+        "entry_id": {
+          "name": "区域",
+          "description": "此调用适用的 Climate Advisor 区域（配置条目）。自 Issue #796 起为必填——配置了多个区域时，HA 的服务注册表没有其他方式知道调用针对哪个区域。调用前请仔细确认——此服务具有破坏性。"
+        },
+        "scope": {
+          "name": "范围",
+          "description": "要重置哪些数据。“all”清除所有数据。“thermal_model”清除空调运行会话的观测记录。“weather_bias”清除预报准确度记录。“suggestions”允许之前忽略的建议再次出现。"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "unknown_zone": {
+      "message": "未知或未加载的 Climate Advisor 区域 entry_id“{entry_id}”。请在 设置 > 设备与服务 中查看正确的区域。"
+    }
+  }
+}

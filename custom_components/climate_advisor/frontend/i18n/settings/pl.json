@@ -1,0 +1,7 @@
+{
+  "settings.tou_applies.both": "Chłodzenie i ogrzewanie",
+  "settings.tou_applies.cool": "Tylko chłodzenie",
+  "settings.tou_applies.heat": "Tylko ogrzewanie",
+  "settings.tou_applies_to": "Dotyczy",
+  "settings.tou_condition": "Tylko gdy włączone"
+}

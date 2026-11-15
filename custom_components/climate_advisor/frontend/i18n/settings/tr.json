@@ -1,0 +1,7 @@
+{
+  "settings.tou_applies.both": "Soğutma ve ısıtma",
+  "settings.tou_applies.cool": "Yalnızca soğutma",
+  "settings.tou_applies.heat": "Yalnızca ısıtma",
+  "settings.tou_applies_to": "Uygulandığı",
+  "settings.tou_condition": "Yalnızca açıkken"
+}

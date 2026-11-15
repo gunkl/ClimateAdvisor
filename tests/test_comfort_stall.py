@@ -26,6 +26,7 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+from custom_components.climate_advisor import i18n  # noqa: E402
 from custom_components.climate_advisor.comfort_stall_decision import (  # noqa: E402
     StallReason,
     decide_comfort_stall,
@@ -199,7 +200,9 @@ class _Rig:
         self.events: list[tuple[str, dict]] = []
         coord._emit_event = lambda t, d: self.events.append((t, d))
         self.notifications: list[tuple[str, str, str, dict]] = []
-        coord._notify_in_background = lambda title, msg, typ, **kw: self.notifications.append((title, msg, typ, kw))
+        coord._notify_in_background = lambda title, msg, typ, **kw: self.notifications.append(
+            (i18n.render_en(title), i18n.render_en(msg), typ, kw)
+        )
         self.set_thermostat(mode=mode, action=action, modes=modes or ["off", "heat", "cool"])
         coord.hass.states.get = lambda _eid: self.thermostat
         for name in (

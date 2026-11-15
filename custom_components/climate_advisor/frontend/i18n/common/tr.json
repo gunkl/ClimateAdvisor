@@ -1,0 +1,16 @@
+{
+  "common.duration.hours": "{n, plural, one {# sa} other {# sa}}",
+  "common.duration.hours_frac": "{n, number, ::.0} sa",
+  "common.duration.min": "{n, plural, one {# dk} other {# dk}}",
+  "common.mode.auto": "Otomatik",
+  "common.mode.cool": "Soğutma",
+  "common.mode.fan_only": "Yalnızca fan",
+  "common.mode.heat": "Isıtma",
+  "common.mode.heat_cool": "Isıtma/Soğutma",
+  "common.mode.off": "Kapalı",
+  "common.tou_skip.condition_off": "koşulu kapalı",
+  "common.tou_skip.condition_off_entity": "koşulu kapalı ({entity})",
+  "common.tou_skip.not_applied_cool": "soğutmaya uygulanmaz",
+  "common.tou_skip.not_applied_heat": "ısıtmaya uygulanmaz",
+  "common.unknown": "Bilinmiyor"
+}

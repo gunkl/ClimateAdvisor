@@ -203,7 +203,7 @@ def _coord(mode: str, schedule: dict, states: dict | None = None) -> ClimateAdvi
         "_stored_schedules",
         "_tou_condition_state",
         "_log_tou_schedule_filter",
-        "_tou_skip_text",
+        "_tou_skip_reasons",
         "_format_tou_ends",
     ):
         setattr(c, name, types.MethodType(getattr(ClimateAdvisorCoordinator, name), c))
@@ -461,20 +461,44 @@ def test_every_scenario_schedule_uses_only_known_fields():
     assert bad == []
 
 
+def _en_texts() -> dict:
+    """The English config-flow phrases (``common`` of strings.json), as ``_async_texts`` provides them."""
+    import json  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    strings = Path(__file__).resolve().parent.parent / "custom_components/climate_advisor/strings.json"
+    return json.loads(strings.read_text(encoding="utf-8"))["common"]
+
+
 def test_summary_survives_an_unknown_applies_to_value():
     from custom_components.climate_advisor.config_flow import ClimateAdvisorOptionsFlow
 
-    label = ClimateAdvisorOptionsFlow._format_schedule_summary({**BASE, "applies_to": "sometimes"})
+    label = ClimateAdvisorOptionsFlow._format_schedule_summary({**BASE, "applies_to": "sometimes"}, _en_texts())
     assert "Weekday peak" in label and "only" not in label
 
 
-def test_skip_text_joins_reasons_once_and_names_the_entity():
-    from custom_components.climate_advisor.scheduler import schedule_skip_text
+def test_summary_names_the_limits_in_one_sentence():
+    from custom_components.climate_advisor.config_flow import ClimateAdvisorOptionsFlow
 
-    assert schedule_skip_text([(SKIP_CONDITION_OFF, "input_boolean.x"), (SKIP_CONDITION_OFF, "input_boolean.x")]) == (
+    texts = _en_texts()
+    label = ClimateAdvisorOptionsFlow._format_schedule_summary(
+        {**BASE, "applies_to": "cool", "condition_entity": "input_boolean.peak"}, texts
+    )
+    assert label.endswith("(High, cooling only, only while input_boolean.peak is on)")
+    assert "heating only" in ClimateAdvisorOptionsFlow._format_schedule_summary({**BASE, "applies_to": "heat"}, texts)
+
+
+def test_skip_reasons_are_listed_once_and_name_the_entity():
+    from custom_components.climate_advisor import i18n
+    from custom_components.climate_advisor.scheduler import schedule_skip_list
+
+    reasons = schedule_skip_list([(SKIP_CONDITION_OFF, "input_boolean.x"), (SKIP_CONDITION_OFF, "input_boolean.x")])
+    assert i18n.render_en(i18n.Msg("activity.tou_window_skip_reasons", reasons=reasons)) == (
         "its condition is off (input_boolean.x)"
     )
-    assert schedule_skip_text([(SKIP_NOT_APPLIED_HEAT, None)]) == "not applied to heating"
+    one = schedule_skip_list([(SKIP_NOT_APPLIED_HEAT, None)])
+    assert i18n.render_en(i18n.Msg("activity.tou_window_skip_reasons", reasons=one)) == "not applied to heating"
+    assert i18n.render(i18n.Msg("activity.tou_window_skip_reasons", reasons=one), "fr") == "non appliqué au chauffage"
 
 
 def test_a_low_tag_schedule_starting_mid_period_is_not_a_new_period():

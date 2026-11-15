@@ -186,3 +186,27 @@ async def make_sim(make_house):
         return await make_house(profile=physics, sim_config=sim_config, **kwargs)
 
     return _make
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _i18n_strict_session():
+    """Issue #1341: load the translation catalogs once and render strictly for the whole real-HA session (a key
+    missing from English or an unrenderable parameter raises instead of quietly rendering the raw key)."""
+    from custom_components.climate_advisor import i18n
+
+    i18n.load_catalogs()
+    i18n.set_strict(True)
+    yield
+    i18n.set_strict(None)
+
+
+@pytest.fixture(autouse=True)
+def _i18n_strict_each_test(_i18n_strict_session):
+    """Re-assert strict mode and the real catalogs before every test."""
+    from custom_components.climate_advisor import i18n
+
+    i18n.set_strict(True)
+    if i18n.catalogs_source() != i18n.default_i18n_dir():
+        i18n.reset_catalogs()
+        i18n.load_catalogs()
+    yield

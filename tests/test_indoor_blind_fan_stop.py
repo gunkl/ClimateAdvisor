@@ -28,6 +28,7 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+from custom_components.climate_advisor import i18n  # noqa: E402
 from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult  # noqa: E402
 from custom_components.climate_advisor.const import (  # noqa: E402
     CONF_FAN_MODE,
@@ -61,6 +62,11 @@ def clock():
     state = {"now": _T0}
     with patch(_NOW_PATH, side_effect=lambda: state["now"]):
         yield state
+
+
+def _en(value):
+    """English rendering of a ``Msg`` (anything else passes through)."""
+    return i18n.render_en(value) if isinstance(value, i18n.Msg) else value
 
 
 def _advance(clock: dict, **kwargs: float) -> None:
@@ -127,7 +133,8 @@ class _Rig:
 
     def pushes(self) -> list[tuple]:
         self.drain_tasks()
-        return [c.args for c in self.engine._notify.await_args_list]
+        # Issue #1341: ``_notify`` takes ``Msg`` title/message; these tests assert the English rendering.
+        return [tuple(_en(a) for a in c.args) for c in self.engine._notify.await_args_list]
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +158,7 @@ class TestBlindDetectionAndStop:
         pushes = rig.pushes()
         assert len(pushes) == 1
         assert pushes[0][2] == "indoor_blind_fan"
-        assert "will turn the fan off at 02:30" in pushes[0][0]
+        assert "will turn the fan off at 2:30 AM" in pushes[0][0]
 
     def test_alert_is_sent_once_per_episode(self, clock):
         rig = _Rig()
@@ -657,7 +664,7 @@ class TestFanCardSuffix:
     def test_suffix_names_the_stop_time(self):
         stop_at = datetime(2026, 10, 9, 2, 30, tzinfo=UTC)
         out = self._suffix({"stop_at": stop_at, "session": "nat_vent", "since": _T0}, "active")
-        assert out == "active (indoor sensor offline — stops 02:30)"
+        assert out == "active (indoor sensor offline — stops 2:30 AM)"
 
     def test_alert_only_session_says_no_auto_stop(self):
         out = self._suffix({"stop_at": None, "session": "override", "since": _T0}, "running (manual override)")

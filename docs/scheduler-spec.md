@@ -63,7 +63,7 @@ No temperature field exists anywhere in this shape — this is deliberate, not a
 
 **Storage.** Stored schedules are read by `scheduler.schedule_from_dict()`: unknown keys are ignored (DEBUG), a record missing a required field is skipped with a WARNING (before, `Schedule(**stored)` raised and the whole update cycle failed), `days` lists become tuples, and an unrecognised `applies_to` means `both`. `schedule_to_dict()` writes required fields always and optional ones only when not their default; the options editor and `GET /api/climate_advisor/settings_extra` both use it (`SCHEDULE_FIELDS` is the one field list). The editor keeps any stored field it does not show; a blank enable entity removes the key.
 
-**Downgrades are not supported.** After a schedule stores `applies_to` or `condition_entity`, a build at or below 0.9.36 cannot read it: that zone fails to set up (no entities, no control) until the field is removed. The release notes say so.
+**Downgrades are not supported.** After a schedule stores `applies_to` or `condition_entity`, a build at or below 0.9.38 cannot read it: that zone fails to set up (no entities, no control) until the field is removed. The release notes say so.
 
 **The one filter.** `filter_schedules(schedules, state_of, hvac_mode)` runs once at the top of `_resolve_tou_schedule_state()`. Every resolver (`resolve_tou_phase`, `resolve_tou_away_vacation_phase`, `resolve_active_schedules`), the chart, the Status card and the Activity record see only the schedules that apply; order is kept (the earliest applicable schedule wins).
 

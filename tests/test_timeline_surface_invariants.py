@@ -26,6 +26,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from custom_components.climate_advisor import i18n
 from custom_components.climate_advisor.briefing import generate_briefing
 from custom_components.climate_advisor.operation_timeline import (
     Actor,
@@ -36,7 +37,7 @@ from custom_components.climate_advisor.operation_timeline import (
 )
 from custom_components.climate_advisor.temperature import display_temp
 from custom_components.climate_advisor.timeline_surfaces import (
-    NEXT_AUTOMATION_LABELS,
+    NEXT_AUTOMATION_LABEL_KEYS,
     CardLive,
     advises_opening,
     apply_direction_veto,
@@ -213,10 +214,33 @@ def test_surfaces_agree_for_generated_snapshots(
     _check_all(snap, day_type, windows_open=windows_open, direction_ok=direction_ok)
 
 
+def test_every_english_open_windows_advice_key_is_listed() -> None:
+    """Owner rule 8 (the old harness hook was ``text.startswith("Open windows")``): every card or status message whose
+    English starts that way is in ``ADVISES_OPENING_KEYS``, so the key-based hook detects what the text hook did."""
+    import json
+
+    from custom_components.climate_advisor.timeline_surfaces import ADVISES_OPENING_KEYS
+
+    i18n.load_catalogs()
+    candidates = set()
+    for area in ("timeline", "status"):  # every area that can hold a Next Action card
+        catalog = json.loads((i18n.default_i18n_dir() / area / "en.json").read_text(encoding="utf-8"))
+        candidates |= {k for k, v in catalog.items() if v.startswith("Open windows")}
+    assert candidates, "found no English 'Open windows' advice at all: the derivation is broken"
+    assert candidates <= ADVISES_OPENING_KEYS, sorted(candidates - ADVISES_OPENING_KEYS)
+    from custom_components.climate_advisor.timeline_surfaces import CardText, advises_opening
+
+    for key in sorted(ADVISES_OPENING_KEYS):  # and every listed key really is a catalog message
+        assert i18n.get_message(key, "en") is not None, key
+        assert advises_opening(CardText("x", i18n.Msg(key)))
+
+
 def test_the_label_table_is_free_of_banned_words_and_clock_times() -> None:
     """Status Card Ontology: Next Automation never narrates mechanism state or tells the occupant to do something CA
     cannot do, and never embeds a clock time in the action (the card's second value carries it)."""
-    for key, label in NEXT_AUTOMATION_LABELS.items():
+    i18n.load_catalogs()
+    for key, catalog_key in NEXT_AUTOMATION_LABEL_KEYS.items():  # the English of each label, from the catalog
+        label = i18n.get_message(catalog_key, "en")[0]
         assert not _BANNED.search(label), (key, label)
         assert not _CLOCK.search(label), (key, label)
         assert key.split(".")[0] not in ("windows_open", "windows_close")

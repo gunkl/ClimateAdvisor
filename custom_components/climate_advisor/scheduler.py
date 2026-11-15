@@ -51,6 +51,7 @@ from datetime import time as dt_time
 from enum import Enum
 from typing import Any
 
+from . import i18n
 from .automation import _in_sleep_window
 from .const import (
     DEFAULT_SETBACK_COOL,
@@ -211,23 +212,36 @@ def filter_schedules(
     return ScheduleFilter(tuple(kept), tuple(skipped), tuple(failed_open))
 
 
-def schedule_skip_text(items: Iterable[tuple[str, str | None]]) -> str:
-    """Several skip reasons as one line, each worded once, in order: ``(reason, entity)`` pairs; an entity given for
-    ``condition_off`` is named ("its condition is off (input_boolean.peak)")."""
-    parts = []
+# One catalog key per skip reason (Issue #1341: the common area), so Status, the Activity record and logs agree.
+_SKIP_KEYS = {
+    SKIP_CONDITION_OFF: "common.tou_skip.condition_off",
+    SKIP_NOT_APPLIED_HEAT: "common.tou_skip.not_applied_heat",
+    SKIP_NOT_APPLIED_COOL: "common.tou_skip.not_applied_cool",
+}
+
+
+def schedule_skip_msg(reason: str, entity: str | None = None) -> i18n.Msg:
+    """The one wording of a skip reason, as a translatable message (Issues #1558/#1565).
+
+    With ``entity`` given for ``condition_off`` the entity is named ("its condition is off (input_boolean.peak)").
+    """
+    if reason == SKIP_CONDITION_OFF and entity:
+        return i18n.Msg("common.tou_skip.condition_off_entity", entity=entity)
+    return i18n.Msg(_SKIP_KEYS.get(reason, "common.tou_skip.condition_off"))
+
+
+def schedule_skip_list(items: Iterable[tuple[str, str | None]]) -> i18n.ListOf:
+    """Several ``(reason, entity)`` skip reasons as one translatable list, each wording once, in order."""
+    seen: dict[tuple[str, str | None], i18n.Msg] = {}
     for reason, entity in items:
-        text = schedule_skip_sentence(reason)
-        parts.append(f"{text} ({entity})" if entity and reason == SKIP_CONDITION_OFF else text)
-    return ", ".join(dict.fromkeys(parts)) or "skipped"
+        key = (reason, entity if reason == SKIP_CONDITION_OFF else None)
+        seen.setdefault(key, schedule_skip_msg(reason, key[1]))
+    return i18n.ListOf(list(seen.values()))
 
 
 def schedule_skip_sentence(reason: str) -> str:
-    """The one wording of a skip reason (Status card, Activity record, log), Issues #1558/#1565."""
-    return {
-        SKIP_CONDITION_OFF: "its condition is off",
-        SKIP_NOT_APPLIED_HEAT: "not applied to heating",
-        SKIP_NOT_APPLIED_COOL: "not applied to cooling",
-    }.get(reason, reason)
+    """The English wording of a skip reason (logs and records), rendered from the same catalog key."""
+    return i18n.render_en(schedule_skip_msg(reason))
 
 
 @dataclass(frozen=True)

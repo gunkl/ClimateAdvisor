@@ -1,0 +1,34 @@
+{
+  "languages": [
+    "en",
+    "fr",
+    "es",
+    "de",
+    "nl",
+    "ja",
+    "pt",
+    "it",
+    "pl",
+    "uk",
+    "ko",
+    "hi",
+    "ar",
+    "ru",
+    "zh-Hans",
+    "tr"
+  ],
+  "areas": [
+    "common",
+    "notify",
+    "status",
+    "timeline",
+    "learning",
+    "night",
+    "activity",
+    "briefing",
+    "dashboard",
+    "settings",
+    "errors",
+    "ai"
+  ]
+}

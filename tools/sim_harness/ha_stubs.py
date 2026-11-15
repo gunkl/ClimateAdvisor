@@ -131,6 +131,7 @@ _HA_MODULES = [
     "homeassistant.helpers.selector",
     "homeassistant.components",
     "homeassistant.components.sensor",
+    "homeassistant.components.switch",
     "homeassistant.components.weather",
     "homeassistant.components.climate",
     "homeassistant.data_entry_flow",
@@ -186,6 +187,22 @@ class _MockHomeAssistantError(Exception):
     _HA_MODULES) — only these two names are realified, mirroring the pattern
     already used for RepairsFlow/DataUpdateCoordinator/etc. below.
     """
+
+    def __init__(
+        self,
+        *args: object,
+        translation_domain: str | None = None,
+        translation_key: str | None = None,
+        translation_placeholders: dict[str, str] | None = None,
+    ) -> None:
+        """Accept HA's translated-exception keywords (Issue #1341); the text is the key when no message is given."""
+        super().__init__(*args)
+        self.translation_domain = translation_domain
+        self.translation_key = translation_key
+        self.translation_placeholders = translation_placeholders
+
+    def __str__(self) -> str:
+        return super().__str__() if self.args else str(self.translation_key or "")
 
 
 class _MockServiceValidationError(_MockHomeAssistantError):
@@ -305,6 +322,10 @@ class _MockCoordinatorEntity:
 
 class _MockSensorEntity:
     """Minimal stand-in for homeassistant.components.sensor.SensorEntity."""
+
+
+class _MockSwitchEntity:
+    """Minimal stand-in for homeassistant.components.switch.SwitchEntity (Issue #1341: switch.py is importable)."""
 
 
 class _MockJsonResponse:
@@ -707,6 +728,7 @@ def install_ha_stubs() -> None:
 
     sensor = sys.modules["homeassistant.components.sensor"]
     sensor.SensorEntity = _MockSensorEntity
+    sys.modules["homeassistant.components.switch"].SwitchEntity = _MockSwitchEntity
     sensor.SensorStateClass = _SensorStateClass
     sensor.SensorDeviceClass = _SensorDeviceClass
 
@@ -766,3 +788,10 @@ def install_ha_stubs() -> None:
         except ImportError:
             sys.modules["voluptuous"] = _make_mock_module("voluptuous")
             sys.modules["voluptuous.error"] = _make_mock_module("voluptuous.error")
+
+    # Issue #1341: the one headless entry point for the translation catalogs. Production reads them once in
+    # ``async_setup_entry``; the harness, simulate.py and every tool that renders (all of them call this function)
+    # never run setup, so read them here, once. ``ensure_catalogs`` never raises and is a no-op afterwards.
+    from custom_components.climate_advisor import i18n as _i18n  # noqa: PLC0415 - needs the stubs installed first
+
+    _i18n.ensure_catalogs()

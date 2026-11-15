@@ -50,6 +50,10 @@
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   [hidden] { display: none !important; }
 </style>
+<!-- Issue #1341: i18n runtime first (FormatJS, then CAI18N). Catalogs: i18n/ (docs/i18n-spec.md). -->
+<script src="intl-messageformat.iife.js"></script>
+<script src="i18n.js"></script>
+<script>CAI18N.init({});</script>
 <!-- Bundled libraries only, same files as index.html (no CDN) -->
 <script src="hammer.min.js"></script>
 <script src="chart.umd.min.js"></script>

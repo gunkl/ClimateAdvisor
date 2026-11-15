@@ -31,6 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from . import i18n
 from .const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
@@ -52,12 +53,12 @@ _UNAVAILABLE_STATES = UNAVAILABLE_STATES  # back-compat alias; rule lives in con
 # The one list-valued config key. Swept separately from the scalar registry
 # below since each list member gets its own independent health check.
 DOOR_WINDOW_SENSORS_CONFIG_KEY = "door_window_sensors"
-DOOR_WINDOW_SENSOR_FRIENDLY_NAME = "Door/window sensor"
+DOOR_WINDOW_SENSOR_NAME = i18n.Msg("notify.entity.door_window_sensor")  # the translatable "friendly name"
 DOOR_WINDOW_SENSOR_CRITICALITY = "degraded"
 THERMOSTAT_CONFIG_KEY = "climate_entity"
 # Issue #1565: each TOU schedule's optional enable entity -- the other list-valued source (one slot per entity).
 TOU_CONDITION_CONFIG_KEY = "schedules.condition_entity"
-TOU_CONDITION_FRIENDLY_NAME = "TOU schedule enable entity"
+TOU_CONDITION_NAME = i18n.Msg("notify.entity.tou_schedule_condition")  # the translatable "friendly name"
 TOU_CONDITION_CRITICALITY = "optional"
 # The list-valued keys: every member gets its own transition/debounce slot (Issue #1181).
 _LIST_CONFIG_KEYS = frozenset({DOOR_WINDOW_SENSORS_CONFIG_KEY, TOU_CONDITION_CONFIG_KEY})
@@ -75,6 +76,9 @@ class EntityHealthIssue:
     # What Climate Advisor is doing about it, in the occupant's terms (Issue #1181). Filled in by the
     # coordinator (``entity_health_consequence``); empty keeps the generic "may not control your HVAC" text.
     detail: str = ""
+    # Issue #1341: ``friendly_name`` and ``detail`` stay the English record text; these are the translatable forms.
+    friendly_name_msg: i18n.Msg | None = None
+    detail_msg: i18n.Msg | None = None
 
     @property
     def state_key(self) -> str:
@@ -88,44 +92,36 @@ class EntityHealthIssue:
         return self.config_key
 
 
-def entity_health_consequence(
+def entity_health_consequence_msg(
     issue: EntityHealthIssue, *, door_last_reading: str | None = None, whf_running: bool = False
-) -> str:
+) -> i18n.Msg | None:
     """The one place that words what Climate Advisor does while an entity is unreadable (Issue #1181).
 
     Door/window sensors (owner rule 3, decision D1): a sensor that last read open keeps heating and cooling
     paused; one that last read closed (or never reported) counts as closed. Thermostat (rule 2, decision D5):
     while the whole-house fan runs, "fan and heating/cooling never together" cannot be checked. Anything else
-    returns "" and keeps the generic text. This module still never changes what automation does.
+    returns None and keeps the generic text. This module still never changes what automation does.
     """
     if issue.config_key == DOOR_WINDOW_SENSORS_CONFIG_KEY:
         if door_last_reading == "open":
-            return (
-                "It last read open, so heating and cooling stay paused until it reports again "
-                "or you change the thermostat."
-            )
+            return i18n.Msg("notify.entity_consequence_door_open")
         if door_last_reading == "closed":
-            return (
-                "It last read closed, so Climate Advisor treats it as closed. "
-                "If that door or window is actually open, heating or cooling may run."
-            )
-        return (
-            "It hasn't reported since Climate Advisor started, so Climate Advisor treats it as closed. "
-            "If that door or window is actually open, heating or cooling may run."
-        )
+            return i18n.Msg("notify.entity_consequence_door_closed")
+        return i18n.Msg("notify.entity_consequence_door_unknown")
     if issue.config_key == TOU_CONDITION_CONFIG_KEY:
         # Issue #1565: a schedule's enable entity that cannot be read fails open.
-        return (
-            "Climate Advisor can't tell whether it is on, so the time-of-use schedule that uses it still applies "
-            "(pre-cooling or pre-heating before its high-cost period goes ahead)."
-        )
+        return i18n.Msg("notify.entity_consequence_tou_condition")
     if issue.config_key == THERMOSTAT_CONFIG_KEY and whf_running:
-        return (
-            "The whole-house fan is running, and Climate Advisor can't check that the fan and heating/cooling "
-            "are never on together until the thermostat responds. Turn the heating or cooling off yourself "
-            "if it is on."
-        )
-    return ""
+        return i18n.Msg("notify.entity_consequence_thermostat_whf")
+    return None
+
+
+def entity_health_consequence(
+    issue: EntityHealthIssue, *, door_last_reading: str | None = None, whf_running: bool = False
+) -> str:
+    """English text of ``entity_health_consequence_msg`` ("" when there is none) -- for records and logs."""
+    msg = entity_health_consequence_msg(issue, door_last_reading=door_last_reading, whf_running=whf_running)
+    return i18n.render_en(msg) if msg is not None else ""
 
 
 def _always_relevant(_config: dict) -> bool:
@@ -152,6 +148,18 @@ def _indoor_temp_entity_relevant(config: dict) -> bool:
     return config.get("indoor_temp_source") in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
 
 
+def _issue(config_key: str, entity_id: str, name: i18n.Msg, criticality: str, status: str) -> EntityHealthIssue:
+    """An issue whose English ``friendly_name`` and translatable ``friendly_name_msg`` come from one ``Msg``."""
+    return EntityHealthIssue(
+        config_key=config_key,
+        entity_id=entity_id,
+        friendly_name=i18n.render_en(name),
+        criticality=criticality,
+        status=status,
+        friendly_name_msg=name,
+    )
+
+
 def _check_scalar_entity(hass: Any, config: dict, config_key: str, meta: dict) -> EntityHealthIssue | None:
     """Default checker: config_key's value is an HA entity_id, resolved via hass.states.get()."""
     if not meta["relevant"](config):
@@ -169,13 +177,7 @@ def _check_scalar_entity(hass: Any, config: dict, config_key: str, meta: dict) -
         status = "unavailable"
     else:
         return None
-    return EntityHealthIssue(
-        config_key=config_key,
-        entity_id=entity_id,
-        friendly_name=meta["friendly_name"],
-        criticality=meta["criticality"],
-        status=status,
-    )
+    return _issue(config_key, entity_id, meta["friendly_name"], meta["criticality"], status)
 
 
 def _check_notify_service(hass: Any, config: dict, config_key: str, meta: dict) -> EntityHealthIssue | None:
@@ -188,13 +190,7 @@ def _check_notify_service(hass: Any, config: dict, config_key: str, meta: dict) 
     service_name = service_value.split(".")[-1] if "." in service_value else service_value
     if hass.services.has_service("notify", service_name):
         return None
-    return EntityHealthIssue(
-        config_key=config_key,
-        entity_id=service_value,
-        friendly_name=meta["friendly_name"],
-        criticality=meta["criticality"],
-        status="missing",
-    )
+    return _issue(config_key, service_value, meta["friendly_name"], meta["criticality"], "missing")
 
 
 # Declarative registry — the single source of truth for what gets swept, how
@@ -202,67 +198,67 @@ def _check_notify_service(hass: Any, config: dict, config_key: str, meta: dict) 
 # Adding a new monitored entity means adding one row here, not a new function.
 ENTITY_HEALTH_REGISTRY: dict[str, dict[str, Any]] = {
     "climate_entity": {
-        "friendly_name": "Thermostat",
+        "friendly_name": i18n.Msg("notify.entity.climate_entity"),
         "criticality": "critical",
         "relevant": _always_relevant,
         "checker": _check_scalar_entity,
     },
     "weather_entity": {
-        "friendly_name": "Weather source",
+        "friendly_name": i18n.Msg("notify.entity.weather_entity"),
         "criticality": "critical",
         "relevant": _always_relevant,
         "checker": _check_scalar_entity,
     },
     "notify_service": {
-        "friendly_name": "Notification service",
+        "friendly_name": i18n.Msg("notify.entity.notify_service"),
         "criticality": "critical",
         "relevant": _always_relevant,
         "checker": _check_notify_service,
     },
     "outdoor_temp_entity": {
-        "friendly_name": "Outdoor temperature sensor",
+        "friendly_name": i18n.Msg("notify.entity.outdoor_temp_entity"),
         "criticality": "degraded",
         "relevant": _outdoor_temp_entity_relevant,
         "checker": _check_scalar_entity,
     },
     "indoor_temp_entity": {
-        "friendly_name": "Indoor temperature sensor",
+        "friendly_name": i18n.Msg("notify.entity.indoor_temp_entity"),
         "criticality": "degraded",
         "relevant": _indoor_temp_entity_relevant,
         "checker": _check_scalar_entity,
     },
     CONF_FAN_ENTITY: {
-        "friendly_name": "Whole-house fan",
+        "friendly_name": i18n.Msg("notify.entity.fan_entity"),
         "criticality": "degraded",
         "relevant": _fan_entities_relevant,
         "checker": _check_scalar_entity,
     },
     CONF_FAN_STATE_ENTITY: {
-        "friendly_name": "Fan state sensor",
+        "friendly_name": i18n.Msg("notify.entity.fan_state_entity"),
         "criticality": "degraded",
         "relevant": _fan_entities_relevant,
         "checker": _check_scalar_entity,
     },
     CONF_FAN_REMOTE_ENTITY: {
-        "friendly_name": "Fan RF remote",
+        "friendly_name": i18n.Msg("notify.entity.fan_remote_entity"),
         "criticality": "optional",
         "relevant": _always_relevant,
         "checker": _check_scalar_entity,
     },
     CONF_HOME_TOGGLE: {
-        "friendly_name": "Home/away toggle",
+        "friendly_name": i18n.Msg("notify.entity.home_toggle_entity"),
         "criticality": "degraded",
         "relevant": _always_relevant,
         "checker": _check_scalar_entity,
     },
     CONF_VACATION_TOGGLE: {
-        "friendly_name": "Vacation toggle",
+        "friendly_name": i18n.Msg("notify.entity.vacation_toggle_entity"),
         "criticality": "optional",
         "relevant": _always_relevant,
         "checker": _check_scalar_entity,
     },
     CONF_GUEST_TOGGLE: {
-        "friendly_name": "Guest toggle",
+        "friendly_name": i18n.Msg("notify.entity.guest_toggle_entity"),
         "criticality": "optional",
         "relevant": _always_relevant,
         "checker": _check_scalar_entity,
@@ -291,7 +287,7 @@ def run_entity_health_sweep(hass: Any, config: dict) -> list[EntityHealthIssue]:
             hass,
             config.get(DOOR_WINDOW_SENSORS_CONFIG_KEY) or [],
             DOOR_WINDOW_SENSORS_CONFIG_KEY,
-            DOOR_WINDOW_SENSOR_FRIENDLY_NAME,
+            DOOR_WINDOW_SENSOR_NAME,
             DOOR_WINDOW_SENSOR_CRITICALITY,
         )
     )
@@ -302,7 +298,7 @@ def run_entity_health_sweep(hass: Any, config: dict) -> list[EntityHealthIssue]:
             hass,
             list(dict.fromkeys(e for e in conditions if isinstance(e, str) and e)),
             TOU_CONDITION_CONFIG_KEY,
-            TOU_CONDITION_FRIENDLY_NAME,
+            TOU_CONDITION_NAME,
             TOU_CONDITION_CRITICALITY,
         )
     )
@@ -311,7 +307,7 @@ def run_entity_health_sweep(hass: Any, config: dict) -> list[EntityHealthIssue]:
 
 
 def _sweep_entity_list(
-    hass: Any, entity_ids: list[str], config_key: str, friendly_name: str, criticality: str
+    hass: Any, entity_ids: list[str], config_key: str, name: i18n.Msg, criticality: str
 ) -> list[EntityHealthIssue]:
     """One issue per listed entity that is missing or unavailable (the list-valued sources, Issues #1181/#1565)."""
     out: list[EntityHealthIssue] = []
@@ -323,13 +319,5 @@ def _sweep_entity_list(
             status = "unavailable"
         else:
             continue
-        out.append(
-            EntityHealthIssue(
-                config_key=config_key,
-                entity_id=entity_id,
-                friendly_name=friendly_name,
-                criticality=criticality,
-                status=status,
-            )
-        )
+        out.append(_issue(config_key, entity_id, name, criticality, status))
     return out

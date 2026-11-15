@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
+from custom_components.climate_advisor import i18n
 from custom_components.climate_advisor.const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
@@ -76,7 +77,7 @@ def _engine_for(day: str, fan: str, **cfg):
     notes: list[str] = []
 
     async def _notify(message, *_a, **_k):
-        notes.append(message)
+        notes.append(i18n.render_en(message))
 
     engine._notify = _notify
     _apply(engine, clock, day, indoor)

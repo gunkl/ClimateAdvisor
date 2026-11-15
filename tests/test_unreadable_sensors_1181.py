@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import custom_components.climate_advisor.coordinator as coordinator_module
+from custom_components.climate_advisor import i18n
 from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
 from custom_components.climate_advisor.const import (
     CONF_FAN_ENTITY,
@@ -323,7 +324,9 @@ def _health_coordinator(states: dict[str, str | None], *, sensors: list[str], la
     coord.automation_engine = MagicMock(_fan_active=False, _fan_override_active=False)
     coord._get_fan_physical_state = lambda: False
     sent: list[tuple[str, str, str]] = []
-    coord._notify_in_background = lambda title, message, kind: sent.append((title, message, kind))
+    coord._notify_in_background = lambda title, message, kind: sent.append(
+        (i18n.render_en(title), i18n.render_en(message), kind)
+    )
     return coord, sent
 
 

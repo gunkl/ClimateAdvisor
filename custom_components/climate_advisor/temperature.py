@@ -250,7 +250,19 @@ def display_delta(value_f: float | None, unit: str, ndigits: int = 1) -> float |
     return round(convert_delta(value_f, unit), ndigits)
 
 
-def format_temp(value_fahrenheit: float, unit: str, decimals: int = 0) -> str:
+def _localized_number(value: float, decimals: int, lang: str | None) -> str | None:
+    """The locale-formatted number for a non-English ``lang``; None for None/"en" (callers keep the legacy f-string)."""
+    if lang is None:
+        return None
+    from . import i18n  # noqa: PLC0415 - i18n lazily imports this module too
+
+    resolved = i18n.resolve_language(lang)
+    if resolved == "en":
+        return None
+    return i18n.format_number(value, resolved, decimals, grouping=False)
+
+
+def format_temp(value_fahrenheit: float, unit: str, decimals: int = 0, lang: str | None = None) -> str:
     """Format an internal Fahrenheit temperature for display in the user's unit.
 
     Examples:
@@ -258,13 +270,19 @@ def format_temp(value_fahrenheit: float, unit: str, decimals: int = 0) -> str:
         format_temp(72.0, CELSIUS)        → "22°C"
         format_temp(72.5, CELSIUS, 1)     → "22.5°C"
         format_temp(85.0, CELSIUS)        → "29°C"
+
+    ``lang`` (Issue #1341): None or English keeps the exact legacy output; any other shipped language uses its
+    decimal separator ("22,5°C"), symbol attached, no space.
     """
     display_value = from_fahrenheit(value_fahrenheit, unit)
     symbol = UNIT_SYMBOL.get(unit, "°F")
+    localized = _localized_number(display_value, decimals, lang)
+    if localized is not None:
+        return f"{localized}{symbol}"
     return f"{display_value:.{decimals}f}{symbol}"
 
 
-def format_temp_delta(delta_fahrenheit: float, unit: str, decimals: int = 0) -> str:
+def format_temp_delta(delta_fahrenheit: float, unit: str, decimals: int = 0, lang: str | None = None) -> str:
     """Format a temperature *difference* for display in the user's unit.
 
     Unlike format_temp, this applies scale conversion only (no +32/−32 offset),
@@ -275,9 +293,14 @@ def format_temp_delta(delta_fahrenheit: float, unit: str, decimals: int = 0) -> 
         format_temp_delta(9.0, CELSIUS)       → "5°C"
         format_temp_delta(5.0, CELSIUS)       → "3°C"
         format_temp_delta(0.0, CELSIUS)       → "0°C"
+
+    ``lang`` behaves as in ``format_temp``.
     """
     delta = convert_delta(delta_fahrenheit, unit)
     symbol = UNIT_SYMBOL.get(unit, "°F")
+    localized = _localized_number(delta, decimals, lang)
+    if localized is not None:
+        return f"{localized}{symbol}"
     return f"{delta:.{decimals}f}{symbol}"
 
 

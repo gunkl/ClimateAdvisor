@@ -3,7 +3,7 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.9.37] — 2026-11-15
+## [0.9.39] — 2026-11-15
 
 ### Added
 - Feat #1558: a time-of-use schedule can be limited to cooling days or heating days.
@@ -19,7 +19,25 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 - A stored time-of-use schedule with a field Climate Advisor doesn't recognise no longer stops the update cycle (before: no time-of-use bank and no comfort band that cycle). Editing a schedule now keeps the settings the form doesn't show.
 
 ### Upgrade note
-- **Downgrading isn't supported.** After you set a schedule's "Applies to" or enable entity, going back to 0.9.36 or earlier stops that zone from loading (no entities, no control) until you remove those settings.
+- **Downgrading isn't supported.** After you set a schedule's "Applies to" or enable entity, going back to 0.9.38 or earlier stops that zone from loading (no entities, no control) until you remove those settings.
+## [0.9.38] — 2026-11-15
+
+### Added
+- Feat #1341: the daily briefing follows your Home Assistant language (part 2 of 3).
+  - **What you'll notice:** the morning briefing notification, its short summary and the briefing on the Status card are written in your HA language. Each day type reads as natural sentences in that language, not word-for-word, and the times, temperatures, the day's window advice, the time-of-use hold and the learning suggestions inside it are translated too.
+  - **After a restart or a language change:** the stored briefing is shown again in your current language. A briefing saved before this update shows its English until the next one is written.
+  - **English is unchanged.**
+
+## [0.9.37] — 2026-11-15
+
+### Added
+- Feat #1341: Climate Advisor speaks your Home Assistant language. Supported: English, French, Spanish, German, Dutch, Japanese, Portuguese, Italian, Polish, Ukrainian, Korean, Hindi, Arabic, Russian, Simplified Chinese and Turkish (part 1 of 3: everything except the daily briefing and the dashboard).
+  - **What you'll notice:** setup and options screens, entity names and states, services, errors and repairs, every notification, the Status and next-action text, the timeline, learning suggestions, the night plan and the Activity record now follow your Home Assistant language (Settings → System → General). English installs see the same English as before.
+  - **Numbers, times and lists** follow your language's conventions (for example `21,5 °C`, 24-hour clocks, "A, B et C").
+  - **Automations:** sensors whose state is a sentence (Status, Your Next Action, Next Automation Action and similar) now show it in your HA language and carry a stable `code` attribute; use `code` in automations instead of matching the text. Fan Status keeps its English state values.
+  - **New installs** in French, Spanish, German, Dutch, Portuguese, Italian, Polish or Turkish get entity ids in that language (Home Assistant's own behaviour). Existing entity ids never change.
+  - **Small English changes:** a few times now use the 12-hour clock like the rest of the cards ("applies at 6:43 AM", "stops 2:30 AM", "until ~3:20 PM"); "1 minute" instead of "1 minutes"; lists read "A and B".
+  - **Stays English:** logs, stored event records, diagnostics, GitHub text and the documentation.
 
 ## [0.9.36] — 2026-11-15
 

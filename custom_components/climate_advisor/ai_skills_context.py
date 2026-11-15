@@ -17,6 +17,7 @@ from __future__ import annotations
 import bisect
 import contextlib
 import datetime
+import functools
 import logging
 import re
 import time
@@ -29,7 +30,7 @@ from homeassistant.util import dt as dt_util
 if TYPE_CHECKING:
     pass
 
-from . import log_capture, zone_registry
+from . import i18n, log_capture, zone_registry
 from .const import (
     ATTR_AUTOMATION_STATUS,
     ATTR_CONTACT_STATUS,
@@ -56,6 +57,7 @@ from .const import (
 from .coordinator import _REJECTION_LOG_CAP
 from .fan_status import is_ca_fan_running
 from .hvac_action import is_hvac_action_active
+from .record_text import record_en
 from .remote_offset import remote_offset_lines, remote_offset_view_for
 from .setpoint_combinations import vacation_edges
 from .swing import swing_tolerance, thermostat_holds_direction, within_thermostat_hysteresis
@@ -1816,8 +1818,99 @@ def _humanize_type(event_type: str) -> str:
     return event_type.replace("_", " ").capitalize()
 
 
-def _format_band_setpoint(floor: Any, ceiling: Any, active: Any, unit: str) -> str:
-    """Render a ComfortBand as a single-setpoint Settings cell.
+# ---------------------------------------------------------------------------
+# Issue #1341: the Activity record as messages.
+#
+# Each renderer builds ``i18n.Msg`` cells (catalog area ``activity``); the AI input and every legacy caller get the
+# English text (``record_en``), the dashboard gets the ``Msg`` wire form. A cell may still be a plain ``str`` (an
+# entity id, a mode code, an old event's stored text); ``render``/``render_en`` pass those through unchanged.
+# ---------------------------------------------------------------------------
+
+Cell = i18n.Msg | str
+
+
+def _m(key: str, **params: Any) -> i18n.Msg:
+    """A catalog message of the ``activity`` area."""
+    return i18n.Msg(f"activity.{key}", **params)
+
+
+def _tp(value_f: Any, unit: str, decimals: int = 0) -> i18n.Temp:
+    """An absolute temperature param (internal °F, shown in ``unit``)."""
+    return i18n.Temp(value_f, unit, decimals)
+
+
+def _tdp(delta_f: Any, unit: str, decimals: int = 0) -> i18n.TempDelta:
+    """A temperature difference param (scale-only conversion)."""
+    return i18n.TempDelta(delta_f, unit, decimals)
+
+
+def _yn(flag: Any) -> str:
+    """``select`` argument for an optional clause."""
+    return "yes" if flag else "no"
+
+
+def _num(value: Any) -> Any:
+    """A payload number as a message param, keeping the exact text a Python f-string would print (2.0 stays "2.0")."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else str(value)
+
+
+def _field(p: dict, name: str, default: Any = "", *, strip: bool = False) -> Cell:
+    """A payload text field: a ``Msg`` when the event stored ``<name>_key``/``<name>_params``, else its text."""
+    key = p.get(f"{name}_key")
+    if key:
+        try:
+            return i18n.Msg.from_wire({"key": key, "params": p.get(f"{name}_params") or {}})
+        except Exception:  # noqa: BLE001 - a malformed stored wire form falls back to the stored English
+            pass
+    value = p.get(name, default)
+    if value is None:
+        return default
+    return str(value).strip() if strip else value
+
+
+def _join(parts: list[Cell], sep: str = "comma") -> Cell:
+    """Join non-empty cells with the language's separator (``", "`` or `` — `` in English)."""
+    parts = [x for x in parts if x != ""]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    limit = 6 if sep == "comma" else 4
+    if len(parts) > limit:
+        return _m(f"join_{sep}_2", a=_join(parts[:-1], sep), b=parts[-1])
+    return _m(f"join_{sep}_{len(parts)}", **{chr(97 + i): part for i, part in enumerate(parts)})
+
+
+def _cell_en(cell: Any) -> str:
+    """The English text of a renderer cell (the AI input / record form)."""
+    return str(record_en(cell))
+
+
+def _cell_wire(cell: Any) -> dict | None:
+    """The wire form of a renderer cell for the API's ``*_msg`` sibling (``None`` when the cell is plain text)."""
+    return cell.to_wire() if isinstance(cell, i18n.Msg) else None
+
+
+def _msg_renderer(fn: Callable[[dict, str], tuple[Any, Any]]) -> Callable[[dict, str], tuple[str, str]]:
+    """Register ``fn`` (returns ``Msg``/``str`` cells) as an English-string renderer; the Msg form is on ``.msg``."""
+
+    @functools.wraps(fn)
+    def wrapper(p: dict, unit: str) -> tuple[str, str]:
+        label, settings = fn(p, unit)
+        return _cell_en(label), _cell_en(settings)
+
+    wrapper.msg = fn  # type: ignore[attr-defined]
+    return wrapper
+
+
+def _precondition_action(p: dict) -> str:
+    """``select`` argument of the TOU pre-conditioning sentence: cool / heat / other."""
+    mode = p.get("mode", "")
+    return "cool" if mode == "cool" else "heat" if mode == "heat" else "other"
+
+
+def _band_setpoint_msg(floor: Any, ceiling: Any, active: Any, unit: str) -> i18n.Msg | str:
+    """Render a ComfortBand as a single-setpoint Settings cell (a ``Msg``; ``""`` when the band is unreadable).
 
     active == "ceiling" -> the cool setpoint is the guarded edge.
     active == "floor"   -> the heat setpoint is the guarded edge.
@@ -1827,30 +1920,38 @@ def _format_band_setpoint(floor: Any, ceiling: Any, active: Any, unit: str) -> s
         ceiling_f = float(ceiling)
     except TypeError, ValueError:
         return ""
+    edges = {"floor": _tp(floor_f, unit), "ceiling": _tp(ceiling_f, unit)}
     if active == "ceiling":
-        return f"setpoint: {format_temp(ceiling_f, unit)} Cool ({format_temp(floor_f, unit)} Heat)"
+        return _m("setpoint_band_cool_guarded", **edges)
     if active == "floor":
-        return f"setpoint: {format_temp(floor_f, unit)} Heat ({format_temp(ceiling_f, unit)} Cool)"
+        return _m("setpoint_band_heat_guarded", **edges)
     # active unknown -- show both
-    return f"setpoint: {format_temp(floor_f, unit)} Heat / {format_temp(ceiling_f, unit)} Cool"
+    return _m("setpoint_band_both", **edges)
+
+
+def _format_band_setpoint(floor: Any, ceiling: Any, active: Any, unit: str) -> str:
+    """English text of ``_band_setpoint_msg`` (the AI input and the legacy string callers)."""
+    return record_en(_band_setpoint_msg(floor, ceiling, active, unit))
 
 
 # ---------------------------------------------------------------------------
 # EVENT_RENDERERS: (payload, unit) -> (event_text, settings_text)
 # All renderers read structured payload fields -- never parse prose strings.
+# Issue #1341: each renderer is written once as returning ``Msg`` (or ``""``) cells; ``@_msg_renderer`` registers
+# an English-string wrapper (the AI input and the legacy callers) and keeps the Msg form on ``.msg`` for the
+# dashboard (the API sends ``event_msg``/``settings_msg`` per row).
 # ---------------------------------------------------------------------------
 
-
-_WRITE_OUTCOME_LABELS = {
-    "blocked": "blocked -- whole-house fan owns the thermostat",
-    "dry_run": "test mode, nothing sent",
-    "failed": "command failed",
-    "superseded": "replaced by a newer command",
-    "not_sent": "no command sent",
+_WRITE_OUTCOME_KEYS = {
+    "blocked": "write_outcome_blocked",
+    "dry_run": "write_outcome_dry_run",
+    "failed": "write_outcome_failed",
+    "superseded": "write_outcome_superseded",
+    "not_sent": "write_outcome_not_sent",
 }
 
 
-def _write_not_sent_suffix(p: dict) -> str | None:
+def _write_not_sent_suffix(p: dict) -> i18n.Msg | str | None:
     """Issue #1049 (change 5): reason text when an ``*_applied`` event's write was NOT sent.
 
     ``None`` for ``outcome == "sent"`` and for historical events with no ``outcome`` field
@@ -1859,46 +1960,53 @@ def _write_not_sent_suffix(p: dict) -> str | None:
     outcome = p.get("outcome")
     if not outcome or outcome == "sent":
         return None
-    return _WRITE_OUTCOME_LABELS.get(outcome, str(outcome).replace("_", " "))
+    key = _WRITE_OUTCOME_KEYS.get(outcome)
+    return _m(key) if key else str(outcome).replace("_", " ")
 
 
-def _render_comfort_band_applied(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_comfort_band_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
-    reason = p.get("reason", "")
+    reason = _field(p, "reason")
     not_sent = _write_not_sent_suffix(p)
     if not_sent:
         label = (
-            f"Comfort band NOT applied ({mode}) -- {not_sent}" if mode else f"Comfort band NOT applied -- {not_sent}"
+            _m("comfort_band_not_applied_mode", mode=mode, why=not_sent)
+            if mode
+            else _m("comfort_band_not_applied", why=not_sent)
         )
     else:
-        label = f"Comfort band applied ({mode})" if mode else "Comfort band applied"
+        label = _m("comfort_band_applied_mode", mode=mode) if mode else _m("comfort_band_applied")
     if reason:
-        label = f"{label} -- {reason}"
-    settings = _format_band_setpoint(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
+        label = _m("label_reason", label=label, reason=reason)
+    settings = _band_setpoint_msg(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
     return label, settings
 
 
-def _render_bedtime_setback(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_bedtime_setback(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
-    label = f"Bedtime setback ({mode} mode)" if mode else "Bedtime setback"
-    settings = _format_band_setpoint(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
+    label = _m("bedtime_setback_mode", mode=mode) if mode else _m("bedtime_setback")
+    settings = _band_setpoint_msg(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
     return label, settings
 
 
-def _render_tou_precondition_applied(p: dict, unit: str) -> tuple[str, str]:
-    mode = p.get("mode", "")
-    action = "Pre-cooling" if mode == "cool" else "Pre-heating" if mode == "heat" else "Pre-conditioning"
+@_msg_renderer
+def _render_tou_precondition_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     schedule_id = p.get("schedule_id", "")
-    label = f"{action} ahead of scheduled high-cost period" + (f" ({schedule_id})" if schedule_id else "")
+    label: Cell = _m(
+        "tou_precondition", action=_precondition_action(p), has_schedule=_yn(schedule_id), schedule_id=schedule_id
+    )
     not_sent = _write_not_sent_suffix(p)
     if not_sent:
-        label = f"{label} -- NOT applied: {not_sent}"
+        label = _m("tou_precondition_not_applied", label=label, why=not_sent)
     target = p.get("target")
-    settings = f"target: {format_temp(target, unit)}" if target is not None else ""
+    settings: Cell = _m("fact_target", target=_tp(target, unit)) if target is not None else ""
     return label, settings
 
 
-def _render_tou_schedule_window_active(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_tou_schedule_window_active(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Phase 3d / Investigation D: a configured cost_tag="high" TOU schedule window
     became active. Occupant-first framing per CLAUDE.md: distinguishes "this window
     coincided with real heating/cooling" from "this window applied to a day with no
@@ -1911,390 +2019,467 @@ def _render_tou_schedule_window_active(p: dict, unit: str) -> tuple[str, str]:
     skipped = p.get("skipped")
     if isinstance(skipped, list) and skipped:
         # Issues #1558/#1565: every schedule covering the window was skipped -- say so, and why (one wording).
-        from .scheduler import schedule_skip_text  # noqa: PLC0415
+        from .scheduler import schedule_skip_list  # noqa: PLC0415
 
         pairs = [(str(i.get("reason")), i.get("entity")) for i in skipped if isinstance(i, dict)]
-        return "TOU high-cost period skipped", schedule_skip_text(pairs)
-    label = "TOU high-cost period active"
-    if preconditioned:
-        settings = f"coincided with active {hvac_mode} operation"
-    else:
-        settings = "no pre-conditioning needed today (hvac_mode=off)"
+        return _m("tou_window_skipped"), _m("tou_window_skip_reasons", reasons=schedule_skip_list(pairs))
+    label = _m("tou_window_active")
+    settings = _m("tou_window_coincided", mode=str(hvac_mode)) if preconditioned else _m("tou_window_none_needed")
     return label, settings
 
 
-def _render_tou_av_precondition_applied(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_tou_av_precondition_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #899: away/vacation counterpart to tou_precondition_applied — the split-
     delta precool/preheat leg, driven directly by apply_tou_away_vacation_precondition()
     rather than the Home/Guest comfort-band path."""
-    mode = p.get("mode", "")
-    action = "Pre-cooling" if mode == "cool" else "Pre-heating" if mode == "heat" else "Pre-conditioning"
-    occupancy = p.get("occupancy", "")
     schedule_id = p.get("schedule_id", "")
-    label = f"{action} ahead of scheduled high-cost period ({occupancy})" + (f" ({schedule_id})" if schedule_id else "")
+    label = _m(
+        "tou_av_precondition",
+        action=_precondition_action(p),
+        occupancy=p.get("occupancy", ""),
+        has_schedule=_yn(schedule_id),
+        schedule_id=schedule_id,
+    )
     target = p.get("target")
-    settings = f"target: {format_temp(target, unit)}" if target is not None else ""
+    settings: Cell = _m("fact_target", target=_tp(target, unit)) if target is not None else ""
     return label, settings
 
 
-def _render_tou_precondition_cycle_summary(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_tou_precondition_cycle_summary(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #899: end-of-window observability for away/vacation TOU pre-conditioning —
     did the split-delta prediction hold up, or did the AC/heat still have to run during
     the (supposedly banked-through) high-cost window?"""
     del unit  # no temperature value rendered here
     hvac_ran = p.get("hvac_ran_during_window")
-    label = "TOU precondition window ended"
-    if hvac_ran:
-        settings = "HVAC still ran during the window — prediction fell short"
-    else:
-        settings = "house drifted through the window with no HVAC use"
+    label = _m("tou_window_ended")
+    settings = _m("tou_window_hvac_ran") if hvac_ran else _m("tou_window_drifted")
     return label, settings
 
 
-def _render_morning_wakeup(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_morning_wakeup(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
-    label = f"Morning wake-up -- comfort restored ({mode})" if mode else "Morning wake-up -- comfort restored"
-    settings = _format_band_setpoint(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
+    label = _m("morning_wakeup_mode", mode=mode) if mode else _m("morning_wakeup")
+    settings = _band_setpoint_msg(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
     return label, settings
 
 
-def _render_occupancy_setback(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_occupancy_setback(p: dict, unit: str) -> tuple[Cell, Cell]:
     occ = p.get("occupancy") or p.get("mode", "")
-    label = f"Occupancy setback ({occ})" if occ else "Occupancy setback"
-    settings = _format_band_setpoint(p.get("floor"), p.get("ceiling"), None, unit)
+    label = _m("occupancy_setback_occ", occupancy=occ) if occ else _m("occupancy_setback")
+    settings: Cell = _band_setpoint_msg(p.get("floor"), p.get("ceiling"), None, unit)
     if p.get("tou_bank") and p.get("target_f") is not None:
         # Issue #1409: the change wrote the time-of-use bank, not the band: say what the thermostat was told.
         with contextlib.suppress(TypeError, ValueError):
-            sent = f"{p.get('hvac_mode', '')} {format_temp(float(p['target_f']), unit)}".strip()
-            settings = f"sent {sent} (time-of-use bank owns the setpoint; band {settings} after it)"
+            settings = _m(
+                "occupancy_setback_tou_bank",
+                hvac_mode=str(p.get("hvac_mode", "")),
+                target=_tp(float(p["target_f"]), unit),
+                band=settings,
+            )
     return label, settings
 
 
-def _render_occupancy_comfort_restored(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_occupancy_comfort_restored(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
     target = p.get("target_f")
-    label = f"Occupancy -- comfort restored ({mode})" if mode else "Occupancy -- comfort restored"
+    label: Cell = _m("occupancy_restored_mode", mode=mode) if mode else _m("occupancy_restored")
     not_sent = _write_not_sent_suffix(p)  # Issue #1245: a failed / dry-run / superseded restore write
     if not_sent:
-        shown = f" ({mode})" if mode else ""
-        label = f"Occupancy -- comfort restore NOT sent{shown} -- {not_sent}"
-    settings = ""
+        label = _m("occupancy_restore_not_sent", mode=mode, has_mode=_yn(mode), why=not_sent)
+    settings: Cell = ""
     if target is not None:
         with contextlib.suppress(TypeError, ValueError):
-            settings = f"setpoint: {format_temp(float(target), unit)}"
+            settings = _m("fact_setpoint", target=_tp(float(target), unit))
     if p.get("tou_bank") and settings:
-        settings += " (time-of-use bank owns the setpoint; comfort band after it)"  # Issue #1409
+        settings = _m("occupancy_restored_tou_bank", setting=settings)  # Issue #1409
     return label, settings
 
 
-def _render_occupancy_comfort_restore_held(p: dict, unit: str) -> tuple[str, str]:
+_RESTORE_HELD_KEYS = {
+    "whf_session": "held_whf_session",
+    "blower_hold": "held_blower_hold",
+    "occupancy_redirect": "held_occupancy_redirect",
+    "no_family": "held_no_family",
+}
+
+
+@_msg_renderer
+def _render_occupancy_comfort_restore_held(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Issue #1245: arriving home, the restore wrote nothing because a ventilation session owns the thermostat.
-    why = {
-        "whf_session": "whole-house fan running",
-        "blower_hold": "window open, blower ventilating",
-        "occupancy_redirect": "away/vacation setback active",
-        "no_family": "no heat/cool edge resolved",
-    }.get(p.get("reason", ""), p.get("reason") or "hold")
+    key = _RESTORE_HELD_KEYS.get(p.get("reason", ""))
+    why: Cell = _m(key) if key else (p.get("reason") or _m("held_default"))
     mode = p.get("mode", "")
-    settings = f"thermostat unchanged ({mode})" if mode else "thermostat unchanged"
-    return f"Occupancy -- comfort restore held, nothing written ({why})", settings
+    settings = _m("thermostat_unchanged_mode", mode=mode) if mode else _m("thermostat_unchanged")
+    return _m("occupancy_restore_held", why=why), settings
 
 
-def _render_pre_cool_applied(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_pre_cool_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     target = p.get("target")
     not_sent = _write_not_sent_suffix(p)
-    label = f"Pre-cool NOT applied -- {not_sent}" if not_sent else "Pre-cool applied"
-    settings = ""
+    label = _m("pre_cool_not_applied", why=not_sent) if not_sent else _m("pre_cool_applied")
+    settings: Cell = ""
     if target is not None:
         try:
             floor = p.get("floor")
             if floor is not None:
-                settings = _format_band_setpoint(floor, float(target), "ceiling", unit)
+                settings = _band_setpoint_msg(floor, float(target), "ceiling", unit)
             else:
-                settings = f"setpoint: {format_temp(float(target), unit)} Cool"
+                settings = _m("setpoint_cool", target=_tp(float(target), unit))
         except TypeError, ValueError:
             pass
     return label, settings
 
 
-def _render_override_detected(p: dict, unit: str) -> tuple[str, str]:
+def _mode_change_fact(old_m: Any, new_m: Any) -> i18n.Msg:
+    return _m("fact_mode_change", old=str(old_m), new=str(new_m))
+
+
+def _setpoint_change_fact(old_t: Any, new_t: Any, unit: str) -> i18n.Msg:
+    return _m("fact_setpoint_change", old=_tp(float(old_t), unit), new=_tp(float(new_t), unit))
+
+
+@_msg_renderer
+def _render_override_detected(p: dict, unit: str) -> tuple[Cell, Cell]:
     old_t = p.get("old_setpoint_f")
     new_t = p.get("new_setpoint_f")
     old_m = p.get("old_mode") or p.get("old_hvac_mode")
     new_m = p.get("new_mode") or p.get("new_hvac_mode")
     source = p.get("source", "")
-    label = f"Setpoint override detected ({source})" if source else "Setpoint override detected"
-    parts = []
+    label = _m("override_detected_source", source=source) if source else _m("override_detected")
+    parts: list[Cell] = []
     if old_m and new_m and old_m != new_m:
-        parts.append(f"mode: {old_m}->{new_m}")
+        parts.append(_mode_change_fact(old_m, new_m))
     if old_t is not None and new_t is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"setpoint: {format_temp(float(old_t), unit)}->{format_temp(float(new_t), unit)}")
-    return label, ", ".join(parts)
+            parts.append(_setpoint_change_fact(old_t, new_t, unit))
+    return label, _join(parts)
 
 
-def _render_ceiling_guard_fired(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_ceiling_guard_fired(p: dict, unit: str) -> tuple[Cell, Cell]:
     breach = p.get("breach_time", "")
     lead = p.get("lead_time_min")
-    label = f"ODE ceiling guard fired (breach {breach}, lead {lead} min)" if lead else "ODE ceiling guard fired"
+    label = _m("ceiling_guard_fired_lead", breach=str(breach), lead=_num(lead)) if lead else _m("ceiling_guard_fired")
     old_m = p.get("old_hvac_mode")
     new_m = p.get("new_hvac_mode", "cool")
     old_t = p.get("old_setpoint_f")
     new_t = p.get("new_setpoint_f")
-    parts = []
+    parts: list[Cell] = []
     if old_m and new_m and old_m != new_m:
-        parts.append(f"mode: {old_m}->{new_m}")
+        parts.append(_mode_change_fact(old_m, new_m))
     if old_t is not None and new_t is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"setpoint: {format_temp(float(old_t), unit)}->{format_temp(float(new_t), unit)}")
+            parts.append(_setpoint_change_fact(old_t, new_t, unit))
     elif new_t is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"setpoint: {format_temp(float(new_t), unit)}")
-    return label, ", ".join(parts)
+            parts.append(_m("fact_setpoint", target=_tp(float(new_t), unit)))
+    return label, _join(parts)
 
 
-def _render_classification_applied(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_classification_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     day_type = p.get("day_type", "")
     trend = p.get("trend", "")
     hvac = p.get("hvac_mode", "")
     old_m = p.get("old_hvac_mode")
-    label = f"Classification applied: {day_type}" if day_type else "Classification applied"
+    label: Cell = _m("classification_applied_day", day_type=day_type) if day_type else _m("classification_applied")
     if trend:
-        label = f"{label} ({trend})"
-    settings_parts = []
+        label = _m("label_trend", label=label, trend=trend)
+    settings_parts: list[Cell] = []
     if old_m and hvac and old_m != hvac:
-        settings_parts.append(f"mode: {old_m}->{hvac}")
+        settings_parts.append(_mode_change_fact(old_m, hvac))
     today_high = p.get("today_high")
     threshold = p.get("applied_threshold_f")
     margin = p.get("threshold_margin_f")
     if today_high is not None and threshold is not None and margin is not None:
         with contextlib.suppress(TypeError, ValueError):
-            margin_s = f"{'+' if margin >= 0 else '-'}{format_temp_delta(abs(margin), unit, 1)}"
             settings_parts.append(
-                f"today's high {format_temp(today_high, unit)} vs. {day_type} threshold "
-                f"{format_temp(threshold, unit)} ({margin_s})"
+                _m(
+                    "classification_high_vs_threshold",
+                    high=_tp(today_high, unit),
+                    day_type=day_type,
+                    threshold=_tp(threshold, unit),
+                    sign="+" if margin >= 0 else "-",
+                    margin=_tdp(abs(margin), unit, 1),
+                )
             )
     trend_mag = p.get("trend_magnitude")
     if trend_mag is not None:
         with contextlib.suppress(TypeError, ValueError):
-            settings_parts.append(f"trend magnitude {format_temp_delta(trend_mag, unit)}")
-    settings = ", ".join(settings_parts)
-    return label, settings
+            settings_parts.append(_m("classification_trend_magnitude", magnitude=_tdp(trend_mag, unit)))
+    return label, _join(settings_parts)
 
 
-def _render_hvac_mode_not_applied(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_hvac_mode_not_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1049: the thermostat is not in the HVAC mode Climate Advisor requested."""
     requested = p.get("requested_mode") or "?"
     actual = p.get("actual_mode")
-    if p.get("kind") == "rejected":
-        label = f"Thermostat rejected HVAC mode {requested} -- mode not changed"
-    elif p.get("kind") == "open_window_retry":
+    kind = p.get("kind")
+    if kind == "rejected":
+        label = _m("hvac_mode_rejected", requested=requested)
+    elif kind == "open_window_retry":
         # Issue #1302: the Off for an open window failed or went unconfirmed; Climate Advisor is re-sending it.
-        label = f"Thermostat still {actual or '?'} with a window open -- re-sending {requested}"
-    elif p.get("kind") == "restore_retry":
+        label = _m("hvac_mode_open_window_retry", actual=actual or "?", requested=requested)
+    elif kind == "restore_retry":
         # Issue #1308: the restore after the window closed (or a whole-house fan release) did not land; re-sending it.
-        label = f"Thermostat still {actual or '?'} after Climate Advisor restored {requested} -- re-sending"
+        label = _m("hvac_mode_restore_retry", actual=actual or "?", requested=requested)
     else:
-        label = f"Thermostat did not switch to {requested} -- it may be ignoring mode commands"
-    settings = f"requested {requested}, thermostat reports {actual}" if actual else f"requested {requested}"
+        label = _m("hvac_mode_not_switched", requested=requested)
+    settings = (
+        _m("hvac_mode_requested_reports", requested=requested, actual=str(actual))
+        if actual
+        else _m("hvac_mode_requested", requested=requested)
+    )
     return label, settings
 
 
-def _render_hvac_mode_applied_recovered(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_hvac_mode_applied_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1049: the thermostat is now in the requested HVAC mode."""
     requested = p.get("requested_mode") or "?"
     minutes = p.get("minutes_down")
-    return f"Thermostat is now in {requested}", (f"not following for {minutes} min" if minutes is not None else "")
+    return (
+        _m("hvac_mode_now", requested=requested),
+        (_m("fact_not_following_min", minutes=_num(minutes)) if minutes is not None else ""),
+    )
 
 
-def _render_hvac_command_recovered(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_hvac_command_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1049: the thermostat accepted a climate command again after failures."""
     minutes = p.get("minutes_down")
-    return "Thermostat accepting commands again", (f"down {minutes} min" if minutes is not None else "")
+    return _m("hvac_command_recovered"), (_m("fact_down_min", minutes=_num(minutes)) if minutes is not None else "")
 
 
-def _render_occupancy_restore_deferred(p: dict, unit: str) -> tuple[str, str]:
+_RESTORE_DEFERRED_KEYS = {
+    "manual_override": "deferred_manual_override",
+    "override_confirm_pending": "deferred_override_confirm_pending",
+    "paused_by_door": "deferred_door_window_open",
+    "open_sensor": "deferred_door_window_open",
+}
+
+
+@_msg_renderer
+def _render_occupancy_restore_deferred(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Issue #1050 (#1048 change 18): arriving home while a hold is active -- the comfort restore waits.
-    why = {
-        "manual_override": "manual thermostat change",
-        "override_confirm_pending": "unconfirmed thermostat change",
-        "paused_by_door": "door/window open",
-        "open_sensor": "door/window open",
-    }.get(p.get("reason", ""), p.get("reason") or "hold")
+    key = _RESTORE_DEFERRED_KEYS.get(p.get("reason", ""))
+    why: Cell = _m(key) if key else (p.get("reason") or _m("held_default"))
     mode = p.get("mode", "")
-    settings = f"resumes once it clears ({mode})" if mode else "resumes once it clears"
-    return f"Occupancy -- comfort restore deferred ({why})", settings
+    settings = _m("resumes_once_clears_mode", mode=mode) if mode else _m("resumes_once_clears")
+    return _m("occupancy_restore_deferred", why=why), settings
 
 
-def _render_hvac_output_stall(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_hvac_output_stall(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1048 change 9: off-target for hours and no equipment ran in the needed direction."""
     heating = p.get("direction") != "cool"
-    side, equipment = ("below", "heating") if heating else ("above", "cooling")
     hours = p.get("hours")
-    label = f"House is {side} the comfort band and the {equipment} hasn't run" + (
-        f" for {hours} hours" if hours is not None else ""
+    label = _m(
+        "hvac_output_stall",
+        direction="heating" if heating else "cooling",
+        has_hours=_yn(hours is not None),
+        hours=_num(hours) if hours is not None else "",
     )
-    parts: list[str] = []
+    parts: list[Cell] = []
     with contextlib.suppress(TypeError, ValueError):
         if p.get("indoor_f") is not None:
-            parts.append(f"indoor {format_temp(float(p['indoor_f']), unit)}")
+            parts.append(_m("fact_indoor", indoor=_tp(float(p["indoor_f"]), unit)))
         if p.get("edge_f") is not None:
-            parts.append(f"band edge {format_temp(float(p['edge_f']), unit)}")
+            parts.append(_m("fact_band_edge", edge=_tp(float(p["edge_f"]), unit)))
     if p.get("thermostat_mode"):
-        parts.append(f"thermostat mode {p['thermostat_mode']}")
+        parts.append(_m("fact_thermostat_mode", mode=str(p["thermostat_mode"])))
     if p.get("thermostat_action"):
-        parts.append(f"action {p['thermostat_action']}")
-    return label, ", ".join(parts)
+        parts.append(_m("fact_action", action=str(p["thermostat_action"])))
+    return label, _join(parts)
 
 
-def _render_hvac_output_stall_recovered(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_hvac_output_stall_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1048 change 9: the off-target stall ended (back in band, or equipment ran)."""
-    how = "equipment ran" if p.get("reason") == "equipment_ran" else "back in the comfort band"
     minutes = p.get("minutes_down")
-    detail = how + (f", alerted {minutes} min ago" if minutes is not None else "")
-    return "House no longer stalled off-target", detail
+    detail = _m(
+        "stall_recovered_detail",
+        how="equipment_ran" if p.get("reason") == "equipment_ran" else "in_band",
+        has_minutes=_yn(minutes is not None),
+        minutes=_num(minutes) if minutes is not None else "",
+    )
+    return _m("stall_recovered"), detail
 
 
-def _render_setpoint_rejected(p: dict, unit: str) -> tuple[str, str]:
+def _reject_streak_fact(streak: Any) -> i18n.Msg:
+    return _m("fact_reject_streak", streak=_num(streak))
+
+
+@_msg_renderer
+def _render_setpoint_rejected(p: dict, unit: str) -> tuple[Cell, Cell]:
     commanded = p.get("commanded")
     reported = p.get("reported")
     streak = p.get("reject_streak")
-    label = "Setpoint validation failed -- retry scheduled"
-    settings = ""
+    label = _m("setpoint_validation_failed")
+    settings: Cell = ""
     if commanded is not None and reported is not None:
         with contextlib.suppress(TypeError, ValueError):
-            settings = (
-                f"commanded {format_temp(float(commanded), unit)}, "
-                f"thermostat reports {format_temp(float(reported), unit)}"
+            settings = _m(
+                "setpoint_commanded_reports",
+                commanded=_tp(float(commanded), unit),
+                reported=_tp(float(reported), unit),
             )
     if streak is not None:
-        settings = f"{settings}, reject streak={streak}" if settings else f"reject streak={streak}"
+        settings = _join([settings, _reject_streak_fact(streak)]) if settings else _reject_streak_fact(streak)
     return label, settings
 
 
-def _render_setpoint_nudge(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_setpoint_nudge(p: dict, unit: str) -> tuple[Cell, Cell]:
     nudge_value = p.get("nudge_value")
     real_target = p.get("real_target")
     mode = p.get("mode", "")
     streak = p.get("reject_streak")
-    label = "Reconciling setpoint -- nudging thermostat"
-    settings = ""
+    label = _m("setpoint_nudge")
+    settings: Cell = ""
     if nudge_value is not None and real_target is not None:
         with contextlib.suppress(TypeError, ValueError):
-            settings = (
-                f"nudge to {format_temp(float(nudge_value), unit)} ({mode}),"
-                f" then {format_temp(float(real_target), unit)} in 30s"
+            settings = _m(
+                "setpoint_nudge_detail",
+                nudge=_tp(float(nudge_value), unit),
+                mode=mode,
+                target=_tp(float(real_target), unit),
             )
     if streak is not None:
-        settings = f"{settings}, reject streak={streak}" if settings else f"reject streak={streak}"
+        settings = _join([settings, _reject_streak_fact(streak)]) if settings else _reject_streak_fact(streak)
     return label, settings
 
 
-def _render_override_cleared(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_override_cleared(p: dict, unit: str) -> tuple[Cell, Cell]:
     was_mode = p.get("was_mode", "")
     old_t = p.get("old_setpoint_f")
-    reason = p.get("reason", "")
-    label = f"Override cleared (was {was_mode})" if was_mode else "Override cleared"
-    settings = ""
+    reason = _field(p, "reason")
+    label = _m("override_cleared_was", mode=was_mode) if was_mode else _m("override_cleared")
+    settings: Cell = ""
     if old_t is not None:
         with contextlib.suppress(TypeError, ValueError):
-            settings = f"was {format_temp(float(old_t), unit)} (manual setpoint)"
+            settings = _m("override_cleared_was_setpoint", setpoint=_tp(float(old_t), unit))
     elif reason:
-        settings = f"fan override — {reason}"
+        settings = _m("override_cleared_fan_reason", reason=reason)
     return label, settings
 
 
-def _render_override_confirmed(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_override_confirmed(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
     cls_mode = p.get("cls_mode", "")
     source = p.get("source", "")
-    label = f"Override confirmed ({mode} mode)" if mode else "Override confirmed"
+    label: Cell = _m("override_confirmed_mode", mode=mode) if mode else _m("override_confirmed")
     if cls_mode and mode and cls_mode != mode:
-        label = f"{label} -- classification wanted {cls_mode}"
-    return label, f"trigger: {source}" if source else ""
+        label = _m("override_confirmed_cls", label=label, cls_mode=cls_mode)
+    return label, _m("fact_trigger", trigger=str(source)) if source else ""
 
 
-def _render_override_self_resolved(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_override_self_resolved(p: dict, unit: str) -> tuple[Cell, Cell]:
     detected = p.get("detected_mode", "")
     current = p.get("current_mode", "")
     if detected and current:
-        return f"Override self-resolved: {detected}->{current} (transient)", ""
-    return "Override self-resolved (transient)", ""
+        return _m("override_self_resolved_modes", detected=detected, current=current), ""
+    return _m("override_self_resolved"), ""
 
 
-def _render_override_adopted(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_override_adopted(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
     src = p.get("source", "")
     pre_expiry = p.get("pre_expiry", False)
-    label = f"Override adopted ({mode} mode)" if mode else "Override adopted"
-    label = f"{label} -- automation agrees" + (", ended grace early" if pre_expiry else ", grace ended cleanly")
-    settings = f"trigger: {src}" if src else ""
+    label: Cell = _m("override_adopted_mode", mode=mode) if mode else _m("override_adopted")
+    label = _m("override_adopted_agrees", label=label, early=_yn(pre_expiry))
+    settings: Cell = _m("fact_trigger", trigger=str(src)) if src else ""
     return label, settings
 
 
-_GRACE_TRIGGER_LABELS: dict[str, str] = {
-    "fan_manual_override": "fan override (manual fan change)",
-    "override_confirmed": "AC/heat mode override",
-    "dashboard_resume": "user resumed from dashboard",
-    "sensor_closed_resume": "all sensors closed",
-    "nat_vent_exit_resume": "natural ventilation ended",
+_GRACE_TRIGGER_KEYS: dict[str, str] = {
+    "fan_manual_override": "grace_trigger_fan_manual_override",
+    "override_confirmed": "grace_trigger_override_confirmed",
+    "dashboard_resume": "grace_trigger_dashboard_resume",
+    "sensor_closed_resume": "grace_trigger_sensor_closed_resume",
+    "nat_vent_exit_resume": "grace_trigger_nat_vent_exit_resume",
 }
 
 
-def _render_grace_started(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_grace_started(p: dict, unit: str) -> tuple[Cell, Cell]:
     trigger = p.get("trigger", "")
     source = p.get("source", "")
     duration = p.get("duration_seconds")
-    dur_str = f" ({duration // 60} min)" if isinstance(duration, int) else ""
-    label = f"Grace period started{dur_str}"
+    label: Cell = _m("grace_started_min", minutes=duration // 60) if isinstance(duration, int) else _m("grace_started")
     if source:
-        label = f"{label} ({source})"
+        label = _m("label_source", label=label, source=str(source))
     # Settings cell: human-readable trigger label for known triggers; empty otherwise.
-    trigger_label = _GRACE_TRIGGER_LABELS.get(trigger, "")
-    return label, trigger_label
+    key = _GRACE_TRIGGER_KEYS.get(trigger)
+    return label, _m(key) if key else ""
 
 
-_CANCEL_REASON_LABELS: dict[str, str] = {
-    "bedtime": "bedtime",
-    "morning_wakeup": "morning wake-up",
-    "user_cancel_override": "user cancelled override",
-    "user_cancel_fan_override": "user cancelled fan override",
-    "adopted_matching_decision": "automation adopted matching decision",
-    "superseded": "replaced by a new grace period",
+_CANCEL_REASON_KEYS: dict[str, str] = {
+    "bedtime": "cancel_reason_bedtime",
+    "morning_wakeup": "cancel_reason_morning_wakeup",
+    "user_cancel_override": "cancel_reason_user_cancel_override",
+    "user_cancel_fan_override": "cancel_reason_user_cancel_fan_override",
+    "adopted_matching_decision": "cancel_reason_adopted_matching_decision",
+    "superseded": "cancel_reason_superseded",
 }
 
 
-def _cancel_reason_label(reason: Any) -> str:
+def _cancel_reason_label(reason: Any) -> i18n.Msg | str:
     """Human label for a cancel/clear reason; never raises, never blank."""
     if not reason or not isinstance(reason, str):
-        return "unspecified"
-    return _CANCEL_REASON_LABELS.get(reason, reason.replace("_", " "))
+        return _m("cancel_reason_unspecified")
+    key = _CANCEL_REASON_KEYS.get(reason)
+    return _m(key) if key else reason.replace("_", " ")
 
 
-def _render_grace_cancelled(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_grace_cancelled(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1029: grace period ended early on purpose (bedtime, wake-up, cancel, superseded)."""
-    label = f"Grace period cancelled ({_cancel_reason_label(p.get('reason'))})"
-    parts: list[str] = []
+    label = _m("grace_cancelled", reason=_cancel_reason_label(p.get("reason")))
+    parts: list[Cell] = []
     trigger = p.get("trigger")
     remaining = p.get("remaining_minutes")
     if trigger:
         parts.append(str(trigger))
     if remaining is not None:
-        parts.append(f"{remaining} min left")
-    settings = ", ".join(parts)
+        parts.append(_m("fact_min_left", minutes=_num(remaining)))
+    settings: Cell = _join(parts)
     rf = p.get("remote_timer_hours")
     if rf is not None:
-        settings = f"{settings}, RF timer {rf}h" if settings else f"RF timer {rf}h"
+        rf_fact = _m("fact_rf_timer", hours=_num(rf))
+        settings = _join([settings, rf_fact]) if settings else rf_fact
     return label, settings
 
 
-def _render_fan_override_cleared(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_override_cleared(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1029: fan override flag cleared by an intentional (non-expiry) path."""
-    label = f"Fan override cleared ({_cancel_reason_label(p.get('reason'))})"
+    label = _m("fan_override_cleared", reason=_cancel_reason_label(p.get("reason")))
     rf = p.get("remote_timer_hours")
-    return label, (f"RF timer {rf}h" if rf is not None else "")
+    return label, (_m("fact_rf_timer", hours=_num(rf)) if rf is not None else "")
 
 
+_SENSOR_REASON_CODES = (
+    "not_configured",
+    "entity_missing",
+    "unavailable",
+    "no_reading",
+    "non_numeric",
+    "non_finite",
+    "implausible",
+    "stale",
+)
 SENSOR_REASON_LABELS: dict[str, str] = {
     "not_configured": "no sensor selected",
     "entity_missing": "sensor entity not found",
@@ -2305,49 +2490,56 @@ SENSOR_REASON_LABELS: dict[str, str] = {
     "implausible": "sensor reading out of range",
     "stale": "sensor stopped updating",
 }
-# Issue #1033: the outdoor name stays importable (api.py, tests); both roles share one table.
+# Issue #1033: the outdoor name stays importable (api.py, tests); both roles share one table. Issue #1341: these
+# English values are the record text; the catalog keys ``activity.sensor_reason_<code>`` carry the same words for the
+# dashboard (a parity test pins them equal).
 OUTDOOR_SENSOR_REASON_LABELS = SENSOR_REASON_LABELS
 
-_OUTDOOR_SOURCE_IN_USE_LABELS: dict[str, str] = {
-    "weather_interpolation": "weather service (hourly forecast)",
-    "weather_attribute": "weather service (current conditions)",
-    # Issue #1337: the weather service is down too; the value comes from the last forecast it sent.
-    "kept_forecast": "last weather forecast (weather service down)",
-}
+_OUTDOOR_SOURCE_IN_USE_CODES = ("weather_interpolation", "weather_attribute", "kept_forecast")
+# weather_interpolation: weather service (hourly forecast); weather_attribute: weather service (current conditions);
+# Issue #1337 kept_forecast: the weather service is down too; the value comes from the last forecast it sent.
 
 
-def _render_outdoor_sensor_fallback(p: dict, unit: str) -> tuple[str, str]:
+def _sensor_reason_msg(reason: Any) -> Cell:
+    """The occupant label for a sensor-failure reason code (``"unspecified"`` when there is none)."""
+    if not reason:
+        return _m("sensor_reason_unspecified")
+    if reason in _SENSOR_REASON_CODES:
+        return _m(f"sensor_reason_{reason}")
+    return str(reason).replace("_", " ")
+
+
+@_msg_renderer
+def _render_outdoor_sensor_fallback(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1032: the dedicated outdoor sensor failed, so the weather service value is in use."""
-    reason = p.get("reason")
-    reason_label = OUTDOOR_SENSOR_REASON_LABELS.get(reason, str(reason).replace("_", " ")) if reason else "unspecified"
-    label = f"Outdoor sensor fallback ({reason_label})"
-    parts: list[str] = []
+    label = _m("outdoor_sensor_fallback", reason=_sensor_reason_msg(p.get("reason")))
+    parts: list[Cell] = []
     in_use = p.get("source_in_use")
     if in_use:
-        parts.append(f"using {_OUTDOOR_SOURCE_IN_USE_LABELS.get(in_use, str(in_use).replace('_', ' '))}")
+        what: Cell = (
+            _m(f"outdoor_source_{in_use}") if in_use in _OUTDOOR_SOURCE_IN_USE_CODES else str(in_use).replace("_", " ")
+        )
+        parts.append(_m("fact_using", what=what))
     value_f = p.get("value_f")
     if isinstance(value_f, (int, float)):
-        parts.append(format_temp(value_f, unit))
-    return label, ", ".join(parts)
+        parts.append(_m("fact_temp", temp=_tp(value_f, unit)))
+    return label, _join(parts)
 
 
-def _render_outdoor_sensor_recovered(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_outdoor_sensor_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1032: the dedicated outdoor sensor is being read again."""
-    parts: list[str] = []
+    parts: list[Cell] = []
     value_f = p.get("value_f")
     if isinstance(value_f, (int, float)):
-        parts.append(format_temp(value_f, unit))
+        parts.append(_m("fact_temp", temp=_tp(value_f, unit)))
     previous = p.get("previous_reason")
     if previous:
-        parts.append(f"was: {OUTDOOR_SENSOR_REASON_LABELS.get(previous, str(previous).replace('_', ' '))}")
+        parts.append(_m("fact_was_reason", reason=_sensor_reason_msg(previous)))
     minutes = p.get("minutes_in_fallback")
     if minutes is not None:
-        parts.append(f"{minutes} min on weather service")
-    return "Outdoor sensor recovered", ", ".join(parts)
-
-
-def _sensor_reason_label(reason: Any) -> str:
-    return SENSOR_REASON_LABELS.get(reason, str(reason).replace("_", " ")) if reason else "unspecified"
+        parts.append(_m("fact_min_on_weather", minutes=_num(minutes)))
+    return _m("outdoor_sensor_recovered"), _join(parts)
 
 
 def _local_hhmm(iso: Any) -> str:
@@ -2359,91 +2551,112 @@ def _local_hhmm(iso: Any) -> str:
         return ""
 
 
-def _render_entity_unavailable(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_entity_unavailable(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1322: a configured entity (thermostat, weather source, sensor, fan) stopped responding."""
-    name = p.get("friendly_name") or p.get("entity_id") or "An entity"
-    state = "not found" if p.get("status") == "missing" else "unavailable"
-    label = f"{name} {state}"
-    parts: list[str] = []
+    name = _field(p, "friendly_name") or p.get("entity_id") or _m("entity_generic")
+    label = _m("entity_not_found" if p.get("status") == "missing" else "entity_unavailable", name=name)
+    parts: list[Cell] = []
     since = _local_hhmm(p.get("down_since"))
     if since:
-        parts.append(f"since {since}")
-    if p.get("detail"):
-        parts.append(str(p["detail"]))
-    return label, ", ".join(parts)
+        parts.append(_m("fact_since", since=since))
+    detail = _field(p, "detail")
+    if detail:
+        parts.append(detail if isinstance(detail, i18n.Msg) else str(detail))
+    return label, _join(parts)
 
 
-def _render_entity_recovered(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_entity_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1322: a configured entity is responding again after an announced outage."""
-    name = p.get("friendly_name") or p.get("entity_id") or "An entity"
-    parts: list[str] = []
+    name = _field(p, "friendly_name") or p.get("entity_id") or _m("entity_generic")
+    parts: list[Cell] = []
     minutes = p.get("outage_minutes")
     if isinstance(minutes, int):
-        parts.append(f"out {minutes} min")
+        parts.append(_m("fact_out_min", minutes=minutes))
     since = _local_hhmm(p.get("down_since"))
     if since:
-        parts.append(f"since {since}")
-    return f"{name} available again", ", ".join(parts)
+        parts.append(_m("fact_since", since=since))
+    return _m("entity_available_again", name=name), _join(parts)
 
 
-def _render_indoor_sensor_unavailable(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_indoor_sensor_unavailable(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1033: an indoor sensor failed (primary: decisions paused; sleep: primary used instead)."""
-    entity = p.get("entity") or "(none selected)"
-    reason_label = _sensor_reason_label(p.get("reason"))
+    entity = p.get("entity") or _m("none_selected")
+    reason = _sensor_reason_msg(p.get("reason"))
     if p.get("role") == "sleep":
-        label = f"Sleep sensor {entity} unavailable ({reason_label}) — using the primary indoor sensor"
+        label = _m("sleep_sensor_unavailable", entity=entity, reason=reason)
     else:
-        label = (
-            f"Indoor sensor {entity} unavailable ({reason_label}) — "
-            "indoor-based automation decisions are paused until it reports again"
-        )
+        label = _m("indoor_sensor_unavailable", entity=entity, reason=reason)
     return label, ""
 
 
-def _render_indoor_source_changed(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_indoor_source_changed(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1230 R1c: the sensor Climate Advisor reads the room temperature from changed."""
-    to_name = p.get("to_name") or p.get("to_entity") or "(unknown)"
-    from_name = p.get("from_name") or p.get("from_entity") or "(unknown)"
+    to_name = p.get("to_name") or p.get("to_entity") or _m("unknown_paren")
+    from_name = p.get("from_name") or p.get("from_entity") or _m("unknown_paren")
     to_role = p.get("to_role")
-    label = f"Room temperature now from {to_name}" + (f" ({to_role})" if to_role else "")
-    label += f" instead of {from_name}"
-    parts: list[str] = []
-    if p.get("reason"):
-        parts.append(str(p["reason"]))
-    for key, text in (("to_value_f", "now"), ("from_value_f", "was")):
+    label = _m(
+        "indoor_source_changed",
+        to_name=to_name,
+        has_role=_yn(to_role),
+        to_role=str(to_role or ""),
+        from_name=from_name,
+    )
+    parts: list[Cell] = []
+    reason = _field(p, "reason")
+    if reason:
+        parts.append(reason if isinstance(reason, i18n.Msg) else str(reason))
+    for key, fact in (("to_value_f", "fact_now_temp"), ("from_value_f", "fact_was_temp")):
         value_f = p.get(key)
         if isinstance(value_f, (int, float)):
-            parts.append(f"{text} {format_temp(value_f, unit, 1)}")
-    return label, ", ".join(parts)
+            parts.append(_m(fact, temp=_tp(value_f, unit, 1)))
+    return label, _join(parts)
 
 
-def _render_humidity_source_changed(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_humidity_source_changed(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1455: the source a chart humidity line (room, bedroom, outdoor) is read from changed. Chart only."""
     subject = str(p.get("subject") or "humidity")
     subject = subject[:1].upper() + subject[1:]
-    from_name = p.get("from_name") or p.get("from_entity") or "no humidity source"
+    from_name = p.get("from_name") or p.get("from_entity") or _m("no_humidity_source")
     if p.get("to_entity"):
         to_name = p.get("to_name") or p.get("to_entity")
         to_kind = p.get("to_kind")
-        label = f"{subject} now from {to_name}" + (f" ({to_kind})" if to_kind else "") + f" instead of {from_name}"
+        label: Cell = _m(
+            "humidity_source_changed",
+            subject=subject,
+            to_name=to_name,
+            has_kind=_yn(to_kind),
+            to_kind=str(to_kind or ""),
+            from_name=from_name,
+        )
     else:
-        label = f"{subject}: no humidity source (was {from_name})"
-    parts: list[str] = []
-    if p.get("reason"):
-        parts.append(str(p["reason"]))
-    for key, text in (("to_rh", "now"), ("from_rh", "was")):
+        label = _m("humidity_source_lost", subject=subject, from_name=from_name)
+    parts: list[Cell] = []
+    reason = _field(p, "reason")
+    if reason:
+        parts.append(reason if isinstance(reason, i18n.Msg) else str(reason))
+    for key, fact in (("to_rh", "fact_now_rh"), ("from_rh", "fact_was_rh")):
         value = p.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            parts.append(f"{text} {value:g}%")
-    return label, ", ".join(parts)
+            parts.append(_m(fact, rh=value))
+    return label, _join(parts)
 
 
-def _render_forecast_model_changed(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_forecast_model_changed(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1432: the model the prediction engine's decisions read changed (stitched CA reading <-> each room).
 
-    ``detail_template`` carries ``{tN}`` slots for temperature DIFFERENCES stored in degrees F (``temps_f``), filled
-    here in the report's unit."""
-    label = str(p.get("headline") or "Prediction model changed")
+    A new event carries ``headline``/``detail`` as messages (``*_key``/``*_params``; the temperature differences are
+    typed ``TempDelta`` params in degrees F with the display unit). An older event carries ``detail_template`` with
+    ``{tN}`` slots and ``temps_f`` (differences in degrees F), filled here in the report's unit."""
+    headline = _field(p, "headline")
+    label: Cell = headline if headline else _m("forecast_model_changed")
+    if p.get("detail_key"):
+        return label, _field(p, "detail")
     tmpl = p.get("detail_template")
     if not isinstance(tmpl, str):
         return label, ""
@@ -2456,82 +2669,90 @@ def _render_forecast_model_changed(p: dict, unit: str) -> tuple[str, str]:
         return label, ""
 
 
-def _render_indoor_sensor_recovered(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_indoor_sensor_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1033: an indoor sensor is being read again."""
-    role = "Sleep sensor" if p.get("role") == "sleep" else "Indoor sensor"
     entity = p.get("entity")
-    label = f"{role} {entity} recovered" if entity else f"{role} recovered"
-    parts: list[str] = []
+    label = _m(
+        "indoor_sensor_recovered",
+        role="sleep" if p.get("role") == "sleep" else "indoor",
+        has_entity=_yn(entity),
+        entity=str(entity or ""),
+    )
+    parts: list[Cell] = []
     value_f = p.get("value_f")
     if isinstance(value_f, (int, float)):
-        parts.append(format_temp(value_f, unit))
+        parts.append(_m("fact_temp", temp=_tp(value_f, unit)))
     previous = p.get("previous_reason")
     if previous:
-        parts.append(f"was: {_sensor_reason_label(previous)}")
+        parts.append(_m("fact_was_reason", reason=_sensor_reason_msg(previous)))
     minutes = p.get("minutes_down")
     if minutes is not None:
-        parts.append(f"down {minutes} min")
-    return label, ", ".join(parts)
+        parts.append(_m("fact_down_min", minutes=_num(minutes)))
+    return label, _join(parts)
 
 
-_BLIND_SESSION_LABELS = {
-    "nat_vent": "ventilation fan",
-    "override": "manually started fan",
-    "economizer": "economizer fan",
-}
+_BLIND_SESSION_CODES = ("nat_vent", "override", "economizer")
 
 
-def _render_fan_blind_started(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_blind_started(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1037: a fan session is running while the indoor temperature is unreadable."""
-    kind = _BLIND_SESSION_LABELS.get(p.get("session"), "fan")
-    label = f"Fan running blind -- {kind} on with no indoor temperature reading"
+    session = p.get("session")
+    label = _m("fan_blind_started", kind=session if session in _BLIND_SESSION_CODES else "other")
     stop_at = p.get("stop_at")
     if p.get("will_stop") and stop_at:
-        return label, f"auto-stop at {_fmt_time(stop_at)} if the sensor does not return"
-    return label, "no auto-stop (not a Climate Advisor-owned ventilation session)"
+        return label, _m("fan_blind_auto_stop", time=_fmt_time(stop_at))
+    return label, _m("fan_blind_no_auto_stop")
 
 
-def _render_fan_blind_stopped(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_blind_stopped(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1037: the blind-fan timeout ended a nat-vent session (always ends the fan)."""
     minutes = p.get("minutes_blind")
-    label = "Nat-vent exit -- indoor temperature unavailable"
-    if minutes is not None:
-        label = f"{label} for {minutes} min"
-    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
-    return f"{label} ({fan_change})", ""
+    fan_change = _fan_change(p, activating=False)
+    label = _m(
+        "fan_blind_stopped",
+        has_minutes=_yn(minutes is not None),
+        minutes=_num(minutes) if minutes is not None else "",
+        fan_change=fan_change,
+    )
+    return label, ""
 
 
-def _render_fan_blind_recovered(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_blind_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1037: indoor temperature reads again after a blind-fan episode."""
-    label = "Fan blind episode ended -- indoor temperature reading again"
-    parts: list[str] = []
+    label = _m("fan_blind_recovered")
+    parts: list[Cell] = []
     value_f = p.get("indoor_f")
     if isinstance(value_f, (int, float)):
-        parts.append(format_temp(value_f, unit))
+        parts.append(_m("fact_temp", temp=_tp(value_f, unit)))
     minutes = p.get("minutes_blind")
     if minutes is not None:
         # lower_bound: the outage is measured to the last blind sighting (a stopped or
         # unevaluated episode), so the real duration may be longer.
-        parts.append(f"blind {'at least ' if p.get('lower_bound') else ''}{minutes} min")
+        parts.append(_m("fact_blind_min", at_least=_yn(p.get("lower_bound")), minutes=_num(minutes)))
     if p.get("stopped"):
-        parts.append("fan had been stopped")
+        parts.append(_m("fact_fan_had_stopped"))
     elif p.get("fan_running", True) is False:
-        parts.append("fan no longer running")
+        parts.append(_m("fact_fan_no_longer_running"))
     else:
-        parts.append("fan kept running")
-    return label, ", ".join(parts)
+        parts.append(_m("fact_fan_kept_running"))
+    return label, _join(parts)
 
 
-def _render_grace_expired(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_grace_expired(p: dict, unit: str) -> tuple[Cell, Cell]:
     source = p.get("source", "")
     re_paused = p.get("re_paused", False)
-    label = f"Grace period expired ({source})" if source else "Grace period expired"
+    label: Cell = _m("grace_expired_source", source=str(source)) if source else _m("grace_expired")
     if re_paused:
-        label = f"{label} -- sensor still open, re-paused"
+        label = _m("grace_expired_repaused", label=label)
     return label, ""
 
 
-def _fan_transition_fallback(fan_device: str, *, activating: bool) -> str:
+def _fan_transition_msg(fan_device: str, *, activating: bool) -> i18n.Msg:
     """Fallback fan-transition text for a payload that lacks `fan_mode_change`.
 
     Issue #957: mirrors `automation.py::_fan_transition_text()` -- a whole-house fan has
@@ -2539,153 +2760,169 @@ def _fan_transition_fallback(fan_device: str, *, activating: bool) -> str:
     thermostat's own fan mode. Kept as a small, `fan_device`-string-only helper (rather
     than threading full config into every renderer) since `fan_device` (from
     `automation.py::_fan_device_label()`) is already present on nearly every payload.
+    Issue #1341: the same message keys as `_fan_transition_text()` so both sides render identically.
     """
-    whf_clause = "WHF: off->on" if activating else "WHF: on->off"
-    hvac_fan_clause = "HVAC fan: auto->on" if activating else "HVAC fan: on->auto"
+    whf = _m("fan_whf_on" if activating else "fan_whf_off")
+    hvac_fan = _m("fan_hvac_on" if activating else "fan_hvac_off")
     if fan_device == "whf":
-        return whf_clause
+        return whf
     if fan_device == "hvac_fan":
-        return hvac_fan_clause
+        return hvac_fan
     if fan_device == "both":
-        return f"{whf_clause}, {hvac_fan_clause}"
-    return f"{fan_device}: off->on" if activating else f"{fan_device}: on->off"
+        return _m("join_comma_2", a=whf, b=hvac_fan)
+    return _m("fan_device_on" if activating else "fan_device_off", device=fan_device)
 
 
-def _render_nat_vent_fan_on(p: dict, unit: str) -> tuple[str, str]:
+def _fan_transition_fallback(fan_device: str, *, activating: bool) -> str:
+    """English text of ``_fan_transition_msg`` (the legacy string form)."""
+    return _cell_en(_fan_transition_msg(fan_device, activating=activating))
+
+
+def _fan_change(p: dict, *, activating: bool) -> Cell:
+    """The payload's own ``fan_mode_change`` (a deferred-toggle note or the transition), else the fallback."""
+    given = _field(p, "fan_mode_change")
+    if given:
+        return given
+    return _fan_transition_msg(p.get("fan_device", "fan"), activating=activating)
+
+
+@_msg_renderer
+def _render_nat_vent_fan_on(p: dict, unit: str) -> tuple[Cell, Cell]:
     indoor = p.get("indoor_temp")
     outdoor = p.get("outdoor_temp")
     on_thr = p.get("on_threshold")
-    fan_device = p.get("fan_device", "fan")
-    label = "Nat-vent fan on (cycling)"
+    label = _m("nat_vent_fan_on_cycling")
     if indoor is not None and on_thr is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent fan on -- indoor {format_temp(float(indoor), unit)} >= {format_temp(float(on_thr), unit)}"
-            )
+            label = _m("nat_vent_fan_on_indoor", indoor=_tp(float(indoor), unit), threshold=_tp(float(on_thr), unit))
     # Issue #936: fan_mode_change, when present, overrides the fallback claim -- set by
     # the nat-vent cycling call site to a "deferred (...)" description when the Issue
     # #641 rate limiter blocked the toggle, mirroring _render_fan_activated()'s same
     # override pattern. Issue #957: fallback corrected to not claim an "auto" state a
     # whole-house fan doesn't have.
-    settings = p.get("fan_mode_change") or _fan_transition_fallback(fan_device, activating=True)
+    settings: Cell = _fan_change(p, activating=True)
     if outdoor is not None:
         with contextlib.suppress(TypeError, ValueError):
-            settings = f"{settings}, outdoor {format_temp(float(outdoor), unit)}"
+            settings = _join([settings, _m("fact_outdoor", outdoor=_tp(float(outdoor), unit))])
     return label, settings
 
 
-def _render_nat_vent_fan_off(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_fan_off(p: dict, unit: str) -> tuple[Cell, Cell]:
     indoor = p.get("indoor_temp")
     off_thr = p.get("off_threshold")
-    fan_device = p.get("fan_device", "fan")
-    label = "Nat-vent fan off (cycling)"
+    label = _m("nat_vent_fan_off_cycling")
     if indoor is not None and off_thr is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent fan off -- indoor {format_temp(float(indoor), unit)} <= {format_temp(float(off_thr), unit)}"
-            )
+            label = _m("nat_vent_fan_off_indoor", indoor=_tp(float(indoor), unit), threshold=_tp(float(off_thr), unit))
     # Issue #936: fan_mode_change, when present, overrides the fallback claim -- mirrors
     # _render_nat_vent_fan_on()/_render_fan_deactivated()'s same override pattern for a
     # deferred (rate-limited) fan-stop command. Issue #957: fallback corrected to not
     # claim an "auto" state a whole-house fan doesn't have.
-    return label, p.get("fan_mode_change") or _fan_transition_fallback(fan_device, activating=False)
+    return label, _fan_change(p, activating=False)
 
 
-def _render_fan_activated(p: dict, unit: str) -> tuple[str, str]:
-    reason = str(p.get("reason", "")).strip()
-    fan_device = p.get("fan_device", "fan")
-    label = f"Fan activated -- {reason}" if reason else "Fan activated"
+@_msg_renderer
+def _render_fan_activated(p: dict, unit: str) -> tuple[Cell, Cell]:
+    reason = _field(p, "reason", strip=True)
+    label = _m("fan_activated_reason", reason=reason) if reason else _m("fan_activated")
     # Issue #649: fan_mode_change, when present, overrides the fallback claim -- set by
     # _exit_nat_vent() to a "deferred (...)" description when the Issue #641 rate limiter
     # blocked the toggle, so this row doesn't claim a state transition that hasn't
     # happened yet. Issue #957: fallback corrected to not claim an "auto" state a
     # whole-house fan doesn't have.
-    settings = p.get("fan_mode_change") or _fan_transition_fallback(fan_device, activating=True)
-    return label, settings
+    return label, _fan_change(p, activating=True)
 
 
-def _render_fan_deactivated(p: dict, unit: str) -> tuple[str, str]:
-    reason = str(p.get("reason", "")).strip()
-    fan_device = p.get("fan_device", "fan")
-    label = f"Fan deactivated -- {reason}" if reason else "Fan deactivated"
-    settings = p.get("fan_mode_change") or _fan_transition_fallback(fan_device, activating=False)
-    return label, settings
+@_msg_renderer
+def _render_fan_deactivated(p: dict, unit: str) -> tuple[Cell, Cell]:
+    reason = _field(p, "reason", strip=True)
+    label = _m("fan_deactivated_reason", reason=reason) if reason else _m("fan_deactivated")
+    return label, _fan_change(p, activating=False)
 
 
-def _render_hvac_write_blocked_whf_active(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_hvac_write_blocked_whf_active(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #392 Fix 1b: choke-point guard intercepted an HVAC write while WHF owns the thermostat.
 
     Makes the structural WHF/AC mutual-exclusion guarantee visible in the Activity Log
     instead of silently dropping the blocked write.
     """
     attempted_mode = str(p.get("attempted_mode", "")).strip()
-    reason = str(p.get("reason", "")).strip()
-    label = f"AC/heat blocked (whole-house fan active) -- {reason}" if reason else "AC/heat blocked"
-    settings = f"hvac: blocked ({attempted_mode})" if attempted_mode else ""
+    reason = _field(p, "reason", strip=True)
+    label = _m("ac_heat_blocked_whf_reason", reason=reason) if reason else _m("ac_heat_blocked")
+    settings = _m("fact_hvac_blocked", mode=attempted_mode) if attempted_mode else ""
     return label, settings
 
 
-def _render_whf_hvac_suppressed(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_whf_hvac_suppressed(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #495: HVAC suppressed for a whole-house-fan session — CA-initiated OR a
     manual/remote fan-on detection (both now route through the same suppress helper).
     """
     prior_mode = str(p.get("prior_mode", "")).strip()
-    reason = str(p.get("reason", "")).strip()
-    label = f"AC/heat paused (whole-house fan) -- {reason}" if reason else "AC/heat paused (whole-house fan)"
-    settings = f"hvac: {prior_mode}->off" if prior_mode else "hvac: ->off"
+    reason = _field(p, "reason", strip=True)
+    label = _m("ac_heat_paused_whf_reason", reason=reason) if reason else _m("ac_heat_paused_whf")
+    settings = _m("fact_hvac_to_off", mode=prior_mode) if prior_mode else _m("fact_hvac_to_off_unknown")
     return label, settings
 
 
-def _render_whf_sealed_observe_notified(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_whf_sealed_observe_notified(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1144: automation is off and the whole-house fan runs with every door/window closed.
 
     Climate Advisor sends no command in observe-only mode; it told the occupant instead (one notice per episode).
     """
-    return "Whole-house fan running on a closed-up house -- automation is off, occupant notified, fan not touched", ""
+    return _m("whf_sealed_observe_notified"), ""
 
 
-def _render_whf_rule2_backstop(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_whf_rule2_backstop(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1288: the whole-house fan and the heating/cooling were both running (a press Climate Advisor missed);
     the rule-2 state backstop stopped one of them."""
     mode = str(p.get("thermostat_mode") or "").strip()
     if p.get("stopped") == "fan":
-        return "Whole-house fan stopped -- heating/cooling was running beside it (newest action wins)", ""
+        return _m("whf_rule2_fan_stopped"), ""
     return (
-        "Heating/cooling turned off -- the whole-house fan was running beside it",
-        f"hvac: {mode}->off" if mode else "hvac: ->off",
+        _m("whf_rule2_hvac_off"),
+        _m("fact_hvac_to_off", mode=mode) if mode else _m("fact_hvac_to_off_unknown"),
     )
 
 
-def _render_whf_rule2_observe_notified(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_whf_rule2_observe_notified(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1288: observe-only, the fan and the heating/cooling run together; the occupant was told, nothing sent."""
-    return "Whole-house fan and heating/cooling both on -- automation is off, occupant notified, nothing changed", ""
+    return _m("whf_rule2_observe_notified"), ""
 
 
-def _render_whf_hvac_released(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_whf_hvac_released(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #495: a manual/remote WHF session ended — HVAC suppression released and CA's
     current classification reasserted (not a blind restore of the mode captured at activation,
     since a remote-timer session can span hours).
     """
-    reason = str(p.get("reason", "")).strip()
-    label = f"AC/heat resumed -- {reason}" if reason else "AC/heat resumed"
-    return label, "hvac: reclassifying"
+    reason = _field(p, "reason", strip=True)
+    label = _m("ac_heat_resumed_reason", reason=reason) if reason else _m("ac_heat_resumed")
+    return label, _m("fact_hvac_reclassifying")
 
 
-def _render_stranded_hvac_suppression_restored(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_stranded_hvac_suppression_restored(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #618: the fan was already physically off, but a whole-house-fan suppression
     snapshot from an earlier session was still stranded — this restores the HVAC mode that
     snapshot captured. Previously invisible in the Activity Record (only a DEBUG log line);
     this is the specific corrective action that could silently cancel active/just-started
     cooling or heating (the 2026-08-10 incident), so it gets its own labeled entry.
     """
-    reason = str(p.get("reason", "")).strip()
+    reason = _field(p, "reason", strip=True)
     restore_mode = str(p.get("restore_mode", "")).strip()
-    label = f"AC/heat restored (fan session ended) -- {reason}" if reason else ("AC/heat restored (fan session ended)")
-    settings = f"hvac: ->{restore_mode}" if restore_mode else "hvac: restored"
+    label = _m("ac_heat_restored_reason", reason=reason) if reason else _m("ac_heat_restored")
+    settings = _m("fact_hvac_to_mode", mode=restore_mode) if restore_mode else _m("fact_hvac_restored")
     return label, settings
 
 
-def _render_fan_manual_override(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_manual_override(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #524: append remote speed/timer context when the override was armed by an RF
     remote press (`automation.py::handle_fan_manual_override`'s `remote_speed`/
     `remote_timer_hours` kwargs) -- without it, this row looked identical whether a specific
@@ -2694,94 +2931,103 @@ def _render_fan_manual_override(p: dict, unit: str) -> tuple[str, str]:
     fan_before = str(p.get("fan_before", "")).strip()
     fan_after = str(p.get("fan_after", "")).strip()
     fan_device = p.get("fan_device", "fan")
-    change = f"{fan_before}->{fan_after}" if fan_before and fan_after else ""
-    settings = f"{fan_device}: {change}" if change else ""
+    parts: list[Cell] = []
+    if fan_before and fan_after:
+        parts.append(_m("fact_fan_change", device=str(fan_device), change=f"{fan_before}->{fan_after}"))
     remote_speed = p.get("remote_speed")
     if remote_speed:
-        settings = f"{settings}, remote: {remote_speed} speed" if settings else f"remote: {remote_speed} speed"
+        parts.append(_m("fact_remote_speed", speed=str(remote_speed)))
     remote_timer_hours = p.get("remote_timer_hours")
     if remote_timer_hours is not None:
-        settings = (
-            f"{settings}, remote timer: {remote_timer_hours}h" if settings else f"remote timer: {remote_timer_hours}h"
-        )
+        parts.append(_m("fact_remote_timer", hours=_num(remote_timer_hours)))
     # Issue #1045: an override re-armed by the startup reconcile (not a fresh press).
     if p.get("restored_from"):
-        settings = f"{settings}, restored after restart" if settings else "restored after restart"
-    return "Fan manual override", settings
+        parts.append(_m("fact_restored_after_restart"))
+    return _m("fan_manual_override"), _join(parts)
 
 
-def _render_fan_speed_observed(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_speed_observed(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #519: a comfort-only remote speed change — NOT a manual override (the fan was
     already running; the user just adjusted speed, so no grace/HVAC-suppression armed)."""
     speed = str(p.get("speed", "")).strip()
     fan_device = p.get("fan_device", "fan")
-    settings = f"{fan_device}: speed->{speed}" if speed else ""
-    return "Fan speed observed (comfort-only)", settings
+    settings = _m("fact_fan_speed", device=str(fan_device), speed=speed) if speed else ""
+    return _m("fan_speed_observed"), settings
 
 
-def _render_fan_running_untracked(p: dict, unit: str) -> tuple[str, str]:
-    source = str(p.get("source", "")).strip() or "thermostat-initiated"
+@_msg_renderer
+def _render_fan_running_untracked(p: dict, unit: str) -> tuple[Cell, Cell]:
+    source = str(p.get("source", "")).strip() or _m("source_thermostat_initiated")
     action = str(p.get("hvac_action", "")).strip()
-    label = f"Fan running (external) -- {source}"
-    settings = f"fan: on (external; hvac_action={action})" if action else "fan: on (external)"
+    label = _m("fan_running_external", source=source)
+    settings = _m("fact_fan_on_external_action", action=action) if action else _m("fact_fan_on_external")
     return label, settings
 
 
-def _render_fan_untracked_cleared(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_untracked_cleared(p: dict, unit: str) -> tuple[Cell, Cell]:
     fan_device = p.get("fan_device")
-    settings = f"fan: {fan_device} off" if fan_device else "fan: off"
-    return "Fan stopped (external)", settings
+    settings = _m("fact_fan_device_off", device=str(fan_device)) if fan_device else _m("fact_fan_off")
+    return _m("fan_stopped_external"), settings
 
 
-def _render_fan_observed_started(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_observed_started(p: dict, unit: str) -> tuple[Cell, Cell]:
     origin = str(p.get("origin", "unknown")).replace("_", " ")
     action = str(p.get("hvac_action", "")).strip()
     mode = str(p.get("thermostat_fan_mode", "")).strip()
     cfg = str(p.get("fan_mode_config", "")).strip()
-    settings = (
-        f"thermostat blower on (CA did not command; {origin}; fan_mode={mode or 'n/a'}, "
-        f"hvac_action={action or 'n/a'}; CA fan config: {cfg or 'n/a'})"
+    settings = _m(
+        "thermostat_blower_on_observed",
+        origin=origin,
+        mode=mode or "n/a",
+        action=action or "n/a",
+        cfg=cfg or "n/a",
     )
-    return "Thermostat fan running (observed, not CA-controlled)", settings
+    return _m("thermostat_fan_running_observed"), settings
 
 
-def _render_fan_observed_stopped(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_observed_stopped(p: dict, unit: str) -> tuple[Cell, Cell]:
     minutes = p.get("duration_minutes")
     cfg = str(p.get("fan_mode_config", "")).strip()
-    dur = f" after {minutes} min" if minutes is not None else ""
-    return "Thermostat fan stopped (observed)", f"thermostat blower off{dur} (CA fan config: {cfg or 'n/a'})"
+    settings = _m(
+        "thermostat_blower_off",
+        has_minutes=_yn(minutes is not None),
+        minutes=_num(minutes) if minutes is not None else "",
+        cfg=cfg or "n/a",
+    )
+    return _m("thermostat_fan_stopped_observed"), settings
 
 
-def _render_fan_ownership_self_healed(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_ownership_self_healed(p: dict, unit: str) -> tuple[Cell, Cell]:
     since = p.get("was_on_since")
-    settings = "CA released a fan it believed it was running" + (f" (since {since})" if since else "")
-    return "Fan ownership cleaned up (self-heal)", settings
+    settings = _m("fan_released_believed_running", has_since=_yn(since), since=str(since or ""))
+    return _m("fan_ownership_self_heal"), settings
 
 
-def _render_fan_orphan_released(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_orphan_released(p: dict, unit: str) -> tuple[Cell, Cell]:
     old = p.get("old_fan_mode")
     sent = p.get("command_sent")
     if p.get("dry_run") is True:
         # Issue #1108: automation was off -- nothing was sent and the pending release was dropped.
-        return (
-            "Fan left as-is: observe-only mode",
-            f"thermostat fan_mode stays {old} (automation off; CA would have released the fan it"
-            " left on under the previous configuration)",
-        )
-    return (
-        "Fan released after configuration change",
-        f"thermostat fan_mode {old} -> {sent} (CA had left it on under the previous configuration)",
-    )
+        return _m("fan_left_as_is"), _m("fan_left_as_is_detail", old=str(old))
+    return _m("fan_released_after_config"), _m("fan_released_after_config_detail", old=str(old), sent=str(sent))
 
 
-def _render_fan_off_hold_ended(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_off_hold_ended(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1205: the occupant ended the fan-off pause while no fan-off grace was running (a thermostat override's
     grace had replaced it). With the grace running, ``grace_cancelled`` already says so, so this row only exists for the
     case that would otherwise leave no trace."""
-    return "Fan-off pause ended (you cancelled it)", ""
+    return _m("fan_off_hold_ended"), ""
 
 
-def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_fan_cancel(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #567: branch on `trigger` — not every fan_cancel event is a user action.
 
     `physical_drift_correction` is CA noticing its own _fan_active bookkeeping was stale
@@ -2792,7 +3038,11 @@ def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
     fan_before = str(p.get("fan_before", "?")).strip()
     fan_after = str(p.get("fan_after", "?")).strip()
     fan_device = p.get("fan_device", "fan")
-    settings = f"{fan_device}: {fan_before}->{fan_after}" if fan_before and fan_after else ""
+    settings: Cell = (
+        _m("fact_fan_change", device=str(fan_device), change=f"{fan_before}->{fan_after}")
+        if fan_before and fan_after
+        else ""
+    )
     trigger = p.get("trigger")
     if trigger == "physical_drift_correction" and p.get("readback"):
         # session_kept False = the windows had closed so the ventilation session ended and the AC
@@ -2800,18 +3050,15 @@ def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
         released = p.get("session_kept") is False
         if p.get("retry"):
             if released:
-                return "Fan switch ignored the on-command -- ventilation ended, AC released", settings
-            return "Fan switch ignored the on-command -- retrying once", settings
+                return _m("fan_cancel_ignored_ended"), settings
+            return _m("fan_cancel_ignored_retry"), settings
         if released:
-            return "Fan switch ignored the on-command again -- giving up on the fan, AC released", settings
-        return (
-            "Fan switch ignored the on-command again -- giving up on the fan (AC stays off while windows are open)",
-            settings,
-        )
+            return _m("fan_cancel_ignored_again_released"), settings
+        return _m("fan_cancel_ignored_again_stays"), settings
     if trigger == "physical_drift_correction":
-        return "Fan ownership corrected -- stale flag cleared (was already off)", settings
+        return _m("fan_cancel_stale_flag"), settings
     if trigger == "timer_boundary_settle":
-        return "Fan cancel -- RF timer session ended", settings
+        return _m("fan_cancel_rf_timer"), settings
     if trigger == "manual_origin_carryforward":
         # Issue #829 / #1205: a PERSON turned off a fan Climate Advisor had taken over or restarted after an earlier
         # manual fan-on. The marker only selects this wording; the fan-off hold starts exactly as for any
@@ -2820,414 +3067,397 @@ def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
         raw_started = p.get("manual_origin_started")
         if raw_started:
             with contextlib.suppress(TypeError, ValueError):
-                started = f" (started {datetime.datetime.fromisoformat(str(raw_started)).strftime('%H:%M')})"
+                started = datetime.datetime.fromisoformat(str(raw_started)).strftime("%H:%M")
         kind = p.get("manual_origin_kind")
-        if kind == "restart":
-            return (
-                f"Fan off -- you turned off the fan Climate Advisor restarted after your grace ended{started};"
-                " holding the fan off",
-                settings,
-            )
-        if kind == "takeover":
-            return (
-                f"Fan off -- you turned off the fan Climate Advisor took over from your earlier manual fan-on"
-                f"{started}; holding the fan off",
-                settings,
-            )
-        return "Fan off -- closing the session from your earlier manual fan-on; holding the fan off", settings
-    return "Fan cancel (user turned off)", settings
+        return (
+            _m(
+                "fan_cancel_manual_origin",
+                kind=kind if kind in ("restart", "takeover") else "other",
+                has_started=_yn(started),
+                started=started,
+            ),
+            settings,
+        )
+    return _m("fan_cancel_user"), settings
 
 
-def _render_nat_vent_outdoor_rise_exit(p: dict, unit: str) -> tuple[str, str]:
+def _exit_label_with_fan(label: Cell, p: dict) -> i18n.Msg:
+    """Issue #957: fold the fan transition into the label itself (not only settings_text) so it survives into the
+    session-grouped Activity Summary input, which reads only the label. This event always ends the fan; a deferred
+    toggle's ``fan_mode_change`` (Issue #649) says so instead."""
+    return _m("label_fan_change", label=label, fan_change=_fan_change(p, activating=False))
+
+
+@_msg_renderer
+def _render_nat_vent_outdoor_rise_exit(p: dict, unit: str) -> tuple[Cell, Cell]:
     outdoor = p.get("outdoor")
     indoor = p.get("indoor")
-    label = "Nat-vent exit -- outdoor warmer than indoor"
+    label = _m("nat_vent_exit_outdoor_warmer")
     if outdoor is not None and indoor is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent exit -- outdoor {format_temp(float(outdoor), unit)}"
-                f" > indoor {format_temp(float(indoor), unit)}"
+            label = _m(
+                "nat_vent_exit_outdoor_gt_indoor", outdoor=_tp(float(outdoor), unit), indoor=_tp(float(indoor), unit)
             )
-    # Issue #957: fold the fan transition into the label itself (not only settings_text)
-    # so it survives into the session-grouped Activity Summary input, which reads only
-    # the label (`ev_text`), not settings_text. `fan_mode_change` may instead carry a
-    # "deferred (...)" description (Issue #649) when the Issue #641 rate limiter blocked
-    # the toggle -- always show whatever it says, since this event always ends the fan.
-    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
-    label = f"{label} ({fan_change})"
-    return label, ""
+    return _exit_label_with_fan(label, p), ""
 
 
-def _render_nat_vent_comfort_floor_exit(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_comfort_floor_exit(p: dict, unit: str) -> tuple[Cell, Cell]:
     indoor = p.get("indoor_temp")
     heat = p.get("comfort_heat")
-    label = "Nat-vent exit -- comfort floor reached"
+    label = _m("nat_vent_exit_floor_reached")
     if indoor is not None and heat is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent exit -- indoor {format_temp(float(indoor), unit)} <= floor {format_temp(float(heat), unit)}"
-            )
-    # Issue #957: fold the fan transition into the label itself so it survives into the
-    # session-grouped Activity Summary input (which reads only the label, not
-    # settings_text) -- this event always ends the fan.
-    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
-    label = f"{label} ({fan_change})"
+            label = _m("nat_vent_exit_indoor_le_floor", indoor=_tp(float(indoor), unit), floor=_tp(float(heat), unit))
+    label = _exit_label_with_fan(label, p)
     hvac_restored = p.get("hvac_mode_restored", "")
-    settings = f"mode: off->{hvac_restored}" if hvac_restored and hvac_restored not in ("unknown", "") else ""
+    settings = (
+        _m("fact_mode_off_to", mode=str(hvac_restored))
+        if hvac_restored and hvac_restored not in ("unknown", "")
+        else ""
+    )
     return label, settings
 
 
-def _render_nat_vent_manual_override_exit(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_manual_override_exit(p: dict, unit: str) -> tuple[Cell, Cell]:
     indoor = p.get("indoor_temp")
     mode = p.get("override_mode", "")
-    label = "Nat-vent exit -- manual override conflict"
+    label = _m("nat_vent_exit_manual_conflict")
     if mode:
-        label = f"Nat-vent exit -- manual override to {mode}"
+        label = _m("nat_vent_exit_manual_override_mode", mode=mode)
         if indoor is not None:
             with contextlib.suppress(TypeError, ValueError):
-                label += f" (indoor {format_temp(float(indoor), unit)})"
-    # Issue #957: this event always ends the fan -- fold the (now correctly-formatted)
-    # transition into the label so it's visible even in the session-grouped summary
-    # input, instead of the previous hardcoded-wrong "fan: on->auto" (a whole-house fan
-    # has no "auto" state).
-    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
-    return f"{label} ({fan_change})", ""
+                label = _m("nat_vent_exit_manual_override_mode_indoor", mode=mode, indoor=_tp(float(indoor), unit))
+    return _exit_label_with_fan(label, p), ""
 
 
-def _render_nat_vent_reconcile_exit(p: dict, unit: str) -> tuple[str, str]:
-    label = "Nat-vent exit -- fan already running independently"
-    reason = p.get("reason", "")
-    return label, reason
+@_msg_renderer
+def _render_nat_vent_reconcile_exit(p: dict, unit: str) -> tuple[Cell, Cell]:
+    reason = _field(p, "reason")
+    return _m("nat_vent_exit_reconcile"), reason if isinstance(reason, i18n.Msg) else str(reason)
 
 
-def _render_nat_vent_away_ceiling_exit(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_away_ceiling_exit(p: dict, unit: str) -> tuple[Cell, Cell]:
     indoor = p.get("indoor")
     cool = p.get("comfort_cool")
-    label = "Nat-vent exit -- away-mode ceiling reached"
+    label = _m("nat_vent_exit_away_ceiling")
     if indoor is not None and cool is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent exit (away) -- indoor {format_temp(float(indoor), unit)}"
-                f" >= ceiling {format_temp(float(cool), unit)}"
-            )
-    # Issue #957: fold the fan transition into the label itself (see the matching comment
-    # in _render_nat_vent_outdoor_rise_exit()) -- this event always ends the fan.
-    fan_change = p.get("fan_mode_change") or _fan_transition_fallback(p.get("fan_device", "fan"), activating=False)
-    return f"{label} ({fan_change})", ""
+            label = _m("nat_vent_exit_away_indoor_ge", indoor=_tp(float(indoor), unit), ceiling=_tp(float(cool), unit))
+    return _exit_label_with_fan(label, p), ""
 
 
-def _render_nat_vent_soft_start_entered(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_soft_start_entered(p: dict, unit: str) -> tuple[Cell, Cell]:
     outdoor = p.get("outdoor")
     indoor = p.get("indoor")
-    label = "Nat-vent soft-start -- purge/comfort at parity"
+    label = _m("nat_vent_soft_start_parity")
     if outdoor is not None and indoor is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent soft-start -- outdoor {format_temp(float(outdoor), unit)}"
-                f" <= indoor {format_temp(float(indoor), unit)}, past today's peak"
-            )
-    parts = []
+            label = _m("nat_vent_soft_start_temps", outdoor=_tp(float(outdoor), unit), indoor=_tp(float(indoor), unit))
+    parts: list[Cell] = []
     peak = p.get("outdoor_today_peak")
     if peak is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"today's peak: {format_temp(float(peak), unit)}")
+            parts.append(_m("fact_todays_peak", peak=_tp(float(peak), unit)))
     heat = p.get("comfort_heat")
     margin = p.get("decline_margin_f")
     if heat is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"floor: {format_temp(float(heat), unit)}")
+            parts.append(_m("fact_floor", floor=_tp(float(heat), unit)))
     if margin is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"decline margin: {float(margin):.1f}°")
-    return label, ", ".join(parts)
+            parts.append(_m("fact_decline_margin", margin=f"{float(margin):.1f}"))
+    return label, _join(parts)
 
 
-def _render_nat_vent_reactivated_while_paused(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_reactivated_while_paused(p: dict, unit: str) -> tuple[Cell, Cell]:
     outdoor = p.get("outdoor")
     indoor = p.get("indoor")
     threshold = p.get("threshold")
-    label = "Nat-vent reactivated while paused by an open door/window"
+    label = _m("nat_vent_reactivated_paused")
     if outdoor is not None and indoor is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent reactivated while paused -- outdoor {format_temp(float(outdoor), unit)}"
-                f" cooled below indoor {format_temp(float(indoor), unit)}"
-            )
-    settings = ""
+            label = _m("nat_vent_reactivated_temps", outdoor=_tp(float(outdoor), unit), indoor=_tp(float(indoor), unit))
+    settings: Cell = ""
     if threshold is not None:
         with contextlib.suppress(TypeError, ValueError):
-            settings = f"threshold: {format_temp(float(threshold), unit)}"
+            settings = _m("fact_threshold", threshold=_tp(float(threshold), unit))
     return label, settings
 
 
-def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[Cell, Cell]:
     indoor = p.get("indoor")
     # Issue #1093: "ceiling" is the guard ceiling; older persisted events only carry "comfort_cool".
     cool = p.get("ceiling", p.get("comfort_cool"))
-    label = "Nat-vent escalated to AC cooling"
+    label = _m("nat_vent_escalated")
     if indoor is not None and cool is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent escalated to AC -- indoor {format_temp(float(indoor), unit)}"
-                f" > ceiling {format_temp(float(cool), unit)}"
-            )
-    parts = ["mode: off->cool"]
+            label = _m("nat_vent_escalated_temps", indoor=_tp(float(indoor), unit), ceiling=_tp(float(cool), unit))
+    parts: list[Cell] = [_m("fact_mode_off_to_cool")]
     hours = p.get("hours_to_breach")
     lead = p.get("lead_min")
     k_cool = p.get("k_active_cool")
     if hours is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"breach in {float(hours):.1f}h")
+            parts.append(_m("fact_breach_in_h", hours=f"{float(hours):.1f}"))
     if lead is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"lead={int(lead)}min")
+            parts.append(_m("fact_lead_min", lead=int(lead)))
     if k_cool is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"k_cool={float(k_cool):.3f}")
+            parts.append(_m("fact_k_cool", k=f"{float(k_cool):.3f}"))
     # Issue #936: fan_mode_change, when present, notes a deferred (rate-limited)
     # fan-stop command instead of silently implying the "mode: off->cool" switch
     # happened cleanly -- mirrors _render_nat_vent_away_ceiling_exit()'s
     # same fan_mode_change read.
-    fan_change = p.get("fan_mode_change", "")
+    fan_change = _field(p, "fan_mode_change")
     if fan_change:
-        parts.append(f"fan: {fan_change}")
-    return label, ", ".join(parts)
+        parts.append(_m("fact_fan", fan=fan_change))
+    return label, _join(parts)
 
 
-def _render_nat_vent_ac_assist_armed(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_ac_assist_armed(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Legacy (Issue #1142 D7): AC assist was removed; kept so persisted logs from earlier versions still render.
-    return "Nat-vent + AC assist armed (full band)", ""
+    return _m("nat_vent_ac_assist_armed"), ""
 
 
-def _render_close_windows_advised(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_close_windows_advised(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Issue #1142 D7: blower ventilation never cools into an open window; the occupant was asked to close it.
     indoor = p.get("indoor")
     ceiling = p.get("comfort_cool")
-    detail = (
-        f"indoor {format_temp(indoor, unit)}, comfort limit {format_temp(ceiling, unit)}" if indoor and ceiling else ""
+    detail: Cell = (
+        _m("fact_indoor_comfort_limit", indoor=_tp(indoor, unit), limit=_tp(ceiling, unit))
+        if indoor and ceiling
+        else ""
     )
-    return "Asked the occupant to close the windows (AC stays off while they are open)", detail
+    return _m("close_windows_advised"), detail
 
 
 # Legacy event, no current emitter (Issue #593 audit) -- kept only to render
 # historically-persisted event logs from a removed nat-vent code path.
-def _render_nat_vent_sleep_ceiling_reached(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_sleep_ceiling_reached(p: dict, unit: str) -> tuple[Cell, Cell]:
     indoor = p.get("indoor_temp")
     cool = p.get("sleep_cool")
-    label = "Nat-vent exit -- sleep ceiling reached"
+    label = _m("nat_vent_exit_sleep_ceiling")
     if indoor is not None and cool is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent exit (sleep) -- indoor {format_temp(float(indoor), unit)}"
-                f" <= sleep ceiling {format_temp(float(cool), unit)}"
-            )
+            label = _m("nat_vent_exit_sleep_temps", indoor=_tp(float(indoor), unit), ceiling=_tp(float(cool), unit))
     return label, ""
 
 
-def _render_nat_vent_bedtime_continue(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_bedtime_continue(p: dict, unit: str) -> tuple[Cell, Cell]:
     outdoor = p.get("outdoor_temp")
     cool = p.get("sleep_cool")
-    label = "Nat-vent/WHF session active -- continuing through bedtime"
+    label = _m("nat_vent_bedtime_continue")
     if outdoor is not None and cool is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent/WHF session active -- continuing through bedtime"
-                f" (outdoor {format_temp(float(outdoor), unit)}, sleep ceiling {format_temp(float(cool), unit)})"
+            label = _m(
+                "nat_vent_bedtime_continue_temps", outdoor=_tp(float(outdoor), unit), ceiling=_tp(float(cool), unit)
             )
     return label, ""
 
 
-def _render_sensor_opened(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_sensor_opened(p: dict, unit: str) -> tuple[Cell, Cell]:
     entity = p.get("entity", "")
     result = p.get("result", "")
     trigger = p.get("trigger", "")
-    label = f"Sensor opened -- {result}" if result else "Sensor opened"
+    label = _m("sensor_opened_result", result=str(result)) if result else _m("sensor_opened")
     if entity == "natural_vent_reeval" and trigger == "open_door_reeval":
-        label = "Re-check: door/window confirmed open"
+        label = _m("sensor_open_recheck")
     elif entity and entity not in ("re-check", "natural_vent_reeval"):
-        label = f"Sensor opened: {entity} ({result})" if result else f"Sensor opened: {entity}"
+        label = (
+            _m("sensor_opened_entity_result", entity=str(entity), result=str(result))
+            if result
+            else _m("sensor_opened_entity", entity=str(entity))
+        )
     elif trigger:
-        label = f"Sensor opened -- {trigger}"
+        label = _m("sensor_opened_trigger", trigger=str(trigger))
     hvac_change = p.get("hvac_mode_change", "")
-    fan_change = p.get("fan_mode_change", "")
-    parts = []
+    fan_change = _field(p, "fan_mode_change")
+    parts: list[Cell] = []
     if hvac_change:
-        parts.append(f"mode: {hvac_change}")
+        parts.append(_m("fact_mode", mode=str(hvac_change)))
     if fan_change:
-        parts.append(f"fan: {fan_change}")
+        parts.append(_m("fact_fan", fan=fan_change))
     outdoor = p.get("outdoor_temp")
     indoor = p.get("indoor_temp")
     threshold = p.get("threshold")
     if outdoor is not None and indoor is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"outdoor {format_temp(float(outdoor), unit)} < indoor {format_temp(float(indoor), unit)}")
+            parts.append(
+                _m("fact_outdoor_lt_indoor", outdoor=_tp(float(outdoor), unit), indoor=_tp(float(indoor), unit))
+            )
     if threshold is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"threshold {format_temp(float(threshold), unit)}")
-    return label, ", ".join(parts)
+            parts.append(_m("fact_threshold_plain", threshold=_tp(float(threshold), unit)))
+    return label, _join(parts)
 
 
-def _render_sensor_all_closed(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_sensor_all_closed(p: dict, unit: str) -> tuple[Cell, Cell]:
     was_paused = p.get("was_paused", False)
     was_nat_vent = p.get("was_nat_vent", False)
-    fan_device = p.get("fan_device", "fan")
     if was_nat_vent:
         # Issue #504 / #957: the fan really did turn off here (via _exit_nat_vent(),
         # whose own fan_deactivated event is intentionally suppressed per Issue #411) —
         # fold the transition into the label so it's visible even in the session-grouped
         # summary input, not just settings_text.
-        fan_change = p.get("fan_mode_change") or _fan_transition_fallback(fan_device, activating=False)
-        return f"All sensors closed -- ending nat-vent ({fan_change})", ""
+        return _m("sensors_closed_ending_nat_vent", fan_change=_fan_change(p, activating=False)), ""
     if was_paused:
-        return "All sensors closed -- resuming HVAC", ""
-    return "All sensors closed", ""
+        return _m("sensors_closed_resuming"), ""
+    return _m("sensors_closed"), ""
 
 
-def _render_nat_vent_forecast_skip(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_forecast_skip(p: dict, unit: str) -> tuple[Cell, Cell]:
     peak = p.get("forecast_peak")
     thr = p.get("threshold")
-    label = "Nat-vent skipped -- forecast too warm"
+    label = _m("nat_vent_skip_forecast_warm")
     if peak is not None and thr is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Nat-vent skipped -- forecast peak {format_temp(float(peak), unit)}"
-                f" > threshold {format_temp(float(thr), unit)}"
-            )
+            label = _m("nat_vent_skip_forecast_peak", peak=_tp(float(peak), unit), threshold=_tp(float(thr), unit))
     return label, ""
 
 
-def _render_nat_vent_floor_imminent_skip(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_nat_vent_floor_imminent_skip(p: dict, unit: str) -> tuple[Cell, Cell]:
     ttf = p.get("time_to_floor_hr")
-    label = "Nat-vent skipped -- floor imminent"
+    label = _m("nat_vent_skip_floor_imminent")
     if ttf is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = f"Nat-vent skipped -- floor in {float(ttf):.2f} hr (thermal model)"
-    parts = []
+            label = _m("nat_vent_skip_floor_in_hr", hours=f"{float(ttf):.2f}")
+    parts: list[Cell] = []
     indoor = p.get("indoor_temp")
     heat = p.get("comfort_heat")
     if indoor is not None and heat is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"{format_temp(float(indoor), unit)} -> floor {format_temp(float(heat), unit)}")
+            parts.append(_m("fact_indoor_to_floor", indoor=_tp(float(indoor), unit), floor=_tp(float(heat), unit)))
     k_passive = p.get("k_passive")
     if k_passive is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"k_passive={float(k_passive):.4f}")
-    return label, ", ".join(parts)
+            parts.append(_m("fact_k_passive", k=f"{float(k_passive):.4f}"))
+    return label, _join(parts)
 
 
-def _render_bedtime_setback_skipped(p: dict, unit: str) -> tuple[str, str]:
-    reason = p.get("reason", "")
+@_msg_renderer
+def _render_bedtime_setback_skipped(p: dict, unit: str) -> tuple[Cell, Cell]:
+    reason = _field(p, "reason")
     occ = p.get("occupancy", "")
     if reason == "occupancy" and occ:
-        return f"Bedtime setback skipped -- {occ} mode active", ""
+        return _m("bedtime_setback_skipped_occ", occupancy=str(occ)), ""
     if reason:
-        return f"Bedtime setback skipped -- {reason}", ""
-    return "Bedtime setback skipped", ""
+        return _m("bedtime_setback_skipped_reason", reason=reason), ""
+    return _m("bedtime_setback_skipped"), ""
 
 
-def _render_morning_wakeup_skipped(p: dict, unit: str) -> tuple[str, str]:
-    reason = p.get("reason", "")
+@_msg_renderer
+def _render_morning_wakeup_skipped(p: dict, unit: str) -> tuple[Cell, Cell]:
+    reason = _field(p, "reason")
     occ = p.get("occupancy", "")
     if reason == "occupancy" and occ:
-        return f"Morning wake-up skipped -- {occ} mode active", ""
-    return (f"Morning wake-up skipped -- {reason}" if reason else "Morning wake-up skipped"), ""
+        return _m("morning_wakeup_skipped_occ", occupancy=str(occ)), ""
+    return (_m("morning_wakeup_skipped_reason", reason=reason) if reason else _m("morning_wakeup_skipped")), ""
 
 
-def _render_pre_cool_suppressed_nat_vent(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_pre_cool_suppressed_nat_vent(p: dict, unit: str) -> tuple[Cell, Cell]:
     indoor = p.get("indoor")
     target = p.get("target")
     reason = p.get("reason")
-    if reason == "active_session":
-        label = "Pre-cool deferred -- nat-vent/WHF session already active"
-    else:
-        label = "Pre-cool suppressed -- nat-vent already achieved target"
-    settings = ""
+    label = _m("pre_cool_deferred_session") if reason == "active_session" else _m("pre_cool_suppressed_nat_vent")
+    settings: Cell = ""
     if indoor is not None and target is not None:
         with contextlib.suppress(TypeError, ValueError):
-            comparator = "<=" if reason != "active_session" else "chasing"
-            settings = (
-                f"indoor {format_temp(float(indoor), unit)} {comparator} target {format_temp(float(target), unit)}"
+            settings = _m(
+                "fact_indoor_vs_target",
+                indoor=_tp(float(indoor), unit),
+                mode="chasing" if reason == "active_session" else "le",
+                target=_tp(float(target), unit),
             )
     return label, settings
 
 
-def _render_pre_cool_overshoot(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_pre_cool_overshoot(p: dict, unit: str) -> tuple[Cell, Cell]:
     indoor = p.get("indoor")
     heat = p.get("comfort_heat")
-    label = "Pre-cool overshoot -- indoor below comfort floor at wake-up"
+    label = _m("pre_cool_overshoot")
     if indoor is not None and heat is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Pre-cool overshoot -- indoor {format_temp(float(indoor), unit)}"
-                f" < floor {format_temp(float(heat), unit)}"
-            )
+            label = _m("pre_cool_overshoot_temps", indoor=_tp(float(indoor), unit), floor=_tp(float(heat), unit))
     return label, ""
 
 
-def _render_system_restarted(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_system_restarted(p: dict, unit: str) -> tuple[Cell, Cell]:
+    # cause == "reload" (Issue #1110) is a config-entry reload, not an HA restart; not "settings saved" -- a
+    # weather auto-resolve reload involves no user action.
     recovered = p.get("recovered_events", 0)
     cause = p.get("cause", "unknown")
-    if cause == "version_changed":
-        old = p.get("old_version")
-        new = p.get("new_version")
-        return (
-            f"--- HA restart boundary (version_changed {old}->{new}, {recovered} prior events recovered) ---",
-            "",
-        )
-    if cause == "user_restart":
-        return f"--- HA restart boundary (user_restart, {recovered} prior events recovered) ---", ""
-    if cause == "reload":
-        # Issue #1110: a config-entry reload, not an HA restart. Not "settings saved" — a
-        # weather auto-resolve reload involves no user action.
-        return (
-            f"--- Climate Advisor zone reloaded (settings applied / repair), {recovered} prior events recovered ---",
-            "",
-        )
-    return f"--- HA restart boundary (unknown, {recovered} prior events recovered) ---", ""
+    return (
+        _m(
+            "system_restarted",
+            cause=cause if cause in ("version_changed", "user_restart", "reload") else "other",
+            old=str(p.get("old_version")),
+            new=str(p.get("new_version")),
+            recovered=_num(recovered),
+        ),
+        "",
+    )
 
 
-def _render_version_changed(p: dict, unit: str) -> tuple[str, str]:
-    old = p.get("old_version")
-    new = p.get("new_version")
-    return f"Version changed: {old} -> {new}", ""
+@_msg_renderer
+def _render_version_changed(p: dict, unit: str) -> tuple[Cell, Cell]:
+    return _m("version_changed", old=str(p.get("old_version")), new=str(p.get("new_version"))), ""
 
 
-def _render_startup_coalesced(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_startup_coalesced(p: dict, unit: str) -> tuple[Cell, Cell]:
     nv = p.get("nat_vent_activated", False)
     hvac = p.get("hvac_commanded", False)
     sensors = p.get("sensors_open_count", 0)
-    notes = []
+    notes: list[Cell] = []
     if nv:
-        notes.append("nat-vent activated")
+        notes.append(_m("note_nat_vent_activated"))
     if hvac:
-        notes.append("HVAC commanded")
+        notes.append(_m("note_hvac_commanded"))
     if sensors:
-        notes.append(f"{sensors} sensor(s) open")
-    suffix = " -- " + ", ".join(notes) if notes else ""
-    settings_parts = []
+        notes.append(_m("note_sensors_open", count=_num(sensors)))
+    label = _m("startup_coalesced", has_notes=_yn(notes), notes=_join(notes))
+    settings_parts: list[Cell] = []
     indoor_f = p.get("indoor_f")
     outdoor_f = p.get("outdoor_f")
     if indoor_f is not None and outdoor_f is not None:
         with contextlib.suppress(TypeError, ValueError):
             settings_parts.append(
-                f"indoor {format_temp(float(indoor_f), unit)} / outdoor {format_temp(float(outdoor_f), unit)}"
+                _m("fact_indoor_outdoor", indoor=_tp(float(indoor_f), unit), outdoor=_tp(float(outdoor_f), unit))
             )
     archetype = p.get("fan_archetype")
     if archetype:
-        settings_parts.append(f"fan: {archetype}")
-    settings = ", ".join(settings_parts)
-    return f"Startup coalescing complete{suffix}", settings
+        settings_parts.append(_m("fact_fan", fan=str(archetype)))
+    return label, _join(settings_parts)
 
 
-def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
     grace_end = p.get("grace_end_time", "")
     stale_mode = p.get("stale_mode", "")
     stale_since = p.get("stale_since", "")
-    settings = f"was {stale_mode} since {stale_since}" if stale_mode else ""
+    settings: Cell = _m("fact_was_since", mode=str(stale_mode), since=str(stale_since)) if stale_mode else ""
     if p.get("reason") == "grace_without_override":
         # Issue #508's watchdog mirror: grace_end_time is typically still in the future here
         # (the timer would have fired correctly on its own) — "expired" would be misleading.
-        return "Grace period recovered (no override was active)", settings
+        return _m("grace_recovered_no_override"), settings
     # Issue #1199: grace end instants are stored as UTC; show the occupant's local time.
     try:
         _end = dt_util.parse_datetime(grace_end) if grace_end else None
@@ -3235,16 +3465,16 @@ def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[str, str]:
             grace_end = dt_util.as_local(_end).isoformat()
     except TypeError, ValueError, AttributeError:
         pass
-    return f"Grace period recovered (expired {grace_end})", settings
+    return _m("grace_recovered_expired", end=str(grace_end)), settings
 
 
-def _render_state_contradiction_warning(p: dict, unit: str) -> tuple[str, str]:
-    hvac_mode = p.get("hvac_mode", "")
-    hvac_action = p.get("hvac_action", "")
-    return f"Mode/action mismatch: {hvac_mode} vs {hvac_action}", ""
+@_msg_renderer
+def _render_state_contradiction_warning(p: dict, unit: str) -> tuple[Cell, Cell]:
+    return _m("mode_action_mismatch", mode=str(p.get("hvac_mode", "")), action=str(p.get("hvac_action", ""))), ""
 
 
-def _render_invariant_violation(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_invariant_violation(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #749: a hard system invariant was violated (e.g. AC and the whole-house
     fan both physically running at once).
 
@@ -3253,107 +3483,133 @@ def _render_invariant_violation(p: dict, unit: str) -> tuple[str, str]:
     moves to the settings column instead of being the label.
     """
     invariant = p.get("invariant", "")
-    detail = p.get("detail", "")
-    label = detail or (f"Hard invariant violated: {invariant}" if invariant else "Hard invariant violated")
+    detail = _field(p, "detail")
+    label: Cell = detail or (
+        _m("invariant_violated_named", invariant=str(invariant)) if invariant else _m("invariant_violated")
+    )
     # Issue #1128: household promises reuse this event with extra keys. A log-level hit was noted
     # but never alerted, and the label says so (the AI Investigator must not call it an alert).
     if p.get("severity") == "log":
-        label = f"Noted, not alerted: {label}"
+        label = _m("invariant_noted_not_alerted", label=label)
     promise = p.get("promise")
     if promise is not None and invariant:
         severity = p.get("severity")
-        return label, f"promise {promise}: {invariant}" + (f" ({severity})" if severity else "")
-    return label, (f"invariant: {invariant}" if invariant else "")
+        return label, _m(
+            "fact_promise",
+            promise=str(promise),
+            invariant=str(invariant),
+            has_severity=_yn(severity),
+            severity=str(severity or ""),
+        )
+    return label, (_m("fact_invariant", invariant=str(invariant)) if invariant else "")
 
 
-def _render_thermal_learning_no_observations(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_thermal_learning_no_observations(p: dict, unit: str) -> tuple[Cell, Cell]:
     runtime = p.get("hvac_runtime_minutes", "")
     fan_only_runtime = p.get("thermostat_fan_only_runtime_minutes", "")
-    if runtime:
-        label = f"Thermal learning: no observations despite {runtime} min HVAC runtime"
-    else:
-        label = "Thermal learning: no observations recorded"
-    settings_parts = []
+    label = _m("thermal_no_observations_runtime", minutes=_num(runtime)) if runtime else _m("thermal_no_observations")
+    settings_parts: list[Cell] = []
     if fan_only_runtime:
-        settings_parts.append(f"fan-only runtime: {fan_only_runtime} min (excluded)")
+        settings_parts.append(_m("fact_fan_only_runtime", minutes=_num(fan_only_runtime)))
     session_count = p.get("thermal_session_count")
     if session_count is not None:
-        settings_parts.append(f"sessions today: {session_count}")
-    settings = ", ".join(settings_parts)
-    return label, settings
+        settings_parts.append(_m("fact_sessions_today", count=_num(session_count)))
+    return label, _join(settings_parts)
 
 
-def _render_incident_detected(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_incident_detected(p: dict, unit: str) -> tuple[Cell, Cell]:
     cls = p.get("incident_class", "")
     incident_id = p.get("incident_id")
-    label = f"Incident detected: {cls}" if cls else "Incident detected"
+    label: Cell = _m("incident_detected_class", incident_class=str(cls)) if cls else _m("incident_detected")
     if incident_id:
-        label = f"{label} ({incident_id})"
-    settings_parts = []
+        label = _m("label_id", label=label, id=str(incident_id))
+    settings_parts: list[Cell] = []
     indoor_f = p.get("indoor_f")
     comfort_heat = p.get("comfort_heat")
     comfort_cool = p.get("comfort_cool")
     if indoor_f is not None and comfort_heat is not None and comfort_cool is not None:
         with contextlib.suppress(TypeError, ValueError):
             settings_parts.append(
-                f"indoor {format_temp(float(indoor_f), unit)} vs. band "
-                f"[{format_temp(float(comfort_heat), unit)}/{format_temp(float(comfort_cool), unit)}]"
+                _m(
+                    "fact_indoor_vs_band",
+                    indoor=_tp(float(indoor_f), unit),
+                    floor=_tp(float(comfort_heat), unit),
+                    ceiling=_tp(float(comfort_cool), unit),
+                )
             )
     occupancy = p.get("occupancy_mode")
     if occupancy:
-        settings_parts.append(f"occupancy: {occupancy}")
+        settings_parts.append(_m("fact_occupancy", occupancy=str(occupancy)))
     # Issue #1049 (change 8): what the thermostat was doing and what CA last tried.
     t_mode = p.get("thermostat_mode")
     if t_mode:
         t_action = p.get("thermostat_action")
-        settings_parts.append(f"thermostat: {t_mode}" + (f" ({t_action})" if t_action else ""))
+        settings_parts.append(
+            _m("fact_thermostat", mode=str(t_mode), has_action=_yn(t_action), action=str(t_action or ""))
+        )
     last_mode = p.get("last_commanded_mode")
     if last_mode:
-        tried = f"CA last tried: {last_mode}"
         last_sp = p.get("last_commanded_setpoint_f")
+        sp_temp: Any = ""
         if last_sp is not None:
             with contextlib.suppress(TypeError, ValueError):
-                tried += f" @ {format_temp(float(last_sp), unit)}"
+                sp_temp = _tp(float(last_sp), unit)
         result = p.get("last_command_result")
-        if result:
-            tried += f" ({result})"
-        settings_parts.append(tried)
-    if cls == "grace_churn":
         settings_parts.append(
-            f"same grace '{p.get('trigger')}' started {p.get('count')}x in {p.get('window_minutes')} min"
-            f" ({p.get('first_time')} .. {p.get('last_time')}); CA fan config: {p.get('fan_mode_config')}"
-            + (
-                f"; last fan event: {p['last_fan_event'].get('type')}"
-                if isinstance(p.get("last_fan_event"), dict)
-                else ""
+            _m(
+                "fact_ca_last_tried",
+                mode=str(last_mode),
+                has_setpoint=_yn(sp_temp != ""),
+                setpoint=sp_temp,
+                has_result=_yn(result),
+                result=str(result or ""),
             )
         )
-    settings = ", ".join(settings_parts)
-    return label, settings
+    if cls == "grace_churn":
+        last_fan = p.get("last_fan_event")
+        settings_parts.append(
+            _m(
+                "fact_grace_churn",
+                trigger=str(p.get("trigger")),
+                count=str(p.get("count")),
+                window=str(p.get("window_minutes")),
+                first=str(p.get("first_time")),
+                last=str(p.get("last_time")),
+                cfg=str(p.get("fan_mode_config")),
+                has_fan_event=_yn(isinstance(last_fan, dict)),
+                fan_event=str(last_fan.get("type")) if isinstance(last_fan, dict) else "",
+            )
+        )
+    return label, _join(settings_parts)
 
 
 # Legacy warm_day events (pre-P3, may appear in persisted event logs). Confirmed
 # zero current emitters (Issue #593 audit) -- kept renderer-only for history.
-def _render_warm_day_setback_applied(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_warm_day_setback_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     old_t = p.get("old_setpoint_f")
     new_t = p.get("new_setpoint_f")
-    label = "Warm-day setback applied"
-    settings = ""
+    label = _m("warm_day_setback_applied")
+    settings: Cell = ""
     if old_t is not None and new_t is not None:
         with contextlib.suppress(TypeError, ValueError):
-            settings = f"setpoint: {format_temp(float(old_t), unit)}->{format_temp(float(new_t), unit)}"
+            settings = _setpoint_change_fact(old_t, new_t, unit)
     return label, settings
 
 
-def _render_warm_day_state_confirmed(p: dict, unit: str) -> tuple[str, str]:
-    return "Warm-day state confirmed (heartbeat)", ""
+@_msg_renderer
+def _render_warm_day_state_confirmed(p: dict, unit: str) -> tuple[Cell, Cell]:
+    return _m("warm_day_state_confirmed"), ""
 
 
-def _render_warm_day_comfort_gap(p: dict, unit: str) -> tuple[str, str]:
-    return "Warm-day comfort gap -- heating before shutoff", ""
+@_msg_renderer
+def _render_warm_day_comfort_gap(p: dict, unit: str) -> tuple[Cell, Cell]:
+    return _m("warm_day_comfort_gap"), ""
 
 
-def _render_paused_entity_settings(p: dict) -> str:
+def _render_paused_entity_settings(p: dict) -> Cell:
     """Shared settings-cell rendering for the door/window pause lifecycle (Issue #592).
 
     ``paused_entity``/``paused_minutes`` are threaded from the same ``_paused_entity``/
@@ -3364,122 +3620,153 @@ def _render_paused_entity_settings(p: dict) -> str:
     minutes = p.get("paused_minutes")
     if not entity:
         return ""
-    settings = entity
     if isinstance(minutes, (int, float)):
-        settings = f"{settings} (open {int(minutes)} min)"
-    return settings
+        return _m("fact_paused_entity_open", entity=str(entity), minutes=int(minutes))
+    return str(entity)
 
 
-def _render_classification_suppressed_paused(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_classification_suppressed_paused(p: dict, unit: str) -> tuple[Cell, Cell]:
     day_type = p.get("day_type", "")
     hvac_mode = p.get("hvac_mode", "")
-    label = "Classification suppressed — windows open"
-    if day_type or hvac_mode:
-        label = f"{label} (day={day_type}, mode={hvac_mode})"
+    label = _m(
+        "classification_suppressed_paused",
+        has_detail=_yn(day_type or hvac_mode),
+        day_type=str(day_type),
+        mode=str(hvac_mode),
+    )
     return label, _render_paused_entity_settings(p)
 
 
-def _render_occupancy_setback_suppressed_paused(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_occupancy_setback_suppressed_paused(p: dict, unit: str) -> tuple[Cell, Cell]:
     occupancy = p.get("occupancy", "away")
-    return f"Occupancy setback suppressed (windows open, {occupancy})", _render_paused_entity_settings(p)
+    return _m("occupancy_setback_suppressed_paused", occupancy=str(occupancy)), _render_paused_entity_settings(p)
 
 
-def _render_comfort_family_switch_locked_out(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_comfort_family_switch_locked_out(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Issue #821: the family-switch lockout (comfort_mode_switch_min_interval_s)
     # blocked a candidate heating/cooling family switch — surfaced so a persistently
     # blocked breach is observable, not silent (per that issue's own design note).
     candidate = p.get("candidate_family", "")
-    reason = p.get("reason", "")
-    label = f"Switch to {candidate} delayed (recent change)" if candidate else "Switch delayed (recent change)"
-    return label, reason
+    label = _m("switch_delayed_candidate", candidate=str(candidate)) if candidate else _m("switch_delayed")
+    return label, _field(p, "reason")
 
 
-def _render_comfort_family_switch(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_comfort_family_switch(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Issue #1066 (nearest-edge arming): the thermostat's guarded edge flipped. The detail shows where
     # indoor sat against the comfort range at that moment so "why did it switch now?" is answerable
     # without raw logs. "breach" means indoor was already outside the range (switched immediately).
     # Events persisted by v0.7.96 and earlier carry the retired deadband/recency keys; they still render.
     resolved_family = p.get("resolved_family", "")
-    label = f"Switched to {resolved_family}" if resolved_family else "Comfort family switched"
+    label: Cell = _m("switched_to_family", family=str(resolved_family)) if resolved_family else _m("family_switched")
     # Issue #1073: also emitted when the thermostat's previous mode could not be read ("unknown").
     if p.get("from_family") == "unknown":
-        label += " (previous mode unknown)"
-    detail_parts = [p.get("reason", "")]
+        label = _m("label_previous_unknown", label=label)
+    detail_parts: list[Cell] = [_field(p, "reason")]
     indoor, floor, ceiling = p.get("indoor_f"), p.get("floor_f"), p.get("ceiling_f")
     if all(isinstance(v, (int, float)) for v in (indoor, floor, ceiling)):
         detail_parts.append(
-            f"indoor {format_temp(indoor, unit, 0)}, comfort range {format_temp(floor, unit, 0)}-"
-            f"{format_temp(ceiling, unit, 0)}"
+            _m(
+                "fact_indoor_comfort_range",
+                indoor=_tp(indoor, unit),
+                floor=_tp(floor, unit),
+                ceiling=_tp(ceiling, unit),
+            )
         )
     margin = p.get("margin_applied_f")
     if isinstance(margin, (int, float)):
-        detail_parts.append(f"arming margin: {format_temp_delta(margin, unit, 1)}")
+        detail_parts.append(_m("fact_arming_margin", margin=_tdp(margin, unit, 1)))
     if p.get("breach"):
-        detail_parts.append("outside the comfort range")
+        detail_parts.append(_m("fact_outside_comfort_range"))
     legacy_deadband = p.get("deadband_applied_f")
     if legacy_deadband is not None:
-        detail_parts.append(f"deadband applied: {format_temp_delta(legacy_deadband, unit, 1)}")
-    return label, " — ".join(part for part in detail_parts if part)
+        detail_parts.append(_m("fact_deadband_applied", deadband=_tdp(legacy_deadband, unit, 1)))
+    return label, _join([part for part in detail_parts if part], sep="dash")
 
 
-def _render_thermostat_mode_set(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_thermostat_mode_set(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Issue #1073: one row per ACTUAL thermostat mode write (re-affirms are never emitted). The detail
     # answers "who asked and why" so a heat/cool flip can be traced without raw logs.
     to_mode = p.get("to_mode") or ""
     from_mode = p.get("from_mode")
-    label = f"Thermostat set to {to_mode}" if to_mode else "Thermostat mode set"
+    label: Cell = _m("thermostat_set_to", mode=str(to_mode)) if to_mode else _m("thermostat_mode_set")
     if from_mode and from_mode != to_mode:
-        label = f"{label} (was {from_mode})"
-    detail_parts = [p.get("reason", "")]
+        label = _m("label_was", label=label, was=str(from_mode))
+    detail_parts: list[Cell] = [_field(p, "reason")]
     source = p.get("source")
     # The row is written when the change is REQUESTED; confirmation/failure are separate rows (#1049).
-    detail_parts.append(f"requested by: {source}" if source else "requested")
+    detail_parts.append(_m("fact_requested_by", source=str(source)) if source else _m("fact_requested"))
     indoor, floor, ceiling = p.get("indoor_f"), p.get("floor_f"), p.get("ceiling_f")
     if isinstance(indoor, (int, float)):
-        indoor_text = f"indoor {format_temp(indoor, unit, 0)}"
         if isinstance(floor, (int, float)) and isinstance(ceiling, (int, float)):
-            indoor_text += f", comfort range {format_temp(floor, unit, 0)}-{format_temp(ceiling, unit, 0)}"
-        detail_parts.append(indoor_text)
+            detail_parts.append(
+                _m(
+                    "fact_indoor_comfort_range",
+                    indoor=_tp(indoor, unit),
+                    floor=_tp(floor, unit),
+                    ceiling=_tp(ceiling, unit),
+                )
+            )
+        else:
+            detail_parts.append(_m("fact_indoor", indoor=_tp(indoor, unit)))
     outcome = p.get("outcome")
     if outcome and outcome not in ("sent", "requested"):
-        detail_parts.append(f"not applied ({outcome})")
-    return label, " — ".join(part for part in detail_parts if part)
+        detail_parts.append(_m("fact_not_applied_outcome", outcome=str(outcome)))
+    return label, _join([part for part in detail_parts if part], sep="dash")
 
 
-_OPPOSITE_SIDE_LABEL = {"heating": "cooling", "cooling": "heating", "heat": "cooling", "cool": "heating"}
+_OPPOSITE_SIDE_CODES = {"heating": "cooling", "cooling": "heating", "heat": "cooling", "cool": "heating"}
 
 
-def _render_comfort_switch_held(p: dict, unit: str) -> tuple[str, str]:
+@_msg_renderer
+def _render_comfort_switch_held(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Issue #1073: the settling guard deliberately did not flip the mode (shallow breach shortly after the
     # opposite side ran or the user acted). Surfaced so a "why isn't it heating yet?" question is answerable.
     candidate = p.get("candidate_family") or ""
-    label = f"Switch to {candidate} held" if candidate else "Switch held"
-    label += " (opposite side ran recently)"
-    detail_parts = []
+    label = _m("switch_held_candidate", candidate=str(candidate)) if candidate else _m("switch_held")
+    detail_parts: list[Cell] = []
     indoor = p.get("indoor_f")
     if isinstance(indoor, (int, float)):
-        detail_parts.append(f"indoor {format_temp(indoor, unit, 0)}")
+        detail_parts.append(_m("fact_indoor", indoor=_tp(indoor, unit)))
     depth, tolerance = p.get("depth_f"), p.get("tolerance_f")
     if p.get("zone") == "margin":
         # Inside the comfort range, near the edge: the opposite side ran recently so the mode was not flipped.
-        margin_text = "still inside the comfort range, near the edge"
-        if isinstance(tolerance, (int, float)):
-            margin_text += f" (a swing up to {format_temp_delta(tolerance, unit, 1)} past it would still be held)"
-        detail_parts.append(margin_text)
+        has_tol = isinstance(tolerance, (int, float))
+        detail_parts.append(
+            _m(
+                "held_margin_near_edge",
+                has_tolerance=_yn(has_tol),
+                tolerance=_tdp(tolerance, unit, 1) if has_tol else "",
+            )
+        )
     elif isinstance(depth, (int, float)):
-        depth_text = f"{format_temp_delta(depth, unit, 1)} past the edge"
-        if isinstance(tolerance, (int, float)):
-            depth_text += f", within the {format_temp_delta(tolerance, unit, 1)} tolerance"
-        detail_parts.append(depth_text)
+        has_tol = isinstance(tolerance, (int, float))
+        detail_parts.append(
+            _m(
+                "held_past_edge",
+                depth=_tdp(depth, unit, 1),
+                has_tolerance=_yn(has_tol),
+                tolerance=_tdp(tolerance, unit, 1) if has_tol else "",
+            )
+        )
     ran = p.get("opposite_ran_min_ago")
     if isinstance(ran, (int, float)):
-        side = _OPPOSITE_SIDE_LABEL.get(str(candidate), "the other side")
-        ran_text = f"{side} ran {int(round(ran))} min ago"
         window = p.get("window_min")
-        if isinstance(window, (int, float)):
-            ran_text += f" (hold lasts up to {int(round(window))} min)"
-        detail_parts.append(ran_text)
-    return label, " — ".join(detail_parts)
+        has_window = isinstance(window, (int, float))
+        detail_parts.append(
+            _m(
+                "held_opposite_ran",
+                side=_OPPOSITE_SIDE_CODES.get(str(candidate), "other"),
+                minutes=int(round(ran)),
+                has_window=_yn(has_window),
+                window=int(round(window)) if has_window else 0,
+            )
+        )
+    return label, _join(detail_parts, sep="dash")
 
 
 # Registry: event_type -> renderer
@@ -3588,43 +3875,50 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
 }
 
 
-def _default_renderer(event_type: str, payload: dict, unit: str) -> tuple[str, str]:
+def _default_renderer_msg(event_type: str, payload: dict, unit: str) -> tuple[Cell, Cell]:
     """Surprise-safe fallback for unregistered event types.
 
     Event cell: humanized type + reason if present.
     Settings cell: generic extraction of recognized fields -- never blank-broken, never raises.
     """
-    label = _humanize_type(event_type)
-    reason = payload.get("reason")
+    label: Cell = _humanize_type(event_type)
+    reason = _field(payload, "reason")
     if reason:
-        label = f"{label} -- {reason}"
+        label = _m("label_reason", label=label, reason=reason)
 
     # Generic settings extraction
-    parts: list[str] = []
+    parts: list[Cell] = []
     old_m = payload.get("old_hvac_mode") or payload.get("old_mode")
     new_m = payload.get("new_hvac_mode") or payload.get("new_mode")
     if old_m and new_m and old_m != new_m:
-        parts.append(f"mode: {old_m}->{new_m}")
+        parts.append(_mode_change_fact(old_m, new_m))
     old_t = payload.get("old_setpoint_f")
     new_t = payload.get("new_setpoint_f")
     if old_t is not None and new_t is not None:
         with contextlib.suppress(TypeError, ValueError):
-            parts.append(f"setpoint: {format_temp(float(old_t), unit)}->{format_temp(float(new_t), unit)}")
+            parts.append(_setpoint_change_fact(old_t, new_t, unit))
     floor = payload.get("floor")
     ceiling = payload.get("ceiling")
     active = payload.get("active")
     if floor is not None and ceiling is not None:
-        s = _format_band_setpoint(floor, ceiling, active, unit)
-        if s:
-            parts.append(s)
+        band = _band_setpoint_msg(floor, ceiling, active, unit)
+        if band:
+            parts.append(band)
     fan = payload.get("fan") or payload.get("fan_mode_change")
     if fan:
-        parts.append(f"fan: {fan}")
+        parts.append(_m("fact_fan", fan=_field(payload, "fan_mode_change") if not payload.get("fan") else str(fan)))
     trigger = payload.get("trigger")
-    if trigger and not any("trigger" in p for p in parts):
-        parts.append(f"trigger: {trigger}")
+    # "trigger" never appears in the parts built above (they are mode/setpoint/band/fan facts), so it is always added.
+    if trigger:
+        parts.append(_m("fact_trigger", trigger=str(trigger)))
 
-    return label, ", ".join(parts)
+    return label, _join(parts)
+
+
+def _default_renderer(event_type: str, payload: dict, unit: str) -> tuple[str, str]:
+    """English text of ``_default_renderer_msg`` (the legacy string form)."""
+    label, settings = _default_renderer_msg(event_type, payload, unit)
+    return _cell_en(label), _cell_en(settings)
 
 
 # Types that should NOT be deduplicated (each has meaningful individual payload)
@@ -3683,16 +3977,18 @@ _REPORT_HIDDEN_EVENT_TYPES: frozenset[str] = frozenset(
 )
 
 
-def _maybe_prepend_whf_warning(table: str, config: dict[str, Any]) -> str:
-    """Prepend a WHF command-only warning banner when fan_state_feedback is disabled."""
+def _whf_warning_applies(config: dict[str, Any]) -> bool:
+    """True when a whole-house fan is configured without state feedback (command-only mode)."""
     _fsf = config.get("fan_state_feedback", False)
     _fmode = config.get("fan_mode", "disabled")
     _fentity = config.get("fan_entity", "")
-    if _fmode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and bool(_fentity) and not _fsf:
-        return (
-            "⚠ Whole house fan state feedback disabled (command-only mode) "
-            "-- physical fan state is unverifiable; events below reflect CA commands.\n\n" + table
-        )
+    return _fmode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and bool(_fentity) and not _fsf
+
+
+def _maybe_prepend_whf_warning(table: str, config: dict[str, Any]) -> str:
+    """Prepend a WHF command-only warning banner when fan_state_feedback is disabled."""
+    if _whf_warning_applies(config):
+        return _cell_en(_m("whf_command_only_banner")) + "\n\n" + table
     return table
 
 
@@ -3711,6 +4007,8 @@ class _RenderedEvent(NamedTuple):
     source: str
     indoor: str
     outdoor: str
+    ev_cell: Cell = ""  # Issue #1341: the same cells as ``Msg`` (or plain text), for the dashboard
+    settings_cell: Cell = ""
 
 
 def _render_timeline_events(
@@ -3772,27 +4070,147 @@ def _render_timeline_events(
         renderer = EVENT_RENDERERS.get(event_type)
         try:
             if renderer is not None:
-                ev_text, settings_text = renderer(payload, unit)
+                ev_cell, settings_cell = getattr(renderer, "msg", renderer)(payload, unit)
             else:
-                ev_text, settings_text = _default_renderer(event_type, payload, unit)
+                ev_cell, settings_cell = _default_renderer_msg(event_type, payload, unit)
             # When nat_vent_fan_off fires while the user owns the fan, annotate the label
             # so the developer knows the physical fan may still be running under user control.
             if event_type == "nat_vent_fan_off" and _fan_user_owns:
-                ev_text = ev_text + " [NOTE: fan may still be running -- user-controlled]"
+                ev_cell = _m("label_fan_user_controlled", label=ev_cell)
+            ev_text, settings_text = _cell_en(ev_cell), _cell_en(settings_cell)
         except Exception:
             _LOGGER.warning("activity_report: renderer raised for event type %r -- using fallback", event_type)
-            ev_text = _humanize_type(event_type)
-            settings_text = ""
+            ev_text = ev_cell = _humanize_type(event_type)
+            settings_text = settings_cell = ""
 
         source = _event_source_label(event_type, payload) or "sensor"
         indoor_cell = _fmt_temp_cell(_first_temp(entry, "indoor_f", "indoor_temp", "indoor"), unit)
         outdoor_cell = _fmt_temp_cell(_first_temp(entry, "outdoor_f", "outdoor_temp", "outdoor"), unit)
 
         rendered.append(
-            _RenderedEvent(event_dt, time_str, event_type, ev_text, settings_text, source, indoor_cell, outdoor_cell)
+            _RenderedEvent(
+                event_dt,
+                time_str,
+                event_type,
+                ev_text,
+                settings_text,
+                source,
+                indoor_cell,
+                outdoor_cell,
+                ev_cell,
+                settings_cell,
+            )
         )
 
     return rendered, limited
+
+
+class _TimelineRow(NamedTuple):
+    """One output row of the collapsed timeline: the English strings plus the same cells as messages (Issue #1341)."""
+
+    time_str: str
+    event_text: str
+    settings_text: str
+    source: str
+    indoor: str
+    outdoor: str
+    event_cell: Cell
+    settings_cell: Cell
+
+
+def _collapse_timeline_rows(
+    raw_event_log: list[Any],
+    config: dict[str, Any],
+    hours: float,
+    now: datetime.datetime,
+    limit: int = 200,
+) -> tuple[list[_TimelineRow], bool]:
+    """Render and deduplicate the event log into timeline rows (English strings and ``Msg`` cells together).
+
+    Consecutive same-type events (excluding types in ``_NO_DEDUP``) collapse into one row with a xN count and time
+    range; the Settings cell of a collapsed row is the LAST event's. Returns (rows, limited) in chronological order;
+    ``limited`` is True if the window contained more than ``limit`` events.
+    """
+    rendered, limited = _render_timeline_events(raw_event_log, config, hours, now, limit=limit)
+    if not rendered:
+        return [], limited
+
+    rows: list[_TimelineRow] = []
+    run: list[_RenderedEvent] = []  # the open run: [first, ..., last]
+    run_settings: tuple[str, Cell] = ("", "")
+
+    def _flush_run() -> None:
+        nonlocal run, run_settings
+        if not run:
+            return
+        first, last = run[0], run[-1]
+        if len(run) == 1:
+            # A run of exactly one event was never actually deduplicated with anything —
+            # this is the common case, not a collapsed group. Use the renderer's real
+            # event text (which carries the descriptive reason) instead of the bare
+            # _humanize_type(run_type) fallback, which silently discarded it for every
+            # event type not on the small _NO_DEDUP allowlist.
+            rows.append(
+                _TimelineRow(
+                    first.time_str,
+                    first.ev_text,
+                    run_settings[0],
+                    first.source,
+                    first.indoor,
+                    first.outdoor,
+                    first.ev_cell,
+                    run_settings[1],
+                )
+            )
+        else:
+            time_range = f"{first.time_str}-{last.time_str}" if first.time_str != last.time_str else first.time_str
+            collapsed = _m(
+                "event_run_collapsed", type=_humanize_type(first.event_type), count=len(run), range=time_range
+            )
+            rows.append(
+                _TimelineRow(
+                    first.time_str,
+                    _cell_en(collapsed),
+                    run_settings[0],
+                    first.source,
+                    first.indoor,
+                    first.outdoor,
+                    collapsed,
+                    run_settings[1],
+                )
+            )
+        run = []
+
+    for ev in rendered:
+        event_type = ev.event_type
+        # Flush run when type changes or type is not deduplicated
+        if event_type in _NO_DEDUP or not run or event_type != run[0].event_type:
+            _flush_run()
+            if event_type in _NO_DEDUP:
+                rows.append(
+                    _TimelineRow(
+                        ev.time_str,
+                        ev.ev_text,
+                        ev.settings_text,
+                        ev.source,
+                        ev.indoor,
+                        ev.outdoor,
+                        ev.ev_cell,
+                        ev.settings_cell,
+                    )
+                )
+            else:
+                # Start a new run; temps are from the first event in the run
+                run = [ev]
+                run_settings = (ev.settings_text, ev.settings_cell)
+        else:
+            # Continue run -- update last time and settings (last setpoint wins); temps stay from first event
+            run.append(ev)
+            if ev.settings_text:
+                run_settings = (ev.settings_text, ev.settings_cell)
+
+    _flush_run()
+    return rows, limited
 
 
 def _build_timeline_rows(
@@ -3812,79 +4230,45 @@ def _build_timeline_rows(
     (time_str, event_text, settings_text, source, indoor, outdoor), in chronological
     order, and `limited` is True if the window contained more than `limit` events.
     """
-    rendered, limited = _render_timeline_events(raw_event_log, config, hours, now, limit=limit)
-    if not rendered:
-        return [], limited
+    rows, limited = _collapse_timeline_rows(raw_event_log, config, hours, now, limit=limit)
+    return [r[:6] for r in rows], limited
 
-    rows: list[
-        tuple[str, str, str, str, str, str]
-    ] = []  # (time_str, event_text, settings_text, source, indoor, outdoor)
 
-    # Dedup state
-    run_type: str | None = None
-    run_count = 0
-    run_first_time: str = ""
-    run_last_time: str = ""
-    run_ev_text: str = ""
-    run_settings: str = ""
-    run_source: str = ""
-    run_indoor: str = ""
-    run_outdoor: str = ""
+def build_event_timeline_wire(
+    raw_event_log: list[Any],
+    config: dict[str, Any],
+    hours: float,
+    now: datetime.datetime,
+    newest_first: bool = False,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """The Activity record as structured rows for the dashboard (Issue #1341).
 
-    def _flush_run() -> None:
-        nonlocal \
-            run_type, \
-            run_count, \
-            run_first_time, \
-            run_last_time, \
-            run_ev_text, \
-            run_settings, \
-            run_source, \
-            run_indoor, \
-            run_outdoor
-        if run_type is None or run_count == 0:
-            return
-        if run_count == 1:
-            # A run of exactly one event was never actually deduplicated with anything —
-            # this is the common case, not a collapsed group. Use the renderer's real
-            # event text (which carries the descriptive reason) instead of the bare
-            # _humanize_type(run_type) fallback, which silently discarded it for every
-            # event type not on the small _NO_DEDUP allowlist.
-            rows.append((run_first_time, run_ev_text, run_settings, run_source, run_indoor, run_outdoor))
-        else:
-            time_range = f"{run_first_time}-{run_last_time}" if run_first_time != run_last_time else run_first_time
-            event_text = f"{_humanize_type(run_type)} x{run_count} ({time_range})"
-            rows.append((run_first_time, event_text, run_settings, run_source, run_indoor, run_outdoor))
-        run_type = None
-        run_count = 0
-
-    for ev in rendered:
-        event_type = ev.event_type
-        # Flush run when type changes or type is not deduplicated
-        if event_type in _NO_DEDUP or event_type != run_type:
-            _flush_run()
-            if event_type in _NO_DEDUP:
-                rows.append((ev.time_str, ev.ev_text, ev.settings_text, ev.source, ev.indoor, ev.outdoor))
-            else:
-                # Start a new run; temps are from the first event in the run
-                run_type = event_type
-                run_count = 1
-                run_first_time = ev.time_str
-                run_last_time = ev.time_str
-                run_ev_text = ev.ev_text
-                run_settings = ev.settings_text
-                run_source = ev.source
-                run_indoor = ev.indoor
-                run_outdoor = ev.outdoor
-        else:
-            # Continue run -- update last time and settings (last setpoint wins); temps stay from first event
-            run_count += 1
-            run_last_time = ev.time_str
-            if ev.settings_text:
-                run_settings = ev.settings_text
-
-    _flush_run()
-    return rows, limited
+    Each row carries the English text the table shows (``event``/``settings``) and, where the cell is a message, its
+    wire form (``event_msg``/``settings_msg``, ``Msg.to_wire()``; ``None`` for a plain-text cell) so the dashboard
+    renders it in the viewer's language. ``limited_msg``/``whf_warning_msg`` are the two table-level notices.
+    """
+    rows, limited = _collapse_timeline_rows(raw_event_log, config, hours, now, limit=limit)
+    ordered = list(reversed(rows)) if newest_first else rows
+    return {
+        "rows": [
+            {
+                "time": r.time_str,
+                "event": r.event_text,
+                "settings": r.settings_text,
+                "source": r.source,
+                "indoor": r.indoor,
+                "outdoor": r.outdoor,
+                "event_msg": _cell_wire(r.event_cell),
+                "settings_msg": _cell_wire(r.settings_cell),
+            }
+            for r in ordered
+        ],
+        "limited": limited,
+        "limited_msg": _m("timeline_limited", limit=limit).to_wire() if limited else None,
+        "no_events_msg": _m("no_events_in_window").to_wire() if not rows else None,
+        "whf_warning_msg": _m("whf_command_only_banner").to_wire() if _whf_warning_applies(config) else None,
+    }
 
 
 _SESSION_GAP_MINUTES = 25  # gap-bounded session boundary threshold (Issue #925)

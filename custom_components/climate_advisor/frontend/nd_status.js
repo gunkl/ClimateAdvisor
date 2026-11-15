@@ -64,29 +64,36 @@
   }
   // automation_status as a phrase: "following today's plan", "cooling with outside air (nat-vent)", or the status's
   // own phrase ("paused — door/window open", "grace period (manual) — 20 min ...").
-  // With the payload's automation_status_msg the backend's own message is shown. Without it (backend not yet sending
-  // one) the old status-text match below is the fallback: it waits on the status code (Issue #1341, lane L4).
-  function automationPhrase(s, d) {
-    if (d && d.automation_status_msg) { var shown = ND.text(d, 'automation_status'); if (shown) return shown; }
-    s = String(s == null ? '' : s).trim();
-    var m = /^active(?: \((away|vacation|guest)\))?(.*)$/.exec(s);
-    if (m) return t('phrase_following', { plan: m[1] || 'today', rest: m[2] });
-    if (s === 'disabled') return t('phrase_disabled');
-    if (!s || s === 'unknown') return t('phrase_unknown');
-    if (/^nat-vent/.test(s)) return t('phrase_natvent', { status: s });
-    return s;
+  // Branches on the payload's stable `status_code` (never on the English text). The message itself (`automation_status_msg`)
+  // is the status in the viewer's language; the prose field (backend language) is all there is when the backend sent no
+  // message (a plain-text status): it is shown as sent.
+  function wireText(w) { return w == null ? '' : CAI18N.tw(w); }
+  function automationPhrase(d) {
+    d = d || {};
+    var code = d.status_code, shown = ND.text(d, 'automation_status');
+    var act = /^active(?:_(away|vacation|guest))?$/.exec(code || '');
+    if (act) { // "active" plus the fan requests that ride on it (with_fan_requests) is still "following the plan"
+      var w = d.automation_status_msg, rest = w && w.key === 'status.auto.with_fan_requests' && w.params ? wireText(w.params.requests) : '';
+      return t('phrase_following', { plan: act[1] || 'today', rest: rest });
+    }
+    if (code === 'disabled') return t('phrase_disabled');
+    if (code === 'nat_vent' || code === 'nat_vent_soft_start') return t('phrase_natvent', { status: shown });
+    if (!shown || shown === 'unknown') return t('phrase_unknown');
+    return shown;
   }
-  // A fan status as a sentence: "Whole-house fan is off", "HVAC fan is running (manual override)".
-  // The same fallback rule as automationPhrase: with <field>_msg the backend's message is the status, else the status
-  // text is read (waits on the fan status code).
-  var FAN_STATE = { inactive: 'fan_off', off: 'fan_off', active: 'fan_running', running: 'fan_running', disabled: 'fan_unmanaged' };
-  function fanSentence(name, s, d, field) {
-    if (d && field && d[field + '_msg']) { var shown = ND.text(d, field); if (shown) return t('fan_line', { name: name, status: shown }); }
-    s = String(s == null ? '' : s).trim();
-    if (s === 'active (unconfirmed)') return t('fan_unconfirmed', { name: name });
-    if (/^nat-vent \(session active, fan idle\)/.test(s)) return t('fan_resting', { name: name, rest: s.replace(/^nat-vent \(session active, fan idle\)/, '') });
-    var m = /^(inactive|active|running|off|disabled)\b(.*)$/.exec(s);
-    return m ? t(FAN_STATE[m[1]], { name: name, rest: m[2] }) : t('fan_line', { name: name, status: s || t('fan_unknown') });
+  // A fan status as a sentence: "Whole-house fan is off", "HVAC fan is running (manual override)". Branches on the
+  // payload's `<field>_code`; a status with rate-limit / blind-indoor notes (or a code this page does not know) is the
+  // backend's own message after the name.
+  var FAN_SENTENCE = {
+    disabled: 'fan_unmanaged', inactive: 'fan_off', active: 'fan_running', active_unconfirmed: 'fan_unconfirmed',
+    running_manual_override: 'fan_running_manual', off_manual_override: 'fan_off_manual', running_untracked: 'fan_running_untracked',
+    running_thermostat: 'fan_running_thermostat', nat_vent_idle: 'fan_resting'
+  };
+  function fanSentence(name, d, field) {
+    d = d || {};
+    var code = d[field + '_code'], w = d[field + '_msg'], key = FAN_SENTENCE[code];
+    if (key && !(w && w.key === 'status.fan_status.compound')) return t(key, { name: name, rest: '' });
+    return t('fan_line', { name: name, status: ND.text(d, field) || t('fan_unknown') });
   }
   // What the thermostat is doing, in one line: "Heating to 68°F · idle now", "Keeping between 66°F and 74°F", with
   // "Climate Advisor wants 70°F" when the thermostat disagrees with CA (#266, #402, #1194 d). Returns HTML.
@@ -123,9 +130,9 @@
   }
   function fanLines(d) {
     var out = '';
-    if (d.whf_status != null) out += '<div class="n">' + ND.iso(fanSentence(t('name_whf'), d.whf_status, d, 'whf_status')) + '</div>';
-    if (d.hvac_fan_status != null) out += '<div class="n">' + ND.iso(fanSentence(t('name_hvac_fan'), d.hvac_fan_status, d, 'hvac_fan_status')) + '</div>';
-    if (d.whf_status == null && d.hvac_fan_status == null) out += '<div class="n">' + ND.iso(fanSentence(t('name_fan'), d.fan_status || 'disabled', d, 'fan_status')) + '</div>';
+    if (d.whf_status != null) out += '<div class="n">' + ND.iso(fanSentence(t('name_whf'), d, 'whf_status')) + '</div>';
+    if (d.hvac_fan_status != null) out += '<div class="n">' + ND.iso(fanSentence(t('name_hvac_fan'), d, 'hvac_fan_status')) + '</div>';
+    if (d.whf_status == null && d.hvac_fan_status == null) out += '<div class="n">' + ND.iso(fanSentence(t('name_fan'), d, 'fan_status')) + '</div>';
     if (d.fan_remote_timer_hours != null) {
       out += '<div class="n">' + ND.iso(d.fan_remote_timer_ends
         ? t('fan_timer_ends', { hours: num(d.fan_remote_timer_hours, 1), time: ND.fmtTime(d.fan_remote_timer_ends) })
@@ -139,10 +146,9 @@
   function tile(id, label, value, notes, title) {
     return '<div class="tile" id="' + id + '"' + (title ? ' title="' + esc(title) + '"' : '') + '><div class="l" title="' + esc(label) + '">' + esc(label) + '</div><div class="v">' + value + '</div>' + (notes || '') + '</div>';
   }
-  // Sensor roles come from the payload as English words (the backend has no role code yet: waits on lane L4); each
-  // known one is a catalog word, an unlisted one is shown as sent.
-  var ROLE_KEYS = { 'thermostat': 'role_thermostat', "thermostat's finer sensor": 'role_finer', 'bedroom sensor': 'role_bedroom', 'room sensor': 'role_room' };
-  function roleText(m) { return m.role_code && CAI18N.has(S + 'role_' + m.role_code) ? t('role_' + m.role_code) : ROLE_KEYS[m.role] ? t(ROLE_KEYS[m.role]) : String(m.role); }
+  // A sensor's role: the backend's `role_msg` (status.sensor_role.*) in the viewer's language; `role_code` is thermostat |
+  // finer_sensor | bedroom_sensor | room_sensor | ca_reading.
+  function roleText(m) { return ND.text(m, 'role'); }
 
   function renderCards() {
     var d = ND.status, grid = ND.$('status-grid');
@@ -155,16 +161,16 @@
       (d.remote_offset && d.remote_offset.text ? '<div class="n remote-offset-line">' + esc(ND.text(d.remote_offset, 'text')) + '</div>' : '');
     // What is happening now, and why: the Status sentence rides on the hallway (thermostat) card. The header health
     // line only says whether automation is on; this says what it is doing (nat-vent, a grace period, a pause).
-    var statusLine = '<div class="n" id="status-automation-line">' + ND.iso(t('automation_line', { phrase: automationPhrase(d.automation_status, d) })) + '</div>';
+    var statusLine = '<div class="n" id="status-automation-line">' + ND.iso(t('automation_line', { phrase: automationPhrase(d) })) + '</div>';
     var cards = [];
     var metas = ((cd || {}).indoor_sensors || []).filter(function (m) { return latestReading(cd, m.id); });
     if (!metas.length) {
       cards.push(tile('status-card-hallway', t('card_indoor_hvac'), indoor, hvacNote + statusLine +
         (d.sleep_indoor_sensor_active ? '<div class="n" id="status-sleep-sensor">' + esc(t('reads_bedroom_sleep')) + '</div>' : '')));
     } else {
-      var holder = metas.filter(function (m) { return m.role_code ? m.role_code === 'thermostat' : m.role === 'thermostat'; })[0] || metas.filter(function (m) { return m.primary; })[0] || metas[0];
+      var holder = metas.filter(function (m) { return m.role_code === 'thermostat'; })[0] || metas.filter(function (m) { return m.primary; })[0] || metas[0];
       metas.forEach(function (m, i) {
-        var r = latestReading(cd, m.id), isBed = m.role_code ? m.role_code === 'bedroom' : m.role === 'bedroom sensor';
+        var r = latestReading(cd, m.id), isBed = m.role_code === 'bedroom_sensor';
         var reads = isBed ? !!d.sleep_indoor_sensor_active : (m.primary && !d.sleep_indoor_sensor_active);
         var id = m === holder ? 'status-card-hallway' : isBed ? 'status-card-bedroom' : 'status-card-sensor-' + i;
         var note = (m === holder ? hvacNote + statusLine : '') +

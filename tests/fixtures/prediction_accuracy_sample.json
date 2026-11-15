@@ -5,7 +5,10 @@
   {
    "id": "_ca",
    "name": "Climate Advisor reading",
+   "name_msg": {"key": "status.sensor_meta.ca_name", "params": {}},
    "role": "the reading Climate Advisor uses",
+   "role_code": "ca_reading",
+   "role_msg": {"key": "status.sensor_meta.ca_role", "params": {}},
    "has_v4": true,
    "has_readings": true
   },
@@ -13,6 +16,8 @@
    "id": "sensor.hallway_temp",
    "name": "Hallway",
    "role": "thermostat's finer sensor",
+   "role_code": "finer_sensor",
+   "role_msg": {"key": "status.sensor_role.finer_sensor", "params": {}},
    "has_v4": true,
    "has_readings": true
   },

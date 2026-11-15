@@ -665,7 +665,7 @@ def test_actions_are_the_classic_posts():
     ],
 )
 def test_context_banners(text):
-    assert text in JS["nd_core.js"]
+    assert text in JS["nd_core.js"] + CATALOG_TEXT  # Issue #1341: the words are catalog messages (dashboard.banner.*)
 
 
 def test_banner_level_roles_and_status_only_promises():
@@ -855,13 +855,16 @@ def test_accuracy_page_is_never_framed_or_opened_in_a_new_tab_1491():
 def test_ha_login_lookup_also_reaches_the_top_window_1491():
     """Issue #1491 belt and braces: each page's HA-login lookup tries the parent, then the top window."""
     pages = {
-        "nd_core.js": JS["nd_core.js"],
         "pa_view.js": (FE / "pa_view.js").read_text("utf-8"),  # Issue #1497: the accuracy page's view and auth
         "index.html": (FE / "index.html").read_text("utf-8"),
     }
     for name, src in pages.items():
         assert "[window.parent, window.top]" in src, name
         assert "window.parent.document" not in src, name
+    # Issue #1341: the new dashboard asks the shared i18n runtime (CAI18N.hass()), which tries the parent, then the top window
+    runtime = (FE / "i18n.js").read_text("utf-8")
+    assert "wins.push(root.parent)" in runtime and "wins.push(root.top)" in runtime
+    assert "I.hass()" in JS["nd_core.js"] and "window.parent.document" not in JS["nd_core.js"]
 
 
 def test_analysis_draws_the_shared_accuracy_view_in_the_card_1497():
@@ -1040,7 +1043,9 @@ def test_night_card_is_a_self_contained_component():
         "fahrenheit",
         "celsius",
     ):
-        assert frag in card or frag.lower() in card.lower(), frag
+        assert frag in card + CATALOG_TEXT or frag.lower() in (card + CATALOG_TEXT).lower(), (
+            frag
+        )  # words: catalog (#1341)
     status = JS["nd_status.js"]
     assert "NDNightCard.mount" in status and "NDNightCard.fromStrategy" in status
     assert "Sample data, not your house" in HTML  # the labelled fallback for an install without the endpoint
@@ -1103,7 +1108,7 @@ def test_status_tab_reads_the_live_night_plan_and_gates_its_figures():
     for figure in ("bed_min", "bed_max", "bed_wake", "d1(", "heat_min", "<svg", "<table"):
         assert figure not in plan_only, f"plan-only view must not show {figure}"
     # low-confidence steps keep the qualifier (decision C13)
-    assert "may help" in card
+    assert "may help" in card + CATALOG_TEXT and "t('may_help')" in card
 
 
 def test_status_places_the_same_actors_as_the_timeline():

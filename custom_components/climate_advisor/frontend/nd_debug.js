@@ -86,7 +86,7 @@
       return names.length ? names.map(function (n) { return (v[n].friendly_name || n) + ': ' + T(v[n].open ? 'open' : 'closed'); }).join('; ') : T('none');
     }
     if (k === 'comfort_family_last_switch' && v && typeof v === 'object') {
-      return (v.from || '?') + ' → ' + (v.to || '?') + ' at ' + tDay(v.ts) + (v.reason ? ' (' + v.reason + ')' : '');
+      return (v.from || '?') + (CAI18N.dir === 'rtl' ? ' ← ' : ' → ') + (v.to || '?') + ' at ' + tDay(v.ts) + (v.reason ? ' (' + v.reason + ')' : '');
     }
     return fmt(v);
   }
@@ -137,12 +137,13 @@
     rows.push(['Decisions use', dec]);
     v = v && !v.error ? v : {};
     var learned = DASH, lf = v.last_fit || {};
-    if (v.has_model === false) learned = 'not yet';
+    var notYet = v.has_model === false;
+    if (notYet) learned = 'not yet';
     else if (has(v.fitted_at)) {
       learned = tDay(v.fitted_at) + (has(v.span_days) ? ' from ' + count(Math.round(v.span_days * 10) / 10, 'day', 'days') + ' of history' : '') + (has(v.n_anchors) ? ', ' + count(v.n_anchors, 'point', 'points') : '');
       if (lf.at && lf.ok !== false) learned += ' (' + ({ first: 'first fit', nightly: 'nightly refit', retry: 'retry' }[lf.reason] || String(lf.reason || 'fit').replace(/_/g, ' ')) + (has(lf.seconds) ? ', ' + lf.seconds + ' s' : '') + ')';
     }
-    if (lf.at && lf.ok === false) learned = (learned === DASH || learned === 'not yet' ? '' : learned + '; ') + 'last attempt ' + tDay(lf.at) + ' failed';
+    if (lf.at && lf.ok === false) learned = (learned === DASH || notYet ? '' : learned + '; ') + 'last attempt ' + tDay(lf.at) + ' failed';
     rows.push(['Last learned', learned]);
     var mae = v.mae_by_lead && typeof v.mae_by_lead === 'object' ? v.mae_by_lead : {};
     var leads = Object.keys(mae).filter(function (k) { return mae[k] != null; }).sort(function (a, b) { return parseFloat(a) - parseFloat(b); });

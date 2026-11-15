@@ -15,10 +15,10 @@
   var AREAS = ['common', 'notify', 'status', 'timeline', 'learning', 'night', 'activity', 'briefing', 'dashboard',
     'settings', 'errors', 'ai'];
   var RTL = ['ar'];
-  // #1341: the page layout flips to right-to-left only once the dashboard CSS uses logical properties
-  // (Stage 2 lane L9 sets this true in the same change). Until then CAI18N.dir still reports 'rtl'
-  // for ar so text code can isolate values, but <html dir> stays ltr so the layout is not broken.
-  var RTL_LAYOUT_READY = false;
+  // #1341: the page layout flips to right-to-left (<html dir="rtl"> for ar) because the dashboard CSS uses logical
+  // properties (the physical_css ratchet is 0 outside the classic index.html, which is never right-to-left). Setting
+  // this false keeps <html dir> ltr for every language while CAI18N.dir still reports 'rtl' for text code.
+  var RTL_LAYOUT_READY = true;
   var FETCH_TIMEOUT_MS = 8000;
 
   var state = {

@@ -130,7 +130,7 @@
     var y = L.yesterday_record, t = L.today_record, n = L.tomorrow_plan, u = ND.sym(L.unit || ND.unit), TL = L.today_live || {};
     var lo = L.comfort_range_low, hi = L.comfort_range_high;
     var tip = T('days.tip', { range: lo != null && hi != null ? 'yes' : 'no', lo: nf(lo, 0), hi: nf(hi, 0), unit: u });
-    function pair(rec, a, b) { return tdisp(rec[a]) + '→' + tdisp(rec[b]); }
+    function pair(rec, a, b) { return tdisp(rec[a]) + (CAI18N.dir === 'rtl' ? '←' : '→') + tdisp(rec[b]); } // forecast → observed: the arrow points the reading direction
     function hl(rec) {
       // Issue #1475: today's observed extremes fill only at end of day; show the outdoor high/low seen so far
       if (rec === t && TL.observed_high_f != null && rec.observed_high_f == null) {
@@ -419,13 +419,32 @@
     applyAiState();
   }
   function reset(label) { var b = $('run-report-btn'); b.disabled = false; b.textContent = T(label === 'Generate' ? 'rep.generate' : 'rep.investigate'); $('report-loading').textContent = T('rep.generating'); $('report-loading').hidden = true; applyAiState(); }
+  // The Activity record as a table in the viewer's language: each row's event / settings is its `_msg` wire message
+  // (CAI18N.text), the notices are `limited_msg` / `whf_warning_msg`; the English markdown `table` stays for copy, download
+  // and the GitHub issue. The diagnostic footer (English, appended after the last table row) is shown below.
+  function activityHtml(resp) {
+    function bold(s) { return esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'); }
+    var rows = resp.rows || [], h = '';
+    if (resp.whf_warning_msg) h += '<div class="banner warn">' + esc(CAI18N.tw(resp.whf_warning_msg)) + '</div>';
+    if (resp.limited_msg) h += '<div class="note">' + esc(CAI18N.tw(resp.limited_msg)) + '</div>';
+    if (!rows.length) return h + '<div class="empty">' + esc(resp.no_events_msg ? CAI18N.tw(resp.no_events_msg) : T('rep.no_events')) + '</div>';
+    h += '<table><thead><tr>' + ['time', 'event', 'settings', 'source', 'indoor', 'outdoor'].map(function (c) { return '<th scope="col">' + esc(T('rep.act_col_' + c)) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+      rows.map(function (r) {
+        return '<tr><td><bdi>' + esc(r.time) + '</bdi></td><td>' + bold(CAI18N.text(r, 'event')) + '</td><td>' + bold(CAI18N.text(r, 'settings')) + '</td><td>' + esc(r.source) + '</td><td><bdi>' + esc(r.indoor) + '</bdi></td><td><bdi>' + esc(r.outdoor) + '</bdi></td></tr>';
+      }).join('') + '</tbody></table>';
+    var lines = String(resp.table || '').split('\n'), last = -1;
+    lines.forEach(function (l, i) { if (l.trim().charAt(0) === '|') last = i; });
+    var footer = last >= 0 ? lines.slice(last + 1).join('\n').trim() : '';
+    return h + (footer ? '<div class="sub" style="margin-top:8px">' + ND.md(footer) + '</div>' : '');
+  }
   async function runActivity() {
     var hours = parseInt($('report-time-window').value, 10) || 12, btn = $('run-report-btn');
     btn.disabled = true; btn.textContent = T('rep.generating'); $('report-loading').hidden = false; $('report-status').textContent = '';
     try {
       var resp = await ND.api('activity_record?hours=' + hours);
       activityTable = resp.table || '';
-      $('report-content').innerHTML = activityTable ? '<div>' + ND.md(activityTable) + '</div>' : '<div class="empty">' + esc(T('rep.no_events')) + '</div>';
+      $('report-content').innerHTML = resp.rows ? '<div>' + activityHtml(resp) + '</div>'
+        : activityTable ? '<div>' + ND.md(activityTable) + '</div>' : '<div class="empty">' + esc(T('rep.no_events')) + '</div>'; // an older backend: the markdown table
       $('report-actions').hidden = false;
     } catch (e) { $('report-status').textContent = T('rep.error', { error: e.message }); } finally { reset('Generate'); }
   }
@@ -479,10 +498,11 @@
       }
       if (!currentReport && acc) { content.innerHTML = '<pre style="white-space:pre-wrap;font-size:12px">' + esc(acc) + '</pre>'; status.textContent = T('rep.stream_ended'); }
     } catch (e) {
-      // The server's error event can carry a code (`ev.code`, e.g. 'ai_not_enabled'); the old English substring test
-      // stays only as a fallback until the backend sends it (listed in the L9b report: ai_investigate error event needs `code`).
-      var cause = e && e.cause, notEnabled = (cause && cause.code === 'ai_not_enabled') || (!(cause && cause.code) && String(e.message).toLowerCase().indexOf('not enabled') >= 0);
-      status.textContent = T('rep.error_not_enabled', { error: e.message, hint: notEnabled ? 'yes' : 'no' });
+      // "AI / investigator not enabled" is the endpoint's HTTP 403 (errors.ai_not_enabled / errors.investigator_not_enabled in
+      // `message_msg`); a failure inside the stream is an SSE error event (plain text, no code). The 403 body is shown in the
+      // viewer's language through its `message_msg`.
+      var notEnabled = !!e && e.status === 403;
+      status.textContent = T('rep.error_not_enabled', { error: (e && e.body && ND.text(e.body, 'message')) || e.message, hint: notEnabled ? 'yes' : 'no' });
       content.innerHTML = '';
     } finally { reset('Investigate'); }
   }

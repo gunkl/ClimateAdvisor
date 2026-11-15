@@ -1,14 +1,10 @@
 {
   "description": "code comparing English prose (Python and JS)",
-  "total": 15,
+  "total": 7,
   "files": {
     "ai_skills_context.py": 1,
     "automation.py": 1,
     "coordinator.py": 4,
-    "diagnostic_snapshot.py": 1,
-    "frontend/chart_v2.js": 2,
-    "frontend/nd_debug.js": 2,
-    "frontend/nd_status.js": 3,
-    "frontend/pa_view.js": 1
+    "diagnostic_snapshot.py": 1
   }
 }

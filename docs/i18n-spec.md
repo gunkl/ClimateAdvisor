@@ -25,7 +25,7 @@ Issue #1341. Plan and recheck record: the #1341 plan (D1-D9, phases P0a-P5). Thi
 - **Language lists:** `index.json` is the source; `i18n.py` and the offline-fallback arrays in `i18n.js` are each checked against it (`tests/test_i18n_engine.py::test_index_json_is_the_single_source_of_the_lists`, `::test_js_language_and_area_lists_match_index_json`), and `tools/i18n_conformance_gen.mjs` reads it.
 - **Backend (D2):** `i18n.hass_language(hass)` = `resolve_language(hass.config.language)`. The backend never mixes two languages.
 - **Dashboard (D2):** per viewer: `?lang=` → parent `hass.language` (the one lookup, `CAI18N.hass()`, which reaches the `home-assistant` element in the parent or top window inside try/catch) → status payload `language` (the backend language, the one documented contract between the two runtimes) → `navigator.language` → `en`. An unsupported code resolves to its nearest shipped language or `en`; it does not fall through to the browser.
-- `<html lang>` is set on every page that loads `i18n.js`, including `entry.html` and `prediction_accuracy.html`. `<html dir>` stays `ltr` for every language, `ar` included, until the dashboard CSS uses logical properties and `RTL_LAYOUT_READY` in `i18n.js` flips to `true` (Stage 2 lane L9, same change); `CAI18N.dir` already reports `rtl` for `ar` so text code can isolate values.
+- `<html lang>` is set on every page that loads `i18n.js`, including `entry.html` and `prediction_accuracy.html`. `<html dir>` is `rtl` for `ar` and `ltr` for every other language (`RTL_LAYOUT_READY` in `i18n.js` is `true`: the dashboard CSS uses logical properties, enforced by the `physical_css` ratchet; the charts' own time axis stays left to right inside an `ltr` chart stack); `CAI18N.dir` reports the language's direction so text code can isolate values.
 - Classic `index.html` stays English (owner Q2).
 
 ## Catalogs (D1)
@@ -96,7 +96,7 @@ Python builds `i18n.Msg(key, **params)`; `i18n.render(msg, lang)` renders it, `r
 
 | Member | Meaning |
 |---|---|
-| `init({statusLanguage, base})` | Resolves the language synchronously (so `lang`/`dir` and `<html lang>` are right at once; `<html dir>` stays `ltr` until `RTL_LAYOUT_READY`), then fetches `index.json` and, for `en` and the chosen language, every area file. Returns a Promise that **always resolves** (a failed fetch leaves English/key fallbacks and one console warning); a later call (for example once the status payload is in) re-resolves and retries. |
+| `init({statusLanguage, base})` | Resolves the language synchronously (so `lang`/`dir` and `<html lang>`/`<html dir>` are right at once; `RTL_LAYOUT_READY` false would keep `<html dir>` `ltr`), then fetches `index.json` and, for `en` and the chosen language, every area file. Returns a Promise that **always resolves** (a failed fetch leaves English/key fallbacks and one console warning); a later call (for example once the status payload is in) re-resolves and retries. |
 | `lang`, `locale`, `dir` | Chosen shipped language; `hass.locale` when the parent has it (else `null`); `ltr`/`rtl` (the direction of the language; see `<html dir>` above). |
 | `timeZone()` | The zone clock times are shown in: IANA id (`server`, the default), `'local'`, or `null` (render the wall clock written in the wire `ts`). |
 | `t(key, params)` | Per-key English fallback; missing everywhere → the key plus one `console.warn`. |

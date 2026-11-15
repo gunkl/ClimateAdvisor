@@ -12,7 +12,9 @@ const STATUS = {
   language: 'de', unit: 'fahrenheit', version: '0.9.9', coordinator_healthy: true, automation_enabled: false,
   day_type: 'mild', hvac_mode: 'heat', hvac_action: 'idle', current_setpoint: 68, ca_target_heat: 70, occupancy_mode: 'away',
   indoor_temp: 71, outdoor_temp: 65, compliance_score: 0.84, hvac_runtime_today: 95, trend_direction: 'warming', trend_magnitude: 3,
-  automation_status: 'active (away)', whf_status: 'inactive', hvac_fan_status: 'running (manual override)',
+  automation_status: 'active (away)', status_code: 'active_away', automation_status_msg: { key: 'status.auto.active_away', params: {} },
+  whf_status: 'inactive', whf_status_code: 'inactive', whf_status_msg: { key: 'status.fan_status.inactive', params: {} },
+  hvac_fan_status: 'running (manual override)', hvac_fan_status_code: 'running_manual_override', hvac_fan_status_msg: { key: 'status.fan_status.running_manual_override', params: {} },
   fan_remote_timer_hours: 2, fan_remote_timer_ends: '2026-11-14T22:30:00-05:00', fan_remote_speed: 3,
   manual_override_active: true, grace_active: false, paused_by_door: true, pause_suppressed_classification_text: 'Door held open',
   contact_status: 'all closed',
@@ -64,8 +66,7 @@ test.describe('Dashboard i18n (Issue #1341, lane L9a)', () => {
     // Data the API sends (names, prose fields, the sample night plan) is shown as sent; a payload-supplied word is not a
     // catalog bypass. The brand name is not translated.
     const DATA = ['Climate Advisor', 'Hallway', 'Bedroom', 'Back door', 'Weather source', 'weather.home', 'Door held open',
-      'Close the windows at 9 PM', 'Set back to 62°F', '10:00 PM', 'Windows closed at night', 'All closed', 'Test briefing',
-      '(manual override)']; // the fan status suffix is backend prose until the status carries a code (waits on lane L4/L7)
+      'Close the windows at 9 PM', 'Set back to 62°F', '10:00 PM', 'Windows closed at night', 'All closed', 'Test briefing'];
     // the night card's own prose (labels, headline, tradeoffs, the options' names) is API data too
     const nightData = await page.evaluate(() => Array.from(document.querySelectorAll('#night-card .rec > div:nth-child(2), #night-card #night-headline, #night-card #night-tradeoffs li, #night-card #night-source-note, #night-card .note-box, #night-card tbody td:first-child, #night-card .pill, #night-card tbody td:last-child'))
       .map((e) => e.textContent.replace(/\s+/g, ' ').trim()).filter(Boolean));
@@ -121,5 +122,64 @@ test.describe('Dashboard i18n (Issue #1341, lane L9a)', () => {
     await expect(page.locator('#actions-btn')).toHaveAttribute('aria-expanded', 'true');
     await page.locator('#actions-menu [data-action="refresh"]').click();
     await expect(page.locator('#actions-menu')).toBeHidden();
+  });
+});
+
+// Issue #1341 (PR C): the dashboard branches on the backend's stable codes and renders its `_msg` siblings; right-to-left.
+test.describe('Dashboard i18n: codes, Activity record rows, Settings values, RTL (Issue #1341, PR C)', () => {
+  test('status sentences come from the codes (not the English text); a compound fan note falls back to the backend message', async ({ page }) => {
+    await openWith(page, '?lang=en', {
+      status_code: 'active', automation_status: 'active', automation_status_msg: { key: 'status.auto.active', params: {} },
+      whf_status: 'running (untracked)', whf_status_code: 'running_untracked', whf_status_msg: { key: 'status.fan_status.running_untracked', params: {} },
+      hvac_fan_status_code: 'running_manual_override',
+      fan_status_code: 'inactive',
+    });
+    await expect(page.locator('#status-automation-line')).toHaveText('Climate Advisor: following today’s plan');
+    await expect(page.locator('#status-card-doors')).toContainText('Whole-house fan is running (untracked)');
+    await expect(page.locator('#status-card-doors')).toContainText('HVAC fan is running (manual override)');
+    // nat-vent and a status this page has no sentence for: the backend message is shown as it is
+    await openWith(page, '?lang=en', { status_code: 'tou_hold', automation_status: 'holding', automation_status_msg: { key: 'status.auto.tou_high_cost', params: { ends: ' until 4 PM' } } });
+    await expect(page.locator('#status-automation-line')).toContainText('TOU high-cost period active until 4 PM');
+  });
+
+  test('ar: <html dir> is rtl, the status page does not scroll sideways, and glyphs that point mirror', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    await openWith(page, '?lang=ar');
+    expect(await page.evaluate(() => [document.documentElement.lang, document.documentElement.dir, CAI18N.dir])).toEqual(['ar', 'rtl', 'rtl']);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => getComputedStyle(document.querySelector('#status-grid')).direction)).toBe('rtl');
+    expect(errors).toEqual([]);
+  });
+
+  test('Settings: enum-like values are catalog words; a source value is its message', async ({ page }) => {
+    await page.route('**/api/climate_advisor/config*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ settings: [
+      { key: 'primary_engine', value: 'v4', label: 'Primary Prediction Engine', description: '', category: 'x' },
+      { key: 'fan_mode', value: 'whole_house_fan', label: 'Fan Mode', description: '', category: 'x' },
+      { key: 'temp_unit', value: 'celsius', label: 'Temperature Unit', description: '', category: 'x' },
+      { key: 'shadow_engine', value: 'none', label: 'Shadow', description: '', category: 'x' },
+      { key: 'indoor_temp_source', value: 'Thermostat’s built-in sensor', value_msg: { key: 'settings.temp_source.reason', params: { label: { $t: 'code', key: 'settings.temp_source.climate_fallback' }, reason: { $t: 'code', key: 'activity.sensor_reason_stale' }, consequence: { $t: 'code', key: 'settings.temp_source.consequence_paused' } } }, label: 'Indoor Temp Source', description: '', category: 'x' },
+    ] }) }));
+    await openWith(page, '?lang=en#settings');
+    const rows = page.locator('#set-groups');
+    await expect(rows).toContainText('Whole-house fan');
+    await expect(rows).toContainText('Celsius (°C)');
+    await expect(rows).toContainText('Thermostat\'s built-in sensor (sensor stopped updating — indoor decisions paused)');
+    expect(await rows.innerText()).not.toMatch(/whole_house_fan|celsius\b/);
+  });
+
+  test('Analysis: the Activity record shows its rows in the viewer language from event_msg / settings_msg', async ({ page }) => {
+    await page.route('**/i18n/activity/de.json', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ 'activity.action_fan_activated': 'Lüfter eingeschaltet' }) }));
+    await page.route('**/api/climate_advisor/activity_record*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      table: '| Time | Event | Settings | Source | Indoor | Outdoor |\n|---|---|---|---|---|---|\n| 10:00 | Fan activated | | automation | 71°F | 60°F |\n\nFOOTER LINE',
+      rows: [{ time: '10:00', event: 'Fan activated', settings: '', source: 'automation', indoor: '71°F', outdoor: '60°F', event_msg: { key: 'activity.action_fan_activated', params: {} }, settings_msg: null }],
+      limited_msg: null, no_events_msg: null, whf_warning_msg: null, hours: 12, is_truncated: false,
+    }) }));
+    await openWith(page, '?lang=de#analysis');
+    await page.selectOption('#report-type', 'activity_record');
+    await page.click('#run-report-btn');
+    await expect(page.locator('#report-content table td', { hasText: 'Lüfter eingeschaltet' })).toBeVisible();
+    await expect(page.locator('#report-content')).toContainText('FOOTER LINE');
+    expect(await page.locator('#report-content th').count()).toBe(6);
   });
 });

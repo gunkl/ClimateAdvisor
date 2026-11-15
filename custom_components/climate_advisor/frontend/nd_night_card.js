@@ -76,8 +76,6 @@
     return {
       live: true, source_note: p ? I.text(p, 'source_note') : '', show_numbers: !p || p.show_numbers !== false, unit: p && p.unit, headline: p ? I.text(p, 'headline') : '',
       tradeoffs: ((p && p.tradeoffs) || []).map(function (x) { return { text: I.text(x, 'text') }; }),
-      // the backend's note_msg is the note body, without the "Not validated yet." lead-in the prose field carries
-      note_is_body: !!(p && p.note_msg),
       nights: rows.length ? [{ title: t('title_tonight'), t: grid, out: null, floor: F(p.floor_f), ceiling: F(p.ceiling_f), start: p.start, end: p.end, rows: rows }] : []
     };
   }
@@ -156,7 +154,7 @@
       var yt = '', grid = '';
       var step = celsius ? 1 : 2;
       for (var v = Math.ceil(lo / step) * step; v <= hi; v += step) {
-        yt += '<div style="position:absolute;right:2px;top:' + (Y(v) / H * 100) + '%;transform:translateY(-50%)"><bdi>' + esc(n0(v)) + '°</bdi></div>';
+        yt += '<div style="position:absolute;inset-inline-end:2px;top:' + (Y(v) / H * 100) + '%;transform:translateY(-50%)"><bdi>' + esc(n0(v)) + '°</bdi></div>';
         grid += '<line x1="0" x2="' + W + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="var(--rule)" stroke-width="1" vector-effect="non-scaling-stroke"></line>';
       }
       var xt = '';
@@ -176,7 +174,7 @@
         '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%" role="img" aria-label="' + esc(label) + '">' + grid +
         '<rect x="0" y="' + Y(D(N.ceiling)) + '" width="' + W + '" height="' + (Y(D(N.floor)) - Y(D(N.ceiling))) + '" fill="var(--band)"></rect>' +
         (hasOut ? '<path d="' + path(N.out) + '" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"></path>' : '') + lines + '</svg>' +
-        '<div style="position:absolute;right:4px;top:2px;font-size:11px;color:var(--muted)">' + iso(hasOut ? t('legend_band_outdoor', { lo: outLo, hi: outHi }) : t('legend_band')) + '</div></div></div>' +
+        '<div style="position:absolute;inset-inline-end:4px;top:2px;font-size:11px;color:var(--muted)">' + iso(hasOut ? t('legend_band_outdoor', { lo: outLo, hi: outHi }) : t('legend_band')) + '</div></div></div>' +
         '<div dir="ltr" style="display:flex;gap:8px"><div style="width:30px"></div><div style="position:relative;flex:1;min-width:0;height:16px;font-size:11px;color:var(--muted)" aria-hidden="true">' + xt + '</div></div>';
 
       var dash = '—';
@@ -194,10 +192,9 @@
         h += '<ul class="note" id="night-tradeoffs" aria-label="' + esc(t('tradeoffs_label')) + '" style="margin:0;padding-inline-start:18px">' + data.tradeoffs.map(function (x) { return '<li>' + esc(x.text) + '</li>'; }).join('') + '</ul>';
       }
       if (data.source_note) h += '<div class="sub" id="night-source-note">' + esc(data.source_note) + '</div>';
-      // The "Not validated yet." lead-in: with the backend's note_msg the note is the body and the lead-in is the catalog's.
-      // Without it the prose field carries the lead-in itself, so it is cut off the front (a text match: waits on the
-      // note's code, lane L6).
-      if (data.note) h += '<div class="note-box"><strong>' + esc(t('not_validated')) + '</strong> ' + esc(data.note_is_body ? data.note : String(data.note).replace(/^Not validated yet\.\s*/, '')) + '</div>';
+      // The "Not validated yet." lead-in is the catalog's; the note is its body (only the labelled sample carries a card-level
+      // note: the live strategy has none, its option notes ride on each row).
+      if (data.note) h += '<div class="note-box"><strong>' + esc(t('not_validated')) + '</strong> ' + esc(data.note) + '</div>';
       el.innerHTML = h;
     }
 

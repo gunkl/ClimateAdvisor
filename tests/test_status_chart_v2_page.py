@@ -363,6 +363,8 @@ def test_band_is_labelled_with_the_sensor_it_applies_to_in_key_and_hover():
         and chart_en()["band.named"] == "Band ({names})"
         and "names: names.join(' / ')" in INDEX
     )
-    assert "e.band_sensor" in _func("_bandLabelAt") and "bedroom sensor" in _func("_sensorLabel")
+    assert "e.band_sensor" in _func("_bandLabelAt") and "'bedroom_sensor'" in _func(
+        "_sensorLabel"
+    )  # the role is a code (#1341)
     assert "_bandLabelInView()" in _func("renderKey")
     assert "_bandLabelAt(ms)" in _func("_renderReadout")

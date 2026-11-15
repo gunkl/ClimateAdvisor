@@ -228,7 +228,9 @@ class TestConfigViewTemperatureUnits:
         delta_keys = {k for k, m in CONFIG_METADATA.items() if m.get("display_transform") == "temp_delta"}
         assert abs_keys == set(self.ABS_KEYS)
         assert delta_keys == set(self.DELTA_KEYS)
-        assert all("unit" not in m for m in CONFIG_METADATA.values())
+        assert all(
+            m.get("unit") in (None, "min", "s") for m in CONFIG_METADATA.values()
+        )  # only static time units; temperature units ride on the response (#1341)
 
     def test_celsius_absolute_settings_are_converted_with_unit(self):
         s = self._settings({"temp_unit": "celsius", "comfort_heat": 71.6, "comfort_cool": 75.2, "threshold_hot": 84.2})

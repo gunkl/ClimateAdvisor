@@ -36,9 +36,16 @@
     if (unit === 'celsius' || unit === '°C') return numText(v) + '°C';
     return numText(v) + (unit ? ' ' + unit : '');
   }
+  // An enum-like setting (engine, fan mode, unit, ...): the stored code as its catalog word (settings.enum.<key>.<code>);
+  // anything else (an entity id) is shown as stored.
+  function enumText(key, v) {
+    var k = 'enum.' + key + '.' + v;
+    return typeof v === 'string' && CAI18N.has('settings.' + k) ? T(k) : null;
+  }
   function fmt(s) {
     var v = s.value;
     if (s.value_msg) { var vm = CAI18N.tw(s.value_msg); if (vm && vm !== s.value_msg.key) return vm; }
+    var en = enumText(s.key, v); if (en != null) return en;
     if (v === true) return T('value.on'); if (v === false) return T('value.off'); if (v == null || v === '') return T('value.not_set');
     if (Array.isArray(v)) return v.length ? v.join(', ') : T('value.none');
     if (typeof v === 'object') return JSON.stringify(v);
@@ -52,7 +59,7 @@
     var d = c.default, txt;
     if (d === true) txt = T('value.on'); else if (d === false) txt = T('value.off');
     else if (typeof d === 'number') txt = withUnit(d, c.unit || s.unit);
-    else txt = String(d) + (c.unit ? ' ' + c.unit : '');
+    else txt = (enumText(key, d) || String(d)) + (c.unit ? ' ' + c.unit : '');
     return T('default_value', { value: txt });
   }
 

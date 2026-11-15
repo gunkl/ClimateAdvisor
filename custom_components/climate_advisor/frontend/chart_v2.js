@@ -249,6 +249,8 @@
   const _CAT = 'dashboard.chart.';
   function _lang() { return window.CAI18N && window.CAI18N.lang ? window.CAI18N.lang : 'en'; }
   function _isRtl() { return !!(window.CAI18N && window.CAI18N.dir === 'rtl'); }
+  // A pointing glyph in a message (the "▸" of "▸ Edit") mirrors in right-to-left pages; "▾" (down) never does.
+  function _flipGlyph(html) { return html.replace(/▸/g, '<span class="dir-flip">▸</span>'); }
   // Locale for Intl calls: English keeps the browser's own locale (as before), any other language its own.
   function _loc() { const l = _lang(); return l === 'en' ? [] : l; }
   // A dynamic Latin name inside right-to-left text: isolate it (what the Python renderer does for ar).
@@ -977,8 +979,8 @@
   // The comfort band applies to whichever sensor Climate Advisor was reading (chart_log band_sensor): say which.
   function _sensorLabel(sid) {
     const m = ((_lastChartData || {}).indoor_sensors || []).find(x => x.id === sid);
-    // m.role is the backend's English role word (matched here until the payload carries a role code)
-    return m ? (m.role === 'bedroom sensor' ? _t('band.sensor_sleep', { name: _iso(_bk(m, 'name')) }) : _iso(_bk(m, 'name'))) : null;
+    // m.role_code is the backend's stable sensor role (thermostat | finer_sensor | bedroom_sensor | room_sensor | ca_reading)
+    return m ? (m.role_code === 'bedroom_sensor' ? _t('band.sensor_sleep', { name: _iso(_bk(m, 'name')) }) : _iso(_bk(m, 'name'))) : null;
   }
 
   function _bandLabelAt(ms) {
@@ -1200,8 +1202,8 @@
     const v4Off = (eng.engines || []).some(x => x.id === 'v4' && !x.running) || !!_capLock(cd, 'v4_running');
     if (_v4Learning.length || (!ready && _shown('v4'))) {
       // the sensor's role when it says which one ("thermostat", "bedroom sensor"), else its name
-      const KNOWN = ['thermostat', 'bedroom sensor', "thermostat's finer sensor"];
-      const names = [...new Set(_v4Learning.map(m => KNOWN.includes(m.role) ? _bk(m, 'role') : _bk(m, 'name')))];
+      const KNOWN = ['thermostat', 'bedroom_sensor', 'finer_sensor'];
+      const names = [...new Set(_v4Learning.map(m => KNOWN.includes(m.role_code) ? _bk(m, 'role') : _bk(m, 'name')))];
       // v4.reason says why there is nothing at all: switched off, a failed read (back on the next refresh), or learning
       const reason = (v4 && v4.reason) || '';
       const text = !ready && (v4Off || reason === 'not_running') ? _t('series.why_v4_off')
@@ -1277,7 +1279,7 @@
     sum.setAttribute('aria-expanded', key.open ? 'true' : 'false');
     sum.title = key.open ? _t('key.hide_title') : _t('key.show_title');
     sum.innerHTML = '<span class="key-sum-text">' + escapeHtml(text) + '</span> <span id="chart-key-count">' + escapeHtml(_t(key.open ? 'key.count_open' : 'key.count', { n: n })) + '</span>' +
-      '<span class="key-sum-act" aria-hidden="true">' + escapeHtml(_t(key.open ? 'key.hide' : 'key.edit')) + '</span>';
+      '<span class="key-sum-act" aria-hidden="true">' + _flipGlyph(escapeHtml(_t(key.open ? 'key.hide' : 'key.edit'))) + '</span>';
   }
 
   // ---- drawing ----
@@ -1306,7 +1308,7 @@
   function _baseOptions(win, opts) {
     return {
       responsive: true, maintainAspectRatio: false, animation: false,
-      layout: { padding: { right: opts.padRight || 0, top: opts.padTop || 0 } },
+      layout: { padding: { 'right': opts.padRight || 0, top: opts.padTop || 0 } }, // Chart.js pads canvas sides physically (the stack is always ltr)
       elements: { point: { hoverRadius: 0 } },
       interaction: { mode: 'index', intersect: false },
       plugins: {
@@ -1718,8 +1720,8 @@
     canvas.height = H * dpr;
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
-    const plotLeft = xs ? xs.left : OUT_PX;
-    const plotRight = xs ? xs.right : W - RIGHT_PX;
+    const plotLeft = !xs ? OUT_PX : xs.left;
+    const plotRight = !xs ? W - RIGHT_PX : xs.right;
     const plotW = plotRight - plotLeft;
     const span = rangeMax - rangeMin;
     const xPx = ms => plotLeft + ((ms - rangeMin) / span) * plotW;
@@ -1775,7 +1777,7 @@
       const px = xs.getPixelForValue(ms);
       if (px >= xs.left && px <= xs.right) {
         line.hidden = false;
-        line.style.left = px + 'px';
+        line.style.insetInlineStart = px + 'px'; // inside the always-ltr chart stack: the canvas pixel
         line.classList.toggle('pinned', !!pinned);
         window.__test_cursorPx = px;
       } else {

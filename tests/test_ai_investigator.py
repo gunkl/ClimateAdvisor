@@ -375,6 +375,42 @@ class TestActivitySummaryParsing:
 
         assert any("drift" in rec.message.lower() for rec in caplog.records)
 
+    def test_drift_check_skipped_for_a_non_english_output_language(self, caplog):
+        """Issue #1341 N3: the drift check (English sentinel + AM/PM regex) only runs for English output."""
+        raw = "## ACTIVITY SUMMARY\nAutomation restarted after an update.\n"
+        for lang in ("de", "ar", "ko"):
+            caplog.clear()
+            with caplog.at_level("WARNING"):
+                parse_investigation_response(raw, language=lang)
+            assert not any("drift" in rec.message.lower() for rec in caplog.records), lang
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            parse_investigation_response(raw, language="en")
+        assert any("drift" in rec.message.lower() for rec in caplog.records)
+
+    def test_registered_skill_gets_the_hass_language(self):
+        """The registry hands the parser the Home Assistant language (parser_takes_language)."""
+        from unittest.mock import MagicMock
+
+        from custom_components.climate_advisor.ai_skills import AISkillRegistry, _parse_response
+        from custom_components.climate_advisor.ai_skills_investigator import register_investigator_skill
+
+        registry = AISkillRegistry()
+        register_investigator_skill(registry)
+        skill = next(iter(registry._skills.values()))
+        assert skill.parser_takes_language is True
+        seen: dict = {}
+
+        def parser(raw, language=None):
+            seen["lang"] = language
+            return {}
+
+        skill.response_parser = parser
+        hass = MagicMock()
+        hass.config.language = "de"
+        _parse_response(skill, "raw", hass)
+        assert seen["lang"] == "de"
+
 
 # ---------------------------------------------------------------------------
 # Group 2: investigation_fallback

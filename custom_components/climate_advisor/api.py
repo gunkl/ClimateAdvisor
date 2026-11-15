@@ -1010,12 +1010,13 @@ class ClimateAdvisorConfigView(HomeAssistantView):
                 }
                 if value_msg is not None:
                     entry["value_msg"] = value_msg.to_wire()
-                # Explicit unit (Issue #1341): the temperature symbol, else the metadata's static time unit
-                # ("min"/"s"); the dashboard never parses "(minutes)" out of a label.
+                # Explicit units (Issue #1341): `unit` stays temperature-only (the symbol, as documented); the
+                # static time unit ("min"/"s") rides in its own `time_unit` field, so a classic page that appends
+                # `unit` to the value shows what it always did.
                 if setting_unit is not None:
                     entry["unit"] = setting_unit
-                elif meta.get("unit"):
-                    entry["unit"] = meta["unit"]
+                elif meta.get("time_unit"):
+                    entry["time_unit"] = meta["time_unit"]
                 settings.append(entry)
 
             return self.json({"settings": settings})

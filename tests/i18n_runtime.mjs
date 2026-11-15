@@ -161,6 +161,40 @@ await check('timeZone(): server zone, local and no hass; times follow it (S4)', 
   assert.ok(!/[  ]/.test(loadRuntime({}).CAI18N.fmt.time(ts, 'en')));
 });
 
+await check('hour/intl/dateYear/calendarDay follow timeZone(); iso isolates only in rtl (S2/N1/N5)', async () => {
+  const instant = new Date('2026-11-14T20:05:00Z'); // 05:05 next day in Tokyo, 12:05 in the (Los Angeles) browser
+  const server = { language: 'en', locale: { time_zone: 'server' }, config: { time_zone: 'Asia/Tokyo' } };
+  const tokyo = loadRuntime({ hass: server }).CAI18N;
+  const browser = loadRuntime({}).CAI18N;
+  // fmt.hour: the same zone as fmt.time (it used to be the browser's)
+  assert.equal(tokyo.fmt.hour(instant, 'en'), '5 AM');
+  assert.equal(browser.fmt.hour(instant, 'en'), '12 PM');
+  assert.equal(loadRuntime({ hass: { language: 'en', locale: { time_zone: 'local' }, config: { time_zone: 'Asia/Tokyo' } } }).CAI18N.fmt.hour(instant, 'en'), '12 PM');
+  // fmt.intl: a zone-aware Intl.DateTimeFormat for any options; a locales array is used as given ([] = browser locale)
+  assert.equal(tokyo.fmt.intl({ hour: 'numeric', minute: '2-digit' }, 'en').format(instant), '5:05 AM');
+  assert.equal(tokyo.fmt.intl({ weekday: 'short' }, 'en').format(instant), 'Sun');
+  assert.equal(browser.fmt.intl({ weekday: 'short' }, 'en').format(instant), 'Sat');
+  assert.equal(tokyo.fmt.intl({ year: 'numeric', month: 'numeric', day: 'numeric' }, ['en-US']).format(instant), '11/15/2026');
+  const h24 = loadRuntime({ hass: { language: 'en', locale: { time_zone: 'server', time_format: '24' }, config: { time_zone: 'Asia/Tokyo' } } }).CAI18N;
+  h24.init && await h24.init({});
+  assert.equal(h24.fmt.intl({ hour: 'numeric', minute: '2-digit' }, ['en-US']).format(instant), '05:05');
+  // an unknown zone id falls back to the browser zone for an instant (never throws)
+  assert.equal(loadRuntime({ hass: { language: 'en', config: { time_zone: 'Nope/Zone' } } }).CAI18N.fmt.intl({ hour: 'numeric' }, 'en').format(instant), '12 PM');
+  // N5: the year shows when the date is not in the current year (in the display zone), never otherwise
+  const now = new Date();
+  const lastYear = new Date(now.getTime() - 400 * 86400000);
+  assert.match(browser.fmt.dateYear(lastYear, 'en'), /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/);
+  assert.equal(browser.fmt.dateYear(now, 'en'), browser.fmt.date(now, 'en'));
+  assert.equal(browser.fmt.dateYear('garbage', 'en'), '—');
+  // a calendar day given by parts is that day in any zone
+  assert.equal(tokyo.fmt.calendarDay(2026, 11, 7, 'en'), 'Nov 7');
+  assert.equal(tokyo.fmt.calendarDay(2026, 11, 7, 'en', true), 'Sat Nov 7');
+  // N1: one isolate helper
+  assert.equal(browser.iso('x_y'), 'x_y');
+  const ar = loadRuntime({ hassLanguage: 'ar' }).CAI18N;
+  assert.equal(ar.iso('sensor.a'), '⁨sensor.a⁩');
+});
+
 await check('tw: a wire without a key renders as nothing (N5)', async () => {
   const { CAI18N } = loadRuntime({ files: FILES });
   await CAI18N.init({});

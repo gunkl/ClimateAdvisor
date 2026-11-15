@@ -16,7 +16,13 @@
   "unit": "fahrenheit",
   "automation_status": "grace period (manual) \u2014 thermostat override \u2014 3h (ends 10:33 PM)",
   "status_code": "grace_period",
-  "automation_status_msg": {"key": "status.auto.grace_period", "params": {"source": "manual", "detail": " \u2014 thermostat override \u2014 3h (ends 10:33 PM)"}},
+  "automation_status_msg": {
+   "key": "status.auto.grace_period",
+   "params": {
+    "source": "manual",
+    "detail": " \u2014 thermostat override \u2014 3h (ends 10:33 PM)"
+   }
+  },
   "invariant_violations": [],
   "promise_summary": {
    "promises": [
@@ -45,10 +51,16 @@
   "occupancy_mode": "home",
   "fan_status": "inactive",
   "fan_status_code": "inactive",
-  "fan_status_msg": {"key": "status.fan_status.inactive", "params": {}},
+  "fan_status_msg": {
+   "key": "status.fan_status.inactive",
+   "params": {}
+  },
   "whf_status": "inactive",
   "whf_status_code": "inactive",
-  "whf_status_msg": {"key": "status.fan_status.inactive", "params": {}},
+  "whf_status_msg": {
+   "key": "status.fan_status.inactive",
+   "params": {}
+  },
   "hvac_fan_status": null,
   "contact_status": "all closed",
   "contact_sensors": [
@@ -110,7 +122,47 @@
     "entry_id": "zone-2",
     "title": "Simulated 2"
    }
-  ]
+  ],
+  "contact_status_msg": {
+   "key": "status.contact.all_closed",
+   "params": {}
+  },
+  "contact_status_code": "all_closed",
+  "next_action_msg": {
+   "key": "status.next_action.open_windows_cooler",
+   "params": {
+    "outdoor": {
+     "$t": "temp",
+     "f": 57,
+     "unit": "fahrenheit",
+     "d": 0
+    },
+    "indoor": {
+     "$t": "temp",
+     "f": 69,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   }
+  },
+  "next_action_code": "open_windows_cooler",
+  "next_automation_action_msg": {
+   "key": "status.next_automation.bedtime_check",
+   "params": {}
+  },
+  "next_automation_action_code": "bedtime_check",
+  "next_automation_time_msg": {
+   "key": "status.clock",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T20:30:00-05:00"
+    }
+   }
+  },
+  "hvac_fan_status_msg": null,
+  "hvac_fan_status_code": null,
+  "pause_suppressed_classification_text_msg": null
  },
  "automation_state": {
   "automation_enabled": true,
@@ -213,7 +265,8 @@
      "outdoor_f": 57.4
     }
    ],
-   "rejection_log_cap": 100, "rejection_log_counts": {
+   "rejection_log_cap": 100,
+   "rejection_log_counts": {
     "ventilated_decay": 100,
     "solar_gain": 100,
     "passive_decay": 100,
@@ -490,14 +543,30 @@
     "value": "weather.forecast_home",
     "label": "Weather Entity",
     "description": "The weather integration used for forecast data. Determines day type classification and all downstream automation decisions.",
-    "category": "core"
+    "category": "core",
+    "label_msg": {
+     "key": "settings.weather_entity.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.weather_entity.description",
+     "params": {}
+    }
    },
    {
     "key": "climate_entity",
     "value": "climate.hallway",
     "label": "Thermostat Entity",
     "description": "The climate entity Climate Advisor controls. All HVAC mode and temperature commands go to this entity.",
-    "category": "core"
+    "category": "core",
+    "label_msg": {
+     "key": "settings.climate_entity.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.climate_entity.description",
+     "params": {}
+    }
    },
    {
     "key": "comfort_heat",
@@ -505,7 +574,15 @@
     "label": "Comfort Heat",
     "description": "Target temperature when heating is active. Lowering saves energy but may feel cooler. Used for morning wake-up and occupancy-home restores.",
     "category": "setpoints",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.comfort_heat.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.comfort_heat.description",
+     "params": {}
+    }
    },
    {
     "key": "comfort_cool",
@@ -513,7 +590,15 @@
     "label": "Comfort Cool",
     "description": "Target temperature when cooling is active. Raising saves energy but may feel warmer. The economizer uses this as the threshold for window cooling decisions.",
     "category": "setpoints",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.comfort_cool.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.comfort_cool.description",
+     "params": {}
+    }
    },
    {
     "key": "setback_heat",
@@ -521,7 +606,15 @@
     "label": "Setback Heat",
     "description": "Temperature when heating and away from home. Lower values save more energy but take longer to recover when you return.",
     "category": "setpoints",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.setback_heat.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.setback_heat.description",
+     "params": {}
+    }
    },
    {
     "key": "setback_cool",
@@ -529,217 +622,494 @@
     "label": "Setback Cool",
     "description": "Temperature when cooling and away from home. Higher values save more energy but take longer to cool down when you return.",
     "category": "setpoints",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.setback_cool.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.setback_cool.description",
+     "params": {}
+    }
    },
    {
     "key": "notify_service",
     "value": "configured",
     "label": "Notification Service",
     "description": "The HA notify service used for alerts and briefings (e.g., notify.mobile_app).",
-    "category": "core"
+    "category": "core",
+    "label_msg": {
+     "key": "settings.notify_service.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.notify_service.description",
+     "params": {}
+    },
+    "value_msg": {
+     "key": "settings.value_configured",
+     "params": {}
+    }
    },
    {
     "key": "temp_unit",
     "value": "fahrenheit",
     "label": "Temperature Unit",
     "description": "Whether setpoints and displayed temperatures use Fahrenheit or Celsius. Setpoints are stored internally in Fahrenheit; changing this unit affects how they are displayed and entered in the UI.",
-    "category": "core"
+    "category": "core",
+    "label_msg": {
+     "key": "settings.temp_unit.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.temp_unit.description",
+     "params": {}
+    }
    },
    {
     "key": "outdoor_temp_source",
     "value": "Dedicated sensor \u2014 sensor.outside_temp_temperature",
     "label": "Outdoor Temp Source",
     "description": "Where outdoor temperature is read from: the weather service, a dedicated sensor, or an input_number helper. The Settings value also names the selected sensor, and says so when it has failed and the weather service is in use instead.",
-    "category": "sensors"
+    "category": "sensors",
+    "label_msg": {
+     "key": "settings.outdoor_temp_source.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.outdoor_temp_source.description",
+     "params": {}
+    },
+    "value_msg": {
+     "key": "settings.temp_source.entity",
+     "params": {
+      "label": {
+       "$t": "code",
+       "key": "settings.temp_source.sensor"
+      },
+      "entity": "sensor.outside_temp_temperature"
+     }
+    }
    },
    {
     "key": "indoor_temp_source",
     "value": "Thermostat's built-in sensor",
     "label": "Indoor Temp Source",
     "description": "Where indoor temperature is read from: the thermostat's built-in sensor, a dedicated sensor, or an input_number helper.",
-    "category": "sensors"
+    "category": "sensors",
+    "label_msg": {
+     "key": "settings.indoor_temp_source.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.indoor_temp_source.description",
+     "params": {}
+    },
+    "value_msg": {
+     "key": "settings.temp_source.climate_fallback",
+     "params": {}
+    }
    },
    {
     "key": "sleep_indoor_temp_entity",
     "value": "sensor.primary_bedroom_temperature_temperature",
     "label": "Sleep Indoor Temp Sensor",
     "description": "Optional bedroom sensor used for comfort and automation decisions while your sleep schedule is active (the thermal model always uses the primary sensor). Falls back to the primary sensor if unavailable. Leave blank to disable.",
-    "category": "sensors"
+    "category": "sensors",
+    "label_msg": {
+     "key": "settings.sleep_indoor_temp_entity.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.sleep_indoor_temp_entity.description",
+     "params": {}
+    }
    },
    {
     "key": "door_window_sensors",
     "value": "1 configured",
     "label": "Door/Window Sensors",
     "description": "Binary sensors that detect open doors and windows. When open past the debounce period, HVAC pauses to avoid wasting energy.",
-    "category": "sensors"
+    "category": "sensors",
+    "label_msg": {
+     "key": "settings.door_window_sensors.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.door_window_sensors.description",
+     "params": {}
+    },
+    "value_msg": {
+     "key": "settings.value_n_configured",
+     "params": {
+      "n": 1
+     }
+    }
    },
    {
     "key": "sensor_polarity_inverted",
     "value": false,
     "label": "Sensor Polarity Inverted",
     "description": "Enable if your sensors report 'off' when open (some reed switches work this way). Incorrect polarity means HVAC pauses when doors are closed.",
-    "category": "sensors"
+    "category": "sensors",
+    "label_msg": {
+     "key": "settings.sensor_polarity_inverted.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.sensor_polarity_inverted.description",
+     "params": {}
+    }
    },
    {
     "key": "sensor_debounce_seconds",
     "value": 10,
     "label": "Sensor Debounce (minutes)",
     "description": "How long a door/window sensor's state must hold steady before Climate Advisor acts on it \u2014 pausing/resuming HVAC, or engaging/exiting natural-ventilation fan control (whole-house fan or HVAC fan). Applies to every controlled device, not just HVAC. Short values react faster but are more exposed to quick trips through a door or a flaky sensor bounce; longer values are steadier but slower to respond to a genuine change.",
-    "category": "sensors"
+    "category": "sensors",
+    "label_msg": {
+     "key": "settings.sensor_debounce_seconds.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.sensor_debounce_seconds.description",
+     "params": {}
+    },
+    "time_unit": "min"
    },
    {
     "key": "manual_grace_seconds",
     "value": 180,
     "label": "Manual Grace Period (minutes)",
     "description": "After you manually change the thermostat \u2014 either the HVAC mode or the target temperature \u2014 CA waits this many minutes before resuming automated setpoint control. Also prevents re-pausing if a door/window opens during this window. Default: 30 minutes.",
-    "category": "sensors"
+    "category": "sensors",
+    "label_msg": {
+     "key": "settings.manual_grace_seconds.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.manual_grace_seconds.description",
+     "params": {}
+    },
+    "time_unit": "min"
    },
    {
     "key": "manual_grace_notify",
     "value": true,
     "label": "Push: Manual Grace Expired",
     "description": "Push notification when manual grace expires and normal behavior resumes.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.manual_grace_notify.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.manual_grace_notify.description",
+     "params": {}
+    }
    },
    {
     "key": "automation_grace_seconds",
     "value": 5,
     "label": "Automation Grace Period (minutes)",
     "description": "After Climate Advisor resumes HVAC (all doors/windows closed), this grace window prevents immediate re-pausing if a door opens briefly.",
-    "category": "sensors"
+    "category": "sensors",
+    "label_msg": {
+     "key": "settings.automation_grace_seconds.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.automation_grace_seconds.description",
+     "params": {}
+    },
+    "time_unit": "min"
    },
    {
     "key": "automation_grace_notify",
     "value": true,
     "label": "Push: Automation Grace Expired",
     "description": "Send a push notification when the automation grace period expires.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.automation_grace_notify.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.automation_grace_notify.description",
+     "params": {}
+    }
    },
    {
     "key": "override_confirm_seconds",
     "value": 10,
     "label": "Override Confirmation Delay (minutes)",
     "description": "Time between system changes and confirmation of manual override. When a change looks like a manual override, Climate Advisor waits this long before formally accepting it. Transient events (thermostat restart, fan cycle) that resolve within the window are ignored. Set to 0 to confirm overrides immediately.",
-    "category": "sensors"
+    "category": "sensors",
+    "label_msg": {
+     "key": "settings.override_confirm_seconds.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.override_confirm_seconds.description",
+     "params": {}
+    },
+    "time_unit": "min"
    },
    {
     "key": "fan_mode",
     "value": "whole_house_fan",
     "label": "Fan Control Mode",
     "description": "Controls how fans assist ventilation. 'Whole house fan' controls a dedicated entity. 'HVAC fan' uses the thermostat fan mode. Fan activates during economizer maintain phase.",
-    "category": "fan"
+    "category": "fan",
+    "label_msg": {
+     "key": "settings.fan_mode.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.fan_mode.description",
+     "params": {}
+    }
    },
    {
     "key": "hvac_fan_restrict_mode",
     "value": "both",
     "label": "HVAC Fan Mode Restriction",
     "description": "Restricts when the HVAC fan (thermostat blower circulation) is allowed to run, based on which HVAC mode last ran. Does not affect the whole-house fan. 'Heat only' blocks the HVAC fan while the thermostat is in cool mode, or off within 2 hours of a cooling cycle \u2014 avoids raising humidity by re-evaporating condensate off wet coils, useful in humid climates. 'Cool only' is the symmetric restriction. 'Both' (default) applies no restriction \u2014 current behavior.",
-    "category": "fan"
+    "category": "fan",
+    "label_msg": {
+     "key": "settings.hvac_fan_restrict_mode.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.hvac_fan_restrict_mode.description",
+     "params": {}
+    }
    },
    {
     "key": "nat_vent_soft_start_enabled",
     "value": true,
     "label": "Nat-Vent Soft-Start (Purge Mode)",
     "description": "When enabled, the whole-house fan may start at outdoor/indoor temperature parity (not waiting for outdoor to be measurably cooler) once today's outdoor temperature is confirmed past its peak and declining \u2014 for air movement and attic/thermal-mass purge, not bulk cooling. On by default; disable if you only want the fan to run once outdoor is measurably cooler than indoor. No humidity/dew-point sensor guards this today.",
-    "category": "fan"
+    "category": "fan",
+    "label_msg": {
+     "key": "settings.nat_vent_soft_start_enabled.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.nat_vent_soft_start_enabled.description",
+     "params": {}
+    }
    },
    {
     "key": "fan_entity",
     "value": "fan.basement_quietcool_transmitter_quietcool_whole_house_fan",
     "label": "Fan Entity",
     "description": "The fan or switch entity to control for whole-house ventilation. Only used when fan mode is 'whole_house_fan' or 'both'.",
-    "category": "fan"
+    "category": "fan",
+    "label_msg": {
+     "key": "settings.fan_entity.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.fan_entity.description",
+     "params": {}
+    }
    },
    {
     "key": "fan_remote_entity",
     "value": "event.basement_quietcool_transmitter_quietcool_remote",
     "label": "Fan RF Remote Event Entity",
     "description": "Optional event entity (e.g. from the gunkl/quietcool-house-fan ESPHome firmware) that fires when the physical RF wall remote is pressed. When set, a remote timer selection (1/2/4/8/12 hours) sets the duration of the fan manual-override grace period, so CA honors the user's chosen runtime instead of the configured default. Leave blank to disable \u2014 no subscription is created and behavior is unchanged.",
-    "category": "fan"
+    "category": "fan",
+    "label_msg": {
+     "key": "settings.fan_remote_entity.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.fan_remote_entity.description",
+     "params": {}
+    }
    },
    {
     "key": "fan_state_entity",
     "value": "input_boolean.quietcool_detectpower",
     "label": "Fan State Entity",
     "description": "Optional separate sensor entity to read the actual physical state of the whole-house fan. Use when the fan has a dedicated control entity and a separate state sensor (WHF dual-entity). If left blank, the Fan Entity is used for both control and state.",
-    "category": "fan"
+    "category": "fan",
+    "label_msg": {
+     "key": "settings.fan_state_entity.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.fan_state_entity.description",
+     "params": {}
+    }
    },
    {
     "key": "fan_state_feedback",
     "value": true,
     "label": "Fan state feedback reliable",
     "description": "Turn ON if your fan entity or state sensor reports actual motor state (not just the last command sent). Leave OFF if you're not sure \u2014 CA will command the fan to the desired state on every cycle without reading back the entity state. Physical wall-switch overrides are undetectable when OFF.",
-    "category": "fan"
+    "category": "fan",
+    "label_msg": {
+     "key": "settings.fan_state_feedback.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.fan_state_feedback.description",
+     "params": {}
+    }
    },
    {
     "key": "fan_min_runtime_per_hour",
     "value": 0.0,
     "label": "Fan Minimum Runtime Per Hour",
     "description": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). Activates the fan for the specified duration each hour for air circulation. The cycle start time is offset from the clock hour based on when HA started.",
-    "category": "fan"
+    "category": "fan",
+    "label_msg": {
+     "key": "settings.fan_min_runtime_per_hour.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.fan_min_runtime_per_hour.description",
+     "params": {}
+    }
    },
    {
     "key": "home_toggle_entity",
     "value": "input_boolean.anyone_home",
     "label": "Home/Away Toggle",
     "description": "An entity that indicates whether someone is home. ON = home, OFF = away. Climate Advisor applies setback temperatures when away.",
-    "category": "occupancy"
+    "category": "occupancy",
+    "label_msg": {
+     "key": "settings.home_toggle_entity.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.home_toggle_entity.description",
+     "params": {}
+    }
    },
    {
     "key": "home_toggle_invert",
     "value": false,
     "label": "Invert Home Toggle",
     "description": "Enable if your toggle reports ON when you're away and OFF when you're home.",
-    "category": "occupancy"
+    "category": "occupancy",
+    "label_msg": {
+     "key": "settings.home_toggle_invert.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.home_toggle_invert.description",
+     "params": {}
+    }
    },
    {
     "key": "vacation_toggle_entity",
     "value": "input_boolean.vacation_mode",
     "label": "Vacation Mode Toggle",
     "description": "An entity that indicates vacation mode. When active, Climate Advisor applies a deeper temperature setback for extended energy savings.",
-    "category": "occupancy"
+    "category": "occupancy",
+    "label_msg": {
+     "key": "settings.vacation_toggle_entity.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.vacation_toggle_entity.description",
+     "params": {}
+    }
    },
    {
     "key": "vacation_toggle_invert",
     "value": false,
     "label": "Invert Vacation Toggle",
     "description": "Enable if your toggle reports ON when you're NOT on vacation.",
-    "category": "occupancy"
+    "category": "occupancy",
+    "label_msg": {
+     "key": "settings.vacation_toggle_invert.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.vacation_toggle_invert.description",
+     "params": {}
+    }
    },
    {
     "key": "guest_toggle_entity",
     "value": "input_boolean.guest_mode",
     "label": "Guest Mode Toggle",
     "description": "An entity that indicates guests are present. Overrides vacation and away modes \u2014 the house stays at comfort temperature while guests are visiting.",
-    "category": "occupancy"
+    "category": "occupancy",
+    "label_msg": {
+     "key": "settings.guest_toggle_entity.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.guest_toggle_entity.description",
+     "params": {}
+    }
    },
    {
     "key": "guest_toggle_invert",
     "value": false,
     "label": "Invert Guest Toggle",
     "description": "Enable if your toggle reports ON when guests are NOT present.",
-    "category": "occupancy"
+    "category": "occupancy",
+    "label_msg": {
+     "key": "settings.guest_toggle_invert.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.guest_toggle_invert.description",
+     "params": {}
+    }
    },
    {
     "key": "welcome_home_debounce_seconds",
     "value": 60,
     "label": "Welcome Home Quiet Period (minutes)",
     "description": "Minimum time between welcome home notifications. If someone leaves and returns within this window, the notification is suppressed. Set to 0 to always notify.",
-    "category": "occupancy"
+    "category": "occupancy",
+    "label_msg": {
+     "key": "settings.welcome_home_debounce_seconds.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.welcome_home_debounce_seconds.description",
+     "params": {}
+    },
+    "time_unit": "min"
    },
    {
     "key": "wake_time",
     "value": "06:30",
     "label": "Wake Time",
     "description": "When morning comfort temperatures are restored. Earlier times mean the house is comfortable when you get up but use more energy overnight.",
-    "category": "schedule"
+    "category": "schedule",
+    "label_msg": {
+     "key": "settings.wake_time.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.wake_time.description",
+     "params": {}
+    }
    },
    {
     "key": "sleep_time",
     "value": "20:30",
     "label": "Sleep Time",
     "description": "When bedtime temperatures take effect. The system transitions to your sleep temperatures at this time.",
-    "category": "schedule"
+    "category": "schedule",
+    "label_msg": {
+     "key": "settings.sleep_time.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.sleep_time.description",
+     "params": {}
+    }
    },
    {
     "key": "sleep_heat",
@@ -747,7 +1117,15 @@
     "label": "Sleep Temperature (Heat)",
     "description": "Target temperature during sleep hours when you are home. Independent from your away setback \u2014 use this to stay warmer at night than when you leave the house.",
     "category": "setpoints",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.sleep_heat.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.sleep_heat.description",
+     "params": {}
+    }
    },
    {
     "key": "sleep_cool",
@@ -755,77 +1133,169 @@
     "label": "Sleep Temperature (Cool)",
     "description": "Target temperature during sleep hours when you are home. Independent from your away setback \u2014 use this to stay cooler at night than when you leave the house.",
     "category": "setpoints",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.sleep_cool.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.sleep_cool.description",
+     "params": {}
+    }
    },
    {
     "key": "briefing_time",
     "value": "06:00",
     "label": "Briefing Time",
     "description": "When the daily climate briefing is generated and sent. Should be before wake_time so you see it when you get up.",
-    "category": "schedule"
+    "category": "schedule",
+    "label_msg": {
+     "key": "settings.briefing_time.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.briefing_time.description",
+     "params": {}
+    }
    },
    {
     "key": "learning_enabled",
     "value": true,
     "label": "Learning Engine",
     "description": "When enabled, Climate Advisor tracks patterns (manual overrides, window compliance, runtime) and generates adaptive suggestions over time.",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.learning_enabled.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.learning_enabled.description",
+     "params": {}
+    }
    },
    {
     "key": "adaptive_preheat_enabled",
     "value": true,
     "label": "Adaptive Pre-heat Timing",
     "description": "Use learned heating rate to compute pre-heat start time.",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.adaptive_preheat_enabled.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.adaptive_preheat_enabled.description",
+     "params": {}
+    }
    },
    {
     "key": "adaptive_setback_enabled",
     "value": true,
     "label": "Adaptive Bedtime Setback",
     "description": "Use learned heating/cooling rate to compute maximum safe setback depth.",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.adaptive_setback_enabled.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.adaptive_setback_enabled.description",
+     "params": {}
+    }
    },
    {
     "key": "weather_bias_enabled",
     "value": true,
     "label": "Weather Forecast Bias Correction",
     "description": "Apply a location-specific correction to tomorrow's forecast based on observed forecast accuracy.",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.weather_bias_enabled.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.weather_bias_enabled.description",
+     "params": {}
+    }
    },
    {
     "key": "min_preheat_minutes",
     "value": 30,
     "label": "Minimum Pre-heat Time (min)",
     "description": "Shortest pre-heat window the system will ever schedule.",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.min_preheat_minutes.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.min_preheat_minutes.description",
+     "params": {}
+    },
+    "time_unit": "min"
    },
    {
     "key": "max_preheat_minutes",
     "value": 240,
     "label": "Maximum Pre-heat Time (min)",
     "description": "Longest pre-heat window the system will ever schedule.",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.max_preheat_minutes.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.max_preheat_minutes.description",
+     "params": {}
+    },
+    "time_unit": "min"
    },
    {
     "key": "default_preheat_minutes",
     "value": 120,
     "label": "Default Pre-heat Time (min)",
     "description": "Pre-heat duration used before enough observations are collected.",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.default_preheat_minutes.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.default_preheat_minutes.description",
+     "params": {}
+    },
+    "time_unit": "min"
    },
    {
     "key": "default_tou_lead_minutes",
     "value": 45,
     "label": "Default TOU Pre-conditioning Lead Time (min)",
     "description": "How long before a scheduled high-cost period the system starts pre-conditioning, used until enough heat/cool cycles are observed to compute your home's actual rate.",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.default_tou_lead_minutes.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.default_tou_lead_minutes.description",
+     "params": {}
+    },
+    "time_unit": "min"
    },
    {
     "key": "preheat_safety_margin",
     "value": 1.3,
     "label": "Pre-heat Safety Margin",
     "description": "Multiplier applied to model-computed pre-heat time as a buffer (e.g. 1.2 = 20% extra).",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.preheat_safety_margin.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.preheat_safety_margin.description",
+     "params": {}
+    }
    },
    {
     "key": "max_setback_depth_f",
@@ -833,63 +1303,137 @@
     "label": "Maximum Setback Depth",
     "description": "Largest overnight setback the adaptive engine may compute.",
     "category": "advanced",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.max_setback_depth_f.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.max_setback_depth_f.description",
+     "params": {}
+    }
    },
    {
     "key": "comfort_mode_switch_min_interval_s",
     "value": null,
     "label": "Minimum Time Between Heat/Cool Switches (sec)",
     "description": "Minimum wait between routine heat/cool switches, to prevent rapid back-and-forth. A real breach (indoor temp actually past a comfort edge) ignores this wait and switches immediately.",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.comfort_mode_switch_min_interval_s.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.comfort_mode_switch_min_interval_s.description",
+     "params": {}
+    },
+    "time_unit": "s"
    },
    {
     "key": "comfort_deadband_hot_f",
     "value": null,
     "label": "Comfort Edge Overshoot Tolerance \u2014 Hot Days",
     "description": "On a hot day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a hot day this applies to switching to heating (the cooling side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.comfort_deadband_hot_f.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.comfort_deadband_hot_f.description",
+     "params": {}
+    }
    },
    {
     "key": "comfort_deadband_warm_f",
     "value": null,
     "label": "Comfort Edge Overshoot Tolerance \u2014 Warm Days",
     "description": "On a warm day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a warm day this applies to switching to heating (the cooling side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.comfort_deadband_warm_f.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.comfort_deadband_warm_f.description",
+     "params": {}
+    }
    },
    {
     "key": "comfort_deadband_mild_f",
     "value": null,
     "label": "Comfort Edge Overshoot Tolerance \u2014 Mild Days",
     "description": "On a mild or off-classified day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. Mild days have no favored side, so this applies to both heat and cool. Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.comfort_deadband_mild_f.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.comfort_deadband_mild_f.description",
+     "params": {}
+    }
    },
    {
     "key": "comfort_deadband_cool_f",
     "value": null,
     "label": "Comfort Edge Overshoot Tolerance \u2014 Cool Days",
     "description": "On a cool day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a cool day this applies to switching to cooling (the heating side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.comfort_deadband_cool_f.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.comfort_deadband_cool_f.description",
+     "params": {}
+    }
    },
    {
     "key": "comfort_deadband_cold_f",
     "value": null,
     "label": "Comfort Edge Overshoot Tolerance \u2014 Cold Days",
     "description": "On a cold day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a cold day this applies to switching to cooling (the heating side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.comfort_deadband_cold_f.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.comfort_deadband_cold_f.description",
+     "params": {}
+    }
    },
    {
     "key": "comfort_family_recency_window_min",
     "value": null,
     "label": "Recent Run Window (min)",
     "description": "How long the heat or cool side counts as having \"recently run\" (equipment that actually ran, or a time-of-use, predicted-ceiling or you-initiated mode change; not every Climate Advisor write). Used by the overshoot tolerance above (a small overshoot inside this window does not flip the thermostat to the opposite mode) and by the predicted-temperature ceiling guard (which waits instead of acting on a predicted overshoot).",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.comfort_family_recency_window_min.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.comfort_family_recency_window_min.description",
+     "params": {}
+    },
+    "time_unit": "min"
    },
    {
     "key": "aggressive_savings",
     "value": false,
     "label": "Prefer Savings Over Comfort",
     "description": "When enabled, favors energy savings: the economizer skips AC-assisted cooling (ventilation only when windows open), and setbacks may be more aggressive. When disabled, AC actively cools to comfort when outdoor temps drop.",
-    "category": "advanced"
+    "category": "advanced",
+    "label_msg": {
+     "key": "settings.aggressive_savings.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.aggressive_savings.description",
+     "params": {}
+    }
    },
    {
     "key": "threshold_hot",
@@ -897,7 +1441,15 @@
     "label": "Hot Day Threshold",
     "description": "Days whose forecast high is at or above this temperature are classified as Hot. Default: 85\u00b0F / 29\u00b0C.",
     "category": "advanced",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.threshold_hot.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.threshold_hot.description",
+     "params": {}
+    }
    },
    {
     "key": "threshold_warm",
@@ -905,7 +1457,15 @@
     "label": "Warm Day Threshold",
     "description": "Days whose forecast high is at or above this temperature (but below Hot) are classified as Warm. Default: 75\u00b0F / 24\u00b0C.",
     "category": "advanced",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.threshold_warm.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.threshold_warm.description",
+     "params": {}
+    }
    },
    {
     "key": "threshold_mild",
@@ -913,7 +1473,15 @@
     "label": "Mild Day Threshold",
     "description": "Days whose forecast high is at or above this temperature (but below Warm) are classified as Mild. Default: 60\u00b0F / 16\u00b0C.",
     "category": "advanced",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.threshold_mild.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.threshold_mild.description",
+     "params": {}
+    }
    },
    {
     "key": "threshold_cool",
@@ -921,161 +1489,349 @@
     "label": "Cool Day Threshold",
     "description": "Days whose forecast high is at or above this temperature (but below Mild) are classified as Cool; below is Cold. Default: 45\u00b0F / 7\u00b0C.",
     "category": "advanced",
-    "unit": "\u00b0F"
+    "unit": "\u00b0F",
+    "label_msg": {
+     "key": "settings.threshold_cool.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.threshold_cool.description",
+     "params": {}
+    }
    },
    {
     "key": "briefing_notifications_enabled",
     "value": true,
     "label": "Send Daily Briefing Notifications (This Zone)",
     "description": "On a multi-zone install, only one zone should send the scheduled daily briefing push/email \u2014 otherwise you get one copy per zone. Turn this ON for exactly one zone. Manually clicking Send Briefing on the debug tab always sends, even when this is off.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.briefing_notifications_enabled.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.briefing_notifications_enabled.description",
+     "params": {}
+    }
    },
    {
     "key": "push_briefing",
     "value": true,
     "label": "Push: Daily Briefing",
     "description": "Send a short TLDR briefing summary to your phone each morning.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.push_briefing.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.push_briefing.description",
+     "params": {}
+    }
    },
    {
     "key": "push_door_window_pause",
     "value": true,
     "label": "Push: HVAC Paused",
     "description": "Send a push notification when HVAC is paused due to an open door or window.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.push_door_window_pause.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.push_door_window_pause.description",
+     "params": {}
+    }
    },
    {
     "key": "push_occupancy_home",
     "value": true,
     "label": "Push: Welcome Home",
     "description": "Send a push notification when someone arrives home and comfort temperature is restored.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.push_occupancy_home.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.push_occupancy_home.description",
+     "params": {}
+    }
    },
    {
     "key": "push_entity_health",
     "value": null,
     "label": "Push: Entity Not Found",
     "description": "Send a push notification when a configured entity (thermostat, weather source, sensor, fan, toggle, or notification service) is removed or stops responding.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.push_entity_health.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.push_entity_health.description",
+     "params": {}
+    }
    },
    {
     "key": "email_briefing",
     "value": true,
     "label": "Email: Full Daily Briefing",
     "description": "Send the full daily briefing via email with complete forecast and plan details.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.email_briefing.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.email_briefing.description",
+     "params": {}
+    }
    },
    {
     "key": "email_door_window_pause",
     "value": true,
     "label": "Email: HVAC Paused",
     "description": "Send an email when HVAC is paused due to an open door or window.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.email_door_window_pause.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.email_door_window_pause.description",
+     "params": {}
+    }
    },
    {
     "key": "email_grace_expired",
     "value": false,
     "label": "Email: Grace Period Expired",
     "description": "Send an email when a grace period expires and normal sensor behavior resumes.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.email_grace_expired.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.email_grace_expired.description",
+     "params": {}
+    }
    },
    {
     "key": "email_grace_repause",
     "value": false,
     "label": "Email: Re-paused",
     "description": "Email when HVAC is re-paused because a door/window is still open after grace.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.email_grace_repause.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.email_grace_repause.description",
+     "params": {}
+    }
    },
    {
     "key": "email_occupancy_home",
     "value": false,
     "label": "Email: Welcome Home",
     "description": "Send an email when someone arrives home and comfort temperature is restored.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.email_occupancy_home.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.email_occupancy_home.description",
+     "params": {}
+    }
    },
    {
     "key": "email_entity_health",
     "value": null,
     "label": "Email: Entity Not Found",
     "description": "Send an email when a configured entity (thermostat, weather source, sensor, fan, toggle, or notification service) is removed or stops responding.",
-    "category": "notifications"
+    "category": "notifications",
+    "label_msg": {
+     "key": "settings.email_entity_health.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.email_entity_health.description",
+     "params": {}
+    }
    },
    {
     "key": "ai_enabled",
     "value": true,
     "label": "Enable AI Features",
     "description": "Master switch for all AI-powered features. When disabled, Climate Advisor uses only its built-in coded logic.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_enabled.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_enabled.description",
+     "params": {}
+    }
    },
    {
     "key": "ai_api_key",
     "value": "configured",
     "label": "Claude API Key",
     "description": "Your Anthropic API key. Stored securely in Home Assistant's config entry. Never logged or exposed in sensor attributes.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_api_key.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_api_key.description",
+     "params": {}
+    },
+    "value_msg": {
+     "key": "settings.value_configured",
+     "params": {}
+    }
    },
    {
     "key": "ai_model",
     "value": "claude-sonnet-5",
     "label": "AI Model",
     "description": "Which Claude model to use. Sonnet is recommended for cost/quality balance. Haiku is cheapest. Opus is most capable but expensive.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_model.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_model.description",
+     "params": {}
+    }
    },
    {
     "key": "ai_reasoning_effort",
     "value": "low",
     "label": "Reasoning Effort",
     "description": "How much reasoning effort Claude uses. Higher effort produces better analysis but uses more tokens and costs more.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_reasoning_effort.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_reasoning_effort.description",
+     "params": {}
+    }
    },
    {
     "key": "ai_max_tokens",
     "value": 8192,
     "label": "Max Response Length (tokens)",
     "description": "Maximum length of AI responses in tokens. Higher values allow more detailed analysis but cost more.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_max_tokens.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_max_tokens.description",
+     "params": {}
+    }
    },
    {
     "key": "ai_temperature",
     "value": 0.3,
     "label": "Creativity (temperature)",
     "description": "Controls randomness in AI responses. 0 = deterministic, 1.0 = most creative. 0.3 recommended for analysis.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_temperature.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_temperature.description",
+     "params": {}
+    }
    },
    {
     "key": "ai_monthly_budget",
     "value": 5,
     "label": "Monthly Budget Cap ($)",
     "description": "Maximum estimated monthly spend in USD. Set to 0 for no limit. AI features pause when budget is reached.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_monthly_budget.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_monthly_budget.description",
+     "params": {}
+    }
    },
    {
     "key": "ai_auto_requests_per_day",
     "value": 5,
     "label": "Auto Requests Per Day",
     "description": "Maximum automated/scheduled AI requests per day. Limits unattended usage from features like daily plan generation. Resets at midnight.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_auto_requests_per_day.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_auto_requests_per_day.description",
+     "params": {}
+    }
    },
    {
     "key": "ai_manual_requests_per_day",
     "value": 20,
     "label": "Manual Requests Per Day",
     "description": "Maximum user-triggered AI requests per day. Limits on-demand usage from features like the Investigative Analysis report. Resets at midnight.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_manual_requests_per_day.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_manual_requests_per_day.description",
+     "params": {}
+    }
    },
    {
     "key": "ai_investigator_enabled",
     "value": true,
     "label": "Enable Investigative Agent",
     "description": "Enable the investigative agent, which performs deep cross-source analysis to find incongruities, data quality issues, and system errors. Requires AI to be enabled and configured. Default is off.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_investigator_enabled.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_investigator_enabled.description",
+     "params": {}
+    }
    },
    {
     "key": "ai_investigator_requests_per_day",
     "value": 10,
     "label": "Investigator Requests Per Day",
     "description": "Maximum investigative analysis runs per day. Each investigation uses extended thinking and is more expensive than other AI requests. Resets at midnight.",
-    "category": "ai_settings"
+    "category": "ai_settings",
+    "label_msg": {
+     "key": "settings.ai_investigator_requests_per_day.label",
+     "params": {}
+    },
+    "description_msg": {
+     "key": "settings.ai_investigator_requests_per_day.description",
+     "params": {}
+    }
    }
   ]
  },
@@ -2109,7 +2865,18 @@
  ],
  "activity_record": {
   "table": "| Time | Event |\n|---|---|\n| 6:12 | override **detected** |",
-  "rows": [{"time": "6:12", "event": "override **detected**", "settings": "", "source": "automation", "indoor": "68\u00b0F", "outdoor": "57\u00b0F", "event_msg": null, "settings_msg": null}],
+  "rows": [
+   {
+    "time": "6:12",
+    "event": "override **detected**",
+    "settings": "",
+    "source": "automation",
+    "indoor": "68\u00b0F",
+    "outdoor": "57\u00b0F",
+    "event_msg": null,
+    "settings_msg": null
+   }
+  ],
   "limited_msg": null,
   "no_events_msg": null,
   "whf_warning_msg": null,

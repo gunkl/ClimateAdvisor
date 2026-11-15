@@ -183,3 +183,54 @@ test.describe('Dashboard i18n: codes, Activity record rows, Settings values, RTL
     expect(await page.locator('#report-content th').count()).toBe(6);
   });
 });
+
+// Issue #1341 S4: the Settings tab under en-XA. Fed the fixture rows as the real ClimateAdvisorConfigView emits them
+// (label_msg / description_msg / value_msg / time_unit), every word on the tab is a catalog message (bracketed and
+// accented); only data the install supplies (entity ids, numbers, names) is plain.
+test.describe('Settings tab under en-XA (Issue #1341 S4)', () => {
+  test('every word on the Settings tab comes from the catalog', async ({ page }) => {
+    const FIXTURE = require('../fixtures/new_dashboard_api.json');
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    const json = (body) => (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    await page.route('**/api/climate_advisor/status*', json(Object.assign({}, STATUS, { language: 'en' })));
+    await page.route('**/api/climate_advisor/config*', json(FIXTURE.config));
+    await page.route('**/api/climate_advisor/settings_extra*', json(FIXTURE.settings_extra));
+    await page.route('**/api/climate_advisor/ai_status*', json(FIXTURE.ai_status));
+    await page.goto('/new_dashboard.html?lang=en-XA#settings');
+    await page.waitForFunction(() => document.querySelector('#set-groups section.card'), null, { timeout: 8000 });
+    // show every description and open every group so all the text is on screen
+    await page.evaluate(() => { const d = document.getElementById('set-desc'); if (d && !d.checked) d.click(); document.querySelectorAll('#panel-settings details').forEach((x) => { x.open = true; }); });
+    await page.waitForTimeout(200);
+    const texts = await page.evaluate(() => {
+      const seen = new Set(), out = [];
+      const BLOCK = 'div, li, td, th, h1, h2, h3, button, label, a, summary, p, caption, option, span';
+      const root = document.getElementById('panel-settings');
+      const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let n = w.nextNode(); n; n = w.nextNode()) {
+        const el = n.parentElement;
+        if (!n.nodeValue.trim() || !el || el.closest('[hidden], script, style, option') || !(el.offsetWidth || el.offsetHeight || el.getClientRects().length)) continue;
+        const blk = el.closest(BLOCK) || el;
+        if (seen.has(blk)) continue;
+        seen.add(blk);
+        out.push(blk.textContent.replace(/\s+/g, ' ').trim());
+      }
+      return out.filter(Boolean);
+    });
+    expect(texts.length).toBeGreaterThan(40);
+    // data the install supplies (a model name, a time-of-use schedule's own name) and weekday names, which Intl supplies
+    const DATA = ['claude-sonnet-5', 'Evening peak', 'Mon, Tue, Wed, Thu, Fri'];
+    const ENTITY = /\b[a-z_]+\.[a-z0-9_]+(?:\.[a-z0-9_]+)*\b/g;   // entity ids and notify services are data
+    const NUM = /[+−-]?\d+(?:[.,:]\d+)*(?:\s?[AaPp][Mm])?(?:\s?°\s?[CF])?%?/g;
+    const bypass = [];
+    for (const raw of texts) {
+      let t = raw;
+      for (const d of DATA) t = t.split(d).join(' ');
+      for (let prev = null; prev !== t;) { prev = t; t = t.replace(/\[[^\[\]]*\]/g, ' '); }
+      t = t.replace(ENTITY, ' ').replace(NUM, ' ');
+      if (/\p{L}/u.test(t)) bypass.push(raw + '   <-- leftover: ' + t.trim());
+    }
+    expect(bypass, 'Settings text that bypassed the catalog (plain English under en-XA)').toEqual([]);
+    expect(errors).toEqual([]);
+  });
+});

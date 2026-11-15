@@ -9,7 +9,7 @@
   // Issue #1341: catalog text (settings.*). T() renders through CAI18N; every result is escaped (esc) or set with
   // textContent. iso() isolates a dynamic Latin name (entity id, repo, model) inside RTL text.
   function T(key, params) { return CAI18N.t('settings.' + key, params); }
-  function iso(x) { return CAI18N.dir === 'rtl' ? '\u2068' + x + '\u2069' : String(x); }
+  var iso = CAI18N.iso;
   // The backend's `<field>_msg` wire sibling when present (rendered in the viewer's language), else its English field.
   function W(wire, plain) { var r = wire ? CAI18N.tw(wire) : ''; return r && (!wire.key || r !== wire.key) ? r : plain; }
   function numText(v) { return CAI18N.fmt.number(Number(v), { maximumFractionDigits: 6, useGrouping: false }); }
@@ -26,8 +26,8 @@
     ['ai', ['ai_enabled', 'ai_api_key', 'ai_model', 'ai_reasoning_effort', 'ai_max_tokens', 'ai_temperature', 'ai_monthly_budget', 'ai_auto_requests_per_day', 'ai_manual_requests_per_day', 'ai_investigator_enabled', 'ai_investigator_requests_per_day']]
   ];
 
-  // A number with its explicit `unit` (the API's field: the temperature symbol, or "min" / "s" for the time settings;
-  // the unit is never parsed out of a label).
+  // A number with its explicit `unit` (the API field `unit` is the temperature symbol, `time_unit` is "min" / "s" for the time settings;
+  // callers pass whichever the row has; the unit is never parsed out of a label).
   function withUnit(v, unit) {
     var mins = function (m) { return m >= 120 && m % 60 === 0 ? T('value.hours', { n: m / 60 }) : T('value.minutes', { n: m }); };
     if (unit === 'min') return mins(v);
@@ -49,7 +49,7 @@
     if (v === true) return T('value.on'); if (v === false) return T('value.off'); if (v == null || v === '') return T('value.not_set');
     if (Array.isArray(v)) return v.length ? v.join(', ') : T('value.none');
     if (typeof v === 'object') return JSON.stringify(v);
-    if (typeof v === 'number') return withUnit(v, s.unit);
+    if (typeof v === 'number') return withUnit(v, s.unit || s.time_unit);
     return String(v) + (s.unit ? (s.unit === 'fahrenheit' || s.unit === '°F' ? '°F' : ' ' + s.unit) : '');
   }
   function labelOf(s) { return W(s.label_msg, s.label || s.key); }
@@ -58,7 +58,7 @@
     var c = X && X.changed && X.changed[key]; if (!c) return '';
     var d = c.default, txt;
     if (d === true) txt = T('value.on'); else if (d === false) txt = T('value.off');
-    else if (typeof d === 'number') txt = withUnit(d, c.unit || s.unit);
+    else if (typeof d === 'number') txt = withUnit(d, c.unit || s.unit || s.time_unit);
     else txt = (enumText(key, d) || String(d)) + (c.unit ? ' ' + c.unit : '');
     return T('default_value', { value: txt });
   }

@@ -108,7 +108,10 @@ Python builds `i18n.Msg(key, **params)`; `i18n.render(msg, lang)` renders it, `r
 | `text(obj, field)` | The one call-site shape for API prose: the `<field>_msg` wire sibling rendered with `tw()` when the backend sent one (and its key is in the catalog), else the plain prose field. `ND.text` is this. |
 | `has(key)` | Whether the language or English catalog has the key. |
 | `apply(root)` | Fills `[data-i18n="key"]` (`textContent`) and `[data-i18n-attr="title:key;aria-label:key"]` (`setAttribute`); `data-i18n-params='{"n":6}'` passes arguments. Never `innerHTML`. A key with no entry leaves the element's English markup (which a test keeps equal to the catalog). |
-| `fmt.hour(d)` | Hour only (`3 PM` / `15`). |
+| `fmt.hour(d)` | Hour only (`3 PM` / `15`), in `timeZone()` like `fmt.time`. |
+| `fmt.intl(opts, lang)` | A zone-aware `Intl.DateTimeFormat` for any options (`timeZone()` plus the 12/24 h setting when `hour` is shown); `lang` is a code or a locales array (`[]` = the browser locale). The one way a page formats an instant it draws itself (chart ticks, readouts). |
+| `fmt.dateYear(d)` / `fmt.calendarDay(y, m, d, lang, weekday)` | `date` plus the year when the date is not in the current year (in the display zone); a calendar day given by parts, the same day in any zone. |
+| `iso(x)` | A dynamic Latin name isolated (U+2068..U+2069) in right-to-left text; the one helper. |
 | `init({areas})` | `areas` limits the fetch to some catalog areas (`entry.html` loads only `dashboard`). |
 | `?lang=en-XA` | The pseudo-locale, built on the fly from `en`: every letter accented, ~35% padding, each message bracketed `[...]`; ICU syntax is preserved. Only ever chosen by `?lang=` (never by `hass` or the browser), never listed in `index.json`, formats numbers and dates as English. A visible word that is not bracketed bypassed the catalog (`tests/ui/i18n-dashboard.spec.js`). |
 

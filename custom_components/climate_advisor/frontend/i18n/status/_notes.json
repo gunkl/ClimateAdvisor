@@ -33,5 +33,8 @@
   "status.remote_offset.delta_above": "{gap} is like '4°'.",
   "status.thermostat_notice.text": "{use} is a clause that ends the first sentence; keep the semicolon structure or use the language's equivalent.",
   "status.next_action_away_1": "Light-hearted line shown when the occupant is away. Keep the tone; no need to translate literally.",
-  "status.next_action_vacation_1": "Light-hearted line shown when the occupant is on vacation. Keep the tone; no need to translate literally."
+  "status.next_action_vacation_1": "Light-hearted line shown when the occupant is on vacation. Keep the tone; no need to translate literally.",
+  "status.pa_reason.bias_over": "Why a prediction-accuracy row did not pass (hover text). |bias| is the absolute value of the average prediction error in degrees F; keep the vertical bars and the > sign. {bias} is already a two-decimal number.",
+  "status.pa_reason.coverage_low": "Why a prediction-accuracy row did not pass (hover text). Coverage is the share (0 to 1) of points the v4 model answered; keep the < sign. v3 / v4 are engine names: do not translate.",
+  "status.pa_reason.not_enough_data": "Why a prediction-accuracy row did not pass (hover text). n is the number of points so far, need the number required; keep the n= form."
 }

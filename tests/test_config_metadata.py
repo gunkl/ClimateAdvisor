@@ -238,7 +238,7 @@ class TestConfigMetadataStructure:
             "sensitive",
             "default",
             "no_default",
-            "unit",
+            "time_unit",
         }
         for key, meta in CONFIG_METADATA.items():
             extra = set(meta.keys()) - allowed
@@ -303,8 +303,8 @@ class TestConfigMetadataI18n:
 
     def test_static_unit_is_a_time_unit_only(self):
         for key, meta in CONFIG_METADATA.items():
-            if "unit" in meta:
-                assert meta["unit"] in {"min", "s"}, key
+            if "time_unit" in meta:
+                assert meta["time_unit"] in {"min", "s"}, key
 
     def test_label_units_match_the_explicit_unit(self):
         # Every label that still says "(minutes)/(min)/(sec)" declares the unit explicitly (the dashboard no
@@ -313,11 +313,11 @@ class TestConfigMetadataI18n:
 
         for key, meta in CONFIG_METADATA.items():
             if re.search(r"\((minutes|min)\)", meta["label"], re.I):
-                assert meta.get("unit") == "min", key
+                assert meta.get("time_unit") == "min", key
             if re.search(r"\((sec|seconds)\)", meta["label"], re.I):
-                assert meta.get("unit") == "s", key
+                assert meta.get("time_unit") == "s", key
             if meta.get("display_transform") == "seconds_to_minutes":
-                assert meta.get("unit") == "min", key
+                assert meta.get("time_unit") == "min", key
 
 
 class TestSettingsApiI18n:
@@ -366,9 +366,10 @@ class TestSettingsApiI18n:
         by_key = self._settings(
             {"temp_unit": "celsius", "manual_grace_seconds": 1800, "comfort_mode_switch_min_interval_s": 300}
         )
-        assert by_key["manual_grace_seconds"]["unit"] == "min"
+        assert by_key["manual_grace_seconds"]["time_unit"] == "min"
+        assert "unit" not in by_key["manual_grace_seconds"]  # REST `unit` is temperature-only
         assert by_key["manual_grace_seconds"]["value"] == 30
-        assert by_key["comfort_mode_switch_min_interval_s"]["unit"] == "s"
+        assert by_key["comfort_mode_switch_min_interval_s"]["time_unit"] == "s"
         assert by_key["comfort_heat"]["unit"] == "°C"
         assert "unit" not in by_key["weather_entity"]
 

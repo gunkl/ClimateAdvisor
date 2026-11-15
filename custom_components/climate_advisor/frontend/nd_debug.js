@@ -9,7 +9,7 @@
   // in-words values stay English (owner decision Q3). A missing catalog degrades to the key, so T() is the only sink.
   function T(key, params) { return CAI18N.t('dashboard.debug.' + key, params); }
   // U+2068..U+2069 isolate a Latin name inside RTL text (the Python renderer does the same for ar)
-  function iso(x) { return CAI18N.dir === 'rtl' ? '\u2068' + x + '\u2069' : String(x); }
+  var iso = CAI18N.iso;
   var A = null, E = null, EV = null, evOff = {}, loaded = false, timer = null;
 
   // Group -> automation_state keys. 'Today's classification', 'Learning pipeline', 'Prediction engines' and 'Last thermostat
@@ -69,7 +69,7 @@
     if (v == null) return DASH;
     if (typeof v === 'boolean') return T(v ? 'yes' : 'no');
     if (typeof v === 'number') return String(Math.round(v * 1000) / 1000);
-    if (typeof v === 'string') return /^\d{4}-\d\d-\d\dT/.test(v) ? new Intl.DateTimeFormat(CAI18N.lang, { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(new Date(v)) : v;
+    if (typeof v === 'string') return /^\d{4}-\d\d-\d\dT/.test(v) ? CAI18N.fmt.intl({ month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }, CAI18N.lang).format(new Date(v)) : v;
     if (Array.isArray(v)) return v.length ? v.map(fmt).join(v.some(function (x) { return x && typeof x === 'object'; }) ? '; ' : ', ') : T('none');
     if (typeof v === 'object') { var ks = Object.keys(v); return ks.length ? ks.map(function (k) { return k.replace(/_/g, ' ') + ' ' + fmt(v[k]); }).join(' · ') : T('none'); }
     return String(v);
@@ -94,14 +94,16 @@
   // ---------- plain-language times ----------
   function when(iso) { var d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d : null; }
   function tShort(d) { return CAI18N.fmt.time(d); }
-  function tDay(iso) {  // "7:30 AM" today, "Mon 7:30 AM" on another day
+  function tDay(iso) {  // "7:30 AM" today, "Mon 7:30 AM" on another day, "Nov 3, 2025 7:30 AM" in another year (HA zone)
     var d = when(iso); if (!d) return DASH;
-    return (d.toDateString() === new Date().toDateString() ? '' : new Intl.DateTimeFormat(CAI18N.lang, { weekday: 'short' }).format(d) + ' ') + tShort(d);
+    var key = function (x) { return CAI18N.fmt.intl({ year: 'numeric', month: 'numeric', day: 'numeric' }, ['en-US']).format(x); };
+    if (key(d) === key(new Date())) return tShort(d);
+    var yr = function (x) { return CAI18N.fmt.intl({ year: 'numeric' }, ['en-US']).format(x); };
+    return (yr(d) === yr(new Date()) ? CAI18N.fmt.intl({ weekday: 'short' }, CAI18N.lang).format(d) : CAI18N.fmt.dateYear(d)) + ' ' + tShort(d);
   }
   function dayLabel(ymd) {  // "2026-11-07" (a local calendar day, not UTC midnight) -> "Sat 11/7"
     var m = /^(\d{4})-(\d\d)-(\d\d)/.exec(ymd || ''); if (!m) return DASH;
-    var d = new Date(+m[1], +m[2] - 1, +m[3]);
-    return new Intl.DateTimeFormat(CAI18N.lang, { weekday: 'short' }).format(d) + ' ' + CAI18N.fmt.date(d);
+    return CAI18N.fmt.calendarDay(+m[1], +m[2], +m[3], CAI18N.lang, true);
   }
   function count(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
   function has(x) { return x != null && x !== ''; }
@@ -161,7 +163,7 @@
       var vals = Object.keys(ar).map(function (k) { return Number(ar[k]) || 0; });
       var n = '_ca' in ar ? Number(ar._ca) || 0 : Math.max.apply(null, vals.concat([0]));
       var since = when(v.archive_since);
-      arTxt = n ? count(n, 'slot', 'slots') + (since ? ' since ' + CAI18N.fmt.date(since) : '') : 'empty';
+      arTxt = n ? count(n, 'slot', 'slots') + (since ? ' since ' + CAI18N.fmt.dateYear(since) : '') : 'empty';
     }
     rows.push(['Archive', arTxt]);
     rows.push(['Mass node', has(v.mass) ? Number(v.mass).toFixed(1) + u : DASH]);

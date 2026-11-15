@@ -28,10 +28,12 @@
     return unit === 'celsius' ? '°C' : '°F';
   }
 
+  // Escapes & < > " ': the output goes into quoted attributes as well as element text. CAI18N.esc when i18n.js is
+  // loaded (the new dashboard); the classic page has no i18n.js, so an equivalent escaper stands in.
+  const _ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    if (window.CAI18N && window.CAI18N.esc) return window.CAI18N.esc(text);
+    return String(text == null ? '' : text).replace(/[&<>"']/g, c => _ESC[c]);
   }
 
   // ---- i18n (Issue #1341) ----
@@ -253,8 +255,18 @@
   function _flipGlyph(html) { return html.replace(/▸/g, '<span class="dir-flip">▸</span>'); }
   // Locale for Intl calls: English keeps the browser's own locale (as before), any other language its own.
   function _loc() { const l = _lang(); return l === 'en' ? [] : l; }
+  // A date/time through CAI18N.fmt.intl: HA's zone (CAI18N.timeZone) and 12/24 h setting, like every other time on the
+  // dashboard. The classic page has no i18n.js and keeps the browser's own zone.
+  function _dtf(opts, loc) {
+    const I = window.CAI18N;
+    if (I && I.fmt && I.fmt.intl) { const f = I.fmt.intl(opts, loc || _loc()); if (f) return f; }
+    return new Intl.DateTimeFormat(loc || _loc(), opts);
+  }
+  function _fmtT(ms, opts, loc) { return _dtf(opts, loc).format(new Date(ms)); }
+  // A stable calendar-day key for a moment, in the displayed zone.
+  function _dayKey(ms) { return _fmtT(ms, { year: 'numeric', month: 'numeric', day: 'numeric' }, ['en-US']); }
   // A dynamic Latin name inside right-to-left text: isolate it (what the Python renderer does for ar).
-  function _iso(s) { return _isRtl() && s ? '⁨' + s + '⁩' : s; }
+  function _iso(s) { return s && window.CAI18N && window.CAI18N.iso ? window.CAI18N.iso(s) : s; }
   function _enNum(n, skel) {
     const d = skel === '::.0' ? 1 : skel === '::.00' ? 2 : skel === '::precision-integer' ? 0 : null;
     if (skel === '::percent') return Math.round(n * 100) + '%';
@@ -346,8 +358,8 @@
   // Text the backend may send with a `<field>_msg` wire sibling (Issue #1341 D3): render it, else the English field.
   function _bk(o, f) {
     if (!o) return '';
-    const w = o[f + '_msg'];
-    if (w && window.CAI18N && window.CAI18N.tw) { try { const r = window.CAI18N.tw(w); if (r) return r; } catch (_e) { /* English field */ } }
+    const I = window.CAI18N;
+    if (I && I.text) { try { return I.text(o, f); } catch (_e) { /* English field */ } }   // has-key check: a missing key never shows raw
     return o[f] == null ? '' : o[f];
   }
   // Numbers: English keeps toFixed / String exactly; other languages get their separators.
@@ -1110,7 +1122,7 @@
     } else {
       const span = v4 && v4.past_span;
       const loaded = ready && CHART_LEADS.some(l => pastPts(l).length > 0);
-      const fmtDay = iso => new Date(iso).toLocaleString(_loc(), { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      const fmtDay = iso => _fmtT(iso, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
       let msg, state;
       if (span && span.first && span.last) {
         msg = _t('lead.none_span', { first: fmtDay(span.first), last: fmtDay(span.last) });
@@ -1290,11 +1302,10 @@
 
   function _xTick(ms) {
     const w = _viewWindow();
-    const d = new Date(ms);
     const span = _spanMs(w);
     if (span <= 36 * 3600000) return _clock(ms);
-    if (span <= 8 * 86400000) return d.toLocaleDateString(_loc(), { weekday: 'short' }) + ' ' + d.toLocaleTimeString(_loc(), { hour: 'numeric' });
-    return d.toLocaleDateString(_loc(), { month: 'short', day: 'numeric' });
+    if (span <= 8 * 86400000) return _fmtT(ms, { weekday: 'short' }) + ' ' + _fmtT(ms, { hour: 'numeric' });
+    return _fmtT(ms, { month: 'short', day: 'numeric' });
   }
 
   function _xScaleOptions(win, showTicks, gridColor, textColor) {
@@ -1812,8 +1823,8 @@
     if (now >= win.min && now <= win.max) return { ms: now, label: _t('readout.now', { time: _clock(now) }) };
     const ms = win.max;
     return { ms: ms, label: Math.abs(ms - now) < 6 * 86400000
-      ? _t('readout.end_week', { weekday: new Date(ms).toLocaleDateString(_loc(), { weekday: 'short' }), time: _clock(ms) })
-      : _t('readout.end_date', { date: new Date(ms).toLocaleDateString(_loc(), { month: 'short', day: 'numeric' }), time: _clock(ms) }) };
+      ? _t('readout.end_week', { weekday: _fmtT(ms, { weekday: 'short' }), time: _clock(ms) })
+      : _t('readout.end_date', { date: _fmtT(ms, { month: 'short', day: 'numeric' }), time: _clock(ms) }) };
   }
 
   function _renderRest() {
@@ -1922,7 +1933,7 @@
       if (closest.event) stateHtml += '<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">' + escapeHtml(String(closest.event).replace(/_/g, ' ')) + '</div>';
     }
     const when = restLabel ? escapeHtml(restLabel)
-      : new Date(ms).toLocaleString(_loc(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      : _fmtT(ms, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     const touchOnly = window.matchMedia && window.matchMedia('(hover: none)').matches;
     const pin = restLabel
       ? '<span class="chp-hint">' + escapeHtml(_t(touchOnly ? 'readout.hint_touch' : 'readout.hint_mouse')) + '</span>'
@@ -2202,7 +2213,7 @@
     if (!_tableView || !_lastChartData) return;
     const m = buildTableModel();
     const sym = _unitSym();
-    const fmtT = t => new Date(t).toLocaleString(_loc(), { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const fmtT = t => _fmtT(t, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     const head = '<tr><th scope="col">' + escapeHtml(_t('table.time')) + '</th>' + m.cols.map(c => '<th scope="col">' + escapeHtml(_t('table.col', { name: c.short, unit: c.unit || sym })) + '</th>').join('') + '<th scope="col">' + escapeHtml(_t('table.thermostat')) + '</th></tr>';
     const stateTxt = st => ({ heating: 1, cooling: 1, fan: 1 })[st] ? _t('table.state_' + st) : st;
     const body = m.rows.map(r => '<tr' + (r.t > Date.now() ? ' class="future"' : '') + '><th scope="row">' + escapeHtml(fmtT(r.t)) + '</th>' +
@@ -2331,14 +2342,14 @@
   // the time of day: English as before; other languages through CAI18N (honours the user's 12/24 h setting)
   function _clock(ms) {
     if (_lang() !== 'en' && window.CAI18N) return window.CAI18N.fmt.time(ms);
-    return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return _fmtT(ms, { hour: 'numeric', minute: '2-digit' }, []);   // English: the browser locale, in the dashboard zone
   }
 
   function _planRowHtml(s, now) {
     const you = s.actor === 'you', low = s.confidence === 'low';
     const held = !!(s.meta && s.meta.status === 'held');   // a held step (a hold or the live direction veto) is not a "may help" offer
-    const sameDay = new Date(s._ms).toDateString() === new Date(now).toDateString();
-    const day = sameDay ? '' : '<span class="plan-day">' + escapeHtml(new Date(s._ms).toLocaleDateString(_loc(), { weekday: 'short' })) + '</span> ';
+    const sameDay = _dayKey(s._ms) === _dayKey(now);
+    const day = sameDay ? '' : '<span class="plan-day">' + escapeHtml(_fmtT(s._ms, { weekday: 'short' })) + '</span> ';
     const lead = you && s.lead_minutes > 0 && s._ms - s.lead_minutes * 60000 > now
       ? '<span class="plan-note">' + escapeHtml(_t('plan.reminder', { time: _clock(s._ms - s.lead_minutes * 60000) })) + '</span>' : '';
     return '<li class="plan-row ' + (you ? 'plan-you' : 'plan-ca') + (low ? ' plan-low' : '') + (held ? ' plan-held' : '') + '" data-kind="' + escapeHtml(s.kind || '') + '" data-actor="' + escapeHtml(s.actor || '') + '">' +
@@ -2358,10 +2369,9 @@
     if (!later.length) return '';
     const days = [];
     later.forEach(s => {
-      const d = new Date(s._ms);
-      const key = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+      const key = _dayKey(s._ms);
       let g = days.find(x => x.key === key);
-      if (!g) { g = { key, label: d.toLocaleDateString(_loc(), { weekday: 'short', month: 'short', day: 'numeric' }), steps: [] }; days.push(g); }
+      if (!g) { g = { key, label: _fmtT(s._ms, { weekday: 'short', month: 'short', day: 'numeric' }), steps: [] }; days.push(g); }
       g.steps.push(s);
     });
     const rows = days.map(g => {

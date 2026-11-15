@@ -33,6 +33,17 @@ class AISkillDefinition:
     config_key_model: str | None = None  # config key for model override (e.g. CONF_AI_INVESTIGATOR_MODEL)
     config_key_max_tokens: str | None = None  # config key for max_tokens override
     config_key_reasoning: str | None = None  # config key for reasoning_effort override
+    # Issue #1341: the parser also needs the output language (it is called as parser(raw, language=<code>)).
+    parser_takes_language: bool = False
+
+
+def _parse_response(skill: AISkillDefinition, text: str, hass: HomeAssistant) -> Any:
+    """Run the skill's parser, giving it the output language when it asks for it."""
+    if skill.parser_takes_language:
+        from . import i18n  # noqa: PLC0415
+
+        return skill.response_parser(text, language=i18n.hass_language(hass))
+    return skill.response_parser(text)
 
 
 class AISkillRegistry:
@@ -121,7 +132,7 @@ class AISkillRegistry:
         if response.success:
             await _maybe_persist_model_fallback(coordinator, override_model, cfg, response)
             try:
-                parsed = skill.response_parser(response.content)
+                parsed = _parse_response(skill, response.content, hass)
                 return {
                     "success": True,
                     "source": "ai",
@@ -243,7 +254,7 @@ class AISkillRegistry:
             return
 
         try:
-            parsed = skill.response_parser(full_text)
+            parsed = _parse_response(skill, full_text, hass)
         except Exception:
             _LOGGER.exception("Failed to parse streaming response for skill '%s'", name)
             parsed = {}

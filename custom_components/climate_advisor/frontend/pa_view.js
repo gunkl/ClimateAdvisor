@@ -174,23 +174,15 @@
   var chart = null, reqSeq = 0, reqCtl = null;
 
   function $(id) { return document.getElementById(id); }
-  function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
-  }
+  var esc = window.CAI18N.esc;
   // Issue #1341: catalog text (dashboard.pa.*). T() renders through CAI18N (params may be typed wire values), the
   // result is escaped by the caller (esc()) or set with textContent. iso() isolates a dynamic Latin name in RTL.
   function T(key, params) { return window.CAI18N ? window.CAI18N.t('dashboard.pa.' + key, params) : key; }
-  function iso(x) { return window.CAI18N && window.CAI18N.dir === 'rtl' ? '\u2068' + x + '\u2069' : String(x); }
+  var iso = window.CAI18N.iso;
   function lang() { return (window.CAI18N && window.CAI18N.lang) || 'en'; }
-  // Intl formatter for the dashboard language that honours the user's 12/24 h preference (the browser locale is not
-  // used: the page language is the dashboard's, as for every other formatter).
-  function dtf(opts) {
-    var o = Object.assign({}, opts), loc = window.CAI18N && window.CAI18N.locale;
-    if (o.hour && loc && (loc.time_format === '12' || loc.time_format === '24')) o.hour12 = loc.time_format === '12';
-    try { return new Intl.DateTimeFormat(lang(), o); } catch (e) { return new Intl.DateTimeFormat(undefined, o); }
-  }
+  // Intl formatter for the dashboard language: HA's time zone (CAI18N.timeZone) and the user's 12/24 h preference, like
+  // every other time on the dashboard (the browser locale and zone are not used).
+  function dtf(opts) { return window.CAI18N.fmt.intl(opts, lang()); }
   function nf(v, d) {
     var o = d == null ? { maximumFractionDigits: 6, useGrouping: false } : { minimumFractionDigits: d, maximumFractionDigits: d, useGrouping: false };
     return window.CAI18N ? window.CAI18N.fmt.number(Number(v), o) : Number(v).toFixed(d == null ? 2 : d);
@@ -203,14 +195,8 @@
   // Issue #1491: HA's <home-assistant> is normally the parent (the panel frame); also look in the top window in case
   // this page is ever one frame deeper. The localStorage 'hassTokens' fallback is never written by the iOS app.
   function hassAuth() {
-    var wins = [window.parent, window.top];
-    for (var i = 0; i < wins.length; i++) {
-      try {
-        var ha = wins[i].document.querySelector('home-assistant');
-        if (ha && ha.hass && ha.hass.auth) return ha.hass.auth;
-      } catch (e) { /* not embedded or cross-origin */ }
-    }
-    return null;
+    var h = window.CAI18N.hass();
+    return h && h.auth ? h.auth : null;
   }
   async function getAuthToken() {
     var auth = hassAuth();

@@ -86,7 +86,6 @@ _MODEL_COSTS: dict[str, dict[str, float]] = {
     "claude-haiku": {"input": 0.80, "output": 4.0},
 }
 
-# Circuit breaker states
 # Issue #1341 (D9): the occupant-facing sections of an AI report are written in the Home Assistant language. The
 # prompt itself and every context section stay English (render_en); only this instruction names the output language.
 # `## SECTION` headers stay English: parse_investigation_response() splits on them.
@@ -126,6 +125,7 @@ def output_language_instruction(language: str | None) -> str:
     )
 
 
+# Circuit breaker states
 _CB_CLOSED = "closed"
 _CB_OPEN = "open"
 _CB_HALF_OPEN = "half_open"

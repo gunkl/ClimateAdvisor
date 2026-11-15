@@ -9,7 +9,7 @@
   // in the viewer's language; numbers are passed as numbers so ICU formats them. Names that are Latin text (engine ids,
   // models, error text from the backend) are isolated with U+2068..U+2069 in RTL text, as the Python renderer does.
   function T(key, params) { return CAI18N.t('dashboard.analysis.' + key, params); }
-  function iso(x) { return CAI18N.dir === 'rtl' ? '\u2068' + x + '\u2069' : String(x); }
+  var iso = CAI18N.iso;
   // locale number with fixed decimals, no grouping (the old toFixed output in English); null/NaN -> the dash
   function nf(v, d) {
     if (v == null || isNaN(v)) return '\u2014';
@@ -201,7 +201,7 @@
     // the record's local calendar day (a 'YYYY-MM-DD' string): shown as a locale date, built from its parts (not UTC midnight)
     var dt = function (r, p) {
       var mm = r && r.date ? /^(\d{4})-(\d\d)-(\d\d)/.exec(String(r.date)) : null;
-      return mm ? ' ' + CAI18N.fmt.date(new Date(+mm[1], +mm[2] - 1, +mm[3])) : p || '';
+      return mm ? ' ' + CAI18N.fmt.calendarDay(+mm[1], +mm[2], +mm[3], CAI18N.lang) : p || '';
     };
     var h = '<table style="min-width:640px"><thead><tr><th scope="col"><span class="sr-only">' + esc(T('days.col.measure')) + '</span></th><th scope="col">' + esc(T('days.col.yesterday')) + esc(dt(y)) +
       '</th><th scope="col">' + esc(T('days.col.today')) + esc(dt(t)) + '</th><th scope="col">' + esc(T('days.col.tomorrow')) + esc(dt(n)) + '</th></tr></thead><tbody>';
@@ -300,7 +300,7 @@
       // Issue #1512: hvN is the evidence behind the heating/cooling rates (older measurements give way to new cycles,
       // never to time alone), not a running total
       row(T('model.kept', { house: envN, hvac: hvN }), T('model.calibration_split', { house: iso(tm.confidence_k_passive || 'none'), hvac: iso(tm.confidence || 'none') }),
-        tm.last_observation_date ? T('model.last_obs', { date: CAI18N.fmt.date(new Date(tm.last_observation_date)) }) : T('model.none_yet'));
+        tm.last_observation_date ? T('model.last_obs', { date: CAI18N.fmt.dateYear(new Date(tm.last_observation_date)) }) : T('model.none_yet'));
     }
     if (!rows.length) rows.push('<div class="empty">' + esc(T('model.nothing')) + '</div>');
     var health = tm && tm.learning_health, html = rows.join('');

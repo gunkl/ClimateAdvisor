@@ -105,6 +105,10 @@
     });
   }
 
+  // A dynamic Latin name (entity id, model, repo) inside right-to-left text: isolated with U+2068..U+2069, as the Python
+  // renderer does for ar. The one helper every page module uses.
+  function iso(x) { return root.CAI18N && root.CAI18N.dir === 'rtl' ? '\u2068' + x + '\u2069' : String(x); }
+
   // ---------- formatters ----------
   // Intl.* based, and byte-identical to the Python formatters in i18n.py (the shared conformance fixture proves
   // it row by row), EXCEPT where noted: plain {n} numbers are String(n), not locale formatted.
@@ -193,12 +197,47 @@
   function time(d, lang) {
     return fmtInstant(d, lang, { hour: 'numeric', minute: '2-digit' }) || BAD;
   }
+  // Same zone as time()/date(): hour labels (night-card axis, chart ticks) follow timeZone(), never the browser zone.
   function hour(d, lang) {
-    var f = dtf(lang, { hour: 'numeric' });
-    return f ? f.format(toDate(d)) : String(toDate(d).getUTCHours());
+    return fmtInstant(d, lang, { hour: 'numeric' }) || String(toDate(d).getUTCHours());
+  }
+  // A zone-aware Intl.DateTimeFormat for any options (the one way the pages format an instant they draw themselves,
+  // e.g. a chart tick): timeZone() applies as for time(), and the user's 12/24 h setting applies when `hour` is shown.
+  // `lang` may be a language code, or a locales array (e.g. [] = the browser locale, ['en-US'] for a stable key).
+  function intl(opts, lang) {
+    var tz = timeZone(), f = null;
+    var arr = Array.isArray(lang);
+    var mk = function (zone) {
+      if (!arr) return dtf(lang, opts, zone);
+      var o = {}, k;
+      for (k in opts) o[k] = opts[k];
+      if (zone) o.timeZone = zone;
+      var loc = CAI18N.locale;
+      if (o.hour && loc && (loc.time_format === '12' || loc.time_format === '24')) o.hour12 = loc.time_format === '12';
+      try { return new Intl.DateTimeFormat(lang, o); } catch (e) { return null; }
+    };
+    if (tz && tz !== 'local') f = mk(tz);
+    return f || mk(null);
   }
   function date(d, lang) {
     return fmtInstant(d, lang, { month: 'short', day: 'numeric' }) || BAD;
+  }
+  // A calendar day given by its parts (a record's local day, "2026-11-07"): shown as that day whatever zone the page
+  // formats in (a plain Date(y, m, d) would drift a day across the browser/HA zone difference). weekday: also the weekday.
+  function calendarDay(y, m, d, lang, weekday) {
+    var at = new Date(Date.UTC(y, m - 1, d, 12));
+    var f = function (o) { o.timeZone = 'UTC'; return new Intl.DateTimeFormat(IL(lang), o).format(at).replace(/[\u202f\u00a0]/g, ' '); };
+    try {
+      var s = f({ month: 'short', day: 'numeric' });
+      return weekday ? f({ weekday: 'short' }) + ' ' + s : s;   // "Sat Nov 7": the two parts, as the classic wording
+    } catch (e) { return BAD; }
+  }
+  // date() plus the year when the instant is not in the current year (in the display zone): for "last observed" /
+  // "fitted" style dates that can be old. date() itself stays "Nov 14" (it is byte-identical to the Python formatter).
+  function dateYear(d, lang) {
+    var y = fmtInstant(d, 'en', { year: 'numeric' });
+    if (y == null || y === fmtInstant(new Date(), 'en', { year: 'numeric' })) return date(d, lang);
+    return fmtInstant(d, lang, { year: 'numeric', month: 'short', day: 'numeric' }) || BAD;
   }
   function dateTime(d, lang) {
     return fmtInstant(d, lang, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) || BAD;
@@ -550,8 +589,9 @@
     hass: getHass,
     timeZone: timeZone,
     esc: esc,
+    iso: iso,
     fmt: {
-      number: number, time: time, hour: hour, date: date, dateTime: dateTime, duration: duration, list: list,
+      number: number, time: time, hour: hour, date: date, dateYear: dateYear, calendarDay: calendarDay, dateTime: dateTime, intl: intl, duration: duration, list: list,
       temp: temp, tempDelta: tempDelta
     },
     t: function (key, params) { return renderKey(key, params, CAI18N.lang); },

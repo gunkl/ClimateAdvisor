@@ -360,7 +360,11 @@ def capture_next_action(coordinator: Any, engine: Any, scenario: dict) -> dict[s
         windows_physically_open=windows_open,
         ae=engine,
     )
-    out: dict[str, Any] = {"text": text, "advises_opening_windows": str(text).startswith("Open windows")}
+    # Issue #1341 (Q6): the card's direction is read from its message KEY, never from its English text. The card from
+    # the timeline carries its message (``timeline_surfaces.CardText``); ``text`` stays the card in English.
+    from custom_components.climate_advisor.timeline_surfaces import advises_opening  # noqa: PLC0415
+
+    out: dict[str, Any] = {"text": text, "advises_opening_windows": advises_opening(text)}
     tl = coordinator._surface_timeline() if hasattr(coordinator, "_surface_timeline") else None
     out["source"] = "timeline" if tl is not None else "legacy"
     action, at = coordinator._compute_next_automation_action(coordinator._current_classification)

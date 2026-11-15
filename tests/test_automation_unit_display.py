@@ -61,6 +61,13 @@ def _run_all(display_unit: str) -> list[str]:
     AutomationEngine._record_action = _spy
     for name, fn in saved.items():
         setattr(auto_mod, name, _forced(fn))
+    # Issue #1341: reasons are messages whose temperature parameters carry the display unit, built by the engine's
+    # typed twins ``_tp``/``_tdp``; the same seam forces the unit there (control flow still reads ``_temp_unit``).
+    from custom_components.climate_advisor import i18n  # noqa: PLC0415
+
+    saved_twins = (AutomationEngine._tp, AutomationEngine._tdp)
+    AutomationEngine._tp = lambda self, v, decimals=1: i18n.Temp(v, display_unit, decimals)
+    AutomationEngine._tdp = lambda self, d, decimals=1: i18n.TempDelta(d, display_unit, decimals)
     try:
         for path in sorted(list((_SIM_DIR / "golden").glob("*.json")) + list((_SIM_DIR / "pending").glob("*.json"))):
             scenario = copy.deepcopy(json.loads(path.read_text(encoding="utf-8")))
@@ -70,6 +77,7 @@ def _run_all(display_unit: str) -> list[str]:
                 continue
     finally:
         AutomationEngine._record_action = orig_record
+        AutomationEngine._tp, AutomationEngine._tdp = saved_twins
         for name, fn in saved.items():
             setattr(auto_mod, name, fn)
     return reasons

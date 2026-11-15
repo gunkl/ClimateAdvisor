@@ -1,0 +1,23 @@
+{
+  "entity": {
+    "sensor": {
+      "day_type": {"name": "Tagestyp", "state": {"hot": "Heiß", "mild": "Mild"}},
+      "automation_status": {"name": "Zustand"}
+    },
+    "switch": {"automation_enabled": {"name": "Automatik"}}
+  },
+  "common": {
+    "schedule_summary": "{name} — {days} {window} ({cost})",
+    "schedule_all_days": "Alle Tage",
+    "schedule_cost_high": "Hoch",
+    "schedule_cost_low": "Niedrig",
+    "key_status_not_configured": "Nicht eingerichtet"
+  },
+  "selector": {
+    "weekday": {"options": {"mon": "Mo", "tue": "Di", "wed": "Mi", "thu": "Do", "fri": "Fr", "sat": "Sa", "sun": "So"}},
+    "fan_mode": {"options": {"hvac_fan": "Lüfter der Heizung/Klimaanlage"}}
+  },
+  "exceptions": {
+    "unknown_zone": {"message": "Unbekannte oder nicht geladene Climate-Advisor-Zone '{entry_id}'."}
+  }
+}

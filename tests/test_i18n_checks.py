@@ -128,13 +128,22 @@ def _ha(tree, lang, content):
     (tree[2] / f"{lang}.json").write_text(json.dumps(content), encoding="utf-8")
 
 
+def _only_ha(tree, *langs):
+    """Keep only the named HA language files in the throwaway tree (the repo now ships 16)."""
+    for path in tree[2].glob("*.json"):
+        if path.stem not in langs:
+            path.unlink()
+
+
 def test_ha_parity_passes_for_matching_translation(tree):
+    _only_ha(tree, "en", "fr")
     _ha(tree, "fr", {"a": {"b": "Bonjour {name}"}})
     _ha(tree, "en", {"a": {"b": "Hello {name}"}})
     assert checks.check_ha_parity() == []
 
 
 def test_ha_parity_flags_keys_and_placeholders(tree):
+    _only_ha(tree, "en", "fr")
     _ha(tree, "en", {"a": {"b": "Hello {name}", "c": "x"}})
     _ha(tree, "fr", {"a": {"b": "Bonjour {nom}", "d": "y"}})
     errors = checks.check_ha_parity()

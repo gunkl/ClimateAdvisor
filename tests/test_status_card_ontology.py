@@ -116,6 +116,7 @@ without the test noticing.
 from __future__ import annotations
 
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -125,6 +126,19 @@ _TARGET_FN = "_compute_next_automation_action"
 _REGISTRY_NAME = "_ONTOLOGY_TIME_EXCEPTIONS"
 
 _TIME_FORMAT_CODES = ("%I", "%H", "%p")
+# Issue #1341: candidate text is a catalog message and its clock times are ``i18n.Time`` params (the one time
+# formatter, ``i18n.format_time``), so the time rule below follows those calls as well as the legacy strftime.
+_TIME_HELPER_CALLS = ("Time", "_clock", "_clock_text", "format_time")
+_I18N_DIR = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "frontend" / "i18n"
+
+
+def _english_catalog() -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for path in sorted(_I18N_DIR.glob("*/en.json")):
+        merged.update(json.loads(path.read_text(encoding="utf-8")))
+    return merged
+
+
 _LITERAL_TIME_RE = re.compile(r"\b(AM|PM)\b|%I:%M")
 _BANNED_WORDS = ("waiting", "paused", "grace", "window")
 _BANNED_WORD_RE = re.compile(r"\b(" + "|".join(_BANNED_WORDS) + r")\b", re.IGNORECASE)
@@ -251,6 +265,11 @@ def _find_time_source(expr: ast.expr, assignments: dict[str, ast.expr]) -> ast.A
                 and any(code in sub.args[0].value for code in _TIME_FORMAT_CODES)
             ):
                 return sub
+            if isinstance(sub, ast.Call) and (
+                (isinstance(sub.func, ast.Attribute) and sub.func.attr in _TIME_HELPER_CALLS)
+                or (isinstance(sub.func, ast.Name) and sub.func.id in _TIME_HELPER_CALLS)
+            ):
+                return sub
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and _LITERAL_TIME_RE.search(sub.value):
                 return sub
             if isinstance(sub, ast.Name) and sub.id in assignments and sub.id not in seen_names:
@@ -260,10 +279,14 @@ def _find_time_source(expr: ast.expr, assignments: dict[str, ast.expr]) -> ast.A
 
 
 def _banned_word_hits(expr: ast.expr) -> list[str]:
+    """Banned mechanism words in the candidate's text. A string constant that is a catalog key is checked as the
+    catalog's English (the text the occupant reads); any other constant is checked as written."""
+    catalog = _english_catalog()
     hits = []
     for sub in ast.walk(expr):
         if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-            found = _BANNED_WORD_RE.findall(sub.value)
+            text = catalog.get(sub.value, sub.value)
+            found = _BANNED_WORD_RE.findall(text)
             hits.extend(w.lower() for w in found)
     return hits
 

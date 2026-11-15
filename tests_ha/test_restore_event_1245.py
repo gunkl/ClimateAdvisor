@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from custom_components.climate_advisor import i18n
+
 pytestmark = pytest.mark.house
 
 _DEBOUNCE_S = 60
@@ -58,7 +60,7 @@ def _spy_notifications(engine) -> list[str]:
     real_notify = engine._notify
 
     async def _spy(message, title, notification_type, **kwargs):
-        sent.append(message)
+        sent.append(i18n.render_en(message))
         return await real_notify(message, title, notification_type, **kwargs)
 
     engine._notify = _spy

@@ -274,7 +274,7 @@ class TestDebugLabel:
         # ran 40 min before t0 + window 120 = t0 + 80 min
         assert until1 == (_T0 + timedelta(minutes=80)).isoformat()
         text = _coordinator_class()._comfort_family_hold_label(engine, clock.now, "fahrenheit")
-        assert "(until ~15:20)" in text
+        assert "(until ~3:20 PM)" in text  # Issue #1341: the one 12-hour formatter, i18n.format_time
 
     def test_celsius_user_sees_no_fahrenheit_numbers(self):
         hold = {
@@ -289,7 +289,7 @@ class TestDebugLabel:
         text = self._label(hold, "celsius")
         assert "°C" in text and "°F" not in text and " F " not in text
         assert "1.0°C past floor" in text and "tolerance 2.8°C" in text
-        assert "(until ~15:48)" in text
+        assert "(until ~3:48 PM)" in text
 
     def test_margin_zone_text(self):
         hold = {

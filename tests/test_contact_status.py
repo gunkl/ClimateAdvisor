@@ -308,8 +308,16 @@ class TestContactStatusSensorSource:
         assert "ClimateAdvisorContactStatusSensor" in self.source
 
     def test_contact_status_display_name(self):
-        """Sensor display name 'Contact Sensors' is present in sensor.py."""
-        assert '"Contact Sensors"' in self.source
+        """Sensor display name 'Contact Sensors' is the English entity name in strings.json (Issue #1341)."""
+        import json
+        import pathlib
+
+        strings_path = (
+            pathlib.Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "strings.json"
+        )
+        catalog = json.loads(strings_path.read_text(encoding="utf-8"))
+        assert catalog["entity"]["sensor"]["contact_status"]["name"] == "Contact Sensors"
+        assert '"Contact Sensors"' not in self.source
 
     def test_sensor_registered_in_async_setup_entry(self):
         """ClimateAdvisorContactStatusSensor is instantiated in async_setup_entry."""
@@ -325,13 +333,15 @@ class TestContactStatusSensorSource:
         assert "mdi:door-closed" in self.source
 
     def test_icon_logic_all_closed_uses_door_closed(self):
-        """Icon logic checks for 'all closed' to return mdi:door-closed."""
-        assert "all closed" in self.source
+        """Icon logic reads the sensors, never the (translated) summary text (Issue #1341)."""
+        assert 'value != "all closed"' not in self.source
+        assert "_compute_contact_details()" in self.source
         assert "mdi:door-closed" in self.source
 
     def test_sensor_extends_base_sensor(self):
         """ClimateAdvisorContactStatusSensor extends ClimateAdvisorBaseSensor."""
-        assert "ClimateAdvisorContactStatusSensor(ClimateAdvisorBaseSensor)" in self.source
+        assert "ClimateAdvisorContactStatusSensor(_ProseSensor)" in self.source
+        assert "class _ProseSensor(ClimateAdvisorBaseSensor)" in self.source
 
 
 # ---------------------------------------------------------------------------

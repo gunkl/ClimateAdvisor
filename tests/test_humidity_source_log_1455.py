@@ -213,6 +213,12 @@ def test_outdoor_weather_fallback_and_return(caplog):
         "to_kind": "weather service",
         "to_rh": 33.0,
         "reason": "weather service (no outdoor humidity sensor)",
+        # Issue #1341: catalog keys beside the stored English, so the Activity row can show it in the viewer's language
+        "subject_key": "status.humidity_subject.outdoor",
+        "from_kind_key": "status.humidity_kind.device_sensor",
+        "to_kind_key": "status.humidity_kind.weather_service",
+        "reason_key": "status.humidity_source.reason_weather_service",
+        "reason_params": {},
     }
     assert env.row(caplog) == [] and len(env.events()) == 1  # still on the weather service: silent
 

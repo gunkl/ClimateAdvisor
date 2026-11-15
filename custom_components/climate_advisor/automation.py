@@ -22,6 +22,7 @@ from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
+from . import i18n
 from .classifier import DayClassification
 from .const import (
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
@@ -168,6 +169,7 @@ from .own_write_echo import (
     prune_own_writes,
     resolve_step,
 )
+from .status_text import CodedText
 
 if TYPE_CHECKING:
     from .classification_fsm import ClassificationDecision
@@ -287,6 +289,7 @@ from .override_grace_lifecycle import (
     OverrideConfirmState,
     OverrideGraceLifecycleState,
 )
+from .record_text import MsgText, msg_of, msg_text
 from .remote_offset import (
     ClampLimit,
     RemoteContext,
@@ -321,6 +324,7 @@ from .temperature import (
     read_state_temp_f,
     to_fahrenheit,
 )
+from .thermostat_profile import FanProfile, live_fan_profile
 from .time_utils import instant_after
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
@@ -946,11 +950,16 @@ def select_comfort_band(
         context = ctx
 
     _unit = config.get("temp_unit", "fahrenheit")
-    reason = (
-        f"{ctx} band [{_band_num(floor, _unit)}/{_band_num(ceiling, _unit)}]"
-        f" (day={classification.day_type}, active={active}"
-        f"{', aggressive' if aggressive_savings else ''}"
-        f"{f', tou_expansion={display_delta(tou_expansion_f, _unit, 1):.1f}' if tou_expansion_f else ''})"
+    reason = _R(
+        "reason_band_select",
+        ctx=ctx,
+        floor=_band_num(floor, _unit),
+        ceiling=_band_num(ceiling, _unit),
+        day_type=str(classification.day_type),
+        active=active,
+        aggressive=_yn_flag(aggressive_savings),
+        has_tou=_yn_flag(tou_expansion_f),
+        tou=f"{display_delta(tou_expansion_f, _unit, 1):.1f}" if tou_expansion_f else "",
     )
     return ComfortBand(floor=floor, ceiling=ceiling, active=active, reason=reason, context=context)
 
@@ -1118,13 +1127,11 @@ def _override_event_source(reason: str) -> str:
     return "manual" if reason.startswith("user_cancel") else "automation"
 
 
-# Issue #1050 (#1048 #18): occupant-facing text for each arrival-home restore-hold reason.
-_RESTORE_DEFERRED_TEXT: dict[str, str] = {
-    "manual_override": "your manual thermostat change",
-    "override_confirm_pending": "your pending thermostat change",
-    "paused_by_door": "the open door/window",
-    "open_sensor": "the open door/window",
-}
+# Issue #1050 (#1048 #18): the arrival-home restore-hold reason codes the welcome-home notice names. The wording is the
+# ``select`` in the ``notify.welcome_home_hold`` catalog message (Issue #1341); an unlisted code reads "the hold".
+_RESTORE_DEFERRED_REASONS: frozenset[str] = frozenset(
+    {"manual_override", "override_confirm_pending", "paused_by_door", "open_sensor"}
+)
 
 
 def resolve_active_band(
@@ -1296,66 +1303,99 @@ def tou_bank_band(schedule: ComfortBand, target: float, mode: str) -> ComfortBan
             floor=min(schedule.floor, target),
             ceiling=target,
             active="ceiling",
-            reason=f"time-of-use pre-cool to {target:.1f}F",
+            reason=_R("reason_tou_pre_cool", target=f"{target:.1f}"),
             context=BAND_CONTEXT_TOU_BANK,
         )
     return ComfortBand(
         floor=target,
         ceiling=max(schedule.ceiling, target),
         active="floor",
-        reason=f"time-of-use pre-heat to {target:.1f}F",
+        reason=_R("reason_tou_pre_heat", target=f"{target:.1f}"),
         context=BAND_CONTEXT_TOU_BANK,
     )
 
 
-def hold_band_label(band: ComfortBand, occupancy_mode: str) -> str:
-    """'comfort band' / 'sleep band' / 'Away band' / 'Vacation band' for a schedule band (pure)."""
+def hold_band_label_msg(band: ComfortBand, occupancy_mode: str) -> i18n.Msg:
+    """The band's name as a message: comfort band / sleep band / Away band / Vacation band (pure)."""
     ctx = getattr(band, "context", "")
     if ctx == BAND_CONTEXT_VACATION or (ctx == BAND_CONTEXT_TOU_EXPANSION and occupancy_mode == OCCUPANCY_VACATION):
-        return "Vacation band"
+        return i18n.Msg("status.hold.band_vacation")
     if ctx in (BAND_CONTEXT_AWAY, BAND_CONTEXT_TOU_EXPANSION):
-        return "Away band"
+        return i18n.Msg("status.hold.band_away")
     if ctx == BAND_CONTEXT_SLEEP:
-        return "sleep band"
-    return "comfort band"
+        return i18n.Msg("status.hold.band_sleep")
+    return i18n.Msg("status.hold.band_comfort")
+
+
+def hold_band_label(band: ComfortBand, occupancy_mode: str) -> str:
+    """'comfort band' / 'sleep band' / 'Away band' / 'Vacation band' for a schedule band (pure; English)."""
+    return i18n.render_en(hold_band_label_msg(band, occupancy_mode))
+
+
+def _hold_band_range_msg(band: ComfortBand, unit: str) -> i18n.Msg:
+    """'60–80°F' as a message (display unit, whole degrees; the unit symbol follows the upper edge only)."""
+    lo = int(f"{from_fahrenheit(band.floor, unit):.0f}")
+    return i18n.Msg("status.hold.range", lo=lo, hi=i18n.Temp(band.ceiling, unit))
 
 
 def _hold_band_text(band: ComfortBand, unit: str) -> str:
-    """'60–80°F' (display unit, whole degrees)."""
-    return f"{format_temp(band.floor, unit)[:-2]}–{format_temp(band.ceiling, unit)}"
+    """'60–80°F' (display unit, whole degrees; English)."""
+    return i18n.render_en(_hold_band_range_msg(band, unit))
 
 
 def _hold_clock(at: datetime) -> str:
-    return dt_util.as_local(at).strftime("%I:%M %p").lstrip("0")
+    return i18n.format_time(dt_util.as_local(at), "en")
+
+
+def hold_after_msg(hold: CurrentHold, unit: str) -> i18n.Msg | None:
+    """What follows the bank, as a message: 'the Away band widened to 60–83°F until 9:00 PM' with a high-cost
+    widening (the Away/Vacation default), 'back to the Away band 60–80°F' without one, 'back to the comfort band
+    68–76°F' at home. None without a bank."""
+    if hold.bank is None:
+        return None
+    after = hold.after_band or hold.schedule_band
+    label = hold_band_label_msg(after, hold.occupancy_mode)
+    range_msg = _hold_band_range_msg(after, unit)
+    if getattr(after, "context", "") == BAND_CONTEXT_TOU_EXPANSION:
+        if hold.bank.period_end is not None:
+            return i18n.Msg(
+                "status.hold.after_widened_until",
+                label=label,
+                range=range_msg,
+                until=i18n.Time(dt_util.as_local(hold.bank.period_end)),
+            )
+        return i18n.Msg("status.hold.after_widened", label=label, range=range_msg)
+    return i18n.Msg("status.hold.after_back", label=label, range=range_msg)
 
 
 def hold_after_text(hold: CurrentHold, unit: str) -> str:
-    """What follows the bank (pure): 'the Away band widened to 60–83°F until 9:00 PM' with a high-cost widening (the
-    Away/Vacation default), 'back to the Away band 60–80°F' without one, 'back to the comfort band 68–76°F' at home.
-    '' without a bank."""
-    if hold.bank is None:
-        return ""
-    after = hold.after_band or hold.schedule_band
-    label = hold_band_label(after, hold.occupancy_mode)
-    if getattr(after, "context", "") == BAND_CONTEXT_TOU_EXPANSION:
-        until = f" until {_hold_clock(hold.bank.period_end)}" if hold.bank.period_end is not None else ""
-        return f"the {label} widened to {_hold_band_text(after, unit)}{until}"
-    return f"back to the {label} {_hold_band_text(after, unit)}"
+    """What follows the bank (pure, English): 'the Away band widened to 60–83°F until 9:00 PM' ... '' without a bank."""
+    msg = hold_after_msg(hold, unit)
+    return i18n.render_en(msg) if msg is not None else ""
 
 
-def hold_sentence(hold: CurrentHold | None, unit: str) -> str | None:
-    """The one bank sentence every surface quotes (pure), or None when no bank owns the thermostat.
+def hold_sentence_msg(hold: CurrentHold | None, unit: str, *, lowercase: bool = False) -> i18n.Msg | None:
+    """The one bank sentence every surface quotes, as a message, or None when no bank owns the thermostat.
 
     'Pre-cooling to 77°F until the 4:15 PM high-cost period, then the Away band widened to 60–83°F until 9:00 PM'
-    (home: '..., then back to the comfort band 68–76°F').
+    (home: '..., then back to the comfort band 68–76°F'). ``lowercase`` is the variant that starts mid-sentence (the
+    Status card line), its own catalog message so each language lowercases correctly.
     """
     if hold is None or hold.bank is None:
         return None
-    verb = "Pre-cooling" if hold.bank.mode == "cool" else "Pre-heating"
-    return (
-        f"{verb} to {format_temp(hold.bank.target, unit)} until the {_hold_clock(hold.bank.ends)} high-cost period, "
-        f"then {hold_after_text(hold, unit)}"
+    return i18n.Msg(
+        "status.hold.sentence_lc" if lowercase else "status.hold.sentence",
+        mode=hold.bank.mode,
+        target=i18n.Temp(hold.bank.target, unit),
+        ends=i18n.Time(dt_util.as_local(hold.bank.ends)),
+        after=hold_after_msg(hold, unit),
     )
+
+
+def hold_sentence(hold: CurrentHold | None, unit: str) -> str | None:
+    """The one bank sentence every surface quotes (pure, English), or None when no bank owns the thermostat."""
+    msg = hold_sentence_msg(hold, unit)
+    return i18n.render_en(msg) if msg is not None else None
 
 
 def pre_cool_sleep_window_config(config: dict) -> dict:
@@ -1455,6 +1495,21 @@ def _fan_archetype_requires_open_sensor(fan_mode: str) -> bool:
     return fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
 
 
+def _R(key: str, **params: Any) -> MsgText:
+    """A catalog message of the ``activity`` area as a record ``reason`` (English text plus the message, #1341)."""
+    return MsgText(i18n.Msg(f"activity.{key}", **params))
+
+
+def _yn_flag(flag: Any) -> str:
+    """``select`` argument for an optional clause."""
+    return "yes" if flag else "no"
+
+
+def _nest(value: Any) -> Any:
+    """A reason as a message parameter: its ``Msg`` when it carries one, else the plain text."""
+    return msg_of(value) or str(value)
+
+
 def _fan_transition_text(config: dict, *, activating: bool) -> str:
     """Return the correct Activity Report transition text for this install's fan mode.
 
@@ -1467,14 +1522,16 @@ def _fan_transition_text(config: dict, *, activating: bool) -> str:
     producing HVAC-thermostat-fan phrasing for a device that doesn't have that state.
     """
     mode = config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-    whf_clause = "WHF: off->on" if activating else "WHF: on->off"
-    hvac_fan_clause = "HVAC fan: auto->on" if activating else "HVAC fan: on->auto"
+    # Issue #1341: the same message keys as ``ai_skills_context._fan_transition_msg`` (the mirror), so the
+    # Activity record renders this text and its payload-less fallback identically.
+    whf_clause = i18n.Msg("activity.fan_whf_on" if activating else "activity.fan_whf_off")
+    hvac_fan_clause = i18n.Msg("activity.fan_hvac_on" if activating else "activity.fan_hvac_off")
     if mode == FAN_MODE_WHOLE_HOUSE:
-        return whf_clause
+        return MsgText(whf_clause)
     if mode == FAN_MODE_HVAC:
-        return hvac_fan_clause
+        return MsgText(hvac_fan_clause)
     if mode == FAN_MODE_BOTH:
-        return f"{whf_clause}, {hvac_fan_clause}"
+        return MsgText(i18n.Msg("activity.join_comma_2", a=whf_clause, b=hvac_fan_clause))
     return ""
 
 
@@ -1820,14 +1877,6 @@ class AutomationEngine:
         """Format an internal-°F absolute temperature in the user's unit (Issue #1048)."""
         return format_temp(value_f, self._temp_unit, decimals)
 
-    def _outdoor_ge_indoor(self, outdoor_f: float, indoor_f: float) -> str:
-        """Shared phrase for the nat-vent airflow-direction exit reasons (Issue #1048)."""
-        return f"outdoor {self._t(outdoor_f)} >= indoor {self._t(indoor_f)}"
-
-    def _indoor_le_comfort_floor(self, indoor_f: float, floor_f: float) -> str:
-        """Shared phrase for the nat-vent comfort-floor exit reasons (Issue #1048)."""
-        return f"indoor {self._t(indoor_f)} ≤ comfort floor {self._t(floor_f)}"
-
     def _band_num(self, value_f: float) -> str:
         """Whole-number band edge in the user's unit, no symbol (the ``[floor/ceiling]`` text)."""
         return _band_num(value_f, self._temp_unit)
@@ -1835,6 +1884,14 @@ class AutomationEngine:
     def _td(self, delta_f: float, decimals: int = 1) -> str:
         """Format an internal-°F delta in the user's unit (scale only, Issue #1048)."""
         return format_temp_delta(delta_f, self._temp_unit, decimals)
+
+    def _tp(self, value_f: float, decimals: int = 1) -> i18n.Temp:
+        """The message parameter for an internal-°F absolute temperature (Issue #1341; ``_t``'s typed twin)."""
+        return i18n.Temp(value_f, self._temp_unit, decimals)
+
+    def _tdp(self, delta_f: float, decimals: int = 1) -> i18n.TempDelta:
+        """The message parameter for an internal-°F delta (Issue #1341; ``_td``'s typed twin)."""
+        return i18n.TempDelta(delta_f, self._temp_unit, decimals)
 
     def __init__(
         self,
@@ -1965,6 +2022,7 @@ class AutomationEngine:
         # Action tracking (Issue #37)
         self._last_action_time: str | None = None
         self._last_action_reason: str | None = None
+        self._last_action_reason_msg: i18n.Msg | None = None  # Issue #1341: the Msg behind _last_action_reason
 
         # Revisit scheduling — 5-min follow-up after any HVAC action
         self._revisit_cancel: Any | None = None
@@ -2569,6 +2627,9 @@ class AutomationEngine:
         # Issue #1517: likewise the primary engine's house model (an engine-neutral ``HouseStepper``) for the ceiling
         # guard's lead time; None on a bare engine or while the primary is still learning.
         self._control_stepper_provider: Callable[[], Any] | None = None
+        # Issue #1556/#1566: the coordinator's learned thermostat fan profile (``live_fan_profile`` over its profile
+        # store); None on a bare engine (headless tools) = a name-only profile of the live fan_modes list.
+        self._fan_profile_provider: Callable[[], FanProfile] | None = None
 
         # Issue #899: away/vacation TOU pre-conditioning — the coordinator's live window
         # (_sync_tou_away_vacation_state(), each cycle), passed in with each decision's facts
@@ -2700,8 +2761,8 @@ class AutomationEngine:
 
     async def _notify(
         self,
-        message: str,
-        title: str,
+        message: str | i18n.Msg,
+        title: str | i18n.Msg,
         notification_type: str,
         *,
         email: bool = True,
@@ -2709,17 +2770,26 @@ class AutomationEngine:
     ) -> None:
         """Send a notification via configured channels, filtered by per-event preferences.
 
+        ``message`` and ``title`` are a plain ``str`` (sent as is) or an ``i18n.Msg`` rendered here, at send time, in
+        ``hass.config.language`` (Issue #1341); logs always carry the English rendering.
+
         ``email=False`` suppresses the email channel for this call (push still follows its
         per-event preference); the default keeps today's push + email behavior.
         ``observe_only_ok=True`` sends even with automation switched off: a notification is not a
         command, and the one caller (the sealed-house whole-house-fan notice, Issue #1144) exists
         precisely to tell the occupant about a fan Climate Advisor will not touch while observing.
         """
-        if _refuse_if_shut_down(self, f"send notification {title!r}"):
+        log_title = i18n.render_en(title)
+        if _refuse_if_shut_down(self, f"send notification {log_title!r}"):
             return
         if self.dry_run and not observe_only_ok:
-            _LOGGER.info("[DRY RUN] Would send notification: %s — %s role=%s", title, message, self.role)
+            _LOGGER.info(
+                "[DRY RUN] Would send notification: %s — %s role=%s", log_title, i18n.render_en(message), self.role
+            )
             return
+        lang = i18n.hass_language(self.hass)
+        title = i18n.render(title, lang)
+        message = i18n.render(message, lang)
         push_key = f"push_{notification_type}"
         email_key = f"email_{notification_type}"
         service_name = self.notify_service.split(".")[-1] if "." in self.notify_service else self.notify_service
@@ -2986,10 +3056,20 @@ class AutomationEngine:
         except Exception:
             _LOGGER.warning("Re-enable door/window reconcile failed; the next cycle retries", exc_info=True)
 
-    def _record_action(self, action: str, reason: str) -> None:
-        """Record an HVAC action with timestamp and reason, and schedule a revisit."""
+    def _record_action(self, action: str | i18n.Msg, reason: str | i18n.Msg) -> None:
+        """Record an HVAC action with timestamp and reason, and schedule a revisit.
+
+        Issue #1341 (D4): ``_last_action_reason`` stays the English record (log, Debug tab, AI context);
+        ``_last_action_reason_msg`` holds the ``Msg`` (``status.action_reason``: the action and the reason, the
+        reason itself a ``Msg`` when the caller passed one) so a surface can show it in the viewer's language.
+        A reason still passed as plain text shows its English in every language until its caller passes a ``Msg``.
+        The message is not persisted (after a restart only the English record is shown).
+        """
         self._last_action_time = dt_util.now().isoformat()
-        self._last_action_reason = f"{action} — {reason}"
+        self._last_action_reason_msg = i18n.Msg(
+            "status.action_reason", action=msg_of(action) or action, reason=msg_of(reason) or reason
+        )
+        self._last_action_reason = i18n.render_en(self._last_action_reason_msg)
         _LOGGER.info("Action recorded: %s", self._last_action_reason)
         self._schedule_revisit()
 
@@ -3640,11 +3720,7 @@ class AutomationEngine:
         # (``_is_whf_press()``: WHOLE_HOUSE/BOTH and not the thermostat's own blower); the blower coexists with
         # the compressor by design, under every configuration (Issue #1163).
         if _whf_press:
-            self.hass.async_create_task(
-                self._suppress_hvac_for_whf(
-                    reason="whole-house fan manually turned on — suppressing HVAC to prevent AC/fan fighting"
-                )
-            )
+            self.hass.async_create_task(self._suppress_hvac_for_whf(reason=_R("reason_whf_manual_on_suppress")))
 
     def handle_fan_speed_observed(self, speed: str, is_remote_event: bool = True) -> None:
         """Record a remote-reported speed CHANGE that does not constitute a manual override
@@ -3774,7 +3850,9 @@ class AutomationEngine:
                 # a session decide pause-vs-restore against live sensor state, instead of starting a fresh
                 # fan-off grace that only gets fought by the orphaned-grace watchdog.
                 self.hass.async_create_task(
-                    self._exit_nat_vent(reason=f"fan={fan_before or '?'}->{fan_after or '?'} (RF timer boundary)")
+                    self._exit_nat_vent(
+                        reason=_R("reason_fan_rf_timer_boundary", before=fan_before or "?", after=fan_after or "?")
+                    )
                 )
             else:
                 # Reconcile didn't adopt the fan (or it was already off) — nothing further to reconcile; just make
@@ -3858,14 +3936,16 @@ class AutomationEngine:
         # Issue #1205: the SAME path for the plain and the marker-matched occupant off -- the fan-off grace (hold)
         # always starts, ends the nat-vent session (preserve_nat_vent_session=False), clears _fan_active/_fan_on_since.
         self._clear_fan_flags_and_start_grace(
-            reason=f"fan={fan_before or '?'}->{fan_after or '?'}",
+            reason=_R("reason_fan_change", before=fan_before or "?", after=fan_after or "?"),
             trigger_label="fan_off",
             preserve_nat_vent_session=False,
         )
         # Issue #495: release any WHF HVAC suppression this session was holding (manual
         # override OR a nat-vent session the user stopped physically) and reclassify —
         # the fan is confirmed off by the very event that triggered this method.
-        self._release_whf_and_reclassify(reason=f"fan turned off by user ({fan_before or '?'}->{fan_after or '?'})")
+        self._release_whf_and_reclassify(
+            reason=_R("reason_fan_off_by_user", before=fan_before or "?", after=fan_after or "?")
+        )
 
     def _clear_fan_flags_and_start_grace(
         self,
@@ -4280,7 +4360,7 @@ class AutomationEngine:
             # _release_whf_and_reclassify() itself checks physical fan state and no-ops
             # if the WHF is still running (e.g. grace expired but the timer hasn't) —
             # the post-grace fan reconcile owns that case instead.
-            self._release_whf_and_reclassify(reason="fan override cleared")
+            self._release_whf_and_reclassify(reason=_R("reason_fan_override_cleared"))
 
     async def start_min_fan_runtime_cycles(self) -> None:
         """Start rolling minimum fan runtime cycles (not clock-aligned).
@@ -4571,7 +4651,7 @@ class AutomationEngine:
         while physically running) is actually turned off instead of reported ALREADY_IN_STATE.
         """
         result = await self._deactivate_fan(
-            reason=f"manual override to {mode} — ending free cooling",
+            reason=_R("reason_manual_override_ending_free_cooling", mode=str(mode)),
             restore_hvac=False,
             release_suppression=True,
             emit_event=False,
@@ -4857,9 +4937,7 @@ class AutomationEngine:
         if notify:
             # _notify() never raises (Issue #1133 M3), so this last step cannot undo the follow-ups above.
             await self._notify(
-                "Brief thermostat adjustment detected \u2014 treated as transient "
-                "(reverted within confirmation window). "
-                "Climate Advisor continues normal operation.",
+                i18n.Msg("notify.override_self_resolved"),
                 "Climate Advisor",
                 notification_type="override_self_resolved",
             )
@@ -5355,7 +5433,7 @@ class AutomationEngine:
                     with self._mode_change_context("pause"):
                         await self._set_hvac_mode(
                             "off",
-                            reason="classification cycle: door/window open — HVAC suppressed while paused",
+                            reason=_R("reason_classification_door_window_open"),
                         )
                 else:
                     _LOGGER.info("apply_classification: thermostat already off — no mode change needed (windows open)")
@@ -5470,9 +5548,11 @@ class AutomationEngine:
                 )
 
             # Arm the comfort band — the thermostat holds the house; no mode-specific dispatch needed.
-            cls_reason = (
-                f"daily classification — {classification.day_type} day,"
-                f" trend {classification.trend_direction} {format_temp_delta(classification.trend_magnitude, unit)}"
+            cls_reason = _R(
+                "reason_daily_classification",
+                day_type=str(classification.day_type),
+                trend=str(classification.trend_direction),
+                magnitude=self._tdp(classification.trend_magnitude, 0),
             )
             _band = select_comfort_band(
                 classification,
@@ -5494,7 +5574,9 @@ class AutomationEngine:
                     classification.day_type,
                 )
             elif _held is not _band:
-                await self._apply_comfort_band(_held, reason=cls_reason + " (pre-cool held)", mode_reason="pre_cool")
+                await self._apply_comfort_band(
+                    _held, reason=_R("reason_pre_cool_held", reason=_nest(cls_reason)), mode_reason="pre_cool"
+                )
             else:
                 await self._apply_comfort_band(_band, reason=cls_reason)
 
@@ -5664,10 +5746,8 @@ class AutomationEngine:
             )
             await self._pause_for_door_window(
                 entity_label="monitored door/window",
-                reason="door/window open at comfort-band arm time",
-                notify_message=(
-                    "🚪 HVAC paused — a monitored door/window is open. Heating/cooling will resume when it's closed."
-                ),
+                reason=_R("reason_door_window_arm_time"),
+                notify_message=i18n.Msg("notify.door_window_paused"),
                 notify_type="door_window_pause",
                 quiet=self._fan_session_about_to_take_over(caller="_apply_comfort_band"),
             )
@@ -5759,7 +5839,13 @@ class AutomationEngine:
         _band_reason = (
             band.reason
             if _effective_active == band.active
-            else f"{band.reason} -- {_effective_active} edge used ({_cmd_shape} at {self._t(_target, 0)})"
+            else _R(
+                "reason_band_edge_used",
+                band=_nest(band.reason),
+                edge=str(_effective_active),
+                shape=str(_cmd_shape),
+                target=self._tp(_target, 0),
+            )
         )
         _signature = (band.active, _cmd_shape, round(_target, 2), _outcome)
         if self._recent_duplicate("comfort_band_applied", _signature):
@@ -6120,13 +6206,16 @@ class AutomationEngine:
                     entry["reason"],
                 )
                 return
+            _mode_set_code = entry["reason"] if entry["reason"] in _MODE_SET_REASON_LABELS else "other"
             self._emit_event_callback(
                 "thermostat_mode_set",
                 {
                     "zone": self._zone_label(),
                     "from_mode": entry["from_mode"],
                     "to_mode": entry["to_mode"],
-                    "reason": _MODE_SET_REASON_LABELS.get(entry["reason"], "other"),
+                    "reason": _R(
+                        f"mode_set_{entry['reason'] if entry['reason'] in _MODE_SET_REASON_LABELS else 'other'}"
+                    ),
                     "source": entry["reason"],
                     "indoor_f": entry["indoor_f"],
                     "floor_f": entry["floor_f"],
@@ -6434,8 +6523,9 @@ class AutomationEngine:
 
         self._mode_align_recheck_cancel = async_call_later(self.hass, MODE_ALIGNMENT_RECHECK_S, _recheck)
 
-    async def _set_hvac_mode(self, mode: str, *, reason: str) -> HvacCommandResult:
+    async def _set_hvac_mode(self, mode: str, *, reason: str | i18n.Msg) -> HvacCommandResult:
         """Set the thermostat HVAC mode and report what happened (Issue #1049)."""
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
         # enforced here rather than by convention at every one of the ~13 call sites.
         if mode != "off" and self._whf_owns_hvac():
@@ -6507,7 +6597,7 @@ class AutomationEngine:
             # Read back later (Off direction included): did the thermostat actually take it?
             self._schedule_mode_alignment_recheck(_mode_seq)
             _LOGGER.info("Set HVAC mode to %s — %s role=%s", mode, reason, self.role)
-            self._record_action(f"Set HVAC to {mode}", reason)
+            self._record_action(_R("action_set_hvac", mode=str(mode)), reason)
             # When taking HVAC offline, assert fan_mode=auto to clear any post-heat
             # blowdown state. Skip if nat-vent is active — clobbering fan_mode=on
             # while nat-vent is running silently stops cooling (Issue #134).
@@ -6535,7 +6625,7 @@ class AutomationEngine:
                     self._fan_command_time = dt_util.now()
                     _cs_off = self.hass.states.get(self.climate_entity)
                     _fan_modes_off = list(_cs_off.attributes.get("fan_modes") or []) if _cs_off else []
-                    _off_value = resolve_fan_mode_command(_fan_modes_off, "off")
+                    _off_value = resolve_fan_mode_command(_fan_modes_off, "off", profile=self._fan_profile())
                     if _off_value is None:
                         _LOGGER.debug(
                             "No safe off/auto fan_mode found in entity's fan_modes=%s — skipping assert",
@@ -6639,7 +6729,7 @@ class AutomationEngine:
             self._last_mode_switch_result = HvacCommandResult.EXECUTED
         self._update_write_record(result=self._last_mode_switch_result)
         self._mode_switch_marker = (mode, dt_util.now())
-        self._record_action(f"Set HVAC to {mode}", "mode switch before setpoint write")
+        self._record_action(_R("action_set_hvac", mode=str(mode)), _R("reason_mode_switch_before_setpoint"))
         if self._write_seq != my_seq:
             _LOGGER.info("Setpoint write superseded by a newer command during the mode switch — aborting")
             return False
@@ -6649,7 +6739,7 @@ class AutomationEngine:
         self,
         temperature: float,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         mode: str = "cool",
         skip_setpoint_sanity_check: bool = False,
         keep_pre_cool_hold: bool = False,
@@ -6674,6 +6764,7 @@ class AutomationEngine:
         ``_hold_pre_cool_band()``) is not a new target either, so it keeps the hold. Any other write -- heat at the
         floor, wake-up, a restore to another band -- still ends it.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         _held = self._pre_cool_band_in_force
         _rewrites_held = _held is not None and mode == "cool" and abs(float(temperature) - _held.ceiling) < 0.05
         if not keep_pre_cool_hold and not _rewrites_held:
@@ -6730,7 +6821,7 @@ class AutomationEngine:
         self,
         temperature: float,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         mode: str = "cool",
         skip_setpoint_sanity_check: bool = False,
     ) -> HvacCommandResult:
@@ -6752,6 +6843,7 @@ class AutomationEngine:
                 Every other caller (``_apply_comfort_band()`` and all its other callers)
                 keeps the default False and still gets the full sanity check.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
         # enforced here rather than by convention at every call site.
         if mode != "off" and self._whf_owns_hvac():
@@ -7101,7 +7193,7 @@ class AutomationEngine:
         self._remote_exit_at = None  # any writer's setpoint ends the exit's wait for "the next band" (Issue #1194 c)
         if _call.ok:
             self._remote_write_failed_at = None  # a write went through: the outer loop's failed-write back-off is over
-        self._record_action(f"Set temp to {format_temp(temperature, unit)} (mode={mode})", reason)
+        self._record_action(_R("action_set_temp", temp=i18n.Temp(temperature, unit), mode=str(mode)), reason)
         return HvacCommandResult.EXECUTED if _call.ok else HvacCommandResult.UNCONFIRMED
 
     # ------------------------------------------------------------------
@@ -7549,7 +7641,7 @@ class AutomationEngine:
             return  # nothing to change on the thermostat: write only when the step changes
         result = await self._set_temperature(
             target,
-            reason=f"remote-sensor offset {self._td(desired)} ({note})",
+            reason=_R("reason_remote_offset", delta=self._tdp(desired), note=str(note)),
             mode=mode,
             keep_pre_cool_hold=True,
         )
@@ -7679,7 +7771,7 @@ class AutomationEngine:
                 floor=heat,
                 ceiling=cool,
                 active="floor" if getattr(c, "hvac_mode", None) == "heat" else "ceiling",
-                reason="flat comfort band (resolver unavailable)",
+                reason=_R("reason_flat_band"),
             )
 
     @staticmethod
@@ -7735,7 +7827,7 @@ class AutomationEngine:
         self,
         c: DayClassification,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         target_override: float | None = None,
         skip_setpoint_sanity_check: bool = False,
     ) -> HvacCommandResult | None:
@@ -7770,6 +7862,7 @@ class AutomationEngine:
         call site. TOU's own gate is already the authority here; the resolver must not
         second-guess it.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         self._last_mode_write = ComfortModeWrite()  # Issue #1245: overwritten by whichever path returns below
         # Issue #85: redirect to setback when not home/guest. Gate unified via
         # should_defer_to_occupancy_setback() (Issue #460); which handler to redirect
@@ -8141,10 +8234,8 @@ class AutomationEngine:
             return  # nat-vent/WHF owns this, or not open / only transiently open — do not pause on a blip
         await self._pause_for_door_window(
             entity_label="monitored door/window",
-            reason="door/window still open at comfort-restore time",
-            notify_message=(
-                "🚪 HVAC paused — a monitored door/window is open. Heating/cooling will resume when it's closed."
-            ),
+            reason=_R("reason_door_window_restore_time"),
+            notify_message=i18n.Msg("notify.door_window_paused"),
             notify_type="door_window_pause",
             quiet=self._fan_session_about_to_take_over(caller="_sync_paused_by_door_with_live_sensors"),
         )
@@ -8172,7 +8263,7 @@ class AutomationEngine:
         self._paused_since = dt_util.now()
 
     async def _pause_for_door_window_action(
-        self, *, entity_label: str, reason: str, notify_message: str, notify_type: str, quiet: bool = False
+        self, *, entity_label: str, reason: str, notify_message: str | i18n.Msg, notify_type: str, quiet: bool = False
     ) -> bool | None:
         """The HVAC-affecting half of a door/window pause (Issue #660 Step 6):
         thermostat mode capture, turning HVAC off (or noting it's already off),
@@ -8197,7 +8288,9 @@ class AutomationEngine:
             _prev_pre_pause_mode = self._pre_pause_mode
             self._pre_pause_mode = mode
             with self._mode_change_context("pause"):
-                _off_result = await self._set_hvac_mode("off", reason=f"{reason}, was {mode} mode")
+                _off_result = await self._set_hvac_mode(
+                    "off", reason=_R("reason_pause_was_mode", reason=_nest(reason), mode=str(mode))
+                )
             if _off_result is HvacCommandResult.DRY_RUN:
                 # Issue #1293: observe-only sent nothing, so the HVAC keeps running and there is no pause to record.
                 # Recording one (``_paused_by_door`` + a "heat→off" ``sensor_opened``) left Climate Advisor believing
@@ -8214,7 +8307,9 @@ class AutomationEngine:
                 return None
             # Issue #1302: a FAILED / UNCONFIRMED Off keeps the pause (the window IS open and ``_pre_pause_mode`` is
             # what closing it restores) and re-sends the Off soon while the thermostat still reads an active mode.
-            self._arm_open_window_off_retry(_off_result, reason=f"door/window pause ({entity_label})")
+            self._arm_open_window_off_retry(
+                _off_result, reason=_R("reason_door_window_pause_entity", entity=entity_label)
+            )
             if not quiet:
                 await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
             if self._emit_event_callback:
@@ -8245,7 +8340,7 @@ class AutomationEngine:
         return None
 
     async def _pause_for_door_window(
-        self, *, entity_label: str, reason: str, notify_message: str, notify_type: str, quiet: bool = False
+        self, *, entity_label: str, reason: str, notify_message: str | i18n.Msg, notify_type: str, quiet: bool = False
     ) -> bool:
         """Pause HVAC for an open door/window, or mark paused if HVAC was already off.
 
@@ -8457,12 +8552,13 @@ class AutomationEngine:
 
                 _is_soft_start = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_SOFT_START
                 nat_vent_reason = (
-                    f"nat-vent soft-start: outdoor {self._t(outdoor)} at/below indoor {self._t(indoor)}"
-                    " parity, past today's peak and declining — purge/comfort air movement"
+                    _R("reason_nv_soft_start", outdoor=self._tp(outdoor), indoor=self._tp(indoor))
                     if _is_soft_start
-                    else (
-                        f"natural ventilation: outdoor {self._t(outdoor)} < indoor {self._t(indoor)},"
-                        f" outdoor {self._t(outdoor)} <= {self._t(nat_vent_threshold)}"
+                    else _R(
+                        "reason_nv_start",
+                        outdoor=self._tp(outdoor),
+                        indoor=self._tp(indoor),
+                        threshold=self._tp(nat_vent_threshold),
                     )
                 )
                 # Issue #1140 follow-up: a window opening while a nat-vent session is ALREADY live is not a
@@ -8593,11 +8689,9 @@ class AutomationEngine:
             # planned-window check stay byte-for-byte unchanged.
             hvac_already_off = await self._pause_for_door_window_action(
                 entity_label=entity_id,
-                reason=f"door/window open — {entity_id}",
-                notify_message=(
-                    f"🚪 HVAC paused — {friendly_name} has been open for "
-                    f"{debounce_minutes} minutes. "
-                    f"Heating/cooling will resume when it's closed."
+                reason=_R("reason_door_window_open_entity", entity=entity_id),
+                notify_message=i18n.Msg(
+                    "notify.door_window_paused_named", name=friendly_name, minutes=debounce_minutes
                 ),
                 notify_type="door_window_pause",
             )
@@ -8658,7 +8752,7 @@ class AutomationEngine:
             # unification, see #418). The "sensor_all_closed" event emitted above already
             # satisfies _exit_nat_vent()'s "caller emits its own specific event" contract.
             if self._natural_vent_active:
-                await self._exit_nat_vent(reason="door/window closed — ending natural ventilation mode")
+                await self._exit_nat_vent(reason=_R("reason_door_closed_ending_nv"))
                 # Issue #1144: this early return used to be the whole story. A fan that
                 # _exit_nat_vent() could not stop (an RF-timer override blocks its deactivation, or the
                 # toggle floor deferred it) kept running for up to 5 minutes against a sealed house.
@@ -8752,13 +8846,13 @@ class AutomationEngine:
             if restore_mode:
                 mode_result = await self._set_hvac_mode(
                     restore_mode,
-                    reason=f"door/window closed — restoring {restore_mode} mode",
+                    reason=_R("reason_door_closed_restoring_mode", mode=restore_mode),
                 )
             write_result = None
             if self._current_classification:
                 write_result = await self._set_temperature_for_mode(
                     self._current_classification,
-                    reason="door/window closed — restoring comfort",
+                    reason=_R("reason_door_closed_restoring_comfort"),
                 )
         self._start_automation_grace_unless_restore_unsent(trigger, mode_result, write_result)
         _LOGGER.info(
@@ -8976,10 +9070,13 @@ class AutomationEngine:
                 if _to_state == NatVentLifecycleState.ACTIVE_FULL_GATE:
                     # Band stays armed — just activate the fan; the compressor self-arbitrates.
                     _activation_result = await self._activate_fan(
-                        reason=(
-                            f"nat-vent re-engaged: outdoor {self._t(outdoor)} < indoor {self._t(_indoor)}"
-                            f" − {self._td(_hysteresis)} hysteresis, indoor > comfort_heat {self._t(_comfort_heat)},"
-                            f" outdoor ≤ threshold {self._t(threshold)} — free cooling still favorable"
+                        reason=_R(
+                            "reason_nv_reengaged",
+                            outdoor=self._tp(outdoor),
+                            indoor=self._tp(_indoor),
+                            hysteresis=self._tdp(_hysteresis),
+                            heat=self._tp(_comfort_heat),
+                            threshold=self._tp(threshold),
                         )
                     )
                     # Preserve _paused_by_door across the apply: legacy's
@@ -9024,10 +9121,7 @@ class AutomationEngine:
                         _comfort_heat,
                     )
                     _activation_result = await self._activate_fan(
-                        reason=(
-                            f"nat-vent soft-start: outdoor {self._t(outdoor)} at/below indoor {self._t(_indoor)}"
-                            " parity, past today's peak and declining — purge/comfort air movement"
-                        )
+                        reason=_R("reason_nv_soft_start", outdoor=self._tp(outdoor), indoor=self._tp(_indoor))
                     )
                     # Preserve _paused_by_door across the apply — see the matching
                     # comment on the ACTIVE_FULL_GATE branch above for the rationale.
@@ -9198,7 +9292,14 @@ class AutomationEngine:
                         exit_decision.vent_floor,
                     )
                     await self._exit_nat_vent(
-                        reason=f"natural vent exit: {self._indoor_le_comfort_floor(indoor, exit_decision.vent_floor)}",
+                        reason=_R(
+                            "reason_nv_exit_why",
+                            why=i18n.Msg(
+                                "activity.reason_why_indoor_le_comfort_floor",
+                                indoor=self._tp(indoor),
+                                floor=self._tp(exit_decision.vent_floor),
+                            ),
+                        ),
                         set_outdoor_exit_time=True,
                         event_type="nat_vent_comfort_floor_exit",
                         event_payload={
@@ -9252,7 +9353,14 @@ class AutomationEngine:
                     # warm/mild ("off") label no longer skips the restore.
                     _selector_follows = bool(self._current_classification)
                     _comfort_floor_result = await self._deactivate_fan(
-                        reason=(f"natural vent exit: {self._indoor_le_comfort_floor(indoor, _vent_floor)}"),
+                        reason=_R(
+                            "reason_nv_exit_why",
+                            why=i18n.Msg(
+                                "activity.reason_why_indoor_le_comfort_floor",
+                                indoor=self._tp(indoor),
+                                floor=self._tp(_vent_floor),
+                            ),
+                        ),
                         restore_hvac=not _selector_follows,
                         release_suppression=True,
                     )
@@ -9313,7 +9421,7 @@ class AutomationEngine:
                         with self._mode_change_context("nat_vent"):
                             _floor_write = await self._set_temperature_for_mode(
                                 c,
-                                reason="natural vent comfort-floor exit — restoring comfort",
+                                reason=_R("reason_nv_floor_exit_restoring"),
                             )
                         self._start_automation_grace_unless_restore_unsent("nat_vent_exit_resume", _floor_write)
                     return
@@ -9330,7 +9438,7 @@ class AutomationEngine:
                         # recorded). Same as the outdoor-rise exit: end the session, record the window pause, leave
                         # the thermostat Off; the away setback lands when the window closes.
                         await self._exit_nat_vent(
-                            reason="nat-vent ceiling exit (away mode), window still open",
+                            reason=_R("reason_nv_away_ceiling_window_open"),
                             set_outdoor_exit_time=True,
                             event_type="nat_vent_away_ceiling_exit",
                             event_payload={
@@ -9355,7 +9463,7 @@ class AutomationEngine:
                     # it was supposed to protect.
                     self._nat_vent_outdoor_exit_time = dt_util.now()
                     self._arm_comfort_family("cooling", dt_util.now())  # Issue #821 Design §4
-                    _away_ceiling_result = await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
+                    _away_ceiling_result = await self._deactivate_fan(reason=_R("reason_nv_away_ceiling"))
                     # Issue #931: flags clear only once the result above is known — see
                     # _end_nat_vent_session().
                     self._end_nat_vent_session(_away_ceiling_result)
@@ -9390,7 +9498,14 @@ class AutomationEngine:
                     # Issue #690: boundary is now non-strict (>=, via is_outdoor_rise_exit()) —
                     # this text is user-visible on the Debug tab via _last_action_reason.
                     await self._exit_nat_vent(
-                        reason=(f"nat vent exit: {self._outdoor_ge_indoor(outdoor, indoor)} — airflow reversed"),
+                        reason=_R(
+                            "reason_nv_exit_airflow_reversed",
+                            why=i18n.Msg(
+                                "activity.reason_why_outdoor_ge_indoor",
+                                outdoor=self._tp(outdoor),
+                                indoor=self._tp(indoor),
+                            ),
+                        ),
                         set_outdoor_exit_time=True,
                         event_type="nat_vent_outdoor_rise_exit",
                         event_payload={
@@ -9426,7 +9541,11 @@ class AutomationEngine:
                     # nat-vent one, Issue #647's door/window one) have both since been removed
                     # (Phase 6 Steps 4-5, graduation).
                     await self._exit_nat_vent(
-                        reason=f"natural vent exit: outdoor {self._t(outdoor)} > threshold {self._t(threshold)}",
+                        reason=_R(
+                            "reason_nv_exit_outdoor_above_threshold",
+                            outdoor=self._tp(outdoor),
+                            threshold=self._tp(threshold),
+                        ),
                         set_outdoor_exit_time=True,
                         event_type="nat_vent_outdoor_rise_exit",
                         event_payload={
@@ -9513,10 +9632,12 @@ class AutomationEngine:
                     # activation was applied (a nat-vent session is recorded).
                     _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
                         _to_state,
-                        reason=(
-                            f"natural vent activated: outdoor {self._t(outdoor)}"
-                            f" < indoor {self._t(indoor)} − {self._td(hysteresis)} hysteresis,"
-                            f" outdoor ≤ threshold {self._t(threshold)}"
+                        reason=_R(
+                            "reason_nv_activated_paused",
+                            outdoor=self._tp(outdoor),
+                            indoor=self._tp(indoor),
+                            hysteresis=self._tdp(hysteresis),
+                            threshold=self._tp(threshold),
                         ),
                         outdoor=outdoor,
                         indoor=indoor,
@@ -9548,10 +9669,7 @@ class AutomationEngine:
                     # ACTIVE_FULL_GATE branch above.
                     _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
                         _to_state,
-                        reason=(
-                            f"nat-vent soft-start while paused: outdoor {self._t(outdoor)} at/below"
-                            f" indoor {self._t(indoor)} parity, past today's peak and declining"
-                        ),
+                        reason=_R("reason_nv_soft_start_paused", outdoor=self._tp(outdoor), indoor=self._tp(indoor)),
                         outdoor=outdoor,
                         indoor=indoor,
                     )
@@ -9646,9 +9764,7 @@ class AutomationEngine:
                     "Nat-vent session force-closed: _natural_vent_active was True but no"
                     " monitored sensor is open — ending session instead of cycling fan",
                 )
-                await self._exit_nat_vent(
-                    reason="nat-vent session force-closed: session flag was stale, sensors are closed"
-                )
+                await self._exit_nat_vent(reason=_R("reason_nv_force_closed"))
                 return
 
             comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
@@ -9731,7 +9847,7 @@ class AutomationEngine:
                     if self._any_monitored_sensor_settled_open():
                         # Issue #1142 D8: see check_natural_vent_conditions()'s matching AWAY_CEILING branch.
                         await self._exit_nat_vent(
-                            reason="nat-vent ceiling exit (away mode) via temp_check, window still open",
+                            reason=_R("reason_nv_away_ceiling_temp_check_window_open"),
                             set_outdoor_exit_time=True,
                             event_type="nat_vent_away_ceiling_exit",
                             event_payload={
@@ -9748,7 +9864,7 @@ class AutomationEngine:
                     # arms, since this branch bypasses _exit_nat_vent()'s choke point too.
                     self._nat_vent_outdoor_exit_time = dt_util.now()
                     self._arm_comfort_family("cooling", dt_util.now())  # Issue #821 Design §4
-                    _away_result = await self._deactivate_fan(reason="nat-vent ceiling exit (away mode) via temp_check")
+                    _away_result = await self._deactivate_fan(reason=_R("reason_nv_away_ceiling_temp_check"))
                     # Issue #931: flags clear only once the result above is known — see
                     # _end_nat_vent_session() (this site already captured the result for
                     # its event-emission check below, but previously never used it to gate
@@ -9797,7 +9913,11 @@ class AutomationEngine:
                         if exit_decision is not None and exit_decision.vent_floor is not None
                         else _hard_floor
                     )
-                    _log_detail = f"indoor {self._t(current_temp)} ≤ floor {self._t(_floor_for_log)}"
+                    _log_detail = _R(
+                        "reason_detail_indoor_le_floor",
+                        indoor=self._tp(current_temp),
+                        floor=self._tp(_floor_for_log),
+                    )
                     _event_type = "nat_vent_comfort_floor_exit"
                     _payload: dict[str, Any] = {
                         "indoor_temp": current_temp,
@@ -9825,9 +9945,16 @@ class AutomationEngine:
                     # comment, Issue #666, for why CEILING_THRESHOLD reuses this type).
                     _outdoor_log = outdoor if outdoor is not None else 0.0
                     _log_detail = (
-                        f"{self._outdoor_ge_indoor(_outdoor_log, current_temp)} — airflow reversed"
+                        _R(
+                            "reason_detail_airflow_reversed",
+                            why=i18n.Msg(
+                                "activity.reason_why_outdoor_ge_indoor",
+                                outdoor=self._tp(_outdoor_log),
+                                indoor=self._tp(current_temp),
+                            ),
+                        )
                         if _exit_reason == NatVentExitReason.OUTDOOR_RISE
-                        else f"outdoor {self._t(_outdoor_log)} > ceiling threshold"
+                        else _R("reason_detail_ceiling_threshold", outdoor=self._tp(_outdoor_log))
                     )
                     _event_type = "nat_vent_outdoor_rise_exit"
                     _payload = {
@@ -9846,7 +9973,12 @@ class AutomationEngine:
                     _log_detail,
                 )
                 await self._exit_nat_vent(
-                    reason=f"nat-vent {_exit_reason.value} exit [{_context}] via temp-check: {_log_detail}",
+                    reason=_R(
+                        "reason_nv_exit_temp_check",
+                        kind=_exit_reason.value,
+                        context=_context,
+                        detail=_nest(_log_detail),
+                    ),
                     set_outdoor_exit_time=_set_outdoor_exit_time,
                     event_type=_event_type,
                     event_payload=_payload,
@@ -10127,7 +10259,12 @@ class AutomationEngine:
             # captured _pre_pause_mode or checked whether a sensor was genuinely still
             # open). _exit_nat_vent() gets all three right, mirroring
             # check_natural_vent_conditions()'s equivalent outdoor-rise-exit call site.
-            stop_reason = f"{self._outdoor_ge_indoor(outdoor, indoor)} — airflow reversed"
+            stop_reason = _R(
+                "reason_stop_airflow_reversed",
+                why=i18n.Msg(
+                    "activity.reason_why_outdoor_ge_indoor", outdoor=self._tp(outdoor), indoor=self._tp(indoor)
+                ),
+            )
             _LOGGER.debug(
                 "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
                 trigger,
@@ -10137,7 +10274,7 @@ class AutomationEngine:
                 f"stop:{stop_reason}",
             )
             await self._exit_nat_vent(
-                reason=f"nat vent exit (fast loop): {stop_reason}",
+                reason=_R("reason_nv_exit_fast_loop", why=_nest(stop_reason)),
                 set_outdoor_exit_time=True,
                 event_type="nat_vent_outdoor_rise_exit",
                 event_payload={
@@ -10157,7 +10294,12 @@ class AutomationEngine:
             # (check_natural_vent_conditions). Subtracting it here would kill free cooling
             # ~1°F early — e.g. stop at outdoor 71 / indoor 72 while a favorable gradient
             # remains.
-            stop_reason = f"{self._outdoor_ge_indoor(outdoor, indoor)} (free cooling gone)"
+            stop_reason = _R(
+                "reason_stop_free_cooling_gone",
+                why=i18n.Msg(
+                    "activity.reason_why_outdoor_ge_indoor", outdoor=self._tp(outdoor), indoor=self._tp(indoor)
+                ),
+            )
             _LOGGER.debug(
                 "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
                 trigger,
@@ -10187,7 +10329,7 @@ class AutomationEngine:
             else:
                 _event_type = "fan_deactivated"
                 _event_payload = {
-                    "reason": f"fan thermostat check — {stop_reason}",
+                    "reason": _R("reason_fan_thermostat_check", why=_nest(stop_reason)),
                     "fan_mode": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
                     "fan_device": _fan_device_label(self.config),
                 }
@@ -10198,7 +10340,7 @@ class AutomationEngine:
             # Arm the same lockout so outdoor hovering near the indoor boundary can't
             # flip-flop this exit against reactivation any more than its sibling can.
             await self._exit_nat_vent(
-                reason=f"fan thermostat check — {stop_reason}",
+                reason=_R("reason_fan_thermostat_check", why=_nest(stop_reason)),
                 set_outdoor_exit_time=True,
                 event_type=_event_type,
                 event_payload=_event_payload,
@@ -10221,7 +10363,12 @@ class AutomationEngine:
         # sleep_heat, on at sleep_heat+2*hysteresis) before that logic ever got a chance to run,
         # permanently ending the nat-vent session at comfort_heat instead of letting it cycle.
         vent_floor_ftc = _resolve_vent_floor(inputs)
-        stop_reason = f"{self._indoor_le_comfort_floor(indoor, vent_floor_ftc)} (cooled to floor)"
+        stop_reason = _R(
+            "reason_stop_cooled_to_floor",
+            why=i18n.Msg(
+                "activity.reason_why_indoor_le_comfort_floor", indoor=self._tp(indoor), floor=self._tp(vent_floor_ftc)
+            ),
+        )
         _LOGGER.debug(
             "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
             trigger,
@@ -10254,7 +10401,7 @@ class AutomationEngine:
         else:
             _event_type = "fan_deactivated"
             _event_payload = {
-                "reason": f"fan thermostat check — {stop_reason}",
+                "reason": _R("reason_fan_thermostat_check", why=_nest(stop_reason)),
                 "fan_mode": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
                 "fan_device": _fan_device_label(self.config),
             }
@@ -10269,7 +10416,7 @@ class AutomationEngine:
         # protection at the idle-open re-entry path check_natural_vent_conditions() already
         # consults (fixed by #696).
         await self._exit_nat_vent(
-            reason=f"fan thermostat check — {stop_reason}",
+            reason=_R("reason_fan_thermostat_check", why=_nest(stop_reason)),
             set_outdoor_exit_time=True,
             event_type=_event_type,
             event_payload=_event_payload,
@@ -10532,7 +10679,9 @@ class AutomationEngine:
             return False  # WHF-only: the signal is the real fan entity, not a thermostat schedule
         cs = self.hass.states.get(self.climate_entity)
         if cs is None or not is_thermostat_schedule_signal(
-            cs.attributes.get("fan_mode", ""), cs.attributes.get("hvac_action", "")
+            cs.attributes.get("fan_mode", ""),
+            cs.attributes.get("hvac_action", ""),
+            profile=self._fan_profile(),
         ):
             return False
         if self._fan_active or self._natural_vent_active or self._fan_override_active:
@@ -10605,9 +10754,9 @@ class AutomationEngine:
         if cs is None:
             return
         attr = str(cs.attributes.get("fan_mode", ""))
-        if not is_thermostat_fan_physically_active(attr, ""):
+        if not is_thermostat_fan_physically_active(attr, "", profile=self._fan_profile()):
             return
-        target = resolve_fan_mode_command(cs.attributes.get("fan_modes"), "off")
+        target = resolve_fan_mode_command(cs.attributes.get("fan_modes"), "off", profile=self._fan_profile())
         if target is None:
             return
         if self.dry_run is True:
@@ -10885,7 +11034,7 @@ class AutomationEngine:
                 )
                 self._fan_active = False
             await self._deactivate_fan(
-                reason=f"{trigger} reconcile — fan confirmed off, releasing any stranded HVAC suppression",
+                reason=_R("reason_reconcile_fan_off", trigger=str(trigger)),
                 # Issue #1181: nor into a door/window that reads open or went dark after last reading open.
                 restore_hvac=(
                     not self._paused_by_door
@@ -11077,11 +11226,10 @@ class AutomationEngine:
             # the fan being adopted as CA-owned at startup — the fan silently starts being
             # managed with no record of why, unlike the turn-off branch below which does
             # emit a fan_deactivated event. Record the adoption the same way.
-            _adopt_reason = (
-                f"{trigger} reconcile — fan already running, indoor {self._t(indoor)},"
-                f" outdoor {self._t(outdoor)}, nat-vent conditions met — adopting as CA-owned"
+            _adopt_reason = _R(
+                "reason_reconcile_adopt", trigger=str(trigger), indoor=self._tp(indoor), outdoor=self._tp(outdoor)
             )
-            self._record_action("Fan activated", _adopt_reason)
+            self._record_action(_R("action_fan_activated"), _adopt_reason)
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "fan_activated",
@@ -11117,7 +11265,7 @@ class AutomationEngine:
                 archetype,
                 self._fan_override_active,
             )
-            _turn_off_reason = f"{trigger} reconcile — fan running without CA warrant"
+            _turn_off_reason = _R("reason_reconcile_unwarranted", trigger=str(trigger))
 
             if self.dry_run and not self._fan_active:
                 # Issue #1499: observe-only, and CA does not own this fan. The stop below would come back DRY_RUN, and
@@ -11378,12 +11526,12 @@ class AutomationEngine:
                 if restore_mode not in ("heat", "cool", "off"):
                     _mode_result = await self._set_hvac_mode(
                         restore_mode,
-                        reason="user resumed from door/window pause",
+                        reason=_R("reason_user_resumed_door_window"),
                     )
                 with self._mode_change_context("restore"):
                     _temp_result = await self._set_temperature_for_mode(
                         self._current_classification,
-                        reason="user resumed from door/window pause",
+                        reason=_R("reason_user_resumed_door_window"),
                     )
 
         # Issue #1306 (owner decision 2026-11-03, "clear pause, no grace"): in observe-only the restore above comes
@@ -11852,12 +12000,9 @@ class AutomationEngine:
 
         if should_notify:
             if source == "manual":
-                message = "Your manual thermostat override has expired. Climate Advisor has resumed automated control."
+                message = i18n.Msg("notify.grace_expired_manual")
             else:
-                message = (
-                    f"Automation grace period expired ({duration // 60} minutes). "
-                    "HVAC will now respond normally to door/window sensor changes."
-                )
+                message = i18n.Msg("notify.grace_expired_automation", minutes=duration // 60)
             self.hass.async_create_task(
                 self._notify(
                     message,
@@ -12104,12 +12249,13 @@ class AutomationEngine:
             if _reactivates:
                 _soft = _reactivation_state == NatVentLifecycleState.ACTIVE_SOFT_START
                 nat_vent_reason = (
-                    f"grace expired — nat-vent soft-start: outdoor {self._t(outdoor)} at/below indoor"
-                    f" {self._t(indoor)} parity, past today's peak and declining"
+                    _R("reason_grace_nv_soft_start", outdoor=self._tp(outdoor), indoor=self._tp(indoor))
                     if _soft
-                    else (
-                        f"grace expired — nat-vent: outdoor {self._t(outdoor)} < indoor {self._t(indoor)},"
-                        f" outdoor {self._t(outdoor)} ≤ {self._t(nat_vent_threshold)}"
+                    else _R(
+                        "reason_grace_nv",
+                        outdoor=self._tp(outdoor),
+                        indoor=self._tp(indoor),
+                        threshold=self._tp(nat_vent_threshold),
                     )
                 )
                 # Issue #935: routed through _apply_nat_vent_fsm_state_after_activation()
@@ -12269,8 +12415,8 @@ class AutomationEngine:
             # tests/test_resume_from_pause.py's test_re_pause_when_hvac_already_off.
             await self._pause_for_door_window(
                 entity_label="re-check",
-                reason="grace expired — door/window still open, re-pausing",
-                notify_message=("Grace period expired but a door/window is still open. HVAC has been paused again."),
+                reason=_R("reason_grace_expired_repause"),
+                notify_message=i18n.Msg("notify.grace_repause"),
                 notify_type="grace_repause",
             )
 
@@ -12498,7 +12644,7 @@ class AutomationEngine:
             # No sleep target available — deactivate fan/economizer unless nat-vent/WHF owns it.
             if _gate != ScheduledBandGate.DEFER_NAT_VENT:
                 if self._fan_active and not _fan_was_overridden:
-                    _no_class_result = await self._deactivate_fan(reason="bedtime — no classification")
+                    _no_class_result = await self._deactivate_fan(reason=_R("reason_bedtime_no_classification"))
                     # Issue #931: was an unconditional clear — now routed through the
                     # shared sole writer so a rate-limited/deferred command doesn't
                     # strand the fan running with the retry mechanism disarmed.
@@ -12527,7 +12673,7 @@ class AutomationEngine:
             _LOGGER.info("Bedtime: nat-vent/WHF session active — leaving fan alone")
         else:
             if self._fan_active and not _fan_was_overridden:
-                _not_active_result = await self._deactivate_fan(reason="bedtime — nat-vent not active")
+                _not_active_result = await self._deactivate_fan(reason=_R("reason_bedtime_nv_not_active"))
                 # Issue #931: was an unconditional clear — now routed through the
                 # shared sole writer so a rate-limited/deferred command doesn't
                 # strand the fan running with the retry mechanism disarmed.
@@ -12578,12 +12724,16 @@ class AutomationEngine:
                 self._today_record.setback_was_adaptive = False
         await self._apply_comfort_band(
             _sleep_band,
-            reason=f"bedtime — sleep band [{self._band_num(_sleep_band.floor)}/{self._band_num(_sleep_band.ceiling)}]",
+            reason=_R(
+                "reason_bedtime_sleep_band",
+                floor=self._band_num(_sleep_band.floor),
+                ceiling=self._band_num(_sleep_band.ceiling),
+            ),
         )
 
     async def handle_pre_cool(
         self, indoor_temp: float | None, nat_vent_just_closed: bool, *, modifier: float | None = None
-    ) -> str:
+    ) -> CodedText:
         """Apply overnight pre-cool setpoint to bank cold thermal mass before a hot day.
 
         Fires at the pre-cool trigger time (nat-vent close + delay, or wake_time - 4h), gated by
@@ -12594,7 +12744,9 @@ class AutomationEngine:
         when the trigger was decided and which day the night wakes into -- Issue #1378). ``None`` judges it
         from the current classification as before.
         Suppressed when nat-vent already brought indoor to or below the target.
-        Returns a short status string for logging.
+        Returns a short status for logging: a ``CodedText`` (Issue #1341) whose text is the English line, whose ``code``
+        is what the coordinator compares (``skipped_*``, ``suppressed_session``, ``suppressed_achieved``, ``applied``,
+        ``not_applied``) and whose ``msg`` carries the same line, with typed params, for the viewer's language.
         """
         c = self._current_classification
         _modifier = modifier if modifier is not None else (resolve_pre_cool_modifier(c, self.config) if c else None)
@@ -12603,13 +12755,13 @@ class AutomationEngine:
                 "Pre-cool trigger fired: skipped — no warming trend and tomorrow not hot (modifier=%s)",
                 getattr(c, "setback_modifier", "n/a"),
             )
-            return "skipped: not eligible"
+            return CodedText("skipped_not_eligible", i18n.Msg("status.pre_cool.skipped_not_eligible"))
 
         # Issue #1371 (defence in depth): pre-cool banks cold thermal mass overnight. A late timer, a restart
         # or an old schedule must never arm the sleep band's lowered ceiling while people are awake.
         if not _in_sleep_window(dt_util.now(), pre_cool_sleep_window_config(self.config)):
             _LOGGER.info("Pre-cool trigger fired: skipped — awake hours (pre-cool runs only in the sleep window)")
-            return "skipped: awake hours"
+            return CodedText("skipped_awake", i18n.Msg("status.pre_cool.skipped_awake"))
 
         # Issue #593: computed up front (pure config + modifier, no gate/indoor dependency)
         # so the DEFER_NAT_VENT "active_session" branch below can show the target it's
@@ -12630,7 +12782,7 @@ class AutomationEngine:
         # would (Issue #498 finding #8a).
         # Issue #1119 follow-up: wait on an unconfirmed manual change (same as apply_classification/TOU).
         if self._scheduled_routine_waits_for_pending_override("pre-cool"):
-            return "skipped: override confirmation pending"
+            return CodedText("skipped_override_pending", i18n.Msg("status.pre_cool.skipped_override_pending"))
         # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
         # since before any event-driven pause path ran would otherwise never be seen.
         await self._sync_paused_by_door_with_live_sensors()
@@ -12653,7 +12805,9 @@ class AutomationEngine:
                 await self.handle_occupancy_vacation()
             else:
                 await self.handle_occupancy_away()
-            return f"skipped: {self._occupancy_mode}"
+            return CodedText(
+                "skipped_occupancy", i18n.Msg("status.pre_cool.skipped_occupancy", mode=self._occupancy_mode)
+            )
 
         if _gate == ScheduledBandGate.DEFER_OVERRIDE:
             _LOGGER.info(
@@ -12661,11 +12815,11 @@ class AutomationEngine:
                 self._manual_override_mode,
                 self._manual_override_time,
             )
-            return "skipped: manual override"
+            return CodedText("skipped_manual_override", i18n.Msg("status.pre_cool.skipped_manual_override"))
 
         if _gate == ScheduledBandGate.DEFER_PAUSED:
             _LOGGER.info("Pre-cool skipped — paused by open door/window")
-            return "skipped: paused_by_door"
+            return CodedText("skipped_paused", i18n.Msg("status.pre_cool.skipped_paused"))
 
         if _gate == ScheduledBandGate.DEFER_NAT_VENT:
             _fan_cfg_pc = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -12685,7 +12839,7 @@ class AutomationEngine:
                     },
                 )
             if _fan_cfg_pc in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
-                return "suppressed: nat-vent/WHF session active"
+                return CodedText("suppressed_session", i18n.Msg("status.pre_cool.suppressed_session"))
             # FAN_MODE_HVAC: fall through and arm the pre-cool ceiling, fan keeps running.
 
         sleep_cool = float(self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
@@ -12730,7 +12884,14 @@ class AutomationEngine:
                         "reason": "achieved",
                     },
                 )
-            return f"suppressed: nat-vent achieved {self._t(indoor_temp)} (target {self._t(pre_cool_target)})"
+            return CodedText(
+                "suppressed_achieved",
+                i18n.Msg(
+                    "status.pre_cool.suppressed_achieved",
+                    indoor=i18n.Temp(indoor_temp, self._temp_unit, 1),
+                    target=i18n.Temp(pre_cool_target, self._temp_unit, 1),
+                ),
+            )
 
         # Get sleep heat floor from current sleep band so we preserve it
         _sleep_band = select_comfort_band(
@@ -12744,13 +12905,17 @@ class AutomationEngine:
             floor=_sleep_band.floor,
             ceiling=pre_cool_target,
             active="ceiling",
-            reason=f"pre-cool — thermal mass banking (target {self._t(pre_cool_target, 0)})",
+            reason=_R("reason_pre_cool_banking", target=self._tp(pre_cool_target, 0)),
             context=BAND_CONTEXT_SLEEP,  # Issue #1371: a night band; keeps #1345 readers on a known context
         )
 
         _pre_cool_result = await self._apply_comfort_band(
             _pre_cool_band,
-            reason=f"pre-cool [{self._band_num(_sleep_band.floor)}/{self._band_num(pre_cool_target)}]",
+            reason=_R(
+                "reason_pre_cool_band",
+                floor=self._band_num(_sleep_band.floor),
+                ceiling=self._band_num(pre_cool_target),
+            ),
             mode_reason="pre_cool",  # Issue #1371: deliberate for the settling guard (spec R3)
         )
         # Issue #1049 (change 5): announce AFTER the write, with its real outcome -- the
@@ -12780,13 +12945,22 @@ class AutomationEngine:
                 pre_cool_target,
                 _sleep_band.floor,
             )
-            return f"applied: {self._t(pre_cool_target)}"
+            return CodedText(
+                "applied", i18n.Msg("status.pre_cool.applied", target=i18n.Temp(pre_cool_target, self._temp_unit, 1))
+            )
         _LOGGER.info(
             "Pre-cool setpoint NOT applied (%s): cool ceiling %.1f°F was intended",
             _pre_cool_outcome,
             pre_cool_target,
         )
-        return f"not applied ({_pre_cool_outcome}): {self._t(pre_cool_target)}"
+        return CodedText(
+            "not_applied",
+            i18n.Msg(
+                "status.pre_cool.not_applied",
+                outcome=_pre_cool_outcome,
+                target=i18n.Temp(pre_cool_target, self._temp_unit, 1),
+            ),
+        )
 
     async def handle_morning_wakeup(self, indoor_temp: float | None = None) -> None:
         """Restore comfort for morning wake-up."""
@@ -12866,7 +13040,7 @@ class AutomationEngine:
         # Deactivate fan if still running from overnight — unless the user is overriding it
         # or nat-vent/WHF currently owns HVAC (Issue #498 fix — see docstring note above).
         if _gate != ScheduledBandGate.DEFER_NAT_VENT and self._fan_active and not _fan_was_overridden:
-            await self._deactivate_fan(reason="morning wakeup — resetting fan state")
+            await self._deactivate_fan(reason=_R("reason_morning_wakeup_fan"))
 
         c = self._current_classification
         if not c:
@@ -12964,9 +13138,10 @@ class AutomationEngine:
             )
         await self._apply_comfort_band(
             _wakeup_band,
-            reason=(
-                f"morning wake-up — comfort band "
-                f"[{self._band_num(_wakeup_band.floor)}/{self._band_num(_wakeup_band.ceiling)}]"
+            reason=_R(
+                "reason_morning_wakeup_band",
+                floor=self._band_num(_wakeup_band.floor),
+                ceiling=self._band_num(_wakeup_band.ceiling),
             ),
         )
 
@@ -13407,9 +13582,7 @@ class AutomationEngine:
         if decision.action is WhfSafetyAction.SUPPRESS_HVAC:
             if decision.backstop:
                 self._announce_whf_rule2_backstop(decision, trigger=trigger, snap=snap, climate_state=climate_state)
-                await self._suppress_hvac_for_whf(
-                    reason="whole-house fan running — heating/cooling turned off (rule-2 backstop)", resend=True
-                )
+                await self._suppress_hvac_for_whf(reason=_R("reason_whf_rule2_backstop"), resend=True)
                 return None
             else:
                 _LOGGER.warning(
@@ -13418,18 +13591,14 @@ class AutomationEngine:
                     trigger,
                     thermostat_mode,
                 )
-            await self._suppress_hvac_for_whf(
-                reason="whole-house fan turned on after HVAC — suppressing HVAC (newest action wins)"
-            )
+            await self._suppress_hvac_for_whf(reason=_R("reason_whf_suppress_newest_wins"))
             return None
 
         # STOP_SEALED / STOP_MUTEX_FAN
         sealed = decision.action is WhfSafetyAction.STOP_SEALED
         if decision.backstop:
             self._announce_whf_rule2_backstop(decision, trigger=trigger, snap=snap, climate_state=climate_state)
-        reason_text = (
-            "sealed house — stopping whole-house fan" if sealed else "HVAC turned on — stopping whole-house fan"
-        )
+        reason_text = _R("reason_whf_stop_sealed" if sealed else "reason_whf_stop_hvac_on")
         now = dt_util.now()
         if self._whf_stop_hold_active(now):
             _LOGGER.debug("WHF safety stop: held after giving up, next attempt later (trigger=%s)", trigger)
@@ -13540,10 +13709,8 @@ class AutomationEngine:
             self.role,
         )
         self._record_action(
-            "Whole-house fan stopped (fan and heating/cooling were both running)"
-            if stops_fan
-            else "Heating/cooling turned off (whole-house fan running)",
-            decision.reason,
+            _R("action_whf_stopped_rule2" if stops_fan else "action_hvac_off_whf_running"),
+            msg_text(decision.reason_msg) if decision.reason_msg is not None else decision.reason,
         )
         if self._emit_event_callback:
             self._emit_event_callback(
@@ -13551,11 +13718,7 @@ class AutomationEngine:
                 {"stopped": "fan" if stops_fan else "hvac", "trigger": trigger, "thermostat_mode": mode},
             )
         if not stops_fan and not self._recent_duplicate("whf_rule2_backstop_hvac", (True,), window_seconds=600):
-            self._notify_whf_safety(
-                "Climate Advisor — heating/cooling turned off",
-                "Climate Advisor turned off the heating/cooling because the whole-house fan was running beside it."
-                " The fan and the heating/cooling are never run together, and the most recent change wins.",
-            )
+            self._notify_whf_safety(i18n.Msg("notify.title.whf_hvac_off"), i18n.Msg("notify.whf_hvac_off"))
 
     def _arm_whf_restore_pending(self, *, fan_already_off: bool, verify_timer: bool = False) -> None:
         """Hand a fan stop's HVAC restore to the ONE gated release (``_complete_whf_safety_release``).
@@ -13619,9 +13782,10 @@ class AutomationEngine:
         mem = self._whf_last_command
         control_was_on = mem[2] if mem is not None and mem[0] == "off" else None
         if control_was_on is False:
-            detail = "control entity already reads off (firmware may not reflect remote power state)"
+            detail_msg = i18n.Msg("notify.whf_stop_failed_detail_control_off")
         else:
-            detail = f"the fan was still running after {max(attempts, 1)} off command(s)"
+            detail_msg = i18n.Msg("notify.whf_stop_failed_detail_attempts", attempts=max(attempts, 1))
+        detail = i18n.render_en(detail_msg)
         _LOGGER.warning(
             "WHF safety stop failed: whole-house fan could not be stopped: %s"
             " attempts=%d trigger=%s control=%s role=%s",
@@ -13631,12 +13795,11 @@ class AutomationEngine:
             self._whf_control_state_name(),
             self.role,
         )
-        self._record_action("Whole-house fan could not be stopped", detail)
+        self._record_action(_R("action_whf_stop_failed"), MsgText(detail_msg))
         if not self._recent_duplicate("whf_stop_failed", (control_was_on is False,), window_seconds=3600):
             self._notify_whf_safety(
-                "Climate Advisor — whole-house fan could not be stopped",
-                f"The whole-house fan is running with every door and window closed and Climate Advisor could not stop"
-                f" it: {detail}. Turn it off at the remote or the wall switch, or open a window.",
+                i18n.Msg("notify.title.whf_stop_failed"),
+                i18n.Msg("notify.whf_stop_failed", detail=detail_msg),
             )
 
     async def _observe_only_whf_notice(self, trigger: str) -> None:
@@ -13690,9 +13853,8 @@ class AutomationEngine:
         )
         try:
             await self._notify(
-                "The whole-house fan is running while every door and window is closed, and automation is switched"
-                " off, so Climate Advisor will not turn it off. Turn the fan off, or open a window.",
-                "Climate Advisor — whole-house fan on with the house closed up",
+                i18n.Msg("notify.whf_observe_sealed"),
+                i18n.Msg("notify.title.whf_observe_sealed"),
                 "invariant_violation",
                 observe_only_ok=True,
             )
@@ -13724,9 +13886,8 @@ class AutomationEngine:
         )
         try:
             await self._notify(
-                "The whole-house fan and the heating/cooling are running at the same time, and automation is switched"
-                " off, so Climate Advisor will not turn either off. Turn one of them off.",
-                "Climate Advisor — whole-house fan and heating/cooling both on",
+                i18n.Msg("notify.whf_observe_rule2"),
+                i18n.Msg("notify.title.whf_observe_rule2"),
                 "invariant_violation",
                 observe_only_ok=True,
             )
@@ -13774,23 +13935,15 @@ class AutomationEngine:
             # Issue #1178: the two stops say different things. A sealed-house stop waits for a window; a rule-2 stop
             # (the fan and the heating/cooling never run together, the newer action wins) does not.
             self._notify_whf_safety(
-                "Climate Advisor — whole-house fan stopped",
-                (
-                    "Climate Advisor turned off the whole-house fan because every monitored door and window is closed."
-                    " It will not restart the fan until a window opens."
-                    if sealed
-                    else "Climate Advisor turned off the whole-house fan because the heating/cooling was turned on"
-                    " after it. The fan and the heating/cooling are never run together, and the most recent change"
-                    " wins."
-                ),
+                i18n.Msg("notify.title.whf_stopped"),
+                i18n.Msg("notify.whf_stopped_sealed" if sealed else "notify.whf_stopped_rule2"),
             )
         if len(stops) >= 3 and not self._recent_duplicate(
             "whf_safety_oscillation", (len(stops) >= 3,), window_seconds=600
         ):
             self._notify_whf_safety(
-                "Climate Advisor — whole-house fan keeps being turned on",
-                f"The whole-house fan was turned on {len(stops)} times in 10 minutes and Climate Advisor stopped"
-                " it each time. Check what keeps switching it on (a remote, a HomeKit automation, a schedule).",
+                i18n.Msg("notify.title.whf_oscillation"),
+                i18n.Msg("notify.whf_oscillation", count=len(stops)),
             )
             _LOGGER.warning("WHF safety anti-oscillation alert: stops_in_10min=%d trigger=%s", len(stops), trigger)
         # A stop that did not take is retried by this verify; the 15 s tick is the second line.
@@ -13873,7 +14026,7 @@ class AutomationEngine:
         )
         if self._pre_fan_hvac_mode is not None:
             await self._deactivate_fan(
-                reason="whole-house fan confirmed off after the sealed-house stop",
+                reason=_R("reason_whf_confirmed_off_sealed"),
                 restore_hvac=not held_open,
                 release_suppression=True,
                 emit_event=False,
@@ -14002,24 +14155,28 @@ class AutomationEngine:
 
     def _alert_whf_stale_sensors(self, snap: WhfSafetySnapshot, count: int) -> None:
         """Alert (once per 6 h per sensor set) that an unavailable sensor is being counted as closed."""
-        names = ", ".join(snap.stale_names) if snap.stale_names else f"{count} sensor(s)"
+        names_msg = i18n.Msg("notify.sensor_count", n=count)
+        names = ", ".join(snap.stale_names) if snap.stale_names else i18n.render_en(names_msg)
         if self._recent_duplicate("whf_stale_sensor", (names,), window_seconds=6 * 3600):
             return
         _LOGGER.warning("WHF safety: door/window sensor unavailable > 60 s, counted as closed: sensors=%s", names)
         self._notify_whf_safety(
-            "Climate Advisor — door/window sensor unavailable",
-            f"{names} has been unavailable for over a minute. Climate Advisor counts it as closed when deciding"
-            " whether the whole-house fan may run.",
+            i18n.Msg("notify.title.whf_stale_sensors"),
+            i18n.Msg(
+                "notify.whf_stale_sensors",
+                names=", ".join(snap.stale_names) if snap.stale_names else names_msg,
+                count=len(snap.stale_names) if snap.stale_names else count,
+            ),
         )
 
-    def _notify_whf_safety(self, title: str, message: str) -> None:
+    def _notify_whf_safety(self, title: str | i18n.Msg, message: str | i18n.Msg) -> None:
         """Fire-and-forget owner push (a notify failure must never abort a safety stop)."""
 
         async def _send() -> None:
             try:
                 await self._notify(message, title, "invariant_violation")
             except Exception:
-                _LOGGER.warning("WHF safety notification failed: title=%s", title, exc_info=True)
+                _LOGGER.warning("WHF safety notification failed: title=%s", i18n.render_en(title), exc_info=True)
 
         self._spawn_whf_task(_send())
 
@@ -14172,22 +14329,22 @@ class AutomationEngine:
         except Exception:
             _LOGGER.warning("Nat-vent closed-window exit retry failed: reason=%s", reason, exc_info=True)
 
-    def _deferred_fan_mode_change_marker(self) -> str:
+    def _deferred_fan_mode_change_marker(self) -> MsgText:
         """Issue #936: the "deferred (5-min floor...)" fan_mode_change payload string,
         shared by every rate-limited-fan-command emission site so the wording can't
         drift between them (previously duplicated verbatim at 6 call sites).
         """
         applies_at = self._fan_rate_limited_until
         return (
-            f"deferred (5-min floor, applies {dt_util.as_local(applies_at).strftime('%H:%M:%S')})"
+            _R("fan_deferred_applies", time=dt_util.as_local(applies_at).strftime("%H:%M:%S"))
             if isinstance(applies_at, datetime)
-            else "deferred (5-min floor)"
+            else _R("fan_deferred")
         )
 
     async def _exit_nat_vent(
         self,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         set_outdoor_exit_time: bool = False,
         event_type: str | None = None,
         event_payload: dict[str, Any] | None = None,
@@ -14229,6 +14386,7 @@ class AutomationEngine:
         Returns:
             The ``FanCommandResult`` from the underlying ``_deactivate_fan()`` call.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         # Issue #931: flags are no longer cleared here, unconditionally, before the
         # deactivate command's result is known — see _end_nat_vent_session(), called
         # below in each branch once `result` is actually available.
@@ -14401,7 +14559,7 @@ class AutomationEngine:
                     with self._mode_change_context("nat_vent"):
                         _resume_write = await self._set_temperature_for_mode(
                             self._current_classification,
-                            reason=f"nat-vent exit resume — {reason}",
+                            reason=_R("reason_nv_exit_resume", reason=_nest(reason)),
                         )
                 self._start_automation_grace_unless_restore_unsent("nat_vent_exit_resume", _resume_write)
                 _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
@@ -14459,13 +14617,13 @@ class AutomationEngine:
         _LOGGER.info("Nat-vent exit (%s): window still open -- thermostat %s -> off", reason, mode)
         with self._mode_change_context("pause"):
             _off_result = await self._set_hvac_mode(
-                "off", reason=f"nat-vent exit with a window open ({reason}), was {mode}"
+                "off", reason=_R("reason_nv_exit_window_open_was", reason=_nest(reason), mode=str(mode))
             )
         if _off_result is HvacCommandResult.DRY_RUN:
             return None  # Issue #1295: observe-only -- nothing sent, the thermostat keeps running
         # Issue #1302: FAILED / UNCONFIRMED still records the pause (the window is open; nothing to restore either way)
         # and re-sends the Off soon while the thermostat still reads an active mode.
-        self._arm_open_window_off_retry(_off_result, reason=f"nat-vent exit with a window open ({reason})")
+        self._arm_open_window_off_retry(_off_result, reason=_R("reason_nv_exit_window_open", reason=_nest(reason)))
         return True
 
     def _schedule_hvac_resend(
@@ -14597,7 +14755,8 @@ class AutomationEngine:
                     )
                 with self._mode_change_context("nat_vent" if session == "blower" else "pause"):
                     _result = await self._set_hvac_mode(
-                        "off", reason=f"re-send: {reason}, thermostat still {live} (attempt {attempt + 1})"
+                        "off",
+                        reason=_R("reason_resend", reason=_nest(reason), live=str(live), attempt=attempt + 1),
                     )
                 self._arm_open_window_off_retry(_result, reason=reason, attempt=attempt + 1, session=session)
         except Exception:
@@ -14750,7 +14909,7 @@ class AutomationEngine:
                             "reason": pending.reason,
                         },
                     )
-                _why = f"re-send: restore after {pending.reason}, thermostat still {live} (attempt {attempt + 1})"
+                _why = _R("reason_resend_restore", reason=_nest(pending.reason), live=str(live), attempt=attempt + 1)
                 _result: HvacCommandResult | None = None
                 with self._mode_change_context("restore"):
                     if self._current_classification is not None:
@@ -15306,7 +15465,7 @@ class AutomationEngine:
         self,
         to_state: NatVentLifecycleState,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         outdoor: float | None,
         indoor: float | None,
     ) -> tuple[bool, FanCommandResult]:
@@ -15317,6 +15476,7 @@ class AutomationEngine:
         ``_apply_nat_vent_fsm_state_after_activation()``, and -- when the activation was not applied
         -- keeps the pause. Returns ``(applied, result)``; callers clear the pause only if ``applied``.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         result = await self._activate_fan(reason=reason)
         applied = self._nat_vent_activation_applied(result)
         self._apply_nat_vent_fsm_state_after_activation(to_state, result, keep_door_pause=True)
@@ -17023,7 +17183,7 @@ class AutomationEngine:
 
         if result.locked_out:
             candidate_family = result.decision.target_family or ("heating" if day_mode == "heat" else "cooling")
-            reason = result.decision.reason or "comfort-family switch lockout"
+            reason = result.decision.reason or _R("reason_cf_lockout")
             _LOGGER.warning(
                 "Comfort edge switch locked out: wants=%s reason=%s current=%s indoor=%s min_dwell_s=%s",
                 candidate_family,
@@ -17394,10 +17554,11 @@ class AutomationEngine:
         )
         if self._natural_vent_active:
             _ceiling_escalation_result = await self._deactivate_fan(
-                reason=(
-                    f"ceiling guard override — indoor {self._t(_indoor_cg)} approaching"
-                    f" ceiling {self._t(_ceiling_cg)}, breach predicted in"
-                    f" {_hours_to_breach:.1f}h — switching to active cooling"
+                reason=_R(
+                    "reason_ceiling_guard_override",
+                    indoor=self._tp(_indoor_cg),
+                    ceiling=self._tp(_ceiling_cg),
+                    hours=f"{_hours_to_breach:.1f}",
                 )
             )
             # Issue #931: flags clear only once the result above is known — see
@@ -17507,11 +17668,11 @@ class AutomationEngine:
             else:
                 _mode_result_cg = await self._set_hvac_mode(
                     "cool",
-                    reason=(f"ODE ceiling guard — breach predicted at {_breach_ts.strftime('%H:%M')}"),
+                    reason=_R("reason_ode_breach_predicted", time=_breach_ts.strftime("%H:%M")),
                 )
             _temp_result_cg = await self._set_temperature(
                 _ceiling_cg,
-                reason="ODE ceiling guard — target comfort ceiling",
+                reason=_R("reason_ode_target_ceiling"),
                 mode="cool",
             )
         # Issue #1417: the guard's cool write is a deliberate "cool ran" record even when cool was already armed.
@@ -17701,7 +17862,7 @@ class AutomationEngine:
             if hvac_outcome_label(_bank_write.result) == "sent":
                 self._away_setback_sent = True  # Issue #1425: the thermostat holds the away/vacation bank
             return
-        await self._apply_comfort_band(_band, reason=f"occupancy {mode} — setback band")
+        await self._apply_comfort_band(_band, reason=_R("reason_occupancy_setback_band", mode=str(mode)))
 
     def _resolve_occupancy_home_fsm_state(self) -> HomeDecision:
         """Single dispatch point for handle_occupancy_home()'s occupancy FSM
@@ -17827,7 +17988,7 @@ class AutomationEngine:
             _bank_write = await self._bank_takes_occupancy_write("home")
             if _bank_write is None:
                 with self._mode_change_context("restore"):
-                    await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {family} comfort")
+                    await self._set_temperature_for_mode(c, reason=_R("reason_occupancy_home_restore", family=family))
             # The comfort-edge selector may have written the OTHER family than the band's active edge (a mild day
             # next to its floor arms heat); report the family it actually armed.
             # Issue #1245: report what ``_set_temperature_for_mode()`` actually did -- the resolved band edge for the
@@ -17903,15 +18064,17 @@ class AutomationEngine:
         if decision.notify is HomeNotifyOutcome.SEND:
             self._last_welcome_home_notified = dt_util.now()
             if decision.restore_deferred_reason is not None:
-                _msg = (
-                    "🏠 Welcome home! Comfort temperature will resume once "
-                    f"{_RESTORE_DEFERRED_TEXT.get(decision.restore_deferred_reason, 'the hold')} clears."
+                _msg = i18n.Msg(
+                    "notify.welcome_home_hold",
+                    hold=decision.restore_deferred_reason
+                    if decision.restore_deferred_reason in _RESTORE_DEFERRED_REASONS
+                    else "other",
                 )
             elif decision.restore and self._last_mode_write.held_reason is not None:
                 # Issue #1245: the restore wrote nothing (WHF session / blower hold) -- don't promise a restore.
-                _msg = "🏠 Welcome home! Comfort temperature will resume once ventilation ends."
+                _msg = i18n.Msg("notify.welcome_home_ventilation")
             else:
-                _msg = "🏠 Welcome home! Restoring comfort temperature. Should feel normal in about 20–30 minutes."
+                _msg = i18n.Msg("notify.welcome_home_restoring")
             await self._notify(_msg, "Climate Advisor", notification_type="occupancy_home")
 
     def _build_fan_fsm_inputs(
@@ -18411,11 +18574,11 @@ class AutomationEngine:
                 mode,
             )
             with self._mode_change_context("nat_vent"):
-                _off_result = await self._set_hvac_mode("off", reason=f"blower ventilation, window open (was {mode})")
+                _off_result = await self._set_hvac_mode("off", reason=_R("reason_blower_window_open", mode=str(mode)))
             # Issue #1307 (mirror of #1302): a FAILED / UNCONFIRMED Off is re-sent while this blower session is still
             # ventilating with a window open and the thermostat still reads an active mode.
             self._arm_open_window_off_retry(
-                _off_result, reason=f"blower ventilation, window open (was {mode})", session="blower"
+                _off_result, reason=_R("reason_blower_window_open", mode=str(mode)), session="blower"
             )
         await self._advise_close_windows_if_too_warm()
 
@@ -18447,10 +18610,12 @@ class AutomationEngine:
             comfort_cool,
         )
         await self._notify(
-            f"It's {self._t(indoor)} inside, above your {self._t(comfort_cool)} comfort limit, and the windows are "
-            "open. Climate Advisor won't run the air conditioning with the windows open. Close the windows and "
-            "it will cool the house.",
-            "Climate Advisor — close the windows",
+            i18n.Msg(
+                "notify.close_windows",
+                indoor=i18n.Temp(indoor, self._temp_unit, 1),
+                limit=i18n.Temp(comfort_cool, self._temp_unit, 1),
+            ),
+            i18n.Msg("notify.title.close_windows"),
             notification_type="door_window_pause",
             email=False,
         )
@@ -18638,7 +18803,7 @@ class AutomationEngine:
                         self.role,
                     )
                     await self._deactivate_fan(
-                        reason="forced start abandoned — house sealed",
+                        reason=_R("reason_whf_forced_start_abandoned"),
                         restore_hvac=True,
                         release_suppression=True,
                         emit_event=False,
@@ -19016,7 +19181,7 @@ class AutomationEngine:
         """
         return self._get_indoor_temp_f() is None
 
-    async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> FanCommandResult:
+    async def _activate_fan(self, *, reason: str | i18n.Msg, emit_event: bool = True) -> FanCommandResult:
         """Activate fan based on configured fan_mode.
 
         Args:
@@ -19032,6 +19197,7 @@ class AutomationEngine:
             avoid reporting a state change that didn't happen (rate-limited) or reporting the
             same deferral twice (a duplicate block within the same window).
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
             return FanCommandResult.DISABLED
@@ -19242,9 +19408,7 @@ class AutomationEngine:
             if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and not _skip_whf_leg:
                 # Whole-house fan exchanges outdoor air directly — running AC/heat
                 # simultaneously fights the fan and wastes energy (Issue #277 Fix C).
-                await self._suppress_hvac_for_whf(
-                    reason="whole-house fan active — suppressing HVAC to prevent fighting outdoor air exchange"
-                )
+                await self._suppress_hvac_for_whf(reason=_R("reason_whf_active_suppress"))
 
                 # Issue #835: bookkeeping below tracks "this fan_mode has a WHF leg",
                 # matching the pre-existing contract — bookkeeping ran unconditionally
@@ -19278,8 +19442,23 @@ class AutomationEngine:
                             "most thermostats support fan circulation independent of heating/cooling"
                         )
                     _fan_modes_on = list(hvac_state.attributes.get("fan_modes") or []) if hvac_state else []
-                    _on_value = resolve_fan_mode_command(_fan_modes_on, "on")
-                    if _on_value is None:
+                    _fan_profile_on = self._fan_profile()
+                    _on_value = resolve_fan_mode_command(_fan_modes_on, "on", profile=_fan_profile_on)
+                    # Issue #1566 (activate/deactivate mirror): never start a blower this thermostat gives CA no safe
+                    # way to stop -- the deactivate below would send nothing and the blower would run on unseen.
+                    _off_value_on = resolve_fan_mode_command(_fan_modes_on, "off", profile=_fan_profile_on)
+                    if _on_value is not None and _off_value_on is None:
+                        _cause = (self.climate_entity, tuple(_fan_modes_on), fan_mode, "no_off")
+                        _log_no_off = _LOGGER.debug if self._hvac_fan_no_on_logged_cause == _cause else _LOGGER.warning
+                        self._hvac_fan_no_on_logged_cause = _cause
+                        _log_no_off(
+                            "Feature suppressed: HVAC fan not activated -- no fan mode on this thermostat is known to "
+                            "leave the blower idle, so Climate Advisor could not turn it back off (fan_modes=%s, "
+                            "Issue #1566) -- %s",
+                            _fan_modes_on,
+                            reason,
+                        )
+                    elif _on_value is None:
                         # Issue #1205 (C-a): the economizer retries about twice an hour, so the same unchanged cause
                         # is an ERROR once and a DEBUG line after that. The cause is the thermostat, its offered
                         # fan_modes and the configured fan mode, so a different thermostat/config logs ERROR again;
@@ -19337,7 +19516,7 @@ class AutomationEngine:
             self._resolve_fan_manual_origin_pending_on_start(
                 deferral_applied_at=_deferral_applied_at, seq_before=_start_seq_before
             )
-            self._record_action("Fan activated", reason)
+            self._record_action(_R("action_fan_activated"), reason)
             if emit_event and self._emit_event_callback:
                 self._emit_event_callback(
                     "fan_activated",
@@ -19574,18 +19753,18 @@ class AutomationEngine:
         if self._request_refresh_callback:
             self._request_refresh_callback()
 
-    def _notify_indoor_blind(self, title: str, message: str) -> None:
+    def _notify_indoor_blind(self, title: str | i18n.Msg, message: str | i18n.Msg) -> None:
         """Fire-and-forget owner push (task, so a notify failure can never kill the backstop chain)."""
 
         async def _send() -> None:
             try:
                 await self._notify(message, title, "indoor_blind_fan")
             except Exception:
-                _LOGGER.warning("Blind-fan notification failed: title=%s", title, exc_info=True)
+                _LOGGER.warning("Blind-fan notification failed: title=%s", i18n.render_en(title), exc_info=True)
 
         self.hass.async_create_task(_send())
 
-    def _push_indoor_blind_alert(self, title: str, message: str, *, force: bool = False) -> bool:
+    def _push_indoor_blind_alert(self, title: str | i18n.Msg, message: str | i18n.Msg, *, force: bool = False) -> bool:
         """Send the episode's alert push unless one went out within INDOOR_BLIND_PUSH_DEBOUNCE_S.
 
         A flapping sensor would otherwise produce an alert + recovery pair every 5-10 minutes
@@ -19685,21 +19864,10 @@ class AutomationEngine:
                     },
                 )
             self._request_indoor_blind_refresh()
-            if will_stop:
-                outcome = (
-                    f"Climate Advisor will turn the fan off at {stop_at.strftime('%H:%M')} if it doesn't come back."
-                )
-            elif session == "override":
-                outcome = (
-                    "The fan was turned on manually (or by its remote), so Climate Advisor will NOT turn it off — "
-                    "you may want to."
-                )
-            else:
-                outcome = "Climate Advisor will not turn this fan off automatically — you may want to."
+            outcome = "will_stop" if will_stop else ("override" if session == "override" else "other")
             self._indoor_blind_alert_pushed = self._push_indoor_blind_alert(
-                "Climate Advisor: fan running without a temperature reading",
-                "The indoor temperature sensor stopped reporting while a ventilation fan is running, so Climate "
-                f"Advisor can't tell whether the house is getting too cold. {outcome}",
+                i18n.Msg("notify.title.blind_alert"),
+                i18n.Msg("notify.blind_alert", outcome=outcome, time=i18n.Time(dt_util.as_local(stop_at))),
                 force=force_push,
             )
         else:
@@ -19730,7 +19898,7 @@ class AutomationEngine:
         # tests/test_nat_vent_exit_lockout_coverage.py). Re-entry while still blind is
         # impossible: decide_nat_vent_gate fails closed on indoor None.
         result = await self._exit_nat_vent(
-            reason=f"indoor temperature unavailable for {minutes} min — stopping ventilation fan",
+            reason=_R("reason_indoor_blind_stop_fan", minutes=minutes),
             event_type="fan_blind_stopped",
             event_payload={
                 "session": "nat_vent",
@@ -19755,9 +19923,8 @@ class AutomationEngine:
         _LOGGER.warning("Fan stopped: indoor blind timeout minutes_blind=%d result=%s", minutes, result.name)
         self._request_indoor_blind_refresh()  # clear the Fan-card suffix now (_exit_nat_vent emitted the event)
         self._notify_indoor_blind(
-            "Climate Advisor: ventilation fan turned off",
-            f"The indoor temperature sensor has been unavailable for {minutes} minutes, so Climate Advisor turned the "
-            "ventilation fan off to avoid overcooling the house. Please check the sensor.",
+            i18n.Msg("notify.title.blind_stopped"),
+            i18n.Msg("notify.blind_stopped", minutes=minutes),
         )
 
     def note_indoor_available(self, indoor: float) -> None:
@@ -19813,21 +19980,16 @@ class AutomationEngine:
         self._request_indoor_blind_refresh()
         if not alert_pushed:
             return  # the alert push was debounced, so its recovery push is too (no orphan "it's back")
-        if stopped:
-            tail = "The fan stays off; ventilation may resume if conditions allow."
-        elif fan_running:
-            tail = "Climate Advisor is monitoring the fan normally again."
-        else:
-            tail = "The fan is no longer running."
+        tail = "stopped" if stopped else ("running" if fan_running else "off")
         if lower_bound and minutes < 5:
-            when = "after a short outage"
+            when = "short"
         elif lower_bound:
-            when = f"after at least {minutes} minutes"
+            when = "at_least"
         else:
-            when = f"after about {minutes} minutes"
+            when = "about"
         self._notify_indoor_blind(
-            "Climate Advisor: indoor temperature is back",
-            f"The indoor temperature sensor is reporting again {when}. {tail}",
+            i18n.Msg("notify.title.blind_recovered"),
+            i18n.Msg("notify.blind_recovered", when=when, tail=tail, minutes=minutes),
         )
 
     def _whf_command_readback_on(self, fan_mode: str) -> bool | None:
@@ -19954,6 +20116,7 @@ class AutomationEngine:
                     is_thermostat_fan_physically_active(
                         _cs_drift.attributes.get("fan_mode", ""),
                         str(_cs_drift.attributes.get("hvac_action", "")).lower(),
+                        profile=self._fan_profile(),
                     )
                     if _cs_drift is not None
                     else None
@@ -20058,11 +20221,11 @@ class AutomationEngine:
             if self._emit_event_callback:
                 _cancel_payload: dict[str, Any] = {
                     "trigger": "physical_drift_correction",
-                    "reason": "physical-state drift confirmed over 2 backstop ticks",
+                    "reason": _R("reason_drift_confirmed"),
                     "fan_device": _fan_device_label(self.config),
                 }
                 if _readback_drift:
-                    _cancel_payload["reason"] = "fan command ignored: command entity never reacted"
+                    _cancel_payload["reason"] = _R("reason_fan_command_ignored")
                     _cancel_payload["readback"] = True
                     _cancel_payload["retry"] = _readback_retry
                     _cancel_payload["session_kept"] = bool(_preserve_session)
@@ -20084,16 +20247,14 @@ class AutomationEngine:
                     " open (Issue #561)"
                 )
             self._clear_fan_flags_and_start_grace(
-                reason="physical-state drift confirmed over 2 backstop ticks",
+                reason=_R("reason_drift_confirmed"),
                 trigger_label="physical_drift_correction",
                 preserve_nat_vent_session=_preserve_session,
                 source="automation",
                 **({"start_grace": False} if _readback_retry else {}),
             )
             if _was_nat_vent_active and not _preserve_session:
-                self._release_whf_and_reclassify(
-                    reason="physical-drift correction found the nat-vent session's sensors closed"
-                )
+                self._release_whf_and_reclassify(reason=_R("reason_drift_sensors_closed"))
             _stale_on_belief = not _readback_drift
             # (Skipped for a read-back drift: the command entity already reads off and never reacted
             # to CA, so there is no stale "on" belief to sync -- Issue #1050.)
@@ -20118,9 +20279,7 @@ class AutomationEngine:
 
                 async def _do_drift_reconciliation_off_command() -> None:
                     try:
-                        await self._command_whf_control_entity(
-                            False, reason="physical-state drift confirmed over 2 backstop ticks"
-                        )
+                        await self._command_whf_control_entity(False, reason=_R("reason_drift_confirmed"))
                     finally:
                         self._fan_command_pending = False
 
@@ -20151,7 +20310,7 @@ class AutomationEngine:
     async def _deactivate_fan(
         self,
         *,
-        reason: str,
+        reason: str | i18n.Msg,
         restore_hvac: bool = True,
         release_suppression: bool | None = None,
         emit_event: bool = True,
@@ -20200,6 +20359,7 @@ class AutomationEngine:
             A ``FanCommandResult`` describing what actually happened (Issue #649) — see
             ``_activate_fan()``'s matching docstring note.
         """
+        reason = msg_text(reason)  # Issue #1341: a Msg reason becomes its English text plus the message
         if release_suppression is None:
             release_suppression = restore_hvac
         _arm_release_after_stop = False
@@ -20334,7 +20494,7 @@ class AutomationEngine:
                     with self._mode_change_context("nat_vent"):
                         _stranded_restore_result = await self._set_hvac_mode(
                             _restore_mode,
-                            reason=f"whole-house fan already stopped — restoring HVAC mode ({_restore_mode})",
+                            reason=_R("reason_whf_already_stopped_restoring", mode=str(_restore_mode)),
                         )
                     if _stranded_restore_result is HvacCommandResult.DRY_RUN:
                         # Issue #1305: observe-only records only what was sent. Nothing reached the thermostat
@@ -20364,11 +20524,12 @@ class AutomationEngine:
                         None,
                         _stranded_restore_result,
                         target=_restore_mode,
-                        reason=f"whole-house fan release ({reason})",
+                        reason=_R("reason_whf_release", reason=_nest(reason)),
                     )
                     if _stranded_restore_result is not HvacCommandResult.DRY_RUN:
                         self._record_action(
-                            "Restored HVAC mode from stranded fan suppression", f"{reason} (restored={_restore_mode})"
+                            _R("action_stranded_hvac_restored"),
+                            _R("reason_stranded_hvac_restored", reason=_nest(reason), mode=str(_restore_mode)),
                         )
                         if self._emit_event_callback:
                             self._emit_event_callback(
@@ -20542,7 +20703,7 @@ class AutomationEngine:
                         with self._mode_change_context("nat_vent"):
                             _whf_restore_result = await self._set_hvac_mode(
                                 _restore_mode,
-                                reason=f"whole-house fan stopped — restoring HVAC mode ({_restore_mode})",
+                                reason=_R("reason_whf_stopped_restoring", mode=str(_restore_mode)),
                             )
                         # Issue #1308: a release restore that did not land stays pending and is re-sent once the fan
                         # session is over (a caller's follow-up comfort write that lands ends it).
@@ -20550,7 +20711,7 @@ class AutomationEngine:
                             None,
                             _whf_restore_result,
                             target=_restore_mode,
-                            reason=f"whole-house fan release ({reason})",
+                            reason=_R("reason_whf_release", reason=_nest(reason)),
                         )
                     else:
                         _LOGGER.debug(
@@ -20565,11 +20726,15 @@ class AutomationEngine:
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH) and not (safety and fan_mode == FAN_MODE_BOTH):
                 _cs_deact = self.hass.states.get(self.climate_entity)
                 _fan_modes_deact = list(_cs_deact.attributes.get("fan_modes") or []) if _cs_deact else []
-                _deact_value = resolve_fan_mode_command(_fan_modes_deact, "off")
+                _deact_value = resolve_fan_mode_command(_fan_modes_deact, "off", profile=self._fan_profile())
                 if _deact_value is None:
-                    _LOGGER.debug(
-                        "No safe off/auto fan_mode found in entity's fan_modes=%s — skipping deactivate command",
+                    # Issue #1566: activation is refused when no off value exists, so this is reached only if the
+                    # profile changed during the session -- loud, because the blower may still be running.
+                    _LOGGER.warning(
+                        "HVAC fan deactivate sent nothing: no fan mode on this thermostat is known to leave the blower "
+                        "idle (fan_modes=%s, Issue #1566) -- the blower may still be running — %s",
                         _fan_modes_deact,
+                        reason,
                     )
                 else:
                     await self._call_service_with_context(
@@ -20603,7 +20768,7 @@ class AutomationEngine:
             # comment on the already-inactive branch above for why that's wrong.
             if release_suppression:
                 self._cancel_fan_thermo_backstop()
-            self._record_action("Fan deactivated", reason)
+            self._record_action(_R("action_fan_deactivated"), reason)
             if emit_event and self._emit_event_callback:
                 self._emit_event_callback(
                     "fan_deactivated",
@@ -20850,7 +21015,7 @@ class AutomationEngine:
             return True
 
         if result.to_state == EconomizerLifecycleState.MAINTAIN:
-            activation_result = await self._activate_fan(reason="economizer maintain — fan assists ventilation")
+            activation_result = await self._activate_fan(reason=_R("reason_economizer_maintain"))
             if not self._apply_economizer_fsm_state_after_activation(result.to_state, activation_result):
                 return True  # the FSM did decide to engage; the fan start was not applied
             if aggressive_savings:
@@ -20865,10 +21030,11 @@ class AutomationEngine:
                 )
         else:  # COOL_DOWN
             activation_result = await self._activate_fan(
-                reason=(
-                    f"economizer cool-down — fan assists the band's cooling: indoor"
-                    f" {format_temp(indoor_temp, unit)} > comfort {format_temp(comfort_cool, unit)},"
-                    f" outdoor {format_temp(outdoor_temp, unit)} assisting"
+                reason=_R(
+                    "reason_economizer_cool_down",
+                    indoor=self._tp(indoor_temp, 0),
+                    comfort=self._tp(comfort_cool, 0),
+                    outdoor=self._tp(outdoor_temp, 0),
                 )
             )
             if not self._apply_economizer_fsm_state_after_activation(result.to_state, activation_result):
@@ -20932,7 +21098,7 @@ class AutomationEngine:
         """
         unit = self._temp_unit
         c = self._current_classification
-        result = await self._deactivate_fan(reason="economizer off — fan no longer needed")
+        result = await self._deactivate_fan(reason=_R("reason_economizer_off_fan"))
         if result is FanCommandResult.DRY_RUN:
             # Issue #1304: observe-only sent no stop -- the fan runs on, so its economizer session stays recorded.
             _LOGGER.debug("Economizer session kept — fan-off not sent (observe-only)")
@@ -20959,7 +21125,7 @@ class AutomationEngine:
             with self._mode_change_context("restore"):
                 await self._set_temperature_for_mode(
                     c,
-                    reason="economizer off — restoring comfort",
+                    reason=_R("reason_economizer_off_restoring"),
                 )
         _LOGGER.info("Economizer deactivated: outdoor=%s", format_temp(outdoor_temp, unit))
 
@@ -21053,6 +21219,19 @@ class AutomationEngine:
         sigs[key] = signature
         ats[key] = now
         return is_duplicate
+
+    def _fan_profile(self) -> FanProfile:
+        """Issue #1556/#1566: what each of the live thermostat's fan modes does (see ``thermostat_profile.py``).
+
+        The coordinator's learned profile when it attached its provider; otherwise the name guess for the live
+        ``fan_modes`` list. Every fan_mode read and write in this engine passes it to ``fan_mode_resolver``.
+        """
+        provider = getattr(self, "_fan_profile_provider", None)
+        if provider is not None:
+            return provider()
+        hass = getattr(self, "hass", None)
+        state = hass.states.get(self.climate_entity) if hass is not None else None
+        return live_fan_profile(None, state)
 
     def _get_thermostat_capabilities(self) -> ThermostatCapabilities:
         """Read the configured thermostat's advertised capabilities (Issue #249).

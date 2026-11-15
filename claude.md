@@ -557,6 +557,7 @@ Climate Advisor speaks 16 languages (`en fr es de nl ja pt it pl uk ko hi ar ru 
 - Logs, stored reasons (`render_en`), GitHub text and AI input stay English.
 - **Import convention (prevents merge conflicts in the two 21k-line files):** every Python module uses exactly `from . import i18n` and calls `i18n.Msg` / `i18n.render` / `i18n.hass_language(self.hass)`. Never `from .i18n import ...`.
 - The classic `index.html` stays English; the new dashboard, `entry.html` and `prediction_accuracy.html` load `i18n.js` first.
+- **Translation guards** (`python tools/i18n.py check`, also run by `tools/validate.py`; detail in `docs/i18n-spec.md`, "Guards and commands"): the four ratchets (`i18n/baselines/*.json`: English literals at Python sinks, English-prose comparisons, English at JS/HTML DOM sinks, physical CSS) may only fall, per file; lower a baseline with `python tools/i18n.py baseline --update` after removing hits, never raise it. Length budgets live in `i18n/budgets.json`. Helpers: `tm-build`/`tm-fill --area A` (translation memory), `prompt --area A --lang L` (translator prompt), `glossary` (warnings only).
 
 ---
 

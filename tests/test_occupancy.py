@@ -593,7 +593,7 @@ class TestNextActionWithOccupancy:
         coord._occupancy_mode = OCCUPANCY_VACATION
         c = _make_classification()
         action = coord._compute_next_action(c)
-        assert action in mod._VACATION_ACTION_MESSAGES
+        assert action.msg in mod._VACATION_ACTION_MESSAGES  # Issue #1341: catalog messages (action is their English)
 
     def test_away_shows_away_message(self):
         """When away, next action is one of the curated away-flavor lines (Issue #527)."""
@@ -604,7 +604,7 @@ class TestNextActionWithOccupancy:
         coord._occupancy_mode = OCCUPANCY_AWAY
         c = _make_classification()
         action = coord._compute_next_action(c)
-        assert action in mod._AWAY_ACTION_MESSAGES
+        assert action.msg in mod._AWAY_ACTION_MESSAGES  # Issue #1341: catalog messages (action is their English)
 
     def test_home_shows_normal_action(self):
         """When home, next action is the normal day-type action."""

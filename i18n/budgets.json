@@ -1,0 +1,12 @@
+{
+  "common.duration.hours": 24,
+  "common.duration.hours_frac": 24,
+  "common.duration.min": 24,
+  "common.mode.auto": 24,
+  "common.mode.cool": 24,
+  "common.mode.fan_only": 24,
+  "common.mode.heat": 24,
+  "common.mode.heat_cool": 24,
+  "common.mode.off": 24,
+  "common.unknown": 24
+}

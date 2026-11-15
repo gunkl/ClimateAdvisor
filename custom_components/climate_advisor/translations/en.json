@@ -554,5 +554,271 @@
       "title": "Ambiguous zone selection",
       "description": "Climate Advisor has more than one zone, and a request did not say which zone it was for: {request}. It was {outcome}. Whatever sent it (a script, an automation, a command-line tool or an old browser tab) may be showing another zone's information.\n\nTo fix it, add `?zone=ENTRY_ID` to that request, where ENTRY_ID is the zone's `entry_id` as listed by `GET /api/climate_advisor/status`. The Climate Advisor dashboards already do this. This notice clears the next time Climate Advisor starts."
     }
+  },
+  "common": {
+    "schedule_summary": "{name} — {days} {window} ({cost})",
+    "schedule_all_days": "All days",
+    "schedule_cost_high": "High",
+    "schedule_cost_low": "Low",
+    "schedule_unnamed": "(unnamed)",
+    "key_status_not_configured": "Not configured",
+    "token_status_configured": "configured",
+    "token_status_not_configured": "not configured",
+    "schedule_add_new": "+ Add a new schedule"
+  },
+  "entity": {
+    "sensor": {
+      "day_type": {
+        "name": "Day Type",
+        "state": {
+          "hot": "Hot",
+          "warm": "Warm",
+          "mild": "Mild",
+          "cool": "Cool",
+          "cold": "Cold",
+          "unknown": "Unknown"
+        }
+      },
+      "trend_direction": {
+        "name": "Trend",
+        "state": {
+          "warming": "Warming",
+          "cooling": "Cooling",
+          "stable": "Stable",
+          "unknown": "Unknown"
+        }
+      },
+      "next_human_action": {
+        "name": "Your Next Action"
+      },
+      "daily_briefing": {
+        "name": "Daily Briefing"
+      },
+      "compliance_score": {
+        "name": "Comfort Score"
+      },
+      "automation_status": {
+        "name": "Status"
+      },
+      "next_automation_action": {
+        "name": "Next Automation Action"
+      },
+      "next_automation_time": {
+        "name": "Next Automation Time"
+      },
+      "occupancy_mode": {
+        "name": "Occupancy Mode",
+        "state": {
+          "home": "Home",
+          "away": "Away",
+          "vacation": "Vacation",
+          "guest": "Guest"
+        }
+      },
+      "last_action_time": {
+        "name": "Last Action Time"
+      },
+      "last_action_reason": {
+        "name": "Last Action Reason"
+      },
+      "fan_status": {
+        "name": "Fan Status",
+        "state": {
+          "disabled": "Disabled",
+          "active": "Active",
+          "inactive": "Inactive"
+        }
+      },
+      "contact_status": {
+        "name": "Contact Sensors"
+      },
+      "ai_status": {
+        "name": "AI Status",
+        "state": {
+          "active": "Active",
+          "inactive": "Inactive",
+          "error": "Error",
+          "disabled": "Disabled",
+          "circuit_open": "Paused after repeated errors",
+          "budget_exceeded": "Monthly budget reached"
+        }
+      },
+      "indoor_temp": {
+        "name": "Indoor Temperature"
+      },
+      "outdoor_temp": {
+        "name": "Outdoor Temperature"
+      },
+      "forecast_high": {
+        "name": "Forecast High"
+      },
+      "forecast_low": {
+        "name": "Forecast Low"
+      },
+      "effective_target_temp": {
+        "name": "Target Temperature"
+      },
+      "heat_threshold": {
+        "name": "Heat Threshold"
+      },
+      "cool_threshold": {
+        "name": "Cool Threshold"
+      }
+    },
+    "switch": {
+      "automation_enabled": {
+        "name": "Automation"
+      }
+    }
+  },
+  "selector": {
+    "fan_mode": {
+      "options": {
+        "disabled": "Disabled (no fan control)",
+        "whole_house_fan": "Whole house fan (dedicated entity)",
+        "hvac_fan": "HVAC fan mode"
+      }
+    },
+    "hvac_fan_restrict": {
+      "options": {
+        "heat": "Heat only (avoid humidity after cooling)",
+        "cool": "Cool only",
+        "both": "Both (no restriction)"
+      }
+    },
+    "outdoor_temp_source": {
+      "options": {
+        "weather_service": "Weather service (recommended)",
+        "sensor": "Dedicated sensor",
+        "input_number": "Input helper (input_number)"
+      }
+    },
+    "indoor_temp_source": {
+      "options": {
+        "climate_fallback": "Climate entity (recommended)",
+        "sensor": "Dedicated sensor",
+        "input_number": "Input helper (input_number)"
+      }
+    },
+    "thermostat_companion": {
+      "options": {
+        "auto": "Auto (use the thermostat's finer sensor when proven)",
+        "off": "Off (always use the thermostat's own reading)"
+      }
+    },
+    "temp_unit": {
+      "options": {
+        "fahrenheit": "Fahrenheit (°F)",
+        "celsius": "Celsius (°C)"
+      }
+    },
+    "prediction_engine": {
+      "options": {
+        "none": "None",
+        "v3": "v3",
+        "v4": "v4"
+      }
+    },
+    "weekday": {
+      "options": {
+        "mon": "Mon",
+        "tue": "Tue",
+        "wed": "Wed",
+        "thu": "Thu",
+        "fri": "Fri",
+        "sat": "Sat",
+        "sun": "Sun"
+      }
+    },
+    "ai_reasoning_effort": {
+      "options": {
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High"
+      }
+    },
+    "suggestion_action": {
+      "options": {
+        "accept": "Accept",
+        "dismiss": "Dismiss"
+      }
+    },
+    "reset_scope": {
+      "options": {
+        "all": "All learned data",
+        "thermal_model": "Thermal model",
+        "weather_bias": "Weather forecast bias",
+        "suggestions": "Dismissed suggestions"
+      }
+    }
+  },
+  "services": {
+    "respond_to_suggestion": {
+      "name": "Respond to suggestion",
+      "description": "Accept or dismiss a learning suggestion from Climate Advisor.",
+      "fields": {
+        "entry_id": {
+          "name": "Zone",
+          "description": "The Climate Advisor zone (config entry) this call applies to. Required since Issue #796 — with more than one zone configured, HA's service registry has no other way to know which zone a call is meant for."
+        },
+        "action": {
+          "name": "Action",
+          "description": "Whether to accept or dismiss the suggestion."
+        },
+        "suggestion_key": {
+          "name": "Suggestion key",
+          "description": "The key identifying the suggestion to respond to."
+        }
+      }
+    },
+    "force_reclassify": {
+      "name": "Force reclassify",
+      "description": "Force Climate Advisor to re-fetch forecast data and reclassify the day. Useful for debugging.",
+      "fields": {
+        "entry_id": {
+          "name": "Zone",
+          "description": "The Climate Advisor zone (config entry) this call applies to. Required since Issue #796 — with more than one zone configured, HA's service registry has no other way to know which zone a call is meant for."
+        }
+      }
+    },
+    "resend_briefing": {
+      "name": "Resend briefing",
+      "description": "Re-generate and resend the daily briefing notification, even if it was already sent today.",
+      "fields": {
+        "entry_id": {
+          "name": "Zone",
+          "description": "The Climate Advisor zone (config entry) this call applies to. Required since Issue #796 — with more than one zone configured, HA's service registry has no other way to know which zone a call is meant for."
+        }
+      }
+    },
+    "dump_diagnostics": {
+      "name": "Dump diagnostics",
+      "description": "Log a comprehensive diagnostic snapshot of Climate Advisor's internal state for troubleshooting. Output is logged at INFO level — check Home Assistant logs to view the result.",
+      "fields": {
+        "entry_id": {
+          "name": "Zone",
+          "description": "The Climate Advisor zone (config entry) this call applies to. Required since Issue #796 — with more than one zone configured, HA's service registry has no other way to know which zone a call is meant for."
+        }
+      }
+    },
+    "reset_learning_data": {
+      "name": "Reset learning data",
+      "description": "Reset some or all of Climate Advisor's learned data. Use after changing HVAC equipment, moving to a new location, or to start fresh.",
+      "fields": {
+        "entry_id": {
+          "name": "Zone",
+          "description": "The Climate Advisor zone (config entry) this call applies to. Required since Issue #796 — with more than one zone configured, HA's service registry has no other way to know which zone a call is meant for. Double check this before calling — this service is destructive."
+        },
+        "scope": {
+          "name": "Scope",
+          "description": "What data to reset. \"all\" wipes everything. \"thermal_model\" clears HVAC session observations. \"weather_bias\" clears forecast accuracy records. \"suggestions\" allows previously dismissed suggestions to reappear."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "unknown_zone": {
+      "message": "Unknown or unloaded Climate Advisor zone entry_id '{entry_id}'. Check Settings > Devices & Services for the correct zone."
+    }
   }
 }

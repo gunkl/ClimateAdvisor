@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from tools.sim_harness._loop import run_coro
-from tools.sim_harness.build_engine import _DEFAULT_CONFIG
+from tools.sim_harness.build_engine import _DEFAULT_CONFIG, scenario_fan_modes
 from tools.sim_harness.fake_hass import FakeHass, FakeState, configure_thermostat_action
 from tools.sim_harness.fake_scheduler import FakeScheduler
 from tools.sim_harness.ha_stubs import EVENT_HOMEASSISTANT_STARTED, install_ha_stubs
@@ -220,8 +220,9 @@ def build_headless_coordinator(
     )
     attrs = {
         "fan_mode": "auto",
-        # Issue #968: see build_engine.py's identical default for the rationale.
-        "fan_modes": ["auto", "on"],
+        # Issue #968/#1556: the same scenario vocabulary as build_engine.py (it was hardcoded here before, so a
+        # coordinator scenario could never exercise a vendor fan vocabulary).
+        "fan_modes": scenario_fan_modes(merged_config),
         "hvac_modes": _default_hvac_modes,
         "supported_features": _default_features,
     }

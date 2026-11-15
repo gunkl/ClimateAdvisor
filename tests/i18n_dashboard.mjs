@@ -65,14 +65,14 @@ function fakeEl(attrs) {
 }
 await check('apply() fills textContent and attributes (never innerHTML); unknown keys keep the markup', async () => {
   const { CAI18N } = loadRuntime({});
-  CAI18N._test.setCatalog('en', { 'k.t': 'T <i>x</i>', 'k.title': 'Ti', 'k.n': '{n}h' });
+  CAI18N._test.setCatalog('en', { 'k.t': 'T &amp; x <3', 'k.title': 'Ti', 'k.n': '{n}h' });
   const e1 = fakeEl({ 'data-i18n': 'k.t' }), e2 = fakeEl({ 'data-i18n': 'k.missing' }), e3 = fakeEl({ 'data-i18n-attr': 'title:k.title;aria-label:k.t' }),
     e4 = fakeEl({ 'data-i18n': 'k.n', 'data-i18n-params': '{"n":6}' });
   const root = { querySelectorAll: (sel) => (sel === '[data-i18n]' ? [e1, e2, e4] : sel === '[data-i18n-attr]' ? [e3] : []) };
   CAI18N.apply(root);
-  assert.equal(e1.textContent, 'T <i>x</i>');
+  assert.equal(e1.textContent, 'T &amp; x <3');
   assert.equal(e2.textContent, 'English');
-  assert.equal(e3.a.title, 'Ti'); assert.equal(e3.a['aria-label'], 'T <i>x</i>');
+  assert.equal(e3.a.title, 'Ti'); assert.equal(e3.a['aria-label'], 'T &amp; x <3');
   assert.equal(e4.textContent, '6h');
 });
 

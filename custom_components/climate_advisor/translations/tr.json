@@ -1,0 +1,824 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Climate Advisor Kurulumu",
+        "description": "Climate Advisor entegrasyonunu yapılandırın. İzlemesi ve kontrol etmesi gereken varlıkları seçin.",
+        "data": {
+          "weather_entity": "Hava durumu hizmeti",
+          "climate_entity": "Termostat",
+          "notify_service": "Bildirim hizmeti"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor'ın tahminler ve dış hava koşulları için kullandığı hava durumu entegrasyonu.",
+          "climate_entity": "Climate Advisor'ın izleyeceği ve kontrol edeceği termostat.",
+          "notify_service": "Uyarılar ve günlük özetler için Home Assistant notify hizmeti (ör. notify.mobile_app_yourphone)."
+        }
+      },
+      "unit": {
+        "title": "Sıcaklık birimi",
+        "description": "Climate Advisor'ın gördüğünüz ve girdiğiniz tüm sıcaklıklarda kullanacağı birimi seçin. Bunu daha sonra Temel ayarlar'dan değiştirebilirsiniz.",
+        "data": {
+          "temp_unit": "Sıcaklık birimi"
+        },
+        "data_description": {
+          "temp_unit": "Climate Advisor'da gösterilen ve girilen tüm sıcaklıklarda kullanılır. Bunu daha sonra Temel ayarlar'dan değiştirebilirsiniz; ardından yeniden yükleme gerekir ve Climate Advisor sizi uyarır."
+        }
+      },
+      "setpoints": {
+        "title": "Hedef sıcaklıklar",
+        "description": "Konfor, evde yokken ve uyku hedef sıcaklıklarınızı belirleyin. Bir kombinasyon ısıtıcı ile kliması birbirine karşı çalıştıracaksa veya garip bir değerde dengelenecekse alanın yanında bir uyarı görünür; korumak için yeniden gönderin.",
+        "data": {
+          "comfort_heat": "Konforlu ısıtma sıcaklığı",
+          "comfort_cool": "Konforlu soğutma sıcaklığı",
+          "setback_heat": "Evde yokken ısıtma sıcaklığı",
+          "setback_cool": "Evde yokken soğutma sıcaklığı",
+          "sleep_heat": "Uyku ısıtma sıcaklığı",
+          "sleep_cool": "Uyku soğutma sıcaklığı"
+        },
+        "data_description": {
+          "comfort_heat": "Evde biri varken ısıtmadaki hedef sıcaklık.",
+          "comfort_cool": "Evde biri varken soğutmadaki hedef sıcaklık.",
+          "setback_heat": "Evde yokken enerji tasarrufu için kullanılan daha düşük sıcaklık.",
+          "setback_cool": "Evde yokken enerji tasarrufu için kullanılan daha yüksek sıcaklık.",
+          "sleep_heat": "Uyku saatlerinde (evdeyken) ısıtmadaki hedef sıcaklık.",
+          "sleep_cool": "Uyku saatlerinde (evdeyken) soğutmadaki hedef sıcaklık."
+        }
+      },
+      "temperature_sources": {
+        "title": "Sıcaklık kaynakları",
+        "description": "Climate Advisor'ın dış ve iç sıcaklık verilerini nereden okuyacağını seçin.",
+        "data": {
+          "outdoor_temp_source": "Dış sıcaklık kaynağı",
+          "indoor_temp_source": "İç sıcaklık kaynağı"
+        },
+        "data_description": {
+          "outdoor_temp_source": "Dış sıcaklığın nereden okunacağı. 'Hava durumu hizmeti' hava durumu entegrasyonunuzu kullanır; özel bir sensör veya giriş yardımcısı belirli bir varlığı kullanmanızı sağlar.",
+          "indoor_temp_source": "İç sıcaklığın nereden okunacağı. 'Climate varlığı' termostatınızın yerleşik sensörünü kullanır; özel bir sensör veya giriş yardımcısı ayrı bir varlığı kullanmanızı sağlar."
+        }
+      },
+      "outdoor_temp_entity": {
+        "title": "Dış sıcaklık varlığı",
+        "description": "Dış sıcaklık değerlerini sağlayan varlığı seçin.",
+        "data": {
+          "outdoor_temp_entity": "Dış sıcaklık varlığı"
+        },
+        "data_description": {
+          "outdoor_temp_entity": "Dış sıcaklığı bildiren sensörü veya giriş yardımcısını seçin."
+        }
+      },
+      "indoor_temp_entity": {
+        "title": "İç sıcaklık varlığı",
+        "description": "İç sıcaklık değerlerini sağlayan varlığı seçin.",
+        "data": {
+          "indoor_temp_entity": "İç sıcaklık varlığı"
+        },
+        "data_description": {
+          "indoor_temp_entity": "İç sıcaklığı bildiren sensörü veya giriş yardımcısını seçin."
+        }
+      },
+      "sensors": {
+        "title": "Kapı ve pencere sensörleri",
+        "description": "Climate Advisor'ın izlemesi gereken ikili sensörleri seçin. Bir sensör kapı veya pencerenin açık olduğunu bildirdiğinde enerji israfını önlemek için iklimlendirme (HVAC) duraklatılır.\n\nTek tek sensörleri veya birden çok sensörü bir araya getiren bir ikili sensör grubu varlığını seçebilirsiniz.\n\nPolarite anahtarı, sensör durumlarının nasıl yorumlanacağını belirler. Çoğu sensör, 'açık' (on) değerinin kapı/pencerenin açık olduğu anlamına geldiği Home Assistant standardını kullanır. Sensörleriniz bunun tersini bildiriyorsa ters çevirme anahtarını açın.",
+        "data": {
+          "door_window_sensors": "Kapı/pencere sensörleri",
+          "sensor_polarity_inverted": "Sensör polaritesini ters çevir",
+          "fan_mode": "Fan kontrol modu",
+          "fan_entity": "Fan varlığı"
+        },
+        "data_description": {
+          "door_window_sensors": "İzlenecek ikili sensör varlıklarını seçin; birden çok sensörü bir araya getiren ikili sensör grupları da olabilir.",
+          "sensor_polarity_inverted": "Sensörleriniz kapalıyken 'on', açıkken 'off' bildiriyorsa bunu açın; bu, Home Assistant standardının tersidir.",
+          "fan_mode": "Havalandırma için fanların nasıl kontrol edileceği. 'Tüm ev fanı' ayrılmış bir fan varlığını kontrol eder. 'HVAC fanı' termostatın fan modunu kullanır.",
+          "fan_entity": "Kontrol edilecek fan veya anahtar varlığı (yalnızca tüm ev fanı modunda gerekir)."
+        }
+      },
+      "occupancy": {
+        "title": "Evde olma bilgisi",
+        "description": "Climate Advisor'a evde kimin olduğunu bildiren anahtar varlıklarını yapılandırın. Tüm alanlar isteğe bağlıdır; o özelliği kullanmıyorsanız boş bırakın.",
+        "data": {
+          "home_toggle_entity": "Evde/dışarıda anahtarı",
+          "home_toggle_invert": "Evde anahtarını ters çevir",
+          "vacation_toggle_entity": "Tatil modu anahtarı",
+          "vacation_toggle_invert": "Tatil anahtarını ters çevir",
+          "guest_toggle_entity": "Misafir modu anahtarı",
+          "guest_toggle_invert": "Misafir anahtarını ters çevir"
+        },
+        "data_description": {
+          "home_toggle_entity": "Evde birinin olup olmadığını bildiren bir varlık (input_boolean, switch vb.). AÇIK = evde, KAPALI = dışarıda.",
+          "home_toggle_invert": "Anahtarınız dışarıdayken AÇIK, evdeyken KAPALI bildiriyorsa bunu açın.",
+          "vacation_toggle_entity": "Tatil modunu bildiren bir varlık. Etkinken daha fazla enerji tasarrufu için daha derin bir sıcaklık düşürme uygulanır.",
+          "vacation_toggle_invert": "Anahtarınız tatilde DEĞİLKEN AÇIK bildiriyorsa bunu açın.",
+          "guest_toggle_entity": "Misafirlerin bulunduğunu bildiren bir varlık. Tatil ve evde yokken modlarını geçersiz kılar; konfor sıcaklığı korunur.",
+          "guest_toggle_invert": "Anahtarınız misafir YOKKEN AÇIK bildiriyorsa bunu açın."
+        }
+      },
+      "schedule": {
+        "title": "Günlük zamanlama",
+        "description": "Climate Advisor'ın ne zaman ısıtıp soğutacağını ve özet göndereceğini bilmesi için hane zamanlamanızı belirleyin.",
+        "data": {
+          "zone_name": "Bölge adı",
+          "wake_time": "Uyanma saati",
+          "sleep_time": "Yatma saati",
+          "briefing_time": "Günlük özet saati",
+          "briefing_notifications_enabled": "Günlük özet bildirimleri"
+        },
+        "data_description": {
+          "zone_name": "Bu bölge için kısa bir ad (ör. \"Yatak odası\"). Ayarlar → Cihazlar ve hizmetler'de ve panodaki bölge seçicide gösterilir. Climate varlığınızın adından önerilir; dilediğiniz gibi düzenleyin.",
+          "wake_time": "Haneniz genellikle ne zaman uyanır. Climate Advisor, bu saatten önce konfor sıcaklığınıza doğru ısıtmaya veya soğutmaya başlar.",
+          "sleep_time": "Haneniz genellikle ne zaman yatar. Climate Advisor bu saatte evde yokken/uyku sıcaklığınıza geçer.",
+          "briefing_time": "Günün tahmini ve HVAC planını içeren günlük iklim özeti bildiriminin ne zaman gönderileceği.",
+          "briefing_notifications_enabled": "Zamanlanmış günlük özeti bu bölge için anlık bildirim olarak gönderin. Yalnızca ilk bölge varsayılan olarak açıktır; böylece çok bölgeli bir ev her bölge için bir kopya göndermez. Bunu daha sonra Bildirimler'den değiştirebilirsiniz."
+        }
+      }
+    },
+    "error": {
+      "invalid_notify_service": "alan_adı.hizmet biçiminde olmalıdır (ör. notify.mobile_app_phone)",
+      "zone_name_too_long": "Bölge adı en fazla 50 karakter olmalıdır",
+      "whf_entity_shared_zone": "Bu fan zaten başka bir Climate Advisor bölgesi tarafından kontrol ediliyor. Bir tüm ev fanı yalnızca tek bir bölgeye ait olabilir. Başka bir fan seçin veya önce diğer bölgeden kaldırın.",
+      "whf_no_sensors_warning": "Hiçbir kapı veya pencere sensörü seçilmedi; bu nedenle Climate Advisor evin ne zaman kapalı olduğunu bilemez ve bunun için tüm ev fanını durdurmaz. Bunu korumak için yeniden gönderin veya sensör ekleyin.",
+      "whf_command_only_warning": "Climate Advisor fanın gerçek durumunu göremez; bu nedenle kendi başlatmadığı bir fanı göremez ve durduramaz. Bunu korumak için yeniden gönderin veya Sensörler ve fan seçeneklerinden bir fan durum sensörü ekleyin.",
+      "setpoint_band_inverted_warning": "Bu ısıtma sıcaklığı, ilgili soğutma sıcaklığına eşit veya ondan yüksek. Hem ısıtma hem klima olan bir sistemde gün boyu sırayla çalışıp evi önce ısıtır, sonra tekrar soğutur. Isıtmayı soğutmanın en az 4 °F (2,5 °C) altına ayarlayın. Korumak için yeniden gönderin.",
+      "setpoint_band_narrow_warning": "Bu ısıtma sıcaklığı, ilgili soğutma sıcaklığının 4 °F (2,5 °C) altından daha az aşağıda. Cihazlar hedefi aşar; bu kadar küçük bir farkla ısıtma ve klima gerekenden fazla sık geçiş yapabilir. Korumak için yeniden gönderin.",
+      "setpoint_outside_thermostat_warning": "Termostatınız bu sıcaklığı kabul etmiyor; bu nedenle Climate Advisor onun yerine kabul edilen en yakın sıcaklığı gönderir. Korumak için yeniden gönderin.",
+      "away_heat_above_home_warning": "Evde yokken ısıtma, evdeyken ısıtmadan daha sıcak; bu yüzden ev, kimse yokken siz evdeyken olduğundan daha fazla ısıtılır. Korumak için yeniden gönderin.",
+      "away_cool_below_home_warning": "Evde yokken soğutma, evdeyken soğutmadan daha serin; bu yüzden klima, kimse yokken siz evdeyken olduğundan daha çok çalışır. Korumak için yeniden gönderin.",
+      "sleep_heat_below_away_warning": "Uyku ısıtması evde yokken ısıtmadan daha serin; bu yüzden gece boyunca ev, kimse yokken olduğundan daha serin tutulur. Korumak için yeniden gönderin.",
+      "sleep_cool_above_away_warning": "Uyku soğutması evde yokken soğutmadan daha sıcak; bu yüzden gece boyunca evin, kimse yokken olduğundan daha fazla ısınmasına izin verilir. Korumak için yeniden gönderin.",
+      "vacation_heat_above_away_warning": "Tatil ısıtması evde yokken ısıtmadan daha sıcak; bu yüzden tatil, normal bir dışarıda gününden daha fazla enerji harcar. Korumak için yeniden gönderin.",
+      "vacation_cool_below_away_warning": "Tatil soğutması evde yokken soğutmadan daha serin; bu yüzden tatil, normal bir dışarıda gününden daha fazla enerji harcar. Korumak için yeniden gönderin.",
+      "vacation_freeze_warning": "Bu ayarla tatil ısıtması 45 °F (7 °C) altına düşer. Uzun bir yolculukta borular donabilir. Korumak için yeniden gönderin."
+    },
+    "abort": {
+      "already_configured": "Bu termostat için zaten bir Climate Advisor bölgesi yapılandırılmış."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Climate Advisor seçenekleri",
+        "description": "Yapılandırılacak bir bölüm seçin.",
+        "menu_options": {
+          "core": "Temel ayarlar",
+          "setpoints": "Hedef sıcaklıklar",
+          "temperature_sources": "Sıcaklık kaynakları",
+          "sensors": "Sensörler ve fan",
+          "occupancy": "Evde olma bilgisi",
+          "schedule": "Zamanlama",
+          "scheduler": "Tarife zamanlayıcı",
+          "notifications": "Bildirimler",
+          "advanced": "Öğrenme ve davranış",
+          "classification_thresholds": "Gün tipi eşikleri",
+          "ai_settings": "Claude yapay zekâ ayarları",
+          "github_settings": "GitHub entegrasyonu"
+        }
+      },
+      "core": {
+        "title": "Temel ayarlar",
+        "description": "Climate Advisor'ın kullandığı ana varlıkları ve bildirim hizmetini yapılandırın.",
+        "data": {
+          "weather_entity": "Hava durumu hizmeti",
+          "climate_entity": "Termostat",
+          "notify_service": "Bildirim hizmeti",
+          "temp_unit": "Sıcaklık birimi",
+          "zone_name": "Bölge adı"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor'ın tahminler ve dış hava koşulları için kullandığı hava durumu entegrasyonu.",
+          "climate_entity": "Climate Advisor'ın izleyeceği ve kontrol edeceği termostat.",
+          "notify_service": "Uyarılar ve günlük özetler için Home Assistant notify hizmeti (ör. notify.mobile_app_yourphone).",
+          "temp_unit": "Climate Advisor'da gösterilen ve girilen tüm sıcaklıklarda kullanılır. Değiştirdikten sonra yeniden yükleme gerekir ve Climate Advisor sizi uyarır.",
+          "zone_name": "Bu bölgenin panoda ve cihaz listesinde gösterilen adı. Yeniden adlandırma varlık kimliklerini değiştirmez."
+        }
+      },
+      "setpoints": {
+        "title": "Hedef sıcaklıklar",
+        "description": "Konfor, evde yokken, uyku ve tatil hedef sıcaklıklarını yapılandırın. Bir kombinasyon ısıtıcı ile kliması birbirine karşı çalıştıracaksa veya garip bir değerde dengelenecekse alanın yanında bir uyarı görünür; korumak için yeniden gönderin.",
+        "data": {
+          "comfort_heat": "Konforlu ısıtma sıcaklığı",
+          "comfort_cool": "Konforlu soğutma sıcaklığı",
+          "setback_heat": "Evde yokken ısıtma sıcaklığı",
+          "setback_cool": "Evde yokken soğutma sıcaklığı",
+          "sleep_heat": "Uyku ısıtma sıcaklığı",
+          "sleep_cool": "Uyku soğutma sıcaklığı",
+          "vacation_heat": "Tatil ısıtma sıcaklığı",
+          "vacation_cool": "Tatil soğutma sıcaklığı"
+        },
+        "data_description": {
+          "comfort_heat": "Evde biri varken ısıtmadaki hedef sıcaklık.",
+          "comfort_cool": "Evde biri varken soğutmadaki hedef sıcaklık.",
+          "setback_heat": "Evde yokken enerji tasarrufu için kullanılan daha düşük sıcaklık.",
+          "setback_cool": "Evde yokken enerji tasarrufu için kullanılan daha yüksek sıcaklık.",
+          "sleep_heat": "Uyku saatlerinde (evdeyken) ısıtmadaki hedef sıcaklık.",
+          "sleep_cool": "Uyku saatlerinde (evdeyken) soğutmadaki hedef sıcaklık.",
+          "vacation_heat": "Tatil anahtarı açıkken ısıtma sıcaklığı. Evde yokken ısıtmadan 3 °F (yaklaşık 1,5 °C) düşük değeri kullanmak için boş bırakın.",
+          "vacation_cool": "Tatil anahtarı açıkken soğutma sıcaklığı. Evde yokken soğutmadan 3 °F (yaklaşık 1,5 °C) yüksek değeri kullanmak için boş bırakın."
+        }
+      },
+      "temperature_sources": {
+        "title": "Sıcaklık kaynakları",
+        "description": "Climate Advisor'ın dış ve iç sıcaklık verilerini nereden okuyacağını seçin.",
+        "data": {
+          "outdoor_temp_source": "Dış sıcaklık kaynağı",
+          "outdoor_temp_entity": "Dış sıcaklık varlığı",
+          "outdoor_humidity_entity": "Dış nem sensörü",
+          "indoor_temp_source": "İç sıcaklık kaynağı",
+          "indoor_temp_entity": "İç sıcaklık varlığı",
+          "indoor_humidity_entity": "İç nem sensörü",
+          "sleep_indoor_temp_entity": "Uyku iç sıcaklık sensörü",
+          "sleep_indoor_humidity_entity": "Uyku nem sensörü",
+          "thermostat_companion_sensor": "Termostat hassas sensörü"
+        },
+        "data_description": {
+          "outdoor_temp_source": "Dış sıcaklığın nereden okunacağı. 'Hava durumu hizmeti' hava durumu entegrasyonunuzu kullanır; özel bir sensör veya giriş yardımcısı belirli bir varlığı kullanmanızı sağlar. 'Hava durumu hizmeti'ne geri dönmek seçilen varlığı kaldırır.",
+          "outdoor_temp_entity": "Dış sıcaklığı bildiren sensörü veya giriş yardımcısını seçin; yukarıdaki kaynak otomatik olarak buna uyar. Hava durumu hizmetine dönmek için bu alanı temizleyin.",
+          "outdoor_humidity_entity": "Durum grafiğinde dışarıda hissedilen sıcaklıkla birlikte gösterilen dış nem sensörü. Yalnızca grafik içindir: hiçbir ısıtma veya soğutma kararı bunu kullanmaz. Otomatik algılama için boş bırakın.",
+          "indoor_temp_source": "İç sıcaklığın nereden okunacağı. 'Climate varlığı' termostatınızın yerleşik sensörünü kullanır; özel bir sensör veya giriş yardımcısı ayrı bir varlığı kullanmanızı sağlar.",
+          "indoor_temp_entity": "İç sıcaklığı bildiren sensörü veya giriş yardımcısını seçin; yukarıdaki kaynak otomatik olarak buna uyar. Termostatın yerleşik sensörüne dönmek için bu alanı temizleyin.",
+          "indoor_humidity_entity": "Climate Advisor'ın gündüz okuduğu odadaki nem sensörü; Durum grafiğinde odanın ne kadar sıcak hissettirdiğiyle birlikte gösterilir. Yalnızca grafik içindir: hiçbir ısıtma veya soğutma kararı bunu kullanmaz. Otomatik algılama için boş bırakın.",
+          "sleep_indoor_temp_entity": "Uyku zamanlamanız etkinken konfor ve otomasyon kararlarında kullanılan isteğe bağlı yatak odası sensörü (termal model her zaman birincil sensörü kullanır). Kullanılamazsa birincil sensöre geri döner. Devre dışı bırakmak için boş bırakın.",
+          "sleep_indoor_humidity_entity": "Uyku zamanlamanız etkinken Durum grafiğinde gösterilen yatak odasındaki nem sensörü. Yalnızca grafik içindir: hiçbir ısıtma veya soğutma kararı bunu kullanmaz. Otomatik algılama için boş bırakın.",
+          "thermostat_companion_sensor": "Birçok termostat ana varlıkta tam derece bildirir, ancak aynı cihazda daha hassas bir sıcaklık sensörü de bulunur. Otomatik, bu hassas sensör aynı değeri verdiğini kanıtladığında (1 °F içinde, termostat tam derece gösterirken kesirleri göstererek) onu kullanır; kaybolursa veya uyuşmazsa termostatın kendi değerine döner. Yalnızca termostatın yerleşik sensör kaynağı için geçerlidir. Kapalı her zaman termostatın kendi değerini kullanır."
+        }
+      },
+      "sensors": {
+        "title": "Sensörler ve fan",
+        "description": "Kapı/pencere sensörlerini ve fan kontrolünü yapılandırın. Bir sensör kapı veya pencerenin açık olduğunu bildirdiğinde enerji israfını önlemek için iklimlendirme (HVAC) duraklatılır.",
+        "data": {
+          "door_window_sensors": "Kapı/pencere sensörleri",
+          "sensor_polarity_inverted": "Sensör polaritesini ters çevir",
+          "sensor_debounce_seconds": "Sensör gecikmesi",
+          "manual_grace_seconds": "Manuel değişiklik sonrası duraklatma",
+          "automation_grace_seconds": "Otomatik değişiklik sonrası bekleme",
+          "override_confirm_seconds": "Geçersiz kılma onay gecikmesi",
+          "fan_mode": "Fan kontrol modu",
+          "hvac_fan_restrict_mode": "HVAC fan kısıtlaması",
+          "fan_entity": "Fan varlığı",
+          "fan_state_entity": "Fan durum varlığı",
+          "fan_state_feedback": "Fan durum geri bildirimi güvenilir",
+          "fan_remote_entity": "Fan RF kumanda olay varlığı",
+          "fan_min_runtime_per_hour": "Saatlik asgari fan çalışma süresi",
+          "nat_vent_soft_start_enabled": "Doğal havalandırma yumuşak başlatma"
+        },
+        "data_description": {
+          "door_window_sensors": "İzlenecek ikili sensör varlıklarını seçin; birden çok sensörü bir araya getiren ikili sensör grupları da olabilir.",
+          "sensor_polarity_inverted": "Sensörleriniz kapalıyken 'on', açıkken 'off' bildiriyorsa bunu açın; bu, Home Assistant standardının tersidir.",
+          "sensor_debounce_seconds": "Climate Advisor tepki vermeden önce bir kapı/pencere sensörünün durumunun ne kadar süre sabit kalması gerektiği; yani HVAC'ı duraklatma/sürdürme veya doğal havalandırma fan kontrolünü başlatma/bitirme. Kısa açılmaların veya kararsız bir sensörün sıçramasının tepkiyi tetiklemesini önler.",
+          "manual_grace_seconds": "Termostatı elle ayarladıktan sonra Climate Advisor otomasyonu sürdürmeden önce ne kadar beklenir.",
+          "automation_grace_seconds": "Climate Advisor otomatik bir değişiklik yaptıktan sonra bir diğerine izin vermeden önce ne kadar beklenir.",
+          "override_confirm_seconds": "Sistem değişiklikleri ile manuel değişikliğin onaylanması arasındaki süre. Bu süre içinde sona eren geçici olaylar (termostat yeniden başlatma, fan döngüleri) otomatik olarak yok sayılır. Değişiklikleri hemen onaylamak için 0 yapın.",
+          "fan_mode": "Havalandırma için fanların nasıl kontrol edileceği. 'Tüm ev fanı' ayrılmış bir fan varlığını kontrol eder. 'HVAC fanı' termostatın fan modunu kullanır.",
+          "hvac_fan_restrict_mode": "Nemli iklimlerde 'Yalnızca ısıtma', ıslak serpantin neminden kaçınmak için soğutmadan sonra 2 saat HVAC fanını atlar.",
+          "fan_entity": "Kontrol edilecek fan veya anahtar varlığı (yalnızca tüm ev fanı modunda gerekir).",
+          "fan_state_entity": "Fanın fiziksel durumunu okumak için isteğe bağlı ayrı sensör (çift varlıklı tüm ev fanları için). Durum için de Fan varlığını kullanmak üzere boş bırakın.",
+          "fan_state_feedback": "Fan varlığınız veya durum sensörünüz gerçek motor durumunu bildiriyorsa (yalnızca gönderilen son komutu değil) bunu AÇIN. Emin değilseniz KAPALI bırakın; CA her döngüde fana istenen durumu komut olarak gönderir.",
+          "fan_remote_entity": "Fiziksel RF duvar kumandasına basıldığında tetiklenen isteğe bağlı olay varlığı (ör. gunkl/quietcool-house-fan bellenimi). Kumandadan seçilen zamanlayıcı (1/2/4/8/12 saat) fan duraklatma süresini belirler. Devre dışı bırakmak için boş bırakın.",
+          "fan_min_runtime_per_hour": "Saatte fan çalışma dakikası (0 = devre dışı, 60 = hep açık). Döngü saate hizalı değildir; HA'nın ne zaman başladığına göre doğal olarak kayar.",
+          "nat_vent_soft_start_enabled": "Etkinleştirildiğinde, bugünün dış sıcaklığının zirveyi geçtiği ve düştüğü doğrulandıktan sonra tüm ev fanı dış/iç sıcaklık eşitliğinde (dışarının belirgin biçimde serinlemesini beklemeden) başlayabilir; amaç toplu soğutma değil, hava hareketi ile çatı arası/ısıl kütle tahliyesidir. Varsayılan olarak açıktır; fanın yalnızca dışarı içeriden belirgin biçimde serin olduğunda çalışmasını istiyorsanız kapatın. Şu anda hiçbir nem/çiğlenme noktası sensörü bunu korumaz."
+        }
+      },
+      "occupancy": {
+        "title": "Evde olma bilgisi",
+        "description": "Climate Advisor'a evde kimin olduğunu bildiren anahtar varlıklarını yapılandırın. Tüm alanlar isteğe bağlıdır; o özelliği kullanmıyorsanız boş bırakın.",
+        "data": {
+          "home_toggle_entity": "Evde/dışarıda anahtarı",
+          "home_toggle_invert": "Evde anahtarını ters çevir",
+          "vacation_toggle_entity": "Tatil modu anahtarı",
+          "vacation_toggle_invert": "Tatil anahtarını ters çevir",
+          "guest_toggle_entity": "Misafir modu anahtarı",
+          "guest_toggle_invert": "Misafir anahtarını ters çevir",
+          "welcome_home_debounce_seconds": "Eve hoş geldiniz sessiz süresi"
+        },
+        "data_description": {
+          "home_toggle_entity": "Evde birinin olup olmadığını bildiren bir varlık (input_boolean, switch vb.). AÇIK = evde, KAPALI = dışarıda.",
+          "home_toggle_invert": "Anahtarınız dışarıdayken AÇIK, evdeyken KAPALI bildiriyorsa bunu açın.",
+          "vacation_toggle_entity": "Tatil modunu bildiren bir varlık. Etkinken daha fazla enerji tasarrufu için daha derin bir sıcaklık düşürme uygulanır.",
+          "vacation_toggle_invert": "Anahtarınız tatilde DEĞİLKEN AÇIK bildiriyorsa bunu açın.",
+          "guest_toggle_entity": "Misafirlerin bulunduğunu bildiren bir varlık. Tatil ve evde yokken modlarını geçersiz kılar; konfor sıcaklığı korunur.",
+          "guest_toggle_invert": "Anahtarınız misafir YOKKEN AÇIK bildiriyorsa bunu açın.",
+          "welcome_home_debounce_seconds": "Eve hoş geldiniz bildirimleri arasındaki asgari süre. Bu süre içinde çıkıp dönerseniz bildirim bastırılır. Her zaman bildirmek için 0 yapın."
+        }
+      },
+      "schedule": {
+        "title": "Günlük zamanlama",
+        "description": "Climate Advisor'ın ne zaman ısıtıp soğutacağını ve özet göndereceğini bilmesi için hane zamanlamanızı belirleyin.",
+        "data": {
+          "wake_time": "Uyanma saati",
+          "sleep_time": "Yatma saati",
+          "briefing_time": "Günlük özet saati"
+        },
+        "data_description": {
+          "wake_time": "Haneniz genellikle ne zaman uyanır. Climate Advisor, bu saatten önce konfor sıcaklığınıza doğru ısıtmaya veya soğutmaya başlar.",
+          "sleep_time": "Haneniz genellikle ne zaman yatar. Climate Advisor bu saatte evde yokken/uyku sıcaklığınıza geçer.",
+          "briefing_time": "Günün tahmini ve HVAC planını içeren günlük iklim özeti bildiriminin ne zaman gönderileceği."
+        }
+      },
+      "scheduler": {
+        "title": "Tarife zamanlayıcı",
+        "description": "En fazla {max} zamana göre maliyet zamanlaması tanımlayın (şu an {count} tanımlı). Climate Advisor, mevcut konfor aralığınızı ve öğrenilen tepki hızını kullanarak yüksek maliyetli bir dönemden önce otomatik olarak ön soğutma veya ön ısıtma yapar; burada ayarlanacak sıcaklık yoktur.",
+        "data": {
+          "manage": "Zamanlamayı yönet"
+        },
+        "data_description": {
+          "manage": "Düzenlenecek bir zamanlama seçin veya yeni bir tane ekleyin."
+        }
+      },
+      "scheduler_edit": {
+        "title": "Tarife zamanlayıcı",
+        "description": "Sıcaklık alanı yok; Climate Advisor, yüksek maliyetli bir aralıktan önce mevcut konfor aralığınıza doğru otomatik olarak hazırlık yapar.",
+        "data": {
+          "name": "Ad",
+          "days": "Günler",
+          "start": "Başlangıç",
+          "end": "Bitiş",
+          "delete_schedule": "Bu zamanlamayı sil"
+        },
+        "data_description": {
+          "name": "Bu zamana göre tarife zamanlaması için kısa bir ad (ör. \"Yaz puantı\").",
+          "days": "Bu zamanlamanın geçerli olduğu haftanın günleri. En az birini seçin.",
+          "start": "Yüksek maliyetli dönemin başlangıcı. Climate Advisor bu saatten önce ön hazırlığa başlar.",
+          "end": "Yüksek maliyetli dönemin bitişi. Başlangıç saatinden farklı olmalıdır.",
+          "delete_schedule": "Bu zamanlamayı silmek için açın ve gönderin."
+        }
+      },
+      "notifications": {
+        "title": "Bildirim tercihleri",
+        "description": "Hangi bildirimleri ve hangi kanallardan alacağınızı seçin. Anlık bildirimler mobil uygulamanıza gider; e-posta bildirimleri send_email hizmeti üzerinden gider.",
+        "data": {
+          "briefing_notifications_enabled": "Günlük özet bildirimleri",
+          "push_briefing": "Anlık: günlük özet",
+          "push_door_window_pause": "Anlık: HVAC duraklatıldı",
+          "push_occupancy_home": "Anlık: eve hoş geldiniz",
+          "manual_grace_notify": "Anlık: manuel duraklatma bitti",
+          "automation_grace_notify": "Anlık: otomasyon duraklatması bitti",
+          "push_entity_health": "Anlık: varlık bulunamadı",
+          "email_briefing": "E-posta: günlük özet",
+          "email_door_window_pause": "E-posta: HVAC duraklatıldı",
+          "email_grace_expired": "E-posta: duraklatma bitti",
+          "email_grace_repause": "E-posta: HVAC yeniden duraklatıldı",
+          "email_occupancy_home": "E-posta: eve hoş geldiniz",
+          "email_entity_health": "E-posta: varlık bulunamadı"
+        },
+        "data_description": {
+          "briefing_notifications_enabled": "Çok bölgeli bir kurulumda zamanlanmış günlük özet anlık bildirimini/e-postasını yalnızca bir bölge göndermelidir; aksi halde her bölge için bir kopya alırsınız. Bunu tam olarak bir bölge için AÇIN. Hata ayıklama sekmesinde Özeti gönder'e elle tıklamak, bu kapalı olsa bile her zaman gönderir.",
+          "push_briefing": "Her sabah telefonunuza kısa bir özet gönderin.",
+          "push_door_window_pause": "Bir kapı veya pencere çok uzun süre açık kaldığı için HVAC duraklatıldığında anlık bildirim gönderin.",
+          "push_occupancy_home": "Biri eve geldiğinde ve konfor sıcaklığı geri yüklendiğinde anlık bildirim gönderin.",
+          "manual_grace_notify": "Manuel duraklatma süresi bittiğinde ve normal sensör davranışı sürdürüldüğünde anlık bildirim gönderin.",
+          "automation_grace_notify": "Otomasyon duraklatma süresi bittiğinde anlık bildirim gönderin.",
+          "push_entity_health": "Yapılandırılmış bir varlık (termostat, hava durumu kaynağı, sensör, fan, anahtar veya bildirim hizmeti) kaldırıldığında veya yanıt vermeyi bıraktığında anlık bildirim gönderin.",
+          "email_briefing": "Tam günlük özeti tüm tahmin ve plan ayrıntılarıyla e-posta ile gönderin.",
+          "email_door_window_pause": "Açık bir kapı veya pencere nedeniyle HVAC duraklatıldığında e-posta gönderin.",
+          "email_grace_expired": "Bir duraklatma süresi bittiğinde ve normal sensör davranışı sürdürüldüğünde e-posta gönderin.",
+          "email_grace_repause": "Duraklatma bittikten sonra bir kapı/pencere hâlâ açık olduğu için HVAC yeniden duraklatıldığında e-posta gönderin.",
+          "email_occupancy_home": "Biri eve geldiğinde e-posta gönderin.",
+          "email_entity_health": "Yapılandırılmış bir varlık (termostat, hava durumu kaynağı, sensör, fan, anahtar veya bildirim hizmeti) kaldırıldığında veya yanıt vermeyi bıraktığında e-posta gönderin."
+        }
+      },
+      "advanced": {
+        "title": "Öğrenme ve davranış",
+        "description": "Climate Advisor'ın tercihlerinizden nasıl öğrendiğini ve konforla tasarrufu nasıl dengelediğini yapılandırın.",
+        "data": {
+          "primary_engine": "Tahmin motoru",
+          "shadow_engine": "Karşılaştırma motoru",
+          "learning_enabled": "Öğrenme ve önerileri etkinleştir",
+          "adaptive_preheat_enabled": "Uyarlanabilir ön ısıtma zamanlaması",
+          "adaptive_setback_enabled": "Uyarlanabilir yatma vakti sıcaklık düşürme",
+          "weather_bias_enabled": "Hava durumu tahmin sapması düzeltmesi",
+          "min_preheat_minutes": "Asgari ön ısıtma süresi",
+          "max_preheat_minutes": "Azami ön ısıtma süresi",
+          "default_preheat_minutes": "Varsayılan ön ısıtma süresi",
+          "default_tou_lead_minutes": "Tarifeye göre ön hazırlık süresi",
+          "preheat_safety_margin": "Ön ısıtma güvenlik payı",
+          "max_setback_depth_f": "Azami sıcaklık düşürme derinliği",
+          "comfort_mode_switch_min_interval_s": "Isıtma/soğutma geçiş aralığı",
+          "aggressive_savings": "Konfor yerine tasarrufu tercih et",
+          "comfort_deadband_hot_f": "Çok sıcak gün aşım toleransı",
+          "comfort_deadband_warm_f": "Ilık gün aşım toleransı",
+          "comfort_deadband_mild_f": "Ilıman gün aşım toleransı",
+          "comfort_deadband_cool_f": "Serin gün aşım toleransı",
+          "comfort_deadband_cold_f": "Soğuk gün aşım toleransı",
+          "comfort_family_recency_window_min": "Son çalışma penceresi",
+          "energy_rate": "Enerji tarifesi",
+          "heat_power_kw": "Isıtma gücü",
+          "cool_power_kw": "Soğutma gücü"
+        },
+        "data_description": {
+          "primary_engine": "Climate Advisor'ın hangi tahmin motorunu kullandığı: v4 (varsayılan) veya v3. Ön ısıtma ve ön soğutma zamanlamasını, tavan korumasını, pencere kapatma saatini ve sıcaklık düşürme derinliğini belirler; Durum grafiğindeki ve Sonraki 24 saat planındaki ana çizgidir. Seçilen motor hâlâ öğrenirken bu kararlar varsayılan davranışlarını kullanır (asla diğer motoru değil) ve grafik zamanlama tahminini gösterir.",
+          "shadow_engine": "Karşılaştırma çizgisi olarak çizilen isteğe bağlı ikinci motor. Tahmin motorundan farklı olmalıdır. Yalnızca bu iki motor çalışır; diğerleri kapatılır.",
+          "learning_enabled": "Etkinleştirildiğinde Climate Advisor manuel ayarlarınızdan öğrenir ve zamanla iyileştirmeler önerir.",
+          "adaptive_preheat_enabled": "Ön ısıtma başlangıç saatini hesaplamak için öğrenilen ısıtma hızını kullanın. Öğrenmenin etkin olmasını gerektirir.",
+          "adaptive_setback_enabled": "Azami güvenli sıcaklık düşürme derinliğini hesaplamak için öğrenilen ısıtma/soğutma hızını kullanın. Öğrenmenin etkin olmasını gerektirir.",
+          "weather_bias_enabled": "Gözlenen tahmin doğruluğuna göre yarının tahminine konuma özgü bir düzeltme uygulayın. Öğrenmenin etkin olmasını gerektirir.",
+          "min_preheat_minutes": "Sistemin planlayacağı en kısa ön ısıtma süresi.",
+          "max_preheat_minutes": "Sistemin planlayacağı en uzun ön ısıtma süresi.",
+          "default_preheat_minutes": "Yeterli gözlem toplanana kadar kullanılan ön ısıtma süresi.",
+          "default_tou_lead_minutes": "Evinizin gerçek hızını hesaplamaya yetecek kadar ısıtma/soğutma döngüsü gözlenene kadar kullanılan, planlanmış yüksek maliyetli bir dönemden ne kadar önce tarifeye göre ön hazırlığın başlayacağı.",
+          "preheat_safety_margin": "Model tarafından hesaplanan ön ısıtma süresine tampon olarak uygulanan çarpan (ör. 1,2 = %20 fazla).",
+          "max_setback_depth_f": "Uyarlanabilir motorun hesaplayabileceği en büyük gece sıcaklık düşürmesi.",
+          "comfort_mode_switch_min_interval_s": "Sürekli ileri geri geçişi önlemek için olağan ısıtma/soğutma geçişleri arasındaki asgari bekleme. Gerçek bir aşım (iç sıcaklığın gerçekten bir konfor sınırını geçmesi) bu beklemeyi yok sayar ve hemen geçiş yapar.",
+          "aggressive_savings": "Etkinleştirildiğinde Climate Advisor konfor yerine enerji tasarrufunu önceler; örneğin ısıtma veya soğutma çalışmadan önce daha geniş sıcaklık dalgalanmalarına tolerans gösterir.",
+          "comfort_deadband_hot_f": "Çok sıcak bir günde: karşıt mod yakın zamanda çalıştıktan sonra (Son çalışma penceresi içinde), karşıt mod açılmadan önce evin bir konfor sınırını kaç derece aşabileceği. Çok sıcak günde bu, ısıtmaya geçiş için geçerlidir (soğutma tarafı asla geciktirilmez). Bundan fazlası hemen geçiş yaptırır. Bu bir toleranstır; bir sınırın önceden hazırlandığı mesafe değildir (o, 2 derece veya konfor aralığınızın daha küçükse üçte biri olarak sabittir).",
+          "comfort_deadband_warm_f": "Ilık bir günde: karşıt mod yakın zamanda çalıştıktan sonra (Son çalışma penceresi içinde), karşıt mod açılmadan önce evin bir konfor sınırını kaç derece aşabileceği. Ilık günde bu, ısıtmaya geçiş için geçerlidir (soğutma tarafı asla geciktirilmez). Bundan fazlası hemen geçiş yaptırır. Bu bir toleranstır; bir sınırın önceden hazırlandığı mesafe değildir (o, 2 derece veya konfor aralığınızın daha küçükse üçte biri olarak sabittir).",
+          "comfort_deadband_mild_f": "Ilıman veya kapalı olarak sınıflandırılan bir günde: karşıt mod yakın zamanda çalıştıktan sonra (Son çalışma penceresi içinde), karşıt mod açılmadan önce evin bir konfor sınırını kaç derece aşabileceği. Ilıman günlerde tercih edilen bir taraf yoktur; bu yüzden hem ısıtma hem soğutma için geçerlidir. Bundan fazlası hemen geçiş yaptırır. Bu bir toleranstır; bir sınırın önceden hazırlandığı mesafe değildir (o, 2 derece veya konfor aralığınızın daha küçükse üçte biri olarak sabittir).",
+          "comfort_deadband_cool_f": "Serin bir günde: karşıt mod yakın zamanda çalıştıktan sonra (Son çalışma penceresi içinde), karşıt mod açılmadan önce evin bir konfor sınırını kaç derece aşabileceği. Serin günde bu, soğutmaya geçiş için geçerlidir (ısıtma tarafı asla geciktirilmez). Bundan fazlası hemen geçiş yaptırır. Bu bir toleranstır; bir sınırın önceden hazırlandığı mesafe değildir (o, 2 derece veya konfor aralığınızın daha küçükse üçte biri olarak sabittir).",
+          "comfort_deadband_cold_f": "Soğuk bir günde: karşıt mod yakın zamanda çalıştıktan sonra (Son çalışma penceresi içinde), karşıt mod açılmadan önce evin bir konfor sınırını kaç derece aşabileceği. Soğuk günde bu, soğutmaya geçiş için geçerlidir (ısıtma tarafı asla geciktirilmez). Bundan fazlası hemen geçiş yaptırır. Bu bir toleranstır; bir sınırın önceden hazırlandığı mesafe değildir (o, 2 derece veya konfor aralığınızın daha küçükse üçte biri olarak sabittir).",
+          "comfort_family_recency_window_min": "Isıtma veya soğutma tarafının ne kadar süre \"yakın zamanda çalışmış\" sayıldığı (gerçekten çalışan cihaz veya tarife, öngörülen tavan ya da sizin başlattığınız mod değişikliği; her Climate Advisor yazması değil). Yukarıdaki aşım toleransı (bu pencere içindeki küçük bir aşım termostatı karşıt moda geçirmez) ve öngörülen sıcaklık tavan koruması (öngörülen aşıma göre davranmak yerine bekler) tarafından kullanılır.",
+          "energy_rate": "İsteğe bağlı. Bir kilovatsaatin kendi para biriminizle maliyeti. Aşağıdaki ısıtma ve soğutma gücüyle birlikte panonun her günün maliyetini tahmin etmesini sağlar. Maliyet göstermemek için üçünü de boş bırakın.",
+          "heat_power_kw": "İsteğe bağlı. Isıtmanızın çalışırken çektiği ortalama elektrik gücü; etiketinden veya akıllı prizden. Günlük maliyet tahmini için enerji tarifesiyle birlikte gereklidir.",
+          "cool_power_kw": "İsteğe bağlı. Soğutmanızın çalışırken çektiği ortalama elektrik gücü; etiketinden veya akıllı prizden. Günlük maliyet tahmini için enerji tarifesiyle birlikte gereklidir."
+        }
+      },
+      "classification_thresholds": {
+        "title": "Gün tipi eşikleri",
+        "description": "Climate Advisor'ın her günü sınıflandırmak için kullandığı sıcaklık eşikleri. Çok sıcak eşiğine eşit veya üstündeki günlerde klima çalışır; Serin eşiğinin altında ısıtma kullanılır. Varsayılanlar: Çok sıcak 85°F (29°C), Ilık 75°F (24°C), Ilıman 60°F (16°C), Serin 45°F (7°C).",
+        "data": {
+          "threshold_hot": "Çok sıcak gün eşiği",
+          "threshold_warm": "Ilık gün eşiği",
+          "threshold_mild": "Ilıman gün eşiği",
+          "threshold_cool": "Serin gün eşiği"
+        },
+        "data_description": {
+          "threshold_hot": "Tahmini en yüksek sıcaklığı bu değere eşit veya üstünde olan günler Çok sıcak (klima modu) olarak sınıflandırılır. Varsayılan: 85°F / 29°C.",
+          "threshold_warm": "Tahmini en yüksek sıcaklığı bu değere eşit veya üstünde olan günler Ilık (pencereler önerilir, klima yok) olarak sınıflandırılır. Varsayılan: 75°F / 24°C.",
+          "threshold_mild": "Tahmini en yüksek sıcaklığı bu değere eşit veya üstünde olan günler Ilıman (rahat, pencereler açık) olarak sınıflandırılır. Varsayılan: 60°F / 16°C.",
+          "threshold_cool": "Tahmini en yüksek sıcaklığı bu değere eşit veya üstünde olan günler Serin (hafif ısıtma) olarak sınıflandırılır. Bunun altı Soğuk'tur (tam ısıtma). Varsayılan: 45°F / 7°C."
+        }
+      },
+      "ai_settings": {
+        "title": "Yapay zekâ ayarları",
+        "description": "Akıllı analiz ve raporlama için Claude yapay zekâ entegrasyonunu yapılandırın.\nAPI anahtarı durumu: {key_status}",
+        "data": {
+          "ai_enabled": "Yapay zekâ özelliklerini etkinleştir",
+          "ai_api_key": "Claude API anahtarı",
+          "ai_model": "Yapay zekâ modeli",
+          "ai_reasoning_effort": "Akıl yürütme çabası",
+          "ai_max_tokens": "Azami yanıt uzunluğu",
+          "ai_temperature": "Yaratıcılık",
+          "ai_monthly_budget": "Aylık bütçe sınırı",
+          "ai_auto_requests_per_day": "Günlük otomatik istek sayısı",
+          "ai_manual_requests_per_day": "Günlük manuel istek sayısı",
+          "ai_investigator_enabled": "Araştırma ajanını etkinleştir",
+          "ai_investigator_requests_per_day": "Günlük araştırmacı istek sayısı"
+        },
+        "data_description": {
+          "ai_enabled": "Tüm yapay zekâ özellikleri için ana anahtar. Kapalıyken Climate Advisor yalnızca yerleşik kodlanmış mantığını kullanır.",
+          "ai_api_key": "Anthropic API anahtarınız. console.anthropic.com adresinden alabilirsiniz. Mevcut anahtarı korumak için boş bırakın.",
+          "ai_model": "Hangi Claude modelinin kullanılacağı. Maliyet/kalite dengesi için Sonnet önerilir.",
+          "ai_reasoning_effort": "Claude'un ne kadar akıl yürütme çabası harcadığı. Daha yüksek = daha iyi analiz ama daha fazla maliyet.",
+          "ai_max_tokens": "Yapay zekâ yanıtlarının token cinsinden azami uzunluğu (256-16384).",
+          "ai_temperature": "Rastgeleliği kontrol eder. 0 = deterministik, 1,0 = en yaratıcı. 0,3 önerilir.",
+          "ai_monthly_budget": "ABD doları cinsinden tahmini azami aylık harcama. Sınırsız için 0 yapın.",
+          "ai_auto_requests_per_day": "Günlük azami otomatik yapay zekâ isteği sayısı (gece yarısı sıfırlanır).",
+          "ai_manual_requests_per_day": "Günlük azami kullanıcı tarafından başlatılan yapay zekâ isteği sayısı (gece yarısı sıfırlanır).",
+          "ai_investigator_enabled": "Araştırma ajanını etkinleştirin (yapay zekânın etkin olmasını gerektirir). Tutarsızlıkları ve veri sorunlarını bulmak için kaynaklar arası derin analiz yapar.",
+          "ai_investigator_requests_per_day": "Günlük azami araştırma analizi sayısı. Her araştırma genişletilmiş düşünme kullanır. Gece yarısı sıfırlanır."
+        }
+      },
+      "github_settings": {
+        "title": "GitHub entegrasyonu",
+        "description": "Araştırma raporları için GitHub sorun gönderimini yapılandırın.\nMevcut belirteç: {token_status}",
+        "data": {
+          "github_token": "GitHub kişisel erişim belirteci",
+          "github_repo": "GitHub deposu"
+        },
+        "data_description": {
+          "github_token": "issues:write kapsamlı belirteç. Mevcut belirteci korumak için boş bırakın.",
+          "github_repo": "Sorunların gönderileceği depo, owner/repo biçiminde; ör. gunkl/ClimateAdvisor."
+        }
+      }
+    },
+    "error": {
+      "entity_required_for_source": "Kullanılacak sensörü veya yardımcıyı seçin ya da kaynağı yeniden hava durumu hizmetine / climate varlığına ayarlayın.",
+      "entity_domain_mismatch": "Bu varlık seçilen kaynakla eşleşmiyor. 'Özel sensör' için bir sensör, 'Giriş yardımcısı' için bir input_number seçin.",
+      "source_entity_conflict": "Kaynağı ve varlığı aynı anda çelişen şekilde değiştirdiniz. Önce bir kaynak seçin, sonra eşleşen varlığı seçin (veya temizleyin).",
+      "invalid_notify_service": "alan_adı.hizmet biçiminde olmalıdır (ör. notify.mobile_app_phone)",
+      "schedule_days_required": "En az bir gün seçin",
+      "schedule_start_end_equal": "Başlangıç ve bitiş saati farklı olmalıdır",
+      "preheat_min_exceeds_max": "Asgari ön ısıtma süresi azami ön ısıtma süresini aşmamalıdır",
+      "preheat_default_exceeds_max": "Varsayılan ön ısıtma süresi azami ön ısıtma süresini aşmamalıdır",
+      "shadow_same_as_primary": "Karşılaştırma motoru tahmin motorundan farklı olmalıdır. Başka bir motor seçin veya Yok'u seçin.",
+      "unknown_engine": "Bu tahmin motoru kullanılamıyor.",
+      "ai_connection_failed": "Claude API'sine bağlanılamadı. API anahtarınızı kontrol edip yeniden deneyin.",
+      "ai_key_required": "Yapay zekâ özellikleri etkinken API anahtarı gereklidir.",
+      "ai_temperature_out_of_range": "Sıcaklık 0,0 ile 1,0 arasında olmalıdır.",
+      "ai_max_tokens_out_of_range": "Azami token değeri bu alan için izin verilen aralığın dışında.",
+      "github_repo_invalid": "Depo owner/repo biçiminde olmalıdır (ör. myuser/MyRepo).",
+      "zone_name_too_long": "Bölge adı en fazla 50 karakter olmalıdır",
+      "whf_entity_shared_zone": "Bu fan zaten başka bir Climate Advisor bölgesi tarafından kontrol ediliyor. Bir tüm ev fanı yalnızca tek bir bölgeye ait olabilir. Başka bir fan seçin veya önce diğer bölgeden kaldırın.",
+      "whf_no_sensors_warning": "Hiçbir kapı veya pencere sensörü seçilmedi; bu nedenle Climate Advisor evin ne zaman kapalı olduğunu bilemez ve bunun için tüm ev fanını durdurmaz. Bunu korumak için yeniden gönderin veya sensör ekleyin.",
+      "whf_command_only_warning": "Climate Advisor fanın gerçek durumunu göremez; bu nedenle kendi başlatmadığı bir fanı göremez ve durduramaz. Bunu korumak için yeniden gönderin veya Sensörler ve fan seçeneklerinden bir fan durum sensörü ekleyin.",
+      "thresholds_must_be_ascending": "Gün tipi eşikleri Serin'den Ilıman'a, Ilık'a ve Çok sıcak'a doğru artmalıdır (Serin < Ilıman < Ilık < Çok sıcak).",
+      "setpoint_band_inverted_warning": "Bu ısıtma sıcaklığı, ilgili soğutma sıcaklığına eşit veya ondan yüksek. Hem ısıtma hem klima olan bir sistemde gün boyu sırayla çalışıp evi önce ısıtır, sonra tekrar soğutur. Isıtmayı soğutmanın en az 4 °F (2,5 °C) altına ayarlayın. Korumak için yeniden gönderin.",
+      "setpoint_band_narrow_warning": "Bu ısıtma sıcaklığı, ilgili soğutma sıcaklığının 4 °F (2,5 °C) altından daha az aşağıda. Cihazlar hedefi aşar; bu kadar küçük bir farkla ısıtma ve klima gerekenden fazla sık geçiş yapabilir. Korumak için yeniden gönderin.",
+      "setpoint_outside_thermostat_warning": "Termostatınız bu sıcaklığı kabul etmiyor; bu nedenle Climate Advisor onun yerine kabul edilen en yakın sıcaklığı gönderir. Korumak için yeniden gönderin.",
+      "away_heat_above_home_warning": "Evde yokken ısıtma, evdeyken ısıtmadan daha sıcak; bu yüzden ev, kimse yokken siz evdeyken olduğundan daha fazla ısıtılır. Korumak için yeniden gönderin.",
+      "away_cool_below_home_warning": "Evde yokken soğutma, evdeyken soğutmadan daha serin; bu yüzden klima, kimse yokken siz evdeyken olduğundan daha çok çalışır. Korumak için yeniden gönderin.",
+      "sleep_heat_below_away_warning": "Uyku ısıtması evde yokken ısıtmadan daha serin; bu yüzden gece boyunca ev, kimse yokken olduğundan daha serin tutulur. Korumak için yeniden gönderin.",
+      "sleep_cool_above_away_warning": "Uyku soğutması evde yokken soğutmadan daha sıcak; bu yüzden gece boyunca evin, kimse yokken olduğundan daha fazla ısınmasına izin verilir. Korumak için yeniden gönderin.",
+      "vacation_heat_above_away_warning": "Tatil ısıtması evde yokken ısıtmadan daha sıcak; bu yüzden tatil, normal bir dışarıda gününden daha fazla enerji harcar. Korumak için yeniden gönderin.",
+      "vacation_cool_below_away_warning": "Tatil soğutması evde yokken soğutmadan daha serin; bu yüzden tatil, normal bir dışarıda gününden daha fazla enerji harcar. Korumak için yeniden gönderin.",
+      "vacation_freeze_warning": "Bu ayarla tatil ısıtması 45 °F (7 °C) altına düşer. Uzun bir yolculukta borular donabilir. Korumak için yeniden gönderin."
+    }
+  },
+  "issues": {
+    "weather_entity_not_found": {
+      "title": "Hava durumu varlığı bulunamadı",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Hava durumu varlığını seçin",
+            "description": "Daha önce yapılandırılan hava durumu varlığı `{entity_id}` artık yok. Aşağıdan doğru hava durumu varlığını seçin.",
+            "data": {
+              "weather_entity": "Hava durumu hizmeti"
+            },
+            "data_description": {
+              "weather_entity": "Tahminleri ve dış hava koşullarını sağlayan hava durumu entegrasyonu."
+            }
+          }
+        }
+      }
+    },
+    "reload_needed": {
+      "title": "Yapılandırma değişikliklerini uygulamak için yeniden yüklemek gerekir.",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Kayıtlı ayarları uygula",
+            "description": "Climate Advisor seçeneklerinde henüz yürürlüğe girmemiş değişiklikler kaydettiniz. Uygulamak için Climate Advisor'ı şimdi yeniden yükleyin."
+          }
+        }
+      }
+    },
+    "zone_resolution_ambiguous": {
+      "title": "Belirsiz bölge seçimi",
+      "description": "Climate Advisor'ın birden fazla bölgesi var ve bir istek hangi bölge için olduğunu belirtmedi: {request}. Sonuç: {outcome}. İsteği gönderen şey (bir betik, bir otomasyon, bir komut satırı aracı veya eski bir tarayıcı sekmesi) başka bir bölgenin bilgilerini gösteriyor olabilir.\n\nDüzeltmek için o isteğe `?zone=ENTRY_ID` ekleyin; ENTRY_ID, `GET /api/climate_advisor/status` ile listelenen bölgenin `entry_id` değeridir. Climate Advisor panoları bunu zaten yapar. Bu bildirim Climate Advisor'ın bir sonraki başlatılışında kaybolur."
+    }
+  },
+  "common": {
+    "schedule_summary": "{name} — {days} {window} ({cost})",
+    "schedule_all_days": "Her gün",
+    "schedule_cost_high": "Yüksek",
+    "schedule_cost_low": "Düşük",
+    "schedule_unnamed": "(adsız)",
+    "key_status_not_configured": "Yapılandırılmadı",
+    "token_status_configured": "yapılandırıldı",
+    "token_status_not_configured": "yapılandırılmadı",
+    "schedule_add_new": "+ Yeni zamanlama ekle"
+  },
+  "entity": {
+    "sensor": {
+      "day_type": {
+        "name": "Gün tipi",
+        "state": {
+          "hot": "Çok sıcak",
+          "warm": "Ilık",
+          "mild": "Ilıman",
+          "cool": "Serin",
+          "cold": "Soğuk",
+          "unknown": "Bilinmiyor"
+        }
+      },
+      "trend_direction": {
+        "name": "Eğilim",
+        "state": {
+          "warming": "Isınıyor",
+          "cooling": "Soğuyor",
+          "stable": "Sabit",
+          "unknown": "Bilinmiyor"
+        }
+      },
+      "next_human_action": {
+        "name": "Sizin sonraki adımınız"
+      },
+      "daily_briefing": {
+        "name": "Günlük özet"
+      },
+      "compliance_score": {
+        "name": "Konfor puanı"
+      },
+      "automation_status": {
+        "name": "Durum"
+      },
+      "next_automation_action": {
+        "name": "Sonraki otomasyon eylemi"
+      },
+      "next_automation_time": {
+        "name": "Sonraki otomasyon zamanı"
+      },
+      "occupancy_mode": {
+        "name": "Evde olma modu",
+        "state": {
+          "home": "Evde",
+          "away": "Dışarıda",
+          "vacation": "Tatil",
+          "guest": "Misafir"
+        }
+      },
+      "last_action_time": {
+        "name": "Son eylem zamanı"
+      },
+      "last_action_reason": {
+        "name": "Son eylem nedeni"
+      },
+      "fan_status": {
+        "name": "Fan durumu",
+        "state": {
+          "disabled": "Devre dışı",
+          "active": "Etkin",
+          "inactive": "Etkin değil"
+        }
+      },
+      "contact_status": {
+        "name": "Temas sensörleri"
+      },
+      "ai_status": {
+        "name": "Yapay zekâ durumu",
+        "state": {
+          "active": "Etkin",
+          "inactive": "Etkin değil",
+          "error": "Hata",
+          "disabled": "Devre dışı",
+          "circuit_open": "Tekrarlanan hatalardan sonra duraklatıldı",
+          "budget_exceeded": "Aylık bütçeye ulaşıldı"
+        }
+      },
+      "indoor_temp": {
+        "name": "İç sıcaklık"
+      },
+      "outdoor_temp": {
+        "name": "Dış sıcaklık"
+      },
+      "forecast_high": {
+        "name": "Tahmini en yüksek sıcaklık"
+      },
+      "forecast_low": {
+        "name": "Tahmini en düşük sıcaklık"
+      },
+      "effective_target_temp": {
+        "name": "Hedef sıcaklık"
+      },
+      "heat_threshold": {
+        "name": "Isıtma eşiği"
+      },
+      "cool_threshold": {
+        "name": "Soğutma eşiği"
+      }
+    },
+    "switch": {
+      "automation_enabled": {
+        "name": "Otomasyon"
+      }
+    }
+  },
+  "selector": {
+    "fan_mode": {
+      "options": {
+        "disabled": "Devre dışı (fan kontrolü yok)",
+        "whole_house_fan": "Tüm ev fanı (ayrılmış varlık)",
+        "hvac_fan": "HVAC fan modu"
+      }
+    },
+    "hvac_fan_restrict": {
+      "options": {
+        "heat": "Yalnızca ısıtma (soğutmadan sonra nemden kaçının)",
+        "cool": "Yalnızca soğutma",
+        "both": "Her ikisi (kısıtlama yok)"
+      }
+    },
+    "outdoor_temp_source": {
+      "options": {
+        "weather_service": "Hava durumu hizmeti (önerilir)",
+        "sensor": "Özel sensör",
+        "input_number": "Giriş yardımcısı (input_number)"
+      }
+    },
+    "indoor_temp_source": {
+      "options": {
+        "climate_fallback": "Climate varlığı (önerilir)",
+        "sensor": "Özel sensör",
+        "input_number": "Giriş yardımcısı (input_number)"
+      }
+    },
+    "thermostat_companion": {
+      "options": {
+        "auto": "Otomatik (kanıtlandığında termostatın hassas sensörünü kullan)",
+        "off": "Kapalı (her zaman termostatın kendi değerini kullan)"
+      }
+    },
+    "temp_unit": {
+      "options": {
+        "fahrenheit": "Fahrenheit (°F)",
+        "celsius": "Celsius (°C)"
+      }
+    },
+    "prediction_engine": {
+      "options": {
+        "none": "Yok",
+        "v3": "v3",
+        "v4": "v4"
+      }
+    },
+    "weekday": {
+      "options": {
+        "mon": "Pzt",
+        "tue": "Sal",
+        "wed": "Çar",
+        "thu": "Per",
+        "fri": "Cum",
+        "sat": "Cmt",
+        "sun": "Paz"
+      }
+    },
+    "ai_reasoning_effort": {
+      "options": {
+        "low": "Düşük",
+        "medium": "Orta",
+        "high": "Yüksek"
+      }
+    },
+    "suggestion_action": {
+      "options": {
+        "accept": "Kabul et",
+        "dismiss": "Reddet"
+      }
+    },
+    "reset_scope": {
+      "options": {
+        "all": "Tüm öğrenilen veriler",
+        "thermal_model": "Termal model",
+        "weather_bias": "Hava durumu tahmin sapması",
+        "suggestions": "Reddedilen öneriler"
+      }
+    }
+  },
+  "services": {
+    "respond_to_suggestion": {
+      "name": "Öneriye yanıt ver",
+      "description": "Climate Advisor'dan gelen bir öğrenme önerisini kabul edin veya reddedin.",
+      "fields": {
+        "entry_id": {
+          "name": "Bölge",
+          "description": "Bu çağrının geçerli olduğu Climate Advisor bölgesi (yapılandırma girdisi). Issue #796'dan beri zorunludur; birden fazla bölge yapılandırıldığında HA'nın hizmet kaydının bir çağrının hangi bölge için olduğunu bilmenin başka yolu yoktur."
+        },
+        "action": {
+          "name": "Eylem",
+          "description": "Önerinin kabul edilip edilmeyeceği."
+        },
+        "suggestion_key": {
+          "name": "Öneri anahtarı",
+          "description": "Yanıtlanacak öneriyi tanımlayan anahtar."
+        }
+      }
+    },
+    "force_reclassify": {
+      "name": "Yeniden sınıflandırmayı zorla",
+      "description": "Climate Advisor'ı tahmin verilerini yeniden almaya ve günü yeniden sınıflandırmaya zorlar. Hata ayıklama için yararlıdır.",
+      "fields": {
+        "entry_id": {
+          "name": "Bölge",
+          "description": "Bu çağrının geçerli olduğu Climate Advisor bölgesi (yapılandırma girdisi). Issue #796'dan beri zorunludur; birden fazla bölge yapılandırıldığında HA'nın hizmet kaydının bir çağrının hangi bölge için olduğunu bilmenin başka yolu yoktur."
+        }
+      }
+    },
+    "resend_briefing": {
+      "name": "Özeti yeniden gönder",
+      "description": "Bugün zaten gönderilmiş olsa bile günlük özet bildirimini yeniden oluşturup gönderir.",
+      "fields": {
+        "entry_id": {
+          "name": "Bölge",
+          "description": "Bu çağrının geçerli olduğu Climate Advisor bölgesi (yapılandırma girdisi). Issue #796'dan beri zorunludur; birden fazla bölge yapılandırıldığında HA'nın hizmet kaydının bir çağrının hangi bölge için olduğunu bilmenin başka yolu yoktur."
+        }
+      }
+    },
+    "dump_diagnostics": {
+      "name": "Tanılama dök",
+      "description": "Sorun giderme için Climate Advisor'ın iç durumunun kapsamlı bir tanılama anlık görüntüsünü günlüğe kaydeder. Çıktı INFO düzeyinde kaydedilir; sonucu görmek için Home Assistant günlüklerine bakın.",
+      "fields": {
+        "entry_id": {
+          "name": "Bölge",
+          "description": "Bu çağrının geçerli olduğu Climate Advisor bölgesi (yapılandırma girdisi). Issue #796'dan beri zorunludur; birden fazla bölge yapılandırıldığında HA'nın hizmet kaydının bir çağrının hangi bölge için olduğunu bilmenin başka yolu yoktur."
+        }
+      }
+    },
+    "reset_learning_data": {
+      "name": "Öğrenme verilerini sıfırla",
+      "description": "Climate Advisor'ın öğrendiği verilerin bir kısmını veya tamamını sıfırlar. HVAC cihazını değiştirdikten, yeni bir yere taşındıktan sonra veya baştan başlamak için kullanın.",
+      "fields": {
+        "entry_id": {
+          "name": "Bölge",
+          "description": "Bu çağrının geçerli olduğu Climate Advisor bölgesi (yapılandırma girdisi). Issue #796'dan beri zorunludur; birden fazla bölge yapılandırıldığında HA'nın hizmet kaydının bir çağrının hangi bölge için olduğunu bilmenin başka yolu yoktur. Çağırmadan önce iyice kontrol edin; bu hizmet yıkıcıdır."
+        },
+        "scope": {
+          "name": "Kapsam",
+          "description": "Hangi verilerin sıfırlanacağı. \"all\" her şeyi siler. \"thermal_model\" HVAC oturum gözlemlerini temizler. \"weather_bias\" tahmin doğruluğu kayıtlarını temizler. \"suggestions\" daha önce reddedilen önerilerin yeniden görünmesine izin verir."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "unknown_zone": {
+      "message": "Bilinmeyen veya yüklenmemiş Climate Advisor bölgesi entry_id '{entry_id}'. Doğru bölge için Ayarlar > Cihazlar ve hizmetler bölümüne bakın."
+    }
+  }
+}

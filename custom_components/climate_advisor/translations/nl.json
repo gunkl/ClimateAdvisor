@@ -1,0 +1,824 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Climate Advisor instellen",
+        "description": "Stel je Climate Advisor-integratie in. Selecteer de entiteiten die moeten worden bewaakt en bediend.",
+        "data": {
+          "weather_entity": "Weerdienst",
+          "climate_entity": "Thermostaat",
+          "notify_service": "Notificatieservice"
+        },
+        "data_description": {
+          "weather_entity": "De weerintegratie die Climate Advisor gebruikt voor voorspellingen en de buitenomstandigheden.",
+          "climate_entity": "De thermostaat die Climate Advisor bewaakt en bedient.",
+          "notify_service": "De Home Assistant-notificatieservice voor meldingen en dagelijkse briefings (bijv. notify.mobile_app_yourphone)."
+        }
+      },
+      "unit": {
+        "title": "Temperatuureenheid",
+        "description": "Kies de eenheid die Climate Advisor gebruikt voor elke temperatuur die je ziet en invoert. Je kunt dit later wijzigen bij Kerninstellingen.",
+        "data": {
+          "temp_unit": "Temperatuureenheid"
+        },
+        "data_description": {
+          "temp_unit": "Wordt gebruikt voor elke temperatuur die in Climate Advisor wordt getoond en ingevoerd. Je kunt dit later wijzigen bij Kerninstellingen; daarna is een herlaadactie nodig en Climate Advisor vraagt je daarom."
+        }
+      },
+      "setpoints": {
+        "title": "Streeftemperaturen",
+        "description": "Stel je streeftemperaturen in voor comfort, afwezigheid en slapen. Als een combinatie ervoor zorgt dat verwarming en airco elkaar tegenwerken of ergens vreemd uitkomen, verschijnt er een waarschuwing naast het veld; verstuur opnieuw om de waarde te behouden.",
+        "data": {
+          "comfort_heat": "Comfortabele verwarmingstemperatuur",
+          "comfort_cool": "Comfortabele koeltemperatuur",
+          "setback_heat": "Verwarmingstemperatuur bij afwezigheid",
+          "setback_cool": "Koeltemperatuur bij afwezigheid",
+          "sleep_heat": "Verwarmingstemperatuur tijdens slapen",
+          "sleep_cool": "Koeltemperatuur tijdens slapen"
+        },
+        "data_description": {
+          "comfort_heat": "Streeftemperatuur bij verwarmen als er iemand thuis is.",
+          "comfort_cool": "Streeftemperatuur bij koelen als er iemand thuis is.",
+          "setback_heat": "Lagere temperatuur bij afwezigheid om energie te besparen.",
+          "setback_cool": "Hogere temperatuur bij afwezigheid om energie te besparen.",
+          "sleep_heat": "Streeftemperatuur bij verwarmen tijdens de slaapuren (als je thuis bent).",
+          "sleep_cool": "Streeftemperatuur bij koelen tijdens de slaapuren (als je thuis bent)."
+        }
+      },
+      "temperature_sources": {
+        "title": "Temperatuurbronnen",
+        "description": "Kies waar Climate Advisor de buiten- en binnentemperatuur vandaan haalt.",
+        "data": {
+          "outdoor_temp_source": "Bron buitentemperatuur",
+          "indoor_temp_source": "Bron binnentemperatuur"
+        },
+        "data_description": {
+          "outdoor_temp_source": "Waar de buitentemperatuur vandaan komt. ‘Weerdienst’ gebruikt je weerintegratie; met een eigen sensor of invoerhulp kun je een specifieke entiteit gebruiken.",
+          "indoor_temp_source": "Waar de binnentemperatuur vandaan komt. ‘Klimaatentiteit’ gebruikt de ingebouwde sensor van je thermostaat; met een eigen sensor of invoerhulp kun je een aparte entiteit gebruiken."
+        }
+      },
+      "outdoor_temp_entity": {
+        "title": "Entiteit buitentemperatuur",
+        "description": "Selecteer de entiteit die de buitentemperatuur levert.",
+        "data": {
+          "outdoor_temp_entity": "Entiteit buitentemperatuur"
+        },
+        "data_description": {
+          "outdoor_temp_entity": "Kies de sensor of invoerhulp die de buitentemperatuur meldt."
+        }
+      },
+      "indoor_temp_entity": {
+        "title": "Entiteit binnentemperatuur",
+        "description": "Selecteer de entiteit die de binnentemperatuur levert.",
+        "data": {
+          "indoor_temp_entity": "Entiteit binnentemperatuur"
+        },
+        "data_description": {
+          "indoor_temp_entity": "Kies de sensor of invoerhulp die de binnentemperatuur meldt."
+        }
+      },
+      "sensors": {
+        "title": "Deur- en raamsensoren",
+        "description": "Selecteer de binaire sensoren die Climate Advisor moet bewaken. Als een sensor meldt dat een deur of raam open is, wordt de verwarming/koeling gepauzeerd om geen energie te verspillen.\n\nJe kunt losse sensoren selecteren of een binaire-sensorgroep die meerdere sensoren bundelt.\n\nDe polariteitsschakelaar bepaalt hoe sensorstatussen worden uitgelegd. De meeste sensoren volgen de Home Assistant-standaard waarbij ‘on’ open (onveilig) betekent. Melden jouw sensoren het omgekeerde, schakel dan de omkeeroptie in.",
+        "data": {
+          "door_window_sensors": "Deur-/raamsensoren",
+          "sensor_polarity_inverted": "Sensorpolariteit omkeren",
+          "fan_mode": "Ventilatorbediening",
+          "fan_entity": "Ventilatorentiteit"
+        },
+        "data_description": {
+          "door_window_sensors": "Selecteer de binaire-sensorentiteiten die je wilt bewaken, ook binaire-sensorgroepen die meerdere sensoren bundelen.",
+          "sensor_polarity_inverted": "Schakel dit in als je sensoren ‘on’ melden als ze gesloten zijn en ‘off’ als ze open zijn, het omgekeerde van de Home Assistant-standaard.",
+          "fan_mode": "Hoe ventilatoren voor ventilatie worden bediend. ‘Huisventilator’ bedient een aparte ventilatorentiteit. ‘HVAC-ventilator’ gebruikt de ventilatorstand van de thermostaat.",
+          "fan_entity": "De ventilator- of schakelaarentiteit die wordt bediend (alleen nodig voor de huisventilatormodus)."
+        }
+      },
+      "occupancy": {
+        "title": "Aanwezigheidsdetectie",
+        "description": "Stel schakelaarentiteiten in die Climate Advisor vertellen wie er thuis is. Alle velden zijn optioneel — laat ze leeg als je deze functie niet gebruikt.",
+        "data": {
+          "home_toggle_entity": "Thuis/weg-schakelaar",
+          "home_toggle_invert": "Thuisschakelaar omkeren",
+          "vacation_toggle_entity": "Vakantiemodus-schakelaar",
+          "vacation_toggle_invert": "Vakantieschakelaar omkeren",
+          "guest_toggle_entity": "Gastmodus-schakelaar",
+          "guest_toggle_invert": "Gastschakelaar omkeren"
+        },
+        "data_description": {
+          "home_toggle_entity": "Een entiteit (input_boolean, switch, enz.) die aangeeft of er iemand thuis is. AAN = thuis, UIT = weg.",
+          "home_toggle_invert": "Schakel in als je schakelaar AAN meldt als je weg bent en UIT als je thuis bent.",
+          "vacation_toggle_entity": "Een entiteit die de vakantiemodus aangeeft. Als deze actief is, wordt de temperatuur extra verlaagd voor langdurige energiebesparing.",
+          "vacation_toggle_invert": "Schakel in als je schakelaar AAN meldt als je NIET op vakantie bent.",
+          "guest_toggle_entity": "Een entiteit die aangeeft dat er gasten zijn. Gaat boven de vakantie- en afwezigheidsmodus — de comforttemperatuur blijft behouden.",
+          "guest_toggle_invert": "Schakel in als je schakelaar AAN meldt als er GEEN gasten zijn."
+        }
+      },
+      "schedule": {
+        "title": "Dagschema",
+        "description": "Stel het schema van je huishouden in, zodat Climate Advisor weet wanneer het moet opwarmen, afkoelen en briefings moet versturen.",
+        "data": {
+          "zone_name": "Zonenaam",
+          "wake_time": "Wektijd",
+          "sleep_time": "Bedtijd",
+          "briefing_time": "Tijd dagelijkse briefing",
+          "briefing_notifications_enabled": "Notificaties dagelijkse briefing"
+        },
+        "data_description": {
+          "zone_name": "Een korte naam voor deze zone (bijv. ‘Slaapkamer’). Wordt getoond onder Instellingen → Apparaten & diensten en in de zoneselectie van het dashboard. Voorgesteld op basis van de naam van je klimaatentiteit — pas aan zoals je wilt.",
+          "wake_time": "Wanneer je huishouden meestal opstaat. Climate Advisor begint vóór dit tijdstip met opwarmen of afkoelen naar je comforttemperatuur.",
+          "sleep_time": "Wanneer je huishouden meestal naar bed gaat. Climate Advisor schakelt op dit tijdstip over naar je afwezigheids-/slaaptemperatuur.",
+          "briefing_time": "Wanneer de dagelijkse klimaatnotificatie met de weersverwachting en het HVAC-plan wordt bezorgd.",
+          "briefing_notifications_enabled": "Verstuur de geplande dagelijkse briefing als pushnotificatie voor deze zone. Alleen de eerste zone staat standaard aan, zodat een huis met meerdere zones niet per zone een kopie verstuurt. Je kunt dit later wijzigen bij Notificaties."
+        }
+      }
+    },
+    "error": {
+      "invalid_notify_service": "Moet het formaat domain.service hebben (bijv. notify.mobile_app_phone)",
+      "zone_name_too_long": "De zonenaam mag maximaal 50 tekens lang zijn",
+      "whf_entity_shared_zone": "Deze ventilator wordt al bediend door een andere Climate Advisor-zone. Een huisventilator kan maar bij één zone horen. Kies een andere ventilator of verwijder hem eerst uit de andere zone.",
+      "whf_no_sensors_warning": "Er zijn geen deur- of raamsensoren geselecteerd. Climate Advisor kan dus niet zien of het huis dicht is en stopt de huisventilator daar niet voor. Verstuur opnieuw om dit te behouden of voeg sensoren toe.",
+      "whf_command_only_warning": "Climate Advisor ziet de werkelijke status van de ventilator niet en kan een ventilator die het niet zelf heeft gestart dus niet zien of stoppen. Verstuur opnieuw om dit te behouden of voeg een ventilatorstatussensor toe bij de opties voor Sensoren en ventilator.",
+      "setpoint_band_inverted_warning": "Deze verwarmingstemperatuur is gelijk aan of hoger dan de bijbehorende koeltemperatuur. Bij een systeem met zowel verwarming als airco wisselen die elkaar de hele dag af: eerst wordt het huis verwarmd, daarna weer gekoeld. Stel de verwarming minstens 4 °F (2,5 °C) lager in dan de koeling. Verstuur opnieuw om dit te behouden.",
+      "setpoint_band_narrow_warning": "Deze verwarmingstemperatuur ligt minder dan 4 °F (2,5 °C) onder de bijbehorende koeltemperatuur. Apparatuur schiet door zijn streeftemperatuur heen, dus bij zo'n klein verschil kunnen verwarming en airco vaker heen en weer schakelen dan nodig is. Verstuur opnieuw om dit te behouden.",
+      "setpoint_outside_thermostat_warning": "Je thermostaat accepteert deze temperatuur niet. Climate Advisor stuurt daarom de dichtstbijzijnde temperatuur die wel wordt geaccepteerd. Verstuur opnieuw om dit te behouden.",
+      "away_heat_above_home_warning": "De verwarming bij afwezigheid staat warmer dan de verwarming bij aanwezigheid. Het huis wordt dus meer verwarmd als er niemand is dan als jij er bent. Verstuur opnieuw om dit te behouden.",
+      "away_cool_below_home_warning": "De koeling bij afwezigheid staat koeler dan de koeling bij aanwezigheid. De airco werkt dus harder als er niemand is dan als jij er bent. Verstuur opnieuw om dit te behouden.",
+      "sleep_heat_below_away_warning": "De verwarming tijdens slapen staat koeler dan de verwarming bij afwezigheid. 's Nachts is het huis dus koeler dan wanneer er niemand is. Verstuur opnieuw om dit te behouden.",
+      "sleep_cool_above_away_warning": "De koeling tijdens slapen staat warmer dan de koeling bij afwezigheid. 's Nachts mag het huis dus warmer worden dan wanneer er niemand is. Verstuur opnieuw om dit te behouden.",
+      "vacation_heat_above_away_warning": "De vakantieverwarming staat warmer dan de verwarming bij afwezigheid. Een vakantie kost dus meer energie dan een gewone dag van huis. Verstuur opnieuw om dit te behouden.",
+      "vacation_cool_below_away_warning": "De vakantiekoeling staat koeler dan de koeling bij afwezigheid. Een vakantie kost dus meer energie dan een gewone dag van huis. Verstuur opnieuw om dit te behouden.",
+      "vacation_freeze_warning": "Met deze instelling komt de vakantieverwarming onder 45 °F (7 °C). Tijdens een lange reis kunnen leidingen bevriezen. Verstuur opnieuw om dit te behouden."
+    },
+    "abort": {
+      "already_configured": "Voor deze thermostaat is al een Climate Advisor-zone ingesteld."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Climate Advisor-opties",
+        "description": "Kies een onderdeel om in te stellen.",
+        "menu_options": {
+          "core": "Kerninstellingen",
+          "setpoints": "Streeftemperaturen",
+          "temperature_sources": "Temperatuurbronnen",
+          "sensors": "Sensoren en ventilator",
+          "occupancy": "Aanwezigheid",
+          "schedule": "Schema",
+          "scheduler": "Tariefplanner (TOU)",
+          "notifications": "Notificaties",
+          "advanced": "Leren en gedrag",
+          "classification_thresholds": "Drempels voor dagtypen",
+          "ai_settings": "Claude AI-instellingen",
+          "github_settings": "GitHub-koppeling"
+        }
+      },
+      "core": {
+        "title": "Kerninstellingen",
+        "description": "Stel de belangrijkste entiteiten en de notificatieservice in die Climate Advisor gebruikt.",
+        "data": {
+          "weather_entity": "Weerdienst",
+          "climate_entity": "Thermostaat",
+          "notify_service": "Notificatieservice",
+          "temp_unit": "Temperatuureenheid",
+          "zone_name": "Zonenaam"
+        },
+        "data_description": {
+          "weather_entity": "De weerintegratie die Climate Advisor gebruikt voor voorspellingen en de buitenomstandigheden.",
+          "climate_entity": "De thermostaat die Climate Advisor bewaakt en bedient.",
+          "notify_service": "De Home Assistant-notificatieservice voor meldingen en dagelijkse briefings (bijv. notify.mobile_app_yourphone).",
+          "temp_unit": "Wordt gebruikt voor elke temperatuur die in Climate Advisor wordt getoond en ingevoerd. Na een wijziging is een herlaadactie nodig en Climate Advisor vraagt je daarom.",
+          "zone_name": "De naam van deze zone in het dashboard en de apparatenlijst. Hernoemen verandert de entiteits-ID's niet."
+        }
+      },
+      "setpoints": {
+        "title": "Streeftemperaturen",
+        "description": "Stel je streeftemperaturen in voor comfort, afwezigheid, slapen en vakantie. Als een combinatie ervoor zorgt dat verwarming en airco elkaar tegenwerken of ergens vreemd uitkomen, verschijnt er een waarschuwing naast het veld; verstuur opnieuw om de waarde te behouden.",
+        "data": {
+          "comfort_heat": "Comfortabele verwarmingstemperatuur",
+          "comfort_cool": "Comfortabele koeltemperatuur",
+          "setback_heat": "Verwarmingstemperatuur bij afwezigheid",
+          "setback_cool": "Koeltemperatuur bij afwezigheid",
+          "sleep_heat": "Verwarmingstemperatuur tijdens slapen",
+          "sleep_cool": "Koeltemperatuur tijdens slapen",
+          "vacation_heat": "Verwarmingstemperatuur tijdens vakantie",
+          "vacation_cool": "Koeltemperatuur tijdens vakantie"
+        },
+        "data_description": {
+          "comfort_heat": "Streeftemperatuur bij verwarmen als er iemand thuis is.",
+          "comfort_cool": "Streeftemperatuur bij koelen als er iemand thuis is.",
+          "setback_heat": "Lagere temperatuur bij afwezigheid om energie te besparen.",
+          "setback_cool": "Hogere temperatuur bij afwezigheid om energie te besparen.",
+          "sleep_heat": "Streeftemperatuur bij verwarmen tijdens de slaapuren (als je thuis bent).",
+          "sleep_cool": "Streeftemperatuur bij koelen tijdens de slaapuren (als je thuis bent).",
+          "vacation_heat": "Verwarmingstemperatuur terwijl de vakantieschakelaar aan staat. Laat leeg om de verwarming bij afwezigheid min 3 °F (ongeveer 1,5 °C) te gebruiken.",
+          "vacation_cool": "Koeltemperatuur terwijl de vakantieschakelaar aan staat. Laat leeg om de koeling bij afwezigheid plus 3 °F (ongeveer 1,5 °C) te gebruiken."
+        }
+      },
+      "temperature_sources": {
+        "title": "Temperatuurbronnen",
+        "description": "Kies waar Climate Advisor de buiten- en binnentemperatuur vandaan haalt.",
+        "data": {
+          "outdoor_temp_source": "Bron buitentemperatuur",
+          "outdoor_temp_entity": "Entiteit buitentemperatuur",
+          "outdoor_humidity_entity": "Sensor buitenluchtvochtigheid",
+          "indoor_temp_source": "Bron binnentemperatuur",
+          "indoor_temp_entity": "Entiteit binnentemperatuur",
+          "indoor_humidity_entity": "Sensor binnenluchtvochtigheid",
+          "sleep_indoor_temp_entity": "Binnentemperatuursensor (slapen)",
+          "sleep_indoor_humidity_entity": "Luchtvochtigheidssensor (slapen)",
+          "thermostat_companion_sensor": "Nauwkeurigere thermostaatsensor"
+        },
+        "data_description": {
+          "outdoor_temp_source": "Waar de buitentemperatuur vandaan komt. ‘Weerdienst’ gebruikt je weerintegratie; met een eigen sensor of invoerhulp kun je een specifieke entiteit gebruiken. Terugschakelen naar ‘Weerdienst’ verwijdert de gekozen entiteit.",
+          "outdoor_temp_entity": "Kies de sensor of invoerhulp die de buitentemperatuur meldt – de bron hierboven schakelt automatisch mee. Maak dit veld leeg om terug te gaan naar de weerdienst.",
+          "outdoor_humidity_entity": "De buitenluchtvochtigheidssensor die in de statusgrafiek wordt getoond, samen met hoe warm of koud het buiten aanvoelt. Alleen voor de grafiek: geen verwarmings- of koelbeslissing gebruikt hem. Laat leeg om automatisch te detecteren.",
+          "indoor_temp_source": "Waar de binnentemperatuur vandaan komt. ‘Klimaatentiteit’ gebruikt de ingebouwde sensor van je thermostaat; met een eigen sensor of invoerhulp kun je een aparte entiteit gebruiken.",
+          "indoor_temp_entity": "Kies de sensor of invoerhulp die de binnentemperatuur meldt – de bron hierboven schakelt automatisch mee. Maak dit veld leeg om terug te gaan naar de ingebouwde sensor van de thermostaat.",
+          "indoor_humidity_entity": "De luchtvochtigheidssensor in de ruimte die Climate Advisor overdag uitleest, getoond in de statusgrafiek samen met hoe warm de ruimte aanvoelt. Alleen voor de grafiek: geen verwarmings- of koelbeslissing gebruikt hem. Laat leeg om automatisch te detecteren.",
+          "sleep_indoor_temp_entity": "Optionele slaapkamersensor die wordt gebruikt voor comfort- en automatiseringsbeslissingen zolang je slaapschema actief is (het thermische model gebruikt altijd de primaire sensor). Valt terug op de primaire sensor als hij niet beschikbaar is. Laat leeg om uit te schakelen.",
+          "sleep_indoor_humidity_entity": "De luchtvochtigheidssensor in de slaapkamer, getoond in de statusgrafiek zolang je slaapschema actief is. Alleen voor de grafiek: geen verwarmings- of koelbeslissing gebruikt hem. Laat leeg om automatisch te detecteren.",
+          "thermostat_companion_sensor": "Veel thermostaten melden hele graden op de hoofdentiteit, maar hebben op hetzelfde apparaat ook een nauwkeurigere temperatuursensor. ‘Auto’ gebruikt die nauwkeurigere sensor zodra die dezelfde meting blijkt te geven (binnen 1 °F, met decimalen terwijl de thermostaat hele graden toont) en valt terug op de eigen meting van de thermostaat als die ontbreekt of afwijkt. Geldt alleen voor de ingebouwde sensor van de thermostaat als bron. ‘Uit’ gebruikt altijd de eigen meting van de thermostaat."
+        }
+      },
+      "sensors": {
+        "title": "Sensoren en ventilator",
+        "description": "Stel deur-/raamsensoren en ventilatorbediening in. Als een sensor meldt dat een deur of raam open is, wordt de verwarming/koeling gepauzeerd om geen energie te verspillen.",
+        "data": {
+          "door_window_sensors": "Deur-/raamsensoren",
+          "sensor_polarity_inverted": "Sensorpolariteit omkeren",
+          "sensor_debounce_seconds": "Vertraging sensorontdendering",
+          "manual_grace_seconds": "Pauze na handmatige wijziging",
+          "automation_grace_seconds": "Wachttijd na automatische wijziging",
+          "override_confirm_seconds": "Bevestigingsvertraging handmatige wijziging",
+          "fan_mode": "Ventilatorbediening",
+          "hvac_fan_restrict_mode": "Beperking HVAC-ventilator",
+          "fan_entity": "Ventilatorentiteit",
+          "fan_state_entity": "Ventilatorstatusentiteit",
+          "fan_state_feedback": "Ventilatorstatus betrouwbaar",
+          "fan_remote_entity": "Gebeurtenisentiteit RF-afstandsbediening ventilator",
+          "fan_min_runtime_per_hour": "Minimale ventilatorlooptijd per uur",
+          "nat_vent_soft_start_enabled": "Zachte start natuurlijke ventilatie"
+        },
+        "data_description": {
+          "door_window_sensors": "Selecteer de binaire-sensorentiteiten die je wilt bewaken, ook binaire-sensorgroepen die meerdere sensoren bundelen.",
+          "sensor_polarity_inverted": "Schakel dit in als je sensoren ‘on’ melden als ze gesloten zijn en ‘off’ als ze open zijn, het omgekeerde van de Home Assistant-standaard.",
+          "sensor_debounce_seconds": "Hoe lang de status van een deur-/raamsensor stabiel moet blijven voordat Climate Advisor reageert – de verwarming/koeling pauzeren of hervatten, of de ventilatorbediening voor natuurlijke ventilatie starten of beëindigen. Voorkomt dat korte openingen of een haperende sensor een reactie uitlokken.",
+          "manual_grace_seconds": "Hoe lang er na een handmatige aanpassing van de thermostaat wordt gewacht voordat Climate Advisor de automatisering hervat.",
+          "automation_grace_seconds": "Hoe lang er na een automatische wijziging van Climate Advisor wordt gewacht voordat een volgende is toegestaan.",
+          "override_confirm_seconds": "Tijd tussen systeemwijzigingen en de bevestiging van een handmatige wijziging. Kortstondige gebeurtenissen (herstart van de thermostaat, ventilatorcycli) die binnen dit venster verdwijnen, worden automatisch genegeerd. Stel in op 0 om handmatige wijzigingen direct te bevestigen.",
+          "fan_mode": "Hoe ventilatoren voor ventilatie worden bediend. ‘Huisventilator’ bedient een aparte ventilatorentiteit. ‘HVAC-ventilator’ gebruikt de ventilatorstand van de thermostaat.",
+          "hvac_fan_restrict_mode": "Voor vochtige klimaten: ‘Alleen verwarmen’ laat de HVAC-ventilator na het koelen 2 uur uit om vocht van de natte verdamper te voorkomen.",
+          "fan_entity": "De ventilator- of schakelaarentiteit die wordt bediend (alleen nodig voor de huisventilatormodus).",
+          "fan_state_entity": "Optionele aparte sensor om de fysieke ventilatorstatus uit te lezen (voor huisventilatoren met twee entiteiten). Laat leeg om ook voor de status de ventilatorentiteit te gebruiken.",
+          "fan_state_feedback": "Zet aan als je ventilatorentiteit of statussensor de werkelijke motorstatus meldt (niet alleen de laatst verstuurde opdracht). Laat uit als je het niet zeker weet — CA stuurt dan elke cyclus de gewenste status naar de ventilator.",
+          "fan_remote_entity": "Optionele gebeurtenisentiteit die afgaat als de fysieke RF-wandafstandsbediening wordt ingedrukt (bijv. van de firmware gunkl/quietcool-house-fan). Een timerkeuze op de afstandsbediening (1/2/4/8/12 uur) bepaalt hoe lang de ventilatoroverride wordt gerespecteerd. Laat leeg om uit te schakelen.",
+          "fan_min_runtime_per_hour": "Minuten ventilatorlooptijd per uur (0 = uitgeschakeld, 60 = altijd aan). De cyclus is niet aan de klok gekoppeld — hij verschuift vanzelf afhankelijk van wanneer HA is gestart.",
+          "nat_vent_soft_start_enabled": "Indien ingeschakeld mag de huisventilator al starten als de buiten- en binnentemperatuur gelijk zijn (zonder te wachten tot het buiten meetbaar koeler is), zodra is bevestigd dat de buitentemperatuur van vandaag haar piek voorbij is en daalt — voor luchtbeweging en het doorspoelen van zolder en thermische massa, niet voor grootschalig koelen. Standaard aan; schakel uit als de ventilator pas mag draaien als het buiten meetbaar koeler is dan binnen. Momenteel bewaakt geen vochtigheids-/dauwpuntsensor dit."
+        }
+      },
+      "occupancy": {
+        "title": "Aanwezigheidsdetectie",
+        "description": "Stel schakelaarentiteiten in die Climate Advisor vertellen wie er thuis is. Alle velden zijn optioneel — laat ze leeg als je deze functie niet gebruikt.",
+        "data": {
+          "home_toggle_entity": "Thuis/weg-schakelaar",
+          "home_toggle_invert": "Thuisschakelaar omkeren",
+          "vacation_toggle_entity": "Vakantiemodus-schakelaar",
+          "vacation_toggle_invert": "Vakantieschakelaar omkeren",
+          "guest_toggle_entity": "Gastmodus-schakelaar",
+          "guest_toggle_invert": "Gastschakelaar omkeren",
+          "welcome_home_debounce_seconds": "Rustperiode ‘Welkom thuis’"
+        },
+        "data_description": {
+          "home_toggle_entity": "Een entiteit (input_boolean, switch, enz.) die aangeeft of er iemand thuis is. AAN = thuis, UIT = weg.",
+          "home_toggle_invert": "Schakel in als je schakelaar AAN meldt als je weg bent en UIT als je thuis bent.",
+          "vacation_toggle_entity": "Een entiteit die de vakantiemodus aangeeft. Als deze actief is, wordt de temperatuur extra verlaagd voor langdurige energiebesparing.",
+          "vacation_toggle_invert": "Schakel in als je schakelaar AAN meldt als je NIET op vakantie bent.",
+          "guest_toggle_entity": "Een entiteit die aangeeft dat er gasten zijn. Gaat boven de vakantie- en afwezigheidsmodus — de comforttemperatuur blijft behouden.",
+          "guest_toggle_invert": "Schakel in als je schakelaar AAN meldt als er GEEN gasten zijn.",
+          "welcome_home_debounce_seconds": "Minimale tijd tussen ‘Welkom thuis’-notificaties. Als je vertrekt en binnen dit venster terugkeert, wordt de notificatie onderdrukt. Stel in op 0 om altijd te melden."
+        }
+      },
+      "schedule": {
+        "title": "Dagschema",
+        "description": "Stel het schema van je huishouden in, zodat Climate Advisor weet wanneer het moet opwarmen, afkoelen en briefings moet versturen.",
+        "data": {
+          "wake_time": "Wektijd",
+          "sleep_time": "Bedtijd",
+          "briefing_time": "Tijd dagelijkse briefing"
+        },
+        "data_description": {
+          "wake_time": "Wanneer je huishouden meestal opstaat. Climate Advisor begint vóór dit tijdstip met opwarmen of afkoelen naar je comforttemperatuur.",
+          "sleep_time": "Wanneer je huishouden meestal naar bed gaat. Climate Advisor schakelt op dit tijdstip over naar je afwezigheids-/slaaptemperatuur.",
+          "briefing_time": "Wanneer de dagelijkse klimaatnotificatie met de weersverwachting en het HVAC-plan wordt bezorgd."
+        }
+      },
+      "scheduler": {
+        "title": "Tariefplanner (TOU)",
+        "description": "Definieer maximaal {max} tijdgebonden tariefschema's ({count} momenteel gedefinieerd). Climate Advisor koelt of verwarmt automatisch voor vóór een periode met hoge kosten, op basis van je bestaande comfortbereik en de geleerde reactiesnelheid — je hoeft hier geen temperaturen in te stellen.",
+        "data": {
+          "manage": "Schema beheren"
+        },
+        "data_description": {
+          "manage": "Kies een schema om te bewerken of voeg een nieuw schema toe."
+        }
+      },
+      "scheduler_edit": {
+        "title": "Tariefplanner (TOU)",
+        "description": "Geen temperatuurvelden — Climate Advisor stuurt vóór een periode met hoge kosten automatisch richting je bestaande comfortbereik.",
+        "data": {
+          "name": "Naam",
+          "days": "Dagen",
+          "start": "Begint",
+          "end": "Eindigt",
+          "delete_schedule": "Dit schema verwijderen"
+        },
+        "data_description": {
+          "name": "Een korte naam voor dit tijdgebonden tariefschema (bijv. ‘Zomerpiek’).",
+          "days": "De dagen van de week waarop dit schema geldt. Selecteer er minstens één.",
+          "start": "Wanneer de periode met hoge kosten begint. Climate Advisor begint vóór dit tijdstip met voorconditioneren.",
+          "end": "Wanneer de periode met hoge kosten eindigt. Moet verschillen van de starttijd.",
+          "delete_schedule": "Schakel in en verstuur om dit schema te verwijderen."
+        }
+      },
+      "notifications": {
+        "title": "Notificatievoorkeuren",
+        "description": "Kies welke notificaties je ontvangt en via welke kanalen. Pushnotificaties gaan naar je mobiele app; e-mailnotificaties lopen via de service send_email.",
+        "data": {
+          "briefing_notifications_enabled": "Notificaties dagelijkse briefing",
+          "push_briefing": "Push: dagelijkse briefing",
+          "push_door_window_pause": "Push: HVAC gepauzeerd",
+          "push_occupancy_home": "Push: welkom thuis",
+          "manual_grace_notify": "Push: pauze na handmatige wijziging verlopen",
+          "automation_grace_notify": "Push: wachttijd na automatisering verlopen",
+          "push_entity_health": "Push: entiteit niet gevonden",
+          "email_briefing": "E-mail: dagelijkse briefing",
+          "email_door_window_pause": "E-mail: HVAC gepauzeerd",
+          "email_grace_expired": "E-mail: pauze verlopen",
+          "email_grace_repause": "E-mail: HVAC opnieuw gepauzeerd",
+          "email_occupancy_home": "E-mail: welkom thuis",
+          "email_entity_health": "E-mail: entiteit niet gevonden"
+        },
+        "data_description": {
+          "briefing_notifications_enabled": "Bij een installatie met meerdere zones moet slechts één zone de geplande dagelijkse briefing als push/e-mail versturen — anders ontvang je een kopie per zone. Zet dit AAN voor precies één zone. Handmatig klikken op Briefing versturen op het debug-tabblad verstuurt altijd, ook als dit uit staat.",
+          "push_briefing": "Stuur elke ochtend een korte TLDR-briefing naar je telefoon.",
+          "push_door_window_pause": "Stuur een pushnotificatie als de HVAC wordt gepauzeerd doordat een deur of raam te lang open staat.",
+          "push_occupancy_home": "Stuur een pushnotificatie als iemand thuiskomt en de comforttemperatuur wordt hersteld.",
+          "manual_grace_notify": "Stuur een pushnotificatie als de pauze na een handmatige wijziging verloopt en het normale sensorgedrag hervat wordt.",
+          "automation_grace_notify": "Stuur een pushnotificatie als de wachttijd na een automatische wijziging verloopt.",
+          "push_entity_health": "Stuur een pushnotificatie als een geconfigureerde entiteit (thermostaat, weerbron, sensor, ventilator, schakelaar of notificatieservice) wordt verwijderd of niet meer reageert.",
+          "email_briefing": "Stuur de volledige dagelijkse briefing per e-mail, met alle details van verwachting en plan.",
+          "email_door_window_pause": "Stuur een e-mail als de HVAC wordt gepauzeerd door een open deur of raam.",
+          "email_grace_expired": "Stuur een e-mail als een pauze verloopt en het normale sensorgedrag hervat wordt.",
+          "email_grace_repause": "Stuur een e-mail als de HVAC opnieuw wordt gepauzeerd omdat een deur/raam na afloop van de pauze nog open staat.",
+          "email_occupancy_home": "Stuur een e-mail als iemand thuiskomt.",
+          "email_entity_health": "Stuur een e-mail als een geconfigureerde entiteit (thermostaat, weerbron, sensor, ventilator, schakelaar of notificatieservice) wordt verwijderd of niet meer reageert."
+        }
+      },
+      "advanced": {
+        "title": "Leren en gedrag",
+        "description": "Stel in hoe Climate Advisor leert van je voorkeuren en comfort afweegt tegen besparing.",
+        "data": {
+          "primary_engine": "Voorspellingsengine",
+          "shadow_engine": "Vergelijkingsengine",
+          "learning_enabled": "Leren en suggesties inschakelen",
+          "adaptive_preheat_enabled": "Adaptieve voorverwarmtijd",
+          "adaptive_setback_enabled": "Adaptieve verlaging bij bedtijd",
+          "weather_bias_enabled": "Correctie weersvoorspellingsafwijking",
+          "min_preheat_minutes": "Minimale voorverwarmtijd",
+          "max_preheat_minutes": "Maximale voorverwarmtijd",
+          "default_preheat_minutes": "Standaard voorverwarmtijd",
+          "default_tou_lead_minutes": "Voorlooptijd TOU-voorconditionering",
+          "preheat_safety_margin": "Veiligheidsmarge voorverwarmen",
+          "max_setback_depth_f": "Maximale verlagingsdiepte",
+          "comfort_mode_switch_min_interval_s": "Schakelinterval verwarmen/koelen",
+          "aggressive_savings": "Besparing boven comfort",
+          "comfort_deadband_hot_f": "Overschrijdingstolerantie op hete dag",
+          "comfort_deadband_warm_f": "Overschrijdingstolerantie op warme dag",
+          "comfort_deadband_mild_f": "Overschrijdingstolerantie op milde dag",
+          "comfort_deadband_cool_f": "Overschrijdingstolerantie op koele dag",
+          "comfort_deadband_cold_f": "Overschrijdingstolerantie op koude dag",
+          "comfort_family_recency_window_min": "Venster ‘recent gedraaid’",
+          "energy_rate": "Energietarief",
+          "heat_power_kw": "Verwarmingsvermogen",
+          "cool_power_kw": "Koelvermogen"
+        },
+        "data_description": {
+          "primary_engine": "Welke voorspellingsengine Climate Advisor gebruikt: v4 (standaard) of v3. Deze bepaalt de timing van voorverwarmen en voorkoelen, de plafondbeveiliging, het sluitmoment van ramen en de verlagingsdiepte, en is de hoofdlijn in de statusgrafiek en het plan voor de komende 24 uur. Zolang de gekozen engine nog leert, gebruiken die beslissingen hun standaardgedrag (nooit de andere engine) en toont de grafiek de schatting op basis van het schema.",
+          "shadow_engine": "Optionele tweede engine die als vergelijkingslijn wordt getekend. Moet verschillen van de voorspellingsengine. Alleen deze twee engines draaien; elke andere staat uit.",
+          "learning_enabled": "Indien ingeschakeld leert Climate Advisor van je handmatige aanpassingen en doet het na verloop van tijd verbetervoorstellen.",
+          "adaptive_preheat_enabled": "Gebruik de geleerde verwarmingssnelheid om de starttijd van het voorverwarmen te berekenen. Vereist dat leren is ingeschakeld.",
+          "adaptive_setback_enabled": "Gebruik de geleerde verwarmings-/koelsnelheid om de maximaal veilige verlagingsdiepte te berekenen. Vereist dat leren is ingeschakeld.",
+          "weather_bias_enabled": "Pas een locatiespecifieke correctie toe op de verwachting voor morgen, gebaseerd op de waargenomen nauwkeurigheid van verwachtingen. Vereist dat leren is ingeschakeld.",
+          "min_preheat_minutes": "Kortste voorverwarmvenster dat het systeem ooit plant.",
+          "max_preheat_minutes": "Langste voorverwarmvenster dat het systeem ooit plant.",
+          "default_preheat_minutes": "Voorverwarmduur die wordt gebruikt voordat er genoeg waarnemingen zijn verzameld.",
+          "default_tou_lead_minutes": "Hoe lang vóór een geplande periode met hoge kosten de TOU-voorconditionering begint. Wordt gebruikt totdat genoeg verwarmings-/koelcycli zijn waargenomen om de werkelijke snelheid van je huis te berekenen.",
+          "preheat_safety_margin": "Vermenigvuldiger die als buffer op de door het model berekende voorverwarmtijd wordt toegepast (bijv. 1,2 = 20% extra).",
+          "max_setback_depth_f": "Grootste nachtelijke verlaging die de adaptieve engine mag berekenen.",
+          "comfort_mode_switch_min_interval_s": "Minimale wachttijd tussen routinematige wisselingen tussen verwarmen en koelen, om snel heen en weer schakelen te voorkomen. Een echte overschrijding (binnentemperatuur daadwerkelijk voorbij een comfortgrens) negeert deze wachttijd en schakelt direct.",
+          "aggressive_savings": "Indien ingeschakeld verkiest Climate Advisor energiebesparing boven comfort — bijvoorbeeld door grotere temperatuurschommelingen te tolereren voordat verwarming of koeling draait.",
+          "comfort_deadband_hot_f": "Op een hete dag: hoeveel graden het huis voorbij een comfortgrens mag gaan, kort nadat de tegenovergestelde modus draaide (binnen het venster ‘recent gedraaid’), voordat de tegenovergestelde modus wordt ingeschakeld. Op een hete dag geldt dit voor het overschakelen naar verwarmen (de koelzijde wordt nooit vertraagd). Gaat het verder dan dit, dan wordt direct geschakeld. Dit is een tolerantie, niet de afstand waarop een grens vooraf wordt scherpgesteld (die ligt vast op 2 graden, of op een derde van je comfortbereik als dat kleiner is).",
+          "comfort_deadband_warm_f": "Op een warme dag: hoeveel graden het huis voorbij een comfortgrens mag gaan, kort nadat de tegenovergestelde modus draaide (binnen het venster ‘recent gedraaid’), voordat de tegenovergestelde modus wordt ingeschakeld. Op een warme dag geldt dit voor het overschakelen naar verwarmen (de koelzijde wordt nooit vertraagd). Gaat het verder dan dit, dan wordt direct geschakeld. Dit is een tolerantie, niet de afstand waarop een grens vooraf wordt scherpgesteld (die ligt vast op 2 graden, of op een derde van je comfortbereik als dat kleiner is).",
+          "comfort_deadband_mild_f": "Op een milde of niet-ingedeelde dag: hoeveel graden het huis voorbij een comfortgrens mag gaan, kort nadat de tegenovergestelde modus draaide (binnen het venster ‘recent gedraaid’), voordat de tegenovergestelde modus wordt ingeschakeld. Milde dagen hebben geen voorkeurskant, dus dit geldt voor zowel verwarmen als koelen. Gaat het verder dan dit, dan wordt direct geschakeld. Dit is een tolerantie, niet de afstand waarop een grens vooraf wordt scherpgesteld (die ligt vast op 2 graden, of op een derde van je comfortbereik als dat kleiner is).",
+          "comfort_deadband_cool_f": "Op een koele dag: hoeveel graden het huis voorbij een comfortgrens mag gaan, kort nadat de tegenovergestelde modus draaide (binnen het venster ‘recent gedraaid’), voordat de tegenovergestelde modus wordt ingeschakeld. Op een koele dag geldt dit voor het overschakelen naar koelen (de verwarmingszijde wordt nooit vertraagd). Gaat het verder dan dit, dan wordt direct geschakeld. Dit is een tolerantie, niet de afstand waarop een grens vooraf wordt scherpgesteld (die ligt vast op 2 graden, of op een derde van je comfortbereik als dat kleiner is).",
+          "comfort_deadband_cold_f": "Op een koude dag: hoeveel graden het huis voorbij een comfortgrens mag gaan, kort nadat de tegenovergestelde modus draaide (binnen het venster ‘recent gedraaid’), voordat de tegenovergestelde modus wordt ingeschakeld. Op een koude dag geldt dit voor het overschakelen naar koelen (de verwarmingszijde wordt nooit vertraagd). Gaat het verder dan dit, dan wordt direct geschakeld. Dit is een tolerantie, niet de afstand waarop een grens vooraf wordt scherpgesteld (die ligt vast op 2 graden, of op een derde van je comfortbereik als dat kleiner is).",
+          "comfort_family_recency_window_min": "Hoe lang de verwarmings- of koelzijde als ‘recent gedraaid’ telt (apparatuur die daadwerkelijk draaide, of een moduswijziging door tarief (TOU), voorspeld plafond of jezelf; niet elke schrijfactie van Climate Advisor). Wordt gebruikt door de overschrijdingstolerantie hierboven (een kleine overschrijding binnen dit venster zet de thermostaat niet om naar de tegenovergestelde modus) en door de beveiliging van het voorspelde temperatuurplafond (die wacht in plaats van te handelen op een voorspelde overschrijding).",
+          "energy_rate": "Optioneel. Wat één kilowattuur je kost, in je eigen valuta. Samen met het verwarmings- en koelvermogen hieronder kan het dashboard hiermee de kosten van elke dag schatten. Laat alle drie leeg om geen kosten te tonen.",
+          "heat_power_kw": "Optioneel. Gemiddeld elektrisch vermogen dat je verwarming opneemt terwijl die draait, van het typeplaatje of een slimme stekker. Nodig, samen met het energietarief, voor de dagelijkse kostenschatting.",
+          "cool_power_kw": "Optioneel. Gemiddeld elektrisch vermogen dat je koeling opneemt terwijl die draait, van het typeplaatje of een slimme stekker. Nodig, samen met het energietarief, voor de dagelijkse kostenschatting."
+        }
+      },
+      "classification_thresholds": {
+        "title": "Drempels voor dagtypen",
+        "description": "Temperatuurdrempels waarmee Climate Advisor elke dag indeelt. Dagen op of boven de drempel Heet draaien op airco; onder de drempel Koel wordt verwarmd. Standaard: Heet 85 °F (29 °C), Warm 75 °F (24 °C), Mild 60 °F (16 °C), Koel 45 °F (7 °C).",
+        "data": {
+          "threshold_hot": "Drempel hete dag",
+          "threshold_warm": "Drempel warme dag",
+          "threshold_mild": "Drempel milde dag",
+          "threshold_cool": "Drempel koele dag"
+        },
+        "data_description": {
+          "threshold_hot": "Dagen met een verwachte maximumtemperatuur op of boven deze waarde worden ingedeeld als Heet (airco-modus). Standaard: 85 °F / 29 °C.",
+          "threshold_warm": "Dagen met een verwachte maximumtemperatuur op of boven deze waarde worden ingedeeld als Warm (ramen aanbevolen, geen airco). Standaard: 75 °F / 24 °C.",
+          "threshold_mild": "Dagen met een verwachte maximumtemperatuur op of boven deze waarde worden ingedeeld als Mild (comfortabel, ramen open). Standaard: 60 °F / 16 °C.",
+          "threshold_cool": "Dagen met een verwachte maximumtemperatuur op of boven deze waarde worden ingedeeld als Koel (lichte verwarming). Daaronder is het Koud (volledige verwarming). Standaard: 45 °F / 7 °C."
+        }
+      },
+      "ai_settings": {
+        "title": "AI-instellingen",
+        "description": "Stel de Claude AI-koppeling in voor slimme analyses en rapportage.\nStatus API-sleutel: {key_status}",
+        "data": {
+          "ai_enabled": "AI-functies inschakelen",
+          "ai_api_key": "Claude API-sleutel",
+          "ai_model": "AI-model",
+          "ai_reasoning_effort": "Denkinspanning",
+          "ai_max_tokens": "Maximale antwoordlengte",
+          "ai_temperature": "Creativiteit",
+          "ai_monthly_budget": "Maandelijks budgetplafond",
+          "ai_auto_requests_per_day": "Automatische verzoeken per dag",
+          "ai_manual_requests_per_day": "Handmatige verzoeken per dag",
+          "ai_investigator_enabled": "Onderzoeksagent inschakelen",
+          "ai_investigator_requests_per_day": "Onderzoeksverzoeken per dag"
+        },
+        "data_description": {
+          "ai_enabled": "Hoofdschakelaar voor alle AI-functies. Indien uitgeschakeld gebruikt Climate Advisor alleen zijn ingebouwde geprogrammeerde logica.",
+          "ai_api_key": "Je Anthropic API-sleutel. Vraag er een aan op console.anthropic.com. Laat leeg om de bestaande sleutel te behouden.",
+          "ai_model": "Welk Claude-model wordt gebruikt. Sonnet wordt aanbevolen voor een goede balans tussen kosten en kwaliteit.",
+          "ai_reasoning_effort": "Hoeveel denkinspanning Claude levert. Hoger = betere analyse, maar hogere kosten.",
+          "ai_max_tokens": "Maximale lengte van AI-antwoorden in tokens (256-16384).",
+          "ai_temperature": "Bepaalt de willekeur. 0 = deterministisch, 1,0 = meest creatief. Aanbevolen: 0,3.",
+          "ai_monthly_budget": "Maximaal geschatte maandelijkse uitgaven in Amerikaanse dollars. Stel in op 0 voor geen limiet.",
+          "ai_auto_requests_per_day": "Maximaal aantal automatische AI-verzoeken per dag (wordt om middernacht gereset).",
+          "ai_manual_requests_per_day": "Maximaal aantal door de gebruiker gestarte AI-verzoeken per dag (wordt om middernacht gereset).",
+          "ai_investigator_enabled": "Schakel de onderzoeksagent in (vereist dat AI is ingeschakeld). Voert een diepgaande analyse over meerdere bronnen uit om tegenstrijdigheden en dataproblemen te vinden.",
+          "ai_investigator_requests_per_day": "Maximaal aantal onderzoeksruns per dag. Elk onderzoek gebruikt uitgebreid denken. Wordt om middernacht gereset."
+        }
+      },
+      "github_settings": {
+        "title": "GitHub-koppeling",
+        "description": "Stel het indienen van GitHub-issues voor onderzoeksrapporten in.\nHuidige token: {token_status}",
+        "data": {
+          "github_token": "GitHub Personal Access Token",
+          "github_repo": "GitHub-repository"
+        },
+        "data_description": {
+          "github_token": "Token met de scope issues:write. Laat leeg om de bestaande token te behouden.",
+          "github_repo": "Repository waaraan issues worden verstuurd, in het formaat owner/repo, bijv. gunkl/ClimateAdvisor."
+        }
+      }
+    },
+    "error": {
+      "entity_required_for_source": "Kies de sensor of hulp die je wilt gebruiken, of zet de bron terug op weerdienst / klimaatentiteit.",
+      "entity_domain_mismatch": "Die entiteit past niet bij de gekozen bron. Kies een sensor voor ‘Eigen sensor’ of een input_number voor ‘Invoerhulp’.",
+      "source_entity_conflict": "Je hebt de bron en de entiteit tegelijk op een tegenstrijdige manier gewijzigd. Kies een bron en kies dan de bijpassende entiteit (of maak het veld leeg).",
+      "invalid_notify_service": "Moet het formaat domain.service hebben (bijv. notify.mobile_app_phone)",
+      "schedule_days_required": "Selecteer minstens één dag",
+      "schedule_start_end_equal": "Begin- en eindtijd moeten verschillen",
+      "preheat_min_exceeds_max": "De minimale voorverwarmtijd mag de maximale voorverwarmtijd niet overschrijden",
+      "preheat_default_exceeds_max": "De standaard voorverwarmtijd mag de maximale voorverwarmtijd niet overschrijden",
+      "shadow_same_as_primary": "De vergelijkingsengine moet verschillen van de voorspellingsengine. Kies een andere engine of Geen.",
+      "unknown_engine": "Die voorspellingsengine is niet beschikbaar.",
+      "ai_connection_failed": "Kan geen verbinding maken met de Claude API. Controleer je API-sleutel en probeer het opnieuw.",
+      "ai_key_required": "Een API-sleutel is vereist als AI-functies zijn ingeschakeld.",
+      "ai_temperature_out_of_range": "De waarde moet tussen 0,0 en 1,0 liggen.",
+      "ai_max_tokens_out_of_range": "De waarde voor maximale tokens valt buiten het toegestane bereik voor dit veld.",
+      "github_repo_invalid": "De repository moet het formaat owner/repo hebben (bijv. myuser/MyRepo).",
+      "zone_name_too_long": "De zonenaam mag maximaal 50 tekens lang zijn",
+      "whf_entity_shared_zone": "Deze ventilator wordt al bediend door een andere Climate Advisor-zone. Een huisventilator kan maar bij één zone horen. Kies een andere ventilator of verwijder hem eerst uit de andere zone.",
+      "whf_no_sensors_warning": "Er zijn geen deur- of raamsensoren geselecteerd. Climate Advisor kan dus niet zien of het huis dicht is en stopt de huisventilator daar niet voor. Verstuur opnieuw om dit te behouden of voeg sensoren toe.",
+      "whf_command_only_warning": "Climate Advisor ziet de werkelijke status van de ventilator niet en kan een ventilator die het niet zelf heeft gestart dus niet zien of stoppen. Verstuur opnieuw om dit te behouden of voeg een ventilatorstatussensor toe bij de opties voor Sensoren en ventilator.",
+      "thresholds_must_be_ascending": "De drempels voor dagtypen moeten oplopen van Koel via Mild en Warm naar Heet (Koel < Mild < Warm < Heet).",
+      "setpoint_band_inverted_warning": "Deze verwarmingstemperatuur is gelijk aan of hoger dan de bijbehorende koeltemperatuur. Bij een systeem met zowel verwarming als airco wisselen die elkaar de hele dag af: eerst wordt het huis verwarmd, daarna weer gekoeld. Stel de verwarming minstens 4 °F (2,5 °C) lager in dan de koeling. Verstuur opnieuw om dit te behouden.",
+      "setpoint_band_narrow_warning": "Deze verwarmingstemperatuur ligt minder dan 4 °F (2,5 °C) onder de bijbehorende koeltemperatuur. Apparatuur schiet door zijn streeftemperatuur heen, dus bij zo'n klein verschil kunnen verwarming en airco vaker heen en weer schakelen dan nodig is. Verstuur opnieuw om dit te behouden.",
+      "setpoint_outside_thermostat_warning": "Je thermostaat accepteert deze temperatuur niet. Climate Advisor stuurt daarom de dichtstbijzijnde temperatuur die wel wordt geaccepteerd. Verstuur opnieuw om dit te behouden.",
+      "away_heat_above_home_warning": "De verwarming bij afwezigheid staat warmer dan de verwarming bij aanwezigheid. Het huis wordt dus meer verwarmd als er niemand is dan als jij er bent. Verstuur opnieuw om dit te behouden.",
+      "away_cool_below_home_warning": "De koeling bij afwezigheid staat koeler dan de koeling bij aanwezigheid. De airco werkt dus harder als er niemand is dan als jij er bent. Verstuur opnieuw om dit te behouden.",
+      "sleep_heat_below_away_warning": "De verwarming tijdens slapen staat koeler dan de verwarming bij afwezigheid. 's Nachts is het huis dus koeler dan wanneer er niemand is. Verstuur opnieuw om dit te behouden.",
+      "sleep_cool_above_away_warning": "De koeling tijdens slapen staat warmer dan de koeling bij afwezigheid. 's Nachts mag het huis dus warmer worden dan wanneer er niemand is. Verstuur opnieuw om dit te behouden.",
+      "vacation_heat_above_away_warning": "De vakantieverwarming staat warmer dan de verwarming bij afwezigheid. Een vakantie kost dus meer energie dan een gewone dag van huis. Verstuur opnieuw om dit te behouden.",
+      "vacation_cool_below_away_warning": "De vakantiekoeling staat koeler dan de koeling bij afwezigheid. Een vakantie kost dus meer energie dan een gewone dag van huis. Verstuur opnieuw om dit te behouden.",
+      "vacation_freeze_warning": "Met deze instelling komt de vakantieverwarming onder 45 °F (7 °C). Tijdens een lange reis kunnen leidingen bevriezen. Verstuur opnieuw om dit te behouden."
+    }
+  },
+  "issues": {
+    "weather_entity_not_found": {
+      "title": "Weerentiteit niet gevonden",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Weerentiteit selecteren",
+            "description": "De eerder ingestelde weerentiteit `{entity_id}` bestaat niet meer. Selecteer hieronder de juiste weerentiteit.",
+            "data": {
+              "weather_entity": "Weerdienst"
+            },
+            "data_description": {
+              "weather_entity": "De weerintegratie die voorspellingen en de buitenomstandigheden levert."
+            }
+          }
+        }
+      }
+    },
+    "reload_needed": {
+      "title": "Herladen vereist om configuratiewijzigingen toe te passen.",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Opgeslagen instellingen toepassen",
+            "description": "Je hebt wijzigingen in de opties van Climate Advisor opgeslagen die nog niet van kracht zijn. Laad Climate Advisor nu opnieuw om ze toe te passen."
+          }
+        }
+      }
+    },
+    "zone_resolution_ambiguous": {
+      "title": "Zone niet eenduidig",
+      "description": "Climate Advisor heeft meer dan één zone en een verzoek gaf niet aan voor welke zone het bedoeld was: {request}. Resultaat: {outcome}. Wat het ook verstuurde (een script, een automatisering, een opdrachtregelprogramma of een oud browsertabblad), het toont mogelijk de gegevens van een andere zone.\n\nVoeg om dit op te lossen `?zone=ENTRY_ID` toe aan dat verzoek, waarbij ENTRY_ID de `entry_id` van de zone is zoals vermeld door `GET /api/climate_advisor/status`. De Climate Advisor-dashboards doen dit al. Deze melding verdwijnt zodra Climate Advisor opnieuw start."
+    }
+  },
+  "common": {
+    "schedule_summary": "{name} — {days} {window} ({cost})",
+    "schedule_all_days": "Alle dagen",
+    "schedule_cost_high": "Hoog",
+    "schedule_cost_low": "Laag",
+    "schedule_unnamed": "(naamloos)",
+    "key_status_not_configured": "Niet ingesteld",
+    "token_status_configured": "ingesteld",
+    "token_status_not_configured": "niet ingesteld",
+    "schedule_add_new": "+ Nieuw schema toevoegen"
+  },
+  "entity": {
+    "sensor": {
+      "day_type": {
+        "name": "Dagtype",
+        "state": {
+          "hot": "Heet",
+          "warm": "Warm",
+          "mild": "Mild",
+          "cool": "Koel",
+          "cold": "Koud",
+          "unknown": "Onbekend"
+        }
+      },
+      "trend_direction": {
+        "name": "Trend",
+        "state": {
+          "warming": "Opwarmend",
+          "cooling": "Afkoelend",
+          "stable": "Stabiel",
+          "unknown": "Onbekend"
+        }
+      },
+      "next_human_action": {
+        "name": "Jouw volgende actie"
+      },
+      "daily_briefing": {
+        "name": "Dagelijkse briefing"
+      },
+      "compliance_score": {
+        "name": "Comfortscore"
+      },
+      "automation_status": {
+        "name": "Status"
+      },
+      "next_automation_action": {
+        "name": "Volgende automatiseringsactie"
+      },
+      "next_automation_time": {
+        "name": "Tijd volgende automatiseringsactie"
+      },
+      "occupancy_mode": {
+        "name": "Aanwezigheidsmodus",
+        "state": {
+          "home": "Thuis",
+          "away": "Afwezig",
+          "vacation": "Vakantie",
+          "guest": "Gast"
+        }
+      },
+      "last_action_time": {
+        "name": "Tijd laatste actie"
+      },
+      "last_action_reason": {
+        "name": "Reden laatste actie"
+      },
+      "fan_status": {
+        "name": "Ventilatorstatus",
+        "state": {
+          "disabled": "Uitgeschakeld",
+          "active": "Actief",
+          "inactive": "Inactief"
+        }
+      },
+      "contact_status": {
+        "name": "Contactsensoren"
+      },
+      "ai_status": {
+        "name": "AI-status",
+        "state": {
+          "active": "Actief",
+          "inactive": "Inactief",
+          "error": "Fout",
+          "disabled": "Uitgeschakeld",
+          "circuit_open": "Gepauzeerd na herhaalde fouten",
+          "budget_exceeded": "Maandbudget bereikt"
+        }
+      },
+      "indoor_temp": {
+        "name": "Binnentemperatuur"
+      },
+      "outdoor_temp": {
+        "name": "Buitentemperatuur"
+      },
+      "forecast_high": {
+        "name": "Verwachte maximumtemperatuur"
+      },
+      "forecast_low": {
+        "name": "Verwachte minimumtemperatuur"
+      },
+      "effective_target_temp": {
+        "name": "Streeftemperatuur"
+      },
+      "heat_threshold": {
+        "name": "Verwarmingsdrempel"
+      },
+      "cool_threshold": {
+        "name": "Koeldrempel"
+      }
+    },
+    "switch": {
+      "automation_enabled": {
+        "name": "Automatisering"
+      }
+    }
+  },
+  "selector": {
+    "fan_mode": {
+      "options": {
+        "disabled": "Uitgeschakeld (geen ventilatorbediening)",
+        "whole_house_fan": "Huisventilator (aparte entiteit)",
+        "hvac_fan": "Ventilatorstand van de HVAC"
+      }
+    },
+    "hvac_fan_restrict": {
+      "options": {
+        "heat": "Alleen verwarmen (vermijd vocht na het koelen)",
+        "cool": "Alleen koelen",
+        "both": "Beide (geen beperking)"
+      }
+    },
+    "outdoor_temp_source": {
+      "options": {
+        "weather_service": "Weerdienst (aanbevolen)",
+        "sensor": "Eigen sensor",
+        "input_number": "Invoerhulp (input_number)"
+      }
+    },
+    "indoor_temp_source": {
+      "options": {
+        "climate_fallback": "Klimaatentiteit (aanbevolen)",
+        "sensor": "Eigen sensor",
+        "input_number": "Invoerhulp (input_number)"
+      }
+    },
+    "thermostat_companion": {
+      "options": {
+        "auto": "Auto (gebruik de nauwkeurigere sensor van de thermostaat zodra die betrouwbaar blijkt)",
+        "off": "Uit (gebruik altijd de eigen meting van de thermostaat)"
+      }
+    },
+    "temp_unit": {
+      "options": {
+        "fahrenheit": "Fahrenheit (°F)",
+        "celsius": "Celsius (°C)"
+      }
+    },
+    "prediction_engine": {
+      "options": {
+        "none": "Geen",
+        "v3": "v3",
+        "v4": "v4"
+      }
+    },
+    "weekday": {
+      "options": {
+        "mon": "Ma",
+        "tue": "Di",
+        "wed": "Wo",
+        "thu": "Do",
+        "fri": "Vr",
+        "sat": "Za",
+        "sun": "Zo"
+      }
+    },
+    "ai_reasoning_effort": {
+      "options": {
+        "low": "Laag",
+        "medium": "Gemiddeld",
+        "high": "Hoog"
+      }
+    },
+    "suggestion_action": {
+      "options": {
+        "accept": "Accepteren",
+        "dismiss": "Negeren"
+      }
+    },
+    "reset_scope": {
+      "options": {
+        "all": "Alle geleerde gegevens",
+        "thermal_model": "Thermisch model",
+        "weather_bias": "Afwijking weersvoorspelling",
+        "suggestions": "Genegeerde suggesties"
+      }
+    }
+  },
+  "services": {
+    "respond_to_suggestion": {
+      "name": "Reageren op suggestie",
+      "description": "Een leersuggestie van Climate Advisor accepteren of negeren.",
+      "fields": {
+        "entry_id": {
+          "name": "Zone",
+          "description": "De Climate Advisor-zone (configuratie-item) waarop deze aanroep van toepassing is. Vereist sinds Issue #796 — met meer dan één geconfigureerde zone kan het serviceregister van HA anders niet weten voor welke zone een aanroep bedoeld is."
+        },
+        "action": {
+          "name": "Actie",
+          "description": "Of de suggestie wordt geaccepteerd of genegeerd."
+        },
+        "suggestion_key": {
+          "name": "Sleutel van suggestie",
+          "description": "De sleutel die de suggestie identificeert waarop wordt gereageerd."
+        }
+      }
+    },
+    "force_reclassify": {
+      "name": "Herclassificatie forceren",
+      "description": "Dwing Climate Advisor om de verwachtingsgegevens opnieuw op te halen en de dag opnieuw in te delen. Handig bij foutopsporing.",
+      "fields": {
+        "entry_id": {
+          "name": "Zone",
+          "description": "De Climate Advisor-zone (configuratie-item) waarop deze aanroep van toepassing is. Vereist sinds Issue #796 — met meer dan één geconfigureerde zone kan het serviceregister van HA anders niet weten voor welke zone een aanroep bedoeld is."
+        }
+      }
+    },
+    "resend_briefing": {
+      "name": "Briefing opnieuw versturen",
+      "description": "De notificatie van de dagelijkse briefing opnieuw genereren en versturen, ook als die vandaag al is verstuurd.",
+      "fields": {
+        "entry_id": {
+          "name": "Zone",
+          "description": "De Climate Advisor-zone (configuratie-item) waarop deze aanroep van toepassing is. Vereist sinds Issue #796 — met meer dan één geconfigureerde zone kan het serviceregister van HA anders niet weten voor welke zone een aanroep bedoeld is."
+        }
+      }
+    },
+    "dump_diagnostics": {
+      "name": "Diagnostiek wegschrijven",
+      "description": "Schrijf een uitgebreide diagnostische momentopname van de interne status van Climate Advisor naar het logboek, voor probleemoplossing. De uitvoer wordt gelogd op INFO-niveau — bekijk de Home Assistant-logboeken om het resultaat te zien.",
+      "fields": {
+        "entry_id": {
+          "name": "Zone",
+          "description": "De Climate Advisor-zone (configuratie-item) waarop deze aanroep van toepassing is. Vereist sinds Issue #796 — met meer dan één geconfigureerde zone kan het serviceregister van HA anders niet weten voor welke zone een aanroep bedoeld is."
+        }
+      }
+    },
+    "reset_learning_data": {
+      "name": "Leergegevens resetten",
+      "description": "Reset een deel van of alle geleerde gegevens van Climate Advisor. Gebruik dit na het wisselen van HVAC-apparatuur, een verhuizing of om opnieuw te beginnen.",
+      "fields": {
+        "entry_id": {
+          "name": "Zone",
+          "description": "De Climate Advisor-zone (configuratie-item) waarop deze aanroep van toepassing is. Vereist sinds Issue #796 — met meer dan één geconfigureerde zone kan het serviceregister van HA anders niet weten voor welke zone een aanroep bedoeld is. Controleer dit goed voordat je aanroept — deze service wist gegevens onherroepelijk."
+        },
+        "scope": {
+          "name": "Bereik",
+          "description": "Welke gegevens worden gereset. ‘all’ wist alles. ‘thermal_model’ wist de waarnemingen van HVAC-runs. ‘weather_bias’ wist de gegevens over voorspellingsnauwkeurigheid. ‘suggestions’ laat eerder genegeerde suggesties weer verschijnen."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "unknown_zone": {
+      "message": "Onbekende of niet geladen Climate Advisor-zone entry_id ‘{entry_id}’. Controleer onder Instellingen > Apparaten & diensten de juiste zone."
+    }
+  }
+}

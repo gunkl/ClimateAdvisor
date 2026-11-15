@@ -270,14 +270,43 @@ class TestPreCoolStatusText:
         asyncio.run(ClimateAdvisorCoordinator._async_pre_cool_trigger(coord, NOW))
         return coord._pre_cool_status
 
+    """Issue #1341: ``handle_pre_cool`` returns a code + message; the coordinator compares the code, never the words."""
+
+    @staticmethod
+    def _result(code, key, **params):
+        from custom_components.climate_advisor import i18n
+        from custom_components.climate_advisor.status_text import CodedText
+
+        return CodedText(code, i18n.Msg(key, **params))
+
     def test_not_applied_is_not_mangled_into_an_active_status(self):
-        status = self._run("not applied (blocked): 72.0°F")
+        from custom_components.climate_advisor import i18n
+
+        result = self._result(
+            "not_applied", "status.pre_cool.not_applied", outcome="blocked", target=i18n.Temp(72.0, "fahrenheit", 1)
+        )
+        assert result == "not applied (blocked): 72.0°F"
+        status = self._run(result)
         assert status == "pre-cool not applied (blocked): 72.0°F"
+        assert status.code == "not_applied"
         assert not status.endswith(")") or "(blocked)" in status
 
     def test_applied_and_suppressed_unchanged(self):
-        assert self._run("applied: 72.0°F") == "pre-cool active (72.0°F)"
-        assert self._run("suppressed: nat-vent achieved 70.0°F").startswith("pre-cool suppressed")
+        from custom_components.climate_advisor import i18n
+
+        target = i18n.Temp(72.0, "fahrenheit", 1)
+        assert (
+            self._run(self._result("applied", "status.pre_cool.applied", target=target)) == "pre-cool active (72.0°F)"
+        )
+        achieved = self._result(
+            "suppressed_achieved",
+            "status.pre_cool.suppressed_achieved",
+            indoor=i18n.Temp(70.0, "fahrenheit", 1),
+            target=target,
+        )
+        assert self._run(achieved) == "pre-cool suppressed — nat-vent achieved 70.0°F (target 72.0°F)"
+        session = self._run(self._result("suppressed_session", "status.pre_cool.suppressed_session"))
+        assert session.startswith("pre-cool suppressed") and session.code == "suppressed"
 
 
 def _run_thermostat_event(coord, event):

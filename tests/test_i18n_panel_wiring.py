@@ -7,10 +7,13 @@ the dashboard must be told the house's language even when the browser says somet
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from custom_components.climate_advisor import _panel_asset_bytes
+import pytest
+
+from custom_components.climate_advisor import _panel_asset_bytes, i18n
 from custom_components.climate_advisor.api import ClimateAdvisorStatusView
 from tools.sim_harness.build_coordinator import build_headless_multi_zone
 
@@ -64,3 +67,33 @@ def test_status_payload_carries_the_backend_language():
     assert "language" in body
     # real resolution is pinned in tests/test_i18n*.py by the engine stage; here: present, a non-empty code
     assert isinstance(body["language"], str) and body["language"]
+
+
+@pytest.mark.parametrize("breakage", ["malformed_json", "load_raises"])
+def test_a_broken_catalog_does_not_stop_setup(breakage, tmp_path, monkeypatch, caplog):
+    """Issue #1341 S1: occupant keeps a working thermostat even if a translation file is broken.
+
+    ``async_setup_entry`` logs the reason and carries on; text then falls back to English, then to the key.
+    """
+    i18n.reset_catalogs()
+    i18n.set_strict(False)  # a broken catalog is the non-strict production path; the session fixture re-arms strict
+    if breakage == "malformed_json":
+        (tmp_path / "i18n").mkdir()
+        (tmp_path / "i18n" / "index.json").write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(i18n, "default_i18n_dir", lambda: tmp_path / "i18n")
+        reason = "Expecting property name"
+    else:
+
+        def boom(*_a, **_k):
+            raise i18n.I18nError("catalog is bad")
+
+        monkeypatch.setattr(i18n, "load_catalogs", boom)
+        reason = "catalog is bad"
+    with caplog.at_level(logging.ERROR, logger="custom_components.climate_advisor"):
+        zones, _hass, _scheduler = build_headless_multi_zone(zone_count=1)  # runs the real async_setup_entry
+    assert zones["zone_0"]["coordinator"] is not None
+    errors = [r.getMessage() for r in caplog.records if "translation catalogs" in r.getMessage()]
+    assert errors and reason in errors[0]
+    assert not i18n.catalogs_loaded()
+    # rendering falls back (non-strict): the key itself, never an exception
+    assert i18n.render(i18n.Msg("common.mode.heat", x=1), "de") == "common.mode.heat"

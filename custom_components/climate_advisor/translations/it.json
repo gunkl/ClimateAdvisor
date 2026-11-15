@@ -332,7 +332,7 @@
           "start": "Inizio",
           "end": "Fine",
           "delete_schedule": "Elimina questo programma",
-          "applies_to": "Si applica a",
+          "applies_to": "Setpoint modificato dal TOU",
           "condition_entity": "Solo se questo è attivo"
         },
         "data_description": {
@@ -341,7 +341,7 @@
           "start": "Quando inizia il periodo a tariffa alta. Climate Advisor inizia a preparare la casa prima di quest’ora.",
           "end": "Quando termina il periodo a tariffa alta. Deve essere diversa dall’ora di inizio.",
           "delete_schedule": "Attiva e invia per eliminare questo programma.",
-          "applies_to": "I giorni in cui questa pianificazione prepara la casa in anticipo. Scegli Solo raffrescamento se il riscaldamento non è elettrico (ad es. una caldaia a gas): in quel caso preriscaldare prima di un periodo a tariffa alta non fa risparmiare nulla. Predefinito: raffrescamento e riscaldamento.",
+          "applies_to": "Quale setpoint questa pianificazione può modificare, prima e durante il periodo a tariffa alta: quello di raffrescamento nei giorni di raffrescamento, quello di riscaldamento nei giorni di riscaldamento. Scegli Solo raffrescamento se il riscaldamento non è elettrico (ad es. una caldaia a gas): così il setpoint di riscaldamento non viene mai modificato. Predefinito: raffrescamento e riscaldamento.",
           "condition_entity": "Facoltativo. La pianificazione vale solo mentre questo sensore binario, input boolean o interruttore è attivo (ad esempio un helper per l'alta stagione). Lascia vuoto per applicarla sempre. Se l'entità manca o non è disponibile, la pianificazione vale comunque."
         }
       },

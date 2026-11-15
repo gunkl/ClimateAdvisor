@@ -10,7 +10,7 @@
   "common.mode.off": "Arrêt",
   "common.tou_skip.condition_off": "sa condition est désactivée",
   "common.tou_skip.condition_off_entity": "sa condition est désactivée ({entity})",
-  "common.tou_skip.not_applied_cool": "non appliqué à la climatisation",
-  "common.tou_skip.not_applied_heat": "non appliqué au chauffage",
+  "common.tou_skip.not_applied_cool": "consigne de climatisation inchangée",
+  "common.tou_skip.not_applied_heat": "consigne de chauffage inchangée",
   "common.unknown": "Inconnu"
 }

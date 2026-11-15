@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "Koelen en verwarmen",
   "settings.tou_applies.cool": "Alleen koelen",
   "settings.tou_applies.heat": "Alleen verwarmen",
-  "settings.tou_applies_to": "Van toepassing op",
+  "settings.tou_applies_to": "Setpoint dat TOU wijzigt",
   "settings.tou_condition": "Alleen als aan",
   "settings.vacation_cool.description": "Temperatuur tijdens koelen op vakantie (Issue #1347). Indien niet ingesteld, gebruikt vakantie de afwezigheidskoeltemperatuur plus 3 °F.",
   "settings.vacation_cool.label": "Vakantie koelen",

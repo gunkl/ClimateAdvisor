@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "Refrigeración y calefacción",
   "settings.tou_applies.cool": "Solo refrigeración",
   "settings.tou_applies.heat": "Solo calefacción",
-  "settings.tou_applies_to": "Se aplica a",
+  "settings.tou_applies_to": "Consigna que cambia el TOU",
   "settings.tou_condition": "Solo si está activado",
   "settings.vacation_cool.description": "Temperatura en refrigeración durante las vacaciones (incidencia n.º 1347). Si no se define, las vacaciones usan la temperatura de ausencia en refrigeración más 3 °F.",
   "settings.vacation_cool.label": "Refrigeración en vacaciones",

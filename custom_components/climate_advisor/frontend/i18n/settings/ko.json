@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "냉방 및 난방",
   "settings.tou_applies.cool": "냉방만",
   "settings.tou_applies.heat": "난방만",
-  "settings.tou_applies_to": "적용 대상",
+  "settings.tou_applies_to": "TOU가 변경하는 설정 온도",
   "settings.tou_condition": "켜져 있을 때만",
   "settings.vacation_cool.description": "휴가 중 냉방할 때의 온도입니다(Issue #1347). 설정하지 않으면 휴가 중에는 외출 냉방 온도에 3°F를 더한 값을 사용합니다.",
   "settings.vacation_cool.label": "휴가 냉방",

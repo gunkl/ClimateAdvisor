@@ -332,7 +332,7 @@
           "start": "Beginnt",
           "end": "Endet",
           "delete_schedule": "Diesen Zeitplan löschen",
-          "applies_to": "Gilt für",
+          "applies_to": "Vom Tarif geänderter Sollwert",
           "condition_entity": "Nur wenn dies an ist"
         },
         "data_description": {
@@ -341,7 +341,7 @@
           "start": "Wann die Hochpreisphase beginnt. Climate Advisor beginnt vor diesem Zeitpunkt mit der Vorkonditionierung.",
           "end": "Wann die Hochpreisphase endet. Muss sich von der Startzeit unterscheiden.",
           "delete_schedule": "Aktivieren und absenden, um diesen Zeitplan zu löschen.",
-          "applies_to": "An welchen Tagen dieser Zeitplan vorkonditioniert. Wählen Sie Nur Kühlen, wenn Ihre Heizung nicht elektrisch ist (z. B. eine Gasheizung): Vorheizen vor einer Hochpreisphase spart dann nichts. Standard: Kühlen und Heizen.",
+          "applies_to": "Welchen Sollwert dieser Zeitplan vor und während seiner Hochpreisphase ändern darf: an Kühltagen den Kühlsollwert, an Heiztagen den Heizsollwert. Wählen Sie Nur Kühlen, wenn Ihre Heizung nicht elektrisch ist (z. B. eine Gasheizung) – dann wird der Heizsollwert nie geändert. Standard: Kühlen und Heizen.",
           "condition_entity": "Optional. Der Zeitplan gilt nur, solange dieser Binärsensor, Input Boolean oder Schalter an ist (zum Beispiel ein Helfer für die Hochsaison). Leer lassen, damit er immer gilt. Fehlt die Entität oder ist sie nicht verfügbar, gilt der Zeitplan trotzdem."
         }
       },

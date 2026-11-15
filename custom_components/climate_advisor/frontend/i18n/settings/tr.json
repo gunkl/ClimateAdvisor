@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "Soğutma ve ısıtma",
   "settings.tou_applies.cool": "Yalnızca soğutma",
   "settings.tou_applies.heat": "Yalnızca ısıtma",
-  "settings.tou_applies_to": "Uygulandığı",
+  "settings.tou_applies_to": "TOU'nun değiştirdiği ayar",
   "settings.tou_condition": "Yalnızca açıkken",
   "settings.vacation_cool.description": "Tatilde ve soğutma yapılırken sıcaklık (Sorun #1347). Ayarlanmazsa tatil, dışarıda soğutma sıcaklığının 3°F fazlasını kullanır.",
   "settings.vacation_cool.label": "Tatil Sıcaklığı (Soğutma)",

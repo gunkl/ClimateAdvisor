@@ -10,7 +10,7 @@
   "common.mode.off": "オフ",
   "common.tou_skip.condition_off": "条件がオフです",
   "common.tou_skip.condition_off_entity": "条件がオフです ({entity})",
-  "common.tou_skip.not_applied_cool": "冷房には適用されません",
-  "common.tou_skip.not_applied_heat": "暖房には適用されません",
+  "common.tou_skip.not_applied_cool": "冷房の設定温度は変更しません",
+  "common.tou_skip.not_applied_heat": "暖房の設定温度は変更しません",
   "common.unknown": "不明"
 }

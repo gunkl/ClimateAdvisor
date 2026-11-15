@@ -10,7 +10,7 @@
   "common.mode.off": "Apagado",
   "common.tou_skip.condition_off": "su condición está desactivada",
   "common.tou_skip.condition_off_entity": "su condición está desactivada ({entity})",
-  "common.tou_skip.not_applied_cool": "no se aplica a la refrigeración",
-  "common.tou_skip.not_applied_heat": "no se aplica a la calefacción",
+  "common.tou_skip.not_applied_cool": "consigna de refrigeración sin cambios",
+  "common.tou_skip.not_applied_heat": "consigna de calefacción sin cambios",
   "common.unknown": "Desconocido"
 }

@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.40] — 2026-11-15
+
+### Changed
+- #1558 wording: the time-of-use schedule setting is now called **"TOU changes this setpoint"** (Cooling and heating / Cooling only / Heating only), and its help text says what it does: which setpoint the schedule may change, before and during its high-cost period (the cooling setpoint on cooling days, the heating setpoint on heating days). With **Cooling only**, the heating setpoint is never changed. Status now reads "… heating setpoint left unchanged" instead of "not applied to heating". Behaviour is unchanged from 0.9.39. All 16 languages are updated.
+
 ## [0.9.39] — 2026-11-15
 
 ### Added

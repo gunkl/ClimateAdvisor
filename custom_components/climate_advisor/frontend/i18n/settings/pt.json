@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "Arrefecimento e aquecimento",
   "settings.tou_applies.cool": "Só arrefecimento",
   "settings.tou_applies.heat": "Só aquecimento",
-  "settings.tou_applies_to": "Aplica-se a",
+  "settings.tou_applies_to": "Setpoint alterado pelo TOU",
   "settings.tou_condition": "Só quando ligado",
   "settings.vacation_cool.description": "Temperatura de arrefecimento em férias (Issue #1347). Se não estiver definida, as férias usam a temperatura de arrefecimento de ausência mais 3 °F.",
   "settings.vacation_cool.label": "Férias a arrefecer",

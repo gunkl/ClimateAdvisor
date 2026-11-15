@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "कूलिंग और हीटिंग",
   "settings.tou_applies.cool": "केवल कूलिंग",
   "settings.tou_applies.heat": "केवल हीटिंग",
-  "settings.tou_applies_to": "किस पर लागू",
+  "settings.tou_applies_to": "TOU द्वारा बदला सेटपॉइंट",
   "settings.tou_condition": "केवल चालू रहने पर",
   "settings.vacation_cool.description": "छुट्टी पर और कूलिंग के समय तापमान (इश्यू #1347)। सेट न होने पर छुट्टी में बाहर होने के कूल तापमान से 3°F अधिक उपयोग होता है।",
   "settings.vacation_cool.label": "छुट्टी (कूलिंग)",

@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "冷房と暖房",
   "settings.tou_applies.cool": "冷房のみ",
   "settings.tou_applies.heat": "暖房のみ",
-  "settings.tou_applies_to": "適用対象",
+  "settings.tou_applies_to": "TOU が変更する設定温度",
   "settings.tou_condition": "オンのときのみ",
   "settings.vacation_cool.description": "休暇中で冷房しているときの温度です(Issue #1347)。未設定の場合は、外出時の冷房温度に 3°F を足した温度になります。",
   "settings.vacation_cool.label": "休暇時(冷房)",

@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "التبريد والتدفئة",
   "settings.tou_applies.cool": "التبريد فقط",
   "settings.tou_applies.heat": "التدفئة فقط",
-  "settings.tou_applies_to": "ينطبق على",
+  "settings.tou_applies_to": "نقطة الضبط التي يغيّرها TOU",
   "settings.tou_condition": "فقط عند التشغيل",
   "settings.vacation_cool.description": "درجة الحرارة عند التبريد وأنت في إجازة (المسألة #1347). إن لم تُضبط، تستخدم الإجازة درجة تبريد الغياب زائد 3°F.",
   "settings.vacation_cool.label": "تبريد الإجازة",

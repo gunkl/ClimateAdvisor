@@ -10,7 +10,7 @@
   "common.mode.off": "Uit",
   "common.tou_skip.condition_off": "de voorwaarde staat uit",
   "common.tou_skip.condition_off_entity": "de voorwaarde staat uit ({entity})",
-  "common.tou_skip.not_applied_cool": "niet van toepassing op koelen",
-  "common.tou_skip.not_applied_heat": "niet van toepassing op verwarmen",
+  "common.tou_skip.not_applied_cool": "koelsetpoint ongewijzigd",
+  "common.tou_skip.not_applied_heat": "verwarmingssetpoint ongewijzigd",
   "common.unknown": "Onbekend"
 }

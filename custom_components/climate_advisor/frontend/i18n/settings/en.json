@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "Cooling and heating",
   "settings.tou_applies.cool": "Cooling only",
   "settings.tou_applies.heat": "Heating only",
-  "settings.tou_applies_to": "Applies to",
+  "settings.tou_applies_to": "Setpoint TOU changes",
   "settings.tou_condition": "Only while on",
   "settings.vacation_cool.description": "Temperature when cooling and on vacation (Issue #1347). When not set, vacation uses the away cool temperature plus 3°F.",
   "settings.vacation_cool.label": "Vacation Cool",

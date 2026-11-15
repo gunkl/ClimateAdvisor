@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "Kühlen und Heizen",
   "settings.tou_applies.cool": "Nur Kühlen",
   "settings.tou_applies.heat": "Nur Heizen",
-  "settings.tou_applies_to": "Gilt für",
+  "settings.tou_applies_to": "Vom Tarif geänderter Sollwert",
   "settings.tou_condition": "Nur wenn an",
   "settings.vacation_cool.description": "Temperatur beim Kühlen im Urlaub (Issue #1347). Ist sie nicht gesetzt, nutzt der Urlaub die Abwesenheits-Kühltemperatur plus 3 °F.",
   "settings.vacation_cool.label": "Urlaub Kühlen",

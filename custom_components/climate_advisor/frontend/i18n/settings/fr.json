@@ -262,7 +262,7 @@
   "settings.tou_applies.both": "Climatisation et chauffage",
   "settings.tou_applies.cool": "Climatisation uniquement",
   "settings.tou_applies.heat": "Chauffage uniquement",
-  "settings.tou_applies_to": "S'applique à",
+  "settings.tou_applies_to": "Consigne modifiée par le TOU",
   "settings.tou_condition": "Seulement si activé",
   "settings.vacation_cool.description": "Température en climatisation pendant les vacances (ticket n° 1347). Si non définie, les vacances utilisent la température d’absence en climatisation plus 3 °F.",
   "settings.vacation_cool.label": "Climatisation en vacances",

@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "falta la temperatura interior o el rango de confort",
   "activity.reason_cf_nat_vent_owns": "la ventilación natural/WHF controla la climatización — la familia de confort cede",
   "activity.reason_cf_no_support": "el termostato no admite ni calefacción ni refrigeración",
-  "activity.reason_cf_settling_guard": "protección de estabilización: {current} funcionó hace {ran} min (periodo {window} min), zona {zone} profundidad {depth}F <= tolerancia {tolerance}F -- se mantiene {current}",
+  "activity.reason_cf_settling_guard": "protección de estabilización: {current} funcionó hace {ran} min (periodo {window} min), zona {zone} profundidad {depth, number, ::.0}F <= tolerancia {tolerance, number, ::.0}F -- se mantiene {current}",
   "activity.reason_cf_tou_owns": "el acondicionamiento previo por tarifa controla la climatización — la familia de confort cede",
   "activity.reason_cf_within_cool_margin": "dentro del margen de armado de refrigeración",
   "activity.reason_cf_within_heat_margin": "dentro del margen de armado de calefacción",

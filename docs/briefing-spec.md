@@ -57,6 +57,13 @@ the second call passes `verbosity="tldr_only"`. Nothing else calls `generate_bri
 directly. Key inputs, all read from `coordinator.config` / `coordinator.data` at call time
 (never fetched fresh by `briefing.py` itself — it has no HA dependency, see module docstring):
 
+Since Issue #1341 the text is built as catalog messages: `generate_briefing_msg()` returns one `Msg`
+(`briefing.full.<day type>`, or `briefing.tldr`) and `generate_briefing()` renders it (English by default) as a
+`BriefingText`, a `str` that also carries the message so the coordinator can persist it and show it in
+`hass.config.language`. The section functions are `_tldr_msg`, `_hot/_warm/_mild/_cool/_cold_day_msg`,
+`_leaving_home_msg`, `_fresh_air_msg`, `_grace_period_msg`, `_tonight_msg`; the old names (`_warm_day_plan`, ...) are
+list-of-lines English views of them. See [i18n-spec.md](i18n-spec.md#briefing).
+
 | Argument | Source |
 |---|---|
 | `classification` | `DayClassification` from `classify_day()`, cached as `self._current_classification` |

@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "الحرارة الداخلية أو نطاق الراحة غير متوفرين",
   "activity.reason_cf_nat_vent_owns": "التهوية الطبيعية/مروحة المنزل بالكامل تتحكم في HVAC — عائلة الراحة تتنحى",
   "activity.reason_cf_no_support": "الثرموستات لا يدعم التدفئة ولا التبريد",
-  "activity.reason_cf_settling_guard": "حماية الاستقرار: {current} عمل قبل {ran} دقيقة (النافذة {window} دقيقة)، عمق منطقة {zone} {depth}F <= هامش التحمل {tolerance}F -- الإبقاء على {current}",
+  "activity.reason_cf_settling_guard": "حماية الاستقرار: {current} عمل قبل {ran} دقيقة (النافذة {window} دقيقة)، عمق منطقة {zone} {depth, number, ::.0}F <= هامش التحمل {tolerance, number, ::.0}F -- الإبقاء على {current}",
   "activity.reason_cf_tou_owns": "التهيئة المسبقة لـ TOU تتحكم في HVAC — عائلة الراحة تتنحى",
   "activity.reason_cf_within_cool_margin": "ضمن هامش تفعيل التبريد",
   "activity.reason_cf_within_heat_margin": "ضمن هامش تفعيل التدفئة",

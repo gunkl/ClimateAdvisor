@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "нет температуры в помещении или диапазона комфорта",
   "activity.reason_cf_nat_vent_owns": "естественная вентиляция/WHF управляет HVAC — режим комфорта уступает",
   "activity.reason_cf_no_support": "термостат не поддерживает ни отопление, ни охлаждение",
-  "activity.reason_cf_settling_guard": "защита стабилизации: {current} работало {ran} мин назад (окно {window} мин), глубина зоны {zone} {depth}F <= допуск {tolerance}F -- остаётся {current}",
+  "activity.reason_cf_settling_guard": "защита стабилизации: {current} работало {ran} мин назад (окно {window} мин), глубина зоны {zone} {depth, number, ::.0}F <= допуск {tolerance, number, ::.0}F -- остаётся {current}",
   "activity.reason_cf_tou_owns": "подготовка под тариф по времени суток управляет HVAC — режим комфорта уступает",
   "activity.reason_cf_within_cool_margin": "в запасе активации охлаждения",
   "activity.reason_cf_within_heat_margin": "в запасе активации отопления",

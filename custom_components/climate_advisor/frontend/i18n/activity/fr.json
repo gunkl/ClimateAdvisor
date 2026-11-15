@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "température intérieure ou plage de confort manquante",
   "activity.reason_cf_nat_vent_owns": "la ventilation naturelle/WHF pilote le CVC — la famille de confort s’efface",
   "activity.reason_cf_no_support": "le thermostat ne gère ni le chauffage ni le refroidissement",
-  "activity.reason_cf_settling_guard": "garde de stabilisation : {current} a fonctionné il y a {ran} min (période {window} min), zone {zone} profondeur {depth}F <= tolérance {tolerance}F -- maintien de {current}",
+  "activity.reason_cf_settling_guard": "garde de stabilisation : {current} a fonctionné il y a {ran} min (période {window} min), zone {zone} profondeur {depth, number, ::.0}F <= tolérance {tolerance, number, ::.0}F -- maintien de {current}",
   "activity.reason_cf_tou_owns": "le préconditionnement tarifaire pilote le CVC — la famille de confort s’efface",
   "activity.reason_cf_within_cool_margin": "dans la marge d’armement du refroidissement",
   "activity.reason_cf_within_heat_margin": "dans la marge d’armement du chauffage",

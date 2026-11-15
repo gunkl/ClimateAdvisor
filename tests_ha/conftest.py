@@ -68,7 +68,8 @@ for _p in (str(_REPO), _sim_portion, *([_overlay] if _overlay else [])):
 # Order now: overlay (if any), sim portion, repo root. First import pins the merged namespace.
 importlib.import_module("custom_components")
 
-pytest_plugins = "pytest_homeassistant_custom_component"
+# Issue #1572: timeout_report names a timed-out test in the run output instead of only a "crashed" xdist worker.
+pytest_plugins = ["pytest_homeassistant_custom_component", "timeout_report"]
 
 
 @pytest.fixture

@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "falta a temperatura interior ou o intervalo de conforto",
   "activity.reason_cf_nat_vent_owns": "a ventilação natural/ventoinha de toda a casa controla o AVAC — o modo de conforto cede",
   "activity.reason_cf_no_support": "o termóstato não suporta aquecimento nem arrefecimento",
-  "activity.reason_cf_settling_guard": "proteção de estabilização: {current} funcionou há {ran} min (janela {window} min), profundidade na zona {zone} {depth}F <= tolerância {tolerance}F -- {current} mantido",
+  "activity.reason_cf_settling_guard": "proteção de estabilização: {current} funcionou há {ran} min (janela {window} min), profundidade na zona {zone} {depth, number, ::.0}F <= tolerância {tolerance, number, ::.0}F -- {current} mantido",
   "activity.reason_cf_tou_owns": "a preparação da tarifa por horário controla o AVAC — o modo de conforto cede",
   "activity.reason_cf_within_cool_margin": "dentro da margem de ativação do arrefecimento",
   "activity.reason_cf_within_heat_margin": "dentro da margem de ativação do aquecimento",

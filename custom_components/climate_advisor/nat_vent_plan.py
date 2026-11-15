@@ -21,12 +21,20 @@ from collections.abc import Callable
 from datetime import datetime, time, timedelta
 from typing import Any
 
+from . import i18n
 from .const import CEILING_PRECOOL_FALLBACK_MIN
 from .nat_vent_gate import resolve_comfort_heat
 from .temperature import find_temperature_crossing
 from .thermal_lead_time import compute_lead_minutes_from_rate
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def ensure_catalogs() -> None:
+    """The shared one-shot loader (``i18n.ensure_catalogs``: tries once, never raises, never retries after a failed
+    setup load, so no blocking file read happens in the event loop). Kept as a name for the briefing's imports."""
+    i18n.ensure_catalogs()
+
 
 _NAT_VENT_CUTOFF_MARGIN_F = 1.0  # forecast-hour margin — distinct from the live-control gates'
 # own boundary choices (nat_vent_gate.py's strict <, fan_thermostat_decision.py's non-strict >=);
@@ -213,9 +221,14 @@ def describe_close_timing(close_time_str: str, already_reached: bool) -> str:
         "already true" phrase naming the present moment instead of a false future
         clock time.
     """
-    if already_reached:
-        return "now"
-    return close_time_str
+    ensure_catalogs()
+    return i18n.render_en(close_timing_msg(close_time_str, already_reached))
+
+
+def close_timing_msg(at: Any, already_reached: bool) -> i18n.Msg:
+    """``describe_close_timing()`` as a message (Issue #1341): 'now' when the close condition was already reached,
+    else the close time. ``at`` is an ``i18n.Time`` (or, for the English string API, an already-formatted time)."""
+    return i18n.Msg("briefing.close_when", already="yes" if already_reached else "no", at=at)
 
 
 def describe_reopen_clause(e_start: str, reopening_from_closed_all_day: bool) -> str:
@@ -247,12 +260,14 @@ def describe_reopen_clause(e_start: str, reopening_from_closed_all_day: bool) ->
     Returns:
         The complete reopen sentence for a Hot-day briefing.
     """
-    verb = "open up" if reopening_from_closed_all_day else "open up again"
-    return (
-        f"Later, once outdoor temps cool back down below indoor"
-        f" (around {e_start}), {verb} and I'll cut the AC to let"
-        f" natural ventilation take over."
-    )
+    ensure_catalogs()
+    return i18n.render_en(reopen_clause_msg(e_start, reopening_from_closed_all_day))
+
+
+def reopen_clause_msg(at: Any, reopening_from_closed_all_day: bool) -> i18n.Msg:
+    """``describe_reopen_clause()`` as a message (Issue #1341); ``at`` is an ``i18n.Time`` (or an already-formatted
+    English time for the string API)."""
+    return i18n.Msg("briefing.hot.reopen", time=at, closed="yes" if reopening_from_closed_all_day else "no")
 
 
 def describe_nat_vent_cutoff_reason(reason: str | None) -> str:
@@ -298,9 +313,16 @@ def describe_nat_vent_cutoff_reason(reason: str | None) -> str:
         directly instead of borrowing heating-season language. Still a single shared
         fragment — no new parameter, no second inline branch in a consumer.
     """
+    ensure_catalogs()
+    return i18n.render_en(cutoff_reason_msg(reason))
+
+
+def cutoff_reason_msg(reason: str | None) -> i18n.Msg:
+    """``describe_nat_vent_cutoff_reason()`` as a message (Issue #1341): the same single decision of what each
+    reason means, for every consumer that renders in the occupant's language."""
     if reason == "comfort_floor":
-        return "since indoor's already down to your comfort floor"
-    return "before outdoor air warms past indoor"
+        return i18n.Msg("briefing.reason.comfort_floor")
+    return i18n.Msg("briefing.reason.outdoor_rise")
 
 
 def _outdoor_at(predicted_outdoor: list[dict] | None, when: datetime) -> float | None:

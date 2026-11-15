@@ -95,7 +95,7 @@ def card_text(msg: i18n.Msg | str, lang: str = "en") -> CardText:
     return CardText(str(msg), None)
 
 
-def _clock(dt: datetime, lang: str = "en") -> str:
+def _clock_label(dt: datetime, lang: str = "en") -> str:
     """The clock time of an aware local datetime in ``lang`` (English ``3:05 PM``)."""
     return i18n.format_time(dt, lang)
 
@@ -274,13 +274,21 @@ def window_card_text(
 
 # Issue #1341 (Q6): the cards whose message tells the occupant to open windows. The harness and the invariant tests
 # read the message KEY, never the English text. A card written elsewhere (the degraded next-action branches) adds its
-# own key here.
+# own key here. ``test_every_english_open_windows_advice_key_is_listed`` derives the candidates from the catalogs.
 ADVISES_OPENING_KEYS = frozenset(
     {
         "timeline.card.open_at",
         "timeline.card.open_briefly",
         "timeline.card.open_cooler",
         "timeline.card.open_unknown",
+        # the legacy Next Action branches (status area) that tell the occupant to open windows
+        "status.next_action.open_windows_at",
+        "status.next_action.open_windows_cooler",
+        "status.next_action.open_windows_cooler_fan",
+        "status.next_action.open_windows_maybe",
+        "status.next_action.open_briefly_warmer",
+        "status.next_action.hot_open_from",
+        "status.next_action.hot_open_until",
     }
 )
 
@@ -404,7 +412,7 @@ def next_automation(
     if not cands:
         return card_text(i18n.Msg(NEXT_AUTOMATION_NONE_KEY), lang), "", None
     ts, label, step = cands[0]
-    return label, _clock(ts, lang), step
+    return label, _clock_label(ts, lang), step
 
 
 # ---------------------------------------------------------------------------
@@ -414,8 +422,8 @@ def next_automation(
 _OPERATIONS_MAX_STEPS = 12
 
 
-def operations_lines(tl: Timeline, now: datetime, *, until: datetime | None = None, lang: str = "en") -> list[str]:
-    """The briefing's list of what happens next, straight from the timeline's step sentences (no recompute).
+def operations_msgs(tl: Timeline, now: datetime, *, until: datetime | None = None) -> list[i18n.Msg | str]:
+    """The briefing's list of what happens next, as each step's message (its stored English when it carries none).
 
     Today's remaining steps up to ``until`` (default: the next local midnight), in time order. The daily briefing send
     itself is not listed (it is how the occupant is reading this).
@@ -428,7 +436,12 @@ def operations_lines(tl: Timeline, now: datetime, *, until: datetime | None = No
         for s in tl.steps
         if s.ts >= now - timedelta(minutes=1) and s.ts < end and s.kind != StepKind.BRIEFING_SEND and s.status != "done"
     ]
-    return [f"  • {step_text(s, lang)}" for s in steps[:_OPERATIONS_MAX_STEPS]]
+    return [s.msg if s.msg is not None else s.text for s in steps[:_OPERATIONS_MAX_STEPS]]
+
+
+def operations_lines(tl: Timeline, now: datetime, *, until: datetime | None = None, lang: str = "en") -> list[str]:
+    """``operations_msgs`` as bulleted text lines in ``lang`` (the coordinator's ``timeline_operations_lines``)."""
+    return [f"  • {render_msg(m, lang)}" for m in operations_msgs(tl, now, until=until)]
 
 
 # ---------------------------------------------------------------------------

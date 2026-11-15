@@ -364,8 +364,6 @@ def _en_or_empty(msg: Any) -> str:
 
     if msg is None:
         return ""
-    if not i18n.catalogs_loaded():
-        i18n.load_catalogs()
     return i18n.render_en(msg)
 
 

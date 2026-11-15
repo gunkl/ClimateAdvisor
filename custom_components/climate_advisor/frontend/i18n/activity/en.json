@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "missing indoor temperature or comfort band",
   "activity.reason_cf_nat_vent_owns": "nat-vent/WHF owns HVAC — comfort family defers",
   "activity.reason_cf_no_support": "thermostat supports neither heat nor cool",
-  "activity.reason_cf_settling_guard": "settling guard: {current} ran {ran} min ago (window {window} min), {zone} zone depth {depth}F <= tolerance {tolerance}F -- holding {current}",
+  "activity.reason_cf_settling_guard": "settling guard: {current} ran {ran} min ago (window {window} min), {zone} zone depth {depth, number, ::.0}F <= tolerance {tolerance, number, ::.0}F -- holding {current}",
   "activity.reason_cf_tou_owns": "TOU precondition owns HVAC — comfort family defers",
   "activity.reason_cf_within_cool_margin": "within cool arming margin",
   "activity.reason_cf_within_heat_margin": "within heat arming margin",

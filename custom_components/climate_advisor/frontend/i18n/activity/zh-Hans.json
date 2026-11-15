@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "缺少室内温度或舒适范围",
   "activity.reason_cf_nat_vent_owns": "自然通风/WHF 掌控暖通空调 — 舒适运行方式让行",
   "activity.reason_cf_no_support": "恒温器既不支持制热也不支持制冷",
-  "activity.reason_cf_settling_guard": "稳定保护：{current} 在 {ran} 分钟前运行过（窗口 {window} 分钟），{zone}区深度 {depth}F <= 容差 {tolerance}F -- 保持 {current}",
+  "activity.reason_cf_settling_guard": "稳定保护：{current} 在 {ran} 分钟前运行过（窗口 {window} 分钟），{zone}区深度 {depth, number, ::.0}F <= 容差 {tolerance, number, ::.0}F -- 保持 {current}",
   "activity.reason_cf_tou_owns": "TOU 预冷/预热掌控暖通空调 — 舒适运行方式让行",
   "activity.reason_cf_within_cool_margin": "处于制冷待命裕量内",
   "activity.reason_cf_within_heat_margin": "处于制热待命裕量内",

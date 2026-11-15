@@ -10,7 +10,7 @@
   "common.mode.off": "Spento",
   "common.tou_skip.condition_off": "la condizione è disattivata",
   "common.tou_skip.condition_off_entity": "la condizione è disattivata ({entity})",
-  "common.tou_skip.not_applied_cool": "non applicato al raffrescamento",
-  "common.tou_skip.not_applied_heat": "non applicato al riscaldamento",
+  "common.tou_skip.not_applied_cool": "setpoint di raffrescamento invariato",
+  "common.tou_skip.not_applied_heat": "setpoint di riscaldamento invariato",
   "common.unknown": "Sconosciuto"
 }

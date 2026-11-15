@@ -2,6 +2,6 @@
   "settings.tou_applies.both": "Climatisation et chauffage",
   "settings.tou_applies.cool": "Climatisation uniquement",
   "settings.tou_applies.heat": "Chauffage uniquement",
-  "settings.tou_applies_to": "S'applique à",
+  "settings.tou_applies_to": "Consigne modifiée par le TOU",
   "settings.tou_condition": "Seulement si activé"
 }

@@ -11,8 +11,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "de": {
@@ -27,8 +27,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "es": {
@@ -43,8 +43,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "fr": {
@@ -59,8 +59,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "hi": {
@@ -75,8 +75,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "it": {
@@ -91,8 +91,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "ja": {
@@ -107,8 +107,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "ko": {
@@ -123,8 +123,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "nl": {
@@ -139,8 +139,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "pl": {
@@ -155,8 +155,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "pt": {
@@ -171,8 +171,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "ru": {
@@ -187,8 +187,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "tr": {
@@ -203,8 +203,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "uk": {
@@ -219,8 +219,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   },
   "zh-Hans": {
@@ -235,8 +235,8 @@
     "common.mode.off": "e3de5ab0ca4c",
     "common.tou_skip.condition_off": "2c34929b8521",
     "common.tou_skip.condition_off_entity": "b789bcd09b4e",
-    "common.tou_skip.not_applied_cool": "7480123dd29b",
-    "common.tou_skip.not_applied_heat": "1fb8c31c4281",
+    "common.tou_skip.not_applied_cool": "ce6c4cb65b2e",
+    "common.tou_skip.not_applied_heat": "1fb7e63d4b11",
     "common.unknown": "bc7819b34ff8"
   }
 }

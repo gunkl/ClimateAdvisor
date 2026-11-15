@@ -332,7 +332,7 @@
           "start": "Empieza",
           "end": "Termina",
           "delete_schedule": "Eliminar este horario",
-          "applies_to": "Se aplica a",
+          "applies_to": "Consigna que cambia el TOU",
           "condition_entity": "Solo si esto está activado"
         },
         "data_description": {
@@ -341,7 +341,7 @@
           "start": "Cuándo empieza el periodo de tarifa alta. Climate Advisor empieza a acondicionar la casa antes de esa hora.",
           "end": "Cuándo termina el periodo de tarifa alta. Debe ser distinta de la hora de inicio.",
           "delete_schedule": "Actívalo y envía para eliminar este horario.",
-          "applies_to": "Los días en los que este horario acondiciona la casa por adelantado. Elija Solo refrigeración si su calefacción no es eléctrica (p. ej., una caldera de gas): precalentar antes de un periodo de tarifa alta no ahorra nada en ese caso. Predeterminado: refrigeración y calefacción.",
+          "applies_to": "Qué consigna puede cambiar este horario, antes y durante su periodo de tarifa alta: la de refrigeración en los días de refrigeración y la de calefacción en los días de calefacción. Elija Solo refrigeración si su calefacción no es eléctrica (p. ej., una caldera de gas): así la consigna de calefacción nunca se cambia. Predeterminado: refrigeración y calefacción.",
           "condition_entity": "Opcional. El horario solo se aplica mientras este sensor binario, input boolean o interruptor esté activado (por ejemplo, un ayudante de «temporada alta»). Déjelo vacío para aplicarlo siempre. Si la entidad no existe o no está disponible, el horario se aplica igualmente."
         }
       },

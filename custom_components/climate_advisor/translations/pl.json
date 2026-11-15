@@ -332,7 +332,7 @@
           "start": "Początek",
           "end": "Koniec",
           "delete_schedule": "Usuń ten harmonogram",
-          "applies_to": "Dotyczy",
+          "applies_to": "Nastawa zmieniana przez TOU",
           "condition_entity": "Tylko gdy to jest włączone"
         },
         "data_description": {
@@ -341,7 +341,7 @@
           "start": "Kiedy zaczyna się okres wysokich kosztów. Climate Advisor zaczyna wstępne przygotowanie domu przed tą godziną.",
           "end": "Kiedy kończy się okres wysokich kosztów. Musi różnić się od godziny początku.",
           "delete_schedule": "Włącz i zatwierdź, aby usunąć ten harmonogram.",
-          "applies_to": "W które dni ten harmonogram wstępnie przygotowuje dom. Wybierz Tylko chłodzenie, jeśli ogrzewanie nie jest elektryczne (np. piec gazowy): wstępne ogrzewanie przed okresem wysokich kosztów nic wtedy nie oszczędza. Domyślnie: chłodzenie i ogrzewanie.",
+          "applies_to": "Którą nastawę ten harmonogram może zmieniać przed okresem wysokich kosztów i w jego trakcie: nastawę chłodzenia w dni chłodzenia, nastawę ogrzewania w dni ogrzewania. Wybierz Tylko chłodzenie, jeśli ogrzewanie nie jest elektryczne (np. piec gazowy) – wtedy nastawa ogrzewania nigdy się nie zmienia. Domyślnie: chłodzenie i ogrzewanie.",
           "condition_entity": "Opcjonalne. Harmonogram obowiązuje tylko wtedy, gdy ten czujnik binarny, input boolean lub przełącznik jest włączony (na przykład pomocnik „sezon szczytowy”). Pozostaw puste, aby obowiązywał zawsze. Jeśli encji brak lub jest niedostępna, harmonogram i tak obowiązuje."
         }
       },

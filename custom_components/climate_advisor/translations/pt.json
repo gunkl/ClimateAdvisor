@@ -332,7 +332,7 @@
           "start": "Início",
           "end": "Fim",
           "delete_schedule": "Eliminar este horário",
-          "applies_to": "Aplica-se a",
+          "applies_to": "Setpoint alterado pelo TOU",
           "condition_entity": "Só quando isto estiver ligado"
         },
         "data_description": {
@@ -341,7 +341,7 @@
           "start": "Quando começa o período de custo elevado. O Climate Advisor começa a pré-condicionar antes desta hora.",
           "end": "Quando termina o período de custo elevado. Tem de ser diferente da hora de início.",
           "delete_schedule": "Ative e envie para eliminar este horário.",
-          "applies_to": "Os dias em que este horário pré-condiciona a casa. Escolha Só arrefecimento se o seu aquecimento não for elétrico (p. ex., uma caldeira a gás): pré-aquecer antes de um período de custo elevado não poupa nada nesse caso. Predefinição: arrefecimento e aquecimento.",
+          "applies_to": "O setpoint que este horário pode alterar, antes e durante o período de custo elevado: o de arrefecimento nos dias de arrefecimento e o de aquecimento nos dias de aquecimento. Escolha Só arrefecimento se o seu aquecimento não for elétrico (p. ex., uma caldeira a gás), para que o setpoint de aquecimento nunca seja alterado. Predefinição: arrefecimento e aquecimento.",
           "condition_entity": "Opcional. O horário só se aplica enquanto este sensor binário, input boolean ou interruptor estiver ligado (por exemplo, um auxiliar de «época alta»). Deixe em branco para aplicar sempre. Se a entidade não existir ou estiver indisponível, o horário aplica-se na mesma."
         }
       },

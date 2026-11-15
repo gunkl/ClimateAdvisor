@@ -10,7 +10,7 @@
   "common.mode.off": "إيقاف",
   "common.tou_skip.condition_off": "شرطه متوقف",
   "common.tou_skip.condition_off_entity": "شرطه متوقف ({entity})",
-  "common.tou_skip.not_applied_cool": "لا ينطبق على التبريد",
-  "common.tou_skip.not_applied_heat": "لا ينطبق على التدفئة",
+  "common.tou_skip.not_applied_cool": "نقطة التبريد دون تغيير",
+  "common.tou_skip.not_applied_heat": "نقطة التدفئة دون تغيير",
   "common.unknown": "غير معروف"
 }

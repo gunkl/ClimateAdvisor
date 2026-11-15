@@ -10,7 +10,7 @@
   "common.mode.off": "关闭",
   "common.tou_skip.condition_off": "其条件为关闭",
   "common.tou_skip.condition_off_entity": "其条件为关闭（{entity}）",
-  "common.tou_skip.not_applied_cool": "不适用于制冷",
-  "common.tou_skip.not_applied_heat": "不适用于制热",
+  "common.tou_skip.not_applied_cool": "制冷设定温度保持不变",
+  "common.tou_skip.not_applied_heat": "制热设定温度保持不变",
   "common.unknown": "未知"
 }

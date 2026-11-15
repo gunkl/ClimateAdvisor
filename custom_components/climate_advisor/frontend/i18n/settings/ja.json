@@ -2,6 +2,6 @@
   "settings.tou_applies.both": "冷房と暖房",
   "settings.tou_applies.cool": "冷房のみ",
   "settings.tou_applies.heat": "暖房のみ",
-  "settings.tou_applies_to": "適用対象",
+  "settings.tou_applies_to": "TOU が変更する設定温度",
   "settings.tou_condition": "オンのときのみ"
 }

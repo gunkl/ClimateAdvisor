@@ -788,3 +788,10 @@ def install_ha_stubs() -> None:
         except ImportError:
             sys.modules["voluptuous"] = _make_mock_module("voluptuous")
             sys.modules["voluptuous.error"] = _make_mock_module("voluptuous.error")
+
+    # Issue #1341: the one headless entry point for the translation catalogs. Production reads them once in
+    # ``async_setup_entry``; the harness, simulate.py and every tool that renders (all of them call this function)
+    # never run setup, so read them here, once. ``ensure_catalogs`` never raises and is a no-op afterwards.
+    from custom_components.climate_advisor import i18n as _i18n  # noqa: PLC0415 - needs the stubs installed first
+
+    _i18n.ensure_catalogs()

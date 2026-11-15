@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "Innentemperatur oder Komfortbereich fehlt",
   "activity.reason_cf_nat_vent_owns": "natürliche Lüftung/Hausventilator steuert die HVAC — Komfortmodus hält sich zurück",
   "activity.reason_cf_no_support": "Thermostat unterstützt weder Heizen noch Kühlen",
-  "activity.reason_cf_settling_guard": "Beruhigungsschutz: {current} lief vor {ran} min (Fenster {window} min), Tiefe in Zone {zone} {depth}F <= Toleranz {tolerance}F -- {current} wird gehalten",
+  "activity.reason_cf_settling_guard": "Beruhigungsschutz: {current} lief vor {ran} min (Fenster {window} min), Tiefe in Zone {zone} {depth, number, ::.0}F <= Toleranz {tolerance, number, ::.0}F -- {current} wird gehalten",
   "activity.reason_cf_tou_owns": "Vorbereitung für zeitvariablen Tarif steuert die HVAC — Komfortmodus hält sich zurück",
   "activity.reason_cf_within_cool_margin": "innerhalb der Scharfschaltmarge zum Kühlen",
   "activity.reason_cf_within_heat_margin": "innerhalb der Scharfschaltmarge zum Heizen",

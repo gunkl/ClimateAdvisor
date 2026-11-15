@@ -127,6 +127,13 @@ OCCUPANT_ORDERS = (
     "blower_press_hvac_fan",  # hvac_fan: the occupant presses the thermostat blower (tracked as a fan override)
     "blower_press_whf_mode",  # whole_house_fan: the same press is NOT tracked (no override, no grace, no stop)
 )
+# Issue #1570: vendor fan vocabularies a generated thermostat can report (the default literal auto/on is the rest).
+# Each is a real list: a Honeywell T6 Pro on Z-Wave JS ("Low" is fan ON, #1556) and a mini-split's speed tiers.
+FAN_VOCABULARIES: tuple[tuple[str, ...], ...] = (
+    ("Auto low", "Low", "Circulation"),
+    ("auto", "low", "medium", "high"),
+)
+FAN_VOCABULARY_RATE = 0.3  # share of thermostat-blower (hvac_fan) days whose thermostat uses a vendor vocabulary
 OCCUPANT_HVAC_RELATIVE_F = 3.0  # the occupant asks for a setpoint this far past the current reading
 OCCUPANT_ORDER_RATE = 0.5  # share of fan-hazard days that take an occupant order instead of an original one
 COMMAND_ONLY_RATE = 0.2  # share of whole-house-fan days whose fan reports no state (command only: "no crash")
@@ -303,6 +310,48 @@ def strip_whf_hazard(plan_dict: dict) -> dict:
     return plan_dict
 
 
+def _fan_vocabulary_values(modes: list[str] | tuple[str, ...]) -> tuple[str, str]:
+    """The (on, off) values a thermostat with ``modes`` uses for the blower -- the production profile's choice."""
+    from custom_components.climate_advisor.thermostat_profile import build_fan_profile  # noqa: PLC0415
+
+    profile = build_fan_profile(modes)
+    assert profile.on_value is not None and profile.off_value is not None, modes
+    return profile.on_value, profile.off_value
+
+
+def _apply_fan_vocabulary(
+    config: dict[str, Any],
+    timed: list[tuple[float, str, dict[str, Any]]],
+    whf: dict[str, Any] | None,
+    modes: tuple[str, ...],
+) -> None:
+    """Give the day's thermostat a vendor fan vocabulary: advertise it, and press its own on/off values."""
+    on_value, off_value = _fan_vocabulary_values(modes)
+    config["thermostat_fan_modes"] = list(modes)
+    mapping = {"on": on_value, "auto": off_value}
+    events = [timed] + ([whf["events"]] if whf is not None and isinstance(whf.get("events"), list) else [])
+    for seq in events:
+        for k, item in enumerate(seq):
+            minute, kind, args = item[0], item[1], item[2]
+            if kind == "blower" and args.get("fan_mode") in mapping:
+                seq[k] = type(item)([minute, kind, {**args, "fan_mode": mapping[args["fan_mode"]]}])
+
+
+def strip_fan_vocabulary(plan_dict: dict) -> dict:
+    """Undo Issue #1570's vendor fan vocabulary in a ``DayPlan.to_dict()`` (for the pinned earlier-draws digests)."""
+    modes = plan_dict["config"].pop("thermostat_fan_modes", None)
+    if not modes:
+        return plan_dict
+    on_value, off_value = _fan_vocabulary_values(modes)
+    back = {on_value: "on", off_value: "auto"}
+    whf = plan_dict.get("whf")
+    for seq in [plan_dict["timed"]] + ([whf["events"]] if isinstance(whf, dict) and "events" in whf else []):
+        for k, item in enumerate(seq):
+            if item[1] == "blower" and item[2].get("fan_mode") in back:
+                seq[k] = type(item)([item[0], item[1], {**item[2], "fan_mode": back[item[2]["fan_mode"]]}])
+    return plan_dict
+
+
 def build_plan(day_seed: int, profile: str = "coordinator") -> DayPlan:
     """Draw one household day.  Pure function of ``(day_seed, profile)``."""
     if profile not in PROFILES:
@@ -450,6 +499,11 @@ def build_plan(day_seed: int, profile: str = "coordinator") -> DayPlan:
         if kind == "thermostat_state_changed":
             timed[k] = (minute + rng.randint(5, 55) / 60.0, kind, args)
     timed.sort(key=lambda x: x[0])
+    # Issue #1570: the thermostat's fan vocabulary. Drawn after everything else (two fixed rolls, fired or not), so
+    # every earlier draw of every seed is unchanged; ``strip_fan_vocabulary()`` undoes it for the pinned digests.
+    vocab_roll, vocab_pick_roll = rng.random(), rng.random()
+    if config.get("fan_mode") == "hvac_fan" and vocab_roll < FAN_VOCABULARY_RATE:
+        _apply_fan_vocabulary(config, timed, whf, FAN_VOCABULARIES[int(vocab_pick_roll * len(FAN_VOCABULARIES))])
 
     return DayPlan(
         day_seed=day_seed,
@@ -643,6 +697,7 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
 
         indoor_down = [False]
         blower_on = [False]  # the occupant pressed the thermostat's own blower on (Issue #1179)
+        from custom_components.climate_advisor.thermostat_profile import fan_command_starts_blower  # noqa: PLC0415
 
         def report_indoor(t: datetime) -> None:
             if indoor_down[0]:
@@ -751,7 +806,8 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
                         last_action = None
                 elif kind == "blower":
                     if plan.use_coordinator:
-                        blower_on[0] = args["fan_mode"] == "on"
+                        # Issue #1570: the press is whatever value runs this thermostat's blower ("Low" on a T6 Pro)
+                        blower_on[0] = fan_command_starts_blower(args["fan_mode"])
                         feed(
                             {
                                 "time": _iso(et),

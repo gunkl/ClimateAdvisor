@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "अंदर का तापमान या आराम सीमा उपलब्ध नहीं",
   "activity.reason_cf_nat_vent_owns": "HVAC प्राकृतिक वेंटिलेशन/पूरे घर के पंखे के पास है — आराम वर्ग पीछे हटता है",
   "activity.reason_cf_no_support": "थर्मोस्टैट न हीटिंग और न कूलिंग को सपोर्ट करता है",
-  "activity.reason_cf_settling_guard": "स्थिरीकरण सुरक्षा: {current} {ran} मिनट पहले चला (अवधि {window} मिनट), {zone} क्षेत्र की गहराई {depth}F <= सहनसीमा {tolerance}F -- {current} बनाए रखा जा रहा है",
+  "activity.reason_cf_settling_guard": "स्थिरीकरण सुरक्षा: {current} {ran} मिनट पहले चला (अवधि {window} मिनट), {zone} क्षेत्र की गहराई {depth, number, ::.0}F <= सहनसीमा {tolerance, number, ::.0}F -- {current} बनाए रखा जा रहा है",
   "activity.reason_cf_tou_owns": "TOU पूर्व-तैयारी HVAC संभाल रही है — आराम वर्ग पीछे हटता है",
   "activity.reason_cf_within_cool_margin": "कूलिंग सक्रिय करने के अंतर के भीतर",
   "activity.reason_cf_within_heat_margin": "हीटिंग सक्रिय करने के अंतर के भीतर",

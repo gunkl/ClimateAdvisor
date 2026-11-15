@@ -31,7 +31,7 @@ REST API history mode (--history):
     python3 tools/ha_logs.py --history --entity sensor.house_status        # any literal entity id still works
 
 `ca:<key>` names a Climate Advisor entity by its unique-id suffix (the sensor's key: automation_status, day_type,
-comfort_score, ... or automation_enabled for the switch) and is looked up in the install's entity registry over SSH
+compliance_score, ... or automation_enabled for the switch) and is looked up in the install's entity registry over SSH
 (Issue #1341). Entity ids depend on the zone's title and on the language HA was set to when the entity was first
 registered, so no entity id is assumed. With several zones add `--entry-id <config entry id>`.
 """

@@ -344,6 +344,50 @@ class TestProseSensors:
         for s in (en, de):  # the automation-facing form never depends on the language
             assert s.extra_state_attributes == {"code": "common.mode.cool", "params": {}}
 
+    def test_str_carriers_render_in_ha_language_with_a_code(self, catalogs):
+        """The coordinator stores CodedText / CardText / MsgText (str carriers of a Msg), not a bare Msg."""
+        from custom_components.climate_advisor.const import ATTR_AUTOMATION_STATUS
+        from custom_components.climate_advisor.record_text import MsgText
+        from custom_components.climate_advisor.sensor import ClimateAdvisorStatusSensor
+        from custom_components.climate_advisor.status_text import CodedText
+        from custom_components.climate_advisor.timeline_surfaces import CardText
+
+        msg = i18n.Msg("common.mode.cool")
+        carriers = {
+            "coded": (CodedText("cooling_now", msg), "cooling_now"),
+            "card": (CardText("Cool", msg), "common.mode.cool"),
+            "msgtext": (MsgText(msg), "common.mode.cool"),
+        }
+        for name, (value, code) in carriers.items():
+            en = _sensor(ClimateAdvisorStatusSensor, {ATTR_AUTOMATION_STATUS: value})
+            de = _sensor(ClimateAdvisorStatusSensor, {ATTR_AUTOMATION_STATUS: value}, "de")
+            assert en.native_value == "Cool", name
+            assert de.native_value == "K\u00fchlen", name  # German prose state, not the English carrier text
+            for s in (en, de):
+                assert s.extra_state_attributes == {"code": code, "params": {}}, name
+
+    def test_coded_text_without_a_message_keeps_its_code_and_text(self, catalogs):
+        from custom_components.climate_advisor.const import ATTR_AUTOMATION_STATUS
+        from custom_components.climate_advisor.sensor import ClimateAdvisorStatusSensor
+        from custom_components.climate_advisor.status_text import CodedText
+
+        s = _sensor(ClimateAdvisorStatusSensor, {ATTR_AUTOMATION_STATUS: CodedText("unknown", None, text="x y")}, "de")
+        assert s.native_value == "x y"
+        assert s.extra_state_attributes == {"code": "unknown", "params": {}}
+
+    def test_fan_status_enum_state_stays_the_english_token(self, catalogs):
+        """An ENUM-like state users' automations compare keeps its raw token in every language; code is exposed."""
+        from custom_components.climate_advisor.const import ATTR_FAN_STATUS
+        from custom_components.climate_advisor.sensor import ClimateAdvisorFanStatusSensor
+        from custom_components.climate_advisor.status_text import fan_status_text
+
+        for token, code in (("inactive", "inactive"), ("running (manual override)", "running_manual_override")):
+            data = {ATTR_FAN_STATUS: fan_status_text(token)}
+            for lang in (None, "de"):
+                s = _sensor(ClimateAdvisorFanStatusSensor, data, lang)
+                assert s.native_value == token
+                assert s.extra_state_attributes["code"] == code
+
     def test_last_action_reason_renders_state_and_full_reason_and_caps(self, catalogs):
         from custom_components.climate_advisor.const import ATTR_LAST_ACTION_REASON
         from custom_components.climate_advisor.sensor import ClimateAdvisorLastActionReasonSensor

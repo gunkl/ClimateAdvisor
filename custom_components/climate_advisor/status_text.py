@@ -31,17 +31,8 @@ class CodedText(str):
         return (CodedText, (self.code, self.msg, str(self)))
 
 
-def code_of(value: Any, default: str | None = None) -> str | None:
-    """The stable code of a status value (``None``/``default`` for plain text)."""
-    return value.code if isinstance(value, CodedText) else default
-
-
-def msg_of(value: Any) -> i18n.Msg | None:
-    """The message of a status value, or None when it is plain text."""
-    if isinstance(value, CodedText):
-        return value.msg
-    msg = getattr(value, "msg", None)  # other str subclasses that carry a message (CardText, MsgText)
-    return msg if isinstance(msg, i18n.Msg) else None
+code_of = i18n.code_of  # the one shared readers (Msg, MsgText, CodedText, CardText); re-exported here
+msg_of = i18n.msg_of
 
 
 def wire_of(value: Any) -> dict | None:

@@ -432,3 +432,27 @@ def test_chart_draws_the_widened_away_period() -> None:
     assert got == {"15:00": 80.0, "16:00": 83.0, "17:00": 83.0, "21:00": 80.0}  # 16:00 holds now (16:20)
     coord._occupancy_mode = OCCUPANCY_HOME
     assert coord._chart_widened_band(band, at) == band
+
+
+def test_next_automation_bank_end_card_carries_the_after_clause_as_a_message() -> None:
+    """Issue #1341 S6 (mirror of the Status path): the card's ``after`` clause is the ``hold_after_msg`` message, so it
+    renders in the viewer's language; English is the same sentence as before."""
+    import custom_components.climate_advisor.coordinator as cm
+    from custom_components.climate_advisor import i18n
+
+    coord = _coordinator()
+    coord._surface_timeline = lambda: types.SimpleNamespace(steps=())
+    coord._automation_enabled = True
+    coord._startup_coalesce_active = False
+    coord._startup_coalesce_expiry = None
+    coord._door_open_timers = {}
+    orig = cm.dt_util.now
+    cm.dt_util.now = lambda time_zone=None: NOW
+    try:
+        label, _when = coord._compute_next_automation_action(coord._current_classification)
+    finally:
+        cm.dt_util.now = orig
+    msg = i18n.msg_of(label)
+    assert msg is not None and msg.key == "timeline.next_automation.tou_bank_end"
+    assert isinstance(msg.params["after"], i18n.Msg)
+    assert label == ("High-cost period starts — the Away band widened to 60–83°F until 9:00 PM")

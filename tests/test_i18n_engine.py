@@ -633,3 +633,29 @@ def test_parser_whitespace_and_angle_brackets_follow_formatjs(pattern, params, e
 def test_parser_rejections_that_formatjs_also_makes(pattern):
     with pytest.raises(i18n.I18nError):
         i18n.format_message(pattern, "en", {"n": 1})
+
+
+def test_warn_once_dedups_on_the_message_not_the_varying_error_text(caplog):
+    """Issue #1341 N5: a render failing with a different value each time must not grow ``_WARNED`` without bound."""
+    import logging
+
+    i18n._WARNED.clear()
+    with caplog.at_level(logging.WARNING):
+        for n in range(5):
+            i18n._warn_once("cannot render 'k' in de (ValueError)", f"bad value {n}")
+    assert len(i18n._WARNED) == 1
+    assert len([r for r in caplog.records if "cannot render" in r.getMessage()]) == 1
+
+
+def test_msg_of_and_code_of_understand_every_carrier():
+    from custom_components.climate_advisor.record_text import MsgText
+    from custom_components.climate_advisor.status_text import CodedText
+    from custom_components.climate_advisor.timeline_surfaces import CardText
+
+    m = i18n.Msg("common.mode.cool")
+    for carrier in (m, MsgText(m), CodedText("c", m), CardText("x", m)):
+        assert i18n.msg_of(carrier) is m
+    assert i18n.code_of(CodedText("c", m)) == "c"
+    for plain in ("text", None, 3, CodedText("c", None, text="t"), CardText("x")):
+        assert i18n.msg_of(plain) is None
+    assert i18n.code_of("text") is None and i18n.code_of(m, "d") == "d"

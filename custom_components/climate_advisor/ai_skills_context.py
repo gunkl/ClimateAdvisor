@@ -2547,7 +2547,7 @@ def _local_hhmm(iso: Any) -> str:
 @_msg_renderer
 def _render_entity_unavailable(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1322: a configured entity (thermostat, weather source, sensor, fan) stopped responding."""
-    name = p.get("friendly_name") or p.get("entity_id") or _m("entity_generic")
+    name = _field(p, "friendly_name") or p.get("entity_id") or _m("entity_generic")
     label = _m("entity_not_found" if p.get("status") == "missing" else "entity_unavailable", name=name)
     parts: list[Cell] = []
     since = _local_hhmm(p.get("down_since"))
@@ -2562,7 +2562,7 @@ def _render_entity_unavailable(p: dict, unit: str) -> tuple[Cell, Cell]:
 @_msg_renderer
 def _render_entity_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1322: a configured entity is responding again after an announced outage."""
-    name = p.get("friendly_name") or p.get("entity_id") or _m("entity_generic")
+    name = _field(p, "friendly_name") or p.get("entity_id") or _m("entity_generic")
     parts: list[Cell] = []
     minutes = p.get("outage_minutes")
     if isinstance(minutes, int):

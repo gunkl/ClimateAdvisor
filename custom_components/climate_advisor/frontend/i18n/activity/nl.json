@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "binnentemperatuur of comfortbereik ontbreekt",
   "activity.reason_cf_nat_vent_owns": "natuurlijke ventilatie/huisventilator stuurt de HVAC aan — comfortmodus houdt zich afzijdig",
   "activity.reason_cf_no_support": "thermostaat ondersteunt noch verwarmen noch koelen",
-  "activity.reason_cf_settling_guard": "stabilisatiebeveiliging: {current} draaide {ran} min geleden (venster {window} min), diepte in zone {zone} {depth}F <= tolerantie {tolerance}F -- {current} wordt vastgehouden",
+  "activity.reason_cf_settling_guard": "stabilisatiebeveiliging: {current} draaide {ran} min geleden (venster {window} min), diepte in zone {zone} {depth, number, ::.0}F <= tolerantie {tolerance, number, ::.0}F -- {current} wordt vastgehouden",
   "activity.reason_cf_tou_owns": "voorbereiding voor tijdgebonden tarief stuurt de HVAC aan — comfortmodus houdt zich afzijdig",
   "activity.reason_cf_within_cool_margin": "binnen de activeringsmarge voor koelen",
   "activity.reason_cf_within_heat_margin": "binnen de activeringsmarge voor verwarmen",

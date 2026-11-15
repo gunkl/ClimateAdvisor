@@ -523,15 +523,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     log_capture.install(hass)
 
     # Issue #1341: read the translation catalogs (blocking file reads) once, in the executor, before
-    # anything renders. Idempotent across zones/entries and reloads.
-    # A broken or missing catalog must never stop setup: rendering then falls back (English, then the key).
-    if not i18n.catalogs_loaded():
-        try:
-            await hass.async_add_executor_job(i18n.load_catalogs)
-        except Exception as err:  # noqa: BLE001 - any failure here (bad JSON, missing file, mismatched index) is non-fatal
-            _LOGGER.error(
-                "Climate Advisor could not load its translation catalogs (%s); continuing with fallbacks", err
-            )
+    # anything renders. ``ensure_catalogs`` never raises, records the attempt and is a no-op afterwards, so a
+    # failed load (bad JSON, missing file, mismatched index) never stops setup and never retries inside the event
+    # loop: rendering then falls back (English, then the key).
+    await hass.async_add_executor_job(i18n.ensure_catalogs)
 
     # Issue #812: one-time migration off the old domain-wide (unscoped)
     # issue ids. Any install with an open Repairs card raised under the OLD

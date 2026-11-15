@@ -517,10 +517,8 @@ _TEXT_CODES: dict[str, dict[str, str]] = {
 
 
 def render_msg(msg: i18n.Msg | str, lang: str = "en") -> str:
-    """``msg`` in ``lang``. Production loads the catalogs once in setup; a headless caller (the simulation harness,
-    unit tests, tools) never runs setup, so the first render loads them (idempotent, one small read)."""
-    if not i18n.catalogs_loaded():
-        i18n.load_catalogs()
+    """``msg`` in ``lang``. The catalogs are loaded once at the entry point (setup, or ``i18n.ensure_catalogs()``
+    for a headless caller); with them missing the render falls back and never raises."""
     return i18n.render(msg, lang)
 
 
@@ -638,8 +636,6 @@ def short_msg(msg: i18n.Msg) -> i18n.Msg:
             return i18n.Msg(STEP_SHORT_PREFIX + msg.key[len(STEP_MSG_PREFIX) :], **msg.params)
         return msg
     short_key = msg.key + "_short"  # another area's sentence (the night strategy) may ship a row wording beside it
-    if not i18n.catalogs_loaded():
-        i18n.load_catalogs()
     return i18n.Msg(short_key, **msg.params) if i18n.get_message(short_key, i18n.DEFAULT_LANGUAGE) else msg
 
 

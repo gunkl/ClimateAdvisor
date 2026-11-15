@@ -44,9 +44,6 @@ pytestmark = pytest.mark.integration
 _CA_SENSORS_TEMPLATE = "{{ integration_entities('climate_advisor') | select('match', 'sensor[.]') | list | tojson }}"
 
 
-_CA_SENSORS_TEMPLATE = "{{ integration_entities('climate_advisor') | select('match', 'sensor[.]') | list | tojson }}"
-
-
 def _api(url: str, ha_url: str, ha_headers: dict, **kwargs) -> requests.Response:
     """GET a HA REST API path and return the response."""
     return requests.get(f"{ha_url}{url}", headers=ha_headers, timeout=15, **kwargs)

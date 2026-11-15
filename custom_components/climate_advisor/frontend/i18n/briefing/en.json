@@ -1,5 +1,6 @@
 {
   "briefing.band": "{lo}–{hi}",
+  "briefing.bullet": "  • {text}",
   "briefing.close_when": "{already, select, yes {now} other {{at}}}",
   "briefing.cold.away": "A cold day, and the house is empty, so the away settings below are what apply.",
   "briefing.cold.bedtime": "At bedtime I'll set back to {target}.",
@@ -50,6 +51,7 @@
   "briefing.leaving.home_heat": "If you head out, I'll drop to {target} after about {minutes, plural, one {# minute} other {# minutes}}. When you get back, I'll warm things right up — should take 20 to 30 minutes depending on how long you were gone.",
   "briefing.leaving.vacation_band": "While you're on vacation, I'm keeping the house at your vacation temperatures ({band}). Comfort temperatures will be restored when you return.",
   "briefing.leaving.vacation_deep": "While you're on vacation, I'm keeping the house at a deeper energy-saving setback to save energy. Comfort temperatures will be restored when you return.",
+  "briefing.lines": "{first}\n{rest}",
   "briefing.mild.air_wont_help": "A mild day. Outside air isn't going to warm the house, so the thermostat holds {band} and steps in if it drifts.",
   "briefing.mild.away": "A mild day, and the house is empty, so the away settings below are what apply.",
   "briefing.mild.close_now": "Close up now — outdoor's already warmed past indoor. If the house dips below {floor} tonight, the heater comes back on automatically.",

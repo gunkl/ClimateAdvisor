@@ -25,8 +25,8 @@ from .automation import (
     _in_sleep_window,
     awake_comfort_edges,
     compute_pre_cool_target,
-    hold_after_text,
-    hold_sentence,
+    hold_after_msg,
+    hold_sentence_msg,
     resolve_pre_cool_modifier,
     select_comfort_band,
 )
@@ -58,7 +58,7 @@ from .nat_vent_plan import (
     resolve_with_fallback,
 )
 from .temperature import FAHRENHEIT, format_temp, free_cooling_direction_ok, from_fahrenheit
-from .timeline_surfaces import TimelineWindows, operations_lines, timeline_windows
+from .timeline_surfaces import TimelineWindows, operations_msgs, timeline_windows
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,6 +110,19 @@ def _slots(key: str, **slots: Any) -> i18n.Msg:
         params[name] = "" if value is None else value
         params[f"has_{name}"] = "no" if value is None else "yes"
     return i18n.Msg(key, **params)
+
+
+def _bullet_lines(items: list[str | i18n.Msg]) -> i18n.Msg | None:
+    """``items`` as one message of bullet lines, one per line (``None`` when empty).
+
+    Each item is its own ``briefing.bullet`` message and the lines are chained with ``briefing.lines`` (first line,
+    newline, the rest), so every item (a timeline sentence, a learner suggestion) renders in the viewer's language.
+    """
+    out: i18n.Msg | None = None
+    for item in reversed(items):
+        line = i18n.Msg("briefing.bullet", text=item)
+        out = line if out is None else i18n.Msg("briefing.lines", first=line, rest=out)
+    return out
 
 
 @dataclass(frozen=True)
@@ -397,7 +410,7 @@ def generate_briefing_msg(
     setback_cool: float,
     wake_time: time,
     sleep_time: time,
-    learning_suggestions: list[str] | None = None,
+    learning_suggestions: list[str | i18n.Msg] | None = None,
     debounce_seconds: int = DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     manual_grace_seconds: int = DEFAULT_MANUAL_GRACE_SECONDS,
     automation_grace_seconds: int = DEFAULT_AUTOMATION_GRACE_SECONDS,
@@ -690,20 +703,20 @@ def generate_briefing_msg(
         _LOGGER.debug("Grace section included — source=%s", grace_source)
 
     steps: i18n.Msg | None = None
-    _bank_line = hold_sentence(facts.current_hold, temp_unit) if facts.current_hold is not None else None
+    _bank_line = hold_sentence_msg(facts.current_hold, temp_unit) if facts.current_hold is not None else None
     if timeline is not None or _bank_line is not None:
-        ops = operations_lines(timeline, now or dt_util.now()) if timeline is not None else []
+        ops = operations_msgs(timeline, now or dt_util.now()) if timeline is not None else []
         now_msg = i18n.Msg("briefing.ops_now", line=_bank_line) if _bank_line is not None else None
         if now_msg is not None or ops:
-            # The step lines are the operation timeline's own sentences (already one line each).
-            steps = _slots("briefing.steps", now=now_msg, ops="\n".join(ops) if ops else None)
+            # The step lines are the operation timeline's own sentences (already one line each), each a message.
+            steps = _slots("briefing.steps", now=now_msg, ops=_bullet_lines(ops))
 
     tonight = _tonight_msg(c, facts, temp_unit=temp_unit, adaptive_thermal_active=adaptive_thermal_active)
 
     # Learning suggestions (kept structured for accept/dismiss clarity): the learner's own sentences as bullets.
     suggestions = None
     if learning_suggestions:
-        suggestions = i18n.Msg("briefing.suggestions", items="\n".join(f"  \u2022 {s}" for s in learning_suggestions))
+        suggestions = i18n.Msg("briefing.suggestions", items=_bullet_lines(list(learning_suggestions)))
 
     key = f"briefing.full.{c.day_type}" if c.day_type in _DAY_TYPE_NAMES else "briefing.full.other"
     msg = _slots(
@@ -844,7 +857,7 @@ def _tldr_msg(
             "briefing.tldr.hvac_bank_cool" if _bank.mode == "cool" else "briefing.tldr.hvac_bank_heat",
             target=i18n.Temp(_bank.target, temp_unit),
             until=_clock(dt_util.as_local(_bank.ends)),
-            after=hold_after_text(facts.current_hold, temp_unit),
+            after=hold_after_msg(facts.current_hold, temp_unit),
         )
     elif facts.unoccupied:
         if _day_mode == "cool":

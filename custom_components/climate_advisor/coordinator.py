@@ -9187,7 +9187,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Returns (briefing_full, briefing_short).  No notifications are sent.
         """
         if suggestions is None:
-            suggestions = self.learning.generate_suggestions()
+            # Issue #1341: the learner's messages, so the briefing renders them in the viewer's language.
+            suggestions = self.learning.generate_suggestion_msgs()
         wake_time = _parse_time(self.config.get("wake_time", "06:30"))
         sleep_time = _parse_time(self.config.get("sleep_time", "22:30"))
 
@@ -9477,7 +9478,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._timeline_shadow_run("briefing")
 
             # Generate briefing text and track which suggestions were sent
-            suggestions = self.learning.generate_suggestions()
+            suggestions = self.learning.generate_suggestion_msgs()
             if self._today_record:
                 self._today_record.suggestion_sent = self.learning.get_last_suggestion_keys()
 

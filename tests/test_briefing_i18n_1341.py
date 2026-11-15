@@ -275,3 +275,67 @@ def test_catalog_messages_never_hold_a_hardcoded_temperature_or_time():
     keys = json.loads((_PKG / "frontend" / "i18n" / "briefing" / "en.json").read_text(encoding="utf-8"))
     bad = [k for k, v in keys.items() if re.search(r"\d\s*\u00b0|\d:\d\d", v)]
     assert not bad, bad
+
+
+# -- Issue #1341 PR B: suggestions, hold sentence and step lines enter as messages -------------------------------------
+def _fr(monkeypatch, entries):
+    cats = {lang: dict(c) for lang, c in i18n._CATALOGS.items()}
+    cats.setdefault("fr", {}).update(entries)
+    monkeypatch.setattr(i18n, "_CATALOGS", cats)
+
+
+def test_suggestion_messages_render_in_each_language_and_english_is_unchanged(monkeypatch):
+    sug = [i18n.Msg("learning.test_a"), "Plain text."]
+    _fr(monkeypatch, {"learning.test_a": "Suggestion fr", "briefing.suggestions": "SUGG\n{items}"})
+    monkeypatch.setitem(i18n._CATALOGS["en"], "learning.test_a", "Suggestion en")
+    msg = generate_briefing_msg(**_briefing_kwargs(_cls("cool"), learning_suggestions=sug))
+    en = i18n.render_en(msg)
+    assert "  • Suggestion en\n  • Plain text." in en
+    # the same list as plain strings gives byte-identical English
+    plain = generate_briefing_msg(
+        **_briefing_kwargs(_cls("cool"), learning_suggestions=["Suggestion en", "Plain text."])
+    )
+    assert i18n.render_en(plain) == en
+    # wire round trip keeps the nested bullet messages
+    assert i18n.Msg.from_wire(json.loads(json.dumps(msg.to_wire()))) == msg
+    assert "Suggestion fr" not in en
+
+
+def test_bullet_lines_chain_is_empty_one_and_many(monkeypatch):
+    from custom_components.climate_advisor.briefing import _bullet_lines
+
+    assert _bullet_lines([]) is None
+    assert i18n.render_en(_bullet_lines(["a"])) == "  • a"
+    assert i18n.render_en(_bullet_lines(["a", i18n.Msg("briefing.title"), "c"])).split("\n")[0] == "  • a"
+    assert i18n.render_en(_bullet_lines(["a", "b", "c"])) == "  • a\n  • b\n  • c"
+    _fr(monkeypatch, {"briefing.title": "TITRE", "briefing.bullet": "  - {text}", "briefing.lines": "{first}\n{rest}"})
+    assert i18n.render(_bullet_lines(["a", i18n.Msg("briefing.title")]), "fr") == "  - a\n  - TITRE"
+
+
+def test_operations_msgs_returns_step_messages_and_lines_wrap_them():
+    from datetime import timedelta
+
+    from custom_components.climate_advisor.operation_timeline import StepKind
+    from custom_components.climate_advisor.timeline_surfaces import operations_lines, operations_msgs
+
+    m = i18n.Msg("briefing.title")
+    steps = [
+        SimpleNamespace(
+            ts=_NOW + timedelta(hours=1), kind=StepKind.BRIEFING_SEND, status="planned", msg=m, text="skip me"
+        ),
+        SimpleNamespace(ts=_NOW + timedelta(hours=2), kind="x", status="planned", msg=m, text="english text"),
+        SimpleNamespace(ts=_NOW + timedelta(hours=3), kind="x", status="planned", msg=None, text="legacy text"),
+    ]
+    tl = SimpleNamespace(steps=steps)
+    assert operations_msgs(tl, _NOW) == [m, "legacy text"]
+    assert operations_lines(tl, _NOW) == [f"  • {i18n.render_en(m)}", "  • legacy text"]
+
+
+def test_hold_sentence_enters_the_briefing_as_a_message():
+    import inspect
+
+    from custom_components.climate_advisor import briefing
+
+    src = inspect.getsource(briefing)
+    assert "hold_sentence_msg" in src and "hold_after_msg" in src
+    assert "hold_after_text" not in src and "hold_sentence(" not in src

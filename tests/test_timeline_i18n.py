@@ -129,9 +129,9 @@ def test_a_language_catalog_drives_the_typed_parameters(monkeypatch) -> None:
     assert out.startswith("<So um ") and "Komfortband 20" in out and "23" in out  # the German catalog's words
     assert "°C" in out and "CA switches" not in out
     assert i18n.render_en(msg) == "Sun 6:15 AM: CA switches to the daytime comfort band, 20°C to 23°C."
-    # a language that has no entry falls back to English per key, never to the key
+    # a language with its own catalog (every one is translated now) renders its words, never the key or the English
     fr = i18n.render(msg, "fr")
-    assert "CA switches to the daytime comfort band, 20°C to 23°C." in fr and "timeline." not in fr
+    assert "plage de confort" in fr and "CA switches" not in fr and "timeline." not in fr
 
 
 def test_the_rest_payload_renders_in_the_language_and_keeps_the_wire(monkeypatch) -> None:

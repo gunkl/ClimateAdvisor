@@ -1,4 +1,6 @@
 {
+  "briefing.title": 64,
+  "briefing.tldr": 255,
   "common.duration.hours": 24,
   "common.duration.hours_frac": 24,
   "common.duration.min": 24,

@@ -640,9 +640,13 @@ class ClimateAdvisorBriefingView(HomeAssistantView):
                         verbosity,
                     )
 
+            from .coordinator import _briefing_display  # noqa: PLC0415 - coordinator is heavy; same renderer as Status
+
             return self.json(
                 {
-                    "briefing": briefing,
+                    "briefing": _briefing_display(hass, briefing),
+                    # Issue #1341: the message the text renders from (None for a plain/legacy text).
+                    "briefing_msg": (msg.to_wire() if (msg := getattr(briefing, "msg", None)) is not None else None),
                     "briefing_sent_today": coordinator._briefing_sent_today,
                     "verbosity": verbosity,
                 }

@@ -84,9 +84,9 @@ _ALLOWED_CALL_SITES: set[tuple[str, str, int]] = {
     # ordinal 1 is the WARM-day plan, ordinal 2 is the MILD-day plan, ordinal 3
     # is the HOT-day plan (Issue #876 — extended the shared dynamic-crossing
     # mechanism to HOT's briefing text, which never used it before).
-    ("briefing.py", "generate_briefing", 1),
-    ("briefing.py", "generate_briefing", 2),
-    ("briefing.py", "generate_briefing", 3),
+    ("briefing.py", "generate_briefing_msg", 1),
+    ("briefing.py", "generate_briefing_msg", 2),
+    ("briefing.py", "generate_briefing_msg", 3),
     # coordinator.py: the ONE per-cycle computation, cached on self._nat_vent_plan.
     # Every other production consumer reads that cache — see
     # _compute_and_cache_nat_vent_plan()'s docstring. Two ordinals (Issue #876):

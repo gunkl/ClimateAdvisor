@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.38] — 2026-11-15
+
+### Added
+- Feat #1341: the daily briefing follows your Home Assistant language (part 2 of 3).
+  - **What you'll notice:** the morning briefing notification, its short summary and the briefing on the Status card are written in your HA language. Each day type reads as natural sentences in that language, not word-for-word, and the times, temperatures, the day's window advice, the time-of-use hold and the learning suggestions inside it are translated too.
+  - **After a restart or a language change:** the stored briefing is shown again in your current language. A briefing saved before this update shows its English until the next one is written.
+  - **English is unchanged.**
+
 ## [0.9.37] — 2026-11-15
 
 ### Added

@@ -73,7 +73,7 @@ from .automation import (
     resolve_pre_cool_modifier_for_night,
     tou_bank_band,
 )
-from .briefing import generate_briefing
+from .briefing import BriefingText, generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
 from .comfort_family_decision import (
@@ -1126,6 +1126,33 @@ def _whf_after_sensor_event(coordinator: Any, event: Any) -> None:
         if arm is not None:
             arm()
     _whf_request_check(coordinator, "sensor_changed")
+
+
+def _briefing_display(hass: Any, text: Any) -> str:
+    """A stored briefing text in the current language (``hass.config.language``, Issue #1341).
+
+    ``_last_briefing`` / ``_last_briefing_short`` stay the English strings (the AI context and records read them);
+    one that carries its message (``BriefingText``) renders that message, so a language change shows on the next
+    read. A text with no message (a state stored before this version, a stub) is shown as it is.
+    """
+    rendered = getattr(text, "rendered", None)
+    return rendered(i18n.hass_language(hass)) if callable(rendered) else text
+
+
+def _briefing_msg_wire(text: Any) -> dict | None:
+    """The wire form of the message a briefing text carries (None for a plain string)."""
+    msg = getattr(text, "msg", None)
+    return msg.to_wire() if msg is not None else None
+
+
+def _restore_briefing_text(text: str, wire: Any) -> str:
+    """A stored briefing: its English plus, when a message was stored, the message (a malformed one is dropped)."""
+    if isinstance(wire, dict):
+        try:
+            return BriefingText(text, i18n.Msg.from_wire(wire))
+        except KeyError, TypeError, ValueError, i18n.I18nError:
+            _LOGGER.warning("Stored briefing message could not be read; showing the stored English text")
+    return text
 
 
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
@@ -2906,8 +2933,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Briefing state
         briefing = state.get("briefing_state", {})
         self._briefing_sent_today = briefing.get("sent_today", False)
-        self._last_briefing = briefing.get("last_text", "")
-        self._last_briefing_short = briefing.get("last_text_short", "")
+        # Issue #1341: the stored English plus (new in this version) the message it was rendered from, so the text
+        # re-renders in the current language. A state saved before this has no message: it shows its stored English.
+        self._last_briefing = _restore_briefing_text(briefing.get("last_text", ""), briefing.get("last_msg"))
+        self._last_briefing_short = _restore_briefing_text(
+            briefing.get("last_text_short", ""), briefing.get("last_msg_short")
+        )
         self._briefing_day_type = briefing.get("briefing_day_type")
         self._briefing_today_high = briefing.get("briefing_today_high")
         self._briefing_windows_recommended = briefing.get("briefing_windows_recommended")
@@ -3053,8 +3084,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "today_record": record_dict,
             "briefing_state": {
                 "sent_today": self._briefing_sent_today,
-                "last_text": self._last_briefing,
-                "last_text_short": self._last_briefing_short,
+                "last_text": str(self._last_briefing),
+                "last_text_short": str(self._last_briefing_short),
+                # Issue #1341: the message wire (None for a plain string), the language-neutral original.
+                "last_msg": _briefing_msg_wire(self._last_briefing),
+                "last_msg_short": _briefing_msg_wire(self._last_briefing_short),
                 "briefing_day_type": self._briefing_day_type,
                 "briefing_today_high": getattr(self, "_briefing_today_high", None),
                 "briefing_windows_recommended": getattr(self, "_briefing_windows_recommended", None),
@@ -5399,8 +5433,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_DAY_TYPE: c.day_type if c else "unknown",
             ATTR_TREND: c.trend_direction if c else "unknown",
             ATTR_TREND_MAGNITUDE: c.trend_magnitude if c else 0,
-            ATTR_BRIEFING: self._last_briefing,
-            ATTR_BRIEFING_SHORT: self._last_briefing_short,
+            # Issue #1341: prose in the backend language (hass.config.language) + the message wire sibling.
+            ATTR_BRIEFING: _briefing_display(self.hass, self._last_briefing),
+            ATTR_BRIEFING_SHORT: _briefing_display(self.hass, self._last_briefing_short),
+            "briefing_msg": _briefing_msg_wire(self._last_briefing),
+            "briefing_short_msg": _briefing_msg_wire(self._last_briefing_short),
             ATTR_NEXT_ACTION: self._compute_next_action(
                 c,
                 indoor_temp=_indoor_temp,
@@ -9150,7 +9187,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Returns (briefing_full, briefing_short).  No notifications are sent.
         """
         if suggestions is None:
-            suggestions = self.learning.generate_suggestions()
+            # Issue #1341: the learner's messages, so the briefing renders them in the viewer's language.
+            suggestions = self.learning.generate_suggestion_msgs()
         wake_time = _parse_time(self.config.get("wake_time", "06:30"))
         sleep_time = _parse_time(self.config.get("sleep_time", "22:30"))
 
@@ -9440,7 +9478,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._timeline_shadow_run("briefing")
 
             # Generate briefing text and track which suggestions were sent
-            suggestions = self.learning.generate_suggestions()
+            suggestions = self.learning.generate_suggestion_msgs()
             if self._today_record:
                 self._today_record.suggestion_sent = self.learning.get_last_suggestion_keys()
 
@@ -9482,18 +9520,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # Send push notification — short TLDR summary
                 _notify_svc = self.config["notify_service"]
                 _notify_name = _notify_svc.split(".")[-1] if "." in _notify_svc else _notify_svc
+                # Issue #1341: title and text in the language HA uses (hass.config.language).
+                _title = i18n.render(i18n.Msg("briefing.title"), i18n.hass_language(self.hass))
                 if self.config.get("push_briefing", True):
                     await self.hass.services.async_call(
                         "notify",
                         _notify_name,
-                        {"message": self._last_briefing_short, "title": "🏠 Your Home Climate Plan for Today"},
+                        {"message": _briefing_display(self.hass, self._last_briefing_short), "title": _title},
                     )
                 # Send email — full briefing
                 if self.config.get("email_briefing", True):
                     await self.hass.services.async_call(
                         "notify",
                         "send_email",
-                        {"message": self._last_briefing, "title": "🏠 Your Home Climate Plan for Today"},
+                        {"message": _briefing_display(self.hass, self._last_briefing), "title": _title},
                     )
                 _LOGGER.info("Daily briefing sent — day type: %s", classification.day_type)
 

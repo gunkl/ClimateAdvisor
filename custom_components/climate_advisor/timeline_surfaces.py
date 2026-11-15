@@ -422,8 +422,8 @@ def next_automation(
 _OPERATIONS_MAX_STEPS = 12
 
 
-def operations_lines(tl: Timeline, now: datetime, *, until: datetime | None = None, lang: str = "en") -> list[str]:
-    """The briefing's list of what happens next, straight from the timeline's step sentences (no recompute).
+def operations_msgs(tl: Timeline, now: datetime, *, until: datetime | None = None) -> list[i18n.Msg | str]:
+    """The briefing's list of what happens next, as each step's message (its stored English when it carries none).
 
     Today's remaining steps up to ``until`` (default: the next local midnight), in time order. The daily briefing send
     itself is not listed (it is how the occupant is reading this).
@@ -436,7 +436,12 @@ def operations_lines(tl: Timeline, now: datetime, *, until: datetime | None = No
         for s in tl.steps
         if s.ts >= now - timedelta(minutes=1) and s.ts < end and s.kind != StepKind.BRIEFING_SEND and s.status != "done"
     ]
-    return [f"  • {step_text(s, lang)}" for s in steps[:_OPERATIONS_MAX_STEPS]]
+    return [s.msg if s.msg is not None else s.text for s in steps[:_OPERATIONS_MAX_STEPS]]
+
+
+def operations_lines(tl: Timeline, now: datetime, *, until: datetime | None = None, lang: str = "en") -> list[str]:
+    """``operations_msgs`` as bulleted text lines in ``lang`` (the coordinator's ``timeline_operations_lines``)."""
+    return [f"  • {render_msg(m, lang)}" for m in operations_msgs(tl, now, until=until)]
 
 
 # ---------------------------------------------------------------------------

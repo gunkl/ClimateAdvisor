@@ -526,3 +526,13 @@ def test_committed_budgets_cover_common_keys():
     english = {k for langs in checks.catalogs_by_area().values() for k in langs.get("en", {})}
     assert budgets and all(k in english for k in budgets)
     assert any(k.startswith("common.") for k in budgets)
+
+
+def test_script_view_closes_on_any_script_end_tag_form():
+    """CodeQL py/bad-tag-filter: ``</script >`` and ``</SCRIPT foo>`` end an inline script too."""
+    from pathlib import Path
+
+    html = '<p>x</p><script>var a = "in";</script ><p>after</p><SCRIPT>var b = 1;</SCRIPT x>'
+    view = checks._script_view(Path("page.html"), html)  # noqa: SLF001
+    assert '"in"' in view and "var b" in view
+    assert "after" not in view

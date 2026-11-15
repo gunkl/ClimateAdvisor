@@ -818,7 +818,7 @@
   },
   "exceptions": {
     "unknown_zone": {
-      "message": "Onbekende of niet geladen Climate Advisor-zone entry_id ‘{entry_id}’. Controleer onder Instellingen > Apparaten & diensten de juiste zone."
+      "message": "Onbekende of niet geladen Climate Advisor-zone entry_id {entry_id}. Controleer onder Instellingen > Apparaten & diensten de juiste zone."
     }
   }
 }

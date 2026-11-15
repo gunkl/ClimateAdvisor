@@ -423,7 +423,7 @@ def _script_view(path: Path, text: str) -> str:
     if path.suffix == ".js":
         return _strip_js_comments(text)
     out = list(_blank(text))
-    for m in re.finditer(r"<script\b(?P<attrs>[^>]*)>(?P<body>.*?)</script>", text, flags=re.S | re.I):
+    for m in re.finditer(r"<script\b(?P<attrs>[^>]*)>(?P<body>.*?)</script\b[^>]*>", text, flags=re.S | re.I):
         if "src=" in m.group("attrs").lower():
             continue
         out[m.start("body") : m.end("body")] = text[m.start("body") : m.end("body")]

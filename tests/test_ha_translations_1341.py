@@ -255,7 +255,7 @@ class TestExceptionAndServices:
         assert err.value.translation_key == "unknown_zone"
         assert err.value.translation_placeholders == {"entry_id": "nope"}
         message = _STRINGS["exceptions"]["unknown_zone"]["message"]
-        assert message.format(entry_id="nope").startswith("Unknown or unloaded Climate Advisor zone entry_id 'nope'.")
+        assert message.format(entry_id="nope").startswith("Unknown or unloaded Climate Advisor zone entry_id nope.")
 
     def test_services_yaml_holds_no_text(self):
         text = (_COMPONENT / "services.yaml").read_text(encoding="utf-8")

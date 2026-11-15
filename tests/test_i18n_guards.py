@@ -522,3 +522,13 @@ def test_budget_for_an_unknown_key_is_an_error(memory, tmp_path):
 def test_committed_budgets_cover_common_keys():
     budgets = checks.load_budgets()
     assert budgets and all(k.startswith("common.") for k in budgets)
+
+
+def test_script_view_closes_on_any_script_end_tag_form():
+    """CodeQL py/bad-tag-filter: ``</script >`` and ``</SCRIPT foo>`` end an inline script too."""
+    from pathlib import Path
+
+    html = '<p>x</p><script>var a = "in";</script ><p>after</p><SCRIPT>var b = 1;</SCRIPT x>'
+    view = checks._script_view(Path("page.html"), html)  # noqa: SLF001
+    assert '"in"' in view and "var b" in view
+    assert "after" not in view

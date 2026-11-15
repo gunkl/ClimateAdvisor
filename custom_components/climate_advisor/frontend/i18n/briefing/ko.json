@@ -1,5 +1,6 @@
 {
   "briefing.band": "{lo}–{hi}",
+  "briefing.bullet": "  • {text}",
   "briefing.close_when": "{already, select, yes {지금} other {{at}}}",
   "briefing.cold.away": "추운 날이고 집이 비어 있어서, 아래의 외출 설정이 적용됩니다.",
   "briefing.cold.bedtime": "취침 시간에는 {target}로 낮추겠습니다.",
@@ -50,6 +51,7 @@
   "briefing.leaving.home_heat": "외출하시면 약 {minutes, plural, other {#분}} 후 {target}로 낮추겠습니다. 돌아오시면 바로 따뜻하게 데우며, 외출 시간에 따라 20~30분 걸립니다.",
   "briefing.leaving.vacation_band": "휴가 중에는 집을 휴가 온도({band})로 유지합니다. 돌아오시면 쾌적 온도로 복원합니다.",
   "briefing.leaving.vacation_deep": "휴가 중에는 에너지를 아끼기 위해 더 깊은 절약 온도로 집을 유지합니다. 돌아오시면 쾌적 온도로 복원합니다.",
+  "briefing.lines": "{first}\n{rest}",
   "briefing.mild.air_wont_help": "온화한 날입니다. 바깥 공기로는 집이 따뜻해지지 않으므로, 온도 조절기가 {band} 범위를 유지하고 벗어나면 개입합니다.",
   "briefing.mild.away": "온화한 날이고 집이 비어 있어서, 아래의 외출 설정이 적용됩니다.",
   "briefing.mild.close_now": "지금 창문을 닫으세요. 바깥이 이미 실내보다 따뜻해졌습니다. 오늘 밤 실내 온도가 {floor} 아래로 내려가면 난방이 자동으로 다시 켜집니다.",

@@ -1,5 +1,6 @@
 {
   "briefing.band": "{lo}–{hi}",
+  "briefing.bullet": "  • {text}",
   "briefing.close_when": "{already, select, yes {今すぐ} other {{at}}}",
   "briefing.cold.away": "寒い日ですが、家は無人のため、以下の外出時設定が適用されます。",
   "briefing.cold.bedtime": "就寝時には{target}まで下げます。",
@@ -50,6 +51,7 @@
   "briefing.leaving.home_heat": "外出される場合、約{minutes, plural, other {#分}}後に{target}まで下げます。お帰りになったらすぐに暖めます。留守にしていた時間にもよりますが、20～30分ほどかかります。",
   "briefing.leaving.vacation_band": "バケーション中は、家をバケーション用の温度（{band}）に保ちます。快適な温度はお帰りの際に戻します。",
   "briefing.leaving.vacation_deep": "バケーション中は、より深い省エネ設定で家を保ち、エネルギーを節約します。快適な温度はお帰りの際に戻します。",
+  "briefing.lines": "{first}\n{rest}",
   "briefing.mild.air_wont_help": "穏やかな日です。外気では家は暖まらないため、サーモスタットが{band}を維持し、ずれた場合は作動します。",
   "briefing.mild.away": "穏やかな日ですが、家は無人のため、以下の外出時設定が適用されます。",
   "briefing.mild.close_now": "今すぐ窓を閉めてください。屋外がすでに室温より暖かくなっています。今夜室温が{floor}を下回った場合は、暖房が自動的に再開します。",

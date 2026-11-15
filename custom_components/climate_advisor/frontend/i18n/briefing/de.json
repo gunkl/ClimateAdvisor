@@ -1,5 +1,6 @@
 {
   "briefing.band": "{lo}–{hi}",
+  "briefing.bullet": "  • {text}",
   "briefing.close_when": "{already, select, yes {jetzt} other {{at}}}",
   "briefing.cold.away": "Ein kalter Tag und das Haus ist leer, deshalb gelten die unten aufgeführten Abwesenheitseinstellungen.",
   "briefing.cold.bedtime": "Zur Schlafenszeit senke ich auf {target} ab.",
@@ -50,6 +51,7 @@
   "briefing.leaving.home_heat": "Wenn du aus dem Haus gehst, senke ich nach etwa {minutes, plural, one {# Minute} other {# Minuten}} auf {target} ab. Wenn du zurückkommst, heize ich sofort wieder auf – das dauert 20 bis 30 Minuten, je nachdem, wie lange du weg warst.",
   "briefing.leaving.vacation_band": "Solange du im Urlaub bist, halte ich das Haus auf deinen Urlaubstemperaturen ({band}). Die Komforttemperaturen werden wiederhergestellt, wenn du zurückkommst.",
   "briefing.leaving.vacation_deep": "Solange du im Urlaub bist, halte ich das Haus auf einer tieferen Energiespar-Absenkung, um Energie zu sparen. Die Komforttemperaturen werden wiederhergestellt, wenn du zurückkommst.",
+  "briefing.lines": "{first}\n{rest}",
   "briefing.mild.air_wont_help": "Ein milder Tag. Die Außenluft wird das Haus nicht erwärmen, daher hält der Thermostat {band} und greift ein, wenn es abweicht.",
   "briefing.mild.away": "Ein milder Tag und das Haus ist leer, deshalb gelten die unten aufgeführten Abwesenheitseinstellungen.",
   "briefing.mild.close_now": "Schließe jetzt – draußen ist es bereits wärmer als drinnen. Fällt das Haus heute Nacht unter {floor}, springt die Heizung automatisch an.",

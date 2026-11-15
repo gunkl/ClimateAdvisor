@@ -1,5 +1,6 @@
 {
   "briefing.band": "{lo}–{hi}",
+  "briefing.bullet": "  • {text}",
   "briefing.close_when": "{already, select, yes {now} other {{at}}}",
   "briefing.cold.away": "Een koude dag en het huis is leeg, dus de instellingen voor afwezigheid hieronder zijn van toepassing.",
   "briefing.cold.bedtime": "Voor het slapengaan verlaag ik naar {target}.",
@@ -50,6 +51,7 @@
   "briefing.leaving.home_heat": "Als je weggaat, verlaag ik na ongeveer {minutes, plural, one {# minuut} other {# minuten}} naar {target}. Als je terugkomt, warm ik alles meteen weer op — dat duurt 20 tot 30 minuten, afhankelijk van hoe lang je weg bent geweest.",
   "briefing.leaving.vacation_band": "Zolang je op vakantie bent, houd ik het huis op je vakantietemperaturen ({band}). De comforttemperaturen worden hersteld wanneer je terugkomt.",
   "briefing.leaving.vacation_deep": "Zolang je op vakantie bent, houd ik het huis op een diepere energiebesparende verlaging. De comforttemperaturen worden hersteld wanneer je terugkomt.",
+  "briefing.lines": "{first}\n{rest}",
   "briefing.mild.air_wont_help": "Een milde dag. Buitenlucht warmt het huis niet op, dus de thermostaat houdt {band} aan en grijpt in als het afwijkt.",
   "briefing.mild.away": "Een milde dag en het huis is leeg, dus de instellingen voor afwezigheid hieronder zijn van toepassing.",
   "briefing.mild.close_now": "Sluit de ramen nu — buiten is het al warmer dan binnen. Zakt het huis vannacht onder {floor}, dan gaat de verwarming automatisch weer aan.",

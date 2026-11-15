@@ -1,5 +1,6 @@
 {
   "briefing.band": "{lo}–{hi}",
+  "briefing.bullet": "  • {text}",
   "briefing.close_when": "{already, select, yes {now} other {{at}}}",
   "briefing.cold.away": "Soğuk bir gün ve ev boş, bu yüzden aşağıdaki evde yokken ayarları geçerli.",
   "briefing.cold.bedtime": "Yatmadan önce sıcaklığı {target} değerine düşüreceğim.",
@@ -50,6 +51,7 @@
   "briefing.leaving.home_heat": "Dışarı çıkarsanız yaklaşık {minutes, plural, one {# dakika} other {# dakika}} sonra {target} değerine düşürürüm. Döndüğünüzde evi hemen ısıtırım — ne kadar süre yok olduğunuza bağlı olarak 20 ila 30 dakika sürer.",
   "briefing.leaving.vacation_band": "Tatildeyken evi tatil sıcaklıklarında ({band}) tutuyorum. Döndüğünüzde konfor sıcaklıkları geri gelecek.",
   "briefing.leaving.vacation_deep": "Tatildeyken evi enerji tasarrufu için daha derin bir düşürmede tutuyorum. Döndüğünüzde konfor sıcaklıkları geri gelecek.",
+  "briefing.lines": "{first}\n{rest}",
   "briefing.mild.air_wont_help": "Ilıman bir gün. Dış hava evi ısıtmaz, bu yüzden termostat {band} aralığını korur ve kayarsa devreye girer.",
   "briefing.mild.away": "Ilıman bir gün ve ev boş, bu yüzden aşağıdaki evde yokken ayarları geçerli.",
   "briefing.mild.close_now": "Pencereleri şimdi kapatın — dışarısı zaten içeriden daha sıcak. Ev bu gece {floor} altına inerse ısıtma otomatik olarak yeniden devreye girer.",

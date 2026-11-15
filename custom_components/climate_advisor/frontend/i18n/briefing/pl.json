@@ -1,5 +1,6 @@
 {
   "briefing.band": "{lo}–{hi}",
+  "briefing.bullet": "  • {text}",
   "briefing.close_when": "{already, select, yes {now} other {{at}}}",
   "briefing.cold.away": "Zimny dzień, a dom jest pusty, więc obowiązują poniższe ustawienia na czas nieobecności.",
   "briefing.cold.bedtime": "Na noc obniżę temperaturę do {target}.",
@@ -50,6 +51,7 @@
   "briefing.leaving.home_heat": "Jeśli wyjdziesz, po około {minutes, plural, one {# minucie} few {# minutach} many {# minutach} other {# minutach}} obniżę temperaturę do {target}. Gdy wrócisz, od razu dogrzeję dom — zajmie to 20–30 minut, zależnie od długości nieobecności.",
   "briefing.leaving.vacation_band": "Gdy jesteś na wakacjach, utrzymuję w domu temperatury wakacyjne ({band}). Temperatura komfortu wróci po Twoim powrocie.",
   "briefing.leaving.vacation_deep": "Gdy jesteś na wakacjach, utrzymuję w domu głębsze obniżenie temperatury dla oszczędzania energii. Temperatura komfortu wróci po Twoim powrocie.",
+  "briefing.lines": "{first}\n{rest}",
   "briefing.mild.air_wont_help": "Łagodny dzień. Powietrze z zewnątrz nie ogrzeje domu, więc termostat utrzymuje {band} i reaguje, gdy temperatura odbiega.",
   "briefing.mild.away": "Łagodny dzień, a dom jest pusty, więc obowiązują poniższe ustawienia na czas nieobecności.",
   "briefing.mild.close_now": "Zamknij okna teraz — na zewnątrz jest już cieplej niż w domu. Jeśli w nocy temperatura w domu spadnie poniżej {floor}, ogrzewanie włączy się automatycznie.",

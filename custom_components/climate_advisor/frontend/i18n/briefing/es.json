@@ -1,5 +1,6 @@
 {
   "briefing.band": "{lo}–{hi}",
+  "briefing.bullet": "  • {text}",
   "briefing.close_when": "{already, select, yes {ya} other {{at}}}",
   "briefing.cold.away": "Día frío y casa vacía, así que se aplican los ajustes de ausencia que verás más abajo.",
   "briefing.cold.bedtime": "A la hora de dormir bajaré la temperatura a {target}.",
@@ -50,6 +51,7 @@
   "briefing.leaving.home_heat": "Si sales, bajaré a {target} pasados unos {minutes, plural, one {# minuto} many {# de minutos} other {# minutos}}. Cuando vuelvas, calentaré la casa enseguida: tardará de 20 a 30 minutos, según el tiempo que hayas estado fuera.",
   "briefing.leaving.vacation_band": "Mientras estás de vacaciones, mantengo la casa a tus temperaturas de vacaciones ({band}). Las temperaturas de confort se restablecerán cuando vuelvas.",
   "briefing.leaving.vacation_deep": "Mientras estás de vacaciones, mantengo la casa con un ahorro más profundo para gastar menos energía. Las temperaturas de confort se restablecerán cuando vuelvas.",
+  "briefing.lines": "{first}\n{rest}",
   "briefing.mild.air_wont_help": "Día templado. El aire exterior no va a calentar la casa, así que el termostato mantiene {band} y actúa si se desvía.",
   "briefing.mild.away": "Día templado y casa vacía, así que se aplican los ajustes de ausencia que verás más abajo.",
   "briefing.mild.close_now": "Cierra ahora: el exterior ya está más cálido que el interior. Si la casa baja de {floor} esta noche, la calefacción se enciende sola.",

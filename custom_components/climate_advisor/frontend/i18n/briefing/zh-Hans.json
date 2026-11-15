@@ -1,5 +1,6 @@
 {
   "briefing.band": "{lo}–{hi}",
+  "briefing.bullet": "  • {text}",
   "briefing.close_when": "{already, select, yes {现在} other {{at}}}",
   "briefing.cold.away": "今天很冷，而且家中无人，因此将采用下方的离家设置。",
   "briefing.cold.bedtime": "就寝时我会将温度降至{target}。",
@@ -50,6 +51,7 @@
   "briefing.leaving.home_heat": "如果您出门，大约{minutes, plural, other {#分钟}}后我会降至{target}。您回来时，我会立即升温——视您外出时间长短，大约需要20到30分钟。",
   "briefing.leaving.vacation_band": "您度假期间，我会将房子保持在您设定的度假温度（{band}）。您回来后会恢复舒适温度。",
   "briefing.leaving.vacation_deep": "您度假期间，我会使用更深度的节能温度来节省能源。您回来后会恢复舒适温度。",
+  "briefing.lines": "{first}\n{rest}",
   "briefing.mild.air_wont_help": "温和的一天。室外空气无法让房子变暖，因此恒温器保持{band}，偏离时会介入。",
   "briefing.mild.away": "今天天气温和，而且家中无人，因此将采用下方的离家设置。",
   "briefing.mild.close_now": "请立即关窗——室外已经比室内暖和了。如果今晚室温降到{floor}以下，暖气会自动重新开启。",

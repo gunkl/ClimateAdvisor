@@ -1,5 +1,6 @@
 {
   "briefing.band": "{lo}–{hi}",
+  "briefing.bullet": "  • {text}",
   "briefing.close_when": "{already, select, yes {maintenant} other {{at}}}",
   "briefing.cold.away": "Journée froide et maison vide : ce sont donc les réglages d’absence ci-dessous qui s’appliquent.",
   "briefing.cold.bedtime": "Au coucher, je baisserai la température à {target}.",
@@ -50,6 +51,7 @@
   "briefing.leaving.home_heat": "Si vous sortez, je baisserai à {target} au bout d’environ {minutes, plural, one {# minute} many {# de minutes} other {# minutes}}. À votre retour, je relancerai le chauffage — comptez 20 à 30 minutes selon la durée de votre absence.",
   "briefing.leaving.vacation_band": "Pendant vos vacances, je maintiens la maison aux températures de vacances ({band}). Les températures de confort seront rétablies à votre retour.",
   "briefing.leaving.vacation_deep": "Pendant vos vacances, je maintiens la maison à une température réduite plus basse pour économiser davantage d’énergie. Les températures de confort seront rétablies à votre retour.",
+  "briefing.lines": "{first}\n{rest}",
   "briefing.mild.air_wont_help": "Journée douce. L’air extérieur ne réchauffera pas la maison : le thermostat maintient donc {band} et intervient en cas de dérive.",
   "briefing.mild.away": "Journée douce et maison vide : ce sont donc les réglages d’absence ci-dessous qui s’appliquent.",
   "briefing.mild.close_now": "Fermez maintenant — l’air extérieur est déjà plus chaud que l’intérieur. Si la maison descend sous {floor} cette nuit, le chauffage se remet en marche automatiquement.",

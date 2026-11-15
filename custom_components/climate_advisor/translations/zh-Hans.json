@@ -331,14 +331,18 @@
           "days": "日期",
           "start": "开始",
           "end": "结束",
-          "delete_schedule": "删除此计划"
+          "delete_schedule": "删除此计划",
+          "applies_to": "适用于",
+          "condition_entity": "仅在此项开启时"
         },
         "data_description": {
           "name": "此分时电价计划的简短名称（例如“夏季高峰”）。",
           "days": "此计划适用的星期。至少选择一天。",
           "start": "高价时段开始的时间。Climate Advisor 会在此时间之前开始预调节。",
           "end": "高价时段结束的时间。必须与开始时间不同。",
-          "delete_schedule": "开启并提交即可删除此计划。"
+          "delete_schedule": "开启并提交即可删除此计划。",
+          "applies_to": "此计划在哪些日子进行预调节。如果供暖不是电力的（例如燃气炉），请选择「仅制冷」：这时在高价时段前预热不会节省任何费用。默认：制冷和制热。",
+          "condition_entity": "可选。只有在此二进制传感器、input boolean 或开关处于开启状态时，计划才会生效（例如「用电高峰季」辅助元素）。留空则始终生效。如果该实体不存在或不可用，计划仍然生效。"
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "未配置",
     "token_status_configured": "已配置",
     "token_status_not_configured": "未配置",
-    "schedule_add_new": "+ 添加新计划"
+    "schedule_add_new": "+ 添加新计划",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}、仅制冷)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}、仅制热)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}、仅在 {entity} 开启时)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}、仅制冷、仅在 {entity} 开启时)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}、仅制热、仅在 {entity} 开启时)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "热模型",
         "weather_bias": "天气预报偏差",
         "suggestions": "已忽略的建议"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "制冷和制热",
+        "cool": "仅制冷",
+        "heat": "仅制热"
       }
     }
   },

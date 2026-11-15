@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "TOU ön koşullandırma aralığı bitti",
   "activity.tou_window_hvac_ran": "HVAC dönem boyunca yine de çalıştı — tahmin yetersiz kaldı",
   "activity.tou_window_none_needed": "bugün ön koşullandırma gerekmiyor (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "TOU yüksek maliyetli dönem atlandı",
   "activity.unknown_paren": "(bilinmiyor)",
   "activity.version_changed": "Sürüm değişti: {old} -> {new}",
   "activity.warm_day_comfort_gap": "Sıcak gün konfor açığı -- kapanmadan önce ısıtma",

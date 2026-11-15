@@ -441,9 +441,13 @@ from .scheduler import (
     COST_TAG_HIGH,
     Schedule,
     TOUPhase,
+    filter_schedules,
     resolve_active_schedules,
     resolve_tou_away_vacation_phase,
     resolve_tou_phase,
+    schedule_from_dict,
+    schedule_skip_list,
+    schedule_skip_sentence,
 )
 from .setpoint_combinations import (
     BAND_LABELS,
@@ -914,6 +918,7 @@ _AUTO_STATUS_KEYS: Final[dict[str, str]] = {
     "active_vacation": "status.auto.active_vacation",
     "active_away": "status.auto.active_away",
     "active_guest": "status.auto.active_guest",
+    "tou_skipped": "status.auto.tou_skipped",  # Issues #1558/#1565
     "active": "status.auto.active",
 }
 
@@ -1278,7 +1283,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Activity Record event — True while a resolved high-cost schedule window
         # currently covers `now`, reset when it no longer does, so the event fires once
         # per window-becomes-active transition rather than once every 30-min cycle.
-        self._tou_active_window_notified: bool = False
+        self._tou_active_window_notified: Any = False  # Issues #1558/#1565: the (ids, applied) key last recorded
+        # Issues #1558/#1565: this cycle's schedule filter (which schedules apply, which are skipped and why), the
+        # skipped schedules' active window (display only: never read by banking), the last filter state logged, the
+        # stored records that could not be read, and the condition-entity listeners.
+        self._tou_schedule_filter: Any = None
+        self._tou_skipped_resolution: Any = None
+        self._tou_filter_logged: tuple[Any, ...] | None = None
+        self._tou_unreadable_logged: tuple[Any, ...] | None = None
+        self._unsub_tou_condition: list[Callable[[], None]] = []
         # Target-band single-choke-point resolution (Issue #514): resolved once per cycle
         # by _resolve_target_band_schedule(), cached here, consumed by the main-cycle and
         # daily-briefing calls to _build_predicted_indoor_future() via band_schedule=.
@@ -1926,6 +1939,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Listeners: occupancy toggles
         self._subscribe_occupancy_listeners()
+        # Issue #1565: each TOU schedule's enable entity (a change re-resolves the schedules at once)
+        self._subscribe_tou_condition_listeners()
         _restored_engine_mode = self.automation_engine._occupancy_mode
         self._occupancy_mode = self._compute_occupancy_mode()
         # Issue #1354: the live toggles win over a restored mode (the engine is single, no shadow engine to sync).
@@ -3499,6 +3514,109 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     )
                 )
 
+    def _subscribe_tou_condition_listeners(self) -> None:
+        """Issue #1565: listen to every TOU schedule's enable entity (schedules change only through a reload)."""
+        schedules = self._stored_schedules(self.config.get("schedules") or [])
+        entities = sorted({s.condition_entity for s in schedules if s.condition_entity})
+        for entity_id in entities:
+            self._unsub_tou_condition.append(
+                async_track_state_change_event(
+                    self.hass, entity_id, self._zone_scoped(self._async_tou_condition_changed)
+                )
+            )
+        if entities:
+            _LOGGER.info("TOU schedule enable entities watched: %s", entities)
+
+    def _unsubscribe_tou_condition_listeners(self) -> None:
+        for unsub in getattr(self, "_unsub_tou_condition", None) or []:
+            unsub()
+        self._unsub_tou_condition = []
+
+    async def _async_tou_condition_changed(self, event: Event) -> None:
+        """Issue #1565: a schedule's enable entity changed -- act now, not at the next 30-minute cycle.
+
+        Occupant view: the peak-season helper turning ON during the lead time starts the pre-cool/pre-heat within
+        seconds (the 5-minute bank check only opens a bank it already knows about), and during an Away/Vacation
+        high-cost period it widens the band at once; turning OFF during a bank (any occupancy) or a widened period
+        writes the regular band now instead of keeping the house banked for up to 30 more minutes. A change of
+        another schedule's entity never ends or rewrites a healthy bank. Uses the paths that already do each job:
+        ``_apply_tou_schedule`` (the bank check's write) and the regular classification pass (the #1405 bank end).
+        """
+        old = event.data.get("old_state")
+        new = event.data.get("new_state")
+        if (getattr(old, "state", None)) == (getattr(new, "state", None)):
+            return  # attributes only
+        if self.automation_engine is None or self._current_classification is None:
+            return
+        if self._suppress_during_startup_coalescing("time-of-use schedule enable entity"):
+            return
+        now = dt_util.now()
+        before = getattr(self, "_tou_phase_resolution", None)
+        bank_before = self._tou_bank_in_force(now) is not None
+        widening_before = self._tou_av_widening_active(before, now)
+        _LOGGER.info(
+            "TOU schedule enable entity changed: entity=%s %s -> %s; re-resolving the schedules",
+            event.data.get("entity_id"),
+            getattr(old, "state", None),
+            getattr(new, "state", None),
+        )
+        self._resolve_tou_schedule_state()
+        after = self._tou_phase_resolution
+        skipped_ids = {s.id for s, _r in (getattr(self._tou_schedule_filter, "skipped", None) or ())}
+        # Only the schedule that was banking/widening becoming skipped ends it -- not another schedule's entity, and
+        # not a resolve that lands in a lead-window gap (the regular cycle handles those, as before).
+        own_schedule_skipped = before is not None and getattr(before, "schedule_id", None) in skipped_ids
+        widening_after = self._tou_av_widening_active(after, now)
+        if after is not None and after.phase == TOUPhase.PRECONDITIONING:
+            same_bank = (
+                before is not None
+                and before.phase == TOUPhase.PRECONDITIONING
+                and (before.schedule_id, before.schedule_start) == (after.schedule_id, after.schedule_start)
+            )
+            if not (same_bank and self._thermostat_holds_tou_bank(after)):  # a healthy bank is never rewritten
+                await self._apply_tou_schedule()
+        elif (bank_before or widening_before) and own_schedule_skipped:
+            await self._reapply_classification_after_tou_change()  # the bank/widening stops applying: band now
+        elif widening_after and not widening_before:
+            await self._reapply_classification_after_tou_change()  # an Away/Vacation period starts applying: widen
+        self._push_tou_bank_card_status()
+
+    @staticmethod
+    def _tou_window_in_progress(res: Any, now: datetime) -> bool:
+        """The resolved high-cost period (``schedule_start <= now < window_end``) is under way, per ``res``."""
+        start, end = getattr(res, "schedule_start", None), getattr(res, "window_end", None)
+        try:
+            return start is not None and end is not None and start <= now < end
+        except TypeError:
+            return False
+
+    def _tou_av_widening_active(self, res: Any, now: datetime) -> bool:
+        """An Away/Vacation high-cost period is widening the band right now (Issue #899), per ``res``."""
+        return bool(
+            res is not None
+            and self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+            and (getattr(res, "expansion_f", None) or 0.0) > 0
+            and self._tou_window_in_progress(res, now)
+        )
+
+    async def _reapply_classification_after_tou_change(self) -> None:
+        """The regular cycle's classification pass, run now because the time-of-use bank/widening ended early.
+
+        The same write the next 30-minute cycle would make (Issue #1405 bank end; Issue #1565 enable entity off).
+        """
+        await decide(
+            self,
+            self.automation_engine.apply_classification,
+            self._current_classification,
+            predicted_indoor=self.control_predicted_indoor(),
+            indoor_temp=self._get_indoor_temp(),
+            tou_bank_owns_setpoint=self._tou_bank_owns_setpoint(),
+            nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
+            nat_vent_cutoff_already_reached=bool(
+                (getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff_already_reached", False)
+            ),
+        )
+
     def _unsubscribe_occupancy_listeners(self) -> None:
         """Unsubscribe all occupancy toggle listeners."""
         for unsub in self._unsub_occupancy_listeners:
@@ -3602,18 +3720,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             return
         self._resolve_tou_schedule_state()  # the window has started: phase NONE, the engine's bank window lapses
-        await decide(
-            self,
-            engine.apply_classification,
-            c,
-            predicted_indoor=self.control_predicted_indoor(),
-            indoor_temp=self._get_indoor_temp(),
-            tou_bank_owns_setpoint=self._tou_bank_owns_setpoint(),
-            nat_vent_cutoff=(getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff"),
-            nat_vent_cutoff_already_reached=bool(
-                (getattr(self, "_nat_vent_plan", None) or {}).get("nat_vent_cutoff_already_reached", False)
-            ),
-        )
+        await self._reapply_classification_after_tou_change()
         self._push_tou_bank_card_status()
 
     def _tou_precondition_push(
@@ -3689,13 +3796,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now = dt_util.now()
 
         # --- Responsibility 1: live expansion state ---
-        window_active = (
-            is_away_vacation
-            and resolution is not None
-            and resolution.schedule_start is not None
-            and resolution.window_end is not None
-            and resolution.schedule_start <= now < resolution.window_end
-        )
+        window_active = is_away_vacation and resolution is not None and self._tou_window_in_progress(resolution, now)
         if self.automation_engine is not None:
             # Issue #1066 (F1): tell the engine whether a TOU precondition (banking toward the
             # cost window) owns the thermostat, so the comfort-edge selector defers until the
@@ -9586,8 +9687,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._sync_tou_away_vacation_state()
             return
 
-        schedules = [Schedule(**s) for s in raw_schedules]
+        schedules = self._stored_schedules(raw_schedules)
         now = dt_util.now()
+        # Issues #1558/#1565: the one filter. Every resolver below, the chart, Status and the Activity record read
+        # only the schedules that apply; the skipped ones are resolved separately, for display only.
+        _filter = filter_schedules(schedules, self._tou_condition_state, self._current_classification.hvac_mode)
+        self._tou_schedule_filter = _filter
+        self._log_tou_schedule_filter(_filter)
+        schedules = list(_filter.kept)
+        self._tou_skipped_resolution = (
+            resolve_active_schedules([s for s, _reason in _filter.skipped], now) if _filter.skipped else None
+        )
         self._tou_active_cost_resolution = resolve_active_schedules(schedules, now)
         # Issue #1230 R6b: the bank's lead time (and the away/vacation depth) read the PRIMARY engine's rates.
         thermal_model = self.control_thermal_model(self._thermal_model if self.automation_engine else None)
@@ -9626,6 +9736,63 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         self._sync_tou_away_vacation_state()
         self._maybe_emit_tou_active_window_event()
+
+    def _stored_schedules(self, raw_schedules: list[Any]) -> list[Schedule]:
+        """The stored schedules as ``Schedule`` objects (Issues #1558/#1565: tolerant of fields this build lacks).
+
+        A record that cannot be read (a required field missing) is left out with a WARNING once per set of
+        unreadable records, instead of failing the whole update cycle the way ``Schedule(**stored)`` did.
+        """
+        out: list[Schedule] = []
+        unreadable: list[Any] = []
+        for raw in raw_schedules:
+            schedule = schedule_from_dict(raw)
+            if schedule is None:
+                unreadable.append(raw.get("id") if isinstance(raw, dict) else repr(raw)[:40])
+            else:
+                out.append(schedule)
+        key = tuple(unreadable)
+        if key != getattr(self, "_tou_unreadable_logged", None):
+            self._tou_unreadable_logged = key
+            if unreadable:
+                _LOGGER.warning("TOU schedule skipped: stored record unreadable (a required field is missing): %s", key)
+        return out
+
+    def _tou_condition_state(self, entity_id: str) -> str | None:
+        """Issue #1565: a schedule's enable entity's state (None when the entity does not exist). Read-only."""
+        state = self.hass.states.get(entity_id)
+        return state.state if state is not None else None
+
+    def _log_tou_schedule_filter(self, schedule_filter: Any) -> None:
+        """Issues #1558/#1565: log the schedules skipped and failed open, once each time that set changes."""
+        names = {s.id: s.name for s in (*schedule_filter.kept, *(s for s, _r in schedule_filter.skipped))}
+        key = (
+            tuple((s.id, reason) for s, reason in schedule_filter.skipped),
+            tuple(schedule_filter.failed_open),
+        )
+        if key == getattr(self, "_tou_filter_logged", None):
+            return
+        self._tou_filter_logged = key
+        for schedule, reason in schedule_filter.skipped:
+            _LOGGER.info(
+                "TOU schedule skipped: schedule=%s reason=%s (%s) entity=%s state=%s",
+                schedule.name,
+                reason,
+                schedule_skip_sentence(reason),
+                schedule.condition_entity,
+                self._tou_condition_state(schedule.condition_entity) if schedule.condition_entity else None,
+            )
+        for schedule_id in schedule_filter.failed_open:
+            entity = next((s.condition_entity for s in schedule_filter.kept if s.id == schedule_id), None)
+            _LOGGER.warning(
+                "TOU schedule condition unreadable: schedule=%s entity=%s state=%s -- the schedule still applies "
+                "(fails open)",
+                names.get(schedule_id, schedule_id),
+                entity,
+                self._tou_condition_state(entity) if entity else None,
+            )
+        if not schedule_filter.skipped and not schedule_filter.failed_open:
+            _LOGGER.info("TOU schedules: every configured schedule applies")
 
     def _outdoor_forecast_at(self, when: datetime) -> float | None:
         """Outdoor temperature expected at ``when`` (Issue #1517): the hourly forecast there when it reaches that
@@ -9705,29 +9872,52 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         transition, matching this project's Observability Requirements.
         """
         resolution = self._tou_active_cost_resolution
-        is_active_high = resolution is not None and resolution.cost_tag == COST_TAG_HIGH
-        if not is_active_high:
+        skipped = getattr(self, "_tou_skipped_resolution", None)
+        applied = resolution is not None and resolution.cost_tag == COST_TAG_HIGH
+        # Issues #1558/#1565: a window whose every covering schedule is skipped is recorded too, with why.
+        shown = resolution if applied else skipped
+        if shown is None or shown.cost_tag != COST_TAG_HIGH:
             self._tou_active_window_notified = False
             return
-        if self._tou_active_window_notified:
+        # Keyed on the covering schedules AND whether they apply, so a window that goes from skipped to applying
+        # (the enable entity turns on mid-window) is recorded again.
+        # Only the HIGH schedules covering now: a low-tag schedule starting or ending mid-period is not a new period.
+        tags = {
+            s.id: s.cost_tag
+            for s in (
+                *(getattr(self._tou_schedule_filter, "kept", None) or ()),
+                *(s for s, _r in (getattr(self._tou_schedule_filter, "skipped", None) or ())),
+            )
+        }
+        key = (tuple(i for i in shown.active_schedule_ids if tags.get(i, COST_TAG_HIGH) == COST_TAG_HIGH), applied)
+        if self._tou_active_window_notified == key:
             return
-        self._tou_active_window_notified = True
+        self._tou_active_window_notified = key
         mode = self._current_classification.hvac_mode if self._current_classification else None
-        preconditioned = mode in ("heat", "cool")
+        preconditioned = applied and mode in ("heat", "cool")
+        reasons = {
+            s.id: (reason, s.condition_entity)
+            for s, reason in (getattr(self._tou_schedule_filter, "skipped", None) or ())
+            if s.id in shown.active_schedule_ids
+        }
         _LOGGER.info(
-            "TOU schedule window active: schedule_ids=%s preconditioned=%s hvac_mode=%s",
-            resolution.active_schedule_ids,
+            "TOU schedule window active: schedule_ids=%s applied=%s preconditioned=%s hvac_mode=%s skipped=%s",
+            shown.active_schedule_ids,
+            applied,
             preconditioned,
             mode,
+            {k: v[0] for k, v in reasons.items()} if not applied else {},
         )
-        self._emit_event(
-            "tou_schedule_window_active",
-            {
-                "active_schedule_ids": list(resolution.active_schedule_ids),
-                "preconditioned": preconditioned,
-                "hvac_mode": mode,
-            },
-        )
+        payload: dict[str, Any] = {
+            "active_schedule_ids": list(shown.active_schedule_ids),
+            "preconditioned": preconditioned,
+            "hvac_mode": mode,
+        }
+        if not applied:
+            payload["skipped"] = [
+                {"schedule_id": sid, "reason": reason, "entity": entity} for sid, (reason, entity) in reasons.items()
+            ]
+        self._emit_event("tou_schedule_window_active", payload)
 
     def _tou_bank_owns_setpoint(self) -> bool:
         """Issue #1393/#1395: this cycle's resolved time-of-use phase is ``PRECONDITIONING`` (Home/Guest bank, or the
@@ -17853,7 +18043,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return _status("active_away")
         if self._occupancy_mode == OCCUPANCY_GUEST:
             return _status("active_guest")
+        # Issues #1558/#1565 (lowest priority): a high-cost window whose schedules were all skipped, and why.
+        _tou_skipped = getattr(self, "_tou_skipped_resolution", None)
+        if _tou_skipped is not None and _tou_skipped.cost_tag == COST_TAG_HIGH:
+            _ends = self._format_tou_ends(_tou_skipped.schedule_end)
+            return _status("tou_skipped", ends=msg_of(_ends) or "", reasons=self._tou_skip_reasons(_tou_skipped))
         return _status("active")
+
+    def _tou_skip_reasons(self, skipped_resolution: Any) -> i18n.ListOf:
+        """Issues #1558/#1565: the reason(s) the covering schedules were skipped, worded once (scheduler)."""
+        return schedule_skip_list(
+            (reason, None)
+            for s, reason in (getattr(self._tou_schedule_filter, "skipped", None) or ())
+            if s.id in skipped_resolution.active_schedule_ids
+        )
 
     @staticmethod
     def _pred_archive_key(dt: datetime) -> int:
@@ -19949,6 +20152,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # (F3 occupancy listeners, F4 fan-remote burst, F5 pre-cool trigger; F1/F2/F8
             # handles are in _unsub_listeners below).
             self._unsubscribe_occupancy_listeners()
+            self._unsubscribe_tou_condition_listeners()  # Issue #1565
             self._cancel_fan_remote_burst(reason="shutdown")
             self._cancel_pre_cool_trigger()
             if self._whf_unknown_sensor_cancel is not None:  # Issue #1144

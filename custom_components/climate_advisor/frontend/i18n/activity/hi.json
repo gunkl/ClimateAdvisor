@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "TOU पूर्व-तैयारी अवधि समाप्त",
   "activity.tou_window_hvac_ran": "अवधि में HVAC फिर भी चला — अनुमान कम पड़ा",
   "activity.tou_window_none_needed": "आज पहले से तैयार करने की ज़रूरत नहीं (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "TOU महंगी अवधि छोड़ी गई",
   "activity.unknown_paren": "(अज्ञात)",
   "activity.version_changed": "संस्करण बदला: {old} -> {new}",
   "activity.warm_day_comfort_gap": "गर्म दिन में आराम की कमी -- बंद करने से पहले हीटिंग",

@@ -124,9 +124,12 @@
     sec.hidden = !X;
     if (!X) return;
     var list = X.schedules || [];
-    $('set-tou-body').innerHTML = list.length ? '<div class="scroll-x"><table style="min-width:420px"><thead><tr><th>' + esc(T('tou.name')) + '</th><th>' + esc(T('tou.days')) + '</th><th>' + esc(T('tou.window')) + '</th><th>' + esc(T('tou.cost')) + '</th></tr></thead><tbody>' + list.map(function (s) {
+    $('set-tou-body').innerHTML = list.length ? '<div class="scroll-x"><table style="min-width:560px"><thead><tr><th>' + esc(T('tou.name')) + '</th><th>' + esc(T('tou.days')) + '</th><th>' + esc(T('tou.window')) + '</th><th>' + esc(T('tou.cost')) + '</th><th>' + esc(CAI18N.t('settings.tou_applies_to')) + '</th><th>' + esc(CAI18N.t('settings.tou_condition')) + '</th></tr></thead><tbody>' + list.map(function (s) {
       return '<tr><td><bdi>' + esc(s.name || T('tou.unnamed')) + '</bdi></td><td>' + esc(touDays(s.days || [])) + '</td><td class="num"><bdi>' + esc(touClock(s.start)) + '–' + esc(touClock(s.end)) +
-        '</bdi></td><td>' + esc(s.cost_tag === 'high' ? T('tou.cost_high') : s.cost_tag === 'low' ? T('tou.cost_low') : s.cost_tag || '') + '</td></tr>';
+        '</bdi></td><td>' + esc(s.cost_tag === 'high' ? T('tou.cost_high') : s.cost_tag === 'low' ? T('tou.cost_low') : s.cost_tag || '') +
+        // Issues #1558/#1565: which days it pre-conditions on, and the entity that enables it (blank = always)
+        '</td><td>' + esc(s.applies_to === 'cool' ? CAI18N.t('settings.tou_applies.cool') : s.applies_to === 'heat' ? CAI18N.t('settings.tou_applies.heat') : CAI18N.t('settings.tou_applies.both')) +
+        '</td><td><bdi>' + esc(s.condition_entity || '—') + '</bdi></td></tr>';
     }).join('') + '</tbody></table></div>' : '<div class="empty">' + esc(T('tou.none')) + '</div>';
   }
 

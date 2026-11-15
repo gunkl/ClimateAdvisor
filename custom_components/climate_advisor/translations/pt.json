@@ -331,14 +331,18 @@
           "days": "Dias",
           "start": "Início",
           "end": "Fim",
-          "delete_schedule": "Eliminar este horário"
+          "delete_schedule": "Eliminar este horário",
+          "applies_to": "Aplica-se a",
+          "condition_entity": "Só quando isto estiver ligado"
         },
         "data_description": {
           "name": "Um nome curto para este horário de tarifa (por exemplo, «Ponta de verão»).",
           "days": "Os dias da semana a que este horário se aplica. Selecione pelo menos um.",
           "start": "Quando começa o período de custo elevado. O Climate Advisor começa a pré-condicionar antes desta hora.",
           "end": "Quando termina o período de custo elevado. Tem de ser diferente da hora de início.",
-          "delete_schedule": "Ative e envie para eliminar este horário."
+          "delete_schedule": "Ative e envie para eliminar este horário.",
+          "applies_to": "Os dias em que este horário pré-condiciona a casa. Escolha Só arrefecimento se o seu aquecimento não for elétrico (p. ex., uma caldeira a gás): pré-aquecer antes de um período de custo elevado não poupa nada nesse caso. Predefinição: arrefecimento e aquecimento.",
+          "condition_entity": "Opcional. O horário só se aplica enquanto este sensor binário, input boolean ou interruptor estiver ligado (por exemplo, um auxiliar de «época alta»). Deixe em branco para aplicar sempre. Se a entidade não existir ou estiver indisponível, o horário aplica-se na mesma."
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "Não configurado",
     "token_status_configured": "configurado",
     "token_status_not_configured": "não configurado",
-    "schedule_add_new": "+ Adicionar novo horário"
+    "schedule_add_new": "+ Adicionar novo horário",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}, só arrefecimento)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}, só aquecimento)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}, só quando {entity} estiver ligado)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, só arrefecimento, só quando {entity} estiver ligado)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, só aquecimento, só quando {entity} estiver ligado)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "Modelo térmico",
         "weather_bias": "Desvio da previsão meteorológica",
         "suggestions": "Sugestões dispensadas"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "Arrefecimento e aquecimento",
+        "cool": "Só arrefecimento",
+        "heat": "Só aquecimento"
       }
     }
   },

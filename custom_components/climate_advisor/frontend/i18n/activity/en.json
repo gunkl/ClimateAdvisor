@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "TOU precondition window ended",
   "activity.tou_window_hvac_ran": "HVAC still ran during the window — prediction fell short",
   "activity.tou_window_none_needed": "no pre-conditioning needed today (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "TOU high-cost period skipped",
   "activity.unknown_paren": "(unknown)",
   "activity.version_changed": "Version changed: {old} -> {new}",
   "activity.warm_day_comfort_gap": "Warm-day comfort gap -- heating before shutoff",

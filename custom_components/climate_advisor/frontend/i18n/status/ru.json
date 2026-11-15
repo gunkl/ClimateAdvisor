@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "действует период высокого тарифа{ends}",
   "status.auto.tou_high_cost_idle": "действует период высокого тарифа{ends} — сегодня предварительный нагрев или охлаждение не требуется",
   "status.auto.tou_precondition": "{mode, select, cool {предварительное охлаждение} other {предварительный нагрев}} — период высокого тарифа{ends}",
+  "status.auto.tou_skipped": "активна — период высокого тарифа пропущен{ends}: {reasons}",
   "status.auto.windows_planned": "окна открыты (по плану)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

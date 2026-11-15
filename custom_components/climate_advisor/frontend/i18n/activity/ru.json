@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "Окно подготовки под тариф по времени суток завершено",
   "activity.tou_window_hvac_ran": "HVAC всё равно работал в окне — прогноз оказался недостаточным",
   "activity.tou_window_none_needed": "сегодня предварительное кондиционирование не нужно (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "Период высокой стоимости (тариф по времени суток) пропущен",
   "activity.unknown_paren": "(неизвестно)",
   "activity.version_changed": "Версия изменена: {old} -> {new}",
   "activity.warm_day_comfort_gap": "Провал комфорта в тёплый день -- отопление перед отключением",

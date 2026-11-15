@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "Période de préconditionnement tarifaire terminée",
   "activity.tou_window_hvac_ran": "le CVC a tout de même fonctionné pendant la période — la prévision était insuffisante",
   "activity.tou_window_none_needed": "aucun préconditionnement nécessaire aujourd’hui (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "Période tarifaire chère ignorée",
   "activity.unknown_paren": "(inconnu)",
   "activity.version_changed": "Version modifiée : {old} -> {new}",
   "activity.warm_day_comfort_gap": "Écart de confort par temps chaud -- chauffage avant l’arrêt",

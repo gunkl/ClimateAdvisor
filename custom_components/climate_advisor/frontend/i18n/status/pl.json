@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "trwa okres wysokich cen{ends}",
   "status.auto.tou_high_cost_idle": "trwa okres wysokich cen{ends} — dziś nie trzeba wstępnie podgrzewać ani chłodzić",
   "status.auto.tou_precondition": "{mode, select, cool {wstępne chłodzenie} other {podgrzewanie wstępne}} — okres wysokich cen{ends}",
+  "status.auto.tou_skipped": "aktywna — okres wysokich cen pominięty{ends}: {reasons}",
   "status.auto.windows_planned": "okna otwarte (zgodnie z planem)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

@@ -331,6 +331,8 @@
           "days": "Days",
           "start": "Starts",
           "end": "Ends",
+          "applies_to": "Applies to",
+          "condition_entity": "Only while this is on",
           "delete_schedule": "Delete this schedule"
         },
         "data_description": {
@@ -338,6 +340,8 @@
           "days": "The days of the week this schedule applies to. Select at least one.",
           "start": "When the High-cost period starts. Climate Advisor begins pre-conditioning before this time.",
           "end": "When the High-cost period ends. Must differ from the start time.",
+          "applies_to": "Which days this schedule pre-conditions on. Choose Cooling only when your heating is not electric (e.g. a gas furnace): pre-heating before a High-cost period saves nothing then. Default: cooling and heating.",
+          "condition_entity": "Optional. The schedule applies only while this binary sensor, input boolean or switch is on (for example a peak-season helper). Leave blank to always apply. If the entity is missing or unavailable, the schedule still applies.",
           "delete_schedule": "Turn on and submit to delete this schedule."
         }
       },
@@ -564,7 +568,12 @@
     "key_status_not_configured": "Not configured",
     "token_status_configured": "configured",
     "token_status_not_configured": "not configured",
-    "schedule_add_new": "+ Add a new schedule"
+    "schedule_add_new": "+ Add a new schedule",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}, cooling only)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}, heating only)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}, only while {entity} is on)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, cooling only, only while {entity} is on)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, heating only, only while {entity} is on)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "Thermal model",
         "weather_bias": "Weather forecast bias",
         "suggestions": "Dismissed suggestions"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "Cooling and heating",
+        "cool": "Cooling only",
+        "heat": "Heating only"
       }
     }
   },

@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "انتهت فترة التهيئة المسبقة لـ TOU",
   "activity.tou_window_hvac_ran": "عمل HVAC خلال الفترة رغم ذلك — التنبؤ كان أقل من المطلوب",
   "activity.tou_window_none_needed": "لا حاجة إلى تهيئة مسبقة اليوم (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "تم تخطي فترة التكلفة العالية لـ TOU",
   "activity.unknown_paren": "(غير معروف)",
   "activity.version_changed": "تغيّر الإصدار: {old} -> {new}",
   "activity.warm_day_comfort_gap": "فجوة راحة في يوم دافئ -- تدفئة قبل الإيقاف",

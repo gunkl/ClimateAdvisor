@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "分时电价高峰时段进行中{ends}",
   "status.auto.tou_high_cost_idle": "分时电价高峰时段进行中{ends} — 今天无需提前调节",
   "status.auto.tou_precondition": "{mode, select, cool {预冷} other {预热}} — 分时电价高峰时段{ends}",
+  "status.auto.tou_skipped": "已启用 — 已跳过分时电价高峰时段{ends}：{reasons}",
   "status.auto.windows_planned": "窗户已打开（按计划）",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

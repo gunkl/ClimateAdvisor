@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "時間帯別料金のピーク時間帯{ends}",
   "status.auto.tou_high_cost_idle": "時間帯別料金のピーク時間帯{ends} — 本日は事前調整は不要です",
   "status.auto.tou_precondition": "{mode, select, cool {予冷} other {予熱}} — 時間帯別料金のピーク時間帯{ends}",
+  "status.auto.tou_skipped": "有効 — 時間帯別料金のピーク時間帯をスキップ{ends}: {reasons}",
   "status.auto.windows_planned": "窓を開放中（予定どおり）",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

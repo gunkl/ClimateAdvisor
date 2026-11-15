@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "TOU high-cost period active{ends}",
   "status.auto.tou_high_cost_idle": "TOU high-cost period active{ends} — no pre-conditioning needed today",
   "status.auto.tou_precondition": "{mode, select, cool {pre-cooling} other {pre-heating}} — TOU high-cost period{ends}",
+  "status.auto.tou_skipped": "active — TOU high-cost period skipped{ends}: {reasons}",
   "status.auto.windows_planned": "windows open (as planned)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

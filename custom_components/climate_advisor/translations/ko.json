@@ -331,14 +331,18 @@
           "days": "요일",
           "start": "시작",
           "end": "종료",
-          "delete_schedule": "이 일정 삭제"
+          "delete_schedule": "이 일정 삭제",
+          "applies_to": "적용 대상",
+          "condition_entity": "이것이 켜져 있을 때만"
         },
         "data_description": {
           "name": "이 시간대별 요금 일정의 짧은 이름입니다 (예: \"여름 피크\").",
           "days": "이 일정을 적용할 요일입니다. 하나 이상 선택하세요.",
           "start": "요금이 높은 시간대가 시작되는 시간입니다. Climate Advisor는 이 시간 전에 준비를 시작합니다.",
           "end": "요금이 높은 시간대가 끝나는 시간입니다. 시작 시간과 달라야 합니다.",
-          "delete_schedule": "켜고 제출하면 이 일정을 삭제합니다."
+          "delete_schedule": "켜고 제출하면 이 일정을 삭제합니다.",
+          "applies_to": "이 일정이 사전 조절을 하는 날입니다. 난방이 전기식이 아니라면(예: 가스 보일러) 「냉방만」을 선택하세요. 그 경우 요금이 높은 시간대 전에 예열해도 절약되지 않습니다. 기본값: 냉방 및 난방.",
+          "condition_entity": "선택 사항입니다. 이 바이너리 센서, input boolean 또는 스위치가 켜져 있는 동안에만 일정이 적용됩니다(예: 성수기 도우미). 항상 적용하려면 비워 두세요. 엔터티가 없거나 사용할 수 없으면 일정은 그대로 적용됩니다."
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "설정되지 않음",
     "token_status_configured": "설정됨",
     "token_status_not_configured": "설정되지 않음",
-    "schedule_add_new": "+ 새 일정 추가"
+    "schedule_add_new": "+ 새 일정 추가",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}, 냉방만)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}, 난방만)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}, {entity}이(가) 켜져 있을 때만)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, 냉방만, {entity}이(가) 켜져 있을 때만)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, 난방만, {entity}이(가) 켜져 있을 때만)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "열 모델",
         "weather_bias": "일기 예보 편향",
         "suggestions": "무시한 제안"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "냉방 및 난방",
+        "cool": "냉방만",
+        "heat": "난방만"
       }
     }
   },

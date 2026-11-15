@@ -8,5 +8,9 @@
   "common.mode.heat": "制热",
   "common.mode.heat_cool": "制热/制冷",
   "common.mode.off": "关闭",
+  "common.tou_skip.condition_off": "其条件为关闭",
+  "common.tou_skip.condition_off_entity": "其条件为关闭（{entity}）",
+  "common.tou_skip.not_applied_cool": "不适用于制冷",
+  "common.tou_skip.not_applied_heat": "不适用于制热",
   "common.unknown": "未知"
 }

@@ -331,14 +331,18 @@
           "days": "الأيام",
           "start": "البداية",
           "end": "النهاية",
-          "delete_schedule": "حذف هذا الجدول"
+          "delete_schedule": "حذف هذا الجدول",
+          "applies_to": "ينطبق على",
+          "condition_entity": "فقط عندما يكون هذا قيد التشغيل"
         },
         "data_description": {
           "name": "اسم قصير لجدول التعرفة هذا حسب وقت الاستخدام (مثل «ذروة الصيف»).",
           "days": "أيام الأسبوع التي ينطبق عليها هذا الجدول. اختر يومًا واحدًا على الأقل.",
           "start": "وقت بدء فترة التكلفة المرتفعة. يبدأ Climate Advisor التهيئة المسبقة قبل هذا الوقت.",
           "end": "وقت انتهاء فترة التكلفة المرتفعة. يجب أن يختلف عن وقت البداية.",
-          "delete_schedule": "فعّل هذا الخيار ثم أرسل لحذف هذا الجدول."
+          "delete_schedule": "فعّل هذا الخيار ثم أرسل لحذف هذا الجدول.",
+          "applies_to": "الأيام التي يقوم فيها هذا الجدول بالتهيئة المسبقة. اختر التبريد فقط إذا لم تكن التدفئة كهربائية (مثل فرن غاز): فالتدفئة المسبقة قبل فترة التكلفة المرتفعة لا توفر شيئًا حينئذٍ. الافتراضي: التبريد والتدفئة.",
+          "condition_entity": "اختياري. يُطبَّق الجدول فقط أثناء تشغيل هذا المستشعر الثنائي أو input boolean أو المفتاح (مثل مساعد «موسم الذروة»). اتركه فارغًا ليُطبَّق دائمًا. إذا كان الكيان غير موجود أو غير متاح، يظل الجدول مطبقًا."
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "غير مكوَّن",
     "token_status_configured": "مكوَّن",
     "token_status_not_configured": "غير مكوَّن",
-    "schedule_add_new": "+ إضافة جدول جديد"
+    "schedule_add_new": "+ إضافة جدول جديد",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}, التبريد فقط)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}, التدفئة فقط)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}, فقط عندما يكون {entity} قيد التشغيل)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, التبريد فقط, فقط عندما يكون {entity} قيد التشغيل)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, التدفئة فقط, فقط عندما يكون {entity} قيد التشغيل)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "النموذج الحراري",
         "weather_bias": "انحياز توقعات الطقس",
         "suggestions": "الاقتراحات المتجاهَلة"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "التبريد والتدفئة",
+        "cool": "التبريد فقط",
+        "heat": "التدفئة فقط"
       }
     }
   },

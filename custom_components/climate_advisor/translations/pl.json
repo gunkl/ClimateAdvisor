@@ -331,14 +331,18 @@
           "days": "Dni",
           "start": "Początek",
           "end": "Koniec",
-          "delete_schedule": "Usuń ten harmonogram"
+          "delete_schedule": "Usuń ten harmonogram",
+          "applies_to": "Dotyczy",
+          "condition_entity": "Tylko gdy to jest włączone"
         },
         "data_description": {
           "name": "Krótka nazwa tego harmonogramu taryfy strefowej (np. „Letni szczyt”).",
           "days": "Dni tygodnia, w które obowiązuje ten harmonogram. Wybierz co najmniej jeden.",
           "start": "Kiedy zaczyna się okres wysokich kosztów. Climate Advisor zaczyna wstępne przygotowanie domu przed tą godziną.",
           "end": "Kiedy kończy się okres wysokich kosztów. Musi różnić się od godziny początku.",
-          "delete_schedule": "Włącz i zatwierdź, aby usunąć ten harmonogram."
+          "delete_schedule": "Włącz i zatwierdź, aby usunąć ten harmonogram.",
+          "applies_to": "W które dni ten harmonogram wstępnie przygotowuje dom. Wybierz Tylko chłodzenie, jeśli ogrzewanie nie jest elektryczne (np. piec gazowy): wstępne ogrzewanie przed okresem wysokich kosztów nic wtedy nie oszczędza. Domyślnie: chłodzenie i ogrzewanie.",
+          "condition_entity": "Opcjonalne. Harmonogram obowiązuje tylko wtedy, gdy ten czujnik binarny, input boolean lub przełącznik jest włączony (na przykład pomocnik „sezon szczytowy”). Pozostaw puste, aby obowiązywał zawsze. Jeśli encji brak lub jest niedostępna, harmonogram i tak obowiązuje."
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "Nie skonfigurowano",
     "token_status_configured": "skonfigurowany",
     "token_status_not_configured": "nie skonfigurowano",
-    "schedule_add_new": "+ Dodaj nowy harmonogram"
+    "schedule_add_new": "+ Dodaj nowy harmonogram",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}, tylko chłodzenie)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}, tylko ogrzewanie)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}, tylko gdy {entity} jest włączone)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, tylko chłodzenie, tylko gdy {entity} jest włączone)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, tylko ogrzewanie, tylko gdy {entity} jest włączone)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "Model termiczny",
         "weather_bias": "Błąd prognozy pogody",
         "suggestions": "Odrzucone sugestie"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "Chłodzenie i ogrzewanie",
+        "cool": "Tylko chłodzenie",
+        "heat": "Tylko ogrzewanie"
       }
     }
   },

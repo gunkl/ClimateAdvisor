@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "Periodo di precondizionamento tariffario terminato",
   "activity.tou_window_hvac_ran": "la climatizzazione è comunque stata in funzione durante il periodo — la previsione era insufficiente",
   "activity.tou_window_none_needed": "oggi non serve alcun precondizionamento (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "Periodo a costo elevato per tariffa saltato",
   "activity.unknown_paren": "(sconosciuto)",
   "activity.version_changed": "Versione cambiata: {old} -> {new}",
   "activity.warm_day_comfort_gap": "Scarto di comfort nelle giornate calde -- riscaldamento prima dello spegnimento",

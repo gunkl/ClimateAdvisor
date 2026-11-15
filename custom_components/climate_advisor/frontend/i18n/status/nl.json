@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "periode met hoog tarief actief{ends}",
   "status.auto.tou_high_cost_idle": "periode met hoog tarief actief{ends} — vandaag geen voorverwarmen of voorkoelen nodig",
   "status.auto.tou_precondition": "{mode, select, cool {voorkoelen} other {voorverwarmen}} — periode met hoog tarief{ends}",
+  "status.auto.tou_skipped": "actief — periode met hoog tarief overgeslagen{ends}: {reasons}",
   "status.auto.windows_planned": "ramen open (zoals gepland)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

@@ -475,6 +475,8 @@
   "activity.tou_window_ended": "Okno przygotowania pod taryfę strefową zakończone",
   "activity.tou_window_hvac_ran": "HVAC mimo to pracował w oknie — prognoza okazała się za mała",
   "activity.tou_window_none_needed": "dziś nie trzeba wstępnego kondycjonowania (hvac_mode=off)",
+  "activity.tou_window_skip_reasons": "{reasons}",
+  "activity.tou_window_skipped": "Pominięto okres wysokich cen (taryfa strefowa)",
   "activity.unknown_paren": "(nieznane)",
   "activity.version_changed": "Zmiana wersji: {old} -> {new}",
   "activity.warm_day_comfort_gap": "Luka komfortu w ciepły dzień -- ogrzewanie przed wyłączeniem",

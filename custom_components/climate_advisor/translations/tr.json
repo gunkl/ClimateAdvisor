@@ -331,14 +331,18 @@
           "days": "Günler",
           "start": "Başlangıç",
           "end": "Bitiş",
-          "delete_schedule": "Bu zamanlamayı sil"
+          "delete_schedule": "Bu zamanlamayı sil",
+          "applies_to": "Uygulandığı",
+          "condition_entity": "Yalnızca bu açıkken"
         },
         "data_description": {
           "name": "Bu zamana göre tarife zamanlaması için kısa bir ad (ör. \"Yaz puantı\").",
           "days": "Bu zamanlamanın geçerli olduğu haftanın günleri. En az birini seçin.",
           "start": "Yüksek maliyetli dönemin başlangıcı. Climate Advisor bu saatten önce ön hazırlığa başlar.",
           "end": "Yüksek maliyetli dönemin bitişi. Başlangıç saatinden farklı olmalıdır.",
-          "delete_schedule": "Bu zamanlamayı silmek için açın ve gönderin."
+          "delete_schedule": "Bu zamanlamayı silmek için açın ve gönderin.",
+          "applies_to": "Bu programın hangi günlerde ön hazırlık yaptığı. Isıtmanız elektrikli değilse (ör. doğalgaz kombi) Yalnızca soğutma'yı seçin: o durumda yüksek maliyetli dönemden önce ön ısıtma hiçbir tasarruf sağlamaz. Varsayılan: soğutma ve ısıtma.",
+          "condition_entity": "İsteğe bağlı. Program yalnızca bu ikili sensör, input boolean veya anahtar açıkken uygulanır (örneğin bir yoğun sezon yardımcısı). Her zaman uygulanması için boş bırakın. Varlık yoksa veya kullanılamıyorsa program yine de uygulanır."
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "Yapılandırılmadı",
     "token_status_configured": "yapılandırıldı",
     "token_status_not_configured": "yapılandırılmadı",
-    "schedule_add_new": "+ Yeni zamanlama ekle"
+    "schedule_add_new": "+ Yeni zamanlama ekle",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}, yalnızca soğutma)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}, yalnızca ısıtma)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}, yalnızca {entity} açıkken)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, yalnızca soğutma, yalnızca {entity} açıkken)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, yalnızca ısıtma, yalnızca {entity} açıkken)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "Termal model",
         "weather_bias": "Hava durumu tahmin sapması",
         "suggestions": "Reddedilen öneriler"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "Soğutma ve ısıtma",
+        "cool": "Yalnızca soğutma",
+        "heat": "Yalnızca ısıtma"
       }
     }
   },

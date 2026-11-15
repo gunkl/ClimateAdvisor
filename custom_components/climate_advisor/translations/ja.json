@@ -331,14 +331,18 @@
           "days": "曜日",
           "start": "開始",
           "end": "終了",
-          "delete_schedule": "このスケジュールを削除"
+          "delete_schedule": "このスケジュールを削除",
+          "applies_to": "適用対象",
+          "condition_entity": "これがオンのときのみ"
         },
         "data_description": {
           "name": "この時間帯別料金スケジュールの短い名前です(例: 「夏のピーク」)。",
           "days": "このスケジュールを適用する曜日です。1つ以上選択してください。",
           "start": "料金の高い時間帯の開始時刻です。Climate Advisor は、この時刻より前に準備を始めます。",
           "end": "料金の高い時間帯の終了時刻です。開始時刻と異なる必要があります。",
-          "delete_schedule": "オンにして送信すると、このスケジュールを削除します。"
+          "delete_schedule": "オンにして送信すると、このスケジュールを削除します。",
+          "applies_to": "このスケジュールが事前調整を行う日です。暖房が電気でない場合（ガス炉など）は「冷房のみ」を選んでください。その場合、料金の高い時間帯の前に予熱しても節約になりません。既定：冷房と暖房。",
+          "condition_entity": "任意。このバイナリーセンサー、input boolean、またはスイッチがオンの間だけスケジュールが適用されます（例：ピークシーズン用のヘルパー）。常に適用する場合は空欄にしてください。エンティティが存在しない、または利用できない場合も、スケジュールは適用されます。"
         }
       },
       "notifications": {
@@ -564,7 +568,12 @@
     "key_status_not_configured": "未設定",
     "token_status_configured": "設定済み",
     "token_status_not_configured": "未設定",
-    "schedule_add_new": "+ 新しいスケジュールを追加"
+    "schedule_add_new": "+ 新しいスケジュールを追加",
+    "schedule_summary_cool": "{name} — {days} {window} ({cost}、冷房のみ)",
+    "schedule_summary_heat": "{name} — {days} {window} ({cost}、暖房のみ)",
+    "schedule_summary_entity": "{name} — {days} {window} ({cost}、{entity} がオンのときのみ)",
+    "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}、冷房のみ、{entity} がオンのときのみ)",
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}、暖房のみ、{entity} がオンのときのみ)"
   },
   "entity": {
     "sensor": {
@@ -749,6 +758,13 @@
         "thermal_model": "熱モデル",
         "weather_bias": "天気予報の偏り",
         "suggestions": "却下した提案"
+      }
+    },
+    "schedule_applies_to": {
+      "options": {
+        "both": "冷房と暖房",
+        "cool": "冷房のみ",
+        "heat": "暖房のみ"
       }
     }
   },

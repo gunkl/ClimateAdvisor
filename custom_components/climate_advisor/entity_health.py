@@ -56,6 +56,12 @@ DOOR_WINDOW_SENSORS_CONFIG_KEY = "door_window_sensors"
 DOOR_WINDOW_SENSOR_NAME = i18n.Msg("notify.entity.door_window_sensor")  # the translatable "friendly name"
 DOOR_WINDOW_SENSOR_CRITICALITY = "degraded"
 THERMOSTAT_CONFIG_KEY = "climate_entity"
+# Issue #1565: each TOU schedule's optional enable entity -- the other list-valued source (one slot per entity).
+TOU_CONDITION_CONFIG_KEY = "schedules.condition_entity"
+TOU_CONDITION_NAME = i18n.Msg("notify.entity.tou_schedule_condition")  # the translatable "friendly name"
+TOU_CONDITION_CRITICALITY = "optional"
+# The list-valued keys: every member gets its own transition/debounce slot (Issue #1181).
+_LIST_CONFIG_KEYS = frozenset({DOOR_WINDOW_SENSORS_CONFIG_KEY, TOU_CONDITION_CONFIG_KEY})
 
 
 @dataclass(frozen=True)
@@ -81,7 +87,7 @@ class EntityHealthIssue:
         ``door_window_sensors`` is a list, so every sensor needs its own slot -- otherwise a second sensor that
         fails during the first one's outage is never announced (Issue #1181).
         """
-        if self.config_key == DOOR_WINDOW_SENSORS_CONFIG_KEY:
+        if self.config_key in _LIST_CONFIG_KEYS:
             return f"{self.config_key}:{self.entity_id}"
         return self.config_key
 
@@ -102,6 +108,9 @@ def entity_health_consequence_msg(
         if door_last_reading == "closed":
             return i18n.Msg("notify.entity_consequence_door_closed")
         return i18n.Msg("notify.entity_consequence_door_unknown")
+    if issue.config_key == TOU_CONDITION_CONFIG_KEY:
+        # Issue #1565: a schedule's enable entity that cannot be read fails open.
+        return i18n.Msg("notify.entity_consequence_tou_condition")
     if issue.config_key == THERMOSTAT_CONFIG_KEY and whf_running:
         return i18n.Msg("notify.entity_consequence_thermostat_whf")
     return None
@@ -273,7 +282,36 @@ def run_entity_health_sweep(hass: Any, config: dict) -> list[EntityHealthIssue]:
         if issue is not None:
             issues.append(issue)
 
-    for entity_id in config.get(DOOR_WINDOW_SENSORS_CONFIG_KEY) or []:
+    issues.extend(
+        _sweep_entity_list(
+            hass,
+            config.get(DOOR_WINDOW_SENSORS_CONFIG_KEY) or [],
+            DOOR_WINDOW_SENSORS_CONFIG_KEY,
+            DOOR_WINDOW_SENSOR_NAME,
+            DOOR_WINDOW_SENSOR_CRITICALITY,
+        )
+    )
+    # Issue #1565: every schedule's enable entity (each one once, even when several schedules share it)
+    conditions = [s.get("condition_entity") for s in config.get("schedules") or [] if isinstance(s, dict)]
+    issues.extend(
+        _sweep_entity_list(
+            hass,
+            list(dict.fromkeys(e for e in conditions if isinstance(e, str) and e)),
+            TOU_CONDITION_CONFIG_KEY,
+            TOU_CONDITION_NAME,
+            TOU_CONDITION_CRITICALITY,
+        )
+    )
+
+    return issues
+
+
+def _sweep_entity_list(
+    hass: Any, entity_ids: list[str], config_key: str, name: i18n.Msg, criticality: str
+) -> list[EntityHealthIssue]:
+    """One issue per listed entity that is missing or unavailable (the list-valued sources, Issues #1181/#1565)."""
+    out: list[EntityHealthIssue] = []
+    for entity_id in entity_ids:
         state = hass.states.get(entity_id)
         if state is None:
             status = "missing"
@@ -281,14 +319,5 @@ def run_entity_health_sweep(hass: Any, config: dict) -> list[EntityHealthIssue]:
             status = "unavailable"
         else:
             continue
-        issues.append(
-            _issue(
-                DOOR_WINDOW_SENSORS_CONFIG_KEY,
-                entity_id,
-                DOOR_WINDOW_SENSOR_NAME,
-                DOOR_WINDOW_SENSOR_CRITICALITY,
-                status,
-            )
-        )
-
-    return issues
+        out.append(_issue(config_key, entity_id, name, criticality, status))
+    return out

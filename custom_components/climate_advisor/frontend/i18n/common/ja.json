@@ -8,5 +8,9 @@
   "common.mode.heat": "暖房",
   "common.mode.heat_cool": "暖房/冷房",
   "common.mode.off": "オフ",
+  "common.tou_skip.condition_off": "条件がオフです",
+  "common.tou_skip.condition_off_entity": "条件がオフです ({entity})",
+  "common.tou_skip.not_applied_cool": "冷房には適用されません",
+  "common.tou_skip.not_applied_heat": "暖房には適用されません",
   "common.unknown": "不明"
 }

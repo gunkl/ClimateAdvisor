@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "horas punta activas{ends}",
   "status.auto.tou_high_cost_idle": "horas punta activas{ends} — hoy no hace falta preacondicionar",
   "status.auto.tou_precondition": "{mode, select, cool {preenfriamiento} other {precalentamiento}} — horas punta{ends}",
+  "status.auto.tou_skipped": "activo — horas punta omitidas{ends}: {reasons}",
   "status.auto.windows_planned": "ventanas abiertas (según lo previsto)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

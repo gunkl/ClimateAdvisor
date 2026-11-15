@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "heures de pointe en cours{ends}",
   "status.auto.tou_high_cost_idle": "heures de pointe en cours{ends} — aucun préconditionnement nécessaire aujourd’hui",
   "status.auto.tou_precondition": "{mode, select, cool {prérefroidissement} other {préchauffage}} — heures de pointe{ends}",
+  "status.auto.tou_skipped": "actif — heures de pointe ignorées{ends} : {reasons}",
   "status.auto.windows_planned": "fenêtres ouvertes (comme prévu)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

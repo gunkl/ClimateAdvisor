@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "فترة الذروة في التعرفة حسب وقت الاستخدام نشطة{ends}",
   "status.auto.tou_high_cost_idle": "فترة الذروة في التعرفة حسب وقت الاستخدام نشطة{ends} — لا حاجة إلى تهيئة مسبقة اليوم",
   "status.auto.tou_precondition": "{mode, select, cool {تبريد مسبق} other {تسخين مسبق}} — فترة الذروة في التعرفة حسب وقت الاستخدام{ends}",
+  "status.auto.tou_skipped": "نشط — تم تخطي فترة الذروة في التعرفة حسب وقت الاستخدام{ends}: {reasons}",
   "status.auto.windows_planned": "النوافذ مفتوحة (حسب الخطة)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

@@ -20,6 +20,7 @@
   "status.auto.tou_high_cost": "yüksek tarife dönemi etkin{ends}",
   "status.auto.tou_high_cost_idle": "yüksek tarife dönemi etkin{ends} — bugün ön ısıtma veya ön soğutma gerekmiyor",
   "status.auto.tou_precondition": "{mode, select, cool {ön soğutma} other {ön ısıtma}} — yüksek tarife dönemi{ends}",
+  "status.auto.tou_skipped": "etkin — yüksek tarife dönemi atlandı{ends}: {reasons}",
   "status.auto.windows_planned": "pencereler açık (planlandığı gibi)",
   "status.auto.with_fan_requests": "{base}{requests}",
   "status.clock": "{t}",

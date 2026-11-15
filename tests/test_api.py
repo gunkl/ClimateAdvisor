@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from custom_components.climate_advisor.api import (
     API_VIEWS,
@@ -1431,38 +1431,53 @@ class TestIssue911ZoneScopedHandlers:
         req.rel_url.query = {}
         return req
 
-    def test_briefing_view_regenerate_failure_warning_tagged_with_zone(self):
-        """ClimateAdvisorBriefingView.get() logs a WARNING when _regenerate_briefing()
-        raises — real production code path, not a mirrored/injected one."""
-        import asyncio
-        import logging
-
-        from custom_components.climate_advisor import log_capture
-        from custom_components.climate_advisor.api import ClimateAdvisorBriefingView
-
+    def _briefing_coordinator(self):
         coordinator = MagicMock()
         coordinator.zone_label = "zone_under_test"
-        coordinator._last_briefing = "cached briefing text"
+        coordinator._last_briefing = "full briefing text"
+        coordinator._last_briefing_short = "short briefing text"
         coordinator._briefing_sent_today = False
+        return coordinator
 
-        async def _boom(verbosity):
-            raise RuntimeError("boom")
+    def _briefing_get(self, coordinator, verbosity):
+        import asyncio
 
-        coordinator._regenerate_briefing = _boom
+        from custom_components.climate_advisor.api import ClimateAdvisorBriefingView
 
         request = self._make_request(coordinator)
-        request.rel_url.query = {"verbosity": "verbose"}
+        if verbosity is not None:
+            request.rel_url.query = {"verbosity": verbosity}
+        view = ClimateAdvisorBriefingView()
+        view.json = lambda body, status_code=200: (body, status_code)
+        with patch("custom_components.climate_advisor.coordinator._briefing_display", side_effect=lambda h, t: t):
+            return asyncio.run(view.get(request))
 
-        handler = log_capture.ClimateAdvisorLogRingBuffer()
-        logger = logging.getLogger("custom_components.climate_advisor.api")
-        logger.addHandler(handler)
-        try:
-            asyncio.run(ClimateAdvisorBriefingView().get(request))
-        finally:
-            logger.removeHandler(handler)
+    def test_briefing_view_tldr_only_serves_the_short_briefing_1577(self):
+        """Issue #1577: verbosity=tldr_only returns the short briefing the coordinator already built (it used to
+        fall through a dead branch and return the full text)."""
+        body, status = self._briefing_get(self._briefing_coordinator(), "tldr_only")
+        assert status == 200 and body["briefing"] == "short briefing text" and body["verbosity"] == "tldr_only"
 
-        records = handler.get_records()
-        assert any(r["zone"] == "zone_under_test" and "regenerate briefing" in r["message"] for r in records)
+    def test_briefing_view_normal_and_verbose_serve_the_full_briefing_1577(self):
+        coordinator = self._briefing_coordinator()
+        for verbosity in (None, "normal", "verbose"):
+            body, status = self._briefing_get(coordinator, verbosity)
+            assert status == 200 and body["briefing"] == "full briefing text", verbosity
+
+    def test_briefing_view_tldr_only_falls_back_to_the_full_text_when_no_short_exists_1577(self):
+        coordinator = self._briefing_coordinator()
+        coordinator._last_briefing_short = ""
+        body, _status = self._briefing_get(coordinator, "tldr_only")
+        assert body["briefing"] == "full briefing text"
+
+    def test_briefing_view_never_looks_for_a_regenerate_method_1577(self):
+        """The removed branch called coordinator._regenerate_briefing, which never existed; the view must not
+        depend on it (a MagicMock coordinator would otherwise fake one)."""
+        coordinator = self._briefing_coordinator()
+        coordinator._regenerate_briefing = MagicMock(side_effect=AssertionError("must not be called"))
+        body, _status = self._briefing_get(coordinator, "verbose")
+        assert body["briefing"] == "full briefing text"
+        coordinator._regenerate_briefing.assert_not_called()
 
     def test_investigate_view_truncated_warning_tagged_with_zone(self):
         """ClimateAdvisorInvestigateView.post() (non-streaming path) logs a WARNING when

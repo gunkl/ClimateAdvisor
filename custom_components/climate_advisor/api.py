@@ -624,10 +624,10 @@ class ClimateAdvisorBriefingView(HomeAssistantView):
 
     Optional query parameter:
         verbosity: "tldr_only" | "normal" (default) | "verbose"
-            Controls how much of the briefing body is returned.
-            - "tldr_only": structured header + TLDR table only
-            - "normal": header + TLDR table + trimmed conversational body
-            - "verbose": header + TLDR table + full original body
+            - "tldr_only": the short briefing (the TLDR table the push notification carries)
+            - "normal": the full briefing
+            - "verbose": accepted for compatibility; the same as "normal" (no longer briefing exists)
+        Both texts are the ones the coordinator built for today's briefing; nothing is regenerated (Issue #1577).
     """
 
     url = API_BRIEFING
@@ -650,18 +650,12 @@ class ClimateAdvisorBriefingView(HomeAssistantView):
                     status_code=400,
                 )
 
+            # Issue #1577: the coordinator builds both texts with every briefing (_build_briefing_text), so the short
+            # one is served as is. There was never a regenerate method: the old hasattr() branch could not run, and
+            # "tldr_only" silently returned the full briefing.
             briefing = coordinator._last_briefing
-
-            # If a non-default verbosity is requested and the coordinator exposes
-            # the data needed to regenerate, do so.  Otherwise return cached text.
-            if verbosity != "normal" and briefing and hasattr(coordinator, "_regenerate_briefing"):
-                try:
-                    briefing = await coordinator._regenerate_briefing(verbosity=verbosity)
-                except Exception:
-                    _LOGGER.warning(
-                        "Could not regenerate briefing for verbosity=%s; returning cached text",
-                        verbosity,
-                    )
+            if verbosity == "tldr_only" and coordinator._last_briefing_short:
+                briefing = coordinator._last_briefing_short
 
             from .coordinator import _briefing_display  # noqa: PLC0415 - coordinator is heavy; same renderer as Status
 

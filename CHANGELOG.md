@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.41] — 2026-11-15
+
+### Fixed
+- Fix #1577: asking the dashboard API for the short briefing (`/api/climate_advisor/briefing?verbosity=tldr_only`) now returns the short briefing — the same text the push notification carries. Before, the request was silently ignored and the full briefing came back, because the endpoint waited on a method that never existed. `verbose` is still accepted and returns the full briefing, as it always effectively did.
+
 ## [0.9.40] — 2026-11-15
 
 ### Added

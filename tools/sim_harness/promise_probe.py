@@ -550,12 +550,18 @@ class FakeHassPromiseSource:
                 except TypeError, ValueError:
                     setpoint = None
             mode = data.get("fan_mode") if service == "set_fan_mode" else data.get("hvac_mode")
+            from custom_components.climate_advisor.thermostat_profile import (  # noqa: PLC0415
+                fan_command_starts_blower,
+            )
+
             return Command(
                 ts=ts,
                 target="thermostat",
                 service=service,
                 mode=str(mode) if mode is not None else None,
                 setpoint_f=setpoint,
+                # Issue #1556: same stamp as the production hook (the harness thermostat has no learned evidence).
+                fan_on=fan_command_starts_blower(mode) if service == "set_fan_mode" else None,
                 origin="ca",
                 automation_enabled=enabled,
                 indoor_f=indoor_f,

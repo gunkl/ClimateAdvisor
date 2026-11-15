@@ -319,6 +319,17 @@ def build_diagnostic_snapshot(hass: Any, coordinator: Any, *, include_control_qu
         config.get("temp_unit", "fahrenheit"),
     )
 
+    # Issue #1566: what Climate Advisor learned this thermostat's fan modes do, the values it sends for fan on/off, and
+    # why fan control is held back (if it is). Mode names and minutes only: no entity names or device ids.
+    profile_fn = getattr(coordinator, "thermostat_profile_diagnostics", None)
+    if callable(profile_fn):
+        try:
+            profile = profile_fn()
+        except Exception:  # noqa: BLE001 - diagnostics must render even if the profile cannot be built
+            profile = None
+        if isinstance(profile, dict):
+            snapshot["thermostat_profile"] = profile
+
     # Issue #1194 (d): the remote-sensor outer loop (comfort target vs commanded setpoint, signed offset, loop state and
     # why, the remote reading and its age). The same view Status and the AI context read; the investigator's text footer
     # does not repeat it (the AI's HVAC ENTITY section already carries it), so it appears once per surface.
@@ -398,6 +409,24 @@ def render_diagnostic_snapshot_text(snapshot: dict[str, Any]) -> str:
         lines.append("  thermostat_capabilities:")
         for key in sorted(caps):
             lines.append(f"    {key}: {caps[key]!r}")
+
+    profile = snapshot.get("thermostat_profile")
+    if isinstance(profile, dict) and isinstance(profile.get("fan"), dict):
+        fan = profile["fan"]
+        lines.append(f"  thermostat_profile (device: {profile.get('device') or 'unknown'}):")
+        lines.append(
+            f"    fan off -> {fan.get('off_value')!r}, fan on -> {fan.get('on_value')!r}, status={fan.get('status')},"
+            f" reports_hvac_action={fan.get('reports_hvac_action')}"
+        )
+        for mode, role in (fan.get("roles") or {}).items():
+            lines.append(
+                f"    {mode!r}: {role.get('role')} ({role.get('source')}; name guess {role.get('name_guess')};"
+                f" fan {role.get('fan_min')} min, idle {role.get('idle_min')} min)"
+            )
+        for problem in fan.get("problems") or []:
+            lines.append(f"    problem: {problem}")
+        for old in profile.get("archived_devices") or []:
+            lines.append(f"    earlier thermostat: {old.get('device') or 'unknown'} fan_modes={old.get('fan_modes')}")
 
     last = snapshot.get("last_command")
     if last:

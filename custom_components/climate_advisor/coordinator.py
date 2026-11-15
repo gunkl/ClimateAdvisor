@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 from homeassistant.const import EVENT_CALL_SERVICE, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import (
     async_call_later,
@@ -489,6 +490,15 @@ from .temperature import (
     unit_mismatch,
 )
 from .thermal_confidence import physics_eligibility
+from .thermostat_profile import (
+    FanProfile,
+    ThermostatIdentity,
+    ThermostatProfile,
+    ThermostatProfileStore,
+    evidence_kind,
+    fan_command_starts_blower,
+    live_fan_profile,
+)
 from .time_utils import instant_after
 from .timeline_surfaces import (
     CardLive,
@@ -1346,6 +1356,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.automation_engine._control_model_provider = self.control_thermal_model
         # Issue #1517: and the primary's house model (engine-neutral stepper) for the lead times; None on a v3 zone.
         self.automation_engine._control_stepper_provider = self.control_house_stepper
+        # Issue #1556/#1566: and this zone's learned thermostat fan profile for every fan_mode read/write.
+        self.automation_engine._fan_profile_provider = self._fan_profile
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -1526,6 +1538,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # thermostat that never does: the climate entity watched, the heat/cool-mode seconds since its last
         # heating/cooling report, and whether it ever reported one (persisted as ``hvac_action_report``).
         self._hvac_report_watch: dict[str, Any] = {}
+        # Issues #1566-#1568: what this zone's thermostat(s) were observed to do, per device fingerprint (persisted as
+        # ``thermostat_profiles``); the timestamp of the last evidence sample; the last profile line logged.
+        self._thermostat_profiles = ThermostatProfileStore()
+        self._thermostat_profile_last_ts: float | None = None
+        self._thermostat_profile_logged: tuple[Any, ...] | None = None
         # epoch seconds of the last burner/compressor stop (heating/cooling -> anything else), for the blower overrun
         self._last_compressor_stop_ts: float | None = None
         self._last_outdoor_temp: float | None = None  # most recent outdoor reading for gate checks
@@ -2438,6 +2455,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._tick_hvac_action_watch()
         except Exception:  # noqa: BLE001 - a notice must never break thermal sampling
             _LOGGER.debug("hvac action watch failed", exc_info=True)
+        try:  # Issues #1566-#1568: learn what this thermostat's fan modes do from its own reports
+            self._tick_thermostat_profile()
+            self._thermostat_profile_tick_failed = False
+        except Exception:  # noqa: BLE001 - learning must never break thermal sampling
+            # WARNING once per failure streak, DEBUG while it continues (a persistent fault would flood every 5 min).
+            _log = _LOGGER.debug if getattr(self, "_thermostat_profile_tick_failed", False) else _LOGGER.warning
+            _log("Thermostat profile tick failed; thermal sampling continues", exc_info=True)
+            self._thermostat_profile_tick_failed = True
         self._sample_all_observations()
 
     def _refresh_outdoor_temp(self, min_delta_f: float = 0.0) -> None:
@@ -2621,6 +2646,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "unreported_s": float(_watch.get("unreported_s") or 0.0),
                 "ever_reported": bool(_watch.get("ever_reported", False)),
             }
+        # Issues #1566-#1568: what each thermostat's fan modes were observed to do, kept across restarts and releases
+        # (never re-learned from scratch). Loaded into the same store the engine's provider reads.
+        if isinstance(state.get("thermostat_profiles"), dict):
+            if not isinstance(getattr(self, "_thermostat_profiles", None), ThermostatProfileStore):
+                self._thermostat_profiles = ThermostatProfileStore()
+            self._thermostat_profiles.load(state["thermostat_profiles"])
         if state_date == yesterday_str and state.get("today_record"):
             try:
                 rec_data = state["today_record"]
@@ -3051,6 +3082,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "hvac_action_report": {
                 k: v for k, v in (getattr(self, "_hvac_report_watch", None) or {}).items() if k != "last_ts"
             },
+            "thermostat_profiles": (  # Issues #1566-#1568
+                self._thermostat_profiles.to_dict()
+                if isinstance(getattr(self, "_thermostat_profiles", None), ThermostatProfileStore)
+                else None
+            ),
             "vent_window_k_backfill_v2": self._vent_window_k_backfill_v2,
             "vent_fan_k_backfill_v2": self._vent_fan_k_backfill_v2,
             "vent_k_relearn_1505": getattr(self, "_vent_k_relearn_1505", False),
@@ -4690,7 +4726,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if cs is None:
             return
         if is_thermostat_fan_physically_active(
-            str(cs.attributes.get("fan_mode", "")), str(cs.attributes.get("hvac_action", "")).lower()
+            str(cs.attributes.get("fan_mode", "")),
+            str(cs.attributes.get("hvac_action", "")).lower(),
+            profile=self._fan_profile(),
         ):
             return
         if fan_mode == FAN_MODE_BOTH and self._get_fan_physical_state() is not False:
@@ -10887,6 +10925,128 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             watch["unreported_s"] = float(watch.get("unreported_s") or 0.0) + max(0.0, min(now - last, 900.0))
         self._hvac_report_watch = watch
 
+    def _fan_profile(self) -> FanProfile:
+        """Issue #1556/#1566: what each of the live thermostat's fan modes does -- learned evidence over the name guess.
+
+        The one source every fan_mode read and write uses (the engine reaches it through ``_fan_profile_provider``).
+        """
+        entity = (getattr(self, "config", None) or {}).get("climate_entity")
+        hass = getattr(self, "hass", None)
+        state = hass.states.get(entity) if hass is not None and entity else None
+        return live_fan_profile(getattr(self, "_thermostat_profiles", None), state)
+
+    def _thermostat_identity(self, entity: str) -> ThermostatIdentity:
+        """Issue #1568: the configured thermostat's fingerprint -- its device registry entry, else its entity id.
+
+        A replaced thermostat is a new device (a new profile); the same device keeps its profile across a restart,
+        an update and a renamed entity. Read-only registry lookups; any failure falls back to the entity id.
+        """
+        try:
+            entry = er.async_get(self.hass).async_get(entity)
+            device_id = entry.device_id if entry is not None else None
+            if isinstance(device_id, str) and device_id:
+                device = dr.async_get(self.hass).async_get(device_id)
+                manufacturer = getattr(device, "manufacturer", None) if device is not None else None
+                model = getattr(device, "model", None) if device is not None else None
+                return ThermostatIdentity(
+                    f"device:{device_id}",
+                    manufacturer if isinstance(manufacturer, str) else None,
+                    model if isinstance(model, str) else None,
+                )
+        except Exception:  # noqa: BLE001 - a registry hiccup must not stop learning; the entity id still identifies it
+            _LOGGER.debug("Thermostat identity: registry lookup failed for %s", entity, exc_info=True)
+        return ThermostatIdentity(f"entity:{entity}")
+
+    def _tick_thermostat_profile(self) -> None:
+        """5-minute tick (Issues #1566-#1568): learn what each fan mode does from the thermostat's own reports.
+
+        1. Select the configured thermostat's profile by fingerprint (a swapped device starts fresh and the old one
+           is archived; a device seen before is restored; a changed mode list keeps evidence for unchanged modes).
+        2. Add the minutes since the last tick to the current fan mode's evidence when ``hvac_action`` reads
+           ``fan`` or ``idle`` (heating/cooling carries no fan-mode evidence). Nothing is inferred from temperatures.
+        3. Log the profile once whenever a role, a sent value or a problem changes (INFO), and a WARNING while no
+           safe fan-off value exists.
+        """
+        entity = self.config.get("climate_entity")
+        state = self.hass.states.get(entity) if entity else None
+        if state is None or state.state in ("unavailable", "unknown"):
+            self._thermostat_profile_last_ts = None  # no reading: do not credit the gap to any mode
+            return
+        store = self._thermostat_profiles
+        now = dt_util.now()
+        attrs = state.attributes
+        fan_modes = attrs.get("fan_modes") if isinstance(attrs.get("fan_modes"), (list, tuple)) else None
+        identity = self._thermostat_identity(entity)
+        previous = store.active
+        change = store.select(identity, fan_modes, now.isoformat())
+        if change.kind == "new":
+            _LOGGER.info("Thermostat profile started: device=%s fan_modes=%s", identity.label, list(fan_modes or []))
+        elif change.kind in ("swapped", "restored"):
+            _LOGGER.warning(
+                "Thermostat changed: device=%s (was %s) -- %s; fan_modes=%s",
+                identity.label,
+                previous.identity.label if previous else "unknown device",
+                "restored the profile learned for it earlier" if change.kind == "restored" else "learning it fresh",
+                list(fan_modes or []),
+            )
+        if change.added or change.removed:
+            _LOGGER.info(
+                "Thermostat fan modes changed: device=%s added=%s removed=%s -- evidence kept for unchanged modes",
+                identity.label,
+                list(change.added),
+                list(change.removed),
+            )
+        action = attrs.get("hvac_action")
+        if action not in (None, "") and store.note_reports_hvac_action():
+            _LOGGER.info("Thermostat reports hvac_action: device=%s -- fan modes can be learned", identity.label)
+        if str(action).strip().lower() == "fan" and store.note_reports_fan():
+            _LOGGER.info("Thermostat reports its blower (hvac_action=fan): device=%s", identity.label)
+        # Issue #1566 review H2: in fan_only/dry the system itself runs the blower, whatever the fan mode says.
+        kind = evidence_kind(action) if state.state not in ("fan_only", "dry") else None
+        last = self._thermostat_profile_last_ts
+        self._thermostat_profile_last_ts = now.timestamp()
+        if kind is not None and isinstance(last, float):
+            store.record(attrs.get("fan_mode"), fan=kind, minutes=max(0.0, min(now.timestamp() - last, 900.0)) / 60.0)
+        profile = self.thermostat_profile(identity)
+        signature = profile.signature()
+        if signature != self._thermostat_profile_logged:
+            self._thermostat_profile_logged = signature
+            _LOGGER.info("Thermostat profile: %s", profile.describe())
+            if profile.fan.modes and profile.fan.off_value is None:
+                _LOGGER.warning(
+                    "Fan control held back: no fan mode on this thermostat is known to leave the blower idle "
+                    "(device=%s fan_modes=%s) -- Climate Advisor will not send a fan-off command it cannot trust",
+                    identity.label,
+                    list(profile.fan.modes),
+                )
+
+    def thermostat_profile(self, identity: ThermostatIdentity | None = None) -> ThermostatProfile:
+        """Issue #1569: the configured thermostat in one object -- identity, learned fan roles, declared capabilities
+        (through the engine's single accessor) and whether it has reported heating/cooling."""
+        if identity is None:
+            active = self._thermostat_profiles.active
+            entity_identity = ThermostatIdentity(f"entity:{self.config.get('climate_entity')}")
+            identity = active.identity if active is not None else entity_identity
+        return ThermostatProfile(
+            identity=identity,
+            fan=self._fan_profile(),
+            capabilities=self.automation_engine._get_thermostat_capabilities(),
+            reports_runs=self._thermostat_has_reported_runs(),
+        )
+
+    def thermostat_profile_diagnostics(self) -> dict[str, Any]:
+        """Issue #1566: the live profile with its evidence, plus the archived thermostats, for diagnostics."""
+        out = self.thermostat_profile().as_dict()
+        out["archived_devices"] = [
+            {
+                "device": a.identity.label,
+                "fan_modes": list(a.fan_modes),
+                "last_seen": a.last_seen,
+            }
+            for a in self._thermostat_profiles.archived()
+        ]
+        return out
+
     def thermostat_action_notice(
         self, decisions: str | None = None, engine_learning: str | None = None
     ) -> dict[str, Any] | None:
@@ -11944,8 +12104,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _fan_cancel_in_this_event = (
             _b2_old_fan_mode is not None
             and _b2_new_fan_mode is not None
-            and is_thermostat_fan_physically_active(_b2_old_fan_mode, "")
-            and not is_thermostat_fan_physically_active(_b2_new_fan_mode, "")
+            and is_thermostat_fan_physically_active(_b2_old_fan_mode, "", profile=self._fan_profile())
+            and not is_thermostat_fan_physically_active(_b2_new_fan_mode, "", profile=self._fan_profile())
         )
 
         _setpoint_override_detected = False
@@ -13379,7 +13539,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             temp = data.get("temperature")
             setpoint_f = to_fahrenheit(float(temp), unit) if isinstance(temp, (int, float)) else None
             if domain == "climate":
-                target, mode, fan_on = "thermostat", data.get("hvac_mode") or data.get("fan_mode"), None
+                target, mode = "thermostat", data.get("hvac_mode") or data.get("fan_mode")
+                # Issue #1556: a fan_mode command's effect comes from this thermostat's profile ("Low" is fan ON on a
+                # T6 Pro), so the promise checks see a fan start whatever the vendor calls it.
+                fan_on = (
+                    fan_command_starts_blower(data.get("fan_mode"), self._fan_profile())
+                    if service == "set_fan_mode"
+                    else None
+                )
             else:
                 target, mode, fan_on = "fan", None, service == "turn_on" if service in ("turn_on", "turn_off") else None
             self._promise_journal.record_command(
@@ -13878,7 +14045,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             separate follow-up issue; do not treat this as a full BOTH-archetype fix.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-        thermostat_signal = is_thermostat_fan_physically_active(fan_mode_attr, hvac_action_attr)
+        thermostat_signal = is_thermostat_fan_physically_active(
+            fan_mode_attr, hvac_action_attr, profile=self._fan_profile()
+        )
         if fan_mode == FAN_MODE_HVAC:
             return thermostat_signal
         if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
@@ -17919,7 +18088,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if cs is not None:
                 thermostat_fan_mode = cs.attributes.get("fan_mode", "")
                 thermostat_hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
-                if is_thermostat_fan_physically_active(thermostat_fan_mode, thermostat_hvac_action):
+                if is_thermostat_fan_physically_active(
+                    thermostat_fan_mode, thermostat_hvac_action, profile=self._fan_profile()
+                ):
                     if ae.is_thermostat_schedule_blower():
                         return FAN_STATUS_THERMOSTAT
                     return resolve_untracked_fan_status(
@@ -18084,7 +18255,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     thermostat_fan_mode = cs.attributes.get("fan_mode", "")
                     thermostat_hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
                     _thermostat_on_cache.append(
-                        is_thermostat_fan_physically_active(thermostat_fan_mode, thermostat_hvac_action)
+                        is_thermostat_fan_physically_active(
+                            thermostat_fan_mode, thermostat_hvac_action, profile=self._fan_profile()
+                        )
                     )
             return _thermostat_on_cache[0]
 

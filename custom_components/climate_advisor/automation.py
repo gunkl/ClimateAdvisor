@@ -324,6 +324,7 @@ from .temperature import (
     read_state_temp_f,
     to_fahrenheit,
 )
+from .thermostat_profile import FanProfile, live_fan_profile
 from .time_utils import instant_after
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
@@ -2626,6 +2627,9 @@ class AutomationEngine:
         # Issue #1517: likewise the primary engine's house model (an engine-neutral ``HouseStepper``) for the ceiling
         # guard's lead time; None on a bare engine or while the primary is still learning.
         self._control_stepper_provider: Callable[[], Any] | None = None
+        # Issue #1556/#1566: the coordinator's learned thermostat fan profile (``live_fan_profile`` over its profile
+        # store); None on a bare engine (headless tools) = a name-only profile of the live fan_modes list.
+        self._fan_profile_provider: Callable[[], FanProfile] | None = None
 
         # Issue #899: away/vacation TOU pre-conditioning — the coordinator's live window
         # (_sync_tou_away_vacation_state(), each cycle), passed in with each decision's facts
@@ -6621,7 +6625,7 @@ class AutomationEngine:
                     self._fan_command_time = dt_util.now()
                     _cs_off = self.hass.states.get(self.climate_entity)
                     _fan_modes_off = list(_cs_off.attributes.get("fan_modes") or []) if _cs_off else []
-                    _off_value = resolve_fan_mode_command(_fan_modes_off, "off")
+                    _off_value = resolve_fan_mode_command(_fan_modes_off, "off", profile=self._fan_profile())
                     if _off_value is None:
                         _LOGGER.debug(
                             "No safe off/auto fan_mode found in entity's fan_modes=%s — skipping assert",
@@ -10675,7 +10679,9 @@ class AutomationEngine:
             return False  # WHF-only: the signal is the real fan entity, not a thermostat schedule
         cs = self.hass.states.get(self.climate_entity)
         if cs is None or not is_thermostat_schedule_signal(
-            cs.attributes.get("fan_mode", ""), cs.attributes.get("hvac_action", "")
+            cs.attributes.get("fan_mode", ""),
+            cs.attributes.get("hvac_action", ""),
+            profile=self._fan_profile(),
         ):
             return False
         if self._fan_active or self._natural_vent_active or self._fan_override_active:
@@ -10748,9 +10754,9 @@ class AutomationEngine:
         if cs is None:
             return
         attr = str(cs.attributes.get("fan_mode", ""))
-        if not is_thermostat_fan_physically_active(attr, ""):
+        if not is_thermostat_fan_physically_active(attr, "", profile=self._fan_profile()):
             return
-        target = resolve_fan_mode_command(cs.attributes.get("fan_modes"), "off")
+        target = resolve_fan_mode_command(cs.attributes.get("fan_modes"), "off", profile=self._fan_profile())
         if target is None:
             return
         if self.dry_run is True:
@@ -19436,8 +19442,23 @@ class AutomationEngine:
                             "most thermostats support fan circulation independent of heating/cooling"
                         )
                     _fan_modes_on = list(hvac_state.attributes.get("fan_modes") or []) if hvac_state else []
-                    _on_value = resolve_fan_mode_command(_fan_modes_on, "on")
-                    if _on_value is None:
+                    _fan_profile_on = self._fan_profile()
+                    _on_value = resolve_fan_mode_command(_fan_modes_on, "on", profile=_fan_profile_on)
+                    # Issue #1566 (activate/deactivate mirror): never start a blower this thermostat gives CA no safe
+                    # way to stop -- the deactivate below would send nothing and the blower would run on unseen.
+                    _off_value_on = resolve_fan_mode_command(_fan_modes_on, "off", profile=_fan_profile_on)
+                    if _on_value is not None and _off_value_on is None:
+                        _cause = (self.climate_entity, tuple(_fan_modes_on), fan_mode, "no_off")
+                        _log_no_off = _LOGGER.debug if self._hvac_fan_no_on_logged_cause == _cause else _LOGGER.warning
+                        self._hvac_fan_no_on_logged_cause = _cause
+                        _log_no_off(
+                            "Feature suppressed: HVAC fan not activated -- no fan mode on this thermostat is known to "
+                            "leave the blower idle, so Climate Advisor could not turn it back off (fan_modes=%s, "
+                            "Issue #1566) -- %s",
+                            _fan_modes_on,
+                            reason,
+                        )
+                    elif _on_value is None:
                         # Issue #1205 (C-a): the economizer retries about twice an hour, so the same unchanged cause
                         # is an ERROR once and a DEBUG line after that. The cause is the thermostat, its offered
                         # fan_modes and the configured fan mode, so a different thermostat/config logs ERROR again;
@@ -20095,6 +20116,7 @@ class AutomationEngine:
                     is_thermostat_fan_physically_active(
                         _cs_drift.attributes.get("fan_mode", ""),
                         str(_cs_drift.attributes.get("hvac_action", "")).lower(),
+                        profile=self._fan_profile(),
                     )
                     if _cs_drift is not None
                     else None
@@ -20704,11 +20726,15 @@ class AutomationEngine:
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH) and not (safety and fan_mode == FAN_MODE_BOTH):
                 _cs_deact = self.hass.states.get(self.climate_entity)
                 _fan_modes_deact = list(_cs_deact.attributes.get("fan_modes") or []) if _cs_deact else []
-                _deact_value = resolve_fan_mode_command(_fan_modes_deact, "off")
+                _deact_value = resolve_fan_mode_command(_fan_modes_deact, "off", profile=self._fan_profile())
                 if _deact_value is None:
-                    _LOGGER.debug(
-                        "No safe off/auto fan_mode found in entity's fan_modes=%s — skipping deactivate command",
+                    # Issue #1566: activation is refused when no off value exists, so this is reached only if the
+                    # profile changed during the session -- loud, because the blower may still be running.
+                    _LOGGER.warning(
+                        "HVAC fan deactivate sent nothing: no fan mode on this thermostat is known to leave the blower "
+                        "idle (fan_modes=%s, Issue #1566) -- the blower may still be running — %s",
                         _fan_modes_deact,
+                        reason,
                     )
                 else:
                     await self._call_service_with_context(
@@ -21193,6 +21219,19 @@ class AutomationEngine:
         sigs[key] = signature
         ats[key] = now
         return is_duplicate
+
+    def _fan_profile(self) -> FanProfile:
+        """Issue #1556/#1566: what each of the live thermostat's fan modes does (see ``thermostat_profile.py``).
+
+        The coordinator's learned profile when it attached its provider; otherwise the name guess for the live
+        ``fan_modes`` list. Every fan_mode read and write in this engine passes it to ``fan_mode_resolver``.
+        """
+        provider = getattr(self, "_fan_profile_provider", None)
+        if provider is not None:
+            return provider()
+        hass = getattr(self, "hass", None)
+        state = hass.states.get(self.climate_entity) if hass is not None else None
+        return live_fan_profile(None, state)
 
     def _get_thermostat_capabilities(self) -> ThermostatCapabilities:
         """Read the configured thermostat's advertised capabilities (Issue #249).

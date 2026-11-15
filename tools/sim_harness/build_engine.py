@@ -77,6 +77,15 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+def scenario_fan_modes(config: dict) -> list[str]:
+    """The fake thermostat's advertised ``fan_modes``: ``config["thermostat_fan_modes"]`` or the legacy on/auto list.
+
+    Issue #1556: shared by the engine-only and coordinator builds, so a scenario's vendor vocabulary (e.g. a T6
+    Pro's ``["Auto low", "Low", "Circulation"]``) reaches the engine in both modes.
+    """
+    return list(config.get("thermostat_fan_modes") or ["auto", "on"])
+
+
 def build_headless_engine(
     config: dict[str, Any] | None = None,
     *,
@@ -173,7 +182,7 @@ def build_headless_engine(
         # scenarios keep their prior fan-activation behavior unchanged. A scenario that
         # wants to exercise a named-speed-only thermostat (Issue #893) sets
         # config["thermostat_fan_modes"], mirroring thermostat_hvac_modes above.
-        "fan_modes": merged_config.get("thermostat_fan_modes", ["auto", "on"]),
+        "fan_modes": scenario_fan_modes(merged_config),
         "hvac_modes": _default_hvac_modes,
         "supported_features": _default_features,
     }

@@ -26,7 +26,7 @@
   // Issue #1399: keys deliberately not shown on this tab; their full data is in Download diagnostics (this tab's button
   // saves the whole automation_state; HA's native diagnostics file carries it as debug_state). Every key of
   // get_debug_state() must be in a GROUPS list, NESTED, MOVED or here: tests/test_new_dashboard.py enforces it.
-  var DOWNLOAD_ONLY = [];
+  var DOWNLOAD_ONLY = ['last_action_reason_msg', 'next_automation_action_msg', 'next_automation_time_msg', 'comfort_family_hold_msg'];  // #1341: the wire siblings of prose fields shown above (render by the language, not displayed raw)
   // Object-valued keys rendered as plain-language rows by their own builders below (engineRows, planRows).
   var CUSTOM = { v4_model: 1, control_feed: 1, operation_timeline: 1 };
   var DASH = '—';

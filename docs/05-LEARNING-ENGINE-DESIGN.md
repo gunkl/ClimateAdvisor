@@ -764,6 +764,8 @@ Analyzes historical records where both forecast and observed temperatures are pr
 
 The following attributes are added to `sensor.climate_advisor_comfort_score` when the thermal model is available:
 
+_(Entity ids depend on the zone title and install language; the unique id is `<entry_id>_compliance_score`. See [09-DEBUGGING-GUIDE.md](09-DEBUGGING-GUIDE.md#1-ha-sensor-entities-recommended-first).)_
+
 | Attribute | Type | Description |
 |---|---|---|
 | `thermal_heating_rate` | `float \| None` | `k_active_heat` in user's configured unit per hour (`None` if no data) |
@@ -856,6 +858,6 @@ indicate data recorded before v0.2.x (fixed-30-min bug) and should be disregarde
 **Formula:** `1 − (sum of daily violation_minutes / (days_recorded × 1440))`
 **Range:** 0.0 (always outside the target range in effect) to 1.0 (always within it), reported as a percentage
 **Example:** 3 days, total 2160 violation minutes → `1 − (2160 / 4320)` = 0.50 = 50%
-**Sensor:** `sensor.climate_advisor_comfort_score` reports this as a percentage (0–100%)
+**Sensor:** `sensor.climate_advisor_comfort_score` reports this as a percentage (0–100%) (unique id `<entry_id>_compliance_score`; the entity id depends on the zone title and install language)
 **Trigger:** More than 5 days with over 30 violation minutes triggers the `comfort_violations`
 suggestion, which reduces setback aggressiveness and starts morning pre-heat 15 minutes earlier.

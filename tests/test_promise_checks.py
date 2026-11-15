@@ -794,6 +794,22 @@ class TestP5BlindFan:
         c = cmd(0, service="set_fan_mode", mode="on", indoor_f=None)
         assert len(hits_for("no_blind_fan_start", make_input(commands=[c]))) == 1
 
+    def test_thermostat_speed_named_fan_start_counts_1556(self):
+        """Issue #1556: a T6 Pro's fan ON is "Low" -- before, only a literal "on" was seen as a start."""
+        c = cmd(0, service="set_fan_mode", mode="Low", indoor_f=None)
+        assert len(hits_for("no_blind_fan_start", make_input(commands=[c]))) == 1
+
+    def test_thermostat_auto_variant_is_not_a_start_1556(self):
+        c = cmd(0, service="set_fan_mode", mode="Auto low", indoor_f=None)
+        assert hits_for("no_blind_fan_start", make_input(commands=[c])) == []
+
+    def test_adapter_stamp_wins_over_the_name_1556(self):
+        """The production hook stamps fan_on from the learned profile; that beats the name guess both ways."""
+        c = cmd(0, service="set_fan_mode", mode="Smart", fan_on=True, indoor_f=None)
+        assert len(hits_for("no_blind_fan_start", make_input(commands=[c]))) == 1
+        c = cmd(0, service="set_fan_mode", mode="low", fan_on=False, indoor_f=None)
+        assert hits_for("no_blind_fan_start", make_input(commands=[c])) == []
+
     def test_occupant_start_is_not_ca(self):
         c = cmd(0, target="fan", service="turn_on", fan_on=True, indoor_f=None, origin="external")
         assert hits_for("no_blind_fan_start", make_input(commands=[c])) == []

@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
+from . import i18n
 from . import predictor_v4 as p4
 from .const import (
     FAN_MODE_HVAC,
@@ -41,7 +42,7 @@ from .const import (
     THERMAL_SWING_DEFAULT_F,
 )
 from .remote_offset import RemoteLoopEmulator
-from .temperature import FAHRENHEIT, format_temp
+from .temperature import FAHRENHEIT
 
 NIGHT_STRATEGY_SCHEMA_VERSION = 1
 
@@ -230,6 +231,8 @@ class StrategyOption:
     path: tuple[tuple[datetime, float], ...] = ()  # target-sensor path under the option
     hall_path: tuple[tuple[datetime, float], ...] = ()
     used: Mapping[str, float] = field(default_factory=dict)  # rate -> steps used (debug)
+    label_msg: i18n.Msg | None = None  # the label as a catalog message (``label`` is its English rendering)
+    note_msg: i18n.Msg | None = None  # the note as a catalog message (``note`` is its English rendering)
 
     @property
     def hvac_minutes(self) -> int:
@@ -263,6 +266,10 @@ class StrategyOption:
                 for a in self.actions
             ],
         }
+        if self.label_msg is not None:
+            d["label_msg"] = self.label_msg.to_wire()
+        if self.note_msg is not None:
+            d["note_msg"] = self.note_msg.to_wire()
         if include_path:
             d["path"] = [[t.isoformat(), round(v, 2)] for t, v in self.path]
         return d
@@ -731,30 +738,32 @@ def grade_rates(
 
 
 # ---------------------------------------------------------------------------------------------- labels
-def _t(value: float, unit: str) -> str:
-    return format_temp(round(value * 2) / 2, unit)
+def _tp(value: float, unit: str) -> i18n.Temp:
+    """A temperature param, rounded to the half degree before conversion (the night plan's display rule)."""
+    return i18n.Temp(round(value * 2) / 2, unit)
+
+
+def _label_msg(key: str, inp: NightInputs) -> i18n.Msg:
+    if key == OPT_CLOSED:
+        return i18n.Msg("night.option_closed")
+    if key == OPT_WINDOWS_2H:
+        return i18n.Msg("night.option_windows_2h", hours=inp.window_hours)
+    if key == OPT_WINDOWS_ALL:
+        return i18n.Msg("night.option_windows_all")
+    if key == OPT_FAN_2H:
+        return i18n.Msg("night.option_fan_2h", hours=inp.window_hours)
+    if key == OPT_FAN_UNTIL_TARGET:
+        return i18n.Msg("night.option_fan_until_target", reach=_tp(inp.floor_f + FAN_UNTIL_ABOVE_FLOOR_F, inp.unit))
+    if key == OPT_FAN_THEN_AC:
+        return i18n.Msg("night.option_fan_then_ac", limit=_tp(inp.ceiling_f - FAN_THEN_AC_BELOW_CEILING_F, inp.unit))
+    if key == OPT_BLOWER_2H:
+        return i18n.Msg("night.option_blower_2h", hours=inp.window_hours)
+    return i18n.Msg("night.option_unknown", key=key)
 
 
 def _label(key: str, inp: NightInputs, sim: _Sim | None) -> str:
-    if key == OPT_CLOSED:
-        return "Keep the windows closed; CA heats or cools the bedroom as needed"
-    if key == OPT_WINDOWS_2H:
-        return f"Open the bedroom windows for {inp.window_hours:g} h at bedtime, then close them"
-    if key == OPT_WINDOWS_ALL:
-        return "Leave the bedroom windows open all night"
-    if key == OPT_FAN_2H:
-        return f"Whole-house fan with the windows open for {inp.window_hours:g} h, then close up"
-    if key == OPT_FAN_UNTIL_TARGET:
-        reach = _t(inp.floor_f + FAN_UNTIL_ABOVE_FLOOR_F, inp.unit)
-        return f"Whole-house fan until the bedroom reaches {reach}, then close up"
-    if key == OPT_FAN_THEN_AC:
-        return (
-            f"Whole-house fan until the bedroom is under {_t(inp.ceiling_f - FAN_THEN_AC_BELOW_CEILING_F, inp.unit)}, "
-            "then close up and let the AC finish"
-        )
-    if key == OPT_BLOWER_2H:
-        return f"Run the HVAC fan for {inp.window_hours:g} h at bedtime"
-    return key
+    """The option label in English (records / debug); occupant surfaces render ``_label_msg``."""
+    return i18n.render_en(_label_msg(key, inp))
 
 
 # ---------------------------------------------------------------------------------------------- the planner
@@ -775,11 +784,13 @@ def _evaluate(inp: NightInputs, key: str, target: str, target_fallback: bool) ->
     runs = any(w > 0 or f > 0 for w, f in zip(sim.win, sim.fan, strict=True))
     acts = _actions_from_sim(sim, inp.start, spec) if runs else ()
     grade, reasons = grade_rates(inp, spec, sim, target, target_fallback=target_fallback)
-    note = ""
+    note_msg: i18n.Msg | None = None
     if spec.mode != "none" and not runs:
-        note = "would not run tonight: the bedroom does not need it"
+        note_msg = i18n.Msg("night.note_not_needed")
     elif spec.mode == "all_night" and acts:
-        note = "windows stay open until you get up"
+        note_msg = i18n.Msg("night.note_windows_until_wake")
+    note = i18n.render_en(note_msg) if note_msg is not None else ""
+    label_msg = _label_msg(key, inp)
     used = {
         "heat_steps": sum(1 for u in sim.uh if u > 0),
         "cool_steps": sum(1 for u in sim.uc if u > 0),
@@ -789,7 +800,7 @@ def _evaluate(inp: NightInputs, key: str, target: str, target_fallback: bool) ->
     }
     return StrategyOption(
         key=key,
-        label=_label(key, inp, sim),
+        label=i18n.render_en(label_msg),
         cls=spec.cls,
         actions=acts,
         n_actions=spec.n_actions if runs else 0,
@@ -807,6 +818,8 @@ def _evaluate(inp: NightInputs, key: str, target: str, target_fallback: bool) ->
         path=tuple(zip(sim.ts, sim.target, strict=True)),
         hall_path=tuple(zip(sim.ts, sim.hall, strict=True)),
         used=used,
+        label_msg=label_msg,
+        note_msg=note_msg,
     )
 
 
@@ -918,10 +931,12 @@ FIGURE_KEYS = (
 )
 #: Shown on the night card: the plan is built on v4's rates whichever model the Status chart shows (Settings).
 SOURCE_MODEL = "v4"
+#: English source of the note (tests pin it equal to the ``night.source_note`` catalog entry).
 SOURCE_NOTE = (
     "From v4. Tonight's bedroom plan is always built on v4's learned rates, "
     "whichever prediction model the Status chart shows."
 )
+SOURCE_NOTE_MSG = i18n.Msg("night.source_note")
 
 
 def api_payload(
@@ -930,6 +945,7 @@ def api_payload(
     unit: str,
     convert: Any,
     include_debug: bool = False,
+    lang: str = "en",
 ) -> dict[str, Any]:
     """The REST body of ``GET /api/climate_advisor/night_strategy``: ``NightStrategy.to_dict()`` with temperatures in
     the display unit (keys keep their ``_f`` names, like the timeline payload), ``unit`` added, the headline and the
@@ -938,7 +954,11 @@ def api_payload(
     ``convert`` is the caller's ``display_temp(value_f, unit)``. When ``show_numbers`` is False (the bedroom model is
     below medium confidence; there is no accuracy gate) every predicted figure is ``null`` and the path is empty, so
     the guarantee does not depend on the page remembering to hide them; the plan itself (options, actions, labels) is
-    unchanged."""
+    unchanged.
+
+    ``lang`` (Issue #1341): the backend language the prose fields (``label``, ``note``, ``headline``, ``source_note``,
+    each trade-off ``text``) render in; every one also carries a ``<field>_msg`` wire sibling (``Msg.to_wire()``) so the
+    dashboard can render in the viewer's own language."""
     gated = strategy
     d = gated.to_dict(include_debug=include_debug)
     scale = 5.0 / 9.0 if unit == "celsius" else 1.0
@@ -946,11 +966,17 @@ def api_payload(
     d["floor_f"] = convert(d["floor_f"], unit)
     d["ceiling_f"] = convert(d["ceiling_f"], unit)
     d["source_model"] = SOURCE_MODEL
-    d["source_note"] = SOURCE_NOTE
+    d["source_note"] = i18n.render(SOURCE_NOTE_MSG, lang)
+    d["source_note_msg"] = SOURCE_NOTE_MSG.to_wire()
     show = gated.show_numbers
     opts = []
     for o in d["options"]:
         o2 = dict(o)
+        opt_obj = gated.option(o["key"])
+        if opt_obj is not None and opt_obj.label_msg is not None:
+            o2["label"] = i18n.render(opt_obj.label_msg, lang)
+        if opt_obj is not None and opt_obj.note_msg is not None:
+            o2["note"] = i18n.render(opt_obj.note_msg, lang)
         if show:
             for k in ("bedroom_low_f", "bedroom_high_f", "bedroom_wake_f"):
                 o2[k] = convert(o2[k], unit)
@@ -962,14 +988,18 @@ def api_payload(
             o2["path"] = []
         opts.append(o2)
     d["options"] = opts
-    d["headline"] = headline(gated, unit)
-    d["tradeoffs"] = tradeoffs(gated, unit) if show else []
+    d["headline"] = headline(gated, unit, lang)
+    hm = headline_msg(gated, unit)
+    d["headline_msg"] = hm.to_wire() if hm is not None else None
+    d["tradeoffs"] = tradeoffs(gated, unit, lang) if show else []
     return d
 
 
 # ---------------------------------------------------------------------------------------------- presentation
-def tradeoffs(strategy: NightStrategy, unit: str = FAHRENHEIT) -> list[dict[str, Any]]:
-    """One line per alternative against the recommendation: what you gain or lose. Facts plus a sentence."""
+def tradeoffs(strategy: NightStrategy, unit: str = FAHRENHEIT, lang: str | None = None) -> list[dict[str, Any]]:
+    """One line per alternative against the recommendation: what you gain or lose. Facts plus a sentence.
+
+    ``text`` is rendered in ``lang`` (English when None); ``text_msg`` and ``label_msg`` are the wire siblings."""
     best = strategy.best
     if best is None:
         return []
@@ -980,75 +1010,81 @@ def tradeoffs(strategy: NightStrategy, unit: str = FAHRENHEIT) -> list[dict[str,
         d_score = o.score - best.score
         d_hvac = o.hvac_minutes - best.hvac_minutes
         d_disc = o.discomfort_fh - best.discomfort_fh
-        parts: list[str] = []
+        parts: list[i18n.Msg] = []
         d_disc_u = d_disc * (5.0 / 9.0 if unit == "celsius" else 1.0)  # a degree-hours figure in the user's unit
         deg = "C" if unit == "celsius" else "F"
         if d_disc_u > 0.05:
-            parts.append(f"{d_disc_u:.1f} more {deg}-hours outside your sleep band")
+            parts.append(i18n.Msg("night.tradeoff_disc_more", n=d_disc_u, deg=deg))
         elif d_disc_u < -0.05:
-            parts.append(f"{-d_disc_u:.1f} fewer {deg}-hours outside your sleep band")
+            parts.append(i18n.Msg("night.tradeoff_disc_fewer", n=-d_disc_u, deg=deg))
         if d_hvac >= 5:
-            parts.append(f"{d_hvac} more minutes of heat or AC")
+            parts.append(i18n.Msg("night.tradeoff_hvac_more", n=d_hvac))
         elif d_hvac <= -5:
-            parts.append(f"{-d_hvac} fewer minutes of heat or AC")
+            parts.append(i18n.Msg("night.tradeoff_hvac_fewer", n=-d_hvac))
         if o.n_actions > best.n_actions:
-            parts.append(f"{o.n_actions - best.n_actions} more thing(s) for you to do")
+            parts.append(i18n.Msg("night.tradeoff_actions_more", n=o.n_actions - best.n_actions))
         elif o.n_actions < best.n_actions:
-            parts.append(f"{best.n_actions - o.n_actions} fewer thing(s) for you to do")
+            parts.append(i18n.Msg("night.tradeoff_actions_fewer", n=best.n_actions - o.n_actions))
         if not o.runs:
-            parts = ["would not do anything tonight"]
-        rows.append(
-            {
-                "key": o.key,
-                "label": o.label,
-                "score_delta": round(d_score, 2),
-                "hvac_minutes_delta": d_hvac,
-                "discomfort_fh_delta": round(d_disc, 2),
-                "text": f"{o.label}: " + (", ".join(parts) if parts else "about the same"),
-            }
-        )
+            parts = [i18n.Msg("night.tradeoff_no_run")]
+        label = o.label_msg if o.label_msg is not None else o.label
+        if parts:
+            text_msg = i18n.Msg("night.tradeoff", label=label, parts=i18n.ListOf(parts))
+        else:
+            text_msg = i18n.Msg("night.tradeoff_same", label=label)
+        row: dict[str, Any] = {
+            "key": o.key,
+            "label": i18n.render(label, lang or i18n.DEFAULT_LANGUAGE),
+            "score_delta": round(d_score, 2),
+            "hvac_minutes_delta": d_hvac,
+            "discomfort_fh_delta": round(d_disc, 2),
+            "text": i18n.render(text_msg, lang or i18n.DEFAULT_LANGUAGE),
+            "text_msg": text_msg.to_wire(),
+        }
+        if o.label_msg is not None:
+            row["label_msg"] = o.label_msg.to_wire()
+        rows.append(row)
     return rows
 
 
-def headline(strategy: NightStrategy, unit: str = FAHRENHEIT) -> str | None:
-    """The one-sentence recommendation, in occupant words. None when there is nothing to recommend."""
+def headline_msg(strategy: NightStrategy, unit: str = FAHRENHEIT) -> i18n.Msg | None:
+    """The one-sentence recommendation as a catalog message. None when there is nothing to recommend."""
     o = strategy.best
     if o is None:
         return None
-    hold = _hold_clause(strategy, o, unit)
+    hold = _hold_msg(strategy, o, unit)
     if o.key == OPT_CLOSED or not o.runs:
-        return f"Keep the windows closed tonight; {hold}." if hold else "Keep the windows closed tonight."
-    close = next((a for a in o.actions if a.kind in ("windows_close", "fan_off")), None)
-    fan = any(a.kind == "fan_on" for a in o.actions)
-    what = {
-        OPT_BLOWER_2H: "run the HVAC fan",
-    }.get(o.key, "run the whole-house fan with the windows open" if fan else "open the bedroom windows")
-    if o.key == OPT_WINDOWS_ALL:
-        text = "Open the bedroom windows at bedtime and leave them open all night"
-    elif close is not None:
-        when = _fmt_time(close.ts)
-        approx = "about " if close.predicted else ""
-        verb = what[0].upper() + what[1:]
-        close_what = "turn it off" if o.key == OPT_BLOWER_2H else "close up"
-        text = f"{verb} until {approx}{when}, then {close_what}"
+        text = i18n.Msg("night.headline_closed")
     else:
-        text = what[0].upper() + what[1:]
-    return f"{text}; {hold}." if hold else f"{text}."
+        close = next((a for a in o.actions if a.kind in ("windows_close", "fan_off")), None)
+        fan = any(a.kind == "fan_on" for a in o.actions)
+        what = "blower" if o.key == OPT_BLOWER_2H else ("fan" if fan else "windows")
+        if o.key == OPT_WINDOWS_ALL:
+            text = i18n.Msg("night.headline_windows_all")
+        elif close is not None:
+            key = "night.headline_until_approx" if close.predicted else "night.headline_until"
+            text = i18n.Msg(key, what=what, t=i18n.Time(close.ts))
+        else:
+            text = i18n.Msg("night.headline_open_only", what=what)
+    return i18n.Msg("night.headline", text=text, hold=hold)
 
 
-def _hold_clause(strategy: NightStrategy, o: StrategyOption, unit: str) -> str:
+def headline(strategy: NightStrategy, unit: str = FAHRENHEIT, lang: str | None = None) -> str | None:
+    """``headline_msg`` rendered in ``lang`` (English when None)."""
+    msg = headline_msg(strategy, unit)
+    return None if msg is None else i18n.render(msg, lang or i18n.DEFAULT_LANGUAGE)
+
+
+def _hold_msg(strategy: NightStrategy, o: StrategyOption, unit: str) -> i18n.Msg:
+    """What CA holds for the bedroom (heat floor, AC ceiling or both). At least one is always true."""
     heat = o.heat_min > 0 or o.cool_min == 0
     cool = o.cool_min > 0
-    parts = []
-    if heat:
-        parts.append(f"CA keeps the heat for the bedroom at {_t(strategy.floor_f, unit)}")
+    floor, ceiling = _tp(strategy.floor_f, unit), _tp(strategy.ceiling_f, unit)
+    if heat and cool:
+        return i18n.Msg("night.hold_both", floor=floor, ceiling=ceiling)
     if cool:
-        parts.append(f"CA keeps the AC for the bedroom at {_t(strategy.ceiling_f, unit)}")
-    return "; ".join(parts)
-
-
-def _fmt_time(dt: datetime) -> str:
-    return dt.strftime("%I:%M %p").lstrip("0")
+        return i18n.Msg("night.hold_cool", ceiling=ceiling)
+    return i18n.Msg("night.hold_heat", floor=floor)
 
 
 # ---------------------------------------------------------------------------------------------- the timeline step
@@ -1059,17 +1095,40 @@ def _timeline_module() -> Any:
     return operation_timeline
 
 
-def _sentence(key: str, unit: str, **f: Any) -> str:
-    """The R4 sentences (plan section 9). Each says only what CA does or what the occupant is asked to do."""
+#: ``apply_night_strategy`` passes the fan as the English word the legacy template shows; the message takes a code.
+FAN_WORD_HVAC = "HVAC fan"
+FAN_WORD_WHOLE_HOUSE = "whole-house fan"
+
+
+def sentence_msg_key(key: str) -> str:
+    """Catalog key of a night sentence: ``night_strategy.windows_close`` -> ``night.sentence_windows_close``."""
+    return "night.sentence_" + key.removeprefix("night_strategy.").replace(".", "_")
+
+
+def sentence_msg(key: str, unit: str, **f: Any) -> i18n.Msg:
+    """The R4 sentences (plan section 9) as a catalog message. Each says only what CA does or what the occupant is
+    asked to do. ``t`` is an aware local datetime; temperatures are internal F (rounded to the half degree)."""
     tmpl = NIGHT_SENTENCES[key]
     for name in tmpl.facts:
         if f.get(name) is None:
             raise KeyError(f"{key}: {name}")
-    vals: dict[str, str] = {}
+    params: dict[str, Any] = {}
     for name, kind in tmpl.facts.items():
         v = f[name]
-        vals[name] = _fmt_time(v) if kind == "time" else (_t(v, unit) if kind == "temp" else str(v))
-    return tmpl.template.format(**vals)
+        if kind == "time":
+            params[name] = i18n.Time(v)
+        elif kind == "temp":
+            params[name] = _tp(v, unit)
+        elif name == "fan":
+            params[name] = "hvac" if v == FAN_WORD_HVAC else "whole_house"
+        else:
+            params[name] = str(v)
+    return i18n.Msg(sentence_msg_key(key), **params)
+
+
+def _sentence(key: str, unit: str, **f: Any) -> str:
+    """``sentence_msg`` in English (the timeline step's stored ``text``; the wire sits in ``meta["text_msg"]``)."""
+    return i18n.render_en(sentence_msg(key, unit, **f))
 
 
 @dataclass(frozen=True)
@@ -1210,7 +1269,7 @@ def apply_night_strategy(
     if opt is None:
         return timeline
 
-    fan_word = "HVAC fan" if opt.cls == CLS_BLOWER else "whole-house fan"
+    fan_word = FAN_WORD_HVAC if opt.cls == CLS_BLOWER else FAN_WORD_WHOLE_HOUSE
     do_nothing = opt.key == OPT_CLOSED or not opt.runs
     conf = "ok" if opt.grade in OFFERED_GRADES and (show or opt.key != OPT_CLOSED) else "low"
 
@@ -1237,12 +1296,13 @@ def apply_night_strategy(
         "replaced": replaced,
     }
     plan_key = "night_strategy.plan.closed" if do_nothing else "night_strategy.plan.active"
+    plan_msg = sentence_msg(plan_key, unit, t=t0, floor=floor, ceiling=ceiling)
     new.append(
         TimelineStep(
             ts=t0,
             actor=Actor.CA,
             kind=StepKind.NIGHT_STRATEGY,
-            text=_sentence(plan_key, unit, t=t0, floor=floor, ceiling=ceiling),
+            text=i18n.render_en(plan_msg),
             reason=plan_key,
             target_f=floor,
             confidence=conf,
@@ -1251,6 +1311,8 @@ def apply_night_strategy(
             meta={
                 **meta_base,
                 "label": opt.label,
+                "text_msg": plan_msg.to_wire(),
+                **({"label_msg": opt.label_msg.to_wire()} if opt.label_msg is not None else {}),
                 "bedroom_low_f": round(opt.bed_min_f, 1),
                 "bedroom_high_f": round(opt.bed_max_f, 1),
                 "bedroom_wake_f": round(opt.bed_wake_f, 1),
@@ -1283,18 +1345,24 @@ def apply_night_strategy(
                 key, facts = REASON_FAN_ON, {"t": a.ts, "fan": fan_word}
             else:
                 key, facts = REASON_FAN_OFF, {"t": a.ts, "fan": fan_word}
+            step_msg = sentence_msg(key, unit, **facts)
             new.append(
                 TimelineStep(
                     ts=a.ts,
                     actor=Actor.YOU,
                     kind=kind,
-                    text=_sentence(key, unit, **facts),
+                    text=i18n.render_en(step_msg),
                     reason=key,
                     target_f=floor if a.kind.endswith("close") or a.kind == "fan_off" else None,
                     confidence="ok",
                     lead_minutes=YOU_STEP_LEAD_MIN,
                     source=STEP_SOURCE,
-                    meta={**meta_base, "predicted_time": a.predicted, "fan_by_ca_natvent": False},
+                    meta={
+                        **meta_base,
+                        "predicted_time": a.predicted,
+                        "fan_by_ca_natvent": False,
+                        "text_msg": step_msg.to_wire(),
+                    },
                 )
             )
     if natvent_covers:

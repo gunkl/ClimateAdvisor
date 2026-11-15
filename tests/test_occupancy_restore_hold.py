@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.climate_advisor import i18n
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.occupancy_fsm import (
@@ -126,7 +127,7 @@ class TestArrivingHomeHold:
         deferred = [d for e, d in events if e == "occupancy_restore_deferred"]
         assert len(deferred) == 1 and deferred[0]["reason"] == reason
         assert f"restore deferred: reason={reason}" in caplog.text
-        msg = eng._notify.await_args.args[0]
+        msg = i18n.render_en(eng._notify.await_args.args[0])
         assert "Restoring comfort" not in msg and "resume once" in msg
         assert eng.occupancy_restore_hold_reason() == reason
 
@@ -151,7 +152,7 @@ class TestArrivingHomeHold:
         _home(eng)
         assert "occupancy_comfort_restored" in _names(events)
         assert "occupancy_restore_deferred" not in _names(events)
-        assert "Restoring comfort" in eng._notify.await_args.args[0]
+        assert "Restoring comfort" in i18n.render_en(eng._notify.await_args.args[0])
 
     def test_deferred_event_is_windowed_deduped(self):
         eng, events, _call = _engine()

@@ -477,9 +477,11 @@ def _resolve_zone_coordinator(hass: HomeAssistant, call) -> ClimateAdvisorCoordi
     entry_id = call.data.get("entry_id")
     coordinator = zone_registry.get_coordinator(hass, entry_id) if entry_id else None
     if coordinator is None:
+        # Issue #1341: the text is strings.json ``exceptions.unknown_zone`` (HA's own method, translated per language).
         raise ServiceValidationError(
-            f"Unknown or unloaded Climate Advisor zone entry_id '{entry_id}'. "
-            "Check Settings > Devices & Services for the correct zone."
+            translation_domain=DOMAIN,
+            translation_key="unknown_zone",
+            translation_placeholders={"entry_id": str(entry_id)},
         )
     return coordinator
 
@@ -522,8 +524,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Issue #1341: read the translation catalogs (blocking file reads) once, in the executor, before
     # anything renders. Idempotent across zones/entries and reloads.
+    # A broken or missing catalog must never stop setup: rendering then falls back (English, then the key).
     if not i18n.catalogs_loaded():
-        await hass.async_add_executor_job(i18n.load_catalogs)
+        try:
+            await hass.async_add_executor_job(i18n.load_catalogs)
+        except Exception as err:  # noqa: BLE001 - any failure here (bad JSON, missing file, mismatched index) is non-fatal
+            _LOGGER.error(
+                "Climate Advisor could not load its translation catalogs (%s); continuing with fallbacks", err
+            )
 
     # Issue #812: one-time migration off the old domain-wide (unscoped)
     # issue ids. Any install with an open Repairs card raised under the OLD

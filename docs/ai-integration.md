@@ -41,7 +41,7 @@ for the full audit of what was ported vs. retired as redundant.
 - The deterministic fallback path when Claude is unavailable or returns an error
 
 **Explicitly does NOT own:**
-- Sensor entity for `sensor.climate_advisor_ai_status` — owned by `sensor.py`
+- Sensor entity for `sensor.climate_advisor_ai_status` — owned by `sensor.py` (entity ids depend on the zone title and install language; look up by unique id — [09-DEBUGGING-GUIDE.md](09-DEBUGGING-GUIDE.md#1-ha-sensor-entities-recommended-first))
 - Report history storage (`get_investigation_report_history()`, `store_investigation_report()`) — owned by `coordinator.py`. The AI Activity Report skill/service and its separate `get_ai_report_history()`/`_ai_report_history` storage were retired entirely in Issue #578 (superseded by the deterministic, non-AI Activity Record).
 - Thermal model computation — owned by `learning.py`
 - Daily record persistence — owned by `coordinator.py` + `learning.py`

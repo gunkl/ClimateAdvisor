@@ -287,15 +287,165 @@ def check_python_temperature_literals(component_dir: str) -> CheckResult:
     return result
 
 
+def check_ha_translations(component_dir):
+    """Issue #1341 (D1/D6): hassfest-style checks of the HA-rendered catalog, using only the standard library.
+
+    Mirrors the rules Home Assistant core's hassfest enforces on ``strings.json`` for the sections this integration
+    uses, plus the cross-checks hassfest cannot do for a custom integration: every ``translation_key`` the code or
+    ``services.yaml`` names exists in the catalog, and the entity/service names are not hard-coded in Python.
+    """
+    import string  # noqa: PLC0415
+
+    result = CheckResult("HA translations (entity, selector, services, exceptions)")
+    strings_path = os.path.join(component_dir, "strings.json")
+    try:
+        with open(strings_path, encoding="utf-8") as f:
+            strings = json.load(f)
+    except OSError, json.JSONDecodeError:
+        return result  # check_strings reports it
+
+    allowed = {
+        "config",
+        "options",
+        "issues",
+        "entity",
+        "selector",
+        "services",
+        "exceptions",
+        "common",
+        "title",
+        "device",
+    }
+    for section in strings:
+        if section not in allowed:
+            result.error(f"strings.json: top-level section '{section}' is not one hassfest accepts")
+
+    key_re = re.compile(r"^[a-z0-9]+([-_][a-z0-9]+)*$")
+
+    def walk(node, path, check_keys):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if check_keys(path, k) and not key_re.match(k):
+                    result.error(
+                        f"strings.json: {'.'.join([*path, k])}: key must match [a-z0-9-_]+ (no leading/trailing _ or -)"
+                    )
+                walk(v, [*path, k], check_keys)
+        elif isinstance(node, str):
+            try:
+                fields = [f for _, f, _, _ in string.Formatter().parse(node) if f is not None]
+            except ValueError as err:
+                result.error(f"strings.json: {'.'.join(path)}: placeholder syntax HA cannot parse ({err})")
+                return
+            for field in fields:
+                if not field.isidentifier():
+                    result.error(f"strings.json: {'.'.join(path)}: placeholder {{{field}}} must be a plain name")
+
+    # Slug-keyed sections: every key below these is a translation key (names, states, options, services, errors).
+    def slug_keys(path, key):
+        if not path:
+            return False
+        head = path[0]
+        if head in ("entity", "selector", "exceptions", "common"):
+            return True
+        if head == "services":
+            return len(path) == 1 or (len(path) >= 2 and path[1:] and path[-1] == "fields")
+        return False
+
+    walk(strings, [], slug_keys)
+
+    entity = strings.get("entity", {})
+    selector_keys = set(strings.get("selector", {}))
+    exceptions = set(strings.get("exceptions", {}))
+
+    # services.yaml <-> services section.
+    services = strings.get("services", {})
+    yaml_path = os.path.join(component_dir, "services.yaml")
+    if os.path.exists(yaml_path):
+        with open(yaml_path, encoding="utf-8") as f:
+            yaml_lines = f.read().splitlines()
+        current = None
+        in_fields = False
+        yaml_services: dict[str, set[str]] = {}
+        for line in yaml_lines:
+            m = re.match(r"^([a-z0-9_]+):\s*$", line)
+            if m:
+                current, in_fields = m.group(1), False
+                yaml_services[current] = set()
+                continue
+            if current and re.match(r"^  fields:\s*$", line):
+                in_fields = True
+                continue
+            m = re.match(r"^    ([a-z0-9_]+):\s*$", line)
+            if current and in_fields and m:
+                yaml_services[current].add(m.group(1))
+            if re.match(r"^\s+(name|description):", line) and not line.lstrip().startswith("#"):
+                result.error(f"services.yaml: '{line.strip()[:40]}' belongs in strings.json (services), not the yaml")
+            m = re.match(r"^\s+translation_key:\s*([a-z0-9_]+)\s*$", line)
+            if m and m.group(1) not in selector_keys:
+                result.error(f"services.yaml: translation_key '{m.group(1)}' has no strings.json selector entry")
+        for svc, fields in yaml_services.items():
+            entry = services.get(svc)
+            if not entry or not entry.get("name") or not entry.get("description"):
+                result.error(f"strings.json: services.{svc} needs a name and a description")
+                continue
+            for field in fields:
+                fe = entry.get("fields", {}).get(field)
+                if not fe or not fe.get("name") or not fe.get("description"):
+                    result.error(f"strings.json: services.{svc}.fields.{field} needs a name and a description")
+        for svc in services:
+            if svc not in yaml_services:
+                result.error(f"strings.json: services.{svc} has no entry in services.yaml")
+
+    # Python <-> catalog.
+    for filename, platform in (("sensor.py", "sensor"), ("switch.py", "switch")):
+        path = os.path.join(component_dir, filename)
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        if re.search(r"_attr_name\s*=", text):
+            result.error(f"{filename}: _attr_name overrides the translated entity name; use _attr_translation_key")
+        for k, v in entity.get(platform, {}).items():
+            if not v.get("name"):
+                result.error(f"strings.json: entity.{platform}.{k} has no name")
+    for filename in sorted(os.listdir(component_dir)):
+        if not filename.endswith(".py"):
+            continue
+        with open(os.path.join(component_dir, filename), encoding="utf-8") as f:
+            text = f.read()
+        known = selector_keys | exceptions | set(strings.get("issues", {}))
+        for m in re.finditer(r'translation_key\s*=\s*"([a-z0-9_]+)"', text):
+            # sensor.py/switch.py set an entity translation_key (checked against the entity section by the tests)
+            if filename not in ("sensor.py", "switch.py") and m.group(1) not in known:
+                result.error(
+                    f"{filename}: translation_key '{m.group(1)}' is not in strings.json (selector/exceptions/issues)"
+                )
+        if filename == "config_flow.py":
+            for m in re.finditer(r'^([A-Z_]+_SELECTOR)\s*=\s*"([a-z0-9_]+)"', text, re.M):
+                if m.group(2) not in selector_keys:
+                    result.error(f"config_flow.py: {m.group(1)} '{m.group(2)}' has no strings.json selector entry")
+    if verbose and result.passed:
+        print("  OK: HA catalog sections, keys, placeholders and cross-references")
+    return result
+
+
 def check_i18n(component_dir):
-    """Issue #1341: translation parity (both catalogs) and staleness locks; bodies live in tools/i18n_checks.py."""
-    result = CheckResult("i18n catalogs (parity, HA parity, staleness)")
+    """Issue #1341: translation parity, staleness locks, length budgets and the English/CSS ratchets.
+
+    Bodies live in tools/i18n_checks.py (shared with the tools/i18n.py CLI, so the two cannot disagree).
+    """
+    result = CheckResult("i18n catalogs (parity, HA parity, staleness, budgets, ratchets)")
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import i18n_checks  # noqa: PLC0415
 
-    for name, errors in i18n_checks.run_all().items():
+    for name, errors in i18n_checks.run_guards().items():
         for err in errors:
             result.error(f"{name}: {err}")
+    for note in i18n_checks.ratchet_notes():
+        result.warn(note)
+    glossary = i18n_checks.glossary_warnings(i18n_checks.catalogs_by_area())
+    if glossary:
+        result.warn(f"glossary: {len(glossary)} term warnings (python tools/i18n.py glossary)")
     return result
 
 
@@ -313,6 +463,7 @@ def main():
         check_manifest(COMPONENT_DIR),
         check_imports(COMPONENT_DIR),
         check_strings(COMPONENT_DIR),
+        check_ha_translations(COMPONENT_DIR),
         check_secrets(COMPONENT_DIR),
         check_hardcoded_units(COMPONENT_DIR),
         check_python_temperature_literals(COMPONENT_DIR),

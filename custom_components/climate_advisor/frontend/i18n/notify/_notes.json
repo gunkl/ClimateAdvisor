@@ -1,0 +1,20 @@
+{
+  "notify.blind_alert": "{outcome} selects one of three whole sentences; {time} is a clock time (when Climate Advisor will stop the fan).",
+  "notify.blind_recovered": "{when} and {tail} select phrases; keep the sentence order. 'short outage' means under 5 minutes.",
+  "notify.control_mode_not_obeyed": "{requested} and {live} are raw thermostat state codes (heat, cool, off ...): leave them unchanged. {live} already carries its quotes.",
+  "notify.control_mode_not_obeyed_for": "Same as control_mode_not_obeyed; 'min' is the abbreviation for minutes.",
+  "notify.control_output_stall": "Status-card diagnostic. {diag} is a nested message (thermostat mode and action codes).",
+  "notify.entity_health_multi": "{names} is a locale-joined list; {details} is a run of already-translated sentences, may be empty-ish text.",
+  "notify.entity_health_single": "{name} is the entity kind (translated); {entity_id} is a literal entity id inside quotes; {consequence} is a whole sentence.",
+  "notify.invariant_violated": "{detail} is a whole translated sentence from the watchdog; this is a safety alert.",
+  "notify.promise_p1_cool": "'AC' is the air conditioner. {near} picks 'right at' or 'only {dip} over'.",
+  "notify.promise_p1_heat": "{near} picks 'right at' or 'only {dip} under'. 'comfort minimum' is the lower comfort setpoint.",
+  "notify.promise_p4_changed": "'manual change' = an occupant override still within its grace period.",
+  "notify.stall_diag": "{mode} and {action} are raw thermostat state codes: leave them unchanged.",
+  "notify.stall_message": "{direction} picks below/heating (heat) or above/cooling (cool). {diag} is a nested message.",
+  "notify.welcome_home_hold": "{hold} selects what the restore waits for; keep the phrase grammatical after 'once'.",
+  "notify.whf_reason_backstop_stop_fan": "Activity Record text. {mode} and {action} are raw thermostat state codes.",
+  "notify.whf_reason_backstop_suppress_hvac": "Activity Record text. {mode} and {action} are raw thermostat state codes.",
+  "notify.whf_stale_sensors": "{names} is a list of sensor names or a count phrase; {count} drives has/have and it/them.",
+  "notify.whf_stop_failed": "{detail} is a nested clause ending without a period; keep the colon structure. Safety alert: short and imperative."
+}

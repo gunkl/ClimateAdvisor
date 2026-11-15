@@ -1,0 +1,10 @@
+{
+  "errors.zone_selection_required": "{hint} is the literal query parameter '?zone=<entry_id>'; keep it unchanged. 'zones' and 'entry_id' are field names in the reply.",
+  "errors.invalid_verbosity": "tldr_only, normal and verbose are literal values; keep them.",
+  "errors.feedback_value": "'correct' and 'incorrect' are literal values; keep them in quotes.",
+  "errors.action_value": "'accept' and 'dismiss' are literal values; keep them in quotes.",
+  "errors.action_or_feedback_required": "action, feedback, accept, dismiss, correct and incorrect are literal field names/values; keep them.",
+  "errors.suggestion_key_required": "suggestion_key is a literal field name; keep it.",
+  "errors.resume_pending": "{mode} is the thermostat mode (heat, cool, ...) or 'none' when unknown; translate the mode words in the select.",
+  "errors.resume_done": "{mode} is the thermostat mode (heat, cool, ...) or 'none' (then N/A)."
+}

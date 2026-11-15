@@ -360,7 +360,9 @@ def test_pre_cool_reschedule_candidate_and_comfort_hold_until_are_true_instants(
         }
 
     label = ClimateAdvisorCoordinator._comfort_family_hold_label(_Ae, now)
-    assert f"(until ~{expect.astimezone(_LA).strftime('%H:%M')})" in label, label
+    from custom_components.climate_advisor import i18n
+
+    assert f"(until ~{i18n.format_time(expect.astimezone(_LA), 'en')})" in label, label
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +447,10 @@ def test_rate_limit_texts_show_the_local_clock_time(monkeypatch, fan_mode, start
     assert engine._deferred_fan_mode_change_marker() == f"deferred (5-min floor, applies {expected})"
     coordinator = object.__new__(ClimateAdvisorCoordinator)
     suffix = ClimateAdvisorCoordinator._whf_rate_limit_suffix(coordinator, engine)
-    assert f"applies at {expected}" in suffix, suffix
+    # Issue #1341: the card text uses the one clock formatter (12-hour in English, no seconds)
+    from custom_components.climate_advisor import i18n
+
+    assert f"applies at {i18n.format_time(applies_at.astimezone(_LA), 'en')}" in suffix, suffix
 
 
 @pytest.mark.parametrize(("_start", "_ends"), _CASES)

@@ -43,6 +43,21 @@ def _make_config_entry(data: dict, version: int = 4, unique_id: str | None = Non
     return entry
 
 
+def _english_texts() -> dict[str, str]:
+    """What ``config_flow._async_texts`` returns on an English install: strings.json ``common`` and weekday labels."""
+    import json
+    import pathlib
+
+    strings = json.loads(
+        (
+            pathlib.Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "strings.json"
+        ).read_text(encoding="utf-8")
+    )
+    texts = dict(strings["common"])
+    texts.update({f"weekday.{k}": v for k, v in strings["selector"]["weekday"]["options"].items()})
+    return texts
+
+
 def _make_hass() -> MagicMock:
     """Create a minimal mock hass object used by migration tests."""
     hass = MagicMock()
@@ -2182,7 +2197,7 @@ class TestFanModeOptionsNoBoth:
         """No entry in FAN_MODE_OPTIONS has value 'both'."""
         from custom_components.climate_advisor.config_flow import FAN_MODE_OPTIONS
 
-        values = [option["value"] for option in FAN_MODE_OPTIONS]
+        values = list(FAN_MODE_OPTIONS)
         assert "both" not in values
 
 
@@ -2543,7 +2558,7 @@ class TestOptionsFlowScheduler:
         data = _run_options_flow(
             entry_data,
             [
-                ("async_step_scheduler", {"manage": "__add__"}),
+                ("async_step_scheduler", {"manage": "add_new"}),
                 ("async_step_scheduler_edit", _schedule_fields()),
             ],
         )
@@ -2564,7 +2579,7 @@ class TestOptionsFlowScheduler:
         flow, captured = _make_options_flow(entry_data)
 
         async def _drive():
-            await flow.async_step_scheduler({"manage": "__add__"})
+            await flow.async_step_scheduler({"manage": "add_new"})
             return await flow.async_step_scheduler_edit(_schedule_fields(days=[]))
 
         result = asyncio.run(_drive())
@@ -2582,7 +2597,7 @@ class TestOptionsFlowScheduler:
         flow, captured = _make_options_flow(entry_data)
 
         async def _drive():
-            await flow.async_step_scheduler({"manage": "__add__"})
+            await flow.async_step_scheduler({"manage": "add_new"})
             return await flow.async_step_scheduler_edit(_schedule_fields(start="18:00:00", end="18:00:00"))
 
         result = asyncio.run(_drive())
@@ -2601,7 +2616,7 @@ class TestOptionsFlowScheduler:
         flow, captured = _make_options_flow(entry_data)
 
         async def _drive():
-            await flow.async_step_scheduler({"manage": "__add__"})
+            await flow.async_step_scheduler({"manage": "add_new"})
             return await flow.async_step_scheduler_edit(_schedule_fields(start="16:00:00", end="16:00:30"))
 
         result = asyncio.run(_drive())
@@ -2665,7 +2680,7 @@ class TestOptionsFlowScheduler:
         data = _run_options_flow(
             entry_data,
             [
-                ("async_step_scheduler", {"manage": "__add__"}),
+                ("async_step_scheduler", {"manage": "add_new"}),
                 ("async_step_scheduler_edit", _schedule_fields()),
             ],
         )
@@ -2683,7 +2698,7 @@ class TestOptionsFlowScheduler:
         flow, captured = _make_options_flow(entry_data)
 
         async def _drive():
-            await flow.async_step_scheduler({"manage": "__add__"})
+            await flow.async_step_scheduler({"manage": "add_new"})
             return await flow.async_step_scheduler_edit(
                 _schedule_fields(name="My Custom Name", start="17:30:00", end="19:45:00", days=[])
             )
@@ -2730,7 +2745,7 @@ class TestOptionsFlowScheduler:
         data = _run_options_flow(
             entry_data,
             [
-                ("async_step_scheduler", {"manage": "__add__"}),
+                ("async_step_scheduler", {"manage": "add_new"}),
                 ("async_step_scheduler_edit", submitted),
             ],
         )
@@ -2745,7 +2760,7 @@ class TestOptionsFlowScheduler:
         data = _run_options_flow(
             entry_data,
             [
-                ("async_step_scheduler", {"manage": "__add__"}),
+                ("async_step_scheduler", {"manage": "add_new"}),
                 ("async_step_scheduler_edit", _schedule_fields(cost_tag="low")),
             ],
         )
@@ -2768,8 +2783,9 @@ class TestOptionsFlowScheduler:
         # _format_schedule_summary() is real (non-mocked) code — this is the direct
         # proof the legacy "all" value still displays correctly, independent of the
         # mocked selector layer HA's frontend would otherwise render.
-        summary = flow._format_schedule_summary(entry_data["schedules"][0])
+        summary = flow._format_schedule_summary(entry_data["schedules"][0], _english_texts())
         assert "All days" in summary
+        assert summary == "Legacy All-Days — All days 09:00:00-12:00:00 (High)"
 
         # Editing the legacy schedule back out must also not raise/crash — the
         # existing "all" days value is still accepted as a pre-filled default even
@@ -2804,9 +2820,10 @@ class TestOptionsFlowScheduler:
         result = asyncio.run(flow.async_step_scheduler_edit(None))
         assert result["type"] == "form"
 
-        day_option_values = [
-            call.kwargs["value"] for call in selector.SelectOptionDict.call_args_list if "value" in call.kwargs
-        ]
+        # Issue #1341: the days are plain values; their labels are ``selector.weekday`` in strings.json.
+        days_configs = [c for c in selector.SelectSelectorConfig.call_args_list if c.kwargs.get("multiple")]
+        assert days_configs[-1].kwargs["translation_key"] == "weekday"
+        day_option_values = list(days_configs[-1].kwargs["options"])
         assert ALL_DAYS not in day_option_values
         assert set(WEEKDAY_ABBREVS).issubset(set(day_option_values))
 

@@ -2,6 +2,6 @@
   "settings.tou_applies.both": "Arrefecimento e aquecimento",
   "settings.tou_applies.cool": "Só arrefecimento",
   "settings.tou_applies.heat": "Só aquecimento",
-  "settings.tou_applies_to": "Aplica-se a",
+  "settings.tou_applies_to": "Setpoint alterado pelo TOU",
   "settings.tou_condition": "Só quando ligado"
 }

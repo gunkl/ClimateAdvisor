@@ -2,6 +2,6 @@
   "settings.tou_applies.both": "냉방 및 난방",
   "settings.tou_applies.cool": "냉방만",
   "settings.tou_applies.heat": "난방만",
-  "settings.tou_applies_to": "적용 대상",
+  "settings.tou_applies_to": "TOU가 변경하는 설정 온도",
   "settings.tou_condition": "켜져 있을 때만"
 }

@@ -332,7 +332,7 @@
           "start": "Begint",
           "end": "Eindigt",
           "delete_schedule": "Dit schema verwijderen",
-          "applies_to": "Van toepassing op",
+          "applies_to": "Door TOU gewijzigd setpoint",
           "condition_entity": "Alleen als dit aan staat"
         },
         "data_description": {
@@ -341,7 +341,7 @@
           "start": "Wanneer de periode met hoge kosten begint. Climate Advisor begint vóór dit tijdstip met voorconditioneren.",
           "end": "Wanneer de periode met hoge kosten eindigt. Moet verschillen van de starttijd.",
           "delete_schedule": "Schakel in en verstuur om dit schema te verwijderen.",
-          "applies_to": "Op welke dagen dit schema vooraf conditioneert. Kies Alleen koelen als uw verwarming niet elektrisch is (bijv. een gasketel): voorverwarmen vóór een periode met hoge kosten bespaart dan niets. Standaard: koelen en verwarmen.",
+          "applies_to": "Welk setpoint dit schema vóór en tijdens de periode met hoge kosten mag wijzigen: het koelsetpoint op koeldagen, het verwarmingssetpoint op verwarmingsdagen. Kies Alleen koelen als uw verwarming niet elektrisch is (bijv. een gasketel), zodat het verwarmingssetpoint nooit wordt gewijzigd. Standaard: koelen en verwarmen.",
           "condition_entity": "Optioneel. Het schema geldt alleen zolang deze binaire sensor, input boolean of schakelaar aan staat (bijvoorbeeld een helper voor het piekseizoen). Laat leeg om altijd toe te passen. Als de entiteit ontbreekt of niet beschikbaar is, geldt het schema toch."
         }
       },

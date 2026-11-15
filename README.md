@@ -35,7 +35,7 @@ A Home Assistant integration that runs your thermostat from the weather forecast
 - **Optional extras:**
   - a bedroom sensor at night (see below);
   - away / vacation / guest occupancy toggles;
-  - time-of-use pre-conditioning ahead of high-cost periods (each schedule can be limited to cooling or heating days, and switched on and off by an entity such as a peak-season helper);
+  - time-of-use pre-conditioning ahead of high-cost periods (each schedule can be limited to changing only the cooling or only the heating setpoint, and switched on and off by an entity such as a peak-season helper);
   - a daily energy cost estimate: enter your energy rate and the heating and cooling power, and each day's record gets an estimated cost (left blank, nothing is assumed and the cost shows "—");
   - an optional Claude-powered AI Investigator.
 - **Learns your house, then plans with it.** A prediction engine learns how fast your home heats, cools, leaks heat and warms in the sun, and forecasts the indoor temperature ahead. The engine you choose (v4 by default) times pre-heating and pre-cooling, the ceiling guard, setbacks and the window close time; see [Prediction engines](#prediction-engines). Climate Advisor also learns your thermostat's own swing, and after two weeks of data it starts offering suggestions.

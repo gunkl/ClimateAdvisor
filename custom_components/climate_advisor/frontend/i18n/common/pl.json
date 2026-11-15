@@ -10,7 +10,7 @@
   "common.mode.off": "Wyłączone",
   "common.tou_skip.condition_off": "warunek jest wyłączony",
   "common.tou_skip.condition_off_entity": "warunek jest wyłączony ({entity})",
-  "common.tou_skip.not_applied_cool": "nie dotyczy chłodzenia",
-  "common.tou_skip.not_applied_heat": "nie dotyczy ogrzewania",
+  "common.tou_skip.not_applied_cool": "nastawa chłodzenia bez zmian",
+  "common.tou_skip.not_applied_heat": "nastawa ogrzewania bez zmian",
   "common.unknown": "Nieznany"
 }

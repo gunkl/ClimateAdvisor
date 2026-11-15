@@ -137,8 +137,8 @@ class TestFilter:
         assert [s.id for s in filter_schedules([a, b, c], _states(), "cool").kept] == ["a", "c"]
 
     def test_one_wording(self):
-        assert schedule_skip_sentence(SKIP_NOT_APPLIED_HEAT) == "not applied to heating"
-        assert schedule_skip_sentence(SKIP_NOT_APPLIED_COOL) == "not applied to cooling"
+        assert schedule_skip_sentence(SKIP_NOT_APPLIED_HEAT) == "heating setpoint left unchanged"
+        assert schedule_skip_sentence(SKIP_NOT_APPLIED_COOL) == "cooling setpoint left unchanged"
         assert schedule_skip_sentence(SKIP_CONDITION_OFF) == "its condition is off"
 
 
@@ -252,7 +252,7 @@ class TestCoordinatorChain:
     def test_skipped_window_is_shown_with_its_reason_and_recorded(self):
         c = _coord("heat", {**BASE, "applies_to": "cool"})
         status = _resolve(c, IN_WINDOW)
-        assert "TOU high-cost period skipped" in status and "not applied to heating" in status
+        assert "TOU high-cost period skipped" in status and "heating setpoint left unchanged" in status
         (event,) = [e for e in c._event_log if e.get("type") == "tou_schedule_window_active"]
         assert event["preconditioned"] is False
         assert event["skipped"] == [{"schedule_id": "s1", "reason": SKIP_NOT_APPLIED_HEAT, "entity": None}]
@@ -497,8 +497,9 @@ def test_skip_reasons_are_listed_once_and_name_the_entity():
         "its condition is off (input_boolean.x)"
     )
     one = schedule_skip_list([(SKIP_NOT_APPLIED_HEAT, None)])
-    assert i18n.render_en(i18n.Msg("activity.tou_window_skip_reasons", reasons=one)) == "not applied to heating"
-    assert i18n.render(i18n.Msg("activity.tou_window_skip_reasons", reasons=one), "fr") == "non appliqué au chauffage"
+    msg = i18n.Msg("activity.tou_window_skip_reasons", reasons=one)
+    assert i18n.render_en(msg) == "heating setpoint left unchanged"
+    assert i18n.render(msg, "fr") == "consigne de chauffage inchangée"
 
 
 def test_a_low_tag_schedule_starting_mid_period_is_not_a_new_period():

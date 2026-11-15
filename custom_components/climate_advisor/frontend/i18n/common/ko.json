@@ -10,7 +10,7 @@
   "common.mode.off": "끔",
   "common.tou_skip.condition_off": "조건이 꺼져 있음",
   "common.tou_skip.condition_off_entity": "조건이 꺼져 있음 ({entity})",
-  "common.tou_skip.not_applied_cool": "냉방에는 적용되지 않음",
-  "common.tou_skip.not_applied_heat": "난방에는 적용되지 않음",
+  "common.tou_skip.not_applied_cool": "냉방 설정 온도는 그대로",
+  "common.tou_skip.not_applied_heat": "난방 설정 온도는 그대로",
   "common.unknown": "알 수 없음"
 }

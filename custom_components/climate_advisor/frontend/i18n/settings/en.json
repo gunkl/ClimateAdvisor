@@ -2,6 +2,6 @@
   "settings.tou_applies.both": "Cooling and heating",
   "settings.tou_applies.cool": "Cooling only",
   "settings.tou_applies.heat": "Heating only",
-  "settings.tou_applies_to": "Applies to",
+  "settings.tou_applies_to": "Setpoint TOU changes",
   "settings.tou_condition": "Only while on"
 }

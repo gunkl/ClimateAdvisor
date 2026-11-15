@@ -10,7 +10,7 @@
   "common.mode.off": "Вимкнено",
   "common.tou_skip.condition_off": "умову вимкнено",
   "common.tou_skip.condition_off_entity": "умову вимкнено ({entity})",
-  "common.tou_skip.not_applied_cool": "не застосовується до охолодження",
-  "common.tou_skip.not_applied_heat": "не застосовується до опалення",
+  "common.tou_skip.not_applied_cool": "уставку охолодження не змінено",
+  "common.tou_skip.not_applied_heat": "уставку опалення не змінено",
   "common.unknown": "Невідомо"
 }

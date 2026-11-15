@@ -332,7 +332,7 @@
           "start": "Début",
           "end": "Fin",
           "delete_schedule": "Supprimer ce planning",
-          "applies_to": "S'applique à",
+          "applies_to": "Consigne modifiée par le TOU",
           "condition_entity": "Seulement si ceci est activé"
         },
         "data_description": {
@@ -341,7 +341,7 @@
           "start": "Début de la période à tarif élevé. Climate Advisor commence à préparer la maison avant cette heure.",
           "end": "Fin de la période à tarif élevé. Doit être différente de l’heure de début.",
           "delete_schedule": "Activez et validez pour supprimer ce planning.",
-          "applies_to": "Les jours où ce planning prépare la maison. Choisissez Climatisation uniquement si votre chauffage n'est pas électrique (p. ex. une chaudière au gaz) : préchauffer avant une période à tarif élevé n'économise alors rien. Par défaut : climatisation et chauffage.",
+          "applies_to": "La consigne que ce planning peut modifier, avant et pendant sa période à tarif élevé : la consigne de climatisation les jours de climatisation, la consigne de chauffage les jours de chauffage. Choisissez Climatisation uniquement si votre chauffage n'est pas électrique (p. ex. une chaudière au gaz) : la consigne de chauffage n'est alors jamais modifiée. Par défaut : climatisation et chauffage.",
           "condition_entity": "Facultatif. Le planning ne s'applique que lorsque ce capteur binaire, input boolean ou interrupteur est activé (par exemple une entrée « saison de pointe »). Laissez vide pour toujours l'appliquer. Si l'entité est absente ou indisponible, le planning s'applique quand même."
         }
       },

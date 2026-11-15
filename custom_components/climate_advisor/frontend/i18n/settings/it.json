@@ -2,6 +2,6 @@
   "settings.tou_applies.both": "Raffrescamento e riscaldamento",
   "settings.tou_applies.cool": "Solo raffrescamento",
   "settings.tou_applies.heat": "Solo riscaldamento",
-  "settings.tou_applies_to": "Si applica a",
+  "settings.tou_applies_to": "Setpoint modificato dal TOU",
   "settings.tou_condition": "Solo se attivo"
 }

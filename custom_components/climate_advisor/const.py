@@ -976,6 +976,7 @@ CONFIG_METADATA = {
     },
     "sensor_debounce_seconds": {
         "label": "Sensor Debounce (minutes)",
+        "time_unit": "min",
         "description": (
             "How long a door/window sensor's state must hold steady before Climate Advisor acts on"
             " it — pausing/resuming HVAC, or engaging/exiting natural-ventilation fan control"
@@ -989,6 +990,7 @@ CONFIG_METADATA = {
     },
     "manual_grace_seconds": {
         "label": "Manual Grace Period (minutes)",
+        "time_unit": "min",
         "description": (
             "After you manually change the thermostat — either the HVAC mode or the target temperature —"
             " CA waits this many minutes before resuming automated setpoint control."
@@ -1005,6 +1007,7 @@ CONFIG_METADATA = {
     },
     "automation_grace_seconds": {
         "label": "Automation Grace Period (minutes)",
+        "time_unit": "min",
         "description": (
             "After Climate Advisor resumes HVAC (all doors/windows closed),"
             " this grace window prevents immediate re-pausing if a door opens briefly."
@@ -1020,6 +1023,7 @@ CONFIG_METADATA = {
     },
     "override_confirm_seconds": {
         "label": "Override Confirmation Delay (minutes)",
+        "time_unit": "min",
         "description": (
             "Time between system changes and confirmation of manual override."
             " When a change looks like a manual override, Climate Advisor waits this long before formally accepting it."
@@ -1158,6 +1162,7 @@ CONFIG_METADATA = {
     },
     "welcome_home_debounce_seconds": {
         "label": "Welcome Home Quiet Period (minutes)",
+        "time_unit": "min",
         "description": (
             "Minimum time between welcome home notifications. If someone leaves and returns"
             " within this window, the notification is suppressed. Set to 0 to always notify."
@@ -1258,21 +1263,25 @@ CONFIG_METADATA = {
     },
     "min_preheat_minutes": {
         "label": "Minimum Pre-heat Time (min)",
+        "time_unit": "min",
         "description": "Shortest pre-heat window the system will ever schedule.",
         "category": "advanced",
     },
     "max_preheat_minutes": {
         "label": "Maximum Pre-heat Time (min)",
+        "time_unit": "min",
         "description": "Longest pre-heat window the system will ever schedule.",
         "category": "advanced",
     },
     "default_preheat_minutes": {
         "label": "Default Pre-heat Time (min)",
+        "time_unit": "min",
         "description": "Pre-heat duration used before enough observations are collected.",
         "category": "advanced",
     },
     "default_tou_lead_minutes": {
         "label": "Default TOU Pre-conditioning Lead Time (min)",
+        "time_unit": "min",
         "description": (
             "How long before a scheduled high-cost period the system starts pre-conditioning,"
             " used until enough heat/cool cycles are observed to compute your home's actual rate."
@@ -1319,6 +1328,7 @@ CONFIG_METADATA = {
     },
     "comfort_mode_switch_min_interval_s": {
         "label": "Minimum Time Between Heat/Cool Switches (sec)",
+        "time_unit": "s",
         "description": (
             "Minimum wait between routine heat/cool switches, to prevent rapid back-and-forth. A real breach"
             " (indoor temp actually past a comfort edge) ignores this wait and switches immediately."
@@ -1387,6 +1397,7 @@ CONFIG_METADATA = {
     },
     "comfort_family_recency_window_min": {
         "label": "Recent Run Window (min)",
+        "time_unit": "min",
         "description": (
             'How long the heat or cool side counts as having "recently run" (equipment that actually ran,'
             " or a time-of-use, predicted-ceiling or you-initiated mode change; not every Climate Advisor"

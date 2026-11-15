@@ -63,7 +63,7 @@
 <header class="top">
   <div class="top-in">
     <div class="brand">Climate Advisor</div>
-    <label class="row small" for="zone-select" id="zone-wrap" hidden>Zone
+    <label class="row small" for="zone-select" id="zone-wrap" hidden><span id="zone-label">Zone</span>
       <select id="zone-select" class="zone-sel"></select>
     </label>
     <!-- Back to whichever dashboard this browser uses: entry.html applies the remembered
@@ -84,6 +84,13 @@
   'use strict';
   var ZONE_STORAGE_KEY = 'climate_advisor_selected_zone'; // same key as index.html and the dashboards
   function $(id) { return document.getElementById(id); }
+  // Issue #1341: the page chrome from the catalog once it is loaded (the English text above is the no-JS/no-catalog fallback)
+  function applyChrome() {
+    document.title = CAI18N.t('dashboard.pa.page_title');
+    $('zone-label').textContent = CAI18N.t('dashboard.pa.zone');
+    $('back-link').textContent = CAI18N.t('dashboard.pa.back');
+  }
+  if (window.CAI18N && CAI18N.ready) CAI18N.ready.then(applyChrome);
   var zone = null;
   try { zone = localStorage.getItem(ZONE_STORAGE_KEY) || null; } catch (e) { zone = null; }
   try {

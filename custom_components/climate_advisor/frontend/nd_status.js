@@ -34,115 +34,149 @@
   }
   // ---------- plain words for the reading cards (Issue #1399) ----------
   // Every line on a card says what it is: no bare state tokens ("active", "idle", "inactive") and no signed gap shown
-  // with a unit as if it were a reading. Exposed as ND.statusWords for the browser tests.
+  // with a unit as if it were a reading. Exposed as ND.statusWords for the browser tests. Issue #1341: every sentence is
+  // a catalog message (dashboard.status.*); the helpers return plain text and the card sinks isolate the numbers.
+  var S = 'dashboard.status.';
+  function t(key, params) { return ND.t(S + key, params); }
+  function num(v, max) { return CAI18N.fmt.number(Number(v), { maximumFractionDigits: max == null ? 1 : max, useGrouping: false }); }
   function cap(s) { s = String(s == null ? '' : s); return s.charAt(0).toUpperCase() + s.slice(1); }
+  // A backend code word (day type, occupancy, treated-as) as a catalog word; an unlisted one is shown as sent.
+  function word(group, code, fallbackCap) {
+    if (code === 'unknown') return ND.t('common.unknown');
+    var k = S + group + '_' + String(code == null ? '' : code).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    if (code != null && code !== '' && CAI18N.has(k)) return ND.t(k);
+    return fallbackCap ? cap(code) : String(code == null ? '' : code);
+  }
   // Two readings, worded as a difference: "The weather service says 54.0°F, 6.2° warmer than your outdoor sensor". Both values
   // are already in the display unit, so the gap needs no conversion (a gap never takes the −32 offset). Under half a
-  // degree it "matches".
+  // degree it "matches". who / yourName are phrases (catalog messages at the call site).
   function saysVs(who, theirs, yours, u, yourName) {
     var gap = Math.round((theirs - yours) * 10) / 10, mag = Math.abs(gap);
-    return who + ' says ' + theirs.toFixed(1) + u + ', ' +
-      (mag < 0.5 ? 'matches ' + yourName : mag.toFixed(1) + '° ' + (gap > 0 ? 'warmer' : 'cooler') + ' than ' + yourName);
+    return t(mag < 0.5 ? 'says_matches' : gap > 0 ? 'says_warmer' : 'says_cooler',
+      { who: who, theirs: ND.num(theirs, 1) + u, name: yourName, gap: ND.num(mag, 1) });
   }
-  // Tomorrow against today (the classifier's trend: a gap, never a reading).
+  // Tomorrow against today (the classifier's trend: a gap, never a reading). The sideways arrow mirrors in RTL.
   function trendWords(dir, mag) {
-    var m = Math.round(Math.abs(mag || 0) * 10) / 10;
-    if (dir === 'warming') return '↑ Tomorrow ' + m.toFixed(1) + '° warmer than today';
-    if (dir === 'cooling') return '↓ Tomorrow ' + m.toFixed(1) + '° cooler than today';
-    return '→ Tomorrow about the same as today';
+    var m = ND.num(Math.round(Math.abs(mag || 0) * 10) / 10, 1);
+    if (dir === 'warming') return '↑ ' + t('trend_warmer', { n: m });
+    if (dir === 'cooling') return '↓ ' + t('trend_cooler', { n: m });
+    return (ND.rtl() ? '←' : '→') + ' ' + t('trend_same');
   }
   // automation_status as a phrase: "following today's plan", "cooling with outside air (nat-vent)", or the status's
   // own phrase ("paused — door/window open", "grace period (manual) — 20 min ...").
-  function automationPhrase(s) {
-    s = String(s == null ? '' : s).trim();
-    var m = /^active(?: \((away|vacation|guest)\))?(.*)$/.exec(s);
-    if (m) return 'following ' + (m[1] ? 'the ' + m[1] + ' plan' : 'today’s plan') + m[2];
-    if (s === 'disabled') return 'paused, not changing the thermostat';
-    if (!s || s === 'unknown') return 'status not known yet';
-    if (/^nat-vent/.test(s)) return 'cooling with outside air (' + s + ')';
-    return s;
+  // Branches on the payload's stable `status_code` (never on the English text). The message itself (`automation_status_msg`)
+  // is the status in the viewer's language; the prose field (backend language) is all there is when the backend sent no
+  // message (a plain-text status): it is shown as sent.
+  function wireText(w) { return w == null ? '' : CAI18N.tw(w); }
+  function automationPhrase(d) {
+    d = d || {};
+    var code = d.status_code, shown = ND.text(d, 'automation_status');
+    var act = /^active(?:_(away|vacation|guest))?$/.exec(code || '');
+    if (act) { // "active" plus the fan requests that ride on it (with_fan_requests) is still "following the plan"
+      var w = d.automation_status_msg, rest = w && w.key === 'status.auto.with_fan_requests' && w.params ? wireText(w.params.requests) : '';
+      return t('phrase_following', { plan: act[1] || 'today', rest: rest });
+    }
+    if (code === 'disabled') return t('phrase_disabled');
+    if (code === 'nat_vent' || code === 'nat_vent_soft_start') return t('phrase_natvent', { status: shown });
+    if (!shown || shown === 'unknown') return t('phrase_unknown');
+    return shown;
   }
-  // A fan status as a sentence: "Whole-house fan is off", "HVAC fan is running (manual override)".
-  var FAN_STATE = { inactive: 'is off', off: 'is off', active: 'is running', running: 'is running', disabled: 'is not managed by Climate Advisor' };
-  function fanSentence(name, s) {
-    s = String(s == null ? '' : s).trim();
-    if (s === 'active (unconfirmed)') return name + ' should be running (not confirmed yet)';
-    if (/^nat-vent \(session active, fan idle\)/.test(s)) return name + ' is resting between outside-air runs' + s.replace(/^nat-vent \(session active, fan idle\)/, '');
-    var m = /^(inactive|active|running|off|disabled)\b(.*)$/.exec(s);
-    return m ? name + ' ' + FAN_STATE[m[1]] + m[2] : name + ': ' + (s || 'status not known');
+  // A fan status as a sentence: "Whole-house fan is off", "HVAC fan is running (manual override)". Branches on the
+  // payload's `<field>_code`; a status with rate-limit / blind-indoor notes (or a code this page does not know) is the
+  // backend's own message after the name.
+  var FAN_SENTENCE = {
+    disabled: 'fan_unmanaged', inactive: 'fan_off', active: 'fan_running', active_unconfirmed: 'fan_unconfirmed',
+    running_manual_override: 'fan_running_manual', off_manual_override: 'fan_off_manual', running_untracked: 'fan_running_untracked',
+    running_thermostat: 'fan_running_thermostat', nat_vent_idle: 'fan_resting'
+  };
+  function fanSentence(name, d, field) {
+    d = d || {};
+    var code = d[field + '_code'], w = d[field + '_msg'], key = FAN_SENTENCE[code];
+    if (key && !(w && w.key === 'status.fan_status.compound')) return t(key, { name: name, rest: '' });
+    return t('fan_line', { name: name, status: ND.text(d, field) || t('fan_unknown') });
   }
   // What the thermostat is doing, in one line: "Heating to 68°F · idle now", "Keeping between 66°F and 74°F", with
-  // "Climate Advisor wants 70°F" when the thermostat disagrees with CA (#266, #402, #1194 d).
-  var ACTION_WORDS = { heating: 'heating now', cooling: 'cooling now', idle: 'idle now', fan: 'fan running now', drying: 'drying now', preheating: 'preheating now', defrosting: 'defrosting now' };
-  function hvacSentence(d, u) {
+  // "Climate Advisor wants 70°F" when the thermostat disagrees with CA (#266, #402, #1194 d). Returns HTML.
+  var ACTION_KEYS = { heating: 'act_heating', cooling: 'act_cooling', idle: 'act_idle', fan: 'act_fan', drying: 'act_drying', preheating: 'act_preheating', defrosting: 'act_defrosting' };
+  function hvacSentence(d, u, isolate) { // isolate: wrap the numbers in <bdi> (the card sink); the plain form is what tests read
+    var fmt = isolate ? ND.iso : esc;
     var mode = d.hvac_mode, sp = d.current_setpoint, want = '', set;
+    function T(v) { return num(v, 1) + u; }
+    function R(v) { return num(Math.round(v), 0) + u; }
     if (mode === 'heat_cool' && (d.target_temp_low != null || d.target_temp_high != null)) {
-      var lo = d.target_temp_low != null ? Math.round(d.target_temp_low) + u : '—';
-      var hi = d.target_temp_high != null ? Math.round(d.target_temp_high) + u : '—';
-      set = 'Keeping between ' + lo + ' and ' + hi;
+      var lo = d.target_temp_low != null ? R(d.target_temp_low) : '—';
+      var hi = d.target_temp_high != null ? R(d.target_temp_high) : '—';
+      set = t('hvac_between', { lo: lo, hi: hi });
       if (d.ca_target_heat != null && d.ca_target_cool != null && d.target_temp_low != null && d.target_temp_high != null &&
         (Math.abs(d.target_temp_low - d.ca_target_heat) > 1 || Math.abs(d.target_temp_high - d.ca_target_cool) > 1)) {
-        want = Math.round(d.ca_target_heat) + u + '–' + Math.round(d.ca_target_cool) + u;
+        want = R(d.ca_target_heat) + '–' + R(d.ca_target_cool);
       }
     } else if (mode === 'off') {
-      set = 'Thermostat is off';
+      set = t('hvac_off');
     } else {
-      var spText = sp != null ? sp + u : null;
-      set = mode === 'heat' && spText ? 'Heating to ' + spText : mode === 'cool' && spText ? 'Cooling to ' + spText
-        : mode === 'fan_only' ? 'Fan only' : mode === 'dry' ? 'Drying' : spText ? 'Set to ' + spText
-        : 'Thermostat mode ' + (mode || 'not known');
+      var spText = sp != null ? T(sp) : null;
+      set = mode === 'heat' && spText ? t('hvac_heating_to', { temp: spText }) : mode === 'cool' && spText ? t('hvac_cooling_to', { temp: spText })
+        : mode === 'fan_only' ? t('hvac_fan_only') : mode === 'dry' ? t('hvac_drying') : spText ? t('hvac_set_to', { temp: spText })
+        : mode ? t('hvac_mode', { mode: CAI18N.has('common.mode.' + mode) ? ND.t('common.mode.' + mode) : String(mode) }) : t('hvac_mode_unknown');
       if (sp != null) {
         var ro = d.remote_offset;
         var ca = (ro && ro.expected_setpoint != null && ro.mode === mode) ? ro.expected_setpoint
           : mode === 'cool' ? d.ca_target_cool : mode === 'heat' ? d.ca_target_heat : null;
-        if (ca != null && Math.abs(sp - ca) > 1) want = Math.round(ca) + u;
+        if (ca != null && Math.abs(sp - ca) > 1) want = R(ca);
       }
     }
-    var act = ACTION_WORDS[d.hvac_action] || (d.hvac_action && d.hvac_action !== 'off' ? d.hvac_action + ' now' : '');
-    return esc(set) + (act ? ' · ' + esc(act) : '') + (want ? ' <span class="sub">(Climate Advisor wants ' + esc(want) + ')</span>' : '');
+    var act = ACTION_KEYS[d.hvac_action] ? t(ACTION_KEYS[d.hvac_action]) : (d.hvac_action && d.hvac_action !== 'off' ? t('act_other', { action: d.hvac_action }) : '');
+    return fmt(set) + (act ? ' · ' + fmt(act) : '') + (want ? ' <span class="sub">' + fmt(t('hvac_wants', { want: want })) + '</span>' : '');
   }
   function fanLines(d) {
     var out = '';
-    if (d.whf_status != null) out += '<div class="n">' + esc(fanSentence('Whole-house fan', d.whf_status)) + '</div>';
-    if (d.hvac_fan_status != null) out += '<div class="n">' + esc(fanSentence('HVAC fan', d.hvac_fan_status)) + '</div>';
-    if (d.whf_status == null && d.hvac_fan_status == null) out += '<div class="n">' + esc(fanSentence('Fan', d.fan_status || 'disabled')) + '</div>';
+    if (d.whf_status != null) out += '<div class="n">' + ND.iso(fanSentence(t('name_whf'), d, 'whf_status')) + '</div>';
+    if (d.hvac_fan_status != null) out += '<div class="n">' + ND.iso(fanSentence(t('name_hvac_fan'), d, 'hvac_fan_status')) + '</div>';
+    if (d.whf_status == null && d.hvac_fan_status == null) out += '<div class="n">' + ND.iso(fanSentence(t('name_fan'), d, 'fan_status')) + '</div>';
     if (d.fan_remote_timer_hours != null) {
-      out += '<div class="n">Fan timer from the remote: ' + esc(d.fan_remote_timer_hours) + ' h' + (d.fan_remote_timer_ends ? ', ends ' + esc(ND.fmtTime(d.fan_remote_timer_ends)) : '') + '</div>';
+      out += '<div class="n">' + ND.iso(d.fan_remote_timer_ends
+        ? t('fan_timer_ends', { hours: num(d.fan_remote_timer_hours, 1), time: ND.fmtTime(d.fan_remote_timer_ends) })
+        : t('fan_timer', { hours: num(d.fan_remote_timer_hours, 1) })) + '</div>';
     }
-    if (d.fan_remote_speed != null) out += '<div class="n">The remote set the fan speed to ' + esc(d.fan_remote_speed) + '</div>';
+    if (d.fan_remote_speed != null) out += '<div class="n">' + ND.iso(t('fan_remote_speed', { speed: d.fan_remote_speed })) + '</div>';
     return out;
   }
   ND.statusWords = { saysVs: saysVs, trendWords: trendWords, automationPhrase: automationPhrase, fanSentence: fanSentence, hvacSentence: hvacSentence };
+  // label is plain text (escaped here); value and notes are trusted HTML built by the callers.
   function tile(id, label, value, notes, title) {
-    return '<div class="tile" id="' + id + '"' + (title ? ' title="' + esc(title) + '"' : '') + '><div class="l" title="' + label + '">' + label + '</div><div class="v">' + value + '</div>' + (notes || '') + '</div>';
+    return '<div class="tile" id="' + id + '"' + (title ? ' title="' + esc(title) + '"' : '') + '><div class="l" title="' + esc(label) + '">' + esc(label) + '</div><div class="v">' + value + '</div>' + (notes || '') + '</div>';
   }
+  // A sensor's role: the backend's `role_msg` (status.sensor_role.*) in the viewer's language; `role_code` is thermostat |
+  // finer_sensor | bedroom_sensor | room_sensor | ca_reading.
+  function roleText(m) { return ND.text(m, 'role'); }
 
   function renderCards() {
     var d = ND.status, grid = ND.$('status-grid');
     if (!d || !grid) return;
     var cd = window.CAChartV2 ? CAChartV2.data() : null;
     var u = sym();
-    var indoor = d.indoor_temp != null ? d.indoor_temp.toFixed(1) + u : '—';
-    var hvacNote = '<div class="n" id="status-hvac-line">' + hvacSentence(d, u) + '</div>' +
-      (d.remote_offset && d.remote_offset.text ? '<div class="n remote-offset-line">' + esc(d.remote_offset.text) + '</div>' : '');
+    function temp1(v) { return v != null ? ND.bdi(ND.num(v, 1) + u) : '—'; }
+    var indoor = temp1(d.indoor_temp);
+    var hvacNote = '<div class="n" id="status-hvac-line">' + hvacSentence(d, u, true) + '</div>' +
+      (d.remote_offset && d.remote_offset.text ? '<div class="n remote-offset-line">' + esc(ND.text(d.remote_offset, 'text')) + '</div>' : '');
     // What is happening now, and why: the Status sentence rides on the hallway (thermostat) card. The header health
     // line only says whether automation is on; this says what it is doing (nat-vent, a grace period, a pause).
-    var statusLine = '<div class="n" id="status-automation-line">Climate Advisor: ' + esc(automationPhrase(d.automation_status)) + '</div>';
+    var statusLine = '<div class="n" id="status-automation-line">' + ND.iso(t('automation_line', { phrase: automationPhrase(d) })) + '</div>';
     var cards = [];
     var metas = ((cd || {}).indoor_sensors || []).filter(function (m) { return latestReading(cd, m.id); });
     if (!metas.length) {
-      cards.push(tile('status-card-hallway', 'Indoor · HVAC', indoor, hvacNote + statusLine +
-        (d.sleep_indoor_sensor_active ? '<div class="n" id="status-sleep-sensor">Climate Advisor reads the bedroom sensor (sleep window)</div>' : '')));
+      cards.push(tile('status-card-hallway', t('card_indoor_hvac'), indoor, hvacNote + statusLine +
+        (d.sleep_indoor_sensor_active ? '<div class="n" id="status-sleep-sensor">' + esc(t('reads_bedroom_sleep')) + '</div>' : '')));
     } else {
-      var holder = metas.filter(function (m) { return m.role === 'thermostat'; })[0] || metas.filter(function (m) { return m.primary; })[0] || metas[0];
+      var holder = metas.filter(function (m) { return m.role_code === 'thermostat'; })[0] || metas.filter(function (m) { return m.primary; })[0] || metas[0];
       metas.forEach(function (m, i) {
-        var r = latestReading(cd, m.id), isBed = m.role === 'bedroom sensor';
+        var r = latestReading(cd, m.id), isBed = m.role_code === 'bedroom_sensor';
         var reads = isBed ? !!d.sleep_indoor_sensor_active : (m.primary && !d.sleep_indoor_sensor_active);
         var id = m === holder ? 'status-card-hallway' : isBed ? 'status-card-bedroom' : 'status-card-sensor-' + i;
         var note = (m === holder ? hvacNote + statusLine : '') +
-          (reads ? '<div class="n"' + (isBed ? ' id="status-sleep-sensor"' : '') + '>Climate Advisor reads this sensor</div>'
-            : isBed ? '<div class="n" id="status-sleep-sensor">Climate Advisor reads it in the sleep window</div>' : '');
-        cards.push(tile(id, esc(m.name) + ' · ' + esc(m.role === 'thermostat' ? 'thermostat' : m.role), r.temp.toFixed(1) + u, note, 'Logged ' + ND.fmtTime(r.time)));
+          (reads ? '<div class="n"' + (isBed ? ' id="status-sleep-sensor"' : '') + '>' + esc(t('reads_this_sensor')) + '</div>'
+            : isBed ? '<div class="n" id="status-sleep-sensor">' + esc(t('reads_in_sleep')) + '</div>' : '');
+        cards.push(tile(id, t('sensor_head', { name: m.name, role: roleText(m) }), temp1(r.temp), note, t('logged_at', { time: ND.fmtTime(r.time) })));
       });
     }
     // Outdoor sensor against the weather service (and the corrected forecast once v4 is shown).
@@ -150,33 +184,33 @@
     var corr = v4.ready && v4.corrected_outdoor && v4.corrected_outdoor.future && v4.corrected_outdoor.future.length ? v4.corrected_outdoor.future[0].temp : null;
     var outNote = '';
     if (svc != null && d.outdoor_temp != null) {
-      outNote += '<div class="n" id="status-outdoor-vs-service" title="The weather service’s figure for this hour against what your outdoor sensor reads now: a gap between two readings, not a temperature.">' + esc(saysVs('The weather service', svc, d.outdoor_temp, u, 'your outdoor sensor')) + '</div>';
+      outNote += '<div class="n" id="status-outdoor-vs-service" title="' + esc(t('outdoor_vs_service_title')) + '">' + ND.iso(saysVs(t('the_weather_service'), svc, d.outdoor_temp, u, t('your_outdoor_sensor'))) + '</div>';
     }
-    if (corr != null) outNote += '<div class="n" title="The weather service’s forecast as Climate Advisor corrects it: it starts from your outdoor sensor’s reading and lets this gap fade over the next few hours (plus what it has learned about the service’s usual miss at each hour).">Climate Advisor’s corrected forecast ' + corr.toFixed(1) + u + '</div>';
-    cards.push(tile('status-card-outdoor', 'Outdoor sensor', d.outdoor_temp != null ? d.outdoor_temp.toFixed(1) + u : '—', outNote));
+    if (corr != null) outNote += '<div class="n" title="' + esc(t('corrected_title')) + '">' + ND.iso(t('corrected_forecast', { temp: ND.num(corr, 1) + u })) + '</div>';
+    cards.push(tile('status-card-outdoor', t('card_outdoor'), temp1(d.outdoor_temp), outNote));
     // Today
-    cards.push(tile('status-card-today', 'Today', esc(cap(d.day_type || 'unknown')),
-      '<div class="n">' + trendWords(d.trend_direction, d.trend_magnitude) + '</div>' +
-      (d.hvac_runtime_today != null ? '<div class="n">System ran ' + Math.round(d.hvac_runtime_today) + ' min today</div>' : '')));
+    cards.push(tile('status-card-today', t('card_today'), esc(d.day_type ? word('day_type', d.day_type, true) : ND.t('common.unknown')),
+      '<div class="n">' + ND.iso(trendWords(d.trend_direction, d.trend_magnitude)) + '</div>' +
+      (d.hvac_runtime_today != null ? '<div class="n">' + ND.iso(t('ran_today', { n: Math.round(d.hvac_runtime_today) })) + '</div>' : '')));
     // Doors, windows and the fan
     var hasContacts = d.contact_sensors && d.contact_sensors.length > 0;
-    cards.push(tile('status-card-doors', 'Doors &amp; windows · Fan',
-      hasContacts ? esc(cap(d.contact_status || 'unknown')) : 'No sensors',
+    cards.push(tile('status-card-doors', t('card_doors_fan'),
+      hasContacts ? esc(cap(ND.text(d, 'contact_status') || ND.t('common.unknown'))) : esc(t('no_sensors')),
       (hasContacts ? d.contact_sensors.filter(function (c) { return c.unreadable; }).map(function (c) {
-        return '<div class="n">' + esc(c.friendly_name) + ' not responding: last read ' + esc(c.last_reading || 'never') + ', treated as ' + esc(c.treated_as) + '</div>';
+        return '<div class="n">' + ND.th(S + 'contact_not_responding', { name: c.friendly_name, last: c.last_reading || ND.t('dashboard.core.never'), treated: word('treated', c.treated_as, false) }) + '</div>';
       }).join('') : '') + fanLines(d)));
     // Occupancy with the comfort score
-    cards.push(tile('status-card-occupancy', 'Occupancy · Comfort', esc(cap(d.occupancy_mode || 'home')),
-      '<div class="n">Comfort score ' + Math.round((d.compliance_score || 0) * 100) + '%</div>'));
+    cards.push(tile('status-card-occupancy', t('card_occupancy'), esc(word('occupancy', d.occupancy_mode || 'home', true)),
+      '<div class="n">' + ND.iso(t('comfort_score', { score: Math.round((d.compliance_score || 0) * 100) / 100 })) + '</div>'));
     grid.innerHTML = cards.join('');
   }
 
   function renderNext() {
     var d = ND.status;
     if (!d) return;
-    ND.$('status-for-you').textContent = d.next_action || 'None';
-    ND.$('status-ca-next').textContent = d.next_automation_action || 'None';
-    ND.$('status-ca-next-time').textContent = d.next_automation_time || '—';
+    ND.$('status-for-you').textContent = ND.text(d, 'next_action') || t('none');
+    ND.$('status-ca-next').textContent = ND.text(d, 'next_automation_action') || t('none');
+    ND.$('status-ca-next-time').textContent = ND.text(d, 'next_automation_time') || '—';
   }
 
   // ---------- plan list ----------
@@ -184,16 +218,15 @@
     var d = ND.status;
     if (!d || !d.nat_vent_active || d.nat_vent_off_threshold == null || d.nat_vent_on_threshold == null) return '';
     var u = sym();
-    return esc((d.nat_vent_ac_assist ? 'AC assist' : 'savings mode') + ' · cycling ' + Math.round(d.nat_vent_off_threshold) + u + '–' + Math.round(d.nat_vent_on_threshold) + u);
+    return ND.iso(t(d.nat_vent_ac_assist ? 'natvent_assist' : 'natvent_savings',
+      { off: num(Math.round(d.nat_vent_off_threshold), 0) + u, on: num(Math.round(d.nat_vent_on_threshold), 0) + u }));
   }
 
   // ---------- night card ----------
-  var NO_NIGHT = 'No night plan yet. It appears once Climate Advisor has classified today.';
-  var NO_NIGHT_DAY = "Tonight's plan appears 6 hours before bedtime.";
-  var V4_OFF = "v4 is switched off, so there is no bedroom figures plan tonight. The plan for the day is under Next 24 hours; turn v4 on under Settings, Prediction engine, to plan the bedroom.";
+  // The 503 body's `reason` is a code ('no_night_in_view', 'v4_off'); anything else is the plain "no plan yet".
   function noNight(e) {
     var r = e && e.body && e.body.reason;
-    return r === 'no_night_in_view' ? NO_NIGHT_DAY : r === 'v4_off' ? V4_OFF : NO_NIGHT;
+    return t(r === 'no_night_in_view' ? 'night_none_day' : r === 'v4_off' ? 'night_v4_off' : 'night_none');
   }
   function setNight(mode, data, msg) { // mode: live | sample | empty | error
     var host = ND.$('night-card');
@@ -210,24 +243,24 @@
   function loadNight() {
     return ND.api('night_strategy').then(function (p) {
       var data = p && p.options ? window.NDNightCard.fromStrategy(p) : null;
-      if (!data || !data.nights.length) setNight('empty', null, NO_NIGHT);
+      if (!data || !data.nights.length) setNight('empty', null, t('night_none'));
       else setNight('live', data);
     }).catch(function (e) {
       if (e.status === 503 || e.message === 'HTTP 503') { setNight('empty', null, noNight(e)); return; }
       if (e.status === 404 || e.message === 'HTTP 404') { // an install without the endpoint: the approved mock, labelled as a sample
         return fetch('nd_night_sample.json').then(function (r) { return r.json(); }).then(function (d) { setNight('sample', d); })
-          .catch(function () { setNight('error', null, 'The night plan could not be loaded.'); });
+          .catch(function () { setNight('error', null, t('night_load_failed')); });
       }
-      setNight('error', null, 'The night plan could not be loaded: ' + e.message);
+      setNight('error', null, t('night_load_failed_why', { error: e.message }));
     });
   }
 
   // ---------- briefing ----------
   function loadBriefing() {
     return ND.api('briefing').then(function (b) {
-      ND.$('status-briefing-text').textContent = (b && b.briefing) || 'No briefing generated yet today.';
+      ND.$('status-briefing-text').textContent = (b && ND.text(b, 'briefing')) || t('briefing_none');
     }).catch(function (e) {
-      ND.$('status-briefing-text').textContent = 'The briefing could not be loaded: ' + e.message;
+      ND.$('status-briefing-text').textContent = t('briefing_failed', { error: e.message });
     });
   }
   function initBriefing() {

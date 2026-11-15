@@ -15,10 +15,10 @@
   var AREAS = ['common', 'notify', 'status', 'timeline', 'learning', 'night', 'activity', 'briefing', 'dashboard',
     'settings', 'errors', 'ai'];
   var RTL = ['ar'];
-  // #1341: the page layout flips to right-to-left only once the dashboard CSS uses logical properties
-  // (Stage 2 lane L9 sets this true in the same change). Until then CAI18N.dir still reports 'rtl'
-  // for ar so text code can isolate values, but <html dir> stays ltr so the layout is not broken.
-  var RTL_LAYOUT_READY = false;
+  // #1341: the page layout flips to right-to-left (<html dir="rtl"> for ar) because the dashboard CSS uses logical
+  // properties (the physical_css ratchet is 0 outside the classic index.html, which is never right-to-left). Setting
+  // this false keeps <html dir> ltr for every language while CAI18N.dir still reports 'rtl' for text code.
+  var RTL_LAYOUT_READY = true;
   var FETCH_TIMEOUT_MS = 8000;
 
   var state = {
@@ -83,6 +83,8 @@
   // The first candidate that is a non-empty string wins (an unsupported one resolves to its nearest shipped
   // language, or en: the dashboard never mixes two languages).
   function pickLanguage(statusLanguage) {
+    var q = queryLang();
+    if (q && String(q).toLowerCase() === 'en-xa') return PSEUDO; // pseudo-locale: only ever from ?lang=
     var hass = getHass();
     var cands = [
       queryLang(),
@@ -103,6 +105,10 @@
     });
   }
 
+  // A dynamic Latin name (entity id, model, repo) inside right-to-left text: isolated with U+2068..U+2069, as the Python
+  // renderer does for ar. The one helper every page module uses.
+  function iso(x) { return root.CAI18N && root.CAI18N.dir === 'rtl' ? '\u2068' + x + '\u2069' : String(x); }
+
   // ---------- formatters ----------
   // Intl.* based, and byte-identical to the Python formatters in i18n.py (the shared conformance fixture proves
   // it row by row), EXCEPT where noted: plain {n} numbers are String(n), not locale formatted.
@@ -110,9 +116,11 @@
   var BAD = '—';
 
   function L(lang) { return lang || CAI18N.lang || 'en'; }
+  // Intl and FormatJS need a real locale: the pseudo-locale formats numbers and dates as English.
+  function IL(lang) { lang = L(lang); return lang === 'en-XA' ? 'en' : lang; }
 
   function number(x, opts, lang) {
-    try { return new Intl.NumberFormat(L(lang), opts || {}).format(x); } catch (e) { return String(x); }
+    try { return new Intl.NumberFormat(IL(lang), opts || {}).format(x); } catch (e) { return String(x); }
   }
 
   // Python's f"{x:.{d}f}": round half to even on the exact binary value of x (not on its shortest decimal text).
@@ -168,7 +176,7 @@
     if (zone) o.timeZone = zone;
     var loc = CAI18N.locale;
     if (o.hour && loc && (loc.time_format === '12' || loc.time_format === '24')) o.hour12 = loc.time_format === '12';
-    try { return new Intl.DateTimeFormat(L(lang), o); } catch (e) { return null; }
+    try { return new Intl.DateTimeFormat(IL(lang), o); } catch (e) { return null; }
   }
   // Format an instant (Date, number or ISO string) per timeZone(); null when it is not a valid instant.
   function fmtInstant(d, lang, opts) {
@@ -189,8 +197,47 @@
   function time(d, lang) {
     return fmtInstant(d, lang, { hour: 'numeric', minute: '2-digit' }) || BAD;
   }
+  // Same zone as time()/date(): hour labels (night-card axis, chart ticks) follow timeZone(), never the browser zone.
+  function hour(d, lang) {
+    return fmtInstant(d, lang, { hour: 'numeric' }) || String(toDate(d).getUTCHours());
+  }
+  // A zone-aware Intl.DateTimeFormat for any options (the one way the pages format an instant they draw themselves,
+  // e.g. a chart tick): timeZone() applies as for time(), and the user's 12/24 h setting applies when `hour` is shown.
+  // `lang` may be a language code, or a locales array (e.g. [] = the browser locale, ['en-US'] for a stable key).
+  function intl(opts, lang) {
+    var tz = timeZone(), f = null;
+    var arr = Array.isArray(lang);
+    var mk = function (zone) {
+      if (!arr) return dtf(lang, opts, zone);
+      var o = {}, k;
+      for (k in opts) o[k] = opts[k];
+      if (zone) o.timeZone = zone;
+      var loc = CAI18N.locale;
+      if (o.hour && loc && (loc.time_format === '12' || loc.time_format === '24')) o.hour12 = loc.time_format === '12';
+      try { return new Intl.DateTimeFormat(lang, o); } catch (e) { return null; }
+    };
+    if (tz && tz !== 'local') f = mk(tz);
+    return f || mk(null);
+  }
   function date(d, lang) {
     return fmtInstant(d, lang, { month: 'short', day: 'numeric' }) || BAD;
+  }
+  // A calendar day given by its parts (a record's local day, "2026-11-07"): shown as that day whatever zone the page
+  // formats in (a plain Date(y, m, d) would drift a day across the browser/HA zone difference). weekday: also the weekday.
+  function calendarDay(y, m, d, lang, weekday) {
+    var at = new Date(Date.UTC(y, m - 1, d, 12));
+    var f = function (o) { o.timeZone = 'UTC'; return new Intl.DateTimeFormat(IL(lang), o).format(at).replace(/[\u202f\u00a0]/g, ' '); };
+    try {
+      var s = f({ month: 'short', day: 'numeric' });
+      return weekday ? f({ weekday: 'short' }) + ' ' + s : s;   // "Sat Nov 7": the two parts, as the classic wording
+    } catch (e) { return BAD; }
+  }
+  // date() plus the year when the instant is not in the current year (in the display zone): for "last observed" /
+  // "fitted" style dates that can be old. date() itself stays "Nov 14" (it is byte-identical to the Python formatter).
+  function dateYear(d, lang) {
+    var y = fmtInstant(d, 'en', { year: 'numeric' });
+    if (y == null || y === fmtInstant(new Date(), 'en', { year: 'numeric' })) return date(d, lang);
+    return fmtInstant(d, lang, { year: 'numeric', month: 'short', day: 'numeric' }) || BAD;
   }
   function dateTime(d, lang) {
     return fmtInstant(d, lang, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) || BAD;
@@ -219,7 +266,7 @@
       return typeof i === 'number' ? number(i, undefined, lang) : (typeof i === 'string' ? i : BAD);
     });
     try {
-      return new Intl.ListFormat(L(lang), { type: style === 'or' ? 'disjunction' : 'conjunction', style: 'long' })
+      return new Intl.ListFormat(IL(lang), { type: style === 'or' ? 'disjunction' : 'conjunction', style: 'long' })
         .format(arr);
     } catch (e) { return arr.join(', '); }
   }
@@ -304,7 +351,7 @@
     var ck = lang + '\u0000' + (cacheKey || pattern);
     var inst = Object.prototype.hasOwnProperty.call(state.compiled, ck) ? state.compiled[ck] : undefined;
     if (inst === undefined) {
-      try { inst = new IMF(pattern, lang); } catch (e) {
+      try { inst = new IMF(pattern, lang === PSEUDO ? 'en' : lang); } catch (e) {
         warnOnce('parse:' + ck, 'message does not parse (' + (cacheKey || pattern) + '): ' + e.message);
         inst = null;
       }
@@ -352,6 +399,135 @@
     return key;
   }
 
+  // ---------- en-XA pseudo-locale (?lang=en-XA only) ----------
+  // Generated on the fly from en so a branch can be checked before any translation exists: every letter is accented,
+  // text grows ~35% and each message is bracketed. ICU syntax (argument names, plural/select keywords, #, quoting,
+  // number skeletons) is left alone; only the literal text is changed. Not a shipped language: it is never listed in
+  // index.json, and python never sees it.
+  var PSEUDO = 'en-XA';
+  var ACCENT = {
+    a: 'à', b: 'ƀ', c: 'ç', d: 'ð', e: 'é', f: 'ƒ', g: 'ĝ', h: 'ĥ', i: 'î', j: 'ĵ', k: 'ķ', l: 'ļ', m: 'ɱ', n: 'ñ',
+    o: 'ö', p: 'þ', q: 'ǫ', r: 'ŕ', s: 'š', t: 'ţ', u: 'û', v: 'ṽ', w: 'ŵ', x: 'ẋ', y: 'ý', z: 'ž',
+    A: 'Â', B: 'Ɓ', C: 'Ç', D: 'Ð', E: 'É', F: 'Ƒ', G: 'Ĝ', H: 'Ĥ', I: 'Î', J: 'Ĵ', K: 'Ķ', L: 'Ļ', M: 'Ṁ', N: 'Ñ',
+    O: 'Ö', P: 'Þ', Q: 'Ǫ', R: 'Ŕ', S: 'Š', T: 'Ţ', U: 'Û', V: 'Ṽ', W: 'Ŵ', X: 'Ẋ', Y: 'Ý', Z: 'Ž'
+  };
+  function pseudoText(t, acc) {
+    var out = '';
+    for (var i = 0; i < t.length; i++) {
+      var c = t.charAt(i);
+      if (Object.prototype.hasOwnProperty.call(ACCENT, c)) { out += ACCENT[c]; acc.n++; } else out += c;
+    }
+    return out;
+  }
+  // Matching close brace for the '{' at index i (quoted braces do not count); -1 when unbalanced.
+  function closeBrace(s, i) {
+    var depth = 0;
+    for (var k = i; k < s.length; k++) {
+      var c = s.charAt(k);
+      if (c === "'") {
+        var nx = s.charAt(k + 1);
+        if (nx === "'") { k++; continue; }
+        if (nx === '{' || nx === '}') { var q = s.indexOf("'", k + 2); if (q < 0) return -1; k = q; continue; }
+      } else if (c === '{') depth++;
+      else if (c === '}') { depth--; if (depth === 0) return k; }
+    }
+    return -1;
+  }
+  function pseudoBody(s, acc) {
+    var out = '', run = '', i = 0;
+    function flush() { if (run) { out += pseudoText(run, acc); run = ''; } }
+    while (i < s.length) {
+      var c = s.charAt(i);
+      if (c === "'") {
+        var nx = s.charAt(i + 1);
+        if (nx === "'") { flush(); out += "''"; i += 2; continue; }
+        if (nx === '{' || nx === '}' || nx === '#') {
+          var q = s.indexOf("'", i + 2);
+          if (q < 0) q = s.length - 1;
+          flush(); out += s.slice(i, q + 1); i = q + 1; continue;
+        }
+        run += c; i++; continue;
+      }
+      if (c === '{') {
+        var end = closeBrace(s, i);
+        if (end < 0) { run += s.slice(i); i = s.length; continue; }
+        flush(); out += pseudoArg(s.slice(i + 1, end), acc); i = end + 1; continue;
+      }
+      if (c === '#') { flush(); out += c; i++; continue; }
+      run += c; i++;
+    }
+    flush();
+    return out;
+  }
+  function pseudoArg(inner, acc) {
+    var m = /^(\s*[^,\s]+\s*),(\s*)(plural|select|selectordinal)(\s*),/.exec(inner);
+    if (!m) return '{' + inner + '}';
+    var out = m[0], rest = inner.slice(m[0].length), i = 0;
+    while (i < rest.length) {
+      var ob = rest.indexOf('{', i);
+      if (ob < 0) { out += rest.slice(i); break; }
+      var cb = closeBrace(rest, ob);
+      if (cb < 0) { out += rest.slice(i); break; }
+      out += rest.slice(i, ob + 1) + pseudoBody(rest.slice(ob + 1, cb), acc) + '}';
+      i = cb + 1;
+    }
+    return '{' + out + '}';
+  }
+  function pseudoMessage(msg) {
+    var acc = { n: 0 };
+    var body = pseudoBody(String(msg), acc);
+    var pad = acc.n >= 4 ? new Array(Math.ceil(acc.n * 0.35) + 1).join('~') : '';
+    return '[' + body + pad + ']';
+  }
+  function pseudoCatalog(en) {
+    var out = {};
+    for (var k in en) if (Object.prototype.hasOwnProperty.call(en, k)) out[k] = pseudoMessage(en[k]);
+    Object.defineProperty(out, '__loaded', { value: true, enumerable: false });
+    return out;
+  }
+
+  // ---------- HTML-safe rendering with <bdi> isolates ----------
+  // th(): like t() but returns a safe HTML string: the message text is escaped, and every string param (a formatted
+  // temperature, a time, a name) is wrapped in <bdi> so it cannot reorder inside right-to-left text. Number params
+  // stay numbers (plural selection needs them). Never put th() output anywhere but innerHTML.
+  function thRender(key, params, lang) {
+    var vals = [], p = {}, k;
+    for (k in (params || {})) {
+      if (!Object.prototype.hasOwnProperty.call(params, k)) continue;
+      var v = params[k];
+      if (v != null && typeof v !== 'number' && typeof v !== 'boolean' && (typeof v !== 'object' || !v.$t)) {
+        p[k] = '' + vals.length + ''; vals.push(String(v));
+      } else p[k] = v;
+    }
+    var html = esc(renderKey(key, p, lang));
+    return html.replace(/(\d+)/g, function (m, n) { return '<bdi>' + esc(vals[+n]) + '</bdi>'; });
+  }
+  // Fill [data-i18n] (textContent) and [data-i18n-attr="title:key;aria-label:key"] (setAttribute) under root.
+  // Never innerHTML. A key with no catalog entry leaves the element's English markup in place.
+  function hasKey(key) { return lookup(CAI18N.lang, key) !== undefined || lookup('en', key) !== undefined; }
+  function apply(rootEl) {
+    var scope = rootEl || (root.document && root.document.documentElement);
+    if (!scope || !scope.querySelectorAll) return;
+    var els = scope.querySelectorAll('[data-i18n]'), i;
+    for (i = 0; i < els.length; i++) {
+      var key = els[i].getAttribute('data-i18n');
+      if (!hasKey(key)) continue;
+      var params = null, raw = els[i].getAttribute('data-i18n-params');
+      if (raw) { try { params = JSON.parse(raw); } catch (e) { params = null; } } // {"n":6} for a message with arguments
+      els[i].textContent = CAI18N.t(key, params);
+    }
+    var attrs = scope.querySelectorAll('[data-i18n-attr]');
+    attrs = Array.prototype.slice.call(attrs);
+    attrs.forEach(function (el) {
+      (el.getAttribute('data-i18n-attr') || '').split(';').forEach(function (pair) {
+        var ix = pair.indexOf(':');
+        if (ix < 1) return;
+        var an = pair.slice(0, ix).trim(), ak = pair.slice(ix + 1).trim();
+        if (ak && hasKey(ak)) el.setAttribute(an, CAI18N.t(ak));
+      });
+    });
+  }
+
   // ---------- catalog loading ----------
   function fetchJson(url) {
     if (typeof root.fetch !== 'function') return Promise.resolve(null);
@@ -371,6 +547,7 @@
   }
   function loadLang(lang) {
     if (state.cat[lang] && state.cat[lang].__loaded) return Promise.resolve();
+    if (lang === PSEUDO) return loadLang('en').then(function () { state.cat[PSEUDO] = pseudoCatalog(state.cat.en || {}); });
     return Promise.all(state.areas.map(function (a) {
       return fetchJson(state.base + a + '/' + lang + '.json');
     })).then(function (parts) {
@@ -412,11 +589,25 @@
     hass: getHass,
     timeZone: timeZone,
     esc: esc,
+    iso: iso,
     fmt: {
-      number: number, time: time, date: date, dateTime: dateTime, duration: duration, list: list,
+      number: number, time: time, hour: hour, date: date, dateYear: dateYear, calendarDay: calendarDay, dateTime: dateTime, intl: intl, duration: duration, list: list,
       temp: temp, tempDelta: tempDelta
     },
     t: function (key, params) { return renderKey(key, params, CAI18N.lang); },
+    th: function (key, params) { return thRender(key, params, CAI18N.lang); },
+    apply: apply,
+    has: hasKey,
+    // The prose of an API field: its `<field>_msg` wire sibling rendered in the viewer's language when the backend sent
+    // one (and the catalog has that key), else the plain prose field the API still carries. The one call-site shape.
+    text: function (obj, field) {
+      if (!obj || typeof obj !== 'object') return '';
+      var w = obj[field + '_msg'];
+      if (w && typeof w === 'object' && w.key && hasKey(w.key)) return renderKey(w.key, w.params, CAI18N.lang);
+      var v = obj[field];
+      return v == null ? '' : String(v);
+    },
+    pseudo: pseudoMessage,
     // A {key, params} wire object from the API (the Python Msg.to_wire() format). Plain strings pass through.
     tw: function (wire) {
       if (wire == null) return '';
@@ -442,13 +633,14 @@
         if (idx && Array.isArray(idx.languages) && idx.languages.length) {
           state.languages = idx.languages.slice();
           CAI18N.languages = idx.languages.slice();
-          if (state.languages.indexOf(CAI18N.lang) < 0) {
+          if (CAI18N.lang !== PSEUDO && state.languages.indexOf(CAI18N.lang) < 0) {
             setLang(resolveLanguage(CAI18N.lang));
             applyDocument(CAI18N.lang);
           }
         }
-        if (idx && Array.isArray(idx.areas) && idx.areas.length) state.areas = idx.areas.slice();
-        var langs = CAI18N.lang === 'en' ? ['en'] : ['en', CAI18N.lang];
+        if (opts.areas && opts.areas.length) state.areas = opts.areas.slice(); // a page that needs only some areas
+        else if (idx && Array.isArray(idx.areas) && idx.areas.length) state.areas = idx.areas.slice();
+        var langs = CAI18N.lang === 'en' ? ['en'] : CAI18N.lang === PSEUDO ? [PSEUDO] : ['en', CAI18N.lang];
         return Promise.all(langs.map(loadLang));
       }).then(function () { return CAI18N; }, function () { return CAI18N; });
       return CAI18N.ready;

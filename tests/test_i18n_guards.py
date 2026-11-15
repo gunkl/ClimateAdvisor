@@ -288,11 +288,16 @@ def test_missing_baseline_is_an_error(tmp_path):
 
 
 def test_baseline_update_only_lowers(tmp_path, monkeypatch):
+    # the repository's own physical-CSS count is 0 (#1341 PR C), so the finder is replaced by two synthetic hits
+    hits = [
+        ast_walk.Hit("frontend/chart_v2.css", 1, "css", "margin-left:"),
+        ast_walk.Hit("frontend/new.css", 2, "css", "left:"),
+    ]
+    monkeypatch.setitem(checks.RATCHETS, "physical_css", (lambda: hits, "synthetic"))
     path = checks.baseline_path("physical_css", tmp_path)
     path.write_text(json.dumps({"files": {"frontend/chart_v2.css": 1000, "gone.css": 5}}), encoding="utf-8")
     counts = checks.write_baseline("physical_css", init=False, baselines_dir=tmp_path)
-    real = ast_walk.counts_by_file(checks.find_physical_css())
-    assert counts["frontend/chart_v2.css"] == real["frontend/chart_v2.css"]
+    assert counts["frontend/chart_v2.css"] == 1
     assert "gone.css" not in counts
     # a file that is not in the old baseline cannot enter through --update
     assert all(f in {"frontend/chart_v2.css"} for f in counts)

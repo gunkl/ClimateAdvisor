@@ -39,6 +39,8 @@ def test_every_other_draw_of_a_seed_is_unchanged() -> None:
         def no_seconds(self, a, b, _calls=calls):  # the #1527 draw is randint(5, 55); every other draw is untouched
             if (a, b) == (5, 55):
                 _calls["n"] += 1
+                # Issue #1570: still CONSUME the draw (later draws, e.g. the fan vocabulary, follow it), then drop it
+                real_randint(self, a, b)
                 return 0
             return real_randint(self, a, b)
 

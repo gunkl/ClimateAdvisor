@@ -3,6 +3,17 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.37] — 2026-11-15
+
+### Added
+- Feat #1341: Climate Advisor speaks your Home Assistant language. Supported: English, French, Spanish, German, Dutch, Japanese, Portuguese, Italian, Polish, Ukrainian, Korean, Hindi, Arabic, Russian, Simplified Chinese and Turkish (part 1 of 3: everything except the daily briefing and the dashboard).
+  - **What you'll notice:** setup and options screens, entity names and states, services, errors and repairs, every notification, the Status and next-action text, the timeline, learning suggestions, the night plan and the Activity record now follow your Home Assistant language (Settings → System → General). English installs see the same English as before.
+  - **Numbers, times and lists** follow your language's conventions (for example `21,5 °C`, 24-hour clocks, "A, B et C").
+  - **Automations:** sensors whose state is a sentence (Status, Your Next Action, Next Automation Action and similar) now show it in your HA language and carry a stable `code` attribute; use `code` in automations instead of matching the text. Fan Status keeps its English state values.
+  - **New installs** in French, Spanish, German, Dutch, Portuguese, Italian, Polish or Turkish get entity ids in that language (Home Assistant's own behaviour). Existing entity ids never change.
+  - **Small English changes:** a few times now use the 12-hour clock like the rest of the cards ("applies at 6:43 AM", "stops 2:30 AM", "until ~3:20 PM"); "1 minute" instead of "1 minutes"; lists read "A and B".
+  - **Stays English:** logs, stored event records, diagnostics, GitHub text and the documentation.
+
 ## [0.9.36] — 2026-11-15
 
 ### Changed (tests only; nothing changes in your house)

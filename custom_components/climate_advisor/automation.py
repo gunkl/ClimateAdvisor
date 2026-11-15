@@ -456,6 +456,23 @@ def _latched(obj: Any) -> bool:
     return getattr(obj, "_shut_down", False) is True or getattr(obj, "_ha_stopping", False) is True
 
 
+def _noop_cancel() -> None:
+    """The cancel handle of a timer that was never armed (Issue #1580): calling it does nothing."""
+
+
+def _call_later(obj: Any, delay: float, fn: Any) -> Callable[[], None]:
+    """``async_call_later`` -- unless ``obj`` is latched (shut down / HA stopping), then nothing is armed (#1580).
+
+    A write awaiting the thermostat can resume after the entry unloaded; arming its follow-up timer then left a
+    timer that outlived the unload. Returns a cancel handle either way (a no-op when nothing was armed), so every
+    caller's ``cancel()`` stays safe.
+    """
+    if _latched(obj):
+        _LOGGER.debug("Timer not armed after shutdown: %s (Issue #1580)", getattr(fn, "__name__", "callback"))
+        return _noop_cancel
+    return async_call_later(obj.hass, delay, fn)
+
+
 def _refuse_if_shut_down(obj: Any, action: str, *, label: Callable[[Any], str] | None = None) -> bool:
     """Issue #1102 latch: True (with one log line) if ``obj`` may no longer act.
 
@@ -3101,7 +3118,7 @@ class AutomationEngine:
             _LOGGER.info("Revisit check triggered (5-min follow-up after action)")
             self.hass.async_create_task(revisit_cb())
 
-        self._revisit_cancel = async_call_later(self.hass, REVISIT_DELAY_SECONDS, _revisit_fired)
+        self._revisit_cancel = _call_later(self, REVISIT_DELAY_SECONDS, _revisit_fired)
 
     def _legacy_clear_confirm_flag(self) -> None:
         """The 1-line flag-clear ``clear_manual_override()`` always used to perform
@@ -4461,7 +4478,7 @@ class AutomationEngine:
                 self._fan_min_cycle_cancel = None
                 self._spawn_whf_task(self._fan_cycle_on())
 
-            self._fan_min_cycle_cancel = async_call_later(self.hass, WHF_SEALED_CYCLE_RETRY_S, _sealed_retry)
+            self._fan_min_cycle_cancel = _call_later(self, WHF_SEALED_CYCLE_RETRY_S, _sealed_retry)
             return
 
         # Issue #1205: the occupant's fan-off hold also holds off the min-runtime cycle (it restarts when the person
@@ -4491,7 +4508,7 @@ class AutomationEngine:
                 self._fan_min_cycle_cancel = None
                 self._spawn_whf_task(self._fan_cycle_on())
 
-            self._fan_min_cycle_cancel = async_call_later(self.hass, _retry_s, _hold_retry)
+            self._fan_min_cycle_cancel = _call_later(self, _retry_s, _hold_retry)
             return
 
         if outcome in (FanCycleOutcome.ACTIVATE_ALWAYS_ON, FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER):
@@ -4512,7 +4529,7 @@ class AutomationEngine:
                     self._fan_min_cycle_cancel = None
                     self._spawn_whf_task(self._fan_cycle_on())
 
-                self._fan_min_cycle_cancel = async_call_later(self.hass, _MIN_RUNTIME_REFUSED_RETRY_S, _refused_retry)
+                self._fan_min_cycle_cancel = _call_later(self, _MIN_RUNTIME_REFUSED_RETRY_S, _refused_retry)
                 return
             self._fan_min_runtime_active = True
             if outcome is FanCycleOutcome.ACTIVATE_ALWAYS_ON:
@@ -4523,7 +4540,7 @@ class AutomationEngine:
                 self._fan_min_cycle_cancel = None
                 self.hass.async_create_task(self._fan_cycle_off())
 
-            self._fan_min_cycle_cancel = async_call_later(self.hass, delay, _turn_off)
+            self._fan_min_cycle_cancel = _call_later(self, delay, _turn_off)
             return
 
         # outcome is RETRY_LATER — fan already running for another reason
@@ -4532,7 +4549,7 @@ class AutomationEngine:
             self._fan_min_cycle_cancel = None
             self.hass.async_create_task(self._fan_cycle_on())
 
-        self._fan_min_cycle_cancel = async_call_later(self.hass, delay, _retry)
+        self._fan_min_cycle_cancel = _call_later(self, delay, _retry)
 
     async def _fan_cycle_off(self) -> None:
         """Fan 'off' phase: deactivate fan, schedule next on after wait period.
@@ -4578,7 +4595,7 @@ class AutomationEngine:
             self._fan_min_cycle_cancel = None
             self.hass.async_create_task(self._fan_cycle_on())
 
-        self._fan_min_cycle_cancel = async_call_later(self.hass, wait_sec, _turn_on)
+        self._fan_min_cycle_cancel = _call_later(self, wait_sec, _turn_on)
 
     def handle_manual_override(
         self,
@@ -4915,7 +4932,7 @@ class AutomationEngine:
                     self._after_override_self_resolved(notify=_notify_transient, recheck_window=_recheck)
                 )
 
-        self._override_confirm_cancel = async_call_later(self.hass, confirm_seconds, _confirm_override_expired)
+        self._override_confirm_cancel = _call_later(self, confirm_seconds, _confirm_override_expired)
 
     async def _after_override_self_resolved(self, *, notify: bool, recheck_window: bool) -> None:
         """Follow-ups of a pending change that self-resolved (PATH B) as one task.
@@ -6508,7 +6525,7 @@ class AutomationEngine:
         previous = getattr(self, slot, None)
         if previous:
             previous()
-        setattr(self, slot, async_call_later(self.hass, delay, fn))
+        setattr(self, slot, _call_later(self, delay, fn))
 
     def _schedule_mode_alignment_recheck(self, my_seq: int) -> None:
         """Schedule the >=130 s read-back mode check in its own cancel slot (Issue #1049)."""
@@ -6521,7 +6538,7 @@ class AutomationEngine:
             self._mode_align_recheck_cancel = None
             self._check_mode_alignment(my_seq, announce=True)
 
-        self._mode_align_recheck_cancel = async_call_later(self.hass, MODE_ALIGNMENT_RECHECK_S, _recheck)
+        self._mode_align_recheck_cancel = _call_later(self, MODE_ALIGNMENT_RECHECK_S, _recheck)
 
     async def _set_hvac_mode(self, mode: str, *, reason: str | i18n.Msg) -> HvacCommandResult:
         """Set the thermostat HVAC mode and report what happened (Issue #1049)."""
@@ -11414,7 +11431,7 @@ class AutomationEngine:
                 return
             self._deferred_reconcile_callback()
 
-        self._deferred_reconcile_cancel = async_call_later(self.hass, delay_s, _fire)
+        self._deferred_reconcile_cancel = _call_later(self, delay_s, _fire)
 
     def _discard_pause_record_for_manual_change(self) -> None:
         """Drop the door/window pause record because the occupant's own thermostat change replaces it.
@@ -11690,7 +11707,7 @@ class AutomationEngine:
             # Converge to correct scheduled state (bedtime setback or current classification)
             self.hass.async_create_task(self._apply_current_scheduled_state())
 
-        cancel = async_call_later(self.hass, duration, _grace_expired)
+        cancel = _call_later(self, duration, _grace_expired)
         if source == "manual":
             self._manual_grace_cancel = cancel
         else:
@@ -12025,7 +12042,7 @@ class AutomationEngine:
         def _grace_expired_restored(_now: Any) -> None:
             self._on_grace_expired(source, duration, should_notify)
 
-        cancel = async_call_later(self.hass, remaining_seconds, _grace_expired_restored)
+        cancel = _call_later(self, remaining_seconds, _grace_expired_restored)
         if source == "manual":
             self._manual_grace_cancel = cancel
         else:
@@ -13477,7 +13494,7 @@ class AutomationEngine:
             setattr(self, attr, None)
             self.request_whf_safety_check(trigger)
 
-        setattr(self, attr, async_call_later(self.hass, delay_s, _fire))
+        setattr(self, attr, _call_later(self, delay_s, _fire))
 
     async def _enforce_whf_safety_locked(
         self,
@@ -19614,7 +19631,7 @@ class AutomationEngine:
                 return
             self.hass.async_create_task(self._thermo_backstop_task())
 
-        self._fan_thermo_cancel = async_call_later(self.hass, 5 * 60, _thermo_tick)
+        self._fan_thermo_cancel = _call_later(self, 5 * 60, _thermo_tick)
 
     async def _thermo_backstop_task(self) -> None:
         """Execute a thermostatic check and reschedule the backstop (Issue #327)."""

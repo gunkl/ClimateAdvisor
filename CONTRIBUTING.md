@@ -53,7 +53,7 @@ Ruff settings are in `pyproject.toml` (line length 120). The pre-commit hooks (`
 
 ### CI
 
-`validate.yml` (`validate-and-test`, `ha-real`), `hassfest.yml` and `hacs.yml` run on pushes and pull requests to both `main` and `0.8.x`. The required checks on `main` are `validate-and-test`, `ha-real` and `validate` (Hassfest). The nightly (`nightly.yml`) runs generated household days and the full real-HA tier and opens a tracking issue when it fails. Details: [DEVELOPMENT.md, CI](docs/DEVELOPMENT.md#ci).
+`validate.yml` (`validate-and-test`, `ha-real`), `hassfest.yml` and `hacs.yml` run on pushes and pull requests to both `main` and `0.8.x`. The required checks on `main` are `validate-and-test`, `ha-real` and `validate` (Hassfest). The nightly (`nightly.yml`) runs generated household days and the full real-HA tier and files an issue when it fails; `nightly-autofix.yml` then has Claude diagnose it and, when it can show a fix, open a draft PR for review. Details: [DEVELOPMENT.md, CI](docs/DEVELOPMENT.md#ci).
 
 ## Golden scenarios and the simulation harness
 

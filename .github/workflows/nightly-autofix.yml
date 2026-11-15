@@ -1,0 +1,134 @@
+name: Nightly failure auto-diagnosis
+
+# When the nightly run fails, its report-failure job files an issue (label nightly-failure). This workflow then has
+# Claude diagnose that issue the way the project investigates any failure, post the diagnosis on the issue, and --
+# when it finds a fix it can show is right -- open a DRAFT pull request for review. Nothing merges or deploys
+# automatically: the owner reviews, and approves (or not).
+#
+# Triggered by the nightly run completing (an issue created with GITHUB_TOKEN cannot trigger workflows itself), or
+# by hand for one issue (Actions -> Nightly failure auto-diagnosis -> Run workflow -> the issue number).
+
+on:
+  workflow_run:
+    workflows: ["Nightly generated days and real-HA tier"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "The nightly-failure issue number to diagnose"
+        required: true
+
+concurrency:
+  group: nightly-autofix
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+      id-token: write
+    steps:
+      - name: Find the issue for this failure
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_ISSUE: ${{ github.event.inputs.issue }}
+        run: |
+          set -euo pipefail
+          gh label create needs-human --color FBCA04 --description "Auto-diagnosis found no fix it could show; needs a person" 2>/dev/null || true
+          if [ -n "${INPUT_ISSUE:-}" ]; then
+            num="$INPUT_ISSUE"
+            run_id=$(gh issue view "$num" --json body,comments --jq '[.body, (.comments[].body)] | join("\n")' \
+              | grep -oE 'nightly-run: [0-9]+' | tail -1 | cut -d' ' -f2 || true)
+          else
+            run_id="$RUN_ID"
+            num=$(gh issue list --state open --label nightly-failure --search "\"nightly-run: $RUN_ID\"" \
+              --json number --jq '.[0].number // empty')
+          fi
+          if [ -z "${num:-}" ]; then echo "No open nightly-failure issue for run ${run_id:-?}; nothing to do."; exit 0; fi
+          # one fix per issue: skip when an open PR already says it fixes this issue
+          if [ -n "$(gh pr list --state open --search "\"Fixes #$num\" in:body" --json number --jq '.[0].number // empty')" ]; then
+            echo "An open PR already fixes #$num; nothing to do."; exit 0
+          fi
+          echo "issue=$num" >> "$GITHUB_OUTPUT"
+          echo "run_id=${run_id:-}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout main
+        if: ${{ steps.find.outputs.issue }}
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        if: ${{ steps.find.outputs.issue }}
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Install the test environment
+        if: ${{ steps.find.outputs.issue }}
+        run: uv sync --locked --only-group test
+
+      - name: Diagnose and propose a fix
+        if: ${{ steps.find.outputs.issue }}
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          additional_permissions: |
+            actions: read
+          claude_args: >-
+            --max-turns 150
+            --allowedTools "Bash(gh:*),Bash(git:*),Bash(uv:*),Bash(python:*),Bash(python3:*),Bash(grep:*),Bash(sed:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Read,Edit,Write,Glob,Grep"
+          prompt: |
+            You are investigating a failed nightly run of Climate Advisor (a Home Assistant integration) in
+            ${{ github.repository }}. The failure is tracked in issue #${{ steps.find.outputs.issue }}
+            (nightly run id: ${{ steps.find.outputs.run_id }}). Work on a branch; never on main.
+
+            Follow the project's own method (read these first: claude.md, docs/00-PROJECT-INSTRUCTIONS.md and the
+            Tier 2/3 doc its Anchors table routes to for the failing area). Docs first, then logs, then code.
+
+            1. Evidence first. Read the issue (`gh issue view ${{ steps.find.outputs.issue }} --comments`) and the
+               failed logs (`gh run view ${{ steps.find.outputs.run_id }} --log-failed`). Reproduce locally:
+               unit tests with `uv run --locked --only-group test python scripts/test.py unit <test path>`, the
+               real-HA tier with `python3 scripts/test.py ha <tests_ha/... path>` (relative tests_ha paths only),
+               generated days with the replay command the log prints (`python tools/simulate.py --replay-generated ...`).
+               A failure you cannot reproduce: say so, and look for load/flakiness evidence (e.g. a pytest-timeout
+               "CA real-HA: TIMEOUT" line, a worker crash) before calling it a product bug.
+            2. Root cause with data: name the file:line, show the evidence (log lines, a reproduction). Trace the
+               regression origin (`git log -p -S "<fragment>" -- <file>`): regression (name the PR) or design gap.
+               Do the symmetry/mirror check from claude.md for the opposite code path.
+            3. Post ONE diagnosis comment on the issue, in plain English, occupant first: what the person at home
+               would experience, the cause, the evidence, and the fix you propose (or why there is none).
+            4. Only when you have a fix you can demonstrate:
+               - branch `nightly-fix/issue-${{ steps.find.outputs.issue }}`;
+               - fix the cause (not the test); add a regression test and PROVE it fails without the fix (revert the
+                 fix, run it, restore) — say so in the PR;
+               - claude.md "Release Process": bump VERSION in custom_components/climate_advisor/const.py and
+                 manifest.json to the next patch after main's, add a CHANGELOG.md entry, and append
+                 fix_history via `python tools/add_fix_entry.py --issue ${{ steps.find.outputs.issue }} ...`;
+               - every new occupant-facing string goes in the translation catalogs in all 16 languages
+                 (docs/i18n-spec.md) and `python tools/i18n.py check` passes;
+               - run the affected tests and `uv run --locked --only-group test python tools/validate.py`; they pass;
+               - commit, push, and open a DRAFT PR (`gh pr create --draft`) whose body starts with
+                 "Fixes #${{ steps.find.outputs.issue }}." and holds a plain-English before/after table, the
+                 evidence, the regression origin, and the tests (with the proof they fail without the fix).
+               If you cannot demonstrate a fix, open no PR: comment the diagnosis and run
+               `gh issue edit ${{ steps.find.outputs.issue }} --add-label needs-human`.
+
+            Hard rules (from claude.md and the owner):
+            - NO AI attribution anywhere: no "Co-Authored-By" trailer, no "Generated with Claude Code" line, in
+              commits, PR bodies or comments.
+            - Never merge, approve, or enable auto-merge; never deploy; never push to main; never edit
+              .github/workflows/ or tools/simulations/golden/ (goldens are locked); never weaken or delete a test to
+              make it pass. A change to the harness assertion layer (tools/sim_harness/outcomes.py) needs an explicit
+              justification of why the old semantics were wrong.
+            - Never print or read secrets (.deploy.env, tokens, /run/secrets).
+            - A setpoint gap under 4 F (narrow gap) is a warned user configuration: excuse those outcomes, never
+              change the engine for them.

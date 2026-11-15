@@ -132,34 +132,72 @@ jobs:
           CA_HA_WORKERS: "4"
         run: python3 scripts/test.py ha  # uv run --locked --only-group test-ha (own venv)
 
-  # Issue #1278: the nightly failed four nights running and nobody noticed, because a failed scheduled
-  # run only shows in the Actions tab. Open one tracking issue on the first failure and comment on it
-  # for every later one, until someone closes it. A runner killed for memory reports "failure" or
-  # "cancelled", so both count.
+  # Issue #1278: a failed scheduled run only shows in the Actions tab, so every failure is filed as an issue.
+  # One issue per distinct failure (the signature is the sorted list of failing tests, or the failed job names
+  # when no test line is found); a later run with the same signature comments on that issue instead. The issue is
+  # what .github/workflows/nightly-autofix.yml diagnoses (it finds it by the hidden nightly-run marker). A runner
+  # killed for memory reports "failure" or "cancelled", so both count.
   report-failure:
     needs: [seeds, generated-days, surfaces, ha-lifecycle]
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     permissions:
       issues: write
+      actions: read
     steps:
-      - name: Open or update the nightly-failure issue
+      - name: File (or update) the issue for this failure
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SEEDS: ${{ needs.seeds.result }}
           GENERATED: ${{ needs.generated-days.result }}
           SURFACES: ${{ needs.surfaces.result }}
           HA: ${{ needs.ha-lifecycle.result }}
         run: |
-          title="Nightly generated-days / real-HA run failing"
-          body="Nightly run failed: $RUN_URL (commit $GITHUB_SHA). generated-days=$GENERATED, surfaces=$SURFACES, ha-lifecycle=$HA."
-          num=$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
-            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          set -euo pipefail
+          gh label create nightly-failure --color B60205 --description "Filed automatically by a failed nightly run" 2>/dev/null || true
+          # The failing tests, from the logs of the jobs that failed (this run is still in progress, so per job).
+          jobs=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | "\(.id) \(.name)"')
+          : > failing.txt
+          : > promises.txt
+          while read -r id name; do
+            [ -z "$id" ] && continue
+            gh run view --job "$id" --log 2>/dev/null > job.log || true
+            grep -oE '(FAILED|ERROR) (tests|tests_ha)/[^ ]+' job.log | sed -E 's/^(FAILED|ERROR) //' >> failing.txt || true
+            # generated days: an unwaived household-promise hit ("UNWAIVED <promise> day_seed=<seed>: ...")
+            grep -oE 'UNWAIVED [a-z_]+ day_seed=[0-9]+' job.log | sed -E 's/^UNWAIVED /promise /' >> failing.txt || true
+            grep -oE 'UNWAIVED [a-z_]+' job.log | sed -E 's/^UNWAIVED //' >> promises.txt || true
+          done <<< "$jobs"
+          sort -u failing.txt -o failing.txt
+          sort -u promises.txt -o promises.txt
+          job_names=$(printf '%s\n' "$jobs" | cut -d' ' -f2- | sort -u | paste -sd, -)
+          # The signature: failing tests plus broken promise NAMES (seeds change every night, the mechanism does not).
+          sig_src=$( { grep -v '^promise ' failing.txt || true; sed 's/^/promise:/' promises.txt; } )
+          [ -z "$sig_src" ] && sig_src="jobs:$job_names"
+          sig=$(printf '%s' "$sig_src" | sha1sum | cut -c1-12)
+          tests=$(sed 's/^/- `/; s/$/`/' failing.txt | head -40)
+          [ -z "$tests" ] && tests="- (no failing test line found; see the failed jobs: $job_names)"
+          summary="seeds=$SEEDS, generated-days=$GENERATED, surfaces=$SURFACES, ha-lifecycle=$HA"
+          num=$(gh issue list --state open --label nightly-failure --search "\"nightly-signature: $sig\" in:body" \
+            --json number --jq '.[0].number // empty')
           if [ -n "$num" ]; then
-            gh issue comment "$num" --body "$body"
+            gh issue comment "$num" --body "The same failure again: $RUN_URL (commit $GITHUB_SHA). $summary.
+          <!-- nightly-run: $RUN_ID -->"
           else
-            gh issue create --title "$title" --body "$body
+            gh issue create --label bug --label nightly-failure --label "severity: medium" \
+              --title "Nightly failure $(date -u +%F): ${job_names:-unknown job}" \
+              --body "Nightly run failed: $RUN_URL (commit $GITHUB_SHA).
 
-          Close this issue once the nightly is green again; the next failure opens a new one."
+          **Jobs:** $summary
+
+          **What failed**
+          $tests
+
+          The nightly auto-diagnosis (\`.github/workflows/nightly-autofix.yml\`) investigates this issue, posts its diagnosis here, and opens a draft PR when it finds a fix. Review it and merge it yourself; nothing merges or deploys automatically.
+
+          <!-- nightly-signature: $sig -->
+          <!-- nightly-run: $RUN_ID -->"
           fi

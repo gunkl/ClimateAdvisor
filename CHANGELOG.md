@@ -8,6 +8,11 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ### Changed
 - #1558 wording: the time-of-use schedule setting is now called **"TOU changes this setpoint"** (Cooling and heating / Cooling only / Heating only), and its help text says what it does: which setpoint the schedule may change, before and during its high-cost period (the cooling setpoint on cooling days, the heating setpoint on heating days). With **Cooling only**, the heating setpoint is never changed. Status now reads "… heating setpoint left unchanged" instead of "not applied to heating". Behaviour is unchanged from 0.9.39. All 16 languages are updated.
 
+## [0.9.41] — 2026-11-15
+
+### Fixed
+- #1580: when a zone is reloaded or removed while Climate Advisor is changing the thermostat, the old instance no longer leaves a follow-up timer running after it has shut down. Nothing in the house changed, because such a timer was already refused when it fired, but it outlived the unload and failed the nightly test run of 2026-11-14. Every timer in the engine and the coordinator now goes through one guard that arms nothing once the instance has shut down.
+
 ## [0.9.39] — 2026-11-15
 
 ### Added

@@ -57,6 +57,8 @@ from .automation import (
     TouBankHold,
     _fan_device_label,
     _in_sleep_window,
+    _latched,
+    _noop_cancel,
     _refuse_if_shut_down,
     awake_comfort_edges,
     band_resolver_for,
@@ -1062,6 +1064,22 @@ def _prune_event_log(event_log: list[dict], now: datetime) -> list[dict]:
 # fed only the now-deleted door/window shadow-comparison axes via
 # _evaluate_door_window_fsm()/_evaluate_door_window_fsm_nat_vent_exit(), which had zero
 # other consumers.
+
+
+def _call_later(obj: Any, delay: float, fn: Any) -> Callable[[], None]:
+    """``async_call_later`` unless the coordinator is latched (Issue #1580; mirror of automation._call_later)."""
+    if _latched(obj):
+        _LOGGER.debug("Timer not armed after shutdown: %s (Issue #1580)", getattr(fn, "__name__", "callback"))
+        return _noop_cancel
+    return async_call_later(obj.hass, delay, fn)
+
+
+def _track_point_in_time(obj: Any, fn: Any, when: Any) -> Callable[[], None]:
+    """``async_track_point_in_time`` unless the coordinator is latched (Issue #1580)."""
+    if _latched(obj):
+        _LOGGER.debug("Timer not armed after shutdown: %s (Issue #1580)", getattr(fn, "__name__", "callback"))
+        return _noop_cancel
+    return async_track_point_in_time(obj.hass, fn, when)
 
 
 def _whf_safety_after_event(after: Callable[[Any, Any], None]) -> Callable[[Any], Any]:
@@ -2172,9 +2190,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1102 (F1): keep the handle so unload cancels it. Discarding it let a
         # reload inside this 300 s window revive the dead instance when it fired.
         # Issue #1337: also kept by name so the sim harness can cancel it on a simulated restart, as unloading does.
-        self._startup_coalesce_timer_cancel = async_call_later(
-            self.hass, 300, self._zone_scoped_sync(_on_startup_coalesce_timer)
-        )
+        self._startup_coalesce_timer_cancel = _call_later(self, 300, self._zone_scoped_sync(_on_startup_coalesce_timer))
         self._unsub_listeners.append(self._startup_coalesce_timer_cancel)
         _LOGGER.info(
             "Startup coalescing window started — override detection suppressed for 300s, coalescing at %s",
@@ -2463,8 +2479,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._whf_unknown_sensor_cancel = None
             self._request_whf_safety_check("sensor_unavailable")
 
-        self._whf_unknown_sensor_cancel = async_call_later(
-            self.hass, WHF_SENSOR_UNKNOWN_GRACE_S + 1.0, self._zone_scoped_sync(_fire)
+        self._whf_unknown_sensor_cancel = _call_later(
+            self, WHF_SENSOR_UNKNOWN_GRACE_S + 1.0, self._zone_scoped_sync(_fire)
         )
 
     @callback
@@ -3693,7 +3709,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #1113: a config-entry background task, cancelled with the entry on unload.
             self._spawn(self._fire_tou_home_bank_end(key), background=True)
 
-        self._tou_home_end_timer_cancel = async_call_later(self.hass, delay, self._zone_scoped_sync(_tou_home_bank_end))
+        self._tou_home_end_timer_cancel = _call_later(self, delay, self._zone_scoped_sync(_tou_home_bank_end))
         self._tou_home_end_timer_key = key
 
     async def _fire_tou_home_bank_end(self, key: tuple) -> None:
@@ -3902,9 +3918,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             self.hass.async_create_task(self._fire_tou_av_window_start(mode_at_schedule))
 
-        self._tou_av_stop_timer_cancel = async_call_later(
-            self.hass, delay, self._zone_scoped_sync(_tou_av_window_start)
-        )
+        self._tou_av_stop_timer_cancel = _call_later(self, delay, self._zone_scoped_sync(_tou_av_window_start))
         self._tou_av_stop_timer_schedule_start = resolution.schedule_start
 
     async def _fire_tou_av_window_start(self, mode: str) -> None:
@@ -3996,8 +4010,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _LOGGER.info("Occupancy away timer expired — applying setback")
                 self.hass.async_create_task(_apply_away_setback())
 
-            self._occupancy_away_timer_cancel = async_call_later(
-                self.hass,
+            self._occupancy_away_timer_cancel = _call_later(
+                self,
                 delay_seconds,
                 self._zone_scoped_sync(_occupancy_away_timer_expired),
             )
@@ -5154,9 +5168,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self.hass.async_create_task(self.async_request_refresh())
 
                 # Issue #1102 (F2): keep the handle so unload cancels it (at most 5 retries).
-                self._unsub_listeners.append(
-                    async_call_later(self.hass, delay, self._zone_scoped_sync(_schedule_retry))
-                )
+                self._unsub_listeners.append(_call_later(self, delay, self._zone_scoped_sync(_schedule_retry)))
             else:
                 _LOGGER.warning(
                     "Weather entity still unavailable after startup retries; will try again at next scheduled update"
@@ -10938,8 +10950,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 getattr(_c, "today_low", None) if _prev_is_today else None,
             )
 
-        self._pre_cool_trigger_cancel = async_track_point_in_time(
-            self.hass, self._zone_scoped(self._async_pre_cool_trigger), trigger_time
+        self._pre_cool_trigger_cancel = _track_point_in_time(
+            self, self._zone_scoped(self._async_pre_cool_trigger), trigger_time
         )
         self._pre_cool_trigger_scheduled = True
         self._pre_cool_trigger_dt = trigger_time
@@ -11020,8 +11032,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if new_trigger is None:
             return
         self._cancel_pre_cool_trigger()
-        self._pre_cool_trigger_cancel = async_track_point_in_time(
-            self.hass, self._zone_scoped(self._async_pre_cool_trigger), new_trigger
+        self._pre_cool_trigger_cancel = _track_point_in_time(
+            self, self._zone_scoped(self._async_pre_cool_trigger), new_trigger
         )
         self._pre_cool_trigger_dt = new_trigger
         _local_trigger = dt_util.as_local(new_trigger)
@@ -11110,9 +11122,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             with contextlib.suppress(Exception):
                 prev()
         try:
-            self._lead_in_recheck_cancel = async_call_later(
-                self.hass, BLOWER_LEAD_IN_DEFER_S, self._zone_scoped(_later)
-            )
+            self._lead_in_recheck_cancel = _call_later(self, BLOWER_LEAD_IN_DEFER_S, self._zone_scoped(_later))
         except Exception:  # noqa: BLE001 - a scheduling problem must never break the listener
             self._lead_in_recheck_cancel = None
             _LOGGER.debug("lead-in fan re-check not scheduled", exc_info=True)
@@ -11558,7 +11568,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
                 self.hass.async_create_task(_do_debounce())
 
-            cancel = async_call_later(self.hass, debounce_sec, self._zone_scoped_sync(_debounce_expired))
+            cancel = _call_later(self, debounce_sec, self._zone_scoped_sync(_debounce_expired))
             self._door_open_timers[entity_id] = cancel
         else:
             # Sensor transitioned to closed — cancel any pending debounce timer
@@ -13199,8 +13209,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._fan_remote_burst_cancel = None
             self.hass.async_create_task(self._flush_fan_remote_burst())
 
-        self._fan_remote_burst_cancel = async_call_later(
-            self.hass, REMOTE_BURST_WINDOW_SECONDS, self._zone_scoped_sync(_burst_window_elapsed)
+        self._fan_remote_burst_cancel = _call_later(
+            self, REMOTE_BURST_WINDOW_SECONDS, self._zone_scoped_sync(_burst_window_elapsed)
         )
 
     @_whf_safety_after_call("rf_burst")
@@ -13295,8 +13305,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if pending is not None:
                 self._spawn(self._confirm_fan_remote_override(pending))
 
-        self._fan_remote_confirm_cancel = async_call_later(
-            self.hass, REMOTE_CONFIRM_SECONDS, self._zone_scoped_sync(_confirm_window_elapsed)
+        self._fan_remote_confirm_cancel = _call_later(
+            self, REMOTE_CONFIRM_SECONDS, self._zone_scoped_sync(_confirm_window_elapsed)
         )
 
     @_whf_safety_after_call("rf_burst")
@@ -13523,7 +13533,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._whf_release_reclassify_cancel = None
             self._spawn(self._async_reassert_setpoint_now(reason))
 
-        self._whf_release_reclassify_cancel = async_call_later(self.hass, 5, self._zone_scoped_sync(_settled))
+        self._whf_release_reclassify_cancel = _call_later(self, 5, self._zone_scoped_sync(_settled))
 
     @callback
     def _on_post_grace_fan_check(self) -> None:

@@ -339,6 +339,9 @@ def check_ha_translations(component_dir):
             for field in fields:
                 if not field.isidentifier():
                     result.error(f"strings.json: {'.'.join(path)}: placeholder {{{field}}} must be a plain name")
+            # hassfest: "the string should not contain placeholders inside single quotes" (caught by CI on #1575)
+            if re.search(r"'[^']*\{[^{}]+\}[^']*'", node):
+                result.error(f"strings.json: {'.'.join(path)}: a placeholder must not sit inside single quotes")
 
     # Slug-keyed sections: every key below these is a translation key (names, states, options, services, errors).
     def slug_keys(path, key):

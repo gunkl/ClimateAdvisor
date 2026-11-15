@@ -818,7 +818,7 @@
   },
   "exceptions": {
     "unknown_zone": {
-      "message": "Entrada entry_id da zona do Climate Advisor desconhecida ou não carregada: '{entry_id}'. Consulte Definições > Dispositivos e serviços para ver a zona correta."
+      "message": "Entrada entry_id da zona do Climate Advisor desconhecida ou não carregada: {entry_id}. Consulte Definições > Dispositivos e serviços para ver a zona correta."
     }
   }
 }

@@ -818,7 +818,7 @@
   },
   "exceptions": {
     "unknown_zone": {
-      "message": "Unknown or unloaded Climate Advisor zone entry_id '{entry_id}'. Check Settings > Devices & Services for the correct zone."
+      "message": "Unknown or unloaded Climate Advisor zone entry_id {entry_id}. Check Settings > Devices & Services for the correct zone."
     }
   }
 }

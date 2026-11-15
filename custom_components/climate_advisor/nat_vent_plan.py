@@ -31,10 +31,9 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def ensure_catalogs() -> None:
-    """Load the i18n catalogs when nothing did yet (a script or a test calling a text helper directly; production
-    loads them once in ``async_setup_entry``, so this is a no-op there)."""
-    if not i18n.catalogs_loaded():
-        i18n.load_catalogs()
+    """The shared one-shot loader (``i18n.ensure_catalogs``: tries once, never raises, never retries after a failed
+    setup load, so no blocking file read happens in the event loop). Kept as a name for the briefing's imports."""
+    i18n.ensure_catalogs()
 
 
 _NAT_VENT_CUTOFF_MARGIN_F = 1.0  # forecast-hour margin — distinct from the live-control gates'

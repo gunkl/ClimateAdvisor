@@ -5,6 +5,13 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.9.40] — 2026-11-15
 
+### Added
+- Feat #1341: the dashboard, its charts, the Settings tab, the Prediction accuracy page and the AI investigation write-ups follow your language (part 3 of 3 — multi-language support is complete).
+  - **What you'll notice:** every tab of the new dashboard is in your Home Assistant profile language (each person sees their own), with local number, date and time formats. Arabic gets a mirrored right-to-left layout; charts keep time running left to right. Times on the dashboard follow your HA profile's time-zone setting everywhere, so the chart, the night card and the status text always agree.
+  - **AI investigations** write their findings in your HA language (section headings stay English so the report still parses).
+  - **Small English changes on the new dashboard:** Settings shows option names as words ("Fahrenheit (°F)", "Whole-house fan", "Both (no restriction)") instead of raw codes; dates read "Nov 2" (with the year when it isn't this year) instead of "11/2"; the Activity record shows its Settings, Source, Indoor and Outdoor columns; the time-of-use table headings read properly.
+  - **Unchanged:** the classic dashboard stays English, and the Debug tab's field names stay English.
+
 ### Changed
 - #1558 wording: the time-of-use schedule setting is now called **"TOU changes this setpoint"** (Cooling and heating / Cooling only / Heating only), and its help text says what it does: which setpoint the schedule may change, before and during its high-cost period (the cooling setpoint on cooling days, the heating setpoint on heating days). With **Cooling only**, the heating setpoint is never changed. Status now reads "… heating setpoint left unchanged" instead of "not applied to heating". Behaviour is unchanged from 0.9.39. All 16 languages are updated.
 

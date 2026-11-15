@@ -18,8 +18,10 @@ function status(u) {
     unit: u.unit, day_type: 'warm', trend_direction: 'warming', trend_magnitude: u.unit === 'celsius' ? 1.7 : 3.0,
     hvac_mode: 'heat', hvac_action: 'idle', current_setpoint: u.setpoint, ca_target_heat: u.setpoint,
     indoor_temp: u.indoor, outdoor_temp: u.outdoor, automation_enabled: true, automation_status: 'active',
+    status_code: 'active', automation_status_msg: { key: 'status.auto.active', params: {} },
     occupancy_mode: 'home', compliance_score: 0.92, hvac_runtime_today: 42,
-    whf_status: 'inactive', hvac_fan_status: 'active', fan_remote_speed: 'low',
+    whf_status: 'inactive', whf_status_code: 'inactive', whf_status_msg: { key: 'status.fan_status.inactive', params: {} },
+    hvac_fan_status: 'active', hvac_fan_status_code: 'active', hvac_fan_status_msg: { key: 'status.fan_status.active', params: {} }, fan_remote_speed: 'low',
     contact_status: 'all closed', contact_sensors: [{ entity_id: 'binary_sensor.door', friendly_name: 'Front door', unreadable: false }],
   };
 }
@@ -35,8 +37,8 @@ async function routeAll(page, u, sensors) {
     if (sensors) { // a long sensor name wraps its header: the big values must still line up
       const t = new Date().toISOString();
       body.indoor_sensors = [
-        { id: 'climate.hall', name: 'Downstairs hallway thermostat by the stairs', role: 'thermostat', primary: true },
-        { id: 'sensor.bed', name: 'Bedroom', role: 'bedroom sensor' },
+        { id: 'climate.hall', name: 'Downstairs hallway thermostat by the stairs', role: 'thermostat', role_code: 'thermostat', role_msg: { key: 'status.sensor_role.thermostat', params: {} }, primary: true },
+        { id: 'sensor.bed', name: 'Bedroom', role: 'bedroom sensor', role_code: 'bedroom_sensor', role_msg: { key: 'status.sensor_role.bedroom_sensor', params: {} } },
       ];
       body.actual_indoor_sensors = { 'climate.hall': [{ time: t, temp: u.indoor }], 'sensor.bed': [{ time: t, temp: u.indoor - 1.7 }] };
     }
@@ -74,9 +76,20 @@ test.describe('Status wording helpers (Issue #1399)', () => {
           W.saysVs('Weather service', 8.6, 8.8, '°C', 'your sensor'),
           W.saysVs('Weather service', 48.3, 47.8, '°F', 'your sensor'),
           W.trendWords('warming', 3), W.trendWords('cooling', 1.7), W.trendWords('stable', 1),
-          W.automationPhrase('active'), W.automationPhrase('active (away)'), W.automationPhrase('nat-vent'), W.automationPhrase('disabled'),
-          W.fanSentence('Whole-house fan', 'inactive'), W.fanSentence('HVAC fan', 'running (manual override)'),
-          W.fanSentence('Whole-house fan', 'active (unconfirmed)'),
+          // the new dashboard branches on the payload's codes, the classic page still reads the English status text
+          ...(w === 'ND.statusWords' ? [
+            W.automationPhrase({ status_code: 'active', automation_status: 'active' }),
+            W.automationPhrase({ status_code: 'active_away', automation_status: 'active (away)' }),
+            W.automationPhrase({ status_code: 'nat_vent', automation_status: 'nat-vent', automation_status_msg: { key: 'status.auto.nat_vent', params: {} } }),
+            W.automationPhrase({ status_code: 'disabled', automation_status: 'disabled' }),
+            W.fanSentence('Whole-house fan', { whf_status: 'inactive', whf_status_code: 'inactive' }, 'whf_status'),
+            W.fanSentence('HVAC fan', { hvac_fan_status: 'running (manual override)', hvac_fan_status_code: 'running_manual_override', hvac_fan_status_msg: { key: 'status.fan_status.running_manual_override', params: {} } }, 'hvac_fan_status'),
+            W.fanSentence('Whole-house fan', { whf_status: 'active (unconfirmed)', whf_status_code: 'active_unconfirmed' }, 'whf_status'),
+          ] : [
+            W.automationPhrase('active'), W.automationPhrase('active (away)'), W.automationPhrase('nat-vent'), W.automationPhrase('disabled'),
+            W.fanSentence('Whole-house fan', 'inactive'), W.fanSentence('HVAC fan', 'running (manual override)'),
+            W.fanSentence('Whole-house fan', 'active (unconfirmed)'),
+          ]),
         ];
       }, pg.words);
       expect(out).toEqual([

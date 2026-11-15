@@ -1,12 +1,5 @@
 {
   "description": "physical CSS properties (use logical ones)",
-  "total": 38,
-  "files": {
-    "frontend/chart_v2.css": 18,
-    "frontend/chart_v2.js": 4,
-    "frontend/nd_night_card.js": 3,
-    "frontend/nd_settings.js": 2,
-    "frontend/new_dashboard.html": 9,
-    "frontend/pa_view.js": 2
-  }
+  "total": 0,
+  "files": {}
 }

@@ -25,7 +25,7 @@ Issue #1341. Plan and recheck record: the #1341 plan (D1-D9, phases P0a-P5). Thi
 - **Language lists:** `index.json` is the source; `i18n.py` and the offline-fallback arrays in `i18n.js` are each checked against it (`tests/test_i18n_engine.py::test_index_json_is_the_single_source_of_the_lists`, `::test_js_language_and_area_lists_match_index_json`), and `tools/i18n_conformance_gen.mjs` reads it.
 - **Backend (D2):** `i18n.hass_language(hass)` = `resolve_language(hass.config.language)`. The backend never mixes two languages.
 - **Dashboard (D2):** per viewer: `?lang=` → parent `hass.language` (the one lookup, `CAI18N.hass()`, which reaches the `home-assistant` element in the parent or top window inside try/catch) → status payload `language` (the backend language, the one documented contract between the two runtimes) → `navigator.language` → `en`. An unsupported code resolves to its nearest shipped language or `en`; it does not fall through to the browser.
-- `<html lang>` is set on every page that loads `i18n.js`, including `entry.html` and `prediction_accuracy.html`. `<html dir>` stays `ltr` for every language, `ar` included, until the dashboard CSS uses logical properties and `RTL_LAYOUT_READY` in `i18n.js` flips to `true` (Stage 2 lane L9, same change); `CAI18N.dir` already reports `rtl` for `ar` so text code can isolate values.
+- `<html lang>` is set on every page that loads `i18n.js`, including `entry.html` and `prediction_accuracy.html`. `<html dir>` is `rtl` for `ar` and `ltr` for every other language (`RTL_LAYOUT_READY` in `i18n.js` is `true`: the dashboard CSS uses logical properties, enforced by the `physical_css` ratchet; the charts' own time axis stays left to right inside an `ltr` chart stack); `CAI18N.dir` reports the language's direction so text code can isolate values.
 - Classic `index.html` stays English (owner Q2).
 
 ## Catalogs (D1)
@@ -96,7 +96,7 @@ Python builds `i18n.Msg(key, **params)`; `i18n.render(msg, lang)` renders it, `r
 
 | Member | Meaning |
 |---|---|
-| `init({statusLanguage, base})` | Resolves the language synchronously (so `lang`/`dir` and `<html lang>` are right at once; `<html dir>` stays `ltr` until `RTL_LAYOUT_READY`), then fetches `index.json` and, for `en` and the chosen language, every area file. Returns a Promise that **always resolves** (a failed fetch leaves English/key fallbacks and one console warning); a later call (for example once the status payload is in) re-resolves and retries. |
+| `init({statusLanguage, base})` | Resolves the language synchronously (so `lang`/`dir` and `<html lang>`/`<html dir>` are right at once; `RTL_LAYOUT_READY` false would keep `<html dir>` `ltr`), then fetches `index.json` and, for `en` and the chosen language, every area file. Returns a Promise that **always resolves** (a failed fetch leaves English/key fallbacks and one console warning); a later call (for example once the status payload is in) re-resolves and retries. |
 | `lang`, `locale`, `dir` | Chosen shipped language; `hass.locale` when the parent has it (else `null`); `ltr`/`rtl` (the direction of the language; see `<html dir>` above). |
 | `timeZone()` | The zone clock times are shown in: IANA id (`server`, the default), `'local'`, or `null` (render the wall clock written in the wire `ts`). |
 | `t(key, params)` | Per-key English fallback; missing everywhere → the key plus one `console.warn`. |
@@ -104,6 +104,16 @@ Python builds `i18n.Msg(key, **params)`; `i18n.render(msg, lang)` renders it, `r
 | `fmt.number/time/date/dateTime/duration/list/temp/tempDelta` | `Intl.*`-based. `temp`/`tempDelta`: `Intl.NumberFormat(lang, {min/maxFractionDigits: d, useGrouping: false})` of the converted value (Celsius `(f-32)*5/9`, delta `f*5/9`), then `°F`/`°C` with no space. `list`: `Intl.ListFormat` conjunction/disjunction, long. `duration`: the `common.duration.min|hours|hours_frac` messages with the same thresholds as `i18n.format_duration` (minutes = max(1, round-half-even(s/60)); whole hours; else one decimal). `time`/`date`: `Intl.DateTimeFormat`, dashboard-owned. |
 | `esc(s)` | The one HTML escaper. |
 | `hass()` | The one parent-`hass` lookup (parent, then top window; never throws). |
+| `th(key, params)` | Like `t()` but returns safe HTML: the message is escaped and every string param (a formatted temperature, a time, a name) is wrapped in `<bdi>`. Number params stay numbers (plural selection). Only for `innerHTML`. |
+| `text(obj, field)` | The one call-site shape for API prose: the `<field>_msg` wire sibling rendered with `tw()` when the backend sent one (and its key is in the catalog), else the plain prose field. `ND.text` is this. |
+| `has(key)` | Whether the language or English catalog has the key. |
+| `apply(root)` | Fills `[data-i18n="key"]` (`textContent`) and `[data-i18n-attr="title:key;aria-label:key"]` (`setAttribute`); `data-i18n-params='{"n":6}'` passes arguments. Never `innerHTML`. A key with no entry leaves the element's English markup (which a test keeps equal to the catalog). |
+| `fmt.hour(d)` | Hour only (`3 PM` / `15`), in `timeZone()` like `fmt.time`. |
+| `fmt.intl(opts, lang)` | A zone-aware `Intl.DateTimeFormat` for any options (`timeZone()` plus the 12/24 h setting when `hour` is shown); `lang` is a code or a locales array (`[]` = the browser locale). The one way a page formats an instant it draws itself (chart ticks, readouts). |
+| `fmt.dateYear(d)` / `fmt.calendarDay(y, m, d, lang, weekday)` | `date` plus the year when the date is not in the current year (in the display zone); a calendar day given by parts, the same day in any zone. |
+| `iso(x)` | A dynamic Latin name isolated (U+2068..U+2069) in right-to-left text; the one helper. |
+| `init({areas})` | `areas` limits the fetch to some catalog areas (`entry.html` loads only `dashboard`). |
+| `?lang=en-XA` | The pseudo-locale, built on the fly from `en`: every letter accented, ~35% padding, each message bracketed `[...]`; ICU syntax is preserved. Only ever chosen by `?lang=` (never by `hass` or the browser), never listed in `index.json`, formats numbers and dates as English. A visible word that is not bracketed bypassed the catalog (`tests/ui/i18n-dashboard.spec.js`). |
 
 Stage 1 adds the file and the `<script>` tags only; no page text uses `t()` yet, so every page behaves exactly as before. Stage 2 (L9) replaces the duplicated `haAuth`/`esc` helpers in `nd_*.js` with these. Prior art: lboue's closed PR #1562 (French), whose `t()`/`data-i18n`/`?lang=` design this adapts; its French strings are imported with credit in the strings phase.
 

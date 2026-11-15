@@ -1,0 +1,5 @@
+{
+  "settings.enum.fan_mode.disabled": "The value of the Fan mode setting: Climate Advisor does not control any fan.",
+  "settings.temp_source.finer": "{entity} is a sensor entity id; keep it untranslated.",
+  "settings.temp_source.reason": "{label} is the temperature source's name (e.g. the thermostat's built-in sensor); {reason} is a short failure reason (e.g. sensor unavailable); {consequence} says what Climate Advisor does instead."
+}

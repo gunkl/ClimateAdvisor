@@ -21,12 +21,122 @@ FE = ROOT / "custom_components" / "climate_advisor" / "frontend"
 HTML = (FE / "new_dashboard.html").read_text(encoding="utf-8")
 JS = {p.name: p.read_text(encoding="utf-8") for p in sorted(FE.glob("nd_*.js"))}
 # R6fe: the chart (and the plan list and overlay) is one shared module, chart_v2.js + chart_v2.css, loaded by BOTH pages.
+# Issue #1341: the Analysis/Debug sentences are catalog messages (area dashboard); English-literal pins read the catalog too.
+CATALOG_EN = json.loads((FE / "i18n" / "dashboard" / "en.json").read_text(encoding="utf-8"))
+CATALOG_TEXT = "\n".join(CATALOG_EN.values())
 CHART_JS = (FE / "chart_v2.js").read_text(encoding="utf-8")
 CHART_CSS = (FE / "chart_v2.css").read_text(encoding="utf-8")
-CORPUS = HTML + "\n".join(JS.values()) + "\n" + CHART_JS + "\n" + CHART_CSS
+SETTINGS_CATALOG_TEXT = "\n".join(
+    json.loads((FE / "i18n" / "settings" / "en.json").read_text(encoding="utf-8")).values()
+)
+# Issue #1341: the new dashboard's English text lives in the catalogs, so the English pins read them too
+CORPUS = (
+    HTML
+    + "\n".join(JS.values())
+    + "\n"
+    + CHART_JS
+    + "\n"
+    + CHART_CSS
+    + "\n"
+    + CATALOG_TEXT
+    + "\n"
+    + SETTINGS_CATALOG_TEXT
+)
+# the page code alone (no catalog text): a phrase found only in a catalog must also have its key referenced (in_catalog)
+CODE_CORPUS = HTML + "\n".join(JS.values()) + "\n" + CHART_JS + "\n" + CHART_CSS
 # the classic page's behaviour = its own file + the shared chart module it loads
 INDEX = (FE / "index.html").read_text(encoding="utf-8") + "\n" + CHART_JS
 FIX = json.loads((ROOT / "tests" / "fixtures" / "new_dashboard_api.json").read_text(encoding="utf-8"))
+
+# ---------------------------------------------------------------------------------------------
+# Issue #1341 S6: a phrase that lives in the catalog only counts if the page actually references the key.
+# ---------------------------------------------------------------------------------------------
+_VENDOR_FILES = {"chart.umd.min.js", "chartjs-plugin-zoom.min.js", "hammer.min.js", "intl-messageformat.iife.js"}
+FRONTEND_SRC = {
+    p.name: p.read_text(encoding="utf-8")
+    for p in sorted([*FE.glob("*.js"), *FE.glob("*.html")])
+    if p.name not in _VENDOR_FILES
+}
+_FRONTEND_ALL = "\n".join(FRONTEND_SRC.values())
+# A module that builds its keys from a literal prefix (`var B = 'dashboard.banner.'`, `T = key => t('settings.' + key)`)
+# references 'rel' for the key '<prefix>rel'.
+_PREFIX_LITERAL = re.compile(r"""['"]((?:dashboard|settings)\.[a-z_0-9.]*\.|settings\.)['"]""")
+_FRONTEND_PREFIXES = {name: set(_PREFIX_LITERAL.findall(text)) for name, text in FRONTEND_SRC.items()}
+# Keys the frontend builds by string concatenation at run time (found by grep, one family each): (key prefix, module,
+# the source text that builds it). The test also checks that the snippet exists and that every entry still matches a key.
+DYNAMIC_KEY_FAMILIES = (
+    ("dashboard.analysis.grade.", "nd_analysis.js", "T('grade.' +"),
+    ("dashboard.analysis.obs.", "nd_analysis.js", "T('obs.' + k)"),
+    ("dashboard.analysis.reason.", "nd_analysis.js", "T('reason.' + code)"),
+    ("dashboard.analysis.rep.act_col_", "nd_analysis.js", "T('rep.act_col_' + c)"),
+    ("dashboard.analysis.rep.window.", "nd_analysis.js", "T('rep.window.' + o[1])"),
+    ("dashboard.analysis.section.", "nd_analysis.js", "T('section.' + "),
+    ("dashboard.night.act_", "nd_night_card.js", "'_predicted'"),  # act_<kind>_predicted
+    ("dashboard.pa.gate.season.", "pa_view.js", "T('gate.season.' +"),
+    ("dashboard.pa.role.", "pa_view.js", "T('role.' + r)"),
+    ("dashboard.status.day_type_", "nd_status.js", "S + group + '_'"),
+    ("dashboard.status.occupancy_", "nd_status.js", "S + group + '_'"),
+    ("dashboard.status.treated_", "nd_status.js", "S + group + '_'"),
+    ("settings.ai.status.", "nd_settings.js", "T('ai.status.' +"),
+    ("settings.ai.breaker.", "nd_settings.js", "T('ai.breaker.' +"),
+    ("settings.enum.", "nd_settings.js", "'enum.' + key + '.' + v"),
+    ("settings.group.", "nd_settings.js", "T('group.' + id + '.title')"),
+)
+# Keys only the backend emits (as a Msg wire in an API payload the page renders): (prefix, backend module, snippet).
+BACKEND_KEY_FAMILIES = (
+    ("settings.temp_source.", "api.py", 'i18n.Msg(f"settings.temp_source.'),
+    ("settings.value_", "api.py", '"settings.value_configured"'),
+)
+_SETTING_ROW_KEY = re.compile(r"settings\.([a-z_0-9]+)\.(label|description)")
+
+
+def _config_metadata_keys() -> set[str]:
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    from custom_components.climate_advisor.const import CONFIG_METADATA
+
+    return set(CONFIG_METADATA)
+
+
+def key_referenced(key: str) -> bool:
+    """True when the frontend (or, for a backend-owned family, the backend) actually uses the catalog key."""
+    if re.search(r"(?<![\w.])" + re.escape(key) + r"(?![\w])", _FRONTEND_ALL):
+        return True
+    for name, prefixes in _FRONTEND_PREFIXES.items():
+        for p in prefixes:
+            if (
+                key.startswith(p)
+                and key[len(p) :]
+                and (f"'{key[len(p) :]}'" in FRONTEND_SRC[name] or f'"{key[len(p) :]}"' in FRONTEND_SRC[name])
+            ):
+                return True
+    for prefix, module, snippet in DYNAMIC_KEY_FAMILIES:
+        if key.startswith(prefix) and snippet in FRONTEND_SRC[module]:
+            return True
+    m = _SETTING_ROW_KEY.fullmatch(key)
+    if m and m.group(1) in _config_metadata_keys():
+        return True  # emitted as label_msg / description_msg by ClimateAdvisorConfigView
+    backend = ROOT / "custom_components" / "climate_advisor"
+    for prefix, module, snippet in BACKEND_KEY_FAMILIES:
+        if key.startswith(prefix) and snippet in (backend / module).read_text(encoding="utf-8"):
+            return True
+    return False
+
+
+_ALL_CATALOG_EN = {
+    **CATALOG_EN,
+    **json.loads((FE / "i18n" / "settings" / "en.json").read_text(encoding="utf-8")),
+}
+
+
+def in_catalog(phrase: str, *, ignore_case: bool = False) -> bool:
+    """The phrase is in a catalog message whose key the page references (not just somewhere in en.json)."""
+    needle = phrase.lower() if ignore_case else phrase
+    return any(
+        needle in (text.lower() if ignore_case else text) and key_referenced(key)
+        for key, text in _ALL_CATALOG_EN.items()
+    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -297,9 +407,9 @@ PARITY = [
     ),
     (
         [],
-        "_group('Overlays', 'Overlays', overlays)",
+        "_group('overlays', overlays)",
         "Chart overlays (target band, target, plan; humidity and feels-like are indoor / outdoor lines, Issue #1414)",
-        ["_group('Overlays', 'Overlays', overlays)", "ov:plan"],
+        ["_group('overlays', overlays)", "ov:plan"],
         "placed",
         "",
     ),
@@ -427,7 +537,7 @@ PARITY = [
         ["settings-content"],
         "settings-content",
         "Settings groups (read-only, with descriptions, search, jump links)",
-        ['id="set-groups"', "'Other'"],
+        ['id="set-groups"', "'other'"],
         "placed",
         "",
     ),
@@ -556,7 +666,9 @@ def _row_param(row):
 def test_parity_row(row):
     _ids, _anchor, home, anchors, status, _reason = row
     for a in anchors:
-        assert a in CORPUS, f"{home}: expected {a!r} in the new dashboard"
+        assert a in CODE_CORPUS or in_catalog(a), (
+            f"{home}: expected {a!r} in the new dashboard (code, or a referenced catalog key)"
+        )
 
 
 def test_parity_summary():
@@ -647,7 +759,9 @@ def test_actions_are_the_classic_posts():
     ],
 )
 def test_context_banners(text):
-    assert text in JS["nd_core.js"]
+    assert text in JS["nd_core.js"] or in_catalog(
+        text
+    )  # Issue #1341: the words are catalog messages (dashboard.banner.*), referenced
 
 
 def test_banner_level_roles_and_status_only_promises():
@@ -776,10 +890,12 @@ def test_analysis_data_calls_and_writes_match_classic():
         assert f in js
     assert "'incident_detected'" in js  # the incident package, as classic
     # report window options are classic's
-    for opt in ('value="6">Last 6 hours', 'value="168">Last 7 days', 'value="720">Last 30 days'):
-        assert opt in js
+    for opt in ("Last 6 hours", "Last 7 days", "Last 30 days"):
+        assert in_catalog(opt), opt
+    for v in ("[6, 'h6']", "[168, 'd7']", "[720, 'd30']"):
+        assert v in js
     for h in ("Accept", "Dismiss", "Correct", "Incorrect"):
-        assert h in js
+        assert in_catalog(h), h
 
 
 def test_analysis_sections_exist():
@@ -796,7 +912,7 @@ def test_analysis_sections_exist():
         "an-ai-line",
         "Tomorrow (plan)",
     ):
-        assert frag in HTML or frag in JS["nd_analysis.js"], frag
+        assert frag in HTML or frag in JS["nd_analysis.js"] or in_catalog(frag), frag
     js = JS["nd_analysis.js"]
     for tile in (
         "Comfort score",
@@ -806,7 +922,7 @@ def test_analysis_sections_exist():
         "Promises missed",
         "Prediction error, 4 h",
     ):
-        assert tile in js, tile
+        assert in_catalog(tile), tile
     assert "fToDisp" in js and "dFToDisp" in js  # records are internal degF; shown in the install's unit
     assert "prediction_accuracy.html" in js and "?zone=" in js  # R1's page, reused
 
@@ -835,13 +951,18 @@ def test_accuracy_page_is_never_framed_or_opened_in_a_new_tab_1491():
 def test_ha_login_lookup_also_reaches_the_top_window_1491():
     """Issue #1491 belt and braces: each page's HA-login lookup tries the parent, then the top window."""
     pages = {
-        "nd_core.js": JS["nd_core.js"],
         "pa_view.js": (FE / "pa_view.js").read_text("utf-8"),  # Issue #1497: the accuracy page's view and auth
         "index.html": (FE / "index.html").read_text("utf-8"),
     }
+    # index.html (no i18n.js) has its own lookup; pa_view.js (always with i18n.js) asks the shared runtime (N1)
+    assert "[window.parent, window.top]" in pages["index.html"]
+    assert "CAI18N.hass()" in pages["pa_view.js"]
     for name, src in pages.items():
-        assert "[window.parent, window.top]" in src, name
         assert "window.parent.document" not in src, name
+    # Issue #1341: the new dashboard asks the shared i18n runtime (CAI18N.hass()), which tries the parent, then the top window
+    runtime = (FE / "i18n.js").read_text("utf-8")
+    assert "wins.push(root.parent)" in runtime and "wins.push(root.top)" in runtime
+    assert "I.hass()" in JS["nd_core.js"] and "window.parent.document" not in JS["nd_core.js"]
 
 
 def test_analysis_draws_the_shared_accuracy_view_in_the_card_1497():
@@ -1020,7 +1141,9 @@ def test_night_card_is_a_self_contained_component():
         "fahrenheit",
         "celsius",
     ):
-        assert frag in card or frag.lower() in card.lower(), frag
+        assert frag in card or frag.lower() in card.lower() or in_catalog(frag, ignore_case=True), (
+            frag
+        )  # words: catalog (#1341)
     status = JS["nd_status.js"]
     assert "NDNightCard.mount" in status and "NDNightCard.fromStrategy" in status
     assert "Sample data, not your house" in HTML  # the labelled fallback for an install without the endpoint
@@ -1083,17 +1206,18 @@ def test_status_tab_reads_the_live_night_plan_and_gates_its_figures():
     for figure in ("bed_min", "bed_max", "bed_wake", "d1(", "heat_min", "<svg", "<table"):
         assert figure not in plan_only, f"plan-only view must not show {figure}"
     # low-confidence steps keep the qualifier (decision C13)
-    assert "may help" in card
+    assert in_catalog("may help") and "t('may_help')" in card
 
 
 def test_status_places_the_same_actors_as_the_timeline():
     mod = CHART_JS
     # "you" and "CA" are named in words and by shape (never colour alone), low confidence says "may help"
-    assert "'You'" in mod and "'CA'" in mod and "may help" in mod
+    assert '"readout.actor_you": "You"' in mod and '"readout.actor_ca": "CA"' in mod and "may help" in mod
     assert "s.confidence === 'low'" in mod
     # nothing in the list invents wording: the step's own server-side text is what is shown (its plan-list row form
     # text_short, Issue #1399, built by timeline_surfaces.plan_list_text; else the canonical text)
-    assert "escapeHtml(s.text_short || s.text || '')" in mod
+    # (Issue #1341: _bk() prefers the step's `<field>_msg` sibling and falls back to the English field)
+    assert "escapeHtml(_bk(s, 'text_short') || _bk(s, 'text'))" in mod
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1178,7 +1302,7 @@ def test_cycle_model_surfaces_1512():
     its rows; every cycle rejection code has a label in the new and classic dashboards (old codes stay, marked)."""
     an, dbg = JS["nd_analysis.js"], JS["nd_debug.js"]
     assert "cycleRows(E.decisions)" in an and "coast_area_f" in an
-    assert "the cycle model measures" in an and "Decisions use" in an
+    assert in_catalog("the cycle model measures") and in_catalog("Decisions use")
     assert "Cycle model: " in dbg and "k_p_cycle" in dbg and "diagnostic only" in dbg
     codes = (
         "cycle_too_short",
@@ -1191,7 +1315,42 @@ def test_cycle_model_surfaces_1512():
         "cycle_sensor_swap",
     )
     for code in codes:
-        assert code + ":" in an, code
+        assert f'"{code}"' in an.replace("'", '"'), code  # the REASON_CODES list
+        assert f"dashboard.analysis.reason.{code}" in CATALOG_EN, code
         assert code + ":" in INDEX, code
     # the retired per-run codes remain for old history, marked as the old method
-    assert "hvac_run_too_short: 'Heating or cooling run was too short to measure (old method)'" in an
+    assert (
+        CATALOG_EN["dashboard.analysis.reason.hvac_run_too_short"]
+        == "Heating or cooling run was too short to measure (old method)"
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# Issue #1341 S6: no dead catalog keys, and no phrase that is only "present" in a catalog nobody reads
+# ---------------------------------------------------------------------------------------------
+
+
+def test_every_dashboard_and_settings_key_is_referenced():
+    """Every key in dashboard/en.json and settings/en.json is used by the frontend (directly, relative to a module's
+    prefix, through a listed dynamic family) or by the backend that emits it as a wire."""
+    unreferenced = sorted(k for k in _ALL_CATALOG_EN if not key_referenced(k))
+    assert not unreferenced, f"{len(unreferenced)} catalog keys nobody references: {unreferenced[:25]}"
+
+
+def test_dynamic_and_backend_key_families_are_live():
+    """The allowlists cannot go stale: each entry's building snippet exists and each prefix still matches a key."""
+    backend = ROOT / "custom_components" / "climate_advisor"
+    for prefix, module, snippet in DYNAMIC_KEY_FAMILIES:
+        assert snippet in FRONTEND_SRC[module], f"{module} no longer builds {prefix}* ({snippet!r})"
+        assert any(k.startswith(prefix) for k in _ALL_CATALOG_EN), f"no key starts with {prefix}"
+    for prefix, module, snippet in BACKEND_KEY_FAMILIES:
+        assert snippet in (backend / module).read_text(encoding="utf-8"), f"{module} no longer emits {prefix}*"
+        assert any(k.startswith(prefix) for k in _ALL_CATALOG_EN), f"no key starts with {prefix}"
+
+
+def test_a_phrase_only_in_an_unreferenced_catalog_key_does_not_count(monkeypatch):
+    """in_catalog() is the real check: a phrase whose only key is unreferenced is not 'present'."""
+    monkeypatch.setitem(_ALL_CATALOG_EN, "dashboard.zz_unused.phrase", "A phrase nobody renders 7f3a")
+    assert not key_referenced("dashboard.zz_unused.phrase")
+    assert not in_catalog("A phrase nobody renders 7f3a")
+    assert in_catalog("Comfort score")

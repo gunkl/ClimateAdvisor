@@ -577,7 +577,15 @@ class TestSmallSinks:
 
 # -- the catalog and the code agree ----------------------------------------------------------------------------
 _PKG = __import__("pathlib").Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor"
-_SOURCES = ("coordinator.py", "automation.py", "api.py", "dashboard_api.py", "remote_offset.py", "status_text.py")
+_SOURCES = (
+    "coordinator.py",
+    "automation.py",
+    "api.py",
+    "dashboard_api.py",
+    "remote_offset.py",
+    "status_text.py",
+    "prediction_accuracy.py",
+)
 
 
 def _catalog_en() -> dict[str, str]:

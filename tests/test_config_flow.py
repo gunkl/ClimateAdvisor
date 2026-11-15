@@ -3482,3 +3482,54 @@ class TestWholeHouseFanSafetySetup:
         }
         result = asyncio.run(flow.async_step_sensors(dict(user_input)))
         assert result["errors"] == {"fan_entity": "whf_entity_shared_zone"}
+
+
+class TestOptionsFlowSchedulerGates:
+    """Issues #1558/#1565: the schedule editor stores "applies to" and the enable entity (REAL handlers)."""
+
+    def _edit(self, existing: dict, **fields):
+        entry_data = dict(FULL_CONFIG)
+        entry_data["schedules"] = [existing]
+        data = _run_options_flow(
+            entry_data,
+            [
+                ("async_step_scheduler", {"manage": existing["id"]}),
+                ("async_step_scheduler_edit", _schedule_fields(**fields)),
+            ],
+        )
+        return data["schedules"][0]
+
+    def test_applies_to_and_enable_entity_are_stored(self):
+        new = self._edit(
+            _seed_schedule("a", "A", "mon", "16:00:00", "21:00:00", "high"),
+            applies_to="cool",
+            condition_entity="binary_sensor.peak_season",
+        )
+        assert new["applies_to"] == "cool" and new["condition_entity"] == "binary_sensor.peak_season"
+
+    def test_defaults_are_not_stored(self):
+        """A schedule saved at the defaults stays exactly the shape it had before #1558/#1565."""
+        new = self._edit(_seed_schedule("a", "A", "mon", "16:00:00", "21:00:00", "high"), applies_to="both")
+        assert "applies_to" not in new and "condition_entity" not in new
+
+    def test_clearing_the_enable_entity_removes_it(self):
+        seeded = {**_seed_schedule("a", "A", "mon", "16:00:00", "21:00:00", "high"), "condition_entity": "switch.x"}
+        new = self._edit(seeded)  # the form left blank: HA omits a blank EntitySelector
+        assert "condition_entity" not in new
+
+    def test_a_field_the_form_does_not_show_is_kept_on_edit(self):
+        """Before: the editor rebuilt each schedule from six fixed keys and dropped anything else."""
+        seeded = {**_seed_schedule("a", "A", "mon", "16:00:00", "21:00:00", "high"), "future_field": 7}
+        assert self._edit(seeded)["future_field"] == 7
+
+    def test_summary_names_the_limits(self):
+        from custom_components.climate_advisor.config_flow import ClimateAdvisorOptionsFlow
+
+        label = ClimateAdvisorOptionsFlow._format_schedule_summary(
+            {
+                **_seed_schedule("a", "A", "mon", "16:00", "21:00", "high"),
+                "applies_to": "cool",
+                "condition_entity": "x.y",
+            }
+        )
+        assert "cooling only" in label and "only when x.y is on" in label

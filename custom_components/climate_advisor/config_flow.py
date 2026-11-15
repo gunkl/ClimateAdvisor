@@ -130,7 +130,21 @@ from .const import (
     TEMP_SOURCE_SENSOR,
     TEMP_SOURCE_WEATHER_SERVICE,
 )
-from .scheduler import ALL_DAYS, COST_TAG_HIGH, MAX_SCHEDULES, WEEKDAY_ABBREVS, _parse_hhmm
+from .scheduler import (
+    ALL_DAYS,
+    APPLIES_TO_BOTH,
+    APPLIES_TO_COOL,
+    APPLIES_TO_HEAT,
+    APPLIES_TO_VALUES,
+    CONDITION_ENTITY_DOMAINS,
+    COST_TAG_HIGH,
+    MAX_SCHEDULES,
+    SCHEDULE_FIELDS,
+    WEEKDAY_ABBREVS,
+    _parse_hhmm,
+    schedule_from_dict,
+    schedule_to_dict,
+)
 from .setpoint_combinations import (
     SETPOINT_SANITY_MAX_F,
     SETPOINT_SANITY_MIN_F,
@@ -139,6 +153,13 @@ from .setpoint_combinations import (
 from .temperature import CELSIUS, FAHRENHEIT, convert_delta, from_fahrenheit, ha_system_unit, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
+
+# Issue #1558: the schedule form's "Applies to" choices (also the schedule summary label).
+_SCHEDULE_APPLIES_LABELS = {
+    APPLIES_TO_BOTH: "Cooling and heating",
+    APPLIES_TO_COOL: "Cooling only",
+    APPLIES_TO_HEAT: "Heating only",
+}
 
 _NOTIFY_SERVICE_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 
@@ -1523,6 +1544,8 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
 
     # ---- Scheduler: TOU cost-period schedules (Issue #786) ----
     #
+    # Issues #1558/#1565: each schedule may also be limited to cooling or heating days, and enabled by an entity.
+    #
     # No temperature fields anywhere in this section — pre-conditioning banks toward the
     # home's own existing comfort-band edge automatically, using its learned thermal
     # response rate, rather than asking the user to configure a target. See
@@ -1536,7 +1559,15 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         tag_label = "High" if schedule.get("cost_tag") == COST_TAG_HIGH else "Low"
         name = schedule.get("name", "(unnamed)")
         window = f"{schedule.get('start')}-{schedule.get('end')}"
-        return f"{name} — {days_label} {window} ({tag_label})"
+        # Issues #1558/#1565: which days it pre-conditions on, and the entity that enables it
+        applies = _SCHEDULE_APPLIES_LABELS.get(schedule.get("applies_to", APPLIES_TO_BOTH))
+        extras = "".join(
+            [
+                f", {applies.lower()}" if schedule.get("applies_to", APPLIES_TO_BOTH) != APPLIES_TO_BOTH else "",
+                f", only when {schedule['condition_entity']} is on" if schedule.get("condition_entity") else "",
+            ]
+        )
+        return f"{name} — {days_label} {window} ({tag_label}{extras})"
 
     async def async_step_scheduler(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """List existing TOU cost-period schedules; choose one to edit, or add a new one."""
@@ -1591,7 +1622,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             if start_raw is not None and end_raw is not None and _parse_hhmm(start_raw) == _parse_hhmm(end_raw):
                 errors["end"] = "schedule_start_end_equal"
             if not errors:
+                # Issues #1558/#1565: one field list (scheduler.SCHEDULE_FIELDS). The form's fields are written from
+                # the input -- an optional field left blank or at its default is dropped, so clearing the enable entity
+                # removes it -- and any stored field this form does not show is kept.
+                kept_extra = {k: v for k, v in (existing or {}).items() if k not in SCHEDULE_FIELDS}
                 new_schedule = {
+                    **kept_extra,
                     "id": existing["id"] if existing else uuid.uuid4().hex,
                     "name": user_input["name"],
                     "days": list(user_input["days"]),
@@ -1605,7 +1641,11 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     # compat with pre-existing "low" schedules (dead-but-harmless,
                     # deliberately not removed there).
                     "cost_tag": COST_TAG_HIGH,
+                    "applies_to": user_input.get("applies_to") or APPLIES_TO_BOTH,
+                    "condition_entity": user_input.get("condition_entity") or None,
                 }
+                parsed = schedule_from_dict(new_schedule)
+                new_schedule = {**kept_extra, **schedule_to_dict(parsed)} if parsed is not None else new_schedule
                 if existing is not None:
                     schedules = [new_schedule if s["id"] == editing_id else s for s in schedules]
                 elif len(schedules) < MAX_SCHEDULES:
@@ -1641,6 +1681,19 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             vol.Required("end", default=defaults.get("end", "21:00:00")): selector.TimeSelector(),
             # cost_tag selector removed from the form (Issue #786 follow-up) — see the
             # commit-path comment above. Always hardcoded to COST_TAG_HIGH there.
+            # Issue #1558: the days this schedule pre-conditions on (default both = before #1558).
+            vol.Optional("applies_to", default=defaults.get("applies_to", APPLIES_TO_BOTH)): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value=v, label=_SCHEDULE_APPLIES_LABELS[v]) for v in APPLIES_TO_VALUES
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            # Issue #1565: optional enable entity (suggested, not default, so it can be cleared).
+            vol.Optional(
+                "condition_entity", description={"suggested_value": defaults.get("condition_entity")}
+            ): selector.EntitySelector(selector.EntitySelectorConfig(domain=list(CONDITION_ENTITY_DOMAINS))),
         }
         if existing is not None:
             schema_dict[vol.Optional("delete_schedule", default=False)] = selector.BooleanSelector()

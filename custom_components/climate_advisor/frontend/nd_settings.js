@@ -71,9 +71,12 @@
     sec.hidden = !X;
     if (!X) return;
     var list = X.schedules || [], dn = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun', all: 'Every day' };
-    $('set-tou-body').innerHTML = list.length ? '<div class="scroll-x"><table style="min-width:420px"><thead><tr><th>Name</th><th>Days</th><th>Window</th><th>Cost</th></tr></thead><tbody>' + list.map(function (s) {
+    $('set-tou-body').innerHTML = list.length ? '<div class="scroll-x"><table style="min-width:560px"><thead><tr><th>Name</th><th>Days</th><th>Window</th><th>Cost</th><th>Applies to</th><th>Only while on</th></tr></thead><tbody>' + list.map(function (s) {
       return '<tr><td>' + esc(s.name || '(unnamed)') + '</td><td>' + esc((s.days || []).map(function (d) { return dn[d] || d; }).join(', ')) + '</td><td class="num">' + esc(String(s.start || '').slice(0, 5)) + '–' + esc(String(s.end || '').slice(0, 5)) +
-        '</td><td>' + esc(s.cost_tag === 'high' ? 'High (peak)' : s.cost_tag === 'low' ? 'Low (off-peak)' : s.cost_tag || '') + '</td></tr>';
+        '</td><td>' + esc(s.cost_tag === 'high' ? 'High (peak)' : s.cost_tag === 'low' ? 'Low (off-peak)' : s.cost_tag || '') +
+        // Issues #1558/#1565: which days it pre-conditions on, and the entity that enables it (blank = always)
+        '</td><td>' + esc(s.applies_to === 'cool' ? 'Cooling only' : s.applies_to === 'heat' ? 'Heating only' : 'Cooling and heating') +
+        '</td><td>' + esc(s.condition_entity || '—') + '</td></tr>';
     }).join('') + '</tbody></table></div>' : '<div class="empty">No time-of-use schedules are set up.</div>';
   }
 

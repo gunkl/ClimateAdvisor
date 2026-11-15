@@ -1,0 +1,107 @@
+{
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "primary_engine": "v3",
+    "schedules": [
+      {
+        "id": "peak1",
+        "name": "Weekday Peak",
+        "days": [
+          "all"
+        ],
+        "start": "16:15",
+        "end": "21:00",
+        "cost_tag": "high",
+        "condition_entity": "input_boolean.peak_season"
+      }
+    ],
+    "thermostat_reports_hvac_action": true
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.1,
+    "k_active_cool": -1.0,
+    "k_active_heat": 1.0
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "capture_next_action": true,
+  "events": [
+    {
+      "time": "2026-01-13T12:59:00",
+      "type": "external_entity_state_change",
+      "entity": "input_boolean.peak_season",
+      "state": "off",
+      "note": "the schedule's enable entity"
+    },
+    {
+      "time": "2026-01-13T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 30.0
+    },
+    {
+      "time": "2026-01-13T14:00:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T15:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    },
+    {
+      "time": "2026-01-13T16:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 30.0,
+      "note": "no bank ran, so the house stayed near 70 F"
+    },
+    {
+      "time": "2026-01-13T16:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-13T15:59:59",
+      "expect": "setpoint_writes",
+      "since": "2026-01-13T13:59:59",
+      "values": [
+        68.0,
+        68.0
+      ],
+      "reason": "Only the band: the enable entity is off, so the schedule is skipped."
+    }
+  ],
+  "name": "tou_schedule_enable_entity_off_no_bank_1565",
+  "description": "Issue #1565: the schedule applies only while input_boolean.peak_season is on. Out of season (off) Climate Advisor does not pre-heat before the 16:15 period.",
+  "verdict": {
+    "type": "positive",
+    "summary": "A schedule whose enable entity is off does not pre-condition",
+    "observed_behavior": "Only the band (68 F) at 14:00 and 15:30; no 76 F bank.",
+    "expected_behavior": "Out of season: no pre-conditioning.",
+    "exercises": {
+      "scenario_effectiveness": "Deleting the condition filter (or failing closed the wrong way) makes 14:00/15:30 write 76 F.",
+      "two_way_alignment": "scheduler-spec 'Enable entity' section: off = skipped; production filter does exactly that.",
+      "user_outcome": "If this regressed, a seasonal-rate home would be pre-conditioned all year again."
+    }
+  },
+  "source": "synthetic: Issue #1405",
+  "issue": 1565
+}

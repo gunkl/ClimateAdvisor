@@ -22,6 +22,7 @@ from homeassistant.components.http import HomeAssistantView
 from . import log_capture
 from .api import _ambiguous_zone_payload, _get_coordinator
 from .const import CONF_GITHUB_REPO, CONF_GITHUB_TOKEN, CONFIG_METADATA, DOMAIN
+from .scheduler import schedule_from_dict, schedule_to_dict
 from .temperature import FAHRENHEIT, UNIT_SYMBOL, display_delta, display_temp
 
 API_SETTINGS_EXTRA = "/api/climate_advisor/settings_extra"
@@ -74,20 +75,12 @@ def build_settings_extra(config: dict[str, Any]) -> dict[str, Any]:
                 entry["unit"] = sym
             changed[key] = entry
 
+    # Issues #1558/#1565: the stored form from the one schedule field list (optional fields appear only when set).
     schedules = []
     for s in config.get("schedules") or []:
-        if not isinstance(s, dict):
-            continue
-        schedules.append(
-            {
-                "id": s.get("id"),
-                "name": s.get("name"),
-                "days": list(s.get("days") or []),
-                "start": s.get("start"),
-                "end": s.get("end"),
-                "cost_tag": s.get("cost_tag"),
-            }
-        )
+        parsed = schedule_from_dict(s)
+        if parsed is not None:
+            schedules.append(schedule_to_dict(parsed))
 
     repo = config.get(CONF_GITHUB_REPO) or ""
     return {

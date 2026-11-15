@@ -315,7 +315,7 @@
       },
       "scheduler": {
         "title": "TOU Scheduler",
-        "description": "Define up to {max} time-of-use cost schedules ({count} currently defined). Climate Advisor automatically pre-cools or pre-heats before a High-cost period using your existing comfort range and learned response rate — there are no temperatures to set here.",
+        "description": "Define up to {max} time-of-use cost schedules ({count} currently defined). Climate Advisor automatically pre-cools or pre-heats before a High-cost period using your existing comfort range and learned response rate — there are no temperatures to set here. A schedule can be limited to cooling or heating days, and switched on and off by an entity.",
         "data": {
           "manage": "Manage schedule"
         },
@@ -331,6 +331,8 @@
           "days": "Days",
           "start": "Starts",
           "end": "Ends",
+          "applies_to": "Applies to",
+          "condition_entity": "Only while this is on",
           "delete_schedule": "Delete this schedule"
         },
         "data_description": {
@@ -338,6 +340,8 @@
           "days": "The days of the week this schedule applies to. Select at least one.",
           "start": "When the High-cost period starts. Climate Advisor begins pre-conditioning before this time.",
           "end": "When the High-cost period ends. Must differ from the start time.",
+          "applies_to": "Which days this schedule pre-conditions on. Choose Cooling only when your heating is not electric (e.g. a gas furnace): pre-heating before a High-cost period saves nothing then. Default: cooling and heating.",
+          "condition_entity": "Optional. The schedule applies only while this binary sensor, input boolean or switch is on (for example a peak-season helper). Leave blank to always apply. If the entity is missing or unavailable, the schedule still applies.",
           "delete_schedule": "Turn on and submit to delete this schedule."
         }
       },

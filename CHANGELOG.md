@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.36] — 2026-11-15
+
+### Changed (tests only; nothing changes in your house)
+- #1570: generated test days now also use thermostats with their own fan-mode names (a Honeywell T6 Pro's `Auto low`/`Low`/`Circulation`, a mini-split's speed list), so the nightly runs would catch a regression like #1556.
+- #1572: the real-Home-Assistant test tier no longer reports slow tests as "crashed" workers on a busy machine. The per-test limit is now 240 s instead of 60 s, and a test that does run out of time is now named in the output.
+
 ## [0.9.35] — 2026-11-14
 
 ### Fixed

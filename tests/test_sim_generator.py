@@ -35,6 +35,7 @@ from tools.sim_harness.generator import (
     run_day,
     run_plan,
     save_finding,
+    strip_fan_vocabulary,
     strip_occupant_seconds,
     strip_whf_hazard,
 )
@@ -316,6 +317,7 @@ def test_adding_hazards_left_every_earlier_draw_unchanged() -> None:
     for i in range(60):
         for profile in ("coordinator", "engine", "mixed"):
             d = build_plan(i, profile).to_dict()
+            d = strip_fan_vocabulary(d)  # Issue #1570: the fan vocabulary is the plan's very last draw
             d = strip_whf_hazard(d)  # Issue #1144: the whole-house-fan day is a later, appended draw
             d = strip_occupant_seconds(d)  # Issue #1527: the occupant's seconds are the last draw of all
             d["timed"] = [t for t in d["timed"] if t[1] not in _HAZARDS]
@@ -655,13 +657,16 @@ def test_the_generated_mutex_is_judged_at_the_production_tolerance_not_a_tick() 
 
 
 def test_the_new_orders_are_timed_as_named() -> None:
+    from custom_components.climate_advisor.thermostat_profile import fan_command_starts_blower  # noqa: PLC0415
+
     for order in OCCUPANT_ORDERS:
         plans = _plans_for(order)
         assert plans, order
         for p in plans:
             fan_on = [m for m, k, a in p.timed if k == "external_fan_state_change" and a["state"] == "on"]
             presses = sorted(m for m, k, _ in p.timed if k == "occupant_hvac_on")
-            blower_on = [m for m, k, a in p.timed if k == "blower" and a["fan_mode"] == "on"]
+            # Issue #1570: a press is whatever value runs this thermostat's blower ("Low" on a T6 Pro), not only "on"
+            blower_on = [m for m, k, a in p.timed if k == "blower" and fan_command_starts_blower(a["fan_mode"])]
             if order == "fan_on_then_occupant_hvac_on":
                 assert len(fan_on) == 1 and len(presses) == 1 and 1.0 <= presses[0] - fan_on[0] <= 25.0
             elif order == "fan_on_then_occupant_hvac_on_fast":

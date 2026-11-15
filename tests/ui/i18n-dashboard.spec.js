@@ -1,0 +1,236 @@
+const { test, expect } = require('@playwright/test');
+
+// Issue #1341 (lane L9a): the dashboard shell, the Status cards, the banners and the night card read their words from the
+// catalog. Two specs of the mechanism, neither needing a finished translation:
+//   en-XA  the pseudo-locale (?lang=en-XA): every word the shell, banners, reading cards and night card show is a catalog
+//          message, so every visible text node there is accented and bracketed. A text node that is plain English bypassed
+//          the catalog. The only plain text allowed is data the API sends (names, prose fields), listed below.
+//   de     German (?lang=de) from a stub catalog: language selection, <html lang>, per-key English fallback for a key the
+//          catalog does not have, locale number format and the status-word messages.
+
+const STATUS = {
+  language: 'de', unit: 'fahrenheit', version: '0.9.9', coordinator_healthy: true, automation_enabled: false,
+  day_type: 'mild', hvac_mode: 'heat', hvac_action: 'idle', current_setpoint: 68, ca_target_heat: 70, occupancy_mode: 'away',
+  indoor_temp: 71, outdoor_temp: 65, compliance_score: 0.84, hvac_runtime_today: 95, trend_direction: 'warming', trend_magnitude: 3,
+  automation_status: 'active (away)', status_code: 'active_away', automation_status_msg: { key: 'status.auto.active_away', params: {} },
+  whf_status: 'inactive', whf_status_code: 'inactive', whf_status_msg: { key: 'status.fan_status.inactive', params: {} },
+  hvac_fan_status: 'running (manual override)', hvac_fan_status_code: 'running_manual_override', hvac_fan_status_msg: { key: 'status.fan_status.running_manual_override', params: {} },
+  fan_remote_timer_hours: 2, fan_remote_timer_ends: '2026-11-14T22:30:00-05:00', fan_remote_speed: 3,
+  manual_override_active: true, grace_active: false, paused_by_door: true, pause_suppressed_classification_text: 'Door held open',
+  contact_status: 'all closed',
+  contact_sensors: [{ friendly_name: 'Back door', unreadable: true, last_reading: null, treated_as: 'closed' }],
+  entity_health_issues: [{ friendly_name: 'Weather source', entity_id: 'weather.home', config_key: 'weather_entity', status: 'unavailable', detail: '' }],
+  promise_summary: { total_hits: 2, promises: [{ label: '1: Windows closed at night', promise: 'x', hits: 2 }] },
+  next_action: 'Close the windows at 9 PM', next_automation_action: 'Set back to 62°F', next_automation_time: '10:00 PM',
+  zone_count: 1, zones: [{ entry_id: 'mock-zone', title: 'Home' }],
+};
+
+async function openWith(page, query, extra) {
+  await page.route('**/api/climate_advisor/status*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(Object.assign({}, STATUS, extra || {})) }));
+  await page.goto('/new_dashboard.html' + query);
+  await page.waitForFunction(() => document.querySelector('#status-grid .tile') && document.querySelector('#night-card .rec, #night-card .empty, #night-card .err'), null, { timeout: 8000 });
+}
+
+// The visible text of each block inside the parts this lane owns (the chart card and the plan list belong to the chart
+// module). Blocks, not text nodes: a message with a number in it is several nodes because the number sits in <bdi>.
+function visibleText(page) {
+  return page.evaluate(() => {
+    const scopes = ['header.top', '#banners', '.status-next', '#status-grid', '#status-plan > .card-head', '#status-slot-night', '#status-briefing'];
+    const BLOCK = 'div, li, td, th, h1, h2, h3, button, label, a, summary, p, caption, option, select';
+    const seen = new Set(), out = [];
+    for (const sel of scopes) {
+      for (const root of document.querySelectorAll(sel)) {
+        const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let n = w.nextNode(); n; n = w.nextNode()) {
+          const el = n.parentElement;
+          if (!n.nodeValue.trim() || !el || el.closest('[hidden], script, style, option') || !(el.offsetWidth || el.offsetHeight || el.getClientRects().length)) continue;
+          const blk = el.closest(BLOCK) || el;
+          if (seen.has(blk)) continue;
+          seen.add(blk);
+          out.push(blk.textContent.replace(/\s+/g, ' ').trim());
+        }
+      }
+    }
+    return out.filter(Boolean);
+  });
+}
+
+test.describe('Dashboard i18n (Issue #1341, lane L9a)', () => {
+  test('en-XA: every word on the shell, banners, reading cards and night card comes from the catalog', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    await openWith(page, '?lang=en-XA');
+    expect(await page.evaluate(() => document.documentElement.lang)).toBe('en-XA');
+    const texts = await visibleText(page);
+    expect(texts.length).toBeGreaterThan(30);
+    // Data the API sends (names, prose fields, the sample night plan) is shown as sent; a payload-supplied word is not a
+    // catalog bypass. The brand name is not translated.
+    const DATA = ['Climate Advisor', 'Hallway', 'Bedroom', 'Back door', 'Weather source', 'weather.home', 'Door held open',
+      'Close the windows at 9 PM', 'Set back to 62°F', '10:00 PM', 'Windows closed at night', 'All closed', 'Test briefing'];
+    // the night card's own prose (labels, headline, tradeoffs, the options' names) is API data too
+    const nightData = await page.evaluate(() => Array.from(document.querySelectorAll('#night-card .rec > div:nth-child(2), #night-card #night-headline, #night-card #night-tradeoffs li, #night-card #night-source-note, #night-card .note-box, #night-card tbody td:first-child, #night-card .pill, #night-card tbody td:last-child'))
+      .map((e) => e.textContent.replace(/\s+/g, ' ').trim()).filter(Boolean));
+    const NUM = /[+\u2212-]?\d+(?:[.,:]\d+)*(?:\s?[AaPp][Mm])?(?:\s?°\s?[CF])?(?:\s?[–-]\s?\d+(?:[.,]\d+)*(?:\s?°\s?[CF])?)?%?/g;
+    const bypass = [];
+    for (const raw of texts) {
+      let t = raw;
+      for (const d of DATA.concat(nightData).sort((a, b) => b.length - a.length)) t = t.split(d).join(' ');
+      for (let prev = null; prev !== t;) { prev = t; t = t.replace(/\[[^\[\]]*\]/g, ' '); } // innermost first: a message can carry another as a param
+      t = t.replace(NUM, ' ');
+      if (/\p{L}/u.test(t)) bypass.push(raw + '   <-- leftover: ' + t.trim());
+    }
+    expect(bypass, 'text that bypassed the catalog (plain English under en-XA)').toEqual([]);
+    expect(texts.some((t) => /\[[^\]]*[ñšţ][^\]]*\]/.test(t))).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  test('de: language, per-key fallback and locale formatting from a stub catalog', async ({ page }) => {
+    await page.route('**/i18n/dashboard/de.json', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      'dashboard.core.tab_status': 'Übersicht',
+      'dashboard.core.for_you': 'Für dich',
+      'dashboard.core.health_line': '{health, select, ok {Gesund} other {Nicht verfügbar}}{version, select, none {} other { · v{version}}} · Automatik {automation, select, on {an} other {aus}}',
+      'dashboard.banner.off_title': 'Automatik ist aus',
+      'dashboard.banner.promises_title': '{n, plural, one {# Haushaltsversprechen} other {# Haushaltsversprechen}} in den letzten 30 Tagen verpasst',
+      'dashboard.status.card_today': 'Heute',
+      'dashboard.status.day_type_mild': 'Mild',
+      'dashboard.status.hvac_heating_to': 'Heizen auf {temp}',
+      'dashboard.status.act_idle': 'gerade im Leerlauf',
+      'dashboard.status.comfort_score': 'Komfortwert {score, number, ::percent}',
+    }) }));
+    await openWith(page, '?lang=de', { automation_enabled: true, manual_override_active: false, paused_by_door: false, contact_sensors: [], entity_health_issues: [] });
+    expect(await page.evaluate(() => document.documentElement.lang)).toBe('de');
+    expect(await page.evaluate(() => CAI18N.lang)).toBe('de');
+    await expect(page.locator('#tab-btn-status')).toHaveText('Übersicht');
+    await expect(page.locator('.status-next .tile .l').first()).toHaveText('Für dich');
+    await expect(page.locator('#health-text')).toHaveText('Gesund · v0.9.9 · Automatik an');
+    await expect(page.locator('#status-card-today .l')).toHaveText('Heute');
+    await expect(page.locator('#status-hvac-line')).toContainText('Heizen auf 68°F · gerade im Leerlauf');
+    await expect(page.locator('#status-card-occupancy')).toContainText('Komfortwert 84');
+    // a key the German catalog does not have falls back to English, per key (not to the key, not to a blank)
+    await expect(page.locator('#tab-btn-analysis')).toHaveText('Analysis');
+    // the banner for two missed promises is German with the plural applied
+    await page.route('**/api/climate_advisor/settings_extra*', (route) => route.fulfill({ status: 404, body: '{}' }));
+    await expect(page.locator('#banners')).toContainText('2 Haushaltsversprechen in den letzten 30 Tagen verpasst');
+    // locale number format: German writes the decimal comma
+    await expect(page.locator('#status-card-hallway .v')).toContainText('71,0°F');
+  });
+
+  test('the Actions menu stays open when its label text (now a child span) is clicked', async ({ page }) => {
+    await openWith(page, '?lang=en');
+    await page.locator('#actions-btn > span').click();
+    await expect(page.locator('#actions-menu')).toBeVisible();
+    await expect(page.locator('#actions-btn')).toHaveAttribute('aria-expanded', 'true');
+    await page.locator('#actions-menu [data-action="refresh"]').click();
+    await expect(page.locator('#actions-menu')).toBeHidden();
+  });
+});
+
+// Issue #1341 (PR C): the dashboard branches on the backend's stable codes and renders its `_msg` siblings; right-to-left.
+test.describe('Dashboard i18n: codes, Activity record rows, Settings values, RTL (Issue #1341, PR C)', () => {
+  test('status sentences come from the codes (not the English text); a compound fan note falls back to the backend message', async ({ page }) => {
+    await openWith(page, '?lang=en', {
+      status_code: 'active', automation_status: 'active', automation_status_msg: { key: 'status.auto.active', params: {} },
+      whf_status: 'running (untracked)', whf_status_code: 'running_untracked', whf_status_msg: { key: 'status.fan_status.running_untracked', params: {} },
+      hvac_fan_status_code: 'running_manual_override',
+      fan_status_code: 'inactive',
+    });
+    await expect(page.locator('#status-automation-line')).toHaveText('Climate Advisor: following today’s plan');
+    await expect(page.locator('#status-card-doors')).toContainText('Whole-house fan is running (untracked)');
+    await expect(page.locator('#status-card-doors')).toContainText('HVAC fan is running (manual override)');
+    // nat-vent and a status this page has no sentence for: the backend message is shown as it is
+    await openWith(page, '?lang=en', { status_code: 'tou_hold', automation_status: 'holding', automation_status_msg: { key: 'status.auto.tou_high_cost', params: { ends: ' until 4 PM' } } });
+    await expect(page.locator('#status-automation-line')).toContainText('TOU high-cost period active until 4 PM');
+  });
+
+  test('ar: <html dir> is rtl, the status page does not scroll sideways, and glyphs that point mirror', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    await openWith(page, '?lang=ar');
+    expect(await page.evaluate(() => [document.documentElement.lang, document.documentElement.dir, CAI18N.dir])).toEqual(['ar', 'rtl', 'rtl']);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => getComputedStyle(document.querySelector('#status-grid')).direction)).toBe('rtl');
+    expect(errors).toEqual([]);
+  });
+
+  test('Settings: enum-like values are catalog words; a source value is its message', async ({ page }) => {
+    await page.route('**/api/climate_advisor/config*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ settings: [
+      { key: 'primary_engine', value: 'v4', label: 'Primary Prediction Engine', description: '', category: 'x' },
+      { key: 'fan_mode', value: 'whole_house_fan', label: 'Fan Mode', description: '', category: 'x' },
+      { key: 'temp_unit', value: 'celsius', label: 'Temperature Unit', description: '', category: 'x' },
+      { key: 'shadow_engine', value: 'none', label: 'Shadow', description: '', category: 'x' },
+      { key: 'indoor_temp_source', value: 'Thermostat’s built-in sensor', value_msg: { key: 'settings.temp_source.reason', params: { label: { $t: 'code', key: 'settings.temp_source.climate_fallback' }, reason: { $t: 'code', key: 'activity.sensor_reason_stale' }, consequence: { $t: 'code', key: 'settings.temp_source.consequence_paused' } } }, label: 'Indoor Temp Source', description: '', category: 'x' },
+    ] }) }));
+    await openWith(page, '?lang=en#settings');
+    const rows = page.locator('#set-groups');
+    await expect(rows).toContainText('Whole-house fan');
+    await expect(rows).toContainText('Celsius (°C)');
+    await expect(rows).toContainText('Thermostat\'s built-in sensor (sensor stopped updating — indoor decisions paused)');
+    expect(await rows.innerText()).not.toMatch(/whole_house_fan|celsius\b/);
+  });
+
+  test('Analysis: the Activity record shows its rows in the viewer language from event_msg / settings_msg', async ({ page }) => {
+    await page.route('**/i18n/activity/de.json', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ 'activity.action_fan_activated': 'Lüfter eingeschaltet' }) }));
+    await page.route('**/api/climate_advisor/activity_record*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      table: '| Time | Event | Settings | Source | Indoor | Outdoor |\n|---|---|---|---|---|---|\n| 10:00 | Fan activated | | automation | 71°F | 60°F |\n\nFOOTER LINE',
+      rows: [{ time: '10:00', event: 'Fan activated', settings: '', source: 'automation', indoor: '71°F', outdoor: '60°F', event_msg: { key: 'activity.action_fan_activated', params: {} }, settings_msg: null }],
+      limited_msg: null, no_events_msg: null, whf_warning_msg: null, hours: 12, is_truncated: false,
+    }) }));
+    await openWith(page, '?lang=de#analysis');
+    await page.selectOption('#report-type', 'activity_record');
+    await page.click('#run-report-btn');
+    await expect(page.locator('#report-content table td', { hasText: 'Lüfter eingeschaltet' })).toBeVisible();
+    await expect(page.locator('#report-content')).toContainText('FOOTER LINE');
+    expect(await page.locator('#report-content th').count()).toBe(6);
+  });
+});
+
+// Issue #1341 S4: the Settings tab under en-XA. Fed the fixture rows as the real ClimateAdvisorConfigView emits them
+// (label_msg / description_msg / value_msg / time_unit), every word on the tab is a catalog message (bracketed and
+// accented); only data the install supplies (entity ids, numbers, names) is plain.
+test.describe('Settings tab under en-XA (Issue #1341 S4)', () => {
+  test('every word on the Settings tab comes from the catalog', async ({ page }) => {
+    const FIXTURE = require('../fixtures/new_dashboard_api.json');
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    const json = (body) => (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    await page.route('**/api/climate_advisor/status*', json(Object.assign({}, STATUS, { language: 'en' })));
+    await page.route('**/api/climate_advisor/config*', json(FIXTURE.config));
+    await page.route('**/api/climate_advisor/settings_extra*', json(FIXTURE.settings_extra));
+    await page.route('**/api/climate_advisor/ai_status*', json(FIXTURE.ai_status));
+    await page.goto('/new_dashboard.html?lang=en-XA#settings');
+    await page.waitForFunction(() => document.querySelector('#set-groups section.card'), null, { timeout: 8000 });
+    // show every description and open every group so all the text is on screen
+    await page.evaluate(() => { const d = document.getElementById('set-desc'); if (d && !d.checked) d.click(); document.querySelectorAll('#panel-settings details').forEach((x) => { x.open = true; }); });
+    await page.waitForTimeout(200);
+    const texts = await page.evaluate(() => {
+      const seen = new Set(), out = [];
+      const BLOCK = 'div, li, td, th, h1, h2, h3, button, label, a, summary, p, caption, option, span';
+      const root = document.getElementById('panel-settings');
+      const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let n = w.nextNode(); n; n = w.nextNode()) {
+        const el = n.parentElement;
+        if (!n.nodeValue.trim() || !el || el.closest('[hidden], script, style, option') || !(el.offsetWidth || el.offsetHeight || el.getClientRects().length)) continue;
+        const blk = el.closest(BLOCK) || el;
+        if (seen.has(blk)) continue;
+        seen.add(blk);
+        out.push(blk.textContent.replace(/\s+/g, ' ').trim());
+      }
+      return out.filter(Boolean);
+    });
+    expect(texts.length).toBeGreaterThan(40);
+    // data the install supplies (a model name, a time-of-use schedule's own name) and weekday names, which Intl supplies
+    const DATA = ['claude-sonnet-5', 'Evening peak', 'Mon, Tue, Wed, Thu, Fri'];
+    const ENTITY = /\b[a-z_]+\.[a-z0-9_]+(?:\.[a-z0-9_]+)*\b/g;   // entity ids and notify services are data
+    const NUM = /[+−-]?\d+(?:[.,:]\d+)*(?:\s?[AaPp][Mm])?(?:\s?°\s?[CF])?%?/g;
+    const bypass = [];
+    for (const raw of texts) {
+      let t = raw;
+      for (const d of DATA) t = t.split(d).join(' ');
+      for (let prev = null; prev !== t;) { prev = t; t = t.replace(/\[[^\[\]]*\]/g, ' '); }
+      t = t.replace(ENTITY, ' ').replace(NUM, ' ');
+      if (/\p{L}/u.test(t)) bypass.push(raw + '   <-- leftover: ' + t.trim());
+    }
+    expect(bypass, 'Settings text that bypassed the catalog (plain English under en-XA)').toEqual([]);
+    expect(errors).toEqual([]);
+  });
+});

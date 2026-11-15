@@ -19,6 +19,9 @@ FRONTEND = ROOT / "custom_components" / "climate_advisor" / "frontend"
 PAGE_HTML = (FRONTEND / "prediction_accuracy.html").read_text(encoding="utf-8")
 VIEW = (FRONTEND / "pa_view.js").read_text(encoding="utf-8")
 PAGE = PAGE_HTML + "\n" + VIEW
+# Issue #1341: the view's words are catalog messages (area dashboard, dashboard.pa.*); the code calls T('key').
+CAT = json.loads((FRONTEND / "i18n" / "dashboard" / "en.json").read_text(encoding="utf-8"))
+CAT_TEXT = "\n".join(CAT.values())
 INDEX = (
     (FRONTEND / "index.html").read_text(encoding="utf-8")
     + "\n"
@@ -39,13 +42,14 @@ def _func(name: str) -> str:
 
 
 def test_control_groups_present_with_aria():
-    for gid, label in (
-        ("grp-sensor", 'aria-labelledby="lbl-sensor"'),
-        ("grp-lead", 'aria-label="How far ahead the prediction was made"'),
-        ("grp-range", 'aria-label="Time range"'),
+    assert re.search(r'role="group" aria-labelledby="lbl-sensor" id="grp-sensor"', PAGE), "grp-sensor"
+    for gid, key, english in (
+        ("grp-lead", "lead_group_aria", "How far ahead the prediction was made"),
+        ("grp-range", "range_aria", "Time range"),
     ):
-        assert re.search(rf'role="group" {re.escape(label)} id="{gid}"', PAGE), gid
-    assert 'id="reset-zoom"' in PAGE and "Reset zoom" in PAGE
+        assert re.search(rf"""role="group" aria-label="' \+ e\('{key}'\) \+ '" id="{gid}\"""", PAGE), gid
+        assert CAT[f"dashboard.pa.{key}"] == english
+    assert 'id="reset-zoom"' in PAGE and "Reset zoom" in PAGE + CAT_TEXT
     assert 'id="zone-select"' in PAGE
 
 
@@ -60,7 +64,8 @@ def test_buttons_are_real_buttons_with_aria_pressed():
 def test_ranges_leads_and_scroll():
     assert "var RANGES = ['6h', '12h', '24h', '3d', '7d', '30d', '1y']" in PAGE
     assert "var LEADS = ['1h', '4h', '12h', '24h', '48h', '72h', '120h']" in PAGE
-    assert "'Scroll back'" in PAGE and "'Scroll forward'" in PAGE
+    assert "T('nav.back')" in PAGE and "T('nav.forward')" in PAGE
+    assert CAT["dashboard.pa.nav.back"] == "Scroll back" and CAT["dashboard.pa.nav.forward"] == "Scroll forward"
     assert "\u2039" in PAGE and "\u203a" in PAGE
     scroll = _func("scroll")
     assert "S.before" in scroll and "toISOString" in scroll
@@ -69,7 +74,8 @@ def test_ranges_leads_and_scroll():
 
 def test_sensor_group_is_ca_reading_plus_response_sensors():
     sl = _func("sensorList")
-    assert "'Climate Advisor reading'" in sl  # Issue #1400: the name the payload gives "_ca", once
+    assert "T('sensor.default_name')" in sl  # Issue #1400: the name the payload gives "_ca", once
+    assert CAT["dashboard.pa.sensor.default_name"] == "Climate Advisor reading"
     assert "s.id !== CA_SENSOR" in sl
     assert "S.sensors" in sl
     assert "S.sensors = d.sensors" in PAGE
@@ -91,24 +97,25 @@ def test_zoom_and_hover_wiring():
 
 
 def test_heat_strip_tiles_scorecard_and_seasons():
-    assert "heat_runs" in PAGE and "Heat ran" in PAGE
+    assert "heat_runs" in PAGE and "Heat ran" in PAGE + CAT_TEXT
     for t in ("v4 average miss", "v3 average miss", "v4 runs warm or cold"):
-        assert t in PAGE
+        assert t in PAGE + CAT_TEXT
     assert "S.data.stats" in PAGE
     # DP-8 is information, never a gate: no ready / pass / fail language, the table only compares
-    assert 'id="gate-table"' in PAGE and "How each model has scored" in PAGE
-    assert "Ready to show v4" not in PAGE and "Pass'" not in PAGE and "'Fail'" not in PAGE
-    assert "v4 beats v3" in PAGE and "v4 beats no change" in PAGE
-    assert "Settings, Prediction engine" in PAGE  # which engine Status shows is the occupant's choice
-    assert 'id="seasons-note"' in PAGE and "Seasons are scored apart" in PAGE
-    assert "must pass on its own" not in PAGE
-    assert "r.scored === false" in PAGE and "Not scored yet" in PAGE
+    both = PAGE + CAT_TEXT
+    assert 'id="gate-table"' in PAGE and "How each model has scored" in both
+    assert "Ready to show v4" not in both and "Pass'" not in both and "'Fail'" not in both
+    assert "v4 beats v3" in both and "v4 beats no change" in both
+    assert "Settings, Prediction engine" in both  # which engine Status shows is the occupant's choice
+    assert 'id="seasons-note"' in PAGE and "Seasons are scored apart" in both
+    assert "must pass on its own" not in both
+    assert "r.scored === false" in PAGE and "Not scored yet" in both
 
 
 def test_tiles_lead_with_the_primary_engine_and_name_the_comparison_engine():
     tiles = _func("renderTiles")
     assert "S.data.primary_engine" in tiles and "S.data.shadow_engine" in tiles
-    assert "main prediction on Status" in tiles
+    assert "T('tile.main_note'" in tiles and "main prediction on Status" in CAT["dashboard.pa.tile.main_note"]
 
 
 # ---- request building --------------------------------------------------------------------------
@@ -161,9 +168,10 @@ def test_fixture_matches_contract_shape():
 
 
 def test_empty_and_error_states():
-    assert "v4 has not been fitted yet; it fits nightly at 3:15" in PAGE
+    both = PAGE + CAT_TEXT
+    assert "v4 has not been fitted yet; it fits nightly at 3:15" in both
     assert "isEmptyModel" in PAGE and "conf === 'none'" in PAGE
-    assert "role', 'alert'" in PAGE and "Could not load prediction accuracy" in PAGE
+    assert "role', 'alert'" in PAGE and "Could not load prediction accuracy" in both
     assert "id = 'retry'" in PAGE
 
 
@@ -254,7 +262,8 @@ def test_index_links_to_page_in_analysis_tab():
 def test_engine_labels_follow_the_payload_roles():
     role = _func("engineRole")
     assert "d.primary_engine" in role and "d.shadow_engine" in role
-    assert "'main engine'" in role and "'comparison'" in role
+    assert "'main'" in role and "'comparison'" in role  # the role is a code; the words are dashboard.pa.role.<code>
+    assert CAT["dashboard.pa.role.main"] == "main engine" and CAT["dashboard.pa.role.comparison"] == "comparison"
     assert "legend-v4-name').textContent = engineName('v4')" in PAGE
     assert "legend-v3-name').textContent = engineName('v3')" in PAGE
 
@@ -268,15 +277,17 @@ def test_lines_break_at_swaps_and_real_gaps_only():
 
 def test_explanation_and_no_v4_wording():
     ex = _func("renderExplain")
-    assert "Each point is a past prediction" in ex
-    assert "lone dots mean the predictions there are spaced out" in ex
-    assert "v4 hasn’t learned this sensor yet (see #1422)" in ex
+    assert "T('explain'" in ex
+    assert "Each point is a past prediction" in CAT["dashboard.pa.explain"]
+    assert "lone dots mean the predictions there are spaced out" in CAT["dashboard.pa.explain"]
+    assert "v4 hasn’t learned this sensor yet (see #1422)" in CAT["dashboard.pa.sensor.why_no_v4"]
 
 
 def test_sensor_buttons_without_data_are_labelled_or_disabled():
     av = _func("sensorAvail")
     assert "has_v4 === false" in av and "has_readings === false" in av
-    assert "'no v4 data yet'" in av and "#1422" in av
+    assert "T('sensor.tag_no_v4')" in av and CAT["dashboard.pa.sensor.tag_no_v4"] == "no v4 data yet"
+    assert "#1422" in CAT["dashboard.pa.sensor.why_no_v4"]
     assert "aria-disabled" in _func("renderControls")
 
 
@@ -298,7 +309,7 @@ def test_page_mounts_the_shared_view_and_keeps_its_own_header():
         "function renderTiles",
         "function authedFetch",
         ".tile {",
-        "How well each prediction engine has forecast this house",  # the closing note, once
+        "e('gate.footer')",  # the closing note, once
     ):
         assert view_bit not in PAGE_HTML and view_bit in VIEW, view_bit
     # the view's styles are scoped, so mounting it never restyles the dashboard around it

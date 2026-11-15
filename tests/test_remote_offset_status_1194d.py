@@ -30,6 +30,7 @@ from custom_components.climate_advisor.remote_offset import (
     remote_offset_view,
     remote_offset_view_for,
 )
+from tests.helpers.chart_i18n import read_chart_js
 from tests.test_remote_offset_1194a import BEDROOM, _classification  # noqa: F401
 from tests.test_remote_offset_1194a import Env as _BaseEnv
 
@@ -539,11 +540,7 @@ class TestFrontend:
 
         fe = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "frontend"
         # classic page + the shared chart module (R6fe moved the chart code out of the page)
-        return (
-            fe.joinpath("index.html").read_text(encoding="utf-8")
-            + "\n"
-            + fe.joinpath("chart_v2.js").read_text(encoding="utf-8")
-        )
+        return fe.joinpath("index.html").read_text(encoding="utf-8") + "\n" + read_chart_js()
 
     def test_status_card_reads_the_payload_fields(self):
         html = self._html()

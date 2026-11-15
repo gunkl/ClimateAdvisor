@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 
+from . import i18n
 from .ai_skills import AISkillDefinition, AISkillRegistry
 from .ai_skills_context import (
     _AUTOMATION_INTERVALS_SECONDS,
@@ -236,6 +237,13 @@ async def async_build_investigator_context(
 
     sections: list[str] = ["=== Climate Advisor Investigator Context ===", ""]
 
+    # Issue #1341 (D9): occupant-facing sections in the Home Assistant language; headers and context stay English.
+    from .claude_api import output_language_instruction  # noqa: PLC0415
+
+    language_instruction = output_language_instruction(i18n.hass_language(hass))
+    if language_instruction:
+        sections += [language_instruction]
+
     # Prepend focus question if provided
     if focus:
         sections += [
@@ -306,12 +314,15 @@ def _check_activity_summary_drift(text: str) -> None:
         )
 
 
-def parse_investigation_response(raw_text: str) -> dict[str, Any]:
+def parse_investigation_response(raw_text: str, language: str | None = None) -> dict[str, Any]:
     """Parse a Claude investigation response into a section dict.
 
     Splits on ## SECTION_NAME headers. Unrecognised headers are skipped.
     Missing sections default to empty string. The original raw text is
     always preserved in the 'full_text' key.
+
+    ``language`` is the output language code (Issue #1341): the English-only drift check is skipped for any other
+    language (its sentinel and AM/PM time format are English text).
     """
     sections: dict[str, Any] = {
         "activity_summary": "",
@@ -365,7 +376,8 @@ def parse_investigation_response(raw_text: str) -> dict[str, Any]:
     # Always restore full_text â€" _flush() cannot overwrite it because it is not in _header_map
     sections["full_text"] = raw_text
 
-    _check_activity_summary_drift(sections["activity_summary"])
+    if not language or language.split("-")[0] == "en":
+        _check_activity_summary_drift(sections["activity_summary"])
 
     return sections
 
@@ -693,6 +705,7 @@ def register_investigator_skill(registry: AISkillRegistry) -> None:
         system_prompt=_SYSTEM_PROMPT,
         context_builder=async_build_investigator_context,
         response_parser=parse_investigation_response,
+        parser_takes_language=True,
         fallback=investigation_fallback,
         triggered_by="manual",
     )

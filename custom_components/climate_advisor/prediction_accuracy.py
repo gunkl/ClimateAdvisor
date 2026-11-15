@@ -40,7 +40,7 @@ from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
-from . import hvac_season
+from . import hvac_season, i18n
 from .const import (
     ENGINE_V3,
     SCORECARD_BIAS_LIMIT_F,
@@ -574,22 +574,27 @@ def _score_row(
     beats_flat = (v4 < flat) if v4 is not None and flat is not None else None
     bias_ok = abs(bias) <= SCORECARD_BIAS_LIMIT_F if bias is not None else None
     scored = n >= SCORECARD_MIN_N and v4 is not None and flat is not None and v3 is not None
-    reasons: list[str] = []
+    # Issue #1341: each reason is a catalog message (status.pa_reason.*); `reasons` stays the English text of the same
+    # messages and `reasons_msg` carries them for the dashboard to render in the viewer's language.
+    reason_msgs: list[i18n.Msg] = []
     if n < SCORECARD_MIN_N:
-        reasons.append(f"not enough data yet (n={n}, need {SCORECARD_MIN_N})")
+        reason_msgs.append(i18n.Msg("status.pa_reason.not_enough_data", n=n, need=SCORECARD_MIN_N))
     if v3_state == "collecting":
-        reasons.append("v3 predictions at this look-ahead are still being collected")
+        reason_msgs.append(i18n.Msg("status.pa_reason.v3_collecting"))
     elif v3_state == "off":
-        reasons.append("v3 is not running (neither the main nor the comparison engine)")
+        reason_msgs.append(i18n.Msg("status.pa_reason.v3_off"))
     if scored:
         if not beats_v3:
-            reasons.append("v4 not better than v3")
+            reason_msgs.append(i18n.Msg("status.pa_reason.v4_not_better_v3"))
         if not beats_flat:
-            reasons.append("v4 not better than no-change")
+            reason_msgs.append(i18n.Msg("status.pa_reason.v4_not_better_flat"))
         if not bias_ok:
-            reasons.append(f"|bias| {abs(bias or 0.0):.2f} > {SCORECARD_BIAS_LIMIT_F}")
+            reason_msgs.append(
+                i18n.Msg("status.pa_reason.bias_over", bias=abs(bias or 0.0), limit=SCORECARD_BIAS_LIMIT_F)
+            )
         if coverage is not None and coverage < SCORECARD_MIN_COVERAGE:
-            reasons.append(f"coverage {coverage:.2f} < {SCORECARD_MIN_COVERAGE}")
+            reason_msgs.append(i18n.Msg("status.pa_reason.coverage_low", coverage=coverage, min=SCORECARD_MIN_COVERAGE))
+    reasons: list[str] = [i18n.render_en(m) for m in reason_msgs]
     return {
         "zone": zone,
         "sensor": CA_SENSOR,
@@ -608,6 +613,7 @@ def _score_row(
         "scored": scored,
         "pass": scored and not reasons,
         "reasons": reasons,
+        "reasons_msg": [m.to_wire() for m in reason_msgs],
     }
 
 

@@ -25,6 +25,7 @@ from custom_components.climate_advisor.remote_offset import (
     classify_loop_state,
     remote_offset_view,
 )
+from tests.helpers.chart_i18n import read_chart_js
 from tests.test_remote_offset_context_1194c import (
     ENTRY_BEDROOM,
     GATES,
@@ -243,11 +244,7 @@ def _index_html() -> str:
     root = Path(__file__).resolve().parent.parent
     # classic page + the shared chart module (R6fe moved the chart code out of the page)
     fe = root / "custom_components" / "climate_advisor" / "frontend"
-    return (
-        fe.joinpath("index.html").read_text(encoding="utf-8")
-        + "\n"
-        + fe.joinpath("chart_v2.js").read_text(encoding="utf-8")
-    )
+    return fe.joinpath("index.html").read_text(encoding="utf-8") + "\n" + read_chart_js()
 
 
 def test_the_thermostat_set_series_has_a_legend_item_shown_only_with_the_series():

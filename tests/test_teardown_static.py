@@ -27,7 +27,18 @@ from pathlib import Path
 
 _PKG = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor"
 
-_HANDLE_RETURNING = {"async_call_later", "async_at_start", "async_at_started", "async_listen", "async_listen_once"}
+_HANDLE_RETURNING = {
+    "async_call_later",
+    "async_at_start",
+    "async_at_started",
+    "async_listen",
+    "async_listen_once",
+    # Issue #1580: the latch-aware guards every engine/coordinator timer now goes through (same handle contract)
+    "_call_later",
+    "_track_point_in_time",
+}
+# Issue #1580: the guards themselves pass the caller's (already zone-wrapped) callback through to HA.
+_TIMER_GUARD_FUNCTIONS = {"_call_later", "_track_point_in_time"}
 
 # Read-only data fetches (weather.get_forecasts): no device, no notification.
 _SERVICE_CALL_ALLOWLIST = {
@@ -291,8 +302,14 @@ def _registered_callback_name(arg: ast.AST) -> str | None:
 def test_every_coordinator_timer_and_listener_is_zone_wrapped():
     tree = ast.parse((_PKG / "coordinator.py").read_text(encoding="utf-8"))
     offenders = []
+    guard_calls = {
+        id(n)
+        for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef) and fn.name in _TIMER_GUARD_FUNCTIONS
+        for n in ast.walk(fn)
+    }
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and _returns_handle(_call_name(node))):
+        if not (isinstance(node, ast.Call) and _returns_handle(_call_name(node))) or id(node) in guard_calls:
             continue
         callbacks = node.args[1:]  # args[0] is hass (or the event type for bus.async_listen)
         if _call_name(node) in ("async_listen", "async_listen_once"):

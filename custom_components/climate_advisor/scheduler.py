@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timedelta
 from datetime import time as dt_time
@@ -209,6 +209,16 @@ def filter_schedules(
                 continue
         kept.append(schedule)
     return ScheduleFilter(tuple(kept), tuple(skipped), tuple(failed_open))
+
+
+def schedule_skip_text(items: Iterable[tuple[str, str | None]]) -> str:
+    """Several skip reasons as one line, each worded once, in order: ``(reason, entity)`` pairs; an entity given for
+    ``condition_off`` is named ("its condition is off (input_boolean.peak)")."""
+    parts = []
+    for reason, entity in items:
+        text = schedule_skip_sentence(reason)
+        parts.append(f"{text} ({entity})" if entity and reason == SKIP_CONDITION_OFF else text)
+    return ", ".join(dict.fromkeys(parts)) or "skipped"
 
 
 def schedule_skip_sentence(reason: str) -> str:

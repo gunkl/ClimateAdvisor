@@ -1911,15 +1911,10 @@ def _render_tou_schedule_window_active(p: dict, unit: str) -> tuple[str, str]:
     skipped = p.get("skipped")
     if isinstance(skipped, list) and skipped:
         # Issues #1558/#1565: every schedule covering the window was skipped -- say so, and why (one wording).
-        from .scheduler import schedule_skip_sentence  # noqa: PLC0415
+        from .scheduler import schedule_skip_text  # noqa: PLC0415
 
-        reasons = []
-        for item in skipped:
-            if isinstance(item, dict):
-                text = schedule_skip_sentence(str(item.get("reason")))
-                entity = item.get("entity")
-                reasons.append(f"{text} ({entity})" if entity and item.get("reason") == "condition_off" else text)
-        return "TOU high-cost period skipped", ", ".join(dict.fromkeys(reasons)) or "skipped"
+        pairs = [(str(i.get("reason")), i.get("entity")) for i in skipped if isinstance(i, dict)]
+        return "TOU high-cost period skipped", schedule_skip_text(pairs)
     label = "TOU high-cost period active"
     if preconditioned:
         settings = f"coincided with active {hvac_mode} operation"

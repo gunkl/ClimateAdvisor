@@ -1559,12 +1559,15 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         tag_label = "High" if schedule.get("cost_tag") == COST_TAG_HIGH else "Low"
         name = schedule.get("name", "(unnamed)")
         window = f"{schedule.get('start')}-{schedule.get('end')}"
-        # Issues #1558/#1565: which days it pre-conditions on, and the entity that enables it
-        applies = _SCHEDULE_APPLIES_LABELS.get(schedule.get("applies_to", APPLIES_TO_BOTH))
+        # Issues #1558/#1565: which days it pre-conditions on, and the entity that enables it -- read the way the
+        # engine reads it (an unrecognised applies_to means both), so a stray stored value never breaks this page.
+        parsed = schedule_from_dict(schedule)
+        applies_to = parsed.applies_to if parsed is not None else APPLIES_TO_BOTH
+        entity = parsed.condition_entity if parsed is not None else None
         extras = "".join(
             [
-                f", {applies.lower()}" if schedule.get("applies_to", APPLIES_TO_BOTH) != APPLIES_TO_BOTH else "",
-                f", only when {schedule['condition_entity']} is on" if schedule.get("condition_entity") else "",
+                f", {_SCHEDULE_APPLIES_LABELS[applies_to].lower()}" if applies_to != APPLIES_TO_BOTH else "",
+                f", only when {entity} is on" if entity else "",
             ]
         )
         return f"{name} — {days_label} {window} ({tag_label}{extras})"
@@ -1682,7 +1685,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             # cost_tag selector removed from the form (Issue #786 follow-up) — see the
             # commit-path comment above. Always hardcoded to COST_TAG_HIGH there.
             # Issue #1558: the days this schedule pre-conditions on (default both = before #1558).
-            vol.Optional("applies_to", default=defaults.get("applies_to", APPLIES_TO_BOTH)): selector.SelectSelector(
+            vol.Optional(
+                "applies_to",
+                default=defaults.get("applies_to")
+                if defaults.get("applies_to") in APPLIES_TO_VALUES
+                else APPLIES_TO_BOTH,
+            ): selector.SelectSelector(
                 selector.SelectSelectorConfig(
                     options=[
                         selector.SelectOptionDict(value=v, label=_SCHEDULE_APPLIES_LABELS[v]) for v in APPLIES_TO_VALUES

@@ -8,10 +8,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ### Added
 - Feat #1558: a time-of-use schedule can be limited to cooling days or heating days.
   - **What you'll notice:** in a home with a gas furnace, set a weekday schedule to "Cooling only". On heating days it no longer pre-heats to your comfort ceiling before the high-cost period. Heating isn't electric, so that pre-heat saved nothing and only moved the thermostat. On cooling days it pre-cools as before.
-  - **Shows why:** the Status card reads "TOU high-cost period skipped … not applied to heating", and the Activity record notes the skipped period.
+  - **Shows why:** while you're home during the high-cost period, the Status card reads "TOU high-cost period skipped … not applied to heating", and the Activity record notes the skipped period.
 - Feat #1565: a time-of-use schedule can be switched on and off by an entity you choose (a binary sensor, input boolean or switch), for example a peak-season helper for a rate that is on-peak only June to September.
   - **Off:** the schedule is skipped. The Status card reads "… skipped: its condition is off".
-  - **Takes effect at once:** turning the entity on during the lead-up starts the pre-cool or pre-heat right away; turning it off during one ends it right away.
+  - **Takes effect at once:** turning the entity on during the lead-up starts the pre-cool or pre-heat right away (and, while you're away, widens the band during the high-cost period right away); turning it off during one ends it right away.
   - **Missing or unavailable entity:** the schedule still applies, so a broken helper never silently stops pre-conditioning. Climate Advisor logs a warning and shows an entity-health card.
   - **Unchanged:** schedules without these settings behave exactly as before.
 
@@ -19,7 +19,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 - A stored time-of-use schedule with a field Climate Advisor doesn't recognise no longer stops the update cycle (before: no time-of-use bank and no comfort band that cycle). Editing a schedule now keeps the settings the form doesn't show.
 
 ### Upgrade note
-- **Downgrading isn't supported.** After you set a schedule's "Applies to" or enable entity, going back to 0.9.35 or earlier stops that zone from loading (no entities, no control) until you remove those settings.
+- **Downgrading isn't supported.** After you set a schedule's "Applies to" or enable entity, going back to 0.9.36 or earlier stops that zone from loading (no entities, no control) until you remove those settings.
 
 ## [0.9.36] — 2026-11-15
 

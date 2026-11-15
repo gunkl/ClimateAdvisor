@@ -351,11 +351,10 @@ class TestListener:
         c._apply_tou_schedule.assert_not_awaited()
         c._reapply_classification_after_tou_change.assert_not_awaited()
 
-    def test_away_widening_ending_mid_window_writes_the_band(self):
-        c = _listener_coord({"binary_sensor.peak": "off"})
-        c._tou_phase_resolution = types.SimpleNamespace(
+    def _away_window(self, c, *, expansion=1.5):
+        return types.SimpleNamespace(
             phase=TOUPhase.NONE,
-            expansion_f=1.5,
+            expansion_f=expansion,
             schedule_start=datetime(2026, 8, 31, 14, 0),
             window_end=datetime(2026, 8, 31, 19, 0),
             schedule_id="s1",
@@ -363,9 +362,60 @@ class TestListener:
             mode="cool",
             precondition_start=None,
         )
-        c._resolve_tou_schedule_state = MagicMock(side_effect=lambda: setattr(c, "_tou_phase_resolution", None))
+
+    def test_away_widening_ending_mid_window_writes_the_band(self):
+        c = _listener_coord({"binary_sensor.peak": "off"})
+        c._occupancy_mode = "away"
+        c._tou_phase_resolution = self._away_window(c)
+
+        def _resolve_skipping_s1():
+            c._tou_phase_resolution = None
+            c._tou_schedule_filter = filter_schedules([_s(condition_entity="binary_sensor.peak")], _states(), "cool")
+            c._tou_schedule_filter = type(c._tou_schedule_filter)((), ((_s(), SKIP_CONDITION_OFF),), ())
+
+        c._resolve_tou_schedule_state = MagicMock(side_effect=_resolve_skipping_s1)
         _fire(c, "on", "off", IN_WINDOW)
         c._reapply_classification_after_tou_change.assert_awaited_once()
+
+    def test_away_widening_starts_when_the_entity_turns_on_mid_window(self):
+        """Review mirror: the entity turning ON during an Away/Vacation high-cost period widens the band at once."""
+        c = _listener_coord({"binary_sensor.peak": "on"})
+        c._occupancy_mode = "away"
+        c._tou_phase_resolution = None
+
+        def _resolve_applying():
+            c._tou_phase_resolution = self._away_window(c)
+            c._tou_schedule_filter = filter_schedules([_s()], _states(), "cool")
+
+        c._resolve_tou_schedule_state = MagicMock(side_effect=_resolve_applying)
+        _fire(c, "off", "on", IN_WINDOW)
+        c._reapply_classification_after_tou_change.assert_awaited_once()
+
+    def test_another_schedules_entity_never_ends_a_healthy_bank(self):
+        """Review: schedule A banks; schedule B's helper turns off. A's bank is left alone."""
+        states = {"binary_sensor.peak": "on", "binary_sensor.other": "on"}
+        c = _listener_coord(states)
+        c.config["schedules"] = [
+            {**BASE, "condition_entity": "binary_sensor.peak"},
+            {**BASE, "id": "s2", "start": "20:00:00", "end": "21:00:00", "condition_entity": "binary_sensor.other"},
+        ]
+        _resolve(c, LEAD)
+        assert c._tou_phase_resolution.schedule_id == "s1"
+        c._thermostat_holds_tou_bank = MagicMock(return_value=True)
+        states["binary_sensor.other"] = "off"
+        _fire(c, "on", "off", LEAD)
+        c._apply_tou_schedule.assert_not_awaited()  # the same bank, already held: never rewritten
+        c._reapply_classification_after_tou_change.assert_not_awaited()
+
+    def test_a_gap_resolve_does_not_end_the_bank(self):
+        """Review: a re-resolve that lands on phase NONE while the banking schedule still applies writes nothing."""
+        c = _listener_coord({"binary_sensor.peak": "on"})
+        _resolve(c, LEAD)
+        c._resolve_tou_schedule_state = MagicMock(
+            side_effect=lambda: setattr(c, "_tou_phase_resolution", types.SimpleNamespace(phase=TOUPhase.NONE))
+        )
+        _fire(c, "on", "unavailable", LEAD)
+        c._reapply_classification_after_tou_change.assert_not_awaited()
 
 
 # ── Entity health ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -409,3 +459,28 @@ def test_every_scenario_schedule_uses_only_known_fields():
                 bad.append((path.name, sorted(unknown)))
     assert seen > 20
     assert bad == []
+
+
+def test_summary_survives_an_unknown_applies_to_value():
+    from custom_components.climate_advisor.config_flow import ClimateAdvisorOptionsFlow
+
+    label = ClimateAdvisorOptionsFlow._format_schedule_summary({**BASE, "applies_to": "sometimes"})
+    assert "Weekday peak" in label and "only" not in label
+
+
+def test_skip_text_joins_reasons_once_and_names_the_entity():
+    from custom_components.climate_advisor.scheduler import schedule_skip_text
+
+    assert schedule_skip_text([(SKIP_CONDITION_OFF, "input_boolean.x"), (SKIP_CONDITION_OFF, "input_boolean.x")]) == (
+        "its condition is off (input_boolean.x)"
+    )
+    assert schedule_skip_text([(SKIP_NOT_APPLIED_HEAT, None)]) == "not applied to heating"
+
+
+def test_a_low_tag_schedule_starting_mid_period_is_not_a_new_period():
+    low = {**BASE, "id": "low", "start": "16:00:00", "end": "17:00:00", "cost_tag": "low"}
+    c = _coord("cool", BASE)
+    c.config["schedules"].append(low)
+    _resolve(c, IN_WINDOW)
+    _resolve(c, datetime(2026, 8, 31, 16, 30))
+    assert len([e for e in c._event_log if e.get("type") == "tou_schedule_window_active"]) == 1

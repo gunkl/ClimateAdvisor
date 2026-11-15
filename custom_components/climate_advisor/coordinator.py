@@ -445,6 +445,7 @@ from .scheduler import (
     resolve_tou_phase,
     schedule_from_dict,
     schedule_skip_sentence,
+    schedule_skip_text,
 )
 from .setpoint_combinations import (
     BAND_LABELS,
@@ -3341,10 +3342,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Issue #1565: a schedule's enable entity changed -- act now, not at the next 30-minute cycle.
 
         Occupant view: the peak-season helper turning ON during the lead time starts the pre-cool/pre-heat within
-        seconds (the 5-minute bank check only opens a bank it already knows about); turning OFF during a bank, or
-        during an Away/Vacation widened period, writes the regular band now instead of keeping the house banked for
-        up to 30 more minutes. Uses the paths that already do each job: ``_apply_tou_schedule`` (the bank check's
-        write) and the regular classification pass (the #1405 bank end).
+        seconds (the 5-minute bank check only opens a bank it already knows about), and during an Away/Vacation
+        high-cost period it widens the band at once; turning OFF during a bank (any occupancy) or a widened period
+        writes the regular band now instead of keeping the house banked for up to 30 more minutes. A change of
+        another schedule's entity never ends or rewrites a healthy bank. Uses the paths that already do each job:
+        ``_apply_tou_schedule`` (the bank check's write) and the regular classification pass (the #1405 bank end).
         """
         old = event.data.get("old_state")
         new = event.data.get("new_state")
@@ -3366,22 +3368,42 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         self._resolve_tou_schedule_state()
         after = self._tou_phase_resolution
+        skipped_ids = {s.id for s, _r in (getattr(self._tou_schedule_filter, "skipped", None) or ())}
+        # Only the schedule that was banking/widening becoming skipped ends it -- not another schedule's entity, and
+        # not a resolve that lands in a lead-window gap (the regular cycle handles those, as before).
+        own_schedule_skipped = before is not None and getattr(before, "schedule_id", None) in skipped_ids
+        widening_after = self._tou_av_widening_active(after, now)
         if after is not None and after.phase == TOUPhase.PRECONDITIONING:
-            await self._apply_tou_schedule()
-        elif bank_before or (widening_before and not self._tou_av_widening_active(after, now)):
-            await self._reapply_classification_after_tou_change()
+            same_bank = (
+                before is not None
+                and before.phase == TOUPhase.PRECONDITIONING
+                and (before.schedule_id, before.schedule_start) == (after.schedule_id, after.schedule_start)
+            )
+            if not (same_bank and self._thermostat_holds_tou_bank(after)):  # a healthy bank is never rewritten
+                await self._apply_tou_schedule()
+        elif (bank_before or widening_before) and own_schedule_skipped:
+            await self._reapply_classification_after_tou_change()  # the bank/widening stops applying: band now
+        elif widening_after and not widening_before:
+            await self._reapply_classification_after_tou_change()  # an Away/Vacation period starts applying: widen
         self._push_tou_bank_card_status()
 
     @staticmethod
-    def _tou_av_widening_active(res: Any, now: datetime) -> bool:
-        """An Away/Vacation high-cost period is widening the band right now (Issue #899), per ``res``."""
-        if res is None or not (getattr(res, "expansion_f", None) or 0.0) > 0:
-            return False
+    def _tou_window_in_progress(res: Any, now: datetime) -> bool:
+        """The resolved high-cost period (``schedule_start <= now < window_end``) is under way, per ``res``."""
         start, end = getattr(res, "schedule_start", None), getattr(res, "window_end", None)
         try:
             return start is not None and end is not None and start <= now < end
         except TypeError:
             return False
+
+    def _tou_av_widening_active(self, res: Any, now: datetime) -> bool:
+        """An Away/Vacation high-cost period is widening the band right now (Issue #899), per ``res``."""
+        return bool(
+            res is not None
+            and self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+            and (getattr(res, "expansion_f", None) or 0.0) > 0
+            and self._tou_window_in_progress(res, now)
+        )
 
     async def _reapply_classification_after_tou_change(self) -> None:
         """The regular cycle's classification pass, run now because the time-of-use bank/widening ended early.
@@ -3580,13 +3602,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now = dt_util.now()
 
         # --- Responsibility 1: live expansion state ---
-        window_active = (
-            is_away_vacation
-            and resolution is not None
-            and resolution.schedule_start is not None
-            and resolution.window_end is not None
-            and resolution.schedule_start <= now < resolution.window_end
-        )
+        window_active = is_away_vacation and resolution is not None and self._tou_window_in_progress(resolution, now)
         if self.automation_engine is not None:
             # Issue #1066 (F1): tell the engine whether a TOU precondition (banking toward the
             # cost window) owns the thermostat, so the comfort-edge selector defers until the
@@ -9610,7 +9626,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         # Keyed on the covering schedules AND whether they apply, so a window that goes from skipped to applying
         # (the enable entity turns on mid-window) is recorded again.
-        key = (tuple(shown.active_schedule_ids), applied)
+        # Only the HIGH schedules covering now: a low-tag schedule starting or ending mid-period is not a new period.
+        tags = {
+            s.id: s.cost_tag
+            for s in (
+                *(getattr(self._tou_schedule_filter, "kept", None) or ()),
+                *(s for s, _r in (getattr(self._tou_schedule_filter, "skipped", None) or ())),
+            )
+        }
+        key = (tuple(i for i in shown.active_schedule_ids if tags.get(i, COST_TAG_HIGH) == COST_TAG_HIGH), applied)
         if self._tou_active_window_notified == key:
             return
         self._tou_active_window_notified = key
@@ -17616,12 +17640,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _tou_skip_text(self, skipped_resolution: Any) -> str:
         """Issues #1558/#1565: the reason(s) the covering schedules were skipped, worded once (scheduler)."""
-        reasons = [
-            reason
+        return schedule_skip_text(
+            (reason, None)
             for s, reason in (getattr(self._tou_schedule_filter, "skipped", None) or ())
             if s.id in skipped_resolution.active_schedule_ids
-        ]
-        return ", ".join(dict.fromkeys(schedule_skip_sentence(r) for r in reasons)) or "skipped"
+        )
 
     @staticmethod
     def _pred_archive_key(dt: datetime) -> int:

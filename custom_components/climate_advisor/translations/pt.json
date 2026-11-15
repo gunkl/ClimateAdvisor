@@ -1,0 +1,824 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configuração do Climate Advisor",
+        "description": "Configure a integração Climate Advisor. Selecione as entidades que deve monitorizar e controlar.",
+        "data": {
+          "weather_entity": "Serviço meteorológico",
+          "climate_entity": "Termóstato",
+          "notify_service": "Serviço de notificações"
+        },
+        "data_description": {
+          "weather_entity": "A integração meteorológica que o Climate Advisor usa para previsões e condições exteriores.",
+          "climate_entity": "O termóstato que o Climate Advisor vai monitorizar e controlar.",
+          "notify_service": "O serviço notify do Home Assistant para alertas e resumos diários (por exemplo, notify.mobile_app_yourphone)."
+        }
+      },
+      "unit": {
+        "title": "Unidade de temperatura",
+        "description": "Escolha a unidade que o Climate Advisor usa em todas as temperaturas que vê e introduz. Pode alterá-la mais tarde nas Definições principais.",
+        "data": {
+          "temp_unit": "Unidade de temperatura"
+        },
+        "data_description": {
+          "temp_unit": "Usada em todas as temperaturas mostradas e introduzidas no Climate Advisor. Pode alterá-la mais tarde nas Definições principais; será então necessário recarregar e o Climate Advisor avisa-o."
+        }
+      },
+      "setpoints": {
+        "title": "Temperaturas-alvo",
+        "description": "Defina as temperaturas-alvo de conforto, ausência e sono. Se uma combinação fizer o aquecimento e o ar condicionado trabalharem um contra o outro ou fixar-se num valor estranho, aparece um aviso junto ao campo; envie novamente para a manter.",
+        "data": {
+          "comfort_heat": "Temperatura de conforto (aquecimento)",
+          "comfort_cool": "Temperatura de conforto (arrefecimento)",
+          "setback_heat": "Temperatura de ausência (aquecimento)",
+          "setback_cool": "Temperatura de ausência (arrefecimento)",
+          "sleep_heat": "Temperatura de sono (aquecimento)",
+          "sleep_cool": "Temperatura de sono (arrefecimento)"
+        },
+        "data_description": {
+          "comfort_heat": "Temperatura-alvo ao aquecer quando há alguém em casa.",
+          "comfort_cool": "Temperatura-alvo ao arrefecer quando há alguém em casa.",
+          "setback_heat": "Temperatura mais baixa usada quando está ausente, para poupar energia.",
+          "setback_cool": "Temperatura mais alta usada quando está ausente, para poupar energia.",
+          "sleep_heat": "Temperatura-alvo ao aquecer durante as horas de sono (quando está em casa).",
+          "sleep_cool": "Temperatura-alvo ao arrefecer durante as horas de sono (quando está em casa)."
+        }
+      },
+      "temperature_sources": {
+        "title": "Fontes de temperatura",
+        "description": "Escolha de onde o Climate Advisor lê os dados de temperatura exterior e interior.",
+        "data": {
+          "outdoor_temp_source": "Fonte da temperatura exterior",
+          "indoor_temp_source": "Fonte da temperatura interior"
+        },
+        "data_description": {
+          "outdoor_temp_source": "Onde ler a temperatura exterior. «Serviço meteorológico» usa a sua integração meteorológica; um sensor dedicado ou um auxiliar de entrada permite usar uma entidade específica.",
+          "indoor_temp_source": "Onde ler a temperatura interior. «Entidade climate» usa o sensor integrado do termóstato; um sensor dedicado ou um auxiliar de entrada permite usar uma entidade separada."
+        }
+      },
+      "outdoor_temp_entity": {
+        "title": "Entidade da temperatura exterior",
+        "description": "Selecione a entidade que fornece as leituras da temperatura exterior.",
+        "data": {
+          "outdoor_temp_entity": "Entidade da temperatura exterior"
+        },
+        "data_description": {
+          "outdoor_temp_entity": "Escolha o sensor ou auxiliar de entrada que indica a temperatura exterior."
+        }
+      },
+      "indoor_temp_entity": {
+        "title": "Entidade da temperatura interior",
+        "description": "Selecione a entidade que fornece as leituras da temperatura interior.",
+        "data": {
+          "indoor_temp_entity": "Entidade da temperatura interior"
+        },
+        "data_description": {
+          "indoor_temp_entity": "Escolha o sensor ou auxiliar de entrada que indica a temperatura interior."
+        }
+      },
+      "sensors": {
+        "title": "Sensores de porta e janela",
+        "description": "Selecione os sensores binários que o Climate Advisor deve monitorizar. Quando um sensor indica que uma porta ou janela está aberta, o AVAC é pausado para não desperdiçar energia.\n\nPode selecionar sensores individuais ou uma entidade de grupo de sensores binários que reúna vários sensores.\n\nA opção de polaridade define como os estados dos sensores são interpretados. A maioria dos sensores segue o padrão do Home Assistant, em que «ligado» significa aberto (inseguro). Se os seus sensores indicarem o contrário, ative a inversão.",
+        "data": {
+          "door_window_sensors": "Sensores de porta/janela",
+          "sensor_polarity_inverted": "Inverter polaridade dos sensores",
+          "fan_mode": "Modo de controlo da ventoinha",
+          "fan_entity": "Entidade da ventoinha"
+        },
+        "data_description": {
+          "door_window_sensors": "Selecione as entidades de sensor binário a monitorizar, incluindo grupos de sensores binários que reúnam vários sensores.",
+          "sensor_polarity_inverted": "Ative se os seus sensores indicarem «ligado» quando fechados e «desligado» quando abertos, ao contrário do padrão do Home Assistant.",
+          "fan_mode": "Como controlar as ventoinhas para ventilação. «Ventoinha de toda a casa» controla uma entidade de ventoinha dedicada. «Ventoinha do AVAC» usa o modo de ventoinha do termóstato.",
+          "fan_entity": "A entidade de ventoinha ou interruptor a controlar (necessária apenas no modo de ventoinha de toda a casa)."
+        }
+      },
+      "occupancy": {
+        "title": "Deteção de presença",
+        "description": "Configure as entidades de alternância que indicam ao Climate Advisor quem está em casa. Todos os campos são opcionais — deixe em branco se não usar essa funcionalidade.",
+        "data": {
+          "home_toggle_entity": "Alternância em casa/ausente",
+          "home_toggle_invert": "Inverter alternância em casa",
+          "vacation_toggle_entity": "Alternância do modo de férias",
+          "vacation_toggle_invert": "Inverter alternância de férias",
+          "guest_toggle_entity": "Alternância do modo de convidados",
+          "guest_toggle_invert": "Inverter alternância de convidados"
+        },
+        "data_description": {
+          "home_toggle_entity": "Uma entidade (input_boolean, switch, etc.) que indica se há alguém em casa. LIGADO = em casa, DESLIGADO = ausente.",
+          "home_toggle_invert": "Ative se a sua alternância indicar LIGADO quando está ausente e DESLIGADO quando está em casa.",
+          "vacation_toggle_entity": "Uma entidade que indica o modo de férias. Quando ativo, aplica-se uma redução de temperatura mais profunda para poupar mais energia.",
+          "vacation_toggle_invert": "Ative se a sua alternância indicar LIGADO quando NÃO está de férias.",
+          "guest_toggle_entity": "Uma entidade que indica a presença de convidados. Tem prioridade sobre os modos de férias e ausência — a temperatura de conforto é mantida.",
+          "guest_toggle_invert": "Ative se a sua alternância indicar LIGADO quando NÃO há convidados."
+        }
+      },
+      "schedule": {
+        "title": "Horário diário",
+        "description": "Defina o horário da sua casa para que o Climate Advisor saiba quando aquecer, arrefecer e enviar resumos.",
+        "data": {
+          "zone_name": "Nome da zona",
+          "wake_time": "Hora de acordar",
+          "sleep_time": "Hora de deitar",
+          "briefing_time": "Hora do resumo diário",
+          "briefing_notifications_enabled": "Notificações do resumo diário"
+        },
+        "data_description": {
+          "zone_name": "Um nome curto para esta zona (por exemplo, «Quarto»). Aparece em Definições → Dispositivos e serviços e no seletor de zona do painel. Sugerido a partir do nome da sua entidade climate — edite como preferir.",
+          "wake_time": "Quando a sua casa costuma acordar. O Climate Advisor começa a aquecer ou arrefecer até à temperatura de conforto antes desta hora.",
+          "sleep_time": "Quando a sua casa costuma ir dormir. O Climate Advisor passa para a temperatura de ausência/sono a esta hora.",
+          "briefing_time": "Quando enviar a notificação do resumo climático diário com a previsão do dia e o plano do AVAC.",
+          "briefing_notifications_enabled": "Enviar o resumo diário agendado como notificação push para esta zona. Só a primeira zona vem ativada por predefinição, para que uma casa com várias zonas não envie uma cópia por zona. Pode alterar isto mais tarde em Notificações."
+        }
+      }
+    },
+    "error": {
+      "invalid_notify_service": "Tem de estar no formato domínio.serviço (por exemplo, notify.mobile_app_phone)",
+      "zone_name_too_long": "O nome da zona deve ter 50 carateres ou menos",
+      "whf_entity_shared_zone": "Esta ventoinha já é controlada por outra zona do Climate Advisor. Uma ventoinha de toda a casa só pode pertencer a uma zona. Escolha outra ventoinha ou remova-a primeiro da outra zona.",
+      "whf_no_sensors_warning": "Não há sensores de porta ou janela selecionados, por isso o Climate Advisor não sabe quando a casa está fechada e não vai parar a ventoinha de toda a casa por esse motivo. Envie novamente para manter assim, ou adicione sensores.",
+      "whf_command_only_warning": "O Climate Advisor não vê o estado real da ventoinha, por isso não consegue ver nem parar uma ventoinha que não tenha iniciado. Envie novamente para manter assim, ou adicione um sensor de estado da ventoinha em Opções de sensores e ventoinha.",
+      "setpoint_band_inverted_warning": "Esta temperatura de aquecimento é igual ou superior à temperatura de arrefecimento correspondente. Num sistema com aquecimento e ar condicionado, vão alternar o dia todo, aquecendo e arrefecendo a casa em seguida. Defina o aquecimento pelo menos 4 °F (2,5 °C) abaixo do arrefecimento. Envie novamente para manter.",
+      "setpoint_band_narrow_warning": "Esta temperatura de aquecimento fica menos de 4 °F (2,5 °C) abaixo da temperatura de arrefecimento correspondente. O equipamento ultrapassa a temperatura-alvo, por isso, com uma diferença tão pequena, o aquecimento e o ar condicionado podem alternar mais do que o necessário. Envie novamente para manter.",
+      "setpoint_outside_thermostat_warning": "O seu termóstato não aceita esta temperatura, por isso o Climate Advisor vai enviar a temperatura aceite mais próxima. Envie novamente para manter.",
+      "away_heat_above_home_warning": "O aquecimento em ausência é mais quente do que o aquecimento em casa, pelo que a casa é mais aquecida quando não está ninguém do que quando está. Envie novamente para manter.",
+      "away_cool_below_home_warning": "O arrefecimento em ausência é mais frio do que o arrefecimento em casa, pelo que o ar condicionado trabalha mais quando não está ninguém do que quando está. Envie novamente para manter.",
+      "sleep_heat_below_away_warning": "O aquecimento de sono é mais frio do que o aquecimento em ausência, pelo que durante a noite a casa fica mais fria do que quando não está ninguém. Envie novamente para manter.",
+      "sleep_cool_above_away_warning": "O arrefecimento de sono é mais quente do que o arrefecimento em ausência, pelo que durante a noite a casa pode ficar mais quente do que quando não está ninguém. Envie novamente para manter.",
+      "vacation_heat_above_away_warning": "O aquecimento de férias é mais quente do que o aquecimento em ausência, pelo que umas férias gastam mais energia do que um dia normal fora. Envie novamente para manter.",
+      "vacation_cool_below_away_warning": "O arrefecimento de férias é mais frio do que o arrefecimento em ausência, pelo que umas férias gastam mais energia do que um dia normal fora. Envie novamente para manter.",
+      "vacation_freeze_warning": "Com esta definição, o aquecimento de férias fica abaixo de 45 °F (7 °C). Os canos podem congelar durante uma viagem longa. Envie novamente para manter."
+    },
+    "abort": {
+      "already_configured": "Este termóstato já tem uma zona do Climate Advisor configurada."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opções do Climate Advisor",
+        "description": "Selecione uma secção para configurar.",
+        "menu_options": {
+          "core": "Definições principais",
+          "setpoints": "Temperaturas-alvo",
+          "temperature_sources": "Fontes de temperatura",
+          "sensors": "Sensores e ventoinha",
+          "occupancy": "Presença",
+          "schedule": "Horário",
+          "scheduler": "Agendador de tarifas",
+          "notifications": "Notificações",
+          "advanced": "Aprendizagem e comportamento",
+          "classification_thresholds": "Limites por tipo de dia",
+          "ai_settings": "Definições de IA Claude",
+          "github_settings": "Integração com o GitHub"
+        }
+      },
+      "core": {
+        "title": "Definições principais",
+        "description": "Configure as entidades principais e o serviço de notificações que o Climate Advisor usa.",
+        "data": {
+          "weather_entity": "Serviço meteorológico",
+          "climate_entity": "Termóstato",
+          "notify_service": "Serviço de notificações",
+          "temp_unit": "Unidade de temperatura",
+          "zone_name": "Nome da zona"
+        },
+        "data_description": {
+          "weather_entity": "A integração meteorológica que o Climate Advisor usa para previsões e condições exteriores.",
+          "climate_entity": "O termóstato que o Climate Advisor vai monitorizar e controlar.",
+          "notify_service": "O serviço notify do Home Assistant para alertas e resumos diários (por exemplo, notify.mobile_app_yourphone).",
+          "temp_unit": "Usada em todas as temperaturas mostradas e introduzidas no Climate Advisor. Depois de a alterar é necessário recarregar, e o Climate Advisor avisa-o.",
+          "zone_name": "O nome mostrado para esta zona no painel e na lista de dispositivos. Mudar o nome não altera os IDs das entidades."
+        }
+      },
+      "setpoints": {
+        "title": "Temperaturas-alvo",
+        "description": "Configure as temperaturas-alvo de conforto, ausência, sono e férias. Se uma combinação fizer o aquecimento e o ar condicionado trabalharem um contra o outro ou fixar-se num valor estranho, aparece um aviso junto ao campo; envie novamente para a manter.",
+        "data": {
+          "comfort_heat": "Temperatura de conforto (aquecimento)",
+          "comfort_cool": "Temperatura de conforto (arrefecimento)",
+          "setback_heat": "Temperatura de ausência (aquecimento)",
+          "setback_cool": "Temperatura de ausência (arrefecimento)",
+          "sleep_heat": "Temperatura de sono (aquecimento)",
+          "sleep_cool": "Temperatura de sono (arrefecimento)",
+          "vacation_heat": "Temperatura de férias (aquecimento)",
+          "vacation_cool": "Temperatura de férias (arrefecimento)"
+        },
+        "data_description": {
+          "comfort_heat": "Temperatura-alvo ao aquecer quando há alguém em casa.",
+          "comfort_cool": "Temperatura-alvo ao arrefecer quando há alguém em casa.",
+          "setback_heat": "Temperatura mais baixa usada quando está ausente, para poupar energia.",
+          "setback_cool": "Temperatura mais alta usada quando está ausente, para poupar energia.",
+          "sleep_heat": "Temperatura-alvo ao aquecer durante as horas de sono (quando está em casa).",
+          "sleep_cool": "Temperatura-alvo ao arrefecer durante as horas de sono (quando está em casa).",
+          "vacation_heat": "Temperatura de aquecimento enquanto o interruptor de férias está ligado. Deixe em branco para usar o aquecimento em ausência menos 3 °F (cerca de 1,5 °C).",
+          "vacation_cool": "Temperatura de arrefecimento enquanto o interruptor de férias está ligado. Deixe em branco para usar o arrefecimento em ausência mais 3 °F (cerca de 1,5 °C)."
+        }
+      },
+      "temperature_sources": {
+        "title": "Fontes de temperatura",
+        "description": "Escolha de onde o Climate Advisor lê os dados de temperatura exterior e interior.",
+        "data": {
+          "outdoor_temp_source": "Fonte da temperatura exterior",
+          "outdoor_temp_entity": "Entidade da temperatura exterior",
+          "outdoor_humidity_entity": "Sensor de humidade exterior",
+          "indoor_temp_source": "Fonte da temperatura interior",
+          "indoor_temp_entity": "Entidade da temperatura interior",
+          "indoor_humidity_entity": "Sensor de humidade interior",
+          "sleep_indoor_temp_entity": "Sensor de temperatura interior (sono)",
+          "sleep_indoor_humidity_entity": "Sensor de humidade (sono)",
+          "thermostat_companion_sensor": "Sensor de precisão do termóstato"
+        },
+        "data_description": {
+          "outdoor_temp_source": "Onde ler a temperatura exterior. «Serviço meteorológico» usa a sua integração meteorológica; um sensor dedicado ou um auxiliar de entrada permite usar uma entidade específica. Voltar a «Serviço meteorológico» remove a entidade escolhida.",
+          "outdoor_temp_entity": "Escolha o sensor ou auxiliar de entrada que indica a temperatura exterior — a fonte acima muda automaticamente em conformidade. Limpe este campo para voltar ao serviço meteorológico.",
+          "outdoor_humidity_entity": "O sensor de humidade exterior mostrado no gráfico de Estado, com a sensação de calor ou frio no exterior. Apenas para o gráfico: nenhuma decisão de aquecimento ou arrefecimento o usa. Deixe em branco para deteção automática.",
+          "indoor_temp_source": "Onde ler a temperatura interior. «Entidade climate» usa o sensor integrado do termóstato; um sensor dedicado ou um auxiliar de entrada permite usar uma entidade separada.",
+          "indoor_temp_entity": "Escolha o sensor ou auxiliar de entrada que indica a temperatura interior — a fonte acima muda automaticamente em conformidade. Limpe este campo para voltar ao sensor integrado do termóstato.",
+          "indoor_humidity_entity": "O sensor de humidade da divisão que o Climate Advisor lê durante o dia, mostrado no gráfico de Estado com a sensação térmica da divisão. Apenas para o gráfico: nenhuma decisão de aquecimento ou arrefecimento o usa. Deixe em branco para deteção automática.",
+          "sleep_indoor_temp_entity": "Sensor opcional do quarto usado nas decisões de conforto e automatização enquanto o horário de sono está ativo (o modelo térmico usa sempre o sensor principal). Se não estiver disponível, usa o sensor principal. Deixe em branco para desativar.",
+          "sleep_indoor_humidity_entity": "O sensor de humidade do quarto, mostrado no gráfico de Estado enquanto o horário de sono está ativo. Apenas para o gráfico: nenhuma decisão de aquecimento ou arrefecimento o usa. Deixe em branco para deteção automática.",
+          "thermostat_companion_sensor": "Muitos termóstatos indicam graus inteiros na entidade principal, mas têm também um sensor de temperatura mais preciso no mesmo dispositivo. Auto usa esse sensor mais preciso depois de provar que dá a mesma leitura (dentro de 1 grau F, mostrando frações enquanto o termóstato mostra graus inteiros) e volta à leitura do próprio termóstato se desaparecer ou divergir. Aplica-se apenas à fonte do sensor integrado do termóstato. Desligado usa sempre a leitura do próprio termóstato."
+        }
+      },
+      "sensors": {
+        "title": "Sensores e ventoinha",
+        "description": "Configure os sensores de porta/janela e o controlo da ventoinha. Quando um sensor indica que uma porta ou janela está aberta, o AVAC é pausado para não desperdiçar energia.",
+        "data": {
+          "door_window_sensors": "Sensores de porta/janela",
+          "sensor_polarity_inverted": "Inverter polaridade dos sensores",
+          "sensor_debounce_seconds": "Atraso de estabilização do sensor",
+          "manual_grace_seconds": "Pausa após alteração manual",
+          "automation_grace_seconds": "Intervalo após alteração automática",
+          "override_confirm_seconds": "Atraso de confirmação de alteração manual",
+          "fan_mode": "Modo de controlo da ventoinha",
+          "hvac_fan_restrict_mode": "Restrição da ventoinha do AVAC",
+          "fan_entity": "Entidade da ventoinha",
+          "fan_state_entity": "Entidade de estado da ventoinha",
+          "fan_state_feedback": "Estado da ventoinha fiável",
+          "fan_remote_entity": "Entidade de eventos do comando RF da ventoinha",
+          "fan_min_runtime_per_hour": "Tempo mínimo de funcionamento da ventoinha por hora",
+          "nat_vent_soft_start_enabled": "Arranque suave da ventilação natural"
+        },
+        "data_description": {
+          "door_window_sensors": "Selecione as entidades de sensor binário a monitorizar, incluindo grupos de sensores binários que reúnam vários sensores.",
+          "sensor_polarity_inverted": "Ative se os seus sensores indicarem «ligado» quando fechados e «desligado» quando abertos, ao contrário do padrão do Home Assistant.",
+          "sensor_debounce_seconds": "Durante quanto tempo o estado de um sensor de porta/janela tem de se manter estável antes de o Climate Advisor reagir — pausando/retomando o AVAC ou iniciando/terminando o controlo da ventoinha de ventilação natural. Evita que aberturas breves ou oscilações de um sensor instável provoquem uma reação.",
+          "manual_grace_seconds": "Quanto tempo esperar após ajustar manualmente o termóstato antes de o Climate Advisor retomar a automatização.",
+          "automation_grace_seconds": "Quanto tempo esperar depois de o Climate Advisor fazer uma alteração automática antes de permitir outra.",
+          "override_confirm_seconds": "Tempo entre alterações do sistema e a confirmação de uma alteração manual. Eventos passageiros (reinício do termóstato, ciclos da ventoinha) que terminem dentro deste intervalo são ignorados automaticamente. Defina 0 para confirmar de imediato.",
+          "fan_mode": "Como controlar as ventoinhas para ventilação. «Ventoinha de toda a casa» controla uma entidade de ventoinha dedicada. «Ventoinha do AVAC» usa o modo de ventoinha do termóstato.",
+          "hvac_fan_restrict_mode": "Em climas húmidos, «Apenas aquecimento» não usa a ventoinha do AVAC durante 2 horas após arrefecer, para evitar a humidade da serpentina molhada.",
+          "fan_entity": "A entidade de ventoinha ou interruptor a controlar (necessária apenas no modo de ventoinha de toda a casa).",
+          "fan_state_entity": "Sensor separado opcional para ler o estado físico da ventoinha (para ventoinhas de toda a casa com duas entidades). Deixe em branco para usar também a entidade da ventoinha para o estado.",
+          "fan_state_feedback": "Ative se a sua entidade de ventoinha ou sensor de estado indicar o estado real do motor (e não apenas o último comando enviado). Deixe desligado se tiver dúvidas — o CA envia o comando do estado pretendido em cada ciclo.",
+          "fan_remote_entity": "Entidade de evento opcional que dispara quando o comando RF de parede físico é premido (por exemplo, do firmware gunkl/quietcool-house-fan). A seleção do temporizador no comando (1/2/4/8/12 horas) define a duração da pausa da ventoinha. Deixe em branco para desativar.",
+          "fan_min_runtime_per_hour": "Minutos de funcionamento da ventoinha por hora (0 = desativado, 60 = sempre ligada). O ciclo não está alinhado com o relógio — desfasa-se naturalmente consoante o momento em que o HA iniciou.",
+          "nat_vent_soft_start_enabled": "Quando ativado, a ventoinha de toda a casa pode arrancar com as temperaturas exterior e interior iguais (sem esperar que o exterior esteja claramente mais fresco) assim que a temperatura exterior de hoje estiver confirmada como já tendo passado o pico e a descer — para movimentar o ar e purgar o sótão/massa térmica, não para arrefecer em volume. Ativado por predefinição; desative se quiser que a ventoinha funcione só quando o exterior estiver claramente mais fresco do que o interior. Atualmente nenhum sensor de humidade/ponto de orvalho protege esta função."
+        }
+      },
+      "occupancy": {
+        "title": "Deteção de presença",
+        "description": "Configure as entidades de alternância que indicam ao Climate Advisor quem está em casa. Todos os campos são opcionais — deixe em branco se não usar essa funcionalidade.",
+        "data": {
+          "home_toggle_entity": "Alternância em casa/ausente",
+          "home_toggle_invert": "Inverter alternância em casa",
+          "vacation_toggle_entity": "Alternância do modo de férias",
+          "vacation_toggle_invert": "Inverter alternância de férias",
+          "guest_toggle_entity": "Alternância do modo de convidados",
+          "guest_toggle_invert": "Inverter alternância de convidados",
+          "welcome_home_debounce_seconds": "Período de silêncio de boas-vindas"
+        },
+        "data_description": {
+          "home_toggle_entity": "Uma entidade (input_boolean, switch, etc.) que indica se há alguém em casa. LIGADO = em casa, DESLIGADO = ausente.",
+          "home_toggle_invert": "Ative se a sua alternância indicar LIGADO quando está ausente e DESLIGADO quando está em casa.",
+          "vacation_toggle_entity": "Uma entidade que indica o modo de férias. Quando ativo, aplica-se uma redução de temperatura mais profunda para poupar mais energia.",
+          "vacation_toggle_invert": "Ative se a sua alternância indicar LIGADO quando NÃO está de férias.",
+          "guest_toggle_entity": "Uma entidade que indica a presença de convidados. Tem prioridade sobre os modos de férias e ausência — a temperatura de conforto é mantida.",
+          "guest_toggle_invert": "Ative se a sua alternância indicar LIGADO quando NÃO há convidados.",
+          "welcome_home_debounce_seconds": "Tempo mínimo entre notificações de boas-vindas. Se sair e regressar dentro deste intervalo, a notificação é suprimida. Defina 0 para notificar sempre."
+        }
+      },
+      "schedule": {
+        "title": "Horário diário",
+        "description": "Defina o horário da sua casa para que o Climate Advisor saiba quando aquecer, arrefecer e enviar resumos.",
+        "data": {
+          "wake_time": "Hora de acordar",
+          "sleep_time": "Hora de deitar",
+          "briefing_time": "Hora do resumo diário"
+        },
+        "data_description": {
+          "wake_time": "Quando a sua casa costuma acordar. O Climate Advisor começa a aquecer ou arrefecer até à temperatura de conforto antes desta hora.",
+          "sleep_time": "Quando a sua casa costuma ir dormir. O Climate Advisor passa para a temperatura de ausência/sono a esta hora.",
+          "briefing_time": "Quando enviar a notificação do resumo climático diário com a previsão do dia e o plano do AVAC."
+        }
+      },
+      "scheduler": {
+        "title": "Agendador de tarifas",
+        "description": "Defina até {max} horários de custo por tarifa horária ({count} definidos atualmente). O Climate Advisor pré-arrefece ou pré-aquece automaticamente antes de um período de custo elevado, usando o seu intervalo de conforto e a taxa de resposta aprendida — não há temperaturas para definir aqui.",
+        "data": {
+          "manage": "Gerir horário"
+        },
+        "data_description": {
+          "manage": "Escolha um horário para editar ou adicione um novo."
+        }
+      },
+      "scheduler_edit": {
+        "title": "Agendador de tarifas",
+        "description": "Sem campos de temperatura — o Climate Advisor ajusta-se automaticamente ao seu intervalo de conforto antes de uma janela de custo elevado.",
+        "data": {
+          "name": "Nome",
+          "days": "Dias",
+          "start": "Início",
+          "end": "Fim",
+          "delete_schedule": "Eliminar este horário"
+        },
+        "data_description": {
+          "name": "Um nome curto para este horário de tarifa (por exemplo, «Ponta de verão»).",
+          "days": "Os dias da semana a que este horário se aplica. Selecione pelo menos um.",
+          "start": "Quando começa o período de custo elevado. O Climate Advisor começa a pré-condicionar antes desta hora.",
+          "end": "Quando termina o período de custo elevado. Tem de ser diferente da hora de início.",
+          "delete_schedule": "Ative e envie para eliminar este horário."
+        }
+      },
+      "notifications": {
+        "title": "Preferências de notificação",
+        "description": "Escolha as notificações que recebe e em que canais. As notificações push vão para a aplicação móvel; as notificações por email seguem pelo serviço send_email.",
+        "data": {
+          "briefing_notifications_enabled": "Notificações do resumo diário",
+          "push_briefing": "Push: resumo diário",
+          "push_door_window_pause": "Push: AVAC pausado",
+          "push_occupancy_home": "Push: boas-vindas",
+          "manual_grace_notify": "Push: pausa manual terminada",
+          "automation_grace_notify": "Push: pausa da automatização terminada",
+          "push_entity_health": "Push: entidade não encontrada",
+          "email_briefing": "Email: resumo diário",
+          "email_door_window_pause": "Email: AVAC pausado",
+          "email_grace_expired": "Email: pausa terminada",
+          "email_grace_repause": "Email: AVAC pausado novamente",
+          "email_occupancy_home": "Email: boas-vindas",
+          "email_entity_health": "Email: entidade não encontrada"
+        },
+        "data_description": {
+          "briefing_notifications_enabled": "Numa instalação com várias zonas, apenas uma zona deve enviar o push/email do resumo diário agendado — caso contrário recebe uma cópia por zona. Ative isto em exatamente uma zona. Clicar manualmente em Enviar resumo no separador de depuração envia sempre, mesmo com isto desativado.",
+          "push_briefing": "Enviar todas as manhãs um resumo curto para o telemóvel.",
+          "push_door_window_pause": "Enviar uma notificação push quando o AVAC é pausado porque uma porta ou janela esteve aberta demasiado tempo.",
+          "push_occupancy_home": "Enviar uma notificação push quando alguém chega a casa e a temperatura de conforto é reposta.",
+          "manual_grace_notify": "Enviar uma notificação push quando a pausa manual termina e o comportamento normal dos sensores é retomado.",
+          "automation_grace_notify": "Enviar uma notificação push quando a pausa da automatização termina.",
+          "push_entity_health": "Enviar uma notificação push quando uma entidade configurada (termóstato, fonte meteorológica, sensor, ventoinha, alternância ou serviço de notificações) é removida ou deixa de responder.",
+          "email_briefing": "Enviar o resumo diário completo por email, com a previsão e o plano em pormenor.",
+          "email_door_window_pause": "Enviar um email quando o AVAC é pausado devido a uma porta ou janela aberta.",
+          "email_grace_expired": "Enviar um email quando uma pausa termina e o comportamento normal dos sensores é retomado.",
+          "email_grace_repause": "Enviar um email quando o AVAC é pausado novamente porque uma porta/janela continua aberta depois de a pausa terminar.",
+          "email_occupancy_home": "Enviar um email quando alguém chega a casa.",
+          "email_entity_health": "Enviar um email quando uma entidade configurada (termóstato, fonte meteorológica, sensor, ventoinha, alternância ou serviço de notificações) é removida ou deixa de responder."
+        }
+      },
+      "advanced": {
+        "title": "Aprendizagem e comportamento",
+        "description": "Configure como o Climate Advisor aprende com as suas preferências e equilibra conforto e poupança.",
+        "data": {
+          "primary_engine": "Motor de previsão",
+          "shadow_engine": "Motor de comparação",
+          "learning_enabled": "Ativar aprendizagem e sugestões",
+          "adaptive_preheat_enabled": "Tempo de pré-aquecimento adaptativo",
+          "adaptive_setback_enabled": "Redução noturna adaptativa",
+          "weather_bias_enabled": "Correção do desvio da previsão meteorológica",
+          "min_preheat_minutes": "Tempo mínimo de pré-aquecimento",
+          "max_preheat_minutes": "Tempo máximo de pré-aquecimento",
+          "default_preheat_minutes": "Tempo de pré-aquecimento predefinido",
+          "default_tou_lead_minutes": "Antecedência do pré-condicionamento por tarifa",
+          "preheat_safety_margin": "Margem de segurança do pré-aquecimento",
+          "max_setback_depth_f": "Profundidade máxima da redução",
+          "comfort_mode_switch_min_interval_s": "Intervalo de alternância aquecimento/arrefecimento",
+          "aggressive_savings": "Preferir poupança ao conforto",
+          "comfort_deadband_hot_f": "Tolerância de excesso em dia muito quente",
+          "comfort_deadband_warm_f": "Tolerância de excesso em dia morno",
+          "comfort_deadband_mild_f": "Tolerância de excesso em dia ameno",
+          "comfort_deadband_cool_f": "Tolerância de excesso em dia fresco",
+          "comfort_deadband_cold_f": "Tolerância de excesso em dia frio",
+          "comfort_family_recency_window_min": "Janela de funcionamento recente",
+          "energy_rate": "Preço da energia",
+          "heat_power_kw": "Potência de aquecimento",
+          "cool_power_kw": "Potência de arrefecimento"
+        },
+        "data_description": {
+          "primary_engine": "Que motor de previsão o Climate Advisor usa: v4 (predefinido) ou v3. Determina o momento do pré-aquecimento e pré-arrefecimento, a proteção de limite máximo, a hora de fecho das janelas e a profundidade da redução, e é a linha principal no gráfico de Estado e no plano das próximas 24 horas. Enquanto o motor escolhido ainda está a aprender, essas decisões usam o comportamento predefinido (nunca o outro motor) e o gráfico mostra a estimativa do horário.",
+          "shadow_engine": "Segundo motor opcional, desenhado como linha de comparação. Tem de ser diferente do motor de previsão. Só estes dois motores funcionam; qualquer outro fica desligado.",
+          "learning_enabled": "Quando ativado, o Climate Advisor aprende com os seus ajustes manuais e sugere melhorias ao longo do tempo.",
+          "adaptive_preheat_enabled": "Usar a taxa de aquecimento aprendida para calcular a hora de início do pré-aquecimento. Requer a aprendizagem ativada.",
+          "adaptive_setback_enabled": "Usar a taxa de aquecimento/arrefecimento aprendida para calcular a profundidade máxima segura da redução. Requer a aprendizagem ativada.",
+          "weather_bias_enabled": "Aplicar à previsão de amanhã uma correção específica da localização, com base na precisão observada das previsões. Requer a aprendizagem ativada.",
+          "min_preheat_minutes": "A janela de pré-aquecimento mais curta que o sistema agenda.",
+          "max_preheat_minutes": "A janela de pré-aquecimento mais longa que o sistema agenda.",
+          "default_preheat_minutes": "Duração do pré-aquecimento usada até haver observações suficientes.",
+          "default_tou_lead_minutes": "Com que antecedência de um período de custo elevado começa o pré-condicionamento por tarifa, usada até haver ciclos de aquecimento/arrefecimento suficientes para calcular a taxa real da sua casa.",
+          "preheat_safety_margin": "Multiplicador aplicado ao tempo de pré-aquecimento calculado pelo modelo, como margem (por exemplo, 1,2 = 20% extra).",
+          "max_setback_depth_f": "A maior redução noturna que o motor adaptativo pode calcular.",
+          "comfort_mode_switch_min_interval_s": "Espera mínima entre alternâncias habituais de aquecimento/arrefecimento, para evitar vaivéns rápidos. Uma ultrapassagem real (temperatura interior efetivamente além do limite de conforto) ignora esta espera e muda de imediato.",
+          "aggressive_savings": "Quando ativado, o Climate Advisor privilegia a poupança de energia em vez do conforto — por exemplo, tolerando maiores oscilações de temperatura antes de aquecer ou arrefecer.",
+          "comfort_deadband_hot_f": "Num dia muito quente: quantos graus além do limite de conforto a casa pode ir, logo depois de o modo oposto ter funcionado (dentro da janela de funcionamento recente), antes de o modo oposto ser ligado. Num dia muito quente isto aplica-se à mudança para aquecimento (o lado do arrefecimento nunca é atrasado). Ir mais longe do que isto muda de imediato. É uma tolerância, não a distância a que um limite é pré-armado (essa é fixa em 2 graus, ou um terço do seu intervalo de conforto, se for menor).",
+          "comfort_deadband_warm_f": "Num dia morno: quantos graus além do limite de conforto a casa pode ir, logo depois de o modo oposto ter funcionado (dentro da janela de funcionamento recente), antes de o modo oposto ser ligado. Num dia morno isto aplica-se à mudança para aquecimento (o lado do arrefecimento nunca é atrasado). Ir mais longe do que isto muda de imediato. É uma tolerância, não a distância a que um limite é pré-armado (essa é fixa em 2 graus, ou um terço do seu intervalo de conforto, se for menor).",
+          "comfort_deadband_mild_f": "Num dia ameno ou classificado como desligado: quantos graus além do limite de conforto a casa pode ir, logo depois de o modo oposto ter funcionado (dentro da janela de funcionamento recente), antes de o modo oposto ser ligado. Os dias amenos não têm lado preferido, por isso aplica-se ao aquecimento e ao arrefecimento. Ir mais longe do que isto muda de imediato. É uma tolerância, não a distância a que um limite é pré-armado (essa é fixa em 2 graus, ou um terço do seu intervalo de conforto, se for menor).",
+          "comfort_deadband_cool_f": "Num dia fresco: quantos graus além do limite de conforto a casa pode ir, logo depois de o modo oposto ter funcionado (dentro da janela de funcionamento recente), antes de o modo oposto ser ligado. Num dia fresco isto aplica-se à mudança para arrefecimento (o lado do aquecimento nunca é atrasado). Ir mais longe do que isto muda de imediato. É uma tolerância, não a distância a que um limite é pré-armado (essa é fixa em 2 graus, ou um terço do seu intervalo de conforto, se for menor).",
+          "comfort_deadband_cold_f": "Num dia frio: quantos graus além do limite de conforto a casa pode ir, logo depois de o modo oposto ter funcionado (dentro da janela de funcionamento recente), antes de o modo oposto ser ligado. Num dia frio isto aplica-se à mudança para arrefecimento (o lado do aquecimento nunca é atrasado). Ir mais longe do que isto muda de imediato. É uma tolerância, não a distância a que um limite é pré-armado (essa é fixa em 2 graus, ou um terço do seu intervalo de conforto, se for menor).",
+          "comfort_family_recency_window_min": "Durante quanto tempo o lado do aquecimento ou do arrefecimento conta como tendo «funcionado recentemente» (equipamento que realmente funcionou, ou uma mudança de modo por tarifa, por limite previsto ou iniciada por si; não cada escrita do Climate Advisor). Usado pela tolerância de excesso acima (um pequeno excesso dentro desta janela não muda o termóstato para o modo oposto) e pela proteção de limite de temperatura previsto (que espera em vez de agir perante um excesso previsto).",
+          "energy_rate": "Opcional. Quanto custa um quilowatt-hora, na sua moeda. Com a potência de aquecimento e de arrefecimento abaixo, permite ao painel estimar o custo de cada dia. Deixe os três em branco para não mostrar custo.",
+          "heat_power_kw": "Opcional. Potência elétrica média que o seu aquecimento consome enquanto funciona, segundo a placa de características ou uma ficha inteligente. Necessária, com o preço da energia, para a estimativa de custo diário.",
+          "cool_power_kw": "Opcional. Potência elétrica média que o seu arrefecimento consome enquanto funciona, segundo a placa de características ou uma ficha inteligente. Necessária, com o preço da energia, para a estimativa de custo diário."
+        }
+      },
+      "classification_thresholds": {
+        "title": "Limites por tipo de dia",
+        "description": "Limites de temperatura que o Climate Advisor usa para classificar cada dia. Os dias iguais ou acima do limite Muito quente usam ar condicionado; abaixo do limite Fresco usam aquecimento. Predefinições: Muito quente 85°F (29°C), Morno 75°F (24°C), Ameno 60°F (16°C), Fresco 45°F (7°C).",
+        "data": {
+          "threshold_hot": "Limite de dia muito quente",
+          "threshold_warm": "Limite de dia morno",
+          "threshold_mild": "Limite de dia ameno",
+          "threshold_cool": "Limite de dia fresco"
+        },
+        "data_description": {
+          "threshold_hot": "Os dias com máxima prevista igual ou superior a esta temperatura são classificados como Muito quentes (modo de ar condicionado). Predefinição: 85°F / 29°C.",
+          "threshold_warm": "Os dias com máxima prevista igual ou superior a esta temperatura são classificados como Mornos (janelas recomendadas, sem ar condicionado). Predefinição: 75°F / 24°C.",
+          "threshold_mild": "Os dias com máxima prevista igual ou superior a esta temperatura são classificados como Amenos (confortáveis, janelas abertas). Predefinição: 60°F / 16°C.",
+          "threshold_cool": "Os dias com máxima prevista igual ou superior a esta temperatura são classificados como Frescos (aquecimento ligeiro). Abaixo disto é Frio (aquecimento total). Predefinição: 45°F / 7°C."
+        }
+      },
+      "ai_settings": {
+        "title": "Definições de IA",
+        "description": "Configure a integração com a IA Claude para análise e relatórios inteligentes.\nEstado da chave de API: {key_status}",
+        "data": {
+          "ai_enabled": "Ativar funcionalidades de IA",
+          "ai_api_key": "Chave de API do Claude",
+          "ai_model": "Modelo de IA",
+          "ai_reasoning_effort": "Esforço de raciocínio",
+          "ai_max_tokens": "Comprimento máximo da resposta",
+          "ai_temperature": "Criatividade",
+          "ai_monthly_budget": "Limite de orçamento mensal",
+          "ai_auto_requests_per_day": "Pedidos automáticos por dia",
+          "ai_manual_requests_per_day": "Pedidos manuais por dia",
+          "ai_investigator_enabled": "Ativar agente de investigação",
+          "ai_investigator_requests_per_day": "Pedidos do investigador por dia"
+        },
+        "data_description": {
+          "ai_enabled": "Interruptor geral de todas as funcionalidades de IA. Quando desativado, o Climate Advisor usa apenas a sua lógica programada.",
+          "ai_api_key": "A sua chave de API da Anthropic. Obtenha uma em console.anthropic.com. Deixe em branco para manter a chave atual.",
+          "ai_model": "Que modelo Claude usar. Recomenda-se o Sonnet pelo equilíbrio entre custo e qualidade.",
+          "ai_reasoning_effort": "Quanto esforço de raciocínio o Claude usa. Mais = melhor análise, mas mais custo.",
+          "ai_max_tokens": "Comprimento máximo das respostas de IA em tokens (256-16384).",
+          "ai_temperature": "Controla a aleatoriedade. 0 = determinista, 1,0 = mais criativo. Recomenda-se 0,3.",
+          "ai_monthly_budget": "Gasto mensal máximo estimado em dólares dos EUA. Defina 0 para não ter limite.",
+          "ai_auto_requests_per_day": "Máximo de pedidos de IA automáticos por dia (repõe à meia-noite).",
+          "ai_manual_requests_per_day": "Máximo de pedidos de IA iniciados pelo utilizador por dia (repõe à meia-noite).",
+          "ai_investigator_enabled": "Ativar o agente de investigação (requer a IA ativada). Faz uma análise profunda entre fontes para encontrar incongruências e problemas nos dados.",
+          "ai_investigator_requests_per_day": "Máximo de análises de investigação por dia. Cada investigação usa raciocínio alargado. Repõe à meia-noite."
+        }
+      },
+      "github_settings": {
+        "title": "Integração com o GitHub",
+        "description": "Configure o envio de problemas para o GitHub com os relatórios de investigação.\nToken atual: {token_status}",
+        "data": {
+          "github_token": "Token de acesso pessoal do GitHub",
+          "github_repo": "Repositório do GitHub"
+        },
+        "data_description": {
+          "github_token": "Token com permissão issues:write. Deixe em branco para manter o token atual.",
+          "github_repo": "Repositório para onde enviar os problemas, no formato owner/repo, por exemplo gunkl/ClimateAdvisor."
+        }
+      }
+    },
+    "error": {
+      "entity_required_for_source": "Escolha o sensor ou auxiliar a usar, ou volte a definir a fonte como serviço meteorológico / entidade climate.",
+      "entity_domain_mismatch": "Essa entidade não corresponde à fonte selecionada. Escolha um sensor para «Sensor dedicado» ou um input_number para «Auxiliar de entrada».",
+      "source_entity_conflict": "Alterou a fonte e a entidade em simultâneo de forma conflituosa. Escolha uma fonte e depois a entidade correspondente (ou limpe-a).",
+      "invalid_notify_service": "Tem de estar no formato domínio.serviço (por exemplo, notify.mobile_app_phone)",
+      "schedule_days_required": "Selecione pelo menos um dia",
+      "schedule_start_end_equal": "A hora de início e a de fim têm de ser diferentes",
+      "preheat_min_exceeds_max": "O tempo mínimo de pré-aquecimento não pode exceder o máximo",
+      "preheat_default_exceeds_max": "O tempo de pré-aquecimento predefinido não pode exceder o máximo",
+      "shadow_same_as_primary": "O motor de comparação tem de ser diferente do motor de previsão. Escolha outro motor ou Nenhum.",
+      "unknown_engine": "Esse motor de previsão não está disponível.",
+      "ai_connection_failed": "Não foi possível ligar à API do Claude. Verifique a chave de API e tente novamente.",
+      "ai_key_required": "A chave de API é obrigatória quando as funcionalidades de IA estão ativadas.",
+      "ai_temperature_out_of_range": "A temperatura tem de estar entre 0,0 e 1,0.",
+      "ai_max_tokens_out_of_range": "O valor máximo de tokens está fora do intervalo permitido para este campo.",
+      "github_repo_invalid": "O repositório tem de estar no formato owner/repo (por exemplo, myuser/MyRepo).",
+      "zone_name_too_long": "O nome da zona deve ter 50 carateres ou menos",
+      "whf_entity_shared_zone": "Esta ventoinha já é controlada por outra zona do Climate Advisor. Uma ventoinha de toda a casa só pode pertencer a uma zona. Escolha outra ventoinha ou remova-a primeiro da outra zona.",
+      "whf_no_sensors_warning": "Não há sensores de porta ou janela selecionados, por isso o Climate Advisor não sabe quando a casa está fechada e não vai parar a ventoinha de toda a casa por esse motivo. Envie novamente para manter assim, ou adicione sensores.",
+      "whf_command_only_warning": "O Climate Advisor não vê o estado real da ventoinha, por isso não consegue ver nem parar uma ventoinha que não tenha iniciado. Envie novamente para manter assim, ou adicione um sensor de estado da ventoinha em Opções de sensores e ventoinha.",
+      "thresholds_must_be_ascending": "Os limites por tipo de dia têm de aumentar de Fresco para Ameno, Morno e Muito quente (Fresco < Ameno < Morno < Muito quente).",
+      "setpoint_band_inverted_warning": "Esta temperatura de aquecimento é igual ou superior à temperatura de arrefecimento correspondente. Num sistema com aquecimento e ar condicionado, vão alternar o dia todo, aquecendo e arrefecendo a casa em seguida. Defina o aquecimento pelo menos 4 °F (2,5 °C) abaixo do arrefecimento. Envie novamente para manter.",
+      "setpoint_band_narrow_warning": "Esta temperatura de aquecimento fica menos de 4 °F (2,5 °C) abaixo da temperatura de arrefecimento correspondente. O equipamento ultrapassa a temperatura-alvo, por isso, com uma diferença tão pequena, o aquecimento e o ar condicionado podem alternar mais do que o necessário. Envie novamente para manter.",
+      "setpoint_outside_thermostat_warning": "O seu termóstato não aceita esta temperatura, por isso o Climate Advisor vai enviar a temperatura aceite mais próxima. Envie novamente para manter.",
+      "away_heat_above_home_warning": "O aquecimento em ausência é mais quente do que o aquecimento em casa, pelo que a casa é mais aquecida quando não está ninguém do que quando está. Envie novamente para manter.",
+      "away_cool_below_home_warning": "O arrefecimento em ausência é mais frio do que o arrefecimento em casa, pelo que o ar condicionado trabalha mais quando não está ninguém do que quando está. Envie novamente para manter.",
+      "sleep_heat_below_away_warning": "O aquecimento de sono é mais frio do que o aquecimento em ausência, pelo que durante a noite a casa fica mais fria do que quando não está ninguém. Envie novamente para manter.",
+      "sleep_cool_above_away_warning": "O arrefecimento de sono é mais quente do que o arrefecimento em ausência, pelo que durante a noite a casa pode ficar mais quente do que quando não está ninguém. Envie novamente para manter.",
+      "vacation_heat_above_away_warning": "O aquecimento de férias é mais quente do que o aquecimento em ausência, pelo que umas férias gastam mais energia do que um dia normal fora. Envie novamente para manter.",
+      "vacation_cool_below_away_warning": "O arrefecimento de férias é mais frio do que o arrefecimento em ausência, pelo que umas férias gastam mais energia do que um dia normal fora. Envie novamente para manter.",
+      "vacation_freeze_warning": "Com esta definição, o aquecimento de férias fica abaixo de 45 °F (7 °C). Os canos podem congelar durante uma viagem longa. Envie novamente para manter."
+    }
+  },
+  "issues": {
+    "weather_entity_not_found": {
+      "title": "Entidade meteorológica não encontrada",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Selecionar entidade meteorológica",
+            "description": "A entidade meteorológica configurada anteriormente, `{entity_id}`, já não existe. Selecione abaixo a entidade meteorológica correta.",
+            "data": {
+              "weather_entity": "Serviço meteorológico"
+            },
+            "data_description": {
+              "weather_entity": "A integração meteorológica que fornece previsões e condições exteriores."
+            }
+          }
+        }
+      }
+    },
+    "reload_needed": {
+      "title": "É necessário recarregar para aplicar as alterações.",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Aplicar definições guardadas",
+            "description": "Guardou alterações nas opções do Climate Advisor que ainda não entraram em vigor. Recarregue já o Climate Advisor para as aplicar."
+          }
+        }
+      }
+    },
+    "zone_resolution_ambiguous": {
+      "title": "Seleção de zona ambígua",
+      "description": "O Climate Advisor tem mais do que uma zona e um pedido não indicou a que zona se destinava: {request}. Foi {outcome}. O que o enviou (um script, uma automatização, uma ferramenta de linha de comandos ou um separador antigo do navegador) pode estar a mostrar informações de outra zona.\n\nPara corrigir, adicione `?zone=ENTRY_ID` a esse pedido, em que ENTRY_ID é o `entry_id` da zona, listado em `GET /api/climate_advisor/status`. Os painéis do Climate Advisor já fazem isto. Este aviso desaparece na próxima vez que o Climate Advisor iniciar."
+    }
+  },
+  "common": {
+    "schedule_summary": "{name} — {days} {window} ({cost})",
+    "schedule_all_days": "Todos os dias",
+    "schedule_cost_high": "Alto",
+    "schedule_cost_low": "Baixo",
+    "schedule_unnamed": "(sem nome)",
+    "key_status_not_configured": "Não configurado",
+    "token_status_configured": "configurado",
+    "token_status_not_configured": "não configurado",
+    "schedule_add_new": "+ Adicionar novo horário"
+  },
+  "entity": {
+    "sensor": {
+      "day_type": {
+        "name": "Tipo de dia",
+        "state": {
+          "hot": "Muito quente",
+          "warm": "Morno",
+          "mild": "Ameno",
+          "cool": "Fresco",
+          "cold": "Frio",
+          "unknown": "Desconhecido"
+        }
+      },
+      "trend_direction": {
+        "name": "Tendência",
+        "state": {
+          "warming": "A aquecer",
+          "cooling": "A arrefecer",
+          "stable": "Estável",
+          "unknown": "Desconhecido"
+        }
+      },
+      "next_human_action": {
+        "name": "Próxima ação sua"
+      },
+      "daily_briefing": {
+        "name": "Resumo diário"
+      },
+      "compliance_score": {
+        "name": "Índice de conforto"
+      },
+      "automation_status": {
+        "name": "Estado"
+      },
+      "next_automation_action": {
+        "name": "Próxima ação da automatização"
+      },
+      "next_automation_time": {
+        "name": "Hora da próxima automatização"
+      },
+      "occupancy_mode": {
+        "name": "Modo de presença",
+        "state": {
+          "home": "Em casa",
+          "away": "Ausente",
+          "vacation": "Férias",
+          "guest": "Convidados"
+        }
+      },
+      "last_action_time": {
+        "name": "Hora da última ação"
+      },
+      "last_action_reason": {
+        "name": "Motivo da última ação"
+      },
+      "fan_status": {
+        "name": "Estado da ventoinha",
+        "state": {
+          "disabled": "Desativado",
+          "active": "Ativo",
+          "inactive": "Inativo"
+        }
+      },
+      "contact_status": {
+        "name": "Sensores de contacto"
+      },
+      "ai_status": {
+        "name": "Estado da IA",
+        "state": {
+          "active": "Ativo",
+          "inactive": "Inativo",
+          "error": "Erro",
+          "disabled": "Desativado",
+          "circuit_open": "Em pausa após erros repetidos",
+          "budget_exceeded": "Orçamento mensal atingido"
+        }
+      },
+      "indoor_temp": {
+        "name": "Temperatura interior"
+      },
+      "outdoor_temp": {
+        "name": "Temperatura exterior"
+      },
+      "forecast_high": {
+        "name": "Máxima prevista"
+      },
+      "forecast_low": {
+        "name": "Mínima prevista"
+      },
+      "effective_target_temp": {
+        "name": "Temperatura-alvo"
+      },
+      "heat_threshold": {
+        "name": "Limite de aquecimento"
+      },
+      "cool_threshold": {
+        "name": "Limite de arrefecimento"
+      }
+    },
+    "switch": {
+      "automation_enabled": {
+        "name": "Automatização"
+      }
+    }
+  },
+  "selector": {
+    "fan_mode": {
+      "options": {
+        "disabled": "Desativado (sem controlo da ventoinha)",
+        "whole_house_fan": "Ventoinha de toda a casa (entidade dedicada)",
+        "hvac_fan": "Modo de ventoinha do AVAC"
+      }
+    },
+    "hvac_fan_restrict": {
+      "options": {
+        "heat": "Apenas aquecimento (evita humidade após arrefecer)",
+        "cool": "Apenas arrefecimento",
+        "both": "Ambos (sem restrição)"
+      }
+    },
+    "outdoor_temp_source": {
+      "options": {
+        "weather_service": "Serviço meteorológico (recomendado)",
+        "sensor": "Sensor dedicado",
+        "input_number": "Auxiliar de entrada (input_number)"
+      }
+    },
+    "indoor_temp_source": {
+      "options": {
+        "climate_fallback": "Entidade climate (recomendado)",
+        "sensor": "Sensor dedicado",
+        "input_number": "Auxiliar de entrada (input_number)"
+      }
+    },
+    "thermostat_companion": {
+      "options": {
+        "auto": "Auto (usar o sensor mais preciso do termóstato quando comprovado)",
+        "off": "Desligado (usar sempre a leitura do próprio termóstato)"
+      }
+    },
+    "temp_unit": {
+      "options": {
+        "fahrenheit": "Fahrenheit (°F)",
+        "celsius": "Celsius (°C)"
+      }
+    },
+    "prediction_engine": {
+      "options": {
+        "none": "Nenhum",
+        "v3": "v3",
+        "v4": "v4"
+      }
+    },
+    "weekday": {
+      "options": {
+        "mon": "Seg",
+        "tue": "Ter",
+        "wed": "Qua",
+        "thu": "Qui",
+        "fri": "Sex",
+        "sat": "Sáb",
+        "sun": "Dom"
+      }
+    },
+    "ai_reasoning_effort": {
+      "options": {
+        "low": "Baixo",
+        "medium": "Médio",
+        "high": "Alto"
+      }
+    },
+    "suggestion_action": {
+      "options": {
+        "accept": "Aceitar",
+        "dismiss": "Dispensar"
+      }
+    },
+    "reset_scope": {
+      "options": {
+        "all": "Todos os dados aprendidos",
+        "thermal_model": "Modelo térmico",
+        "weather_bias": "Desvio da previsão meteorológica",
+        "suggestions": "Sugestões dispensadas"
+      }
+    }
+  },
+  "services": {
+    "respond_to_suggestion": {
+      "name": "Responder a sugestão",
+      "description": "Aceite ou dispense uma sugestão de aprendizagem do Climate Advisor.",
+      "fields": {
+        "entry_id": {
+          "name": "Zona",
+          "description": "A zona do Climate Advisor (entrada de configuração) a que esta chamada se aplica. Obrigatório desde o Issue #796 — com mais do que uma zona configurada, o registo de serviços do HA não tem outra forma de saber a que zona se destina uma chamada."
+        },
+        "action": {
+          "name": "Ação",
+          "description": "Se deve aceitar ou dispensar a sugestão."
+        },
+        "suggestion_key": {
+          "name": "Chave da sugestão",
+          "description": "A chave que identifica a sugestão a que responder."
+        }
+      }
+    },
+    "force_reclassify": {
+      "name": "Forçar reclassificação",
+      "description": "Força o Climate Advisor a obter novamente os dados da previsão e a reclassificar o dia. Útil para depuração.",
+      "fields": {
+        "entry_id": {
+          "name": "Zona",
+          "description": "A zona do Climate Advisor (entrada de configuração) a que esta chamada se aplica. Obrigatório desde o Issue #796 — com mais do que uma zona configurada, o registo de serviços do HA não tem outra forma de saber a que zona se destina uma chamada."
+        }
+      }
+    },
+    "resend_briefing": {
+      "name": "Reenviar resumo",
+      "description": "Gera e reenvia a notificação do resumo diário, mesmo que já tenha sido enviada hoje.",
+      "fields": {
+        "entry_id": {
+          "name": "Zona",
+          "description": "A zona do Climate Advisor (entrada de configuração) a que esta chamada se aplica. Obrigatório desde o Issue #796 — com mais do que uma zona configurada, o registo de serviços do HA não tem outra forma de saber a que zona se destina uma chamada."
+        }
+      }
+    },
+    "dump_diagnostics": {
+      "name": "Exportar diagnóstico",
+      "description": "Regista um instantâneo de diagnóstico completo do estado interno do Climate Advisor para resolução de problemas. O resultado é registado ao nível INFO — consulte os registos do Home Assistant para o ver.",
+      "fields": {
+        "entry_id": {
+          "name": "Zona",
+          "description": "A zona do Climate Advisor (entrada de configuração) a que esta chamada se aplica. Obrigatório desde o Issue #796 — com mais do que uma zona configurada, o registo de serviços do HA não tem outra forma de saber a que zona se destina uma chamada."
+        }
+      }
+    },
+    "reset_learning_data": {
+      "name": "Repor dados de aprendizagem",
+      "description": "Repõe alguns ou todos os dados aprendidos do Climate Advisor. Use depois de mudar o equipamento de AVAC, de se mudar para outro local, ou para recomeçar do zero.",
+      "fields": {
+        "entry_id": {
+          "name": "Zona",
+          "description": "A zona do Climate Advisor (entrada de configuração) a que esta chamada se aplica. Obrigatório desde o Issue #796 — com mais do que uma zona configurada, o registo de serviços do HA não tem outra forma de saber a que zona se destina uma chamada. Confirme bem antes de chamar — este serviço é destrutivo."
+        },
+        "scope": {
+          "name": "Âmbito",
+          "description": "Os dados a repor. «all» apaga tudo. «thermal_model» limpa as observações de sessões de AVAC. «weather_bias» limpa os registos de precisão da previsão. «suggestions» permite que sugestões anteriormente dispensadas voltem a aparecer."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "unknown_zone": {
+      "message": "Entrada entry_id da zona do Climate Advisor desconhecida ou não carregada: {entry_id}. Consulte Definições > Dispositivos e serviços para ver a zona correta."
+    }
+  }
+}

@@ -66,7 +66,9 @@ class TestPromiseSummary:
         assert rows["observe_only_silence"]["last_hit"] == stats["observe_only_silence"]["last_ts"]
         assert rows["settling_flip"]["hits"] == 1
         # compact: counts, a label and the last-hit time -- no evidence, no first-seen time, no entity ids
-        assert all(set(r) == {"promise", "label", "hits", "last_hit"} for r in summary["promises"])
+        assert all(set(r) == {"promise", "label", "label_msg", "hits", "last_hit"} for r in summary["promises"])
+        assert rows["settling_flip"]["label"] == "1: settling flip"  # the English wording is unchanged
+        assert rows["settling_flip"]["label_msg"]["key"] == "status.promise.settling_flip"
         json.dumps(summary)  # JSON-safe
 
 

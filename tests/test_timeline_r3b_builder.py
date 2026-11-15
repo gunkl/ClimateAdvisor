@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, time, timedelta
 
+from custom_components.climate_advisor import i18n
 from custom_components.climate_advisor.operation_timeline import (
     LIVE_KINDS,
     StepKind,
@@ -21,7 +22,7 @@ from custom_components.climate_advisor.operation_timeline import (
     detail_dict,
 )
 from custom_components.climate_advisor.timeline_surfaces import (
-    NEXT_AUTOMATION_LABELS,
+    NEXT_AUTOMATION_LABEL_KEYS,
     next_automation,
     next_automation_label,
     operations_lines,
@@ -47,7 +48,9 @@ def test_the_ceiling_guard_step_is_the_ac_turning_on_to_hold_the_ceiling() -> No
     assert step.ts == breach and step.mode == "cool" and step.source.startswith("automation._apply_ode_ceiling_guard")
     assert next_automation_label(step, "fahrenheit") == "AC turns on to hold the ceiling"
     action, _at, used = next_automation(tl, NOON, "fahrenheit")
-    assert action in NEXT_AUTOMATION_LABELS.values() or action.startswith(("Bedtime", "Pre-cool"))
+    i18n.load_catalogs()
+    english = {i18n.get_message(key, "en")[0] for key in NEXT_AUTOMATION_LABEL_KEYS.values()}
+    assert action in english or action.startswith(("Bedtime", "Pre-cool"))
     assert used is not None
 
 

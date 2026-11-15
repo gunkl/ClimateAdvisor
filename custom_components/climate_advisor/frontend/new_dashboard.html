@@ -465,6 +465,10 @@
 </dialog>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 
+<!-- Issue #1341: i18n runtime first (FormatJS, then CAI18N). Catalogs: i18n/ (docs/i18n-spec.md). -->
+<script src="intl-messageformat.iife.js"></script>
+<script src="i18n.js"></script>
+<script>CAI18N.init({});</script>
 <script src="hammer.min.js"></script>
 <script src="chart.umd.min.js"></script>
 <script src="chartjs-plugin-zoom.min.js"></script>

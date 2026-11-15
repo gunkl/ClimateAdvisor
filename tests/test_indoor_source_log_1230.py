@@ -156,12 +156,17 @@ def test_activity_entry_content(caplog):
         "from_entity": COMP,
         "from_name": "Santa Maria Hallway Current Temperature",
         "from_role": "thermostat's finer sensor",
+        "from_role_key": "status.sensor_role.finer_sensor",
         "from_value_f": event["from_value_f"],
         "to_entity": CLIMATE,
         "to_name": "Santa Maria Hallway",
         "to_role": "thermostat",
+        "to_role_key": "status.sensor_role.thermostat",
         "to_value_f": 69.0,
         "reason": "more than 1.0 °F apart",
+        # Issue #1341: the reason as a catalog message beside the stored English
+        "reason_key": "status.indoor_source.reason_inconsistent",
+        "reason_params": {"n": 1.0},
     }
     # The 71.9 reading failed the consistency check, so the snapshot has the raw sensor value
     assert event["from_value_f"] == pytest.approx(71.9)

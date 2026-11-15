@@ -21,43 +21,50 @@ from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from typing import Any
 
+from . import i18n
 from .operation_timeline import (
     Actor,
     MissingFact,
     StepKind,
     Timeline,
     TimelineStep,
-    say,
+    _en,
+    render_msg,
+    sentence_msg,
+    short_msg,
+    step_short_text,
+    step_text,
 )
-from .temperature import format_temp
 
 # Kinds that are the user's window actions (the only "you" steps today).
 _WINDOW_KINDS = (StepKind.WINDOWS_OPEN, StepKind.WINDOWS_CLOSE)
 
-# Next Automation: the automation-executed steps it may list, with the card label each one gets. Constants live HERE so
-# tests/test_status_card_ontology.py can scan them for banned words ("waiting", "paused", "grace", "window") and
-# clock times (Status Card Ontology: Next Automation never narrates mechanism state and never tells the occupant to
-# do something CA cannot do). The time is the card's second value, never part of the label.
-NEXT_AUTOMATION_LABELS: dict[str, str] = {
-    "briefing_send": "Send daily briefing",
-    "wake_band.heat": "Morning wake-up — restore heat comfort",
-    "wake_band.cool": "Morning wake-up — restore cool comfort",
-    "wake_band.check": "Morning wake-up check",
-    "sleep_band.heat": "Bedtime — heat setback to {temp}",
-    "sleep_band.cool": "Bedtime — cool setback to {temp}",
-    "sleep_band.check": "Bedtime check",
-    "precool_start.weather": "Pre-cool ceiling ({temp})",
-    "precool_start.tou": "Pre-cool for TOU schedule ({temp})",
-    "preheat_start.tou": "Pre-heat for TOU schedule ({temp})",
-    "natvent_start.predicted": "Natural ventilation",
-    "ceiling_guard": "AC turns on to hold the ceiling",
-    # Issue #1404: the end of a time-of-use bank (its high-cost period starts). ``{after}`` is what follows, from the
-    # shared hold resolver: "back to the Away band 60–80°F" / "the Away band widened to 60–83°F until 9:00 PM".
-    "tou_bank_end": "High-cost period starts — {after}",
-    # Issue #1404 (mirror): the away/vacation widening for the high-cost period, and its end.
-    "tou_expansion_start": "High-cost period starts — setback widens to {temp}",
-    "tou_expansion_end": "High-cost period ends — setback back to {temp}",
+# Next Automation: the automation-executed steps it may list, with the catalog message each one gets
+# (``timeline.next_automation.<id>``; Issue #1341). The English lives in the catalog; tests scan it for banned words
+# ("waiting", "paused", "grace", "window") and clock times (Status Card Ontology: Next Automation never narrates
+# mechanism state and never tells the occupant to do something CA cannot do). The time is the card's second value,
+# never part of the label. ``{after}`` in ``tou_bank_end`` is what follows the bank, from the shared hold resolver.
+NEXT_AUTOMATION_LABEL_KEYS: dict[str, str] = {
+    label_id: f"timeline.next_automation.{label_id}"
+    for label_id in (
+        "briefing_send",
+        "wake_band.heat",
+        "wake_band.cool",
+        "wake_band.check",
+        "sleep_band.heat",
+        "sleep_band.cool",
+        "sleep_band.check",
+        "precool_start.weather",
+        "precool_start.tou",
+        "preheat_start.tou",
+        "natvent_start.predicted",
+        "ceiling_guard",
+        "tou_bank_end",  # Issue #1404: the end of a time-of-use bank (its high-cost period starts)
+        "tou_expansion_start",  # Issue #1404 (mirror): the away/vacation widening for the high-cost period...
+        "tou_expansion_end",  # ...and its end
+    )
 }
+NEXT_AUTOMATION_NONE_KEY = "timeline.next_automation.none"  # "No more actions today"
 
 # Kinds a Next Automation candidate may come from that are listed even when they fall on another local day (the
 # overnight pre-cool crosses midnight; a forecast-derived start is the next one whenever it is).
@@ -66,8 +73,31 @@ _ANYTIME_KINDS = frozenset(
 )
 
 
-def _clock(dt: datetime) -> str:
-    return dt.strftime("%I:%M %p").lstrip("0")
+class CardText(str):
+    """A card sentence rendered in one language that still carries its message (``.msg``).
+
+    Behaves as the plain ``str`` everywhere (comparison, ``startswith``, JSON, f-strings); a surface that needs the
+    message (the ``<field>_msg`` wire sibling, the harness's ``advises_opening``) reads ``.msg``. Joining it with
+    another string yields a plain ``str``: a composite sentence must be one ``Msg``."""
+
+    msg: i18n.Msg | None
+
+    def __new__(cls, text: str, msg: i18n.Msg | None = None) -> CardText:
+        obj = super().__new__(cls, text)
+        obj.msg = msg
+        return obj
+
+
+def card_text(msg: i18n.Msg | str, lang: str = "en") -> CardText:
+    """``msg`` rendered in ``lang`` as a ``CardText`` (a plain string stays its own text with no message)."""
+    if isinstance(msg, i18n.Msg):
+        return CardText(render_msg(msg, lang), msg)
+    return CardText(str(msg), None)
+
+
+def _clock_label(dt: datetime, lang: str = "en") -> str:
+    """The clock time of an aware local datetime in ``lang`` (English ``3:05 PM``)."""
+    return i18n.format_time(dt, lang)
 
 
 # ---------------------------------------------------------------------------
@@ -178,26 +208,29 @@ def apply_direction_veto(tl: Timeline, now: datetime, live: CardLive) -> Timelin
     try:
         if live.heat_side_veto:
             key = "held.direction_veto.heat"
-            text = say(key, live.unit, outdoor=o, floor=live.armed_heat)
+            msg = sentence_msg(key, live.unit, outdoor=o, floor=live.armed_heat)
         else:
             key = "held.direction_veto.warm"
-            text = say(key, live.unit, outdoor=o, indoor=i)
+            msg = sentence_msg(key, live.unit, outdoor=o, indoor=i)
     except MissingFact:  # unreachable (readings are known above); a surface never fails on a wording
         return tl
     held = replace(
         step,
-        text=text,
+        text=_en(msg),
+        msg=msg,
         meta={**step.meta, "status": "held", "hold": key, "hold_kind": DIRECTION_VETO},
     )
     return replace(tl, steps=tuple(held if s is step else s for s in tl.steps))
 
 
-def window_card_text(tl: Timeline, now: datetime, live: CardLive) -> tuple[str, TimelineStep] | None:
-    """The Next Action card's window text and the step it came from, or None when the plan has no window step today.
+def window_card_msg(tl: Timeline, now: datetime, live: CardLive) -> tuple[i18n.Msg | str, TimelineStep] | None:
+    """The Next Action card's window sentence as a message, and the step it came from; None when the plan has no
+    window step today.
 
     The timing comes from the timeline step; the direction rule is applied to the live reading (a plan hour that the
     reading now contradicts becomes "keep closed", never an invitation). The veto is a property of the step
-    (``apply_direction_veto``), so the card, the plan list and the briefing say the same sentence.
+    (``apply_direction_veto``), so the card, the plan list and the briefing say the same sentence. A step that
+    carries no message (an older replay) answers with its stored English text.
     """
     tl = apply_direction_veto(tl, now, live)
     step = card_user_step(tl, now, windows_open=live.windows_open)
@@ -208,39 +241,63 @@ def window_card_text(tl: Timeline, now: datetime, live: CardLive) -> tuple[str, 
     known = o is not None and i is not None
     if step.kind == StepKind.WINDOWS_OPEN:
         if step.ts > now:
-            return f"Open windows at {_clock(step.ts)}", step
+            return i18n.Msg("timeline.card.open_at", t=i18n.Time(step.ts)), step
         if is_direction_vetoed(step):
-            return step.text, step
+            return (step.msg if step.msg is not None else step.text), step
         if known:
             assert o is not None
             assert i is not None
+            params = {"outdoor": i18n.Temp(o, unit), "indoor": i18n.Temp(i, unit)}
             if step.reason == "windows_open.free_heating" and o > i:
-                return (
-                    f"Open windows briefly — outdoor's warmer ({format_temp(o, unit)} vs {format_temp(i, unit)}).",
-                    step,
-                )
-            return (
-                f"Open windows — outdoor's cooler now ({format_temp(o, unit)} vs {format_temp(i, unit)}).",
-                step,
-            )
-        return "Open windows — outdoor air may be cooler now.", step
+                return i18n.Msg("timeline.card.open_briefly", **params), step
+            return i18n.Msg("timeline.card.open_cooler", **params), step
+        return i18n.Msg("timeline.card.open_unknown"), step
     # a close step
     if live.windows_open and known and not live.direction_ok:
         assert o is not None
         assert i is not None
+        params = {"outdoor": i18n.Temp(o, unit), "indoor": i18n.Temp(i, unit)}
         if live.heat_side_veto:
-            return (
-                f"Close windows to hold heat — outdoor's cooler ({format_temp(o, unit)} vs {format_temp(i, unit)}).",
-                step,
-            )
-        return f"Close windows — outdoor's not helping now ({format_temp(o, unit)} vs {format_temp(i, unit)}).", step
-    return f"Close windows by {_clock(step.ts)}", step
+            return i18n.Msg("timeline.card.close_hold_heat", **params), step
+        return i18n.Msg("timeline.card.close_not_helping", **params), step
+    return i18n.Msg("timeline.card.close_by", t=i18n.Time(step.ts)), step
 
 
-def advises_opening(text: str) -> bool:
-    """Whether a Next Action text tells the occupant to open windows (the invariant tests and the harness hook use
-    it)."""
-    return text.startswith("Open windows")
+def window_card_text(
+    tl: Timeline, now: datetime, live: CardLive, lang: str = "en"
+) -> tuple[CardText, TimelineStep] | None:
+    """The Next Action card's window text (in ``lang``, carrying its message) and the step it came from, or None
+    when the plan has no window step today. See ``window_card_msg`` for the rules."""
+    got = window_card_msg(tl, now, live)
+    return None if got is None else (card_text(got[0], lang), got[1])
+
+
+# Issue #1341 (Q6): the cards whose message tells the occupant to open windows. The harness and the invariant tests
+# read the message KEY, never the English text. A card written elsewhere (the degraded next-action branches) adds its
+# own key here. ``test_every_english_open_windows_advice_key_is_listed`` derives the candidates from the catalogs.
+ADVISES_OPENING_KEYS = frozenset(
+    {
+        "timeline.card.open_at",
+        "timeline.card.open_briefly",
+        "timeline.card.open_cooler",
+        "timeline.card.open_unknown",
+        # the legacy Next Action branches (status area) that tell the occupant to open windows
+        "status.next_action.open_windows_at",
+        "status.next_action.open_windows_cooler",
+        "status.next_action.open_windows_cooler_fan",
+        "status.next_action.open_windows_maybe",
+        "status.next_action.open_briefly_warmer",
+        "status.next_action.hot_open_from",
+        "status.next_action.hot_open_until",
+    }
+)
+
+
+def advises_opening(card: Any) -> bool:
+    """Whether a Next Action card tells the occupant to open windows (the invariant tests and the harness hook use
+    it). Reads the card's message key; a bare string carries none and never advises."""
+    msg = card if isinstance(card, i18n.Msg) else getattr(card, "msg", None)
+    return isinstance(msg, i18n.Msg) and msg.key in ADVISES_OPENING_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -281,14 +338,27 @@ def _label_key(step: TimelineStep) -> str | None:
     return None
 
 
-def next_automation_label(step: TimelineStep, unit: str) -> str | None:
-    """The Next Automation card label for one CA step, or None when the step is not a card candidate."""
+_TEMP_LABELS = frozenset(
+    {
+        "sleep_band.heat",
+        "sleep_band.cool",
+        "precool_start.weather",
+        "precool_start.tou",
+        "preheat_start.tou",
+        "tou_expansion_start",
+        "tou_expansion_end",
+    }
+)
+
+
+def next_automation_label_msg(step: TimelineStep, unit: str) -> i18n.Msg | None:
+    """The Next Automation card label for one CA step as a message, or None when the step is not a card candidate."""
     key = _label_key(step)
     if key is None:
         return None
-    template = NEXT_AUTOMATION_LABELS[key]
-    if "{temp}" not in template:
-        return template
+    catalog_key = NEXT_AUTOMATION_LABEL_KEYS[key]
+    if key not in _TEMP_LABELS:
+        return i18n.Msg(catalog_key)
     facts = step.facts
     if key == "sleep_band.heat":
         temp = facts.get("floor")
@@ -298,37 +368,51 @@ def next_automation_label(step: TimelineStep, unit: str) -> str | None:
         temp = step.target_f
     if temp is None:
         return None
-    return template.format(temp=format_temp(float(temp), unit))
+    return i18n.Msg(catalog_key, temp=i18n.Temp(float(temp), unit))
 
 
-def tou_bank_end_label(after: str) -> str:
+def next_automation_label(step: TimelineStep, unit: str, lang: str = "en") -> CardText | None:
+    """The Next Automation card label for one CA step in ``lang`` (carrying its message), or None."""
+    msg = next_automation_label_msg(step, unit)
+    return None if msg is None else card_text(msg, lang)
+
+
+def tou_bank_end_label_msg(after: str | i18n.Msg) -> i18n.Msg:
     """The Next Automation label for the end of a time-of-use bank (Issue #1404); ``after`` is the band text that
     follows it (``automation.hold_after_text()``), so the card says the same as Status and the plan list."""
-    return NEXT_AUTOMATION_LABELS["tou_bank_end"].format(after=after)
+    return i18n.Msg(NEXT_AUTOMATION_LABEL_KEYS["tou_bank_end"], after=after)
 
 
-def next_automation_candidates(tl: Timeline, now: datetime, unit: str) -> list[tuple[datetime, str, TimelineStep]]:
+def tou_bank_end_label(after: str | i18n.Msg, lang: str = "en") -> CardText:
+    return card_text(tou_bank_end_label_msg(after), lang)
+
+
+def next_automation_candidates(
+    tl: Timeline, now: datetime, unit: str, lang: str = "en"
+) -> list[tuple[datetime, CardText, TimelineStep]]:
     """Every automation-executed step that is still ahead, with its card label (earliest first)."""
-    out: list[tuple[datetime, str, TimelineStep]] = []
+    out: list[tuple[datetime, CardText, TimelineStep]] = []
     for s in tl.steps:
         if s.actor != Actor.CA or s.ts <= now:
             continue
         if s.ts.date() != now.date() and s.kind not in _ANYTIME_KINDS:
             continue
-        label = next_automation_label(s, unit)
+        label = next_automation_label(s, unit, lang)
         if label is not None:
             out.append((s.ts, label, s))
     out.sort(key=lambda e: e[0])
     return out
 
 
-def next_automation(tl: Timeline, now: datetime, unit: str) -> tuple[str, str, TimelineStep | None]:
+def next_automation(
+    tl: Timeline, now: datetime, unit: str, lang: str = "en"
+) -> tuple[CardText, str, TimelineStep | None]:
     """(action, time label, step) for the card; ("No more actions today", "", None) when nothing is left."""
-    cands = next_automation_candidates(tl, now, unit)
+    cands = next_automation_candidates(tl, now, unit, lang)
     if not cands:
-        return "No more actions today", "", None
+        return card_text(i18n.Msg(NEXT_AUTOMATION_NONE_KEY), lang), "", None
     ts, label, step = cands[0]
-    return label, _clock(ts), step
+    return label, _clock_label(ts, lang), step
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +422,7 @@ def next_automation(tl: Timeline, now: datetime, unit: str) -> tuple[str, str, T
 _OPERATIONS_MAX_STEPS = 12
 
 
-def operations_lines(tl: Timeline, now: datetime, *, until: datetime | None = None) -> list[str]:
+def operations_lines(tl: Timeline, now: datetime, *, until: datetime | None = None, lang: str = "en") -> list[str]:
     """The briefing's list of what happens next, straight from the timeline's step sentences (no recompute).
 
     Today's remaining steps up to ``until`` (default: the next local midnight), in time order. The daily briefing send
@@ -352,7 +436,7 @@ def operations_lines(tl: Timeline, now: datetime, *, until: datetime | None = No
         for s in tl.steps
         if s.ts >= now - timedelta(minutes=1) and s.ts < end and s.kind != StepKind.BRIEFING_SEND and s.status != "done"
     ]
-    return [f"  • {s.text}" for s in steps[:_OPERATIONS_MAX_STEPS]]
+    return [f"  • {step_text(s, lang)}" for s in steps[:_OPERATIONS_MAX_STEPS]]
 
 
 # ---------------------------------------------------------------------------
@@ -450,17 +534,14 @@ def _about_min(minutes: float) -> int:
     return max(5, int(round(minutes / 5.0)) * 5)
 
 
-def _run_text(mode: str, minutes: float, start: datetime, end: datetime, *, placed: bool = True) -> str:
-    verb = "Heating" if mode == "heat" else "Cooling"
-    edge = "floor" if mode == "heat" else "ceiling"
-    if placed:
-        return (
-            f"{verb} expected for about {_about_min(minutes)} min between {_clock(start)} and {_clock(end)}, "
-            f"holding the band's {edge}."
-        )
-    return (
-        f"{verb} expected for about {_about_min(minutes)} min, around {_clock(start)} (the plan's window runs to "
-        f"{_clock(end)}), holding the band's {edge}."
+def _run_msg(mode: str, minutes: float, start: datetime, end: datetime, *, placed: bool = True) -> i18n.Msg:
+    """A predicted run's hover sentence as a message (``timeline.strip.run_<heat|cool>_<placed|around>``)."""
+    word = "heat" if mode == "heat" else "cool"
+    return i18n.Msg(
+        f"timeline.strip.run_{word}_{'placed' if placed else 'around'}",
+        minutes=_about_min(minutes),
+        start=i18n.Time(start),
+        end=i18n.Time(end),
     )
 
 
@@ -513,7 +594,7 @@ def _duration_bar(
     return a, a + timedelta(minutes=minutes), extra
 
 
-def strip_spans(tl: Timeline, now: datetime) -> list[dict[str, Any]]:
+def strip_spans(tl: Timeline, now: datetime, lang: str = "en") -> list[dict[str, Any]]:
     """The chart's activity strips from ``now`` to the end of the plan, read off the timeline (Issue #1436).
 
     One dict per span: ``row`` (a ``STRIP_ROWS`` id), ``start`` / ``end`` (ISO), ``kind`` (the step kind it came from,
@@ -535,6 +616,9 @@ def strip_spans(tl: Timeline, now: datetime) -> list[dict[str, Any]]:
       home band from tomorrow, ``operation_timeline._occupancy_for``), to the end of the plan for Vacation.
     * ``override``: an occupant change CA holds, from now to the ``resume_schedule`` step.
     * ``windows`` (windows physically open) has no plan part: the plan's expectation is ``windowsplan``.
+
+    ``text`` / ``text_short`` are in ``lang``; ``text_msg`` / ``text_short_msg`` are their ``Msg.to_wire()`` siblings
+    (Issue #1341), present when the span's sentence is a message.
     """
     horizon = tl.horizon_end
     steps = sorted(tl.steps, key=lambda s: s.ts)
@@ -546,13 +630,19 @@ def strip_spans(tl: Timeline, now: datetime) -> list[dict[str, Any]]:
         b: datetime,
         step: TimelineStep | None,
         *,
-        text: str = "",
+        text: i18n.Msg | str = "",
         kind: str = "",
         extra: dict[str, Any] | None = None,
     ) -> None:
         a2, b2 = max(a, now), min(b, horizon)
         if b2 <= a2:
             return
+        if step is not None:
+            msg = step.msg
+            full, short = step_text(step, lang), step_short_text(step, lang)
+        else:
+            msg = text if isinstance(text, i18n.Msg) else None
+            full = short = render_msg(text, lang)
         out.append(
             {
                 **(extra or {}),
@@ -563,9 +653,10 @@ def strip_spans(tl: Timeline, now: datetime) -> list[dict[str, Any]]:
                 "step_id": step.id if step is not None else "",
                 "step_ts": step.ts.isoformat() if step is not None else None,
                 "actor": step.actor.value if step is not None else Actor.CA.value,
-                "text": step.text if step is not None else text,
+                "text": full,
                 # the hover shows the step's time beside it, so the sentence without its leading time (#1399)
-                "text_short": plan_list_text(step.text, step.actor.value) if step is not None else text,
+                "text_short": short,
+                **({"text_msg": msg.to_wire(), "text_short_msg": short_msg(msg).to_wire()} if msg is not None else {}),
                 "confidence": step.confidence if step is not None else "ok",
             }
         )
@@ -603,7 +694,7 @@ def strip_spans(tl: Timeline, now: datetime) -> list[dict[str, Any]]:
         if row is None:
             continue
         bars, placed = _run_bars(r)
-        text = _run_text(r.mode, r.minutes, r.start, r.end, placed=placed)
+        text = _run_msg(r.mode, r.minutes, r.start, r.end, placed=placed)
         extra = {
             "run": idx,
             "window_start": r.start.isoformat(),
@@ -696,20 +787,29 @@ def plan_list_text(text: str, actor: str) -> str:
 
 
 def timeline_api_payload(
-    contract: dict[str, Any], detail: dict[str, Any] | None, unit: str, convert: Any
+    contract: dict[str, Any], detail: dict[str, Any] | None, unit: str, convert: Any, lang: str = "en"
 ) -> dict[str, Any]:
     """The REST body: the contract dict with temperatures in the display unit, ``unit`` added, and each step's
     ``text_short`` (its plan-list row wording, ``plan_list_text``; a view field, not part of the stored contract).
 
     ``convert`` is the caller's ``display_temp(value_f, unit)`` (kept out of this module so it stays unit-library
-    free). Sentences were already written in the user's unit by the builder, so only the numeric fields convert.
+    free). Sentences are rendered here in ``lang`` from each step's message (``text_msg``, the wire sibling kept in
+    the body; ``text_short_msg`` is the row wording's); a step without one keeps its stored English. Only the numeric
+    fields convert.
     """
     out = dict(contract)
     out["unit"] = unit
     steps = []
     for s in contract.get("steps", []):
         s2 = dict(s)
-        s2["text_short"] = plan_list_text(str(s2.get("text", "")), str(s2.get("actor", "")))
+        wire = s2.get("text_msg")
+        if isinstance(wire, dict):
+            msg = i18n.Msg.from_wire(wire)
+            s2["text"] = render_msg(msg, lang)
+            s2["text_short"] = render_msg(short_msg(msg), lang)
+            s2["text_short_msg"] = short_msg(msg).to_wire()
+        else:
+            s2["text_short"] = plan_list_text(str(s2.get("text", "")), str(s2.get("actor", "")))
         if s2.get("target_f") is not None:
             s2["target_f"] = convert(s2["target_f"], unit)
         meta = dict(s2.get("meta") or {})
@@ -726,6 +826,8 @@ def timeline_api_payload(
     out["path"] = [{**p, "temp_f": convert(p["temp_f"], unit)} for p in contract.get("path", [])]
     if detail is not None:
         d = dict(detail)
+        if d.get("summary_msg"):
+            d["summary"] = [render_msg(i18n.Msg.from_wire(w), lang) for w in d["summary_msg"]]
         d["band"] = [
             {**b, "floor": convert(b["floor"], unit), "ceiling": convert(b["ceiling"], unit)} for b in d.get("band", [])
         ]

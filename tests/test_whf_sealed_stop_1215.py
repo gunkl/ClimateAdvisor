@@ -40,6 +40,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.climate_advisor import i18n
 from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
 from custom_components.climate_advisor.const import CONF_FAN_ENTITY, CONF_FAN_MODE, FAN_MODE_HVAC, FAN_MODE_WHOLE_HOUSE
 from custom_components.climate_advisor.fan_status import fan_transition_is_echo_of, remote_event_is_echo_of
@@ -432,7 +433,7 @@ async def _episode_with_alerts(clock, route, alerts, **kw):
         AutomationEngine,
         "_notify_whf_safety",
         autospec=True,
-        side_effect=lambda self, title, message: alerts.append((title, message)),
+        side_effect=lambda self, title, message: alerts.append((i18n.render_en(title), i18n.render_en(message))),
     ):
         return await _episode(clock, route, **kw)
 
@@ -626,7 +627,7 @@ def test_a_fan_that_cannot_be_stopped_never_gets_the_ac_back_and_the_reconcile_s
             AutomationEngine,
             "_notify_whf_safety",
             autospec=True,
-            side_effect=lambda self, title, message: alerts.append((title, message)),
+            side_effect=lambda self, title, message: alerts.append((i18n.render_en(title), i18n.render_en(message))),
         ):
             result = await _episode(
                 clock,

@@ -12,6 +12,7 @@ import datetime as _datetime
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+from custom_components.climate_advisor import i18n
 from tests.test_entity_health_coordinator import BASE_CONFIG, _make_coordinator, _patch_now
 
 T0 = _datetime.datetime(2026, 11, 4, 4, 32, 8, tzinfo=_datetime.UTC)
@@ -124,7 +125,7 @@ class TestNotificationTitle:
         coord._notify_in_background = MagicMock()
         _states(coord, mapping)
         coord._run_entity_health_check()
-        return coord._notify_in_background.call_args.args[0]
+        return i18n.render_en(coord._notify_in_background.call_args.args[0])
 
     def test_an_unavailable_entity_is_not_called_not_found(self):
         assert self._title({"climate.thermostat": "heat", "weather.home": "unavailable"}) == (
@@ -175,3 +176,54 @@ def test_a_failure_recording_the_row_never_costs_the_notification():
     issues = coord._run_entity_health_check()
     assert [i.entity_id for i in issues] == ["weather.home"], "the sweep result was lost"
     coord._notify_in_background.assert_called_once()
+
+
+class TestStandardMessageFields:
+    """Issue #1341 S5: outage rows carry ``friendly_name``/``detail`` as messages (the one ``<field>_key`` /
+    ``<field>_params`` convention), never a ``*_msg`` sibling; English is unchanged."""
+
+    def test_events_use_the_standard_key_fields_and_english_is_unchanged(self, monkeypatch):
+        from custom_components.climate_advisor.record_text import split_msg_fields
+
+        _patch_now(monkeypatch, [T0, T0 + _datetime.timedelta(minutes=113)])
+        coord = _make_coordinator(BASE_CONFIG)
+        _states(coord, {"climate.thermostat": "heat", "weather.home": "unavailable"})
+        coord._run_entity_health_check()
+        _states(coord, {"climate.thermostat": "heat", "weather.home": "sunny"})
+        coord._run_entity_health_check()
+        down, up = coord.emitted[0][1], coord.emitted[-1][1]
+        for payload in (down, up):
+            assert not any(k.endswith("_msg") for k in payload), payload
+        assert down["friendly_name"] == "Weather source"
+        stored_down, stored_up = split_msg_fields(down), split_msg_fields(up)
+        assert stored_down["friendly_name"] == "Weather source"
+        assert stored_down["friendly_name_key"] == "notify.entity.weather_entity"
+        assert stored_up["friendly_name"] == "Weather source"
+        assert stored_up["friendly_name_key"] == "notify.entity.weather_entity"
+
+    def test_both_renderers_rebuild_the_name_from_the_standard_fields(self):
+        """The row is rebuilt from ``friendly_name_key/_params`` (a stale stored text is ignored), unavailable and
+        recovered alike; the AI input renders English."""
+        from custom_components.climate_advisor.ai_skills_context import EVENT_RENDERERS
+
+        keyed = {
+            "friendly_name": "STALE TEXT",
+            "friendly_name_key": "notify.entity.weather_entity",
+            "friendly_name_params": {},
+        }
+        label, _ = EVENT_RENDERERS["entity_unavailable"](
+            {"entity_id": "weather.home", "status": "unavailable", **keyed}, "fahrenheit"
+        )
+        assert label == "Weather source unavailable"
+        label, _ = EVENT_RENDERERS["entity_recovered"](
+            {"entity_id": "weather.home", "outage_minutes": 5, **keyed}, "fahrenheit"
+        )
+        assert label == "Weather source available again"
+
+    def test_a_row_without_keys_keeps_its_plain_english(self):
+        from custom_components.climate_advisor.ai_skills_context import EVENT_RENDERERS
+
+        label, _ = EVENT_RENDERERS["entity_recovered"](
+            {"entity_id": "weather.x", "friendly_name": "Forecast Home", "outage_minutes": 1}, "fahrenheit"
+        )
+        assert label == "Forecast Home available again"

@@ -22,7 +22,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.start import async_at_started
 
-from . import log_capture, zone_registry
+from . import i18n, log_capture, zone_registry
 from .api import API_VIEWS, ZONELESS_VIEWS
 from .const import (
     CONF_AI_API_KEY,
@@ -477,11 +477,35 @@ def _resolve_zone_coordinator(hass: HomeAssistant, call) -> ClimateAdvisorCoordi
     entry_id = call.data.get("entry_id")
     coordinator = zone_registry.get_coordinator(hass, entry_id) if entry_id else None
     if coordinator is None:
+        # Issue #1341: the text is strings.json ``exceptions.unknown_zone`` (HA's own method, translated per language).
         raise ServiceValidationError(
-            f"Unknown or unloaded Climate Advisor zone entry_id '{entry_id}'. "
-            "Check Settings > Devices & Services for the correct zone."
+            translation_domain=DOMAIN,
+            translation_key="unknown_zone",
+            translation_placeholders={"entry_id": str(entry_id)},
         )
     return coordinator
+
+
+_PANEL_HASH_FILES = (
+    "entry.html",
+    "index.html",
+    "new_dashboard.html",
+    "i18n.js",
+    "intl-messageformat.iife.js",
+)
+
+
+def _panel_asset_bytes(frontend_path: Path) -> bytes:
+    """Bytes the panel ?v= hash covers (blocking reads: call in the executor).
+
+    Issue #1341: besides the three pages, the i18n runtime and every catalog file under frontend/i18n/
+    (sorted, so the hash is stable) change the hash, so an updated translation busts the iframe cache.
+    """
+    chunks = [(frontend_path / name).read_bytes() for name in _PANEL_HASH_FILES if (frontend_path / name).is_file()]
+    catalog_dir = frontend_path / "i18n"
+    if catalog_dir.is_dir():
+        chunks.extend(path.read_bytes() for path in sorted(catalog_dir.rglob("*.json")))
+    return b"".join(chunks)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -497,6 +521,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # coordinator is added would make every REST view resolve the log
     # handler instead of the coordinator.
     log_capture.install(hass)
+
+    # Issue #1341: read the translation catalogs (blocking file reads) once, in the executor, before
+    # anything renders. ``ensure_catalogs`` never raises, records the attempt and is a no-op afterwards, so a
+    # failed load (bad JSON, missing file, mismatched index) never stops setup and never retries inside the event
+    # loop: rendering then falls back (English, then the key).
+    await hass.async_add_executor_job(i18n.ensure_catalogs)
 
     # Issue #812: one-time migration off the old domain-wide (unscoped)
     # issue ids. Any install with an open Repairs card raised under the OLD
@@ -774,13 +804,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 from homeassistant.components.frontend import async_register_built_in_panel
 
-                def _read_panel_bytes() -> bytes:
-                    return b"".join(
-                        (frontend_path / name).read_bytes()
-                        for name in ("entry.html", "index.html", "new_dashboard.html")
-                    )
-
-                _panel_bytes = await hass.async_add_executor_job(_read_panel_bytes)
+                _panel_bytes = await hass.async_add_executor_job(_panel_asset_bytes, frontend_path)
                 _panel_hash = hashlib.md5(_panel_bytes).hexdigest()[:8]
                 async_register_built_in_panel(
                     hass,

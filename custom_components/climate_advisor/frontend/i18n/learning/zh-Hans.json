@@ -1,0 +1,14 @@
+{
+  "learning.override_detail": "多为{direction, select, up {上调} other {下调}}，幅度约 {delta}",
+  "learning.override_detail_peak": "多为{direction, select, up {上调} other {下调}}，幅度约 {delta}，通常在 {hour}:00 前后",
+  "learning.suggestion.comfort_violations": "在最近 14 天中的 {days} 天里，室内温度有超过 30 分钟超出了您的舒适范围。要降低节能温度的力度，还是提前开始早晨预热？",
+  "learning.suggestion.forecast_bias_significant": "我注意到，您的天气服务预报的最高气温持续比您所在位置的实际情况{direction, select, higher {高} other {低}}约 {delta}。我现在会应用一项修正来提高预报准确度，这有助于预热和预冷的决策考虑您所在地的实际情况。",
+  "learning.suggestion.frequent_door_pauses": "过去两周里，因门窗敞开，暖通空调已暂停 {count, plural, other {#次}}。如果某扇门是主要原因，要延长该门的暂停延迟，还是将其排除在监测之外？",
+  "learning.suggestion.frequent_door_pauses_sensor": "过去两周里，因门窗敞开，暖通空调已暂停 {count, plural, other {#次}}。触发最频繁的是 {sensor}（{top_count, plural, other {#次}}）。要延长该传感器的暂停延迟，还是将其排除在监测之外？",
+  "learning.suggestion.frequent_overrides": "过去两周里，您手动调整了 {count, plural, other {#次}}恒温器（{detail}）。要让 Climate Advisor 调整舒适设定温度，还是添加定时升温？",
+  "learning.suggestion.frequent_overrides_no_detail": "过去两周里，您手动调整了 {count, plural, other {#次}}恒温器。这可能说明舒适设定温度不符合您的偏好。要让 Climate Advisor 分析这些手动调整的规律并建议新的设定温度吗？",
+  "learning.suggestion.high_runtime_mild_days": "在温和和温暖的日子里，暖通空调平均运行了 {minutes, plural, other {#分钟}}，比预期更长。这可能是门窗一直开着，或设定温度过于严格。要增加门窗传感器，还是调整温和日子的设定温度？",
+  "learning.suggestion.low_window_compliance": "在最近建议开窗的 {days, plural, other {#天}}里，窗户只开了 {compliance, number, ::percent} 的时间。要让 Climate Advisor 不再建议开关窗，改为按优化后的时间表使用暖通空调吗？这会多耗一点能源，但无需任何手动操作。",
+  "learning.suggestion.short_departures": "您经常外出 30–45 分钟，这几乎不够节能温度在您回来之前生效。对于这类短时外出，要把节能温度的延迟从 15 分钟缩短到 5 分钟，还是在外出不足 1 小时时跳过节能温度？",
+  "learning.suggestion.thermal_model_ready": "我现在已收集到足够的热力观测数据，可以估算您住宅的保温性能和暖通空调的表现。预热时间和就寝时的节能温度会根据住宅的实际表现自动调整，无需任何操作。"
+}

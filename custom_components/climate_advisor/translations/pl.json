@@ -1,0 +1,824 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Konfiguracja Climate Advisor",
+        "description": "Skonfiguruj integrację Climate Advisor. Wybierz encje, które ma monitorować i sterować.",
+        "data": {
+          "weather_entity": "Usługa pogodowa",
+          "climate_entity": "Termostat",
+          "notify_service": "Usługa powiadomień"
+        },
+        "data_description": {
+          "weather_entity": "Integracja pogodowa, z której Climate Advisor korzysta przy prognozach i warunkach na zewnątrz.",
+          "climate_entity": "Termostat, który Climate Advisor będzie monitorować i sterować.",
+          "notify_service": "Usługa powiadomień Home Assistant dla alertów i codziennych podsumowań (np. notify.mobile_app_yourphone)."
+        }
+      },
+      "unit": {
+        "title": "Jednostka temperatury",
+        "description": "Wybierz jednostkę, której Climate Advisor używa dla każdej wyświetlanej i wprowadzanej temperatury. Możesz ją później zmienić w Ustawieniach podstawowych.",
+        "data": {
+          "temp_unit": "Jednostka temperatury"
+        },
+        "data_description": {
+          "temp_unit": "Używana dla każdej temperatury wyświetlanej i wprowadzanej w Climate Advisor. Możesz ją później zmienić w Ustawieniach podstawowych; wtedy wymagane jest ponowne wczytanie, o czym poinformuje Climate Advisor."
+        }
+      },
+      "setpoints": {
+        "title": "Temperatury zadane",
+        "description": "Ustaw docelowe temperatury komfortu, nieobecności i snu. Jeśli dana kombinacja sprawiłaby, że ogrzewanie i klimatyzacja będą ze sobą walczyć lub ustawią się w dziwnym miejscu, obok pola pojawi się ostrzeżenie; zatwierdź ponownie, aby je zachować.",
+        "data": {
+          "comfort_heat": "Komfortowa temperatura ogrzewania",
+          "comfort_cool": "Komfortowa temperatura chłodzenia",
+          "setback_heat": "Temperatura ogrzewania podczas nieobecności",
+          "setback_cool": "Temperatura chłodzenia podczas nieobecności",
+          "sleep_heat": "Temperatura ogrzewania podczas snu",
+          "sleep_cool": "Temperatura chłodzenia podczas snu"
+        },
+        "data_description": {
+          "comfort_heat": "Temperatura docelowa przy ogrzewaniu, gdy ktoś jest w domu.",
+          "comfort_cool": "Temperatura docelowa przy chłodzeniu, gdy ktoś jest w domu.",
+          "setback_heat": "Niższa temperatura podczas nieobecności w domu, aby oszczędzać energię.",
+          "setback_cool": "Wyższa temperatura podczas nieobecności w domu, aby oszczędzać energię.",
+          "sleep_heat": "Temperatura docelowa przy ogrzewaniu w godzinach snu (gdy ktoś jest w domu).",
+          "sleep_cool": "Temperatura docelowa przy chłodzeniu w godzinach snu (gdy ktoś jest w domu)."
+        }
+      },
+      "temperature_sources": {
+        "title": "Źródła temperatury",
+        "description": "Wybierz, skąd Climate Advisor odczytuje temperaturę na zewnątrz i wewnątrz.",
+        "data": {
+          "outdoor_temp_source": "Źródło temperatury zewnętrznej",
+          "indoor_temp_source": "Źródło temperatury wewnętrznej"
+        },
+        "data_description": {
+          "outdoor_temp_source": "Skąd odczytywać temperaturę na zewnątrz. „Usługa pogodowa” korzysta z integracji pogodowej; dedykowany czujnik lub pomocnik wejściowy pozwala użyć konkretnej encji.",
+          "indoor_temp_source": "Skąd odczytywać temperaturę wewnątrz. „Encja klimatu” korzysta z wbudowanego czujnika termostatu; dedykowany czujnik lub pomocnik wejściowy pozwala użyć osobnej encji."
+        }
+      },
+      "outdoor_temp_entity": {
+        "title": "Encja temperatury zewnętrznej",
+        "description": "Wybierz encję, która dostarcza odczyty temperatury zewnętrznej.",
+        "data": {
+          "outdoor_temp_entity": "Encja temperatury zewnętrznej"
+        },
+        "data_description": {
+          "outdoor_temp_entity": "Wybierz czujnik lub pomocnik wejściowy, który podaje temperaturę zewnętrzną."
+        }
+      },
+      "indoor_temp_entity": {
+        "title": "Encja temperatury wewnętrznej",
+        "description": "Wybierz encję, która dostarcza odczyty temperatury wewnętrznej.",
+        "data": {
+          "indoor_temp_entity": "Encja temperatury wewnętrznej"
+        },
+        "data_description": {
+          "indoor_temp_entity": "Wybierz czujnik lub pomocnik wejściowy, który podaje temperaturę wewnętrzną."
+        }
+      },
+      "sensors": {
+        "title": "Czujniki drzwi i okien",
+        "description": "Wybierz czujniki binarne, które Climate Advisor ma monitorować. Gdy czujnik wskazuje otwarte drzwi lub okno, HVAC zostanie wstrzymany, aby nie marnować energii.\n\nMożesz wybrać pojedyncze czujniki lub encję grupy czujników binarnych, która łączy kilka czujników.\n\nPrzełącznik polaryzacji określa, jak interpretowane są stany czujników. Większość czujników stosuje standard Home Assistant, w którym „on” oznacza otwarte (niebezpieczne). Jeśli Twoje czujniki raportują odwrotnie, włącz przełącznik odwrócenia.",
+        "data": {
+          "door_window_sensors": "Czujniki drzwi/okien",
+          "sensor_polarity_inverted": "Odwróć polaryzację czujników",
+          "fan_mode": "Tryb sterowania wentylatorem",
+          "fan_entity": "Encja wentylatora"
+        },
+        "data_description": {
+          "door_window_sensors": "Wybierz dowolne encje czujników binarnych do monitorowania, także grupy czujników binarnych łączące kilka czujników.",
+          "sensor_polarity_inverted": "Włącz, jeśli czujniki raportują „on”, gdy są zamknięte, i „off”, gdy są otwarte, czyli odwrotnie niż w standardzie Home Assistant.",
+          "fan_mode": "Jak sterować wentylatorami do wietrzenia. „Wentylator całego domu” steruje dedykowaną encją wentylatora. „Wentylator HVAC” używa trybu wentylatora termostatu.",
+          "fan_entity": "Encja wentylatora lub przełącznika do sterowania (potrzebna tylko w trybie wentylatora całego domu)."
+        }
+      },
+      "occupancy": {
+        "title": "Wykrywanie obecności",
+        "description": "Skonfiguruj encje przełączników, które informują Climate Advisor, kto jest w domu. Wszystkie pola są opcjonalne — zostaw puste, jeśli nie korzystasz z tej funkcji.",
+        "data": {
+          "home_toggle_entity": "Przełącznik w domu/poza domem",
+          "home_toggle_invert": "Odwróć przełącznik w domu",
+          "vacation_toggle_entity": "Przełącznik trybu wakacyjnego",
+          "vacation_toggle_invert": "Odwróć przełącznik wakacji",
+          "guest_toggle_entity": "Przełącznik trybu gości",
+          "guest_toggle_invert": "Odwróć przełącznik gości"
+        },
+        "data_description": {
+          "home_toggle_entity": "Encja (input_boolean, switch itp.) wskazująca, czy ktoś jest w domu. WŁ. = w domu, WYŁ. = poza domem.",
+          "home_toggle_invert": "Włącz, jeśli przełącznik pokazuje WŁ., gdy nikogo nie ma, i WYŁ., gdy ktoś jest w domu.",
+          "vacation_toggle_entity": "Encja wskazująca tryb wakacyjny. Gdy jest aktywna, temperatura jest obniżana mocniej, aby dłużej oszczędzać energię.",
+          "vacation_toggle_invert": "Włącz, jeśli przełącznik pokazuje WŁ., gdy NIE jesteś na wakacjach.",
+          "guest_toggle_entity": "Encja wskazująca, że w domu są goście. Ma pierwszeństwo przed trybem wakacyjnym i nieobecności — utrzymywana jest temperatura komfortu.",
+          "guest_toggle_invert": "Włącz, jeśli przełącznik pokazuje WŁ., gdy NIE ma gości."
+        }
+      },
+      "schedule": {
+        "title": "Harmonogram dnia",
+        "description": "Ustaw harmonogram domowników, aby Climate Advisor wiedział, kiedy nagrzewać, schładzać i wysyłać podsumowania.",
+        "data": {
+          "zone_name": "Nazwa strefy",
+          "wake_time": "Godzina pobudki",
+          "sleep_time": "Pora snu",
+          "briefing_time": "Godzina codziennego podsumowania",
+          "briefing_notifications_enabled": "Powiadomienia o codziennym podsumowaniu"
+        },
+        "data_description": {
+          "zone_name": "Krótka nazwa tej strefy (np. „Sypialnia”). Wyświetlana w Ustawienia → Urządzenia i usługi oraz w wyborze strefy na pulpicie. Proponowana na podstawie nazwy encji klimatu — zmień ją według uznania.",
+          "wake_time": "Kiedy domownicy zwykle wstają. Climate Advisor zaczyna ogrzewać lub chłodzić do temperatury komfortu przed tą godziną.",
+          "sleep_time": "Kiedy domownicy zwykle idą spać. Climate Advisor przełącza się o tej porze na temperaturę nieobecności/snu.",
+          "briefing_time": "Kiedy dostarczać codzienne powiadomienie z prognozą pogody i planem HVAC.",
+          "briefing_notifications_enabled": "Wysyłaj zaplanowane codzienne podsumowanie jako powiadomienie push dla tej strefy. Domyślnie włączona jest tylko pierwsza strefa, aby dom z wieloma strefami nie dostawał jednej kopii na strefę. Możesz to później zmienić w Powiadomieniach."
+        }
+      }
+    },
+    "error": {
+      "invalid_notify_service": "Musi mieć format domena.usługa (np. notify.mobile_app_phone)",
+      "zone_name_too_long": "Nazwa strefy może mieć maksymalnie 50 znaków",
+      "whf_entity_shared_zone": "Ten wentylator jest już sterowany przez inną strefę Climate Advisor. Wentylator całego domu może należeć tylko do jednej strefy. Wybierz inny wentylator lub najpierw usuń go z drugiej strefy.",
+      "whf_no_sensors_warning": "Nie wybrano czujników drzwi ani okien, więc Climate Advisor nie wie, kiedy dom jest zamknięty, i nie zatrzyma z tego powodu wentylatora całego domu. Zatwierdź ponownie, aby to zachować, lub dodaj czujniki.",
+      "whf_command_only_warning": "Climate Advisor nie widzi rzeczywistego stanu wentylatora, więc nie może zobaczyć ani zatrzymać wentylatora, którego sam nie uruchomił. Zatwierdź ponownie, aby to zachować, lub dodaj czujnik stanu wentylatora w opcjach Czujniki i wentylator.",
+      "setpoint_band_inverted_warning": "Ta temperatura ogrzewania jest równa odpowiedniej temperaturze chłodzenia lub wyższa. W systemie z ogrzewaniem i klimatyzacją będą działać na zmianę przez cały dzień: najpierw ogrzewać dom, a potem znowu go chłodzić. Ustaw ogrzewanie co najmniej 4 °F (2,5 °C) poniżej chłodzenia. Zatwierdź ponownie, aby to zachować.",
+      "setpoint_band_narrow_warning": "Ta temperatura ogrzewania jest mniej niż 4 °F (2,5 °C) niższa od odpowiedniej temperatury chłodzenia. Urządzenia przekraczają temperaturę zadaną, więc przy tak małej różnicy ogrzewanie i klimatyzacja mogą przełączać się tam i z powrotem częściej, niż to konieczne. Zatwierdź ponownie, aby to zachować.",
+      "setpoint_outside_thermostat_warning": "Twój termostat nie akceptuje tej temperatury, więc Climate Advisor wyśle zamiast niej najbliższą temperaturę, którą akceptuje. Zatwierdź ponownie, aby to zachować.",
+      "away_heat_above_home_warning": "Ogrzewanie podczas nieobecności jest cieplejsze niż ogrzewanie, gdy ktoś jest w domu, więc dom jest ogrzewany mocniej, gdy nikogo nie ma, niż gdy jesteś. Zatwierdź ponownie, aby to zachować.",
+      "away_cool_below_home_warning": "Chłodzenie podczas nieobecności jest chłodniejsze niż chłodzenie, gdy ktoś jest w domu, więc klimatyzacja pracuje intensywniej, gdy nikogo nie ma, niż gdy jesteś. Zatwierdź ponownie, aby to zachować.",
+      "sleep_heat_below_away_warning": "Ogrzewanie podczas snu jest chłodniejsze niż ogrzewanie podczas nieobecności, więc w nocy w domu jest chłodniej niż wtedy, gdy nikogo nie ma. Zatwierdź ponownie, aby to zachować.",
+      "sleep_cool_above_away_warning": "Chłodzenie podczas snu jest cieplejsze niż chłodzenie podczas nieobecności, więc w nocy w domu może być cieplej niż wtedy, gdy nikogo nie ma. Zatwierdź ponownie, aby to zachować.",
+      "vacation_heat_above_away_warning": "Ogrzewanie podczas wakacji jest cieplejsze niż ogrzewanie podczas nieobecności, więc wakacje zużywają więcej energii niż zwykły dzień poza domem. Zatwierdź ponownie, aby to zachować.",
+      "vacation_cool_below_away_warning": "Chłodzenie podczas wakacji jest chłodniejsze niż chłodzenie podczas nieobecności, więc wakacje zużywają więcej energii niż zwykły dzień poza domem. Zatwierdź ponownie, aby to zachować.",
+      "vacation_freeze_warning": "Przy tym ustawieniu ogrzewanie podczas wakacji spada poniżej 45 °F (7 °C). Podczas długiego wyjazdu rury mogą zamarznąć. Zatwierdź ponownie, aby to zachować."
+    },
+    "abort": {
+      "already_configured": "Ten termostat ma już skonfigurowaną strefę Climate Advisor."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opcje Climate Advisor",
+        "description": "Wybierz sekcję do skonfigurowania.",
+        "menu_options": {
+          "core": "Ustawienia podstawowe",
+          "setpoints": "Temperatury zadane",
+          "temperature_sources": "Źródła temperatury",
+          "sensors": "Czujniki i wentylator",
+          "occupancy": "Obecność",
+          "schedule": "Harmonogram",
+          "scheduler": "Harmonogram taryf (TOU)",
+          "notifications": "Powiadomienia",
+          "advanced": "Uczenie się i zachowanie",
+          "classification_thresholds": "Progi typów dnia",
+          "ai_settings": "Ustawienia Claude AI",
+          "github_settings": "Integracja z GitHub"
+        }
+      },
+      "core": {
+        "title": "Ustawienia podstawowe",
+        "description": "Skonfiguruj główne encje i usługę powiadomień, z których korzysta Climate Advisor.",
+        "data": {
+          "weather_entity": "Usługa pogodowa",
+          "climate_entity": "Termostat",
+          "notify_service": "Usługa powiadomień",
+          "temp_unit": "Jednostka temperatury",
+          "zone_name": "Nazwa strefy"
+        },
+        "data_description": {
+          "weather_entity": "Integracja pogodowa, z której Climate Advisor korzysta przy prognozach i warunkach na zewnątrz.",
+          "climate_entity": "Termostat, który Climate Advisor będzie monitorować i sterować.",
+          "notify_service": "Usługa powiadomień Home Assistant dla alertów i codziennych podsumowań (np. notify.mobile_app_yourphone).",
+          "temp_unit": "Używana dla każdej temperatury wyświetlanej i wprowadzanej w Climate Advisor. Po zmianie wymagane jest ponowne wczytanie, o czym poinformuje Climate Advisor.",
+          "zone_name": "Nazwa tej strefy na pulpicie i w liście urządzeń. Zmiana nazwy nie zmienia identyfikatorów encji."
+        }
+      },
+      "setpoints": {
+        "title": "Temperatury zadane",
+        "description": "Ustaw docelowe temperatury komfortu, nieobecności, snu i wakacji. Jeśli dana kombinacja sprawiłaby, że ogrzewanie i klimatyzacja będą ze sobą walczyć lub ustawią się w dziwnym miejscu, obok pola pojawi się ostrzeżenie; zatwierdź ponownie, aby je zachować.",
+        "data": {
+          "comfort_heat": "Komfortowa temperatura ogrzewania",
+          "comfort_cool": "Komfortowa temperatura chłodzenia",
+          "setback_heat": "Temperatura ogrzewania podczas nieobecności",
+          "setback_cool": "Temperatura chłodzenia podczas nieobecności",
+          "sleep_heat": "Temperatura ogrzewania podczas snu",
+          "sleep_cool": "Temperatura chłodzenia podczas snu",
+          "vacation_heat": "Temperatura ogrzewania podczas wakacji",
+          "vacation_cool": "Temperatura chłodzenia podczas wakacji"
+        },
+        "data_description": {
+          "comfort_heat": "Temperatura docelowa przy ogrzewaniu, gdy ktoś jest w domu.",
+          "comfort_cool": "Temperatura docelowa przy chłodzeniu, gdy ktoś jest w domu.",
+          "setback_heat": "Niższa temperatura podczas nieobecności w domu, aby oszczędzać energię.",
+          "setback_cool": "Wyższa temperatura podczas nieobecności w domu, aby oszczędzać energię.",
+          "sleep_heat": "Temperatura docelowa przy ogrzewaniu w godzinach snu (gdy ktoś jest w domu).",
+          "sleep_cool": "Temperatura docelowa przy chłodzeniu w godzinach snu (gdy ktoś jest w domu).",
+          "vacation_heat": "Temperatura ogrzewania, gdy włączony jest przełącznik wakacji. Zostaw puste, aby użyć temperatury ogrzewania podczas nieobecności minus 3 °F (ok. 1,5 °C).",
+          "vacation_cool": "Temperatura chłodzenia, gdy włączony jest przełącznik wakacji. Zostaw puste, aby użyć temperatury chłodzenia podczas nieobecności plus 3 °F (ok. 1,5 °C)."
+        }
+      },
+      "temperature_sources": {
+        "title": "Źródła temperatury",
+        "description": "Wybierz, skąd Climate Advisor odczytuje temperaturę na zewnątrz i wewnątrz.",
+        "data": {
+          "outdoor_temp_source": "Źródło temperatury zewnętrznej",
+          "outdoor_temp_entity": "Encja temperatury zewnętrznej",
+          "outdoor_humidity_entity": "Czujnik wilgotności zewnętrznej",
+          "indoor_temp_source": "Źródło temperatury wewnętrznej",
+          "indoor_temp_entity": "Encja temperatury wewnętrznej",
+          "indoor_humidity_entity": "Czujnik wilgotności wewnętrznej",
+          "sleep_indoor_temp_entity": "Czujnik temperatury wewnętrznej (sen)",
+          "sleep_indoor_humidity_entity": "Czujnik wilgotności (sen)",
+          "thermostat_companion_sensor": "Dokładniejszy czujnik termostatu"
+        },
+        "data_description": {
+          "outdoor_temp_source": "Skąd odczytywać temperaturę na zewnątrz. „Usługa pogodowa” korzysta z integracji pogodowej; dedykowany czujnik lub pomocnik wejściowy pozwala użyć konkretnej encji. Powrót do „Usługi pogodowej” usuwa wybraną encję.",
+          "outdoor_temp_entity": "Wybierz czujnik lub pomocnik wejściowy, który podaje temperaturę zewnętrzną – źródło powyżej przełączy się automatycznie. Wyczyść to pole, aby wrócić do usługi pogodowej.",
+          "outdoor_humidity_entity": "Czujnik wilgotności na zewnątrz, pokazywany na wykresie Status razem z temperaturą odczuwalną na zewnątrz. Tylko do wykresu: żadna decyzja o ogrzewaniu ani chłodzeniu go nie używa. Zostaw puste, aby wykryć automatycznie.",
+          "indoor_temp_source": "Skąd odczytywać temperaturę wewnątrz. „Encja klimatu” korzysta z wbudowanego czujnika termostatu; dedykowany czujnik lub pomocnik wejściowy pozwala użyć osobnej encji.",
+          "indoor_temp_entity": "Wybierz czujnik lub pomocnik wejściowy, który podaje temperaturę wewnętrzną – źródło powyżej przełączy się automatycznie. Wyczyść to pole, aby wrócić do wbudowanego czujnika termostatu.",
+          "indoor_humidity_entity": "Czujnik wilgotności w pomieszczeniu, które Climate Advisor odczytuje w ciągu dnia, pokazywany na wykresie Status razem z temperaturą odczuwalną w pomieszczeniu. Tylko do wykresu: żadna decyzja o ogrzewaniu ani chłodzeniu go nie używa. Zostaw puste, aby wykryć automatycznie.",
+          "sleep_indoor_temp_entity": "Opcjonalny czujnik w sypialni używany do decyzji o komforcie i automatyzacji, gdy aktywny jest harmonogram snu (model termiczny zawsze używa czujnika głównego). Gdy jest niedostępny, używany jest czujnik główny. Zostaw puste, aby wyłączyć.",
+          "sleep_indoor_humidity_entity": "Czujnik wilgotności w sypialni, pokazywany na wykresie Status, gdy aktywny jest harmonogram snu. Tylko do wykresu: żadna decyzja o ogrzewaniu ani chłodzeniu go nie używa. Zostaw puste, aby wykryć automatycznie.",
+          "thermostat_companion_sensor": "Wiele termostatów podaje w głównej encji pełne stopnie, ale ma na tym samym urządzeniu także dokładniejszy czujnik temperatury. Tryb Auto używa tego dokładniejszego czujnika, gdy okaże się, że pokazuje ten sam odczyt (w granicach 1 °F, z ułamkami, gdy termostat pokazuje pełne stopnie), a gdy go zabraknie lub się rozjedzie, wraca do odczytu samego termostatu. Dotyczy tylko źródła „wbudowany czujnik termostatu”. Tryb Wył. zawsze używa odczytu samego termostatu."
+        }
+      },
+      "sensors": {
+        "title": "Czujniki i wentylator",
+        "description": "Skonfiguruj czujniki drzwi/okien i sterowanie wentylatorem. Gdy czujnik wskazuje otwarte drzwi lub okno, HVAC zostanie wstrzymany, aby nie marnować energii.",
+        "data": {
+          "door_window_sensors": "Czujniki drzwi/okien",
+          "sensor_polarity_inverted": "Odwróć polaryzację czujników",
+          "sensor_debounce_seconds": "Opóźnienie eliminacji drgań czujnika",
+          "manual_grace_seconds": "Wstrzymanie po ręcznej zmianie",
+          "automation_grace_seconds": "Przerwa po automatycznej zmianie",
+          "override_confirm_seconds": "Opóźnienie potwierdzenia ręcznej zmiany",
+          "fan_mode": "Tryb sterowania wentylatorem",
+          "hvac_fan_restrict_mode": "Ograniczenie wentylatora HVAC",
+          "fan_entity": "Encja wentylatora",
+          "fan_state_entity": "Encja stanu wentylatora",
+          "fan_state_feedback": "Wiarygodny stan wentylatora",
+          "fan_remote_entity": "Encja zdarzeń pilota RF wentylatora",
+          "fan_min_runtime_per_hour": "Minimalny czas pracy wentylatora na godzinę",
+          "nat_vent_soft_start_enabled": "Łagodny rozruch wentylacji naturalnej"
+        },
+        "data_description": {
+          "door_window_sensors": "Wybierz dowolne encje czujników binarnych do monitorowania, także grupy czujników binarnych łączące kilka czujników.",
+          "sensor_polarity_inverted": "Włącz, jeśli czujniki raportują „on”, gdy są zamknięte, i „off”, gdy są otwarte, czyli odwrotnie niż w standardzie Home Assistant.",
+          "sensor_debounce_seconds": "Jak długo stan czujnika drzwi/okna musi być stabilny, zanim Climate Advisor zareaguje – wstrzymując lub wznawiając HVAC albo włączając lub kończąc sterowanie wentylatorem w wentylacji naturalnej. Zapobiega reakcji na krótkie otwarcia lub drgania niestabilnego czujnika.",
+          "manual_grace_seconds": "Jak długo czekać po ręcznej zmianie termostatu, zanim Climate Advisor wznowi automatykę.",
+          "automation_grace_seconds": "Jak długo czekać po automatycznej zmianie wprowadzonej przez Climate Advisor, zanim dozwolona będzie kolejna.",
+          "override_confirm_seconds": "Czas między zmianami systemowymi a potwierdzeniem ręcznej zmiany. Przejściowe zdarzenia (restart termostatu, cykle wentylatora), które ustąpią w tym czasie, są automatycznie ignorowane. Ustaw 0, aby potwierdzać ręczne zmiany natychmiast.",
+          "fan_mode": "Jak sterować wentylatorami do wietrzenia. „Wentylator całego domu” steruje dedykowaną encją wentylatora. „Wentylator HVAC” używa trybu wentylatora termostatu.",
+          "hvac_fan_restrict_mode": "W wilgotnym klimacie opcja „Tylko grzanie” wyłącza wentylator HVAC na 2 godziny po chłodzeniu, aby uniknąć wilgoci z mokrego parownika.",
+          "fan_entity": "Encja wentylatora lub przełącznika do sterowania (potrzebna tylko w trybie wentylatora całego domu).",
+          "fan_state_entity": "Opcjonalny osobny czujnik do odczytu fizycznego stanu wentylatora (dla wentylatorów całego domu z dwiema encjami). Zostaw puste, aby stan również odczytywać z encji wentylatora.",
+          "fan_state_feedback": "Włącz, jeśli encja wentylatora lub czujnik stanu raportuje rzeczywisty stan silnika (a nie tylko ostatnio wysłane polecenie). Zostaw wyłączone, jeśli nie masz pewności — CA będzie w każdym cyklu wysyłać do wentylatora żądany stan.",
+          "fan_remote_entity": "Opcjonalna encja zdarzeń, która uruchamia się po naciśnięciu fizycznego pilota ściennego RF (np. z firmware gunkl/quietcool-house-fan). Wybór timera na pilocie (1/2/4/8/12 godzin) ustawia czas wstrzymania po ręcznej zmianie wentylatora. Zostaw puste, aby wyłączyć.",
+          "fan_min_runtime_per_hour": "Minuty pracy wentylatora na godzinę (0 = wyłączone, 60 = zawsze włączony). Cykl nie jest zsynchronizowany z zegarem — przesuwa się naturalnie zależnie od tego, kiedy uruchomił się HA.",
+          "nat_vent_soft_start_enabled": "Po włączeniu wentylator całego domu może ruszyć przy równych temperaturach na zewnątrz i wewnątrz (bez czekania, aż na zewnątrz będzie wyraźnie chłodniej), gdy potwierdzono, że dzisiejsza temperatura zewnętrzna minęła szczyt i spada — dla ruchu powietrza i przewietrzenia strychu oraz masy termicznej, nie do intensywnego chłodzenia. Domyślnie włączone; wyłącz, jeśli wentylator ma pracować dopiero wtedy, gdy na zewnątrz jest wyraźnie chłodniej niż w środku. Obecnie żaden czujnik wilgotności ani punktu rosy tego nie zabezpiecza."
+        }
+      },
+      "occupancy": {
+        "title": "Wykrywanie obecności",
+        "description": "Skonfiguruj encje przełączników, które informują Climate Advisor, kto jest w domu. Wszystkie pola są opcjonalne — zostaw puste, jeśli nie korzystasz z tej funkcji.",
+        "data": {
+          "home_toggle_entity": "Przełącznik w domu/poza domem",
+          "home_toggle_invert": "Odwróć przełącznik w domu",
+          "vacation_toggle_entity": "Przełącznik trybu wakacyjnego",
+          "vacation_toggle_invert": "Odwróć przełącznik wakacji",
+          "guest_toggle_entity": "Przełącznik trybu gości",
+          "guest_toggle_invert": "Odwróć przełącznik gości",
+          "welcome_home_debounce_seconds": "Przerwa między powitaniami w domu"
+        },
+        "data_description": {
+          "home_toggle_entity": "Encja (input_boolean, switch itp.) wskazująca, czy ktoś jest w domu. WŁ. = w domu, WYŁ. = poza domem.",
+          "home_toggle_invert": "Włącz, jeśli przełącznik pokazuje WŁ., gdy nikogo nie ma, i WYŁ., gdy ktoś jest w domu.",
+          "vacation_toggle_entity": "Encja wskazująca tryb wakacyjny. Gdy jest aktywna, temperatura jest obniżana mocniej, aby dłużej oszczędzać energię.",
+          "vacation_toggle_invert": "Włącz, jeśli przełącznik pokazuje WŁ., gdy NIE jesteś na wakacjach.",
+          "guest_toggle_entity": "Encja wskazująca, że w domu są goście. Ma pierwszeństwo przed trybem wakacyjnym i nieobecności — utrzymywana jest temperatura komfortu.",
+          "guest_toggle_invert": "Włącz, jeśli przełącznik pokazuje WŁ., gdy NIE ma gości.",
+          "welcome_home_debounce_seconds": "Minimalny odstęp między powiadomieniami powitalnymi. Jeśli wyjdziesz i wrócisz w tym czasie, powiadomienie zostanie pominięte. Ustaw 0, aby powiadamiać zawsze."
+        }
+      },
+      "schedule": {
+        "title": "Harmonogram dnia",
+        "description": "Ustaw harmonogram domowników, aby Climate Advisor wiedział, kiedy nagrzewać, schładzać i wysyłać podsumowania.",
+        "data": {
+          "wake_time": "Godzina pobudki",
+          "sleep_time": "Pora snu",
+          "briefing_time": "Godzina codziennego podsumowania"
+        },
+        "data_description": {
+          "wake_time": "Kiedy domownicy zwykle wstają. Climate Advisor zaczyna ogrzewać lub chłodzić do temperatury komfortu przed tą godziną.",
+          "sleep_time": "Kiedy domownicy zwykle idą spać. Climate Advisor przełącza się o tej porze na temperaturę nieobecności/snu.",
+          "briefing_time": "Kiedy dostarczać codzienne powiadomienie z prognozą pogody i planem HVAC."
+        }
+      },
+      "scheduler": {
+        "title": "Harmonogram taryf (TOU)",
+        "description": "Zdefiniuj do {max} harmonogramów taryf strefowych (obecnie zdefiniowano: {count}). Climate Advisor automatycznie schładza lub nagrzewa dom przed okresem wysokich kosztów, na podstawie Twojego zakresu komfortu i wyuczonego tempa reakcji — nie ma tu temperatur do ustawienia.",
+        "data": {
+          "manage": "Zarządzaj harmonogramem"
+        },
+        "data_description": {
+          "manage": "Wybierz harmonogram do edycji lub dodaj nowy."
+        }
+      },
+      "scheduler_edit": {
+        "title": "Harmonogram taryf (TOU)",
+        "description": "Bez pól temperatury — przed oknem wysokich kosztów Climate Advisor automatycznie dąży do Twojego zakresu komfortu.",
+        "data": {
+          "name": "Nazwa",
+          "days": "Dni",
+          "start": "Początek",
+          "end": "Koniec",
+          "delete_schedule": "Usuń ten harmonogram"
+        },
+        "data_description": {
+          "name": "Krótka nazwa tego harmonogramu taryfy strefowej (np. „Letni szczyt”).",
+          "days": "Dni tygodnia, w które obowiązuje ten harmonogram. Wybierz co najmniej jeden.",
+          "start": "Kiedy zaczyna się okres wysokich kosztów. Climate Advisor zaczyna wstępne przygotowanie domu przed tą godziną.",
+          "end": "Kiedy kończy się okres wysokich kosztów. Musi różnić się od godziny początku.",
+          "delete_schedule": "Włącz i zatwierdź, aby usunąć ten harmonogram."
+        }
+      },
+      "notifications": {
+        "title": "Preferencje powiadomień",
+        "description": "Wybierz, jakie powiadomienia otrzymujesz i jakimi kanałami. Powiadomienia push trafiają do aplikacji mobilnej; powiadomienia e-mail są wysyłane przez usługę send_email.",
+        "data": {
+          "briefing_notifications_enabled": "Powiadomienia o codziennym podsumowaniu",
+          "push_briefing": "Push: codzienne podsumowanie",
+          "push_door_window_pause": "Push: HVAC wstrzymany",
+          "push_occupancy_home": "Push: witaj w domu",
+          "manual_grace_notify": "Push: koniec wstrzymania po ręcznej zmianie",
+          "automation_grace_notify": "Push: koniec przerwy po automatyzacji",
+          "push_entity_health": "Push: nie znaleziono encji",
+          "email_briefing": "E-mail: codzienne podsumowanie",
+          "email_door_window_pause": "E-mail: HVAC wstrzymany",
+          "email_grace_expired": "E-mail: koniec wstrzymania",
+          "email_grace_repause": "E-mail: HVAC ponownie wstrzymany",
+          "email_occupancy_home": "E-mail: witaj w domu",
+          "email_entity_health": "E-mail: nie znaleziono encji"
+        },
+        "data_description": {
+          "briefing_notifications_enabled": "W instalacji z wieloma strefami tylko jedna strefa powinna wysyłać zaplanowane codzienne podsumowanie jako push/e-mail — w przeciwnym razie dostaniesz po jednej kopii na strefę. Włącz to dla dokładnie jednej strefy. Ręczne kliknięcie Wyślij podsumowanie na karcie debugowania zawsze wysyła, nawet gdy to jest wyłączone.",
+          "push_briefing": "Wysyłaj co rano krótkie podsumowanie na telefon.",
+          "push_door_window_pause": "Wyślij powiadomienie push, gdy HVAC zostanie wstrzymany, bo drzwi lub okno były otwarte zbyt długo.",
+          "push_occupancy_home": "Wyślij powiadomienie push, gdy ktoś wróci do domu i przywrócona zostanie temperatura komfortu.",
+          "manual_grace_notify": "Wyślij powiadomienie push, gdy wstrzymanie po ręcznej zmianie dobiegnie końca i wznowione zostanie normalne działanie czujników.",
+          "automation_grace_notify": "Wyślij powiadomienie push, gdy dobiegnie końca przerwa po automatycznej zmianie.",
+          "push_entity_health": "Wyślij powiadomienie push, gdy skonfigurowana encja (termostat, źródło pogody, czujnik, wentylator, przełącznik lub usługa powiadomień) zostanie usunięta lub przestanie odpowiadać.",
+          "email_briefing": "Wyślij pełne codzienne podsumowanie e-mailem ze wszystkimi szczegółami prognozy i planu.",
+          "email_door_window_pause": "Wyślij e-mail, gdy HVAC zostanie wstrzymany z powodu otwartych drzwi lub okna.",
+          "email_grace_expired": "Wyślij e-mail, gdy wstrzymanie dobiegnie końca i wznowione zostanie normalne działanie czujników.",
+          "email_grace_repause": "Wyślij e-mail, gdy HVAC zostanie ponownie wstrzymany, bo po zakończeniu wstrzymania drzwi/okno nadal są otwarte.",
+          "email_occupancy_home": "Wyślij e-mail, gdy ktoś wróci do domu.",
+          "email_entity_health": "Wyślij e-mail, gdy skonfigurowana encja (termostat, źródło pogody, czujnik, wentylator, przełącznik lub usługa powiadomień) zostanie usunięta lub przestanie odpowiadać."
+        }
+      },
+      "advanced": {
+        "title": "Uczenie się i zachowanie",
+        "description": "Skonfiguruj, jak Climate Advisor uczy się Twoich preferencji i równoważy komfort z oszczędnościami.",
+        "data": {
+          "primary_engine": "Silnik prognoz",
+          "shadow_engine": "Silnik porównawczy",
+          "learning_enabled": "Włącz uczenie się i sugestie",
+          "adaptive_preheat_enabled": "Adaptacyjny czas podgrzewania wstępnego",
+          "adaptive_setback_enabled": "Adaptacyjne obniżenie na porę snu",
+          "weather_bias_enabled": "Korekta błędu prognozy pogody",
+          "min_preheat_minutes": "Minimalny czas podgrzewania wstępnego",
+          "max_preheat_minutes": "Maksymalny czas podgrzewania wstępnego",
+          "default_preheat_minutes": "Domyślny czas podgrzewania wstępnego",
+          "default_tou_lead_minutes": "Wyprzedzenie przygotowania pod taryfę TOU",
+          "preheat_safety_margin": "Margines bezpieczeństwa podgrzewania wstępnego",
+          "max_setback_depth_f": "Maksymalna głębokość obniżenia",
+          "comfort_mode_switch_min_interval_s": "Odstęp przełączania grzanie/chłodzenie",
+          "aggressive_savings": "Oszczędność ponad komfort",
+          "comfort_deadband_hot_f": "Tolerancja przekroczenia w upalny dzień",
+          "comfort_deadband_warm_f": "Tolerancja przekroczenia w ciepły dzień",
+          "comfort_deadband_mild_f": "Tolerancja przekroczenia w łagodny dzień",
+          "comfort_deadband_cool_f": "Tolerancja przekroczenia w chłodny dzień",
+          "comfort_deadband_cold_f": "Tolerancja przekroczenia w zimny dzień",
+          "comfort_family_recency_window_min": "Okno „niedawnej pracy”",
+          "energy_rate": "Cena energii",
+          "heat_power_kw": "Moc ogrzewania",
+          "cool_power_kw": "Moc chłodzenia"
+        },
+        "data_description": {
+          "primary_engine": "Którego silnika prognoz używa Climate Advisor: v4 (domyślny) lub v3. Wyznacza czas podgrzewania wstępnego i wstępnego chłodzenia, zabezpieczenie przed przekroczeniem pułapu, moment zamknięcia okien i głębokość obniżenia oraz jest główną linią na wykresie Status i w planie na najbliższe 24 godziny. Dopóki wybrany silnik się uczy, te decyzje działają według zachowania domyślnego (nigdy według drugiego silnika), a wykres pokazuje oszacowanie z harmonogramu.",
+          "shadow_engine": "Opcjonalny drugi silnik rysowany jako linia porównawcza. Musi różnić się od silnika prognoz. Działają tylko te dwa silniki; każdy inny jest wyłączony.",
+          "learning_enabled": "Po włączeniu Climate Advisor uczy się na podstawie Twoich ręcznych zmian i z czasem sugeruje ulepszenia.",
+          "adaptive_preheat_enabled": "Użyj wyuczonego tempa ogrzewania do obliczenia czasu startu podgrzewania wstępnego. Wymaga włączonego uczenia się.",
+          "adaptive_setback_enabled": "Użyj wyuczonego tempa ogrzewania/chłodzenia do obliczenia maksymalnej bezpiecznej głębokości obniżenia. Wymaga włączonego uczenia się.",
+          "weather_bias_enabled": "Zastosuj korektę specyficzną dla lokalizacji do jutrzejszej prognozy na podstawie zaobserwowanej trafności prognoz. Wymaga włączonego uczenia się.",
+          "min_preheat_minutes": "Najkrótsze okno podgrzewania wstępnego, jakie system kiedykolwiek zaplanuje.",
+          "max_preheat_minutes": "Najdłuższe okno podgrzewania wstępnego, jakie system kiedykolwiek zaplanuje.",
+          "default_preheat_minutes": "Czas podgrzewania wstępnego używany, zanim zbierze się dość obserwacji.",
+          "default_tou_lead_minutes": "Jak długo przed zaplanowanym okresem wysokich kosztów zaczyna się przygotowanie pod taryfę TOU; używane, dopóki nie zaobserwowano dość cykli grzania/chłodzenia, by obliczyć rzeczywiste tempo domu.",
+          "preheat_safety_margin": "Mnożnik stosowany do obliczonego przez model czasu podgrzewania wstępnego jako bufor (np. 1,2 = 20% więcej).",
+          "max_setback_depth_f": "Największe nocne obniżenie, jakie może obliczyć silnik adaptacyjny.",
+          "comfort_mode_switch_min_interval_s": "Minimalny czas oczekiwania między rutynowymi przełączeniami grzanie/chłodzenie, aby uniknąć szybkiego przełączania tam i z powrotem. Rzeczywiste przekroczenie (temperatura wewnętrzna faktycznie poza granicą komfortu) pomija to oczekiwanie i przełącza natychmiast.",
+          "aggressive_savings": "Po włączeniu Climate Advisor przedkłada oszczędność energii nad komfort — na przykład toleruje większe wahania temperatury, zanim włączy się ogrzewanie lub chłodzenie.",
+          "comfort_deadband_hot_f": "W upalny dzień: o ile stopni dom może wyjść poza granicę komfortu, tuż po pracy przeciwnego trybu (w oknie „niedawnej pracy”), zanim włączy się przeciwny tryb. W upalny dzień dotyczy to przełączenia na ogrzewanie (strona chłodzenia nigdy nie jest opóźniana). Przekroczenie większe niż to powoduje natychmiastowe przełączenie. To tolerancja, a nie odległość, przy której granica jest uzbrajana wstępnie (ta jest stała: 2 stopnie lub jedna trzecia zakresu komfortu, jeśli jest mniejsza).",
+          "comfort_deadband_warm_f": "W ciepły dzień: o ile stopni dom może wyjść poza granicę komfortu, tuż po pracy przeciwnego trybu (w oknie „niedawnej pracy”), zanim włączy się przeciwny tryb. W ciepły dzień dotyczy to przełączenia na ogrzewanie (strona chłodzenia nigdy nie jest opóźniana). Przekroczenie większe niż to powoduje natychmiastowe przełączenie. To tolerancja, a nie odległość, przy której granica jest uzbrajana wstępnie (ta jest stała: 2 stopnie lub jedna trzecia zakresu komfortu, jeśli jest mniejsza).",
+          "comfort_deadband_mild_f": "W łagodny lub nieklasyfikowany dzień: o ile stopni dom może wyjść poza granicę komfortu, tuż po pracy przeciwnego trybu (w oknie „niedawnej pracy”), zanim włączy się przeciwny tryb. Łagodne dni nie mają strony uprzywilejowanej, więc dotyczy to zarówno grzania, jak i chłodzenia. Przekroczenie większe niż to powoduje natychmiastowe przełączenie. To tolerancja, a nie odległość, przy której granica jest uzbrajana wstępnie (ta jest stała: 2 stopnie lub jedna trzecia zakresu komfortu, jeśli jest mniejsza).",
+          "comfort_deadband_cool_f": "W chłodny dzień: o ile stopni dom może wyjść poza granicę komfortu, tuż po pracy przeciwnego trybu (w oknie „niedawnej pracy”), zanim włączy się przeciwny tryb. W chłodny dzień dotyczy to przełączenia na chłodzenie (strona ogrzewania nigdy nie jest opóźniana). Przekroczenie większe niż to powoduje natychmiastowe przełączenie. To tolerancja, a nie odległość, przy której granica jest uzbrajana wstępnie (ta jest stała: 2 stopnie lub jedna trzecia zakresu komfortu, jeśli jest mniejsza).",
+          "comfort_deadband_cold_f": "W zimny dzień: o ile stopni dom może wyjść poza granicę komfortu, tuż po pracy przeciwnego trybu (w oknie „niedawnej pracy”), zanim włączy się przeciwny tryb. W zimny dzień dotyczy to przełączenia na chłodzenie (strona ogrzewania nigdy nie jest opóźniana). Przekroczenie większe niż to powoduje natychmiastowe przełączenie. To tolerancja, a nie odległość, przy której granica jest uzbrajana wstępnie (ta jest stała: 2 stopnie lub jedna trzecia zakresu komfortu, jeśli jest mniejsza).",
+          "comfort_family_recency_window_min": "Jak długo strona grzania lub chłodzenia uchodzi za „niedawno pracującą” (sprzęt, który faktycznie pracował, albo zmiana trybu wynikająca z taryfy (TOU), przewidywanego pułapu lub Twojej ręcznej zmiany; nie każdy zapis Climate Advisor). Używane przez tolerancję przekroczenia powyżej (małe przekroczenie w tym oknie nie przełącza termostatu na przeciwny tryb) oraz przez zabezpieczenie przed przewidywanym pułapem temperatury (które czeka, zamiast reagować na przewidywane przekroczenie).",
+          "energy_rate": "Opcjonalne. Ile kosztuje Cię jedna kilowatogodzina, w Twojej walucie. Razem z mocą ogrzewania i chłodzenia poniżej pozwala pulpitowi oszacować koszt każdego dnia. Zostaw wszystkie trzy puste, aby nie pokazywać kosztów.",
+          "heat_power_kw": "Opcjonalne. Średnia moc elektryczna pobierana przez ogrzewanie podczas pracy, z tabliczki znamionowej lub z inteligentnej wtyczki. Potrzebna wraz z ceną energii do dziennego szacunku kosztów.",
+          "cool_power_kw": "Opcjonalne. Średnia moc elektryczna pobierana przez chłodzenie podczas pracy, z tabliczki znamionowej lub z inteligentnej wtyczki. Potrzebna wraz z ceną energii do dziennego szacunku kosztów."
+        }
+      },
+      "classification_thresholds": {
+        "title": "Progi typów dnia",
+        "description": "Progi temperatury, według których Climate Advisor klasyfikuje każdy dzień. Dni od progu Upalny wzwyż działają z klimatyzacją; poniżej progu Chłodny używane jest ogrzewanie. Domyślnie: Upalny 85 °F (29 °C), Ciepły 75 °F (24 °C), Łagodny 60 °F (16 °C), Chłodny 45 °F (7 °C).",
+        "data": {
+          "threshold_hot": "Próg upalnego dnia",
+          "threshold_warm": "Próg ciepłego dnia",
+          "threshold_mild": "Próg łagodnego dnia",
+          "threshold_cool": "Próg chłodnego dnia"
+        },
+        "data_description": {
+          "threshold_hot": "Dni z prognozowaną temperaturą maksymalną równą tej wartości lub wyższą są klasyfikowane jako Upalne (tryb klimatyzacji). Domyślnie: 85 °F / 29 °C.",
+          "threshold_warm": "Dni z prognozowaną temperaturą maksymalną równą tej wartości lub wyższą są klasyfikowane jako Ciepłe (zalecane okna, bez klimatyzacji). Domyślnie: 75 °F / 24 °C.",
+          "threshold_mild": "Dni z prognozowaną temperaturą maksymalną równą tej wartości lub wyższą są klasyfikowane jako Łagodne (komfortowo, okna otwarte). Domyślnie: 60 °F / 16 °C.",
+          "threshold_cool": "Dni z prognozowaną temperaturą maksymalną równą tej wartości lub wyższą są klasyfikowane jako Chłodne (lekkie ogrzewanie). Poniżej to Zimne (pełne ogrzewanie). Domyślnie: 45 °F / 7 °C."
+        }
+      },
+      "ai_settings": {
+        "title": "Ustawienia AI",
+        "description": "Skonfiguruj integrację z Claude AI do inteligentnej analizy i raportowania.\nStan klucza API: {key_status}",
+        "data": {
+          "ai_enabled": "Włącz funkcje AI",
+          "ai_api_key": "Klucz API Claude",
+          "ai_model": "Model AI",
+          "ai_reasoning_effort": "Wysiłek rozumowania",
+          "ai_max_tokens": "Maksymalna długość odpowiedzi",
+          "ai_temperature": "Kreatywność",
+          "ai_monthly_budget": "Miesięczny limit budżetu",
+          "ai_auto_requests_per_day": "Automatyczne zapytania dziennie",
+          "ai_manual_requests_per_day": "Ręczne zapytania dziennie",
+          "ai_investigator_enabled": "Włącz agenta analitycznego",
+          "ai_investigator_requests_per_day": "Zapytania agenta analitycznego dziennie"
+        },
+        "data_description": {
+          "ai_enabled": "Główny przełącznik wszystkich funkcji opartych na AI. Po wyłączeniu Climate Advisor używa tylko wbudowanej, zaprogramowanej logiki.",
+          "ai_api_key": "Twój klucz API Anthropic. Uzyskasz go na console.anthropic.com. Zostaw puste, aby zachować obecny klucz.",
+          "ai_model": "Którego modelu Claude używać. Zalecany jest Sonnet jako dobry kompromis między kosztem a jakością.",
+          "ai_reasoning_effort": "Ile wysiłku rozumowania wkłada Claude. Wyżej = lepsza analiza, ale wyższy koszt.",
+          "ai_max_tokens": "Maksymalna długość odpowiedzi AI w tokenach (256–16384).",
+          "ai_temperature": "Steruje losowością. 0 = deterministycznie, 1,0 = najbardziej kreatywnie. Zalecane: 0,3.",
+          "ai_monthly_budget": "Maksymalne szacowane miesięczne wydatki w dolarach amerykańskich. Ustaw 0 dla braku limitu.",
+          "ai_auto_requests_per_day": "Maksymalna liczba automatycznych zapytań AI dziennie (zerowana o północy).",
+          "ai_manual_requests_per_day": "Maksymalna liczba zapytań AI wywołanych przez użytkownika dziennie (zerowana o północy).",
+          "ai_investigator_enabled": "Włącz agenta analitycznego (wymaga włączonego AI). Wykonuje głęboką analizę z wielu źródeł, aby znaleźć niespójności i problemy z danymi.",
+          "ai_investigator_requests_per_day": "Maksymalna liczba uruchomień analizy dziennie. Każda analiza korzysta z rozszerzonego rozumowania. Zerowane o północy."
+        }
+      },
+      "github_settings": {
+        "title": "Integracja z GitHub",
+        "description": "Skonfiguruj zgłaszanie issues na GitHubie dla raportów analizy.\nBieżący token: {token_status}",
+        "data": {
+          "github_token": "Osobisty token dostępu GitHub",
+          "github_repo": "Repozytorium GitHub"
+        },
+        "data_description": {
+          "github_token": "Token z zakresem issues:write. Zostaw puste, aby zachować obecny token.",
+          "github_repo": "Repozytorium, do którego zgłaszane są issues, w formacie owner/repo, np. gunkl/ClimateAdvisor."
+        }
+      }
+    },
+    "error": {
+      "entity_required_for_source": "Wybierz czujnik lub pomocnika do użycia albo ustaw źródło z powrotem na usługę pogodową / encję klimatu.",
+      "entity_domain_mismatch": "Ta encja nie pasuje do wybranego źródła. Wybierz czujnik dla „Dedykowany czujnik” lub input_number dla „Pomocnik wejściowy”.",
+      "source_entity_conflict": "Zmieniono jednocześnie źródło i encję w sposób, który się wyklucza. Wybierz źródło, a potem pasującą encję (lub wyczyść pole).",
+      "invalid_notify_service": "Musi mieć format domena.usługa (np. notify.mobile_app_phone)",
+      "schedule_days_required": "Wybierz co najmniej jeden dzień",
+      "schedule_start_end_equal": "Godzina początku i końca muszą być różne",
+      "preheat_min_exceeds_max": "Minimalny czas podgrzewania wstępnego nie może przekraczać maksymalnego",
+      "preheat_default_exceeds_max": "Domyślny czas podgrzewania wstępnego nie może przekraczać maksymalnego",
+      "shadow_same_as_primary": "Silnik porównawczy musi różnić się od silnika prognoz. Wybierz inny silnik lub Brak.",
+      "unknown_engine": "Ten silnik prognoz jest niedostępny.",
+      "ai_connection_failed": "Nie można połączyć się z API Claude. Sprawdź klucz API i spróbuj ponownie.",
+      "ai_key_required": "Klucz API jest wymagany, gdy funkcje AI są włączone.",
+      "ai_temperature_out_of_range": "Wartość musi mieścić się między 0,0 a 1,0.",
+      "ai_max_tokens_out_of_range": "Maksymalna liczba tokenów jest poza dozwolonym zakresem dla tego pola.",
+      "github_repo_invalid": "Repozytorium musi mieć format owner/repo (np. myuser/MyRepo).",
+      "zone_name_too_long": "Nazwa strefy może mieć maksymalnie 50 znaków",
+      "whf_entity_shared_zone": "Ten wentylator jest już sterowany przez inną strefę Climate Advisor. Wentylator całego domu może należeć tylko do jednej strefy. Wybierz inny wentylator lub najpierw usuń go z drugiej strefy.",
+      "whf_no_sensors_warning": "Nie wybrano czujników drzwi ani okien, więc Climate Advisor nie wie, kiedy dom jest zamknięty, i nie zatrzyma z tego powodu wentylatora całego domu. Zatwierdź ponownie, aby to zachować, lub dodaj czujniki.",
+      "whf_command_only_warning": "Climate Advisor nie widzi rzeczywistego stanu wentylatora, więc nie może zobaczyć ani zatrzymać wentylatora, którego sam nie uruchomił. Zatwierdź ponownie, aby to zachować, lub dodaj czujnik stanu wentylatora w opcjach Czujniki i wentylator.",
+      "thresholds_must_be_ascending": "Progi typów dnia muszą rosnąć od Chłodnego przez Łagodny i Ciepły do Upalnego (Chłodny < Łagodny < Ciepły < Upalny).",
+      "setpoint_band_inverted_warning": "Ta temperatura ogrzewania jest równa odpowiedniej temperaturze chłodzenia lub wyższa. W systemie z ogrzewaniem i klimatyzacją będą działać na zmianę przez cały dzień: najpierw ogrzewać dom, a potem znowu go chłodzić. Ustaw ogrzewanie co najmniej 4 °F (2,5 °C) poniżej chłodzenia. Zatwierdź ponownie, aby to zachować.",
+      "setpoint_band_narrow_warning": "Ta temperatura ogrzewania jest mniej niż 4 °F (2,5 °C) niższa od odpowiedniej temperatury chłodzenia. Urządzenia przekraczają temperaturę zadaną, więc przy tak małej różnicy ogrzewanie i klimatyzacja mogą przełączać się tam i z powrotem częściej, niż to konieczne. Zatwierdź ponownie, aby to zachować.",
+      "setpoint_outside_thermostat_warning": "Twój termostat nie akceptuje tej temperatury, więc Climate Advisor wyśle zamiast niej najbliższą temperaturę, którą akceptuje. Zatwierdź ponownie, aby to zachować.",
+      "away_heat_above_home_warning": "Ogrzewanie podczas nieobecności jest cieplejsze niż ogrzewanie, gdy ktoś jest w domu, więc dom jest ogrzewany mocniej, gdy nikogo nie ma, niż gdy jesteś. Zatwierdź ponownie, aby to zachować.",
+      "away_cool_below_home_warning": "Chłodzenie podczas nieobecności jest chłodniejsze niż chłodzenie, gdy ktoś jest w domu, więc klimatyzacja pracuje intensywniej, gdy nikogo nie ma, niż gdy jesteś. Zatwierdź ponownie, aby to zachować.",
+      "sleep_heat_below_away_warning": "Ogrzewanie podczas snu jest chłodniejsze niż ogrzewanie podczas nieobecności, więc w nocy w domu jest chłodniej niż wtedy, gdy nikogo nie ma. Zatwierdź ponownie, aby to zachować.",
+      "sleep_cool_above_away_warning": "Chłodzenie podczas snu jest cieplejsze niż chłodzenie podczas nieobecności, więc w nocy w domu może być cieplej niż wtedy, gdy nikogo nie ma. Zatwierdź ponownie, aby to zachować.",
+      "vacation_heat_above_away_warning": "Ogrzewanie podczas wakacji jest cieplejsze niż ogrzewanie podczas nieobecności, więc wakacje zużywają więcej energii niż zwykły dzień poza domem. Zatwierdź ponownie, aby to zachować.",
+      "vacation_cool_below_away_warning": "Chłodzenie podczas wakacji jest chłodniejsze niż chłodzenie podczas nieobecności, więc wakacje zużywają więcej energii niż zwykły dzień poza domem. Zatwierdź ponownie, aby to zachować.",
+      "vacation_freeze_warning": "Przy tym ustawieniu ogrzewanie podczas wakacji spada poniżej 45 °F (7 °C). Podczas długiego wyjazdu rury mogą zamarznąć. Zatwierdź ponownie, aby to zachować."
+    }
+  },
+  "issues": {
+    "weather_entity_not_found": {
+      "title": "Nie znaleziono encji pogody",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Wybierz encję pogody",
+            "description": "Wcześniej skonfigurowana encja pogody `{entity_id}` już nie istnieje. Wybierz poniżej właściwą encję pogody.",
+            "data": {
+              "weather_entity": "Usługa pogodowa"
+            },
+            "data_description": {
+              "weather_entity": "Integracja pogodowa, która dostarcza prognozy i warunki na zewnątrz."
+            }
+          }
+        }
+      }
+    },
+    "reload_needed": {
+      "title": "Wczytaj ponownie, aby zastosować zmiany konfiguracji.",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Zastosuj zapisane ustawienia",
+            "description": "Zapisano zmiany w opcjach Climate Advisor, które jeszcze nie weszły w życie. Wczytaj Climate Advisor ponownie, aby je zastosować."
+          }
+        }
+      }
+    },
+    "zone_resolution_ambiguous": {
+      "title": "Niejednoznaczny wybór strefy",
+      "description": "Climate Advisor ma więcej niż jedną strefę, a żądanie nie wskazało, której strefy dotyczy: {request}. Wynik: {outcome}. Cokolwiek je wysłało (skrypt, automatyzacja, narzędzie wiersza poleceń lub stara karta przeglądarki), może pokazywać informacje innej strefy.\n\nAby to naprawić, dodaj do tego żądania `?zone=ENTRY_ID`, gdzie ENTRY_ID to `entry_id` strefy wymienione przez `GET /api/climate_advisor/status`. Pulpity Climate Advisor już to robią. To powiadomienie zniknie przy następnym uruchomieniu Climate Advisor."
+    }
+  },
+  "common": {
+    "schedule_summary": "{name} — {days} {window} ({cost})",
+    "schedule_all_days": "Wszystkie dni",
+    "schedule_cost_high": "Wysoki",
+    "schedule_cost_low": "Niski",
+    "schedule_unnamed": "(bez nazwy)",
+    "key_status_not_configured": "Nie skonfigurowano",
+    "token_status_configured": "skonfigurowany",
+    "token_status_not_configured": "nie skonfigurowano",
+    "schedule_add_new": "+ Dodaj nowy harmonogram"
+  },
+  "entity": {
+    "sensor": {
+      "day_type": {
+        "name": "Typ dnia",
+        "state": {
+          "hot": "Upalny",
+          "warm": "Ciepły",
+          "mild": "Łagodny",
+          "cool": "Chłodny",
+          "cold": "Zimny",
+          "unknown": "Nieznany"
+        }
+      },
+      "trend_direction": {
+        "name": "Trend",
+        "state": {
+          "warming": "Ocieplenie",
+          "cooling": "Ochłodzenie",
+          "stable": "Stabilnie",
+          "unknown": "Nieznany"
+        }
+      },
+      "next_human_action": {
+        "name": "Twoje następne działanie"
+      },
+      "daily_briefing": {
+        "name": "Codzienne podsumowanie"
+      },
+      "compliance_score": {
+        "name": "Wskaźnik komfortu"
+      },
+      "automation_status": {
+        "name": "Status"
+      },
+      "next_automation_action": {
+        "name": "Następne działanie automatyki"
+      },
+      "next_automation_time": {
+        "name": "Czas następnego działania automatyki"
+      },
+      "occupancy_mode": {
+        "name": "Tryb obecności",
+        "state": {
+          "home": "W domu",
+          "away": "Poza domem",
+          "vacation": "Wakacje",
+          "guest": "Goście"
+        }
+      },
+      "last_action_time": {
+        "name": "Czas ostatniego działania"
+      },
+      "last_action_reason": {
+        "name": "Powód ostatniego działania"
+      },
+      "fan_status": {
+        "name": "Stan wentylatora",
+        "state": {
+          "disabled": "Wyłączony",
+          "active": "Aktywny",
+          "inactive": "Nieaktywny"
+        }
+      },
+      "contact_status": {
+        "name": "Czujniki kontaktowe"
+      },
+      "ai_status": {
+        "name": "Stan AI",
+        "state": {
+          "active": "Aktywne",
+          "inactive": "Nieaktywne",
+          "error": "Błąd",
+          "disabled": "Wyłączone",
+          "circuit_open": "Wstrzymano po powtarzających się błędach",
+          "budget_exceeded": "Osiągnięto miesięczny budżet"
+        }
+      },
+      "indoor_temp": {
+        "name": "Temperatura wewnętrzna"
+      },
+      "outdoor_temp": {
+        "name": "Temperatura zewnętrzna"
+      },
+      "forecast_high": {
+        "name": "Prognozowana temperatura maksymalna"
+      },
+      "forecast_low": {
+        "name": "Prognozowana temperatura minimalna"
+      },
+      "effective_target_temp": {
+        "name": "Temperatura docelowa"
+      },
+      "heat_threshold": {
+        "name": "Próg grzania"
+      },
+      "cool_threshold": {
+        "name": "Próg chłodzenia"
+      }
+    },
+    "switch": {
+      "automation_enabled": {
+        "name": "Automatyka"
+      }
+    }
+  },
+  "selector": {
+    "fan_mode": {
+      "options": {
+        "disabled": "Wyłączone (bez sterowania wentylatorem)",
+        "whole_house_fan": "Wentylator całego domu (dedykowana encja)",
+        "hvac_fan": "Tryb wentylatora HVAC"
+      }
+    },
+    "hvac_fan_restrict": {
+      "options": {
+        "heat": "Tylko grzanie (unikaj wilgoci po chłodzeniu)",
+        "cool": "Tylko chłodzenie",
+        "both": "Oba (bez ograniczenia)"
+      }
+    },
+    "outdoor_temp_source": {
+      "options": {
+        "weather_service": "Usługa pogodowa (zalecane)",
+        "sensor": "Dedykowany czujnik",
+        "input_number": "Pomocnik wejściowy (input_number)"
+      }
+    },
+    "indoor_temp_source": {
+      "options": {
+        "climate_fallback": "Encja klimatu (zalecane)",
+        "sensor": "Dedykowany czujnik",
+        "input_number": "Pomocnik wejściowy (input_number)"
+      }
+    },
+    "thermostat_companion": {
+      "options": {
+        "auto": "Auto (używaj dokładniejszego czujnika termostatu, gdy się sprawdzi)",
+        "off": "Wył. (zawsze używaj odczytu samego termostatu)"
+      }
+    },
+    "temp_unit": {
+      "options": {
+        "fahrenheit": "Fahrenheit (°F)",
+        "celsius": "Celsjusz (°C)"
+      }
+    },
+    "prediction_engine": {
+      "options": {
+        "none": "Brak",
+        "v3": "v3",
+        "v4": "v4"
+      }
+    },
+    "weekday": {
+      "options": {
+        "mon": "pon.",
+        "tue": "wt.",
+        "wed": "śr.",
+        "thu": "czw.",
+        "fri": "pt.",
+        "sat": "sob.",
+        "sun": "niedz."
+      }
+    },
+    "ai_reasoning_effort": {
+      "options": {
+        "low": "Niski",
+        "medium": "Średni",
+        "high": "Wysoki"
+      }
+    },
+    "suggestion_action": {
+      "options": {
+        "accept": "Zaakceptuj",
+        "dismiss": "Odrzuć"
+      }
+    },
+    "reset_scope": {
+      "options": {
+        "all": "Wszystkie wyuczone dane",
+        "thermal_model": "Model termiczny",
+        "weather_bias": "Błąd prognozy pogody",
+        "suggestions": "Odrzucone sugestie"
+      }
+    }
+  },
+  "services": {
+    "respond_to_suggestion": {
+      "name": "Odpowiedz na sugestię",
+      "description": "Zaakceptuj lub odrzuć sugestię uczenia się od Climate Advisor.",
+      "fields": {
+        "entry_id": {
+          "name": "Strefa",
+          "description": "Strefa Climate Advisor (wpis konfiguracji), której dotyczy to wywołanie. Wymagane od Issue #796 — przy więcej niż jednej skonfigurowanej strefie rejestr usług HA nie ma innego sposobu, by wiedzieć, której strefy dotyczy wywołanie."
+        },
+        "action": {
+          "name": "Działanie",
+          "description": "Czy zaakceptować, czy odrzucić sugestię."
+        },
+        "suggestion_key": {
+          "name": "Klucz sugestii",
+          "description": "Klucz identyfikujący sugestię, na którą odpowiadasz."
+        }
+      }
+    },
+    "force_reclassify": {
+      "name": "Wymuś ponowną klasyfikację",
+      "description": "Wymuś na Climate Advisor ponowne pobranie danych prognozy i ponowną klasyfikację dnia. Przydatne przy debugowaniu.",
+      "fields": {
+        "entry_id": {
+          "name": "Strefa",
+          "description": "Strefa Climate Advisor (wpis konfiguracji), której dotyczy to wywołanie. Wymagane od Issue #796 — przy więcej niż jednej skonfigurowanej strefie rejestr usług HA nie ma innego sposobu, by wiedzieć, której strefy dotyczy wywołanie."
+        }
+      }
+    },
+    "resend_briefing": {
+      "name": "Wyślij podsumowanie ponownie",
+      "description": "Wygeneruj ponownie i wyślij ponownie powiadomienie z codziennym podsumowaniem, nawet jeśli zostało już dziś wysłane.",
+      "fields": {
+        "entry_id": {
+          "name": "Strefa",
+          "description": "Strefa Climate Advisor (wpis konfiguracji), której dotyczy to wywołanie. Wymagane od Issue #796 — przy więcej niż jednej skonfigurowanej strefie rejestr usług HA nie ma innego sposobu, by wiedzieć, której strefy dotyczy wywołanie."
+        }
+      }
+    },
+    "dump_diagnostics": {
+      "name": "Zrzut diagnostyczny",
+      "description": "Zapisz w dzienniku obszerną migawkę diagnostyczną wewnętrznego stanu Climate Advisor do rozwiązywania problemów. Wynik jest zapisywany na poziomie INFO — sprawdź dzienniki Home Assistant, aby go zobaczyć.",
+      "fields": {
+        "entry_id": {
+          "name": "Strefa",
+          "description": "Strefa Climate Advisor (wpis konfiguracji), której dotyczy to wywołanie. Wymagane od Issue #796 — przy więcej niż jednej skonfigurowanej strefie rejestr usług HA nie ma innego sposobu, by wiedzieć, której strefy dotyczy wywołanie."
+        }
+      }
+    },
+    "reset_learning_data": {
+      "name": "Zresetuj dane uczenia się",
+      "description": "Zresetuj część lub całość danych wyuczonych przez Climate Advisor. Użyj po wymianie sprzętu HVAC, przeprowadzce lub aby zacząć od nowa.",
+      "fields": {
+        "entry_id": {
+          "name": "Strefa",
+          "description": "Strefa Climate Advisor (wpis konfiguracji), której dotyczy to wywołanie. Wymagane od Issue #796 — przy więcej niż jednej skonfigurowanej strefie rejestr usług HA nie ma innego sposobu, by wiedzieć, której strefy dotyczy wywołanie. Sprawdź to dokładnie przed wywołaniem — ta usługa nieodwracalnie usuwa dane."
+        },
+        "scope": {
+          "name": "Zakres",
+          "description": "Jakie dane zresetować. „all” usuwa wszystko. „thermal_model” czyści obserwacje cykli pracy HVAC. „weather_bias” czyści zapisy trafności prognoz. „suggestions” pozwala ponownie pojawić się wcześniej odrzuconym sugestiom."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "unknown_zone": {
+      "message": "Nieznana lub niewczytana strefa Climate Advisor o entry_id „{entry_id}”. Sprawdź właściwą strefę w Ustawienia > Urządzenia i usługi."
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "common.duration.hours": "{n, plural, one {# sa} other {# sa}}",
+  "common.duration.hours_frac": "{n, number, ::.0} sa",
+  "common.duration.min": "{n, plural, one {# dk} other {# dk}}",
+  "common.mode.auto": "Otomatik",
+  "common.mode.cool": "Soğutma",
+  "common.mode.fan_only": "Yalnızca fan",
+  "common.mode.heat": "Isıtma",
+  "common.mode.heat_cool": "Isıtma/Soğutma",
+  "common.mode.off": "Kapalı",
+  "common.unknown": "Bilinmiyor"
+}

@@ -1,0 +1,12 @@
+{
+  "common.duration.hours": "{n, plural, one {# godz.} few {# godz.} many {# godz.} other {# godz.}}",
+  "common.duration.hours_frac": "{n, number, ::.0} godz.",
+  "common.duration.min": "{n, plural, one {# min} few {# min} many {# min} other {# min}}",
+  "common.mode.auto": "Auto",
+  "common.mode.cool": "Chłodzenie",
+  "common.mode.fan_only": "Tylko wentylator",
+  "common.mode.heat": "Ogrzewanie",
+  "common.mode.heat_cool": "Grzanie/Chłodzenie",
+  "common.mode.off": "Wyłączone",
+  "common.unknown": "Nieznany"
+}

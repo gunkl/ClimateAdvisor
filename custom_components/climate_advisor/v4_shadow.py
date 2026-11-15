@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta, tzinfo
 from datetime import time as dtime
 from typing import Any
 
+from . import i18n
 from .const import V4_PREDICT_HORIZON_HOURS, V4_UNUSABLE_WARN_REFITS
 from .remote_offset import RemoteLoopEmulator  # noqa: F401 - Issue #1553: the shared emulated loop (re-exported)
 from .window_span import (  # noqa: F401 - the shared rule lives in the engine-neutral module; re-exported here
@@ -288,25 +289,92 @@ def unusable_fit_record(
     }
 
 
+# Issue #1341: the words of this module are whole-sentence catalog messages (area ``timeline``, keys
+# ``timeline.v4.*``); the ``describe_*`` / ``*_notice`` functions keep their ``str`` API as the English rendering of
+# the matching ``*_msg`` function, so the log lines and the Debug tab keep their exact text.
+
+# The engine's stored fit reasons are persisted codes (``predictor_v4``: they stay as stored); each known one has a
+# catalog word, an unknown one (``fit failed: ValueError``) is shown as stored.
+_FIT_REASON_KEYS: dict[str, str] = {
+    "confidence none": "confidence_none",
+    "no usable fit": "no_usable_fit",
+    "too few scored points": "too_few_scored_points",
+    "too few samples": "too_few_samples",
+    "too few anchors": "too_few_anchors",
+    "non-finite initial cost": "non_finite_cost",
+    "under 3 days of samples": "under_3_days",
+    "under 10 days of samples": "under_10_days",
+    "fit diverged": "fit_diverged",
+    "does not beat no-change at 4 h by 10 %": "no_beat_4h",
+    "heating or cooling not yet observed": "mode_not_observed",
+    "too few accepted thermostat starts in a used mode": "too_few_starts_used_mode",
+    "too few accepted thermostat starts": "too_few_starts",
+    "carried from last season": "carried",
+    "heating not seen": "heating_not_seen",
+    "cooling not seen": "cooling_not_seen",
+    "too few anchors with heating": "few_anchors_heating",
+    "too few anchors with cooling": "few_anchors_cooling",
+    "does not beat no-change by 10 % while heating": "no_beat_heating",
+    "does not beat no-change by 10 % while cooling": "no_beat_cooling",
+}
+
+
+def _reason_param(code: Any) -> Any:
+    """A stored fit reason as a message parameter: its catalog word when known, else the stored text."""
+
+    text = str(code or "")
+    key = _FIT_REASON_KEYS.get(text)
+    return i18n.Code(f"timeline.v4.reason.{key}") if key else text
+
+
+def _kept_param(rec: Mapping[str, Any]) -> Any:
+
+    kept = str(rec.get("kept_fitted_at") or "")[:10]
+    return kept if kept else i18n.Code("timeline.v4.earlier_fit")
+
+
+def describe_unusable_fit_msg(rec: Mapping[str, Any] | None) -> Any:
+    """``"last refit unusable (<reason>); keeping the model from <date>"`` as a message; None when there is none."""
+
+    if not isinstance(rec, Mapping):
+        return None
+    n = rec.get("count") if isinstance(rec.get("count"), int) else 1
+    return i18n.Msg(
+        "timeline.v4.unusable_fit",
+        n=max(1, n),
+        reason=_reason_param(rec.get("fit_reason") or "confidence none"),
+        kept=_kept_param(rec),
+    )
+
+
+def unusable_fit_notice_msg(rec: Mapping[str, Any] | None) -> Any:
+    """The occupant-facing sentence once V4_UNUSABLE_WARN_REFITS refits in a row were unusable; None before that."""
+
+    if not isinstance(rec, Mapping) or not isinstance(rec.get("count"), int) or rec["count"] < V4_UNUSABLE_WARN_REFITS:
+        return None
+    return i18n.Msg(
+        "timeline.v4.unusable_notice",
+        n=rec["count"],
+        reason=_reason_param(rec.get("fit_reason") or "confidence none"),
+        kept=_kept_param(rec),
+    )
+
+
+def _en_or_empty(msg: Any) -> str:
+
+    if msg is None:
+        return ""
+    return i18n.render_en(msg)
+
+
 def describe_unusable_fit(rec: Mapping[str, Any] | None) -> str:
     """ "last refit unusable (<reason>); keeping the model from <date>" for the log and the Debug tab; "" when none."""
-    if not isinstance(rec, Mapping):
-        return ""
-    kept = str(rec.get("kept_fitted_at") or "")[:10] or "an earlier fit"
-    n = rec.get("count") if isinstance(rec.get("count"), int) else 1
-    head = "last refit unusable" if n <= 1 else f"last {n} refits unusable"
-    return f"{head} ({rec.get('fit_reason') or 'confidence none'}); keeping the model from {kept}"
+    return _en_or_empty(describe_unusable_fit_msg(rec))
 
 
 def unusable_fit_notice(rec: Mapping[str, Any] | None) -> str:
     """The occupant-facing sentence once V4_UNUSABLE_WARN_REFITS refits in a row were unusable; "" before that."""
-    if not isinstance(rec, Mapping) or not isinstance(rec.get("count"), int) or rec["count"] < V4_UNUSABLE_WARN_REFITS:
-        return ""
-    kept = str(rec.get("kept_fitted_at") or "")[:10] or "an earlier fit"
-    return (
-        f"v4 could not refit your home the last {rec['count']} times ({rec.get('fit_reason') or 'confidence none'}); "
-        f"pre-heat, pre-cool and the other decisions still use the model from {kept}"
-    )
+    return _en_or_empty(unusable_fit_notice_msg(rec))
 
 
 # ---------------------------------------------------------------------------
@@ -342,13 +410,42 @@ def node_choice_changed(previous: Mapping[str, Any] | None, new: Mapping[str, An
 _MODE_WORD = {"heat": "heating", "cool": "cooling"}
 
 
-def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
-    """``(why, by_mode)`` in plain words for the Debug tab: why v4 has its grade, and each mode's thermostat starts.
+def _word_param(mode: str) -> Any:
 
-    ``summary`` is :func:`model_summary`'s dict. v4 is ``ok`` only when BOTH heating and cooling have enough usable
-    thermostat starts in the training window (``predictor_v4.fit``'s gates); this says which input holds it back."""
+    return i18n.Code(f"timeline.v4.word.{_MODE_WORD[mode]}")
+
+
+def _grade_param(grade: Any) -> Any:
+
+    return i18n.Code(f"timeline.v4.grade.{grade}") if grade in ("ok", "low", "none") else str(grade)
+
+
+def _days_param(days: Any) -> Any:
+
+    if isinstance(days, (int, float)):
+        return i18n.Msg("timeline.v4.days", n=float(days))
+    return i18n.Msg("timeline.v4.too_few_days")
+
+
+# The persisted v4 fit codes (predictor_v4 writes these exact strings into the stored model, so they are data codes,
+# not display text; #1341). Each maps to the catalog message family describe_* renders for it.
+_V4_REASON_KINDS: dict[str, str] = {
+    "under 3 days of samples": "under_3_days",
+    "fit diverged": "fit_diverged",
+    "does not beat no-change at 4 h by 10 %": "no_beat_4h",
+    "under 10 days of samples": "under_10_days",
+    "heating or cooling not yet observed": "mode_not_observed",
+    "too few accepted thermostat starts in a used mode": "too_few_starts",
+}
+
+
+def describe_grade_msgs(summary: Mapping[str, Any] | None) -> tuple[Any, Any]:
+    """``(why, by_mode)`` as messages (a stored reason this module has no word for stays text); ``(None, None)`` when
+    there is no model. See :func:`describe_grade`."""
+
+    M = i18n.Msg  # noqa: N806 - the message constructor, short at its many call sites
     if not isinstance(summary, Mapping) or not summary.get("has_model"):
-        return "", ""
+        return None, None
     try:
         pv = _predictor()
         need_starts, need_days = int(pv.GATE_MIN_ACCEPTED_STARTS), float(pv.GATE_MIN_DAYS_OK)
@@ -356,30 +453,54 @@ def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
         need_starts, need_days = 5, 10.0
     modes = summary.get("modes") if isinstance(summary.get("modes"), Mapping) else {}
 
-    def mode_txt(mode: str) -> str:
+    def mode_msg(mode: str) -> Any:
         m = modes.get(mode) if isinstance(modes.get(mode), Mapping) else {}
-        word, acc, tot, grade = _MODE_WORD[mode], m.get("accepted"), m.get("starts"), m.get("grade")
+        word, acc, tot, grade = _word_param(mode), m.get("accepted"), m.get("starts"), m.get("grade")
         if m.get("carried_grade"):
             # Issue #1525: what the house learned about this mode stands until new runs of it displace it
-            new = "not seen" if m.get("seen") is False else f"{acc if isinstance(acc, int) else 0} usable new starts"
-            return f"{word} {grade}: {m.get('reason')} ({new})"
+            new = (
+                M("timeline.v4.mode.new_not_seen")
+                if m.get("seen") is False
+                else M("timeline.v4.mode.new_starts", n=acc if isinstance(acc, int) else 0)
+            )
+            return M(
+                "timeline.v4.mode.carried",
+                word=word,
+                grade=_grade_param(grade),
+                reason=_reason_param(m.get("reason")),
+                new=new,
+            )
         if grade == "unseen" or m.get("seen") is False or (not tot and m.get("seen") is None):
-            return f"{word} not seen"
+            return M("timeline.v4.mode.not_seen", word=word)
         if not isinstance(acc, int):
-            return f"{word}: no start count"
-        enough = "enough" if acc >= need_starts else f"needs {need_starts}"
-        starts = f"{acc} usable of {tot} starts ({enough})"
+            return M("timeline.v4.mode.no_count", word=word)
+        enough = M("timeline.v4.mode.enough") if acc >= need_starts else M("timeline.v4.mode.needs", n=need_starts)
+        starts = M("timeline.v4.mode.starts", acc=acc, tot=tot if tot is not None else "None", enough=enough)
         if grade in ("ok", "low", "none"):
             why = m.get("reason") or ""
-            extra = f"; {why}" if grade == "low" and why and "starts" not in why else ""
-            return f"{word} {grade}: {starts}{extra}"
-        return f"{word} {starts}"
+            if grade == "low" and why and "starts" not in why:
+                return M(
+                    "timeline.v4.mode.graded_why",
+                    word=word,
+                    grade=_grade_param(grade),
+                    starts=starts,
+                    why=_reason_param(why),
+                )
+            return M("timeline.v4.mode.graded", word=word, grade=_grade_param(grade), starts=starts)
+        return M("timeline.v4.mode.plain", word=word, starts=starts)
 
     span = summary.get("span_days")
-    window = f" in the last {round(float(span))} days" if isinstance(span, (int, float)) else ""
-    by_mode = " · ".join(mode_txt(m) for m in ("heat", "cool")) + window if modes else ""
+    span_days = round(float(span)) if isinstance(span, (int, float)) else None
+    by_mode: Any = None
+    if modes:
+        parts = {"heat": mode_msg("heat"), "cool": mode_msg("cool")}
+        by_mode = (
+            M("timeline.v4.by_mode_window", heat=parts["heat"], cool=parts["cool"], days=span_days)
+            if span_days is not None
+            else M("timeline.v4.by_mode", heat=parts["heat"], cool=parts["cool"])
+        )
     days = summary.get("sample_days")
-    days_w = f"{float(days):.1f} days" if isinstance(days, (int, float)) else "too few days"
+    days_w = _days_param(days)
     code = summary.get("confidence_reason") or ""
     carried_reason = next(
         (
@@ -389,35 +510,182 @@ def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
         ),
         "",
     )
-    carried = [
-        _MODE_WORD[m] for m in ("heat", "cool") if isinstance(modes.get(m), Mapping) and modes[m].get("carried_grade")
-    ]
+
+    def words(selected: list[str]) -> Any:
+        return i18n.ListOf([_word_param(m) for m in selected], "and")
+
+    carried = [m for m in ("heat", "cool") if isinstance(modes.get(m), Mapping) and modes[m].get("carried_grade")]
     short = [
-        _MODE_WORD[m]
+        m
         for m in ("heat", "cool")
-        if isinstance(modes.get(m), Mapping)
-        and (modes[m].get("accepted") or 0) < need_starts
-        and _MODE_WORD[m] not in carried
+        if isinstance(modes.get(m), Mapping) and (modes[m].get("accepted") or 0) < need_starts and m not in carried
     ]
     unseen = [
-        _MODE_WORD[m]
+        m
         for m in ("heat", "cool")
         if isinstance(modes.get(m), Mapping) and not modes[m].get("seen") and not modes[m].get("carried")
     ]
-    why = {
-        "": ("every check passes" + (f"; {' and '.join(carried)} {carried_reason}" if carried else ""))
-        if summary.get("confidence") == "ok"
-        else "",
-        "under 3 days of samples": f"only {days_w} of history (needs 3)",
-        "fit diverged": "the last fit did not settle on a model",
-        "does not beat no-change at 4 h by 10 %": 'it does not yet beat "no change" by 10 % at 4 h ahead',
-        "under 10 days of samples": f"only {days_w} of history (needs {need_days:g} for ok)",
-        "heating or cooling not yet observed": f"{' and '.join(unseen) or 'one mode'} not seen{window} "
-        "(ok needs both heating and cooling)",
-        "too few accepted thermostat starts in a used mode": f"too few usable {' and '.join(short) or ''} starts "
-        f"(ok needs {need_starts} in each mode it has seen)".replace("usable  starts", "usable starts"),
-    }.get(code, code)
+    why: Any
+    kind = _V4_REASON_KINDS.get(code)
+    if code == "":
+        if summary.get("confidence") != "ok":
+            why = ""
+        elif carried:
+            why = M("timeline.v4.why.ok_carried", modes=words(carried), reason=_reason_param(carried_reason))
+        else:
+            why = M("timeline.v4.why.ok")
+    elif kind == "under_3_days":
+        why = M("timeline.v4.why.under_3_days", days=days_w)
+    elif kind == "fit_diverged":
+        why = M("timeline.v4.why.fit_diverged")
+    elif kind == "no_beat_4h":
+        why = M("timeline.v4.why.no_beat_4h")
+    elif kind == "under_10_days":
+        why = M("timeline.v4.why.under_10_days", days=days_w, need=need_days)
+    elif kind == "mode_not_observed":
+        modes_p = words(unseen) if unseen else M("timeline.v4.one_mode")
+        why = (
+            M("timeline.v4.why.mode_not_observed_window", modes=modes_p, days=span_days)
+            if span_days is not None
+            else M("timeline.v4.why.mode_not_observed", modes=modes_p)
+        )
+    elif kind == "too_few_starts":
+        why = (
+            M("timeline.v4.why.too_few_starts", modes=words(short), need=need_starts)
+            if short
+            else M("timeline.v4.why.too_few_starts_any", need=need_starts)
+        )
+    else:
+        why = str(code)
     return why, by_mode
+
+
+def describe_grade(summary: Mapping[str, Any] | None) -> tuple[str, str]:
+    """``(why, by_mode)`` in plain words for the Debug tab: why v4 has its grade, and each mode's thermostat starts.
+
+    ``summary`` is :func:`model_summary`'s dict. v4 is ``ok`` only when BOTH heating and cooling have enough usable
+    thermostat starts in the training window (``predictor_v4.fit``'s gates); this says which input holds it back.
+    The English rendering of :func:`describe_grade_msgs` (``("", "")`` when there is no model)."""
+    why, by_mode = describe_grade_msgs(summary)
+    return _en_or_empty(why), _en_or_empty(by_mode)
+
+
+def describe_node_choice_msgs(
+    choice: Mapping[str, Any] | None,
+    *,
+    unit: str | None = None,
+    fmt_delta: Callable[[float], str] | None = None,
+    names: Mapping[str, str] | None = None,
+    changed: bool = False,
+) -> tuple[Any, Any]:
+    """``(headline, reason)`` as messages (``(None, None)`` without a choice; the reason is None for an unknown code).
+
+    Temperature differences are ``TempDelta`` parameters in ``unit`` (2 decimals, rendered in the reader's language);
+    a caller that has only a formatter (``fmt_delta``, degrees F in, text out) gets its text instead, which is how the
+    ``str`` wrapper below keeps its exact output."""
+
+    M = i18n.Msg  # noqa: N806
+    if not isinstance(choice, Mapping):
+        return None, None
+    names = names or {}
+
+    def delta(f: float) -> Any:
+        if fmt_delta is not None:
+            return fmt_delta(f)
+        return i18n.TempDelta(float(f), unit or "fahrenheit", 2)
+
+    now_w = "yes" if changed else "no"
+    prim, sleep = choice.get("primary"), choice.get("sleep")
+    p_name: Any = names.get(prim, prim) if isinstance(prim, str) else M("timeline.v4.node.the_thermostat")
+    s_name: Any = names.get(sleep, sleep) if isinstance(sleep, str) else M("timeline.v4.node.the_sleep_sensor")
+    per_room = choice.get("model") == MODEL_PER_ROOM
+    if per_room:
+        headline = (
+            M("timeline.v4.node.headline_rooms", changed=now_w)
+            if sleep
+            else M("timeline.v4.node.headline_thermostat", changed=now_w)
+        )
+    else:
+        headline = M("timeline.v4.node.headline_stitched", changed=now_w)
+
+    def days(key: str) -> Any:
+        d = choice.get(f"{key}_days")
+        return M("timeline.v4.days", n=float(d)) if isinstance(d, (int, float)) else M("timeline.v4.no_days")
+
+    need = choice.get("min_days", 3.0)
+    need_w: Any = float(need) if isinstance(need, (int, float)) else 3
+    mae = (choice.get("scores") or {}).get("mae") or {}
+    a, b = mae.get(MODEL_STITCHED) or {}, mae.get(MODEL_PER_ROOM) or {}
+    lead = str(choice.get("lead") or "4h")
+
+    def score_msg() -> Any:
+        if b.get(lead) is None or a.get(lead) is None:
+            return ""
+        others = [k for k in ("1h", "12h") if k != lead and a.get(k) is not None and b.get(k) is not None]
+        if len(others) == 2:
+            more: Any = M(
+                "timeline.v4.node.others_two",
+                h1=others[0][:-1], b1=delta(b[others[0]]), a1=delta(a[others[0]]),
+                h2=others[1][:-1], b2=delta(b[others[1]]), a2=delta(a[others[1]]),
+            )  # fmt: skip
+        elif others:
+            more = M("timeline.v4.node.others_one", h1=others[0][:-1], b1=delta(b[others[0]]), a1=delta(a[others[0]]))
+        else:
+            more = ""
+        return M(
+            "timeline.v4.node.score_room" if sleep else "timeline.v4.node.score_own",
+            b=delta(b[lead]),
+            a=delta(a[lead]),
+            h=lead[:-1],
+            more="none" if more == "" else "some",
+            others=more if more != "" else "",
+            p_name=p_name,
+        )
+
+    reason_code = choice.get("reason")
+    qual = (
+        M(
+            "timeline.v4.node.qual_rooms",
+            need=need_w,
+            p_name=p_name,
+            pdays=days("primary"),
+            s_name=s_name,
+            sdays=days("sleep"),
+        )
+        if sleep
+        else M("timeline.v4.node.qual_one", need=need_w, p_name=p_name, pdays=days("primary"))
+    )
+    reason: Any
+    if reason_code == "per_room_no_worse":
+        reason = M("timeline.v4.node.reason_no_worse", qual=qual, score=score_msg())
+    elif reason_code == "stitched_not_usable":
+        reason = M("timeline.v4.node.reason_stitched_unusable", qual=qual)
+    elif reason_code == "per_room_scored_worse":
+        tol = choice.get("tolerance_f")
+        if isinstance(tol, (int, float)):
+            reason = M("timeline.v4.node.reason_worse_tol", qual=qual, score=score_msg(), tol=delta(float(tol)))
+        else:
+            reason = M("timeline.v4.node.reason_worse", qual=qual, score=score_msg())
+    elif reason_code == "too_few_shared_anchors":
+        n = (choice.get("scores") or {}).get("n_anchors")
+        reason = M("timeline.v4.node.reason_few_anchors", qual=qual, n=n if isinstance(n, (int, float)) else str(n))
+    elif reason_code == "per_room_not_usable":
+        reason = M(
+            "timeline.v4.node.reason_not_fitted",
+            qual=qual,
+            why=_reason_param(choice.get("per_room_fit_reason") or "no usable fit"),
+        )
+    elif reason_code == "primary_not_ready":
+        reason = M("timeline.v4.node.reason_primary_not_ready", p_name=p_name, pdays=days("primary"), need=need_w)
+    elif reason_code == "sleep_not_ready":
+        reason = M(
+            "timeline.v4.node.reason_sleep_not_ready", s_name=s_name, sdays=days("sleep"), need=need_w, p_name=p_name
+        )
+    elif reason_code == "no_primary_entity":
+        reason = M("timeline.v4.node.reason_no_primary")
+    else:
+        reason = None
+    return headline, reason
 
 
 def describe_node_choice(
@@ -430,78 +698,10 @@ def describe_node_choice(
     """``(headline, reason)`` in plain words for the INFO line, the Activity row and the Debug tab (Issue #1432).
 
     ``fmt_delta`` formats a temperature DIFFERENCE given in degrees F in the user's unit (``format_temp_delta``);
-    ``names`` maps entity ids to friendly names. ``changed`` words the headline as a change ("now forecasts")."""
-    if not isinstance(choice, Mapping):
-        return "", ""
-    names = names or {}
-    now_w = "now " if changed else ""
-    prim, sleep = choice.get("primary"), choice.get("sleep")
-    p_name = names.get(prim, prim) if isinstance(prim, str) else "the thermostat"
-    s_name = names.get(sleep, sleep) if isinstance(sleep, str) else "the sleep sensor"
-    per_room = choice.get("model") == MODEL_PER_ROOM
-    if per_room:
-        headline = (
-            f"v4 {now_w}forecasts each room separately (thermostat by day, bedroom at night)"
-            if sleep
-            else f"v4 {now_w}forecasts the thermostat's room from its own readings"
-        )
-    else:
-        headline = f"v4 {now_w}forecasts from the stitched Climate Advisor reading (one model for every room)"
-
-    def days(key: str) -> str:
-        d = choice.get(f"{key}_days")
-        return f"{float(d):.1f} days" if isinstance(d, (int, float)) else "no days"
-
-    need = choice.get("min_days", 3.0)
-    need_w = f"{float(need):g}" if isinstance(need, (int, float)) else "3"
-    mae = (choice.get("scores") or {}).get("mae") or {}
-    a, b = mae.get(MODEL_STITCHED) or {}, mae.get(MODEL_PER_ROOM) or {}
-    lead = str(choice.get("lead") or "4h")
-
-    def score_txt() -> str:
-        if b.get(lead) is None or a.get(lead) is None:
-            return ""
-        who = "the per-room forecast" if sleep else f"{p_name}'s own forecast"
-        main = f"{who} scored {fmt_delta(b[lead])} vs {fmt_delta(a[lead])} at {lead[:-1]} h"
-        others = [
-            f"{k[:-1]} h {fmt_delta(b[k])} vs {fmt_delta(a[k])}"
-            for k in ("1h", "12h")
-            if k != lead and a.get(k) is not None and b.get(k) is not None
-        ]
-        return main + (f" ({', '.join(others)})" if others else "")
-
-    reason_code = choice.get("reason")
-    rooms = "both rooms have" if sleep else f"{p_name} has"
-    qual = f"{rooms} {need_w}+ days of readings ({p_name} {days('primary')}" + (
-        f", {s_name} {days('sleep')})" if sleep else ")"
-    )
-    if reason_code == "per_room_no_worse":
-        reason = f"{qual} and {score_txt()} on this home's history"
-    elif reason_code == "stitched_not_usable":
-        reason = f"{qual} and the stitched model has no usable fit"
-    elif reason_code == "per_room_scored_worse":
-        tol = choice.get("tolerance_f")
-        tol_w = f" (it may be at most {fmt_delta(float(tol))} worse)" if isinstance(tol, (int, float)) else ""
-        reason = f"{qual}, but {score_txt()} on this home's history{tol_w}"
-    elif reason_code == "too_few_shared_anchors":
-        n = (choice.get("scores") or {}).get("n_anchors")
-        reason = f"{qual}, but there is not enough shared history yet to compare the two forecasts ({n} points)"
-    elif reason_code == "per_room_not_usable":
-        why = choice.get("per_room_fit_reason") or "no usable fit"
-        reason = f"{qual}, but its own model could not be fitted ({why})"
-    elif reason_code == "primary_not_ready":
-        reason = f"{p_name} has only {days('primary')} of its own readings (needs {need_w})"
-    elif reason_code == "sleep_not_ready":
-        reason = (
-            f"{s_name} has only {days('sleep')} of its own readings (needs {need_w}) for a model of its own; until "
-            f"then the stitched reading (the bedroom at night) is forecast as one line, and sleep hours are never "
-            f"forecast from {p_name}'s room"
-        )
-    elif reason_code == "no_primary_entity":
-        reason = "no thermostat sensor to model on its own"
-    else:
-        reason = ""
-    return headline, reason
+    ``names`` maps entity ids to friendly names. ``changed`` words the headline as a change ("now forecasts").
+    The English rendering of :func:`describe_node_choice_msgs`."""
+    headline, reason = describe_node_choice_msgs(choice, fmt_delta=fmt_delta, names=names, changed=changed)
+    return _en_or_empty(headline), _en_or_empty(reason)
 
 
 def display_candidates(

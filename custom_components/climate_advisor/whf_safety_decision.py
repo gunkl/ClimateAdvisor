@@ -42,6 +42,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from . import i18n
+
 # Fan modes in which a physical whole-house fan exists (mirrors const.FAN_MODE_WHOLE_HOUSE / _BOTH;
 # kept literal so this leaf has no package imports).
 _WHF_FAN_MODES = frozenset({"whole_house_fan", "both"})
@@ -200,6 +202,13 @@ class WhfSafetyDecision:
     sealed: bool = False
     in_flight: bool = False  # Issue #1215: NONE because Climate Advisor's own stop is still converging
     backstop: bool = False  # Issue #1288: decided by the rule-2 state backstop (device state, no press stamp)
+    # The translatable form of ``reason`` (Issue #1341); ``reason`` stays the English record/log text.
+    reason_msg: i18n.Msg | None = None
+
+
+def _decision(action: WhfSafetyAction, msg: i18n.Msg, **kwargs: object) -> WhfSafetyDecision:
+    """A decision whose English ``reason`` and translatable ``reason_msg`` come from one ``Msg``."""
+    return WhfSafetyDecision(action, i18n.render_en(msg), reason_msg=msg, **kwargs)  # type: ignore[arg-type]
 
 
 def sensor_reading(
@@ -260,21 +269,24 @@ def decide_whf_safety(inputs: WhfSafetyInputs) -> WhfSafetyDecision:
     then rule 2 (WHF vs HVAC, newest occupant action wins), then the rule-2 state backstop.
     """
     if inputs.fan_mode not in _WHF_FAN_MODES:
-        return WhfSafetyDecision(WhfSafetyAction.NONE, "not a whole-house-fan install")
+        return _decision(WhfSafetyAction.NONE, i18n.Msg("notify.whf_reason_not_a_whf"))
 
     running = inputs.fan_on if inputs.fan_on is not None else inputs.fan_believed_on
     if not running:
-        return WhfSafetyDecision(WhfSafetyAction.NONE, "fan not running")
+        return _decision(WhfSafetyAction.NONE, i18n.Msg("notify.whf_reason_fan_not_running"))
 
     # Issue #1215: Climate Advisor's own stop is still converging. One stop runs at a time: the physical reading lags
     # the command, so "running" inside the window is the stop working, not a fresh violation. Deciding again here is
     # what restarted the fan 29 times in two minutes. The window ends (and the stop is judged, retried or reported)
     # in the shell, not here.
     if inputs.stop_in_flight_for_s is not None:
-        return WhfSafetyDecision(
+        return _decision(
             WhfSafetyAction.NONE,
-            f"stop in flight ({inputs.stop_in_flight_for_s:.0f}s of {WHF_STOP_CONVERGE_WINDOW_S:.0f}s):"
-            " awaiting the physical reading",
+            i18n.Msg(
+                "notify.whf_reason_stop_in_flight",
+                elapsed=round(inputs.stop_in_flight_for_s),
+                window=round(WHF_STOP_CONVERGE_WINDOW_S),
+            ),
             in_flight=True,
         )
 
@@ -293,16 +305,16 @@ def decide_whf_safety(inputs: WhfSafetyInputs) -> WhfSafetyDecision:
                 wait = WHF_SEALED_CONFIRM_S - min(stable)
                 retry = max(retry or 0.0, wait)
         if retry is not None:
-            return WhfSafetyDecision(
+            return _decision(
                 WhfSafetyAction.DEFER,
-                "sealed house — settling before stopping the fan",
+                i18n.Msg("notify.whf_reason_sealed_settling"),
                 retry_in_s=retry,
                 stale_sensor_count=stale,
                 sealed=True,
             )
-        return WhfSafetyDecision(
+        return _decision(
             WhfSafetyAction.STOP_SEALED,
-            "whole-house fan running with every door/window closed",
+            i18n.Msg("notify.whf_reason_sealed_stop"),
             stale_sensor_count=stale,
             sealed=True,
         )
@@ -311,22 +323,22 @@ def decide_whf_safety(inputs: WhfSafetyInputs) -> WhfSafetyDecision:
     if inputs.thermostat_mode in WHF_ACTIVE_HVAC_MODES:
         fan_t, hvac_t = inputs.occupant_fan_on_at, inputs.occupant_hvac_on_at
         if hvac_t is not None and (fan_t is None or hvac_t > fan_t):
-            return WhfSafetyDecision(
+            return _decision(
                 WhfSafetyAction.STOP_MUTEX_FAN,
-                f"occupant turned HVAC on ({inputs.thermostat_mode}) after the fan — newest action wins",
+                i18n.Msg("notify.whf_reason_occupant_hvac_after_fan", mode=str(inputs.thermostat_mode)),
                 stale_sensor_count=stale,
             )
         if fan_t is not None and not inputs.whf_owns_hvac:
-            return WhfSafetyDecision(
+            return _decision(
                 WhfSafetyAction.SUPPRESS_HVAC,
-                f"occupant turned the fan on after HVAC ({inputs.thermostat_mode}) — newest action wins",
+                i18n.Msg("notify.whf_reason_occupant_fan_after_hvac", mode=str(inputs.thermostat_mode)),
                 stale_sensor_count=stale,
             )
 
     backstop = _rule2_state_backstop(inputs, stale)
     if backstop is not None:
         return backstop
-    return WhfSafetyDecision(WhfSafetyAction.NONE, "no conflict", stale_sensor_count=stale)
+    return _decision(WhfSafetyAction.NONE, i18n.Msg("notify.whf_reason_no_conflict"), stale_sensor_count=stale)
 
 
 def _rule2_state_backstop(inputs: WhfSafetyInputs, stale: int) -> WhfSafetyDecision | None:
@@ -352,26 +364,34 @@ def _rule2_state_backstop(inputs: WhfSafetyInputs, stale: int) -> WhfSafetyDecis
     if inputs.own_hvac_off_for_s is not None and inputs.own_hvac_off_for_s < WHF_RULE2_OWN_OFF_QUIET_S:
         retry = max(retry, WHF_RULE2_OWN_OFF_QUIET_S - inputs.own_hvac_off_for_s)
     if retry > 0.0:
-        return WhfSafetyDecision(
+        return _decision(
             WhfSafetyAction.DEFER,
-            "rule-2 state backstop: fan and heating/cooling both on — confirming before acting",
+            i18n.Msg("notify.whf_reason_backstop_confirming"),
             retry_in_s=retry,
             stale_sensor_count=stale,
             backstop=True,
         )
     fan_for, mode_for = inputs.fan_on_for_s, inputs.thermostat_mode_for_s
     if fan_for is not None and mode_for is not None and mode_for < fan_for:
-        return WhfSafetyDecision(
+        return _decision(
             WhfSafetyAction.STOP_MUTEX_FAN,
-            f"rule-2 state backstop: thermostat switched to {inputs.thermostat_mode} after the fan came on and is"
-            f" {inputs.hvac_action} beside it ({inputs.overlap_for_s:.0f}s) — stopping the fan (newest action wins)",
+            i18n.Msg(
+                "notify.whf_reason_backstop_stop_fan",
+                mode=str(inputs.thermostat_mode),
+                action=str(inputs.hvac_action),
+                seconds=round(inputs.overlap_for_s),
+            ),
             stale_sensor_count=stale,
             backstop=True,
         )
-    return WhfSafetyDecision(
+    return _decision(
         WhfSafetyAction.SUPPRESS_HVAC,
-        f"rule-2 state backstop: thermostat {inputs.hvac_action} ({inputs.thermostat_mode}) beside the running fan"
-        f" ({inputs.overlap_for_s:.0f}s) — suppressing heating/cooling (the fan is the newer action)",
+        i18n.Msg(
+            "notify.whf_reason_backstop_suppress_hvac",
+            mode=str(inputs.thermostat_mode),
+            action=str(inputs.hvac_action),
+            seconds=round(inputs.overlap_for_s),
+        ),
         stale_sensor_count=stale,
         backstop=True,
     )

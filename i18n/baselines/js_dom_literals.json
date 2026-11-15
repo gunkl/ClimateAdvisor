@@ -1,0 +1,17 @@
+{
+  "description": "hard-coded English at JS/HTML DOM sinks (classic index.html excluded)",
+  "total": 206,
+  "files": {
+    "frontend/chart_v2.js": 26,
+    "frontend/entry.html": 5,
+    "frontend/nd_analysis.js": 28,
+    "frontend/nd_core.js": 5,
+    "frontend/nd_debug.js": 2,
+    "frontend/nd_night_card.js": 2,
+    "frontend/nd_settings.js": 1,
+    "frontend/nd_status.js": 2,
+    "frontend/new_dashboard.html": 119,
+    "frontend/pa_view.js": 12,
+    "frontend/prediction_accuracy.html": 4
+  }
+}

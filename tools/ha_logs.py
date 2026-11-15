@@ -22,12 +22,18 @@ SSH mode (default):
 REST API history mode (--history):
     python3 tools/ha_logs.py --history               # Last 24h logbook (all entries)
     python3 tools/ha_logs.py --history --filter climate_advisor  # Filter logbook text
-    python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status
-    python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status --hours 48
-    python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status,sensor.climate_advisor_day_type
+    python3 tools/ha_logs.py --history --entity ca:automation_status
+    python3 tools/ha_logs.py --history --entity ca:automation_status --hours 48
+    python3 tools/ha_logs.py --history --entity ca:automation_status,ca:day_type
     python3 tools/ha_logs.py --history --start "2026-03-28T18:00:00"
     python3 tools/ha_logs.py --history --start "2026-03-28T18:00:00" --end "2026-03-29T09:00:00"
-    python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status --start "2026-03-28T18:00:00"
+    python3 tools/ha_logs.py --history --entity ca:automation_status --start "2026-03-28T18:00:00"
+    python3 tools/ha_logs.py --history --entity sensor.house_status        # any literal entity id still works
+
+`ca:<key>` names a Climate Advisor entity by its unique-id suffix (the sensor's key: automation_status, day_type,
+compliance_score, ... or automation_enabled for the switch) and is looked up in the install's entity registry over SSH
+(Issue #1341). Entity ids depend on the zone's title and on the language HA was set to when the entity was first
+registered, so no entity id is assumed. With several zones add `--entry-id <config entry id>`.
 """
 
 import argparse
@@ -327,6 +333,59 @@ def ssh_target(config: dict[str, str]) -> str:
     return f"{config['HA_SSH_USER']}@{config['HA_HOST']}"
 
 
+def find_ca_entity_ids(registry: dict, key: str, entry_id: str | None = None) -> list[str]:
+    """Entity ids of Climate Advisor's ``key`` entity in an entity-registry document (Issue #1341).
+
+    Matches on ``platform`` and the unique id ``<config entry id>_<key>``, never on the entity id's spelling.
+    """
+    found = []
+    for ent in registry.get("data", {}).get("entities", []):
+        if ent.get("platform") != "climate_advisor":
+            continue
+        unique_id = str(ent.get("unique_id", ""))
+        entry = ent.get("config_entry_id") or unique_id.rsplit("_" + key, 1)[0]
+        if not unique_id.endswith("_" + key):
+            continue
+        if entry_id and entry != entry_id and not unique_id.startswith(entry_id + "_"):
+            continue
+        found.append(ent["entity_id"])
+    return found
+
+
+def resolve_entity_ids(config: dict[str, str], tokens: list[str], entry_id: str | None = None) -> list[str]:
+    """Replace each ``ca:<key>`` token with its entity id from the install's registry; literal ids pass through."""
+    if not any(t.startswith("ca:") for t in tokens):
+        return tokens
+    remote = f"cat {shlex.quote(config['HA_CONFIG_PATH'])}/.storage/core.entity_registry"
+    result = subprocess.run(
+        ssh_args(config) + [ssh_target(config), remote],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    try:
+        registry = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        print(f"ERROR: could not read the entity registry over SSH: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    out: list[str] = []
+    for token in tokens:
+        if not token.startswith("ca:"):
+            out.append(token)
+            continue
+        ids = find_ca_entity_ids(registry, token[3:], entry_id)
+        if not ids:
+            print(f"ERROR: no Climate Advisor entity with key '{token[3:]}' in the registry.", file=sys.stderr)
+            sys.exit(1)
+        if len(ids) > 1:
+            print(f"ERROR: '{token}' matches several zones ({', '.join(ids)}); pass --entry-id.", file=sys.stderr)
+            sys.exit(1)
+        out.append(ids[0])
+    return out
+
+
 def strip_ansi(text: str) -> str:
     """Remove ANSI escape codes from text."""
     return _ANSI_RE.sub("", text)
@@ -409,7 +468,13 @@ def main() -> None:
         "--entity",
         type=str,
         default="",
-        help="Entity ID(s) to filter history (comma-separated, e.g. sensor.climate_advisor_status)",
+        help="Entity ID(s) to filter history (comma-separated): literal ids, or ca:<key> (e.g. ca:automation_status)",
+    )
+    parser.add_argument(
+        "--entry-id",
+        type=str,
+        default="",
+        help="Climate Advisor zone (config entry id) for ca:<key> lookups on a multi-zone install",
     )
     parser.add_argument(
         "--hours",
@@ -443,6 +508,7 @@ def main() -> None:
     if args.history:
         # REST API history mode
         entity_ids = [e.strip() for e in args.entity.split(",") if e.strip()] if args.entity else []
+        entity_ids = resolve_entity_ids(config, entity_ids, args.entry_id or None)
 
         output_parts = []
         if entity_ids:

@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "temperatura interna o intervallo di comfort mancanti",
   "activity.reason_cf_nat_vent_owns": "la ventilazione naturale/WHF gestisce la climatizzazione — la famiglia di comfort cede",
   "activity.reason_cf_no_support": "il termostato non supporta né riscaldamento né raffrescamento",
-  "activity.reason_cf_settling_guard": "protezione di assestamento: {current} è stato in funzione {ran} min fa (finestra {window} min), zona {zone} profondità {depth}F <= tolleranza {tolerance}F -- si mantiene {current}",
+  "activity.reason_cf_settling_guard": "protezione di assestamento: {current} è stato in funzione {ran} min fa (finestra {window} min), zona {zone} profondità {depth, number, ::.0}F <= tolleranza {tolerance, number, ::.0}F -- si mantiene {current}",
   "activity.reason_cf_tou_owns": "il precondizionamento tariffario gestisce la climatizzazione — la famiglia di comfort cede",
   "activity.reason_cf_within_cool_margin": "entro il margine di armamento del raffrescamento",
   "activity.reason_cf_within_heat_margin": "entro il margine di armamento del riscaldamento",

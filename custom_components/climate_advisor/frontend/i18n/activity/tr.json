@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "iç sıcaklık veya konfor aralığı eksik",
   "activity.reason_cf_nat_vent_owns": "HVAC'ı doğal havalandırma/tüm ev fanı yönetiyor — konfor ailesi geri çekiliyor",
   "activity.reason_cf_no_support": "termostat ne ısıtmayı ne soğutmayı destekliyor",
-  "activity.reason_cf_settling_guard": "oturma koruması: {current} {ran} dk önce çalıştı (pencere {window} dk), {zone} bölgesi derinliği {depth}F <= tolerans {tolerance}F -- {current} korunuyor",
+  "activity.reason_cf_settling_guard": "oturma koruması: {current} {ran} dk önce çalıştı (pencere {window} dk), {zone} bölgesi derinliği {depth, number, ::.0}F <= tolerans {tolerance, number, ::.0}F -- {current} korunuyor",
   "activity.reason_cf_tou_owns": "TOU ön koşullandırması HVAC'ı yönetiyor — konfor ailesi geri çekiliyor",
   "activity.reason_cf_within_cool_margin": "soğutma devreye alma payı dahilinde",
   "activity.reason_cf_within_heat_margin": "ısıtma devreye alma payı dahilinde",

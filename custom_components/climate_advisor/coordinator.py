@@ -64,7 +64,6 @@ from .automation import (
     compute_pre_cool_target,
     fallback_edges_without_classification,
     hold_after_msg,
-    hold_after_text,
     hold_sentence_msg,
     hvac_outcome_label,
     pre_cool_sleep_window_config,
@@ -436,7 +435,7 @@ from .promise_journal import (
 from .promise_journal import (
     Reading as _PromiseReading,
 )
-from .record_text import split_msg_fields
+from .record_text import msg_text, split_msg_fields
 from .remote_offset import RemoteOffsetState
 from .scheduler import (
     COST_TAG_HIGH,
@@ -942,7 +941,7 @@ _PROMISE_LABEL_KEYS: Final[dict[str, str]] = {
 }
 
 
-def _clock(value: datetime | time) -> i18n.Time:
+def _clock_time(value: datetime | time) -> i18n.Time:
     """A wall-clock ``i18n.Time`` param for a datetime (shown in local time) or a bare ``time`` (today's date)."""
     if isinstance(value, datetime):
         return i18n.Time(dt_util.as_local(value))
@@ -994,13 +993,14 @@ def _entity_health_rows(issues: Any) -> list[dict[str, Any]]:
 
 def _clock_text(value: datetime | time) -> CodedText:
     """A clock time as status text (``status.clock``): the English text is ``3:45 PM``; ``msg`` follows the language."""
-    return CodedText("clock", i18n.Msg("status.clock", t=_clock(value)))
+    return CodedText("clock", i18n.Msg("status.clock", t=_clock_time(value)))
 
 
 def _label_text(label: i18n.Msg | str) -> CodedText:
     """An automation-candidate label (a catalog message, or plain text the timeline still produces) as status text."""
-    if isinstance(label, i18n.Msg):
-        return CodedText(label.key.rsplit(".", 1)[-1], label)
+    msg = msg_of(label)  # a bare Msg, or a CardText from the timeline that carries one (it must not lose it)
+    if msg is not None:
+        return CodedText(msg.key.rsplit(".", 1)[-1], msg)
     return CodedText("timeline_step", None, text=str(label))
 
 
@@ -10719,7 +10719,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             i18n.Msg(
                 "status.pre_cool_status.scheduled",
                 target=i18n.Temp(pre_cool_target, self.config.get("temp_unit", "fahrenheit")),
-                t=_clock(trigger_time),
+                t=_clock_time(trigger_time),
             ),
         )
 
@@ -10796,7 +10796,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pre_cool_trigger_dt = new_trigger
         _local_trigger = dt_util.as_local(new_trigger)
         self._pre_cool_status = CodedText(
-            "rescheduled", i18n.Msg("status.pre_cool_status.rescheduled", t=_clock(_local_trigger))
+            "rescheduled", i18n.Msg("status.pre_cool_status.rescheduled", t=_clock_time(_local_trigger))
         )
         _LOGGER.info(
             "Pre-cool trigger pulled earlier to %s — nat-vent exited ahead of its scheduled window close",
@@ -13820,12 +13820,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # Issue #1322: the Activity log records the outage (once per outage, never per reminder).
                 outage = {
                     "entity_id": issue.entity_id,
-                    "friendly_name": issue.friendly_name,
+                    # a ``MsgText`` is its English text; ``split_msg_fields`` adds the standard ``<field>_key`` /
+                    # ``<field>_params`` (the one convention every event field uses)
+                    "friendly_name": msg_text(issue.friendly_name_msg) or issue.friendly_name,
                     "status": issue.status,
                     "criticality": issue.criticality,
-                    "detail": issue.detail,
-                    "friendly_name_msg": issue.friendly_name_msg.to_wire() if issue.friendly_name_msg else None,
-                    "detail_msg": issue.detail_msg.to_wire() if issue.detail_msg else None,
+                    "detail": msg_text(issue.detail_msg) or issue.detail,
                     "down_since": down_since.isoformat(),
                 }
                 activity.append((issue.entity_id, lambda data=outage: self._emit_event("entity_unavailable", data)))
@@ -13849,8 +13849,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # Issue #1322: the Activity log records the recovery and how long the entity was out.
                 recovered = {
                     "entity_id": tracked.get("entity_id", key),
-                    "friendly_name": tracked.get("friendly_name", key),
-                    "friendly_name_msg": tracked.get("friendly_name_msg"),
+                    "friendly_name": (
+                        msg_text(i18n.Msg.from_wire(tracked["friendly_name_msg"]))
+                        if tracked.get("friendly_name_msg")
+                        else tracked.get("friendly_name", key)
+                    ),
                     "outage_minutes": outage_minutes,
                     "down_since": down_since.isoformat(),
                 }
@@ -16711,12 +16714,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if c.windows_recommended:
             if not timeline_mode and c.window_open_time and now < c.window_open_time:
                 return _decide(
-                    "open_windows_at", i18n.Msg("status.next_action.open_windows_at", t=_clock(c.window_open_time))
+                    "open_windows_at", i18n.Msg("status.next_action.open_windows_at", t=_clock_time(c.window_open_time))
                 )
             elif not timeline_mode and _effective_close_time and now < _effective_close_time:
                 return _decide(
                     "close_windows_by",
-                    i18n.Msg("status.next_action.close_windows_by", t=_clock(_effective_close_time)),
+                    i18n.Msg("status.next_action.close_windows_by", t=_clock_time(_effective_close_time)),
                 )
             elif now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
                 if windows_physically_open:
@@ -16817,7 +16820,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ):
                 return _decide(
                     "hot_open_until",
-                    i18n.Msg("status.next_action.hot_open_until", threshold=_tmp(threshold), t=_clock(_close_time)),
+                    i18n.Msg(
+                        "status.next_action.hot_open_until", threshold=_tmp(threshold), t=_clock_time(_close_time)
+                    ),
                 )
             elif (
                 not timeline_mode
@@ -16827,7 +16832,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ):
                 return _decide(
                     "hot_open_from",
-                    i18n.Msg("status.next_action.hot_open_from", t=_clock(_evening_open_time)),
+                    i18n.Msg("status.next_action.hot_open_from", t=_clock_time(_evening_open_time)),
                 )
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
                 return _decide("nothing_to_do", "-")
@@ -18186,7 +18191,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return ""
         direction = getattr(ae, "_fan_rate_limited_direction", None)
         pending = "on" if direction == "activate" else "off"
-        return CodedText("rate_limit", i18n.Msg("status.part.rate_limit", pending=pending, t=_clock(until)))
+        return CodedText("rate_limit", i18n.Msg("status.part.rate_limit", pending=pending, t=_clock_time(until)))
 
     def _append_indoor_blind_suffix(self, status: str | None, *, card: str) -> str | None:
         """Append the blind-fan note to a Fan (WHF)/(HVAC) card value (Issue #1037).
@@ -18215,7 +18220,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # deferred the fan-off): never advertise a time that is already in the past.
                 note = i18n.Msg("status.part.blind_stop_pending")
             else:
-                note = i18n.Msg("status.part.blind_stops", t=_clock(stop_at))
+                note = i18n.Msg("status.part.blind_stops", t=_clock_time(stop_at))
         else:
             note = i18n.Msg("status.part.blind_no_stop")
         return _fan_status_compound(status, blind=note)
@@ -18355,7 +18360,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         unavailable — never raises."""
         if not isinstance(schedule_start, datetime):
             return ""
-        return CodedText("ends", i18n.Msg("status.part.ends", t=_clock(schedule_start)))
+        return CodedText("ends", i18n.Msg("status.part.ends", t=_clock_time(schedule_start)))
 
     def _grace_status_detail(self, ae: AutomationEngine) -> str | CodedText:
         """Status-card grace detail: ' — <cause>' plus ' — <duration> (ends HH:MM)' (Issues #625/#860/#1095).
@@ -18401,7 +18406,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     return None
             except TypeError:
                 return None
-            return _clock(value)
+            return _clock_time(value)
 
         hold_msg: i18n.Msg | str = ""
         run_msg: i18n.Msg | str = ""
@@ -18457,7 +18462,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return ""
         return CodedText(
             "grace_remaining",
-            i18n.Msg("status.part.remaining", dur=i18n.Duration(duration_s), t=_clock(end_dt)),
+            i18n.Msg("status.part.remaining", dur=i18n.Duration(duration_s), t=_clock_time(end_dt)),
         )
 
     def _compute_next_automation_action(self, c: DayClassification | None) -> tuple[CodedText, CodedText]:
@@ -18517,7 +18522,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _bank_cand.append(
                 (
                     _bank_hold.bank.ends,
-                    tou_bank_end_label(hold_after_text(_bank_hold, self.config.get("temp_unit", "fahrenheit"))),
+                    # the message itself (not its English text), so the card renders in the viewer's language
+                    tou_bank_end_label(hold_after_msg(_bank_hold, self.config.get("temp_unit", "fahrenheit")) or ""),
                 )
             )
 
@@ -19523,7 +19529,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 where=where,
                 tolerance=i18n.TempDelta(float(tolerance), unit, 1),
                 ran=int(round(ran)),
-                until=_clock(until_dt),
+                until=_clock_time(until_dt),
             )
         except Exception:  # noqa: BLE001 - diagnostics must never break the debug view
             return None

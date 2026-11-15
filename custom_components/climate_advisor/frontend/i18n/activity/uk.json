@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "немає температури в приміщенні або діапазону комфорту",
   "activity.reason_cf_nat_vent_owns": "природна вентиляція/WHF керує HVAC — режим комфорту поступається",
   "activity.reason_cf_no_support": "термостат не підтримує ні опалення, ні охолодження",
-  "activity.reason_cf_settling_guard": "захист стабілізації: {current} працювало {ran} хв тому (вікно {window} хв), глибина зони {zone} {depth}F <= допуск {tolerance}F -- лишається {current}",
+  "activity.reason_cf_settling_guard": "захист стабілізації: {current} працювало {ran} хв тому (вікно {window} хв), глибина зони {zone} {depth, number, ::.0}F <= допуск {tolerance, number, ::.0}F -- лишається {current}",
   "activity.reason_cf_tou_owns": "підготовка під погодинний тариф керує HVAC — режим комфорту поступається",
   "activity.reason_cf_within_cool_margin": "у запасі активації охолодження",
   "activity.reason_cf_within_heat_margin": "у запасі активації опалення",

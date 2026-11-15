@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "室温または快適温度範囲がありません",
   "activity.reason_cf_nat_vent_owns": "自然換気/WHF が空調を制御中 — 快適動作の系統は譲ります",
   "activity.reason_cf_no_support": "サーモスタットが暖房にも冷房にも対応していません",
-  "activity.reason_cf_settling_guard": "安定化ガード: {current} が {ran} 分前に運転(期間 {window} 分)、{zone}ゾーンの深さ {depth}F <= 許容範囲 {tolerance}F -- {current} を維持",
+  "activity.reason_cf_settling_guard": "安定化ガード: {current} が {ran} 分前に運転(期間 {window} 分)、{zone}ゾーンの深さ {depth, number, ::.0}F <= 許容範囲 {tolerance, number, ::.0}F -- {current} を維持",
   "activity.reason_cf_tou_owns": "TOU の予冷/予熱が空調を制御中 — 快適動作の系統は譲ります",
   "activity.reason_cf_within_cool_margin": "冷房の待機マージン内",
   "activity.reason_cf_within_heat_margin": "暖房の待機マージン内",

@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "brak temperatury w domu lub zakresu komfortu",
   "activity.reason_cf_nat_vent_owns": "wentylacja naturalna/WHF steruje HVAC — tryb komfortu ustępuje",
   "activity.reason_cf_no_support": "termostat nie obsługuje ani ogrzewania, ani chłodzenia",
-  "activity.reason_cf_settling_guard": "ochrona stabilizacji: {current} działało {ran} min temu (okno {window} min), głębokość strefy {zone} {depth}F <= tolerancja {tolerance}F -- pozostaje {current}",
+  "activity.reason_cf_settling_guard": "ochrona stabilizacji: {current} działało {ran} min temu (okno {window} min), głębokość strefy {zone} {depth, number, ::.0}F <= tolerancja {tolerance, number, ::.0}F -- pozostaje {current}",
   "activity.reason_cf_tou_owns": "przygotowanie pod taryfę strefową steruje HVAC — tryb komfortu ustępuje",
   "activity.reason_cf_within_cool_margin": "w marginesie uzbrojenia chłodzenia",
   "activity.reason_cf_within_heat_margin": "w marginesie uzbrojenia ogrzewania",

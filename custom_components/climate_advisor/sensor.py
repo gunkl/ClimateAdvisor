@@ -138,24 +138,31 @@ class ClimateAdvisorBaseSensor(CoordinatorEntity, SensorEntity):
     def _prose(self, value: Any) -> Any:
         """Render a coordinator value for display (Issue #1341, D6).
 
-        A ``Msg``/``Code`` the coordinator provides is rendered in HA's language; a plain ``str`` (or anything else)
-        passes through unchanged, so a value can migrate to a message without a change here.
+        A ``Msg``/``Code`` the coordinator provides, or a ``str`` carrier of one (``CodedText``, ``CardText``,
+        ``MsgText``), is rendered in HA's language; plain prose (or anything else) passes through unchanged, so a
+        value can migrate to a message without a change here.
         """
-        if isinstance(value, i18n.Msg | i18n.Code):
+        if isinstance(value, i18n.Code):
             return i18n.render(value, self._lang())
+        msg = i18n.msg_of(value)
+        if msg is not None:
+            return i18n.render(msg, self._lang())
         return value
 
     @staticmethod
     def _code_attrs(value: Any) -> dict[str, Any]:
-        """Stable ``code``/``params`` attributes for automations: the message key and its wire params.
+        """Stable ``code``/``params`` attributes for automations: the status code (else the message key) and the
+        message's wire params, for a ``Msg``/``Code`` or any ``str`` carrier of one.
 
         ``code`` is None (and ``params`` empty) while the coordinator still hands over plain prose.
         """
         if isinstance(value, i18n.Code):
             value = i18n.Msg(value.key)
-        if isinstance(value, i18n.Msg):
-            return {"code": value.key, "params": value.to_wire()["params"]}
-        return {"code": None, "params": {}}
+        msg = i18n.msg_of(value)
+        if msg is not None:
+            return {"code": i18n.code_of(value) or msg.key, "params": msg.to_wire()["params"]}
+        code = i18n.code_of(value)
+        return {"code": code, "params": {}}
 
     def _raw(self, key: str | None = None) -> Any:
         """The coordinator's value for ``key`` (this sensor's own by default), before rendering."""
@@ -420,10 +427,22 @@ class ClimateAdvisorLastActionReasonSensor(ClimateAdvisorBaseSensor):
 
 
 class ClimateAdvisorFanStatusSensor(_ProseSensor):
-    """Sensor showing the current fan status (active/inactive/override/disabled)."""
+    """Sensor showing the current fan status (active/inactive/override/disabled).
+
+    An ENUM-like state: the documented "Fan Status Values" tokens are what users' automations compare, so the
+    state stays the raw English token in every language (never rendered through the catalog). The display name of
+    the slug tokens comes from ``entity.sensor.fan_status.state.*`` (HA's own method); the stable ``code``/``params``
+    are exposed as attributes.
+    """
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, ATTR_FAN_STATUS, "mdi:fan")
+
+    @property
+    def native_value(self) -> Any:
+        """The raw English fan-status token."""
+        raw = self._raw()
+        return str(raw) if raw is not None else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

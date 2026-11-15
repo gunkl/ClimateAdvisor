@@ -212,8 +212,9 @@ def _settling_hold(
             ran=f"{ran:.0f}",
             window=f"{inputs.recency_window_min:.0f}",
             zone=zone,
-            depth=f"{depth:.1f}",
-            tolerance=f"{inputs.tolerance_f:.1f}",
+            # numbers, formatted by the message (``{x, number, ::.0}``); round() ties exactly like the old f"{x:.1f}"
+            depth=round(depth, 1),
+            tolerance=round(inputs.tolerance_f, 1),
         ),
         breach=past_edge > 0.0,
         margin_applied_f=margin,

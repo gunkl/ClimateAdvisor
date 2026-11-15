@@ -1139,6 +1139,21 @@ class Msg:
         return msg
 
 
+def msg_of(value: Any) -> Msg | None:
+    """The ``Msg`` a value carries: a ``Msg`` itself, or a ``str`` carrier with a ``.msg`` (``MsgText``,
+    ``CodedText``, ``CardText``), else ``None``. The one reader every surface uses."""
+    if isinstance(value, Msg):
+        return value
+    msg = getattr(value, "msg", None) if isinstance(value, str) else None
+    return msg if isinstance(msg, Msg) else None
+
+
+def code_of(value: Any, default: str | None = None) -> str | None:
+    """The stable code of a status value (a ``CodedText``'s ``.code``); ``default`` for anything without one."""
+    code = getattr(value, "code", None) if isinstance(value, str) else None
+    return code if isinstance(code, str) else default
+
+
 def param_to_wire(v: Any) -> Any:
     """Python param to the JSON wire form (plain str/int/float pass through).
 
@@ -1163,7 +1178,7 @@ def param_to_wire(v: Any) -> Any:
             if isinstance(err, I18nError):
                 raise
             raise I18nError(f"cannot serialise {type(v).__name__} parameter: {err}") from err
-        _warn_once(f"cannot serialise a {type(v).__name__} parameter ({err})")
+        _warn_once(f"cannot serialise a {type(v).__name__} parameter", err)
         return {"$t": "bad"}
 
 
@@ -1176,7 +1191,7 @@ def param_from_wire(v: Any) -> Any:
             if isinstance(err, I18nError):
                 raise
             raise I18nError(f"malformed wire parameter {v!r}: {err}") from err
-        _warn_once(f"malformed wire parameter ({type(err).__name__}: {err})")
+        _warn_once(f"malformed wire parameter ({type(err).__name__})", err)
         return _BadParam(str(err))
 
 
@@ -1243,7 +1258,7 @@ def _to_plain(v: Any, lang: str, key: str | None = None) -> Any:
             if isinstance(err, I18nError):
                 raise
             raise I18nError(f"cannot render {type(v).__name__} parameter: {err}") from err
-        _warn_once(f"bad {type(v).__name__} parameter in {key or 'a message'} ({err})")
+        _warn_once(f"bad {type(v).__name__} parameter in {key or 'a message'}", err)
         return BAD_PARAM
 
 
@@ -1276,6 +1291,7 @@ _CATALOGS: dict[str, dict[str, str]] = {}
 _LOADED_FROM: Path | None = None
 _STRICT_OVERRIDE: bool | None = None
 _WARNED: set[str] = set()
+_ENSURE_TRIED = False
 
 
 def default_i18n_dir() -> Path:
@@ -1303,6 +1319,24 @@ def load_catalogs(frontend_dir: Path | None = None) -> None:
     _LOADED_FROM = i18n_dir
 
 
+def ensure_catalogs() -> None:
+    """The one lazy loader: try to load the catalogs once, record the attempt, NEVER raise.
+
+    A no-op once loaded, and also after a failed attempt (so a failed setup load never triggers blocking file
+    reads again from inside the event loop). Rendering with the catalogs missing stays non-raising (English
+    fallback, then the key). Production calls it once from an executor job in ``async_setup_entry``; headless
+    entry points (the simulation harness, tools, tests) call it once up front.
+    """
+    global _ENSURE_TRIED  # noqa: PLW0603
+    if _LOADED_FROM is not None or _ENSURE_TRIED:
+        return
+    _ENSURE_TRIED = True
+    try:
+        load_catalogs()
+    except Exception as err:  # noqa: BLE001 - any failure (bad JSON, missing file, mismatched index) is non-fatal
+        _LOGGER.error("Climate Advisor could not load its translation catalogs (%s); continuing with fallbacks", err)
+
+
 def catalogs_loaded() -> bool:
     return _LOADED_FROM is not None
 
@@ -1324,9 +1358,10 @@ def use_catalogs(catalogs: Mapping[str, Mapping[str, str]]) -> None:
 
 def reset_catalogs() -> None:
     """Forget the cached catalogs (tests)."""
-    global _CATALOGS, _LOADED_FROM  # noqa: PLW0603
+    global _CATALOGS, _LOADED_FROM, _ENSURE_TRIED  # noqa: PLW0603
     _CATALOGS = {}
     _LOADED_FROM = None
+    _ENSURE_TRIED = False
 
 
 def set_strict(flag: bool | None) -> None:
@@ -1341,10 +1376,12 @@ def _strict() -> bool:
     return os.environ.get("CA_I18N_STRICT") == "1"
 
 
-def _warn_once(what: str) -> None:
+def _warn_once(what: str, detail: object = None) -> None:
+    """Log ``what`` once. The dedup key is ``what`` only (never the varying error text), so a message that fails
+    with a different value each time cannot grow ``_WARNED`` without bound; ``detail`` is logged the first time."""
     if what not in _WARNED:
         _WARNED.add(what)
-        _LOGGER.warning("i18n: %s", what)
+        _LOGGER.warning("i18n: %s%s", what, f": {detail}" if detail is not None else "")
 
 
 def get_message(key: str, lang: str) -> tuple[str, str] | None:
@@ -1377,7 +1414,7 @@ def _render_msg(msg: Msg, lang: str) -> str:
         if _strict():
             raise
         # Never raise while rendering: the English message (in English), then the key.
-        _warn_once(f"cannot render {key!r} in {lang} ({type(err).__name__}: {err})")
+        _warn_once(f"cannot render {key!r} in {lang} ({type(err).__name__})", err)
         english = get_message(key, DEFAULT_LANGUAGE)
         if lang != DEFAULT_LANGUAGE and english is not None:
             try:

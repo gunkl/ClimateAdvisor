@@ -97,3 +97,48 @@ def test_a_broken_catalog_does_not_stop_setup(breakage, tmp_path, monkeypatch, c
     assert not i18n.catalogs_loaded()
     # rendering falls back (non-strict): the key itself, never an exception
     assert i18n.render(i18n.Msg("common.mode.heat", x=1), "de") == "common.mode.heat"
+
+
+def test_setup_loads_the_catalogs_through_the_executor_and_a_failed_attempt_is_not_retried(monkeypatch):
+    """Issue #1341 S2/S3: ``async_setup_entry`` reads the catalogs in the executor with the one lazy loader. A failed
+    attempt is recorded, so no later render path re-reads files (in the event loop) and none of them raises."""
+    from tools.sim_harness.fake_hass import FakeHass
+
+    seen: list = []
+    original = FakeHass.async_add_executor_job
+
+    def spy(self, fn, *args):
+        seen.append(fn)
+        return original(self, fn, *args)
+
+    monkeypatch.setattr(FakeHass, "async_add_executor_job", spy)
+    zones, _hass, _scheduler = build_headless_multi_zone(zone_count=1)
+    assert zones["zone_0"]["coordinator"] is not None
+    assert i18n.ensure_catalogs in seen
+    assert i18n.catalogs_loaded()
+
+    # a failed first attempt: non-strict, nothing raises, and the failure is never retried
+    i18n.reset_catalogs()
+    i18n.set_strict(False)  # this test only; the session fixture re-arms strict
+    calls: list = []
+
+    def boom(*_a, **_k):
+        calls.append(1)
+        raise i18n.I18nError("catalog is bad")
+
+    monkeypatch.setattr(i18n, "load_catalogs", boom)
+    try:
+        i18n.ensure_catalogs()
+        i18n.ensure_catalogs()
+        assert calls == [1]
+        assert not i18n.catalogs_loaded()
+        from custom_components.climate_advisor.operation_timeline import render_msg
+        from custom_components.climate_advisor.record_text import record_en
+
+        assert render_msg(i18n.Msg("common.mode.heat"), "de") == "common.mode.heat"  # key fallback, no raise
+        assert record_en(i18n.Msg("common.mode.heat")) == "common.mode.heat"
+        assert calls == [1]  # render paths never reloaded
+    finally:
+        i18n.reset_catalogs()
+        monkeypatch.undo()
+        i18n.load_catalogs()

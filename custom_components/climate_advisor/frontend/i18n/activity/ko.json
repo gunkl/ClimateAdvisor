@@ -325,7 +325,7 @@
   "activity.reason_cf_missing_input": "실내 온도 또는 쾌적 온도 범위 없음",
   "activity.reason_cf_nat_vent_owns": "자연 환기/WHF가 냉난방 담당 — 쾌적 운전 방식은 양보",
   "activity.reason_cf_no_support": "온도 조절기가 난방도 냉방도 지원하지 않음",
-  "activity.reason_cf_settling_guard": "안정화 보호: {current}이(가) {ran}분 전 운전됨 (기간 {window}분), {zone} 구역 깊이 {depth}F <= 허용 범위 {tolerance}F -- {current} 유지",
+  "activity.reason_cf_settling_guard": "안정화 보호: {current}이(가) {ran}분 전 운전됨 (기간 {window}분), {zone} 구역 깊이 {depth, number, ::.0}F <= 허용 범위 {tolerance, number, ::.0}F -- {current} 유지",
   "activity.reason_cf_tou_owns": "TOU 사전 냉난방이 냉난방 담당 — 쾌적 운전 방식은 양보",
   "activity.reason_cf_within_cool_margin": "냉방 대기 여유 범위 내",
   "activity.reason_cf_within_heat_margin": "난방 대기 여유 범위 내",

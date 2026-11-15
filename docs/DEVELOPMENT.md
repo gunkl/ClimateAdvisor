@@ -17,7 +17,7 @@ Home Assistant is covered in [SSH Setup](SSH-SETUP.md).
 | Which CI checks must pass to merge to `main`? | Branch protection requires `validate-and-test` and `ha-real` (both in `validate.yml`) and `validate` (Hassfest). | [§CI](DEVELOPMENT.md#ci) |
 | How do I run the real-Home-Assistant tier, build the house fixture, prove a test fails without the fix, or update snapshots? | `python scripts/test.py ha` (WSL on Windows). Use the `make_house` fixture in `tests_ha/house/`. `scripts/revert_proof.py` proves an escaped-bug test fails on the pre-fix commit. | [Real-HA tier](DEVELOPMENT.md#real-ha-tier-the-house-markers-revert-proof-snapshots-step-2-issue-1127) |
 | How do I run the simulator and its goldens? | `python tools/simulate.py` drives the real `AutomationEngine` (single-engine harness, #236). Goldens are locked by `MANIFEST.json`, and only `--sign` after human review changes them. | [§Simulator](DEVELOPMENT.md#simulator) |
-| What does the nightly run, and how do I hear about a failure? | It runs fresh-seed generated days (P1-P7, then P8) and the full real-HA tier. Each seed prints its timing and `peak_rss`. When any job fails, `report-failure` opens one tracking issue, or comments on it if it is already open. | [§Nightly](DEVELOPMENT.md#nightly) |
+| What does the nightly run, and how do I hear about a failure? | It runs fresh-seed generated days (P1-P7, then P8) and the full real-HA tier. Each seed prints its timing and `peak_rss`. When any job fails, `report-failure` files an issue for that failure (label `nightly-failure`; a repeat of the same failure comments on it), and `nightly-autofix.yml` has Claude diagnose it and, when it can show a fix, open a draft PR for review. | [§Nightly](DEVELOPMENT.md#nightly) |
 | Where do the README's test badges come from? | `badges.yml` runs both tiers with coverage and JUnit XML on every push to `main`, daily and by hand; `tools/badges.py` turns the reports and the real-HA ledger into shields.io endpoint JSON on the `badges` branch. The nightly badge is GitHub's workflow status. Issue #1343. | [§Test badges](DEVELOPMENT.md#test-badges) |
 | What must a PR carry besides code? | A version bump in `const.py` and `manifest.json`, a `CHANGELOG.md` entry and a `fix_history.jsonl` entry added with `tools/add_fix_entry.py`. `tests/test_version_sync.py` checks that the two versions match. | [§Before Submitting Changes](DEVELOPMENT.md#before-submitting-changes) |
 | What is the correct sequence for adding a new module? | Create the module in `custom_components/climate_advisor/` and a matching `tests/test_<module>.py`. Add any new HA submodule to `_HA_MODULES` in `tools/sim_harness/ha_stubs.py`, then run the full unit tier. | [§Adding a New Module](DEVELOPMENT.md#adding-a-new-module) |
@@ -207,10 +207,22 @@ regenerated, because CI uses `--locked`.
 | `generated-days` | Runs `simulate.py --generate <days> --seeds ...`, judged by the household promises P1-P7 and the waiver ledger (`--issue-state github`). It prints each seed's timing and `peak_rss`: read these before raising the 120-minute cap. Failing scenarios are uploaded as the `generated-failures` artifact. |
 | `surfaces` | Runs `simulate.py --surfaces --generate 50` on the same seeds (P8, ratcheted by `tools/simulations/surface_divergences.json`). |
 | `ha-lifecycle` | Runs the full real-HA tier. |
-| `report-failure` | Runs when any job failed or was cancelled. It opens the issue "Nightly generated-days / real-HA run failing", or comments on it if it is already open. Close that issue once the nightly is green again. |
+| `report-failure` | Runs when any job failed or was cancelled. It files one issue per distinct failure: title "Nightly failure <date>: <jobs>", labels `bug`, `nightly-failure`, `severity: medium`, the failing tests (pytest `FAILED`/`ERROR` lines) and broken household promises (`UNWAIVED <promise> day_seed=<n>`). The signature is the failing tests plus the promise NAMES (seeds change every night), so the same failure on a later night comments on the open issue instead of filing a new one. Hidden markers `nightly-signature` and `nightly-run` tie the issue to the run. |
 
 To replay a failure, run `python tools/simulate.py --replay-generated <file>` on the downloaded artifact, or
 `--generate-day <day_seed> --profile <profile>` with the values from the log.
+
+### Automatic diagnosis (`nightly-autofix.yml`)
+
+When the nightly run finishes with a failure, `nightly-autofix.yml` finds that run's `nightly-failure` issue (by its
+`nightly-run` marker; it skips when an open PR already says `Fixes #N`) and runs Claude (`anthropics/claude-code-action`,
+the `CLAUDE_CODE_OAUTH_TOKEN` secret) with the project's investigation method: docs first, then the failed logs and a
+local reproduction, the root cause with evidence, the regression origin, and the mirror check. Claude posts one
+plain-English diagnosis comment on the issue. Only when it can demonstrate a fix (a regression test shown to fail
+without it, the version bump, CHANGELOG, fix_history, translations, `tools/validate.py`) does it open a **draft** PR
+whose body starts "Fixes #N."; otherwise it labels the issue `needs-human`. It never merges, deploys, pushes to `main`,
+edits workflows or goldens, or adds AI attribution: the owner reviews the draft and decides. Run it by hand for one
+issue with **Actions → Nightly failure auto-diagnosis → Run workflow** (the issue number).
 
 ## Test badges
 

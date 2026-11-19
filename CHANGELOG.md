@@ -3,6 +3,20 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.51] — 2026-11-18
+
+### Fixed
+- Fix #1593: at night, the v4 bedroom forecast on the chart and the Prediction accuracy page now follows how the bedroom nudge loop really works:
+  - it remembers a setpoint raise already in force;
+  - it counts short furnace runs as short;
+  - it no longer shows a warm-up at bedtime.
+
+  The night card's plan after bedtime also starts from the live state.
+- Fix #1610: the forecast switches to the sleep band at bedtime in every home, instead of easing into it over two hours.
+- Fix #1609: the forecast learns when your thermostat starts and stops heating against the setpoint it was actually given, so it no longer restarts the furnace too early.
+- Fix #1616: the forecast uses the awake band from wake time and your own setpoint while you have overridden the thermostat. The Prediction accuracy backtest scores the forecast the same way.
+- Overall, the forecast for the next 1–24 hours is more accurate for the whole house, and much more accurate for the bedroom 12–24 hours ahead. The timing of the bedroom's short night warm-ups on the chart is still approximate; that is the bedroom-model refit tracked in #1594.
+
 ## [0.9.44] — 2026-11-18
 
 ### Changed (project records only; nothing changes in your house)

@@ -450,3 +450,32 @@ def test_remote_offset_startup_feedback_counts_across_fall_back():
     engine.note_remote_offset_actuation("heat", _la(9, 0))
     assert engine._remote_raise_pending_feedback is False
     assert engine._remote_startup_latency_s == 120.0
+
+
+def test_comfort_stall_alert_recovers_when_heating_runs_in_the_repeated_hour():
+    """The "heating is not keeping up" alert goes out at 01:55 PDT; heating runs at 01:05 PST, 10 real minutes later.
+    That run is after the alert, so the alert closes as recovered (before: 01:05 read as earlier than 01:55, and the
+    owner's Status kept the stall entry and its reminders)."""
+    from tests.test_comfort_stall import _rig
+
+    r = _rig(action="idle")
+    try:
+
+        def tick(at_utc: datetime, indoor: float) -> None:
+            r.now = at_utc.astimezone(_LA)
+            r.dt.now.return_value = r.now
+            r.coord._update_comfort_stall(indoor, 68.0, 75.0, r.now)
+
+        start = datetime(2026, 11, 1, 5, 55, tzinfo=UTC)  # 22:55 PDT
+        for half_hours in range(7):  # three hours below the band
+            tick(start + timedelta(minutes=30 * half_hours), 62.0)
+        assert r.names() == ["hvac_output_stall"], r.names()
+        assert r.coord._stall_announced_at.astimezone(UTC) == datetime(2026, 11, 1, 8, 55, tzinfo=UTC)
+
+        r.set_thermostat(mode="heat", action="heating")
+        tick(datetime(2026, 11, 1, 9, 5, tzinfo=UTC), 62.0)  # 01:05 PST
+        assert r.names() == ["hvac_output_stall", "hvac_output_stall_recovered"], r.names()
+        assert r.events[1][1]["reason"] == "equipment_ran"
+        assert r.events[1][1]["minutes_down"] == 10
+    finally:
+        r.close()

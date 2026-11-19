@@ -83,10 +83,9 @@ ALLOWED: dict[tuple[str, str, str], str] = {
     + " (_classification_fetched_at reuse window for the briefing; worst case one extra forecast fetch)",
     ("forecast_archive.py", "_maybe_prune", "now - self._last_prune"): _LOG_THROTTLE,
     ("prediction_engines.py", "control_path", "now - stamp"): _ISO,
-    # swing.py is loaded standalone by path (tools/thermal_replay.py, tools/learning_db.py), so it cannot import
-    # time_utils; its coast window is learning-only (one coast sample a year may close early or late).
-    ("swing.py", "coast_close", 'now - cand["off_dt"]'): "standalone pure module (see comment above)",
-    ("swing.py", "coast_feed", 'now - cand["off_dt"]'): "standalone pure module (see comment above)",
+    # swing.py is loaded standalone by tools/ and cannot import time_utils: its own stdlib helper (Issue #1607) keeps
+    # the raw subtraction only for two naive (stub) clocks; aware values are compared in UTC.
+    ("swing.py", "_coast_age_s", "now - off_dt"): "the naive-only branch of swing's stdlib UTC helper (#1607)",
     ("temperature.py", "is_sensor_stale", "now - last_seen"): _UTC_OR_HA_STATE,
     ("thermal_lead_time.py", "_warn_out_of_reach", "now - last"): _MONOTONIC,
     ("v4_archive.py", "_maybe_prune", "now_ts - self._last_prune"): _MONOTONIC,

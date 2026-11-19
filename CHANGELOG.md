@@ -3,6 +3,16 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.48] — 2026-11-19
+
+### Fixed
+- Fix #1620: in a home with a sleep or remote sensor and a narrow comfort band, the night forecast on the chart and in the night plan no longer runs warm. When the sleep loop raised the heat setpoint to the middle of the band (for example 68 °F in a 66–70 °F band), the forecast learned the thermostat against the band edge instead. It then ran the forecast furnace too long. Cooling had the same problem in reverse. The prediction backtest tool now picks each row's mode the same way.
+- Fix #1594: the night forecast's warm-ups are closer to the real ones in homes whose thermostat or room sensor briefly reads the warm air of each furnace run. The forecast thermostat now learns its longest run from the home's own recorded runs, and no longer runs the forecast furnace past it. On one home's last 30 days the night forecast's average error fell from 1.18 to 1.02 °F and each forecast warm-up from 4.1 to 3.3 °F (real: 1.75 °F). Homes without that brief reading spike are unchanged (checked on 96 simulated homes). The forecast thermostat learns the new limit at the next daily refit.
+
+### Notes
+- The learned forecast model now stores each mode's longest run. Downgrading is not supported. An older version ignores the new field and forecasts as before.
+- Test fix #1614: the fan-thermostat comparator's positive control now passes when run on its own or in any order.
+
 ## [0.9.47] — 2026-11-18
 
 ### Fixed

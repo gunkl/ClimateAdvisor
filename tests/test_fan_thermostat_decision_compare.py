@@ -120,7 +120,16 @@ def test_comparator_positive_control_detects_a_broken_new_function():
     the coverage-gap test above) and confirm the comparator flags every call as
     a disagreement.
     """
+    # Issue #1614: production must be imported BEFORE the patch. fan_fsm.py (the caller) and automation.py bind the
+    # name at import time (``from .fan_thermostat_decision import decide_fan_thermostat_check``); run on its own, this
+    # test was the first to import them, so production bound the forced stub too, both sides returned STOP_DEACTIVATE
+    # and 0/N disagreed.
+    from custom_components.climate_advisor import automation, fan_fsm, fan_thermostat_decision
     from custom_components.climate_advisor.fan_thermostat_decision import FanThermostatOutcome
+
+    real_decide = fan_thermostat_decision.decide_fan_thermostat_check
+    production = (fan_fsm, automation)
+    assert all(m.decide_fan_thermostat_check is real_decide for m in production), "production must hold the real one"
 
     run = FanThermostatComparisonRun()
     with patch(
@@ -129,6 +138,7 @@ def test_comparator_positive_control_detects_a_broken_new_function():
     ):
         for name, scen in _load_goldens():
             compare_scenario(scen, f"{name}_POSITIVE_CONTROL", run)
+        assert all(m.decide_fan_thermostat_check is real_decide for m in production), "patch only the comparator side"
 
     assert run.n_calls > 0, "positive control needs real calls to compare against"
     assert len(run.disagreements) == run.n_calls, (

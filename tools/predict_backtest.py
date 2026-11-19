@@ -350,12 +350,25 @@ class ChartIndex:
         forecast feeds it (``v4_shadow.with_armed_band``): the band the engine armed (no wake / bedtime ramp, no
         remote-loop offset: ``comfort_target`` is the armed edge on a row with an offset) where a non-override row logs
         the commanded setpoint (``commanded_setpoint`` = ``predictor_v4._commanded_setpoint``: this mode's side
-        only), else the schedule band. A future override is not known at the anchor, so its rows keep the schedule
-        band; an override in force at the anchor is held by :meth:`override_hold`. ``override_end[i]`` is when the
-        override run that row ``i`` belongs to ends (the first row after it without the flag: the log's stand-in for
-        the engine's grace end, which the chart log does not carry)."""
+        only, the mode chosen per row), else the schedule band. A future override is not known at the anchor, so its
+        rows keep the schedule band; an override in force at the anchor is held by :meth:`override_hold`.
+        ``override_end[i]`` is when the override run that row ``i`` belongs to ends (the first row after it without the
+        flag: the log's stand-in for the engine's grace end, which the chart log does not carry)."""
         self.band_armed = []
-        for (lo, hi), r in zip(self.band, self.rows, strict=True):
+        # Issue #1620: the rule takes the mode (``heat=``): a heat setpoint is any value below the cool edge, so trying
+        # heat first would take a cooling setpoint as the heat one. The mode is chosen as ``samples_from_chart_log``
+        # chooses it: the running action, else the last one within 12 h, else cool from 68 F outdoor. An engine with
+        # the earlier rule (no ``heat=``) keeps the earlier heat-then-cool order.
+        try:
+            moded = commanded_setpoint is not None and "heat" in inspect.signature(commanded_setpoint).parameters
+        except TypeError, ValueError:
+            moded = False
+        last_active: tuple[float, str] | None = None
+        for (lo, hi), dt, r in zip(self.band, self.dts, self.rows, strict=True):
+            hv = r.get("hvac")
+            t = dt.timestamp()
+            if hv in ("heating", "cooling"):
+                last_active = (t, hv)
             if commanded_setpoint is None:  # an engine without the rule (a test fake): the schedule band
                 self.band_armed.append((lo, hi))
                 continue
@@ -363,7 +376,19 @@ class ChartIndex:
             if base is None:
                 base = _num(r.get("setpoint"))
             if base is not None and r.get("override") is not True and (lo is not None or hi is not None):
-                if lo is not None:
+                if moded:
+                    if hv in ("heating", "cooling"):
+                        heat = hv == "heating"
+                    elif last_active is not None and t - last_active[0] <= 12 * 3600:
+                        heat = last_active[1] == "heating"
+                    else:
+                        out = _num(r.get("outdoor"))
+                        heat = not (out is not None and out >= 68.0)
+                    if heat and lo is not None:
+                        lo = commanded_setpoint(lo, base, hi, heat=True)
+                    elif not heat and hi is not None:
+                        hi = commanded_setpoint(hi, base, lo, heat=False)
+                elif lo is not None:
                     new_lo = commanded_setpoint(lo, base, hi)
                     if new_lo != lo:
                         lo = new_lo

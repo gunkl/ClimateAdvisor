@@ -307,6 +307,45 @@ class TestTrainingSetpoint:
         smp = p4.samples_from_chart_log(rows, tz=TZ_LA, primary="sensor.hall", in_sleep=_night)
         assert smp and all(s.cool_sp_f == 72.0 for s in smp)
 
+    @pytest.mark.parametrize(("lower", "upper", "sp"), [(66.0, 70.0, 68.0), (66.0, 72.0, 70.0), (66.0, 72.0, 69.0)])
+    def test_a_loop_raise_at_or_past_the_band_midpoint_is_still_this_modes_setpoint(self, lower, upper, sp):
+        """#1620: on a narrow band the loop's raise (up to 4 F) reaches the midpoint; it is still the heat setpoint."""
+        t = datetime.combine(DAY, time(23, 0), TZ_LA)
+        rows = [
+            _row(t, "heating", lower + 0.5, sp=sp, lower=lower, upper=upper, ct=lower),
+            _row(t + timedelta(minutes=30), "idle", sp, sp=sp, lower=lower, upper=upper, ct=lower),
+        ]
+        smp = p4.samples_from_chart_log(rows, tz=TZ_LA, primary="sensor.hall", in_sleep=_night)
+        assert smp and all(s.heat_sp_f == sp for s in smp)
+
+    @pytest.mark.parametrize(("lower", "upper", "sp"), [(70.0, 74.0, 72.0), (70.0, 76.0, 73.0), (70.0, 76.0, 72.0)])
+    def test_cooling_mirror_of_a_loop_drop_at_or_past_the_midpoint(self, lower, upper, sp):
+        t = datetime.combine(DAY, time(23, 0), TZ_LA)
+        rows = [
+            _row(t, "cooling", upper - 0.5, sp=sp, lower=lower, upper=upper, ct=upper),
+            _row(t + timedelta(minutes=30), "idle", sp, sp=sp, lower=lower, upper=upper, ct=upper),
+        ]
+        smp = p4.samples_from_chart_log(rows, tz=TZ_LA, primary="sensor.hall", in_sleep=_night)
+        assert smp and all(s.cool_sp_f == sp and s.heat_sp_f is None for s in smp)
+
+    @pytest.mark.parametrize(
+        ("heat", "edge", "other", "commanded", "want"),
+        [
+            (True, 66.0, 70.0, 68.0, 68.0),  # midpoint: this mode's
+            (True, 66.0, 70.0, 69.5, 69.5),
+            (True, 66.0, 70.0, 70.0, 66.0),  # at the cool edge: the other mode's
+            (True, 66.0, 70.0, 71.0, 66.0),
+            (True, 67.0, 73.0, 66.0, 66.0),  # the bedtime ramp: commanded below the logged edge
+            (False, 76.0, 70.0, 73.0, 73.0),
+            (False, 76.0, 70.0, 70.0, 76.0),
+            (False, 76.0, 70.0, 68.0, 76.0),
+            (True, 66.0, None, 80.0, 80.0),
+            (True, 66.0, 70.0, None, 66.0),
+        ],
+    )
+    def test_commanded_setpoint_rule(self, heat, edge, other, commanded, want):
+        assert p4._commanded_setpoint(edge, commanded, other, heat=heat) == want
+
     def test_without_a_sleep_sensor_the_commanded_setpoint_is_learned_too(self):
         night = _cycles(datetime.combine(DAY, time(21, 0), TZ_LA), edge=66.0, offset=2.0, n=2, night=True)
         smp = p4.samples_from_chart_log(night, tz=TZ_LA, primary="sensor.hall")
@@ -877,6 +916,14 @@ class TestBacktestArmedSetpoints:
         assert idx.armed_at((t + timedelta(hours=17)).timestamp()) == (66.0, 72.0)  # the armed edge, no offset
         assert idx.loop_offset_at((t + timedelta(hours=17)).timestamp()) == 2.0
         assert idx.band_at(t.timestamp()) == (66.5, 72.5)  # the schedule source is unchanged
+
+    def test_a_narrow_band_takes_each_modes_commanded_setpoint_on_its_own_side(self):
+        """#1620: 66-70 with the loop's 68 is the heat setpoint; 70-76 cooling with 73 is the cool one, not the heat."""
+        t = datetime(2026, 11, 17, 23, 0, tzinfo=PST)
+        rows = [_row(t, "heating", 66.5, sp=68.0, lower=66.0, upper=70.0)]
+        assert self._idx(rows).armed_at(t.timestamp()) == (68.0, 70.0)
+        rows = [_row(t, "cooling", 74.0, sp=73.0, lower=70.0, upper=76.0, outdoor=80.0)]
+        assert self._idx(rows).armed_at(t.timestamp()) == (70.0, 73.0)
 
     def test_an_override_at_the_anchor_is_held_until_it_ends_and_a_later_one_is_not_foreseen(self):
         t = datetime(2026, 11, 17, 9, 0, tzinfo=PST)

@@ -504,7 +504,7 @@ from .thermostat_profile import (
     fan_command_starts_blower,
     live_fan_profile,
 )
-from .time_utils import instant_after
+from .time_utils import instant_after, seconds_since
 from .timeline_surfaces import (
     CardLive,
     apply_direction_veto,
@@ -3360,7 +3360,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         on_since = getattr(self, on_since_attr)
         if on_since and self._today_record:
             now = dt_util.now()
-            elapsed = (now - on_since).total_seconds() / 60.0
+            elapsed = seconds_since(on_since, now=now) / 60.0
             setattr(self._today_record, field, getattr(self._today_record, field) + elapsed)
             split_field = self._RUNTIME_MODE_FIELD.get(mode)
             if split_field:
@@ -3380,7 +3380,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         base = getattr(self._today_record, field) if self._today_record is not None else 0.0
         on_since = getattr(self, on_since_attr)
         if on_since is not None:
-            base += (dt_util.now() - on_since).total_seconds() / 60.0
+            base += seconds_since(on_since, now=dt_util.now()) / 60.0
         return round(base, 1)
 
     def _flush_hvac_runtime(self) -> None:
@@ -3969,7 +3969,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._cancel_occupancy_away_timer()
             # Returning home
             if self._occupancy_away_since and self._today_record:
-                elapsed = (now - self._occupancy_away_since).total_seconds() / 60.0
+                elapsed = seconds_since(self._occupancy_away_since, now=now) / 60.0
                 self._today_record.occupancy_away_minutes += elapsed
                 _LOGGER.debug(
                     "Away duration: %.1f minutes added to daily record",
@@ -4135,14 +4135,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         cmd_time = self.automation_engine._hvac_command_time
         if cmd_time is None:
             return False
-        return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
+        return seconds_since(cmd_time, now=dt_util.now()) < threshold_seconds
 
     def _is_recent_temp_command(self, threshold_seconds: float = 30.0) -> bool:
         """Check if a temperature setpoint command was issued recently (race guard)."""
         cmd_time = self.automation_engine._temp_command_time
         if cmd_time is None:
             return False
-        return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
+        return seconds_since(cmd_time, now=dt_util.now()) < threshold_seconds
 
     def _is_recent_fan_command(self, threshold_seconds: float = 30.0) -> bool:
         """Check if a fan command was issued recently (race guard).
@@ -4158,7 +4158,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         cmd_time = self.automation_engine._fan_command_time
         if cmd_time is None:
             return False
-        return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
+        return seconds_since(cmd_time, now=dt_util.now()) < threshold_seconds
 
     def _any_sensor_open(self) -> bool:
         """Return True if any monitored contact sensor is currently open."""
@@ -4420,7 +4420,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # Issue #1407 (C22): in a bank, outside BOTH the hold and the schedule band; else the band in effect.
                 bands = self._comfort_score_bank_bands(now) or (self._comfort_score_band_now(),)
                 if self._last_violation_check is not None:
-                    elapsed_minutes = min((now - self._last_violation_check).total_seconds() / 60, 30.0)
+                    elapsed_minutes = min(seconds_since(self._last_violation_check, now=now) / 60, 30.0)
                 else:
                     elapsed_minutes = 30.0
                 self._last_violation_check = now
@@ -7417,7 +7417,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 (record or {}).get("generated"),
                 end.isoformat(),
             )
-            age = (now - cache["at"]).total_seconds() if cache and isinstance(cache.get("at"), datetime) else None
+            age = seconds_since(cache["at"], now=now) if cache and isinstance(cache.get("at"), datetime) else None
             retry_s = 600.0 if cache is not None and cache.get("strategy") is None else 3600.0
             if cache is None or regenerated or cache.get("key") != evidence_key or age is None or age >= retry_s:
                 strategy, reason = self._timeline_night_plan(
@@ -11924,7 +11924,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _last_cmd_mode is not None
             and _last_cmd_time is not None
             and new_state.state == _last_cmd_mode
-            and (dt_util.now() - _last_cmd_time).total_seconds() < 120
+            and seconds_since(_last_cmd_time, now=dt_util.now()) < 120  # Issue #1244: real time across DST
         )
         # Issue #1246: CA can send two mode writes inside the echo window (door-close restore, then a family flip);
         # a slow cloud thermostat reports the FIRST after the second was sent. Membership in the recent own-write
@@ -11964,7 +11964,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug(
                     "Skipping pause-override: thermostat confirmed automation command (mode=%s, commanded %.1fs ago)",
                     _last_cmd_mode,
-                    (dt_util.now() - _last_cmd_time).total_seconds(),
+                    seconds_since(_last_cmd_time, now=dt_util.now()),
                 )
             elif not _any_command_pending and not self._is_recent_hvac_command(threshold_seconds=3.0):
                 _LOGGER.info(
@@ -12507,7 +12507,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # this as an override — old_temp/new_temp isn't a real setpoint pair.
                 try:
                     _cmd_age = (
-                        f"{(dt_util.now() - _last_cmd_time).total_seconds():.0f}s ago"
+                        f"{seconds_since(_last_cmd_time, now=dt_util.now()):.0f}s ago"
                         if _last_cmd_time is not None
                         else "None"
                     )
@@ -12622,13 +12622,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _fan_ct = self.automation_engine._fan_command_time
             try:
                 _fan_cmd_age = (
-                    f"{(dt_util.now() - _fan_ct).total_seconds():.0f}s ago" if _fan_ct is not None else "None"
+                    f"{seconds_since(_fan_ct, now=dt_util.now()):.0f}s ago" if _fan_ct is not None else "None"
                 )
             except TypeError, AttributeError:
                 _fan_cmd_age = "None"
             try:
                 _hvac_cmd_age = (
-                    f"{(dt_util.now() - _last_cmd_time).total_seconds():.0f}s ago"
+                    f"{seconds_since(_last_cmd_time, now=dt_util.now()):.0f}s ago"
                     if _last_cmd_time is not None
                     else "None"
                 )
@@ -14080,7 +14080,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if key not in current_keys:
                 tracked = self._entity_health_state.pop(key)
                 down_since = tracked.get("down_since") or tracked.get("first_seen") or now
-                outage_minutes = max(0, int((now - down_since).total_seconds() // 60))
+                outage_minutes = max(0, int(seconds_since(down_since, now=now) // 60))
                 _LOGGER.info(
                     "Entity health: %s is available again outage_minutes=%d",
                     key,
@@ -14453,7 +14453,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Coast windows (Issue #1233): the start/end rules live in swing.coast_thermostat_event (shared with
             # tools/swing_audit.py). Applied here, before any await, so an interleaved event sees them settled.
             since_change = (
-                (now - self._last_setpoint_change_ts).total_seconds()
+                seconds_since(self._last_setpoint_change_ts, now=now)
                 if self._last_setpoint_change_ts is not None
                 else None
             )
@@ -14486,7 +14486,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 indoor = self._get_indoor_temp_with_provenance().primary_value
                 setpoint = self._read_thermostat_setpoint_f(new_state, new_dir)
                 since = (
-                    (now - self._last_setpoint_change_ts).total_seconds()
+                    seconds_since(self._last_setpoint_change_ts, now=now)
                     if self._last_setpoint_change_ts is not None
                     else None
                 )
@@ -14496,7 +14496,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "setpoint_f": setpoint,
                     "on_indoor_f": indoor,
                     "seconds_since_setpoint_change": since,
-                    "seconds_since_previous_off": (now - last_off).total_seconds() if last_off is not None else None,
+                    "seconds_since_previous_off": seconds_since(last_off, now=now) if last_off is not None else None,
                     "resolution_f": self._swing_reading_resolution_f(),
                     "indoor_entity": self._primary_indoor_entity(),
                 }
@@ -14762,7 +14762,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if (
                 _last_known is not None
                 and _last_known_ts is not None
-                and (dt_util.now() - _last_known_ts).total_seconds() < 1800  # 30 min
+                and seconds_since(_last_known_ts, now=dt_util.now()) < 1800  # 30 min
             ):
                 outdoor = _last_known
         if outdoor is not None and outdoor != getattr(self, "_last_known_outdoor_f", None):
@@ -17289,7 +17289,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         def _minutes_since(since: Any) -> int | None:
             if isinstance(since, datetime):
-                return max(0, int((now - since).total_seconds() // 60))
+                return max(0, int(seconds_since(since, now=now) // 60))
             return None
 
         def _entry(issue: str, msg: i18n.Msg) -> dict[str, Any]:
@@ -17475,11 +17475,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 recovered_by = "in_band"
             else:
                 _ran = (self._equipment_last_active or {}).get(announced)
-                if _ran is not None and self._stall_announced_at is not None and _ran > self._stall_announced_at:
+                if (
+                    _ran is not None
+                    and self._stall_announced_at is not None
+                    and seconds_since(self._stall_announced_at, now=_ran) > 0  # as instants (Issue #1244)
+                ):
                     recovered_by = "equipment_ran"
             if recovered_by is not None:
                 minutes = (
-                    round((now - self._stall_announced_at).total_seconds() / 60) if self._stall_announced_at else None
+                    round(seconds_since(self._stall_announced_at, now=now) / 60) if self._stall_announced_at else None
                 )
                 _LOGGER.info(
                     "Comfort stall recovered: direction=%s reason=%s minutes=%s", announced, recovered_by, minutes
@@ -17505,7 +17509,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return  # unreachable: the decision excludes missing inputs
         unit = self.config.get("temp_unit", "fahrenheit")
         edge = comfort_heat if direction == "heat" else comfort_cool
-        elapsed_s = (now - (decision.effective_since or now)).total_seconds()
+        elapsed_s = seconds_since(decision.effective_since or now, now=now)
         hours = max(1, round(elapsed_s / 3600))
         gap = i18n.TempDelta(abs(indoor - edge), unit, 1)
         mode_txt = state_str if isinstance(state_str, str) else "unknown"

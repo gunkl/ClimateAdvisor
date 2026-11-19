@@ -13,6 +13,7 @@ from typing import NamedTuple
 
 from .const import ECONOMIZER_TEMP_DELTA, UNAVAILABLE_STATES, WINDOWS_RECOMMENDED_HYSTERESIS_F
 from .swing import swing_tolerance, thermostat_holds_direction
+from .time_utils import seconds_since
 
 FAHRENHEIT = "fahrenheit"
 CELSIUS = "celsius"
@@ -186,7 +187,7 @@ def next_fallback_episode(
         if announced is None:
             return EpisodeStep("fallback", reason, now, None)
         return EpisodeStep("changed", reason, since, None)
-    minutes = round((now - since).total_seconds() / 60) if since else None
+    minutes = round(seconds_since(since, now=now) / 60) if since else None
     return EpisodeStep("recovered", None, None, minutes)
 
 
@@ -198,7 +199,7 @@ def reminder_due(last: datetime | None, now: datetime, interval_s: float) -> boo
     blind-fan push debounce still uses its own inline check -- tracked in issue #1058.) The
     caller owns storing ``now`` as the new last-sent time when it acts.
     """
-    return last is None or (now - last).total_seconds() >= interval_s
+    return last is None or seconds_since(last, now=now) >= interval_s  # Issue #1244: real time across DST
 
 
 def read_sensor_state_f(state, unit: str) -> tuple[float | None, str | None]:

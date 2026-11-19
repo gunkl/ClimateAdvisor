@@ -59,6 +59,7 @@ from .const import (
     SETPOINT_ECHO_MEMORY_MAX,
     SETPOINT_HOLD_TOLERANCE_F,
 )
+from .time_utils import seconds_since
 
 #: The attributes a setpoint write can be recorded on.
 SETPOINT_ATTRIBUTES = ("temperature", "target_temp_low", "target_temp_high")
@@ -176,7 +177,7 @@ def prune_own_writes[W: _Stamped](
 
     Shared by the setpoint memory (``OwnSetpointWrite``) and the mode memory (``OwnModeWrite``, Issue #1246).
     """
-    live = tuple(w for w in writes if (now - w.written_at).total_seconds() < window_s)
+    live = tuple(w for w in writes if seconds_since(w.written_at, now=now) < window_s)  # Issue #1244: real time
     return live if cap is None else live[-cap:]
 
 
@@ -222,7 +223,7 @@ def outstanding_own_write(
     for write in reversed(tuple(writes)):
         if write.entity_id != entity_id or write.attribute != attribute:
             continue
-        if (now - write.written_at).total_seconds() >= window_s:
+        if seconds_since(write.written_at, now=now) >= window_s:
             continue
         if values_match(write.value, value, step):
             return write

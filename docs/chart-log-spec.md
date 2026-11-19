@@ -113,6 +113,7 @@ This spec covers the `ChartStateLog` class in its entirety: construction, `load(
 5. **Entries whose `ts` cannot be parsed survive pruning:** `_maybe_prune()` keeps entries with `ts is None` (unparseable) rather than dropping them silently, to surface bugs rather than hide them.
 6. **Atomic write isolation:** the original file is never partially overwritten. All writes go to a tempfile in the same directory; `os.replace()` is the single commit point.
 7. **No in-process sorting on append:** entries are not re-sorted by timestamp when appended. Callers are expected to call `append()` in chronological order.
+8. **Time-order record, bisected queries (Issue #1598):** occupant view: a chart, diagnostics download or AI Investigator run no longer parses a whole year of rows to show the last few days. `self._order` records, for one list object, how many leading rows have parseable, non-decreasing timestamps (`-1` = that list is not sorted). `load()` and `_maybe_prune()` set it from the timestamps they already parse; rows appended since are checked lazily by `_time_sorted_rows()` (normally none or one); a list assigned directly is checked once in full. When the rows are sorted, `get_entries()` finds `[cutoff, before)` by bisection (about log2(n) parses) and returns exactly the slice the full scan would. When they are not (a clock stepped back, or a row without a usable `ts` kept by the prune), it falls back to the full scan, with the same result as before. Executor-safe: the record is one tuple replaced whole, and the query bisects a stable list reference up to the length it read. Tests: `tests/test_chart_log_bisect_1598.py` (parse counts on a 365-day log; equality with the full scan on randomized sorted, out-of-order, unparseable, DST-offset and appended logs).
 
 ## Retention Model
 
@@ -388,6 +389,8 @@ def append(
 The optional `before` parameter anchors the query window to a past point in time. When supplied, the returned range is `[before − range_days, before)` instead of `[now − range_days, now)`. When `None` (default), the window ends at the current clock time.
 
 This parameter is the building block for chart historical navigation: `get_chart_data(before_ts=...)` passes a `datetime` derived from `before_ts` straight through to `get_entries(before=...)`.
+
+Cost (Issue #1598): on time-sorted rows the window is found by bisection, so a query parses about log2(n) timestamps plus the rows it returns or buckets, not every retained row (see Invariant 8). Callers: `get_chart_data()` (executor), the control-quality report (executor, Issue #1331). The coordinator cycle no longer calls it: its former per-cycle `get_entries("7d")` for `_thermal_factors` was removed because nothing has read those factors since #132.
 
 ### Recognised `range_str` values
 

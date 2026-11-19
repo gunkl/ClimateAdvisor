@@ -1579,7 +1579,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._nat_vent_cutoff_reason_candidate: str | None = None
         self._nat_vent_cutoff_reason_candidate_since: datetime | None = None
         self._pred_archive: dict[int, float] = {}
-        self._thermal_factors: dict | None = None
 
         # Observe-only mode: when disabled, automation still runs but skips actions
         self._automation_enabled: bool = True
@@ -5681,8 +5680,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     _pred_indoor_source,
                 )
 
-        with contextlib.suppress(Exception):
-            self._thermal_factors = _compute_thermal_factors(self._chart_log.get_entries("7d"))
+        # Issue #1598: the cycle no longer recomputes ``_thermal_factors`` here. Nothing has read them since #132
+        # removed their last consumer, and the recompute scanned the whole chart log on the event loop every cycle.
 
         # Purge archive entries older than 7 days (bounded at ≤336 entries at 30-min resolution).
         _archive_expire_cutoff = int((dt_util.now() - timedelta(days=7)).timestamp())

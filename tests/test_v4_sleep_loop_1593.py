@@ -406,18 +406,91 @@ def _ramp_inputs(now: datetime, lower_now: float) -> list:
     return v4_shadow.build_inputs(now=now, hourly=hourly, band=band, horizon_hours=3, step_min=15)
 
 
+class TestArmedBandFromWakeAndOverrides:
+    """#1616: from wake time the house arms the awake band at once (the schedule ramps it over two hours), and an
+    occupant's own setpoint holds until the override is due to end."""
+
+    def _wake_inputs(self) -> list:
+        now = datetime(2026, 11, 17, 5, 30, tzinfo=PST)  # the week-long display horizon always holds a night too
+        d = now.date()
+        band = [(now, 66.0, 72.0)] + [
+            (datetime.combine(d, time(h), PST), lo, hi)
+            for h, lo, hi in ((7, 66.75, 72.75), (8, 67.75, 73.75), (9, 68.0, 74.0))
+        ]
+        hourly = [(now + timedelta(hours=k), 45.0) for k in range(6)]
+        return v4_shadow.build_inputs(now=now, hourly=hourly, band=band, horizon_hours=3, step_min=15)
+
+    def test_steps_from_wake_time_get_the_awake_band(self):
+        inputs = self._wake_inputs()
+        assert any(66.0 < i.heat_sp_f < 68.0 for i in inputs if i.ts.time() >= time(6, 15))  # the ramp
+        armed = v4_shadow.with_armed_band(inputs, band_at=_band_at(), occupancy_mode="home")
+        for a in armed:
+            want = (68.0, 74.0) if a.ts.time() >= time(6, 15) else (66.0, 72.0)
+            assert (a.heat_sp_f, a.cool_sp_f) == want, a
+
+    def test_an_override_holds_its_setpoint_until_it_is_due_to_end(self):
+        inputs = self._wake_inputs()
+        until = datetime(2026, 11, 17, 7, 0, tzinfo=PST)
+        hold = v4_shadow.OverrideHold(until, 70.0, None)
+        armed = v4_shadow.with_armed_band(inputs, band_at=_band_at(), occupancy_mode="home", hold=hold)
+        for a in armed:
+            if a.ts < until:
+                assert (a.heat_sp_f, a.cool_sp_f) == (70.0, None)
+            else:
+                assert a.heat_sp_f == 68.0
+        off = v4_shadow.with_armed_band(
+            inputs, band_at=_band_at(), occupancy_mode="home", hold=v4_shadow.OverrideHold(until, None, None)
+        )
+        assert all((a.heat_sp_f, a.cool_sp_f) == (None, None) for a in off if a.ts < until)
+
+    def test_override_hold_reads_the_engine(self):
+        from types import SimpleNamespace
+
+        end = "2026-11-17T15:30:00+00:00"
+        eng = SimpleNamespace(_manual_override_active=True, _grace_end_time=end)
+        h = v4_shadow.override_hold(eng, mode="heat", setpoint_f=70.0)
+        assert h == v4_shadow.OverrideHold(datetime.fromisoformat(end), 70.0, None)
+        assert v4_shadow.override_hold(eng, mode="cool", setpoint_f=76.0).cool_sp_f == 76.0
+        assert v4_shadow.override_hold(eng, mode="off", setpoint_f=None) == v4_shadow.OverrideHold(
+            datetime.fromisoformat(end), None, None
+        )
+        assert (
+            v4_shadow.override_hold(SimpleNamespace(_manual_override_active=False), mode="heat", setpoint_f=70) is None
+        )
+        assert v4_shadow.override_hold(SimpleNamespace(_manual_override_active=True, _grace_end_time=None), mode="heat",
+                                       setpoint_f=70.0) is None  # fmt: skip
+
+    def test_the_loop_gate_is_closed_while_an_override_holds(self):
+        emu = _emu(offset_f=2.0, gated_steps=2)
+        assert _call(emu, 64.0) == (66.0, 72.0)  # held: no offset on the occupant's value
+        assert _call(emu, 64.0) == (66.0, 72.0)
+        assert _call(emu, 64.0) == (68.0, 72.0)  # the gate reopens at offset 0: one raise
+
+    def test_the_display_cycle_passes_the_override_hold(self):
+        import ast
+
+        src = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "coordinator.py"
+        cls = next(
+            n for n in ast.walk(ast.parse(src.read_text()))
+            if isinstance(n, ast.ClassDef) and n.name == "ClimateAdvisorCoordinator"
+        )  # fmt: skip
+        meth = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_v4_shadow_cycle_impl")
+        text = ast.unparse(meth)
+        assert "self._v4_override_hold()" in text and "hold=hold" in text and "gated_steps=held" in text
+
+
 class TestSleepBandFromBedtime:
     def test_in_window_steps_get_the_armed_sleep_band(self):
         now = datetime(2026, 11, 17, 20, 14, tzinfo=PST)
         inputs = _ramp_inputs(now, 68.0)
         ramp = [(i.ts.strftime("%H:%M"), i.heat_sp_f) for i in inputs]
         assert any(sp > 66.5 for t, sp in ramp if t >= "20:30"), ramp  # the schedule's ramp the bug fed
-        armed = v4_shadow.with_armed_sleep_band(inputs, band_at=_band_at(), occupancy_mode="home")
+        armed = v4_shadow.with_armed_band(inputs, band_at=_band_at(), occupancy_mode="home")
         for a, i in zip(armed, inputs, strict=True):
             if i.ts.time() >= time(20, 30):
                 assert (a.heat_sp_f, a.cool_sp_f) == (66.0, 72.0)
             else:
-                assert a == i  # awake steps keep the schedule
+                assert (a.heat_sp_f, a.cool_sp_f) == (68.0, 74.0)  # awake steps: the awake band (#1616)
         # the schedule itself (chart, v3, comfort score) is untouched: a new list
         assert any(sp > 66.5 for t, sp in ramp if t >= "20:30")
 
@@ -425,13 +498,13 @@ class TestSleepBandFromBedtime:
         """A pre-cool / TOU overlay lowers the ceiling the engine commands; the sleep band never raises it again."""
         now = datetime(2026, 11, 17, 22, 0, tzinfo=PST)
         inputs = [dataclasses.replace(i, cool_sp_f=70.0) for i in _ramp_inputs(now, 66.0)]
-        armed = v4_shadow.with_armed_sleep_band(inputs, band_at=_band_at(), occupancy_mode="home")
+        armed = v4_shadow.with_armed_band(inputs, band_at=_band_at(), occupancy_mode="home")
         assert all(a.cool_sp_f == 70.0 for a in armed)
 
     def test_away_keeps_the_schedule(self):
         now = datetime(2026, 11, 17, 20, 14, tzinfo=PST)
         inputs = _ramp_inputs(now, 68.0)
-        assert v4_shadow.with_armed_sleep_band(inputs, band_at=_band_at(), occupancy_mode="away") == inputs
+        assert v4_shadow.with_armed_band(inputs, band_at=_band_at(), occupancy_mode="away") == inputs
 
 
 # ======================================================== cause 1 mirror: the night plan after bedtime (night card)
@@ -536,10 +609,18 @@ def replay_origin(fx: dict, origin: datetime, *, seed: bool, armed: bool, horizo
     now_pt = [p for p in sched if p[0] <= o][-1]
     band = [(origin, now_pt[1], now_pt[2])] + [(datetime.fromtimestamp(t, PST), lo, hi) for t, lo, hi in sched if t > o]
     inputs = v4_shadow.build_inputs(now=origin, hourly=hourly, band=band, horizon_hours=horizon_h, step_min=15)
-    if armed:
-        inputs = v4_shadow.with_armed_sleep_band(inputs, band_at=_band_at(*fx["sleep_band"]), occupancy_mode="home")
     clim = fx["climate"]
     cur = [c for c in clim if c[0] <= o][-1]
+    hold = None
+    if armed:
+        # an occupant override in force at the origin holds its setpoint until the override run ends (the log's stand-in
+        # for the engine's grace end, which the chart log does not carry)
+        span = next((sp for sp in fx.get("override_spans", []) if sp[0] <= o < sp[1]), None)
+        if span is not None and cur[2] is not None:
+            hold = v4_shadow.OverrideHold(datetime.fromtimestamp(span[1], PST), float(cur[2]), None)
+        inputs = v4_shadow.with_armed_band(
+            inputs, band_at=_band_at(*fx["sleep_band"]), occupancy_mode="home", hold=hold
+        )
     run = None
     if cur[1] == "heating":
         k = [c for c in clim if c[0] <= o]
@@ -551,13 +632,16 @@ def replay_origin(fx: dict, origin: datetime, *, seed: bool, armed: bool, horizo
         run = (o - start) / 60.0
     loop_kw: dict[str, Any] = {}
     in_window = p4.in_sleep_window(origin, fx["sleep_time"], fx["wake_time"])
-    if seed and in_window and cur[2] is not None and cur[2] > fx["sleep_band"][0]:
+    if seed and hold is None and in_window and cur[2] is not None and cur[2] > fx["sleep_band"][0]:
         changed = o
         for c in reversed([c for c in clim if c[0] <= o]):
             if c[2] != cur[2]:
                 break
             changed = c[0]
         loop_kw = {"offset_f": float(cur[2]) - fx["sleep_band"][0], "seconds_since_raise": o - changed}
+    held = sum(1 for i in inputs if hold is not None and hold.holds(i.ts))
+    if held:
+        loop_kw["gated_steps"] = held
     emu = RemoteLoopEmulator(swing_heat_f=1.44, swing_cool_f=1.44, unit="fahrenheit", **loop_kw)
     extra: dict[str, Any] = {}
     if run is not None:
@@ -714,7 +798,7 @@ class TestCoordinatorWiring:
             for n in ast.walk(meth["_v4_shadow_cycle_impl"])
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
         }
-        assert {"_v4_live_sleep_loop", "with_armed_sleep_band"} <= calls
+        assert {"_v4_live_sleep_loop", "with_armed_band"} <= calls
         assert "RemoteLoopEmulator" not in ast.unparse(meth["_v4_shadow_cycle_impl"])  # never an unseeded loop
         night = ast.unparse(meth["_timeline_night_plan"])
         assert "_v4_night_loop_now" in night
@@ -742,5 +826,5 @@ def test_every_home_gets_the_armed_sleep_band_not_only_one_with_a_sleep_sensor()
         n for n in ast.walk(meth) if isinstance(n, ast.If | ast.IfExp) and "ca_sleep_node" in ast.unparse(n.test)
     ]
     for g in guarded:
-        assert "with_armed_sleep_band" not in ast.unparse(g), ast.unparse(g)
-    assert "with_armed_sleep_band" in ast.unparse(meth)
+        assert "with_armed_band" not in ast.unparse(g), ast.unparse(g)
+    assert "with_armed_band" in ast.unparse(meth)

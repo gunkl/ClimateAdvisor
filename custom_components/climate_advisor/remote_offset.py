@@ -167,7 +167,9 @@ class RemoteLoopEmulator:
     ``RemoteOffsetState.offset_f``: heat +, cool -; ``seconds_since_raise`` = how long ago the live loop raised, for
     its startup wait), and the startup wait is the live one (``startup_latency_s``: the thermostat's measured
     latency, ``AutomationEngine._remote_startup_latency_s``). The defaults are a loop that starts at offset 0, as the
-    live loop does when the sleep window opens (``AutomationEngine._enter_remote_context``).
+    live loop does when the sleep window opens (``AutomationEngine._enter_remote_context``). ``gated_steps``: the
+    first steps an occupant override holds the thermostat (Issue #1616): the loop's gate is closed there, as live
+    (``decide_remote_offset_gate``: an owner -> offset 0), so the held setpoint is passed through unchanged.
     """
 
     def __init__(
@@ -180,7 +182,9 @@ class RemoteLoopEmulator:
         offset_f: float = 0.0,
         seconds_since_raise: float | None = None,
         startup_latency_s: float | None = None,
+        gated_steps: int = 0,
     ) -> None:
+        self._gated = max(0, int(gated_steps))  # Issue #1616: steps an occupant override holds (the loop's gate closed)
         self._swing = {"heat": float(swing_heat_f), "cool": float(swing_cool_f)}
         self._step = step_f(unit)
         self._cap = cap_f(unit)
@@ -218,7 +222,10 @@ class RemoteLoopEmulator:
     def setpoints(
         self, *, in_window: bool, target_f: float, heat_sp: float | None, cool_sp: float | None, running: int
     ) -> tuple[float | None, float | None]:
-        if not in_window or not math.isfinite(target_f):
+        gated = self._gated > 0
+        if gated:
+            self._gated -= 1
+        if gated or not in_window or not math.isfinite(target_f):
             self._mag = {"heat": 0.0, "cool": 0.0}
             self._since_raise = {"heat": None, "cool": None}
             return heat_sp, cool_sp

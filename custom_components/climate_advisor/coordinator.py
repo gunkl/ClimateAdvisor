@@ -7506,7 +7506,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         plan = night_strategy.plan_night(inp)
         return plan, "ok"
 
-    def _v4_live_sleep_loop(self, now: datetime) -> Any:
+    def _v4_override_hold(self) -> Any:
+        """The occupant override the thermostat holds now, for the v4 display forecast (Issue #1616): a READ of the
+        engine's override flag and its grace end, and of the thermostat's live mode and setpoint. Display only."""
+        climate = self.hass.states.get(self.config.get("climate_entity", ""))
+        return v4_shadow.override_hold(
+            self.automation_engine,
+            mode=climate.state if climate is not None else None,
+            setpoint_f=self._read_chart_setpoint(),
+        )
+
+    def _v4_live_sleep_loop(self, now: datetime, gated_steps: int = 0) -> Any:
         """The emulated bedroom loop for the v4 display forecast made now (Issue #1593): ``live_loop_emulator``
         on the engine's READ-ONLY loop description (the offset in force, its raise clock, the live swing and the
         measured startup latency). Display only: the emulator moves forecast setpoints, never the thermostat."""
@@ -7515,6 +7525,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             now=now,
             unit=self.config.get("temp_unit", "fahrenheit"),
             step_minutes=v4_shadow.step_minutes(),
+            gated_steps=gated_steps,
         )
 
     def _v4_night_loop_now(self, now: datetime) -> dict[str, Any]:
@@ -8032,13 +8043,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # swing and startup wait), and the sleep-window steps carry the band the engine arms at bedtime, not the
         # schedule's ramp into it (the schedule itself is unchanged: the chart, v3 and the comfort score read it).
         # Issue #1610: every home's thermostat gets the flat sleep band at bedtime, with or without a sleep sensor.
-        sleep_loop = self._v4_live_sleep_loop(now) if cycle.get("ca_sleep_node") else None
+        # Issue #1616: and the awake band from wake time (no ramp), and an occupant's own setpoint until the override is
+        # due to end (the remote loop's gate is closed while it holds, as live).
+        hold = self._v4_override_hold()
         if self._current_classification is not None:
-            inputs = cycle["inputs"] = v4_shadow.with_armed_sleep_band(
+            inputs = cycle["inputs"] = v4_shadow.with_armed_band(
                 inputs,
                 band_at=band_resolver_for(self._current_classification, self.config),
                 occupancy_mode=self._occupancy_mode,
+                hold=hold,
             )
+        held = sum(1 for i in inputs if hold is not None and hold.holds(i.ts))
+        sleep_loop = self._v4_live_sleep_loop(now, gated_steps=held) if cycle.get("ca_sleep_node") else None
         predictions, new_mass = await self._executor_job(
             functools.partial(v4_shadow.run_cycle, display=True, sleep_loop=sleep_loop, **cycle)
         )

@@ -118,6 +118,19 @@ class TestParseCount:
         assert out[-3:] == log._entries[-3:]
         assert counter.calls <= 3 + 64
 
+    def test_query_after_the_hourly_prune_does_not_rescan(self, tmp_path: Path, frozen_now) -> None:
+        # The prune already parses every row once an hour; it records the order so the next query need not.
+        now = _now()
+        frozen_now(now)
+        log = _year_log(tmp_path, now)
+        frozen_now(now + timedelta(minutes=30))
+        log._last_prune = None
+        log.append(hvac="idle", fan=False, indoor=70.0, outdoor=60.0)
+        counter = _ParseCounter()
+        with patch.object(chart_log_mod, "_parse_ts", counter):
+            log.get_entries("24h")
+        assert counter.calls <= 64
+
 
 def _random_rows(rng: random.Random, now: datetime, n: int) -> list[dict]:
     rows = []
@@ -202,6 +215,33 @@ class TestEqualityWithFullScan:
             log.append(hvac="idle", fan=False, indoor=70.0, outdoor=60.0, ts=t.isoformat())
             for range_str, before in _queries(rng, t)[:4]:
                 assert log.get_entries(range_str, before=before) == _full_scan(log, range_str, before, t)
+
+    @pytest.mark.parametrize("bad", ["not-a-time", None, "missing"])
+    def test_an_unparseable_row_mid_log_is_never_bisected(self, tmp_path: Path, frozen_now, bad) -> None:
+        # The prune keeps rows whose ts cannot be parsed; such a row must send the query to the full scan (which
+        # drops it), never into the bisection, whose comparisons it would break.
+        now = _now()
+        frozen_now(now)
+        rows = [_row(now - timedelta(minutes=30 * k), k) for k in range(200, 0, -1)]
+        odd = {key: v for key, v in rows[100].items() if key != "ts"} if bad == "missing" else {**rows[100], "ts": bad}
+        log = ChartStateLog(tmp_path)
+        log._entries = [*rows[:100], odd, *rows[100:]]
+        for range_str in RANGES:
+            for before in (None, now - timedelta(minutes=30 * 99), now - timedelta(minutes=30 * 101)):
+                assert log.get_entries(range_str, before=before) == _full_scan(log, range_str, before, now)
+
+    def test_a_replaced_list_is_rechecked_not_trusted(self, tmp_path: Path, frozen_now) -> None:
+        # The order record belongs to one list object: a different list of the same length must be checked anew.
+        now = _now()
+        frozen_now(now)
+        rows = [_row(now - timedelta(minutes=30 * k), k) for k in range(300, 0, -1)]
+        log = _loaded(tmp_path, rows)
+        log.get_entries("24h")
+        shuffled = list(log._entries)
+        random.Random(7).shuffle(shuffled)
+        log._entries = shuffled
+        for range_str in RANGES:
+            assert log.get_entries(range_str) == _full_scan(log, range_str, None, now)
 
     def test_empty_log(self, tmp_path: Path) -> None:
         log = ChartStateLog(tmp_path)

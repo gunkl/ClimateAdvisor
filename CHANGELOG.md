@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.43] — 2026-11-18
+
+### Fixed
+- Fix #1590: tables on the new dashboard no longer squeeze their short columns. The Activity record showed times as "16:3" / "7" and headers as "Tim" / "e" and "Indo" / "or", because the rule that lets long translated words wrap also let a table shrink a column to one character. Times, temperatures and short words now stay on one line; long text still wraps, and a word too long to fit still breaks instead of widening the page.
+
 ## [0.9.41] — 2026-11-15
 
 ### Fixed

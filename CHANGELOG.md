@@ -3,6 +3,18 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.48] — 2026-11-18
+
+### Fixed
+- Fix #1244: on the night the clocks go back, a thermostat or fan change you make in the repeated 1 a.m. hour is no longer mistaken for Climate Advisor's own command and ignored; your change starts the manual-override grace as usual. Around both daylight-saving changes, these now run for their real length, not an hour too long or short:
+  - the 5-minute fan toggle floor;
+  - the natural-ventilation re-entry lockout;
+  - the welcome-home notice spacing;
+  - the fan stop when the indoor sensor goes offline.
+
+  The Fan card shows the true stop time, and the daily comfort and away minutes can no longer go negative.
+- Fix #1607: Climate Advisor's learning of how far your home keeps warming or cooling after the heat or AC stops now stays accurate across the daylight-saving changes. Each measurement window lasts its real 30 minutes, so the night the clocks go back no longer records outside-weather drift as coast, and the night they go forward no longer loses that night's coast sample.
+
 ## [0.9.44] — 2026-11-18
 
 ### Changed (project records only; nothing changes in your house)

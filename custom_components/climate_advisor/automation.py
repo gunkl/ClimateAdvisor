@@ -12659,6 +12659,19 @@ class AutomationEngine:
             if self._economizer_active:
                 await self._deactivate_economizer(outdoor_temp=0)
 
+        if (
+            _gate == ScheduledBandGate.DEFER_NAT_VENT
+            and self._emit_event_callback
+            and not self._recent_duplicate("nat_vent_bedtime_continue", (_fan_device_label(self.config),))
+        ):
+            self._emit_event_callback(
+                "nat_vent_bedtime_continue",
+                {
+                    "fan_device": _fan_device_label(self.config),
+                    "outdoor_temp": self._last_outdoor_temp,
+                    "sleep_cool": _sleep_band.ceiling,
+                },
+            )
         if self._today_record is not None:
             # Issue #402: key off _sleep_band.active (the edge _apply_comfort_band() actually
             # arms below), not c.hvac_mode. On a warm/mild day c.hvac_mode is "off", but the
@@ -12695,20 +12708,6 @@ class AutomationEngine:
                     "active": _sleep_band.active,
                     "modifier": c.setback_modifier,
                     **mode_write_fields(self._last_band_write),
-                },
-            )
-        # The continuation row keeps following the bedtime row, as before #1596 moved both after the write.
-        if (
-            _gate == ScheduledBandGate.DEFER_NAT_VENT
-            and self._emit_event_callback
-            and not self._recent_duplicate("nat_vent_bedtime_continue", (_fan_device_label(self.config),))
-        ):
-            self._emit_event_callback(
-                "nat_vent_bedtime_continue",
-                {
-                    "fan_device": _fan_device_label(self.config),
-                    "outdoor_temp": self._last_outdoor_temp,
-                    "sleep_cool": _sleep_band.ceiling,
                 },
             )
 
@@ -17842,12 +17841,22 @@ class AutomationEngine:
         # Issue #1409: inside an open time-of-use bank window the change writes the bank instead (decided first, so the
         # record below states what the thermostat was actually sent).
         _bank_write = await self._bank_takes_occupancy_write(mode)
+        if _bank_write is None:
+            await self._apply_comfort_band(_band, reason=_R("reason_occupancy_setback_band", mode=str(mode)))
+        # Issue #1267: the row is emitted AFTER the write and states what the thermostat was sent (``outcome``, plus
+        # ``held_reason`` when nothing was written: WHF session, blower hold, open window, no capable mode). The event
+        # type stays ``occupancy_setback`` either way -- the occupant did leave (P7 away timeline, promise journal).
         # Issue #591: WINDOWED dedup — see handle_occupancy_away()'s original comment for
         # the full rationale (repeated bands are often intentional re-confirmations, but
-        # an unguarded site reopens the #584 double-emit shape within seconds).
-        _sig = (mode, round(_band.floor, 2), round(_band.ceiling, 2))
+        # an unguarded site reopens the #584 double-emit shape within seconds). The outcome is part of the
+        # signature, so a held setback followed by a sent one inside the window is two rows.
         if _bank_write is not None:
-            _sig = (mode, "tou_bank", _bank_write.mode, round(_bank_write.target_f, 2))
+            _write_fields: dict[str, Any] = {"outcome": hvac_outcome_label(_bank_write.result)}
+            _sig: tuple[Any, ...] = (mode, "tou_bank", _bank_write.mode, round(_bank_write.target_f, 2))
+        else:
+            _write_fields = mode_write_fields(self._last_band_write)
+            _sig = (mode, round(_band.floor, 2), round(_band.ceiling, 2))
+        _sig = (*_sig, _write_fields["outcome"], _write_fields.get("held_reason"))
         if self._emit_event_callback and not self._recent_duplicate("occupancy_setback", _sig, window_seconds=600):
             _payload: dict[str, Any] = {
                 "mode": mode,
@@ -17855,6 +17864,7 @@ class AutomationEngine:
                 "ceiling": _band.ceiling,
                 "occupancy": mode,
                 "indoor_f": self._get_indoor_temp_f(),
+                **_write_fields,
             }
             if _bank_write is not None:
                 _payload.update(
@@ -17862,16 +17872,12 @@ class AutomationEngine:
                         "tou_bank": True,
                         "target_f": _bank_write.target_f,
                         "hvac_mode": _bank_write.mode,
-                        "outcome": hvac_outcome_label(_bank_write.result),
                         "note": "a time-of-use bank owns the setpoint; the band applies after it",
                     }
                 )
             self._emit_event_callback("occupancy_setback", _payload)
-        if _bank_write is not None:
-            if hvac_outcome_label(_bank_write.result) == "sent":
-                self._away_setback_sent = True  # Issue #1425: the thermostat holds the away/vacation bank
-            return
-        await self._apply_comfort_band(_band, reason=_R("reason_occupancy_setback_band", mode=str(mode)))
+        if _bank_write is not None and hvac_outcome_label(_bank_write.result) == "sent":
+            self._away_setback_sent = True  # Issue #1425: the thermostat holds the away/vacation bank
 
     def _resolve_occupancy_home_fsm_state(self) -> HomeDecision:
         """Single dispatch point for handle_occupancy_home()'s occupancy FSM

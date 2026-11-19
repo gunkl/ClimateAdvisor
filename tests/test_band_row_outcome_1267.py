@@ -23,9 +23,7 @@ from tests.test_promise_checks import _cold_house, events, hits_for, make_input
 from tests.test_return_home_off_day_1208 import _FANS, _engine_for, _run_at, _setpoints
 
 _DAYS = ["hot", "warm", "mild", "cold"]
-# Issue #1267's occupancy_setback emission site is held back pending an owner decision (two locked goldens pin the
-# whole-house-fan block as the outcome in force at the away transition); its rows are covered by the renderer tests.
-_ROWS = ["bedtime_setback", "morning_wakeup"]
+_ROWS = ["occupancy_setback", "bedtime_setback", "morning_wakeup"]
 
 
 def _rows(engine, kind):
@@ -194,7 +192,7 @@ def test_no_capable_mode_band_row_is_held(kind):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("kind", ["morning_wakeup"])
+@pytest.mark.parametrize("kind", ["occupancy_setback", "morning_wakeup"])
 def test_blocked_then_sent_within_the_dedup_window_gives_two_rows(kind):
     engine = _engine_for("warm", FAN_MODE_WHOLE_HOUSE)
     _whf_session(engine)
@@ -224,20 +222,16 @@ def test_identical_sent_setback_inside_the_window_is_still_deduped():
 
 
 def test_not_sent_setback_still_starts_the_p7_away_timeline():
-    """The occupant did leave: a setback row whose band was not sent keeps the P7 'away' meaning (same event type)."""
-    row = {"mode": "away", "occupancy": "away", "floor": 62, "ceiling": 80, "outcome": "blocked"}
-    row["held_reason"] = "whf_session"
+    """The occupant did leave: a held setback row keeps the P7 'away' meaning (same event type)."""
+    engine = _engine_for("cold", FAN_MODE_WHOLE_HOUSE)
+    _whf_session(engine)
+    _trigger(engine, "occupancy_setback")
+    (row,) = _rows(engine, "occupancy_setback")
+    assert row["outcome"] == "blocked"
     away = events((-30, "occupancy_setback", row))
     assert hits_for("comfort_kept", make_input(_cold_house(60), marks=away)) == []
     home = events((-30, "occupancy_setback", row), (-20, "occupancy_comfort_restored", {"outcome": "sent"}))
     assert len(hits_for("comfort_kept", make_input(_cold_house(60), marks=home))) == 1
-
-
-def test_not_sent_setback_row_renders_not_sent():
-    row = {"mode": "away", "occupancy": "away", "floor": 62, "ceiling": 80, "outcome": "blocked"}
-    row["held_reason"] = "whf_session"
-    label, settings = EVENT_RENDERERS["occupancy_setback"](row, "F")
-    assert label == "Occupancy setback (away) -- NOT sent (whole-house fan running)" and settings
 
 
 @pytest.mark.parametrize(

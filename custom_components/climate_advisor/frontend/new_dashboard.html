@@ -198,6 +198,10 @@
      hyphenate; CJK breaks by the strict rules; direction arrows and chevrons mirror in right-to-left languages (clocks,
      checkmarks and vertical arrows do not). */
   main, #banners, header.top, dialog { overflow-wrap: anywhere; hyphens: auto; }
+  /* Issue #1590: table cells break a long word only when nothing else fits. `anywhere` (and automatic hyphenation) let an
+     auto-sized column shrink to a character or a syllable, so the Activity record printed "16:3 / 7", "Tim / e" and
+     "man- / ual". */
+  td, th { overflow-wrap: break-word; hyphens: manual; }
   button, .btn, .pill, .chip-link, .badge, nav.tabs button, .menu button, summary, th, .tile .l { hyphens: manual; }
   :lang(ja), :lang(zh), :lang(ko) { line-break: strict; }
   [dir="rtl"] .dir-arrow { display: inline-block; transform: scaleX(-1); }

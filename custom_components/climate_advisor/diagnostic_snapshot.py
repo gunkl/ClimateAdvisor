@@ -30,6 +30,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from . import log_capture
 from .const import VERSION
 from .control_quality import build_control_quality, merge_chart_resolutions
 from .remote_offset import remote_offset_view_for
@@ -249,34 +250,60 @@ def recent_hvac_events(coordinator: Any, limit: int = 40) -> list[dict[str, Any]
     return redact_sensitive(picked[-limit:])
 
 
-def _build_control_quality_section(coordinator: Any, config: dict[str, Any]) -> dict[str, Any] | None:
-    """In-memory control-quality report (Issue #1066); ``None`` on any failure.
+def _control_quality_inputs(coordinator: Any, config: dict[str, Any]) -> dict[str, Any] | None:
+    """Copy the control-quality report's live inputs (Issue #1331); ``None`` when there is no chart log or on failure.
 
-    Reads only the chart log's in-memory ``get_entries()`` (no ``load()``/``save()``, no file
-    I/O), the indoor-temperature history and the engine's mode-change ring buffer, so it is safe
-    to call from async views. A broken report must never break a download, hence the blanket catch.
+    Event loop only: the engine's mode-change ring buffer and hold log and the coordinator's indoor history are mutated
+    by the loop, so they are copied here (the engine properties already return copies). The chart log is passed by
+    reference: its rows are never edited after append and ``load()``/prune replace the list, so it is read off the loop
+    the same way ``get_chart_data`` reads it.
     """
     try:
         chart_log = getattr(coordinator, "_chart_log", None)
         if chart_log is None:
             return None
-        now = datetime.now(UTC)
-        entries = merge_chart_resolutions(chart_log.get_entries("3d"), chart_log.get_entries("7d"), now)
         engine = getattr(coordinator, "automation_engine", None)
         changes = getattr(engine, "comfort_mode_changes", None)
         history = getattr(coordinator, "_indoor_temp_history", None)
         holds = getattr(engine, "comfort_holds", None)
+        return {
+            "chart_log": chart_log,
+            "now": datetime.now(UTC),
+            "mode_changes": list(changes) if isinstance(changes, list) else [],
+            "indoor_history": list(history) if isinstance(history, list) else None,
+            "temp_unit": config.get("temp_unit", "fahrenheit"),
+            "comfort_holds": list(holds) if isinstance(holds, list) else None,
+        }
+    except Exception:  # noqa: BLE001 - diagnostics must never raise
+        _LOGGER.debug("control_quality inputs unavailable", exc_info=True)
+        return None
+
+
+def _compute_control_quality(inputs: dict[str, Any]) -> dict[str, Any] | None:
+    """The control-quality report (Issue #1066) from ``_control_quality_inputs()``; ``None`` on any failure.
+
+    Pure CPU over the chart log's in-memory rows (no file I/O) and the copied inputs, so it runs in the executor
+    (Issue #1331): a week of rows must not hold Home Assistant's event loop. A broken report must never break a
+    download, hence the blanket catch.
+    """
+    try:
+        chart_log = inputs["chart_log"]
+        now = inputs["now"]
+        entries = merge_chart_resolutions(chart_log.get_entries("3d"), chart_log.get_entries("7d"), now)
         return build_control_quality(
             now=now,
-            mode_changes=list(changes) if isinstance(changes, list) else [],
+            mode_changes=inputs["mode_changes"],
             chart_entries=entries,
-            indoor_history=list(history) if isinstance(history, list) else None,
-            temp_unit=config.get("temp_unit", "fahrenheit"),
-            comfort_holds=list(holds) if isinstance(holds, list) else None,
+            indoor_history=inputs["indoor_history"],
+            temp_unit=inputs["temp_unit"],
+            comfort_holds=inputs["comfort_holds"],
         )
     except Exception:  # noqa: BLE001 - diagnostics must never raise
         _LOGGER.debug("control_quality section unavailable", exc_info=True)
         return None
+
+
+_OMIT = object()
 
 
 def build_diagnostic_snapshot(hass: Any, coordinator: Any, *, include_control_quality: bool = True) -> dict[str, Any]:
@@ -288,7 +315,39 @@ def build_diagnostic_snapshot(hass: Any, coordinator: Any, *, include_control_qu
     ``include_control_quality=False`` skips the (comparatively expensive) control-quality report and
     omits the key entirely; the Activity Record footer passes it because the compact footer never
     renders that block.
+
+    Synchronous: with the report included it does a week of CPU work, so ``async def`` callers use
+    ``async_build_diagnostic_snapshot()``, which builds the report in the executor (Issue #1331).
     """
+    report: Any = _OMIT
+    if include_control_quality:
+        inputs = _control_quality_inputs(coordinator, getattr(coordinator, "config", None) or {})
+        report = _compute_control_quality(inputs) if inputs is not None else None
+    return _build_snapshot(hass, coordinator, report)
+
+
+async def async_build_diagnostic_snapshot(hass: Any, coordinator: Any) -> dict[str, Any]:
+    """``build_diagnostic_snapshot()`` for ``async def`` callers: the report is built off the event loop (Issue #1331).
+
+    Occupant view: downloading diagnostics or logs, or running the AI Investigator, no longer freezes Home Assistant
+    while a week of chart history is analysed. The live inputs are copied on the loop, the report is computed in the
+    executor, then the rest of the snapshot (states, last command, promise counters) is read on the loop as before.
+    Same output as the synchronous builder; ``control_quality`` is ``None`` when the report (or the executor) fails.
+    """
+    inputs = _control_quality_inputs(coordinator, getattr(coordinator, "config", None) or {})
+    report: dict[str, Any] | None = None
+    if inputs is not None:
+        try:
+            report = await hass.async_add_executor_job(
+                log_capture.bind_zone_for_executor(_compute_control_quality), inputs
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must never raise
+            _LOGGER.debug("control_quality executor job failed", exc_info=True)
+    return _build_snapshot(hass, coordinator, report)
+
+
+def _build_snapshot(hass: Any, coordinator: Any, report: Any) -> dict[str, Any]:
+    """The snapshot itself, on the calling thread; ``report`` is the control-quality block, or ``_OMIT``."""
     config = getattr(coordinator, "config", None) or {}
     snapshot: dict[str, Any] = {
         "version": VERSION,
@@ -349,8 +408,8 @@ def build_diagnostic_snapshot(hass: Any, coordinator: Any, *, include_control_qu
         if fan_state is not None
         else None
     )
-    if include_control_quality:
-        snapshot["control_quality"] = _build_control_quality_section(coordinator, config)
+    if report is not _OMIT:
+        snapshot["control_quality"] = report
 
     # Issue #1128: per-promise hit counters (counts and timestamps only, no entity ids).
     # Issue #1490: the counts are the last 30 days (the coordinator prunes on every bump, load and status

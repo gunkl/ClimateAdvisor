@@ -1543,9 +1543,10 @@ class ClimateAdvisorEventLogView(HomeAssistantView):
             # version) so a downloaded log bundle is self-contained for triage without a
             # separate manual round-trip to ask what the thermostat reports.
             try:
-                from .diagnostic_snapshot import build_diagnostic_snapshot  # noqa: PLC0415
+                from .diagnostic_snapshot import async_build_diagnostic_snapshot  # noqa: PLC0415
 
-                diagnostics = build_diagnostic_snapshot(hass, coordinator)
+                # Issue #1331: the control-quality report is built in the executor, not on the event loop.
+                diagnostics = await async_build_diagnostic_snapshot(hass, coordinator)
             except Exception:
                 diagnostics = None
 

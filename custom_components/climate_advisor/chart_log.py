@@ -6,6 +6,7 @@ Supports downsampled retrieval for charting over 6h–1y ranges.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import json
 import logging
@@ -13,6 +14,7 @@ import os
 import sys
 import tempfile
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,23 @@ def _parse_ts(ts_str: str) -> datetime | None:
             dt = dt.replace(tzinfo=UTC)
         return dt
     return None
+
+
+def _row_ts(entry: dict[str, Any]) -> datetime | None:
+    """A row's parsed ``ts`` (``None`` when missing or unparseable)."""
+    return _parse_ts(entry.get("ts", ""))
+
+
+def _order_after(last: datetime | None, timestamps: Iterable[datetime | None]) -> tuple[bool, datetime | None]:
+    """Issue #1598: whether ``timestamps`` continue a time-sorted run that ended at ``last``, and the run's newest.
+
+    A missing/unparseable timestamp or a step backwards (a clock correction) breaks the run.
+    """
+    for ts in timestamps:
+        if ts is None or (last is not None and ts < last):
+            return False, None
+        last = ts
+    return True, last
 
 
 def _bucket_comfort_target(group: list[dict[str, Any]]) -> float | None:
@@ -151,6 +170,10 @@ class ChartStateLog:
         self._path = resolve_entry_scoped_path(config_dir, _CHART_LOG_FILE, entry_id)
         self._max_days = max_days
         self._entries: list[dict[str, Any]] = []
+        # Issue #1598: what is known about the time order of ``_entries``: (that list object, how many leading rows
+        # have parseable, non-decreasing timestamps, the newest of them). ``-1`` = that list is not time-sorted.
+        # One tuple, replaced whole, so an executor-thread reader never sees a half-updated record.
+        self._order: tuple[list[dict[str, Any]], int, datetime | None] = (self._entries, 0, None)
         # Prune on append at most once per hour to avoid O(n) work on every snapshot
         self._last_prune: datetime | None = None
 
@@ -185,6 +208,7 @@ class ChartStateLog:
 
         cutoff = datetime.now(UTC) - timedelta(days=self._max_days)
         pruned: list[dict[str, Any]] = []
+        pruned_ts: list[datetime] = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -192,12 +216,14 @@ class ChartStateLog:
             if ts is None or ts < cutoff:
                 continue
             pruned.append(entry)
+            pruned_ts.append(ts)
 
         removed = len(entries) - len(pruned)
         if removed:
             _LOGGER.debug("chart_log: pruned %d old entries on load", removed)
 
         self._entries = pruned
+        self._note_order(pruned, pruned_ts)
 
     def save(self) -> None:
         """Atomic write to disk (tempfile + os.replace). 0o600 on non-Windows."""
@@ -370,16 +396,33 @@ class ChartStateLog:
         self._last_prune = now
         cutoff = now - timedelta(days=self._max_days)
         before = len(self._entries)
+        sorted_rows = self._time_sorted_rows(check_unknown=False)
+        if sorted_rows is not None:
+            # Issue #1599: rows in time order (all parseable), so the rows to drop are a prefix found by bisection
+            # (~log2(n) parses) instead of parsing every row of up to a year once an hour on the event loop. Keeps
+            # exactly the suffix the walk below would keep.
+            rows, n = sorted_rows
+            lo = bisect.bisect_left(rows, cutoff, 0, n, key=_row_ts)
+            if lo:
+                kept_rows = rows[lo:]
+                self._entries = kept_rows
+                self._order = (kept_rows, len(kept_rows), _row_ts(kept_rows[-1]) if kept_rows else None)
+                _LOGGER.debug("chart_log: pruned %d old entries on append", lo)
+            return
+        # Order unknown or broken: the full walk (which records the order for next time).
         # Keep entries whose ts parses and is within window. Also keep entries
         # whose ts cannot be parsed — they shouldn't normally exist, but dropping
         # them silently here would hide bugs and surprise callers that just
         # appended them.
         kept: list[dict[str, Any]] = []
+        kept_ts: list[datetime | None] = []
         for e in self._entries:
             ts = _parse_ts(e.get("ts", ""))
             if ts is None or ts >= cutoff:
                 kept.append(e)
+                kept_ts.append(ts)
         self._entries = kept
+        self._note_order(kept, kept_ts)
         removed = before - len(self._entries)
         if removed:
             _LOGGER.debug("chart_log: pruned %d old entries on append", removed)
@@ -405,12 +448,23 @@ class ChartStateLog:
         anchor = before if before is not None else dt_util.now()
         cutoff = anchor - timedelta(days=range_days)
 
-        filtered = [e for e in self._entries if self._entry_after(e, cutoff)]
+        sorted_rows = self._time_sorted_rows()
+        if sorted_rows is not None:
+            # Issue #1598: rows are in time order, so the window is found by bisection (~log2(n) timestamp parses)
+            # instead of parsing every row of up to a year to keep the last few days. The [cutoff, before) slice is
+            # exactly what the full scan below keeps.
+            rows, n = sorted_rows
+            lo = bisect.bisect_left(rows, cutoff, 0, n, key=_row_ts)
+            hi = bisect.bisect_left(rows, before, lo, n, key=_row_ts) if before is not None else n
+            filtered = rows[lo:hi]
+        else:
+            # Out of order (a clock stepped back) or a row without a usable ts: the full scan.
+            filtered = [e for e in self._entries if self._entry_after(e, cutoff)]
 
-        # When a before anchor is supplied, exclude entries at or after it so
-        # the caller receives only the [cutoff, anchor) window.
-        if before is not None:
-            filtered = [e for e in filtered if not self._entry_after(e, before)]
+            # When a before anchor is supplied, exclude entries at or after it so
+            # the caller receives only the [cutoff, anchor) window.
+            if before is not None:
+                filtered = [e for e in filtered if not self._entry_after(e, before)]
 
         if range_days <= _RAW_THRESHOLD_DAYS:
             return filtered
@@ -437,6 +491,37 @@ class ChartStateLog:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _note_order(self, entries: list[dict[str, Any]], timestamps: list[datetime | None]) -> None:
+        """Record the time order of ``entries`` from timestamps a full pass already parsed (load / prune)."""
+        ordered, last = _order_after(None, timestamps)
+        self._order = (entries, len(entries) if ordered else -1, last)
+
+    def _time_sorted_rows(self, *, check_unknown: bool = True) -> tuple[list[dict[str, Any]], int] | None:
+        """Issue #1598: ``(rows, n)`` when the first ``n`` rows (all of them, now) are time-sorted, else ``None``.
+
+        Only rows appended since the last check are parsed (normally none or one); a list the log has not seen
+        (assigned directly) is checked once in full. Rows are only ever appended, never edited, so a verified prefix
+        stays valid. Safe from an executor thread: ``rows`` is a stable reference and ``n`` bounds the bisection.
+        ``check_unknown=False`` (the prune, Issue #1599) returns ``None`` instead of checking a list the log has no
+        record of, since the prune's own full walk then records it.
+        """
+        rows = self._entries
+        n = len(rows)
+        known, verified, last = self._order
+        if known is not rows or verified > n:
+            if not check_unknown:
+                return None
+            verified, last = 0, None
+        if verified < 0:
+            return None
+        if verified < n:
+            ordered, last = _order_after(last, (_row_ts(e) for e in rows[verified:n]))
+            if not ordered:
+                self._order = (rows, -1, None)
+                return None
+            self._order = (rows, n, last)
+        return rows, n
 
     @staticmethod
     def _range_str_to_days(range_str: str) -> float:

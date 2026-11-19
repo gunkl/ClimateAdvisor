@@ -140,7 +140,7 @@ custom_components/climate_advisor/
 ├── zone_registry.py       # get_coordinator()/iter_coordinators()/get_default_coordinator()/list_zones() — resolves/enumerates zone coordinators by entry_id. See Multi-Zone Spec.
 ├── storage_paths.py       # resolve_entry_scoped_path()/migrate_legacy_storage_file() — entry-scoped persistence filenames for learning.py/state.py/chart_log.py/forecast_archive.py; remove_entry_scoped_files() deletes (with const.ENTRY_SCOPED_FILES) a removed zone's files (0.9.1, State Persistence spec). See Multi-Zone Spec.
 ├── diagnostics.py         # Native HA diagnostics download hook (async_get_diagnostics_payload()).
-├── diagnostic_snapshot.py # Shared redacted diagnostic snapshot: build_diagnostic_snapshot() (thermostat live attributes + parsed capabilities + last_command block), recent_hvac_events(), redact_sensitive(). Consumed by diagnostics.py, the api.py log downloads and the AI investigator (Issue #1049).
+├── diagnostic_snapshot.py # Shared redacted diagnostic snapshot: build_diagnostic_snapshot() (thermostat live attributes + parsed capabilities + last_command block), recent_hvac_events(), redact_sensitive(). Consumed by diagnostics.py, the api.py log downloads and the AI investigator (Issue #1049); those async callers use async_build_diagnostic_snapshot(), which builds the control_quality report in the executor (Issue #1331).
 ├── incident_payload.py    # Shared `incident_detected` payload builder (build_incident_payload) and climate-error classifier (is_climate_validation_error) used by both the coordinator and the engine emitters (Issue #1049). Tier 2: incident-payload-brief.md.
 └── frontend/            # Dashboard panel (iframe): index.html (classic) + new_dashboard.html (nd_*.js, the default) + entry.html (the panel entry) + the shared chart_v2.js/.css + the shared Prediction accuracy view pa_view.js (prediction_accuracy.html and the Analysis tab) + locally bundled Chart.js v4 + zoom plugin + HammerJS
 ```
@@ -508,7 +508,7 @@ A single-setpoint thermostat guards one comfort edge at a time. Every evaluation
 | Trigger | `comfort_family_temperature_check()` from `coordinator._async_thermostat_changed()` | Every temperature change; re-enters `apply_classification()` only when the selector disagrees with the armed family |
 | Decision memory | The thermostat's real HVAC mode | Restart-safe; only the dwell timestamp is held in memory |
 | Mode-change history | `AutomationEngine.comfort_mode_changes` (cap 200) | Appended by `_record_commanded_mode()`, persisted in the state file; feeds `control_quality` |
-| Report | `control_quality.py` -> `diagnostic_snapshot` | Download Logs / Full Logs / HA diagnostics; reading guide in [09-DEBUGGING-GUIDE.md](09-DEBUGGING-GUIDE.md#control-quality-report-issue-1066) |
+| Report | `control_quality.py` -> `diagnostic_snapshot` | Download Logs / Full Logs / HA diagnostics; built in the executor by `async_build_diagnostic_snapshot()` (Issue #1331); reading guide in [09-DEBUGGING-GUIDE.md](09-DEBUGGING-GUIDE.md#control-quality-report-issue-1066) |
 
 The ODE floor guard (`ode_floor_guard.py`) was removed in this change. The ODE ceiling guard (`ode_ceiling_guard.py`) keeps its decision but skips its `cool` write while the selector is guarding the floor.
 

@@ -239,6 +239,8 @@ The Debug tab shows a "holding {family}: ... (until ~HH:MM)" line while a hold i
 
 Source of truth: `custom_components/climate_advisor/control_quality.py` (module docstring has the exact definitions); the mode-change ring buffer is `AutomationEngine.comfort_mode_changes`.
 
+**Where it is computed (Issue #1331).** Downloading diagnostics or logs, or running the AI Investigator, no longer freezes Home Assistant while the report is built. The three async callers (HA "Download diagnostics", Download Logs / Full Logs, the investigator footer) call `diagnostic_snapshot.async_build_diagnostic_snapshot()`: the live inputs (the engine's `comfort_mode_changes` and `comfort_holds` copies, the indoor history, the time and unit) are copied on the event loop, the report (`chart_log.get_entries("3d"/"7d")`, `merge_chart_resolutions`, `build_control_quality`) runs in the executor, and the rest of the snapshot (thermostat state, last command, promise counters) is read on the loop. `control_quality` is `null` when the report or the executor job fails; the rest of the download is unaffected. The synchronous `build_diagnostic_snapshot()` stays for tests and for the Activity Record footer, which skips the report. The report's linearity is guarded by a line count (`sys.monitoring`), not wall-clock timing: `tests/test_control_quality.py::TestMisarmedAccuracy::test_five_thousand_samples_is_linear_by_line_count`.
+
 ## Debugging a house-off-target stall alert (Issue #1050)
 
 **What the occupant experienced:** the house sat more than 1 degree outside the comfort band for 3+ hours and the heating/cooling never started, and nothing told them. The alert is push-only (no email) and repeats every 12 h while it persists.

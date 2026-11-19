@@ -243,7 +243,7 @@ def outstanding_own_mode_write(
     (``decide_mode_echo`` consumes it on arrival) and still inside the same echo window. None otherwise.
     """
     for write in reversed(tuple(writes)):
-        if write.mode == mode and (now - write.written_at).total_seconds() < window_s:
+        if write.mode == mode and seconds_since(write.written_at, now=now) < window_s:  # Issue #1244: real time
             return write
     return None
 

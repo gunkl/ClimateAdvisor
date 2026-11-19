@@ -30,6 +30,7 @@ from typing import Any, NamedTuple
 from . import i18n
 from .const import V4_PREDICT_HORIZON_HOURS, V4_UNUSABLE_WARN_REFITS
 from .remote_offset import RemoteLoopEmulator  # noqa: F401 - Issue #1553: the shared emulated loop (re-exported)
+from .time_utils import seconds_since
 from .window_span import (  # noqa: F401 - the shared rule lives in the engine-neutral module; re-exported here
     WINDOW_PLAN_FALLBACK_HOURS,
     planned_window_span,
@@ -894,7 +895,7 @@ def live_loop_seed(state: Any, raise_at: datetime | None, now: datetime) -> tupl
     since: float | None = None
     if isinstance(raise_at, datetime):
         try:
-            since = max(0.0, (now - raise_at).total_seconds())
+            since = max(0.0, seconds_since(raise_at, now=now))  # Issue #1244: real time
         except TypeError:  # naive/aware clock mix (stubs)
             since = None
     return float(offset), since

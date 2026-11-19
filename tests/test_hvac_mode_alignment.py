@@ -7,7 +7,7 @@ whose state we flip by hand to model a device that ignores / later obeys a mode 
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,12 +15,14 @@ import pytest
 from custom_components.climate_advisor import ai_skills_context as _ctx
 from custom_components.climate_advisor import automation as automation_module
 from custom_components.climate_advisor.automation import (
+    MODE_ALIGNMENT_RECHECK_S,
     AutomationEngine,
     ComfortBand,
     HvacCommandResult,
     HvacWriteRecord,
     hvac_outcome_label,
 )
+from custom_components.climate_advisor.const import OWN_WRITE_ECHO_WINDOW_S
 from custom_components.climate_advisor.setpoint_verify_decision import ModeAlignmentOutcome, decide_mode_alignment
 
 NOW = datetime(2026, 1, 12, 7, 0, 0, tzinfo=UTC)
@@ -151,19 +153,34 @@ def _names(engine):
     return [n for n, _ in engine._events]
 
 
+def _past_echo_window(timers, engine, now):
+    """The 130 s re-check, then the end of the mode echo window (Issue #1595).
+
+    At 130 s the write is still outstanding in the #1246 echo memory and the thermostat still shows its old mode, so a
+    slow cloud thermostat may simply not have answered yet: the re-check waits for the window end, and only a
+    thermostat still ignoring the mode then is announced.
+    """
+    now.return_value = NOW + timedelta(seconds=MODE_ALIGNMENT_RECHECK_S)
+    timers.fire(engine, MODE_ALIGNMENT_RECHECK_S)
+    assert "hvac_mode_not_applied" not in _names(engine), "announced inside the echo window"
+    wait = OWN_WRITE_ECHO_WINDOW_S - MODE_ALIGNMENT_RECHECK_S + 1
+    now.return_value = NOW + timedelta(seconds=MODE_ALIGNMENT_RECHECK_S + wait)
+    timers.fire(engine, wait)
+
+
 class TestReadBackEpisode:
     def test_thermostat_ignoring_a_heat_request_is_announced_once_then_recovers(self):
         engine = _engine("off")
         # Mode commands "succeed" but the device never switches: state stays off.
         timers = _Timers()
         p1, p2, p3 = _patched(timers)
-        with p1, p2, p3:
+        with p1, p2, p3 as now:
             asyncio.run(engine._set_temperature(70.0, reason="t", mode="heat"))
             assert {d for d, _ in timers.items} == {10, 130}
             timers.fire(engine, 10)  # early check: starts the mismatch clock, never announces
             assert "hvac_mode_not_applied" not in _names(engine)
             assert engine._hvac_write_record.mismatch_since is not None
-            timers.fire(engine, 130)
+            _past_echo_window(timers, engine, now)
             timers.fire(engine, 130)  # second miss in the same episode: silent
             assert _names(engine).count("hvac_mode_not_applied") == 1
             ev = next(d for n, d in engine._events if n == "hvac_mode_not_applied")
@@ -189,9 +206,9 @@ class TestReadBackEpisode:
         engine = _engine("heat")
         timers = _Timers()
         p1, p2, p3 = _patched(timers)
-        with p1, p2, p3:
+        with p1, p2, p3 as now:
             asyncio.run(engine._set_hvac_mode("off", reason="door/window pause"))
-            timers.fire(engine, 130)
+            _past_echo_window(timers, engine, now)
         ev = next(d for n, d in engine._events if n == "hvac_mode_not_applied")
         assert (ev["requested_mode"], ev["actual_mode"]) == ("off", "heat")
 

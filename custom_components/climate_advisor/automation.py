@@ -165,6 +165,7 @@ from .own_write_echo import (
     echo_window_wait_s,
     hold_tolerance,
     holds_own_setpoint,
+    outstanding_own_mode_write,
     outstanding_own_write,
     prune_own_writes,
     resolve_step,
@@ -6393,7 +6394,9 @@ class AutomationEngine:
             },
         )
 
-    def _check_mode_alignment(self, my_seq: int, *, announce: bool) -> ModeAlignmentOutcome:
+    def _check_mode_alignment(
+        self, my_seq: int, *, announce: bool, before_mode: str | None = None
+    ) -> ModeAlignmentOutcome:
         """Read back whether the thermostat is in the mode last requested (Issue #1049, change 2).
 
         ``announce=False`` (the early 10 s check) only starts the mismatch clock -- cloud
@@ -6401,6 +6404,10 @@ class AutomationEngine:
         ``announce=True`` (the >=130 s re-check) opens a once-per-episode ``hvac_mode_not_applied``
         via ``next_fallback_episode`` and closes it with ``hvac_mode_applied_recovered`` when the
         thermostat is finally in the requested mode.
+
+        Issue #1595: ``before_mode`` is what the thermostat reported before the write. When the re-check finds it
+        still there and the write is still outstanding in the #1246 mode echo memory, the write is not answered yet:
+        the re-check waits for the end of the echo window instead of announcing (``_mode_echo_wait_s``).
         """
         state = self.hass.states.get(self.climate_entity)
         live = getattr(state, "state", None) if state is not None else None
@@ -6436,6 +6443,17 @@ class AutomationEngine:
         since = rec.mismatch_since or now
         self._update_write_record(apply_skip_reason=None, mismatch_since=since)
         if not announce:
+            return outcome
+        wait_s = self._mode_echo_wait_s(requested, live, before_mode)
+        if wait_s is not None:
+            _LOGGER.info(
+                "HVAC mode not answered yet: requested %s, thermostat still reports %r -- re-checking in %.0fs "
+                "(echo window)",
+                requested,
+                live,
+                wait_s,
+            )
+            self._schedule_mode_alignment_recheck(my_seq, delay_s=wait_s)  # judged at the window end, no second wait
             return outcome
         step = next_fallback_episode(requested, rec.episode_reason, since, now)
         self._update_write_record(episode_reason=step.announced, mismatch_since=step.since)
@@ -6532,8 +6550,14 @@ class AutomationEngine:
             previous()
         setattr(self, slot, _call_later(self, delay, fn))
 
-    def _schedule_mode_alignment_recheck(self, my_seq: int) -> None:
-        """Schedule the >=130 s read-back mode check in its own cancel slot (Issue #1049)."""
+    def _schedule_mode_alignment_recheck(
+        self, my_seq: int, *, before_mode: str | None = None, delay_s: float = MODE_ALIGNMENT_RECHECK_S
+    ) -> None:
+        """Schedule the >=130 s read-back mode check in its own cancel slot (Issue #1049).
+
+        ``before_mode``: the thermostat's mode before the write, so the re-check can tell an unanswered write from a
+        refused one (Issue #1595); ``delay_s``: the re-check of an unanswered write lands at the echo window end.
+        """
         if self._mode_align_recheck_cancel:
             self._mode_align_recheck_cancel()
             self._mode_align_recheck_cancel = None
@@ -6541,9 +6565,29 @@ class AutomationEngine:
         @callback
         def _recheck(_now: Any) -> None:
             self._mode_align_recheck_cancel = None
-            self._check_mode_alignment(my_seq, announce=True)
+            self._check_mode_alignment(my_seq, announce=True, before_mode=before_mode)
 
-        self._mode_align_recheck_cancel = _call_later(self, MODE_ALIGNMENT_RECHECK_S, _recheck)
+        self._mode_align_recheck_cancel = _call_later(self, delay_s, _recheck)
+
+    def _mode_echo_wait_s(self, requested: str | None, live: object, before_mode: str | None) -> float | None:
+        """Seconds until the echo window of an UNANSWERED mode write ends, or None (the re-check may announce now).
+
+        The mode twin of ``_setpoint_echo_wait_s`` (Issue #1595): unanswered = the thermostat still reports the mode it
+        had before the write (``before_mode``) and a write of ``requested`` is still outstanding in the #1246 mode echo
+        memory (``own_write_echo.outstanding_own_mode_write``; an arrived echo is consumed). A thermostat that reports
+        any other mode answered, so it is never waited for. Never raises: a bookkeeping problem means "judge now".
+        """
+        if not requested or before_mode is None or live != before_mode or live == requested:
+            return None
+        writes = getattr(self, "_own_mode_writes", None)
+        if not writes:
+            return None
+        now = dt_util.now()
+        try:
+            write = outstanding_own_mode_write(writes, mode=requested, now=now)
+            return None if write is None else echo_window_wait_s(write, now)
+        except TypeError:  # naive/aware (or stubbed) clock mix: judge now, as before
+            return None
 
     async def _set_hvac_mode(self, mode: str, *, reason: str | i18n.Msg) -> HvacCommandResult:
         """Set the thermostat HVAC mode and report what happened (Issue #1049)."""
@@ -6585,6 +6629,7 @@ class AutomationEngine:
         self._record_commanded_mode(mode, reason)
         self._last_commanded_hvac_time = dt_util.now()
         _cs_reaffirm = self.hass.states.get(self.climate_entity)
+        _mode_before = getattr(_cs_reaffirm, "state", None)  # Issue #1595: what the thermostat showed before this write
         if _cs_reaffirm and _cs_reaffirm.state == mode:
             _LOGGER.debug("_set_hvac_mode: thermostat already %r — re-affirming", mode)
         try:
@@ -6617,7 +6662,7 @@ class AutomationEngine:
             self._mode_switch_marker = (mode, dt_util.now())
             self._update_write_record(result=HvacCommandResult.EXECUTED if _call.ok else HvacCommandResult.UNCONFIRMED)
             # Read back later (Off direction included): did the thermostat actually take it?
-            self._schedule_mode_alignment_recheck(_mode_seq)
+            self._schedule_mode_alignment_recheck(_mode_seq, before_mode=_mode_before)
             _LOGGER.info("Set HVAC mode to %s — %s role=%s", mode, reason, self.role)
             self._record_action(_R("action_set_hvac", mode=str(mode)), reason)
             # When taking HVAC offline, assert fan_mode=auto to clear any post-heat
@@ -6953,6 +6998,7 @@ class AutomationEngine:
         _before_write_f = read_state_temp_f(self.hass.states.get(self.climate_entity), "temperature", unit)
         self._pending_setpoint_sent = service_temp
         self._pending_setpoint_before_f = _before_write_f
+        _mode_before = getattr(self.hass.states.get(self.climate_entity), "state", None)  # Issue #1595
         try:
             # Single call: hvac_mode + temperature together.  Including hvac_mode in every
             # call bypasses HA deduplication (the mode key makes each call distinct) and
@@ -7204,7 +7250,7 @@ class AutomationEngine:
         # Issue #1144 / #1135: a newer write supersedes the previous write's pending acceptance check; the
         # helper cancels the older 10 s timer (unload could not cancel an overwritten, untracked handle).
         self._rearm_timer("_setpoint_retry_cancel", 10, _schedule_check)
-        self._schedule_mode_alignment_recheck(_my_seq)
+        self._schedule_mode_alignment_recheck(_my_seq, before_mode=_mode_before)
         _LOGGER.info(
             "Set temperature to %s (mode=%s) — zone=%s %s role=%s",
             format_temp(temperature, unit),

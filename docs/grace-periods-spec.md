@@ -1321,6 +1321,22 @@ Tests: `tests/test_post_fan_verify_late_echo_1272.py` (echo at 45 s and 110 s, n
 the echo, a newer write and an occupant change during the wait; heat and cool; `hvac_fan` fan on and off,
 `whole_house_fan` fan on).
 
+*The mode read-back re-check waits for the same window (Issue #1595).* What the person saw: Climate Advisor switched the
+thermostat's mode on a cloud thermostat that reports the change 130-180 s later, and announced "HVAC mode not applied"
+(once per episode, a Status warning) for a change that took effect seconds after the 130 s re-check
+(`MODE_ALIGNMENT_RECHECK_S`). The re-check (`_check_mode_alignment(announce=True)`) now carries the mode the thermostat
+reported BEFORE the write (`_schedule_mode_alignment_recheck(..., before_mode=...)`, read in `_set_hvac_mode` and in
+`_set_temperature_impl` before the explicit switch). When it is MISALIGNED, the thermostat still reports that mode and a
+write of the requested mode is still outstanding in the #1246 memory (`own_write_echo.outstanding_own_mode_write`, the mode
+twin of `outstanding_own_write`; an arrived echo is consumed), the write is not answered yet: it logs "HVAC mode not answered
+yet" and re-arms the re-check for the window end (`AutomationEngine._mode_echo_wait_s`, the mode twin of
+`_setpoint_echo_wait_s`; both use `own_write_echo.echo_window_wait_s`). That re-check judges as before, so a thermostat
+that never applies the mode is announced once, at the window end, and a newer write makes it stale. A thermostat that
+reports a third mode answered, and is announced at 130 s as before. The mismatch clock (`mismatch_since`) still starts at
+the first miss. No new `ModeAlignmentOutcome`. Tests: `tests/test_mode_recheck_echo_window_1595.py` (echo at 150 s, no
+echo, a third mode; heat and cool nights, Off and the other family requested, both fan modes; `FakeHass.set_mode_echo_delay`
+holds the mode back), `tests/test_hvac_mode_alignment.py` (engine-level, announce at the window end).
+
 ### Note — Away/vacation setback and override detection (Issue #221)
 
 Away/vacation setback setpoint changes are guarded by `_is_recent_temp_command(30s)` in the coordinator's setpoint-change detection block (fix #221). When CA issues a setback setpoint command via `handle_occupancy_away()` or `handle_occupancy_vacation()`, `_set_temperature()` records a `_temp_command_time` timestamp. Any thermostat echo arriving within 30 s is suppressed and does not trigger a manual override detection. This prevents the automation's own setback from opening a spurious grace period. Since Issue #1232 a setback echo that arrives later than 30 s is recognised by value too (see [Setpoint echo recognition by value](#setpoint-echo-recognition-by-value-issue-1232)); the 30 s guard remains the backstop.

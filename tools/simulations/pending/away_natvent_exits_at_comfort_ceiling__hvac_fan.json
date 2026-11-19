@@ -72,11 +72,10 @@
     },
     {
       "at": "2026-07-10T10:00:00",
-      "expect": "setback_applied",
-      "expect_temp": 79.0,
+      "expect": "natural_ventilation",
       "track": "logic",
       "simulator_support": true,
-      "reason": "[hvac_fan twin] Away transition: setback_cool=79F applied. This is the only change production makes on occupancy_away — nat-vent is not exited."
+      "reason": "[hvac_fan twin] Away transition while the blower ventilates through an open window: the away band is NOT sent (blower hold, #1142 D7 rule 3: no heat/cool with a window open), so the thermostat stays Off and ventilation stays the outcome in force. The occupancy_setback row says not_sent / blower_hold (#1267). Before #1267 this asserted setback_applied 79F, which only passed because the harness counted a not-sent setback as applied (owner-approved outcomes.py fix, 2026-11-18). If the hold regressed and the away band were written into the open window, this fails."
     },
     {
       "at": "2026-07-10T14:01:35",

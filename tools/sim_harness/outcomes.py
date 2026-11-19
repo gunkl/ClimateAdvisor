@@ -79,6 +79,9 @@ Occupancy / wakeup (Issue #240 — production emits these directly now):
     outcome label unchanged.
   occupancy_comfort_restored   → comfort_restored (home return)
   morning_wakeup               → comfort_restored (wakeup success path)
+  Issues #1267 / #1596: a bedtime_setback / occupancy_setback / morning_wakeup row whose ``outcome`` is not
+  ``sent`` (the band never reached the thermostat) maps to None -- not a decision; the write path's own event stays
+  in force. Sent rows and rows without ``outcome`` (old logs) map as above. See the note in _map_event_to_outcome.
   (Previously production emitted no event and these were guessed from the
    action_log; that derivation was removed once #240 landed.)
 
@@ -286,7 +289,8 @@ class ProductionDecision:
 
 
 def _band_event_was_sent(payload: Any) -> bool:
-    """True when a ``comfort_band_applied`` payload represents a setpoint that reached the thermostat.
+    """True when a ``comfort_band_applied`` (or, Issues #1267 / #1596, an ``occupancy_setback`` / ``bedtime_setback`` /
+    ``morning_wakeup``) payload represents a setpoint that reached the thermostat.
 
     ``outcome`` is ``sent`` for a delivered write; events with NO ``outcome`` field are legacy
     (pre-Issue #1049) and keep their original meaning. Anything else (blocked / dry_run / failed /
@@ -495,6 +499,19 @@ def _map_event_to_outcome(
     if event_type == "ceiling_guard_fired":
         target = payload.get("target_f")
         return ProductionDecision(ts_str, event_type, "ceiling_guard_fired", target)
+
+    # Issues #1267 / #1596 (Test infrastructure change rule; owner-approved 2026-11-18, "Yes option 1"):
+    # these three rows are emitted AFTER the band write and carry its ``outcome``. Mapping a row whose band was
+    # NOT sent (whole-house fan blocked it, blower hold, open window, no capable mode, dry run, failed, superseded)
+    # to "setback_applied" / "comfort_restored" was WRONG: it claims a setback / restore the thermostat never
+    # received. It only looked right while the row was emitted BEFORE the write, so the write path's own decision
+    # event (e.g. hvac_write_blocked_whf_active) shadowed it under last-decision-wins. A not-sent row is therefore
+    # not a decision of its own: the write path's event (or the session in force) stays the outcome. Stricter, so
+    # it cannot hide a real failure: a scenario expecting setback_applied / comfort_restored now FAILS when the
+    # band was not actually sent. Sent rows, and rows without ``outcome`` (pre-fix logs), keep their mapping
+    # (``_band_event_was_sent``).
+    if event_type in ("bedtime_setback", "occupancy_setback", "morning_wakeup") and not _band_event_was_sent(payload):
+        return None
 
     # --- Bedtime ---
     if event_type == "bedtime_setback":

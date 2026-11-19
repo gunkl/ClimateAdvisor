@@ -607,17 +607,20 @@ Heating/cooling deadband (thermostat behavior — not a CA fault):
   at comfort_heat=68°F and indoor=67°F, the thermostat reporting hvac_action=idle
   or hvac_action=fan is expected deadband behavior — not a CA failure.
 
-Warm-day comfort floor guard:
-  When day_type is warm/hot, CA sets hvac_mode=off — but ONLY after indoor reaches
-  comfort_heat. If indoor < comfort_heat at automation time, CA heats first
-  (event: warm_day_comfort_gap) then shuts off. A brief morning heating cycle on
-  a warm day is intentional. This guard prevents comfort violations at shutoff.
-The warm_day_state_confirmed event fires every 30 min when the thermostat is already off\
- (heartbeat) — no service call is made.
-The warm_day_setback_applied event fires when an actual setpoint or mode change is needed\
- (cool→setback_cool, heat→setback_heat, or hard off).
-High event counts for warm_day_state_confirmed on sustained warm days are expected normal\
- behavior — 60+ firings in 48 hours is typical.
+Comfort band on warm and mild days (Issues #249 / #1208 / #1269):
+  A warm or mild classification carries hvac_mode "off". That is a day-plan label (no heating or
+  cooling is expected to be needed), NOT a command: CA does not turn the thermostat off for it.
+  While the home is occupied and awake, CA arms the comfort band every cycle via
+  select_comfort_band (event: comfort_band_applied, with the mode and setpoint it sent and its
+  outcome). The thermostat runs single-setpoint, so the nearest-edge selector picks heat (at the
+  floor) or cool (at the ceiling) depending on which edge indoor is closer to -- a heat or cool
+  start inside the comfort band on a warm or mild day is expected, not an anomaly.
+  Away/vacation arm the away/vacation setback band and the sleep window arms the sleep band, the
+  same way. The thermostat is Off only when something else holds it there: an open window
+  (door/window pause, Rule 3), a whole-house-fan session, blower ventilation with a window open,
+  or the occupant's own change.
+  warm_day_comfort_gap, warm_day_state_confirmed and warm_day_setback_applied are legacy events
+  (before #249): they appear only in old logs and nothing emits them today.
 
 Natural ventilation / economizer maintain phase:
   CA can set hvac_mode=off AND fan_mode=on simultaneously for fan-only air
@@ -1964,6 +1967,41 @@ def _write_not_sent_suffix(p: dict) -> i18n.Msg | str | None:
     return _m(key) if key else str(outcome).replace("_", " ")
 
 
+def _held_why(reason: Any) -> Cell:
+    """Catalog text for a ``held_reason`` code (``ComfortModeWrite``); an unknown code is shown as given."""
+    key = _RESTORE_HELD_KEYS.get(reason or "")
+    return _m(key) if key else (str(reason) if reason else _m("held_default"))
+
+
+def _mode_write_fact(d: Any, before: Any = None) -> Cell:
+    """Issues #1268 / #1597: the "mode: ..." fact of a nat-vent row from its structured write record.
+
+    ``d`` is the row's ``hvac_restore`` / ``hvac_mode_set`` (``mode`` / ``outcome`` / ``held_reason``); ``before`` the
+    mode the thermostat held before (None: the exit rows, which always leave a fan session's Off).
+    """
+    if not isinstance(d, dict):
+        return ""
+    held = d.get("held_reason")
+    if held:
+        return _m("fact_mode_unchanged", why=_held_why(held))
+    mode = d.get("mode")
+    if not mode:
+        return ""
+    fact = _m("fact_mode_change", old=str(before), new=str(mode)) if before else _m("fact_mode_off_to", mode=str(mode))
+    not_sent = _write_not_sent_suffix(d)
+    return _m("fact_mode_not_sent", fact=fact, why=not_sent) if not_sent else fact
+
+
+def _band_write_not_sent(label: Cell, p: dict) -> Cell:
+    """Issues #1267 / #1596: a setback / bedtime / wake-up row whose band was NOT sent says so, and why.
+
+    Rows from versions before the fix carry no ``outcome`` and keep their wording.
+    """
+    held = p.get("held_reason")
+    why = _held_why(held) if held else _write_not_sent_suffix(p)
+    return _m("band_write_not_sent", label=label, why=why) if why else label
+
+
 @_msg_renderer
 def _render_comfort_band_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
@@ -1988,7 +2026,7 @@ def _render_bedtime_setback(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
     label = _m("bedtime_setback_mode", mode=mode) if mode else _m("bedtime_setback")
     settings = _band_setpoint_msg(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
-    return label, settings
+    return _band_write_not_sent(label, p), settings
 
 
 @_msg_renderer
@@ -2063,7 +2101,7 @@ def _render_morning_wakeup(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
     label = _m("morning_wakeup_mode", mode=mode) if mode else _m("morning_wakeup")
     settings = _band_setpoint_msg(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
-    return label, settings
+    return _band_write_not_sent(label, p), settings
 
 
 @_msg_renderer
@@ -2080,7 +2118,7 @@ def _render_occupancy_setback(p: dict, unit: str) -> tuple[Cell, Cell]:
                 target=_tp(float(p["target_f"]), unit),
                 band=settings,
             )
-    return label, settings
+    return _band_write_not_sent(label, p), settings
 
 
 @_msg_renderer
@@ -2105,14 +2143,20 @@ _RESTORE_HELD_KEYS = {
     "blower_hold": "held_blower_hold",
     "occupancy_redirect": "held_occupancy_redirect",
     "no_family": "held_no_family",
+    # Issues #1267 / #1596 / #1268 / #1597 (``ComfortModeWrite`` held reasons of the band and nat-vent rows)
+    "window_open": "held_window_open",
+    "no_capable_mode": "held_no_capable_mode",
+    "occupant_change": "held_occupant_change",
+    "fan_off_pending": "held_fan_off_pending",
+    "no_window_settled": "held_no_window_settled",
+    "fan_not_started": "held_fan_not_started",
 }
 
 
 @_msg_renderer
 def _render_occupancy_comfort_restore_held(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Issue #1245: arriving home, the restore wrote nothing because a ventilation session owns the thermostat.
-    key = _RESTORE_HELD_KEYS.get(p.get("reason", ""))
-    why: Cell = _m(key) if key else (p.get("reason") or _m("held_default"))
+    why = _held_why(p.get("reason"))
     mode = p.get("mode", "")
     settings = _m("thermostat_unchanged_mode", mode=mode) if mode else _m("thermostat_unchanged")
     return _m("occupancy_restore_held", why=why), settings
@@ -3110,6 +3154,9 @@ def _render_nat_vent_comfort_floor_exit(p: dict, unit: str) -> tuple[Cell, Cell]
         with contextlib.suppress(TypeError, ValueError):
             label = _m("nat_vent_exit_indoor_le_floor", indoor=_tp(float(indoor), unit), floor=_tp(float(heat), unit))
     label = _exit_label_with_fan(label, p)
+    if "hvac_restore" in p:  # Issue #1268: what the exit actually wrote (or why it wrote nothing)
+        return label, _mode_write_fact(p["hvac_restore"])
+    # Rows from versions before #1268 carry the day label only (not necessarily what was written); kept as they were.
     hvac_restored = p.get("hvac_mode_restored", "")
     settings = (
         _m("fact_mode_off_to", mode=str(hvac_restored))
@@ -3285,7 +3332,11 @@ def _render_sensor_opened(p: dict, unit: str) -> tuple[Cell, Cell]:
     hvac_change = p.get("hvac_mode_change", "")
     fan_change = _field(p, "fan_mode_change")
     parts: list[Cell] = []
-    if hvac_change:
+    if "hvac_mode_set" in p:  # Issue #1597: what the nat-vent start did to the thermostat
+        hold = _mode_write_fact(p["hvac_mode_set"], before=p.get("hvac_mode_before") or "unknown")
+        if hold:
+            parts.append(hold)
+    elif hvac_change:  # the pause rows, and nat-vent rows from before #1597 (their "->band-armed" kept as written)
         parts.append(_m("fact_mode", mode=str(hvac_change)))
     if fan_change:
         parts.append(_m("fact_fan", fan=fan_change))

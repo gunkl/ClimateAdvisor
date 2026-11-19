@@ -1580,6 +1580,21 @@ class TestCAOperationalDesignContext:
         ctx = self._run(async_build_investigator_context(hass, coord, deep=True))
         assert "programmatic control" in ctx.lower() or "100%" in ctx
 
+    def test_warm_day_block_describes_the_armed_comfort_band_not_hvac_off(self):
+        """Issue #1269: the AI was told "When day_type is warm/hot, CA sets hvac_mode=off", so it could tell the
+        occupant their HVAC is off on a warm day or flag a correct heat/cool start inside the band as an anomaly."""
+        coord = _make_coordinator()
+        hass = _make_hass()
+        ctx = self._run(async_build_investigator_context(hass, coord, deep=True))
+        assert "CA sets hvac_mode=off" not in ctx
+        assert "select_comfort_band" in ctx and "comfort_band_applied" in ctx
+        assert "day-plan label" in ctx
+        # The three retired event names are described only as legacy rows from old logs.
+        for retired in ("warm_day_comfort_gap", "warm_day_state_confirmed", "warm_day_setback_applied"):
+            assert retired in ctx
+        assert "legacy" in ctx.lower() and "#249" in ctx
+        assert "every 30 min" not in ctx, "no retired heartbeat described as live behaviour"
+
 
 # ---------------------------------------------------------------------------
 # Group: Window compliance per-record bug (Issue #113)

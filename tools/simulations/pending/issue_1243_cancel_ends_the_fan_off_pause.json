@@ -1,0 +1,114 @@
+{
+  "name": "issue_1243_cancel_ends_the_fan_off_pause",
+  "description": "Issue #1243: the occupant turned the whole-house fan off (a 3-hour fan-off pause), then presses Cancel Override on the dashboard. The pause ends and Climate Advisor may run the fan again: free cooling through the open window restarts.",
+  "source": "synthetic",
+  "issue": 1243,
+  "notes": [
+    "Occupant impact: on a mild evening with a window open the whole-house fan is cooling the house for free. The occupant switches it off at the wall, which starts a 3-hour fan-off pause (Climate Advisor will not start a fan). Twenty minutes later they change their mind and press Cancel Override. The pause must end and free cooling resume; if the cancel no longer ended the fan-off pause, the house would sit warm with the window open and the fan idle for the rest of the 3 hours.",
+    "Harness: the cancel_override event now calls production's cancel_override(reason='user_cancel_override') and _schedule_reclassify_after_cancel(). The pre-#1243 event acted only when _manual_override_active was set (it is not: a fan-off pause is no thermostat override), so on this scenario it did nothing and every assertion after the cancel failed.",
+    "(a) Scenario effectiveness: make cancel_override() leave the fan-off pause in place (automation.py: drop the `self._end_fan_off_hold(...)` call under `if _fan_side_cancel:` AND pass `ends_fan_off_hold=False` to `_cancel_grace_intentionally()`; either one alone is covered by the other) and the fan stays off: the 22:45 natural_ventilation decision and the final _fan_active assertion fail.",
+    "(b) Two-way alignment: docs/grace-periods-spec.md (fan-off hold, #1205: a cancel aimed at the fan side ends the occupant's fan-off request) and docs/sim-harness-spec.md (cancel_override event) describe this path.",
+    "(c) User outcome if a regression slipped through: Cancel Override would leave the fan-off pause running; the fan would stay off and the open house warm until the pause ran out.",
+    "Pending, not golden: goldens are locked until the owner approves a scenario card. Enforced by tests/test_production_harness.py::test_issue_1243_cancel_pending_scenario_passes_production_engine."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.window"
+    ],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "manual_grace_seconds": 10800
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "events": [
+    {
+      "time": "2026-09-28T22:20:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "Seeds a prior 'off' state for fan.whf so the next change to 'on' is a real transition (pattern of issue_1006)."
+    },
+    {
+      "time": "2026-09-28T22:20:05",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Warm night, HVAC off, windows recommended."
+    },
+    {
+      "time": "2026-09-28T22:20:10",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 63.0,
+      "note": "Outdoor 9F cooler than indoor: free cooling is warranted throughout."
+    },
+    {
+      "time": "2026-09-28T22:20:15",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "note": "The window is open for the whole scenario."
+    },
+    {
+      "time": "2026-09-28T22:20:20",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "on",
+      "note": "The fan is running free cooling."
+    },
+    {
+      "time": "2026-09-28T22:22:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "The occupant turns the fan off at the wall: a 3-hour fan_off grace and fan-off hold start (until 01:22)."
+    },
+    {
+      "time": "2026-09-28T22:40:00",
+      "type": "cancel_override",
+      "note": "The occupant presses Cancel Override on the dashboard: no thermostat change is active, so the cancel targets the fan side and ends the fan-off pause."
+    },
+    {
+      "time": "2026-09-28T22:45:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 63.0,
+      "note": "Same readings five minutes later (past the 10 s follow-up re-apply)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-09-28T22:40:00",
+      "expect": "event_emitted",
+      "event": "grace_cancelled",
+      "payload_subset": {
+        "reason": "user_cancel_override",
+        "trigger": "fan_off"
+      },
+      "reason": "The Cancel Override press ended the occupant's fan-off grace."
+    },
+    {
+      "at": "2026-09-28T22:45:00",
+      "expect": "natural_ventilation",
+      "reason": "Once the pause is cancelled the next reading restarts free cooling through the open window (without the cancel the fan-off hold blocks every fan start until 01:22)."
+    },
+    {
+      "at": "2026-09-28T22:45:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": true,
+      "reason": "Final state: free cooling restarted the fan once the pause was cancelled."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Cancel Override ends the occupant's fan-off pause and free cooling resumes",
+    "observed_behavior": "grace_cancelled (trigger fan_off) at 22:40; free cooling restarts the fan at the 22:45 reading; fan running at the end",
+    "expected_behavior": "A cancel with no thermostat change behind it targets the fan side: it ends the fan-off pause (#1205), and Climate Advisor may run the fan again"
+  }
+}

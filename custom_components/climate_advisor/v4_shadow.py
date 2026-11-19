@@ -25,11 +25,12 @@ import zlib
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta, tzinfo
 from datetime import time as dtime
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import i18n
 from .const import V4_PREDICT_HORIZON_HOURS, V4_UNUSABLE_WARN_REFITS
 from .remote_offset import RemoteLoopEmulator  # noqa: F401 - Issue #1553: the shared emulated loop (re-exported)
+from .time_utils import seconds_since
 from .window_span import (  # noqa: F401 - the shared rule lives in the engine-neutral module; re-exported here
     WINDOW_PLAN_FALLBACK_HOURS,
     planned_window_span,
@@ -874,6 +875,148 @@ def run_state_from_rows(rows: Sequence[Mapping[str, Any]], now: datetime) -> tup
     return action, max(0.0, (now - first_ts).total_seconds() / 60.0)
 
 
+def live_loop_seed(state: Any, raise_at: datetime | None, now: datetime) -> tuple[float, float | None]:
+    """``(offset_f, seconds_since_raise)`` the live bedroom loop holds now, for a forecast that starts mid-loop.
+
+    Issue #1593: every display cycle (and a night re-plan after bedtime) used to start the emulated loop at offset 0,
+    so a raise already in force was forgotten and the next warm-up was missed. ``state`` is the engine's ONE
+    description of the loop (``AutomationEngine.remote_offset_state()``, read by the caller with its facts passed in):
+    the signed offset the thermostat holds (heat +, cool -) while the SLEEP context supplies the reading, else 0
+    (another context, the primary sensor, a gate that cleared it: ``None``). ``raise_at`` is when the live loop last
+    raised (the engine's ``_remote_raise_at``; None when unknown). Pure; never raises.
+    """
+    from .const import REMOTE_CONTEXT_SLEEP  # noqa: PLC0415
+
+    offset = getattr(state, "offset_f", None) if state is not None else None
+    if getattr(state, "context", None) != REMOTE_CONTEXT_SLEEP or not isinstance(offset, (int, float)):
+        return 0.0, None
+    if not math.isfinite(offset) or abs(offset) < 1e-6:
+        return 0.0, None
+    since: float | None = None
+    if isinstance(raise_at, datetime):
+        try:
+            since = max(0.0, seconds_since(raise_at, now=now))  # Issue #1244: real time
+        except TypeError:  # naive/aware clock mix (stubs)
+            since = None
+    return float(offset), since
+
+
+def live_loop_emulator(
+    *,
+    state: Any,
+    raise_at: datetime | None,
+    latency_s: float | None,
+    swing_heat_f: float,
+    swing_cool_f: float,
+    now: datetime,
+    unit: str,
+    step_minutes: int,
+    gated_steps: int = 0,
+) -> RemoteLoopEmulator:
+    """The emulated bedroom loop for a forecast made NOW, from the live loop's facts (passed in by the caller): the
+    offset in force (:func:`live_loop_seed`), the live loop's swing (``AutomationEngine._remote_swing_f``: the measured
+    one, Issue #1477) and its startup wait (the measured latency ``_remote_startup_latency_s``), so the forecast and
+    the house share one rule and one set of numbers."""
+    offset, since = live_loop_seed(state, raise_at, now)
+    return RemoteLoopEmulator(
+        swing_heat_f=swing_heat_f,
+        swing_cool_f=swing_cool_f,
+        unit=unit,
+        step_minutes=step_minutes,
+        offset_f=offset,
+        seconds_since_raise=since,
+        startup_latency_s=latency_s if isinstance(latency_s, (int, float)) else None,
+        gated_steps=gated_steps,
+    )
+
+
+def override_hold(engine: Any, *, mode: str | None, setpoint_f: float | None) -> OverrideHold | None:
+    """The occupant override in force now, read-only from the engine (Issue #1616), or None.
+
+    An override is in force while ``_manual_override_active``; Climate Advisor takes the thermostat back when its grace
+    ends (``_grace_end_time``). ``mode`` / ``setpoint_f`` are the thermostat's live mode and setpoint: heat or cool
+    hold that setpoint on that side, off holds nothing on. No known end (grace disabled), or an end already past ->
+    None (the forecast follows the plan, as before)."""
+    if getattr(engine, "_manual_override_active", False) is not True:
+        return None
+    raw = getattr(engine, "_grace_end_time", None)
+    try:
+        until = datetime.fromisoformat(raw) if isinstance(raw, str) else None
+    except ValueError:
+        until = None
+    if until is None or until.tzinfo is None:
+        return None
+    if mode == "heat" and isinstance(setpoint_f, (int, float)):
+        return OverrideHold(until, float(setpoint_f), None)
+    if mode == "cool" and isinstance(setpoint_f, (int, float)):
+        return OverrideHold(until, None, float(setpoint_f))
+    if mode == "off":
+        return OverrideHold(until, None, None)
+    return None
+
+
+# ``automation.BAND_CONTEXT_*`` of the bands the engine arms for an occupied home (no engine import here)
+_ARMED_CONTEXTS = frozenset({"comfort", "prefer_savings", "sleep"})
+
+
+class OverrideHold(NamedTuple):
+    """The occupant's setpoint the thermostat holds until ``until`` (an occupant override, Issue #1616).
+
+    ``heat_sp_f`` / ``cool_sp_f`` are what the thermostat is set to in its mode (the other side ``None``; both
+    ``None`` when the occupant switched it off). ``until`` is when Climate Advisor is due to take the thermostat back
+    (the override's grace end, ``AutomationEngine._grace_end_time``)."""
+
+    until: datetime
+    heat_sp_f: float | None
+    cool_sp_f: float | None
+
+    def holds(self, ts: datetime) -> bool:
+        return ts < self.until
+
+
+def with_armed_band(
+    inputs: Sequence[Any],
+    *,
+    band_at: Callable[[datetime, str], Any],
+    occupancy_mode: str,
+    hold: OverrideHold | None = None,
+) -> list[Any]:
+    """The forecast steps with the setpoints the thermostat will actually be given (Issues #1593, #1610, #1616).
+
+    Occupant view: the house switches the thermostat to the flat sleep band at bedtime and to the awake comfort band at
+    wake time, and holds an occupant's own setpoint until the override is due to end. The forecast fed the target band
+    schedule instead: its one-hour ramp into the sleep floor, its two-hour ramp out of it after wake time (interpolated
+    over more), and the plan's band while the occupant held another value; the thermostat learned against what it is
+    commanded (#1609) then started too late or too early. Per step:
+
+    * while ``hold`` is in force: the occupant's setpoint (the other side not armed);
+    * a step whose band (``band_at``: ``automation.band_resolver_for``, the engine's own ``select_comfort_band``) is the
+      comfort, prefer-savings or sleep band: its floor as the heat setpoint, its ceiling as the cool setpoint, unless
+      the schedule carries a ceiling below every armed ceiling in the horizon (a pre-cool / TOU overlay the engine
+      commands on top of the band, as ``operation_timeline.build_segments`` keeps it; the schedule's ramps run
+      between two armed ceilings and never get there);
+    * every other step (away, vacation: the schedule already holds the setback for today only) as it is.
+
+    Returns a new list; the schedule itself (the chart's band, v3, the comfort score) is not changed.
+    """
+    bands = [band_at(i.ts, occupancy_mode) for i in inputs]
+    armed = [getattr(b, "context", None) in _ARMED_CONTEXTS for b in bands]
+    lowest = min((float(b.ceiling) for b, a in zip(bands, armed, strict=True) if a), default=math.inf)
+    out: list[Any] = []
+    for i, band, is_armed in zip(inputs, bands, armed, strict=True):
+        if hold is not None and hold.holds(i.ts):
+            out.append(dataclasses.replace(i, heat_sp_f=hold.heat_sp_f, cool_sp_f=hold.cool_sp_f))
+            continue
+        if not is_armed:
+            out.append(i)
+            continue
+        ceiling = float(band.ceiling)
+        if i.cool_sp_f is not None and i.cool_sp_f < lowest - 1e-6:
+            ceiling = float(i.cool_sp_f)
+        out.append(dataclasses.replace(i, heat_sp_f=float(band.floor), cool_sp_f=ceiling))
+    return out
+
+
 def _parse_row_ts(raw: Any) -> datetime | None:
     try:
         dt = datetime.fromisoformat(raw) if isinstance(raw, str) else None
@@ -1286,6 +1429,10 @@ def night_inputs(
     mass_f: float | None = None,
     path: Sequence[tuple[datetime, float]] | None = None,
     unit: str = "fahrenheit",
+    loop_offset_f: float = 0.0,
+    loop_since_raise_s: float | None = None,
+    loop_startup_latency_s: float | None = None,
+    run_now: tuple[int, float] | None = None,
 ) -> Any:
     """``night_strategy.NightInputs`` from the live state, or None when the night cannot be planned.
 
@@ -1294,6 +1441,11 @@ def night_inputs(
     back to the timeline's ``_ca`` ``path`` and any other sensor to its current reading. When the night is already
     under way (``start`` == ``now``) it is the live reading. ``corrected_outdoor`` is tonight's forecast after v4's
     learned correction. Pure: no clock, no I/O.
+
+    Issue #1593: a night already under way also starts from the live bedroom loop (``loop_offset_f`` signed,
+    ``loop_since_raise_s``: :func:`live_loop_seed`) and the heating / cooling run in progress (``run_now``); planned
+    from bedtime the loop starts at offset 0 with no run, as the live loop does when the sleep window opens.
+    ``loop_startup_latency_s`` is the thermostat's measured startup latency (the live loop's startup wait).
     """
     from . import night_strategy as ns  # noqa: PLC0415 - lazy: a broken engine disables the plan, not setup
     from . import predictor_v4 as p4  # noqa: PLC0415
@@ -1343,4 +1495,8 @@ def night_inputs(
         evidence=evidence,
         validation=validation,
         unit=unit,
+        loop_offset_f=0.0 if ahead else float(loop_offset_f or 0.0),
+        loop_since_raise_s=None if ahead else loop_since_raise_s,
+        loop_startup_latency_s=loop_startup_latency_s,
+        run_now=None if ahead else run_now,
     )

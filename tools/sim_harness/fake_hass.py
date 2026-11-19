@@ -136,6 +136,8 @@ class _FakeServices:
         # Issue #1194 (e): entity_id -> seconds a cloud thermostat takes to report a setpoint it was just told (opt-in;
         # empty by default, so every existing scenario still sees the instant, context-carrying echo).
         self._echo_delay_s: dict[str, float] = {}
+        # Issue #1595: the same for an HVAC mode it was just told (``set_hvac_mode``); opt-in, empty by default.
+        self._mode_echo_delay_s: dict[str, float] = {}
         # Issue #1310: entity_id -> the thermostat's own start/stop deadband (entity units) used to derive the
         # hvac_action it reports after one of CA's commands; ``None`` = this entity's action is never derived
         # (the generator's ToyHouse owns it). Absent = THERMOSTAT_ACTION_DEADBAND_F.
@@ -312,6 +314,17 @@ class _FakeServices:
         else:
             self._echo_delay_s.pop(entity_id, None)
 
+    def set_mode_echo_delay(self, entity_id: str, seconds: float) -> None:
+        """A cloud thermostat reports a ``set_hvac_mode`` ``seconds`` later, with none of CA's Context (Issue #1595).
+
+        The mode twin of ``set_echo_delay`` (the real-HA dev thermostat sim's ``set_echo_delay()`` delays both).
+        Separate so every existing setpoint-delay test keeps its instant mode echo.  ``0`` restores the instant echo.
+        """
+        if seconds > 0:
+            self._mode_echo_delay_s[entity_id] = float(seconds)
+        else:
+            self._mode_echo_delay_s.pop(entity_id, None)
+
     def has_quirk(self, entity_id: Any, quirk: str) -> bool:
         if isinstance(entity_id, list):
             entity_id = entity_id[0] if entity_id else None
@@ -410,8 +423,9 @@ class _FakeServices:
                         "Cannot set temperature while the thermostat is off (sensi_like quirk)"
                     )
                 return  # non-blocking: HA logs and swallows; state unchanged
-        delay = self._echo_delay_s.get(self._first_entity(data.get("entity_id")), 0.0)
-        if delay > 0 and domain == "climate" and service == "set_temperature" and self._defer is not None:
+        delays = {"set_temperature": self._echo_delay_s, "set_hvac_mode": self._mode_echo_delay_s}.get(service, {})
+        delay = delays.get(self._first_entity(data.get("entity_id")), 0.0)
+        if delay > 0 and domain == "climate" and self._defer is not None:
             held = dict(data)
             self._defer(delay, lambda _now: self._apply_state_feedback(domain, service, held, context=None))
             return
@@ -785,6 +799,10 @@ class FakeHass:
     def set_echo_delay(self, entity_id: str, seconds: float) -> None:
         """Opt a thermostat into a late, context-free setpoint echo (Issue #1194 e / #1232)."""
         self.services.set_echo_delay(entity_id, seconds)
+
+    def set_mode_echo_delay(self, entity_id: str, seconds: float) -> None:
+        """Opt a thermostat into a late, context-free HVAC mode echo (Issue #1595)."""
+        self.services.set_mode_echo_delay(entity_id, seconds)
 
     def set_action_deadband(self, entity_id: str, deadband: float | None) -> None:
         """The thermostat's own start/stop deadband for its ``hvac_action`` (Issue #1310); ``None`` turns it off."""

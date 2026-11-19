@@ -24,6 +24,7 @@ from enum import Enum
 from typing import NamedTuple
 
 from .confirmed_transition import is_confirmed, resolve_candidate_since
+from .time_utils import seconds_since
 
 DIRECTION_HEAT = "heat"
 DIRECTION_COOL = "cool"
@@ -158,7 +159,7 @@ def decide_comfort_stall(
     # count: the thermostat is doing its job (even if undersized) -- that is a different problem.
     ran = last_active.get(direction)
     effective = since
-    if since is not None and ran is not None and ran > since:
+    if since is not None and ran is not None and seconds_since(since, now=ran) > 0:  # as instants (Issue #1244)
         effective = ran
     confirmed = is_confirmed(candidate=direction, candidate_since=effective, now=now, sustain_seconds=sustain_seconds)
     return StallDecision(

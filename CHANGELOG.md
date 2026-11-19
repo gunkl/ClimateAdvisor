@@ -3,6 +3,52 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.47] — 2026-11-18
+
+### Fixed
+- Fix #1603: if you confirm Off as a manual override and then turn the thermostat to Cool or Heat while Climate Advisor is sending one of its own commands (a blower cycle, or the whole-house fan starting when a window opens), your change is no longer ignored. The dashboard no longer keeps showing "manual override: off" over a house that is cooling or heating, and your Heat choice is no longer reverted when the old Off grace ends.
+- Fix #1612: a thermostat mode change you make a moment after Climate Advisor sends one of its own commands (its regular setpoint update, a blower cycle, the whole-house fan starting) is now noticed a few seconds later and respected as your manual override. Before, it was missed and Climate Advisor quietly put the house back on its own plan.
+- Fix #1613: these changes are now detected as yours instead of being undone at the next update:
+  - turning the heat or AC back on right after Climate Advisor pauses it for an open door or window;
+  - changing the setpoint right after Climate Advisor's regular setpoint update;
+  - turning the blower on just after that update.
+
+  A thermostat switching itself to fan-only, or restoring its own program setpoint, in response to Climate Advisor's fan command is not read as your change.
+- Fix #1596: at bedtime and wake-up, the Activity Report and AI context no longer claim a new band that was never sent; the row says "NOT sent" and why. That happens when the whole-house fan is running, the blower is ventilating through an open window, Climate Advisor is in test mode, or the thermostat rejected the command.
+- Fix #1268: when natural ventilation ends at the comfort floor, the Activity Report shows the mode Climate Advisor actually armed instead of the day's label. If nothing was armed, it says "unchanged" with the reason: window still open, your change kept, or fan-off still pending.
+- Fix #1597: when a window opens and ventilation starts, the Activity Report says the thermostat was turned Off (or left alone, and why), instead of "band-armed".
+- Fix #1606: when natural ventilation restarts from a periodic re-check, the Activity Report also says what happened to the thermostat.
+- Fix #1605: when ventilation cools the house to the comfort floor but the fan can't be switched off yet (the 5-minute toggle limit), Climate Advisor now waits. It doesn't restore heating or cooling or start a grace period while the fan still runs; comfort is restored once the fan stops. The Activity Report says the fan-off is deferred.
+- Fix #1269: the AI no longer tells you Climate Advisor turns HVAC off on warm days. It knows the comfort band is armed, and that a heat or cool start inside it is normal.
+- Fix #1272: on cloud thermostats that report a new setpoint late, a fan turning on or off right after a setpoint change no longer makes Climate Advisor send the same setpoint again. It waits up to 3 minutes for the thermostat to answer. A thermostat that really reverts to a different value is still corrected 30 seconds after the fan command.
+- Fix #1595: on cloud thermostats that report a mode change 2–3 minutes late, Climate Advisor no longer shows "HVAC mode not applied" for a mode change that went through. A thermostat that really ignores the mode is still reported, about 3 minutes after the change.
+- Fix #1244: on the night the clocks go back, a thermostat or fan change you make in the repeated 1 a.m. hour is no longer mistaken for Climate Advisor's own command and ignored; your change starts the manual-override grace as usual. Around both daylight-saving changes, these now run for their real length, not an hour too long or short:
+  - the 5-minute fan toggle floor;
+  - the natural-ventilation re-entry lockout;
+  - the welcome-home notice spacing;
+  - the fan stop when the indoor sensor goes offline.
+
+  The Fan card shows the true stop time, and the daily comfort and away minutes can no longer go negative.
+- Fix #1607: Climate Advisor's learning of how far your home keeps warming or cooling after the heat or AC stops now stays accurate across the daylight-saving changes. Each measurement window lasts its real 30 minutes, so the night the clocks go back no longer records outside-weather drift as coast, and the night they go forward no longer loses that night's coast sample.
+- Fix #1593: at night, the v4 bedroom forecast on the chart and the Prediction accuracy page now follows how the bedroom nudge loop really works:
+  - it remembers a setpoint raise already in force;
+  - it counts short furnace runs as short;
+  - it no longer shows a warm-up at bedtime.
+
+  The night card's plan after bedtime also starts from the live state.
+- Fix #1610: the forecast switches to the sleep band at bedtime in every home, instead of easing into it over two hours.
+- Fix #1609: the forecast learns when your thermostat starts and stops heating against the setpoint it was actually given, so it no longer restarts the furnace too early.
+- Fix #1616: the forecast uses the awake band from wake time and your own setpoint while you have overridden the thermostat. The Prediction accuracy backtest scores the forecast the same way.
+- Overall, the forecast for the next 1–24 hours is more accurate for the whole house, and much more accurate for the bedroom 12–24 hours ahead. The timing of the bedroom's short night warm-ups on the chart is still approximate; that is the bedroom-model refit tracked in #1594.
+- Fix #1267: when you leave home, the Activity Report and AI context no longer claim an "Occupancy setback" that was never sent. That happens when the whole-house fan is running, the blower is ventilating through an open window, Climate Advisor is in test mode, or the thermostat rejected the command; the row says "NOT sent" and why.
+
+### Changed (tests and project tooling only; nothing changes in your house)
+- #1238: if Home Assistant restarts after you started the whole-house fan with the RF remote (even while HA was down), Climate Advisor keeps the fan and your timer through the start-up window. A real-HA test now guards this.
+- #1254: after you confirm Off as a manual override, then switch to heat and back to cool, Climate Advisor shows no leftover "manual override: off". A real-HA test now guards this on hot and warm days for both fan types.
+- #1243: the simulations now press the dashboard's Cancel Override and Cancel Fan Override buttons the way Climate Advisor really does. A broken cancel (a fan-off pause that cannot be ended, a fan not handed back, a grace that will not cancel) would now be caught.
+- #1604: if the air outside turns cool while Home Assistant is down, Climate Advisor doesn't start the whole-house fan or AC in the first minutes after the restart, before its start-up check of the house. Real-HA tests now guard this; starting afterwards is still allowed.
+- #1267 / #1596: the simulation harness no longer counts a bedtime, leaving-home or wake-up band that never reached the thermostat as applied. A scenario now fails if it expects a setback that wasn't sent.
+
 ## [0.9.46] — 2026-11-18
 
 ### Fixed

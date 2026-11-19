@@ -764,16 +764,44 @@ def _hits_of(day_seed: int, promise: str) -> list:
     return [h for h in run_day(day_seed).report.hard if h.promise == promise]
 
 
-@pytest.mark.parametrize("day_seed", _FAST_PRESS_BACKSTOP_SEEDS)
-def test_without_the_rule_2_state_backstop_the_fast_press_days_break_rule_2(day_seed, monkeypatch) -> None:
-    """Revert check (Issue #1288): the backstop seeds press inside the 3 s echo guard, so no press stamp exists.
-    Remove the state backstop and the fan and the AC run together past the 30 s tolerance; nothing excuses it."""
+def _press_stays_missed(monkeypatch) -> None:
+    """Issues #1612/#1613: the coordinator re-checks a press dropped by its in-flight guards once they clear, so on
+    these days the press is no longer missed. Turn the re-check off to recreate a press the detection misses (as it
+    still does inside the start-up coalescing window, or for a change the re-check never judges as the occupant's)."""
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    monkeypatch.setattr(ClimateAdvisorCoordinator, "_note_dropped_change", lambda self, *a, **k: None)
+
+
+def _remove_rule2_state_backstop(monkeypatch) -> None:
     import custom_components.climate_advisor.whf_safety_decision as wsd
 
     monkeypatch.setattr(wsd, "_rule2_state_backstop", lambda inputs, stale: None)
-    plan = _fast_press_day(day_seed)
-    hits = [h for h in run_plan(plan).report.hard if h.promise == "ac_whf_mutex"]
-    assert hits, "removing the rule-2 state backstop no longer breaks rule 2 on this seed; pick another 1-2 s seed"
+
+
+@pytest.mark.parametrize("day_seed", _FAST_PRESS_BACKSTOP_SEEDS)
+@pytest.mark.parametrize("backstop", [True, False], ids=["with_backstop", "without_backstop"])
+def test_a_missed_fast_press_is_caught_by_the_rule_2_state_backstop(day_seed, backstop, monkeypatch) -> None:
+    """Revert check (Issue #1288): the backstop seeds press inside the 3 s echo guard, so no press stamp exists.
+    With the press missed, removing the state backstop runs the fan and the AC together past the 30 s tolerance
+    (nothing excuses it); with the backstop the day keeps them apart. The positive control for the backstop."""
+    _press_stays_missed(monkeypatch)
+    if not backstop:
+        _remove_rule2_state_backstop(monkeypatch)
+    hits = [h for h in run_plan(_fast_press_day(day_seed)).report.hard if h.promise == "ac_whf_mutex"]
+    if backstop:
+        assert not hits, [h.detail for h in hits]
+    else:
+        assert hits, "removing the rule-2 state backstop no longer breaks rule 2 on this seed; pick another 1-2 s seed"
+
+
+@pytest.mark.parametrize("day_seed", _FAST_PRESS_BACKSTOP_SEEDS)
+def test_the_rechecked_fast_press_keeps_rule_2_even_without_the_backstop(day_seed, monkeypatch) -> None:
+    """Issues #1612/#1613: the same days, re-check on: the press is detected once the guard clears, so rule 2 holds
+    with the backstop removed (the backstop is now defence in depth for presses still missed)."""
+    _remove_rule2_state_backstop(monkeypatch)
+    hits = [h for h in run_plan(_fast_press_day(day_seed)).report.hard if h.promise == "ac_whf_mutex"]
+    assert not hits, [h.detail for h in hits]
 
 
 def test_a_blower_press_under_whole_house_fan_is_not_a_fan_override_and_does_not_suppress_the_hvac() -> None:

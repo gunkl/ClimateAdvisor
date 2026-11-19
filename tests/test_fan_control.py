@@ -32,7 +32,11 @@ def _frozen_now_value():
     return datetime(2026, 3, 19, 14, 30, 0)
 
 
-from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult  # noqa: E402
+from custom_components.climate_advisor.automation import (  # noqa: E402
+    AutomationEngine,
+    ComfortModeWrite,
+    FanCommandResult,
+)
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
 from custom_components.climate_advisor.const import (  # noqa: E402
     ATTR_FAN_OVERRIDE_SINCE,
@@ -2619,7 +2623,8 @@ def _make_idle_reactivation_engine(
     engine._last_outdoor_temp = outdoor_temp
     engine._sensor_check_callback = lambda: True
     engine._activate_fan = AsyncMock()
-    engine._apply_nat_vent_hvac_state = AsyncMock()
+    # Issue #1597/#1606: the hold returns what the thermostat holds; the re-check start row reports it.
+    engine._apply_nat_vent_hvac_state = AsyncMock(return_value=ComfortModeWrite(family="off"))
     engine._emit_event_callback = MagicMock()
 
     mock_cs = MagicMock()

@@ -68,6 +68,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from .time_utils import seconds_since
+
 
 def is_reactivation_locked_out(
     *,
@@ -84,5 +86,4 @@ def is_reactivation_locked_out(
     """
     if outdoor_exit_time is None:
         return False
-    elapsed = (now - outdoor_exit_time).total_seconds()
-    return elapsed < lockout_seconds
+    return seconds_since(outdoor_exit_time, now=now) < lockout_seconds  # Issue #1244: real time across DST

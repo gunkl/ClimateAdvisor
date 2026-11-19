@@ -358,8 +358,10 @@ async def _heat_running(house) -> None:
 async def _fan_then_heat_inside_the_echo_guard(house) -> None:
     """Fan on -> Climate Advisor turns the heat off for it -> the occupant presses heat again 1 s later.
 
-    The second press lands inside Climate Advisor's 3 s HVAC echo guard, so it is read as Climate Advisor's own
-    write: no occupant HVAC-on stamp exists for rule 2 to compare (the press is missed).
+    The second press lands inside Climate Advisor's 3 s HVAC echo guard, so at that moment it is not seen as the
+    occupant's: no occupant HVAC-on stamp exists for rule 2 to compare. Since Issues #1612/#1613 the dropped press is
+    re-checked once the guard clears (about 4 s later) and detected as the occupant's, before the toy thermostat's next
+    30 s tick starts the compressor.
     """
     ae = house.coordinator.automation_engine
     await _press_after_refresh(house, True)
@@ -373,12 +375,12 @@ async def _fan_then_heat_inside_the_echo_guard(house) -> None:
 
 async def test_rule2_backstop_heat_pressed_1s_after_the_fans_suppression_stops_one_device(make_house) -> None:
     """Issue #1288: someone opens a window, the heat is running, they switch the whole-house fan on, Climate Advisor
-    turns the heat off for it, and they press heat again a second later. That press is inside the 3 s echo guard and
-    is never seen as theirs. Before the backstop the fan and the heat then ran together (the fan session already owned
-    the HVAC, so rule 2 had nothing left to do). Now one device is stopped within 30 s of the overlap starting: the
-    fan, because the heat press is the newer action.
-
-    Real HA reproduces the missed press here (no stamp is patched); see the precondition asserts.
+    turns the heat off for it, and they press heat again a second later. That press is inside the 3 s echo guard.
+    Before the backstop the fan and the heat then ran together (the fan session already owned the HVAC, so rule 2 had
+    nothing left to do); the #1288 backstop stopped one device within 30 s. Since Issues #1612/#1613 the press is
+    re-checked once the guard clears and detected as the occupant's, so the fan is stopped (the heat press is the
+    newer action) before the heat even starts: at most a 30 s overlap, the fan the device stopped. The backstop's own
+    decision stays pinned by ``tests/test_whf_safety_enforcer.py`` and the observe-only test below.
     """
     house = await make_house(fan="whf", **_open_window_house())
     events = _tee_events(house)
@@ -391,18 +393,19 @@ async def test_rule2_backstop_heat_pressed_1s_after_the_fans_suppression_stops_o
     await _fan_then_heat_inside_the_echo_guard(house)
     start, end = await _watch_overlap(house, 90)
 
-    assert start is not None, "precondition: the fan and the heat ran together (the missed press reproduced)"
-    assert end is not None and end - start <= 30, f"fan and heat still both running {90 - start}s after overlapping"
-    assert _backstop(events, "fan"), f"no whf_rule2_backstop event for the stop: {events}"
+    assert start is None or (end is not None and end - start <= 30), f"fan and heat ran together: {start}-{end}"
     assert _ca_fan_off(house.calls[calls_before:]), "the newer heat press must win: the fan is the device stopped"
     assert not house.fan.is_on
+    assert house.thermostat.mode == "heat", "the occupant's heat press is kept"
+    assert not _backstop(events, "hvac"), f"the heat must not be the device stopped: {events}"
 
 
 async def test_rule2_backstop_door_pause_overridden_then_fan_then_heat_stops_one_device(make_house) -> None:
     """Issue #1288 with a door pause: the door has been open long enough that Climate Advisor paused the HVAC. The
     occupant overrides the pause with heat, then switches the whole-house fan on (Climate Advisor turns the heat off
-    for it) and presses heat again 1 s later. That press is missed (inside the echo guard), so without the backstop
-    the fan and the heat run together. Now the fan is stopped within 30 s of the overlap starting.
+    for it) and presses heat again 1 s later, inside the echo guard. Without the backstop the fan and the heat ran
+    together; since Issues #1612/#1613 the press is re-checked and detected, so the fan is stopped (at most a 30 s
+    overlap) and the heat kept.
     """
     house = await make_house(fan="whf", **_sealed_house(contacts=["door"]))
     ae = house.coordinator.automation_engine
@@ -416,24 +419,23 @@ async def test_rule2_backstop_door_pause_overridden_then_fan_then_heat_stops_one
     await _fan_then_heat_inside_the_echo_guard(house)
     start, end = await _watch_overlap(house, 90)
 
-    assert start is not None, "precondition: the fan and the heat ran together (the missed press reproduced)"
-    assert end is not None and end - start <= 30, f"fan and heat still both running {90 - start}s after overlapping"
-    assert _backstop(events, "fan"), f"no whf_rule2_backstop event for the stop: {events}"
+    assert start is None or (end is not None and end - start <= 30), f"fan and heat ran together: {start}-{end}"
     assert _ca_fan_off(house.calls[calls_before:])
     assert not house.fan.is_on
+    assert house.thermostat.mode == "heat", "the occupant's heat press is kept"
+    assert not _backstop(events, "hvac"), f"the heat must not be the device stopped: {events}"
 
 
-async def test_fast_heat_press_during_a_running_door_pause_never_runs_beside_the_fan(make_house) -> None:
+async def test_fast_heat_press_during_a_running_door_pause_is_kept_and_stops_the_fan(make_house) -> None:
     """Control for the test above: the door pause is still running (HVAC off) when the occupant switches the fan on
-    and presses heat 1 s later. In real HA the press is missed (echo guard) and the pause's own classification cycle
-    turns the heat off again before the compressor starts, so the fan and the heat never run together at all. Pins
-    that the backstop adds no second stop here (the fan, legitimately ventilating an open house, keeps running).
-    This one passes with or without the backstop.
+    and presses heat 1 s later. Before Issue #1613 the press was missed (echo guard) and the pause's own
+    classification cycle turned the occupant's heat off again. Now the dropped press is re-checked through the pause
+    branch and is the occupant's override of the pause; the heat press is the newer action, so rule 2 stops the fan.
+    The fan and the heat never run together for more than 30 s, and the heat is the device kept.
     """
     house = await make_house(fan="whf", **_sealed_house(contacts=["door"], initial_hvac_mode="heat"))
     ae = house.coordinator.automation_engine
     events = _tee_events(house)
-    await house.occupant_sets_thermostat(setpoint_f=80.0)
     await house.advance(minutes=2)
     await house.open("door")
     await house.advance(minutes=2)
@@ -442,13 +444,14 @@ async def test_fast_heat_press_during_a_running_door_pause_never_runs_beside_the
 
     await _press_after_refresh(house, True)
     await _advance_finely(house, 1)
-    await house.occupant_sets_thermostat(mode="heat")
-    start, _ = await _watch_overlap(house, 60)
+    await house.occupant_sets_thermostat(mode="heat", setpoint_f=80.0)  # above the 72 F room: the heat would run
+    start, end = await _watch_overlap(house, 60)
 
-    assert start is None, "the fan and the heat ran together during a door pause"
-    assert house.fan.is_on and house.thermostat.mode == "off"
-    assert not _ca_fan_off(house.calls[calls_before:])
-    assert not _backstop(events), events
+    assert start is None or (end is not None and end - start <= 30), f"fan and heat ran together: {start}-{end}"
+    assert house.thermostat.mode == "heat", "the occupant's heat press during the pause must be kept"
+    assert ae._override_confirm_pending or ae._manual_override_active, "the press is the occupant's override"
+    assert not house.fan.is_on and _ca_fan_off(house.calls[calls_before:]), "the newer heat press wins: fan stopped"
+    assert not _backstop(events, "hvac"), events
 
 
 async def test_mirror_fan_pressed_beside_running_heat_suppresses_hvac_and_keeps_the_fan(make_house) -> None:

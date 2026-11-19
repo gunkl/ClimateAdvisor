@@ -125,7 +125,6 @@ from .const import (
     OCCUPANCY_HOME,
     OCCUPANCY_VACATION,
     OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
-    OWN_WRITE_ECHO_WINDOW_S,
     PEAK_DECLINE_MARGIN_F,
     REMOTE_OFFSET_EXIT_GRACE_S,
     REMOTE_OFFSET_LATENCY_EWMA_ALPHA,
@@ -163,8 +162,10 @@ from .own_write_echo import (
     context_id_matches,
     decide_mode_echo,
     decide_setpoint_echo,
+    echo_window_wait_s,
     hold_tolerance,
     holds_own_setpoint,
+    outstanding_own_mode_write,
     outstanding_own_write,
     prune_own_writes,
     resolve_step,
@@ -325,7 +326,7 @@ from .temperature import (
     to_fahrenheit,
 )
 from .thermostat_profile import FanProfile, live_fan_profile
-from .time_utils import instant_after
+from .time_utils import instant_after, seconds_since
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
     WHF_OCCUPANT_PRESS_PENDING_S,
@@ -652,12 +653,47 @@ class ComfortModeWrite:
     write was attempted). ``held_reason`` is non-None when nothing was written: ``whf_session`` (the whole-house
     fan owns the thermostat), ``blower_hold`` (blower ventilation through an open window keeps it Off, Rule 3),
     ``occupancy_redirect`` (away/vacation redirected to setback) or ``no_family`` (the resolver chose neither).
+
+    Issues #1267 / #1596: ``_apply_comfort_band()`` keeps its own record of the same shape (``_last_band_write``) so the
+    setback / bedtime / wake-up rows report what was sent; it adds ``window_open`` (a monitored window is open, the
+    choke point paused instead of arming) and ``no_capable_mode`` (the thermostat has no mode for the active edge).
+    Issues #1268 / #1597: the nat-vent rows use it too (``mode_write_fields()``): ``occupant_change`` (the occupant's
+    change is protected), ``fan_off_pending`` (the fan-off was deferred, the restore follows it), ``no_window_settled``
+    (no window open past its delay) and ``fan_not_started`` (the fan session took no ownership of the thermostat).
     """
 
     result: HvacCommandResult | None = None
     family: str | None = None
     target_f: float | None = None
     held_reason: str | None = None
+
+
+def mode_write_fields(write: ComfortModeWrite, *, nested: bool = False) -> dict[str, Any]:
+    """Activity-row fields for what a thermostat write actually did (Issues #1267 / #1596 / #1268 / #1597).
+
+    ``outcome`` is ``hvac_outcome_label()`` of the write (``not_sent`` when nothing was attempted); ``held_reason`` is
+    present only when nothing was written. ``nested`` (the nat-vent rows' ``hvac_restore`` / ``hvac_mode_set``) adds
+    ``mode``, the family the thermostat now holds, and leaves ``outcome`` out when the thermostat already held that
+    mode with no write of this path (a whole-house fan session's own Off, an Off thermostat the blower keeps Off).
+    Structured codes, rendered through the activity catalog.
+    """
+    fields: dict[str, Any] = {}
+    if nested:
+        fields["mode"] = write.family
+    if not (nested and write.result is None and write.held_reason is None and write.family is not None):
+        fields["outcome"] = hvac_outcome_label(write.result)
+    if write.held_reason is not None:
+        fields["held_reason"] = write.held_reason
+    return fields
+
+
+def nat_vent_start_fields(before: str, hold: ComfortModeWrite) -> dict[str, Any]:
+    """The ``sensor_opened`` (natural_ventilation) fields of every nat-vent start row (Issues #1597 / #1606).
+
+    ``before`` is the thermostat mode read just before the fan start; ``hold`` is ``_apply_nat_vent_hvac_state()``'s
+    record of what the thermostat holds afterwards.
+    """
+    return {"hvac_mode_before": before, "hvac_mode_set": mode_write_fields(hold, nested=True)}
 
 
 @dataclass(frozen=True)
@@ -1861,6 +1897,9 @@ class AutomationEngine:
     # this away period. Reset when the house goes away; a deferred arrival restore is a "still on the setback" hold
     # only when it is True (a setback a door/window pause skipped never reached the thermostat).
     _away_setback_sent: bool = False
+    # Issues #1267 / #1596: what the last _apply_comfort_band() wrote (class-level default for engines built via
+    # object.__new__ in tests; __init__ sets the instance value).
+    _last_band_write: ComfortModeWrite = ComfortModeWrite()
     # Issue #1433: True while the coordinator's 15-minute away timer runs (set when the timer starts, cleared when it
     # expires or is cancelled). The engine already knows the house is away (Issue #85), but the setback waits for the
     # timer: until then no other path (the 30-minute cycle, bedtime, pre-cool, a time-of-use start) sends it.
@@ -2177,6 +2216,11 @@ class AutomationEngine:
         # i.e. target + remote-sensor offset). Re-asserting writers pass this back through the single setpoint
         # path so the offset is never applied twice.
         self._pending_setpoint_target: float | None = None
+        # Issue #1272: the value SENT (thermostat unit) and what the thermostat reported BEFORE that write (internal F):
+        # every read-back verify of the last write (10 s, post-fan) asks ``_setpoint_echo_wait_s`` whether it is still
+        # unanswered from these two.
+        self._pending_setpoint_sent: float | None = None
+        self._pending_setpoint_before_f: float | None = None
         # Issue #1194 (a): remote-sensor outer loop state (see ``remote_offset_check``). In-memory only: a restart
         # is a clean slate (offset 0, applied unknown) exactly like the manual-override state.
         self._remote_target_f: float | None = None  # comfort target of the last setpoint write (internal F)
@@ -2315,6 +2359,9 @@ class AutomationEngine:
         # restarts — a fresh process has no flapping history to guard against, same as
         # _nat_vent_outdoor_exit_time.
         self._last_mode_write = ComfortModeWrite()  # Issue #1245: outcome of the last _set_temperature_for_mode()
+        # Issues #1267 / #1596: outcome of the last _apply_comfort_band() (a sibling record: _last_mode_write is
+        # overwritten as "occupancy_redirect" when a comfort restore redirects into the away band).
+        self._last_band_write = ComfortModeWrite()
         self._comfort_mode_family: str | None = None
         self._comfort_mode_family_entry_time: datetime | None = None
         # Same-tick guard (folded in from Issue #699's own finding): so a family
@@ -4833,7 +4880,7 @@ class AutomationEngine:
         if (
             self._last_override_detected_time is None
             or self._last_override_detected_key != _dedup_key
-            or (_now - self._last_override_detected_time) >= _dedup_window
+            or seconds_since(self._last_override_detected_time, now=_now) >= _dedup_window.total_seconds()
         ):
             self._last_override_detected_time = _now
             self._last_override_detected_key = _dedup_key
@@ -5459,7 +5506,7 @@ class AutomationEngine:
                     "classification_suppressed_paused", _paused_key
                 ):
                     _pause_minutes = (
-                        (dt_util.now() - self._paused_since).total_seconds() / 60.0
+                        seconds_since(self._paused_since, now=dt_util.now()) / 60.0
                         if self._paused_since is not None
                         else None
                     )
@@ -5768,6 +5815,7 @@ class AutomationEngine:
                 notify_type="door_window_pause",
                 quiet=self._fan_session_about_to_take_over(caller="_apply_comfort_band"),
             )
+            self._last_band_write = ComfortModeWrite(held_reason="window_open")
             return None  # paused instead of armed: no write attempted
 
         # Issue #1142 D7 (owner decision): while a blower session ventilates through an open window NEITHER heat nor
@@ -5784,6 +5832,7 @@ class AutomationEngine:
                 reason,
             )
             await self._apply_nat_vent_hvac_state()
+            self._last_band_write = ComfortModeWrite(held_reason="blower_hold")
             return None
 
         caps = self._get_thermostat_capabilities()
@@ -5828,8 +5877,10 @@ class AutomationEngine:
                 _effective_active,
                 list(caps.modes),
             )
+            self._last_band_write = ComfortModeWrite(held_reason="no_capable_mode")
             return None
 
+        self._last_band_write = self._mode_write_record(_write_result, _cmd_shape, _target)
         # Issue #1417: a deliberate band write (the overnight pre-cool and its 30-minute re-assert) is a "ran" record
         # for its side even in the mode already armed; selector writes are not deliberate and record nothing.
         self._note_deliberate_command(_cmd_shape, mode_reason, result=_write_result)
@@ -6027,7 +6078,7 @@ class AutomationEngine:
             _LOGGER.info(
                 "Mode change to %s recognised as Climate Advisor's own write echoing back: age_s=%s role=%s",
                 observed_mode,
-                [round((now - w.written_at).total_seconds()) for w in verdict.consumed],
+                [round(seconds_since(w.written_at, now=now)) for w in verdict.consumed],
                 self.role,
             )
         return verdict.recognised
@@ -6048,7 +6099,7 @@ class AutomationEngine:
         try:
             _recent_cmd = (
                 _cmd_time is not None
-                and abs((dt_util.now() - _cmd_time).total_seconds()) < COMFORT_RECENT_COMMAND_WINDOW_S
+                and abs(seconds_since(_cmd_time, now=dt_util.now())) < COMFORT_RECENT_COMMAND_WINDOW_S
             )
         except TypeError:  # naive vs aware datetime mix: treat the earlier command as stale
             _recent_cmd = False
@@ -6388,7 +6439,9 @@ class AutomationEngine:
             },
         )
 
-    def _check_mode_alignment(self, my_seq: int, *, announce: bool) -> ModeAlignmentOutcome:
+    def _check_mode_alignment(
+        self, my_seq: int, *, announce: bool, before_mode: str | None = None
+    ) -> ModeAlignmentOutcome:
         """Read back whether the thermostat is in the mode last requested (Issue #1049, change 2).
 
         ``announce=False`` (the early 10 s check) only starts the mismatch clock -- cloud
@@ -6396,6 +6449,10 @@ class AutomationEngine:
         ``announce=True`` (the >=130 s re-check) opens a once-per-episode ``hvac_mode_not_applied``
         via ``next_fallback_episode`` and closes it with ``hvac_mode_applied_recovered`` when the
         thermostat is finally in the requested mode.
+
+        Issue #1595: ``before_mode`` is what the thermostat reported before the write. When the re-check finds it
+        still there and the write is still outstanding in the #1246 mode echo memory, the write is not answered yet:
+        the re-check waits for the end of the echo window instead of announcing (``_mode_echo_wait_s``).
         """
         state = self.hass.states.get(self.climate_entity)
         live = getattr(state, "state", None) if state is not None else None
@@ -6431,6 +6488,17 @@ class AutomationEngine:
         since = rec.mismatch_since or now
         self._update_write_record(apply_skip_reason=None, mismatch_since=since)
         if not announce:
+            return outcome
+        wait_s = self._mode_echo_wait_s(requested, live, before_mode)
+        if wait_s is not None:
+            _LOGGER.info(
+                "HVAC mode not answered yet: requested %s, thermostat still reports %r -- re-checking in %.0fs "
+                "(echo window)",
+                requested,
+                live,
+                wait_s,
+            )
+            self._schedule_mode_alignment_recheck(my_seq, delay_s=wait_s)  # judged at the window end, no second wait
             return outcome
         step = next_fallback_episode(requested, rec.episode_reason, since, now)
         self._update_write_record(episode_reason=step.announced, mismatch_since=step.since)
@@ -6527,8 +6595,14 @@ class AutomationEngine:
             previous()
         setattr(self, slot, _call_later(self, delay, fn))
 
-    def _schedule_mode_alignment_recheck(self, my_seq: int) -> None:
-        """Schedule the >=130 s read-back mode check in its own cancel slot (Issue #1049)."""
+    def _schedule_mode_alignment_recheck(
+        self, my_seq: int, *, before_mode: str | None = None, delay_s: float = MODE_ALIGNMENT_RECHECK_S
+    ) -> None:
+        """Schedule the >=130 s read-back mode check in its own cancel slot (Issue #1049).
+
+        ``before_mode``: the thermostat's mode before the write, so the re-check can tell an unanswered write from a
+        refused one (Issue #1595); ``delay_s``: the re-check of an unanswered write lands at the echo window end.
+        """
         if self._mode_align_recheck_cancel:
             self._mode_align_recheck_cancel()
             self._mode_align_recheck_cancel = None
@@ -6536,9 +6610,29 @@ class AutomationEngine:
         @callback
         def _recheck(_now: Any) -> None:
             self._mode_align_recheck_cancel = None
-            self._check_mode_alignment(my_seq, announce=True)
+            self._check_mode_alignment(my_seq, announce=True, before_mode=before_mode)
 
-        self._mode_align_recheck_cancel = _call_later(self, MODE_ALIGNMENT_RECHECK_S, _recheck)
+        self._mode_align_recheck_cancel = _call_later(self, delay_s, _recheck)
+
+    def _mode_echo_wait_s(self, requested: str | None, live: object, before_mode: str | None) -> float | None:
+        """Seconds until the echo window of an UNANSWERED mode write ends, or None (the re-check may announce now).
+
+        The mode twin of ``_setpoint_echo_wait_s`` (Issue #1595): unanswered = the thermostat still reports the mode it
+        had before the write (``before_mode``) and a write of ``requested`` is still outstanding in the #1246 mode echo
+        memory (``own_write_echo.outstanding_own_mode_write``; an arrived echo is consumed). A thermostat that reports
+        any other mode answered, so it is never waited for. Never raises: a bookkeeping problem means "judge now".
+        """
+        if not requested or before_mode is None or live != before_mode or live == requested:
+            return None
+        writes = getattr(self, "_own_mode_writes", None)
+        if not writes:
+            return None
+        now = dt_util.now()
+        try:
+            write = outstanding_own_mode_write(writes, mode=requested, now=now)
+            return None if write is None else echo_window_wait_s(write, now)
+        except TypeError:  # naive/aware (or stubbed) clock mix: judge now, as before
+            return None
 
     async def _set_hvac_mode(self, mode: str, *, reason: str | i18n.Msg) -> HvacCommandResult:
         """Set the thermostat HVAC mode and report what happened (Issue #1049)."""
@@ -6580,6 +6674,7 @@ class AutomationEngine:
         self._record_commanded_mode(mode, reason)
         self._last_commanded_hvac_time = dt_util.now()
         _cs_reaffirm = self.hass.states.get(self.climate_entity)
+        _mode_before = getattr(_cs_reaffirm, "state", None)  # Issue #1595: what the thermostat showed before this write
         if _cs_reaffirm and _cs_reaffirm.state == mode:
             _LOGGER.debug("_set_hvac_mode: thermostat already %r — re-affirming", mode)
         try:
@@ -6612,7 +6707,7 @@ class AutomationEngine:
             self._mode_switch_marker = (mode, dt_util.now())
             self._update_write_record(result=HvacCommandResult.EXECUTED if _call.ok else HvacCommandResult.UNCONFIRMED)
             # Read back later (Off direction included): did the thermostat actually take it?
-            self._schedule_mode_alignment_recheck(_mode_seq)
+            self._schedule_mode_alignment_recheck(_mode_seq, before_mode=_mode_before)
             _LOGGER.info("Set HVAC mode to %s — %s role=%s", mode, reason, self.role)
             self._record_action(_R("action_set_hvac", mode=str(mode)), reason)
             # When taking HVAC offline, assert fan_mode=auto to clear any post-heat
@@ -6669,7 +6764,7 @@ class AutomationEngine:
         if marker is None or marker[0] != mode:
             return False
         try:
-            return (dt_util.now() - marker[1]).total_seconds() < MODE_SWITCH_DEDUPE_SECONDS
+            return seconds_since(marker[1], now=dt_util.now()) < MODE_SWITCH_DEDUPE_SECONDS
         except TypeError:
             return False
 
@@ -6946,6 +7041,9 @@ class AutomationEngine:
         # What the thermostat reported BEFORE this write: the read-back verify tells "not answered yet" (still this
         # value, the echo outstanding) from "answered with a different value" (Issue #1194 e F1).
         _before_write_f = read_state_temp_f(self.hass.states.get(self.climate_entity), "temperature", unit)
+        self._pending_setpoint_sent = service_temp
+        self._pending_setpoint_before_f = _before_write_f
+        _mode_before = getattr(self.hass.states.get(self.climate_entity), "state", None)  # Issue #1595
         try:
             # Single call: hvac_mode + temperature together.  Including hvac_mode in every
             # call bypasses HA deduplication (the mode key makes each call distinct) and
@@ -7018,7 +7116,7 @@ class AutomationEngine:
             if outcome in (SetpointVerifyOutcome.STALE, SetpointVerifyOutcome.NO_READING):
                 return
             if outcome is SetpointVerifyOutcome.REASSERT:
-                _echo_wait_s = self._setpoint_echo_wait_s(service_temp, reported, _before_write_f)
+                _echo_wait_s = self._setpoint_echo_wait_s(reported)
                 if _echo_wait_s is not None:
                     # A slow cloud thermostat: the write is still unanswered (it reports the value it had before, and
                     # #1232's echo memory still holds this write). Not a rejection yet -- re-check when the echo
@@ -7197,7 +7295,7 @@ class AutomationEngine:
         # Issue #1144 / #1135: a newer write supersedes the previous write's pending acceptance check; the
         # helper cancels the older 10 s timer (unload could not cancel an overwritten, untracked handle).
         self._rearm_timer("_setpoint_retry_cancel", 10, _schedule_check)
-        self._schedule_mode_alignment_recheck(_my_seq)
+        self._schedule_mode_alignment_recheck(_my_seq, before_mode=_mode_before)
         _LOGGER.info(
             "Set temperature to %s (mode=%s) — zone=%s %s role=%s",
             format_temp(temperature, unit),
@@ -7371,7 +7469,7 @@ class AutomationEngine:
             note = "context_band"
         elif state is RemoteLoopState.CLEARING:
             in_grace = self._remote_exit_at is not None and (
-                (now - self._remote_exit_at).total_seconds() < REMOTE_OFFSET_EXIT_GRACE_S
+                seconds_since(self._remote_exit_at, now=now) < REMOTE_OFFSET_EXIT_GRACE_S
             )
             note = "exit_grace" if in_grace or not self._remote_offset_backing_off_now(now) else "backing_off"
         clamp: ClampLimit | None = None
@@ -7423,7 +7521,7 @@ class AutomationEngine:
         if failed is None:
             return False
         try:
-            return (now - failed).total_seconds() < SETPOINT_RETRY_DELAY_S
+            return seconds_since(failed, now=now) < SETPOINT_RETRY_DELAY_S
         except TypeError:
             return False
 
@@ -7518,7 +7616,7 @@ class AutomationEngine:
         entered = self._remote_entered_at
         if entered is None:
             return False
-        return (now - entered).total_seconds() < startup_wait_s(self._remote_startup_latency_s)
+        return seconds_since(entered, now=now) < startup_wait_s(self._remote_startup_latency_s)
 
     def _remote_offset_for_write(self, target_f: float, mode: str) -> float:
         """Signed offset (internal F delta) to add to ``target_f`` for THIS write, via the single setpoint path.
@@ -7607,7 +7705,7 @@ class AutomationEngine:
         if (
             ctx is None
             and self._remote_exit_at is not None
-            and (now - self._remote_exit_at).total_seconds() < REMOTE_OFFSET_EXIT_GRACE_S
+            and seconds_since(self._remote_exit_at, now=now) < REMOTE_OFFSET_EXIT_GRACE_S
         ):
             return  # the context just ended: let the next band's own writer land first (Issue #1194 c)
         if self._remote_offset_backing_off(now, ctx if fresh else None):
@@ -7630,7 +7728,7 @@ class AutomationEngine:
                 magnitude_f=self._remote_offset_f,
                 step_f=step_f(self._temp_unit),
                 max_magnitude_f=self._remote_offset_cap_for(target, mode),
-                seconds_since_raise=(now - self._remote_raise_at).total_seconds() if self._remote_raise_at else None,
+                seconds_since_raise=seconds_since(self._remote_raise_at, now=now) if self._remote_raise_at else None,
                 wait_s=startup_wait_s(self._remote_startup_latency_s),
                 equipment_active=self._live_hvac_action() == ("heating" if mode == "heat" else "cooling"),
             )
@@ -7725,7 +7823,7 @@ class AutomationEngine:
             return
         if direction != self._remote_target_mode:
             return
-        elapsed = (when - self._remote_raise_at).total_seconds()
+        elapsed = seconds_since(self._remote_raise_at, now=when)
         if elapsed < 0:
             return
         self._remote_raise_pending_feedback = False
@@ -8564,8 +8662,7 @@ class AutomationEngine:
                 self._report_nat_vent_start_veto(_start_veto, entity_id=entity_id)
             if _nat_vent_gate_entered:
                 # Capture mode before nat_vent changes
-                _old_mode_nv = self.hass.states.get(self.climate_entity)
-                _old_mode_nv = _old_mode_nv.state if _old_mode_nv else "unknown"
+                _old_mode_nv = self._thermostat_mode_now()
 
                 _is_soft_start = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_SOFT_START
                 nat_vent_reason = (
@@ -8654,7 +8751,7 @@ class AutomationEngine:
                         indoor,
                         nat_vent_threshold,
                     )
-                    await self._apply_nat_vent_hvac_state()
+                    _nv_hold = await self._apply_nat_vent_hvac_state()
                     if _is_soft_start and not _session_was_live and self._emit_event_callback:
                         # Same event the reactivation sites emit; BEFORE "sensor_opened" so that stays the last
                         # event at this instant (the golden harness maps it to "natural_ventilation").
@@ -8668,10 +8765,12 @@ class AutomationEngine:
                                 "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                             },
                         )
+                    # Issue #1597: what the thermostat holds now (Off by the fan's suppression or the blower hold, or
+                    # left alone and why) -- not the pre-#1142 "band-armed", which was never true for a fan session.
                     _sensor_opened_payload = {
                         "entity": entity_id,
                         "result": "natural_ventilation",
-                        "hvac_mode_change": f"{_old_mode_nv}→band-armed",
+                        **nat_vent_start_fields(_old_mode_nv, _nv_hold),
                     }
                     # Issue #1140: claim a fan transition only when the fan command really ran. A deferred
                     # (rate-limited) or overridden command still reports the window hand-off as before -- the
@@ -9085,7 +9184,8 @@ class AutomationEngine:
                 # this block does nothing — the same externally-observable outcome the
                 # deleted legacy branches produced.
                 if _to_state == NatVentLifecycleState.ACTIVE_FULL_GATE:
-                    # Band stays armed — just activate the fan; the compressor self-arbitrates.
+                    # Issue #1606: the mode the thermostat held when ventilation restarted (for the row below).
+                    _reeval_mode_before = self._thermostat_mode_now()
                     _activation_result = await self._activate_fan(
                         reason=_R(
                             "reason_nv_reengaged",
@@ -9115,9 +9215,10 @@ class AutomationEngine:
                     # overridden commands keep their pre-#1140 reporting; see handle_door_window_open().)
                     # Issue #1304: observe-only (DRY_RUN) sent nothing and recorded no session -> no row either.
                     if _activation_result not in _NAT_VENT_NO_WORKING_FAN_RESULTS | {FanCommandResult.DRY_RUN}:
-                        await self._apply_nat_vent_hvac_state()
+                        _reeval_hold = await self._apply_nat_vent_hvac_state()
                         # Issue #244: emit so the re-evaluation activation is visible in the
                         # event log / timeline / AI report (previously this path was silent).
+                        # Issue #1606: with what the thermostat holds now, like the window-open start row.
                         if self._emit_event_callback:
                             self._emit_event_callback(
                                 "sensor_opened",
@@ -9125,6 +9226,7 @@ class AutomationEngine:
                                     "entity": "natural_vent_reeval",
                                     "result": "natural_ventilation",
                                     "trigger": "open_door_reeval",
+                                    **nat_vent_start_fields(_reeval_mode_before, _reeval_hold),
                                 },
                             )
                 elif _to_state == NatVentLifecycleState.ACTIVE_SOFT_START:
@@ -9324,123 +9426,39 @@ class AutomationEngine:
                             "comfort_heat": exit_decision.vent_floor,
                             "fan_device": _fan_device_label(self.config),
                             "fan_mode_change": _fan_transition_text(self.config, activating=False),
-                            "hvac_mode_restored": "unchanged (window still open)",
                         },
                     )
                     return
 
                 if exit_decision.reason == NatVentExitReason.COMFORT_FLOOR:
-                    # Note (Issue #620 investigation): like fan_thermostat_check()'s
-                    # STOP_COOLED_TO_FLOOR (now fixed via _exit_nat_vent()), this branch calls
-                    # _deactivate_fan() with default restore_hvac=True and no live sensor check
-                    # — the same bug class. NOT migrated to _exit_nat_vent() here: unlike the
-                    # fast-path branches, this one explicitly restores to
-                    # _current_classification.hvac_mode (live intent) via the _set_hvac_mode()/
-                    # _set_temperature_for_mode() calls below, not _exit_nat_vent()'s
-                    # _pre_fan_hvac_mode snapshot — those are different restore-target semantics
-                    # that need their own decision, not a mechanical swap. Flagged as a known
-                    # follow-up, out of scope for #620.
-                    #
-                    # Issue #739: this branch bypasses _exit_nat_vent() entirely, so it never
-                    # armed the reactivation lockout the way every sibling exit reason in this
-                    # method (and, since #696/#755, both COMFORT_FLOOR-class fast-path twins)
-                    # already does — the exact "self-complementary at a fixed reading" gap #696
-                    # disproved, just unnoticed here because this branch's own bypass makes it
-                    # invisible to the _exit_nat_vent()-only AST coverage scan. Confirmed live:
-                    # a comfort-floor exit here on 2026-08-22 left indoor still below the
-                    # 70-72F daytime band, and the WHF reactivated within a minute on a
-                    # ~1F uptick, immediately re-breaching the floor it had just exited to
-                    # protect. Set the exit time directly (this branch has no
-                    # set_outdoor_exit_time kwarg to pass, same as the AWAY_CEILING branch
-                    # below).
-                    _vent_floor = exit_decision.vent_floor
-                    self._nat_vent_outdoor_exit_time = dt_util.now()
-                    # Issue #821 (Design §4): exiting nat-vent counts as "cooling family
-                    # was active until just now" — arm the family-switch lockout's dwell
-                    # clock at this handoff so a heat call cannot fire in the same/next
-                    # cycle purely from momentary post-exit indoor readings.
-                    self._arm_comfort_family("cooling", dt_util.now())
-                    # Issue #1066 (F4): when a heat/cool classification exists, the
-                    # _set_temperature_for_mode() call below writes mode+setpoint through the
-                    # comfort-edge selector. The blind _pre_fan_hvac_mode / classification-mode
-                    # restores would write the WRONG mode first on a hot day (cool, then heat a
-                    # few ms later -- a mode double write the plan removed). Release the WHF
-                    # suppression without restoring; the selector call restores the right mode.
-                    # Issue #1208: any classification -- the selector resolves the family from the armed band, so a
-                    # warm/mild ("off") label no longer skips the restore.
-                    _selector_follows = bool(self._current_classification)
-                    _comfort_floor_result = await self._deactivate_fan(
+                    # Issue #1605: routed through the shared _exit_nat_vent() choke point (windows closed here; the
+                    # window-open case is the branch above). It used to hand-roll the exit and, on a fan-off deferred
+                    # by the 5-minute floor (#641), still restored and started the "nat_vent_exit_resume" grace with
+                    # the session live -- the #1141 defect _exit_nat_vent() already fixed. The choke point applies the
+                    # #1141 rule (restore + grace only once the session ended; a deferral is recorded and retried),
+                    # the occupant-change protection (#1147), the observe-only rule (#1304), the reactivation lockout
+                    # (#739: set_outdoor_exit_time) and the #821 family dwell, and emits the row after the decision.
+                    # Issue #1066 (F4) / #1208: with a classification the selector writes mode + setpoint in one
+                    # switch, so the blind pre-fan mode replay is skipped (no cool-then-heat double write).
+                    await self._exit_nat_vent(
                         reason=_R(
                             "reason_nv_exit_why",
                             why=i18n.Msg(
                                 "activity.reason_why_indoor_le_comfort_floor",
                                 indoor=self._tp(indoor),
-                                floor=self._tp(_vent_floor),
+                                floor=self._tp(exit_decision.vent_floor),
                             ),
                         ),
-                        restore_hvac=not _selector_follows,
-                        release_suppression=True,
+                        set_outdoor_exit_time=True,
+                        event_type="nat_vent_comfort_floor_exit",
+                        event_payload={
+                            "indoor_temp": indoor,
+                            "comfort_heat": exit_decision.vent_floor,
+                            "fan_mode_change": _fan_transition_text(self.config, activating=False),
+                            "fan_device": _fan_device_label(self.config),
+                        },
+                        replay_pre_fan_mode=not self._current_classification,
                     )
-                    # Issue #931: flags clear only once the result above is known — see
-                    # _end_nat_vent_session(). Issue #697's fix (both flags cleared
-                    # together, matching every other site) still applies; only the
-                    # ordering relative to the deactivate call, and the result check,
-                    # changed.
-                    self._end_nat_vent_session(_comfort_floor_result)
-                    if _comfort_floor_result is FanCommandResult.DRY_RUN:
-                        # Issue #1304: observe-only sent no stop -- the session continues, no exit row, no restore.
-                        _LOGGER.info(
-                            "[DRY RUN] Natural vent would exit (comfort floor): indoor %.1f°F ≤ floor %.1f°F —"
-                            " nothing sent, session kept role=%s",
-                            indoor,
-                            _vent_floor,
-                            self.role,
-                        )
-                        return
-                    _LOGGER.info(
-                        "Natural vent exit (comfort floor): indoor %.1f°F ≤ floor %.1f°F — restoring %s",
-                        indoor,
-                        _vent_floor,
-                        self._current_classification.hvac_mode if self._current_classification else "unknown",
-                    )
-                    if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "nat_vent_comfort_floor_exit",
-                            {
-                                "indoor_temp": indoor,
-                                "comfort_heat": _vent_floor,
-                                "fan_mode_change": _fan_transition_text(self.config, activating=False),
-                                "fan_device": _fan_device_label(self.config),
-                                "hvac_mode_restored": (
-                                    "unchanged (occupant's change kept)"
-                                    if self._manual_change_protected()
-                                    else (
-                                        self._current_classification.hvac_mode
-                                        if self._current_classification
-                                        else "unknown"
-                                    )
-                                ),
-                            },
-                        )
-                    if self._manual_change_protected():
-                        self._note_deferred_to_protected_change()
-                        _LOGGER.info(
-                            "Comfort restore skipped: occupant's manual change protected "
-                            "(nat-vent comfort-floor exit) override_active=%s confirm_pending=%s",
-                            self._manual_override_active,
-                            self._override_confirm_pending,
-                        )
-                    elif self._current_classification:
-                        c = self._current_classification
-                        # Issue #1066 (F4): no blind _set_hvac_mode(c.hvac_mode) here -- the
-                        # selector call below writes mode + setpoint in one explicit switch.
-                        # Issue #1208: no label gate -- the family comes from the armed band.
-                        with self._mode_change_context("nat_vent"):
-                            _floor_write = await self._set_temperature_for_mode(
-                                c,
-                                reason=_R("reason_nv_floor_exit_restoring"),
-                            )
-                        self._start_automation_grace_unless_restore_unsent("nat_vent_exit_resume", _floor_write)
                     return
 
                 if exit_decision.reason == NatVentExitReason.AWAY_CEILING:
@@ -9620,7 +9638,7 @@ class AutomationEngine:
                 if _to_state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT:
                     _lockout_check_now = dt_util.now()
                     if self._nat_vent_outdoor_exit_time is not None:
-                        elapsed = (_lockout_check_now - self._nat_vent_outdoor_exit_time).total_seconds()
+                        elapsed = seconds_since(self._nat_vent_outdoor_exit_time, now=_lockout_check_now)
                         _LOGGER.debug(
                             "Nat vent paused-by-door: lockout active — %.0fs elapsed of %.0fs (%.0fs remaining)",
                             elapsed,
@@ -9942,9 +9960,6 @@ class AutomationEngine:
                         "source": "temp_check",
                         "fan_device": _fan_device_label(self.config),
                         "fan_mode_change": _fan_transition_text(self.config, activating=False),
-                        "hvac_mode_restored": (
-                            self._current_classification.hvac_mode if self._current_classification else "unknown"
-                        ),
                     }
                     # Issue #696: previously False on the (now-disproven) assumption that
                     # exit and re-entry always check the identical comfort_heat quantity at
@@ -10411,9 +10426,6 @@ class AutomationEngine:
                 "comfort_heat": vent_floor_ftc,
                 "fan_mode_change": _fan_transition_text(self.config, activating=False),
                 "fan_device": _fan_device_label(self.config),
-                "hvac_mode_restored": (
-                    self._current_classification.hvac_mode if self._current_classification else "unknown"
-                ),
             }
         else:
             _event_type = "fan_deactivated"
@@ -10536,7 +10548,7 @@ class AutomationEngine:
         _wanted = preview.decision.target_family
         if _attempt is not None and _attempt[0] == _wanted:
             try:
-                _since_attempt = (_now_rt - _attempt[1]).total_seconds()
+                _since_attempt = seconds_since(_attempt[1], now=_now_rt)
             except TypeError:
                 _since_attempt = COMFORT_REACTIVE_RETRY_S  # naive vs aware: do not suppress
             if 0 <= _since_attempt < COMFORT_REACTIVE_RETRY_S:
@@ -10673,7 +10685,7 @@ class AutomationEngine:
         if self._nat_vent_outdoor_exit_time is None:
             return None
         lockout_s = float(self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S))
-        elapsed = (now - self._nat_vent_outdoor_exit_time).total_seconds()
+        elapsed = seconds_since(self._nat_vent_outdoor_exit_time, now=now)
         return elapsed, lockout_s
 
     def _blower_is_thermostat_initiated(
@@ -10735,7 +10747,7 @@ class AutomationEngine:
         since, self._observed_fan_since = self._observed_fan_since, None
         if since is None:
             return
-        minutes = round(max(0.0, (dt_util.now() - since).total_seconds()) / 60.0, 1)
+        minutes = round(max(0.0, seconds_since(since, now=dt_util.now())) / 60.0, 1)
         if self._emit_event_callback:
             self._emit_event_callback(
                 "fan_observed_stopped", {"duration_minutes": minutes, **self._observed_fan_payload()}
@@ -10744,11 +10756,11 @@ class AutomationEngine:
     def _note_automation_grace_start(self, trigger: str) -> None:
         """Self-report a repeating automation grace: >=3 starts of the same trigger within 60 min."""
         now = dt_util.now()
-        starts = [t for t in self._grace_churn_starts.get(trigger, []) if (now - t) < timedelta(minutes=60)]
+        starts = [t for t in self._grace_churn_starts.get(trigger, []) if seconds_since(t, now=now) < 3600]
         starts.append(now)
         self._grace_churn_starts[trigger] = starts
         last = self._grace_churn_last_emit.get(trigger)
-        if len(starts) < 3 or (last is not None and (now - last) < timedelta(hours=6)):
+        if len(starts) < 3 or (last is not None and seconds_since(last, now=now) < 6 * 3600):
             return
         self._grace_churn_last_emit[trigger] = now
         self._emit_engine_incident(
@@ -11310,7 +11322,8 @@ class AutomationEngine:
             _cooldown_window = timedelta(minutes=5)
             _now = dt_util.now()
             _last_correction = self._last_unwarranted_fan_correction_at
-            if _last_correction is not None and (_now - _last_correction) < _cooldown_window:
+            _cooldown_s = _cooldown_window.total_seconds()
+            if _last_correction is not None and seconds_since(_last_correction, now=_now) < _cooldown_s:
                 _LOGGER.info(
                     "Unwarranted-fan correction suppressed — already corrected at %s,"
                     " within the 5-minute cooldown (likely a recurring condition CA cannot"
@@ -12283,6 +12296,7 @@ class AutomationEngine:
                 # Issue #1132 (mirror of #931): only clear the pause / report a nat-vent
                 # session when the activation was applied. Otherwise fall through to the
                 # re-pause below, which re-records the pause (idempotent when already paused).
+                _repause_mode_before = self._thermostat_mode_now()  # Issue #1606: for the re-check row below
                 _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
                     _reactivation_state,
                     reason=nat_vent_reason,
@@ -12370,10 +12384,10 @@ class AutomationEngine:
                 # gap live.)
                 self._paused_entity = None
                 self._paused_since = None
-                await self._apply_nat_vent_hvac_state()
+                _repause_hold = await self._apply_nat_vent_hvac_state()
                 _LOGGER.info(
                     "Re-check after grace: nat-vent conditions met — outdoor %.1f°F < indoor %.1f°F,"
-                    " outdoor ≤ %.1f°F, band stays armed",
+                    " outdoor ≤ %.1f°F, nat-vent HVAC state applied (Off while a window is open)",
                     outdoor,
                     indoor,
                     nat_vent_threshold,
@@ -12409,6 +12423,7 @@ class AutomationEngine:
                         {
                             "entity": "re-check",
                             "result": "natural_ventilation",
+                            **nat_vent_start_fields(_repause_mode_before, _repause_hold),  # Issue #1606
                             "outdoor_temp": outdoor,
                             "indoor_temp": indoor,
                             "threshold": nat_vent_threshold,
@@ -12541,7 +12556,7 @@ class AutomationEngine:
         # seconds BEFORE bedtime (e.g. a 22:29:50 daytime setpoint) must not swallow the bedtime
         # step — that delayed the sleep band up to 30 minutes. When sleep_time/wake_time are unset
         # _in_sleep_window() cannot answer (returns False), so keep the prior behavior there.
-        if self._temp_command_time is not None and (dt_util.now() - self._temp_command_time).total_seconds() < 30:
+        if self._temp_command_time is not None and seconds_since(self._temp_command_time, now=dt_util.now()) < 30:
             _sleep_cfg_known = bool(self.config.get("sleep_time") and self.config.get("wake_time"))
             if not _sleep_cfg_known or _in_sleep_window(self._temp_command_time, self.config):
                 _LOGGER.info(
@@ -12698,17 +12713,6 @@ class AutomationEngine:
             if self._economizer_active:
                 await self._deactivate_economizer(outdoor_temp=0)
 
-        if self._emit_event_callback:
-            self._emit_event_callback(
-                "bedtime_setback",
-                {
-                    "mode": c.hvac_mode,
-                    "floor": _sleep_band.floor,
-                    "ceiling": _sleep_band.ceiling,
-                    "active": _sleep_band.active,
-                    "modifier": c.setback_modifier,
-                },
-            )
         if (
             _gate == ScheduledBandGate.DEFER_NAT_VENT
             and self._emit_event_callback
@@ -12747,6 +12751,19 @@ class AutomationEngine:
                 ceiling=self._band_num(_sleep_band.ceiling),
             ),
         )
+        # Issue #1596: emitted AFTER the write, with what the thermostat was actually sent.
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "bedtime_setback",
+                {
+                    "mode": c.hvac_mode,
+                    "floor": _sleep_band.floor,
+                    "ceiling": _sleep_band.ceiling,
+                    "active": _sleep_band.active,
+                    "modifier": c.setback_modifier,
+                    **mode_write_fields(self._last_band_write),
+                },
+            )
 
     async def handle_pre_cool(
         self, indoor_temp: float | None, nat_vent_just_closed: bool, *, modifier: float | None = None
@@ -13075,7 +13092,7 @@ class AutomationEngine:
                 # explain the gap.
                 if (
                     self._temp_command_time is not None
-                    and (dt_util.now() - self._temp_command_time).total_seconds() < 30
+                    and seconds_since(self._temp_command_time, now=dt_util.now()) < 30
                 ):
                     _LOGGER.info(
                         "Morning check: indoor %.1f°F below comfort_heat %.1f°F — "
@@ -13142,17 +13159,6 @@ class AutomationEngine:
         # deduped, becoming the new trailing "last observable decision" and masking the correct
         # outcome. Windowed (not permanent) — this event legitimately fires once per real
         # wake-up, hours apart.
-        _wakeup_sig = (c.hvac_mode, round(_wakeup_band.floor, 2), round(_wakeup_band.ceiling, 2), _wakeup_band.active)
-        if self._emit_event_callback and not self._recent_duplicate("morning_wakeup", _wakeup_sig, window_seconds=600):
-            self._emit_event_callback(
-                "morning_wakeup",
-                {
-                    "mode": c.hvac_mode,
-                    "floor": _wakeup_band.floor,
-                    "ceiling": _wakeup_band.ceiling,
-                    "active": _wakeup_band.active,
-                },
-            )
         await self._apply_comfort_band(
             _wakeup_band,
             reason=_R(
@@ -13161,6 +13167,28 @@ class AutomationEngine:
                 ceiling=self._band_num(_wakeup_band.ceiling),
             ),
         )
+        # Issue #1596: emitted AFTER the write, with what the thermostat was actually sent; the outcome is part of the
+        # dedup signature, so a held wake-up followed by a sent one inside the window is two rows.
+        _write_fields = mode_write_fields(self._last_band_write)
+        _wakeup_sig = (
+            c.hvac_mode,
+            round(_wakeup_band.floor, 2),
+            round(_wakeup_band.ceiling, 2),
+            _wakeup_band.active,
+            _write_fields["outcome"],
+            _write_fields.get("held_reason"),
+        )
+        if self._emit_event_callback and not self._recent_duplicate("morning_wakeup", _wakeup_sig, window_seconds=600):
+            self._emit_event_callback(
+                "morning_wakeup",
+                {
+                    "mode": c.hvac_mode,
+                    "floor": _wakeup_band.floor,
+                    "ceiling": _wakeup_band.ceiling,
+                    "active": _wakeup_band.active,
+                    **_write_fields,
+                },
+            )
 
     def _any_monitored_sensor_open(self) -> bool:
         """Return True if any monitored door/window sensor is currently open.
@@ -13281,7 +13309,7 @@ class AutomationEngine:
         if not isinstance(at, datetime):
             return False
         try:
-            age = (dt_util.now() - at).total_seconds()
+            age = seconds_since(at, now=dt_util.now())
         except TypeError:
             return False
         return 0 <= age < WHF_OCCUPANT_PRESS_PENDING_S
@@ -13320,7 +13348,7 @@ class AutomationEngine:
             return None
         direction, at, _ = mem
         try:
-            age = (dt_util.now() - at).total_seconds()
+            age = seconds_since(at, now=dt_util.now())
         except TypeError:
             return None
         if age < 0 or age >= within_s:
@@ -13348,7 +13376,7 @@ class AutomationEngine:
             return None
         window = WHF_STOP_CONVERGE_WINDOW_S if direction == "off" else WHF_START_CONVERGE_WINDOW_S
         try:
-            age = (dt_util.now() - mem[1]).total_seconds()
+            age = seconds_since(mem[1], now=dt_util.now())
         except TypeError:
             return None
         if age < 0 or age >= window:
@@ -13388,7 +13416,7 @@ class AutomationEngine:
         if gave_up is None:
             return False
         try:
-            if (now - gave_up).total_seconds() < WHF_STOP_GIVEUP_HOLD_S:
+            if seconds_since(gave_up, now=now) < WHF_STOP_GIVEUP_HOLD_S:
                 return True
         except TypeError:
             pass
@@ -13694,7 +13722,7 @@ class AutomationEngine:
         own_at = getattr(self, "_last_commanded_hvac_time", None)
         if getattr(self, "_last_commanded_hvac_mode", None) == "off" and isinstance(own_at, datetime):
             try:
-                own_off_for = max(0.0, (now - own_at).total_seconds())
+                own_off_for = max(0.0, seconds_since(own_at, now=now))
             except TypeError:
                 own_off_for = None
         attrs = getattr(climate_state, "attributes", None) or {}
@@ -13939,9 +13967,9 @@ class AutomationEngine:
         # DISTINCT stops (fan observed off since the previous stop) for the anti-oscillation alert.
         # A verify-retry of a stop that did not take is not a new stop.
         last = self._whf_safety_last_stop_at
-        in_episode = isinstance(last, datetime) and (now - last).total_seconds() < 600
+        in_episode = isinstance(last, datetime) and seconds_since(last, now=now) < 600
         distinct = (not in_episode) or self._whf_safety_seen_off_since_stop
-        stops = [t for t in getattr(self, "_whf_safety_stop_times", []) if (now - t).total_seconds() < 600]
+        stops = [t for t in getattr(self, "_whf_safety_stop_times", []) if seconds_since(t, now=now) < 600]
         if distinct:
             stops.append(now)
         self._whf_safety_stop_times = stops
@@ -13998,7 +14026,7 @@ class AutomationEngine:
         if self._whf_off_seen_at is None:
             self._whf_off_seen_at = now
         try:
-            return max(0.0, WHF_RESTORE_QUIET_S - (now - self._whf_off_seen_at).total_seconds())
+            return max(0.0, WHF_RESTORE_QUIET_S - seconds_since(self._whf_off_seen_at, now=now))
         except TypeError:
             return 0.0
 
@@ -14365,6 +14393,7 @@ class AutomationEngine:
         set_outdoor_exit_time: bool = False,
         event_type: str | None = None,
         event_payload: dict[str, Any] | None = None,
+        replay_pre_fan_mode: bool = True,
     ) -> FanCommandResult:
         """Single choke point for ending a nat-vent session (Issue #411).
 
@@ -14399,6 +14428,10 @@ class AutomationEngine:
                 overwritten based on the real outcome — left as given when the toggle
                 executed, replaced with a "deferred" description when newly rate-limited.
                 Ignored if ``event_type`` is None.
+            replay_pre_fan_mode: Issue #1605 -- with the windows closed, ``_deactivate_fan()`` first replays the
+                mode captured when the fan session started, then the selector restore corrects it. The slow-loop
+                comfort-floor exit passes False when a classification exists (Issue #1066 F4: the selector alone
+                writes mode + setpoint, no cool-then-heat double write); every other caller keeps the replay.
 
         Returns:
             The ``FanCommandResult`` from the underlying ``_deactivate_fan()`` call.
@@ -14415,6 +14448,9 @@ class AutomationEngine:
         if set_outdoor_exit_time:
             self._nat_vent_outdoor_exit_time = dt_util.now()
         sensor_open = self._any_monitored_sensor_settled_open()
+        # Issue #1268: what the exit did to the thermostat, set by each branch below once it is known (the row's
+        # ``hvac_restore``). None: the branch states nothing (no classification to restore from).
+        _restore: ComfortModeWrite | None = None
         # emit_event=False on both branches: the caller's own specific exit event
         # (nat_vent_comfort_floor_exit, nat_vent_outdoor_rise_exit, etc.) is emitted
         # below, by this method, once the
@@ -14438,6 +14474,7 @@ class AutomationEngine:
                 reason=reason, restore_hvac=False, release_suppression=True, emit_event=False
             )
             self._end_nat_vent_session(result)
+            _restore = ComfortModeWrite(held_reason="occupant_change")
             # Issue #1304: a DRY_RUN stop ended nothing (logged by _deactivate_fan()), so this line is DEBUG then.
             _log = (
                 _LOGGER.debug
@@ -14479,6 +14516,7 @@ class AutomationEngine:
             # so the next tick's retry re-enters this branch and records the pause once the fan-off
             # ran; if the window closes first, the sensors-closed branch below completes the session.
             if self._end_nat_vent_session(result):
+                _restore = ComfortModeWrite(held_reason="window_open")  # Rule 3: nothing restored into the window
                 # Issue #1142 D4 (cool side) and its heat-side mirror: the window pause is recorded below, so the
                 # thermostat must be Off NOW, not at the next 30-minute cycle. A blower session's former AC-assist
                 # band (and any mode a comfort restore armed) would otherwise keep heating/cooling into the open
@@ -14535,6 +14573,7 @@ class AutomationEngine:
             else:
                 # Issue #649: a repeat of an already-reported deferral logs at DEBUG, not INFO —
                 # one retry tick after another while still blocked.
+                _restore = ComfortModeWrite(held_reason="fan_off_pending")
                 _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
                 _log(
                     "Nat-vent exit (%s): monitored sensor still open but fan-off deferred — "
@@ -14542,7 +14581,9 @@ class AutomationEngine:
                     reason,
                 )
         else:
-            result = await self._deactivate_fan(reason=reason, emit_event=False)
+            result = await self._deactivate_fan(
+                reason=reason, restore_hvac=replay_pre_fan_mode, release_suppression=True, emit_event=False
+            )
             # Issue #1141 (mirror, found during #1142): restore and the automation grace belong to a
             # session that actually ended. A fan-off deferred by the 5-minute floor KEEPS the session
             # (#931; the fan is still on), and starting "nat_vent_exit_resume" grace now left session and
@@ -14578,6 +14619,7 @@ class AutomationEngine:
                             self._current_classification,
                             reason=_R("reason_nv_exit_resume", reason=_nest(reason)),
                         )
+                    _restore = self._last_mode_write  # Issue #1268: what the selector actually wrote (or why not)
                 self._start_automation_grace_unless_restore_unsent("nat_vent_exit_resume", _resume_write)
                 _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
                 _log("Nat-vent exit (%s): sensors closed — restoring HVAC and starting grace period", reason)
@@ -14589,6 +14631,7 @@ class AutomationEngine:
                 _LOGGER.debug("Nat-vent exit (%s): fan stop not sent (observe-only) -- session kept", reason)
                 self._schedule_deferred_closed_exit_retry(reason, event_type, event_payload)
             else:
+                _restore = ComfortModeWrite(held_reason="fan_off_pending")  # the retry's row reports the restore
                 _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
                 _log(
                     "Nat-vent exit (%s): sensors closed but fan-off deferred — restore and grace wait for the fan-off",
@@ -14605,6 +14648,8 @@ class AutomationEngine:
             payload = dict(event_payload or {})
             if result is FanCommandResult.RATE_LIMITED_NEW:
                 payload["fan_mode_change"] = self._deferred_fan_mode_change_marker()
+            if _restore is not None:
+                payload["hvac_restore"] = mode_write_fields(_restore, nested=True)  # Issue #1268
             # EXECUTED / ALREADY_IN_STATE / OVERRIDDEN / DISABLED: payload's own
             # fan_mode_change (if any) is left exactly as the caller built it — matches
             # pre-#649 behavior for every outcome that isn't a fresh deferral.
@@ -16686,7 +16731,7 @@ class AutomationEngine:
         cmd_time = getattr(self, "_last_commanded_hvac_time", None)
         if cmd_mode is not None and cmd_time is not None:
             try:
-                if abs((now - cmd_time).total_seconds()) < COMFORT_RECENT_COMMAND_WINDOW_S:
+                if abs(seconds_since(cmd_time, now=now)) < COMFORT_RECENT_COMMAND_WINDOW_S:
                     mode = cmd_mode
             except TypeError:  # naive vs aware datetime mix: treat the command as stale
                 mode = None
@@ -17767,7 +17812,7 @@ class AutomationEngine:
             )
             if self._emit_event_callback and not self._recent_duplicate("occupancy_setback_suppressed_paused", (mode,)):
                 _pause_minutes = (
-                    (dt_util.now() - self._paused_since).total_seconds() / 60.0
+                    seconds_since(self._paused_since, now=dt_util.now()) / 60.0
                     if self._paused_since is not None
                     else None
                 )
@@ -17850,12 +17895,22 @@ class AutomationEngine:
         # Issue #1409: inside an open time-of-use bank window the change writes the bank instead (decided first, so the
         # record below states what the thermostat was actually sent).
         _bank_write = await self._bank_takes_occupancy_write(mode)
+        if _bank_write is None:
+            await self._apply_comfort_band(_band, reason=_R("reason_occupancy_setback_band", mode=str(mode)))
+        # Issue #1267: the row is emitted AFTER the write and states what the thermostat was sent (``outcome``, plus
+        # ``held_reason`` when nothing was written: WHF session, blower hold, open window, no capable mode). The event
+        # type stays ``occupancy_setback`` either way -- the occupant did leave (P7 away timeline, promise journal).
         # Issue #591: WINDOWED dedup — see handle_occupancy_away()'s original comment for
         # the full rationale (repeated bands are often intentional re-confirmations, but
-        # an unguarded site reopens the #584 double-emit shape within seconds).
-        _sig = (mode, round(_band.floor, 2), round(_band.ceiling, 2))
+        # an unguarded site reopens the #584 double-emit shape within seconds). The outcome is part of the
+        # signature, so a held setback followed by a sent one inside the window is two rows.
         if _bank_write is not None:
-            _sig = (mode, "tou_bank", _bank_write.mode, round(_bank_write.target_f, 2))
+            _write_fields: dict[str, Any] = {"outcome": hvac_outcome_label(_bank_write.result)}
+            _sig: tuple[Any, ...] = (mode, "tou_bank", _bank_write.mode, round(_bank_write.target_f, 2))
+        else:
+            _write_fields = mode_write_fields(self._last_band_write)
+            _sig = (mode, round(_band.floor, 2), round(_band.ceiling, 2))
+        _sig = (*_sig, _write_fields["outcome"], _write_fields.get("held_reason"))
         if self._emit_event_callback and not self._recent_duplicate("occupancy_setback", _sig, window_seconds=600):
             _payload: dict[str, Any] = {
                 "mode": mode,
@@ -17863,6 +17918,7 @@ class AutomationEngine:
                 "ceiling": _band.ceiling,
                 "occupancy": mode,
                 "indoor_f": self._get_indoor_temp_f(),
+                **_write_fields,
             }
             if _bank_write is not None:
                 _payload.update(
@@ -17870,16 +17926,12 @@ class AutomationEngine:
                         "tou_bank": True,
                         "target_f": _bank_write.target_f,
                         "hvac_mode": _bank_write.mode,
-                        "outcome": hvac_outcome_label(_bank_write.result),
                         "note": "a time-of-use bank owns the setpoint; the band applies after it",
                     }
                 )
             self._emit_event_callback("occupancy_setback", _payload)
-        if _bank_write is not None:
-            if hvac_outcome_label(_bank_write.result) == "sent":
-                self._away_setback_sent = True  # Issue #1425: the thermostat holds the away/vacation bank
-            return
-        await self._apply_comfort_band(_band, reason=_R("reason_occupancy_setback_band", mode=str(mode)))
+        if _bank_write is not None and hvac_outcome_label(_bank_write.result) == "sent":
+            self._away_setback_sent = True  # Issue #1425: the thermostat holds the away/vacation bank
 
     def _resolve_occupancy_home_fsm_state(self) -> HomeDecision:
         """Single dispatch point for handle_occupancy_home()'s occupancy FSM
@@ -17898,9 +17950,9 @@ class AutomationEngine:
             comfort_f = self.config["comfort_heat"] if family == "heat" else self.config["comfort_cool"]
             setback_f = self.config["setback_heat"] if family == "heat" else self.config["setback_cool"]
         debounce_seconds = self.config.get(CONF_WELCOME_HOME_DEBOUNCE, DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS)
-        seconds_since: float | None = None
+        since_notified: float | None = None
         if self._last_welcome_home_notified is not None:
-            seconds_since = (dt_util.now() - self._last_welcome_home_notified).total_seconds()
+            since_notified = seconds_since(self._last_welcome_home_notified, now=dt_util.now())
         inputs = HomeInputs(
             has_classification=c is not None,
             hvac_mode=family,
@@ -17908,7 +17960,7 @@ class AutomationEngine:
             comfort_f=comfort_f,
             setback_f=setback_f,
             debounce_seconds=float(debounce_seconds),
-            seconds_since_last_notified=seconds_since,
+            seconds_since_last_notified=since_notified,
             restore_hold=self._occupancy_restore_hold_reason(),
         )
         return decide_home_dispatch(inputs)
@@ -18067,7 +18119,7 @@ class AutomationEngine:
         if decision.notify is HomeNotifyOutcome.SUPPRESSED_DEBOUNCE:
             debounce_seconds = self.config.get(CONF_WELCOME_HOME_DEBOUNCE, DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS)
             elapsed = (
-                (dt_util.now() - self._last_welcome_home_notified).total_seconds()
+                seconds_since(self._last_welcome_home_notified, now=dt_util.now())
                 if self._last_welcome_home_notified is not None
                 else 0.0
             )
@@ -18527,8 +18579,17 @@ class AutomationEngine:
         if self._reclassify_callback:
             self._reclassify_callback()
 
-    async def _apply_nat_vent_hvac_state(self) -> None:
+    def _thermostat_mode_now(self) -> str:
+        """The climate entity's current mode, or ``"unknown"`` (the nat-vent start rows' ``hvac_mode_before``)."""
+        state = self.hass.states.get(self.climate_entity)
+        return state.state if state else "unknown"
+
+    async def _apply_nat_vent_hvac_state(self) -> ComfortModeWrite:
         """Apply the correct HVAC state when nat-vent is active.
+
+        Returns what the thermostat holds afterwards (Issue #1597, read by the nat-vent start row): ``family="off"``
+        when it is Off (written here, or by the whole-house fan's suppression), or a ``held_reason`` when it was left
+        alone (``occupant_change``, ``no_window_settled``, ``fan_not_started``). Every other caller ignores it.
 
         Called immediately after nat-vent activates (all paths) and on every
         30-minute apply_classification() cycle while nat-vent is active.
@@ -18558,7 +18619,12 @@ class AutomationEngine:
                 "_apply_nat_vent_hvac_state: no-op (fan_mode=%s — HVAC suppressed by _activate_fan or disabled)",
                 fan_mode,
             )
-            return
+            # Issue #1597: ownership means Climate Advisor actually turned the HVAC Off (#1293).
+            return (
+                ComfortModeWrite(family="off")
+                if self._whf_owns_hvac()
+                else ComfortModeWrite(held_reason="fan_not_started")
+            )
 
         if self._manual_change_protected():
             self._note_deferred_to_protected_change()
@@ -18568,7 +18634,7 @@ class AutomationEngine:
                 self._manual_override_active,
                 self._override_confirm_pending,
             )
-            return
+            return ComfortModeWrite(held_reason="occupant_change")
 
         if not self._any_monitored_sensor_settled_open():
             # Issue #1225 (minor): nothing is open past its delay (every window shut, or one still inside its delay),
@@ -18576,10 +18642,11 @@ class AutomationEngine:
             _LOGGER.info(
                 "_apply_nat_vent_hvac_state: no window open past its delay -- thermostat left to the normal path"
             )
-            return
+            return ComfortModeWrite(held_reason="no_window_settled")
 
         state = self.hass.states.get(self.climate_entity)
         mode = state.state if state else None
+        _hold = ComfortModeWrite(family="off")  # already Off: nothing to write
         if mode in (None, "off", "unavailable", "unknown"):
             _LOGGER.info(
                 "_apply_nat_vent_hvac_state: thermostat already %s -- blower ventilation, no heat/cool armed", mode
@@ -18597,7 +18664,9 @@ class AutomationEngine:
             self._arm_open_window_off_retry(
                 _off_result, reason=_R("reason_blower_window_open", mode=str(mode)), session="blower"
             )
+            _hold = ComfortModeWrite(result=_off_result, family="off")
         await self._advise_close_windows_if_too_warm()
+        return _hold
 
     async def _advise_close_windows_if_too_warm(self) -> None:
         """Tell the occupant to close the windows when blower ventilation is not enough (Issue #1142 D7).
@@ -18793,7 +18862,7 @@ class AutomationEngine:
                 _occupant_since = bool(
                     isinstance(self._occupant_fan_action_at, datetime)
                     and isinstance(_started, datetime)
-                    and self._occupant_fan_action_at >= _started
+                    and seconds_since(_started, now=self._occupant_fan_action_at) >= 0  # Issue #1244: as instants
                 )
                 # Issue #1205: an occupant fan-off pause that began inside the 5 s gap forbids this start too.
                 _hold = self._fan_off_hold_active() is True
@@ -18949,17 +19018,19 @@ class AutomationEngine:
         except TypeError:  # naive/aware (or stubbed) clock mix: drop the old entries, never fail the command
             self._own_setpoint_writes = new
 
-    def _setpoint_echo_wait_s(
-        self, sent_value: float, reported_f: float | None, before_f: float | None
-    ) -> float | None:
-        """Seconds until the echo window of an UNANSWERED setpoint write ends, or None (the verify may judge it now).
+    def _setpoint_echo_wait_s(self, reported_f: float | None) -> float | None:
+        """Seconds until the echo window of the last setpoint write ends while it is UNANSWERED, else None (judge now).
 
-        Unanswered = the thermostat still reports the value it had before the write (``before_f``, internal F) and the
-        write (``sent_value``, the thermostat's unit, as sent) is still outstanding in #1232's echo memory
-        (``outstanding_own_write``). A thermostat that answered with a different value (clamped, refused) is never
-        waited for. Never raises: any bookkeeping problem means "judge now", as before.
+        Unanswered = the thermostat still reports the value it had before the write (``_pending_setpoint_before_f``,
+        internal F) and the write (``_pending_setpoint_sent``, the thermostat's unit, as sent) is still outstanding in
+        #1232's echo memory (``outstanding_own_write``). A thermostat that answered with a different value (clamped,
+        refused, a program revert) is never waited for. Shared by the 10 s read-back verify (#1194 e F1) and the
+        post-fan verifies (#1272); each checks its write sequence first, so "the last write" is the one it judges.
+        Never raises: any bookkeeping problem means "judge now", as before.
         """
-        if reported_f is None or before_f is None or abs(reported_f - before_f) >= 0.1:
+        sent_value = getattr(self, "_pending_setpoint_sent", None)
+        before_f = getattr(self, "_pending_setpoint_before_f", None)
+        if sent_value is None or reported_f is None or before_f is None or abs(reported_f - before_f) >= 0.1:
             return None
         writes = getattr(self, "_own_setpoint_writes", None)
         if not writes:
@@ -18981,9 +19052,69 @@ class AutomationEngine:
             )
             if write is None:
                 return None
-            return max(1.0, OWN_WRITE_ECHO_WINDOW_S - (now - write.written_at).total_seconds() + 1.0)
+            return echo_window_wait_s(write, now)
         except TypeError, ValueError:
             return None
+
+    def _arm_post_fan_setpoint_verify(self, slot: str) -> None:
+        """Re-assert the last commanded setpoint 30 s after a fan command if the thermostat does not show it.
+
+        Ecobee may revert to its comfort program after a fan command. Shared by ``_activate_fan()`` (slot
+        ``_fan_on_verify_cancel``) and ``_deactivate_fan()`` (``_fan_off_verify_cancel``), which carried byte-for-byte
+        identical copies; the decision is ``setpoint_verify_decision.decide_setpoint_verify()``.
+
+        Issue #1272: a slow cloud thermostat that has not answered the write yet (still the value it had before, the
+        write still outstanding in #1232's echo memory) is not a revert -- re-sending the same setpoint would be a
+        duplicate write. The verify then re-checks in its own slot when the echo window ends, re-running the whole
+        decision (write sequence, the occupant's protected change), the same wait as the 10 s read-back verify.
+        """
+        verify_seq = self._write_seq
+        expected_temp = self._pending_setpoint_single
+        expected_mode = self._last_commanded_hvac_mode
+
+        async def _verify() -> None:
+            actual_temp = read_state_temp_f(self.hass.states.get(self.climate_entity), "temperature", self._temp_unit)
+            outcome = decide_setpoint_verify(
+                current_write_seq=self._write_seq,
+                verify_write_seq=verify_seq,
+                expected_temp=expected_temp,
+                expected_mode=expected_mode,
+                # Issue #1133: a PENDING change is the occupant's too -- do not reassert over it at 30 s.
+                manual_override_active=self._manual_change_protected(),
+                actual_temp=actual_temp,
+            )
+            if outcome is not SetpointVerifyOutcome.REASSERT:
+                return
+            wait_s = self._setpoint_echo_wait_s(actual_temp)
+            if wait_s is not None:
+                _LOGGER.info(
+                    "Post-fan setpoint verify: thermostat %.1f°F not answered yet (expected %.1f°F) -- "
+                    "re-checking in %.0fs (echo window)",
+                    actual_temp,
+                    expected_temp,
+                    wait_s,
+                )
+                self._rearm_timer(slot, wait_s, _post_fan_verify_due)
+                return
+            _LOGGER.info(
+                "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
+                actual_temp,
+                expected_temp,
+                expected_mode,
+            )
+            # Issue #1194 (a): re-assert the comfort TARGET (the single path re-applies the offset);
+            # ``expected_temp`` is the commanded value and would be offset twice.
+            await self._set_temperature(
+                self._pending_setpoint_target if self._pending_setpoint_target is not None else expected_temp,
+                reason="post-fan-verify/repair",
+                mode=expected_mode,
+            )
+
+        @callback
+        def _post_fan_verify_due(_now: Any) -> None:
+            self.hass.async_create_task(_verify())
+
+        self._rearm_timer(slot, 30.0, _post_fan_verify_due)
 
     def _settle_own_setpoint_write(self, context_id: str, *, sent: bool) -> None:
         """After the awaited call returns: forget a write that never reached the thermostat, else restart its window.
@@ -19094,7 +19225,7 @@ class AutomationEngine:
                 "age_s=%s role=%s",
                 verdict.reason,
                 observed,
-                [round((now - w.written_at).total_seconds()) for w in verdict.consumed],
+                [round(seconds_since(w.written_at, now=now)) for w in verdict.consumed],
                 self.role,
             )
         return verdict.recognised
@@ -19373,7 +19504,7 @@ class AutomationEngine:
                 reason,
             )
         elif _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW:
-            _elapsed = (dt_util.now() - self._fan_toggle_command_time).total_seconds()
+            _elapsed = seconds_since(self._fan_toggle_command_time, now=dt_util.now())
             _LOGGER.info(
                 "Fan toggle deferred: rate limit (%.0fs since last change, min %ds) — %s (%s) — applies at %s",
                 _elapsed,
@@ -19541,49 +19672,7 @@ class AutomationEngine:
                 )
 
             # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
-            # Re-assert our setpoint within 30s so the coordinator's _is_recent_temp_command guard
-            # covers any delayed state report.
-            _verify_seq = self._write_seq
-            _expected_temp = self._pending_setpoint_single
-            _expected_mode = self._last_commanded_hvac_mode
-
-            async def _do_verify_after_fan_on() -> None:
-                # Architecture-reset Step 2: the decision now lives in
-                # setpoint_verify_decision.decide_setpoint_verify() — shared with
-                # _do_verify_after_fan_off(), which had byte-for-byte identical logic
-                # before this consolidation (found during the #429 dedup sweep).
-                unit = self._temp_unit
-                current_state = self.hass.states.get(self.climate_entity)
-                actual_temp = read_state_temp_f(current_state, "temperature", unit)
-                outcome = decide_setpoint_verify(
-                    current_write_seq=self._write_seq,
-                    verify_write_seq=_verify_seq,
-                    expected_temp=_expected_temp,
-                    expected_mode=_expected_mode,
-                    # Issue #1133: a PENDING change is the occupant's too -- do not reassert over it at 30 s.
-                    manual_override_active=self._manual_change_protected(),
-                    actual_temp=actual_temp,
-                )
-                if outcome is SetpointVerifyOutcome.REASSERT:
-                    _LOGGER.info(
-                        "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
-                        actual_temp,
-                        _expected_temp,
-                        _expected_mode,
-                    )
-                    # Issue #1194 (a): re-assert the comfort TARGET (the single path re-applies the offset);
-                    # ``_expected_temp`` is the commanded value and would be offset twice.
-                    await self._set_temperature(
-                        self._pending_setpoint_target if self._pending_setpoint_target is not None else _expected_temp,
-                        reason="post-fan-verify/repair",
-                        mode=_expected_mode,
-                    )
-
-            @callback
-            def _verify_setpoint_after_fan_on(_now: Any) -> None:
-                self.hass.async_create_task(_do_verify_after_fan_on())
-
-            self._rearm_timer("_fan_on_verify_cancel", 30.0, _verify_setpoint_after_fan_on)
+            self._arm_post_fan_setpoint_verify("_fan_on_verify_cancel")
 
             # Issue #327: thermostatic backstop timer — fires every 5 min while the fan
             # is CA-owned; calls fan_thermostat_check so a slow-updating outdoor sensor
@@ -19754,13 +19843,14 @@ class AutomationEngine:
             return None
         if self._indoor_blind_session_kind() is None:
             return None
-        if (dt_util.now() - last_seen).total_seconds() > INDOOR_BLIND_EPISODE_GAP_S:
+        if seconds_since(last_seen, now=dt_util.now()) > INDOOR_BLIND_EPISODE_GAP_S:
             return None  # stale episode — nothing is evaluating it any more
         will_stop = self._indoor_blind_session == "nat_vent"
         return {
             "since": since,
             "session": self._indoor_blind_session,
-            "stop_at": since + timedelta(seconds=INDOOR_BLIND_FAN_STOP_S) if will_stop else None,
+            # Issue #1244: a true (UTC) instant, the same one indoor_blind_check() stops at (#1199 rule).
+            "stop_at": instant_after(INDOOR_BLIND_FAN_STOP_S, now=since) if will_stop else None,
         }
 
     def _request_indoor_blind_refresh(self) -> None:
@@ -19792,10 +19882,10 @@ class AutomationEngine:
         """
         now = dt_util.now()
         last = self._indoor_blind_last_alert_push
-        if not force and last is not None and (now - last).total_seconds() < INDOOR_BLIND_PUSH_DEBOUNCE_S:
+        if not force and last is not None and seconds_since(last, now=now) < INDOOR_BLIND_PUSH_DEBOUNCE_S:
             _LOGGER.info(
                 "Blind-fan alert push suppressed: reason=debounce since_last_s=%.0f window_s=%.0f",
-                (now - last).total_seconds(),
+                seconds_since(last, now=now),
                 INDOOR_BLIND_PUSH_DEBOUNCE_S,
             )
             return False
@@ -19830,7 +19920,7 @@ class AutomationEngine:
         elif (
             self._indoor_blind_since is None
             or last_seen is None
-            or (now - last_seen).total_seconds() > INDOOR_BLIND_EPISODE_GAP_S
+            or seconds_since(last_seen, now=now) > INDOOR_BLIND_EPISODE_GAP_S
         ):
             # No live episode, or the previous one was last evaluated too long ago to trust
             # (e.g. a stale "since" from before the fan stopped being backstopped).
@@ -19859,8 +19949,8 @@ class AutomationEngine:
         self._indoor_blind_last_seen = now
         self._indoor_blind_session = session
         will_stop = session == "nat_vent"
-        stop_at = since + timedelta(seconds=INDOOR_BLIND_FAN_STOP_S)
-        blind_s = (now - since).total_seconds()
+        stop_at = instant_after(INDOOR_BLIND_FAN_STOP_S, now=since)  # Issue #1244: a true instant (UTC)
+        blind_s = seconds_since(since, now=now)
 
         if not self._indoor_blind_alerted:
             self._indoor_blind_alerted = True
@@ -19868,7 +19958,7 @@ class AutomationEngine:
                 "Fan running blind: indoor temperature unavailable session=%s will_stop=%s stop_at=%s",
                 session,
                 will_stop,
-                stop_at.strftime("%H:%M") if will_stop else "none",
+                dt_util.as_local(stop_at).strftime("%H:%M") if will_stop else "none",
             )
             if self._emit_event_callback:
                 self._emit_event_callback(
@@ -19964,10 +20054,10 @@ class AutomationEngine:
         stopped = self._indoor_blind_stopped
         session = self._indoor_blind_session
         last_seen = self._indoor_blind_last_seen
-        stale = last_seen is None or (now - last_seen).total_seconds() > INDOOR_BLIND_EPISODE_GAP_S
+        stale = last_seen is None or seconds_since(last_seen, now=now) > INDOOR_BLIND_EPISODE_GAP_S
         lower_bound = stopped or stale
         end = last_seen if lower_bound and last_seen is not None else now
-        minutes = int((end - since).total_seconds() // 60)
+        minutes = int(seconds_since(since, now=end) // 60)
         fan_running = self._indoor_blind_session_kind() is not None
         self._reset_indoor_blind_episode()
         if not alerted:
@@ -20616,7 +20706,7 @@ class AutomationEngine:
                 reason,
             )
         elif _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW:
-            _elapsed = (dt_util.now() - self._fan_toggle_command_time).total_seconds()
+            _elapsed = seconds_since(self._fan_toggle_command_time, now=dt_util.now())
             _LOGGER.info(
                 "Fan toggle deferred: rate limit (%.0fs since last change, min %ds) — %s (%s) — applies at %s",
                 _elapsed,
@@ -20793,49 +20883,7 @@ class AutomationEngine:
                 )
 
             # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
-            # Re-assert our setpoint within 30s so the coordinator's _is_recent_temp_command guard
-            # covers any delayed state report.
-            _verify_seq = self._write_seq
-            _expected_temp = self._pending_setpoint_single
-            _expected_mode = self._last_commanded_hvac_mode
-
-            async def _do_verify_after_fan_off() -> None:
-                # Architecture-reset Step 2: the decision now lives in
-                # setpoint_verify_decision.decide_setpoint_verify() — shared with
-                # _do_verify_after_fan_on(), which had byte-for-byte identical logic
-                # before this consolidation (found during the #429 dedup sweep).
-                unit = self._temp_unit
-                current_state = self.hass.states.get(self.climate_entity)
-                actual_temp = read_state_temp_f(current_state, "temperature", unit)
-                outcome = decide_setpoint_verify(
-                    current_write_seq=self._write_seq,
-                    verify_write_seq=_verify_seq,
-                    expected_temp=_expected_temp,
-                    expected_mode=_expected_mode,
-                    # Issue #1133: a PENDING change is the occupant's too -- do not reassert over it at 30 s.
-                    manual_override_active=self._manual_change_protected(),
-                    actual_temp=actual_temp,
-                )
-                if outcome is SetpointVerifyOutcome.REASSERT:
-                    _LOGGER.info(
-                        "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
-                        actual_temp,
-                        _expected_temp,
-                        _expected_mode,
-                    )
-                    # Issue #1194 (a): re-assert the comfort TARGET (the single path re-applies the offset);
-                    # ``_expected_temp`` is the commanded value and would be offset twice.
-                    await self._set_temperature(
-                        self._pending_setpoint_target if self._pending_setpoint_target is not None else _expected_temp,
-                        reason="post-fan-verify/repair",
-                        mode=_expected_mode,
-                    )
-
-            @callback
-            def _verify_setpoint_after_fan_off(_now: Any) -> None:
-                self.hass.async_create_task(_do_verify_after_fan_off())
-
-            self._rearm_timer("_fan_off_verify_cancel", 30.0, _verify_setpoint_after_fan_off)
+            self._arm_post_fan_setpoint_verify("_fan_off_verify_cancel")
         finally:
             self._fan_command_pending = False
             if not _command_issued:
@@ -21230,7 +21278,7 @@ class AutomationEngine:
             _within_window = (
                 isinstance(last_at, datetime)
                 and isinstance(now, datetime)
-                and (now - last_at).total_seconds() < window_seconds
+                and seconds_since(last_at, now=now) < window_seconds
             )
         is_duplicate = last_signature == signature and _within_window
         sigs[key] = signature

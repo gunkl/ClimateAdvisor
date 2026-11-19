@@ -17,7 +17,8 @@ registry and ``tests/test_executor_offload.py``'s ``_BLOCKING_METHODS`` registry
 call site added later without a classification fails immediately, instead of silently
 repeating this bug class a fourth time.
 
-**Known blind spot (Issue #739):** this scanner only sees calls to
+**Known blind spot (Issue #739; that site was closed by Issue #1605, which routes it through
+``_exit_nat_vent()`` as ``("check_natural_vent_conditions", 2)``):** this scanner only sees calls to
 ``self._exit_nat_vent(...)`` — a branch that bypasses that function entirely is invisible
 to it. ``check_natural_vent_conditions()``'s own ``COMFORT_FLOOR`` branch does exactly
 that (it calls ``_deactivate_fan()`` directly, per that branch's own Issue #620 note), and
@@ -70,14 +71,18 @@ _COVERAGE_REGISTRY: dict[tuple[str, int], str] = {
         "like the fast loop's twin) so the pause is recorded and the thermostat left Off"
     ),
     ("check_natural_vent_conditions", 2): (
+        "arms lockout -- Issue #1605: COMFORT_FLOOR with every window closed now routes through the choke point "
+        "(it used to bypass it, the #739 blind spot below); set_outdoor_exit_time=True keeps the #739 lockout"
+    ),
+    ("check_natural_vent_conditions", 3): (
         "arms lockout -- Issue #1142 D8: AWAY_CEILING with a window still open; the same exit that bypassed "
         "the choke point (and armed the lockout directly) when every sensor is closed"
     ),
-    ("check_natural_vent_conditions", 3): (
+    ("check_natural_vent_conditions", 4): (
         "arms lockout — original outdoor-rise exit (Issue #115/#411), the lockout mechanism's "
         "first and originally-only use case"
     ),
-    ("check_natural_vent_conditions", 4): (
+    ("check_natural_vent_conditions", 5): (
         "arms lockout — Issue #641 (CEILING_THRESHOLD): outdoor hovering near "
         "comfort_cool + nat_vent_delta can cross the boundary tick-to-tick from sensor/weather "
         "noise, flip-flopping against the reactivation gate's own outdoor < threshold check"

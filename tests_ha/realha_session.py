@@ -21,7 +21,8 @@ Dispatch modes (design 8.2) - how many events used each is reported in ``RealHAS
 * ``state-write``      the adapter writes a state or entity value; real listeners react
 * ``service-occupant`` a real service call carrying a marked occupant Context
 * ``time-travel``      the adapter only moves the clock; the production schedule fires
-* ``real-lifecycle``   a real unload + setup (``simulate_restart``) or the real API view (``cancel_override``)
+* ``real-lifecycle``   a real unload + setup (``simulate_restart``) or the real API view (``cancel_override``,
+                       ``cancel_fan_override``)
 * ``direct-callback``  the same production method FakeHass calls, awaited inside the HA loop (declared fallback)
 * ``no-op``            event types the FakeHass adapter also ignores (``grace_start`` ...)
 
@@ -118,6 +119,7 @@ _MODE_BY_TYPE = {
     "thermostat_state_changed": "service-occupant",
     "simulate_restart": "real-lifecycle",
     "cancel_override": "real-lifecycle",
+    "cancel_fan_override": "real-lifecycle",
     "coordinator_refresh": "real-lifecycle",
     "startup_coalesce": "direct-callback",
     "fan_backstop_tick": "direct-callback",
@@ -741,8 +743,8 @@ class RealHASession:
             await coordinator.async_refresh()
             return "real-lifecycle"
 
-        if etype == "cancel_override":
-            return await self._cancel_override()
+        if etype in ("cancel_override", "cancel_fan_override"):
+            return await self._cancel_override(fan=etype == "cancel_fan_override")
 
         if etype == "simulate_restart":
             await house.restart(settle=False)
@@ -787,14 +789,18 @@ class RealHASession:
             await self.house.occupant_sets_fan_mode(event["thermostat_fan_mode"])
         return "service-occupant"
 
-    async def _cancel_override(self) -> str:
-        """The dashboard's Cancel Override button: the real API view, not a copy of its logic."""
-        from custom_components.climate_advisor.api import ClimateAdvisorCancelOverrideView
+    async def _cancel_override(self, *, fan: bool = False) -> str:
+        """The dashboard's Cancel Override / Cancel Fan Override button: the real API view, not a copy of its logic."""
+        from custom_components.climate_advisor.api import (
+            ClimateAdvisorCancelFanOverrideView,
+            ClimateAdvisorCancelOverrideView,
+        )
 
         request = MagicMock()
         request.app = {"hass": self.hass}
         request.query = {}
-        await ClimateAdvisorCancelOverrideView().post(request)
+        view = ClimateAdvisorCancelFanOverrideView if fan else ClimateAdvisorCancelOverrideView
+        await view().post(request)
         return "real-lifecycle"
 
     # ----------------------------------------------------------------- finish

@@ -107,7 +107,8 @@ await house.reload_zone(); await house.restart(down_for_seconds=0); await house.
 * `startup`: `cold` leaves the 300 s override-suppression window open. `settled` (the default) advances past it.
 * Lifecycle: `close()` unloads Climate Advisor, then the sim, and HA's autouse `verify_cleanup` is the safety net.
   `restart()` unloads and sets up again on the same `hass` and config dir, so it exercises persistence but not HA boot
-  ordering.
+  ordering. `restart(while_down=fn)` runs `async def fn(house)` while Climate Advisor is unloaded (an occupant press
+  while HA is down).
 * **The 30 s slices pitfall:** `advance()` fires timers only at the end of each slice (`tests_ha.house.builder.SIM_STEP`).
   A timer due mid-slice runs at the slice's end, at the same virtual instant as the next `occupant_*` call. The
   occupant's change then lands inside CA's echo guard (3 s for mode, 30 s for setpoint) and goes undetected, which a

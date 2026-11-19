@@ -1,0 +1,109 @@
+{
+  "name": "issue_1243_cancel_fan_override_hands_the_fan_back",
+  "description": "Issue #1243: the occupant started the whole-house fan by hand while free cooling was not warranted (outdoor warmer than indoor), then presses Cancel Fan Override on the dashboard. The fan override ends and Climate Advisor, back in charge of the fan, switches it off.",
+  "source": "synthetic",
+  "issue": 1243,
+  "notes": [
+    "Occupant impact: on a warm evening with a window open the occupant switches the whole-house fan on at the wall although the air outside is warmer than inside. Climate Advisor treats that as their fan override and leaves the fan alone. Ten minutes later they press Cancel Fan Override to hand the fan back. Climate Advisor must take it back: with outdoor air warmer than indoor it switches the fan off. If the cancel no longer handed the fan back, the fan would keep pulling warm air into the house for the rest of the override's grace.",
+    "Harness: new cancel_fan_override event, the same two calls as api.py's ClimateAdvisorCancelFanOverrideView.post() (decide_sync(ae.cancel_override, reason='user_cancel_fan_override'), then _schedule_reclassify_after_cancel()). Before #1243 the harness had no such event (an unknown event type is ignored), so this scenario's assertions after the cancel failed.",
+    "(a) Scenario effectiveness: make cancel_override() keep the fan override (automation.py: `keep_fan_override=not _fan_side_cancel` -> `keep_fan_override=True` in the `_clear_manual_override_active(...)` call) and the fan stays on under the occupant's override: the final _fan_override_active / fan_not_active assertions fail. Deleting the fan-only `override_cleared` emit in cancel_override() fails the 20:20 event_emitted assertion.",
+    "(b) Two-way alignment: docs/grace-periods-spec.md (Cancel Fan Override, #508/#1205) and docs/sim-harness-spec.md (event dispatch table: cancel_fan_override) describe this path.",
+    "(c) User outcome if a regression slipped through: Cancel Fan Override would not hand the fan back; it would keep running warm air into the house until the override's grace ran out.",
+    "Pending, not golden: goldens are locked until the owner approves a scenario card. Enforced by tests/test_production_harness.py::test_issue_1243_cancel_pending_scenario_passes_production_engine."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.window"
+    ],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "manual_grace_seconds": 7200
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "events": [
+    {
+      "time": "2026-07-15T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 82.0,
+      "note": "Outdoor warmer than indoor: free cooling is not warranted."
+    },
+    {
+      "time": "2026-07-15T20:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day: Climate Advisor cools."
+    },
+    {
+      "time": "2026-07-15T20:02:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "Seeds a prior 'off' state so the next change to 'on' is a real transition."
+    },
+    {
+      "time": "2026-07-15T20:03:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "note": "The occupant opens a window (the AC pauses for it); it stays open."
+    },
+    {
+      "time": "2026-07-15T20:10:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "on",
+      "note": "The occupant switches the fan on at the wall: Climate Advisor records a fan override (fan_manual_override grace) and leaves the fan alone."
+    },
+    {
+      "time": "2026-07-15T20:20:00",
+      "type": "cancel_fan_override",
+      "note": "The occupant presses Cancel Fan Override on the dashboard."
+    },
+    {
+      "time": "2026-07-15T20:25:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 82.0,
+      "note": "Same readings five minutes later (past the 10 s follow-up re-apply)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T20:20:00",
+      "expect": "event_emitted",
+      "event": "override_cleared",
+      "payload_subset": {
+        "was_mode": null,
+        "reason": "user_cancel_fan_override"
+      },
+      "reason": "The fan-only override was ended by the Cancel Fan Override press (the fan-only override_cleared row)."
+    },
+    {
+      "at": "2026-07-15T20:25:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_override_active",
+      "value": false,
+      "reason": "Final state: Climate Advisor is in charge of the fan again (without the cancel the override runs until 22:10)."
+    },
+    {
+      "at": "2026-07-15T20:25:00",
+      "expect": "fan_not_active",
+      "reason": "Final state: with outdoor air warmer than indoor, Climate Advisor switched the handed-back fan off."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Cancel Fan Override hands the fan back; Climate Advisor switches an unwarranted fan off",
+    "observed_behavior": "override_cleared (reason user_cancel_fan_override) at 20:20; no fan override and the fan off at the end",
+    "expected_behavior": "Cancel Fan Override ends the occupant's fan override and Climate Advisor reconciles the fan at once (cancel_override()'s post-grace fan check)"
+  }
+}

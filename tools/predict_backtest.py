@@ -345,6 +345,69 @@ class ChartIndex:
                 hi = sp
             self.band_cmd.append((lo, hi))
 
+    def set_armed(self, commanded_setpoint: Any) -> None:
+        """The default setpoint source (Issue #1616): what the thermostat was actually given, as the live display
+        forecast feeds it (``v4_shadow.with_armed_band``): the band the engine armed (no wake / bedtime ramp, no
+        remote-loop offset: ``comfort_target`` is the armed edge on a row with an offset) where a non-override row logs
+        the commanded setpoint (``commanded_setpoint`` = ``predictor_v4._commanded_setpoint``: this mode's side
+        only), else the schedule band. A future override is not known at the anchor, so its rows keep the schedule
+        band; an override in force at the anchor is held by :meth:`override_hold`. ``override_end[i]`` is when the
+        override run that row ``i`` belongs to ends (the first row after it without the flag: the log's stand-in for
+        the engine's grace end, which the chart log does not carry)."""
+        self.band_armed = []
+        for (lo, hi), r in zip(self.band, self.rows, strict=True):
+            if commanded_setpoint is None:  # an engine without the rule (a test fake): the schedule band
+                self.band_armed.append((lo, hi))
+                continue
+            base = _num(r.get("comfort_target"))
+            if base is None:
+                base = _num(r.get("setpoint"))
+            if base is not None and r.get("override") is not True and (lo is not None or hi is not None):
+                if lo is not None:
+                    new_lo = commanded_setpoint(lo, base, hi)
+                    if new_lo != lo:
+                        lo = new_lo
+                    elif hi is not None:
+                        hi = commanded_setpoint(hi, base, lo)
+                elif hi is not None:
+                    hi = commanded_setpoint(hi, base, None)
+            self.band_armed.append((lo, hi))
+        self.override_end: list[float | None] = [None] * len(self.rows)
+        end: float | None = None
+        for i in range(len(self.rows) - 1, -1, -1):
+            if self.rows[i].get("override") is True:
+                self.override_end[i] = end
+            else:
+                end = self.t[i]
+
+    def override_hold(self, t: float) -> tuple[float, float | None, float | None] | None:
+        """``(until, heat_sp, cool_sp)`` of an occupant override in force at ``t`` (Issue #1616), else None."""
+        i = self._idx_at_or_before(t)
+        if i < 0 or t - self.t[i] > 2 * 3600 or not hasattr(self, "override_end"):
+            return None
+        r = self.rows[i]
+        end = self.override_end[i]
+        sp = _num(r.get("setpoint"))
+        if r.get("override") is not True or end is None or sp is None:
+            return None
+        lo, hi = self.band[i]
+        heat = hi is None or (lo is not None and abs(sp - lo) < abs(sp - hi))
+        return (end, sp, None) if heat else (end, None, sp)
+
+    def armed_at(self, t: float) -> tuple[float | None, float | None]:
+        i = self._idx_at_or_before(t)
+        if i < 0 or t - self.t[i] > 2 * 3600:
+            return (None, None)
+        return self.band_armed[i]
+
+    def loop_offset_at(self, t: float) -> float:
+        """The remote-sensor loop's signed offset logged at ``t`` (``setpoint - comfort_target``), 0 without one."""
+        r = self.row_at(t, 2400)
+        if not r or r.get("override") is True:
+            return 0.0
+        sp, ct = _num(r.get("setpoint")), _num(r.get("comfort_target"))
+        return float(sp - ct) if sp is not None and ct is not None else 0.0
+
     def band_at(self, t: float, commanded: bool = False) -> tuple[float | None, float | None]:
         i = self._idx_at_or_before(t)
         if i < 0 or t - self.t[i] > 2 * 3600:
@@ -892,6 +955,32 @@ def infer_sleep(rows: list[dict], primary: str, tz: tzinfo) -> tuple[str | None,
     return node, (lambda dt, _h=frozenset(hours): dt.hour in _h)
 
 
+def sleep_window_times(in_sleep: Any) -> tuple[str, str] | None:
+    """``("HH:00", "HH:00")`` bedtime / wake time of the inferred hour-granular sleep window (``infer_sleep``), for
+    ``predict(ca_sleep_time=, ca_wake_time=)``; None without a window or when it is not one contiguous span."""
+    if in_sleep is None:
+        return None
+    base = datetime(2026, 1, 5)
+    hours = [h for h in range(24) if in_sleep(base.replace(hour=h))]
+    if not hours or len(hours) == 24:
+        return None
+    starts = [h for h in hours if (h - 1) % 24 not in hours]
+    if len(starts) != 1:
+        return None
+    end = starts[0]
+    while (end + 1) % 24 in hours:
+        end = (end + 1) % 24
+    return f"{starts[0]:02d}:00", f"{(end + 1) % 24:02d}:00"
+
+
+def _loop_swing(learning_db: dict | None) -> tuple[float, float]:
+    """The measured swing the live bedroom loop uses (``swing.measured_swing_f`` on the learning DB's thermal model)."""
+    _install_ha_stubs()
+    swing = importlib.import_module("custom_components.climate_advisor.swing")
+    thermal = (learning_db or {}).get("thermal_model_cache") or {}
+    return swing.measured_swing_f(thermal, "heat"), swing.measured_swing_f(thermal, "cool")
+
+
 def week_nodes(
     train_rows: list[dict],
     cand_primary: str,
@@ -1044,7 +1133,13 @@ def run_backtest(
     idx = ChartIndex(rows, tz, cand_nodes, cand_primary, aliases, in_sleep)
     seasons_by_day = day_seasons(rows, tz)
     idx.set_commanded(seasons_by_day)
-    commanded = getattr(args, "setpoint_source", "band") == "commanded"
+    source = getattr(args, "setpoint_source", "armed")
+    commanded = source == "commanded"
+    armed_src = source == "armed"
+    if armed_src:
+        idx.set_armed(getattr(pred, "_commanded_setpoint", None))
+    sleep_hm = sleep_window_times(in_sleep)
+    loop_swing = _loop_swing(learning_db)
     primary, nodes = cand_primary, cand_nodes
     seen_nodes: dict[str, None] = {}
     if not idx.t:
@@ -1265,16 +1360,23 @@ def run_backtest(
                 if sp is not None
             )
 
-            def band_fn(anchor_ep: float, t_ep: float) -> tuple[float | None, float | None]:
-                return idx.band_at(anchor_ep if args.setpoints == "hold" else t_ep, commanded)
+            hold = idx.override_hold(A.timestamp()) if armed_src else None
 
-            def build_inputs(actual: bool, A=A, hourly=hourly, plan_span=v4_spans):
+            def band_fn(anchor_ep: float, t_ep: float, hold=hold) -> tuple[float | None, float | None]:
+                if hold is not None and t_ep < hold[0]:
+                    return hold[1], hold[2]
+                t = anchor_ep if args.setpoints == "hold" else t_ep
+                return idx.armed_at(t) if armed_src else idx.band_at(t, commanded)
+
+            def build_inputs(actual: bool, A=A, hourly=hourly, plan_span=v4_spans, hold=hold):
                 out = []
                 last_lo = last_hi = None
                 steps = grid_steps(A, HORIZON_H * 3600 // STEP_S)
                 for k, t in enumerate(steps, start=1):
                     lo, hi = band_fn(A.timestamp(), t.timestamp())
-                    lo, hi = pred.plan_setpoints(lo, hi, (last_lo, last_hi))  # the rule the live shadow shares
+                    held = hold is not None and t.timestamp() < hold[0]
+                    if not held:
+                        lo, hi = pred.plan_setpoints(lo, hi, (last_lo, last_hi))  # the rule the live shadow shares
                     last_lo, last_hi = lo, hi
                     if actual:
                         row = idx.row_at(t.timestamp(), 1800) or {}
@@ -1308,10 +1410,28 @@ def run_backtest(
                 model=model,
                 hourly=hourly,
                 display=bool(display_model),
+                hold=hold,
             ):
                 for inp in inputs:
                     if inp.ts.timestamp() <= A.timestamp():
                         raise LeakageError("a predict() input is not in the future")
+                extra: dict[str, Any] = {"display_nodes": True} if display else {}
+                if armed_src and sleep_node and sleep_hm and sleep_node in getattr(model, "nodes", {}):
+                    # Issue #1616: the live display forecast emulates the remote-sensor loop in the sleep window,
+                    # seeded with the offset in force at the anchor and gated while an override holds
+                    held_n = sum(1 for i in inputs if hold is not None and i.ts.timestamp() < hold[0])
+                    extra.update(
+                        ca_sleep_node=sleep_node,
+                        ca_sleep_time=sleep_hm[0],
+                        ca_wake_time=sleep_hm[1],
+                        sleep_loop=_shadow_module().RemoteLoopEmulator(
+                            swing_heat_f=loop_swing[0],
+                            swing_cool_f=loop_swing[1],
+                            unit="fahrenheit",
+                            offset_f=0.0 if hold is not None else idx.loop_offset_at(A.timestamp()),
+                            gated_steps=held_n,
+                        ),
+                    )
                 res = pred.predict(
                     model,
                     now=A,
@@ -1324,7 +1444,7 @@ def run_backtest(
                     hvac_action_now=act_now,
                     run_elapsed_min=run_min,
                     openness_prior=prior,
-                    **({"display_nodes": True} if display else {}),
+                    **extra,
                 )
                 if res is None:
                     return None
@@ -1483,7 +1603,7 @@ def run_backtest(
             },
             "inputs": {
                 "setpoints": args.setpoints,
-                "setpoint_source": getattr(args, "setpoint_source", "band"),
+                "setpoint_source": getattr(args, "setpoint_source", "armed"),
                 "window_plan_hours": args.window_plan_hours,
                 "window_plan_source": getattr(args, "window_plan_source", "record"),
                 "train_days": args.train_days,
@@ -1925,10 +2045,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--setpoints", choices=("scheduled", "hold"), default="scheduled")
     p.add_argument(
         "--setpoint-source",
-        choices=("band", "commanded"),
-        default="band",
-        help="band: the plan's lower/upper (what the live shadow knows); commanded: the logged thermostat "
-        "setpoint of the day's mode (diagnostic - the commanded value is typically 1-2 F above the band floor)",
+        choices=("armed", "schedule", "band", "commanded"),
+        default="armed",
+        help="armed (default, Issue #1616): what the live display forecast feeds - the band the engine arms (no "
+        "wake / bedtime ramp), an override in force at the anchor held until it ends, the remote-sensor loop emulated "
+        "in the sleep window; schedule (alias band): the plan's lower/upper as logged, ramps included; commanded: the "
+        "logged thermostat setpoint of the day's mode (diagnostic: hindsight of overrides and loop raises)",
     )
     p.add_argument(
         "--window-plan-hours",

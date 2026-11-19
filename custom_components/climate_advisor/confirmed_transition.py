@@ -40,6 +40,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from .time_utils import seconds_since
+
 
 def resolve_candidate_since(
     *,
@@ -86,5 +88,5 @@ def is_confirmed(
     """
     if candidate is None or candidate_since is None:
         return False
-    elapsed = (now - candidate_since).total_seconds()
-    return elapsed >= sustain_seconds
+    # Issue #1244: real elapsed time (a local ``since`` and ``now`` subtract in wall-clock time across a DST change).
+    return seconds_since(candidate_since, now=now) >= sustain_seconds

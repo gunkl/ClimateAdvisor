@@ -608,7 +608,9 @@ opens a coast window with the off reading as baseline (`swing.coast_thermostat_e
 thermostat state change, or a tick of the dedicated indoor sensor - folds into it (`swing.coast_feed`; heat keeps
 the running peak, cool the running trough, `swing.coast_extreme`). The window ends at the first of: the
 equipment starting again (`next_on`), a setpoint or HVAC-mode change (`setpoint_change`), or
-`THERMAL_COAST_MAX_S` (1800 s, `timeout`). The reading that accompanies the ending event is not coast.
+`THERMAL_COAST_MAX_S` (1800 s, `timeout`), measured in real seconds (`swing._coast_age_s` compares both local
+timestamps in UTC, so a window that spans a daylight-saving change still lasts 30 real minutes, Issue #1607). The
+reading that accompanies the ending event is not coast.
 `swing.build_coast_sample` judges it: no post-off reading -> no sample (`no_post_readings`); a fall-back
 after a heat stop is a coast of 0.0; more than `THERMAL_COAST_MAX_F` (5 F) is weather or another actor
 (`out_of_bounds`). Stored in `coast_{heat,cool}_samples` (newest `THERMAL_COAST_ESTIMATOR_WINDOW` = 15),

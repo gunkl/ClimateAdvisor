@@ -3,14 +3,6 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.9.47] — 2026-11-18
-
-### Changed (tests only; nothing changes in your house)
-- #1238: if Home Assistant restarts after you started the whole-house fan with the RF remote (even while HA was down), Climate Advisor keeps the fan and your timer through the start-up window. A real-HA test now guards this.
-- #1254: after you confirm Off as a manual override, then switch to heat and back to cool, Climate Advisor shows no leftover "manual override: off". A real-HA test now guards this on hot and warm days for both fan types.
-- #1243: the simulations now press the dashboard's Cancel Override and Cancel Fan Override buttons the way Climate Advisor really does. A broken cancel (a fan-off pause that cannot be ended, a fan not handed back, a grace that will not cancel) would now be caught.
-- #1604: if the air outside turns cool while Home Assistant is down, Climate Advisor doesn't start the whole-house fan or AC in the first minutes after the restart, before its start-up check of the house. Real-HA tests now guard this; starting afterwards is still allowed.
-
 ## [0.9.46] — 2026-11-18
 
 ### Fixed

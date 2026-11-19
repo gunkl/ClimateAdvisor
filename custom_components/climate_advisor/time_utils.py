@@ -14,9 +14,18 @@ compares against ``dt_util.now()`` as a true instant whatever zone either side i
 Display code converts with ``dt_util.as_local()`` before formatting (UTC ``strftime`` would
 show UTC clock time).
 
-Scope: this covers END instants only (``now + duration``). Elapsed time measured as
-``dt_util.now() - self._stored_local_now`` has the same wall-clock flaw and is a separate,
-wider class (see the Issue #1199 follow-up).
+The mirror rule (Issue #1244): ELAPSED time since a stored START instant is measured by
+:func:`seconds_since`, never as ``dt_util.now() - self._started_at``. A start stored as
+``dt_util.now()`` carries the local ``ZoneInfo``; Python subtracts two datetimes that share a
+tzinfo in wall-clock time and ignores the fold, so across fall-back the elapsed time can come
+out NEGATIVE (01:58 PDT -> 01:02 PST reads -56 min instead of 4 min) and every
+``elapsed < window`` guard reads "recent": the occupant's own thermostat change in the
+repeated hour is taken as Climate Advisor's echo, and the fan toggle floor, nat-vent re-entry
+lockout and welcome-home spacing last up to an hour too long. Across spring-forward the
+elapsed time is an hour too long and those protections end early. Converting both sides to
+UTC first is exact. The stores themselves stay local (``.date()`` comparisons, logs and the
+dashboard read them); only the arithmetic changes. ``tests/test_dst_elapsed_static.py``
+fails on a new raw ``now - self._x`` elapsed pattern.
 """
 
 from __future__ import annotations
@@ -36,3 +45,20 @@ def instant_after(seconds: float, *, now: datetime | None = None) -> datetime:
     """
     base = dt_util.utcnow() if now is None else dt_util.as_utc(now)
     return base + timedelta(seconds=seconds)
+
+
+def seconds_since(start: datetime, *, now: datetime | None = None) -> float:
+    """Return the real seconds from ``start`` to ``now`` (default: ``dt_util.now()``) (Issue #1244).
+
+    Both sides are converted to UTC first, so the result is the true elapsed time across a
+    daylight-saving change whatever zone (or fold) either side carries. Two naive values
+    subtract as they are; a naive/aware mix raises ``TypeError`` exactly like the raw
+    subtraction it replaces, so every caller's existing "unusable clock" fallback is kept
+    (production clocks are always aware; only stubbed clocks are naive). Callers in a module
+    with its own ``dt_util`` import pass ``now=dt_util.now()`` so a test that patches that
+    module's clock keeps driving the result. Negative when ``start`` is in the future.
+    """
+    current = dt_util.now() if now is None else now
+    if current.tzinfo is None or start.tzinfo is None:
+        return (current - start).total_seconds()  # both naive: as before; a mix raises TypeError as before
+    return (dt_util.as_utc(current) - dt_util.as_utc(start)).total_seconds()

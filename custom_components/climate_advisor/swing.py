@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from statistics import median
 from typing import Any
 
@@ -581,6 +581,20 @@ class CoastVerdict:
     reason: str
 
 
+def _coast_age_s(now: datetime, off_dt: datetime) -> float:
+    """Real seconds since the coast window opened (Issue #1607, the swing.py mirror of #1244).
+
+    ``off_dt`` and ``now`` are the coordinator's local ``dt_util.now()`` values; two such datetimes subtract in
+    wall-clock time and ignore the daylight-saving fold, so across fall-back a window looked up to an hour younger
+    (it ran past its 30-minute bound) and across spring-forward an hour older (it closed at once). Both aware: compare
+    in UTC. Standard library only -- this module is loaded standalone by tools/ and cannot import ``time_utils``.
+    Naive values (stub clocks) subtract as before; a naive/aware mix raises ``TypeError`` as before.
+    """
+    if now.tzinfo is None or off_dt.tzinfo is None:
+        return (now - off_dt).total_seconds()
+    return (now.astimezone(UTC) - off_dt.astimezone(UTC)).total_seconds()
+
+
 def coast_timed_out(age_s: float) -> bool:
     """True when a coast window opened ``age_s`` seconds ago has run past its bound (live and audit share it)."""
     return age_s > THERMAL_COAST_MAX_S
@@ -656,7 +670,7 @@ def coast_close(windows: dict[str, dict[str, Any]], mode: str, ended_by: str, no
     cand = windows.pop(mode, None)
     if cand is None:
         return None
-    age_s = (now - cand["off_dt"]).total_seconds()
+    age_s = _coast_age_s(now, cand["off_dt"])
     if coast_timed_out(age_s):
         ended_by = COAST_ENDED_TIMEOUT
     return mode, ended_by, build_coast_sample(mode, cand, ended_by, min(age_s, THERMAL_COAST_MAX_S))
@@ -672,7 +686,7 @@ def coast_feed(windows: dict[str, dict[str, Any]], now: datetime, reading: float
     closed: list[CoastClosed] = []
     for mode in list(windows):
         cand = windows[mode]
-        if coast_timed_out((now - cand["off_dt"]).total_seconds()):
+        if coast_timed_out(_coast_age_s(now, cand["off_dt"])):
             c = coast_close(windows, mode, COAST_ENDED_TIMEOUT, now)
             if c is not None:
                 closed.append(c)

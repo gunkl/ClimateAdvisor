@@ -44,6 +44,7 @@ from .comfort_family_decision import (
     ComfortFamilyOutcome,
     decide_comfort_family,
 )
+from .time_utils import seconds_since
 
 
 class ComfortFamilyState(Enum):
@@ -189,13 +190,13 @@ def transition(
     dwell_since = None
     for _mark in _dwell_marks:
         try:
-            if dwell_since is None or _mark > dwell_since:
+            if dwell_since is None or seconds_since(dwell_since, now=_mark) > 0:  # instants (Issue #1244)
                 dwell_since = _mark
         except TypeError:  # naive vs aware mix: ignore the unusable mark
             continue
     if not decision.breach and dwell_since is not None:
         try:
-            elapsed = (inputs.now - dwell_since).total_seconds()
+            elapsed = seconds_since(dwell_since, now=inputs.now)
         except TypeError:
             elapsed = inputs.min_dwell_seconds  # unusable clock: do not lock
         if elapsed < inputs.min_dwell_seconds:

@@ -24,7 +24,7 @@ from enum import Enum
 
 from homeassistant.util import dt as dt_util
 
-from .time_utils import instant_after
+from .time_utils import instant_after, seconds_since
 
 # Issue #1247: how long past its ``applies_at`` a recorded deferral still counts as pending. The deferred start/stop
 # is retried by (a) short timers due at ``applies_at`` + 1 s and (b) the 30-minute coordinator cycle (the paused-
@@ -106,7 +106,7 @@ def decide_fan_toggle_rate_limit(
     if not isinstance(inputs.last_toggle_command_time, datetime):
         return FanToggleRateLimitOutcome.ALLOW, None
 
-    elapsed = (inputs.now - inputs.last_toggle_command_time).total_seconds()
+    elapsed = seconds_since(inputs.last_toggle_command_time, now=inputs.now)  # Issue #1244: real time across DST
     if elapsed >= inputs.min_interval_s:
         return FanToggleRateLimitOutcome.ALLOW, None
 

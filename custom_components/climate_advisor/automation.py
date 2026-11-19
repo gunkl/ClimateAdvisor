@@ -325,7 +325,7 @@ from .temperature import (
     to_fahrenheit,
 )
 from .thermostat_profile import FanProfile, live_fan_profile
-from .time_utils import instant_after
+from .time_utils import instant_after, seconds_since
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
     WHF_OCCUPANT_PRESS_PENDING_S,
@@ -4833,7 +4833,7 @@ class AutomationEngine:
         if (
             self._last_override_detected_time is None
             or self._last_override_detected_key != _dedup_key
-            or (_now - self._last_override_detected_time) >= _dedup_window
+            or seconds_since(self._last_override_detected_time, now=_now) >= _dedup_window.total_seconds()
         ):
             self._last_override_detected_time = _now
             self._last_override_detected_key = _dedup_key
@@ -5459,7 +5459,7 @@ class AutomationEngine:
                     "classification_suppressed_paused", _paused_key
                 ):
                     _pause_minutes = (
-                        (dt_util.now() - self._paused_since).total_seconds() / 60.0
+                        seconds_since(self._paused_since, now=dt_util.now()) / 60.0
                         if self._paused_since is not None
                         else None
                     )
@@ -6027,7 +6027,7 @@ class AutomationEngine:
             _LOGGER.info(
                 "Mode change to %s recognised as Climate Advisor's own write echoing back: age_s=%s role=%s",
                 observed_mode,
-                [round((now - w.written_at).total_seconds()) for w in verdict.consumed],
+                [round(seconds_since(w.written_at, now=now)) for w in verdict.consumed],
                 self.role,
             )
         return verdict.recognised
@@ -6048,7 +6048,7 @@ class AutomationEngine:
         try:
             _recent_cmd = (
                 _cmd_time is not None
-                and abs((dt_util.now() - _cmd_time).total_seconds()) < COMFORT_RECENT_COMMAND_WINDOW_S
+                and abs(seconds_since(_cmd_time, now=dt_util.now())) < COMFORT_RECENT_COMMAND_WINDOW_S
             )
         except TypeError:  # naive vs aware datetime mix: treat the earlier command as stale
             _recent_cmd = False
@@ -6669,7 +6669,7 @@ class AutomationEngine:
         if marker is None or marker[0] != mode:
             return False
         try:
-            return (dt_util.now() - marker[1]).total_seconds() < MODE_SWITCH_DEDUPE_SECONDS
+            return seconds_since(marker[1], now=dt_util.now()) < MODE_SWITCH_DEDUPE_SECONDS
         except TypeError:
             return False
 
@@ -7371,7 +7371,7 @@ class AutomationEngine:
             note = "context_band"
         elif state is RemoteLoopState.CLEARING:
             in_grace = self._remote_exit_at is not None and (
-                (now - self._remote_exit_at).total_seconds() < REMOTE_OFFSET_EXIT_GRACE_S
+                seconds_since(self._remote_exit_at, now=now) < REMOTE_OFFSET_EXIT_GRACE_S
             )
             note = "exit_grace" if in_grace or not self._remote_offset_backing_off_now(now) else "backing_off"
         clamp: ClampLimit | None = None
@@ -7423,7 +7423,7 @@ class AutomationEngine:
         if failed is None:
             return False
         try:
-            return (now - failed).total_seconds() < SETPOINT_RETRY_DELAY_S
+            return seconds_since(failed, now=now) < SETPOINT_RETRY_DELAY_S
         except TypeError:
             return False
 
@@ -7518,7 +7518,7 @@ class AutomationEngine:
         entered = self._remote_entered_at
         if entered is None:
             return False
-        return (now - entered).total_seconds() < startup_wait_s(self._remote_startup_latency_s)
+        return seconds_since(entered, now=now) < startup_wait_s(self._remote_startup_latency_s)
 
     def _remote_offset_for_write(self, target_f: float, mode: str) -> float:
         """Signed offset (internal F delta) to add to ``target_f`` for THIS write, via the single setpoint path.
@@ -7607,7 +7607,7 @@ class AutomationEngine:
         if (
             ctx is None
             and self._remote_exit_at is not None
-            and (now - self._remote_exit_at).total_seconds() < REMOTE_OFFSET_EXIT_GRACE_S
+            and seconds_since(self._remote_exit_at, now=now) < REMOTE_OFFSET_EXIT_GRACE_S
         ):
             return  # the context just ended: let the next band's own writer land first (Issue #1194 c)
         if self._remote_offset_backing_off(now, ctx if fresh else None):
@@ -7630,7 +7630,7 @@ class AutomationEngine:
                 magnitude_f=self._remote_offset_f,
                 step_f=step_f(self._temp_unit),
                 max_magnitude_f=self._remote_offset_cap_for(target, mode),
-                seconds_since_raise=(now - self._remote_raise_at).total_seconds() if self._remote_raise_at else None,
+                seconds_since_raise=seconds_since(self._remote_raise_at, now=now) if self._remote_raise_at else None,
                 wait_s=startup_wait_s(self._remote_startup_latency_s),
                 equipment_active=self._live_hvac_action() == ("heating" if mode == "heat" else "cooling"),
             )
@@ -7725,7 +7725,7 @@ class AutomationEngine:
             return
         if direction != self._remote_target_mode:
             return
-        elapsed = (when - self._remote_raise_at).total_seconds()
+        elapsed = seconds_since(self._remote_raise_at, now=when)
         if elapsed < 0:
             return
         self._remote_raise_pending_feedback = False
@@ -9620,7 +9620,7 @@ class AutomationEngine:
                 if _to_state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT:
                     _lockout_check_now = dt_util.now()
                     if self._nat_vent_outdoor_exit_time is not None:
-                        elapsed = (_lockout_check_now - self._nat_vent_outdoor_exit_time).total_seconds()
+                        elapsed = seconds_since(self._nat_vent_outdoor_exit_time, now=_lockout_check_now)
                         _LOGGER.debug(
                             "Nat vent paused-by-door: lockout active — %.0fs elapsed of %.0fs (%.0fs remaining)",
                             elapsed,
@@ -10536,7 +10536,7 @@ class AutomationEngine:
         _wanted = preview.decision.target_family
         if _attempt is not None and _attempt[0] == _wanted:
             try:
-                _since_attempt = (_now_rt - _attempt[1]).total_seconds()
+                _since_attempt = seconds_since(_attempt[1], now=_now_rt)
             except TypeError:
                 _since_attempt = COMFORT_REACTIVE_RETRY_S  # naive vs aware: do not suppress
             if 0 <= _since_attempt < COMFORT_REACTIVE_RETRY_S:
@@ -10673,7 +10673,7 @@ class AutomationEngine:
         if self._nat_vent_outdoor_exit_time is None:
             return None
         lockout_s = float(self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S))
-        elapsed = (now - self._nat_vent_outdoor_exit_time).total_seconds()
+        elapsed = seconds_since(self._nat_vent_outdoor_exit_time, now=now)
         return elapsed, lockout_s
 
     def _blower_is_thermostat_initiated(
@@ -10735,7 +10735,7 @@ class AutomationEngine:
         since, self._observed_fan_since = self._observed_fan_since, None
         if since is None:
             return
-        minutes = round(max(0.0, (dt_util.now() - since).total_seconds()) / 60.0, 1)
+        minutes = round(max(0.0, seconds_since(since, now=dt_util.now())) / 60.0, 1)
         if self._emit_event_callback:
             self._emit_event_callback(
                 "fan_observed_stopped", {"duration_minutes": minutes, **self._observed_fan_payload()}
@@ -10744,11 +10744,11 @@ class AutomationEngine:
     def _note_automation_grace_start(self, trigger: str) -> None:
         """Self-report a repeating automation grace: >=3 starts of the same trigger within 60 min."""
         now = dt_util.now()
-        starts = [t for t in self._grace_churn_starts.get(trigger, []) if (now - t) < timedelta(minutes=60)]
+        starts = [t for t in self._grace_churn_starts.get(trigger, []) if seconds_since(t, now=now) < 3600]
         starts.append(now)
         self._grace_churn_starts[trigger] = starts
         last = self._grace_churn_last_emit.get(trigger)
-        if len(starts) < 3 or (last is not None and (now - last) < timedelta(hours=6)):
+        if len(starts) < 3 or (last is not None and seconds_since(last, now=now) < 6 * 3600):
             return
         self._grace_churn_last_emit[trigger] = now
         self._emit_engine_incident(
@@ -11310,7 +11310,8 @@ class AutomationEngine:
             _cooldown_window = timedelta(minutes=5)
             _now = dt_util.now()
             _last_correction = self._last_unwarranted_fan_correction_at
-            if _last_correction is not None and (_now - _last_correction) < _cooldown_window:
+            _cooldown_s = _cooldown_window.total_seconds()
+            if _last_correction is not None and seconds_since(_last_correction, now=_now) < _cooldown_s:
                 _LOGGER.info(
                     "Unwarranted-fan correction suppressed — already corrected at %s,"
                     " within the 5-minute cooldown (likely a recurring condition CA cannot"
@@ -12541,7 +12542,7 @@ class AutomationEngine:
         # seconds BEFORE bedtime (e.g. a 22:29:50 daytime setpoint) must not swallow the bedtime
         # step — that delayed the sleep band up to 30 minutes. When sleep_time/wake_time are unset
         # _in_sleep_window() cannot answer (returns False), so keep the prior behavior there.
-        if self._temp_command_time is not None and (dt_util.now() - self._temp_command_time).total_seconds() < 30:
+        if self._temp_command_time is not None and seconds_since(self._temp_command_time, now=dt_util.now()) < 30:
             _sleep_cfg_known = bool(self.config.get("sleep_time") and self.config.get("wake_time"))
             if not _sleep_cfg_known or _in_sleep_window(self._temp_command_time, self.config):
                 _LOGGER.info(
@@ -13075,7 +13076,7 @@ class AutomationEngine:
                 # explain the gap.
                 if (
                     self._temp_command_time is not None
-                    and (dt_util.now() - self._temp_command_time).total_seconds() < 30
+                    and seconds_since(self._temp_command_time, now=dt_util.now()) < 30
                 ):
                     _LOGGER.info(
                         "Morning check: indoor %.1f°F below comfort_heat %.1f°F — "
@@ -13281,7 +13282,7 @@ class AutomationEngine:
         if not isinstance(at, datetime):
             return False
         try:
-            age = (dt_util.now() - at).total_seconds()
+            age = seconds_since(at, now=dt_util.now())
         except TypeError:
             return False
         return 0 <= age < WHF_OCCUPANT_PRESS_PENDING_S
@@ -13320,7 +13321,7 @@ class AutomationEngine:
             return None
         direction, at, _ = mem
         try:
-            age = (dt_util.now() - at).total_seconds()
+            age = seconds_since(at, now=dt_util.now())
         except TypeError:
             return None
         if age < 0 or age >= within_s:
@@ -13348,7 +13349,7 @@ class AutomationEngine:
             return None
         window = WHF_STOP_CONVERGE_WINDOW_S if direction == "off" else WHF_START_CONVERGE_WINDOW_S
         try:
-            age = (dt_util.now() - mem[1]).total_seconds()
+            age = seconds_since(mem[1], now=dt_util.now())
         except TypeError:
             return None
         if age < 0 or age >= window:
@@ -13388,7 +13389,7 @@ class AutomationEngine:
         if gave_up is None:
             return False
         try:
-            if (now - gave_up).total_seconds() < WHF_STOP_GIVEUP_HOLD_S:
+            if seconds_since(gave_up, now=now) < WHF_STOP_GIVEUP_HOLD_S:
                 return True
         except TypeError:
             pass
@@ -13694,7 +13695,7 @@ class AutomationEngine:
         own_at = getattr(self, "_last_commanded_hvac_time", None)
         if getattr(self, "_last_commanded_hvac_mode", None) == "off" and isinstance(own_at, datetime):
             try:
-                own_off_for = max(0.0, (now - own_at).total_seconds())
+                own_off_for = max(0.0, seconds_since(own_at, now=now))
             except TypeError:
                 own_off_for = None
         attrs = getattr(climate_state, "attributes", None) or {}
@@ -13939,9 +13940,9 @@ class AutomationEngine:
         # DISTINCT stops (fan observed off since the previous stop) for the anti-oscillation alert.
         # A verify-retry of a stop that did not take is not a new stop.
         last = self._whf_safety_last_stop_at
-        in_episode = isinstance(last, datetime) and (now - last).total_seconds() < 600
+        in_episode = isinstance(last, datetime) and seconds_since(last, now=now) < 600
         distinct = (not in_episode) or self._whf_safety_seen_off_since_stop
-        stops = [t for t in getattr(self, "_whf_safety_stop_times", []) if (now - t).total_seconds() < 600]
+        stops = [t for t in getattr(self, "_whf_safety_stop_times", []) if seconds_since(t, now=now) < 600]
         if distinct:
             stops.append(now)
         self._whf_safety_stop_times = stops
@@ -13998,7 +13999,7 @@ class AutomationEngine:
         if self._whf_off_seen_at is None:
             self._whf_off_seen_at = now
         try:
-            return max(0.0, WHF_RESTORE_QUIET_S - (now - self._whf_off_seen_at).total_seconds())
+            return max(0.0, WHF_RESTORE_QUIET_S - seconds_since(self._whf_off_seen_at, now=now))
         except TypeError:
             return 0.0
 
@@ -16686,7 +16687,7 @@ class AutomationEngine:
         cmd_time = getattr(self, "_last_commanded_hvac_time", None)
         if cmd_mode is not None and cmd_time is not None:
             try:
-                if abs((now - cmd_time).total_seconds()) < COMFORT_RECENT_COMMAND_WINDOW_S:
+                if abs(seconds_since(cmd_time, now=now)) < COMFORT_RECENT_COMMAND_WINDOW_S:
                     mode = cmd_mode
             except TypeError:  # naive vs aware datetime mix: treat the command as stale
                 mode = None
@@ -17767,7 +17768,7 @@ class AutomationEngine:
             )
             if self._emit_event_callback and not self._recent_duplicate("occupancy_setback_suppressed_paused", (mode,)):
                 _pause_minutes = (
-                    (dt_util.now() - self._paused_since).total_seconds() / 60.0
+                    seconds_since(self._paused_since, now=dt_util.now()) / 60.0
                     if self._paused_since is not None
                     else None
                 )
@@ -17898,9 +17899,9 @@ class AutomationEngine:
             comfort_f = self.config["comfort_heat"] if family == "heat" else self.config["comfort_cool"]
             setback_f = self.config["setback_heat"] if family == "heat" else self.config["setback_cool"]
         debounce_seconds = self.config.get(CONF_WELCOME_HOME_DEBOUNCE, DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS)
-        seconds_since: float | None = None
+        since_notified: float | None = None
         if self._last_welcome_home_notified is not None:
-            seconds_since = (dt_util.now() - self._last_welcome_home_notified).total_seconds()
+            since_notified = seconds_since(self._last_welcome_home_notified, now=dt_util.now())
         inputs = HomeInputs(
             has_classification=c is not None,
             hvac_mode=family,
@@ -17908,7 +17909,7 @@ class AutomationEngine:
             comfort_f=comfort_f,
             setback_f=setback_f,
             debounce_seconds=float(debounce_seconds),
-            seconds_since_last_notified=seconds_since,
+            seconds_since_last_notified=since_notified,
             restore_hold=self._occupancy_restore_hold_reason(),
         )
         return decide_home_dispatch(inputs)
@@ -18067,7 +18068,7 @@ class AutomationEngine:
         if decision.notify is HomeNotifyOutcome.SUPPRESSED_DEBOUNCE:
             debounce_seconds = self.config.get(CONF_WELCOME_HOME_DEBOUNCE, DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS)
             elapsed = (
-                (dt_util.now() - self._last_welcome_home_notified).total_seconds()
+                seconds_since(self._last_welcome_home_notified, now=dt_util.now())
                 if self._last_welcome_home_notified is not None
                 else 0.0
             )
@@ -18793,7 +18794,7 @@ class AutomationEngine:
                 _occupant_since = bool(
                     isinstance(self._occupant_fan_action_at, datetime)
                     and isinstance(_started, datetime)
-                    and self._occupant_fan_action_at >= _started
+                    and seconds_since(_started, now=self._occupant_fan_action_at) >= 0  # Issue #1244: as instants
                 )
                 # Issue #1205: an occupant fan-off pause that began inside the 5 s gap forbids this start too.
                 _hold = self._fan_off_hold_active() is True
@@ -18981,7 +18982,7 @@ class AutomationEngine:
             )
             if write is None:
                 return None
-            return max(1.0, OWN_WRITE_ECHO_WINDOW_S - (now - write.written_at).total_seconds() + 1.0)
+            return max(1.0, OWN_WRITE_ECHO_WINDOW_S - seconds_since(write.written_at, now=now) + 1.0)
         except TypeError, ValueError:
             return None
 
@@ -19094,7 +19095,7 @@ class AutomationEngine:
                 "age_s=%s role=%s",
                 verdict.reason,
                 observed,
-                [round((now - w.written_at).total_seconds()) for w in verdict.consumed],
+                [round(seconds_since(w.written_at, now=now)) for w in verdict.consumed],
                 self.role,
             )
         return verdict.recognised
@@ -19373,7 +19374,7 @@ class AutomationEngine:
                 reason,
             )
         elif _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW:
-            _elapsed = (dt_util.now() - self._fan_toggle_command_time).total_seconds()
+            _elapsed = seconds_since(self._fan_toggle_command_time, now=dt_util.now())
             _LOGGER.info(
                 "Fan toggle deferred: rate limit (%.0fs since last change, min %ds) — %s (%s) — applies at %s",
                 _elapsed,
@@ -19754,13 +19755,14 @@ class AutomationEngine:
             return None
         if self._indoor_blind_session_kind() is None:
             return None
-        if (dt_util.now() - last_seen).total_seconds() > INDOOR_BLIND_EPISODE_GAP_S:
+        if seconds_since(last_seen, now=dt_util.now()) > INDOOR_BLIND_EPISODE_GAP_S:
             return None  # stale episode — nothing is evaluating it any more
         will_stop = self._indoor_blind_session == "nat_vent"
         return {
             "since": since,
             "session": self._indoor_blind_session,
-            "stop_at": since + timedelta(seconds=INDOOR_BLIND_FAN_STOP_S) if will_stop else None,
+            # Issue #1244: a true (UTC) instant, the same one indoor_blind_check() stops at (#1199 rule).
+            "stop_at": instant_after(INDOOR_BLIND_FAN_STOP_S, now=since) if will_stop else None,
         }
 
     def _request_indoor_blind_refresh(self) -> None:
@@ -19792,10 +19794,10 @@ class AutomationEngine:
         """
         now = dt_util.now()
         last = self._indoor_blind_last_alert_push
-        if not force and last is not None and (now - last).total_seconds() < INDOOR_BLIND_PUSH_DEBOUNCE_S:
+        if not force and last is not None and seconds_since(last, now=now) < INDOOR_BLIND_PUSH_DEBOUNCE_S:
             _LOGGER.info(
                 "Blind-fan alert push suppressed: reason=debounce since_last_s=%.0f window_s=%.0f",
-                (now - last).total_seconds(),
+                seconds_since(last, now=now),
                 INDOOR_BLIND_PUSH_DEBOUNCE_S,
             )
             return False
@@ -19830,7 +19832,7 @@ class AutomationEngine:
         elif (
             self._indoor_blind_since is None
             or last_seen is None
-            or (now - last_seen).total_seconds() > INDOOR_BLIND_EPISODE_GAP_S
+            or seconds_since(last_seen, now=now) > INDOOR_BLIND_EPISODE_GAP_S
         ):
             # No live episode, or the previous one was last evaluated too long ago to trust
             # (e.g. a stale "since" from before the fan stopped being backstopped).
@@ -19859,8 +19861,8 @@ class AutomationEngine:
         self._indoor_blind_last_seen = now
         self._indoor_blind_session = session
         will_stop = session == "nat_vent"
-        stop_at = since + timedelta(seconds=INDOOR_BLIND_FAN_STOP_S)
-        blind_s = (now - since).total_seconds()
+        stop_at = instant_after(INDOOR_BLIND_FAN_STOP_S, now=since)  # Issue #1244: a true instant (UTC)
+        blind_s = seconds_since(since, now=now)
 
         if not self._indoor_blind_alerted:
             self._indoor_blind_alerted = True
@@ -19868,7 +19870,7 @@ class AutomationEngine:
                 "Fan running blind: indoor temperature unavailable session=%s will_stop=%s stop_at=%s",
                 session,
                 will_stop,
-                stop_at.strftime("%H:%M") if will_stop else "none",
+                dt_util.as_local(stop_at).strftime("%H:%M") if will_stop else "none",
             )
             if self._emit_event_callback:
                 self._emit_event_callback(
@@ -19964,10 +19966,10 @@ class AutomationEngine:
         stopped = self._indoor_blind_stopped
         session = self._indoor_blind_session
         last_seen = self._indoor_blind_last_seen
-        stale = last_seen is None or (now - last_seen).total_seconds() > INDOOR_BLIND_EPISODE_GAP_S
+        stale = last_seen is None or seconds_since(last_seen, now=now) > INDOOR_BLIND_EPISODE_GAP_S
         lower_bound = stopped or stale
         end = last_seen if lower_bound and last_seen is not None else now
-        minutes = int((end - since).total_seconds() // 60)
+        minutes = int(seconds_since(since, now=end) // 60)
         fan_running = self._indoor_blind_session_kind() is not None
         self._reset_indoor_blind_episode()
         if not alerted:
@@ -20616,7 +20618,7 @@ class AutomationEngine:
                 reason,
             )
         elif _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW:
-            _elapsed = (dt_util.now() - self._fan_toggle_command_time).total_seconds()
+            _elapsed = seconds_since(self._fan_toggle_command_time, now=dt_util.now())
             _LOGGER.info(
                 "Fan toggle deferred: rate limit (%.0fs since last change, min %ds) — %s (%s) — applies at %s",
                 _elapsed,
@@ -21230,7 +21232,7 @@ class AutomationEngine:
             _within_window = (
                 isinstance(last_at, datetime)
                 and isinstance(now, datetime)
-                and (now - last_at).total_seconds() < window_seconds
+                and seconds_since(last_at, now=now) < window_seconds
             )
         is_duplicate = last_signature == signature and _within_window
         sigs[key] = signature

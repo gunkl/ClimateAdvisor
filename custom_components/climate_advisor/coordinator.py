@@ -7498,11 +7498,44 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             mass_f=self._v4_store.v4_mass_f,
             path=path,
             unit=snap.unit,
+            # Issue #1593: a night already under way starts from the live loop and the run in progress
+            **self._v4_night_loop_now(snap.now),
         )
         if inp is None:
             return None, "cannot_plan"
         plan = night_strategy.plan_night(inp)
         return plan, "ok"
+
+    def _v4_live_sleep_loop(self, now: datetime) -> Any:
+        """The emulated bedroom loop for the v4 display forecast made now (Issue #1593): ``live_loop_emulator``
+        on the engine's READ-ONLY loop description (the offset in force, its raise clock, the live swing and the
+        measured startup latency). Display only: the emulator moves forecast setpoints, never the thermostat."""
+        return v4_shadow.live_loop_emulator(
+            self.automation_engine,
+            now=now,
+            unit=self.config.get("temp_unit", "fahrenheit"),
+            step_minutes=v4_shadow.step_minutes(),
+        )
+
+    def _v4_night_loop_now(self, now: datetime) -> dict[str, Any]:
+        """The live bedroom loop and run for ``v4_shadow.night_inputs`` (Issue #1593; used only when the night is
+        already under way): the offset in force and its raise clock (``v4_shadow.live_loop_seed``), the measured
+        startup latency, and the heating / cooling run from the newest chart rows (``run_state_from_rows``, as the
+        display cycle reads it). Read-only; a failed read plans the night from the loop's start (offset 0, no run)."""
+        try:
+            engine = self.automation_engine
+            offset, since = v4_shadow.live_loop_seed(engine, now)
+            action, minutes = v4_shadow.run_state_from_rows(self._chart_log.raw_entries()[-80:], now)
+            latency = getattr(engine, "_remote_startup_latency_s", None)
+        except Exception:  # noqa: BLE001 - advice never fails on a live read
+            _LOGGER.debug("night strategy: live loop state unreadable; planning from offset 0", exc_info=True)
+            return {}
+        return {
+            "loop_offset_f": offset,
+            "loop_since_raise_s": since,
+            "loop_startup_latency_s": latency if isinstance(latency, (int, float)) else None,
+            "run_now": (1 if action == "heating" else -1, float(minutes or 0.0)) if action else None,
+        }
 
     def night_strategy_payload(self) -> tuple[dict[str, Any] | None, str]:
         """``(body, reason)`` for ``GET /api/climate_advisor/night_strategy``: the strategy in the display unit.
@@ -7995,17 +8028,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         inputs = cycle["inputs"]
         # Issue #1553: inside the sleep window the house regulates the bedroom through the remote-sensor outer loop
         # (#1194); the display forecast emulates it with the live rule, so the chart shows what the house will do.
-        sleep_loop = (
-            v4_shadow.RemoteLoopEmulator(
-                # the live loop's swing (``AutomationEngine._remote_swing_f``): the measured one, Issue #1477
-                swing_heat_f=measured_swing_f(getattr(self, "_thermal_model", None) or {}, "heat"),
-                swing_cool_f=measured_swing_f(getattr(self, "_thermal_model", None) or {}, "cool"),
-                unit=self.config.get("temp_unit", "fahrenheit"),
-                step_minutes=v4_shadow.step_minutes(),
-            )
-            if cycle.get("ca_sleep_node")
-            else None
-        )
+        # Issue #1593: the emulated loop starts from the live one (the offset in force, its raise clock, the live
+        # swing and startup wait), and the sleep-window steps carry the band the engine arms at bedtime, not the
+        # schedule's ramp into it (the schedule itself is unchanged: the chart, v3 and the comfort score read it).
+        sleep_loop = None
+        if cycle.get("ca_sleep_node"):
+            sleep_loop = self._v4_live_sleep_loop(now)
+            if self._current_classification is not None:
+                inputs = cycle["inputs"] = v4_shadow.with_armed_sleep_band(
+                    inputs,
+                    band_at=band_resolver_for(self._current_classification, self.config),
+                    occupancy_mode=self._occupancy_mode,
+                )
         predictions, new_mass = await self._executor_job(
             functools.partial(v4_shadow.run_cycle, display=True, sleep_loop=sleep_loop, **cycle)
         )

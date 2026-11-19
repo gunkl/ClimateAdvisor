@@ -162,16 +162,38 @@ class RemoteLoopEmulator:
     only between runs, step down any time, the offset capped at the tighter of the cap and the opposite band edge.
     Outside the sleep window, or with a side not armed (``None``: windows open, an HVAC pause), that side's offset is
     cleared and the plain band edge is held, as the live loop's gate does.
+
+    Issue #1593: a forecast made while the live loop already holds an offset starts from it (``offset_f``, signed as
+    ``RemoteOffsetState.offset_f``: heat +, cool -; ``seconds_since_raise`` = how long ago the live loop raised, for
+    its startup wait), and the startup wait is the live one (``startup_latency_s``: the thermostat's measured
+    latency, ``AutomationEngine._remote_startup_latency_s``). The defaults are a loop that starts at offset 0, as the
+    live loop does when the sleep window opens (``AutomationEngine._enter_remote_context``).
     """
 
-    def __init__(self, *, swing_heat_f: float, swing_cool_f: float, unit: str, step_minutes: int = 15) -> None:
+    def __init__(
+        self,
+        *,
+        swing_heat_f: float,
+        swing_cool_f: float,
+        unit: str,
+        step_minutes: int = 15,
+        offset_f: float = 0.0,
+        seconds_since_raise: float | None = None,
+        startup_latency_s: float | None = None,
+    ) -> None:
         self._swing = {"heat": float(swing_heat_f), "cool": float(swing_cool_f)}
         self._step = step_f(unit)
         self._cap = cap_f(unit)
-        self._wait_s = startup_wait_s(None)
+        self._wait_s = startup_wait_s(startup_latency_s)
         self._step_s = float(step_minutes * 60)
         self._mag = {"heat": 0.0, "cool": 0.0}
         self._since_raise: dict[str, float | None] = {"heat": None, "cool": None}
+        side = "heat" if offset_f > _EPS else ("cool" if offset_f < -_EPS else None)
+        if side is not None:
+            self._mag[side] = min(abs(float(offset_f)), self._cap)
+            if seconds_since_raise is not None:
+                # ``_side`` adds one step before its first decision (made at the forecast's start, ``now``)
+                self._since_raise[side] = float(seconds_since_raise) - self._step_s
 
     def _side(self, mode: str, target: float, remote: float, floor: float, ceiling: float, running: bool) -> float:
         since = self._since_raise[mode]

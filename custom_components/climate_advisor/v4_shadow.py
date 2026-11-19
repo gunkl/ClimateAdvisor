@@ -874,6 +874,83 @@ def run_state_from_rows(rows: Sequence[Mapping[str, Any]], now: datetime) -> tup
     return action, max(0.0, (now - first_ts).total_seconds() / 60.0)
 
 
+def live_loop_seed(engine: Any, now: datetime) -> tuple[float, float | None]:
+    """``(offset_f, seconds_since_raise)`` the live bedroom loop holds now, for a forecast that starts mid-loop.
+
+    Issue #1593: every display cycle (and a night re-plan after bedtime) used to start the emulated loop at offset 0,
+    so a raise already in force was forgotten and the next warm-up was missed. Read from the engine's ONE description
+    of the loop (``AutomationEngine.remote_offset_state``): the signed offset the thermostat holds (heat +, cool -)
+    while the SLEEP context supplies the reading, else 0 (another context, the primary sensor, a gate that cleared it:
+    ``None``). The raise clock is the engine's ``_remote_raise_at`` (None when unknown). Never raises.
+    """
+    from .const import REMOTE_CONTEXT_SLEEP  # noqa: PLC0415
+
+    try:
+        st = engine.remote_offset_state()
+    except Exception:  # noqa: BLE001 - a display forecast never fails on the loop description
+        return 0.0, None
+    offset = getattr(st, "offset_f", None) if st is not None else None
+    if getattr(st, "context", None) != REMOTE_CONTEXT_SLEEP or not isinstance(offset, (int, float)):
+        return 0.0, None
+    if not math.isfinite(offset) or abs(offset) < 1e-6:
+        return 0.0, None
+    raised = getattr(engine, "_remote_raise_at", None)
+    since: float | None = None
+    if isinstance(raised, datetime):
+        try:
+            since = max(0.0, (now - raised).total_seconds())
+        except TypeError:  # naive/aware clock mix (stubs)
+            since = None
+    return float(offset), since
+
+
+def live_loop_emulator(engine: Any, *, now: datetime, unit: str, step_minutes: int) -> RemoteLoopEmulator:
+    """The emulated bedroom loop for a forecast made NOW: the live offset (:func:`live_loop_seed`), the live loop's
+    swing (``AutomationEngine._remote_swing_f``: the measured one, Issue #1477) and its startup wait (the measured
+    latency ``_remote_startup_latency_s``), so the forecast and the house share one rule and one set of numbers."""
+    offset, since = live_loop_seed(engine, now)
+    latency = getattr(engine, "_remote_startup_latency_s", None)
+    return RemoteLoopEmulator(
+        swing_heat_f=engine._remote_swing_f("heat"),
+        swing_cool_f=engine._remote_swing_f("cool"),
+        unit=unit,
+        step_minutes=step_minutes,
+        offset_f=offset,
+        seconds_since_raise=since,
+        startup_latency_s=latency if isinstance(latency, (int, float)) else None,
+    )
+
+
+_BAND_CONTEXT_SLEEP = "sleep"  # ``automation.BAND_CONTEXT_SLEEP`` (this module may not import the engine)
+
+
+def with_armed_sleep_band(
+    inputs: Sequence[Any], *, band_at: Callable[[datetime, str], Any], occupancy_mode: str
+) -> list[Any]:
+    """The forecast steps with the band the engine ARMS in the sleep window (Issue #1593), as a new list.
+
+    Occupant view: the house puts the flat sleep floor on the thermostat at bedtime, but the forecast fed the target
+    band schedule's one-hour ramp into it (interpolated over about two hours), so the emulated bedroom loop saw a
+    67-68 F target after bedtime and forecast a warm-up that never happens. A step whose band (``band_at``:
+    ``automation.band_resolver_for``, the engine's own ``select_comfort_band``) is the sleep band takes its floor as
+    the heat setpoint and its ceiling as the cool setpoint; a LOWER ceiling the schedule carries (the pre-cool / TOU
+    overlay the engine commands on top of the band, as ``operation_timeline.build_segments`` keeps it) is kept.
+    Other steps, and every step while away or on vacation (their band is not the sleep band), are returned as they
+    are. The schedule itself (the chart's band, v3, the comfort score) is not changed.
+    """
+    out: list[Any] = []
+    for i in inputs:
+        band = band_at(i.ts, occupancy_mode)
+        if getattr(band, "context", None) != _BAND_CONTEXT_SLEEP:
+            out.append(i)
+            continue
+        ceiling = float(band.ceiling)
+        if i.cool_sp_f is not None and i.cool_sp_f < ceiling:
+            ceiling = float(i.cool_sp_f)
+        out.append(dataclasses.replace(i, heat_sp_f=float(band.floor), cool_sp_f=ceiling))
+    return out
+
+
 def _parse_row_ts(raw: Any) -> datetime | None:
     try:
         dt = datetime.fromisoformat(raw) if isinstance(raw, str) else None
@@ -1286,6 +1363,10 @@ def night_inputs(
     mass_f: float | None = None,
     path: Sequence[tuple[datetime, float]] | None = None,
     unit: str = "fahrenheit",
+    loop_offset_f: float = 0.0,
+    loop_since_raise_s: float | None = None,
+    loop_startup_latency_s: float | None = None,
+    run_now: tuple[int, float] | None = None,
 ) -> Any:
     """``night_strategy.NightInputs`` from the live state, or None when the night cannot be planned.
 
@@ -1294,6 +1375,11 @@ def night_inputs(
     back to the timeline's ``_ca`` ``path`` and any other sensor to its current reading. When the night is already
     under way (``start`` == ``now``) it is the live reading. ``corrected_outdoor`` is tonight's forecast after v4's
     learned correction. Pure: no clock, no I/O.
+
+    Issue #1593: a night already under way also starts from the live bedroom loop (``loop_offset_f`` signed,
+    ``loop_since_raise_s``: :func:`live_loop_seed`) and the heating / cooling run in progress (``run_now``); planned
+    from bedtime the loop starts at offset 0 with no run, as the live loop does when the sleep window opens.
+    ``loop_startup_latency_s`` is the thermostat's measured startup latency (the live loop's startup wait).
     """
     from . import night_strategy as ns  # noqa: PLC0415 - lazy: a broken engine disables the plan, not setup
     from . import predictor_v4 as p4  # noqa: PLC0415
@@ -1343,4 +1429,8 @@ def night_inputs(
         evidence=evidence,
         validation=validation,
         unit=unit,
+        loop_offset_f=0.0 if ahead else float(loop_offset_f or 0.0),
+        loop_since_raise_s=None if ahead else loop_since_raise_s,
+        loop_startup_latency_s=loop_startup_latency_s,
+        run_now=None if ahead else run_now,
     )

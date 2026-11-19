@@ -283,7 +283,7 @@ def test_occupant_fan_press_pending_window_is_real_time(monkeypatch):
         pytest.param(datetime(2026, 3, 8, 9, 40, tzinfo=UTC), "3:10 AM", id="spring_forward"),
     ],
 )
-def test_blind_fan_stops_after_thirty_real_minutes(monkeypatch, fan_mode, blind_from_utc, local_stop):
+def test_blind_fan_stops_after_thirty_real_minutes(monkeypatch, caplog, fan_mode, blind_from_utc, local_stop):
     from tests.test_indoor_blind_fan_stop import _Rig
 
     clk = _make_clock(monkeypatch, blind_from_utc)
@@ -292,6 +292,7 @@ def test_blind_fan_stops_after_thirty_real_minutes(monkeypatch, fan_mode, blind_
     rig.start_nat_vent()
     rig.blind()
     true_stop = blind_from_utc + timedelta(seconds=INDOOR_BLIND_FAN_STOP_S)
+    assert f"stop_at={true_stop.astimezone(_LA):%H:%M}" in caplog.text, "the WARNING names the local stop time"
 
     info = rig.engine.indoor_blind_info
     assert info["stop_at"] == true_stop, info
@@ -378,3 +379,74 @@ def test_comfort_stall_counts_a_heating_run_in_the_repeated_hour():
     )
     assert decision.effective_since is ran
     assert decision.confirmed is False
+
+
+# ---------------------------------------------------------------------------
+# Comparisons between two stored local instants (intra-zone ``>`` also ignores the fold)
+# ---------------------------------------------------------------------------
+
+
+def test_comfort_family_dwell_runs_from_the_really_latest_mode_change():
+    """Selector switch at 01:50 PDT, then a thermostat mode change at 01:05 PST (15 real minutes later). At 01:12 PST
+    the 10-minute anti-chatter dwell still runs from 01:05 PST: no family switch yet (before: 01:50 read as the later
+    mark, and the dwell was over)."""
+    from custom_components.climate_advisor.comfort_family_fsm import (
+        ComfortFamilyDwellState,
+        ComfortFamilyEvent,
+        ComfortFamilyEventKind,
+        ComfortFamilyFsmInputs,
+        ComfortFamilyState,
+        transition,
+    )
+
+    def _event(now, last_mode_change_at):
+        return ComfortFamilyEvent(
+            kind=ComfortFamilyEventKind.TICK,
+            inputs=ComfortFamilyFsmInputs(
+                default_family="cooling",
+                indoor=73.0,
+                floor=68.0,
+                ceiling=74.0,
+                margin_f=2.0,
+                natural_vent_active=False,
+                whf_owns_hvac=False,
+                now=now,
+                min_dwell_seconds=600.0,
+                last_mode_change_at=last_mode_change_at,
+            ),
+        )
+
+    heating = ComfortFamilyState.HEATING
+    dwell = ComfortFamilyDwellState(dwell_since=_la(8, 50))  # 01:50 PDT
+    assert transition(heating, _event(_la(9, 12), _la(9, 5)), dwell).locked_out is True
+    # 01:45 PDT -> 01:00 PST is 15 real minutes: the dwell is over and the switch goes ahead.
+    t = transition(heating, _event(_la(9, 0), None), ComfortFamilyDwellState(dwell_since=_la(8, 45)))
+    assert t.locked_out is False and t.to_state is ComfortFamilyState.COOLING
+
+
+def test_whf_forced_start_second_step_respects_an_occupant_press_in_the_gap(monkeypatch):
+    """CA's forced start (off, then on 5 s later) begins at 01:59:58 PDT; the occupant presses the fan off at
+    01:00:01 PST, 3 real seconds later, inside the gap. The second step must not switch the fan back on."""
+    from tests.test_fan_control import TestCommandWhfControlEntity
+
+    _make_clock(monkeypatch, datetime(2026, 11, 1, 9, 0, 3, tzinfo=UTC))
+    engine = TestCommandWhfControlEntity._engine(None, control_state="on", ground_truth=False)
+    engine._fan_active = True
+    engine._whf_forced_start_at = _la(8, 59, s=58)
+    engine._occupant_fan_action_at = _la(9, 0, s=1)
+    asyncio.run(engine._finish_forced_whf_start("fan.whf", "fan", "test"))
+    turned_on = [c for c in engine.hass.services.async_call.call_args_list if c.args[:2] == ("fan", "turn_on")]
+    assert not turned_on, "CA switched the fan back on over the occupant's press"
+
+
+def test_remote_offset_startup_feedback_counts_across_fall_back():
+    """A remote-sensor raise at 01:58 PDT and the heat starting 01:00 PST (2 real minutes later) is the raise's
+    feedback (before: -58 minutes read as 'before the raise' and the feedback was dropped)."""
+    engine = _make_engine(indoor=72.0, mode="heat")
+    engine._remote_raise_pending_feedback = True
+    engine._remote_raise_at = _la(8, 58)
+    engine._remote_target_mode = "heat"
+    engine._remote_startup_latency_s = None
+    engine.note_remote_offset_actuation("heat", _la(9, 0))
+    assert engine._remote_raise_pending_feedback is False
+    assert engine._remote_startup_latency_s == 120.0

@@ -8031,15 +8031,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1593: the emulated loop starts from the live one (the offset in force, its raise clock, the live
         # swing and startup wait), and the sleep-window steps carry the band the engine arms at bedtime, not the
         # schedule's ramp into it (the schedule itself is unchanged: the chart, v3 and the comfort score read it).
-        sleep_loop = None
-        if cycle.get("ca_sleep_node"):
-            sleep_loop = self._v4_live_sleep_loop(now)
-            if self._current_classification is not None:
-                inputs = cycle["inputs"] = v4_shadow.with_armed_sleep_band(
-                    inputs,
-                    band_at=band_resolver_for(self._current_classification, self.config),
-                    occupancy_mode=self._occupancy_mode,
-                )
+        # Issue #1610: every home's thermostat gets the flat sleep band at bedtime, with or without a sleep sensor.
+        sleep_loop = self._v4_live_sleep_loop(now) if cycle.get("ca_sleep_node") else None
+        if self._current_classification is not None:
+            inputs = cycle["inputs"] = v4_shadow.with_armed_sleep_band(
+                inputs,
+                band_at=band_resolver_for(self._current_classification, self.config),
+                occupancy_mode=self._occupancy_mode,
+            )
         predictions, new_mass = await self._executor_job(
             functools.partial(v4_shadow.run_cycle, display=True, sleep_loop=sleep_loop, **cycle)
         )

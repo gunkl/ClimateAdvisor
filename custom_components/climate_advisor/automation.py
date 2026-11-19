@@ -652,12 +652,38 @@ class ComfortModeWrite:
     write was attempted). ``held_reason`` is non-None when nothing was written: ``whf_session`` (the whole-house
     fan owns the thermostat), ``blower_hold`` (blower ventilation through an open window keeps it Off, Rule 3),
     ``occupancy_redirect`` (away/vacation redirected to setback) or ``no_family`` (the resolver chose neither).
+
+    Issues #1267 / #1596: ``_apply_comfort_band()`` keeps its own record of the same shape (``_last_band_write``) so the
+    setback / bedtime / wake-up rows report what was sent; it adds ``window_open`` (a monitored window is open, the
+    choke point paused instead of arming) and ``no_capable_mode`` (the thermostat has no mode for the active edge).
+    Issues #1268 / #1597: the nat-vent rows use it too (``mode_write_fields()``): ``occupant_change`` (the occupant's
+    change is protected), ``fan_off_pending`` (the fan-off was deferred, the restore follows it), ``no_window_settled``
+    (no window open past its delay) and ``fan_not_started`` (the fan session took no ownership of the thermostat).
     """
 
     result: HvacCommandResult | None = None
     family: str | None = None
     target_f: float | None = None
     held_reason: str | None = None
+
+
+def mode_write_fields(write: ComfortModeWrite, *, nested: bool = False) -> dict[str, Any]:
+    """Activity-row fields for what a thermostat write actually did (Issues #1267 / #1596 / #1268 / #1597).
+
+    ``outcome`` is ``hvac_outcome_label()`` of the write (``not_sent`` when nothing was attempted); ``held_reason`` is
+    present only when nothing was written. ``nested`` (the nat-vent rows' ``hvac_restore`` / ``hvac_mode_set``) adds
+    ``mode``, the family the thermostat now holds, and leaves ``outcome`` out when the thermostat already held that
+    mode with no write of this path (a whole-house fan session's own Off, an Off thermostat the blower keeps Off).
+    Structured codes, rendered through the activity catalog.
+    """
+    fields: dict[str, Any] = {}
+    if nested:
+        fields["mode"] = write.family
+    if not (nested and write.result is None and write.held_reason is None and write.family is not None):
+        fields["outcome"] = hvac_outcome_label(write.result)
+    if write.held_reason is not None:
+        fields["held_reason"] = write.held_reason
+    return fields
 
 
 @dataclass(frozen=True)
@@ -1861,6 +1887,9 @@ class AutomationEngine:
     # this away period. Reset when the house goes away; a deferred arrival restore is a "still on the setback" hold
     # only when it is True (a setback a door/window pause skipped never reached the thermostat).
     _away_setback_sent: bool = False
+    # Issues #1267 / #1596: what the last _apply_comfort_band() wrote (class-level default for engines built via
+    # object.__new__ in tests; __init__ sets the instance value).
+    _last_band_write: ComfortModeWrite = ComfortModeWrite()
     # Issue #1433: True while the coordinator's 15-minute away timer runs (set when the timer starts, cleared when it
     # expires or is cancelled). The engine already knows the house is away (Issue #85), but the setback waits for the
     # timer: until then no other path (the 30-minute cycle, bedtime, pre-cool, a time-of-use start) sends it.
@@ -2315,6 +2344,9 @@ class AutomationEngine:
         # restarts — a fresh process has no flapping history to guard against, same as
         # _nat_vent_outdoor_exit_time.
         self._last_mode_write = ComfortModeWrite()  # Issue #1245: outcome of the last _set_temperature_for_mode()
+        # Issues #1267 / #1596: outcome of the last _apply_comfort_band() (a sibling record: _last_mode_write is
+        # overwritten as "occupancy_redirect" when a comfort restore redirects into the away band).
+        self._last_band_write = ComfortModeWrite()
         self._comfort_mode_family: str | None = None
         self._comfort_mode_family_entry_time: datetime | None = None
         # Same-tick guard (folded in from Issue #699's own finding): so a family
@@ -5768,6 +5800,7 @@ class AutomationEngine:
                 notify_type="door_window_pause",
                 quiet=self._fan_session_about_to_take_over(caller="_apply_comfort_band"),
             )
+            self._last_band_write = ComfortModeWrite(held_reason="window_open")
             return None  # paused instead of armed: no write attempted
 
         # Issue #1142 D7 (owner decision): while a blower session ventilates through an open window NEITHER heat nor
@@ -5784,6 +5817,7 @@ class AutomationEngine:
                 reason,
             )
             await self._apply_nat_vent_hvac_state()
+            self._last_band_write = ComfortModeWrite(held_reason="blower_hold")
             return None
 
         caps = self._get_thermostat_capabilities()
@@ -5828,8 +5862,10 @@ class AutomationEngine:
                 _effective_active,
                 list(caps.modes),
             )
+            self._last_band_write = ComfortModeWrite(held_reason="no_capable_mode")
             return None
 
+        self._last_band_write = self._mode_write_record(_write_result, _cmd_shape, _target)
         # Issue #1417: a deliberate band write (the overnight pre-cool and its 30-minute re-assert) is a "ran" record
         # for its side even in the mode already armed; selector writes are not deliberate and record nothing.
         self._note_deliberate_command(_cmd_shape, mode_reason, result=_write_result)
@@ -8654,7 +8690,7 @@ class AutomationEngine:
                         indoor,
                         nat_vent_threshold,
                     )
-                    await self._apply_nat_vent_hvac_state()
+                    _nv_hold = await self._apply_nat_vent_hvac_state()
                     if _is_soft_start and not _session_was_live and self._emit_event_callback:
                         # Same event the reactivation sites emit; BEFORE "sensor_opened" so that stays the last
                         # event at this instant (the golden harness maps it to "natural_ventilation").
@@ -8668,10 +8704,13 @@ class AutomationEngine:
                                 "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                             },
                         )
+                    # Issue #1597: what the thermostat holds now (Off by the fan's suppression or the blower hold, or
+                    # left alone and why) -- not the pre-#1142 "band-armed", which was never true for a fan session.
                     _sensor_opened_payload = {
                         "entity": entity_id,
                         "result": "natural_ventilation",
-                        "hvac_mode_change": f"{_old_mode_nv}→band-armed",
+                        "hvac_mode_before": _old_mode_nv,
+                        "hvac_mode_set": mode_write_fields(_nv_hold, nested=True),
                     }
                     # Issue #1140: claim a fan transition only when the fan command really ran. A deferred
                     # (rate-limited) or overridden command still reports the window hand-off as before -- the
@@ -9324,7 +9363,6 @@ class AutomationEngine:
                             "comfort_heat": exit_decision.vent_floor,
                             "fan_device": _fan_device_label(self.config),
                             "fan_mode_change": _fan_transition_text(self.config, activating=False),
-                            "hvac_mode_restored": "unchanged (window still open)",
                         },
                     )
                     return
@@ -9403,26 +9441,9 @@ class AutomationEngine:
                         _vent_floor,
                         self._current_classification.hvac_mode if self._current_classification else "unknown",
                     )
-                    if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "nat_vent_comfort_floor_exit",
-                            {
-                                "indoor_temp": indoor,
-                                "comfort_heat": _vent_floor,
-                                "fan_mode_change": _fan_transition_text(self.config, activating=False),
-                                "fan_device": _fan_device_label(self.config),
-                                "hvac_mode_restored": (
-                                    "unchanged (occupant's change kept)"
-                                    if self._manual_change_protected()
-                                    else (
-                                        self._current_classification.hvac_mode
-                                        if self._current_classification
-                                        else "unknown"
-                                    )
-                                ),
-                            },
-                        )
+                    _floor_restore: ComfortModeWrite | None = None
                     if self._manual_change_protected():
+                        _floor_restore = ComfortModeWrite(held_reason="occupant_change")
                         self._note_deferred_to_protected_change()
                         _LOGGER.info(
                             "Comfort restore skipped: occupant's manual change protected "
@@ -9440,7 +9461,19 @@ class AutomationEngine:
                                 c,
                                 reason=_R("reason_nv_floor_exit_restoring"),
                             )
+                        _floor_restore = self._last_mode_write
                         self._start_automation_grace_unless_restore_unsent("nat_vent_exit_resume", _floor_write)
+                    # Issue #1268: emitted AFTER the restore, with what the thermostat was actually sent.
+                    if self._emit_event_callback:
+                        _floor_payload: dict[str, Any] = {
+                            "indoor_temp": indoor,
+                            "comfort_heat": _vent_floor,
+                            "fan_mode_change": _fan_transition_text(self.config, activating=False),
+                            "fan_device": _fan_device_label(self.config),
+                        }
+                        if _floor_restore is not None:
+                            _floor_payload["hvac_restore"] = mode_write_fields(_floor_restore, nested=True)
+                        self._emit_event_callback("nat_vent_comfort_floor_exit", _floor_payload)
                     return
 
                 if exit_decision.reason == NatVentExitReason.AWAY_CEILING:
@@ -9942,9 +9975,6 @@ class AutomationEngine:
                         "source": "temp_check",
                         "fan_device": _fan_device_label(self.config),
                         "fan_mode_change": _fan_transition_text(self.config, activating=False),
-                        "hvac_mode_restored": (
-                            self._current_classification.hvac_mode if self._current_classification else "unknown"
-                        ),
                     }
                     # Issue #696: previously False on the (now-disproven) assumption that
                     # exit and re-entry always check the identical comfort_heat quantity at
@@ -10411,9 +10441,6 @@ class AutomationEngine:
                 "comfort_heat": vent_floor_ftc,
                 "fan_mode_change": _fan_transition_text(self.config, activating=False),
                 "fan_device": _fan_device_label(self.config),
-                "hvac_mode_restored": (
-                    self._current_classification.hvac_mode if self._current_classification else "unknown"
-                ),
             }
         else:
             _event_type = "fan_deactivated"
@@ -12698,30 +12725,6 @@ class AutomationEngine:
             if self._economizer_active:
                 await self._deactivate_economizer(outdoor_temp=0)
 
-        if self._emit_event_callback:
-            self._emit_event_callback(
-                "bedtime_setback",
-                {
-                    "mode": c.hvac_mode,
-                    "floor": _sleep_band.floor,
-                    "ceiling": _sleep_band.ceiling,
-                    "active": _sleep_band.active,
-                    "modifier": c.setback_modifier,
-                },
-            )
-        if (
-            _gate == ScheduledBandGate.DEFER_NAT_VENT
-            and self._emit_event_callback
-            and not self._recent_duplicate("nat_vent_bedtime_continue", (_fan_device_label(self.config),))
-        ):
-            self._emit_event_callback(
-                "nat_vent_bedtime_continue",
-                {
-                    "fan_device": _fan_device_label(self.config),
-                    "outdoor_temp": self._last_outdoor_temp,
-                    "sleep_cool": _sleep_band.ceiling,
-                },
-            )
         if self._today_record is not None:
             # Issue #402: key off _sleep_band.active (the edge _apply_comfort_band() actually
             # arms below), not c.hvac_mode. On a warm/mild day c.hvac_mode is "off", but the
@@ -12747,6 +12750,33 @@ class AutomationEngine:
                 ceiling=self._band_num(_sleep_band.ceiling),
             ),
         )
+        # Issue #1596: emitted AFTER the write, with what the thermostat was actually sent.
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "bedtime_setback",
+                {
+                    "mode": c.hvac_mode,
+                    "floor": _sleep_band.floor,
+                    "ceiling": _sleep_band.ceiling,
+                    "active": _sleep_band.active,
+                    "modifier": c.setback_modifier,
+                    **mode_write_fields(self._last_band_write),
+                },
+            )
+        # The continuation row keeps following the bedtime row, as before #1596 moved both after the write.
+        if (
+            _gate == ScheduledBandGate.DEFER_NAT_VENT
+            and self._emit_event_callback
+            and not self._recent_duplicate("nat_vent_bedtime_continue", (_fan_device_label(self.config),))
+        ):
+            self._emit_event_callback(
+                "nat_vent_bedtime_continue",
+                {
+                    "fan_device": _fan_device_label(self.config),
+                    "outdoor_temp": self._last_outdoor_temp,
+                    "sleep_cool": _sleep_band.ceiling,
+                },
+            )
 
     async def handle_pre_cool(
         self, indoor_temp: float | None, nat_vent_just_closed: bool, *, modifier: float | None = None
@@ -13142,17 +13172,6 @@ class AutomationEngine:
         # deduped, becoming the new trailing "last observable decision" and masking the correct
         # outcome. Windowed (not permanent) — this event legitimately fires once per real
         # wake-up, hours apart.
-        _wakeup_sig = (c.hvac_mode, round(_wakeup_band.floor, 2), round(_wakeup_band.ceiling, 2), _wakeup_band.active)
-        if self._emit_event_callback and not self._recent_duplicate("morning_wakeup", _wakeup_sig, window_seconds=600):
-            self._emit_event_callback(
-                "morning_wakeup",
-                {
-                    "mode": c.hvac_mode,
-                    "floor": _wakeup_band.floor,
-                    "ceiling": _wakeup_band.ceiling,
-                    "active": _wakeup_band.active,
-                },
-            )
         await self._apply_comfort_band(
             _wakeup_band,
             reason=_R(
@@ -13161,6 +13180,28 @@ class AutomationEngine:
                 ceiling=self._band_num(_wakeup_band.ceiling),
             ),
         )
+        # Issue #1596: emitted AFTER the write, with what the thermostat was actually sent; the outcome is part of the
+        # dedup signature, so a held wake-up followed by a sent one inside the window is two rows.
+        _write_fields = mode_write_fields(self._last_band_write)
+        _wakeup_sig = (
+            c.hvac_mode,
+            round(_wakeup_band.floor, 2),
+            round(_wakeup_band.ceiling, 2),
+            _wakeup_band.active,
+            _write_fields["outcome"],
+            _write_fields.get("held_reason"),
+        )
+        if self._emit_event_callback and not self._recent_duplicate("morning_wakeup", _wakeup_sig, window_seconds=600):
+            self._emit_event_callback(
+                "morning_wakeup",
+                {
+                    "mode": c.hvac_mode,
+                    "floor": _wakeup_band.floor,
+                    "ceiling": _wakeup_band.ceiling,
+                    "active": _wakeup_band.active,
+                    **_write_fields,
+                },
+            )
 
     def _any_monitored_sensor_open(self) -> bool:
         """Return True if any monitored door/window sensor is currently open.
@@ -14415,6 +14456,9 @@ class AutomationEngine:
         if set_outdoor_exit_time:
             self._nat_vent_outdoor_exit_time = dt_util.now()
         sensor_open = self._any_monitored_sensor_settled_open()
+        # Issue #1268: what the exit did to the thermostat, set by each branch below once it is known (the row's
+        # ``hvac_restore``). None: the branch states nothing (no classification to restore from).
+        _restore: ComfortModeWrite | None = None
         # emit_event=False on both branches: the caller's own specific exit event
         # (nat_vent_comfort_floor_exit, nat_vent_outdoor_rise_exit, etc.) is emitted
         # below, by this method, once the
@@ -14438,6 +14482,7 @@ class AutomationEngine:
                 reason=reason, restore_hvac=False, release_suppression=True, emit_event=False
             )
             self._end_nat_vent_session(result)
+            _restore = ComfortModeWrite(held_reason="occupant_change")
             # Issue #1304: a DRY_RUN stop ended nothing (logged by _deactivate_fan()), so this line is DEBUG then.
             _log = (
                 _LOGGER.debug
@@ -14479,6 +14524,7 @@ class AutomationEngine:
             # so the next tick's retry re-enters this branch and records the pause once the fan-off
             # ran; if the window closes first, the sensors-closed branch below completes the session.
             if self._end_nat_vent_session(result):
+                _restore = ComfortModeWrite(held_reason="window_open")  # Rule 3: nothing restored into the window
                 # Issue #1142 D4 (cool side) and its heat-side mirror: the window pause is recorded below, so the
                 # thermostat must be Off NOW, not at the next 30-minute cycle. A blower session's former AC-assist
                 # band (and any mode a comfort restore armed) would otherwise keep heating/cooling into the open
@@ -14535,6 +14581,7 @@ class AutomationEngine:
             else:
                 # Issue #649: a repeat of an already-reported deferral logs at DEBUG, not INFO —
                 # one retry tick after another while still blocked.
+                _restore = ComfortModeWrite(held_reason="fan_off_pending")
                 _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
                 _log(
                     "Nat-vent exit (%s): monitored sensor still open but fan-off deferred — "
@@ -14578,6 +14625,7 @@ class AutomationEngine:
                             self._current_classification,
                             reason=_R("reason_nv_exit_resume", reason=_nest(reason)),
                         )
+                    _restore = self._last_mode_write  # Issue #1268: what the selector actually wrote (or why not)
                 self._start_automation_grace_unless_restore_unsent("nat_vent_exit_resume", _resume_write)
                 _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
                 _log("Nat-vent exit (%s): sensors closed — restoring HVAC and starting grace period", reason)
@@ -14589,6 +14637,7 @@ class AutomationEngine:
                 _LOGGER.debug("Nat-vent exit (%s): fan stop not sent (observe-only) -- session kept", reason)
                 self._schedule_deferred_closed_exit_retry(reason, event_type, event_payload)
             else:
+                _restore = ComfortModeWrite(held_reason="fan_off_pending")  # the retry's row reports the restore
                 _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
                 _log(
                     "Nat-vent exit (%s): sensors closed but fan-off deferred — restore and grace wait for the fan-off",
@@ -14605,6 +14654,8 @@ class AutomationEngine:
             payload = dict(event_payload or {})
             if result is FanCommandResult.RATE_LIMITED_NEW:
                 payload["fan_mode_change"] = self._deferred_fan_mode_change_marker()
+            if _restore is not None:
+                payload["hvac_restore"] = mode_write_fields(_restore, nested=True)  # Issue #1268
             # EXECUTED / ALREADY_IN_STATE / OVERRIDDEN / DISABLED: payload's own
             # fan_mode_change (if any) is left exactly as the caller built it — matches
             # pre-#649 behavior for every outcome that isn't a fresh deferral.
@@ -18527,8 +18578,12 @@ class AutomationEngine:
         if self._reclassify_callback:
             self._reclassify_callback()
 
-    async def _apply_nat_vent_hvac_state(self) -> None:
+    async def _apply_nat_vent_hvac_state(self) -> ComfortModeWrite:
         """Apply the correct HVAC state when nat-vent is active.
+
+        Returns what the thermostat holds afterwards (Issue #1597, read by the nat-vent start row): ``family="off"``
+        when it is Off (written here, or by the whole-house fan's suppression), or a ``held_reason`` when it was left
+        alone (``occupant_change``, ``no_window_settled``, ``fan_not_started``). Every other caller ignores it.
 
         Called immediately after nat-vent activates (all paths) and on every
         30-minute apply_classification() cycle while nat-vent is active.
@@ -18558,7 +18613,12 @@ class AutomationEngine:
                 "_apply_nat_vent_hvac_state: no-op (fan_mode=%s — HVAC suppressed by _activate_fan or disabled)",
                 fan_mode,
             )
-            return
+            # Issue #1597: ownership means Climate Advisor actually turned the HVAC Off (#1293).
+            return (
+                ComfortModeWrite(family="off")
+                if self._whf_owns_hvac()
+                else ComfortModeWrite(held_reason="fan_not_started")
+            )
 
         if self._manual_change_protected():
             self._note_deferred_to_protected_change()
@@ -18568,7 +18628,7 @@ class AutomationEngine:
                 self._manual_override_active,
                 self._override_confirm_pending,
             )
-            return
+            return ComfortModeWrite(held_reason="occupant_change")
 
         if not self._any_monitored_sensor_settled_open():
             # Issue #1225 (minor): nothing is open past its delay (every window shut, or one still inside its delay),
@@ -18576,10 +18636,11 @@ class AutomationEngine:
             _LOGGER.info(
                 "_apply_nat_vent_hvac_state: no window open past its delay -- thermostat left to the normal path"
             )
-            return
+            return ComfortModeWrite(held_reason="no_window_settled")
 
         state = self.hass.states.get(self.climate_entity)
         mode = state.state if state else None
+        _hold = ComfortModeWrite(family="off")  # already Off: nothing to write
         if mode in (None, "off", "unavailable", "unknown"):
             _LOGGER.info(
                 "_apply_nat_vent_hvac_state: thermostat already %s -- blower ventilation, no heat/cool armed", mode
@@ -18597,7 +18658,9 @@ class AutomationEngine:
             self._arm_open_window_off_retry(
                 _off_result, reason=_R("reason_blower_window_open", mode=str(mode)), session="blower"
             )
+            _hold = ComfortModeWrite(result=_off_result, family="off")
         await self._advise_close_windows_if_too_warm()
+        return _hold
 
     async def _advise_close_windows_if_too_warm(self) -> None:
         """Tell the occupant to close the windows when blower ventilation is not enough (Issue #1142 D7).

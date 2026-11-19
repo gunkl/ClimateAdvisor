@@ -1220,11 +1220,13 @@ class TestSensorOpenedEventPayloadNatVent:
         assert len(opened_events) == 1
         payload = opened_events[0][1]
         assert payload.get("result") == "natural_ventilation"
-        assert "hvac_mode_change" in payload, "hvac_mode_change must be present for nat_vent result"
         assert "fan_mode_change" in payload, "fan_mode_change must be present for nat_vent result"
-        # Issue #249 P3: nat-vent no longer turns HVAC off — the comfort band stays armed and only
-        # the fan turns on (the compressor self-arbitrates with the open window). Was "→off".
-        assert payload["hvac_mode_change"].endswith("→band-armed")
+        # Issue #1597: the row reports what the thermostat holds after the start, structured. It used to pin
+        # "hvac_mode_change: heat→band-armed" (Issue #249 P3), which went stale with #1142 D1/D7: a whole-house fan
+        # session turns the thermostat Off (_activate_fan -> _suppress_hvac_for_whf), so "band-armed" was false.
+        assert "hvac_mode_change" not in payload
+        assert payload["hvac_mode_before"] == "heat"
+        assert payload["hvac_mode_set"] == {"mode": "off"}  # Off written by the fan session's suppression
         # Issue #957: a WHF has no "auto" state -- it's a binary on/off relay. Was "auto→on"
         # (HVAC-thermostat-fan phrasing, wrong for a WHF-mode install).
         assert payload["fan_mode_change"] == "WHF: off->on"

@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.45] — 2026-11-18
+
+### Fixed
+- Fix #1272: on cloud thermostats that report a new setpoint late, a fan turning on or off right after a setpoint change no longer makes Climate Advisor send the same setpoint again. It waits up to 3 minutes for the thermostat to answer. A thermostat that really reverts to a different value is still corrected 30 seconds after the fan command.
+- Fix #1595: on cloud thermostats that report a mode change 2–3 minutes late, Climate Advisor no longer shows "HVAC mode not applied" for a mode change that went through. A thermostat that really ignores the mode is still reported, about 3 minutes after the change.
+
 ## [0.9.44] — 2026-11-18
 
 ### Changed (project records only; nothing changes in your house)

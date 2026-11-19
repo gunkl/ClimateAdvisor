@@ -686,6 +686,15 @@ def mode_write_fields(write: ComfortModeWrite, *, nested: bool = False) -> dict[
     return fields
 
 
+def nat_vent_start_fields(before: str, hold: ComfortModeWrite) -> dict[str, Any]:
+    """The ``sensor_opened`` (natural_ventilation) fields of every nat-vent start row (Issues #1597 / #1606).
+
+    ``before`` is the thermostat mode read just before the fan start; ``hold`` is ``_apply_nat_vent_hvac_state()``'s
+    record of what the thermostat holds afterwards.
+    """
+    return {"hvac_mode_before": before, "hvac_mode_set": mode_write_fields(hold, nested=True)}
+
+
 @dataclass(frozen=True)
 class PendingRestore:
     """A restore that has not landed yet (Issue #1308, owner decision 2026-11-03 "retry, no grace").
@@ -8600,8 +8609,7 @@ class AutomationEngine:
                 self._report_nat_vent_start_veto(_start_veto, entity_id=entity_id)
             if _nat_vent_gate_entered:
                 # Capture mode before nat_vent changes
-                _old_mode_nv = self.hass.states.get(self.climate_entity)
-                _old_mode_nv = _old_mode_nv.state if _old_mode_nv else "unknown"
+                _old_mode_nv = self._thermostat_mode_now()
 
                 _is_soft_start = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_SOFT_START
                 nat_vent_reason = (
@@ -8709,8 +8717,7 @@ class AutomationEngine:
                     _sensor_opened_payload = {
                         "entity": entity_id,
                         "result": "natural_ventilation",
-                        "hvac_mode_before": _old_mode_nv,
-                        "hvac_mode_set": mode_write_fields(_nv_hold, nested=True),
+                        **nat_vent_start_fields(_old_mode_nv, _nv_hold),
                     }
                     # Issue #1140: claim a fan transition only when the fan command really ran. A deferred
                     # (rate-limited) or overridden command still reports the window hand-off as before -- the
@@ -9124,7 +9131,8 @@ class AutomationEngine:
                 # this block does nothing — the same externally-observable outcome the
                 # deleted legacy branches produced.
                 if _to_state == NatVentLifecycleState.ACTIVE_FULL_GATE:
-                    # Band stays armed — just activate the fan; the compressor self-arbitrates.
+                    # Issue #1606: the mode the thermostat held when ventilation restarted (for the row below).
+                    _reeval_mode_before = self._thermostat_mode_now()
                     _activation_result = await self._activate_fan(
                         reason=_R(
                             "reason_nv_reengaged",
@@ -9154,9 +9162,10 @@ class AutomationEngine:
                     # overridden commands keep their pre-#1140 reporting; see handle_door_window_open().)
                     # Issue #1304: observe-only (DRY_RUN) sent nothing and recorded no session -> no row either.
                     if _activation_result not in _NAT_VENT_NO_WORKING_FAN_RESULTS | {FanCommandResult.DRY_RUN}:
-                        await self._apply_nat_vent_hvac_state()
+                        _reeval_hold = await self._apply_nat_vent_hvac_state()
                         # Issue #244: emit so the re-evaluation activation is visible in the
                         # event log / timeline / AI report (previously this path was silent).
+                        # Issue #1606: with what the thermostat holds now, like the window-open start row.
                         if self._emit_event_callback:
                             self._emit_event_callback(
                                 "sensor_opened",
@@ -9164,6 +9173,7 @@ class AutomationEngine:
                                     "entity": "natural_vent_reeval",
                                     "result": "natural_ventilation",
                                     "trigger": "open_door_reeval",
+                                    **nat_vent_start_fields(_reeval_mode_before, _reeval_hold),
                                 },
                             )
                 elif _to_state == NatVentLifecycleState.ACTIVE_SOFT_START:
@@ -9368,112 +9378,34 @@ class AutomationEngine:
                     return
 
                 if exit_decision.reason == NatVentExitReason.COMFORT_FLOOR:
-                    # Note (Issue #620 investigation): like fan_thermostat_check()'s
-                    # STOP_COOLED_TO_FLOOR (now fixed via _exit_nat_vent()), this branch calls
-                    # _deactivate_fan() with default restore_hvac=True and no live sensor check
-                    # — the same bug class. NOT migrated to _exit_nat_vent() here: unlike the
-                    # fast-path branches, this one explicitly restores to
-                    # _current_classification.hvac_mode (live intent) via the _set_hvac_mode()/
-                    # _set_temperature_for_mode() calls below, not _exit_nat_vent()'s
-                    # _pre_fan_hvac_mode snapshot — those are different restore-target semantics
-                    # that need their own decision, not a mechanical swap. Flagged as a known
-                    # follow-up, out of scope for #620.
-                    #
-                    # Issue #739: this branch bypasses _exit_nat_vent() entirely, so it never
-                    # armed the reactivation lockout the way every sibling exit reason in this
-                    # method (and, since #696/#755, both COMFORT_FLOOR-class fast-path twins)
-                    # already does — the exact "self-complementary at a fixed reading" gap #696
-                    # disproved, just unnoticed here because this branch's own bypass makes it
-                    # invisible to the _exit_nat_vent()-only AST coverage scan. Confirmed live:
-                    # a comfort-floor exit here on 2026-08-22 left indoor still below the
-                    # 70-72F daytime band, and the WHF reactivated within a minute on a
-                    # ~1F uptick, immediately re-breaching the floor it had just exited to
-                    # protect. Set the exit time directly (this branch has no
-                    # set_outdoor_exit_time kwarg to pass, same as the AWAY_CEILING branch
-                    # below).
-                    _vent_floor = exit_decision.vent_floor
-                    self._nat_vent_outdoor_exit_time = dt_util.now()
-                    # Issue #821 (Design §4): exiting nat-vent counts as "cooling family
-                    # was active until just now" — arm the family-switch lockout's dwell
-                    # clock at this handoff so a heat call cannot fire in the same/next
-                    # cycle purely from momentary post-exit indoor readings.
-                    self._arm_comfort_family("cooling", dt_util.now())
-                    # Issue #1066 (F4): when a heat/cool classification exists, the
-                    # _set_temperature_for_mode() call below writes mode+setpoint through the
-                    # comfort-edge selector. The blind _pre_fan_hvac_mode / classification-mode
-                    # restores would write the WRONG mode first on a hot day (cool, then heat a
-                    # few ms later -- a mode double write the plan removed). Release the WHF
-                    # suppression without restoring; the selector call restores the right mode.
-                    # Issue #1208: any classification -- the selector resolves the family from the armed band, so a
-                    # warm/mild ("off") label no longer skips the restore.
-                    _selector_follows = bool(self._current_classification)
-                    _comfort_floor_result = await self._deactivate_fan(
+                    # Issue #1605: routed through the shared _exit_nat_vent() choke point (windows closed here; the
+                    # window-open case is the branch above). It used to hand-roll the exit and, on a fan-off deferred
+                    # by the 5-minute floor (#641), still restored and started the "nat_vent_exit_resume" grace with
+                    # the session live -- the #1141 defect _exit_nat_vent() already fixed. The choke point applies the
+                    # #1141 rule (restore + grace only once the session ended; a deferral is recorded and retried),
+                    # the occupant-change protection (#1147), the observe-only rule (#1304), the reactivation lockout
+                    # (#739: set_outdoor_exit_time) and the #821 family dwell, and emits the row after the decision.
+                    # Issue #1066 (F4) / #1208: with a classification the selector writes mode + setpoint in one
+                    # switch, so the blind pre-fan mode replay is skipped (no cool-then-heat double write).
+                    await self._exit_nat_vent(
                         reason=_R(
                             "reason_nv_exit_why",
                             why=i18n.Msg(
                                 "activity.reason_why_indoor_le_comfort_floor",
                                 indoor=self._tp(indoor),
-                                floor=self._tp(_vent_floor),
+                                floor=self._tp(exit_decision.vent_floor),
                             ),
                         ),
-                        restore_hvac=not _selector_follows,
-                        release_suppression=True,
-                    )
-                    # Issue #931: flags clear only once the result above is known — see
-                    # _end_nat_vent_session(). Issue #697's fix (both flags cleared
-                    # together, matching every other site) still applies; only the
-                    # ordering relative to the deactivate call, and the result check,
-                    # changed.
-                    self._end_nat_vent_session(_comfort_floor_result)
-                    if _comfort_floor_result is FanCommandResult.DRY_RUN:
-                        # Issue #1304: observe-only sent no stop -- the session continues, no exit row, no restore.
-                        _LOGGER.info(
-                            "[DRY RUN] Natural vent would exit (comfort floor): indoor %.1f°F ≤ floor %.1f°F —"
-                            " nothing sent, session kept role=%s",
-                            indoor,
-                            _vent_floor,
-                            self.role,
-                        )
-                        return
-                    _LOGGER.info(
-                        "Natural vent exit (comfort floor): indoor %.1f°F ≤ floor %.1f°F — restoring %s",
-                        indoor,
-                        _vent_floor,
-                        self._current_classification.hvac_mode if self._current_classification else "unknown",
-                    )
-                    _floor_restore: ComfortModeWrite | None = None
-                    if self._manual_change_protected():
-                        _floor_restore = ComfortModeWrite(held_reason="occupant_change")
-                        self._note_deferred_to_protected_change()
-                        _LOGGER.info(
-                            "Comfort restore skipped: occupant's manual change protected "
-                            "(nat-vent comfort-floor exit) override_active=%s confirm_pending=%s",
-                            self._manual_override_active,
-                            self._override_confirm_pending,
-                        )
-                    elif self._current_classification:
-                        c = self._current_classification
-                        # Issue #1066 (F4): no blind _set_hvac_mode(c.hvac_mode) here -- the
-                        # selector call below writes mode + setpoint in one explicit switch.
-                        # Issue #1208: no label gate -- the family comes from the armed band.
-                        with self._mode_change_context("nat_vent"):
-                            _floor_write = await self._set_temperature_for_mode(
-                                c,
-                                reason=_R("reason_nv_floor_exit_restoring"),
-                            )
-                        _floor_restore = self._last_mode_write
-                        self._start_automation_grace_unless_restore_unsent("nat_vent_exit_resume", _floor_write)
-                    # Issue #1268: emitted AFTER the restore, with what the thermostat was actually sent.
-                    if self._emit_event_callback:
-                        _floor_payload: dict[str, Any] = {
+                        set_outdoor_exit_time=True,
+                        event_type="nat_vent_comfort_floor_exit",
+                        event_payload={
                             "indoor_temp": indoor,
-                            "comfort_heat": _vent_floor,
+                            "comfort_heat": exit_decision.vent_floor,
                             "fan_mode_change": _fan_transition_text(self.config, activating=False),
                             "fan_device": _fan_device_label(self.config),
-                        }
-                        if _floor_restore is not None:
-                            _floor_payload["hvac_restore"] = mode_write_fields(_floor_restore, nested=True)
-                        self._emit_event_callback("nat_vent_comfort_floor_exit", _floor_payload)
+                        },
+                        replay_pre_fan_mode=not self._current_classification,
+                    )
                     return
 
                 if exit_decision.reason == NatVentExitReason.AWAY_CEILING:
@@ -12310,6 +12242,7 @@ class AutomationEngine:
                 # Issue #1132 (mirror of #931): only clear the pause / report a nat-vent
                 # session when the activation was applied. Otherwise fall through to the
                 # re-pause below, which re-records the pause (idempotent when already paused).
+                _repause_mode_before = self._thermostat_mode_now()  # Issue #1606: for the re-check row below
                 _applied, _activation_result = await self._activate_fan_for_paused_reactivation(
                     _reactivation_state,
                     reason=nat_vent_reason,
@@ -12397,10 +12330,10 @@ class AutomationEngine:
                 # gap live.)
                 self._paused_entity = None
                 self._paused_since = None
-                await self._apply_nat_vent_hvac_state()
+                _repause_hold = await self._apply_nat_vent_hvac_state()
                 _LOGGER.info(
                     "Re-check after grace: nat-vent conditions met — outdoor %.1f°F < indoor %.1f°F,"
-                    " outdoor ≤ %.1f°F, band stays armed",
+                    " outdoor ≤ %.1f°F, nat-vent HVAC state applied (Off while a window is open)",
                     outdoor,
                     indoor,
                     nat_vent_threshold,
@@ -12436,6 +12369,7 @@ class AutomationEngine:
                         {
                             "entity": "re-check",
                             "result": "natural_ventilation",
+                            **nat_vent_start_fields(_repause_mode_before, _repause_hold),  # Issue #1606
                             "outdoor_temp": outdoor,
                             "indoor_temp": indoor,
                             "threshold": nat_vent_threshold,
@@ -14406,6 +14340,7 @@ class AutomationEngine:
         set_outdoor_exit_time: bool = False,
         event_type: str | None = None,
         event_payload: dict[str, Any] | None = None,
+        replay_pre_fan_mode: bool = True,
     ) -> FanCommandResult:
         """Single choke point for ending a nat-vent session (Issue #411).
 
@@ -14440,6 +14375,10 @@ class AutomationEngine:
                 overwritten based on the real outcome — left as given when the toggle
                 executed, replaced with a "deferred" description when newly rate-limited.
                 Ignored if ``event_type`` is None.
+            replay_pre_fan_mode: Issue #1605 -- with the windows closed, ``_deactivate_fan()`` first replays the
+                mode captured when the fan session started, then the selector restore corrects it. The slow-loop
+                comfort-floor exit passes False when a classification exists (Issue #1066 F4: the selector alone
+                writes mode + setpoint, no cool-then-heat double write); every other caller keeps the replay.
 
         Returns:
             The ``FanCommandResult`` from the underlying ``_deactivate_fan()`` call.
@@ -14589,7 +14528,9 @@ class AutomationEngine:
                     reason,
                 )
         else:
-            result = await self._deactivate_fan(reason=reason, emit_event=False)
+            result = await self._deactivate_fan(
+                reason=reason, restore_hvac=replay_pre_fan_mode, release_suppression=True, emit_event=False
+            )
             # Issue #1141 (mirror, found during #1142): restore and the automation grace belong to a
             # session that actually ended. A fan-off deferred by the 5-minute floor KEEPS the session
             # (#931; the fan is still on), and starting "nat_vent_exit_resume" grace now left session and
@@ -18577,6 +18518,11 @@ class AutomationEngine:
             self._emit_event_callback("whf_hvac_released", {"reason": reason})
         if self._reclassify_callback:
             self._reclassify_callback()
+
+    def _thermostat_mode_now(self) -> str:
+        """The climate entity's current mode, or ``"unknown"`` (the nat-vent start rows' ``hvac_mode_before``)."""
+        state = self.hass.states.get(self.climate_entity)
+        return state.state if state else "unknown"
 
     async def _apply_nat_vent_hvac_state(self) -> ComfortModeWrite:
         """Apply the correct HVAC state when nat-vent is active.

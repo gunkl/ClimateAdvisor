@@ -153,19 +153,23 @@ def _names(engine):
     return [n for n, _ in engine._events]
 
 
-def _past_echo_window(timers, engine, now):
-    """The 130 s re-check, then the end of the mode echo window (Issue #1595).
+def _past_echo_window(timers, engine) -> datetime:
+    """The 130 s re-check, then the end of the mode echo window (Issue #1595). Call inside ``_patched``.
 
     At 130 s the write is still outstanding in the #1246 echo memory and the thermostat still shows its old mode, so a
     slow cloud thermostat may simply not have answered yet: the re-check waits for the window end, and only a
-    thermostat still ignoring the mode then is announced.
+    thermostat still ignoring the mode then is announced. ``_patched`` freezes ``dt_util.now``; this moves that frozen
+    clock to each re-check's real time and returns the window-end time (the clock stays there). Shared by every test
+    that opens a "mode not applied" episode.
     """
+    now = automation_module.dt_util.now  # the frozen-clock mock installed by _patched
     now.return_value = NOW + timedelta(seconds=MODE_ALIGNMENT_RECHECK_S)
     timers.fire(engine, MODE_ALIGNMENT_RECHECK_S)
     assert "hvac_mode_not_applied" not in _names(engine), "announced inside the echo window"
     wait = OWN_WRITE_ECHO_WINDOW_S - MODE_ALIGNMENT_RECHECK_S + 1
     now.return_value = NOW + timedelta(seconds=MODE_ALIGNMENT_RECHECK_S + wait)
     timers.fire(engine, wait)
+    return now.return_value
 
 
 class TestReadBackEpisode:
@@ -174,13 +178,13 @@ class TestReadBackEpisode:
         # Mode commands "succeed" but the device never switches: state stays off.
         timers = _Timers()
         p1, p2, p3 = _patched(timers)
-        with p1, p2, p3 as now:
+        with p1, p2, p3:
             asyncio.run(engine._set_temperature(70.0, reason="t", mode="heat"))
             assert {d for d, _ in timers.items} == {10, 130}
             timers.fire(engine, 10)  # early check: starts the mismatch clock, never announces
             assert "hvac_mode_not_applied" not in _names(engine)
             assert engine._hvac_write_record.mismatch_since is not None
-            _past_echo_window(timers, engine, now)
+            _past_echo_window(timers, engine)
             timers.fire(engine, 130)  # second miss in the same episode: silent
             assert _names(engine).count("hvac_mode_not_applied") == 1
             ev = next(d for n, d in engine._events if n == "hvac_mode_not_applied")
@@ -206,9 +210,9 @@ class TestReadBackEpisode:
         engine = _engine("heat")
         timers = _Timers()
         p1, p2, p3 = _patched(timers)
-        with p1, p2, p3 as now:
+        with p1, p2, p3:
             asyncio.run(engine._set_hvac_mode("off", reason="door/window pause"))
-            _past_echo_window(timers, engine, now)
+            _past_echo_window(timers, engine)
         ev = next(d for n, d in engine._events if n == "hvac_mode_not_applied")
         assert (ev["requested_mode"], ev["actual_mode"]) == ("off", "heat")
 

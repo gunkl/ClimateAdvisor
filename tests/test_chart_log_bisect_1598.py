@@ -273,3 +273,94 @@ class TestCoordinatorCycleDoesNotRescanTheWeek:
             or (isinstance(node, ast.Attribute) and node.attr == "_thermal_factors")
         ]
         assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #1599: the hourly prune (the write-path twin of #1598)
+# ---------------------------------------------------------------------------
+
+
+def _old_prune_walk(rows: list[dict], cutoff: datetime) -> list[dict]:
+    """The pre-#1599 ``_maybe_prune`` walk (every row parsed; unparseable rows kept), the equality reference."""
+    return [e for e in rows if (ts := chart_log_mod._parse_ts(e.get("ts", ""))) is None or ts >= cutoff]
+
+
+def _prune_now(log: ChartStateLog, frozen_now, at: datetime) -> list[dict]:
+    """Run one prune pass at ``at``; returns what the old walk would have kept from the same rows."""
+    frozen_now(at)
+    expected = _old_prune_walk(list(log._entries), at - timedelta(days=log._max_days))
+    log._last_prune = None
+    log._maybe_prune()
+    return expected
+
+
+class TestHourlyPrune:
+    """Occupant view: once an hour Home Assistant paused while every row of a year of chart history was parsed to
+    drop the oldest hour. On time-sorted rows the prefix to drop is found by bisection."""
+
+    def test_prune_of_a_year_log_parses_a_few_rows_not_all(self, tmp_path: Path, frozen_now) -> None:
+        now = _now()
+        frozen_now(now)
+        log = _year_log(tmp_path, now)
+        total = log.entry_count
+        counter = _ParseCounter()
+        with patch.object(chart_log_mod, "_parse_ts", counter):
+            expected = _prune_now(log, frozen_now, now + timedelta(hours=3))
+        # the reference walk itself parsed ``total`` rows through the counter; the prune must add only ~log2(n)
+        prune_parses = counter.calls - total
+        assert log._entries == expected and len(expected) < total
+        assert prune_parses <= 64, f"{prune_parses} parses to prune a {total}-row log"
+
+    def test_prune_after_append_bisects(self, tmp_path: Path, frozen_now) -> None:
+        # the real path: append() -> _maybe_prune(), with the newly appended row checked lazily
+        now = _now()
+        frozen_now(now)
+        log = _year_log(tmp_path, now)
+        frozen_now(now + timedelta(hours=2))
+        log._last_prune = None
+        counter = _ParseCounter()
+        with patch.object(chart_log_mod, "_parse_ts", counter):
+            log.append(hvac="idle", fan=False, indoor=70.0, outdoor=60.0)
+        assert counter.calls <= 64
+        oldest = chart_log_mod._parse_ts(log._entries[0]["ts"])
+        assert oldest >= now + timedelta(hours=2) - timedelta(days=365)
+
+    @pytest.mark.parametrize("seed", range(24))
+    def test_random_logs_keep_exactly_what_the_old_walk_kept(self, tmp_path: Path, frozen_now, seed: int) -> None:
+        rng = random.Random(3000 + seed)
+        now = _now()
+        frozen_now(now)
+        rows = _random_rows(rng, now, rng.randrange(1, 1500))
+        if rng.random() < 0.6:
+            rows = _disorder(rng, rows, now)
+        max_days = rng.choice((1, 3, 30, 365))
+        mode = rng.choice(("loaded", "assigned", "assigned_after_query"))
+        if mode == "loaded":
+            log = ChartStateLog(tmp_path, max_days=365)
+            log._path.write_text(json.dumps({"entries": rows}), encoding="utf-8")
+            log.load()
+            log._max_days = max_days
+        else:
+            log = ChartStateLog(tmp_path, max_days=max_days)
+            log._entries = list(rows)
+            if mode == "assigned_after_query":
+                log.get_entries("24h")  # the order record now covers this list (or marks it unsorted)
+        t = now
+        for _ in range(4):
+            t += timedelta(hours=rng.uniform(0.5, 24 * max_days))
+            if rng.random() < 0.5:
+                frozen_now(t)
+                log.append(hvac="idle", fan=False, indoor=70.0, outdoor=60.0, ts=t.isoformat())
+            expected = _prune_now(log, frozen_now, t)
+            assert log._entries == expected
+            for range_str in ("24h", "7d"):
+                assert log.get_entries(range_str) == _full_scan(log, range_str, None, t)
+
+    def test_unparseable_rows_survive_the_prune(self, tmp_path: Path, frozen_now) -> None:
+        now = _now()
+        frozen_now(now)
+        old = [_row(now - timedelta(days=400 - k), k) for k in range(10)]
+        log = ChartStateLog(tmp_path)
+        log._entries = [*old[:5], {"ts": "garbage"}, *old[5:], {"hvac": "idle"}, _row(now, 99)]
+        expected = _prune_now(log, frozen_now, now)
+        assert log._entries == expected == [{"ts": "garbage"}, {"hvac": "idle"}, _row(now, 99)]

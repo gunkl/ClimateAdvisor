@@ -396,6 +396,20 @@ class ChartStateLog:
         self._last_prune = now
         cutoff = now - timedelta(days=self._max_days)
         before = len(self._entries)
+        sorted_rows = self._time_sorted_rows(check_unknown=False)
+        if sorted_rows is not None:
+            # Issue #1599: rows in time order (all parseable), so the rows to drop are a prefix found by bisection
+            # (~log2(n) parses) instead of parsing every row of up to a year once an hour on the event loop. Keeps
+            # exactly the suffix the walk below would keep.
+            rows, n = sorted_rows
+            lo = bisect.bisect_left(rows, cutoff, 0, n, key=_row_ts)
+            if lo:
+                kept_rows = rows[lo:]
+                self._entries = kept_rows
+                self._order = (kept_rows, len(kept_rows), _row_ts(kept_rows[-1]) if kept_rows else None)
+                _LOGGER.debug("chart_log: pruned %d old entries on append", lo)
+            return
+        # Order unknown or broken: the full walk (which records the order for next time).
         # Keep entries whose ts parses and is within window. Also keep entries
         # whose ts cannot be parsed — they shouldn't normally exist, but dropping
         # them silently here would hide bugs and surprise callers that just
@@ -483,17 +497,21 @@ class ChartStateLog:
         ordered, last = _order_after(None, timestamps)
         self._order = (entries, len(entries) if ordered else -1, last)
 
-    def _time_sorted_rows(self) -> tuple[list[dict[str, Any]], int] | None:
+    def _time_sorted_rows(self, *, check_unknown: bool = True) -> tuple[list[dict[str, Any]], int] | None:
         """Issue #1598: ``(rows, n)`` when the first ``n`` rows (all of them, now) are time-sorted, else ``None``.
 
         Only rows appended since the last check are parsed (normally none or one); a list the log has not seen
         (assigned directly) is checked once in full. Rows are only ever appended, never edited, so a verified prefix
         stays valid. Safe from an executor thread: ``rows`` is a stable reference and ``n`` bounds the bisection.
+        ``check_unknown=False`` (the prune, Issue #1599) returns ``None`` instead of checking a list the log has no
+        record of, since the prune's own full walk then records it.
         """
         rows = self._entries
         n = len(rows)
         known, verified, last = self._order
         if known is not rows or verified > n:
+            if not check_unknown:
+                return None
             verified, last = 0, None
         if verified < 0:
             return None

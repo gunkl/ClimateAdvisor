@@ -21,7 +21,7 @@ if "homeassistant" not in sys.modules:
     _install_ha_stubs()
 
 from custom_components.climate_advisor import automation as _am  # noqa: E402
-from tests.test_hvac_mode_alignment import NOW, _engine, _patched, _Timers  # noqa: E402
+from tests.test_hvac_mode_alignment import NOW, _engine, _past_echo_window, _patched, _Timers  # noqa: E402
 
 _PKG = Path(__file__).parent.parent / "custom_components" / "climate_advisor"
 
@@ -44,12 +44,14 @@ def _issues(coord, now):
         return coord._compute_hvac_control_issues()
 
 
-def _open_mode_episode(engine, timers):
-    """Drive the REAL engine to an open 'thermostat ignored the requested mode' episode."""
+def _open_mode_episode(engine, timers) -> datetime:
+    """Drive the REAL engine to an open 'thermostat ignored the requested mode' episode; returns when it opened."""
     asyncio.run(engine._set_temperature(70.0, reason="t", mode="heat"))
     timers.fire(engine, 10)
-    timers.fire(engine, 130)
+    # Issue #1595: the thermostat still shows its old mode, so the episode opens at the echo window end, not at 130 s.
+    opened = _past_echo_window(timers, engine)
     assert engine._hvac_write_record.episode_reason == "heat"
+    return opened
 
 
 def _open_failure_episode(engine):
@@ -64,8 +66,8 @@ class TestComputeHvacControlIssues:
         timers = _Timers()
         p1, p2, p3 = _patched(timers)
         with p1, p2, p3:
-            _open_mode_episode(engine, timers)
-        out = _issues(_coord(engine), NOW + timedelta(minutes=12))
+            opened = _open_mode_episode(engine, timers)
+        out = _issues(_coord(engine), opened + timedelta(minutes=12))
         assert [i["issue"] for i in out] == ["mode_not_obeyed"]
         d = out[0]["detail"]
         assert "heat" in d and "'off'" in d and "12 min" in d
@@ -95,10 +97,10 @@ class TestComputeHvacControlIssues:
         timers = _Timers()
         p1, p2, p3 = _patched(timers)
         with p1, p2, p3:
-            _open_mode_episode(engine, timers)
-            _open_failure_episode(engine)
+            opened = _open_mode_episode(engine, timers)
+            _open_failure_episode(engine)  # opens at the same (frozen) time as the mode episode
         # Issue #1121: command_failing is held until the failure episode is >= 5 min old.
-        assert {i["issue"] for i in _issues(_coord(engine), NOW + timedelta(minutes=5))} == {
+        assert {i["issue"] for i in _issues(_coord(engine), opened + timedelta(minutes=5))} == {
             "mode_not_obeyed",
             "command_failing",
         }

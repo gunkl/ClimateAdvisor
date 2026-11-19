@@ -35,9 +35,10 @@ def decide_setpoint_verify(
     manual_override_active: bool,
     actual_temp: float | None,
 ) -> SetpointVerifyOutcome:
-    """Pure reimplementation of _do_verify_after_fan_on()/_do_verify_after_fan_off()'s
-    (identical) decision logic. The shell owns actually calling _set_temperature()
-    when the outcome is REASSERT."""
+    """Pure decision of the post-fan setpoint verify (``AutomationEngine._arm_post_fan_setpoint_verify``, once
+    the two identical fan-on/fan-off closures). The shell owns actually calling _set_temperature()
+    when the outcome is REASSERT, and first waits out the echo window of a write the thermostat
+    has not answered yet (Issue #1272)."""
     if current_write_seq != verify_write_seq:
         return SetpointVerifyOutcome.STALE
     if expected_temp is None or expected_mode is None:

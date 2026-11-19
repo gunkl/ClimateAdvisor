@@ -125,7 +125,6 @@ from .const import (
     OCCUPANCY_HOME,
     OCCUPANCY_VACATION,
     OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
-    OWN_WRITE_ECHO_WINDOW_S,
     PEAK_DECLINE_MARGIN_F,
     REMOTE_OFFSET_EXIT_GRACE_S,
     REMOTE_OFFSET_LATENCY_EWMA_ALPHA,
@@ -163,8 +162,10 @@ from .own_write_echo import (
     context_id_matches,
     decide_mode_echo,
     decide_setpoint_echo,
+    echo_window_wait_s,
     hold_tolerance,
     holds_own_setpoint,
+    outstanding_own_mode_write,
     outstanding_own_write,
     prune_own_writes,
     resolve_step,
@@ -2177,6 +2178,11 @@ class AutomationEngine:
         # i.e. target + remote-sensor offset). Re-asserting writers pass this back through the single setpoint
         # path so the offset is never applied twice.
         self._pending_setpoint_target: float | None = None
+        # Issue #1272: the value SENT (thermostat unit) and what the thermostat reported BEFORE that write (internal F):
+        # every read-back verify of the last write (10 s, post-fan) asks ``_setpoint_echo_wait_s`` whether it is still
+        # unanswered from these two.
+        self._pending_setpoint_sent: float | None = None
+        self._pending_setpoint_before_f: float | None = None
         # Issue #1194 (a): remote-sensor outer loop state (see ``remote_offset_check``). In-memory only: a restart
         # is a clean slate (offset 0, applied unknown) exactly like the manual-override state.
         self._remote_target_f: float | None = None  # comfort target of the last setpoint write (internal F)
@@ -6388,7 +6394,9 @@ class AutomationEngine:
             },
         )
 
-    def _check_mode_alignment(self, my_seq: int, *, announce: bool) -> ModeAlignmentOutcome:
+    def _check_mode_alignment(
+        self, my_seq: int, *, announce: bool, before_mode: str | None = None
+    ) -> ModeAlignmentOutcome:
         """Read back whether the thermostat is in the mode last requested (Issue #1049, change 2).
 
         ``announce=False`` (the early 10 s check) only starts the mismatch clock -- cloud
@@ -6396,6 +6404,10 @@ class AutomationEngine:
         ``announce=True`` (the >=130 s re-check) opens a once-per-episode ``hvac_mode_not_applied``
         via ``next_fallback_episode`` and closes it with ``hvac_mode_applied_recovered`` when the
         thermostat is finally in the requested mode.
+
+        Issue #1595: ``before_mode`` is what the thermostat reported before the write. When the re-check finds it
+        still there and the write is still outstanding in the #1246 mode echo memory, the write is not answered yet:
+        the re-check waits for the end of the echo window instead of announcing (``_mode_echo_wait_s``).
         """
         state = self.hass.states.get(self.climate_entity)
         live = getattr(state, "state", None) if state is not None else None
@@ -6431,6 +6443,17 @@ class AutomationEngine:
         since = rec.mismatch_since or now
         self._update_write_record(apply_skip_reason=None, mismatch_since=since)
         if not announce:
+            return outcome
+        wait_s = self._mode_echo_wait_s(requested, live, before_mode)
+        if wait_s is not None:
+            _LOGGER.info(
+                "HVAC mode not answered yet: requested %s, thermostat still reports %r -- re-checking in %.0fs "
+                "(echo window)",
+                requested,
+                live,
+                wait_s,
+            )
+            self._schedule_mode_alignment_recheck(my_seq, delay_s=wait_s)  # judged at the window end, no second wait
             return outcome
         step = next_fallback_episode(requested, rec.episode_reason, since, now)
         self._update_write_record(episode_reason=step.announced, mismatch_since=step.since)
@@ -6527,8 +6550,14 @@ class AutomationEngine:
             previous()
         setattr(self, slot, _call_later(self, delay, fn))
 
-    def _schedule_mode_alignment_recheck(self, my_seq: int) -> None:
-        """Schedule the >=130 s read-back mode check in its own cancel slot (Issue #1049)."""
+    def _schedule_mode_alignment_recheck(
+        self, my_seq: int, *, before_mode: str | None = None, delay_s: float = MODE_ALIGNMENT_RECHECK_S
+    ) -> None:
+        """Schedule the >=130 s read-back mode check in its own cancel slot (Issue #1049).
+
+        ``before_mode``: the thermostat's mode before the write, so the re-check can tell an unanswered write from a
+        refused one (Issue #1595); ``delay_s``: the re-check of an unanswered write lands at the echo window end.
+        """
         if self._mode_align_recheck_cancel:
             self._mode_align_recheck_cancel()
             self._mode_align_recheck_cancel = None
@@ -6536,9 +6565,29 @@ class AutomationEngine:
         @callback
         def _recheck(_now: Any) -> None:
             self._mode_align_recheck_cancel = None
-            self._check_mode_alignment(my_seq, announce=True)
+            self._check_mode_alignment(my_seq, announce=True, before_mode=before_mode)
 
-        self._mode_align_recheck_cancel = _call_later(self, MODE_ALIGNMENT_RECHECK_S, _recheck)
+        self._mode_align_recheck_cancel = _call_later(self, delay_s, _recheck)
+
+    def _mode_echo_wait_s(self, requested: str | None, live: object, before_mode: str | None) -> float | None:
+        """Seconds until the echo window of an UNANSWERED mode write ends, or None (the re-check may announce now).
+
+        The mode twin of ``_setpoint_echo_wait_s`` (Issue #1595): unanswered = the thermostat still reports the mode it
+        had before the write (``before_mode``) and a write of ``requested`` is still outstanding in the #1246 mode echo
+        memory (``own_write_echo.outstanding_own_mode_write``; an arrived echo is consumed). A thermostat that reports
+        any other mode answered, so it is never waited for. Never raises: a bookkeeping problem means "judge now".
+        """
+        if not requested or before_mode is None or live != before_mode or live == requested:
+            return None
+        writes = getattr(self, "_own_mode_writes", None)
+        if not writes:
+            return None
+        now = dt_util.now()
+        try:
+            write = outstanding_own_mode_write(writes, mode=requested, now=now)
+            return None if write is None else echo_window_wait_s(write, now)
+        except TypeError:  # naive/aware (or stubbed) clock mix: judge now, as before
+            return None
 
     async def _set_hvac_mode(self, mode: str, *, reason: str | i18n.Msg) -> HvacCommandResult:
         """Set the thermostat HVAC mode and report what happened (Issue #1049)."""
@@ -6580,6 +6629,7 @@ class AutomationEngine:
         self._record_commanded_mode(mode, reason)
         self._last_commanded_hvac_time = dt_util.now()
         _cs_reaffirm = self.hass.states.get(self.climate_entity)
+        _mode_before = getattr(_cs_reaffirm, "state", None)  # Issue #1595: what the thermostat showed before this write
         if _cs_reaffirm and _cs_reaffirm.state == mode:
             _LOGGER.debug("_set_hvac_mode: thermostat already %r — re-affirming", mode)
         try:
@@ -6612,7 +6662,7 @@ class AutomationEngine:
             self._mode_switch_marker = (mode, dt_util.now())
             self._update_write_record(result=HvacCommandResult.EXECUTED if _call.ok else HvacCommandResult.UNCONFIRMED)
             # Read back later (Off direction included): did the thermostat actually take it?
-            self._schedule_mode_alignment_recheck(_mode_seq)
+            self._schedule_mode_alignment_recheck(_mode_seq, before_mode=_mode_before)
             _LOGGER.info("Set HVAC mode to %s — %s role=%s", mode, reason, self.role)
             self._record_action(_R("action_set_hvac", mode=str(mode)), reason)
             # When taking HVAC offline, assert fan_mode=auto to clear any post-heat
@@ -6946,6 +6996,9 @@ class AutomationEngine:
         # What the thermostat reported BEFORE this write: the read-back verify tells "not answered yet" (still this
         # value, the echo outstanding) from "answered with a different value" (Issue #1194 e F1).
         _before_write_f = read_state_temp_f(self.hass.states.get(self.climate_entity), "temperature", unit)
+        self._pending_setpoint_sent = service_temp
+        self._pending_setpoint_before_f = _before_write_f
+        _mode_before = getattr(self.hass.states.get(self.climate_entity), "state", None)  # Issue #1595
         try:
             # Single call: hvac_mode + temperature together.  Including hvac_mode in every
             # call bypasses HA deduplication (the mode key makes each call distinct) and
@@ -7018,7 +7071,7 @@ class AutomationEngine:
             if outcome in (SetpointVerifyOutcome.STALE, SetpointVerifyOutcome.NO_READING):
                 return
             if outcome is SetpointVerifyOutcome.REASSERT:
-                _echo_wait_s = self._setpoint_echo_wait_s(service_temp, reported, _before_write_f)
+                _echo_wait_s = self._setpoint_echo_wait_s(reported)
                 if _echo_wait_s is not None:
                     # A slow cloud thermostat: the write is still unanswered (it reports the value it had before, and
                     # #1232's echo memory still holds this write). Not a rejection yet -- re-check when the echo
@@ -7197,7 +7250,7 @@ class AutomationEngine:
         # Issue #1144 / #1135: a newer write supersedes the previous write's pending acceptance check; the
         # helper cancels the older 10 s timer (unload could not cancel an overwritten, untracked handle).
         self._rearm_timer("_setpoint_retry_cancel", 10, _schedule_check)
-        self._schedule_mode_alignment_recheck(_my_seq)
+        self._schedule_mode_alignment_recheck(_my_seq, before_mode=_mode_before)
         _LOGGER.info(
             "Set temperature to %s (mode=%s) — zone=%s %s role=%s",
             format_temp(temperature, unit),
@@ -18950,17 +19003,19 @@ class AutomationEngine:
         except TypeError:  # naive/aware (or stubbed) clock mix: drop the old entries, never fail the command
             self._own_setpoint_writes = new
 
-    def _setpoint_echo_wait_s(
-        self, sent_value: float, reported_f: float | None, before_f: float | None
-    ) -> float | None:
-        """Seconds until the echo window of an UNANSWERED setpoint write ends, or None (the verify may judge it now).
+    def _setpoint_echo_wait_s(self, reported_f: float | None) -> float | None:
+        """Seconds until the echo window of the last setpoint write ends while it is UNANSWERED, else None (judge now).
 
-        Unanswered = the thermostat still reports the value it had before the write (``before_f``, internal F) and the
-        write (``sent_value``, the thermostat's unit, as sent) is still outstanding in #1232's echo memory
-        (``outstanding_own_write``). A thermostat that answered with a different value (clamped, refused) is never
-        waited for. Never raises: any bookkeeping problem means "judge now", as before.
+        Unanswered = the thermostat still reports the value it had before the write (``_pending_setpoint_before_f``,
+        internal F) and the write (``_pending_setpoint_sent``, the thermostat's unit, as sent) is still outstanding in
+        #1232's echo memory (``outstanding_own_write``). A thermostat that answered with a different value (clamped,
+        refused, a program revert) is never waited for. Shared by the 10 s read-back verify (#1194 e F1) and the
+        post-fan verifies (#1272); each checks its write sequence first, so "the last write" is the one it judges.
+        Never raises: any bookkeeping problem means "judge now", as before.
         """
-        if reported_f is None or before_f is None or abs(reported_f - before_f) >= 0.1:
+        sent_value = getattr(self, "_pending_setpoint_sent", None)
+        before_f = getattr(self, "_pending_setpoint_before_f", None)
+        if sent_value is None or reported_f is None or before_f is None or abs(reported_f - before_f) >= 0.1:
             return None
         writes = getattr(self, "_own_setpoint_writes", None)
         if not writes:
@@ -18982,9 +19037,69 @@ class AutomationEngine:
             )
             if write is None:
                 return None
-            return max(1.0, OWN_WRITE_ECHO_WINDOW_S - seconds_since(write.written_at, now=now) + 1.0)
+            return echo_window_wait_s(write, now)
         except TypeError, ValueError:
             return None
+
+    def _arm_post_fan_setpoint_verify(self, slot: str) -> None:
+        """Re-assert the last commanded setpoint 30 s after a fan command if the thermostat does not show it.
+
+        Ecobee may revert to its comfort program after a fan command. Shared by ``_activate_fan()`` (slot
+        ``_fan_on_verify_cancel``) and ``_deactivate_fan()`` (``_fan_off_verify_cancel``), which carried byte-for-byte
+        identical copies; the decision is ``setpoint_verify_decision.decide_setpoint_verify()``.
+
+        Issue #1272: a slow cloud thermostat that has not answered the write yet (still the value it had before, the
+        write still outstanding in #1232's echo memory) is not a revert -- re-sending the same setpoint would be a
+        duplicate write. The verify then re-checks in its own slot when the echo window ends, re-running the whole
+        decision (write sequence, the occupant's protected change), the same wait as the 10 s read-back verify.
+        """
+        verify_seq = self._write_seq
+        expected_temp = self._pending_setpoint_single
+        expected_mode = self._last_commanded_hvac_mode
+
+        async def _verify() -> None:
+            actual_temp = read_state_temp_f(self.hass.states.get(self.climate_entity), "temperature", self._temp_unit)
+            outcome = decide_setpoint_verify(
+                current_write_seq=self._write_seq,
+                verify_write_seq=verify_seq,
+                expected_temp=expected_temp,
+                expected_mode=expected_mode,
+                # Issue #1133: a PENDING change is the occupant's too -- do not reassert over it at 30 s.
+                manual_override_active=self._manual_change_protected(),
+                actual_temp=actual_temp,
+            )
+            if outcome is not SetpointVerifyOutcome.REASSERT:
+                return
+            wait_s = self._setpoint_echo_wait_s(actual_temp)
+            if wait_s is not None:
+                _LOGGER.info(
+                    "Post-fan setpoint verify: thermostat %.1f°F not answered yet (expected %.1f°F) -- "
+                    "re-checking in %.0fs (echo window)",
+                    actual_temp,
+                    expected_temp,
+                    wait_s,
+                )
+                self._rearm_timer(slot, wait_s, _post_fan_verify_due)
+                return
+            _LOGGER.info(
+                "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
+                actual_temp,
+                expected_temp,
+                expected_mode,
+            )
+            # Issue #1194 (a): re-assert the comfort TARGET (the single path re-applies the offset);
+            # ``expected_temp`` is the commanded value and would be offset twice.
+            await self._set_temperature(
+                self._pending_setpoint_target if self._pending_setpoint_target is not None else expected_temp,
+                reason="post-fan-verify/repair",
+                mode=expected_mode,
+            )
+
+        @callback
+        def _post_fan_verify_due(_now: Any) -> None:
+            self.hass.async_create_task(_verify())
+
+        self._rearm_timer(slot, 30.0, _post_fan_verify_due)
 
     def _settle_own_setpoint_write(self, context_id: str, *, sent: bool) -> None:
         """After the awaited call returns: forget a write that never reached the thermostat, else restart its window.
@@ -19542,49 +19657,7 @@ class AutomationEngine:
                 )
 
             # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
-            # Re-assert our setpoint within 30s so the coordinator's _is_recent_temp_command guard
-            # covers any delayed state report.
-            _verify_seq = self._write_seq
-            _expected_temp = self._pending_setpoint_single
-            _expected_mode = self._last_commanded_hvac_mode
-
-            async def _do_verify_after_fan_on() -> None:
-                # Architecture-reset Step 2: the decision now lives in
-                # setpoint_verify_decision.decide_setpoint_verify() — shared with
-                # _do_verify_after_fan_off(), which had byte-for-byte identical logic
-                # before this consolidation (found during the #429 dedup sweep).
-                unit = self._temp_unit
-                current_state = self.hass.states.get(self.climate_entity)
-                actual_temp = read_state_temp_f(current_state, "temperature", unit)
-                outcome = decide_setpoint_verify(
-                    current_write_seq=self._write_seq,
-                    verify_write_seq=_verify_seq,
-                    expected_temp=_expected_temp,
-                    expected_mode=_expected_mode,
-                    # Issue #1133: a PENDING change is the occupant's too -- do not reassert over it at 30 s.
-                    manual_override_active=self._manual_change_protected(),
-                    actual_temp=actual_temp,
-                )
-                if outcome is SetpointVerifyOutcome.REASSERT:
-                    _LOGGER.info(
-                        "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
-                        actual_temp,
-                        _expected_temp,
-                        _expected_mode,
-                    )
-                    # Issue #1194 (a): re-assert the comfort TARGET (the single path re-applies the offset);
-                    # ``_expected_temp`` is the commanded value and would be offset twice.
-                    await self._set_temperature(
-                        self._pending_setpoint_target if self._pending_setpoint_target is not None else _expected_temp,
-                        reason="post-fan-verify/repair",
-                        mode=_expected_mode,
-                    )
-
-            @callback
-            def _verify_setpoint_after_fan_on(_now: Any) -> None:
-                self.hass.async_create_task(_do_verify_after_fan_on())
-
-            self._rearm_timer("_fan_on_verify_cancel", 30.0, _verify_setpoint_after_fan_on)
+            self._arm_post_fan_setpoint_verify("_fan_on_verify_cancel")
 
             # Issue #327: thermostatic backstop timer — fires every 5 min while the fan
             # is CA-owned; calls fan_thermostat_check so a slow-updating outdoor sensor
@@ -20795,49 +20868,7 @@ class AutomationEngine:
                 )
 
             # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
-            # Re-assert our setpoint within 30s so the coordinator's _is_recent_temp_command guard
-            # covers any delayed state report.
-            _verify_seq = self._write_seq
-            _expected_temp = self._pending_setpoint_single
-            _expected_mode = self._last_commanded_hvac_mode
-
-            async def _do_verify_after_fan_off() -> None:
-                # Architecture-reset Step 2: the decision now lives in
-                # setpoint_verify_decision.decide_setpoint_verify() — shared with
-                # _do_verify_after_fan_on(), which had byte-for-byte identical logic
-                # before this consolidation (found during the #429 dedup sweep).
-                unit = self._temp_unit
-                current_state = self.hass.states.get(self.climate_entity)
-                actual_temp = read_state_temp_f(current_state, "temperature", unit)
-                outcome = decide_setpoint_verify(
-                    current_write_seq=self._write_seq,
-                    verify_write_seq=_verify_seq,
-                    expected_temp=_expected_temp,
-                    expected_mode=_expected_mode,
-                    # Issue #1133: a PENDING change is the occupant's too -- do not reassert over it at 30 s.
-                    manual_override_active=self._manual_change_protected(),
-                    actual_temp=actual_temp,
-                )
-                if outcome is SetpointVerifyOutcome.REASSERT:
-                    _LOGGER.info(
-                        "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
-                        actual_temp,
-                        _expected_temp,
-                        _expected_mode,
-                    )
-                    # Issue #1194 (a): re-assert the comfort TARGET (the single path re-applies the offset);
-                    # ``_expected_temp`` is the commanded value and would be offset twice.
-                    await self._set_temperature(
-                        self._pending_setpoint_target if self._pending_setpoint_target is not None else _expected_temp,
-                        reason="post-fan-verify/repair",
-                        mode=_expected_mode,
-                    )
-
-            @callback
-            def _verify_setpoint_after_fan_off(_now: Any) -> None:
-                self.hass.async_create_task(_do_verify_after_fan_off())
-
-            self._rearm_timer("_fan_off_verify_cancel", 30.0, _verify_setpoint_after_fan_off)
+            self._arm_post_fan_setpoint_verify("_fan_off_verify_cancel")
         finally:
             self._fan_command_pending = False
             if not _command_issued:

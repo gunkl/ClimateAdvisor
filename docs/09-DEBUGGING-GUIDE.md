@@ -201,7 +201,7 @@ python3 tools/ha_logs.py --lines 3000 --filter "unit\|Observed outdoor extreme"
 
 **Confirming a thermostat that ignores the mode (all of these together):**
 1. `last_command.mode` is `heat`/`cool`, `live_state` is something else (typically `off`), `live_state_matches_commanded` is `false`, and `read_back_skip_reason` is `null` (the check ran and judged).
-2. `recent_hvac_events` shows `hvac_mode_not_applied` (`kind: not_obeyed`, `requested_mode`, `actual_mode`) about 130 s after a `comfort_band_applied` / `setpoint_*` event whose `outcome` is `sent`. One row per episode; it closes with `hvac_mode_applied_recovered` (`minutes_down`).
+2. `recent_hvac_events` shows `hvac_mode_not_applied` (`kind: not_obeyed`, `requested_mode`, `actual_mode`) about 130 s (at most ~181 s, when the thermostat still showed its old mode: Issue #1595) after a `comfort_band_applied` / `setpoint_*` event whose `outcome` is `sent`. One row per episode; it closes with `hvac_mode_applied_recovered` (`minutes_down`).
 3. Logs (`python tools/ha_logs.py --lines 3000`, grep): `Switching HVAC mode before setpoint write` (CA did send the explicit mode switch), then WARNING `HVAC mode not applied -- requested ... but thermostat reports ...`. If the switch line is absent, CA believed the mode already matched (check `live_state` freshness / the 120 s dedupe) -- if present and the thermostat still reports the old mode, the integration is swallowing `climate.set_hvac_mode` itself.
 4. The Status tab / `GET /api/climate_advisor/status` -> `hvac_control_issues` has a `mode_not_obeyed` entry while the episode is open.
 

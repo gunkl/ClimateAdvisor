@@ -31,7 +31,7 @@ from tests.test_heat_cool_override import (
     _make_coordinator_stub,
     _make_event,
 )
-from tests.test_hvac_mode_alignment import NOW, _engine, _patched, _Timers
+from tests.test_hvac_mode_alignment import NOW, _engine, _past_echo_window, _patched, _Timers
 from tools.sim_harness.outcomes import check_assertion
 
 
@@ -52,7 +52,8 @@ def _issues(coord, now=NOW):
 def _open_episode(engine, timers):
     asyncio.run(engine._set_temperature(70.0, reason="t", mode="heat"))
     timers.fire(engine, 10)
-    timers.fire(engine, 130)
+    # Issue #1595: the thermostat still shows its old mode, so the episode opens at the echo window end, not at 130 s.
+    _past_echo_window(timers, engine)
     assert engine._hvac_write_record.episode_reason == "heat"
 
 
@@ -184,7 +185,7 @@ class TestStatusRefreshOncePerEpisode:
             asyncio.run(engine._set_temperature(70.0, reason="t", mode="heat"))
             timers.fire(engine, 10)
             engine._request_refresh_callback.assert_not_called()  # early check only starts the clock
-            timers.fire(engine, 130)
+            _past_echo_window(timers, engine)  # Issue #1595: opens at the echo window end (old mode still shown)
             assert engine._request_refresh_callback.call_count == 1  # open
             timers.fire(engine, 130)
             timers.fire(engine, 130)

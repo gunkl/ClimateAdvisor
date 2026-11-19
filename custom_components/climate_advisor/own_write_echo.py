@@ -230,6 +230,32 @@ def outstanding_own_write(
     return None
 
 
+def outstanding_own_mode_write(
+    writes: Iterable[OwnModeWrite],
+    *,
+    mode: str,
+    now: datetime,
+    window_s: float = OWN_WRITE_ECHO_WINDOW_S,
+) -> OwnModeWrite | None:
+    """The newest remembered write of ``mode`` whose echo has not come back yet (Issue #1595).
+
+    The mode twin of ``outstanding_own_write``, for the read-back mode re-check: the write is still in the #1246 memory
+    (``decide_mode_echo`` consumes it on arrival) and still inside the same echo window. None otherwise.
+    """
+    for write in reversed(tuple(writes)):
+        if write.mode == mode and (now - write.written_at).total_seconds() < window_s:
+            return write
+    return None
+
+
+def echo_window_wait_s(write: _Stamped, now: datetime, *, window_s: float = OWN_WRITE_ECHO_WINDOW_S) -> float:
+    """Seconds until ``write``'s echo window has ended, plus 1 s so a re-check lands after it (at least 1 s).
+
+    The one wait every read-back re-check uses for an outstanding write: setpoint (#1194 e, #1272) and mode (#1595).
+    """
+    return max(1.0, window_s - seconds_since(write.written_at, now=now) + 1.0)  # Issue #1244: real time
+
+
 def _applies(write: OwnSetpointWrite, attribute: str) -> bool:
     if write.attribute == attribute:
         return True

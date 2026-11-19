@@ -79,6 +79,31 @@ def test_remote_offset_1194e_scenarios_discovered() -> None:
     assert len(_REMOTE_OFFSET_FILES) >= 17, "the remote-offset Tier A scenario set is missing"
 
 
+# Issue #1243: the dashboard-cancel scenarios (a lone grace, the fan-off pause, a fan-only override) live in pending/
+# (goldens are locked) and are enforced here by name; every assertion is evaluated, none is skipped. The same files
+# run through real Home Assistant and the real API views in tests_ha/test_cancel_events_realha_1243.py.
+_CANCEL_1243_FILES = sorted(PENDING_DIR.glob("issue_1243_*.json"))
+
+
+@pytest.mark.parametrize("scenario_path", _CANCEL_1243_FILES, ids=lambda p: p.stem.removeprefix("issue_1243_"))
+def test_issue_1243_cancel_pending_scenario_passes_production_engine(scenario_path: Path) -> None:
+    from simulate import run_scenario_production  # noqa: PLC0415
+
+    result = run_scenario_production(scenario_path, state="pending")
+    assert not result.get("callback_errors"), f"{scenario_path.stem}: callback errors: {result['callback_errors']}"
+    real = [a for a in result["assertions"] if not a.get("skipped")]
+    assert real and len(real) == len(result["assertions"]), "no assertion of a cancel scenario may be skipped"
+    assert result["passed"] is True, f"{scenario_path.stem}: " + "; ".join(
+        f"@{a['at']} expected={a['expected']!r} actual={a['actual']!r}"
+        for a in result["assertions"]
+        if a.get("pass") is False
+    )
+
+
+def test_issue_1243_cancel_scenarios_discovered() -> None:
+    assert len(_CANCEL_1243_FILES) == 3, [p.stem for p in _CANCEL_1243_FILES]
+
+
 def test_all_goldens_discovered() -> None:
     """Guard against an empty parametrization silently passing."""
     assert len(_GOLDEN_FILES) >= 20, f"expected the full golden set, found {len(_GOLDEN_FILES)}"

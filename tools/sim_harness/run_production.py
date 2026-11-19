@@ -40,10 +40,14 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
                               for a SUBSEQUENT plain sensor_open event to correctly compute
                               old_state.state == "unavailable" and exercise the real
                               _async_door_window_changed() reconnect-blip path (Issue #645).
-  cancel_override         → (use_coordinator=True only) replicates api.py's
-                              ClimateAdvisorCancelOverrideView.post(): clear_manual_override()
-                              + _cancel_grace_timers() synchronously, then a real 10s
-                              async_call_later before re-applying coordinator._current_classification
+  cancel_override         → (use_coordinator=True only) the two production calls of api.py's
+                              ClimateAdvisorCancelOverrideView.post(): decide_sync(ae.cancel_override,
+                              reason="user_cancel_override"), then, if it cancelled something,
+                              api._schedule_reclassify_after_cancel() (its 10 s re-apply of
+                              coordinator._current_classification runs on the virtual clock)
+  cancel_fan_override     → (use_coordinator=True only) the same for
+                              ClimateAdvisorCancelFanOverrideView.post(),
+                              reason="user_cancel_fan_override" (Issue #1243)
   classification          → build DayClassification from event fields
                             + run_coro(engine.apply_classification(classification))
   occupancy_away          → engine.set_occupancy_mode("away")
@@ -170,6 +174,12 @@ _snapshot_engine_state = snapshot_engine_state
 _parse_event_time = parse_event_time
 
 __all__ = ["FakeHassSession", "ProductionRunResult", "run_production_scenario"]
+
+# Issue #1243: the dashboard's two cancel buttons, each the reason its api.py view passes to cancel_override().
+_CANCEL_EVENT_REASONS = {
+    "cancel_override": "user_cancel_override",
+    "cancel_fan_override": "user_cancel_fan_override",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1003,30 +1013,20 @@ def _dispatch_event(
                 fan_mode_attr=new_fan_mode_attr,
             )
 
-    elif etype == "cancel_override":
-        # Issue #476: replicates api.py's ClimateAdvisorCancelOverrideView.post()
-        # exactly — clear_manual_override() + _cancel_grace_timers() synchronously,
-        # then a real 10-second async_call_later before re-applying the current
-        # classification. This is the production code path for the dashboard's
-        # "Cancel Override" button (cancel_override_then_resume.json). Requires a
-        # real coordinator — there is no engine-only equivalent since the delayed
-        # re-apply is coordinator-owned state (coordinator._current_classification).
+    elif etype in _CANCEL_EVENT_REASONS:
+        # Issues #476, #1243: the dashboard's "Cancel Override" / "Cancel Fan Override" buttons. The same two
+        # production calls both api.py views make (ClimateAdvisorCancelOverrideView /
+        # ClimateAdvisorCancelFanOverrideView.post()): ae.cancel_override(reason=...) through decide_sync, then, when
+        # something was cancelled, api._schedule_reclassify_after_cancel() -- its 10 s follow-up runs on the virtual
+        # clock (FakeScheduler patches api.async_call_later). Only the HTTP response wording is left out. Requires a
+        # real coordinator: the follow-up re-applies coordinator-owned state (coordinator._current_classification).
         if coordinator is not None:
-            import custom_components.climate_advisor.coordinator as _coord_mod  # noqa: PLC0415
+            from custom_components.climate_advisor.api import _schedule_reclassify_after_cancel  # noqa: PLC0415
+            from custom_components.climate_advisor.engine_inputs import decide_sync  # noqa: PLC0415
 
             ae = coordinator.automation_engine
-            if ae._manual_override_active:
-                ae.clear_manual_override()
-                ae._cancel_grace_timers()
-
-                @_coord_mod.callback
-                def _apply_after_delay(_now: Any, _coordinator: Any = coordinator, _ae: Any = ae) -> None:
-                    if _coordinator._current_classification:
-                        _coordinator.hass.async_create_task(
-                            _ae.apply_classification(_coordinator._current_classification)
-                        )
-
-                _coord_mod.async_call_later(coordinator.hass, 10, _apply_after_delay)
+            if decide_sync(coordinator, ae.cancel_override, reason=_CANCEL_EVENT_REASONS[etype]):
+                _schedule_reclassify_after_cancel(coordinator.hass, coordinator, ae)
 
     elif etype in ("fan_cycle_on", "fan_cycle_off", "grace_start", "grace_end"):
         # FINDINGS: no clean production entry point — see module docstring.

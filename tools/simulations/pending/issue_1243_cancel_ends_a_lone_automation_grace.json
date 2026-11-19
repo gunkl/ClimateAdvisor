@@ -1,0 +1,100 @@
+{
+  "name": "issue_1243_cancel_ends_a_lone_automation_grace",
+  "description": "Issue #1243: the dashboard's Cancel Override button pressed while only Climate Advisor's own automation grace is running (no occupant override behind it) ends that grace, as production's cancel_override() does since #1095.",
+  "source": "synthetic",
+  "issue": 1243,
+  "notes": [
+    "Occupant impact: after a door closes, Climate Advisor resumes cooling and starts its own 90-minute automation grace; the dashboard shows that grace. The occupant presses Cancel Override to end it. The button must end the grace (the dashboard answers 'grace cancelled'); if it silently did nothing, the dashboard would keep showing a grace the occupant just cancelled.",
+    "Harness: the cancel_override event now makes the same two calls as api.py's ClimateAdvisorCancelOverrideView.post() -- decide_sync(ae.cancel_override, reason='user_cancel_override'), then _schedule_reclassify_after_cancel() when something was cancelled. The pre-#1243 event only acted when _manual_override_active was set, so on this scenario it did nothing and both assertions below failed (grace still active, no grace_cancelled row).",
+    "(a) Scenario effectiveness: delete the `or self._grace_active` term from cancel_override()'s nothing-to-cancel guard (automation.py, the `if not (self._occupant_override_active() or self._grace_active or self._fan_off_hold_active())` line) and cancel_override() returns False here: no grace_cancelled row and _grace_active stays true, so both assertions fail.",
+    "(b) Two-way alignment: docs/grace-periods-spec.md (Cancel Override ends a lone grace, #1095) and docs/sim-harness-spec.md (event dispatch table: cancel_override) describe what this scenario exercises.",
+    "(c) User outcome if a regression slipped through: the occupant's Cancel Override would no longer end a grace with no override behind it, and the dashboard would keep counting down a grace they cancelled.",
+    "Pending, not golden: goldens are locked until the owner approves a scenario card. Enforced by tests/test_production_harness.py::test_issue_1243_cancel_pending_scenario_passes_production_engine."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "automation_grace_seconds": 5400,
+    "door_window_sensors": [
+      "binary_sensor.front_door"
+    ],
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "events": [
+    {
+      "time": "2026-06-10T14:00:00",
+      "type": "classification",
+      "hvac_mode": "cool",
+      "day_type": "hot",
+      "today_high": 90,
+      "note": "Hot day, Climate Advisor cools."
+    },
+    {
+      "time": "2026-06-10T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 85.0,
+      "note": "Outdoor hotter than indoor: nat-vent not viable, so an open door pauses the AC."
+    },
+    {
+      "time": "2026-06-10T14:31:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_door",
+      "note": "Door opens: Climate Advisor pauses the AC."
+    },
+    {
+      "time": "2026-06-10T14:45:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.front_door",
+      "note": "Door closes: Climate Advisor resumes cooling and starts its own 90-minute automation grace. No occupant override exists."
+    },
+    {
+      "time": "2026-06-10T14:50:00",
+      "type": "cancel_override",
+      "note": "The occupant presses Cancel Override on the dashboard while only the automation grace runs."
+    },
+    {
+      "time": "2026-06-10T14:51:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 85.0,
+      "note": "Same readings; moves the clock past the cancel's 10 s follow-up re-apply."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T14:45:00",
+      "expect": "resumed",
+      "reason": "Precondition: the door close resumed cooling (this starts the automation grace)."
+    },
+    {
+      "at": "2026-06-10T14:50:00",
+      "expect": "event_emitted",
+      "event": "grace_cancelled",
+      "payload_subset": {
+        "reason": "user_cancel_override",
+        "grace_source": "automation"
+      },
+      "reason": "The Cancel Override press ended Climate Advisor's own grace, recorded with the button's reason."
+    },
+    {
+      "at": "2026-06-10T14:51:00",
+      "expect": "field_equals",
+      "field": "engine_state._grace_active",
+      "value": false,
+      "reason": "Final state: no grace is running (without the cancel the 90-minute grace would still run until 16:15)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Cancel Override ends a lone automation grace",
+    "observed_behavior": "grace_cancelled (reason user_cancel_override, grace_source automation) at 14:50; no grace at the end",
+    "expected_behavior": "The dashboard's Cancel Override ends any grace that is running, even with no occupant override behind it (#1095)"
+  }
+}

@@ -7516,12 +7516,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             setpoint_f=self._read_chart_setpoint(),
         )
 
+    def _v4_loop_facts(self) -> dict[str, Any]:
+        """The live bedroom loop's facts for the v4 forecasts (Issues #1593, #1616): the engine's loop description
+        (``remote_offset_state``, called through ``decide_sync`` so the coordinator's facts are passed in, as every
+        engine call from outside automation.py is), its raise clock and measured startup latency. READ-ONLY."""
+        engine = self.automation_engine
+        latency = getattr(engine, "_remote_startup_latency_s", None)
+        return {
+            "state": decide_sync(self, engine.remote_offset_state),
+            "raise_at": getattr(engine, "_remote_raise_at", None),
+            "latency_s": latency if isinstance(latency, (int, float)) else None,
+        }
+
     def _v4_live_sleep_loop(self, now: datetime, gated_steps: int = 0) -> Any:
         """The emulated bedroom loop for the v4 display forecast made now (Issue #1593): ``live_loop_emulator``
-        on the engine's READ-ONLY loop description (the offset in force, its raise clock, the live swing and the
-        measured startup latency). Display only: the emulator moves forecast setpoints, never the thermostat."""
+        on the live loop's facts (``_v4_loop_facts``) and the live loop's own swing. Display only: the emulator moves
+        forecast setpoints, never the thermostat."""
+        engine = self.automation_engine
         return v4_shadow.live_loop_emulator(
-            self.automation_engine,
+            **self._v4_loop_facts(),
+            swing_heat_f=engine._remote_swing_f("heat"),
+            swing_cool_f=engine._remote_swing_f("cool"),
             now=now,
             unit=self.config.get("temp_unit", "fahrenheit"),
             step_minutes=v4_shadow.step_minutes(),
@@ -7530,21 +7545,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _v4_night_loop_now(self, now: datetime) -> dict[str, Any]:
         """The live bedroom loop and run for ``v4_shadow.night_inputs`` (Issue #1593; used only when the night is
-        already under way): the offset in force and its raise clock (``v4_shadow.live_loop_seed``), the measured
-        startup latency, and the heating / cooling run from the newest chart rows (``run_state_from_rows``, as the
-        display cycle reads it). Read-only; a failed read plans the night from the loop's start (offset 0, no run)."""
+        already under way): the offset in force and its raise clock (``v4_shadow.live_loop_seed`` on
+        ``_v4_loop_facts``), the measured startup latency, and the heating / cooling run from the newest chart rows
+        (``run_state_from_rows``, as the display cycle reads it). Read-only; a failed read plans the night from the
+        loop's start (offset 0, no run)."""
         try:
-            engine = self.automation_engine
-            offset, since = v4_shadow.live_loop_seed(engine, now)
+            facts = self._v4_loop_facts()
+            offset, since = v4_shadow.live_loop_seed(facts["state"], facts["raise_at"], now)
             action, minutes = v4_shadow.run_state_from_rows(self._chart_log.raw_entries()[-80:], now)
-            latency = getattr(engine, "_remote_startup_latency_s", None)
         except Exception:  # noqa: BLE001 - advice never fails on a live read
             _LOGGER.debug("night strategy: live loop state unreadable; planning from offset 0", exc_info=True)
             return {}
         return {
             "loop_offset_f": offset,
             "loop_since_raise_s": since,
-            "loop_startup_latency_s": latency if isinstance(latency, (int, float)) else None,
+            "loop_startup_latency_s": facts["latency_s"],
             "run_now": (1 if action == "heating" else -1, float(minutes or 0.0)) if action else None,
         }
 

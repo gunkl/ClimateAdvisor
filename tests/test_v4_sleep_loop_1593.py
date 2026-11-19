@@ -73,20 +73,24 @@ class TestSeededEmulator:
 
     def test_live_seed_reads_only_an_offset_of_the_sleep_context(self):
         now = datetime(2026, 11, 18, 0, 50, tzinfo=PST)
-        eng = _FakeEngine(offset=2.0, context="sleep", raise_at=now - timedelta(minutes=6))
-        assert v4_shadow.live_loop_seed(eng, now) == (2.0, 360.0)
-        assert v4_shadow.live_loop_seed(_FakeEngine(offset=2.0, context=None), now) == (0.0, None)
-        assert v4_shadow.live_loop_seed(_FakeEngine(offset=None, context="sleep"), now) == (0.0, None)
-        assert v4_shadow.live_loop_seed(_FakeEngine(state=None), now) == (0.0, None)
-        assert v4_shadow.live_loop_seed(object(), now) == (0.0, None)
+        raised = now - timedelta(minutes=6)
+
+        def seed(**kw):
+            return v4_shadow.live_loop_seed(_FakeEngine(**kw).remote_offset_state(), raised, now)
+
+        assert seed(offset=2.0, context="sleep") == (2.0, 360.0)
+        assert seed(offset=2.0, context=None) == (0.0, None)
+        assert seed(offset=None, context="sleep") == (0.0, None)
+        assert seed(state=None) == (0.0, None)
+        assert v4_shadow.live_loop_seed(_FakeEngine().remote_offset_state(), None, now) == (2.0, None)
 
     def test_live_emulator_takes_swing_and_startup_wait_from_the_engine(self):
         now = datetime(2026, 11, 18, 0, 50, tzinfo=PST)
         eng = _FakeEngine(offset=2.0, context="sleep", raise_at=now - timedelta(seconds=60), latency=300.0, swing=1.44)
-        emu = v4_shadow.live_loop_emulator(eng, now=now, unit="fahrenheit", step_minutes=15)
+        emu = _live_loop(TestCoordinatorWiring._coord(None, [], eng), now)
         assert _call(emu, 66.5) == (68.0, 72.0)  # the live +2 F
         assert eng.swing_modes == ["heat", "cool"]  # the engine's own swing (``_remote_swing_f``), one source
-        emu2 = v4_shadow.live_loop_emulator(eng, now=now, unit="fahrenheit", step_minutes=15)
+        emu2 = _live_loop(TestCoordinatorWiring._coord(None, [], eng), now)
         assert _call(emu2, 64.0) == (68.0, 72.0)  # still inside the live startup wait
 
 
@@ -765,11 +769,15 @@ class TestCoordinatorWiring:
     def _coord(self, rows: list[dict], engine: Any) -> Any:
         from types import SimpleNamespace
 
-        return SimpleNamespace(
+        from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator as C
+
+        ns = SimpleNamespace(
             automation_engine=engine,
             config={"temp_unit": "fahrenheit"},
             _chart_log=SimpleNamespace(raw_entries=lambda: rows),
         )
+        ns._v4_loop_facts = lambda: C._v4_loop_facts(ns)
+        return ns
 
     def test_the_night_plan_reads_the_live_loop_and_the_run_in_progress(self):
         from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator as C
@@ -784,7 +792,7 @@ class TestCoordinatorWiring:
             "loop_startup_latency_s": 120.0,
             "run_now": (1, pytest.approx(6.0)),
         }
-        assert C._v4_night_loop_now(self._coord(rows, object()), now)["loop_offset_f"] == 0.0
+        assert C._v4_night_loop_now(self._coord(rows, object()), now) == {}  # unreadable: planned from offset 0
 
     def test_the_display_cycle_seeds_the_loop_and_arms_the_sleep_band(self):
         import ast
@@ -807,10 +815,10 @@ class TestCoordinatorWiring:
         assert _call(emu, 66.5) == (68.0, 72.0)
 
 
-def _live_loop(coord: Any) -> RemoteLoopEmulator:
+def _live_loop(coord: Any, now: datetime | None = None) -> RemoteLoopEmulator:
     from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator as C
 
-    return C._v4_live_sleep_loop(coord, datetime(2026, 11, 18, 0, 50, tzinfo=PST))
+    return C._v4_live_sleep_loop(coord, now or datetime(2026, 11, 18, 0, 50, tzinfo=PST))
 
 
 def test_every_home_gets_the_armed_sleep_band_not_only_one_with_a_sleep_sensor():

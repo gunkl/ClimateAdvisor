@@ -874,52 +874,57 @@ def run_state_from_rows(rows: Sequence[Mapping[str, Any]], now: datetime) -> tup
     return action, max(0.0, (now - first_ts).total_seconds() / 60.0)
 
 
-def live_loop_seed(engine: Any, now: datetime) -> tuple[float, float | None]:
+def live_loop_seed(state: Any, raise_at: datetime | None, now: datetime) -> tuple[float, float | None]:
     """``(offset_f, seconds_since_raise)`` the live bedroom loop holds now, for a forecast that starts mid-loop.
 
     Issue #1593: every display cycle (and a night re-plan after bedtime) used to start the emulated loop at offset 0,
-    so a raise already in force was forgotten and the next warm-up was missed. Read from the engine's ONE description
-    of the loop (``AutomationEngine.remote_offset_state``): the signed offset the thermostat holds (heat +, cool -)
-    while the SLEEP context supplies the reading, else 0 (another context, the primary sensor, a gate that cleared it:
-    ``None``). The raise clock is the engine's ``_remote_raise_at`` (None when unknown). Never raises.
+    so a raise already in force was forgotten and the next warm-up was missed. ``state`` is the engine's ONE
+    description of the loop (``AutomationEngine.remote_offset_state()``, read by the caller with its facts passed in):
+    the signed offset the thermostat holds (heat +, cool -) while the SLEEP context supplies the reading, else 0
+    (another context, the primary sensor, a gate that cleared it: ``None``). ``raise_at`` is when the live loop last
+    raised (the engine's ``_remote_raise_at``; None when unknown). Pure; never raises.
     """
     from .const import REMOTE_CONTEXT_SLEEP  # noqa: PLC0415
 
-    try:
-        st = engine.remote_offset_state()
-    except Exception:  # noqa: BLE001 - a display forecast never fails on the loop description
-        return 0.0, None
-    offset = getattr(st, "offset_f", None) if st is not None else None
-    if getattr(st, "context", None) != REMOTE_CONTEXT_SLEEP or not isinstance(offset, (int, float)):
+    offset = getattr(state, "offset_f", None) if state is not None else None
+    if getattr(state, "context", None) != REMOTE_CONTEXT_SLEEP or not isinstance(offset, (int, float)):
         return 0.0, None
     if not math.isfinite(offset) or abs(offset) < 1e-6:
         return 0.0, None
-    raised = getattr(engine, "_remote_raise_at", None)
     since: float | None = None
-    if isinstance(raised, datetime):
+    if isinstance(raise_at, datetime):
         try:
-            since = max(0.0, (now - raised).total_seconds())
+            since = max(0.0, (now - raise_at).total_seconds())
         except TypeError:  # naive/aware clock mix (stubs)
             since = None
     return float(offset), since
 
 
 def live_loop_emulator(
-    engine: Any, *, now: datetime, unit: str, step_minutes: int, gated_steps: int = 0
+    *,
+    state: Any,
+    raise_at: datetime | None,
+    latency_s: float | None,
+    swing_heat_f: float,
+    swing_cool_f: float,
+    now: datetime,
+    unit: str,
+    step_minutes: int,
+    gated_steps: int = 0,
 ) -> RemoteLoopEmulator:
-    """The emulated bedroom loop for a forecast made NOW: the live offset (:func:`live_loop_seed`), the live loop's
-    swing (``AutomationEngine._remote_swing_f``: the measured one, Issue #1477) and its startup wait (the measured
-    latency ``_remote_startup_latency_s``), so the forecast and the house share one rule and one set of numbers."""
-    offset, since = live_loop_seed(engine, now)
-    latency = getattr(engine, "_remote_startup_latency_s", None)
+    """The emulated bedroom loop for a forecast made NOW, from the live loop's facts (passed in by the caller): the
+    offset in force (:func:`live_loop_seed`), the live loop's swing (``AutomationEngine._remote_swing_f``: the measured
+    one, Issue #1477) and its startup wait (the measured latency ``_remote_startup_latency_s``), so the forecast and
+    the house share one rule and one set of numbers."""
+    offset, since = live_loop_seed(state, raise_at, now)
     return RemoteLoopEmulator(
-        swing_heat_f=engine._remote_swing_f("heat"),
-        swing_cool_f=engine._remote_swing_f("cool"),
+        swing_heat_f=swing_heat_f,
+        swing_cool_f=swing_cool_f,
         unit=unit,
         step_minutes=step_minutes,
         offset_f=offset,
         seconds_since_raise=since,
-        startup_latency_s=latency if isinstance(latency, (int, float)) else None,
+        startup_latency_s=latency_s if isinstance(latency_s, (int, float)) else None,
         gated_steps=gated_steps,
     )
 

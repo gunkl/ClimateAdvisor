@@ -206,8 +206,7 @@ _BARE_TASK_RATCHET = {
     ("automation.py", "_thermo_tick"): 1,
     ("automation.py", "_turn_off"): 1,
     ("automation.py", "_turn_on"): 1,
-    ("automation.py", "_verify_setpoint_after_fan_off"): 1,
-    ("automation.py", "_verify_setpoint_after_fan_on"): 1,
+    ("automation.py", "_post_fan_verify_due"): 1,  # Issue #1272: the two post-fan verify sites, merged
     ("automation.py", "clear_fan_override"): 1,
     ("automation.py", "handle_fan_manual_override"): 1,
     ("automation.py", "on_fan_turned_off"): 1,

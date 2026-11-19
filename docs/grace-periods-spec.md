@@ -1303,6 +1303,24 @@ thermostat answering with its limit is neither a rejection nor a manual change. 
 own check then waits for its own echo). Tests: `tests/test_setpoint_verify_late_echo_1194e.py` (echo at 45 s and 110 s, no
 echo by 180 s, a different value, an instant echo; heat and cool, both fan modes).
 
+*The post-fan verifies wait for the same window (Issue #1272).* What the person saw: on a cloud thermostat, a fan command
+shortly after a setpoint write made Climate Advisor send the SAME setpoint again 30 s later (`post-fan-verify/repair`), an
+extra thermostat write and Activity line for a write that had worked. The fan-on and fan-off verifies are now one method,
+`AutomationEngine._arm_post_fan_setpoint_verify(slot)` (slots `_fan_on_verify_cancel` / `_fan_off_verify_cancel`, decision
+`decide_setpoint_verify`), and on REASSERT they ask the same `_setpoint_echo_wait_s` as the 10 s verify. That helper reads
+the last write's sent value and pre-write reading (`_pending_setpoint_sent`, `_pending_setpoint_before_f`, stored next to
+`_pending_setpoint_single` by `_set_temperature_impl`). While the write is unanswered the verify logs "not answered yet"
+and re-arms in its own slot for the end of the window; that re-check re-runs the whole decision, so a newer write makes it
+stale and an occupant's change (confirmed or pending, `_manual_change_protected()`) is never overwritten. A thermostat that
+never answers is repaired once, at the window end. A comfort-program revert to a DIFFERENT value, or any revert after the
+echo arrived (the echo consumed the write), is repaired at 30 s as before. Accepted cost: a program that reverts to exactly
+the pre-write value BEFORE the echo arrives looks like "not answered yet" and is repaired at the window end (up to ~180 s)
+instead of at 30 s. Whole-house fan installs reach only the fan-on verify with a fresh write (every setpoint write is
+blocked while the fan owns the thermostat, and the restore after it is a newer write), and its repair is a blocked attempt.
+Tests: `tests/test_post_fan_verify_late_echo_1272.py` (echo at 45 s and 110 s, no echo, a different value, a revert after
+the echo, a newer write and an occupant change during the wait; heat and cool; `hvac_fan` fan on and off,
+`whole_house_fan` fan on).
+
 ### Note — Away/vacation setback and override detection (Issue #221)
 
 Away/vacation setback setpoint changes are guarded by `_is_recent_temp_command(30s)` in the coordinator's setpoint-change detection block (fix #221). When CA issues a setback setpoint command via `handle_occupancy_away()` or `handle_occupancy_vacation()`, `_set_temperature()` records a `_temp_command_time` timestamp. Any thermostat echo arriving within 30 s is suppressed and does not trigger a manual override detection. This prevents the automation's own setback from opening a spurious grace period. Since Issue #1232 a setback echo that arrives later than 30 s is recognised by value too (see [Setpoint echo recognition by value](#setpoint-echo-recognition-by-value-issue-1232)); the 30 s guard remains the backstop.

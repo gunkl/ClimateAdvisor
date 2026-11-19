@@ -774,7 +774,9 @@ class TestReassertersNeverDoubleTheOffset:
         env = self._raised_then_reverted(config={"fan_mode": "hvac_fan"})
         env.run(env.engine._activate_fan(reason="test"))
         self._thermostat_reports(env, 66.0)  # e.g. an Ecobee reverting to its program after the fan command
-        env.advance(31)
+        # Issue #1272 accepted cost: a revert to exactly the pre-write value while the write is still outstanding in
+        # the echo memory reads as "not answered yet", so the verify repairs at the echo window end, not at 30 s.
+        env.advance(185)
         assert env.sp_f() == [66.0, 68.0, 68.0]
 
     def test_post_fan_off_reassert(self):

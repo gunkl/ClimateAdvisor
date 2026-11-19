@@ -364,3 +364,33 @@ class TestHourlyPrune:
         log._entries = [*old[:5], {"ts": "garbage"}, *old[5:], {"hvac": "idle"}, _row(now, 99)]
         expected = _prune_now(log, frozen_now, now)
         assert log._entries == expected == [{"ts": "garbage"}, {"hvac": "idle"}, _row(now, 99)]
+
+    def test_consecutive_prunes_and_queries_stay_cheap(self, tmp_path: Path, frozen_now) -> None:
+        # a bisected prune records the order of the list it keeps, so neither the next prune nor a query rescans it
+        now = _now()
+        frozen_now(now)
+        log = _year_log(tmp_path, now)
+        _prune_now(log, frozen_now, now + timedelta(hours=2))
+        counter = _ParseCounter()
+        with patch.object(chart_log_mod, "_parse_ts", counter):
+            frozen_now(now + timedelta(hours=4))
+            log._last_prune = None
+            log._maybe_prune()
+            log.get_entries("24h", before=now - timedelta(days=100))
+        assert counter.calls <= 2 * 64
+
+    def test_unknown_list_is_walked_once_not_checked_then_walked(self, tmp_path: Path, frozen_now) -> None:
+        # a list the log has no record of goes straight to the walk (which records it); checking its order first
+        # would parse it twice when it turns out unsorted
+        now = _now()
+        frozen_now(now)
+        rows = [_row(now - timedelta(minutes=30 * k), k) for k in range(2000, 0, -1)]
+        rows.append(_row(now - timedelta(days=2), 0))  # one late row written with an earlier clock
+        log = ChartStateLog(tmp_path, max_days=30)
+        log._entries = rows
+        counter = _ParseCounter()
+        with patch.object(chart_log_mod, "_parse_ts", counter):
+            frozen_now(now)
+            log._last_prune = None
+            log._maybe_prune()
+        assert counter.calls <= len(rows) + 1

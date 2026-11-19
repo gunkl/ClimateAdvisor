@@ -170,9 +170,13 @@ class TestRedactionInsideBuilder:
             assert leak not in text
 
     def test_api_and_investigator_use_the_redacting_builder_only(self):
-        """Both leave-the-machine consumers must go through build_diagnostic_snapshot."""
+        """Both leave-the-machine consumers must go through the redacting builder.
+
+        Issue #1331: the async callers use ``async_build_diagnostic_snapshot`` (report built in the executor), which
+        renders through the same redacting body as ``build_diagnostic_snapshot``.
+        """
         for module in (api_module, investigator_module):
-            assert "build_diagnostic_snapshot(hass, coordinator)" in inspect.getsource(module)
+            assert "await async_build_diagnostic_snapshot(hass, coordinator)" in inspect.getsource(module)
 
     def test_hvac_events_filtered_and_redacted(self):
         coord = _coordinator(_engine())

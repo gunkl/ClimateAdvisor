@@ -48,6 +48,7 @@ THERMOSTAT_DEFAULT_OFF_F = 0.0
 GATE_MIN_ACCEPTED_STARTS = 5  # accepted heating (cooling) starts needed to trust the learned thermostat of a mode
 _MIN_RUN_CAP_MIN = 30.0  # cap of the learned minimum-run length
 _MIN_RUN_DEFAULT_MIN = 15.0  # minimum run when the model does not carry one (v1 models)
+_MAX_RUN_QUANTILE = 0.9  # the emulator's longest run: this quantile of the recorded runs (Issue #1594)
 # closed-loop calibration grid (degrees F relative to the setpoint the predictor receives)
 _CAL_ON_GRID = (-0.5, 0.0, 0.5, 1.0, 1.5, 2.0)
 _CAL_OFF_GRID = (-0.5, 0.0, 0.5, 1.0, 1.5, 2.0)
@@ -206,6 +207,11 @@ class V4Thermostat:
     #: minimum run per mode in minutes; ``None`` -> ``min(burst, 15)`` (v1 models carry neither field).
     min_run_heat_min: float | None = None
     min_run_cool_min: float | None = None
+    #: longest emulated run per mode in minutes (Issue #1594); ``None`` -> no cap (models fitted before 0.9.48, a
+    #: mode with too few recorded runs). A run that reaches it ends; the next step starts a new one if the reading is
+    #: still past the start point.
+    max_run_heat_min: float | None = None
+    max_run_cool_min: float | None = None
     #: True when on/off were chosen by closed-loop calibration (False: learned medians or the defaults).
     calibrated: bool = False
 
@@ -502,6 +508,8 @@ def _roll_house(
         off_below = therm.off_below_f
         min_h = _min_run(therm, heat=True)
         min_c = _min_run(therm, heat=False)
+        max_h = therm.max_run_heat_min if therm.max_run_heat_min is not None else 1e9
+        max_c = therm.max_run_cool_min if therm.max_run_cool_min is not None else 1e9
         rstep = therm.reading_step_f if therm.reading_step_f >= 0.05 else 0.0
         uh_l = [0.0] * n
         uc_l = [0.0] * n
@@ -551,7 +559,8 @@ def _roll_house(
                 # run (Issue #1593: a run 6.9 min into a 7.3 min minimum was credited a full step, 1.2 F past the
                 # stop point, and no run could be shorter than a step). A step short of 1 is the run's end.
                 need = (sp_h + off_above - (h + dt * base)) / (q_h * dt)
-                u = _run_duty(need, (min_h - elapsed) / step_min)
+                # ... and never past the longest run (Issue #1594): a run that reaches it ends inside this step.
+                u = min(_run_duty(need, (min_h - elapsed) / step_min), max(0.0, (max_h - elapsed) / step_min))
                 if u < 1.0:
                     mode = 0
                 elapsed += step_min * u
@@ -560,7 +569,7 @@ def _roll_house(
             elif mode == -1:
                 assert sp_c is not None
                 need = ((h + dt * base) - (sp_c - off_below)) / (q_c * dt)
-                u = _run_duty(need, (min_c - elapsed) / step_min)
+                u = min(_run_duty(need, (min_c - elapsed) / step_min), max(0.0, (max_c - elapsed) / step_min))
                 if u < 1.0:
                     mode = 0
                 elapsed += step_min * u
@@ -657,7 +666,8 @@ def learn_thermostat_detail(samples: Sequence[V4Sample], *, primary: str) -> tup
     in force differs between the previous two samples or the start sample). A run's *stop* offset is the
     higher (lower) reading around the run's end minus the setpoint. Run length is the total active minutes of
     a run: the median is ``burst_minutes`` (reported), a low quantile (capped at 30 min) is the minimum run
-    the emulator enforces. These are the uncalibrated estimates; ``fit`` refines on/off by closed loop.
+    the emulator enforces and a high one (``_MAX_RUN_QUANTILE``) the longest run it lets one make. These are the
+    uncalibrated estimates; ``fit`` refines on/off by closed loop.
     With fewer than 5 accepted starts / run ends the offsets fall back to the defaults (0 F, 0 F, 10 min) -
     the counts are returned so the caller can cap confidence.
     """
@@ -722,6 +732,19 @@ def learn_thermostat_detail(samples: Sequence[V4Sample], *, primary: str) -> tup
         srt = sorted(runs)
         return round(min(_MIN_RUN_CAP_MIN, max(5.0, srt[int(0.2 * len(srt))])), 1)
 
+    def _high_run(runs: list[float]) -> float | None:
+        """Issue #1594: the longest run the emulator lets the thermostat make. A sensor that briefly reads the warm
+        (cold) supply air of each run ends the real run within minutes, a rise the single-pole house cannot represent,
+        so the emulated reading reaches the stop point late and its runs run long (a wider stop-offset grid instead
+        only drove the calibrated offset to the grid's edge, away from the measured one). Where the reading has no
+        such spike the emulated runs end before the cap (a high quantile of the real ones; a lower one made the
+        forecast worse on such homes); in a long recovery the run ends at the cap and the next step starts another,
+        so the duty stays."""
+        if len(runs) < GATE_MIN_ACCEPTED_STARTS:
+            return None
+        srt = sorted(runs)
+        return round(max(5.0, srt[min(len(srt) - 1, int(_MAX_RUN_QUANTILE * len(srt)))]), 1)
+
     on_below = _med(h_starts, THERMOSTAT_DEFAULT_ON_F, -2.0, 4.0)
     on_above = _med(c_starts, THERMOSTAT_DEFAULT_ON_F, -2.0, 4.0)
     off_above = _med(h_stops, THERMOSTAT_DEFAULT_OFF_F, -2.0, 4.0)
@@ -740,6 +763,8 @@ def learn_thermostat_detail(samples: Sequence[V4Sample], *, primary: str) -> tup
         off_below_f=round(off_below, 2),
         min_run_heat_min=_low_run(h_runs),
         min_run_cool_min=_low_run(c_runs),
+        max_run_heat_min=_high_run(h_runs),
+        max_run_cool_min=_high_run(c_runs),
     )
     return th, _ThermostatStats(n_h_starts, len(h_starts), n_c_starts, len(c_starts))
 
@@ -2469,6 +2494,8 @@ def to_dict(model: V4Model) -> dict[str, Any]:
             "off_below_f": th.off_below_f,
             "min_run_heat_min": th.min_run_heat_min,
             "min_run_cool_min": th.min_run_cool_min,
+            "max_run_heat_min": th.max_run_heat_min,
+            "max_run_cool_min": th.max_run_cool_min,
             "calibrated": th.calibrated,
         },
         "openness": (
@@ -2542,6 +2569,8 @@ def from_dict(d: Any) -> V4Model | None:
             off_below_f=float(th.get("off_below_f", 0.0)),
             min_run_heat_min=None if th.get("min_run_heat_min") is None else float(th["min_run_heat_min"]),
             min_run_cool_min=None if th.get("min_run_cool_min") is None else float(th["min_run_cool_min"]),
+            max_run_heat_min=None if th.get("max_run_heat_min") is None else float(th["max_run_heat_min"]),
+            max_run_cool_min=None if th.get("max_run_cool_min") is None else float(th["max_run_cool_min"]),
             calibrated=bool(th.get("calibrated", False)),
         )
         if not all(
@@ -2557,7 +2586,12 @@ def from_dict(d: Any) -> V4Model | None:
             return None
         if any(
             v is not None and (not _finite(v) or v <= 0)
-            for v in (thermostat.min_run_heat_min, thermostat.min_run_cool_min)
+            for v in (
+                thermostat.min_run_heat_min,
+                thermostat.min_run_cool_min,
+                thermostat.max_run_heat_min,
+                thermostat.max_run_cool_min,
+            )
         ):
             return None
         if thermostat.burst_minutes <= 0 or (
@@ -2835,7 +2869,9 @@ def samples_from_chart_log(
             elif fresh("override"):
                 sp = None  # the occupant's value, which the plan never feeds: neither a start nor a calibration step
             else:
-                sp = _commanded_setpoint(sp, fresh("setpoint"), fresh("upper" if mode == "heat" else "lower"))
+                sp = _commanded_setpoint(
+                    sp, fresh("setpoint"), fresh("upper" if mode == "heat" else "lower"), heat=mode == "heat"
+                )
             if sp is not None:
                 heat_sp, cool_sp = (sp, None) if mode == "heat" else (None, sp)
         heat_d, cool_d = _duty(hvac_tl, g)
@@ -2862,7 +2898,7 @@ def samples_from_chart_log(
     return out
 
 
-def _commanded_setpoint(edge: float, commanded: float | None, other_edge: float | None) -> float:
+def _commanded_setpoint(edge: float, commanded: float | None, other_edge: float | None, *, heat: bool) -> float:
     """The setpoint a sample's thermostat is learned against (Issues #1593, #1609): the COMMANDED one.
 
     The thermostat starts and stops relative to what it is told, and on one home's native readings it does so the same
@@ -2870,12 +2906,16 @@ def _commanded_setpoint(edge: float, commanded: float | None, other_edge: float 
     while against the plain band edge the same runs look different by time of day: the schedule's wake ramp logs
     ``lower`` 66.5-67.5 while the house commands 68 from wake time, the remote-sensor loop commands the sleep floor
     + 2 F at night, and the bedtime ramp logs 67 while the house commands 66. Mixed, they calibrated a 0.5 F start
-    offset. The chart row's ``setpoint`` is the commanded value; it is used when it is this mode's setpoint (nearer
-    this mode's band edge than the opposite one: the row logs one setpoint, the thermostat's mode), else the band edge
-    stands (rows without a logged setpoint, a setpoint of the other mode)."""
+    offset. The chart row's ``setpoint`` is the commanded value; it is used when it can be this mode's setpoint, else
+    the band edge stands (rows without a logged setpoint, a setpoint of the other mode).
+
+    Issue #1620: a heat setpoint is any value below the cool edge (a cool one any value above the heat edge). The sleep
+    loop raises the heat setpoint up to 4 F, which on a narrow band reaches or passes the band's midpoint (66-70 F
+    with the loop's 68 F); the earlier "nearer this mode's edge" test learned those runs against 66 F. Only a value at
+    or beyond the other edge is the other mode's setpoint."""
     if commanded is None:
         return edge
-    if other_edge is not None and abs(commanded - edge) >= abs(commanded - other_edge):
+    if other_edge is not None and (commanded >= other_edge if heat else commanded <= other_edge):
         return edge
     return commanded
 

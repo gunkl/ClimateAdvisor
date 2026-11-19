@@ -2832,8 +2832,10 @@ def samples_from_chart_log(
                 else:
                     kept = last_active_sp.get(mode)
                     sp = kept[1] if kept is not None and g - kept[0] <= 12 * 3600 else None
-            elif in_sleep is not None and not fresh("override") and in_sleep(datetime.fromtimestamp(g, tz)):
-                sp = _sleep_window_setpoint(sp, fresh("setpoint"), fresh("upper" if mode == "heat" else "lower"))
+            elif fresh("override"):
+                sp = None  # the occupant's value, which the plan never feeds: neither a start nor a calibration step
+            else:
+                sp = _commanded_setpoint(sp, fresh("setpoint"), fresh("upper" if mode == "heat" else "lower"))
             if sp is not None:
                 heat_sp, cool_sp = (sp, None) if mode == "heat" else (None, sp)
         heat_d, cool_d = _duty(hvac_tl, g)
@@ -2860,17 +2862,17 @@ def samples_from_chart_log(
     return out
 
 
-def _sleep_window_setpoint(edge: float, commanded: float | None, other_edge: float | None) -> float:
-    """The setpoint a sleep-window sample is learned against (Issue #1593): the COMMANDED one.
+def _commanded_setpoint(edge: float, commanded: float | None, other_edge: float | None) -> float:
+    """The setpoint a sample's thermostat is learned against (Issues #1593, #1609): the COMMANDED one.
 
-    In the sleep window the forecast feeds the thermostat what the house commands there: the sleep band the engine
-    arms at bedtime (not the schedule's ramp into it) plus the remote-sensor loop's offset (``RemoteLoopEmulator``).
-    The chart row's ``setpoint`` is exactly that (``comfort_target`` + offset while the loop holds one, the plain
-    sleep edge otherwise), while ``lower`` / ``upper`` log the plain band and its ramp. Learned against the plain edge,
-    a night of +2 F runs looked like a thermostat that stops 2.5 F above its setpoint, and the emulator then added
-    the +2 F again. The commanded value is used only when it is this mode's setpoint (nearer this mode's band edge
-    than the opposite one: the row logs one setpoint, the thermostat's mode); otherwise, and outside the sleep window,
-    the band edge stands (the day's fit is unchanged)."""
+    The thermostat starts and stops relative to what it is told, and on one home's native readings it does so the same
+    way at every hour (starts 1.36-1.98 F below the commanded setpoint, typically 1.44 F; stops 0.36-0.64 F below it),
+    while against the plain band edge the same runs look different by time of day: the schedule's wake ramp logs
+    ``lower`` 66.5-67.5 while the house commands 68 from wake time, the remote-sensor loop commands the sleep floor
+    + 2 F at night, and the bedtime ramp logs 67 while the house commands 66. Mixed, they calibrated a 0.5 F start
+    offset. The chart row's ``setpoint`` is the commanded value; it is used when it is this mode's setpoint (nearer
+    this mode's band edge than the opposite one: the row logs one setpoint, the thermostat's mode), else the band edge
+    stands (rows without a logged setpoint, a setpoint of the other mode)."""
     if commanded is None:
         return edge
     if other_edge is not None and abs(commanded - edge) >= abs(commanded - other_edge):

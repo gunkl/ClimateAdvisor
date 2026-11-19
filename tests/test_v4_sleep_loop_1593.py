@@ -269,11 +269,13 @@ class TestTrainingSetpoint:
         assert night and all(s.heat_sp_f == 66.0 for s in night)
         assert all(s.heat_sp_f == 68.0 for s in smp if s.ts < t)
 
-    def test_daytime_and_override_rows_keep_the_band_edge(self):
-        t = datetime.combine(DAY, time(9, 0), TZ_LA)
+    def test_the_wake_ramp_rows_carry_the_commanded_setpoint_and_override_rows_teach_nothing(self):
+        """#1609: the schedule ramps ``lower`` 66 -> 68 over two hours after wake while the house commands 68 at wake;
+        an occupant override holds the thermostat at the occupant's value, which the plan never feeds."""
+        t = datetime.combine(DAY, time(6, 30), TZ_LA)
         rows = [
-            _row(t, "heating", 68.0, sp=69.5, lower=68.0),
-            _row(t + timedelta(minutes=30), "idle", 69.0, sp=69.5, lower=68.0),
+            _row(t, "heating", 66.5, sp=68.0, lower=66.5),
+            _row(t + timedelta(minutes=30), "idle", 68.0, sp=68.0, lower=67.0),
         ]
         smp = p4.samples_from_chart_log(rows, tz=TZ_LA, primary="sensor.hall", in_sleep=_night)
         assert smp and all(s.heat_sp_f == 68.0 for s in smp)
@@ -283,7 +285,7 @@ class TestTrainingSetpoint:
             _row(n + timedelta(minutes=30), "idle", 67, sp=68.5, lower=66.0, override=True),
         ]
         smp = p4.samples_from_chart_log(rows, tz=TZ_LA, primary="sensor.hall", in_sleep=_night)
-        assert smp and all(s.heat_sp_f == 66.0 for s in smp)  # the occupant's value: the plan never feeds it
+        assert smp and all(s.heat_sp_f is None for s in smp)  # neither a start nor a calibration step
 
     def test_cooling_mirror_and_a_setpoint_of_the_other_mode_is_not_used(self):
         t = datetime.combine(DAY, time(23, 0), TZ_LA)
@@ -301,10 +303,81 @@ class TestTrainingSetpoint:
         smp = p4.samples_from_chart_log(rows, tz=TZ_LA, primary="sensor.hall", in_sleep=_night)
         assert smp and all(s.cool_sp_f == 72.0 for s in smp)
 
-    def test_without_a_sleep_sensor_nothing_changes(self):
+    def test_without_a_sleep_sensor_the_commanded_setpoint_is_learned_too(self):
         night = _cycles(datetime.combine(DAY, time(21, 0), TZ_LA), edge=66.0, offset=2.0, n=2, night=True)
         smp = p4.samples_from_chart_log(night, tz=TZ_LA, primary="sensor.hall")
-        assert smp and all(s.heat_sp_f == 66.0 for s in smp)
+        assert smp and all(s.heat_sp_f == 68.0 for s in smp)
+
+    def test_rows_without_a_logged_setpoint_keep_the_band_edge(self):
+        t = datetime.combine(DAY, time(9, 0), TZ_LA)
+        rows = [
+            _row(t, "heating", 67.5, sp=None, lower=68.0),
+            _row(t + timedelta(minutes=30), "idle", 68.5, sp=None, lower=68.0),
+        ]
+        smp = p4.samples_from_chart_log(rows, tz=TZ_LA, primary="sensor.hall")
+        assert smp and all(s.heat_sp_f == 68.0 for s in smp)
+
+
+# ===================================== #1609: the fitted thermostat matches the one measured on the native readings
+ROWS_1609 = Path(__file__).resolve().parent / "fixtures" / "v4_thermostat_1609_rows.json"
+
+
+def _measured_offsets(fx: dict) -> tuple[float, float]:
+    """(start offset, stop offset) of the real thermostat on the hallway sensor against the COMMANDED setpoint, from
+    the native-resolution history: starts at least 5 min after the last setpoint change, the reading at the start;
+    the reading a minute after the run's end."""
+    clim, hall = fx["climate"], fx["hallway"]
+    starts: list[float] = []
+    stops: list[float] = []
+    changed = clim[0][0]
+    for k in range(1, len(clim)):
+        t, act, sp = clim[k]
+        if clim[k - 1][2] != sp:
+            changed = t
+        h = _hold(hall, t)
+        if act == "heating" and clim[k - 1][1] != "heating" and h is not None and sp is not None:
+            if t - changed >= 300:
+                starts.append(sp - h)
+            end = next((c for c in clim[k:] if c[1] != "heating"), None)
+            if end is not None and end[2] == sp:
+                stops.append(_hold(hall, end[0] + 60) - sp)
+    return statistics.median(starts), statistics.median(stops)
+
+
+def _rows_1609() -> list[dict]:
+    fx = json.loads(ROWS_1609.read_text())
+    prim = fx["primary"]
+    rows = []
+    for ep, h, sp, lo, hi, ov, reading, out, ev in fx["rows"]:
+        r = {
+            "ts": datetime.fromtimestamp(ep, PST).isoformat(), "hvac": fx["hvac"][h], "setpoint": sp, "lower": lo,
+            "upper": hi, "outdoor": out, "indoor_sensors": {prim: reading} if reading is not None else {},
+        }  # fmt: skip
+        if ov:
+            r["override"] = True
+        if ev:
+            r["event"] = "hvac_action_change"
+        rows.append(r)
+    return rows
+
+
+class TestFittedThermostat:
+    def test_the_fit_learns_the_measured_start_and_stop_offsets(self):
+        """30 days before the 2026-11-18 fit: the real thermostat starts about 1.44 F below the commanded setpoint and
+        stops about 0.4-0.6 F below it. Learned against the band edge it calibrated a 0.5 F start offset."""
+        on_meas, off_meas = _measured_offsets(_fx())
+        assert on_meas == pytest.approx(1.44, abs=0.1) and -0.7 <= off_meas <= -0.3, (on_meas, off_meas)
+        prim = json.loads(ROWS_1609.read_text())["primary"]
+        smp = p4.samples_from_chart_log(
+            _rows_1609(), tz=PST, primary=prim, in_sleep=lambda t: p4.in_sleep_window(t, "20:30", "06:15")
+        )
+        model = p4.fit(smp, primary=prim, sensors=[prim], tz=PST, now=datetime(2026, 11, 18, 3, 31, tzinfo=PST))
+        th = model.thermostat
+        assert model.fit["thermostat_calibration"]["heat"]["calibrated"]
+        # the calibration grid steps 0.5 F: within half a step of the measured offsets
+        assert th.on_below_f == pytest.approx(on_meas, abs=0.25), th
+        assert th.off_above_f == pytest.approx(off_meas, abs=0.25), th
+        assert model.fit["starts_accepted"]["heat"] >= p4.GATE_MIN_ACCEPTED_STARTS
 
 
 # ======================================================================= cause 4: the sleep band from bedtime
@@ -654,3 +727,20 @@ def _live_loop(coord: Any) -> RemoteLoopEmulator:
     from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator as C
 
     return C._v4_live_sleep_loop(coord, datetime(2026, 11, 18, 0, 50, tzinfo=PST))
+
+
+def test_every_home_gets_the_armed_sleep_band_not_only_one_with_a_sleep_sensor():
+    """Issue #1610: without a sleep sensor the house still puts the flat sleep band on the thermostat at bedtime, so
+    the display forecast must not feed the schedule's ramp for those homes either."""
+    import ast
+
+    src = Path(__file__).resolve().parent.parent / "custom_components" / "climate_advisor" / "coordinator.py"
+    tree = ast.parse(src.read_text())
+    cls = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "ClimateAdvisorCoordinator")
+    meth = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_v4_shadow_cycle_impl")
+    guarded = [
+        n for n in ast.walk(meth) if isinstance(n, ast.If | ast.IfExp) and "ca_sleep_node" in ast.unparse(n.test)
+    ]
+    for g in guarded:
+        assert "with_armed_sleep_band" not in ast.unparse(g), ast.unparse(g)
+    assert "with_armed_sleep_band" in ast.unparse(meth)

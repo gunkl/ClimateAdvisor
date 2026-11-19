@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.44] — 2026-11-18
+
+### Changed (project records only; nothing changes in your house)
+- The changelog matches the published releases again. Three changes merged at the same time on 2026-11-15 were listed under two separate 0.9.41 headings and a 0.9.42 heading. All three shipped together in the v0.9.41 release and are now listed there; there is no 0.9.42. A test now fails if the changelog repeats a version, lists versions out of order, or its newest entry does not match the integration version.
+
 ## [0.9.43] — 2026-11-18
 
 ### Fixed
@@ -10,8 +15,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ## [0.9.41] — 2026-11-15
 
+_#1580, #1583 and #1577 merged together and shipped as the v0.9.41 release; there is no 0.9.42._
+
 ### Fixed
+- #1580: when a zone is reloaded or removed while Climate Advisor is changing the thermostat, the old instance no longer leaves a follow-up timer running after it has shut down. Nothing in the house changed, because such a timer was already refused when it fired, but it outlived the unload and failed the nightly test run of 2026-11-14. Every timer in the engine and the coordinator now goes through one guard that arms nothing once the instance has shut down.
 - Fix #1577: asking the dashboard API for the short briefing (`/api/climate_advisor/briefing?verbosity=tldr_only`) now returns the short briefing — the same text the push notification carries. Before, the request was silently ignored and the full briefing came back, because the endpoint waited on a method that never existed. `verbose` is still accepted and returns the full briefing, as it always effectively did.
+
+### Changed (project tooling only; nothing changes in your house)
+- A failed nightly test run now files its own issue, listing the failing tests and broken household promises. A repeat of the same failure comments on that issue instead of filing a new one. A new workflow then has Claude diagnose the issue, post the diagnosis, and, when it can show a fix, open a draft pull request for review. Nothing merges or deploys automatically.
 
 ## [0.9.40] — 2026-11-15
 
@@ -24,15 +35,6 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ### Changed
 - #1558 wording: the time-of-use schedule setting is now called **"TOU changes this setpoint"** (Cooling and heating / Cooling only / Heating only), and its help text says what it does: which setpoint the schedule may change, before and during its high-cost period (the cooling setpoint on cooling days, the heating setpoint on heating days). With **Cooling only**, the heating setpoint is never changed. Status now reads "… heating setpoint left unchanged" instead of "not applied to heating". Behaviour is unchanged from 0.9.39. All 16 languages are updated.
-
-## [0.9.42] — 2026-11-15
-
-### Changed (project tooling only; nothing changes in your house)
-- A failed nightly test run now files its own issue, listing the failing tests and broken household promises. A repeat of the same failure comments on that issue instead of filing a new one. A new workflow then has Claude diagnose the issue, post the diagnosis, and, when it can show a fix, open a draft pull request for review. Nothing merges or deploys automatically.
-## [0.9.41] — 2026-11-15
-
-### Fixed
-- #1580: when a zone is reloaded or removed while Climate Advisor is changing the thermostat, the old instance no longer leaves a follow-up timer running after it has shut down. Nothing in the house changed, because such a timer was already refused when it fired, but it outlived the unload and failed the nightly test run of 2026-11-14. Every timer in the engine and the coordinator now goes through one guard that arms nothing once the instance has shut down.
 
 ## [0.9.39] — 2026-11-15
 

@@ -3,6 +3,18 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.50] — 2026-11-18
+
+### Fixed
+- Fix #1603: if you confirm Off as a manual override and then turn the thermostat to Cool or Heat while Climate Advisor is sending one of its own commands (a blower cycle, or the whole-house fan starting when a window opens), your change is no longer ignored. The dashboard no longer keeps showing "manual override: off" over a house that is cooling or heating, and your Heat choice is no longer reverted when the old Off grace ends.
+- Fix #1612: a thermostat mode change you make a moment after Climate Advisor sends one of its own commands (its regular setpoint update, a blower cycle, the whole-house fan starting) is now noticed a few seconds later and respected as your manual override. Before, it was missed and Climate Advisor quietly put the house back on its own plan.
+- Fix #1613: these changes are now detected as yours instead of being undone at the next update:
+  - turning the heat or AC back on right after Climate Advisor pauses it for an open door or window;
+  - changing the setpoint right after Climate Advisor's regular setpoint update;
+  - turning the blower on just after that update.
+
+  A thermostat switching itself to fan-only, or restoring its own program setpoint, in response to Climate Advisor's fan command is not read as your change.
+
 ## [0.9.44] — 2026-11-18
 
 ### Changed (project records only; nothing changes in your house)

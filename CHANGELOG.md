@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.46] — 2026-11-18
+
+### Fixed
+- Fix #1331: downloading diagnostics or logs, or running the AI Investigator, no longer briefly freezes Home Assistant while the control-quality report is computed; the report is now built in the background.
+- Fix #1598: Climate Advisor's 30-minute cycle no longer pauses Home Assistant to scan the whole year of chart history (the scan fed a value nothing read, so it is gone); charts and diagnostics also read only the days they need.
+- Fix #1599: about once an hour, Climate Advisor trims old chart history; this no longer briefly pauses Home Assistant, even with a full year of history.
+
 ## [0.9.44] — 2026-11-18
 
 ### Changed (project records only; nothing changes in your house)

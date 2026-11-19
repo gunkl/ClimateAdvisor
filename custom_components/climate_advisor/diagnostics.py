@@ -24,7 +24,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from .const import CONFIG_METADATA, DOMAIN, REDACTED_CONFIG_KEYS, VERSION
-from .diagnostic_snapshot import build_diagnostic_snapshot, recent_hvac_events
+from .diagnostic_snapshot import async_build_diagnostic_snapshot, recent_hvac_events
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -101,7 +101,8 @@ async def async_get_diagnostics_payload(hass: HomeAssistant, entry: ConfigEntry)
         # Attribute redaction happens inside the builder; a failure here must not lose the
         # rest of the diagnostics file.
         try:
-            thermostat_snapshot: Any = build_diagnostic_snapshot(hass, coordinator)
+            # Issue #1331: the control-quality report is built in the executor, not on the event loop.
+            thermostat_snapshot: Any = await async_build_diagnostic_snapshot(hass, coordinator)
             hvac_events: Any = recent_hvac_events(coordinator)
         except Exception:
             _LOGGER.warning("diagnostics: thermostat snapshot failed -- omitting from payload", exc_info=True)

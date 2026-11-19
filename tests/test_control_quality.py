@@ -9,8 +9,6 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
-
 from custom_components.climate_advisor.control_quality import (
     CONTROL_QUALITY_SCHEMA,
     build_control_quality,
@@ -55,6 +53,40 @@ def change(ago, to_mode, indoor, floor=70.0, ceiling=74.0, from_mode=None, reaso
 
 def build(changes=(), rows=(), history=None, now=NOW):
     return build_control_quality(now=now, mode_changes=list(changes), chart_entries=list(rows), indoor_history=history)
+
+
+def _lines_executed_in_control_quality(fn):
+    """(Python lines executed in control_quality.py while ``fn`` runs, its result) via ``sys.monitoring`` (Issue #1331).
+
+    Its own tool id (not ``sys.settrace``), so it runs alongside coverage, which badges.yml enables; lines in other
+    files are DISABLEd after their first hit so the count costs little.
+    """
+    import sys
+
+    import custom_components.climate_advisor.control_quality as cqm
+
+    mon = sys.monitoring
+    tool = next(t for t in (mon.PROFILER_ID, 3, 4) if mon.get_tool(t) is None)
+    mon.use_tool_id(tool, "ca-1331-line-count")
+    count = 0
+
+    def on_line(code, _line):
+        nonlocal count
+        if code.co_filename == cqm.__file__:
+            count += 1
+            return None
+        return mon.DISABLE
+
+    mon.register_callback(tool, mon.events.LINE, on_line)
+    mon.set_events(tool, mon.events.LINE)
+    try:
+        result = fn()
+    finally:
+        mon.set_events(tool, 0)
+        mon.register_callback(tool, mon.events.LINE, None)
+        mon.free_tool_id(tool)
+        mon.restart_events()
+    return count, result
 
 
 def w24(report):
@@ -156,35 +188,54 @@ class TestMisarmedAccuracy:
         m = w24(build([change(1600, "cool", 75)], rows))["misarmed"]
         assert m["minutes"] == 0.0
 
-    @pytest.mark.skip(
-        reason="Issue #1331: timing-based linearity is unreliable under suite load; replace with a deterministic "
-        "work count once the snapshot build moves off the event loop"
-    )
-    def test_five_thousand_samples_is_fast_and_linear(self):
-        # Issue #1083: an absolute 0.1 s wall-clock limit flaked on loaded CI runners. What matters is that the
-        # build stays linear. The sizes differ 4x, so linear code is ~4x slower and quadratic code ~16x; the 8x limit
-        # sits a factor of two from each, so noise cannot fail linear code and a quadratic build cannot pass.
-        # The previous 2x sizes with a 3.5x limit did both: suite load (other xdist workers and sessions) gave
-        # 4-7x on linear code (15->102 ms, 20->78 ms, 26->104 ms), while an injected quadratic loop gave 2.6-3.3x.
-        # Measured 2026-11-04: linear 3.2-6.0x under load, quadratic 15.6-17.4x. Runs are interleaved so a load burst
-        # cannot land on one size only, and the best of 7 per size rides out spikes longer than a single run.
+    def test_five_thousand_samples_is_linear_by_line_count(self):
+        # Issue #1331: wall-clock ratios flaked under suite load (linear code measured up to 8.4x), so linearity is
+        # judged by WORK: Python lines executed inside control_quality.py, which load cannot change. Sizes differ 4x:
+        # linear code measured 3.35x, an injected O(n^2) pass 15x; the 6x limit sits well clear of both. A generous
+        # wall ceiling still catches a gross slowdown hidden in C-level calls, which a line count cannot see.
         def sample(n: int):
             rows = [row(m, indoor=69 if (m // 30) % 2 else 72) for m in range(n, 0, -1)]
             return [change(n, "cool", 69)], rows
 
-        small, large = sample(1250), sample(5000)
-        times: dict[int, list[float]] = {1250: [], 5000: []}
-        for _ in range(7):
-            for n, (changes, rows) in ((1250, small), (5000, large)):
-                t0 = time.perf_counter()
-                report = build(changes, rows, now=NOW)
-                times[n].append(time.perf_counter() - t0)
-                assert report["windows"]["7d"]["misarmed"]["minutes"] is not None
-        t_small, t_large = min(times[1250]), min(times[5000])
-        assert t_large < 3.0, f"build took {t_large * 1000:.0f} ms"
-        assert t_large < max(8.0 * t_small, 0.05), (
-            f"not linear: 1250 samples {t_small * 1000:.0f} ms -> 5000 samples {t_large * 1000:.0f} ms"
+        counts = {}
+        for n in (1250, 5000):
+            changes, rows = sample(n)
+            t0 = time.perf_counter()
+            counts[n], report = _lines_executed_in_control_quality(lambda c=changes, r=rows: build(c, r, now=NOW))
+            assert time.perf_counter() - t0 < 3.0
+            assert report["windows"]["7d"]["misarmed"]["minutes"] is not None
+        assert counts[1250] > 1000  # the counter saw the builder run
+        ratio = counts[5000] / counts[1250]
+        assert ratio < 6.0, f"not linear: {counts[1250]} -> {counts[5000]} lines ({ratio:.2f}x for 4x the rows)"
+
+    def test_line_count_guard_catches_a_quadratic_pass(self, monkeypatch):
+        # The guard above is only worth having if it fails on quadratic code: inject an all-pairs pass whose lines
+        # are attributed to control_quality.py, as a real regression's would be.
+        import custom_components.climate_advisor.control_quality as cqm
+
+        ns: dict = {}
+        src = (
+            "def _all_pairs(rows):\n"
+            "    n = 0\n"
+            "    for _a in rows:\n"
+            "        for _b in rows:\n"
+            "            n += 1\n"
+            "    return n\n"
         )
+        exec(compile(src, cqm.__file__, "exec"), ns)  # noqa: S102 - test-only sabotage
+        orig = cqm._normalise_rows
+
+        def quadratic(chart_entries):
+            out = orig(chart_entries)
+            ns["_all_pairs"](out)
+            return out
+
+        monkeypatch.setattr(cqm, "_normalise_rows", quadratic)
+        counts = {}
+        for n in (300, 1200):  # small sizes: the injected pass is 1.4M lines at 1200 rows
+            rows = [row(m) for m in range(n, 0, -1)]
+            counts[n], _ = _lines_executed_in_control_quality(lambda r=rows, n=n: build([change(n, "cool", 69)], r))
+        assert counts[1200] / counts[300] > 10.0
 
 
 class TestModeChanges:

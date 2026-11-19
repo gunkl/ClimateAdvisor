@@ -272,9 +272,10 @@ async def async_build_investigator_context(
     # triage never again needs a manual "can you tell me what your thermostat reports"
     # round-trip (the exact pattern that stalled #893/#894's diagnosis).
     try:
-        from .diagnostic_snapshot import build_diagnostic_snapshot, render_diagnostic_snapshot_text  # noqa: PLC0415
+        from .diagnostic_snapshot import async_build_diagnostic_snapshot, render_diagnostic_snapshot_text  # noqa: PLC0415
 
-        sections.append(render_diagnostic_snapshot_text(build_diagnostic_snapshot(hass, coordinator)))
+        # Issue #1331: the control-quality report is built in the executor, not on the event loop.
+        sections.append(render_diagnostic_snapshot_text(await async_build_diagnostic_snapshot(hass, coordinator)))
     except Exception:
         _LOGGER.warning("investigator: diagnostic snapshot footer failed — skipping", exc_info=True)
 

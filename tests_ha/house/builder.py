@@ -19,6 +19,7 @@ Lifecycle contract
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -294,15 +295,25 @@ class House:
         await self._drain()
         await self._setup_ca()
 
-    async def restart(self, *, settle: bool = True, down_for_seconds: float = 0) -> None:
+    async def restart(
+        self,
+        *,
+        settle: bool = True,
+        down_for_seconds: float = 0,
+        while_down: Callable[[House], Awaitable[None]] | None = None,
+    ) -> None:
         """Unload and set up Climate Advisor again on the same hass and config dir (see module docstring).
 
         ``down_for_seconds`` keeps Climate Advisor unloaded for that long first; the thermostat and fan keep
-        running, as real devices do while HA is down.
+        running, as real devices do while HA is down. ``while_down`` (``async def (house)``) runs right after
+        the unload: what the occupant does while HA is down (a wall-switch or RF-remote press, say), which
+        Climate Advisor can only learn from the devices' state once it is set up again.
         """
         assert self.ca_entry is not None
         assert await self.hass.config_entries.async_unload(self.ca_entry.entry_id)
         await self._drain()
+        if while_down is not None:
+            await while_down(self)
         if down_for_seconds:
             await self.advance(seconds=down_for_seconds)
         await self._setup_ca()

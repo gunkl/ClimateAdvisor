@@ -3,6 +3,16 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.49] — 2026-11-18
+
+### Fixed
+- Fix #1596: at bedtime and wake-up, the Activity Report and AI context no longer claim a new band that was never sent; the row says "NOT sent" and why. That happens when the whole-house fan is running, the blower is ventilating through an open window, Climate Advisor is in test mode, or the thermostat rejected the command.
+- Fix #1268: when natural ventilation ends at the comfort floor, the Activity Report shows the mode Climate Advisor actually armed instead of the day's label. If nothing was armed, it says "unchanged" with the reason: window still open, your change kept, or fan-off still pending.
+- Fix #1597: when a window opens and ventilation starts, the Activity Report says the thermostat was turned Off (or left alone, and why), instead of "band-armed".
+- Fix #1606: when natural ventilation restarts from a periodic re-check, the Activity Report also says what happened to the thermostat.
+- Fix #1605: when ventilation cools the house to the comfort floor but the fan can't be switched off yet (the 5-minute toggle limit), Climate Advisor now waits. It doesn't restore heating or cooling or start a grace period while the fan still runs; comfort is restored once the fan stops. The Activity Report says the fan-off is deferred.
+- Fix #1269: the AI no longer tells you Climate Advisor turns HVAC off on warm days. It knows the comfort band is armed, and that a heat or cool start inside it is normal.
+
 ## [0.9.44] — 2026-11-18
 
 ### Changed (project records only; nothing changes in your house)

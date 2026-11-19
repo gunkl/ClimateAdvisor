@@ -197,6 +197,13 @@ class NightInputs:
     window_hours: float = DEFAULT_WINDOW_HOURS
     offset_loop: bool = True  # the #1194 outer loop is active when the target is not the thermostat's sensor
     unit: str = FAHRENHEIT
+    # Issue #1593: a night planned after bedtime starts from the live loop and the run in progress, as the house is
+    # (signed offset heat + / cool -, seconds since its raise, the thermostat's measured startup latency; the run:
+    # +1 heating / -1 cooling, minutes run). Planned from bedtime they stay at the live loop's start: offset 0, no run.
+    loop_offset_f: float = 0.0
+    loop_since_raise_s: float | None = None
+    loop_startup_latency_s: float | None = None
+    run_now: tuple[int, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -472,9 +479,15 @@ def _simulate(
         swing_cool_f=inp.loop_swing_cool_f if inp.loop_swing_cool_f is not None else inp.swing_cool_f,
         unit=inp.unit,
         step_minutes=STEP_MINUTES,
+        offset_f=inp.loop_offset_f if use_loop else 0.0,
+        seconds_since_raise=inp.loop_since_raise_s,
+        startup_latency_s=inp.loop_startup_latency_s,
     )
-    run_mode = 0  # the emulated thermostat's run in progress: +1 heating, -1 cooling, 0 none
-    run_min = 0.0  # minutes that run has lasted (the predictor's minimum-run rule counts from it)
+    # the emulated thermostat's run in progress (+1 heating, -1 cooling, 0 none) and the minutes it has lasted (the
+    # predictor's minimum-run rule counts from it): the live run when the night is planned after bedtime (#1593)
+    run_mode, run_min = (
+        (inp.run_now[0], float(inp.run_now[1])) if inp.run_now is not None and inp.run_now[0] in (1, -1) else (0, 0.0)
+    )
     elapsed_h = 0.0
     adaptive_on = spec.mode in ("until_floor", "until_ceiling")
     done = False

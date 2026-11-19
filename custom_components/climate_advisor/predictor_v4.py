@@ -547,23 +547,22 @@ def _roll_house(
                     mode = -1
             if mode == 1:
                 assert sp_h is not None
-                u = 1.0
-                if elapsed >= min_h:  # past the minimum run: the last step is partial, landing on the stop point
-                    need = (sp_h + off_above - (h + dt * base)) / (q_h * dt)
-                    if need < 1.0:
-                        u = need if need > 0.0 else 0.0
-                        mode = 0
+                # The duty that lands the room on the stop point, but never less than what is left of the minimum
+                # run (Issue #1593: a run 6.9 min into a 7.3 min minimum was credited a full step, 1.2 F past the
+                # stop point, and no run could be shorter than a step). A step short of 1 is the run's end.
+                need = (sp_h + off_above - (h + dt * base)) / (q_h * dt)
+                u = _run_duty(need, (min_h - elapsed) / step_min)
+                if u < 1.0:
+                    mode = 0
                 elapsed += step_min * u
                 u_h = u
                 uh_l[k] = u
             elif mode == -1:
                 assert sp_c is not None
-                u = 1.0
-                if elapsed >= min_c:
-                    need = ((h + dt * base) - (sp_c - off_below)) / (q_c * dt)
-                    if need < 1.0:
-                        u = need if need > 0.0 else 0.0
-                        mode = 0
+                need = ((h + dt * base) - (sp_c - off_below)) / (q_c * dt)
+                u = _run_duty(need, (min_c - elapsed) / step_min)
+                if u < 1.0:
+                    mode = 0
                 elapsed += step_min * u
                 u_c = u
                 uc_l[k] = u
@@ -575,6 +574,12 @@ def _roll_house(
         m += dm * dt
         hs[k] = h
     return hs, sun, uh_l, uc_l, m
+
+
+def _run_duty(need: float, min_left: float) -> float:
+    """Duty of one step of a run: what lands the room on the stop point (``need``), at least what is left of the
+    minimum run (``min_left``, in steps), at most a whole step. Below 1 the run ends inside the step."""
+    return min(1.0, max(need, min_left, 0.0))
 
 
 def _min_run(th: V4Thermostat, *, heat: bool) -> float:
@@ -2786,6 +2791,7 @@ def samples_from_chart_log(
             for key in ("windows_open",):
                 if isinstance(e.get(key), bool):
                     state[key] = (ep, e[key])
+            state["override"] = (ep, e.get("override") is True)  # written only when true: every row sets it
             fr = e.get("fan_running", e.get("fan"))
             if isinstance(fr, bool):
                 state["fan"] = (ep, fr)
@@ -2826,6 +2832,10 @@ def samples_from_chart_log(
                 else:
                     kept = last_active_sp.get(mode)
                     sp = kept[1] if kept is not None and g - kept[0] <= 12 * 3600 else None
+            elif fresh("override"):
+                sp = None  # the occupant's value, which the plan never feeds: neither a start nor a calibration step
+            else:
+                sp = _commanded_setpoint(sp, fresh("setpoint"), fresh("upper" if mode == "heat" else "lower"))
             if sp is not None:
                 heat_sp, cool_sp = (sp, None) if mode == "heat" else (None, sp)
         heat_d, cool_d = _duty(hvac_tl, g)
@@ -2850,6 +2860,24 @@ def samples_from_chart_log(
         )
         g += _STEP_S
     return out
+
+
+def _commanded_setpoint(edge: float, commanded: float | None, other_edge: float | None) -> float:
+    """The setpoint a sample's thermostat is learned against (Issues #1593, #1609): the COMMANDED one.
+
+    The thermostat starts and stops relative to what it is told, and on one home's native readings it does so the same
+    way at every hour (starts 1.36-1.98 F below the commanded setpoint, typically 1.44 F; stops 0.36-0.64 F below it),
+    while against the plain band edge the same runs look different by time of day: the schedule's wake ramp logs
+    ``lower`` 66.5-67.5 while the house commands 68 from wake time, the remote-sensor loop commands the sleep floor
+    + 2 F at night, and the bedtime ramp logs 67 while the house commands 66. Mixed, they calibrated a 0.5 F start
+    offset. The chart row's ``setpoint`` is the commanded value; it is used when it is this mode's setpoint (nearer
+    this mode's band edge than the opposite one: the row logs one setpoint, the thermostat's mode), else the band edge
+    stands (rows without a logged setpoint, a setpoint of the other mode)."""
+    if commanded is None:
+        return edge
+    if other_edge is not None and abs(commanded - edge) >= abs(commanded - other_edge):
+        return edge
+    return commanded
 
 
 def _row_primary_value(

@@ -7497,11 +7497,70 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             mass_f=self._v4_store.v4_mass_f,
             path=path,
             unit=snap.unit,
+            # Issue #1593: a night already under way starts from the live loop and the run in progress
+            **self._v4_night_loop_now(snap.now),
         )
         if inp is None:
             return None, "cannot_plan"
         plan = night_strategy.plan_night(inp)
         return plan, "ok"
+
+    def _v4_override_hold(self) -> Any:
+        """The occupant override the thermostat holds now, for the v4 display forecast (Issue #1616): a READ of the
+        engine's override flag and its grace end, and of the thermostat's live mode and setpoint. Display only."""
+        climate = self.hass.states.get(self.config.get("climate_entity", ""))
+        return v4_shadow.override_hold(
+            self.automation_engine,
+            mode=climate.state if climate is not None else None,
+            setpoint_f=self._read_chart_setpoint(),
+        )
+
+    def _v4_loop_facts(self) -> dict[str, Any]:
+        """The live bedroom loop's facts for the v4 forecasts (Issues #1593, #1616): the engine's loop description
+        (``remote_offset_state``, called through ``decide_sync`` so the coordinator's facts are passed in, as every
+        engine call from outside automation.py is), its raise clock and measured startup latency. READ-ONLY."""
+        engine = self.automation_engine
+        latency = getattr(engine, "_remote_startup_latency_s", None)
+        return {
+            "state": decide_sync(self, engine.remote_offset_state),
+            "raise_at": getattr(engine, "_remote_raise_at", None),
+            "latency_s": latency if isinstance(latency, (int, float)) else None,
+        }
+
+    def _v4_live_sleep_loop(self, now: datetime, gated_steps: int = 0) -> Any:
+        """The emulated bedroom loop for the v4 display forecast made now (Issue #1593): ``live_loop_emulator``
+        on the live loop's facts (``_v4_loop_facts``) and the live loop's own swing. Display only: the emulator moves
+        forecast setpoints, never the thermostat."""
+        engine = self.automation_engine
+        return v4_shadow.live_loop_emulator(
+            **self._v4_loop_facts(),
+            swing_heat_f=engine._remote_swing_f("heat"),
+            swing_cool_f=engine._remote_swing_f("cool"),
+            now=now,
+            unit=self.config.get("temp_unit", "fahrenheit"),
+            step_minutes=v4_shadow.step_minutes(),
+            gated_steps=gated_steps,
+        )
+
+    def _v4_night_loop_now(self, now: datetime) -> dict[str, Any]:
+        """The live bedroom loop and run for ``v4_shadow.night_inputs`` (Issue #1593; used only when the night is
+        already under way): the offset in force and its raise clock (``v4_shadow.live_loop_seed`` on
+        ``_v4_loop_facts``), the measured startup latency, and the heating / cooling run from the newest chart rows
+        (``run_state_from_rows``, as the display cycle reads it). Read-only; a failed read plans the night from the
+        loop's start (offset 0, no run)."""
+        try:
+            facts = self._v4_loop_facts()
+            offset, since = v4_shadow.live_loop_seed(facts["state"], facts["raise_at"], now)
+            action, minutes = v4_shadow.run_state_from_rows(self._chart_log.raw_entries()[-80:], now)
+        except Exception:  # noqa: BLE001 - advice never fails on a live read
+            _LOGGER.debug("night strategy: live loop state unreadable; planning from offset 0", exc_info=True)
+            return {}
+        return {
+            "loop_offset_f": offset,
+            "loop_since_raise_s": since,
+            "loop_startup_latency_s": facts["latency_s"],
+            "run_now": (1 if action == "heating" else -1, float(minutes or 0.0)) if action else None,
+        }
 
     def night_strategy_payload(self) -> tuple[dict[str, Any] | None, str]:
         """``(body, reason)`` for ``GET /api/climate_advisor/night_strategy``: the strategy in the display unit.
@@ -7994,17 +8053,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         inputs = cycle["inputs"]
         # Issue #1553: inside the sleep window the house regulates the bedroom through the remote-sensor outer loop
         # (#1194); the display forecast emulates it with the live rule, so the chart shows what the house will do.
-        sleep_loop = (
-            v4_shadow.RemoteLoopEmulator(
-                # the live loop's swing (``AutomationEngine._remote_swing_f``): the measured one, Issue #1477
-                swing_heat_f=measured_swing_f(getattr(self, "_thermal_model", None) or {}, "heat"),
-                swing_cool_f=measured_swing_f(getattr(self, "_thermal_model", None) or {}, "cool"),
-                unit=self.config.get("temp_unit", "fahrenheit"),
-                step_minutes=v4_shadow.step_minutes(),
+        # Issue #1593: the emulated loop starts from the live one (the offset in force, its raise clock, the live
+        # swing and startup wait), and the sleep-window steps carry the band the engine arms at bedtime, not the
+        # schedule's ramp into it (the schedule itself is unchanged: the chart, v3 and the comfort score read it).
+        # Issue #1610: every home's thermostat gets the flat sleep band at bedtime, with or without a sleep sensor.
+        # Issue #1616: and the awake band from wake time (no ramp), and an occupant's own setpoint until the override is
+        # due to end (the remote loop's gate is closed while it holds, as live).
+        hold = self._v4_override_hold()
+        if self._current_classification is not None:
+            inputs = cycle["inputs"] = v4_shadow.with_armed_band(
+                inputs,
+                band_at=band_resolver_for(self._current_classification, self.config),
+                occupancy_mode=self._occupancy_mode,
+                hold=hold,
             )
-            if cycle.get("ca_sleep_node")
-            else None
-        )
+        held = sum(1 for i in inputs if hold is not None and hold.holds(i.ts))
+        sleep_loop = self._v4_live_sleep_loop(now, gated_steps=held) if cycle.get("ca_sleep_node") else None
         predictions, new_mass = await self._executor_job(
             functools.partial(v4_shadow.run_cycle, display=True, sleep_loop=sleep_loop, **cycle)
         )

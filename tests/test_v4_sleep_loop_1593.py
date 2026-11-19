@@ -828,3 +828,62 @@ def test_every_home_gets_the_armed_sleep_band_not_only_one_with_a_sleep_sensor()
     for g in guarded:
         assert "with_armed_band" not in ast.unparse(g), ast.unparse(g)
     assert "with_armed_band" in ast.unparse(meth)
+
+
+# ================================================ #1616: the backtest's default setpoints are what production feeds
+def _pb():
+    import importlib.util
+    import sys
+
+    tools = Path(__file__).resolve().parent.parent / "tools"
+    if "predict_backtest" in sys.modules:
+        return sys.modules["predict_backtest"]
+    sys.path.insert(0, str(tools))
+    spec = importlib.util.spec_from_file_location("predict_backtest", tools / "predict_backtest.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["predict_backtest"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestBacktestArmedSetpoints:
+    def _idx(self, rows):
+        pb = _pb()
+        idx = pb.ChartIndex(rows, PST, ["sensor.hall"], "sensor.hall")
+        idx.set_armed(p4._commanded_setpoint)
+        return idx
+
+    def test_the_default_source_is_what_the_display_forecast_feeds(self):
+        args = _pb().build_parser().parse_args([])
+        assert args.setpoint_source == "armed"
+        assert _pb().build_parser().parse_args(["--setpoint-source", "schedule"]).setpoint_source == "schedule"
+
+    def test_the_wake_ramp_and_the_loop_offset_give_way_to_the_armed_band(self):
+        t = datetime(2026, 11, 17, 6, 30, tzinfo=PST)
+        rows = [
+            _row(t, "heating", 66.5, sp=68.0, lower=66.5),  # wake ramp: the house commands 68 at once
+            _row(t + timedelta(hours=17), "idle", 66.0, sp=68.0, lower=66.0, ct=66.0),  # a +2 F loop hold
+        ]
+        idx = self._idx(rows)
+        assert idx.armed_at(t.timestamp()) == (68.0, 72.5)
+        assert idx.armed_at((t + timedelta(hours=17)).timestamp()) == (66.0, 72.0)  # the armed edge, no offset
+        assert idx.loop_offset_at((t + timedelta(hours=17)).timestamp()) == 2.0
+        assert idx.band_at(t.timestamp()) == (66.5, 72.5)  # the schedule source is unchanged
+
+    def test_an_override_at_the_anchor_is_held_until_it_ends_and_a_later_one_is_not_foreseen(self):
+        t = datetime(2026, 11, 17, 9, 0, tzinfo=PST)
+        rows = [
+            _row(t, "idle", 68.0, sp=70.0, lower=68.0, override=True),
+            _row(t + timedelta(minutes=30), "idle", 69.0, sp=70.0, lower=68.0, override=True),
+            _row(t + timedelta(minutes=60), "idle", 69.0, sp=68.0, lower=68.0),
+            _row(t + timedelta(hours=3), "idle", 68.0, sp=71.0, lower=68.0, override=True),
+        ]
+        idx = self._idx(rows)
+        assert idx.override_hold(t.timestamp() + 60) == ((t + timedelta(minutes=60)).timestamp(), 70.0, None)
+        assert idx.override_hold((t + timedelta(minutes=90)).timestamp()) is None
+        assert idx.armed_at((t + timedelta(hours=3)).timestamp()) == (68.0, 74.0)  # not the later override's 71
+
+    def test_the_inferred_window_gives_the_loop_its_bedtime_and_wake_time(self):
+        hours = {21, 22, 23, 0, 1, 2, 3, 4, 5}
+        assert _pb().sleep_window_times(lambda d: d.hour in hours) == ("21:00", "06:00")
+        assert _pb().sleep_window_times(None) is None

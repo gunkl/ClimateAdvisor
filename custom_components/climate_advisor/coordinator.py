@@ -17,7 +17,7 @@ import logging
 import math
 import statistics
 import threading
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -192,8 +192,8 @@ from .const import (
     DEFAULT_THRESHOLD_MILD,
     DEFAULT_THRESHOLD_WARM,
     DOMAIN,
-    DROPPED_MODE_RECHECK_MAX_ATTEMPTS,
-    DROPPED_MODE_RECHECK_S,
+    DROPPED_CHANGE_RECHECK_MAX_ATTEMPTS,
+    DROPPED_CHANGE_RECHECK_S,
     ECONOMIZER_EVENING_START_HOUR,
     ECONOMIZER_TEMP_DELTA,
     ENGINE_V3,
@@ -1068,6 +1068,28 @@ def _prune_event_log(event_log: list[dict], now: datetime) -> list[dict]:
 # other consumers.
 
 
+@dataclass(frozen=True)
+class _RecheckState:
+    """The part of a thermostat State the change handler reads (Issue #1603 dropped-change re-check)."""
+
+    state: str
+    attributes: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _RecheckEvent:
+    """A synthetic thermostat-change event for the dropped-change re-check (Issue #1603)."""
+
+    data: dict[str, Any]
+    context: Any = None
+    recheck_attempt: int = 0
+
+
+def _state_value(state: Any, key: str) -> Any:
+    """``state.state`` for ``"state"``, else that attribute (dropped-change re-check keys, Issue #1603)."""
+    return state.state if key == "state" else state.attributes.get(key)
+
+
 def _call_later(obj: Any, delay: float, fn: Any) -> Callable[[], None]:
     """``async_call_later`` unless the coordinator is latched (Issue #1580; mirror of automation._call_later)."""
     if _latched(obj):
@@ -1095,9 +1117,9 @@ def _whf_safety_after_event(after: Callable[[Any, Any], None]) -> Callable[[Any]
 
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
-        async def wrapped(self: Any, event: Any) -> Any:
+        async def wrapped(self: Any, event: Any, **kwargs: Any) -> Any:  # kwargs: the #1603 re-check flag
             try:
-                return await fn(self, event)
+                return await fn(self, event, **kwargs)
             finally:
                 try:
                     after(self, event)
@@ -1632,7 +1654,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # check re-runs once it has been unknown for the 60 s benefit of the doubt (cancelled on shutdown).
         self._whf_unknown_sensor_cancel: Callable[[], None] | None = None
         self._lead_in_recheck_cancel: Callable[[], None] | None = None  # Issue #1535: the lead-in fan re-check
-        self._dropped_mode_recheck_cancel: Callable[[], None] | None = None  # Issue #1603: dropped mode re-check
+        self._dropped_change_recheck_cancel: Callable[[], None] | None = None  # Issue #1603: dropped change re-check
+        self._dropped_change: dict[str, Any] | None = None  # Issue #1603: what the re-check will judge again
         self._whf_release_reclassify_cancel: Callable[[], None] | None = None  # Issue #1215
         self._whf_safety_started_at: datetime | None = None
         # Issue #1389: set up during Home Assistant's own start (not a reload) -- an unreadable door/window
@@ -11173,52 +11196,78 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
         )
 
-    def _recheck_dropped_mode_change(self, old_mode: str, dropped_mode: str, attempt: int = 1) -> None:
-        """Issue #1603: re-judge a Fix-D change the in-flight-command guard dropped, once the guard clears.
+    def _ca_fan_command_in_flight(self) -> bool:
+        """A CA fan command is in flight or under 30 s old: a thermostat side effect of it cannot be told apart."""
+        return bool(self.automation_engine._fan_command_pending or self._is_recent_fan_command(threshold_seconds=30.0))
 
-        Only a change that was NOT CA's own mode echo gets here: the listener already asked the #1232/#1246 own-write
-        memory (``_is_expected_confirmation``, which includes ``recognise_own_mode_echo``) before dropping it. It is
-        superseded through the SAME Fix-D path only when the thermostat still shows the dropped mode (any later change,
-        an echo of a later CA write included, was judged by the listener itself) and an override is still active with
-        a different mode. A newer drop replaces a pending re-check.
+    def _note_dropped_change(self, event: Any, old_state: Any, new_state: Any, keys: Iterable[str]) -> None:
+        """Issues #1603/#1612/#1613: an occupant change the in-flight-command guards dropped is judged again later.
+
+        ``keys`` are what the detector dropped: ``"state"`` (the mode) or attribute names (setpoint attributes,
+        ``fan_mode``). Only the guards dropped it (each detector already ruled out CA's own echo first). A mode of
+        ``fan_only`` is never re-judged: CA never writes it, so it may be a thermostat's side effect of CA's own fan
+        command. Drops merge (the first pre-drop value is kept); one re-check runs ``DROPPED_CHANGE_RECHECK_S`` later.
         """
-
-        @callback
-        def _later(_now: Any) -> None:
-            self._dropped_mode_recheck_cancel = None
-            if getattr(self, "_shut_down", False) is True:
-                return
-            ae = self.automation_engine
-            state = self.hass.states.get(self.config.get("climate_entity", ""))
-            live = state.state if state is not None else None
-            if live != dropped_mode or not ae._manual_override_active or live == ae._manual_override_mode:
-                return
-            if self._ca_command_in_flight():
-                if attempt < DROPPED_MODE_RECHECK_MAX_ATTEMPTS:
-                    self._recheck_dropped_mode_change(old_mode, dropped_mode, attempt + 1)
-                else:
-                    _LOGGER.warning(
-                        "Mode change to %s during override %s not re-checked: CA commands kept the guard set (#1603)",
-                        dropped_mode,
-                        ae._manual_override_mode,
-                    )
-                return
-            _LOGGER.info(
-                "Mode change to %s landed while a CA command was in flight: re-checked now (Issue #1603)", live
+        attempt = int(getattr(event, "recheck_attempt", 0)) + 1
+        drop = getattr(self, "_dropped_change", None)
+        if drop is None:
+            drop = {"before": {}, "after": {}, "context": getattr(event, "context", None)}
+        for key in keys:
+            after = _state_value(new_state, key)
+            if key == "state" and after == "fan_only":
+                _LOGGER.debug("Mode change to fan_only during a CA command not re-checked: may be its side effect")
+                continue
+            drop["before"].setdefault(key, _state_value(old_state, key))
+            drop["after"][key] = after
+        if not drop["after"]:
+            return
+        if attempt > DROPPED_CHANGE_RECHECK_MAX_ATTEMPTS:
+            _LOGGER.warning(
+                "Thermostat change %s not re-checked: Climate Advisor commands kept the guard set (Issue #1603)",
+                drop["after"],
             )
-            self._supersede_thermostat_override(old_mode, live)
-
-        prev = getattr(self, "_dropped_mode_recheck_cancel", None)
+            self._dropped_change = None
+            return
+        drop["attempt"] = attempt
+        self._dropped_change = drop
+        prev = getattr(self, "_dropped_change_recheck_cancel", None)
         if prev is not None:
             with contextlib.suppress(Exception):
                 prev()
         try:
-            self._dropped_mode_recheck_cancel = _call_later(
-                self, DROPPED_MODE_RECHECK_S, self._zone_scoped_sync(_later)
+            self._dropped_change_recheck_cancel = _call_later(
+                self, DROPPED_CHANGE_RECHECK_S, self._zone_scoped(self._async_recheck_dropped_change)
             )
         except Exception:  # noqa: BLE001 - a scheduling problem must never break the listener
-            self._dropped_mode_recheck_cancel = None
-            _LOGGER.debug("dropped mode-change re-check not scheduled", exc_info=True)
+            self._dropped_change_recheck_cancel = None
+            _LOGGER.debug("dropped thermostat-change re-check not scheduled", exc_info=True)
+
+    async def _async_recheck_dropped_change(self, _now: Any = None) -> None:
+        """Re-run the SAME thermostat-change detection for what is still showing of a dropped change.
+
+        The synthetic event is the live state with only the dropped keys set back to their pre-drop values in
+        ``old_state``; a key no longer showing its dropped value (a later change, an echo of a later CA write
+        included, was judged by the listener itself) is left out. Bookkeeping that belongs to the real event
+        (promise reading, equipment/runtime edges, swing and observation samples) is not repeated.
+        """
+        self._dropped_change_recheck_cancel = None
+        drop, self._dropped_change = getattr(self, "_dropped_change", None), None
+        if drop is None or getattr(self, "_shut_down", False) is True:
+            return
+        live = self.hass.states.get(self.config.get("climate_entity", ""))
+        if live is None:
+            return
+        keys = [k for k, v in drop["after"].items() if _state_value(live, k) == v and drop["before"][k] != v]
+        if not keys:
+            return
+        old_value = {k: drop["before"][k] for k in keys}
+        old_attrs = {**live.attributes, **{k: v for k, v in old_value.items() if k != "state"}}
+        old = _RecheckState(old_value.get("state", live.state), old_attrs)
+        new = _RecheckState(live.state, dict(live.attributes))
+        _LOGGER.info("Re-checking a thermostat change that landed during a CA command: %s (Issue #1603)", keys)
+        await self._async_thermostat_changed(
+            _RecheckEvent({"old_state": old, "new_state": new}, drop["context"], drop["attempt"]), recheck=True
+        )
 
     def _fan_is_blower_only(self, action: str | None, hvac_mode: str | None = None) -> bool:
         """``hvac_action`` ``fan`` in a heating or cooling mode (heat, cool, heat_cool, auto): the blower alone, never
@@ -11927,10 +11976,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._glide_hvac_session_mode(new_state.state)
 
     @_whf_safety_after_event(_whf_after_thermostat_event)
-    async def _async_thermostat_changed(self, event: Event) -> None:
-        """Track thermostat changes for learning (detect manual overrides)."""
+    async def _async_thermostat_changed(self, event: Event, *, recheck: bool = False) -> None:
+        """Track thermostat changes for learning (detect manual overrides).
+
+        ``recheck``: the dropped-change re-check (Issue #1603) -- detection only, the real event's bookkeeping ran.
+        """
         # Issue #1128: evidence first, before any early return below (sync, no I/O, never raises).
-        self._record_promise_reading()
+        if not recheck:
+            self._record_promise_reading()
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
         if not new_state or not old_state:
@@ -11965,17 +12018,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1048 change 9: remember when heating/cooling equipment was last seen active
         # (per direction) for the comfort stall alert. Before any early return so a short
         # cycle between two 30-min coordinator updates is never missed.
-        self._note_equipment_activity(new_state.attributes.get("hvac_action"), old_state.attributes.get("hvac_action"))
+        if not recheck:  # Issue #1603: equipment facts of the real event, not repeated by the re-check
+            self._note_equipment_activity(
+                new_state.attributes.get("hvac_action"), old_state.attributes.get("hvac_action")
+            )
 
-        # Issue #1234: sample the thermostat's own hysteresis at each REAL hvac_action edge. Before any
-        # early return (like the equipment-activity stamp) so a short cycle is never missed; never raises.
-        await self._track_swing_edges(old_state, new_state)
+            # Issue #1234: sample the thermostat's own hysteresis at each REAL hvac_action edge. Before any
+            # early return (like the equipment-activity stamp) so a short cycle is never missed; never raises.
+            await self._track_swing_edges(old_state, new_state)
 
-        # Issue #1286: HVAC runtime/session edges are equipment facts, not occupant changes, so they are tracked
-        # before the startup-coalescing return (which exists to suppress override detection only, #321). A
-        # restart mid-run used to miss a stop inside the ~300 s window and kept counting runtime (and sampling
-        # the heat/cool observation) for idle equipment; a start inside it was not counted until coalescing ended.
-        await self._track_hvac_runtime_edges(old_state, new_state)
+            # Issue #1286: HVAC runtime/session edges are equipment facts, not occupant changes, so they are tracked
+            # before the startup-coalescing return (which exists to suppress override detection only, #321). A
+            # restart mid-run used to miss a stop inside the ~300 s window and kept counting runtime (and sampling
+            # the heat/cool observation) for idle equipment; a start inside it was not counted until coalescing
+            # ended.
+            await self._track_hvac_runtime_edges(old_state, new_state)
 
         # Bug 1 (Issue #321): Suppress override detection during startup coalescing window
         if self._suppress_during_startup_coalescing(f"thermostat override detection for {new_state.state}"):
@@ -12044,6 +12101,38 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not _is_expected_confirmation
         )
 
+        # The plain mode-override candidate (no override active); the in-flight guard is applied at the branch.
+        _normal_mode_candidate = bool(
+            old_state.state != new_state.state
+            and not is_unavailable_state(new_state.state)
+            and not _is_availability_recovery
+            and not self.automation_engine._manual_override_active
+            and not _is_expected_confirmation
+            and self._current_classification
+            # Issue #618 investigation note: an earlier version of this fix flipped this
+            # comparison to check classification.hvac_mode first. Reverted — the full test
+            # suite caught test_heat_cool_override.py::test_heat_cool_to_cool_fires_override_
+            # when_ca_commanded_heat_cool failing, which documents that comparing against
+            # _last_commanded_hvac_mode (not classification.hvac_mode) was itself a deliberate
+            # prior fix ("Bug C"): when CA is running heat_cool banding, its actual commanded
+            # mode ("heat_cool") legitimately differs from classification's simplified
+            # heat/cool/off recommendation, and a user switching away from heat_cool must still
+            # be detected as a real override even though the new mode happens to match
+            # classification. Flipping priority here silently reintroduced Bug C. The
+            # 2026-08-10 incident's 14:20 "Manual override detected" was, on reflection,
+            # correct: CA's last real command was genuinely "off" (from the WHF-suppression
+            # bug fixed elsewhere in this issue), so a change away from that CA-issued state IS
+            # a real, undirected deviation — PATH B's existing self-resolution (10-minute
+            # confirm window, no grace started, "transient" notification) is the correct,
+            # already-working handling for "turned out to match what CA wants anyway." See the
+            # PR discussion for this issue for the full analysis.
+            and new_state.state
+            != ca_expected_mode(
+                self.automation_engine._last_commanded_hvac_mode,
+                self._current_classification.hvac_mode if self._current_classification else None,
+            )
+        )
+
         # Detect manual HVAC override during a door/window pause.
         # Note: we intentionally do NOT require old_state == "off" here.
         # The async _set_hvac_mode("off") service call may not have
@@ -12095,6 +12184,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self.automation_engine._temp_command_pending,
                     self._is_recent_hvac_command(threshold_seconds=3.0),
                 )
+                self._note_dropped_change(event, old_state, new_state, ("state",))  # Issue #1613: re-check
         elif _supersede_candidate and not self._ca_command_in_flight():
             # Fix D (Issue #282): mode change to a DIFFERENT mode while grace is active.
             # The existing elif below guards with `not _manual_override_active`, so this
@@ -12105,41 +12195,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #1603: the same change, but a CA command is in flight (pending flags or the 3 s window). Dropping
             # it left "manual override: off" over a house the occupant had switched to cool/heat until grace expiry,
             # which then acted on the abandoned Off. Re-check it once the guard clears.
-            self._recheck_dropped_mode_change(old_state.state, new_state.state)
-        elif (
-            old_state.state != new_state.state
-            and not is_unavailable_state(new_state.state)
-            and not _is_availability_recovery
-            and not self.automation_engine._manual_override_active
-            and not self.automation_engine._hvac_command_pending
-            and not self.automation_engine._fan_command_pending
-            and not self.automation_engine._temp_command_pending
-            and not self._is_recent_hvac_command()
-            and not _is_expected_confirmation
-            and self._current_classification
-            # Issue #618 investigation note: an earlier version of this fix flipped this
-            # comparison to check classification.hvac_mode first. Reverted — the full test
-            # suite caught test_heat_cool_override.py::test_heat_cool_to_cool_fires_override_
-            # when_ca_commanded_heat_cool failing, which documents that comparing against
-            # _last_commanded_hvac_mode (not classification.hvac_mode) was itself a deliberate
-            # prior fix ("Bug C"): when CA is running heat_cool banding, its actual commanded
-            # mode ("heat_cool") legitimately differs from classification's simplified
-            # heat/cool/off recommendation, and a user switching away from heat_cool must still
-            # be detected as a real override even though the new mode happens to match
-            # classification. Flipping priority here silently reintroduced Bug C. The
-            # 2026-08-10 incident's 14:20 "Manual override detected" was, on reflection,
-            # correct: CA's last real command was genuinely "off" (from the WHF-suppression
-            # bug fixed elsewhere in this issue), so a change away from that CA-issued state IS
-            # a real, undirected deviation — PATH B's existing self-resolution (10-minute
-            # confirm window, no grace started, "transient" notification) is the correct,
-            # already-working handling for "turned out to match what CA wants anyway." See the
-            # PR discussion for this issue for the full analysis.
-            and new_state.state
-            != ca_expected_mode(
-                self.automation_engine._last_commanded_hvac_mode,
-                self._current_classification.hvac_mode if self._current_classification else None,
-            )
-        ):
+            self._note_dropped_change(event, old_state, new_state, ("state",))
+        elif _normal_mode_candidate and self._ca_command_in_flight():
+            # Issue #1612: the plain mode override below, but a CA command is in flight: re-check once it clears
+            # (dropped, CA's next write of its plan undid the occupant's mode with no override or grace).
+            self._note_dropped_change(event, old_state, new_state, ("state",))
+        elif _normal_mode_candidate:
             # Mode changed outside of door/window pause to something
             # different from what CA is actively controlling — manual override
             _LOGGER.info(
@@ -12284,7 +12345,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Only applies to HVAC/Both fan modes — whole-house fans run independently.
         # Natural ventilation is intentionally hvac_mode=off + fan active — do not clear.
         ae = self.automation_engine
-        if new_state.state == "off" and ae._fan_active and not ae._fan_override_active:
+        if not recheck and new_state.state == "off" and ae._fan_active and not ae._fan_override_active:
             _fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
             if _fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH) and not ae._natural_vent_active:
                 _LOGGER.warning("Thermostat set to off while HVAC fan was marked active — clearing stale fan state")
@@ -12344,7 +12405,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # accumulate enough samples for OLS.
         # Guard: only sample if HVAC is still actively heating/cooling (same phase),
         # and at least 60 seconds have elapsed since the last sample to avoid flooding.
-        if is_hvac_compressor_active(new_action) and old_action == new_action:
+        if not recheck and is_hvac_compressor_active(new_action) and old_action == new_action:
             _active_obs_type = OBS_TYPE_HVAC_HEAT if new_action == "heating" else OBS_TYPE_HVAC_COOL
             self._ensure_pending_observations()
             _active_obs = self._pending_observations.get(_active_obs_type)
@@ -12465,23 +12526,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 is True
             )
 
-        _setpoint_candidate = bool(
+        _setpoint_judgeable = bool(
             _setpoint_changed
             # Issue #1049: a reconnecting thermostat has no prior setpoint — that is a reading
             # appearing, not an occupant changing it. (Only the recovery case: a missing prior
             # setpoint in any other transition keeps its original override semantics.)
             and not _is_availability_recovery
             and self._today_record
-            and not self.automation_engine._temp_command_pending
-            and not self.automation_engine._hvac_command_pending
-            and not self.automation_engine._fan_command_pending
-            and not self._is_recent_hvac_command(threshold_seconds=30.0)
-            and not self._is_recent_temp_command(threshold_seconds=30.0)
             and not _own_setpoint_echo  # Issue #1232: CA's own write echoing back late (value/Context match)
             and not _holds_own_setpoint  # Issue #1397: within 0.5 F of CA's own setpoint
-            and not self._is_recent_fan_command(threshold_seconds=30.0)
             and not _fan_cancel_in_this_event  # Issue #359 Fix A: fan-off echo suppresses grace
         )
+        _setpoint_guarded = _setpoint_judgeable and bool(  # guards only for a candidate (short-circuit as before)
+            self.automation_engine._temp_command_pending
+            or self.automation_engine._hvac_command_pending
+            or self._is_recent_hvac_command(threshold_seconds=30.0)
+            or self._is_recent_temp_command(threshold_seconds=30.0)
+            or self._ca_fan_command_in_flight()
+        )
+        _setpoint_candidate = _setpoint_judgeable and not _setpoint_guarded
+        # Issue #1613: dropped only by CA's own setpoint/mode command guards -> re-check once they clear. Not inside a
+        # CA fan-command window: a thermostat may restore its program setpoint after a fan command (ecobee, the
+        # post-fan verify), which cannot be told from the occupant.
+        if _setpoint_judgeable and _setpoint_guarded and not self._ca_fan_command_in_flight():
+            self._note_dropped_change(event, old_state, new_state, _sp_attrs)
         # Owner decision (2026-10-31, Issue #1133): while the whole-house fan has suppressed HVAC, the
         # thermostat reads Off only because of the fan and a window is open. A temperature-only change then
         # does not stop the fan, does not resume heat/cool (that would heat an open window) and is not a manual
@@ -12662,28 +12730,37 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 old_fan_mode,
                 new_fan_mode,
             )
-        if (
+        _fan_mode_judgeable = bool(
             _fan_ctl_37
             and _blower_is_ca_fan_37
             and new_fan_mode is not None
             and old_fan_mode is not None
             and new_fan_mode != old_fan_mode
-            and not self.automation_engine._fan_command_pending
             # Issue #774: an active fan override must not block re-detection of the fan
             # turning OFF — that's the override's own defining condition ending, and is
             # exactly what `_fan_cancel_in_this_event` (computed above) identifies. Only an
             # ON-direction re-detection while already overridden is the redundant case this
             # guard exists to skip.
             and (not self.automation_engine._fan_override_active or _fan_cancel_in_this_event)
-            and not self.automation_engine._hvac_command_pending
-            and not self._is_recent_hvac_command(threshold_seconds=30.0)
-            and not _is_expected_confirmation
-            and not self._is_recent_fan_command(threshold_seconds=30.0)
+            # a mode change in the same event that confirms CA's own command: its fan_mode may come with it
+            and not (_is_expected_confirmation and old_state.state != new_state.state)
             and not _setpoint_override_detected
             # Issue #1133: one thermostat event, one root cause -- a mode-change override wins over a fan-ON press
             # in the same event, but the fan-OFF/cancel direction still has to end a thermostat-fan override.
             and not (_mode_override_detected and not _fan_cancel_in_this_event)
-        ):
+        )
+        # CA's own mode/setpoint command windows. ``_is_expected_confirmation`` is, for a fan-mode-only event (the
+        # mode unchanged), only the 120 s "thermostat in the mode CA last commanded" window: a time guard too.
+        _fan_mode_hvac_guarded = _fan_mode_judgeable and bool(
+            self.automation_engine._hvac_command_pending
+            or self._is_recent_hvac_command(threshold_seconds=30.0)
+            or _is_expected_confirmation
+        )
+        if _fan_mode_judgeable and _fan_mode_hvac_guarded and not self._ca_fan_command_in_flight():
+            # Issue #1613: dropped only by CA's own mode/setpoint command guard -> re-check once it clears. Inside a
+            # CA fan-command window it may be that command's own echo: never re-checked.
+            self._note_dropped_change(event, old_state, new_state, ("fan_mode",))
+        if _fan_mode_judgeable and not _fan_mode_hvac_guarded and not self._ca_fan_command_in_flight():
             _fan_ct = self.automation_engine._fan_command_time
             try:
                 _fan_cmd_age = (
@@ -20236,9 +20313,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if getattr(self, "_lead_in_recheck_cancel", None) is not None:  # Issue #1535
                 self._lead_in_recheck_cancel()
                 self._lead_in_recheck_cancel = None
-            if getattr(self, "_dropped_mode_recheck_cancel", None) is not None:  # Issue #1603
-                self._dropped_mode_recheck_cancel()
-                self._dropped_mode_recheck_cancel = None
+            if getattr(self, "_dropped_change_recheck_cancel", None) is not None:  # Issue #1603
+                self._dropped_change_recheck_cancel()
+                self._dropped_change_recheck_cancel = None
             if getattr(self, "_whf_release_reclassify_cancel", None) is not None:  # Issue #1215
                 self._whf_release_reclassify_cancel()
                 self._whf_release_reclassify_cancel = None

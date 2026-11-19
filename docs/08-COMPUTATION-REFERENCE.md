@@ -3259,11 +3259,11 @@ change as CA's own echo:
 
 | Occupant change after coalesce end (real HA, 1 s clock) | Guard | Measured result |
 |---|---|---|
-| Mode, 0–2 s or 10–12 s after | `_is_recent_hvac_command()` default 3 s | Not detected; the comfort-edge selector restores the plan's mode about 2.5 min later |
+| Mode, 0–2 s or 10–12 s after | `_is_recent_hvac_command()` default 3 s | Not detected at once; since Issues #1612/#1613 re-checked about 4 s later (`_note_dropped_change()`) and detected like any other change (before: the comfort-edge selector restored the plan's mode about 2.5 min later) |
 | Mode, 3–9 s, or from 13 s | — | Detected: override, confirm window, grace |
-| Setpoint, 0–39 s after | `_is_recent_hvac_command(30)` / `_is_recent_temp_command(30)` | Not detected. A change before the +10 s write is overwritten by it; a later one stays until CA's next setpoint write (the next 30-min cycle), which restores the plan's setpoint with no override and no notice |
+| Setpoint, 0–39 s after | `_is_recent_hvac_command(30)` / `_is_recent_temp_command(30)` | Not detected at once. A change before the +10 s write is overwritten by it (the thermostat no longer shows it, so nothing is re-checked); since Issue #1613 a later one is re-checked once the 30 s guards clear and detected (before: CA's next 30-min cycle restored the plan's setpoint with no override and no notice). Not re-checked inside a CA fan-command window (a thermostat may restore its program setpoint after a fan command) |
 | Setpoint, from 41 s | — | Detected, unless it is CA's own write reported late (Issue #1232: the value CA wrote, or its HA Context, for 180 s after each write, is recognised as CA's echo) |
-| Thermostat `fan_mode` (blower, `hvac_fan`) | `_is_recent_hvac_command(30)` | Same 30 s rule (from the code, not measured) |
+| Thermostat `fan_mode` (blower, `hvac_fan`) | `_is_recent_hvac_command(30)`, and `_is_expected_confirmation` (the 120 s "thermostat in CA's last commanded mode" window) | Measured (Issue #1613): not detected at once; re-checked until both windows clear (up to about 2 min) and then detected. Not re-checked inside a CA fan-command window (it may be CA's own blower echo) |
 
 None of this is specific to restarts: the same 3 s (mode) and 30 s (setpoint, blower) windows follow **every** CA
 climate write, including the setpoint re-affirmed each 30-minute cycle. They exist because a thermostat reports

@@ -192,6 +192,8 @@ from .const import (
     DEFAULT_THRESHOLD_MILD,
     DEFAULT_THRESHOLD_WARM,
     DOMAIN,
+    DROPPED_MODE_RECHECK_MAX_ATTEMPTS,
+    DROPPED_MODE_RECHECK_S,
     ECONOMIZER_EVENING_START_HOUR,
     ECONOMIZER_TEMP_DELTA,
     ENGINE_V3,
@@ -1630,6 +1632,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # check re-runs once it has been unknown for the 60 s benefit of the doubt (cancelled on shutdown).
         self._whf_unknown_sensor_cancel: Callable[[], None] | None = None
         self._lead_in_recheck_cancel: Callable[[], None] | None = None  # Issue #1535: the lead-in fan re-check
+        self._dropped_mode_recheck_cancel: Callable[[], None] | None = None  # Issue #1603: dropped mode re-check
         self._whf_release_reclassify_cancel: Callable[[], None] | None = None  # Issue #1215
         self._whf_safety_started_at: datetime | None = None
         # Issue #1389: set up during Home Assistant's own start (not a reload) -- an unreadable door/window
@@ -11127,6 +11130,96 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._lead_in_recheck_cancel = None
             _LOGGER.debug("lead-in fan re-check not scheduled", exc_info=True)
 
+    def _ca_command_in_flight(self) -> bool:
+        """A CA thermostat/fan command is in flight: pending flags, or a mode/setpoint command under 3 s ago."""
+        ae = self.automation_engine
+        return bool(
+            ae._hvac_command_pending
+            or ae._fan_command_pending
+            or ae._temp_command_pending
+            or self._is_recent_hvac_command()
+        )
+
+    def _supersede_thermostat_override(self, old_mode: str, new_mode: str) -> None:
+        """Fix D (#282): the occupant switched to a different mode during an override -- supersede it, re-detect."""
+        ae = self.automation_engine
+        _LOGGER.info(
+            "New mode change during active override grace: %s → was overriding %s — restarting",
+            new_mode,
+            ae._manual_override_mode,
+        )
+        # Issue #664: this is the real production trigger for OVERRIDE_SUPERSEDED,
+        # not OVERRIDE_CANCELLED — clear_manual_override() here never calls
+        # _cancel_grace_timers() (Issue #282's "Fix D" deliberately leaves the
+        # still-running grace protecting the NEW override handle_manual_override()
+        # is about to (re)detect below), unlike cancel_override()'s real
+        # OVERRIDE_CANCELLED behavior which clears both confirm AND grace. Feeding
+        # this as OVERRIDE_CANCELLED (as Issue #647 originally did, shadow-only)
+        # would have made an authoritative FSM wrongly force grace to NONE here.
+        from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+        decide_sync(
+            self,
+            ae._replace_thermostat_override,
+            reason="new_override_during_grace",
+            fsm_kind=_OGFEventKind.OVERRIDE_SUPERSEDED,
+            clear_fan=False,
+        )
+        decide_sync(
+            self,
+            ae.handle_manual_override,
+            old_mode=old_mode,
+            new_mode=new_mode,
+            classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
+        )
+
+    def _recheck_dropped_mode_change(self, old_mode: str, dropped_mode: str, attempt: int = 1) -> None:
+        """Issue #1603: re-judge a Fix-D change the in-flight-command guard dropped, once the guard clears.
+
+        Only a change that was NOT CA's own mode echo gets here: the listener already asked the #1232/#1246 own-write
+        memory (``_is_expected_confirmation``, which includes ``recognise_own_mode_echo``) before dropping it. It is
+        superseded through the SAME Fix-D path only when the thermostat still shows the dropped mode (any later change,
+        an echo of a later CA write included, was judged by the listener itself) and an override is still active with
+        a different mode. A newer drop replaces a pending re-check.
+        """
+
+        @callback
+        def _later(_now: Any) -> None:
+            self._dropped_mode_recheck_cancel = None
+            if getattr(self, "_shut_down", False) is True:
+                return
+            ae = self.automation_engine
+            state = self.hass.states.get(self.config.get("climate_entity", ""))
+            live = state.state if state is not None else None
+            if live != dropped_mode or not ae._manual_override_active or live == ae._manual_override_mode:
+                return
+            if self._ca_command_in_flight():
+                if attempt < DROPPED_MODE_RECHECK_MAX_ATTEMPTS:
+                    self._recheck_dropped_mode_change(old_mode, dropped_mode, attempt + 1)
+                else:
+                    _LOGGER.warning(
+                        "Mode change to %s during override %s not re-checked: CA commands kept the guard set (#1603)",
+                        dropped_mode,
+                        ae._manual_override_mode,
+                    )
+                return
+            _LOGGER.info(
+                "Mode change to %s landed while a CA command was in flight: re-checked now (Issue #1603)", live
+            )
+            self._supersede_thermostat_override(old_mode, live)
+
+        prev = getattr(self, "_dropped_mode_recheck_cancel", None)
+        if prev is not None:
+            with contextlib.suppress(Exception):
+                prev()
+        try:
+            self._dropped_mode_recheck_cancel = _call_later(
+                self, DROPPED_MODE_RECHECK_S, self._zone_scoped_sync(_later)
+            )
+        except Exception:  # noqa: BLE001 - a scheduling problem must never break the listener
+            self._dropped_mode_recheck_cancel = None
+            _LOGGER.debug("dropped mode-change re-check not scheduled", exc_info=True)
+
     def _fan_is_blower_only(self, action: str | None, hvac_mode: str | None = None) -> bool:
         """``hvac_action`` ``fan`` in a heating or cooling mode (heat, cool, heat_cool, auto): the blower alone, never
         a run (owner decision 2026-11-13). False for any other action, in ``fan_only`` mode (the fan_only session, #912)
@@ -11940,6 +12033,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _is_availability_recovery = is_availability_recovery(old_state)
 
         _mode_override_detected = False  # set by any of the mode-change override registrations below
+        # Fix D (Issue #282) candidate: a real mode change, to a DIFFERENT mode than the active override's, that is not
+        # CA's own command confirming/echoing. Whether a CA command is in flight decides now vs re-check (#1603).
+        _supersede_candidate = (
+            old_state.state != new_state.state
+            and not is_unavailable_state(new_state.state)
+            and not _is_availability_recovery
+            and self.automation_engine._manual_override_active
+            and new_state.state != self.automation_engine._manual_override_mode
+            and not _is_expected_confirmation
+        )
 
         # Detect manual HVAC override during a door/window pause.
         # Note: we intentionally do NOT require old_state == "off" here.
@@ -11992,55 +12095,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self.automation_engine._temp_command_pending,
                     self._is_recent_hvac_command(threshold_seconds=3.0),
                 )
-        elif (
+        elif _supersede_candidate and not self._ca_command_in_flight():
             # Fix D (Issue #282): mode change to a DIFFERENT mode while grace is active.
             # The existing elif below guards with `not _manual_override_active`, so this
             # branch fires first and handles the re-override case.
-            old_state.state != new_state.state
-            and not is_unavailable_state(new_state.state)
-            and not _is_availability_recovery
-            and self.automation_engine._manual_override_active
-            and new_state.state != self.automation_engine._manual_override_mode
-            and not self.automation_engine._hvac_command_pending
-            and not self.automation_engine._fan_command_pending
-            and not self.automation_engine._temp_command_pending
-            and not self._is_recent_hvac_command()
-            and not _is_expected_confirmation
-        ):
-            # User switched to a different mode while grace was running — clear the
-            # old override and register the new one so the grace period restarts.
-            _LOGGER.info(
-                "New mode change during active override grace: %s → was overriding %s — restarting",
-                new_state.state,
-                self.automation_engine._manual_override_mode,
-            )
-            # Issue #664: this is the real production trigger for OVERRIDE_SUPERSEDED,
-            # not OVERRIDE_CANCELLED — clear_manual_override() here never calls
-            # _cancel_grace_timers() (Issue #282's "Fix D" deliberately leaves the
-            # still-running grace protecting the NEW override handle_manual_override()
-            # is about to (re)detect below), unlike cancel_override()'s real
-            # OVERRIDE_CANCELLED behavior which clears both confirm AND grace. Feeding
-            # this as OVERRIDE_CANCELLED (as Issue #647 originally did, shadow-only)
-            # would have made an authoritative FSM wrongly force grace to NONE here.
-            ae = self.automation_engine
-
-            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
-
-            decide_sync(
-                self,
-                ae._replace_thermostat_override,
-                reason="new_override_during_grace",
-                fsm_kind=_OGFEventKind.OVERRIDE_SUPERSEDED,
-                clear_fan=False,
-            )
-            decide_sync(
-                self,
-                self.automation_engine.handle_manual_override,
-                old_mode=old_state.state,
-                new_mode=new_state.state,
-                classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
-            )
+            self._supersede_thermostat_override(old_state.state, new_state.state)
             _mode_override_detected = True
+        elif _supersede_candidate:
+            # Issue #1603: the same change, but a CA command is in flight (pending flags or the 3 s window). Dropping
+            # it left "manual override: off" over a house the occupant had switched to cool/heat until grace expiry,
+            # which then acted on the abandoned Off. Re-check it once the guard clears.
+            self._recheck_dropped_mode_change(old_state.state, new_state.state)
         elif (
             old_state.state != new_state.state
             and not is_unavailable_state(new_state.state)
@@ -20171,6 +20236,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if getattr(self, "_lead_in_recheck_cancel", None) is not None:  # Issue #1535
                 self._lead_in_recheck_cancel()
                 self._lead_in_recheck_cancel = None
+            if getattr(self, "_dropped_mode_recheck_cancel", None) is not None:  # Issue #1603
+                self._dropped_mode_recheck_cancel()
+                self._dropped_mode_recheck_cancel = None
             if getattr(self, "_whf_release_reclassify_cancel", None) is not None:  # Issue #1215
                 self._whf_release_reclassify_cancel()
                 self._whf_release_reclassify_cancel = None

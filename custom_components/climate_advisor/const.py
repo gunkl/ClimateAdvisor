@@ -1745,6 +1745,10 @@ THERMOSTAT_NO_ACTION_NOTICE_S: float = 3 * 86400
 # compressor) is re-checked this much later: a run started meanwhile makes it the blower's lead-in (never adopted as a
 # ventilation session); a fan still running alone is reconciled as a genuine schedule / outside fan.
 BLOWER_LEAD_IN_DEFER_S: float = 120
+# Issue #1603: a thermostat mode change that lands while a CA command is in flight (pending flags or the 3 s
+# recent-command window) during an active override is re-checked this much later, and again while the guard holds.
+DROPPED_MODE_RECHECK_S: float = 4.0
+DROPPED_MODE_RECHECK_MAX_ATTEMPTS: int = 15
 # A setpoint change during a run ends the run; an off edge (or mode switch) this soon after it is the run's real end.
 CYCLE_SETPOINT_OFF_WINDOW_S: float = 60
 # Refit throttle (Pi CPU): a mode is refitted at most this often, sooner once this many new eligible cycles wait or

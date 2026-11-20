@@ -11,7 +11,7 @@ context providers in `ai_skills_context.py`, registered in the same `ContextProv
 the investigator already used. See [Issue #563](https://github.com/gunkl/ClimateAdvisor/issues/563)
 for the full audit of what was ported vs. retired as redundant.
 
-**Issue #1336 (0.9.50):** the AI Investigator can run on any AI provider set up in Home
+**Issue #1336 (0.9.51):** the AI Investigator can run on any AI provider set up in Home
 Assistant, through HA's AI Task. Built-in Claude (Climate Advisor's own Anthropic client and
 key) still works but is deprecated. AI settings are install-wide. See
 [Provider model](#provider-model-ai-task-first-issue-1336).
@@ -24,7 +24,7 @@ key) still works but is deprecated. AI settings are install-wide. See
 | What does the AI provider need to be set to (Issue #1336)? | A context window of at least 16k tokens for input (owner decision) and an output limit of at least 8192 tokens with reasoning at medium. A window that holds both (Ollama `num_ctx`) needs 24k; suggest 32768. Token sizes are estimates from character counts. | [Provider requirements](#provider-requirements-issue-1336) |
 | Which provider limits can Climate Advisor read and warn about? | Anthropic, OpenAI, Google `max_tokens` (defaults 3000, 3000, 19400) and Ollama `num_ctx` (default 8192). OpenRouter, Nabu Casa Cloud and custom integrations can't be checked. Limits only ever warn; nothing blocks. | [Provider limits](#provider-limits-climate-advisor-can-read) |
 | When is the occupant warned about a too-small limit? | Three times, from one reader (`ai_limits.async_read_limits`): after saving AI settings (`ai_limits_warning` step), before each run (`GET ai_limits`, *Run anyway* / *Cancel*), and after a run that hit a limit or came back cut short (error-code and cut-short notices). | [Limit checks](#limit-checks-warn-never-block) |
-| Are AI settings per zone? | No, install-wide since 0.9.50. The same values sit on every zone's entry (saving in one zone copies them to all), one shared client serves every zone, and migration v21 unified existing per-zone settings. | [Install-wide settings](#install-wide-settings-and-the-shared-client) |
+| Are AI settings per zone? | No, install-wide since 0.9.51. The same values sit on every zone's entry (saving in one zone copies them to all), one shared client serves every zone, and migration v21 unified existing per-zone settings. | [Install-wide settings](#install-wide-settings-and-the-shared-client) |
 | What did the move to AI Task give up? | Live streaming (the report appears all at once), cost tracking and the monthly budget, and the "partial report" flag (HA's Anthropic and OpenAI integrations raise an error at the output limit). Accepted by the owner. | [What AI Task does not give](#what-ai-task-does-not-give-accepted-losses) |
 | Which reasoning levels are offered? | Low and medium only (owner decision). A stored `high` becomes `medium` at migration v21, and the built-in client's extended-thinking path (16384-token budget) has no caller any more. | [Reasoning: medium at most](#reasoning-medium-at-most) |
 | What stops the integration from hammering the AI provider during an outage? | A circuit breaker trips after `AI_CIRCUIT_BREAKER_THRESHOLD` consecutive failures, blocks all calls for `AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS`, then probes once in half-open state before re-closing. Same breaker for both providers, and install-wide since the client is shared. | [Circuit Breaker](#circuit-breaker) |
@@ -120,7 +120,7 @@ request limits count across all zones together.
 
 ### Migration v21 (config entry 20 → 21)
 
-**What the occupant experiences on the first start of 0.9.50.** Nothing breaks. An install
+**What the occupant experiences on the first start of 0.9.51.** Nothing breaks. An install
 with a Claude key keeps using built-in Claude and sees the deprecation notice. If exactly one
 zone had AI on (the usual case), its settings now apply to every zone. If several zones had
 AI on with different settings, one Repairs notice says which zone's settings were kept.

@@ -8,7 +8,7 @@ sectioned report in the same language, from the same Claude model, through HA's 
 integration. Climate Advisor no longer holds the key. This checklist proves that on the real
 house, and measures the token counts the requirements were estimated from.
 
-Run it after the owner deploys the release with Issue #1336 (0.9.50). The owner decides
+Run it after the owner deploys the release with Issue #1336 (0.9.51). The owner decides
 when to deploy; nothing here needs calendar time beyond the two investigations per step.
 
 ## Anchors

@@ -217,7 +217,7 @@ To replay a failure, run `python tools/simulate.py --replay-generated <file>` on
 
 When the nightly run finishes with a failure, `nightly-autofix.yml` finds that run's `nightly-failure` issue (by its
 `nightly-run` marker; it skips when an open PR already says `Fixes #N`) and runs Claude (`anthropics/claude-code-action`,
-the `CLAUDE_CODE_OAUTH_TOKEN` secret) with the project's investigation method: docs first, then the failed logs and a
+logged in by workload identity federation, see below) with the project's investigation method: docs first, then the failed logs and a
 local reproduction, the root cause with evidence, the regression origin, and the mirror check. Claude posts one
 plain-English diagnosis comment on the issue. Only when it can demonstrate a fix (a regression test shown to fail
 without it, the version bump, CHANGELOG, fix_history, translations, `tools/validate.py`) does it open a **draft** PR
@@ -228,10 +228,18 @@ issue with **Actions → Nightly failure auto-diagnosis → Run workflow** (the 
 **When the diagnosis itself cannot run** (Issue #1625). The action hides Claude's output because the repo is public, so
 a failed Claude step used to leave only "is_error:true" in the log. A follow-up step now runs
 `.github/scripts/autodiag_failure.py`. It reads only the final error message from the action's `execution_file`
-(never the transcript), redacts anything token-like, and names the kind of failure: **authentication** (replace the
-`CLAUDE_CODE_OAUTH_TOKEN` secret from `claude setup-token`), **usage limit**, **API unavailable**, **turn limit** or
+(never the transcript), redacts anything token-like, and names the kind of failure: **authentication** (the federation login was
+refused), **usage limit**, **API unavailable**, **turn limit** or
 **unknown**. It writes that to the job summary, comments it on the nightly-failure issue and labels the issue
 `needs-human`. `claude.yml` (the `@claude` responder) runs the same script on failure, writing only to its job summary.
+
+**How the workflows log in to Claude.** Both Claude workflows use Anthropic workload identity federation instead of a
+stored token. Each job has `id-token: write`; the action requests a GitHub OIDC token and exchanges it for an Anthropic
+access token that expires in about 10 minutes. The federation rule, organization, service account and workspace IDs in
+the workflow are identifiers, not credentials: what the rule allows (this repository and its workflows) is configured
+in the Claude Console. No Claude secret is stored in the repository or its Actions secrets.
+`anthropic-wif-test.yml` exchanges a token on push and prints the response with the token redacted, as a quick
+check that the rule still works.
 
 ## Test badges
 

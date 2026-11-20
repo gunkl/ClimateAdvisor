@@ -24,9 +24,10 @@ _KINDS = (
     (
         "authentication",
         ("invalid api key", "/login", "oauth", "unauthorized", "401", "authentication", "expired", "revoked"),
-        "The CLAUDE_CODE_OAUTH_TOKEN repository secret is missing, expired or revoked. Run `claude setup-token` "
-        "locally and replace the secret (Settings -> Secrets and variables -> Actions), then re-run this diagnosis "
-        "from Actions -> Nightly failure auto-diagnosis -> Run workflow with this issue number.",
+        "The Anthropic workload identity federation login was refused. Check in the Claude Console that the "
+        "federation rule, service account and workspace named in the workflow still exist and that the rule allows "
+        "this repository, workflow and event, then re-run this diagnosis from Actions -> Nightly failure "
+        "auto-diagnosis -> Run workflow with this issue number.",
     ),
     (
         "usage limit",

@@ -3,7 +3,7 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.9.50] — 2026-11-20
+## [0.9.51] — 2026-11-20
 
 ### Added
 - #1336: use your own AI provider. The AI Investigator can now run on any AI provider you have set up in Home Assistant, such as OpenAI, Google Gemini, Anthropic, OpenRouter, Ollama or Nabu Casa Cloud. A local Ollama model keeps your house data at home.
@@ -29,6 +29,11 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ### Notes
 - The config entry moves to version 21. Downgrading is not supported.
+
+## [0.9.50] — 2026-11-20
+
+### Changed (CI only; nothing changes in your house)
+- #1625: the nightly auto-diagnosis and the `@claude` responder now log in to Claude with workload identity federation instead of a stored token. Each run exchanges its GitHub identity for an Anthropic access token that lasts about 10 minutes, so there is no Claude secret to expire or leak. Before, both used a saved token that had stopped working, so every diagnosis failed with "401 OAuth access token is invalid". An authentication failure now points at the federation setup instead of the old token.
 
 ## [0.9.49] — 2026-11-20
 

@@ -19,7 +19,7 @@ Claude model and the same report, and Climate Advisor no longer holds your key.
 
 ## Status
 
-- **Deprecated in 0.9.50** (Issue #1336). The provider choice `ai_provider` defaults to
+- **Deprecated in 0.9.51** (Issue #1336). The provider choice `ai_provider` defaults to
   `ha_ai_task` for new installs. An existing install with a key stays on `builtin_claude`
   until the occupant switches.
 - **Notices:** the AI settings step's description while `builtin_claude` is selected, and the

@@ -1,4 +1,6 @@
 {
+  "ai.limits.cancel": 24,
+  "ai.limits.run_anyway": 24,
   "briefing.title": 64,
   "briefing.tldr": 255,
   "common.duration.hours": 24,

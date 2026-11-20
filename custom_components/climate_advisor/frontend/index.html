@@ -1966,7 +1966,7 @@
     fan: 'Fan',
     schedule: 'Schedule',
     advanced: 'Advanced',
-    ai_settings: 'AI Settings (Claude)',
+    ai_settings: 'AI Settings',
   };
   const CATEGORY_ORDER = ['core', 'setpoints', 'sensors', 'fan', 'schedule', 'advanced', 'ai_settings'];
 
@@ -2221,6 +2221,58 @@
     content.innerHTML = html;
   }
 
+  // ---- AI provider limits and notices (Issue #1336) ----
+  // Classic stays English (docs/i18n-spec.md non-goals); the new dashboard renders the same notices from the `ai`
+  // catalog. Before a run, GET ai_limits: a readable limit that is too small shows a warning with Run anyway / Cancel,
+  // an unreadable one a one-line note, and a failed request runs silently. The check only ever warns.
+  const _AI_REQ = { output: 8192, context: 16384, combined: 24576 }; // const.AI_REQUIRED_*
+  let _aiLastLimits = null;
+  function _aiIntegration(l) { return (l && l.integration) || (l && l.provider === 'builtin_claude' ? 'climate_advisor' : '—'); }
+  function _aiFailedChecks(l) { return (l && Array.isArray(l.checks) ? l.checks : []).filter((c) => c && c.ok === false); }
+  function _aiCheckLine(l, c) {
+    const kind = c.kind === 'output' ? 'Output limit' : c.kind === 'context' ? 'Context window' : 'Combined context window (input and output)';
+    return kind + ': ' + (c.setting || '') + ' in ' + _aiIntegration(l) + ' is ' + Number(c.value || 0).toLocaleString('en')
+      + '; it needs at least ' + Number(c.required || 0).toLocaleString('en') + '.';
+  }
+  function _aiNotice(code) {
+    const n = (x) => Number(x).toLocaleString('en');
+    if (code === 'ai_output_limit') return 'The AI provider stopped at its output limit before the report was finished. Raise its maximum tokens to at least ' + n(_AI_REQ.output) + " in that integration's settings.";
+    if (code === 'ai_context_limit') return "The data for this report did not fit in the AI model's context window. Use a model with a context window of at least " + n(_AI_REQ.context) + ' tokens (' + n(_AI_REQ.combined) + " where input and output share one window, as with Ollama's num_ctx), or choose a shorter time window.";
+    if (code === 'ai_task_no_entity') return "No AI Task entity is chosen, and Home Assistant has no preferred one. Choose an AI Task entity in Climate Advisor's AI settings, or set a default under Settings > System > AI.";
+    if (code === 'ai_provider_error') return 'The AI provider returned an error, so the report could not be written. Check that integration in Home Assistant, then try again.';
+    if (code === 'ai_report_cut_short') {
+      const c = _aiFailedChecks(_aiLastLimits)[0];
+      return 'The report came back cut short: some sections are missing. ' + (c
+        ? 'Raise ' + (c.setting || '') + ' in ' + _aiIntegration(_aiLastLimits) + ' to at least ' + n(c.required || _AI_REQ.output) + ', then run it again.'
+        : "Raise the AI provider's output limit to at least " + n(_AI_REQ.output) + " tokens in that integration's settings, then run it again.");
+    }
+    return null;
+  }
+  function _aiCutShortCode(r) { return r && r.cut_short ? (r.cut_short_code || 'ai_report_cut_short') : null; }
+  function _aiNoticeHtml(code) { const t = _aiNotice(code); return t ? '<div style="background:var(--warning);color:#000;font-size:0.82rem;padding:6px 10px;border-radius:4px;margin-bottom:8px;">' + escapeHtml(t) + '</div>' : ''; }
+  async function _aiPreRunLimits(content) {
+    let l;
+    _aiLastLimits = null;
+    try { l = await apiFetch('ai_limits'); } catch (_) { return { go: 'run', note: '' }; } // never blocks
+    if (!l || typeof l !== 'object') return { go: 'run', note: '' };
+    _aiLastLimits = l;
+    if (l.readable === false) return { go: 'run', note: "Can't check this provider's limits; it needs a 16k-token context window and an 8k-token output limit." };
+    const failed = l.ok === false ? _aiFailedChecks(l) : [];
+    if (!failed.length || !content) return { go: 'run', note: '' };
+    return new Promise((resolve) => {
+      content.innerHTML = '<div role="alert" style="background:var(--warning);color:#000;font-size:0.82rem;padding:6px 10px;border-radius:4px;margin-bottom:8px;">'
+        + "<strong>This AI provider's limits look too small for an investigation</strong><ul style=\"margin:4px 0 4px 18px;\">"
+        + failed.map((c) => '<li>' + escapeHtml(_aiCheckLine(l, c)) + '</li>').join('') + '</ul>'
+        + "<div>Raise it in that integration's settings in Home Assistant. If you run anyway, the report may be cut short or fail.</div>"
+        + '<div class="btn-group" style="margin-top:6px;"><button type="button" class="btn secondary" data-ai-limits="cancel">Cancel</button>'
+        + '<button type="button" class="btn" data-ai-limits="run">Run anyway</button></div></div>';
+      content.querySelectorAll('[data-ai-limits]').forEach((b) => b.addEventListener('click', () => {
+        content.innerHTML = '';
+        resolve({ go: b.getAttribute('data-ai-limits'), note: '' });
+      }));
+    });
+  }
+
   async function _runAIInvestigation() {
     const btn = document.getElementById('run-report-btn');
     const loading = document.getElementById('report-loading');
@@ -2234,10 +2286,20 @@
     btn.disabled = true;
     btn.textContent = 'Running\u2026';
     loading.style.display = 'block';
-    loading.textContent = 'Connecting\u2026';
+    loading.textContent = "Checking the AI provider's limits\u2026";
     status.textContent = '';
     if (content) content.innerHTML = '';
     if (actions) actions.style.display = 'none';
+
+    const pre = await _aiPreRunLimits(content);
+    if (pre.go !== 'run') {
+      status.textContent = 'Investigation cancelled.';
+      _resetReportControls(btn, loading, 'Investigate');
+      return;
+    }
+    loading.style.display = 'block';
+    loading.textContent = 'Connecting\u2026';
+    if (pre.note) status.textContent = pre.note;
 
     let accumulated = '';
 
@@ -2271,7 +2333,7 @@
           try { event = JSON.parse(raw.slice(6)); } catch (_) { continue; }
 
           if (event.type === 'thinking') {
-            // Show tail of Claude's reasoning chain so user sees it's actively working
+            // Show tail of the model's reasoning chain so user sees it's actively working
             const tail = event.text.replace(/[\n]+/g, ' ').trim().slice(-180);
             loading.textContent = 'Thinking… ' + tail;
 
@@ -2303,6 +2365,9 @@
               input_context: event.input_context || '',
               truncated: !!event.truncated,
               truncated_empty: !!event.truncated_empty,
+              cut_short: !!event.cut_short,
+              cut_short_code: event.cut_short_code || null,
+              error_code: event.error_code || null,
             };
             _currentReport = {
               reportType: 'investigation',
@@ -2321,7 +2386,9 @@
             break;
 
           } else if (event.type === 'error') {
-            throw new Error(event.message || 'Investigation failed');
+            const evErr = new Error(event.message || 'Investigation failed');
+            evErr.errorCode = event.error_code || null;
+            throw evErr;
           }
         }
       }
@@ -2337,7 +2404,7 @@
         ? ' \u2014 enable it in Home Assistant \u2192 Settings \u2192 Integrations \u2192 Climate Advisor \u2192 Configure \u2192 AI Settings'
         : '';
       status.textContent = 'Error: ' + err.message + hint;
-      if (content) content.innerHTML = '';
+      if (content) content.innerHTML = _aiNoticeHtml(err.errorCode);
     } finally {
       _resetReportControls(btn, loading, 'Investigate');
     }
@@ -2423,7 +2490,7 @@
     if (!result.success) {
       const err = result.error || 'Unknown error';
       const src = result.source || 'error';
-      content.innerHTML = '<p style="color:var(--danger)">Report failed (' + escapeHtml(src) + '): ' + escapeHtml(err) + '</p>';
+      content.innerHTML = _aiNoticeHtml(result.error_code) + '<p style="color:var(--danger)">Report failed (' + escapeHtml(src) + '): ' + escapeHtml(err) + '</p>';
       if (actions) actions.style.display = 'none';
       return;
     }
@@ -2443,7 +2510,10 @@
     const sourceLabel = result.source === 'fallback'
       ? '<span style="color:var(--warning);font-size:0.8rem">(fallback \u2014 AI unavailable)</span>'
       : '<span style="color:var(--success);font-size:0.8rem">(AI-generated)</span>';
-    let html = tsSpan + truncatedBanner + '<div style="margin-bottom:8px">' + sourceLabel + '</div>';
+    const cutCode = _aiCutShortCode(result);
+    const aiNoticeBanner = _aiNoticeHtml(cutCode)
+      + (result.error_code && result.error_code !== cutCode ? _aiNoticeHtml(result.error_code) : '');
+    let html = tsSpan + truncatedBanner + aiNoticeBanner + '<div style="margin-bottom:8px">' + sourceLabel + '</div>';
     if (entry.reportType === 'activity') {
       const sections = ['summary', 'timeline', 'decisions', 'anomalies', 'diagnostics'];
       const sectionLabels = { summary: 'Summary', timeline: 'Timeline', decisions: 'Decisions', anomalies: 'Anomalies', diagnostics: 'Diagnostics' };

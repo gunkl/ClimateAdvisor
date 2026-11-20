@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "Raise it in that integration's settings in Home Assistant. If you run anyway, the report may be cut short or fail.",
+  "ai.limits.cancel": "Cancel",
+  "ai.limits.cancelled": "Investigation cancelled.",
+  "ai.limits.check": "{kind, select, output {Output limit} context {Context window} other {Combined context window (input and output)}}: {setting} in {integration} is {value}; it needs at least {required}.",
+  "ai.limits.checking": "Checking the AI provider's limits…",
+  "ai.limits.run_anyway": "Run anyway",
+  "ai.limits.title": "This AI provider's limits look too small for an investigation",
+  "ai.limits.unreadable": "Can't check this provider's limits; it needs a 16k-token context window and an 8k-token output limit.",
+  "ai.notice.ai_context_limit": "The data for this report did not fit in the AI model's context window. Use a model with a context window of at least {context} tokens ({combined} where input and output share one window, as with Ollama's num_ctx), or choose a shorter time window.",
+  "ai.notice.ai_output_limit": "The AI provider stopped at its output limit before the report was finished. Raise its maximum tokens to at least {required} in that integration's settings.",
+  "ai.notice.ai_provider_error": "The AI provider returned an error, so the report could not be written. Check that integration in Home Assistant, then try again.",
+  "ai.notice.ai_report_cut_short": "The report came back cut short: some sections are missing. {has_setting, select, yes {Raise {setting} in {integration} to at least {required}, then run it again.} other {Raise the AI provider's output limit to at least {required} tokens in that integration's settings, then run it again.}}",
+  "ai.notice.ai_task_no_entity": "No AI Task entity is chosen, and Home Assistant has no preferred one. Choose an AI Task entity in Climate Advisor's AI settings, or set a default under Settings > System > AI.",
+  "ai.status_gathering": "Gathering system data…",
+  "ai.status_provider": "Waiting for the AI provider to write the report…",
+  "ai.status_sending": "Sending the data to the AI provider…"
+}

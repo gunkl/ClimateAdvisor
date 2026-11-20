@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "Home Assistant のその統合の設定で引き上げてください。このまま実行すると、レポートが途中で切れたり失敗したりする可能性があります。",
+  "ai.limits.cancel": "キャンセル",
+  "ai.limits.cancelled": "調査をキャンセルしました。",
+  "ai.limits.check": "{kind, select, output {出力上限} context {コンテキストウィンドウ} other {入出力共通のコンテキストウィンドウ}}：{integration} の {setting} は {value} です。{required} 以上が必要です。",
+  "ai.limits.checking": "AI プロバイダーの上限を確認しています…",
+  "ai.limits.run_anyway": "このまま実行",
+  "ai.limits.title": "この AI プロバイダーの上限は調査には小さすぎるようです",
+  "ai.limits.unreadable": "このプロバイダーの上限を確認できません。16k トークンのコンテキストウィンドウと 8k トークンの出力上限が必要です。",
+  "ai.notice.ai_context_limit": "このレポートのデータが AI モデルのコンテキストウィンドウに収まりませんでした。コンテキストウィンドウが {context} トークン以上のモデル（Ollama の num_ctx のように入力と出力で 1 つのウィンドウを共有する場合は {combined}）を使うか、期間を短くしてください。",
+  "ai.notice.ai_output_limit": "レポートが完成する前に、AI プロバイダーが出力上限で停止しました。その統合の設定で最大トークン数を {required} 以上に引き上げてください。",
+  "ai.notice.ai_provider_error": "AI プロバイダーがエラーを返したため、レポートを作成できませんでした。Home Assistant でその統合を確認してから、もう一度お試しください。",
+  "ai.notice.ai_report_cut_short": "レポートが途中で切れて返されました。一部のセクションがありません。{has_setting, select, yes {{integration} の {setting} を {required} 以上に引き上げてから、もう一度実行してください。} other {その統合の設定で AI プロバイダーの出力上限を {required} トークン以上に引き上げてから、もう一度実行してください。}}",
+  "ai.notice.ai_task_no_entity": "AI Task エンティティが選択されておらず、Home Assistant に優先エンティティもありません。Climate Advisor の AI 設定で AI Task エンティティを選ぶか、設定 > システム > AI で既定のエンティティを設定してください。",
+  "ai.status_gathering": "システムデータを収集しています…",
+  "ai.status_provider": "AI プロバイダーがレポートを作成するのを待っています…",
+  "ai.status_sending": "データを AI プロバイダーに送信しています…"
+}

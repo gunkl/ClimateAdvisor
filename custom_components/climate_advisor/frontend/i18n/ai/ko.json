@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "Home Assistant에서 해당 통합 구성요소 설정으로 늘리세요. 그대로 실행하면 보고서가 잘리거나 실패할 수 있습니다.",
+  "ai.limits.cancel": "취소",
+  "ai.limits.cancelled": "조사가 취소되었습니다.",
+  "ai.limits.check": "{kind, select, output {출력 한도} context {컨텍스트 창} other {입출력 공용 컨텍스트 창}}: {integration}의 {setting} 값은 {value}이며, {required} 이상이 필요합니다.",
+  "ai.limits.checking": "AI 제공자의 한도를 확인하는 중…",
+  "ai.limits.run_anyway": "그래도 실행",
+  "ai.limits.title": "이 AI 제공자의 한도가 조사에 비해 너무 작아 보입니다",
+  "ai.limits.unreadable": "이 제공자의 한도를 확인할 수 없습니다. 16k 토큰 컨텍스트 창과 8k 토큰 출력 한도가 필요합니다.",
+  "ai.notice.ai_context_limit": "이 보고서의 데이터가 AI 모델의 컨텍스트 창에 들어가지 않았습니다. 컨텍스트 창이 {context} 토큰 이상인 모델을 사용하거나(Ollama의 num_ctx처럼 입력과 출력이 한 창을 함께 쓰는 경우 {combined}), 더 짧은 기간을 선택하세요.",
+  "ai.notice.ai_output_limit": "보고서가 완성되기 전에 AI 제공자가 출력 한도에서 멈췄습니다. 해당 통합 구성요소 설정에서 최대 토큰을 {required} 이상으로 늘리세요.",
+  "ai.notice.ai_provider_error": "AI 제공자가 오류를 반환하여 보고서를 작성하지 못했습니다. Home Assistant에서 해당 통합 구성요소를 확인한 후 다시 시도하세요.",
+  "ai.notice.ai_report_cut_short": "보고서가 잘린 채로 돌아왔습니다. 일부 섹션이 없습니다. {has_setting, select, yes {{integration}의 {setting}을(를) {required} 이상으로 늘린 후 다시 실행하세요.} other {해당 통합 구성요소 설정에서 AI 제공자의 출력 한도를 {required} 토큰 이상으로 늘린 후 다시 실행하세요.}}",
+  "ai.notice.ai_task_no_entity": "선택된 AI Task 구성요소가 없고 Home Assistant에 기본 구성요소도 없습니다. Climate Advisor의 AI 설정에서 AI Task 구성요소를 선택하거나, 설정 > 시스템 > AI에서 기본값을 지정하세요.",
+  "ai.status_gathering": "시스템 데이터를 수집하는 중…",
+  "ai.status_provider": "AI 제공자가 보고서를 작성하기를 기다리는 중…",
+  "ai.status_sending": "AI 제공자에게 데이터를 보내는 중…"
+}

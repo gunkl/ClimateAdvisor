@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "Aumente-o nas definições dessa integração no Home Assistant. Se executar mesmo assim, o relatório pode ficar incompleto ou falhar.",
+  "ai.limits.cancel": "Cancelar",
+  "ai.limits.cancelled": "Investigação cancelada.",
+  "ai.limits.check": "{kind, select, output {Limite de saída} context {Janela de contexto} other {Janela de contexto combinada (entrada e saída)}}: {setting} em {integration} é {value}; precisa de pelo menos {required}.",
+  "ai.limits.checking": "A verificar os limites do fornecedor de IA…",
+  "ai.limits.run_anyway": "Executar mesmo assim",
+  "ai.limits.title": "Os limites deste fornecedor de IA parecem demasiado baixos para uma investigação",
+  "ai.limits.unreadable": "Não é possível verificar os limites deste fornecedor; precisa de uma janela de contexto de 16k tokens e de um limite de saída de 8k tokens.",
+  "ai.notice.ai_context_limit": "Os dados deste relatório não couberam na janela de contexto do modelo de IA. Utilize um modelo com uma janela de contexto de pelo menos {context} tokens ({combined} quando a entrada e a saída partilham uma só janela, como no num_ctx do Ollama), ou escolha um período mais curto.",
+  "ai.notice.ai_output_limit": "O fornecedor de IA parou no seu limite de saída antes de terminar o relatório. Aumente o número máximo de tokens para pelo menos {required} nas definições dessa integração.",
+  "ai.notice.ai_provider_error": "O fornecedor de IA devolveu um erro, pelo que não foi possível escrever o relatório. Verifique essa integração no Home Assistant e tente novamente.",
+  "ai.notice.ai_report_cut_short": "O relatório chegou incompleto: faltam algumas secções. {has_setting, select, yes {Aumente {setting} em {integration} para pelo menos {required} e execute-o novamente.} other {Aumente o limite de saída do fornecedor de IA para pelo menos {required} tokens nas definições dessa integração e execute-o novamente.}}",
+  "ai.notice.ai_task_no_entity": "Não foi escolhida nenhuma entidade AI Task e o Home Assistant não tem uma preferida. Escolha uma entidade AI Task nas definições de IA do Climate Advisor, ou defina uma predefinida em Definições > Sistema > IA.",
+  "ai.status_gathering": "A recolher dados do sistema…",
+  "ai.status_provider": "A aguardar que o fornecedor de IA escreva o relatório…",
+  "ai.status_sending": "A enviar os dados para o fornecedor de IA…"
+}

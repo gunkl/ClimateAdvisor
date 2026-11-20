@@ -15,8 +15,8 @@
 | How does the thermal state machine (v3) work and which methods own each phase? | Ten coordinator methods drive six concurrent observation types in `_pending_observations` (Issue #121); observations are in memory only, so a run in progress at a restart is learned from only after it (Issue #1437). | [§Coordinator Thermal State Machine Methods](02-ARCHITECTURE-REFERENCE.md#coordinator-thermal-state-machine-methods) |
 | How does state persistence work — what is stored, where, and in what format? | Two JSON files: `climate_advisor_state.json` (runtime coordinator state, atomic write) and `climate_advisor_learning.json` (thermal model + observation history). State version mismatch discards and resets; no migration chain. | [§State Persistence Brief](state-persistence.md) |
 | How does unit conversion work between °F and °C? | `from_fahrenheit()` for absolute temperatures (subtracts 32, ×5/9); `convert_delta()` for differences and rates (×5/9 only, no offset). Unit is user-selected in config flow, not auto-detected from HA. | [§Temperature Conversion Brief](temperature-conversion.md) |
-| How does the REST API work — endpoints, auth, and data access pattern? | 26 views (24 in `api.py` `API_VIEWS`, the zone list `zones` in `ZONELESS_VIEWS`, plus `settings_extra` in `dashboard_api.py` `DASHBOARD_VIEWS`), all requiring a HA long-lived token. GETs read from `coordinator.data`; POSTs delegate to the coordinator or automation engine. Two config fields are redacted; out-of-range numerics are silently clamped. | [§REST API Brief](rest-api.md) |
-| How does the Claude AI integration work — circuit breaker, rate limiting, skills, budget? | `ClaudeAPIClient` wraps all API calls with a three-state circuit breaker, per-month budget cap, and exponential-backoff retry. `AISkillRegistry` provides a pluggable skill framework; two skills are registered: `activity_report` and `investigator`. | [§AI Integration Brief](ai-integration.md) |
+| How does the REST API work — endpoints, auth, and data access pattern? | 27 views (25 in `api.py` `API_VIEWS`, including `ai_limits` since Issue #1336, the zone list `zones` in `ZONELESS_VIEWS`, plus `settings_extra` in `dashboard_api.py` `DASHBOARD_VIEWS`), all requiring a HA long-lived token. GETs read from `coordinator.data`; POSTs delegate to the coordinator or automation engine. Two config fields are redacted; out-of-range numerics are silently clamped. | [§REST API Brief](rest-api.md) |
+| How does the AI integration work — providers, circuit breaker, rate limiting, skills, budget? | Since Issue #1336 the AI Investigator runs on any Home Assistant AI provider through AI Task (`ai_task.async_generate_data` on the chosen or preferred AI Task entity); built-in Claude (direct Anthropic API) is deprecated. One shared `ClaudeAPIClient` per install (`hass.data[f"{DOMAIN}_ai"]`) wraps both with a three-state circuit breaker and daily limits; the monthly budget applies to built-in Claude only. AI settings are install-wide. `AISkillRegistry` holds one skill, `investigator` (Issue #563). | [§AI Integration Brief](ai-integration.md) |
 | How does multi-zone support work — what is a "zone", and how does the coordinator/API/services resolve which one a call is for? | A zone is a second Climate Advisor config entry, not a new schema. `zone_registry.py` resolves/enumerates zone coordinators by `entry_id`; all 5 HA services require an `entry_id` field; the REST endpoints accept an optional `entry_id` query param (with several zones and none given a GET degrades to a logged, Repairs-flagged guess and a POST refuses with 400); `timeline`, `night_strategy` and `prediction_accuracy` take `zone` and refuse with 400 instead of guessing. Shipped v0.7.0 (2026-09-01, Issue #796). | [Multi-Zone Spec](multi-zone-spec.md) |
 | Where is the full Tier 3 occupancy dispatch spec — priority resolution, state transitions, setback formulas? | The Territory spec covers all four occupancy modes, GUEST > VACATION > HOME/AWAY priority, toggle entity wiring, 7-row state transition table, setback formulas, and persistence across HA restarts. | [§Occupancy Dispatch Spec](occupancy-dispatch-spec.md) |
 | Which setpoint combinations warn on the setpoints page, and what range limits remain (Issue #1347)? | One 40–95 °F sanity range; thrash/incoherent combinations warn and save on an identical resubmit; pure rules in `setpoint_combinations.py`, vacation resolver `vacation_edges()`. | [Setpoint Combination Warnings](setpoint-combination-warnings.md) |
@@ -60,7 +60,9 @@ custom_components/climate_advisor/
 ├── learning.py          # Pattern tracking, suggestion generation, persistence
 ├── sensor.py            # HA sensor entities for dashboards
 ├── switch.py            # Automation enable/disable switch (observe-only mode)
-├── claude_api.py        # Centralized Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking. Provides async_request() for all AI features.
+├── claude_api.py        # Centralized AI client (one per install, Issue #1336): AI Task transport (ai_task.async_generate_data) or the deprecated built-in Claude transport (Anthropic API, auth, retry, budget); circuit breaker and rate limiting for both. Provides async_request() for all AI features.
+├── ai_limits.py         # Provider limit reader (Issue #1336): async_read_limits() reads the chosen AI Task entity's max_tokens / num_ctx (read-only, boundary exception §3) for the options-flow warning and GET ai_limits.
+├── ai_settings_sync.py  # Install-wide AI settings (Issue #1336): AI_SHARED_KEYS, provider_of, is_ai_configured, pick_install_ai_values / unified_entry_data (migration v21), async_copy_to_other_entries (AI step save).
 ├── ai_skills.py         # AI skills framework: lightweight registry for pluggable AI analysis capabilities. Skills register a context builder, response parser, and optional fallback.
 ├── chart_log.py         # Chart state log: persistent 1-year ring buffer of HVAC/fan/temp data points and event markers, used by the Temperature Forecast chart.
 ├── cycle_model.py       # Pooled heating/cooling cycle model (Issues #1512/#1516): fit_cycles, clean_series, infer_resolution, grade, typical_prior, prior_from_cache. Pure math, no HA imports; shared with tools/thermal_replay.py and tools/predict_backtest.py. See 05-LEARNING-ENGINE-DESIGN.md.
@@ -163,7 +165,9 @@ Weather Entity ──► Coordinator (every 30 min)
                        │                      │
                        │                      └──► Suggestions (after 14+ days)
                        │
-                       └──► AI Service Calls ──► claude_api.py (circuit breaker, budget)
+                       └──► AI Service Calls ──► claude_api.py (shared client: circuit breaker, limits;
+                                                       │        AI Task → ai_task.async_generate_data,
+                                                       │        or deprecated built-in Claude → Anthropic API)
                                                        │
                                                   ai_skills.py (skill registry)
                                                        │
@@ -301,7 +305,7 @@ Both are rendered in the dashboard as a stepped purple/magenta line: solid past,
 | `sensor.climate_advisor_comfort_score` | 0–100% | `pending_suggestions`, `suggestions` (text in HA language, Issue #1341), `suggestion_codes` (`[{code, params}]`), `comfort_violations_minutes_today`, `comfort_range_low`, `comfort_range_high` |
 | `sensor.climate_advisor_status` | active/inactive | — |
 | `sensor.climate_advisor_occupancy_mode` | home/away/vacation/guest | occupancy_entity_states (raw toggle states) |
-| `sensor.climate_advisor_ai_status` | active/inactive/error/disabled/circuit_open | last_request_time, error_count, total_requests, model_in_use, circuit_breaker, monthly_cost_estimate, auto_requests_today, manual_requests_today |
+| `sensor.climate_advisor_ai_status` | active/inactive/error/disabled/circuit_open | last_request_time, error_count, total_requests, model_in_use, circuit_breaker, monthly_cost_estimate, auto_requests_today, manual_requests_today. Same values in every zone (one shared client, Issue #1336); cost 0 on AI Task |
 
 ## Services Registered
 
@@ -803,7 +807,7 @@ dismisses it from the queue.
 ### ai_skills_investigator.py — AI Investigator Skill
 
 The skill definition, system prompt and thin orchestrator. The structured context it hands the
-Claude investigator - sensor values, HVAC session history, thermal model parameters, fan status,
+AI investigator (any AI Task provider, or the deprecated built-in Claude, Issue #1336) - sensor values, HVAC session history, thermal model parameters, fan status,
 occupancy mode, diagnostic guidance - is assembled by the context providers in
 `ai_skills_context.py` (that is where the deadband logic and the swing lines live, Issue #1233 doc
 fix). That context knows the thermostat's deadband behavior (the learned one-sided swing: how far past the setpoint the

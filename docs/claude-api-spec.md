@@ -2,6 +2,12 @@
 
 # Claude API Client — Territory Spec (Tier 3)
 
+**Issue #1336:** `ClaudeAPIClient` is now the install's AI client for both providers. The main
+transport is Home Assistant's AI Task ([AI Task Transport](#ai-task-transport-issue-1336));
+the Anthropic transport described in most of this spec is **built-in Claude, deprecated**,
+kept until a removal release the owner has not named yet. When it is removed this spec
+becomes the AI client spec.
+
 ## Anchors
 
 | Question | Short answer | → Full answer |
@@ -14,6 +20,10 @@
 | What happens to the circuit breaker failure counter when the circuit is half-open and the probe fails? | The failure counter increments (`consecutive_failures += 1`) via the same post-call path as any other failure. If it meets or exceeds `AI_CIRCUIT_BREAKER_THRESHOLD` (5), the breaker transitions back to `"open"` and `opened_at` is reset. | [Circuit Breaker State Machine](#circuit-breaker-state-machine) |
 | What config keys does `ClaudeAPIClient.__init__()` read, and what happens if `CONF_AI_API_KEY` is absent or empty? | It reads only `CONF_AI_API_KEY` at init time. If absent or empty, `self._client` remains `None` and a WARNING is logged; all subsequent `async_request()` calls return `ClaudeResponse(success=False, error="Anthropic client not initialized…")`. | [Initialization and Configuration](#initialization-and-configuration) |
 | How does the client know what request shape (thinking control, temperature) a given model needs? | It doesn't discover this live anymore (Issue #572). `_build_request_kwargs()` looks up the model in the static `AI_MODEL_CAPABILITIES` table in `const.py`, verified against the live Anthropic API ahead of time. A model not in the table falls back to the legacy shape (the behavior proven safe for years prior to claude-sonnet-5) and logs a WARNING naming it — no learning step, no per-model failure, no persistence to lose. | [Per-Model Capability Table](#per-model-capability-table-issue-572) |
+| How does the client call a Home Assistant AI provider instead of Anthropic (Issue #1336)? | When `config[ai_provider] == "ha_ai_task"`, `async_request` / `async_request_streaming` call `ai_task.async_generate_data(hass, task_name=AI_TASK_NAME, entity_id=ai_task_entity or None, instructions=system_prompt + "\n\n" + user_message)` inside `asyncio.timeout(AI_TASK_TIMEOUT_SECONDS)`. Circuit breaker, daily limits and history are reused; cost and tokens are 0 and the budget check is skipped. | [AI Task Transport](#ai-task-transport-issue-1336) |
+| Which `error_code` does a failed AI Task call get? | A `HomeAssistantError` is classified by message or translation key: Anthropic `response_max_tokens` or OpenAI "max output tokens" → `ai_output_limit`; Anthropic `response_context_window_exceeded` → `ai_context_limit`; "No entity_id provided and no preferred entity set" or `no_entity` → `ai_task_no_entity`; anything else → `ai_provider_error`. | [Error classification](#error-classification) |
+| Which reasoning levels does the client accept (Issue #1336)? | `low` and `medium` (`AI_REASONING_OPTIONS`). A stored `high` is migrated to `medium` (config entry v21); the legacy-shape extended-thinking branch (16384-token budget) has no caller. | [Reasoning Options](#reasoning-options-low-and-medium-issue-1336) |
+| Is there one client per zone? | No, one per install since Issue #1336: `hass.data[f"{DOMAIN}_ai"]["client"]`, shared by every zone's coordinator; each zone's setup or reload calls `update_config()` with its (identical) entry data. | [Initialization and Configuration](#initialization-and-configuration) |
 | How do I tell, from logs alone, what request shape was actually sent for a given AI call, without a live diagnostic script? | `_log_request_kwargs_decision()` logs one DEBUG line before every API call: model, reasoning_effort, `thinking_type` (`"none"`/`"enabled"`/`"adaptive"`), max_tokens, and whether `temperature`/`output_config` made it into the built kwargs. "Response finished" lines also log `input_tokens` alongside `output_tokens`. Any `APIError` — always unexpected now, since the shape is table-verified — logs a distinct `"Unexpected API error"` WARNING with the full raw message and is never retried with a different shape. | [Observability](#observability) |
 
 ---
@@ -24,7 +34,7 @@
 - **Approximate line range:** L1 – L1266 (entire file)
 - **Primary entry points:** `ClaudeAPIClient.async_request()` (L252), `ClaudeAPIClient.__init__()` (L215)
 
-This spec covers `ClaudeAPIClient` and the supporting dataclasses (`ClaudeResponse`, `_CircuitBreaker`, `_RateLimitCounters`, `_BudgetTracker`). It does NOT cover:
+This spec covers `ClaudeAPIClient` and the supporting dataclasses (`ClaudeResponse`, `_CircuitBreaker`, `_RateLimitCounters`, `_BudgetTracker`). Since Issue #1336 the client has two transports, chosen per request by `config[ai_provider]`: the **AI Task transport** (`ha_ai_task`, the main path, [below](#ai-task-transport-issue-1336)) and the **Anthropic transport** (`builtin_claude`, deprecated; everything else in this spec). The guard layer, counters and history are shared. It does NOT cover:
 
 - The `AISkillRegistry` and `AISkillDefinition` execution pipeline — covered by `ai-skills-spec.md`
 - Context assembly for `"activity_report"` and `"investigator"` skills — covered by `ai-skills-activity-spec.md` and `ai-skills-investigator-spec.md`
@@ -34,7 +44,7 @@ This spec covers `ClaudeAPIClient` and the supporting dataclasses (`ClaudeRespon
 
 ## Pre-conditions
 
-For `async_request()` to proceed past the guard layer and reach the network:
+For `async_request()` to proceed past the guard layer and reach the network (Anthropic transport; the AI Task transport's guard list is in [AI Task Transport](#ai-task-transport-issue-1336)):
 
 1. `self._circuit_breaker.state` must be `"closed"` or `"half_open"` — checked by `_check_circuit_breaker()`.
 2. The daily request counter for the given `triggered_by` (`"auto"` or `"manual"`) must be below its configured cap — checked by `_check_rate_limit(triggered_by)`.
@@ -91,9 +101,15 @@ After a failed `async_request()` call (`response.success = False`):
 
 9. **Request history is capped.** `self.request_history` is a `deque(maxlen=AI_REQUEST_HISTORY_CAP)` — Python enforces the cap automatically; no explicit eviction logic is required.
 
-10. **Extended thinking forces `temperature=1` (when the model supports temperature at all).** `_build_request_kwargs()` (the single kwargs-building source for both the streaming and non-streaming paths — see [Per-Model Capability Table](#per-model-capability-table-issue-572)) overwrites `kwargs["temperature"]` to `1` whenever it attaches a `thinking` parameter: unconditionally at `reasoning_effort == AI_REASONING_HIGH` for a `"legacy"`-shape model, and at every reasoning tier for an `"adaptive"`-shape model. A model whose `AI_MODEL_CAPABILITIES` entry sets `supports_temperature: False` never gets `temperature` added at all, at any tier.
+10. **A thinking parameter forces `temperature=1` (when the model supports temperature at all).** `_build_request_kwargs()` (the single kwargs-building source for both the streaming and non-streaming paths — see [Per-Model Capability Table](#per-model-capability-table-issue-572)) overwrites `kwargs["temperature"]` to `1` whenever it attaches a `thinking` parameter, which since Issue #1336 means at every reasoning tier for an `"adaptive"`-shape model only. The `"legacy"`-shape `high` extended-thinking branch has no caller (reasoning is `low`/`medium`). A model whose `AI_MODEL_CAPABILITIES` entry sets `supports_temperature: False` never gets `temperature` added at all, at any tier.
 
 11. **The circuit breaker failure counter is never decremented.** It is only zeroed (on success, in `async_request()`) or incremented (on failure, in `async_request()`). There is no partial-credit decay.
+
+12. **The AI Task transport never charges the budget.** It records `estimated_cost = 0.0`, `input_tokens = output_tokens = 0`, and skips `_check_budget()` (Issue #1336).
+
+13. **Every AI Task failure carries an `error_code`** from the four `AI_ERROR_*` codes; none is left unclassified (Issue #1336).
+
+14. **One client per install.** Every zone's `coordinator.claude_client` is the same object (`hass.data[f"{DOMAIN}_ai"]["client"]`), so the circuit breaker, daily counters and request history are install-wide (Issue #1336).
 
 ---
 
@@ -160,6 +176,114 @@ async def async_request(
 
 ---
 
+## AI Task Transport (Issue #1336)
+
+**What the occupant experiences.** With an AI Task entity chosen (or HA's preferred one), the
+Investigator runs on the occupant's own Home Assistant AI provider. The report arrives in one
+piece when it is done. If the provider refuses (output limit, context window, no entity, any
+other failure), the occupant gets the non-AI fallback report plus a notice that says why and,
+for a limit, which setting to raise.
+
+### Selection
+
+| `config[CONF_AI_PROVIDER]` | Transport |
+|---|---|
+| `"ha_ai_task"` (`AI_PROVIDER_HA_AI_TASK`) | AI Task, this section |
+| `"builtin_claude"` (`AI_PROVIDER_BUILTIN_CLAUDE`, deprecated) | Anthropic SDK, the rest of this spec |
+| absent (pre-v21 data) | `ai_settings_sync.provider_of()`: a key means `builtin_claude`, otherwise `ha_ai_task`. Migration v21 writes the key, so this is only a safety net |
+
+### Pre-conditions
+
+1. `self.hass` is set (the coordinator sets the `hass` attribute when it takes the shared client).
+2. AI is configured for the install: `ai_settings_sync.is_ai_configured(entry.data)`. On AI Task no key is needed; an empty `ai_task_entity` is valid and means HA's preferred AI Task entity.
+3. `manifest.json` lists `"after_dependencies": ["ai_task"]`, so `ai_task` is set up first when the occupant has it.
+
+### Guard sequence
+
+Same order as the Anthropic transport, minus the budget:
+
+1. `_reset_daily_counters_if_needed()`
+2. `_check_circuit_breaker()` → `False`: `ClaudeResponse(success=False, circuit_open=True)`
+3. `_check_rate_limit(triggered_by)` → `False`: `ClaudeResponse(success=False, rate_limited=True)`
+4. **Budget: skipped.** No cost is known.
+
+### The call
+
+```python
+async with asyncio.timeout(AI_TASK_TIMEOUT_SECONDS):  # 300 s; ai_task has no timeout of its own
+    result = await homeassistant.components.ai_task.async_generate_data(
+        hass,
+        task_name=AI_TASK_NAME,  # "Climate Advisor investigation"
+        entity_id=config[CONF_AI_TASK_ENTITY] or None,  # None = HA's preferred AI Task entity
+        instructions=system_prompt + "\n\n" + user_message,
+    )
+```
+
+- No `structure`: `result.data` is plain text, which `parse_investigation_response` splits
+  as before.
+- `instructions` carries Climate Advisor's whole system prompt, including the
+  `=== OUTPUT LANGUAGE ===` block, because AI Task always uses HA's fixed system prompt with
+  `language=None`.
+- `max_tokens`, `temperature`, `model` and `reasoning_effort` arguments are ignored on this
+  transport: they are the provider's own settings (see
+  [Provider requirements](ai-integration.md#provider-requirements-issue-1336)).
+
+### Post-conditions
+
+- **Success:** `ClaudeResponse(success=True, content=<result text>, input_tokens=0, output_tokens=0, estimated_cost=0.0, latency_ms=<elapsed>)`. Circuit breaker, daily counter, `_total_requests` and `request_history` are updated exactly as on the Anthropic transport (post-conditions 1 and 3–6 above). `monthly_cost` is unchanged. `truncated` is never set: AI Task returns no stop reason.
+- **Failure:** post-conditions 7–11 above, plus the response carries `error_code` (one of the four below) and `error` (the provider's message). The caller ([AI skills pipeline](ai-skills-spec.md#cut-short-and-error-codes-issue-1336)) runs the deterministic fallback.
+
+### Streaming
+
+`async_request_streaming()` on this transport yields exactly:
+
+1. one `{"type": "text", "text": <the whole result text>}` event, then
+2. `{"type": "stop", "stop_reason": "end_turn"}`.
+
+No thinking or delta events: AI Task has no stream for callers. On failure it yields the same
+error the non-streaming path returns, with its `error_code`.
+
+### Error Classification
+
+Every `HomeAssistantError` (which also covers `ServiceValidationError`) is classified by its
+message or translation key:
+
+| Provider error (HA 2026.10.4) | `error_code` | Constant | What the occupant is told |
+|---|---|---|---|
+| Anthropic translation key `response_max_tokens`; OpenAI "max output tokens" | `ai_output_limit` | `AI_ERROR_OUTPUT_LIMIT` | The provider stopped at its output limit; raise max tokens to at least 8192 in that integration |
+| Anthropic translation key `response_context_window_exceeded` | `ai_context_limit` | `AI_ERROR_CONTEXT_LIMIT` | The request did not fit the model's context window; it needs at least 16k tokens |
+| "No entity_id provided and no preferred entity set" (2026.10.4), or translation key `no_entity` (HA `dev`, **[unverified against a release]**) | `ai_task_no_entity` | `AI_ERROR_NO_ENTITY` | Choose an AI Task entity in AI settings, or set a default under Settings > System > AI |
+| Anything else | `ai_provider_error` | `AI_ERROR_PROVIDER` | The AI provider failed; the fallback report is shown |
+
+A known limitation: providers other than Anthropic and OpenAI were not checked for their
+output-limit errors, so theirs land in `ai_provider_error`. The pre-run limit check and the
+`cut_short` notice cover that gap.
+
+### What the transport does not do
+
+- No retry with a different shape and no model fallback (those are Anthropic-SDK concerns).
+- No write to the provider's integration; the only other read is the limit lookup in
+  `ai_limits.py` ([boundary exception §3](HA-BOUNDARY-EXCEPTIONS.md#3-ai-task-generate-data-and-the-limit-lookup-issue-1336)).
+
+---
+
+## Reasoning Options: low and medium (Issue #1336)
+
+`AI_REASONING_OPTIONS = [AI_REASONING_LOW, AI_REASONING_MEDIUM]`. The owner decided on medium
+at most, which keeps a normal report plus thinking inside an 8192-token output limit.
+
+| Stored value | After migration v21 | Built-in Claude request |
+|---|---|---|
+| `low` | `low` | legacy shape: no thinking control; adaptive shape: `thinking = {"type": "adaptive"}`, `output_config = {"effort": "low"}` |
+| `medium` | `medium` | legacy shape: no thinking control; adaptive shape: as above with `"medium"` |
+| `high` | **`medium`** | — (no caller) |
+
+**Removed:** the high extended-thinking path, `kwargs["thinking"] = {"type": "enabled", "budget_tokens": AI_REASONING_BUDGET_TOKENS[high]}` (16384), and its forced `temperature=1`. It was the only path that sent a 16384-token thinking budget. `AI_REASONING_HIGH` stays defined only so migration v21 and old stored values are recognised. The low and medium budgets (1024, 4096) remain as reference values.
+
+On the AI Task transport the reasoning level is the provider's own option (Anthropic `thinking_effort`, OpenAI `reasoning_effort`), documented as "set medium".
+
+---
+
 ## Per-Model Capability Table (Issue #572)
 
 `ClaudeAPIClient` used to *discover* per-model request-shape quirks live, reactively, from the API's own error responses or from a "successful but unusable" symptom — see history below. Issue #572 replaced that entirely: this product supports a small, known set of Claude models, not an arbitrary universe of them, so the correct request shape is hardcoded in `AI_MODEL_CAPABILITIES` (`const.py`), verified against the live Anthropic API ahead of time rather than discovered from a live failure.
@@ -179,7 +303,7 @@ AI_MODEL_CAPABILITIES: dict[str, dict] = {
 
 | `thinking_shape` | Effect on `_build_request_kwargs()` |
 |---|---|
-| `"legacy"` | No thinking control at `"low"`/`"medium"`. At `"high"`, `kwargs["thinking"] = {"type": "enabled", "budget_tokens": N}` (extended thinking) — the behavior this integration has always used, unchanged for claude-sonnet-4-6/opus-4-6/haiku-4-5. |
+| `"legacy"` | No thinking control at `"low"`/`"medium"`, unchanged for claude-sonnet-4-6/opus-4-6/haiku-4-5. The former `"high"` branch (`kwargs["thinking"] = {"type": "enabled", "budget_tokens": 16384}`) has no caller since Issue #1336 ([Reasoning Options](#reasoning-options-low-and-medium-issue-1336)). |
 | `"adaptive"` | `kwargs["thinking"] = {"type": "adaptive"}` and `kwargs["output_config"] = {"effort": reasoning_effort}` at **every** reasoning tier, from the very first request — no learning step. |
 
 `supports_temperature: False` omits `temperature` from `kwargs` entirely (some newer models reject it outright with a 400).
@@ -299,9 +423,13 @@ When `success=False` and all guard flags are `False`, the failure came from insi
 
 ## Initialization and Configuration
 
+### One shared client per install (Issue #1336)
+
+The client is created once per install, when the first zone whose entry data passes `ai_settings_sync.is_ai_configured()` sets up, and stored with the skill registry in `hass.data[f"{DOMAIN}_ai"] = {"client": ClaudeAPIClient, "skills": AISkillRegistry}`. Every zone's `coordinator.claude_client` / `coordinator.ai_skills` point at those objects, and the coordinator sets `client.hass`. Each zone's setup or reload calls `client.update_config(entry.data)`; all entries hold the same AI values ([install-wide settings](ai-integration.md#install-wide-settings-and-the-shared-client)), so the order does not matter. The last zone to unload removes it, in the same `if not hass.data[DOMAIN]:` block that removes the panel.
+
 ### `__init__()` Config Keys Read
 
-`ClaudeAPIClient.__init__()` reads exactly one config key at construction time:
+`ClaudeAPIClient.__init__()` reads exactly one config key at construction time (the Anthropic transport's key; the AI Task transport reads `ai_provider` and `ai_task_entity` at call time):
 
 | Key | Purpose |
 |---|---|
@@ -351,6 +479,10 @@ If `from anthropic import ...` raises `ImportError`:
 | `APITimeoutError` | `_async_call_with_retry()` | Same retry/backoff | `ClaudeResponse(success=False, error="Timeout error: …")` after all retries |
 | `APIError` | `_async_call_with_retry()` | Same retry/backoff | `ClaudeResponse(success=False, error="API error: …")` after all retries |
 | Unexpected exception | `_async_call_with_retry()` | Same retry/backoff | `ClaudeResponse(success=False, error="Unexpected error: …")` after all retries |
+| AI Task: provider stopped at its output limit (Anthropic `response_max_tokens`, OpenAI "max output tokens") | AI Task transport | Classified; failure path (breaker, fallback) | `ClaudeResponse(success=False, error_code="ai_output_limit")` |
+| AI Task: context window exceeded (Anthropic `response_context_window_exceeded`) | AI Task transport | Same | `error_code="ai_context_limit"` |
+| AI Task: no entity picked and no preferred entity set | AI Task transport | Same | `error_code="ai_task_no_entity"` |
+| AI Task: any other `HomeAssistantError` | AI Task transport | Same | `error_code="ai_provider_error"` |
 | `restore_persistent_stats()` with bad `counter_date` string | `date.fromisoformat()` | `except (KeyError, ValueError)`: resets `counter_date = date.today()` | Counter starts fresh for the day |
 | `_estimate_cost()` with unrecognized model | Prefix lookup miss | Falls through to Sonnet rates as default | Cost estimate uses $3.00/$15.00 per 1M tokens |
 | `APIError` for a table-verified model (Issue #572 — always unexpected now, since the shape is pre-verified) | `APIError` branch of `_async_call_with_retry()` / `async_request_streaming()` | Logged as `"Unexpected API error for model '%s'"`; normal retry/backoff (non-streaming) or immediate re-raise (streaming) — never a different-shape retry | Same as the generic `APIError` row above |
@@ -371,7 +503,9 @@ If `from anthropic import ...` raises `ImportError`:
 - [`_check_budget`](../custom_components/climate_advisor/claude_api.py#L839) — month-roll detection and cap check
 - [`_check_rate_limit`](../custom_components/climate_advisor/claude_api.py#L766) — daily counter check for `"auto"` vs `"manual"` callers
 - [`check_investigator_rate_limit`](../custom_components/climate_advisor/claude_api.py#L783) — separate investigator gate; also checks `CONF_AI_INVESTIGATOR_ENABLED`
-- [`update_config`](../custom_components/climate_advisor/claude_api.py#L740) — updates config in place; **not called from production code** — every real config change goes through `async_reload()` instead
+- [`update_config`](../custom_components/climate_advisor/claude_api.py#L740) — updates config in place; since Issue #1336 called by each zone's setup or reload to refresh the shared client (a config change still takes effect through the zone reload)
+- `homeassistant.components.ai_task.async_generate_data` — the AI Task transport's only call (Issue #1336); error classification into `AI_ERROR_*` in `claude_api.py`
+- [`ai_limits.async_read_limits`](../custom_components/climate_advisor/ai_limits.py) — provider limit reader shared by the options flow and `GET ai_limits` (Issue #1336)
 - [`get_persistent_stats`](../custom_components/climate_advisor/claude_api.py#L674) — serializes counters + monthly cost for HA state persistence
 - [`restore_persistent_stats`](../custom_components/climate_advisor/claude_api.py#L696) — rehydrates counters after HA restart or config reload
 - [`ClaudeResponse`](../custom_components/climate_advisor/claude_api.py#L95) — response dataclass; all fields documented above

@@ -30,7 +30,9 @@ audit.
 | Why do `observation_count_heat`/`_cool` in `LEARNING — THERMAL MODEL` not match `committed` in `THERMAL OBSERVATION PIPELINE`? | They measure different scopes, both by design: `observation_count_heat`/`_cool` are the evidence behind the heat/cool rates (confidence-grading input: the pre-upgrade count, giving way only as newer informative cycles replace or contradict it, plus the cycle model's weighted informative cycles, Issue #1512; not cumulative: it can fall and stays flat in a quiet season); `committed` is a live count of the observations still kept: each kind keeps its own share of `THERMAL_OBS_CAP` (200), none leaves with time (Issue #1523). A large gap is expected on installs with history and is not data loss (Issue #586). | [§Thermal Observation Pipeline Context](#thermal-observation-pipeline-context) |
 | Does the registry cache skill responses? | No. The registry has no response cache. Every `async_execute()` call builds a fresh context, calls Claude, and parses a new response. | [Caching](#caching) |
 | What invariant holds for `async_execute()` with respect to exceptions? | `async_execute()` never raises to the caller. Every exception inside context building, Claude call, parsing, and fallback invocation is caught and surfaced as a structured error dict. | [Invariants](#invariants) |
-| How does a caller know a report was cut off before Claude finished writing it? | `ClaudeAPIClient` inspects the Anthropic API's `stop_reason` on every request; `truncated=True` (present only on the AI success path) iff `stop_reason == "max_tokens"`. A stream ending on `max_tokens` is otherwise indistinguishable from a normal completion — no exception is raised (Issue #420). | [Return contract](#return-contract) |
+| How does a caller know a report was cut off before Claude finished writing it? | Built-in Claude: `ClaudeAPIClient` inspects the Anthropic API's `stop_reason`; `truncated=True` (present only on the AI success path) iff `stop_reason == "max_tokens"` (Issue #420). AI Task returns no stop reason, so since Issue #1336 the investigate view also sets `cut_short` when `parse_investigation_response` shows a required section empty while `full_text` is non-empty, or when `truncated` is true; then `cut_short_code = "ai_report_cut_short"`. | [Cut-short and error codes](#cut-short-and-error-codes-issue-1336) |
+| Does the skill pipeline change for AI Task providers (Issue #1336)? | No. `async_execute[_streaming]` still calls `claude_client.async_request[_streaming]`; the client picks the transport by `ai_provider`. Prompt, context providers, parser and fallback are reused unchanged. A failure now carries an `error_code` (`ai_output_limit`, `ai_context_limit`, `ai_task_no_entity`, `ai_provider_error`), and status events carry an i18n `key`. | [Cut-short and error codes](#cut-short-and-error-codes-issue-1336) |
+| Where do the skills and client live with several zones? | One shared registry and client per install, `hass.data[f"{DOMAIN}_ai"]` (`{"client", "skills"}`); `coordinator.ai_skills` points at it. Each run still assembles only its own zone's context (Issue #1336). | [AI Integration: install-wide settings](ai-integration.md#install-wide-settings-and-the-shared-client) |
 
 ---
 
@@ -44,7 +46,7 @@ built-in skill implementation.
 - **File 3:** `custom_components/climate_advisor/ai_skills_context.py` — `ContextProviderRegistry` + all 15 individual context providers, including the render/timeline functions and the providers ported from the retired `ai_skills_activity.py`
 
 **Does NOT cover:**
-- Anthropic API transport, circuit breaker, rate limiting, cost estimation — covered by `claude_api.py` (spec pending at `docs/claude-api-spec.md`)
+- The AI transports (AI Task and the deprecated Anthropic one), circuit breaker, rate limiting, cost estimation, error classification — covered by `claude_api.py` ([Claude API Client spec](claude-api-spec.md), [AI Task Transport](claude-api-spec.md#ai-task-transport-issue-1336))
 - HA service registration for the `investigator` skill's calls — owned by `coordinator.py`. The separate `ai_activity_report` service and skill entry point were retired entirely in Issue #578 (superseded by the deterministic, non-AI Activity Record).
 - Report history storage (`store_investigation_report()`, `get_investigation_report_history()`) — owned by `coordinator.py`
 
@@ -155,7 +157,35 @@ Every `async_execute()` call returns exactly this shape:
 
 The first six keys are always present. `truncated` is only present on the AI success path
 (step 5) — fallback and error results omit it, and callers should treat a missing key as
-`False`. `async_execute()` never raises.
+`False`. On the AI Task transport `truncated` is never true (no stop reason is returned).
+`async_execute()` never raises. The investigate view adds `error_code`, `cut_short` and
+`cut_short_code` to what it returns ([below](#cut-short-and-error-codes-issue-1336)).
+
+### Cut-short and error codes (Issue #1336)
+
+**What the occupant experiences.** When a run fails at the provider, the dashboard shows the
+non-AI fallback report and a notice in their language that says why: the output limit, the
+context window, no AI Task entity chosen, or a general provider failure. When a report comes
+back with sections missing, it is shown with a "cut short" notice naming the setting to
+raise. Status lines are shown in the viewer's language.
+
+These fields are added by `api.py` `ai_investigate` (SSE and non-streaming JSON alike); the
+existing protocol is otherwise unchanged.
+
+| Field | On | Value | Rule |
+|---|---|---|---|
+| `key` (+ `params` if any) | every `{"type": "status", "text": ...}` event | `ai.status_gathering`, `ai.status_sending` or `ai.status_provider` | The dashboard renders `key` from `frontend/i18n/ai/<lang>.json` and falls back to `text` |
+| `error_code` | `{"type": "error", "message": ...}` events, and the non-streaming result | `ai_output_limit` / `ai_context_limit` / `ai_task_no_entity` / `ai_provider_error`, or `null` | From the client's classification ([Error classification](claude-api-spec.md#error-classification)); `null` for failures that are not provider errors (rate limit, circuit open, ...) |
+| `cut_short` | the `done` event, and the non-streaming result | bool | `true` iff `parse_investigation_response(full_text)` has any required section empty while `full_text` is non-empty, **or** `truncated` is true |
+| `cut_short_code` | same, only when `cut_short` | `"ai_report_cut_short"` (`AI_CUT_SHORT`) | Frontend i18n key for the notice |
+
+Required sections are the seven `## HEADER` sections in the [Response Parser](#response-parser)
+table. The check reuses that parser; there is no second parser. A reply that is empty
+altogether is not `cut_short` by this rule (`full_text` is empty).
+
+**Pipeline effect:** none. A failure with an `error_code` is still `response.success=False`,
+so step 6 runs the fallback exactly as before; the code only changes what the occupant is
+told.
 
 ### `_run_fallback()` contract
 

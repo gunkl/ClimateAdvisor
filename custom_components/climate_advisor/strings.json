@@ -169,7 +169,7 @@
           "notifications": "Notifications",
           "advanced": "Learning & Behavior",
           "classification_thresholds": "Day-Type Thresholds",
-          "ai_settings": "Claude AI Settings",
+          "ai_settings": "AI settings",
           "github_settings": "GitHub Integration"
         }
       },
@@ -451,9 +451,11 @@
       },
       "ai_settings": {
         "title": "AI Settings",
-        "description": "Configure Claude AI integration for intelligent analysis and reporting.\nAPI Key Status: {key_status}",
+        "description": "These settings apply to all zones.\n\nChoose an AI Task entity from any AI integration in Home Assistant, or leave it empty to use Home Assistant's preferred one.\n\nBuilt-in Claude is deprecated and will be removed. To keep using Claude, add Home Assistant's Anthropic integration, add an AI Task to it, and choose that entity here.\n\nThe AI provider needs a context window of at least 16k tokens and an output limit of at least 8192 tokens, with reasoning set to medium.\n\nAPI key (built-in Claude only): {key_status}",
         "data": {
           "ai_enabled": "Enable AI Features",
+          "ai_provider": "AI Provider",
+          "ai_task_entity": "AI Task Entity",
           "ai_api_key": "Claude API Key",
           "ai_model": "AI Model",
           "ai_reasoning_effort": "Reasoning Effort",
@@ -467,17 +469,23 @@
         },
         "data_description": {
           "ai_enabled": "Master switch for all AI-powered features. When disabled, Climate Advisor uses only its built-in coded logic.",
-          "ai_api_key": "Your Anthropic API key. Get one at console.anthropic.com. Leave blank to keep existing key.",
-          "ai_model": "Which Claude model to use. Sonnet is recommended for cost/quality balance.",
-          "ai_reasoning_effort": "How much reasoning effort Claude uses. Higher = better analysis but more cost.",
-          "ai_max_tokens": "Maximum length of AI responses in tokens (256-16384).",
-          "ai_temperature": "Controls randomness. 0 = deterministic, 1.0 = most creative. 0.3 recommended.",
-          "ai_monthly_budget": "Maximum estimated monthly spend in US dollars. Set to 0 for no limit.",
+          "ai_provider": "Home Assistant AI Task uses an AI integration you set up in Home Assistant. Built-in Claude is deprecated and will be removed.",
+          "ai_task_entity": "The AI Task entity to use. Leave empty to use Home Assistant's preferred AI Task entity. Not used by built-in Claude.",
+          "ai_api_key": "Built-in Claude only. Your Anthropic API key. Get one at console.anthropic.com. Leave blank to keep existing key.",
+          "ai_model": "Built-in Claude only. Which Claude model to use. Sonnet is recommended for cost/quality balance.",
+          "ai_reasoning_effort": "Built-in Claude only. How much reasoning effort Claude uses. Higher = better analysis but more cost.",
+          "ai_max_tokens": "Built-in Claude only. Maximum length of AI responses in tokens (256-16384).",
+          "ai_temperature": "Built-in Claude only. Controls randomness. 0 = deterministic, 1.0 = most creative. 0.3 recommended.",
+          "ai_monthly_budget": "Built-in Claude only. Maximum estimated monthly spend in US dollars. Set to 0 for no limit.",
           "ai_auto_requests_per_day": "Maximum automated AI requests per day (resets at midnight).",
           "ai_manual_requests_per_day": "Maximum user-triggered AI requests per day (resets at midnight).",
           "ai_investigator_enabled": "Enable the investigative agent (requires AI to be enabled). Performs deep cross-source analysis to find incongruities and data issues.",
           "ai_investigator_requests_per_day": "Maximum investigative analysis runs per day. Each investigation uses extended thinking. Resets at midnight."
         }
+      },
+      "ai_limits_warning": {
+        "title": "AI provider limits too low",
+        "description": "Your AI settings are saved. Some limits of the AI provider are too low, so AI reports may be cut short or fail:\n\n{checks}\n\nRaise them in the AI Task options of that integration. Climate Advisor needs a context window of at least 16k tokens and an output limit of at least 8192 tokens. Submit to continue."
       },
       "github_settings": {
         "title": "GitHub Integration",
@@ -557,6 +565,14 @@
     "zone_resolution_ambiguous": {
       "title": "Ambiguous zone selection",
       "description": "Climate Advisor has more than one zone, and a request did not say which zone it was for: {request}. It was {outcome}. Whatever sent it (a script, an automation, a command-line tool or an old browser tab) may be showing another zone's information.\n\nTo fix it, add `?zone=ENTRY_ID` to that request, where ENTRY_ID is the zone's `entry_id` as listed by `GET /api/climate_advisor/status`. The Climate Advisor dashboards already do this. This notice clears the next time Climate Advisor starts."
+    },
+    "builtin_claude_deprecated": {
+      "title": "Built-in Claude is deprecated",
+      "description": "Climate Advisor's AI uses built-in Claude, which is deprecated and will be removed in a future release. AI reports stop working when it is removed.\n\nTo move:\n1. Add Home Assistant's Anthropic integration (or another AI integration) and add an AI Task to it.\n2. In the AI Task's options, turn off the recommended model settings, then set the maximum tokens to 8192 or more and the thinking effort to medium.\n3. In Climate Advisor's options, open AI settings, choose Home Assistant AI Task and pick that entity. This applies to all zones.\n\nThis notice clears the next time Climate Advisor starts with no zone using built-in Claude."
+    },
+    "ai_settings_unified": {
+      "title": "AI settings now apply to all zones",
+      "description": "AI settings are now shared by all zones. Your zones had different AI settings, so Climate Advisor kept the settings of {zone} and used them for every zone. The daily AI request limits now count across all zones.\n\nTo change them, open AI settings in any zone's options."
     }
   },
   "common": {
@@ -573,7 +589,11 @@
     "schedule_summary_heat": "{name} — {days} {window} ({cost}, heating only)",
     "schedule_summary_entity": "{name} — {days} {window} ({cost}, only while {entity} is on)",
     "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, cooling only, only while {entity} is on)",
-    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, heating only, only while {entity} is on)"
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, heating only, only while {entity} is on)",
+    "ai_limit_output": "{integration}: the output limit ({setting}) is {value} tokens; it needs at least {required}.",
+    "ai_limit_context": "{integration}: the context window ({setting}) is {value} tokens; it needs at least {required}.",
+    "ai_limit_combined": "{integration}: the context window ({setting}) is {value} tokens. It holds both the question and the answer, so it needs at least {required}.",
+    "ai_limit_builtin_output": "Built-in Claude: Maximum Response Length is {value} tokens; it needs at least {required}."
   },
   "entity": {
     "sensor": {
@@ -742,8 +762,13 @@
     "ai_reasoning_effort": {
       "options": {
         "low": "Low",
-        "medium": "Medium",
-        "high": "High"
+        "medium": "Medium"
+      }
+    },
+    "ai_provider": {
+      "options": {
+        "ha_ai_task": "Home Assistant AI Task",
+        "builtin_claude": "Built-in Claude (deprecated)"
       }
     },
     "suggestion_action": {

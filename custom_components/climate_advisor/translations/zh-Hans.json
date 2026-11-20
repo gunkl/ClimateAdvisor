@@ -169,7 +169,7 @@
           "notifications": "通知",
           "advanced": "学习与行为",
           "classification_thresholds": "日类型阈值",
-          "ai_settings": "Claude AI 设置",
+          "ai_settings": "AI 设置",
           "github_settings": "GitHub 集成"
         }
       },
@@ -451,9 +451,11 @@
       },
       "ai_settings": {
         "title": "AI 设置",
-        "description": "配置 Claude AI 集成，用于智能分析和报告。\nAPI 密钥状态：{key_status}",
+        "description": "这些设置适用于所有区域。\n\n从 Home Assistant 的任一 AI 集成中选择一个 AI 任务实体；留空则使用 Home Assistant 的首选实体。\n\n内置 Claude 已弃用，并将被移除。如需继续使用 Claude，请添加 Home Assistant 的 Anthropic 集成，为其添加一个 AI 任务，然后在此选择该实体。\n\nAI 提供商需要至少 16k 词元的上下文窗口和至少 8192 词元的输出上限，推理设为中。\n\nAPI 密钥（仅限内置 Claude）：{key_status}",
         "data": {
           "ai_enabled": "启用 AI 功能",
+          "ai_provider": "AI 提供商",
+          "ai_task_entity": "AI 任务实体",
           "ai_api_key": "Claude API 密钥",
           "ai_model": "AI 模型",
           "ai_reasoning_effort": "推理强度",
@@ -467,17 +469,23 @@
         },
         "data_description": {
           "ai_enabled": "所有 AI 功能的总开关。禁用后，Climate Advisor 只使用内置的编码逻辑。",
-          "ai_api_key": "您的 Anthropic API 密钥。可在 console.anthropic.com 获取。留空则保留现有密钥。",
-          "ai_model": "使用哪个 Claude 模型。建议使用 Sonnet，兼顾成本与质量。",
-          "ai_reasoning_effort": "Claude 使用多少推理强度。越高分析越好，但成本也越高。",
-          "ai_max_tokens": "AI 响应的最大长度，以 token 计（256-16384）。",
-          "ai_temperature": "控制随机性。0 = 确定性，1.0 = 最具创造性。建议 0.3。",
-          "ai_monthly_budget": "每月预估最高花费，以美元计。设为 0 表示不限制。",
+          "ai_provider": "Home Assistant AI 任务使用你在 Home Assistant 中设置的 AI 集成。内置 Claude 已弃用，并将被移除。",
+          "ai_task_entity": "要使用的 AI 任务实体。留空则使用 Home Assistant 的首选 AI 任务实体。内置 Claude 不使用此项。",
+          "ai_api_key": "仅限内置 Claude。您的 Anthropic API 密钥。可在 console.anthropic.com 获取。留空则保留现有密钥。",
+          "ai_model": "仅限内置 Claude。使用哪个 Claude 模型。建议使用 Sonnet，兼顾成本与质量。",
+          "ai_reasoning_effort": "仅限内置 Claude。Claude 使用多少推理强度。越高分析越好，但成本也越高。",
+          "ai_max_tokens": "仅限内置 Claude。AI 响应的最大长度，以 token 计（256-16384）。",
+          "ai_temperature": "仅限内置 Claude。控制随机性。0 = 确定性，1.0 = 最具创造性。建议 0.3。",
+          "ai_monthly_budget": "仅限内置 Claude。每月预估最高花费，以美元计。设为 0 表示不限制。",
           "ai_auto_requests_per_day": "每日自动 AI 请求的最大次数（午夜重置）。",
           "ai_manual_requests_per_day": "每日用户触发的 AI 请求的最大次数（午夜重置）。",
           "ai_investigator_enabled": "启用调查代理（需要启用 AI）。执行深入的跨数据源分析，以发现不一致和数据问题。",
           "ai_investigator_requests_per_day": "每日调查分析的最大运行次数。每次调查都使用扩展思考。午夜重置。"
         }
+      },
+      "ai_limits_warning": {
+        "title": "AI 提供商的上限过低",
+        "description": "你的 AI 设置已保存。AI 提供商的部分上限过低，AI 报告可能会被截断或失败：\n\n{checks}\n\n请在该集成的 AI 任务选项中调高这些上限。Climate Advisor 需要至少 16k 词元的上下文窗口和至少 8192 词元的输出上限。提交以继续。"
       },
       "github_settings": {
         "title": "GitHub 集成",
@@ -557,6 +565,14 @@
     "zone_resolution_ambiguous": {
       "title": "区域选择不明确",
       "description": "Climate Advisor 有多个区域，而一个请求没有说明针对哪个区域：{request}。结果是 {outcome}。发送该请求的程序（脚本、自动化、命令行工具或旧的浏览器标签页）可能正在显示另一个区域的信息。\n\n要修复此问题，请在该请求中添加 `?zone=ENTRY_ID`，其中 ENTRY_ID 是 `GET /api/climate_advisor/status` 所列出的该区域的 `entry_id`。Climate Advisor 仪表板已经这样做了。此通知将在 Climate Advisor 下次启动时清除。"
+    },
+    "builtin_claude_deprecated": {
+      "title": "内置 Claude 已弃用",
+      "description": "Climate Advisor 的 AI 使用内置 Claude。它已弃用，并将在未来的版本中移除。移除后 AI 报告将无法使用。\n\n迁移步骤：\n1. 添加 Home Assistant 的 Anthropic 集成（或其他 AI 集成），并为其添加一个 AI 任务。\n2. 在该 AI 任务的选项中关闭推荐的模型设置，然后将最大词元数设为 8192 或更高，将思考力度设为中。\n3. 在 Climate Advisor 的选项中打开 AI 设置，选择 Home Assistant AI 任务并选中该实体。此设置适用于所有区域。\n\n当 Climate Advisor 下次启动且没有任何区域使用内置 Claude 时，此通知将消失。"
+    },
+    "ai_settings_unified": {
+      "title": "AI 设置现在适用于所有区域",
+      "description": "AI 设置现在由所有区域共用。你的各区域原本有不同的 AI 设置，因此 Climate Advisor 保留了 {zone} 的设置，并将其用于每个区域。每日 AI 请求上限现在按所有区域合计。\n\n如需更改，请在任一区域的选项中打开 AI 设置。"
     }
   },
   "common": {
@@ -573,7 +589,11 @@
     "schedule_summary_heat": "{name} — {days} {window} ({cost}、仅制热)",
     "schedule_summary_entity": "{name} — {days} {window} ({cost}、仅在 {entity} 开启时)",
     "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}、仅制冷、仅在 {entity} 开启时)",
-    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}、仅制热、仅在 {entity} 开启时)"
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}、仅制热、仅在 {entity} 开启时)",
+    "ai_limit_output": "{integration}：输出上限（{setting}）为 {value} 词元；至少需要 {required}。",
+    "ai_limit_context": "{integration}：上下文窗口（{setting}）为 {value} 词元；至少需要 {required}。",
+    "ai_limit_combined": "{integration}：上下文窗口（{setting}）为 {value} 词元。它同时容纳问题和回答，因此至少需要 {required}。",
+    "ai_limit_builtin_output": "内置 Claude：最大响应长度为 {value} 词元；至少需要 {required}。"
   },
   "entity": {
     "sensor": {
@@ -742,8 +762,13 @@
     "ai_reasoning_effort": {
       "options": {
         "low": "低",
-        "medium": "中",
-        "high": "高"
+        "medium": "中"
+      }
+    },
+    "ai_provider": {
+      "options": {
+        "ha_ai_task": "Home Assistant AI 任务",
+        "builtin_claude": "内置 Claude（已弃用）"
       }
     },
     "suggestion_action": {

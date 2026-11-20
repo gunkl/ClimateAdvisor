@@ -169,7 +169,7 @@
           "notifications": "알림",
           "advanced": "학습 및 동작",
           "classification_thresholds": "날씨 유형 임계값",
-          "ai_settings": "Claude AI 설정",
+          "ai_settings": "AI 설정",
           "github_settings": "GitHub 통합"
         }
       },
@@ -451,9 +451,11 @@
       },
       "ai_settings": {
         "title": "AI 설정",
-        "description": "Claude AI 통합 구성요소를 설정하여 지능형 분석과 보고서를 사용하세요.\nAPI 키 상태: {key_status}",
+        "description": "이 설정은 모든 구역에 적용됩니다.\n\nHome Assistant의 AI 통합구성요소 중 하나에서 AI 작업 엔티티를 선택하거나, 비워 두면 Home Assistant가 선호하는 엔티티를 사용합니다.\n\n내장 Claude는 지원 중단되었으며 제거될 예정입니다. Claude를 계속 사용하려면 Home Assistant의 Anthropic 통합구성요소를 추가하고, 여기에 AI 작업을 추가한 다음, 그 엔티티를 여기서 선택하세요.\n\nAI 제공자는 최소 16k 토큰의 컨텍스트 창과 최소 8192 토큰의 출력 한도가 필요하며, 추론은 보통으로 설정해야 합니다.\n\nAPI 키(내장 Claude 전용): {key_status}",
         "data": {
           "ai_enabled": "AI 기능 사용",
+          "ai_provider": "AI 제공자",
+          "ai_task_entity": "AI 작업 엔티티",
           "ai_api_key": "Claude API 키",
           "ai_model": "AI 모델",
           "ai_reasoning_effort": "추론 강도",
@@ -467,17 +469,23 @@
         },
         "data_description": {
           "ai_enabled": "모든 AI 기반 기능의 마스터 스위치입니다. 끄면 Climate Advisor는 내장된 코드 로직만 사용합니다.",
-          "ai_api_key": "Anthropic API 키입니다. console.anthropic.com에서 발급받을 수 있습니다. 기존 키를 유지하려면 비워 두세요.",
-          "ai_model": "사용할 Claude 모델입니다. 비용과 품질의 균형 면에서 Sonnet을 권장합니다.",
-          "ai_reasoning_effort": "Claude가 추론에 들이는 노력의 정도입니다. 높을수록 분석이 좋아지지만 비용이 더 듭니다.",
-          "ai_max_tokens": "AI 응답의 최대 길이(토큰 수, 256~16384)입니다.",
-          "ai_temperature": "무작위성을 조절합니다. 0 = 결정적, 1.0 = 가장 창의적. 0.3을 권장합니다.",
-          "ai_monthly_budget": "월 예상 지출의 최대 금액(미국 달러)입니다. 0으로 설정하면 제한이 없습니다.",
+          "ai_provider": "Home Assistant AI 작업은 Home Assistant에 설정한 AI 통합구성요소를 사용합니다. 내장 Claude는 지원 중단되었으며 제거될 예정입니다.",
+          "ai_task_entity": "사용할 AI 작업 엔티티입니다. 비워 두면 Home Assistant가 선호하는 AI 작업 엔티티를 사용합니다. 내장 Claude에서는 사용하지 않습니다.",
+          "ai_api_key": "내장 Claude 전용. Anthropic API 키입니다. console.anthropic.com에서 발급받을 수 있습니다. 기존 키를 유지하려면 비워 두세요.",
+          "ai_model": "내장 Claude 전용. 사용할 Claude 모델입니다. 비용과 품질의 균형 면에서 Sonnet을 권장합니다.",
+          "ai_reasoning_effort": "내장 Claude 전용. Claude가 추론에 들이는 노력의 정도입니다. 높을수록 분석이 좋아지지만 비용이 더 듭니다.",
+          "ai_max_tokens": "내장 Claude 전용. AI 응답의 최대 길이(토큰 수, 256~16384)입니다.",
+          "ai_temperature": "내장 Claude 전용. 무작위성을 조절합니다. 0 = 결정적, 1.0 = 가장 창의적. 0.3을 권장합니다.",
+          "ai_monthly_budget": "내장 Claude 전용. 월 예상 지출의 최대 금액(미국 달러)입니다. 0으로 설정하면 제한이 없습니다.",
           "ai_auto_requests_per_day": "하루 자동 AI 요청의 최대 횟수입니다 (자정에 초기화).",
           "ai_manual_requests_per_day": "하루 사용자 실행 AI 요청의 최대 횟수입니다 (자정에 초기화).",
           "ai_investigator_enabled": "조사 에이전트를 사용합니다 (AI가 켜져 있어야 함). 여러 데이터 소스를 깊이 교차 분석하여 불일치와 데이터 문제를 찾습니다.",
           "ai_investigator_requests_per_day": "하루 조사 분석 실행의 최대 횟수입니다. 각 조사는 확장된 사고를 사용합니다. 자정에 초기화됩니다."
         }
+      },
+      "ai_limits_warning": {
+        "title": "AI 제공자 한도가 너무 낮음",
+        "description": "AI 설정이 저장되었습니다. AI 제공자의 일부 한도가 너무 낮아 AI 보고서가 중간에 끊기거나 실패할 수 있습니다:\n\n{checks}\n\n해당 통합구성요소의 AI 작업 옵션에서 한도를 높이세요. Climate Advisor에는 최소 16k 토큰의 컨텍스트 창과 최소 8192 토큰의 출력 한도가 필요합니다. 계속하려면 제출하세요."
       },
       "github_settings": {
         "title": "GitHub 통합",
@@ -557,6 +565,14 @@
     "zone_resolution_ambiguous": {
       "title": "구역 선택이 모호함",
       "description": "Climate Advisor에 구역이 여러 개 있는데, 요청이 어느 구역에 대한 것인지 지정되지 않았습니다: {request}. 결과는 {outcome}였습니다. 요청을 보낸 쪽(스크립트, 자동화, 명령줄 도구 또는 오래된 브라우저 탭)에 다른 구역의 정보가 표시되고 있을 수 있습니다.\n\n해결하려면 해당 요청에 `?zone=ENTRY_ID`를 추가하세요. ENTRY_ID는 `GET /api/climate_advisor/status`에 나열된 구역의 `entry_id`입니다. Climate Advisor 대시보드는 이미 이렇게 하고 있습니다. 이 알림은 다음에 Climate Advisor가 시작될 때 사라집니다."
+    },
+    "builtin_claude_deprecated": {
+      "title": "내장 Claude 지원 중단",
+      "description": "Climate Advisor의 AI는 내장 Claude를 사용합니다. 내장 Claude는 지원 중단되었으며 향후 릴리스에서 제거됩니다. 제거되면 AI 보고서가 작동하지 않습니다.\n\n전환 방법:\n1. Home Assistant의 Anthropic 통합구성요소(또는 다른 AI 통합구성요소)를 추가하고 여기에 AI 작업을 추가합니다.\n2. AI 작업의 옵션에서 권장 모델 설정을 끈 다음, 최대 토큰을 8192 이상으로, 사고 노력을 보통으로 설정합니다.\n3. Climate Advisor의 옵션에서 AI 설정을 열고 Home Assistant AI 작업을 선택한 뒤 그 엔티티를 고릅니다. 이 설정은 모든 구역에 적용됩니다.\n\n이 알림은 내장 Claude를 사용하는 구역이 없는 상태로 Climate Advisor가 다음에 시작될 때 사라집니다."
+    },
+    "ai_settings_unified": {
+      "title": "이제 AI 설정이 모든 구역에 적용됨",
+      "description": "이제 AI 설정은 모든 구역이 함께 사용합니다. 구역마다 AI 설정이 달랐기 때문에 Climate Advisor는 {zone}의 설정을 유지하고 모든 구역에 사용했습니다. 이제 하루 AI 요청 한도는 모든 구역을 합산해 계산합니다.\n\n변경하려면 아무 구역의 옵션에서 AI 설정을 여세요."
     }
   },
   "common": {
@@ -573,7 +589,11 @@
     "schedule_summary_heat": "{name} — {days} {window} ({cost}, 난방만)",
     "schedule_summary_entity": "{name} — {days} {window} ({cost}, {entity}이(가) 켜져 있을 때만)",
     "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, 냉방만, {entity}이(가) 켜져 있을 때만)",
-    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, 난방만, {entity}이(가) 켜져 있을 때만)"
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, 난방만, {entity}이(가) 켜져 있을 때만)",
+    "ai_limit_output": "{integration}: 출력 한도({setting})가 {value} 토큰입니다. 최소 {required}이(가) 필요합니다.",
+    "ai_limit_context": "{integration}: 컨텍스트 창({setting})이 {value} 토큰입니다. 최소 {required}이(가) 필요합니다.",
+    "ai_limit_combined": "{integration}: 컨텍스트 창({setting})이 {value} 토큰입니다. 질문과 답변을 모두 담으므로 최소 {required}이(가) 필요합니다.",
+    "ai_limit_builtin_output": "내장 Claude: 최대 응답 길이이(가) {value} 토큰입니다. 최소 {required}이(가) 필요합니다."
   },
   "entity": {
     "sensor": {
@@ -742,8 +762,13 @@
     "ai_reasoning_effort": {
       "options": {
         "low": "낮음",
-        "medium": "보통",
-        "high": "높음"
+        "medium": "보통"
+      }
+    },
+    "ai_provider": {
+      "options": {
+        "ha_ai_task": "Home Assistant AI 작업",
+        "builtin_claude": "내장 Claude(지원 중단)"
       }
     },
     "suggestion_action": {

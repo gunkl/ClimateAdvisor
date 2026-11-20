@@ -80,7 +80,8 @@ ENGLISH_OPTION_LABELS = {
     },
     "temp_unit": {"fahrenheit": "Fahrenheit (°F)", "celsius": "Celsius (°C)"},
     "weekday": {d: d.capitalize() for d in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")},
-    "ai_reasoning_effort": {"low": "Low", "medium": "Medium", "high": "High"},
+    # Issue #1336: "high" is no longer offered (medium is the highest reasoning effort).
+    "ai_reasoning_effort": {"low": "Low", "medium": "Medium"},
 }
 
 
@@ -163,6 +164,9 @@ class TestSelectors:
         from custom_components.climate_advisor.const import AI_REASONING_OPTIONS
 
         assert set(_options("ai_reasoning_effort")) == set(AI_REASONING_OPTIONS)
+        from custom_components.climate_advisor.const import AI_PROVIDER_OPTIONS
+
+        assert set(_options("ai_provider")) == set(AI_PROVIDER_OPTIONS)
 
     def test_every_registered_prediction_engine_has_an_option_entry(self):
         engines = {i for i, _ in prediction_engines.options(False)}

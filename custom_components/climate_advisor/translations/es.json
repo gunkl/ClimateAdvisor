@@ -169,7 +169,7 @@
           "notifications": "Notificaciones",
           "advanced": "Aprendizaje y comportamiento",
           "classification_thresholds": "Umbrales de tipo de día",
-          "ai_settings": "Ajustes de la IA de Claude",
+          "ai_settings": "Ajustes de la IA",
           "github_settings": "Integración con GitHub"
         }
       },
@@ -451,9 +451,11 @@
       },
       "ai_settings": {
         "title": "Ajustes de la IA",
-        "description": "Configura la integración de la IA de Claude para análisis e informes inteligentes.\nEstado de la clave de API: {key_status}",
+        "description": "Estos ajustes se aplican a todas las zonas.\n\nElige una entidad de Tarea de IA de cualquier integración de IA de Home Assistant, o déjala vacía para usar la preferida de Home Assistant.\n\nClaude integrado está obsoleto y se eliminará. Para seguir usando Claude, añade la integración Anthropic de Home Assistant, añádele una Tarea de IA y elige esa entidad aquí.\n\nEl proveedor de IA necesita una ventana de contexto de al menos 16k tokens y un límite de salida de al menos 8192 tokens, con el razonamiento en medio.\n\nClave API (solo Claude integrado): {key_status}",
         "data": {
           "ai_enabled": "Activar funciones de IA",
+          "ai_provider": "Proveedor de IA",
+          "ai_task_entity": "Entidad de Tarea de IA",
           "ai_api_key": "Clave de API de Claude",
           "ai_model": "Modelo de IA",
           "ai_reasoning_effort": "Esfuerzo de razonamiento",
@@ -467,17 +469,23 @@
         },
         "data_description": {
           "ai_enabled": "Interruptor general de todas las funciones con IA. Si está desactivado, Climate Advisor usa solo su lógica integrada.",
-          "ai_api_key": "Tu clave de API de Anthropic. Consigue una en console.anthropic.com. Déjalo en blanco para conservar la clave actual.",
-          "ai_model": "Qué modelo de Claude usar. Se recomienda Sonnet por su equilibrio entre coste y calidad.",
-          "ai_reasoning_effort": "Cuánto esfuerzo de razonamiento usa Claude. Más alto = mejor análisis pero más coste.",
-          "ai_max_tokens": "Longitud máxima de las respuestas de la IA en tokens (256-16384).",
-          "ai_temperature": "Controla la aleatoriedad. 0 = determinista, 1,0 = más creativo. Se recomienda 0,3.",
-          "ai_monthly_budget": "Gasto mensual máximo estimado en dólares estadounidenses. Pon 0 para no tener límite.",
+          "ai_provider": "Tarea de IA de Home Assistant usa una integración de IA configurada en Home Assistant. Claude integrado está obsoleto y se eliminará.",
+          "ai_task_entity": "La entidad de Tarea de IA que se usará. Déjala vacía para usar la entidad de Tarea de IA preferida de Home Assistant. Claude integrado no la usa.",
+          "ai_api_key": "Solo Claude integrado. Tu clave de API de Anthropic. Consigue una en console.anthropic.com. Déjalo en blanco para conservar la clave actual.",
+          "ai_model": "Solo Claude integrado. Qué modelo de Claude usar. Se recomienda Sonnet por su equilibrio entre coste y calidad.",
+          "ai_reasoning_effort": "Solo Claude integrado. Cuánto esfuerzo de razonamiento usa Claude. Más alto = mejor análisis pero más coste.",
+          "ai_max_tokens": "Solo Claude integrado. Longitud máxima de las respuestas de la IA en tokens (256-16384).",
+          "ai_temperature": "Solo Claude integrado. Controla la aleatoriedad. 0 = determinista, 1,0 = más creativo. Se recomienda 0,3.",
+          "ai_monthly_budget": "Solo Claude integrado. Gasto mensual máximo estimado en dólares estadounidenses. Pon 0 para no tener límite.",
           "ai_auto_requests_per_day": "Máximo de solicitudes de IA automáticas por día (se reinicia a medianoche).",
           "ai_manual_requests_per_day": "Máximo de solicitudes de IA iniciadas por el usuario por día (se reinicia a medianoche).",
           "ai_investigator_enabled": "Activa el agente de investigación (requiere que la IA esté activada). Realiza un análisis profundo cruzando varias fuentes para encontrar incoherencias y problemas de datos.",
           "ai_investigator_requests_per_day": "Máximo de análisis de investigación por día. Cada investigación usa razonamiento extendido. Se reinicia a medianoche."
         }
+      },
+      "ai_limits_warning": {
+        "title": "Límites del proveedor de IA demasiado bajos",
+        "description": "Tus ajustes de IA se han guardado. Algunos límites del proveedor de IA son demasiado bajos, así que los informes de IA pueden quedar cortados o fallar:\n\n{checks}\n\nAuméntalos en las opciones de la Tarea de IA de esa integración. Climate Advisor necesita una ventana de contexto de al menos 16k tokens y un límite de salida de al menos 8192 tokens. Envía para continuar."
       },
       "github_settings": {
         "title": "Integración con GitHub",
@@ -557,6 +565,14 @@
     "zone_resolution_ambiguous": {
       "title": "Selección de zona ambigua",
       "description": "Climate Advisor tiene más de una zona y una solicitud no indicó para qué zona era: {request}. Se resolvió así: {outcome}. Lo que la envió (un script, una automatización, una herramienta de línea de comandos o una pestaña antigua del navegador) puede estar mostrando la información de otra zona.\n\nPara solucionarlo, añade `?zone=ENTRY_ID` a esa solicitud, donde ENTRY_ID es el `entry_id` de la zona tal como lo lista `GET /api/climate_advisor/status`. Los paneles de Climate Advisor ya lo hacen. Este aviso desaparece la próxima vez que se inicie Climate Advisor."
+    },
+    "builtin_claude_deprecated": {
+      "title": "Claude integrado está obsoleto",
+      "description": "La IA de Climate Advisor usa Claude integrado, que está obsoleto y se eliminará en una versión futura. Los informes de IA dejarán de funcionar cuando se elimine.\n\nPara migrar:\n1. Añade la integración Anthropic de Home Assistant (u otra integración de IA) y añádele una Tarea de IA.\n2. En las opciones de la Tarea de IA, desactiva los ajustes de modelo recomendados y luego pon el máximo de tokens en 8192 o más y el esfuerzo de razonamiento en medio.\n3. En las opciones de Climate Advisor, abre Ajustes de la IA, elige Tarea de IA de Home Assistant y selecciona esa entidad. Se aplica a todas las zonas.\n\nEste aviso desaparece la próxima vez que Climate Advisor se inicie sin ninguna zona que use Claude integrado."
+    },
+    "ai_settings_unified": {
+      "title": "Los ajustes de IA ahora se aplican a todas las zonas",
+      "description": "Los ajustes de IA ahora son comunes a todas las zonas. Tus zonas tenían ajustes de IA distintos, así que Climate Advisor conservó los de {zone} y los usó para todas las zonas. Los límites diarios de solicitudes de IA ahora cuentan para todas las zonas en conjunto.\n\nPara cambiarlos, abre Ajustes de la IA en las opciones de cualquier zona."
     }
   },
   "common": {
@@ -573,7 +589,11 @@
     "schedule_summary_heat": "{name} — {days} {window} ({cost}, solo calefacción)",
     "schedule_summary_entity": "{name} — {days} {window} ({cost}, solo si {entity} está activado)",
     "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, solo refrigeración, solo si {entity} está activado)",
-    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, solo calefacción, solo si {entity} está activado)"
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, solo calefacción, solo si {entity} está activado)",
+    "ai_limit_output": "{integration}: el límite de salida ({setting}) es de {value} tokens; necesita al menos {required}.",
+    "ai_limit_context": "{integration}: la ventana de contexto ({setting}) es de {value} tokens; necesita al menos {required}.",
+    "ai_limit_combined": "{integration}: la ventana de contexto ({setting}) es de {value} tokens. Contiene tanto la pregunta como la respuesta, así que necesita al menos {required}.",
+    "ai_limit_builtin_output": "Claude integrado: Longitud máxima de la respuesta es de {value} tokens; necesita al menos {required}."
   },
   "entity": {
     "sensor": {
@@ -742,8 +762,13 @@
     "ai_reasoning_effort": {
       "options": {
         "low": "Baja",
-        "medium": "Media",
-        "high": "Alta"
+        "medium": "Media"
+      }
+    },
+    "ai_provider": {
+      "options": {
+        "ha_ai_task": "Tarea de IA de Home Assistant",
+        "builtin_claude": "Claude integrado (obsoleto)"
       }
     },
     "suggestion_action": {

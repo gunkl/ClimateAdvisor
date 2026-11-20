@@ -298,3 +298,43 @@ class TestLimitWarning:
         flow, _ = _make_options_flow({})
         _run(flow, _submit(ai_enabled=False))
         limits.assert_not_called()
+
+
+class TestNewZoneJoinsInstallAiSettings:
+    """A zone added later starts with the install's AI settings (they are install-wide)."""
+
+    def _create(self, existing_data):
+        from tests.test_config_flow import _make_config_flow
+
+        flow = _make_config_flow()
+        existing = []
+        if existing_data is not None:
+            entry = _make_config_entry(existing_data)
+            existing = [entry]
+        flow.hass.config_entries.async_entries = lambda domain=None: existing
+        return asyncio.run(
+            flow.async_step_schedule(
+                {"zone_name": "Z2", "wake_time": "07:00:00", "sleep_time": "23:00:00", "briefing_time": "06:30:00"}
+            )
+        )
+
+    def test_new_zone_copies_ai_values_from_existing_zone(self):
+        result = self._create(
+            {
+                "climate_entity": "climate.a",
+                "ai_enabled": True,
+                "ai_provider": "ha_ai_task",
+                "ai_task_entity": "ai_task.openai",
+                "ai_manual_requests_per_day": 7,
+            }
+        )
+        data = result["data"]
+        assert data["ai_enabled"] is True
+        assert data["ai_provider"] == "ha_ai_task"
+        assert data["ai_task_entity"] == "ai_task.openai"
+        assert data["ai_manual_requests_per_day"] == 7
+        assert "climate_entity" not in data or data["climate_entity"] != "climate.a"
+
+    def test_first_zone_gets_no_ai_values(self):
+        result = self._create(None)
+        assert "ai_provider" not in result["data"]

@@ -956,6 +956,12 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_BRIEFING_NOTIFICATIONS_ENABLED,
                     zone_registry.default_briefing_notifications_enabled(self.hass),
                 )
+                # Issue #1336: AI settings are install-wide, so a zone added later joins with the
+                # install's AI values (every existing zone holds the same ones; the first in stable
+                # order is read).
+                existing_zones = self.hass.config_entries.async_entries(DOMAIN)
+                if existing_zones:
+                    self._data.update(ai_settings_sync.extract_ai_values(existing_zones[0].data))
                 _LOGGER.info(
                     "Config entry created — zone=%s, wake=%s, sleep=%s, briefing=%s",
                     zone_name,

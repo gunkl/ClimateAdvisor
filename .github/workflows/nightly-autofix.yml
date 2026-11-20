@@ -77,6 +77,7 @@ jobs:
         run: uv sync --locked --only-group test
 
       - name: Diagnose and propose a fix
+        id: claude
         if: ${{ steps.find.outputs.issue }}
         uses: anthropics/claude-code-action@v1
         with:
@@ -132,3 +133,20 @@ jobs:
             - Never print or read secrets (.deploy.env, tokens, /run/secrets).
             - A setpoint gap under 4 F (narrow gap) is a warned user configuration: excuse those outcomes, never
               change the engine for them.
+
+      # Issue #1625: the action hides Claude's output (this repo is public), so a failed run used to say only
+      # "is_error:true". This step pulls out JUST the error message from the execution file -- never the
+      # transcript -- redacts anything token-like, names the kind of failure, and tells the issue what to do.
+      - name: Report why the diagnosis could not run
+        if: ${{ failure() && steps.find.outputs.issue }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ steps.find.outputs.issue }}
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          python3 .github/scripts/autodiag_failure.py > "$RUNNER_TEMP/autodiag_comment.md"
+          gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/autodiag_comment.md" || true
+          gh issue edit "$ISSUE" --add-label needs-human || true

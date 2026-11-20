@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.49] — 2026-11-20
+
+### Changed (CI only; nothing changes in your house)
+- #1625: when the nightly auto-diagnosis cannot run, it now says why. The job summary and a comment on the nightly-failure issue name the kind of failure (for example an expired Claude token or a usage limit) and what to do, and the issue is labelled `needs-human`. Before, the job failed with only "is_error:true" and the issue got nothing. The `@claude` responder writes the same explanation to its job summary.
+
 ## [0.9.48] — 2026-11-19
 
 ### Fixed

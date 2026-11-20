@@ -48,3 +48,12 @@ jobs:
           # or https://code.claude.com/docs/en/cli-reference for available options
           # claude_args: '--allowed-tools Bash(gh pr:*)'
 
+
+      # Issue #1625 (mirror of nightly-autofix.yml): the action hides Claude's output, so say why a run failed. Only
+      # the final error message is read (token-like text redacted) and written to the job summary; this job has
+      # read-only permissions, so it does not comment.
+      - name: Report why Claude could not run
+        if: ${{ failure() }}
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: python3 .github/scripts/autodiag_failure.py > /dev/null

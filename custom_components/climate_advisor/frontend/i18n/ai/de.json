@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "Erhöhe den Wert in den Einstellungen dieser Integration in Home Assistant. Wenn du trotzdem startest, kann der Bericht unvollständig sein oder fehlschlagen.",
+  "ai.limits.cancel": "Abbrechen",
+  "ai.limits.cancelled": "Analyse abgebrochen.",
+  "ai.limits.check": "{kind, select, output {Ausgabelimit} context {Kontextfenster} other {Gemeinsames Kontextfenster (Ein- und Ausgabe)}}: {setting} in {integration} ist {value}; nötig sind mindestens {required}.",
+  "ai.limits.checking": "Limits des KI-Anbieters werden geprüft…",
+  "ai.limits.run_anyway": "Trotzdem starten",
+  "ai.limits.title": "Die Limits dieses KI-Anbieters wirken für eine Analyse zu klein",
+  "ai.limits.unreadable": "Die Limits dieses Anbieters können nicht geprüft werden; nötig sind ein Kontextfenster von 16k Tokens und ein Ausgabelimit von 8k Tokens.",
+  "ai.notice.ai_context_limit": "Die Daten für diesen Bericht passen nicht in das Kontextfenster des KI-Modells. Verwende ein Modell mit einem Kontextfenster von mindestens {context} Tokens ({combined}, wenn Ein- und Ausgabe ein Fenster teilen, wie bei num_ctx von Ollama), oder wähle einen kürzeren Zeitraum.",
+  "ai.notice.ai_output_limit": "Der KI-Anbieter hat an seinem Ausgabelimit angehalten, bevor der Bericht fertig war. Erhöhe die maximalen Tokens in den Einstellungen dieser Integration auf mindestens {required}.",
+  "ai.notice.ai_provider_error": "Der KI-Anbieter hat einen Fehler gemeldet, daher konnte der Bericht nicht geschrieben werden. Prüfe diese Integration in Home Assistant und versuche es dann erneut.",
+  "ai.notice.ai_report_cut_short": "Der Bericht kam unvollständig zurück: Einige Abschnitte fehlen. {has_setting, select, yes {Erhöhe {setting} in {integration} auf mindestens {required} und starte ihn dann erneut.} other {Erhöhe das Ausgabelimit des KI-Anbieters in den Einstellungen dieser Integration auf mindestens {required} Tokens und starte ihn dann erneut.}}",
+  "ai.notice.ai_task_no_entity": "Es ist keine AI-Task-Entität gewählt, und Home Assistant hat keine bevorzugte. Wähle eine AI-Task-Entität in den KI-Einstellungen von Climate Advisor oder lege unter Einstellungen > System > KI eine Standard-Entität fest.",
+  "ai.status_gathering": "Systemdaten werden gesammelt…",
+  "ai.status_provider": "Warte darauf, dass der KI-Anbieter den Bericht schreibt…",
+  "ai.status_sending": "Daten werden an den KI-Anbieter gesendet…"
+}

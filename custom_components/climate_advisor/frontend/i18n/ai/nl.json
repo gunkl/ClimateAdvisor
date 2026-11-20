@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "Verhoog het in de instellingen van die integratie in Home Assistant. Als je toch start, kan het rapport onvolledig zijn of mislukken.",
+  "ai.limits.cancel": "Annuleren",
+  "ai.limits.cancelled": "Onderzoek geannuleerd.",
+  "ai.limits.check": "{kind, select, output {Uitvoerlimiet} context {Contextvenster} other {Gedeeld contextvenster (invoer en uitvoer)}}: {setting} in {integration} is {value}; nodig is minstens {required}.",
+  "ai.limits.checking": "Limieten van de AI-aanbieder controleren…",
+  "ai.limits.run_anyway": "Toch uitvoeren",
+  "ai.limits.title": "De limieten van deze AI-aanbieder lijken te klein voor een onderzoek",
+  "ai.limits.unreadable": "De limieten van deze aanbieder kunnen niet worden gecontroleerd; nodig zijn een contextvenster van 16k tokens en een uitvoerlimiet van 8k tokens.",
+  "ai.notice.ai_context_limit": "De gegevens voor dit rapport passen niet in het contextvenster van het AI-model. Gebruik een model met een contextvenster van minstens {context} tokens ({combined} als invoer en uitvoer één venster delen, zoals bij num_ctx van Ollama), of kies een kortere periode.",
+  "ai.notice.ai_output_limit": "De AI-aanbieder stopte bij zijn uitvoerlimiet voordat het rapport af was. Verhoog het maximale aantal tokens naar minstens {required} in de instellingen van die integratie.",
+  "ai.notice.ai_provider_error": "De AI-aanbieder gaf een fout, dus het rapport kon niet worden geschreven. Controleer die integratie in Home Assistant en probeer het opnieuw.",
+  "ai.notice.ai_report_cut_short": "Het rapport kwam onvolledig terug: er ontbreken secties. {has_setting, select, yes {Verhoog {setting} in {integration} naar minstens {required} en voer het opnieuw uit.} other {Verhoog het uitvoerlimiet van de AI-aanbieder naar minstens {required} tokens in de instellingen van die integratie en voer het opnieuw uit.}}",
+  "ai.notice.ai_task_no_entity": "Er is geen AI Task-entiteit gekozen en Home Assistant heeft geen voorkeursentiteit. Kies een AI Task-entiteit in de AI-instellingen van Climate Advisor, of stel een standaard in onder Instellingen > Systeem > AI.",
+  "ai.status_gathering": "Systeemgegevens verzamelen…",
+  "ai.status_provider": "Wachten tot de AI-aanbieder het rapport schrijft…",
+  "ai.status_sending": "Gegevens naar de AI-aanbieder sturen…"
+}

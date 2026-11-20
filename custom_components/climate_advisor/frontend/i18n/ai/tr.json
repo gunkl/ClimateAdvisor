@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "Bunu Home Assistant'ta o entegrasyonun ayarlarından yükseltin. Yine de çalıştırırsanız rapor yarım kalabilir ya da başarısız olabilir.",
+  "ai.limits.cancel": "İptal",
+  "ai.limits.cancelled": "İnceleme iptal edildi.",
+  "ai.limits.check": "{kind, select, output {Çıktı sınırı} context {Bağlam penceresi} other {Ortak bağlam penceresi (girdi ve çıktı)}}: {integration} içindeki {setting} değeri {value}; en az {required} gerekiyor.",
+  "ai.limits.checking": "Yapay zekâ sağlayıcısının sınırları kontrol ediliyor…",
+  "ai.limits.run_anyway": "Yine de çalıştır",
+  "ai.limits.title": "Bu yapay zekâ sağlayıcısının sınırları bir inceleme için fazla küçük görünüyor",
+  "ai.limits.unreadable": "Bu sağlayıcının sınırları kontrol edilemiyor; 16k token bağlam penceresi ve 8k token çıktı sınırı gerekiyor.",
+  "ai.notice.ai_context_limit": "Bu raporun verileri yapay zekâ modelinin bağlam penceresine sığmadı. Bağlam penceresi en az {context} token olan bir model kullanın (Ollama'nın num_ctx ayarında olduğu gibi girdi ve çıktı tek pencereyi paylaşıyorsa {combined}) ya da daha kısa bir zaman aralığı seçin.",
+  "ai.notice.ai_output_limit": "Yapay zekâ sağlayıcısı rapor bitmeden çıktı sınırında durdu. O entegrasyonun ayarlarında en fazla token sayısını en az {required} olarak yükseltin.",
+  "ai.notice.ai_provider_error": "Yapay zekâ sağlayıcısı bir hata döndürdü, bu yüzden rapor yazılamadı. Home Assistant'ta o entegrasyonu kontrol edin ve yeniden deneyin.",
+  "ai.notice.ai_report_cut_short": "Rapor yarım geldi: bazı bölümler eksik. {has_setting, select, yes {{integration} içindeki {setting} değerini en az {required} olarak yükseltin, sonra yeniden çalıştırın.} other {O entegrasyonun ayarlarında yapay zekâ sağlayıcısının çıktı sınırını en az {required} token olarak yükseltin, sonra yeniden çalıştırın.}}",
+  "ai.notice.ai_task_no_entity": "Hiçbir AI Task varlığı seçilmedi ve Home Assistant'ın tercih ettiği bir varlık da yok. Climate Advisor'ın yapay zekâ ayarlarında bir AI Task varlığı seçin ya da Ayarlar > Sistem > Yapay zekâ altında varsayılan bir varlık belirleyin.",
+  "ai.status_gathering": "Sistem verileri toplanıyor…",
+  "ai.status_provider": "Yapay zekâ sağlayıcısının raporu yazması bekleniyor…",
+  "ai.status_sending": "Veriler yapay zekâ sağlayıcısına gönderiliyor…"
+}

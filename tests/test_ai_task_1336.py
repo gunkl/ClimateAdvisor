@@ -359,8 +359,14 @@ def _limits_hass(domain: str | None, subentry_data: dict | None, *, preferred: s
 def _read(hass, registry, config):
     from custom_components.climate_advisor import ai_limits
 
-    er_mod = sys.modules["homeassistant.helpers.entity_registry"]
-    with patch.object(er_mod, "async_get", return_value=registry):
+    # Swap in a whole fake module rather than patching ``async_get`` on the shared stub: patching a child of the
+    # process-wide MagicMock and restoring it detaches it from ``ha_stubs.clear_stub_call_history()``'s reset
+    # (Issue #1508), so every later simulated day's ``er.async_get(hass)`` calls (and their FakeHass) stay alive.
+    fake_er = SimpleNamespace(async_get=lambda _hass: registry)
+    with (
+        patch.dict(sys.modules, {"homeassistant.helpers.entity_registry": fake_er}),
+        patch.object(sys.modules["homeassistant.helpers"], "entity_registry", fake_er),
+    ):
         return asyncio.run(ai_limits.async_read_limits(hass, config))
 
 

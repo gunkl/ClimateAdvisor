@@ -169,7 +169,7 @@
           "notifications": "Notifications",
           "advanced": "Apprentissage et comportement",
           "classification_thresholds": "Seuils des types de journée",
-          "ai_settings": "Paramètres de l’IA Claude",
+          "ai_settings": "Paramètres de l’IA",
           "github_settings": "Intégration GitHub"
         }
       },
@@ -451,9 +451,11 @@
       },
       "ai_settings": {
         "title": "Paramètres de l’IA",
-        "description": "Configurez l’intégration de l’IA Claude pour l’analyse et les rapports intelligents.\nÉtat de la clé API : {key_status}",
+        "description": "Ces paramètres s’appliquent à toutes les zones.\n\nChoisissez une entité Tâche IA fournie par n’importe quelle intégration d’IA de Home Assistant, ou laissez vide pour utiliser celle que Home Assistant préfère.\n\nClaude intégré est obsolète et sera supprimé. Pour continuer à utiliser Claude, ajoutez l’intégration Anthropic de Home Assistant, ajoutez-lui une Tâche IA, puis choisissez cette entité ici.\n\nLe fournisseur d’IA doit offrir une fenêtre de contexte d’au moins 16k jetons et une limite de sortie d’au moins 8192 jetons, avec un raisonnement réglé sur moyen.\n\nClé API (Claude intégré uniquement) : {key_status}",
         "data": {
           "ai_enabled": "Activer les fonctions d’IA",
+          "ai_provider": "Fournisseur d’IA",
+          "ai_task_entity": "Entité Tâche IA",
           "ai_api_key": "Clé API Claude",
           "ai_model": "Modèle d’IA",
           "ai_reasoning_effort": "Effort de raisonnement",
@@ -467,17 +469,23 @@
         },
         "data_description": {
           "ai_enabled": "Interrupteur général de toutes les fonctions d’IA. Désactivé, Climate Advisor n’utilise que sa logique intégrée.",
-          "ai_api_key": "Votre clé API Anthropic. Obtenez-en une sur console.anthropic.com. Laissez vide pour conserver la clé existante.",
-          "ai_model": "Modèle Claude à utiliser. Sonnet est recommandé pour l’équilibre coût/qualité.",
-          "ai_reasoning_effort": "Niveau d’effort de raisonnement de Claude. Plus élevé = meilleure analyse mais coût plus important.",
-          "ai_max_tokens": "Longueur maximale des réponses de l’IA, en jetons (256-16384).",
-          "ai_temperature": "Contrôle le caractère aléatoire. 0 = déterministe, 1,0 = le plus créatif. 0,3 recommandé.",
-          "ai_monthly_budget": "Dépense mensuelle maximale estimée, en dollars américains. Mettez 0 pour aucune limite.",
+          "ai_provider": "Tâche IA de Home Assistant utilise une intégration d’IA configurée dans Home Assistant. Claude intégré est obsolète et sera supprimé.",
+          "ai_task_entity": "L’entité Tâche IA à utiliser. Laissez vide pour utiliser l’entité Tâche IA préférée de Home Assistant. Non utilisée par Claude intégré.",
+          "ai_api_key": "Claude intégré uniquement. Votre clé API Anthropic. Obtenez-en une sur console.anthropic.com. Laissez vide pour conserver la clé existante.",
+          "ai_model": "Claude intégré uniquement. Modèle Claude à utiliser. Sonnet est recommandé pour l’équilibre coût/qualité.",
+          "ai_reasoning_effort": "Claude intégré uniquement. Niveau d’effort de raisonnement de Claude. Plus élevé = meilleure analyse mais coût plus important.",
+          "ai_max_tokens": "Claude intégré uniquement. Longueur maximale des réponses de l’IA, en jetons (256-16384).",
+          "ai_temperature": "Claude intégré uniquement. Contrôle le caractère aléatoire. 0 = déterministe, 1,0 = le plus créatif. 0,3 recommandé.",
+          "ai_monthly_budget": "Claude intégré uniquement. Dépense mensuelle maximale estimée, en dollars américains. Mettez 0 pour aucune limite.",
           "ai_auto_requests_per_day": "Nombre maximal de requêtes d’IA automatiques par jour (remis à zéro à minuit).",
           "ai_manual_requests_per_day": "Nombre maximal de requêtes d’IA déclenchées par l’utilisateur par jour (remis à zéro à minuit).",
           "ai_investigator_enabled": "Active l’agent d’investigation (nécessite que l’IA soit activée). Effectue une analyse approfondie croisant plusieurs sources pour détecter les incohérences et les problèmes de données.",
           "ai_investigator_requests_per_day": "Nombre maximal d’analyses d’investigation par jour. Chaque investigation utilise une réflexion étendue. Remis à zéro à minuit."
         }
+      },
+      "ai_limits_warning": {
+        "title": "Limites du fournisseur d’IA trop basses",
+        "description": "Vos paramètres d’IA sont enregistrés. Certaines limites du fournisseur d’IA sont trop basses, les rapports d’IA risquent donc d’être tronqués ou d’échouer :\n\n{checks}\n\nAugmentez-les dans les options de la Tâche IA de cette intégration. Climate Advisor a besoin d’une fenêtre de contexte d’au moins 16k jetons et d’une limite de sortie d’au moins 8192 jetons. Validez pour continuer."
       },
       "github_settings": {
         "title": "Intégration GitHub",
@@ -557,6 +565,14 @@
     "zone_resolution_ambiguous": {
       "title": "Sélection de zone ambiguë",
       "description": "Climate Advisor a plusieurs zones, et une requête n’indiquait pas la zone concernée : {request}. Elle a été {outcome}. L’émetteur (un script, une automatisation, un outil en ligne de commande ou un ancien onglet de navigateur) affiche peut-être les informations d’une autre zone.\n\nPour corriger, ajoutez `?zone=ENTRY_ID` à cette requête, où ENTRY_ID est l’`entry_id` de la zone, tel que listé par `GET /api/climate_advisor/status`. Les tableaux de bord Climate Advisor le font déjà. Cet avis disparaît au prochain démarrage de Climate Advisor."
+    },
+    "builtin_claude_deprecated": {
+      "title": "Claude intégré est obsolète",
+      "description": "L’IA de Climate Advisor utilise Claude intégré, qui est obsolète et sera supprimé dans une prochaine version. Les rapports d’IA cesseront alors de fonctionner.\n\nPour migrer :\n1. Ajoutez l’intégration Anthropic de Home Assistant (ou une autre intégration d’IA) et ajoutez-lui une Tâche IA.\n2. Dans les options de la Tâche IA, désactivez les paramètres de modèle recommandés, puis réglez le nombre maximal de jetons sur 8192 ou plus et l’effort de réflexion sur moyen.\n3. Dans les options de Climate Advisor, ouvrez Paramètres de l’IA, choisissez Tâche IA de Home Assistant et sélectionnez cette entité. Cela s’applique à toutes les zones.\n\nCet avis disparaît au prochain démarrage de Climate Advisor si aucune zone n’utilise Claude intégré."
+    },
+    "ai_settings_unified": {
+      "title": "Les paramètres d’IA s’appliquent désormais à toutes les zones",
+      "description": "Les paramètres d’IA sont désormais partagés par toutes les zones. Vos zones avaient des paramètres d’IA différents ; Climate Advisor a donc conservé ceux de {zone} et les a appliqués à chaque zone. Les limites quotidiennes de requêtes d’IA comptent désormais pour l’ensemble des zones.\n\nPour les modifier, ouvrez Paramètres de l’IA dans les options de n’importe quelle zone."
     }
   },
   "common": {
@@ -573,7 +589,11 @@
     "schedule_summary_heat": "{name} — {days} {window} ({cost}, chauffage uniquement)",
     "schedule_summary_entity": "{name} — {days} {window} ({cost}, seulement si {entity} est activé)",
     "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, climatisation uniquement, seulement si {entity} est activé)",
-    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, chauffage uniquement, seulement si {entity} est activé)"
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, chauffage uniquement, seulement si {entity} est activé)",
+    "ai_limit_output": "{integration} : la limite de sortie ({setting}) est de {value} jetons ; il en faut au moins {required}.",
+    "ai_limit_context": "{integration} : la fenêtre de contexte ({setting}) est de {value} jetons ; il en faut au moins {required}.",
+    "ai_limit_combined": "{integration} : la fenêtre de contexte ({setting}) est de {value} jetons. Elle contient à la fois la question et la réponse, il en faut donc au moins {required}.",
+    "ai_limit_builtin_output": "Claude intégré : Longueur maximale des réponses est de {value} jetons ; il en faut au moins {required}."
   },
   "entity": {
     "sensor": {
@@ -742,8 +762,13 @@
     "ai_reasoning_effort": {
       "options": {
         "low": "Faible",
-        "medium": "Moyen",
-        "high": "Élevé"
+        "medium": "Moyen"
+      }
+    },
+    "ai_provider": {
+      "options": {
+        "ha_ai_task": "Tâche IA de Home Assistant",
+        "builtin_claude": "Claude intégré (obsolète)"
       }
     },
     "suggestion_action": {

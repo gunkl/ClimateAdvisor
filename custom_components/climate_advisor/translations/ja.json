@@ -169,7 +169,7 @@
           "notifications": "通知",
           "advanced": "学習と動作",
           "classification_thresholds": "日のタイプのしきい値",
-          "ai_settings": "Claude AI の設定",
+          "ai_settings": "AI の設定",
           "github_settings": "GitHub 連携"
         }
       },
@@ -451,9 +451,11 @@
       },
       "ai_settings": {
         "title": "AI の設定",
-        "description": "Claude AI 連携を設定して、インテリジェントな分析とレポートを利用します。\nAPI キーの状態: {key_status}",
+        "description": "これらの設定はすべてのゾーンに適用されます。\n\nHome Assistant の任意の AI 連携から AI タスクエンティティを選んでください。空欄にすると Home Assistant の優先エンティティを使います。\n\n組み込み Claude は非推奨で、今後削除されます。Claude を使い続けるには、Home Assistant の Anthropic 連携を追加し、そこに AI タスクを追加して、そのエンティティをここで選んでください。\n\nAI プロバイダーには、16k トークン以上のコンテキストウィンドウと 8192 トークン以上の出力上限が必要です。推論は中に設定してください。\n\nAPI キー (組み込み Claude のみ): {key_status}",
         "data": {
           "ai_enabled": "AI 機能を有効にする",
+          "ai_provider": "AI プロバイダー",
+          "ai_task_entity": "AI タスクエンティティ",
           "ai_api_key": "Claude API キー",
           "ai_model": "AI モデル",
           "ai_reasoning_effort": "推論の強度",
@@ -467,17 +469,23 @@
         },
         "data_description": {
           "ai_enabled": "すべての AI 機能のマスタースイッチです。無効にすると、Climate Advisor は組み込みのロジックのみを使用します。",
-          "ai_api_key": "Anthropic の API キーです。console.anthropic.com で取得できます。既存のキーを保持する場合は空欄のままにしてください。",
-          "ai_model": "使用する Claude モデルです。コストと品質のバランスから Sonnet をおすすめします。",
-          "ai_reasoning_effort": "Claude が推論に費やす労力の大きさです。高いほど分析の質が上がりますが、コストも増えます。",
-          "ai_max_tokens": "AI の応答の最大長(トークン数、256〜16384)です。",
-          "ai_temperature": "ランダム性を制御します。0 = 決定的、1.0 = 最も創造的。0.3 をおすすめします。",
-          "ai_monthly_budget": "月額の推定支出の上限(米ドル)です。0 にすると上限なしです。",
+          "ai_provider": "Home Assistant AI タスクは、Home Assistant で設定した AI 連携を使います。組み込み Claude は非推奨で、今後削除されます。",
+          "ai_task_entity": "使用する AI タスクエンティティ。空欄にすると Home Assistant の優先 AI タスクエンティティを使います。組み込み Claude では使いません。",
+          "ai_api_key": "組み込み Claude のみ。Anthropic の API キーです。console.anthropic.com で取得できます。既存のキーを保持する場合は空欄のままにしてください。",
+          "ai_model": "組み込み Claude のみ。使用する Claude モデルです。コストと品質のバランスから Sonnet をおすすめします。",
+          "ai_reasoning_effort": "組み込み Claude のみ。Claude が推論に費やす労力の大きさです。高いほど分析の質が上がりますが、コストも増えます。",
+          "ai_max_tokens": "組み込み Claude のみ。AI の応答の最大長(トークン数、256〜16384)です。",
+          "ai_temperature": "組み込み Claude のみ。ランダム性を制御します。0 = 決定的、1.0 = 最も創造的。0.3 をおすすめします。",
+          "ai_monthly_budget": "組み込み Claude のみ。月額の推定支出の上限(米ドル)です。0 にすると上限なしです。",
           "ai_auto_requests_per_day": "1日あたりの自動 AI リクエストの上限です(午前0時にリセット)。",
           "ai_manual_requests_per_day": "1日あたりのユーザー操作による AI リクエストの上限です(午前0時にリセット)。",
           "ai_investigator_enabled": "調査エージェントを有効にします(AI の有効化が必要)。複数のデータソースにまたがる詳細な分析を行い、不整合やデータの問題を見つけます。",
           "ai_investigator_requests_per_day": "1日あたりの調査分析の実行回数の上限です。各調査では拡張思考を使用します。午前0時にリセットされます。"
         }
+      },
+      "ai_limits_warning": {
+        "title": "AI プロバイダーの上限が低すぎます",
+        "description": "AI の設定は保存されました。AI プロバイダーの上限の一部が低すぎるため、AI レポートが途中で切れたり失敗したりする可能性があります:\n\n{checks}\n\nその連携の AI タスクのオプションで上限を上げてください。Climate Advisor には 16k トークン以上のコンテキストウィンドウと 8192 トークン以上の出力上限が必要です。送信して続けてください。"
       },
       "github_settings": {
         "title": "GitHub 連携",
@@ -557,6 +565,14 @@
     "zone_resolution_ambiguous": {
       "title": "ゾーンの選択があいまいです",
       "description": "Climate Advisor には複数のゾーンがありますが、リクエストがどのゾーン宛てか指定されていませんでした: {request}。結果は {outcome} でした。送信元(スクリプト、オートメーション、コマンドラインツール、古いブラウザタブ)が、別のゾーンの情報を表示している可能性があります。\n\n修正するには、そのリクエストに `?zone=ENTRY_ID` を追加してください。ENTRY_ID は `GET /api/climate_advisor/status` に一覧表示されるゾーンの `entry_id` です。Climate Advisor のダッシュボードはすでにこれを行っています。この通知は次回 Climate Advisor が起動したときに消えます。"
+    },
+    "builtin_claude_deprecated": {
+      "title": "組み込み Claude は非推奨です",
+      "description": "Climate Advisor の AI は組み込み Claude を使っています。これは非推奨で、今後のリリースで削除されます。削除されると AI レポートは動かなくなります。\n\n移行の手順:\n1. Home Assistant の Anthropic 連携 (または別の AI 連携) を追加し、そこに AI タスクを追加します。\n2. AI タスクのオプションで推奨モデル設定をオフにし、最大トークン数を 8192 以上、思考の労力を中に設定します。\n3. Climate Advisor のオプションで AI の設定を開き、Home Assistant AI タスクを選んで、そのエンティティを選択します。これはすべてのゾーンに適用されます。\n\nこの通知は、組み込み Claude を使うゾーンがない状態で Climate Advisor が次に起動したときに消えます。"
+    },
+    "ai_settings_unified": {
+      "title": "AI の設定がすべてのゾーンに適用されるようになりました",
+      "description": "AI の設定はすべてのゾーンで共通になりました。ゾーンごとに AI の設定が異なっていたため、Climate Advisor は {zone} の設定を残し、すべてのゾーンに使いました。AI リクエストの 1 日の上限は、すべてのゾーンの合計で数えます。\n\n変更するには、任意のゾーンのオプションで AI の設定を開いてください。"
     }
   },
   "common": {
@@ -573,7 +589,11 @@
     "schedule_summary_heat": "{name} — {days} {window} ({cost}、暖房のみ)",
     "schedule_summary_entity": "{name} — {days} {window} ({cost}、{entity} がオンのときのみ)",
     "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}、冷房のみ、{entity} がオンのときのみ)",
-    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}、暖房のみ、{entity} がオンのときのみ)"
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}、暖房のみ、{entity} がオンのときのみ)",
+    "ai_limit_output": "{integration}: 出力上限 ({setting}) は {value} トークンです。{required} 以上が必要です。",
+    "ai_limit_context": "{integration}: コンテキストウィンドウ ({setting}) は {value} トークンです。{required} 以上が必要です。",
+    "ai_limit_combined": "{integration}: コンテキストウィンドウ ({setting}) は {value} トークンです。質問と回答の両方が入るため、{required} 以上が必要です。",
+    "ai_limit_builtin_output": "組み込み Claude: 最大応答長は {value} トークンです。{required} 以上が必要です。"
   },
   "entity": {
     "sensor": {
@@ -742,8 +762,13 @@
     "ai_reasoning_effort": {
       "options": {
         "low": "低",
-        "medium": "中",
-        "high": "高"
+        "medium": "中"
+      }
+    },
+    "ai_provider": {
+      "options": {
+        "ha_ai_task": "Home Assistant AI タスク",
+        "builtin_claude": "組み込み Claude (非推奨)"
       }
     },
     "suggestion_action": {

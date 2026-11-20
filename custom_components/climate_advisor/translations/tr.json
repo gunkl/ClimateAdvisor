@@ -169,7 +169,7 @@
           "notifications": "Bildirimler",
           "advanced": "Öğrenme ve davranış",
           "classification_thresholds": "Gün tipi eşikleri",
-          "ai_settings": "Claude yapay zekâ ayarları",
+          "ai_settings": "Yapay zekâ ayarları",
           "github_settings": "GitHub entegrasyonu"
         }
       },
@@ -451,9 +451,11 @@
       },
       "ai_settings": {
         "title": "Yapay zekâ ayarları",
-        "description": "Akıllı analiz ve raporlama için Claude yapay zekâ entegrasyonunu yapılandırın.\nAPI anahtarı durumu: {key_status}",
+        "description": "Bu ayarlar tüm bölgeler için geçerlidir.\n\nHome Assistant'taki herhangi bir yapay zekâ entegrasyonundan bir Yapay Zekâ Görevi varlığı seçin ya da Home Assistant'ın tercih ettiği varlığı kullanmak için boş bırakın.\n\nYerleşik Claude kullanımdan kaldırılıyor ve silinecek. Claude'u kullanmaya devam etmek için Home Assistant'ın Anthropic entegrasyonunu ekleyin, ona bir Yapay Zekâ Görevi ekleyin ve o varlığı burada seçin.\n\nYapay zekâ sağlayıcısının en az 16k token bağlam penceresine ve en az 8192 token çıktı sınırına ihtiyacı vardır; akıl yürütme orta olarak ayarlanmalıdır.\n\nAPI anahtarı (yalnızca yerleşik Claude): {key_status}",
         "data": {
           "ai_enabled": "Yapay zekâ özelliklerini etkinleştir",
+          "ai_provider": "Yapay zekâ sağlayıcısı",
+          "ai_task_entity": "Yapay Zekâ Görevi varlığı",
           "ai_api_key": "Claude API anahtarı",
           "ai_model": "Yapay zekâ modeli",
           "ai_reasoning_effort": "Akıl yürütme çabası",
@@ -467,17 +469,23 @@
         },
         "data_description": {
           "ai_enabled": "Tüm yapay zekâ özellikleri için ana anahtar. Kapalıyken Climate Advisor yalnızca yerleşik kodlanmış mantığını kullanır.",
-          "ai_api_key": "Anthropic API anahtarınız. console.anthropic.com adresinden alabilirsiniz. Mevcut anahtarı korumak için boş bırakın.",
-          "ai_model": "Hangi Claude modelinin kullanılacağı. Maliyet/kalite dengesi için Sonnet önerilir.",
-          "ai_reasoning_effort": "Claude'un ne kadar akıl yürütme çabası harcadığı. Daha yüksek = daha iyi analiz ama daha fazla maliyet.",
-          "ai_max_tokens": "Yapay zekâ yanıtlarının token cinsinden azami uzunluğu (256-16384).",
-          "ai_temperature": "Rastgeleliği kontrol eder. 0 = deterministik, 1,0 = en yaratıcı. 0,3 önerilir.",
-          "ai_monthly_budget": "ABD doları cinsinden tahmini azami aylık harcama. Sınırsız için 0 yapın.",
+          "ai_provider": "Home Assistant Yapay Zekâ Görevi, Home Assistant'ta kurduğunuz bir yapay zekâ entegrasyonunu kullanır. Yerleşik Claude kullanımdan kaldırılıyor ve silinecek.",
+          "ai_task_entity": "Kullanılacak Yapay Zekâ Görevi varlığı. Home Assistant'ın tercih ettiği Yapay Zekâ Görevi varlığını kullanmak için boş bırakın. Yerleşik Claude bunu kullanmaz.",
+          "ai_api_key": "Yalnızca yerleşik Claude. Anthropic API anahtarınız. console.anthropic.com adresinden alabilirsiniz. Mevcut anahtarı korumak için boş bırakın.",
+          "ai_model": "Yalnızca yerleşik Claude. Hangi Claude modelinin kullanılacağı. Maliyet/kalite dengesi için Sonnet önerilir.",
+          "ai_reasoning_effort": "Yalnızca yerleşik Claude. Claude'un ne kadar akıl yürütme çabası harcadığı. Daha yüksek = daha iyi analiz ama daha fazla maliyet.",
+          "ai_max_tokens": "Yalnızca yerleşik Claude. Yapay zekâ yanıtlarının token cinsinden azami uzunluğu (256-16384).",
+          "ai_temperature": "Yalnızca yerleşik Claude. Rastgeleliği kontrol eder. 0 = deterministik, 1,0 = en yaratıcı. 0,3 önerilir.",
+          "ai_monthly_budget": "Yalnızca yerleşik Claude. ABD doları cinsinden tahmini azami aylık harcama. Sınırsız için 0 yapın.",
           "ai_auto_requests_per_day": "Günlük azami otomatik yapay zekâ isteği sayısı (gece yarısı sıfırlanır).",
           "ai_manual_requests_per_day": "Günlük azami kullanıcı tarafından başlatılan yapay zekâ isteği sayısı (gece yarısı sıfırlanır).",
           "ai_investigator_enabled": "Araştırma ajanını etkinleştirin (yapay zekânın etkin olmasını gerektirir). Tutarsızlıkları ve veri sorunlarını bulmak için kaynaklar arası derin analiz yapar.",
           "ai_investigator_requests_per_day": "Günlük azami araştırma analizi sayısı. Her araştırma genişletilmiş düşünme kullanır. Gece yarısı sıfırlanır."
         }
+      },
+      "ai_limits_warning": {
+        "title": "Yapay zekâ sağlayıcısı sınırları çok düşük",
+        "description": "Yapay zekâ ayarlarınız kaydedildi. Yapay zekâ sağlayıcısının bazı sınırları çok düşük, bu yüzden yapay zekâ raporları yarıda kesilebilir ya da başarısız olabilir:\n\n{checks}\n\nBunları o entegrasyonun Yapay Zekâ Görevi seçeneklerinden yükseltin. Climate Advisor'ın en az 16k token bağlam penceresine ve en az 8192 token çıktı sınırına ihtiyacı vardır. Devam etmek için gönderin."
       },
       "github_settings": {
         "title": "GitHub entegrasyonu",
@@ -557,6 +565,14 @@
     "zone_resolution_ambiguous": {
       "title": "Belirsiz bölge seçimi",
       "description": "Climate Advisor'ın birden fazla bölgesi var ve bir istek hangi bölge için olduğunu belirtmedi: {request}. Sonuç: {outcome}. İsteği gönderen şey (bir betik, bir otomasyon, bir komut satırı aracı veya eski bir tarayıcı sekmesi) başka bir bölgenin bilgilerini gösteriyor olabilir.\n\nDüzeltmek için o isteğe `?zone=ENTRY_ID` ekleyin; ENTRY_ID, `GET /api/climate_advisor/status` ile listelenen bölgenin `entry_id` değeridir. Climate Advisor panoları bunu zaten yapar. Bu bildirim Climate Advisor'ın bir sonraki başlatılışında kaybolur."
+    },
+    "builtin_claude_deprecated": {
+      "title": "Yerleşik Claude kullanımdan kaldırılıyor",
+      "description": "Climate Advisor'ın yapay zekâsı yerleşik Claude'u kullanıyor. Yerleşik Claude kullanımdan kaldırılıyor ve gelecekteki bir sürümde silinecek. Silindiğinde yapay zekâ raporları çalışmayı durdurur.\n\nGeçiş için:\n1. Home Assistant'ın Anthropic entegrasyonunu (veya başka bir yapay zekâ entegrasyonunu) ekleyin ve ona bir Yapay Zekâ Görevi ekleyin.\n2. Yapay Zekâ Görevi'nin seçeneklerinde önerilen model ayarlarını kapatın, ardından azami token sayısını 8192 veya üzerine, düşünme çabasını da orta olarak ayarlayın.\n3. Climate Advisor'ın seçeneklerinde yapay zekâ ayarlarını açın, Home Assistant Yapay Zekâ Görevi'ni seçin ve o varlığı belirleyin. Bu, tüm bölgeler için geçerlidir.\n\nBu bildirim, Climate Advisor hiçbir bölge yerleşik Claude'u kullanmadan bir sonraki kez başladığında kaybolur."
+    },
+    "ai_settings_unified": {
+      "title": "Yapay zekâ ayarları artık tüm bölgeler için geçerli",
+      "description": "Yapay zekâ ayarları artık tüm bölgeler tarafından paylaşılıyor. Bölgelerinizin yapay zekâ ayarları farklıydı, bu yüzden Climate Advisor {zone} bölgesinin ayarlarını korudu ve her bölge için kullandı. Günlük yapay zekâ istek sınırları artık tüm bölgeler için toplam olarak sayılır.\n\nDeğiştirmek için herhangi bir bölgenin seçeneklerinde yapay zekâ ayarlarını açın."
     }
   },
   "common": {
@@ -573,7 +589,11 @@
     "schedule_summary_heat": "{name} — {days} {window} ({cost}, yalnızca ısıtma)",
     "schedule_summary_entity": "{name} — {days} {window} ({cost}, yalnızca {entity} açıkken)",
     "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, yalnızca soğutma, yalnızca {entity} açıkken)",
-    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, yalnızca ısıtma, yalnızca {entity} açıkken)"
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, yalnızca ısıtma, yalnızca {entity} açıkken)",
+    "ai_limit_output": "{integration}: çıktı sınırı ({setting}) {value} token; en az {required} gerekiyor.",
+    "ai_limit_context": "{integration}: bağlam penceresi ({setting}) {value} token; en az {required} gerekiyor.",
+    "ai_limit_combined": "{integration}: bağlam penceresi ({setting}) {value} token. Hem soruyu hem yanıtı içerdiği için en az {required} gerekiyor.",
+    "ai_limit_builtin_output": "Yerleşik Claude: Azami yanıt uzunluğu {value} token; en az {required} gerekiyor."
   },
   "entity": {
     "sensor": {
@@ -742,8 +762,13 @@
     "ai_reasoning_effort": {
       "options": {
         "low": "Düşük",
-        "medium": "Orta",
-        "high": "Yüksek"
+        "medium": "Orta"
+      }
+    },
+    "ai_provider": {
+      "options": {
+        "ha_ai_task": "Home Assistant Yapay Zekâ Görevi",
+        "builtin_claude": "Yerleşik Claude (kaldırılıyor)"
       }
     },
     "suggestion_action": {

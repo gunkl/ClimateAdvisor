@@ -7,6 +7,7 @@ import functools
 import logging
 import math
 import re
+import sys
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -17,9 +18,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector, translation
 
-from . import prediction_engines, zone_registry
+from . import ai_settings_sync, prediction_engines, zone_registry
 from .const import (
     AI_MODELS,
+    AI_PROVIDER_BUILTIN_CLAUDE,
+    AI_PROVIDER_OPTIONS,
+    AI_REASONING_MEDIUM,
     AI_REASONING_OPTIONS,
     COMPANION_SENSOR_AUTO,
     COMPANION_SENSOR_OFF,
@@ -32,7 +36,9 @@ from .const import (
     CONF_AI_MAX_TOKENS,
     CONF_AI_MODEL,
     CONF_AI_MONTHLY_BUDGET,
+    CONF_AI_PROVIDER,
     CONF_AI_REASONING_EFFORT,
+    CONF_AI_TASK_ENTITY,
     CONF_AI_TEMPERATURE,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
@@ -94,6 +100,7 @@ from .const import (
     DEFAULT_AI_MODEL,
     DEFAULT_AI_MONTHLY_BUDGET,
     DEFAULT_AI_REASONING_EFFORT,
+    DEFAULT_AI_TASK_ENTITY,
     DEFAULT_AI_TEMPERATURE,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_COMFORT_COOL,
@@ -209,6 +216,30 @@ FAN_MODE_SELECTOR = "fan_mode"
 ENGINE_SELECTOR = "prediction_engine"
 
 
+# Issue #1336: the AI Task picker uses the same filter as HA's own ai_task/services.yaml.
+_AI_TASK_GENERATE_DATA = "ai_task.AITaskEntityFeature.GENERATE_DATA"
+
+
+def _ai_task_entity_selector() -> selector.EntitySelector:
+    """The AI Task entity picker: ai_task entities that can generate data (Issue #1336).
+
+    HA accepts ``supported_features`` only inside ``filter``, and resolves the feature name by importing
+    ``homeassistant.components.ai_task``. The feature filter is used only when that module is already loaded
+    (no import inside the event loop) and HA accepts it; otherwise the picker falls back to every ai_task
+    entity, so the AI settings form always opens.
+    """
+    if "homeassistant.components.ai_task" in sys.modules:
+        try:
+            return selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    filter={"domain": "ai_task", "supported_features": [_AI_TASK_GENERATE_DATA]}
+                )
+            )
+        except Exception:  # noqa: BLE001 - the form must open even if HA rejects the feature filter
+            _LOGGER.debug("AI Task feature filter not accepted; offering every ai_task entity", exc_info=True)
+    return selector.EntitySelector(selector.EntitySelectorConfig(filter={"domain": "ai_task"}))
+
+
 # Issue #835: restricts *when* the hvac_fan/both fan mechanism is allowed to run,
 # based on which HVAC mode last ran — avoids raising humidity by circulating air
 # over wet coils shortly after a cooling cycle.
@@ -268,6 +299,8 @@ TEMP_UNIT_SELECTOR = "temp_unit"
 # effort choices (``selector.ai_reasoning_effort``).
 WEEKDAY_SELECTOR = "weekday"
 AI_REASONING_SELECTOR = "ai_reasoning_effort"
+# Issue #1336: the AI provider choices (``selector.ai_provider``).
+AI_PROVIDER_SELECTOR = "ai_provider"
 # The list step's "add a new schedule" choice. A schedule id is a 32-character hex uuid, so this cannot collide.
 SCHEDULER_ADD = "add_new"
 
@@ -612,7 +645,7 @@ def _setpoint_warnings(hass: HomeAssistant, climate_entity: str | None, values_f
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 20
+    VERSION = 21
 
     # Class-level default so a flow built without __init__ (tests) still works; only ever re-assigned.
     _whf_acknowledged: dict[str, str] = {}
@@ -974,6 +1007,8 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     # Class-level default so a flow built without __init__ (tests) still works; only ever re-assigned.
     _whf_acknowledged: dict[str, str] = {}
     _setpoints_acknowledged: dict[str, Any] = {}
+    # Issue #1336: the failed AI limit checks shown by async_step_ai_limits_warning.
+    _ai_limits_text: str = ""
 
     def __init__(self) -> None:
         """Initialize the options flow."""
@@ -2159,17 +2194,25 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     # ---- AI Settings ----
 
     async def async_step_ai_settings(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
-        """AI Settings — Claude API configuration."""
+        """AI settings: the AI provider for the whole install (Issue #1336).
+
+        The values are install-wide: saving here also copies them to every other zone's entry
+        (``ai_settings_sync``). Built-in Claude is deprecated; the API key, the live model list and
+        the connection test apply to it only. After saving, the provider's limits are checked and a
+        warning step is shown when they are known to be too small. The check never blocks saving.
+        """
         errors: dict[str, str] = {}
         current = self.config_entry.data
 
         if user_input is not None:
             ai_enabled = user_input.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED)
+            provider = user_input.get(CONF_AI_PROVIDER) or ai_settings_sync.provider_of(current)
+            builtin = provider == AI_PROVIDER_BUILTIN_CLAUDE
             new_key = user_input.get(CONF_AI_API_KEY, "")
             existing_key = current.get(CONF_AI_API_KEY, "")
 
-            # If AI enabled but no key provided and no existing key, require one
-            if ai_enabled and not new_key and not existing_key:
+            # Only built-in Claude needs a key; an AI Task entity carries its own credentials.
+            if ai_enabled and builtin and not new_key and not existing_key:
                 errors[CONF_AI_API_KEY] = "ai_key_required"
 
             # Validate temperature range
@@ -2185,7 +2228,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             if not (256 <= ai_max_tokens <= 16384):
                 errors[CONF_AI_MAX_TOKENS] = "ai_max_tokens_out_of_range"
 
-            if not errors and new_key and new_key != existing_key and ai_enabled:
+            if not errors and builtin and new_key and new_key != existing_key and ai_enabled:
                 try:
                     from .claude_api import ClaudeAPIClient
 
@@ -2202,12 +2245,14 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
 
             if not errors:
                 # If the user left the key field blank, preserve the existing key
-                merged = {**user_input}
+                merged = {**user_input, CONF_AI_PROVIDER: provider}
                 if not new_key:
                     if existing_key:
                         merged[CONF_AI_API_KEY] = existing_key
                     else:
                         merged.pop(CONF_AI_API_KEY, None)
+                # A cleared AI Task picker is dropped by voluptuous; store "" (HA's preferred entity).
+                merged[CONF_AI_TASK_ENTITY] = user_input.get(CONF_AI_TASK_ENTITY) or DEFAULT_AI_TASK_ENTITY
 
                 # Apply int() conversion for number fields
                 for key in (
@@ -2221,6 +2266,15 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         merged[key] = int(merged[key])
 
                 await self._commit_section(merged)
+                saved = dict(self.config_entry.data)
+                # Issue #1336: AI settings are install-wide; every other zone gets the same values.
+                ai_settings_sync.async_copy_to_other_entries(
+                    self.hass, self.config_entry.entry_id, ai_settings_sync.extract_ai_values(saved)
+                )
+                failed = await self._async_failed_ai_limits(saved)
+                if failed:
+                    self._ai_limits_text = await self._async_ai_limits_text(failed)
+                    return await self.async_step_ai_limits_warning()
                 return await self.async_step_init()
 
         # Build masked key status placeholder for description
@@ -2230,18 +2284,35 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         else:
             key_status = _text(await _async_texts(self.hass), "key_status_not_configured")
 
-        # Issue #563: populate the dropdown from Anthropic's live model registry
-        # instead of the hardcoded AI_MODELS list, so newly released models appear
-        # without a CA code change. fetch_available_models() never raises — it
-        # falls back to AI_MODELS on any failure (no key yet, network error, an
-        # unsupported SDK version) — but a config-flow render must never hang on a
-        # slow network either, hence the wrapping timeout here.
-        from .claude_api import fetch_available_models  # noqa: PLC0415
+        current_provider = ai_settings_sync.provider_of(current)
+        if current_provider == AI_PROVIDER_BUILTIN_CLAUDE:
+            # Issue #563: populate the dropdown from Anthropic's live model registry
+            # instead of the hardcoded AI_MODELS list, so newly released models appear
+            # without a CA code change. fetch_available_models() never raises — it
+            # falls back to AI_MODELS on any failure (no key yet, network error, an
+            # unsupported SDK version) — but a config-flow render must never hang on a
+            # slow network either, hence the wrapping timeout here. Built-in Claude only
+            # (Issue #1336): an AI Task provider picks its model in its own integration.
+            from .claude_api import fetch_available_models  # noqa: PLC0415
 
-        try:
-            model_options = await asyncio.wait_for(fetch_available_models(existing_key, hass=self.hass), timeout=5.0)
-        except Exception:  # noqa: BLE001 — includes asyncio.TimeoutError; must never block config flow render
+            try:
+                model_options = await asyncio.wait_for(
+                    fetch_available_models(existing_key, hass=self.hass), timeout=5.0
+                )
+            except Exception:  # noqa: BLE001 — includes asyncio.TimeoutError; must never block config flow render
+                model_options = AI_MODELS
+        else:
             model_options = AI_MODELS
+        # Issue #1336: keep the stored model selectable even when the list no longer has it, so a Claude-only
+        # field can never stop an AI Task owner from saving (HA rejects a default that is not an option).
+        stored_model = current.get(CONF_AI_MODEL, DEFAULT_AI_MODEL)
+        if stored_model and stored_model not in model_options:
+            model_options = [*model_options, stored_model]
+
+        # Issue #1336: "high" is no longer offered; like the v21 migration, a stored "high" shows as medium.
+        reasoning = current.get(CONF_AI_REASONING_EFFORT, DEFAULT_AI_REASONING_EFFORT)
+        if reasoning not in AI_REASONING_OPTIONS:
+            reasoning = AI_REASONING_MEDIUM
 
         schema = vol.Schema(
             {
@@ -2249,22 +2320,32 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     CONF_AI_ENABLED,
                     default=current.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED),
                 ): selector.BooleanSelector(),
+                vol.Optional(CONF_AI_PROVIDER, default=current_provider): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=list(AI_PROVIDER_OPTIONS),
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                        translation_key=AI_PROVIDER_SELECTOR,
+                    )
+                ),
+                # Empty = Home Assistant's preferred AI Task entity (Settings > System > AI).
+                # Same filter as HA's own ai_task/services.yaml.
+                vol.Optional(
+                    CONF_AI_TASK_ENTITY,
+                    description={"suggested_value": current.get(CONF_AI_TASK_ENTITY) or None},
+                ): _ai_task_entity_selector(),
                 vol.Optional(CONF_AI_API_KEY, default=""): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
                 vol.Optional(
                     CONF_AI_MODEL,
-                    default=current.get(CONF_AI_MODEL, DEFAULT_AI_MODEL),
+                    default=stored_model,
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=[{"value": m, "label": m} for m in model_options],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
-                vol.Optional(
-                    CONF_AI_REASONING_EFFORT,
-                    default=current.get(CONF_AI_REASONING_EFFORT, DEFAULT_AI_REASONING_EFFORT),
-                ): selector.SelectSelector(
+                vol.Optional(CONF_AI_REASONING_EFFORT, default=reasoning): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=list(AI_REASONING_OPTIONS),
                         mode=selector.SelectSelectorMode.DROPDOWN,
@@ -2334,6 +2415,64 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             data_schema=schema,
             errors=errors,
             description_placeholders={"key_status": key_status},
+        )
+
+    async def _async_failed_ai_limits(self, data: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """The provider limit checks that failed for these saved values (Issue #1336). Never raises.
+
+        Uses the shared limit reader (``ai_limits.async_read_limits``). Nothing is checked when AI is
+        off, when the reader is unavailable, or when the provider's limits cannot be read.
+        """
+        if not ai_settings_sync.is_ai_configured(data):
+            return []
+        try:
+            from . import ai_limits  # noqa: PLC0415
+        except ImportError:
+            _LOGGER.debug("AI limit reader not available; skipping the limit check")
+            return []
+        try:
+            result = await ai_limits.async_read_limits(self.hass, dict(data))
+        except Exception:  # noqa: BLE001 - a limit check must never block saving
+            _LOGGER.debug("AI limit check failed", exc_info=True)
+            return []
+        if not isinstance(result, Mapping) or result.get("ok", True):
+            return []
+        integration = result.get("integration")
+        return [
+            {**check, "integration": integration}
+            for check in result.get("checks") or []
+            if isinstance(check, Mapping) and not check.get("ok", True)
+        ]
+
+    async def _async_ai_limits_text(self, failed: list[dict[str, Any]]) -> str:
+        """One translated line per failed limit check, as a Markdown list."""
+        texts = await _async_texts(self.hass)
+        lines = []
+        for check in failed:
+            integration = check.get("integration")
+            # Built-in Claude has no integration: its one check is the Maximum Response Length field.
+            key = f"ai_limit_{check.get('kind', 'output')}" if integration else "ai_limit_builtin_output"
+            line = _text(
+                texts,
+                key,
+                integration=str(integration or ""),
+                setting=str(check.get("setting", "")),
+                value=str(check.get("value", "")),
+                required=str(check.get("required", "")),
+            )
+            lines.append(f"- {line}")
+        return "\n".join(lines)
+
+    async def async_step_ai_limits_warning(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Issue #1336: the AI settings are saved, but the provider's limits look too small. Warn only."""
+        if user_input is not None:
+            return await self.async_step_init()
+        return self.async_show_form(
+            step_id="ai_limits_warning",
+            data_schema=vol.Schema({}),
+            description_placeholders={"checks": self._ai_limits_text},
         )
 
     # ---- GitHub Integration ----

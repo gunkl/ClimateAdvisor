@@ -169,7 +169,7 @@
           "notifications": "Benachrichtigungen",
           "advanced": "Lernen & Verhalten",
           "classification_thresholds": "Schwellenwerte für Tagestypen",
-          "ai_settings": "Claude-KI-Einstellungen",
+          "ai_settings": "KI-Einstellungen",
           "github_settings": "GitHub-Anbindung"
         }
       },
@@ -451,9 +451,11 @@
       },
       "ai_settings": {
         "title": "KI-Einstellungen",
-        "description": "Richte die Claude-KI-Anbindung für intelligente Analysen und Berichte ein.\nStatus des API-Schlüssels: {key_status}",
+        "description": "Diese Einstellungen gelten für alle Zonen.\n\nWähle eine KI-Aufgabe-Entität aus einer beliebigen KI-Integration in Home Assistant oder lass das Feld leer, um die bevorzugte Entität von Home Assistant zu verwenden.\n\nDas integrierte Claude ist veraltet und wird entfernt. Um Claude weiter zu nutzen, füge die Anthropic-Integration von Home Assistant hinzu, ergänze dort eine KI-Aufgabe und wähle diese Entität hier aus.\n\nDer KI-Anbieter braucht ein Kontextfenster von mindestens 16k Tokens und ein Ausgabelimit von mindestens 8192 Tokens, mit dem Denkaufwand auf mittel.\n\nAPI-Schlüssel (nur integriertes Claude): {key_status}",
         "data": {
           "ai_enabled": "KI-Funktionen aktivieren",
+          "ai_provider": "KI-Anbieter",
+          "ai_task_entity": "KI-Aufgabe-Entität",
           "ai_api_key": "Claude-API-Schlüssel",
           "ai_model": "KI-Modell",
           "ai_reasoning_effort": "Denkaufwand",
@@ -467,17 +469,23 @@
         },
         "data_description": {
           "ai_enabled": "Hauptschalter für alle KI-gestützten Funktionen. Wenn deaktiviert, nutzt Climate Advisor nur seine eingebaute programmierte Logik.",
-          "ai_api_key": "Dein Anthropic-API-Schlüssel. Du bekommst einen unter console.anthropic.com. Leer lassen, um den vorhandenen Schlüssel zu behalten.",
-          "ai_model": "Welches Claude-Modell verwendet wird. Sonnet wird für ein ausgewogenes Verhältnis von Kosten und Qualität empfohlen.",
-          "ai_reasoning_effort": "Wie viel Denkaufwand Claude betreibt. Höher = bessere Analyse, aber höhere Kosten.",
-          "ai_max_tokens": "Maximale Länge der KI-Antworten in Tokens (256–16384).",
-          "ai_temperature": "Steuert die Zufälligkeit. 0 = deterministisch, 1,0 = am kreativsten. Empfohlen: 0,3.",
-          "ai_monthly_budget": "Maximal geschätzte Monatsausgaben in US-Dollar. 0 bedeutet kein Limit.",
+          "ai_provider": "Home Assistant KI-Aufgabe nutzt eine KI-Integration, die du in Home Assistant eingerichtet hast. Das integrierte Claude ist veraltet und wird entfernt.",
+          "ai_task_entity": "Die zu verwendende KI-Aufgabe-Entität. Leer lassen, um die bevorzugte KI-Aufgabe-Entität von Home Assistant zu verwenden. Wird vom integrierten Claude nicht genutzt.",
+          "ai_api_key": "Nur integriertes Claude. Dein Anthropic-API-Schlüssel. Du bekommst einen unter console.anthropic.com. Leer lassen, um den vorhandenen Schlüssel zu behalten.",
+          "ai_model": "Nur integriertes Claude. Welches Claude-Modell verwendet wird. Sonnet wird für ein ausgewogenes Verhältnis von Kosten und Qualität empfohlen.",
+          "ai_reasoning_effort": "Nur integriertes Claude. Wie viel Denkaufwand Claude betreibt. Höher = bessere Analyse, aber höhere Kosten.",
+          "ai_max_tokens": "Nur integriertes Claude. Maximale Länge der KI-Antworten in Tokens (256–16384).",
+          "ai_temperature": "Nur integriertes Claude. Steuert die Zufälligkeit. 0 = deterministisch, 1,0 = am kreativsten. Empfohlen: 0,3.",
+          "ai_monthly_budget": "Nur integriertes Claude. Maximal geschätzte Monatsausgaben in US-Dollar. 0 bedeutet kein Limit.",
           "ai_auto_requests_per_day": "Maximale Anzahl automatischer KI-Anfragen pro Tag (wird um Mitternacht zurückgesetzt).",
           "ai_manual_requests_per_day": "Maximale Anzahl vom Nutzer ausgelöster KI-Anfragen pro Tag (wird um Mitternacht zurückgesetzt).",
           "ai_investigator_enabled": "Den Untersuchungs-Agenten aktivieren (erfordert aktivierte KI). Führt eine tiefe quellenübergreifende Analyse durch, um Widersprüche und Datenprobleme zu finden.",
           "ai_investigator_requests_per_day": "Maximale Anzahl von Untersuchungsläufen pro Tag. Jede Untersuchung nutzt erweitertes Denken. Wird um Mitternacht zurückgesetzt."
         }
+      },
+      "ai_limits_warning": {
+        "title": "Limits des KI-Anbieters zu niedrig",
+        "description": "Deine KI-Einstellungen sind gespeichert. Einige Limits des KI-Anbieters sind zu niedrig, daher können KI-Berichte abgeschnitten werden oder fehlschlagen:\n\n{checks}\n\nErhöhe sie in den Optionen der KI-Aufgabe dieser Integration. Climate Advisor braucht ein Kontextfenster von mindestens 16k Tokens und ein Ausgabelimit von mindestens 8192 Tokens. Zum Fortfahren absenden."
       },
       "github_settings": {
         "title": "GitHub-Anbindung",
@@ -557,6 +565,14 @@
     "zone_resolution_ambiguous": {
       "title": "Zone nicht eindeutig",
       "description": "Climate Advisor hat mehr als eine Zone, und eine Anfrage hat nicht angegeben, für welche Zone sie gilt: {request}. Ergebnis: {outcome}. Was auch immer sie gesendet hat (ein Skript, eine Automatisierung, ein Kommandozeilenwerkzeug oder ein alter Browser-Tab), zeigt möglicherweise Informationen einer anderen Zone an.\n\nZur Behebung füge dieser Anfrage `?zone=ENTRY_ID` hinzu, wobei ENTRY_ID die `entry_id` der Zone ist, wie sie `GET /api/climate_advisor/status` auflistet. Die Climate-Advisor-Dashboards tun das bereits. Dieser Hinweis verschwindet beim nächsten Start von Climate Advisor."
+    },
+    "builtin_claude_deprecated": {
+      "title": "Integriertes Claude ist veraltet",
+      "description": "Die KI von Climate Advisor nutzt das integrierte Claude. Es ist veraltet und wird in einer künftigen Version entfernt. Danach funktionieren KI-Berichte nicht mehr.\n\nSo wechselst du:\n1. Füge die Anthropic-Integration von Home Assistant (oder eine andere KI-Integration) hinzu und ergänze dort eine KI-Aufgabe.\n2. Schalte in den Optionen der KI-Aufgabe die empfohlenen Modelleinstellungen aus und setze dann die maximalen Tokens auf 8192 oder mehr und den Denkaufwand auf mittel.\n3. Öffne in den Optionen von Climate Advisor die KI-Einstellungen, wähle Home Assistant KI-Aufgabe und dann diese Entität. Das gilt für alle Zonen.\n\nDieser Hinweis verschwindet, sobald Climate Advisor startet und keine Zone mehr das integrierte Claude nutzt."
+    },
+    "ai_settings_unified": {
+      "title": "KI-Einstellungen gelten jetzt für alle Zonen",
+      "description": "KI-Einstellungen gelten jetzt gemeinsam für alle Zonen. Deine Zonen hatten unterschiedliche KI-Einstellungen, daher hat Climate Advisor die Einstellungen von {zone} behalten und für jede Zone übernommen. Die täglichen Limits für KI-Anfragen zählen jetzt über alle Zonen hinweg.\n\nZum Ändern öffne die KI-Einstellungen in den Optionen einer beliebigen Zone."
     }
   },
   "common": {
@@ -573,7 +589,11 @@
     "schedule_summary_heat": "{name} — {days} {window} ({cost}, nur Heizen)",
     "schedule_summary_entity": "{name} — {days} {window} ({cost}, nur wenn {entity} an ist)",
     "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, nur Kühlen, nur wenn {entity} an ist)",
-    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, nur Heizen, nur wenn {entity} an ist)"
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, nur Heizen, nur wenn {entity} an ist)",
+    "ai_limit_output": "{integration}: Das Ausgabelimit ({setting}) beträgt {value} Tokens; nötig sind mindestens {required}.",
+    "ai_limit_context": "{integration}: Das Kontextfenster ({setting}) beträgt {value} Tokens; nötig sind mindestens {required}.",
+    "ai_limit_combined": "{integration}: Das Kontextfenster ({setting}) beträgt {value} Tokens. Es enthält Frage und Antwort zusammen, daher sind mindestens {required} nötig.",
+    "ai_limit_builtin_output": "Integriertes Claude: Maximale Antwortlänge beträgt {value} Tokens; nötig sind mindestens {required}."
   },
   "entity": {
     "sensor": {
@@ -742,8 +762,13 @@
     "ai_reasoning_effort": {
       "options": {
         "low": "Niedrig",
-        "medium": "Mittel",
-        "high": "Hoch"
+        "medium": "Mittel"
+      }
+    },
+    "ai_provider": {
+      "options": {
+        "ha_ai_task": "Home Assistant KI-Aufgabe",
+        "builtin_claude": "Integriertes Claude (veraltet)"
       }
     },
     "suggestion_action": {
